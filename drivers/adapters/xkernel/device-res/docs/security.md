@@ -73,7 +73,8 @@ according to `DmaDirection`.
 
 Invariants:
 
-- the caller's buffer remains valid for the mapping lifetime;
+- the caller's initialized RAM remains pinned with stable attributes and exclusive
+  aliases for the mapping lifetime;
 - `unmap_streaming()` consumes the same provider-returned `DmaMapping`;
 - the direction matches the original mapping.
 
@@ -103,7 +104,7 @@ Invariants:
 The unsafe `DmaOp` implementation guarantees non-null live allocations and valid
 whole device intervals. Mapping requires initialized caller storage retained
 exclusively until exact unmap. Sync verifies the original mapping in this
-shared backend before copying; unmap checks original pointer, length and
+shared backend before copying or cache maintenance; unmap checks original pointer, length and
 direction. Free, map, sync and unmap carry unsafe caller contracts. The coherent
 RAII handle owns allocation release, while copyable allocation metadata alone
 carries no ownership proof. Driver teardown must stop DMA before dropping pages.
@@ -111,6 +112,8 @@ carries no ownership proof. Driver teardown must stop DMA before dropping pages.
 Device masks supplied by probe and the platform address offset remain trusted inputs.
 Current defaults use unrestricted masks and the platform offset. Device
 masks provide software checks without hardware isolation. Hook or page-attribute failure retains
-uncertain backing pages in kdma; failed queue preparation cancels mappings before
-publication. All receive bytes must be initialized because map copies them even
-when a descriptor will be written by hardware.
+uncertain backing pages in kdma. Mainline VirtIO still uses its infallible static
+share contract; this adapter makes no library-side rollback guarantee. Coherent
+allocation initializes its full rounded extent. Receive bounce maps copy initialized
+original bytes before hardware publication. Eligible direct mappings preserve page
+attributes and complete direction-aware cache ownership handoffs through kdma.

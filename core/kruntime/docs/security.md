@@ -244,3 +244,16 @@ published-slot validation and runs only local TLB invalidation/acknowledgement;
 it does not dispatch arbitrary IPI callbacks. Page-table mutation retains the
 same memspace lock and validation. This prevents the IRQ-off waiter from forcing
 the updater through shootdown's give-up path during concurrent DMA page-attribute updates.
+
+
+## DMA direct-range and cache boundary
+
+The host direct-range query validates the whole interval under the kernel-layout
+lock, checking read/write kernel RAM, identical flags and physical continuity.
+Private KVM guest memory is rejected so direct mapping does not share neighboring
+pages incidentally. The query establishes provenance at that instant; the caller
+must pin storage and attributes through unmap. Cache requests have private kdma
+construction and stopped-owner/exclusive-RAM invariants. Host hooks reject
+misaligned or overflowing ranges before issuing AArch64 PoC or x86 CLFLUSH
+instructions. They neither sleep nor retain request borrows. Actual instruction stride
+is separate from DMA isolation; current tests cover homogeneous QEMU CPUs.

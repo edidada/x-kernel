@@ -333,3 +333,17 @@ IPI feature 关闭时，该入口保留空实现。
 
 - **冗余设计**：无（单路径主核 init）。
 - **过载控制**：不在此 crate；调度与内存压力由 `ktask` / `kalloc` 负责。
+
+
+## Unified DMA mapping and cache hooks
+
+`dma_integration.rs` provides both kdma interfaces. `query_contiguous` holds one
+kernel-layout lock while validating uniform read/write RAM mappings and physical
+continuity over every covering leaf; it rejects DEVICE/USER and private KVM guest
+memory. This query is not a lifetime pin. Callers retain stable owned RAM until
+unmap. Cache hooks borrow privately constructed range requests, validate their
+hardware stride and complete non-sleeping PoC maintenance. AArch64 uses whole-page
+streaming isolation and explicit maintenance; x86_64 uses coherent streaming DMA
+and CLFLUSH/MFENCE for allocation memory-type changes. Unsupported cached direct
+hosts select bounce. Incoming TLB acknowledgements are serviced while waiting
+for the kernel-layout lock with IRQs disabled.

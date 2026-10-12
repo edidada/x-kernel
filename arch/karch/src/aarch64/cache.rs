@@ -94,9 +94,10 @@ pub fn clean_dcache_line_to_poc(vaddr: VirtAddr) {
 /// of Coherency.
 #[inline]
 pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
-    let addr = start.as_usize() & !(CACHE_LINE - 1);
-    let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
-    for va in (addr..end).step_by(CACHE_LINE) {
+    let line_size = data_cache_line_size();
+    let addr = start.as_usize() & !(line_size - 1);
+    let end = (start.as_usize() + size + line_size - 1) & !(line_size - 1);
+    for va in (addr..end).step_by(line_size) {
         // SAFETY: `dc cvac` is issued for each cache line covering the
         // requested range so MMU-off or non-coherent readers observe the
         // current CPU's writes from PoC.
@@ -104,6 +105,48 @@ pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
     }
     // SAFETY: `dsb sy` waits until all preceding clean operations reach PoC.
     unsafe { asm!("dsb sy") };
+}
+
+/// Return the data-cache maintenance stride reported by CTR_EL0.DminLine.
+pub fn data_cache_line_size() -> usize {
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at the kernel exception level and has no side effects.
+    unsafe { asm!("mrs {ctr}, ctr_el0", ctr = out(reg) ctr, options(nomem, nostack)) };
+    4 << ((ctr >> 16) & 0xf)
+}
+
+/// Invalidate an exclusively owned range of complete cache lines to PoC.
+///
+/// # Safety
+/// Both endpoints are aligned to data_cache_line_size(), size is nonzero, and
+/// the range is mapped live RAM without address overflow. CPU aliases and DMA
+/// accesses have stopped; dirty CPU data may be discarded.
+pub unsafe fn invalidate_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    let end = start.as_usize() + size;
+    for address in (start.as_usize()..end).step_by(data_cache_line_size()) {
+        // SAFETY: caller supplies exclusively owned whole live cache lines and
+        // authorizes discarding CPU contents after stopping CPU and DMA accesses.
+        unsafe { asm!("dc ivac, {address}", address = in(reg) address, options(nostack)) };
+    }
+    // SAFETY: DSB SY completes every preceding invalidation before ownership returns.
+    unsafe { asm!("dsb sy", options(nostack)) };
+}
+
+/// Clean and invalidate an exclusively owned range of complete cache lines to PoC.
+///
+/// # Safety
+/// Both endpoints are aligned to data_cache_line_size(), size is nonzero, and
+/// the range is mapped live RAM without address overflow. CPU aliases and DMA
+/// accesses have stopped for the duration of maintenance.
+pub unsafe fn clean_invalidate_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    let end = start.as_usize() + size;
+    for address in (start.as_usize()..end).step_by(data_cache_line_size()) {
+        // SAFETY: caller supplies exclusively owned live cache lines with both
+        // owners stopped; CIVAC preserves dirty bytes before invalidating them.
+        unsafe { asm!("dc civac, {address}", address = in(reg) address, options(nostack)) };
+    }
+    // SAFETY: DSB SY completes maintenance before a device or attribute change proceeds.
+    unsafe { asm!("dsb sy", options(nostack)) };
 }
 
 /// Orders prior CPU stores before a device reads the same memory via DMA.

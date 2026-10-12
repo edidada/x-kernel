@@ -2874,6 +2874,7 @@ dependencies = [
 name = "kruntime"
 version = "0.3.0-dev"
 dependencies = [
+ "alloc-engine",
  "backtrace",
  "boot-info",
  "chrono",

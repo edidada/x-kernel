@@ -7,14 +7,16 @@
 
 //! DMA allocation helpers and bus address types.
 //!
-//! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
-//! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
-//! [`map_dma_buffer`] / [`unmap_dma_buffer`] stage ordinary buffers
-//! through a shared coherent bounce pool for temporary transactions.
-//! Every operation receives a [`DmaDeviceContext`] selected by device probe.
-//! Device masks are checked against complete bus intervals; [`p2b`] / [`b2p`]
-//! describe the platform conversion. See
-//! `docs/design.md` for the full boundary contracts.
+//! [`CoherentAllocation`] owns persistent zero-initialized DMA pages;
+//! [`StreamingMapping`] maps initialized pinned kernel buffers and explicitly
+//! hands ownership between CPU and device. [`DmaMappingPolicy`] selects automatic,
+//! required-direct or forced-bounce mapping in the unified platform DMA domain.
+//! [`DmaCacheIf`] supplies cache maintenance independently of memory ordering.
+//!
+//! Existing flat allocation/map/sync APIs accept [`DmaDeviceContext`] address
+//! limits and use the same shared backend. Current VirtIO integration retains the
+//! mainline static HAL. [`p2b`] / [`b2p`] describe platform conversion, not DMA
+//! reachability. See `docs/design.md` for lifecycle and execution-context contracts.
 //!
 //! # Example
 //!
@@ -48,14 +50,18 @@
 extern crate alloc;
 
 mod bounce_pool;
+mod cache;
 mod device;
 mod dma;
+mod mapping;
 
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
+pub use cache::{DmaCacheIf, DmaCacheOperation, DmaCachePolicy, DmaCacheRange};
 pub use device::DmaDeviceContext;
 pub use dma::DmaPageTableIf;
+pub use mapping::{CoherentAllocation, DmaMappingKind, DmaMappingPolicy, StreamingMapping};
 use memaddr::PhysAddr;
 
 /// Converts a physical address to a bus address.
@@ -144,10 +150,11 @@ pub enum DmaDirection {
 
 /// Maps an existing buffer for temporary DMA access.
 ///
-/// The current backend always stages the mapping through pooled coherent bounce
-/// memory. Keeping this behind `kdma` lets future implementations restore
-/// direct-map optimizations with stricter page-granularity safety checks
-/// without changing driver code.
+/// Direct DMA is selected for an eligible physically contiguous kernel RAM
+/// interval with supported cache isolation/maintenance and a reachable bus range.
+/// Otherwise the buffer is staged through shared coherent bounce memory. Direct
+/// mapping preserves the original page attributes. [`StreamingMapping::map`]
+/// additionally exposes explicit selection policy and the selected backend kind.
 ///
 /// # Errors
 ///
@@ -158,9 +165,11 @@ pub enum DmaDirection {
 ///
 /// # Safety
 ///
-/// `buffer` must contain initialized bytes and remain live and exclusively owned
-/// until [`unmap_dma_buffer`] on the same `device` with the same direction.
+/// `buffer` must contain initialized pinned kernel RAM with stable page attributes
+/// and remain live and exclusively owned, including all aliases, until
+/// [`unmap_dma_buffer`] on the same `device` with the same direction.
 /// CPU access while mapped requires an ownership handoff with [`sync_dma_buffer`].
+/// Receive buffers are CPU read-only while mapped; CPU writes require bidirectional DMA.
 /// Keep the context alive, expose the address only to its represented device,
 /// and stop hardware access before unmapping. Receive mappings preserve original
 /// bytes for cancellation and partial writes by copying them into the bounce buffer.
@@ -183,8 +192,9 @@ pub unsafe fn map_dma_buffer(
 /// # Panics
 ///
 /// Panics when `dma_addr` is not an active mapping or when `buffer`'s
-/// pointer, length or direction differs from the recorded mapping;
-/// both are caller contract violations, not runtime conditions.
+/// pointer, length or direction differs from the recorded mapping, or if the
+/// cache ownership handoff fails. The mapping remains active on failure.
+/// [`StreamingMapping::unmap`] provides a recoverable token-returning alternative.
 ///
 /// # Example
 ///
@@ -202,6 +212,7 @@ pub unsafe fn unmap_dma_buffer(
 }
 
 /// Owner receiving access to an existing streaming mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmaSyncTarget {
     /// CPU may access the original buffer after device completion.
     Cpu,
@@ -211,14 +222,21 @@ pub enum DmaSyncTarget {
 
 /// Synchronize a mapping for an ownership handoff while retaining it.
 ///
+/// Repeated requests for the current owner are idempotent. Bounce mappings copy
+/// by direction; non-coherent direct mappings perform the required cache operation.
+/// Both paths order accesses separately from cache consistency.
+///
 /// # Errors
 /// Returns `AllocError::InvalidInput` when the mapping arguments do not match
 /// an active record in the shared backend, before accessing buffer memory.
+/// Cache-maintenance errors propagate while retaining the previous owner.
 ///
 /// # Safety
 /// The original buffer must remain initialized, live and exclusively owned.
 /// Stop the previous owner's accesses before calling, and restrict subsequent
-/// accesses to the selected owner until the next handoff or unmap.
+/// accesses to the selected owner until the next successful handoff or unmap.
+/// The original pinned RAM and its mapping attributes remain stable; receive
+/// mappings remain CPU read-only. Use the original device/provider.
 pub unsafe fn sync_dma_buffer(
     _device: &DmaDeviceContext,
     dma_addr: DmaBusAddress,

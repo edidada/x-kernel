@@ -106,12 +106,14 @@ provider. Out-of-mask candidates return an error; this backend has no
 low-address allocation guarantee.
 
 The zero-sized `XKernelResourceProvider` delegates legacy DMA calls to a static
-platform compatibility context. The bound VirtIO path uses the per-device
-provider for queue pages, GPU pages, buffers and indirect descriptors. Address
-zero is a valid successful provider result; fallibility is represented by Result.
-Streaming sync performs bounce copies through kdma instead of inherited no-ops.
+platform compatibility context. Mainline VirtIO uses this shared provider through
+its static HAL, without a transport DMA provider extension. Address zero is a
+valid successful provider result; fallibility is represented by Result in DmaOp.
+Streaming sync delegates Direct/Bounce ownership handoffs to kdma.
 `InvalidInput` maps to `InvalidResource`; allocation/hook exhaustion maps to
-`NoMemory`. Cache policy remains uncached/shared for all devices.
+`NoMemory`. Coherent allocation remains uncached/shared; eligible contiguous
+streaming buffers use direct DMA with the unified host cache contract, and other
+buffers use the shared coherent bounce pool.
 
 The `dma-trace` feature forwards coherent diagnostics to kdma. Integration
 selects this adapter feature without a direct dependency on the DMA core.

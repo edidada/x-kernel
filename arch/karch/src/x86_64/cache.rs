@@ -9,6 +9,33 @@
 
 use memaddr::VirtAddr;
 
+/// Return the CLFLUSH stride, or None when the processor lacks CLFLUSH.
+pub fn data_cache_line_size() -> Option<usize> {
+    let info = core::arch::x86_64::__cpuid(1);
+    let size = ((info.ebx >> 8) & 0xff) as usize * 8;
+    (info.edx & (1 << 19) != 0 && size.is_power_of_two()).then_some(size)
+}
+
+/// Clean and invalidate complete cache lines before changing memory attributes.
+///
+/// # Safety
+/// CLFLUSH is available; both endpoints are aligned to its reported stride.
+/// The nonempty range is mapped live RAM without overflow, with CPU aliases and
+/// device accesses stopped until maintenance and the attribute change complete.
+pub unsafe fn clean_invalidate_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    if let Some(line_size) = data_cache_line_size() {
+        for address in (start.as_usize()..start.as_usize() + size).step_by(line_size) {
+            // SAFETY: caller retains exclusively owned mapped whole cache lines;
+            // CPUID established CLFLUSH availability and the exact instruction stride.
+            unsafe {
+                core::arch::asm!("clflush [{address}]", address = in(reg) address, options(nostack))
+            };
+        }
+        // SAFETY: MFENCE completes preceding CLFLUSH operations before the caller proceeds.
+        unsafe { core::arch::asm!("mfence", options(nostack)) };
+    }
+}
+
 /// Local icache flush — no-op on x86_64.
 #[inline]
 pub fn flush_icache_all_local() {}

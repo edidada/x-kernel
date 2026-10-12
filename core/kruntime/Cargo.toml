@@ -41,6 +41,7 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
+alloc-engine.workspace = true
 kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }

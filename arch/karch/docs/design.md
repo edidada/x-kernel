@@ -5,7 +5,8 @@
 This document covers `src/cache.rs` and `src/<arch>/cache_layout.rs`, the pure
 layout part of `karch`.
 Architecture-specific instruction operations remain described in the crate
-README and their source rustdoc; this is not a redesign of cache maintenance.
+README and their source rustdoc. The DMA-specific maintenance extensions are
+covered separately below.
 
 ## Contract and Implementation
 
@@ -46,3 +47,18 @@ protocols remain authoritative. The host timer harness imports this exact pure
 source file, rather than linking the kernel configuration dependencies of
 `karch`. Tests cover array isolation, larger payloads, stronger alignment and
 value access; consumer tests cover timer slots and watchdog state.
+
+
+## DMA maintenance primitives
+
+AArch64 data-cache maintenance now reads CTR_EL0.DminLine for instruction stride.
+Clean, invalidate and clean/invalidate complete to PoC with DSB SY. Invalidation
+APIs are unsafe and require pinned live RAM, complete line endpoints, exclusive
+ownership and stopped CPU/device aliases. The DMA host chooses a separate,
+conservative whole-page isolation policy; the stride is not that isolation limit.
+
+x86_64 reports CLFLUSH availability and stride from CPUID leaf 1. Its unsafe
+clean/invalidate range completes with MFENCE and is used before DMA page memory
+types change. Coherent streaming DMA still uses ownership ordering without cache
+instructions. kdma and the runtime validate full range and alignment before these
+primitives. These additions retain the independent SMP layout policy above.

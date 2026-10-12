@@ -8,8 +8,8 @@ use alloc_engine::{AllocError, AllocResult};
 
 /// Immutable address capabilities selected by device probe.
 ///
-/// All contexts currently use the platform address conversion and the shared
-/// uncached bounce backend. A restrictive mask can reject an allocation; it
+/// All contexts currently use the platform address conversion, cache contract
+/// and shared Direct/Bounce mapping backend. A restrictive mask can reject an allocation; it
 /// does not request a private pool or guarantee low-address memory availability.
 #[derive(Debug)]
 pub struct DmaDeviceContext {

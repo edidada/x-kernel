@@ -10,7 +10,14 @@ This crate provides a uniform API across all supported architectures (AArch64, x
   Instruction-cache and TLB maintenance completion require a DSB covering
   both reads and writes instead.
 - **Cache maintenance** (AArch64): `flush_icache_all()`,
-  `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`
+  `clean_dcache_line_to_poc(vaddr)`, `clean_dcache_range_to_poc(start, size)`,
+  `data_cache_line_size()`, `invalidate_dcache_range_to_poc(start, size)` and
+  `clean_invalidate_dcache_range_to_poc(start, size)`. Invalidation requires
+  exclusively owned, pinned whole cache lines and stopped CPU/device accesses.
+  The reported AArch64 instruction stride is separate from DMA isolation policy.
+- **Memory-type cache transition** (x86_64): `data_cache_line_size()` reports the
+  optional CLFLUSH stride; `clean_invalidate_dcache_range_to_poc()` completes
+  CLFLUSH/MFENCE over exclusive whole lines before page attributes change.
 - **Cache isolation layout**: `cache::CacheAligned<T>` and
   `cache::SMP_CACHE_BYTES` expose the architecture-owned compile-time layout
   policy, independent of cache-maintenance instruction strides. See

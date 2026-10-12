@@ -2,10 +2,9 @@
 
 ## Scope and Inputs
 
-This analysis covers `src/cache.rs` and `src/<arch>/cache_layout.rs` only.
-Privileged architecture operations,
-cache-maintenance instructions and their callers are outside this layout-only
-analysis and retain their existing source-level safety contracts.
+The layout analysis below covers `src/cache.rs` and `src/<arch>/cache_layout.rs`.
+DMA-specific maintenance primitives are audited in the extension section at the
+end; other privileged architecture operations retain their source-level contracts.
 
 The sole input is an owned Rust value `T`. This module has no raw-pointer, FFI,
 user-memory, device, file or network parsing entry point and no unsafe code.
@@ -71,3 +70,21 @@ not evidence of DMA safety, synchronization, pinning or hardware cache behavior.
 - Check padding cost before applying the wrapper to large arrays.
 - Keep the host harness and production consumers on the same implementation.
 - Do not reuse the layout constant as a hardware cache instruction stride.
+
+
+## DMA maintenance extension
+
+The AArch64 PoC and x86_64 CLFLUSH range primitives are also audited here.
+AArch64 instruction stride comes from CTR_EL0; x86 stride and instruction support
+come from CPUID. Callers establish nonempty, nonoverflowing pinned RAM, full line
+endpoints, exclusive aliases and stopped devices. DSB SY/MFENCE completes the
+operation before ownership or page attributes change. Invalidation can discard
+dirty CPU data, so receive handoff uses clean/invalidate before device ownership
+and invalidate only after the device finishes. CPU cache coherence does not
+establish asynchronous hardware ownership.
+
+Runtime cache hooks borrow privately constructed kdma range requests and validate
+alignment before issuing instructions. AArch64 DMA isolation uses whole pages,
+independently of the cache-maintenance stride and the SMP layout wrapper. QEMU
+validates the integration on homogeneous AArch64/x86_64 CPUs; physical non-coherent
+DMA and heterogeneous system cache discovery require separate validation.

@@ -7,7 +7,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator, TlsfByteAllocator};
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{DmaBusAddress, DmaDirection, DmaInfo};
+use crate::{DmaBusAddress, DmaInfo};
 
 pub(super) const DMA_BOUNCE_POOL_PAGES: usize = 1024;
 
@@ -16,14 +16,6 @@ pub(super) struct BouncePool {
     bus_addr: DmaBusAddress,
     size: usize,
     allocator: TlsfByteAllocator,
-}
-
-pub(super) struct BounceMapping {
-    pub original_cpu_addr: usize,
-    pub direction: DmaDirection,
-    pub cpu_addr: usize,
-    pub len: usize,
-    pub layout: Layout,
 }
 
 impl BouncePool {
