@@ -27,13 +27,32 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
+mod dispatch;
 mod generic;
+mod removal;
 
 pub use generic::{
     ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassWithdraw,
     DetachedParent,
 };
 use generic::{ClassDeviceMetadata, ClassRegistry, ClassRemovalCallback};
+pub use removal::remove_all_detached;
+#[cfg(feature = "block")]
+pub use removal::{block_withdraw, unpublish_block};
+#[cfg(feature = "char")]
+pub use removal::{char_withdraw, unpublish_char};
+#[cfg(feature = "display")]
+pub use removal::{display_withdraw, unpublish_display};
+#[cfg(feature = "hwrng")]
+pub use removal::{hwrng_withdraw, unpublish_hwrng};
+#[cfg(feature = "input")]
+pub use removal::{input_withdraw, unpublish_input};
+#[cfg(feature = "net")]
+pub use removal::{net_withdraw, unpublish_net};
+#[cfg(feature = "virtio-9p")]
+pub use removal::{unpublish_virtio_9p, virtio_9p_withdraw};
+#[cfg(feature = "vsock")]
+pub use removal::{unpublish_vsock, vsock_withdraw};
 
 // ---------------------------------------------------------------------------
 // Concrete class runtime types
@@ -466,117 +485,6 @@ class_api!(
 );
 
 // ---------------------------------------------------------------------------
-// Removal entries (compose root's remove notifier)
-// ---------------------------------------------------------------------------
-
-/// Remove one hwrng publication by id (full removal path).
-#[cfg(feature = "hwrng")]
-pub fn unpublish_hwrng(id: ClassDeviceId) {
-    class_remove(hwrng_class_registry, id);
-}
-
-/// Withdrawal guard for one `hwrng` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "hwrng")]
-pub fn hwrng_withdraw(device: &ClassDevice<HwrngDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_hwrng, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "char")]
-pub fn unpublish_char(id: ClassDeviceId) {
-    class_remove(char_class_registry, id);
-}
-
-/// Withdrawal guard for one `char` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "char")]
-pub fn char_withdraw(device: &ClassDevice<CharDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_char, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "net")]
-pub fn unpublish_net(id: ClassDeviceId) {
-    class_remove(net_class_registry, id);
-}
-
-/// Withdrawal guard for one `net` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "net")]
-pub fn net_withdraw(device: &ClassDevice<NetDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_net, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "display")]
-pub fn unpublish_display(id: ClassDeviceId) {
-    class_remove(display_class_registry, id);
-}
-
-/// Withdrawal guard for one `display` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "display")]
-pub fn display_withdraw(device: &ClassDevice<DisplayDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_display, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "input")]
-pub fn unpublish_input(id: ClassDeviceId) {
-    class_remove(input_class_registry, id);
-}
-
-/// Withdrawal guard for one `input` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "input")]
-pub fn input_withdraw(device: &ClassDevice<InputDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_input, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "vsock")]
-pub fn unpublish_vsock(id: ClassDeviceId) {
-    class_remove(vsock_class_registry, id);
-}
-
-/// Withdrawal guard for one `vsock` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "vsock")]
-pub fn vsock_withdraw(device: &ClassDevice<VsockDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_vsock, device.id())
-}
-
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "virtio-9p")]
-pub fn unpublish_virtio_9p(id: ClassDeviceId) {
-    class_remove(virtio_9p_class_registry, id);
-}
-
-/// Withdrawal guard for one `virtio_9p` publication: the Data-owned owner of
-/// the unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "virtio-9p")]
-pub fn virtio_9p_withdraw(device: &ClassDevice<Virtio9pDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_virtio_9p, device.id())
-}
-
-/// Unpublish a block disk by dev_t (add_disk's inverse, invoked from the
-/// block activation close).
-#[cfg(feature = "block")]
-pub fn unpublish_block(device_number: devnode::DeviceNumber) {
-    block::del_gendisk(device_number);
-}
-
-/// Withdrawal guard for one block publication: the full class_remove path
-/// (registry removal → `del_gendisk` + devnode withdraw via
-/// `ClassRuntimeMetadata::unpublish_class`). The Data-owned owner of the
-/// unpublish (see [`ClassWithdraw`]).
-#[cfg(feature = "block")]
-pub fn block_withdraw(device: &ClassDevice<BlockDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(|id| class_remove(block_class_registry, id), device.id())
-}
-
-/// Unpublish by publication id (event-driven removal, all classes).
 #[cfg(feature = "char")]
 pub fn remove_char_device(id: ClassDeviceId) {
     class_remove(char_class_registry, id);
@@ -723,199 +631,6 @@ mod node_compat {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CharDevice impl for ClassDevice (console/serial consumers)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "char")]
-impl CharDevice for ClassDevice<CharDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with_available(|device| device.read(buf))
-    }
-
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
-        self.with_available(|device| device.write(buf))
-    }
-
-    fn flush(&self) -> DriverResult {
-        self.with_available(|device| device.flush())
-    }
-}
-
-#[cfg(feature = "display")]
-impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
-    fn info(&self) -> DisplayInfo {
-        self.with(|device| device.info())
-    }
-
-    fn need_flush(&self) -> bool {
-        self.with(|device| device.need_flush())
-    }
-
-    fn flush(&self) -> DriverResult {
-        self.with_available(|device| device.flush())
-    }
-
-    fn create_scanout_resource(
-        &self,
-        resource: display::ScanoutResource,
-        paddr: u64,
-        length: u32,
-    ) -> DriverResult {
-        self.with_available(|device| device.create_scanout_resource(resource, paddr, length))
-    }
-
-    fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
-        self.with_available(|device| device.destroy_scanout_resource(resource_id))
-    }
-
-    fn present_scanout_resource(
-        &self,
-        resource_id: u32,
-        rect: display::ScanoutRect,
-    ) -> DriverResult {
-        self.with_available(|device| device.present_scanout_resource(resource_id, rect))
-    }
-}
-
-#[cfg(feature = "input")]
-impl InputDevice for ClassDevice<InputDeviceImpl> {
-    fn device_id(&self) -> InputDeviceId {
-        self.with(|device| device.device_id())
-    }
-
-    fn physical_location(&self) -> &str {
-        self.input_physical_location()
-    }
-
-    fn unique_id(&self) -> &str {
-        self.input_unique_id()
-    }
-
-    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
-        self.with_available(|device| device.get_event_bits(ty, out))
-    }
-
-    fn read_event(&self) -> DriverResult<Event> {
-        self.with_available(|device| device.read_event())
-    }
-}
-
-#[cfg(feature = "net")]
-impl NetDevice for ClassDevice<NetDeviceImpl> {
-    fn mac(&self) -> net::MacAddress {
-        self.with(|device| device.mac())
-    }
-
-    fn can_tx(&self) -> bool {
-        // Linux netif_tx_disable parity: after the offline flag flips the
-        // queue reports stopped, so the network stack's poll loop stops
-        // selecting this NIC instead of retrying `send` into `BadState`.
-        self.is_available() && self.with(|device| device.can_tx())
-    }
-
-    fn can_rx(&self) -> bool {
-        self.is_available() && self.with(|device| device.can_rx())
-    }
-
-    fn rx_queue_len(&self) -> usize {
-        self.with(|device| device.rx_queue_len())
-    }
-
-    fn tx_queue_len(&self) -> usize {
-        self.with(|device| device.tx_queue_len())
-    }
-
-    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
-        self.with_available(|device| device.recycle_rx(rx_buf))
-    }
-
-    fn recycle_tx(&self) -> DriverResult {
-        self.with_available(|device| device.recycle_tx())
-    }
-
-    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
-        self.with_available(|device| device.send(tx_buf))
-    }
-
-    fn recv(&self) -> DriverResult<NetBufHandle> {
-        self.with_available(|device| device.recv())
-    }
-
-    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
-        self.with_available(|device| device.alloc_tx_buf(size))
-    }
-
-    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
-        self.with_available(|device| device.set_rx_scheduler(scheduler))
-    }
-}
-
-#[cfg(feature = "vsock")]
-impl VsockDevice for ClassDevice<VsockDeviceImpl> {
-    fn guest_cid(&self) -> u64 {
-        self.with(|device| device.guest_cid())
-    }
-
-    fn listen(&self, port: u32) {
-        self.with(|device| device.listen(port));
-    }
-
-    fn unlisten(&self, port: u32) {
-        self.with(|device| device.unlisten(port));
-    }
-
-    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
-        self.with_available(|device| device.connect(info))
-    }
-
-    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
-        self.with_available(|device| device.accept(info))
-    }
-
-    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
-        self.with_available(|device| device.force_close(info))
-    }
-
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
-        self.with_available(|device| device.send(info, buf))
-    }
-
-    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
-        self.with_available(|device| device.shutdown(info))
-    }
-
-    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
-        self.with_available(|device| device.credit_update(info))
-    }
-
-    fn poll_event(
-        &self,
-        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
-    ) -> DriverResult<bool> {
-        self.with_available(|device| device.poll_event(handler))
-    }
-}
-
-#[cfg(feature = "virtio-9p")]
-impl ClassDevice<Virtio9pDeviceImpl> {
-    pub fn mount_tag(&self) -> String {
-        self.with(|device| device.mount_tag())
-    }
-}
-
-#[cfg(feature = "virtio-9p")]
-impl Virtio9pDevice for ClassDevice<Virtio9pDeviceImpl> {
-    fn mount_tag(&self) -> String {
-        self.mount_tag()
-    }
-
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
-        self.with_available(|device| device.request(req, resp))
-    }
-}
-
-/// Shared class prelude for runtime publishers and consumers.
 pub mod prelude {
     #[cfg(feature = "block")]
     pub use block::BlockDeviceOperations;
@@ -940,134 +655,4 @@ pub mod prelude {
         VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl,
         VsockTransportEvent, VsockTransportEventKind,
     };
-}
-
-/// Safety-net drain: withdraws the detached publication of EVERY
-/// registered class for the owning device id. NOT the production removal
-/// path anymore — each driver `Data` owns its publications via
-/// withdrawal guards (`ClassWithdraw`) and unpublishes at its own drop.
-/// This remains for diagnostics (leaked-publicion audits) and as the
-/// fallback for a driver that forgets its guard; the per-class entries
-/// self-register below so new classes drain without editing callers.
-pub fn remove_all_detached(owner: u64) {
-    // Find each class publication for this owner, then run the FULL removal
-    // path (removal callbacks, devnode withdraw, class unpublish) via the
-    // per-class unpublish_* entries — the same code the family activation
-    // close() paths use. This guarantees no cleanup step is bypassed and
-    // both removal entry points (composition-root notifier and activation
-    // close) are idempotent with each other.
-    #[cfg(feature = "hwrng")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = hwrng_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(hwrng_class_registry, id);
-    }
-    #[cfg(feature = "char")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = char_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(char_class_registry, id);
-        if let Some(console) = char_console_hook() {
-            console(id);
-        }
-    }
-    #[cfg(feature = "net")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = net_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(net_class_registry, id);
-    }
-    #[cfg(feature = "input")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = input_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(input_class_registry, id);
-    }
-    #[cfg(feature = "display")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = display_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(display_class_registry, id);
-    }
-    #[cfg(feature = "vsock")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = vsock_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(vsock_class_registry, id);
-    }
-    #[cfg(feature = "virtio-9p")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(virtio_9p_class_registry, id);
-    }
-    // Block publications carry the gendisk lifecycle in
-    // ClassRuntimeMetadata::unpublish_class (del_gendisk); the full
-    // class_remove path triggers it.
-    #[cfg(feature = "block")]
-    loop {
-        // Bind via `let`-else: the registry lock guard is a temporary of the
-        // scrutinee and would otherwise live through the loop body (the
-        // `while let` temporary-lifetime rule) — class_remove re-locks the
-        // same registry and would self-deadlock on the non-reentrant spin.
-        let Some(id) = block_class_registry().lock().find_detached(owner) else {
-            break;
-        };
-        class_remove(block_class_registry, id);
-    }
-}
-
-/// Optional console-adoption hook the console runtime installs so char
-/// removals update the active console (the one class-specific consumer
-/// action that is not expressible as a removed-subscription).
-#[cfg(feature = "char")]
-type ConsoleHook = Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>>;
-#[cfg(feature = "char")]
-static CHAR_CONSOLE_HOOK: SpinNoPreempt<ConsoleHook> = SpinNoPreempt::new(None);
-
-#[cfg(feature = "char")]
-fn char_console_hook() -> Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>> {
-    CHAR_CONSOLE_HOOK.lock().clone()
-}
-
-/// Install the console-adoption hook for char removals (called by the
-/// console runtime at init).
-#[cfg(feature = "char")]
-pub fn set_char_removal_hook(hook: Arc<dyn Fn(ClassDeviceId) + Send + Sync>) {
-    *CHAR_CONSOLE_HOOK.lock() = Some(hook);
 }
