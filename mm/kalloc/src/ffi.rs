@@ -30,12 +30,12 @@ fn create_layout(user_size: usize) -> Option<Layout> {
 /// pointer exactly like a `malloc` allocation: pass it back only to this
 /// module's `free`, ensure the requested `size` matches the intended object
 /// layout, and never dereference a null return value.
-pub unsafe extern "C" fn malloc(size: c_int) -> *mut c_void {
-    if size <= 0 {
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    if size == 0 {
         return ptr::null_mut();
     }
 
-    let user_size = size as usize;
+    let user_size = size;
     if let Some(layout) = create_layout(user_size) {
         match global_allocator().alloc(layout) {
             // SAFETY: `ptr` is a live allocation of at least `layout.size()`
@@ -89,8 +89,10 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 /// The same pointer-ownership rules as [`malloc`] apply. Callers must ensure
 /// `nmemb * size` describes the intended object region and use the returned
 /// pointer only if it is non-null.
-pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
-    let total_size = nmemb.saturating_mul(size);
+pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+    let Some(total_size) = nmemb.checked_mul(size) else {
+        return ptr::null_mut();
+    };
     if total_size == 0 {
         return ptr::null_mut();
     }
@@ -102,7 +104,7 @@ pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
         // SAFETY: `ptr` points to `total_size` writable bytes returned by
         // `malloc`, so zero-initializing that region is valid.
         unsafe {
-            ptr::write_bytes(ptr as *mut u8, 0, total_size as usize);
+            ptr::write_bytes(ptr as *mut u8, 0, total_size);
         }
     }
     ptr
@@ -119,8 +121,8 @@ pub unsafe extern "C" fn calloc(nmemb: c_int, size: c_int) -> *mut c_void {
 pub unsafe extern "C" fn __memcpy_chk(
     dest: *mut c_void,
     src: *const c_void,
-    len: c_int,
-    dest_len: c_int,
+    len: usize,
+    dest_len: usize,
 ) -> *mut c_void {
     if dest.is_null() || src.is_null() {
         return dest;
@@ -133,7 +135,7 @@ pub unsafe extern "C" fn __memcpy_chk(
     // SAFETY: the null and destination-size checks above establish valid,
     // non-overlapping byte ranges of `len` bytes for the copy.
     unsafe {
-        ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len as usize);
+        ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len);
     }
     dest
 }

@@ -6,7 +6,7 @@
 //!
 //! 实现 ext4 文件系统的 extents 功能，用于高效管理文件的连续块分配。
 
-use alloc::{vec, vec::*};
+use alloc::{collections::BTreeSet, vec, vec::*};
 
 use log::{debug, error};
 
@@ -82,6 +82,154 @@ impl<'a> ExtentTree<'a> {
         self.inode.l_i_blocks_high = ((newv >> 32) & 0xFFFF) as u16;
     }
 
+    pub(crate) fn validate_child_extent_depth(
+        parent: &ExtentNode,
+        child: &ExtentNode,
+    ) -> BlockDevResult<()> {
+        let ExtentNode::Index { header, .. } = parent else {
+            return Err(BlockDevError::Corrupted);
+        };
+        Self::validate_child_extent_depth_by_parent_depth(header.eh_depth, child)
+    }
+
+    pub(crate) fn validate_child_extent_depth_by_parent_depth(
+        parent_depth: u16,
+        child: &ExtentNode,
+    ) -> BlockDevResult<()> {
+        if parent_depth == 0 {
+            return Err(BlockDevError::Corrupted);
+        }
+        let expected = parent_depth - 1;
+        if child.header().eh_depth != expected {
+            return Err(BlockDevError::Corrupted);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn extent_index_phys_block(hi: u16, lo: u32) -> BlockDevResult<u32> {
+        let phys = ((hi as u64) << 32) | lo as u64;
+        u32::try_from(phys).map_err(|_| BlockDevError::Corrupted)
+    }
+
+    /// Walk all leaf extents, bounding index depth and detecting index block cycles.
+    pub(crate) fn walk_extent_leaves<B: BlockDevice, F>(
+        dev: &mut Jbd2Dev<B>,
+        node: &ExtentNode,
+        visited: &mut BTreeSet<u32>,
+        index_levels_remaining: u16,
+        visit: &mut F,
+    ) -> BlockDevResult<()>
+    where
+        F: FnMut(&Ext4Extent) -> BlockDevResult<()>,
+    {
+        match node {
+            ExtentNode::Leaf { header, entries } => {
+                if index_levels_remaining != 0 || header.eh_depth != 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                for ext in entries {
+                    visit(ext)?;
+                }
+                Ok(())
+            }
+            ExtentNode::Index { header, entries } => {
+                if index_levels_remaining == 0 || header.eh_depth == 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                if header.eh_depth != index_levels_remaining {
+                    return Err(BlockDevError::Corrupted);
+                }
+                if header.eh_depth > EXTENT_TREE_MAX_DEPTH {
+                    return Err(BlockDevError::Corrupted);
+                }
+                for idx in entries {
+                    let child_block =
+                        Self::extent_index_phys_block(idx.ei_leaf_hi, idx.ei_leaf_lo)?;
+                    if child_block == 0 || !visited.insert(child_block) {
+                        return Err(BlockDevError::Corrupted);
+                    }
+                    dev.read_block(child_block)?;
+                    let child = Self::parse_node(dev.buffer()).ok_or(BlockDevError::Corrupted)?;
+                    Self::validate_child_extent_depth(node, &child)?;
+                    Self::walk_extent_leaves(
+                        dev,
+                        &child,
+                        visited,
+                        index_levels_remaining.saturating_sub(1),
+                        visit,
+                    )?;
+                    visited.remove(&child_block);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn walk_extent_index_blocks<B: BlockDevice, F>(
+        dev: &mut Jbd2Dev<B>,
+        node: &ExtentNode,
+        visited: &mut BTreeSet<u32>,
+        index_levels_remaining: u16,
+        visit_index_block: &mut F,
+    ) -> BlockDevResult<()>
+    where
+        F: FnMut(u32) -> BlockDevResult<()>,
+    {
+        match node {
+            ExtentNode::Leaf { header, .. } => {
+                if index_levels_remaining != 0 || header.eh_depth != 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                Ok(())
+            }
+            ExtentNode::Index { header, entries } => {
+                if index_levels_remaining == 0 || header.eh_depth == 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                if header.eh_depth != index_levels_remaining {
+                    return Err(BlockDevError::Corrupted);
+                }
+                for idx in entries {
+                    let child_block =
+                        Self::extent_index_phys_block(idx.ei_leaf_hi, idx.ei_leaf_lo)?;
+                    if child_block == 0 || !visited.insert(child_block) {
+                        return Err(BlockDevError::Corrupted);
+                    }
+                    visit_index_block(child_block)?;
+                    dev.read_block(child_block)?;
+                    let child = Self::parse_node(dev.buffer()).ok_or(BlockDevError::Corrupted)?;
+                    Self::validate_child_extent_depth(node, &child)?;
+                    Self::walk_extent_index_blocks(
+                        dev,
+                        &child,
+                        visited,
+                        index_levels_remaining.saturating_sub(1),
+                        visit_index_block,
+                    )?;
+                    visited.remove(&child_block);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn root_index_depth(node: &ExtentNode) -> BlockDevResult<u16> {
+        match node {
+            ExtentNode::Leaf { header, .. } => {
+                if header.eh_depth != 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                Ok(0)
+            }
+            ExtentNode::Index { header, .. } => {
+                if header.eh_depth == 0 || header.eh_depth > EXTENT_TREE_MAX_DEPTH {
+                    return Err(BlockDevError::Corrupted);
+                }
+                Ok(header.eh_depth)
+            }
+        }
+    }
+
     pub fn parse_node(bytes: &[u8]) -> Option<ExtentNode> {
         Self::parse_node_from_bytes(bytes)
     }
@@ -112,6 +260,13 @@ impl<'a> ExtentTree<'a> {
         let max = header.eh_max as usize;
         if entries > max {
             error!("Extent header entries overflow: entries={entries}, max={max}");
+            return None;
+        }
+        if header.eh_depth > EXTENT_TREE_MAX_DEPTH {
+            error!(
+                "Extent header depth out of range: depth={} max={}",
+                header.eh_depth, EXTENT_TREE_MAX_DEPTH
+            );
             return None;
         }
 
@@ -245,7 +400,9 @@ impl<'a> ExtentTree<'a> {
             Some(node) => node,
             None => return Ok(None),
         };
-        self.find_in_node(dev, &root, lblock)
+        let index_depth = Self::root_index_depth(&root)?;
+        let mut visited = BTreeSet::new();
+        self.find_in_node(dev, &root, lblock, &mut visited, index_depth)
     }
 
     /// 在给定节点下查找逻辑块对应的 extent
@@ -255,9 +412,14 @@ impl<'a> ExtentTree<'a> {
         dev: &mut Jbd2Dev<B>,
         node: &ExtentNode,
         lblock: u32,
+        visited: &mut BTreeSet<u32>,
+        index_levels_remaining: u16,
     ) -> BlockDevResult<Option<Ext4Extent>> {
         match node {
-            ExtentNode::Leaf { entries, .. } => {
+            ExtentNode::Leaf { entries, header } => {
+                if index_levels_remaining != 0 || header.eh_depth != 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
                 for et in entries {
                     let start = et.ee_block; // 逻辑起始块
                     let len = et.ee_len as u32; // 覆盖长度
@@ -268,7 +430,15 @@ impl<'a> ExtentTree<'a> {
                 }
                 Ok(None)
             }
-            ExtentNode::Index { entries, .. } => {
+            ExtentNode::Index {
+                header, entries, ..
+            } => {
+                if index_levels_remaining == 0 || header.eh_depth == 0 {
+                    return Err(BlockDevError::Corrupted);
+                }
+                if header.eh_depth != index_levels_remaining {
+                    return Err(BlockDevError::Corrupted);
+                }
                 if entries.is_empty() {
                     return Ok(None);
                 }
@@ -283,19 +453,32 @@ impl<'a> ExtentTree<'a> {
                     }
                 }
 
-                let child_block = (chosen.ei_leaf_hi as u64) << 32 | (chosen.ei_leaf_lo as u64);
+                let child_block =
+                    Self::extent_index_phys_block(chosen.ei_leaf_hi, chosen.ei_leaf_lo)?;
+                if child_block == 0 || !visited.insert(child_block) {
+                    return Err(BlockDevError::Corrupted);
+                }
 
                 debug!("Descending into extent child block {child_block} for lblock {lblock}");
 
                 // 读取子节点所在的物理块，并从块开头解析 extent 节点
-                dev.read_block(child_block as u32)?;
+                dev.read_block(child_block)?;
                 let buf = dev.buffer();
                 let child = match Self::parse_node_from_bytes(buf) {
                     Some(n) => n,
                     None => return Ok(None),
                 };
+                Self::validate_child_extent_depth(node, &child)?;
 
-                self.find_in_node(dev, &child, lblock)
+                let result = self.find_in_node(
+                    dev,
+                    &child,
+                    lblock,
+                    visited,
+                    index_levels_remaining.saturating_sub(1),
+                );
+                visited.remove(&child_block);
+                result
             }
         }
     }
@@ -419,11 +602,14 @@ impl<'a> ExtentTree<'a> {
                         };
 
                         while idx_pos < entries.len() {
-                            let child_phy = ((entries[idx_pos].ei_leaf_hi as u64) << 32)
-                                | (entries[idx_pos].ei_leaf_lo as u64);
-                            dev.read_block(child_phy as u32)?;
+                            let child_phy = ExtentTree::extent_index_phys_block(
+                                entries[idx_pos].ei_leaf_hi,
+                                entries[idx_pos].ei_leaf_lo,
+                            )?;
+                            dev.read_block(child_phy)?;
                             let child = ExtentTree::parse_node_from_bytes(dev.buffer())
                                 .ok_or(BlockDevError::Corrupted)?;
+                            ExtentTree::validate_child_extent_depth(node, &child)?;
 
                             let r = pre_step(dev, &child, search_lbn)?;
                             match r.kind {
@@ -621,9 +807,16 @@ impl<'a> ExtentTree<'a> {
 
             {
                 let base = extent_start_phys(&e);
+                if base > u32::MAX as u64 {
+                    return Err(BlockDevError::Corrupted);
+                }
                 let off = within_off as u64;
                 for j in 0..(cut_len as u64) {
-                    fs.free_block(dev, base + off + j)?;
+                    let block = base
+                        .checked_add(off)
+                        .and_then(|v| v.checked_add(j))
+                        .ok_or(BlockDevError::Corrupted)?;
+                    fs.free_block(dev, block)?;
                     tree.sub_inode_sectors_for_block();
                 }
             }
@@ -714,13 +907,20 @@ impl<'a> ExtentTree<'a> {
                         if pp == 0 { 0 } else { pp - 1 }
                     };
 
+                    let parent_depth = header.eh_depth;
                     while idx_pos < entries.len() {
-                        let child_phy = ((entries[idx_pos].ei_leaf_hi as u64) << 32)
-                            | (entries[idx_pos].ei_leaf_lo as u64);
-                        dev.read_block(child_phy as u32)?;
+                        let child_phy = ExtentTree::extent_index_phys_block(
+                            entries[idx_pos].ei_leaf_hi,
+                            entries[idx_pos].ei_leaf_lo,
+                        )?;
+                        dev.read_block(child_phy)?;
                         let child_bytes = dev.buffer();
                         let mut child_node = ExtentTree::parse_node_from_bytes(child_bytes)
                             .ok_or(BlockDevError::Corrupted)?;
+                        ExtentTree::validate_child_extent_depth_by_parent_depth(
+                            parent_depth,
+                            &child_node,
+                        )?;
 
                         let child_res = step_recursive(
                             tree,
@@ -729,7 +929,7 @@ impl<'a> ExtentTree<'a> {
                             &mut child_node,
                             search_lbn,
                             remaining,
-                            Some(child_phy as u32),
+                            Some(child_phy),
                         )?;
 
                         match child_res.kind {
@@ -737,7 +937,7 @@ impl<'a> ExtentTree<'a> {
                                 if child_res.empty {
                                     entries.remove(idx_pos);
                                     header.eh_entries = entries.len() as u16;
-                                    fs.free_block(dev, child_phy)?;
+                                    fs.free_block(dev, child_phy as u64)?;
                                     tree.sub_inode_sectors_for_block();
                                 } else {
                                     entries[idx_pos].ei_block = child_res.first_key;
@@ -857,12 +1057,19 @@ impl<'a> ExtentTree<'a> {
                 }
 
                 if entries.len() == 1 {
-                    let child_phy =
-                        ((entries[0].ei_leaf_hi as u64) << 32) | (entries[0].ei_leaf_lo as u64);
-                    block_dev.read_block(child_phy as u32)?;
+                    let parent_depth = header.eh_depth;
+                    let child_phy = ExtentTree::extent_index_phys_block(
+                        entries[0].ei_leaf_hi,
+                        entries[0].ei_leaf_lo,
+                    )?;
+                    block_dev.read_block(child_phy)?;
                     let child_bytes = block_dev.buffer();
                     let mut child_node = ExtentTree::parse_node_from_bytes(child_bytes)
                         .ok_or(BlockDevError::Corrupted)?;
+                    ExtentTree::validate_child_extent_depth_by_parent_depth(
+                        parent_depth,
+                        &child_node,
+                    )?;
 
                     let inline_max = inline_eh_max_for_node(&child_node) as usize;
                     let child_entries_len = match &child_node {
@@ -879,7 +1086,7 @@ impl<'a> ExtentTree<'a> {
 
                         self.store_root_to_inode(&child_node);
 
-                        fs.free_block(block_dev, child_phy)?;
+                        fs.free_block(block_dev, child_phy as u64)?;
                         self.sub_inode_sectors_for_block();
                         return Ok(());
                     }
@@ -1427,13 +1634,17 @@ impl<'a> ExtentTree<'a> {
                 };
 
                 // 读取子节点
-                let child_phy_block = ((entries[idx_pos].ei_leaf_hi as u64) << 32)
-                    | (entries[idx_pos].ei_leaf_lo as u64);
+                let child_phy_block = Self::extent_index_phys_block(
+                    entries[idx_pos].ei_leaf_hi,
+                    entries[idx_pos].ei_leaf_lo,
+                )?;
                 // 读取子节点
-                block_dev.read_block(child_phy_block as u32)?;
+                block_dev.read_block(child_phy_block)?;
                 let child_bytes = block_dev.buffer();
                 let mut child_node =
-                    Self::parse_node_from_bytes(child_bytes).expect("Can't parse node from bytes!");
+                    Self::parse_node_from_bytes(child_bytes).ok_or(BlockDevError::Corrupted)?;
+                let parent_depth = header.eh_depth;
+                Self::validate_child_extent_depth_by_parent_depth(parent_depth, &child_node)?;
 
                 //  递归调用
                 let child_split_res = self.insert_recursive(
@@ -1441,7 +1652,7 @@ impl<'a> ExtentTree<'a> {
                     block_dev,
                     &mut child_node,
                     new_ext,
-                    Some(child_phy_block as u32),
+                    Some(child_phy_block),
                 )?;
 
                 let new_child_key = Self::get_node_start_block(&child_node);
@@ -1818,8 +2029,10 @@ mod tests {
                 ExtentNode::Leaf { entries, .. } => out.extend_from_slice(entries),
                 ExtentNode::Index { entries, .. } => {
                     for idx in entries {
-                        let child_phy = ((idx.ei_leaf_hi as u64) << 32) | (idx.ei_leaf_lo as u64);
-                        dev.read_block(child_phy as u32).unwrap();
+                        let child_phy =
+                            ExtentTree::extent_index_phys_block(idx.ei_leaf_hi, idx.ei_leaf_lo)
+                                .unwrap();
+                        dev.read_block(child_phy).unwrap();
                         let child =
                             ExtentTree::parse_node_from_bytes(dev.buffer()).expect("parse child");
                         walk(dev, &child, out);

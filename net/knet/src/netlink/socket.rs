@@ -8,11 +8,13 @@ use core::{sync::atomic::Ordering, task::Context};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollSet, Pollable};
+use kthread::with_current_credentials;
 
 use super::{
     NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue,
     NetlinkSocketInner, UEVENT_SEQNUM, UEVENT_SUBSCRIBERS,
-    route::{build_error_response, handle_route_request},
+    route::{build_error_response, handle_route_request, rtnetlink_mutation_requires_net_admin},
+    wire::NlMsgHeader,
 };
 use crate::{
     RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
@@ -49,9 +51,28 @@ impl NetlinkSocket {
         Ok(())
     }
 
+    fn deny_unprivileged_rtnetlink_mutation(request: &[u8]) -> Option<Vec<NetlinkPacket>> {
+        let header = NlMsgHeader::read(request)?;
+        if !rtnetlink_mutation_requires_net_admin(header.msg_type) {
+            return None;
+        }
+        if with_current_credentials(|credentials| credentials.is_privileged()) {
+            return None;
+        }
+        Some(vec![NetlinkPacket {
+            from: NetlinkAddr { pid: 0, groups: 0 },
+            data: build_error_response(request, LinuxError::EPERM),
+        }])
+    }
+
     fn handle_request(&self, request: Vec<u8>) -> Vec<NetlinkPacket> {
         match self.inner.protocol {
-            NETLINK_ROUTE => handle_route_request(&request),
+            NETLINK_ROUTE => {
+                if let Some(deny) = Self::deny_unprivileged_rtnetlink_mutation(&request) {
+                    return deny;
+                }
+                handle_route_request(&request)
+            }
             NETLINK_KOBJECT_UEVENT => Vec::new(),
             _ => vec![NetlinkPacket {
                 from: NetlinkAddr { pid: 0, groups: 0 },

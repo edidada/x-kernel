@@ -127,7 +127,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，`d_reclen` 按 ABI 向上取整 |
 | T-15 | `getdents64` 对未对齐 `linux_dirent64` 指针做对齐写入 | 用户输出缓冲区 / ABI 布局 | 高 | `Vec<u8>` 基址非 8 字节对齐，aligned `write` 在 AArch64 等架构上是 UB | header 使用 `write_unaligned`；不依赖 `offset` 倍数等于指针对齐 |
 | T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
-| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或调用者凭据 | `classify_procfd_path` 拒绝无效 pid/fd；直接解析和 procfs `ThreadFdDir` 均调用 `can_access_process_files`（自身、root，或 fsuid/fsgid 匹配目标全部 UID/GID）；fd 表读取持 read lock |
+| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或调用者凭据 | `classify_procfd_path` 拒绝无效 pid/fd；`can_access_process_files` 门控解析；`resolve_at` 返回 `ResolveAtOutcome` 供 stat/chown/chmod/utime/link 等调用 `ensure_procfd_dac`；`sys_openat` 使用 `check_procfd_open_dac`；fd 表读取持 read lock |
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 procfd 路径被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | `resolve_open_path_source` 将 `O_NOFOLLOW` 转为 `AT_SYMLINK_NOFOLLOW`，并对 live procfd 返回 loop 错误 |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |

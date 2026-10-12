@@ -18,7 +18,7 @@
 //! - `task`: Process, thread, signal, and pidfd management
 //! - `time`: Time and process-timer operations
 
-use kerrno::LinuxError;
+use kerrno::{KError, LinuxError};
 use khal::uspace::UserContext;
 use kthread::UserThreadRuntimeAction;
 use linux_sysno::Sysno;
@@ -694,12 +694,18 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             Err(kerrno::KError::Unsupported)
         }
 
-        // TEE syscalls (>=500)
+        // TEE syscalls (>=500): TA images only (`/tee/ta/{uuid}.ta`).
         #[cfg(feature = "tee")]
-        _ if uctx.sysno() >= 500 => match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
-            Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
-            Err(errno) => Ok(errno as isize),
-        },
+        _ if uctx.sysno() >= 500 => {
+            if !tee_kernel::tee::current_process_may_invoke_tee_syscalls() {
+                Err(KError::OperationNotPermitted)
+            } else {
+                match tee_kernel::tee::dispatch_irq_tee_syscall(sysno, uctx) {
+                    Ok(_) => Ok(tee_kernel::TEE_SUCCESS as isize),
+                    Err(errno) => Ok(errno as isize),
+                }
+            }
+        }
 
         _ => {
             let tid = ktask::current().id().as_u64() as u32;

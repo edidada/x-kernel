@@ -63,7 +63,8 @@ fuzz_target!(|data: &[u8]| {
         if !auxv.is_empty() {
             let args = [std::string::String::from("fuzz")];
             let envs = [std::string::String::from("FUZZ=1")];
-            let _ = kernel_elf_parser::app_stack_region(&args, &envs, &auxv, stack_end);
+            let at_random = [0u8; 16];
+            let _ = kernel_elf_parser::app_stack_region(&args, &envs, &auxv, &at_random, stack_end);
         }
         Some(())
     }));

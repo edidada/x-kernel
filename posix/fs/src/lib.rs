@@ -21,6 +21,7 @@ mod mount;
 mod namei;
 mod open;
 mod path;
+mod procfd_dac;
 mod stat;
 mod sync;
 

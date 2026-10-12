@@ -29,6 +29,12 @@ MD5 support is retained for GP TEE compatibility and is implemented through
 the RustCrypto `md-5` backend. It should not be selected for new security
 protocols.
 
+DES and 3DES (TDEA) block cipher helpers remain in this crate for regression
+tests and benchmarks. The kernel TEE rejects `TEE_ALG_DES_*`, `TEE_ALG_DES3_*`,
+`TEE_TYPE_DES`, `TEE_TYPE_DES3`, and related CBC-MAC/CMAC algorithms at
+`cryp_state_alloc` / `cipher_init` with `TEE_ERROR_NOT_SUPPORTED` (NIST SP
+800-131A).
+
 Glue code must not introduce secret-dependent branches for operations that are
 expected to be constant-time. Some compatibility paths, such as high-level TEE
 object parsing and public metadata checks, are not secret-bearing.

@@ -4,6 +4,10 @@
 
 //! Block cipher abstraction — AES-128-ECB, AES-256-ECB, SM4-ECB, DES-ECB,
 //! DES3-ECB.
+//!
+//! DES / 3DES (`DesEcb`, `Des3Ecb`) remain for unit tests and known-answer checks only.
+//! The TEE syscall layer rejects `TEE_ALG_DES_*`, `TEE_ALG_DES3_*`, and `TEE_TYPE_DES(3)`
+//! (NIST SP 800-131A).
 
 use cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 
@@ -106,8 +110,8 @@ define_block_ciphers! {
     Aes256Ecb => { backend: aes::Aes256, name: "AES-256-ECB", block: 16, key: 32 },
     /// SM4 in ECB mode (single block).
     Sm4Ecb => { backend: sm4::Sm4, name: "SM4-ECB", block: 16, key: 16 },
-    /// DES in ECB mode (single block).
+    /// Single-DES ECB — not exposed through TEE crypto operations; tests/benches only.
     DesEcb => { backend: des::Des, name: "DES-ECB", block: 8, key: 8 },
-    /// Triple-DES (3DES / TDEA) in ECB mode (single block).
+    /// 3DES (TDEA) ECB — not exposed through TEE crypto operations; tests/benches only.
     Des3Ecb => { backend: des::TdesEde3, name: "3DES-ECB", block: 8, key: 24 },
 }

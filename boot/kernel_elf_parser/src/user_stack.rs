@@ -44,6 +44,7 @@ use crate::auxv::{AuxEntry, AuxType};
 /// * `args` - Arguments of the application
 /// * `envs` - Environment variables of the application
 /// * `auxv` - Auxiliary vectors of the application
+/// * `at_random` - Sixteen bytes placed on the stack for `AT_RANDOM` when auxv omits it
 /// * `sp`   - Highest address of the stack
 ///
 /// # Return
@@ -57,6 +58,7 @@ pub fn app_stack_region(
     args: &[String],
     envs: &[String],
     auxv: &[AuxEntry],
+    at_random: &[u8; 16],
     sp: usize,
 ) -> Result<Vec<u8>, &'static str> {
     let mut data = VecDeque::new();
@@ -66,8 +68,7 @@ pub fn app_stack_region(
         sp.checked_sub(data.len()).ok_or("user stack overflow")
     };
 
-    // define a random string with 16 bytes
-    let random_str_pos = push("0123456789abcdef".as_bytes())?;
+    let random_str_pos = push(at_random.as_bytes())?;
     // Push arguments and environment variables
     let envs_slice: Result<Vec<_>, _> = envs
         .iter()

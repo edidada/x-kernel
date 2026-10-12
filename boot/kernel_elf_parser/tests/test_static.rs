@@ -68,7 +68,9 @@ fn test_ustack(elf_parser: &ELFParser) {
     // The highest address of the user stack.
     let ustack_end = 0x4000_0000;
 
-    let stack_data = kernel_elf_parser::app_stack_region(&args, &envs, &auxv, ustack_end).unwrap();
+    let at_random = *b"0123456789abcdef";
+    let stack_data =
+        kernel_elf_parser::app_stack_region(&args, &envs, &auxv, &at_random, ustack_end).unwrap();
     // The first 8 bytes of the stack is the number of arguments.
     assert_eq!(stack_data[0..8], [3, 0, 0, 0, 0, 0, 0, 0]);
 }

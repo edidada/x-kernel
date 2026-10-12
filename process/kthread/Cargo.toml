@@ -32,6 +32,7 @@ ksync.workspace = true
 ktask = { workspace = true, features = ["task_ext"] }
 ktimer.workspace = true
 klazy.workspace = true
+linux-raw-sys.workspace = true
 memspace.workspace = true
 slab.workspace = true
 tee_task_iface = { workspace = true, optional = true }

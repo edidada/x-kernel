@@ -597,19 +597,13 @@ fn collect_extent_tree_blocks<B: BlockDevice>(
     node: &ExtentNode,
     out: &mut Vec<u64>,
 ) -> BlockDevResult<()> {
-    match node {
-        ExtentNode::Leaf { .. } => Ok(()),
-        ExtentNode::Index { entries, .. } => {
-            for idx in entries {
-                let child_block = ((idx.ei_leaf_hi as u64) << 32) | (idx.ei_leaf_lo as u64);
-                out.push(child_block);
-                dev.read_block(child_block as u32)?;
-                let child = ExtentTree::parse_node(dev.buffer()).ok_or(BlockDevError::Corrupted)?;
-                collect_extent_tree_blocks(dev, &child, out)?;
-            }
-            Ok(())
-        }
-    }
+    let index_depth = ExtentTree::root_index_depth(node)?;
+    let mut visited = alloc::collections::BTreeSet::new();
+    let mut push_block = |block: u32| {
+        out.push(block as u64);
+        Ok(())
+    };
+    ExtentTree::walk_extent_index_blocks(dev, node, &mut visited, index_depth, &mut push_block)
 }
 
 fn extents_from_lbn_map(map: &BTreeMap<u32, u64>) -> Vec<Ext4Extent> {

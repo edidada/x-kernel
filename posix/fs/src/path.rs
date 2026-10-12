@@ -11,7 +11,7 @@ use kerrno::{KError, KResult};
 use kfd::{FileLike, Kstat};
 use kfs::{File, FsContext};
 use kthread::{current_process_state, current_thread, get_process_state};
-use kvfs::Location;
+use kvfs::{Location, Permission};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_NOFOLLOW, O_PATH};
 
 /// Executes a function with the file system context for the given directory file descriptor.
@@ -132,6 +132,30 @@ pub(crate) fn classify_procfd_path(path: &str, current_pid: u32) -> ParsedProcFd
 pub(crate) enum ResolveAtResult {
     Location(Location),
     Other(Arc<dyn FileLike>),
+}
+
+/// Result of [`resolve_at`], including whether the path was a live procfd shortcut.
+#[derive(Clone)]
+pub(crate) struct ResolveAtOutcome {
+    pub(crate) result: ResolveAtResult,
+    pub(crate) live_procfd: bool,
+}
+
+impl ResolveAtOutcome {
+    /// Enforces inode DAC when the path was resolved through live procfd.
+    pub(crate) fn ensure_procfd_dac(&self, permission: Permission) -> KResult<()> {
+        if !self.live_procfd {
+            return Ok(());
+        }
+        let ResolveAtResult::Location(loc) = &self.result else {
+            return Ok(());
+        };
+        crate::procfd_dac::check_procfd_inode_dac(loc, permission)
+    }
+
+    pub(crate) fn into_location(self) -> KResult<Location> {
+        self.result.into_location()
+    }
 }
 
 #[derive(Clone)]
@@ -299,11 +323,24 @@ fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32) -> KResult<Loca
     })
 }
 
-pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
+pub(crate) fn resolve_at(
+    dirfd: c_int,
+    path: Option<&str>,
+    flags: u32,
+) -> KResult<ResolveAtOutcome> {
     match resolve_path_source(dirfd, path, flags)? {
-        PathSource::Resolved(path) => Ok(path.into_result()),
+        PathSource::Resolved(path) => {
+            let live_procfd = path.is_procfd();
+            Ok(ResolveAtOutcome {
+                result: path.into_result(),
+                live_procfd,
+            })
+        }
         PathSource::Path(path) => {
-            resolve_filesystem_path(dirfd, &path, flags).map(ResolveAtResult::Location)
+            resolve_filesystem_path(dirfd, &path, flags).map(|location| ResolveAtOutcome {
+                result: ResolveAtResult::Location(location),
+                live_procfd: false,
+            })
         }
     }
 }
@@ -312,7 +349,8 @@ fn procfd_entry(pid: u32, fd: c_int) -> KResult<Arc<dyn FileLike>> {
     let proc_state = get_process_state(pid)?;
     let is_self = pid == current_thread().pid();
     let target_credentials = (!is_self).then(|| proc_state.credentials.read());
-    // Live `/proc/<pid>/fd/<fd>` skips VFS DAC, so this is the only gate.
+    // Ptrace-style gate before resolving the target fd; live procfd consumers
+    // also run inode DAC via `ResolveAtOutcome::ensure_procfd_dac` / `check_procfd_open_dac`.
     // Policy is `Credentials::can_access_process_files` (ptrace FSCREDS).
     let is_allowed = target_credentials
         .as_ref()

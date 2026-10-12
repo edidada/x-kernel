@@ -195,6 +195,19 @@ fn test_supplementary_groups_are_sorted_and_preserve_duplicates() {
 }
 
 #[def_test]
+fn test_can_send_signal_to_matches_linux_kill_ok() {
+    let alice = Credentials::new(1000, 100);
+    let bob = Credentials::new(2000, 200);
+    assert!(!alice.can_send_signal_to(&bob));
+    assert!(alice.can_send_signal_to(&Credentials::new(1000, 300)));
+    assert!(Credentials::root().can_send_signal_to(&bob));
+
+    let mut setuid_peer = Credentials::new(2000, 200);
+    setuid_peer.set_resuid_unchecked(None, Some(1000), None);
+    assert!(alice.can_send_signal_to(&setuid_peer));
+}
+
+#[def_test]
 fn test_process_file_access_requires_self_privilege_or_matching_ids() {
     let caller = Credentials::new(1000, 100);
     let target = Credentials::new(2000, 200);
@@ -214,4 +227,23 @@ fn test_process_file_access_requires_self_privilege_or_matching_ids() {
     let mut matching_gid = Credentials::new(1000, 100);
     matching_gid.set_resgid_unchecked(None, Some(200), None);
     assert!(!caller.can_access_process_files(&matching_gid, false));
+}
+
+#[def_test]
+fn test_oom_score_adj_write_requires_privilege_or_matching_euid() {
+    let caller = Credentials::new(1000, 100);
+    let target = Credentials::new(2000, 200);
+    assert!(!caller.can_modify_oom_score_adj(&target));
+    assert!(Credentials::root().can_modify_oom_score_adj(&target));
+
+    let peer = Credentials::new(1000, 200);
+    assert!(caller.can_modify_oom_score_adj(&peer));
+    // Same EUID is enough for oom_score_adj, but FSCREDS proc access still needs GID match.
+    assert!(!caller.can_access_process_files(&peer, false));
+
+    let mut setuid_peer = Credentials::new(2000, 200);
+    setuid_peer.set_resuid_unchecked(None, Some(1000), None);
+    // Matches Linux oom_score_adj: caller EUID == target EUID even when RUID differs.
+    assert!(caller.can_modify_oom_score_adj(&setuid_peer));
+    assert!(!caller.can_access_process_files(&setuid_peer, false));
 }

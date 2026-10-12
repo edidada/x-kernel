@@ -157,26 +157,37 @@ impl HashTreeManager {
             return Err(HashTreeError::BufferTooSmall);
         }
 
-        // Parse root node info
-        let dot = Ext4DirEntryInfo::parse_from_bytes(&data[0..8])
-            .ok_or(HashTreeError::CorruptedHashTree)?;
-
-        let dotdot = Ext4DirEntryInfo::parse_from_bytes(&data[dot.inode as usize..])
-            .ok_or(HashTreeError::CorruptedHashTree)?;
-
-        // Extract root info
-        let info_offset = dot.inode as usize + dotdot.inode as usize;
-        if info_offset + core::mem::size_of::<Ext4DxRootInfo>() > data.len() {
+        let dot_rec_len = read_u16_le(&data[4..6]) as usize;
+        if dot_rec_len < 8 || dot_rec_len > data.len() {
             return Err(HashTreeError::CorruptedHashTree);
         }
 
-        let info_bytes = &data[info_offset..info_offset + core::mem::size_of::<Ext4DxRootInfo>()];
+        let dotdot_offset = dot_rec_len;
+        if dotdot_offset + 8 > data.len() {
+            return Err(HashTreeError::CorruptedHashTree);
+        }
+
+        let dotdot_rec_len = read_u16_le(&data[dotdot_offset + 4..dotdot_offset + 6]) as usize;
+        if dotdot_rec_len < 8 {
+            return Err(HashTreeError::CorruptedHashTree);
+        }
+
+        let info_offset = dotdot_offset
+            .checked_add(dotdot_rec_len)
+            .ok_or(HashTreeError::CorruptedHashTree)?;
+        let info_end = info_offset
+            .checked_add(core::mem::size_of::<Ext4DxRootInfo>())
+            .ok_or(HashTreeError::CorruptedHashTree)?;
+        if info_end > data.len() {
+            return Err(HashTreeError::CorruptedHashTree);
+        }
+
+        let info_bytes = &data[info_offset..info_end];
         let hash_version = info_bytes[5]; // hash_version field is at offset 5
         let indirect_levels = info_bytes[6]; // indirect_levels field is at offset 6
 
         // Parse hash entries
-        let entries_offset = info_offset + core::mem::size_of::<Ext4DxRootInfo>();
-        let entries = self.parse_dx_entries(&data[entries_offset..])?;
+        let entries = self.parse_dx_entries(&data[info_end..])?;
 
         Ok(HashTreeNode::Root {
             hash_version,

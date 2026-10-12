@@ -55,6 +55,9 @@ resource owners
 | T-06 | `execve` 检查线程数后并发 clone 发布新线程 | 高 | `execve` 与 `clone(CLONE_THREAD)` 都持有 `ProcessLifecycleState::exec_transition` |
 | T-07 | `capget` 对非特权进程返回全 1 capability，用户态据此跳过检查 | 中 | `capget` 按目标 `euid == 0` 填全开或全关；跨进程查询走 `can_access_process_files` |
 | T-08 | `seccomp`/`PR_SET_SECCOMP` 返回成功但未安装过滤器 | 中 | 未实现过滤时 `seccomp` 返回 `ENOSYS`，`prctl(PR_SET_SECCOMP)` 返回 `EINVAL` |
+| T-09 | 非 TA 进程调用 syscall number ≥ 500 进入 TEE 内部 API | 高 | `dispatch_irq_syscall` 与 `dispatch_irq_tee_syscall` 均要求可执行文件为 canonical `/tee/ta/{uuid}.ta`；否则 `EPERM` / `TEE_ERROR_ACCESS_DENIED` |
+| T-10 | `kill`/`tkill`/`tgkill`/`pidfd_send_signal` 向任意进程发信号 | 高 | `kthread::send_signal_to_{process,thread}` 对非 `SI_KERNEL` 信号校验 `Credentials::can_send_signal_to`（`CAP_KILL`/`kill_ok` 近似） |
+| T-11 | `shmat`/`shmget` 未校验 IPC 权限 attach 任意段 | 高 | `posix-ipc` 创建段时填充 `shm_perm` uid/gid/mode；`shmget`/`shmat`/`shmctl` 使用 `has_ipc_permission` 与 owner 检查 |
 
 ## 审计清单
 

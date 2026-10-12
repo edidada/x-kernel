@@ -1128,7 +1128,7 @@ pub static TEE_CRYP_OBJ_PROPS: [TeeCrypObjTypeProps; 19] = [
     prop(
         TEE_TYPE_RSA_KEYPAIR,
         1,
-        256,
+        1024,
         CFG_CORE_BIGNUM_MAX_BITS as _,
         0,
         TEE_CRYP_OBJ_RSA_KEYPAIR_ATTRS,
@@ -1136,7 +1136,7 @@ pub static TEE_CRYP_OBJ_PROPS: [TeeCrypObjTypeProps; 19] = [
     prop(
         TEE_TYPE_RSA_PUBLIC_KEY,
         1,
-        256,
+        1024,
         CFG_CORE_BIGNUM_MAX_BITS as _,
         0,
         TEE_CRYP_OBJ_RSA_PUB_KEY_ATTRS,
@@ -1203,6 +1203,9 @@ pub fn tee_obj_set_type(obj: &mut TeeObj, obj_type: u32, max_key_size: size_t) -
         }
 
         obj.attr.push(TeeCryptObj::None);
+    } else if obj_type == TEE_TYPE_DES || obj_type == TEE_TYPE_DES3 {
+        // DES / 3DES (TDEA) keys are prohibited for data protection (NIST SP 800-131A).
+        return Err(TEE_ERROR_NOT_SUPPORTED);
     } else {
         // Find description of object
         let type_props = tee_svc_find_type_props(obj_type).ok_or(TEE_ERROR_NOT_SUPPORTED)?;

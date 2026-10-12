@@ -103,6 +103,7 @@ VFS / DAC permission checks
 | T-07 | `apply_exec` 调用顺序错误丢失 setuid/setgid 程序语义 | 中 | setuid executable 支持先重置 saved ID 后更新 effective ID | `design.md` 记录顺序要求；未来 exec loader 改动需联动审计 |
 | T-08 | root 简化模型与 capability 语义不一致 | 中 | 引入 capability 后仍只检查 `euid == 0` | 把 `is_privileged` 作为替换点；capability 支持应在策略层接入 |
 | T-09 | procfd 直接路径与 procfs 后端的跨进程策略不一致 | 高 | 两处各自比较 UID 并发生漂移 | 两个入口统一调用 `Credentials::can_access_process_files`（含 UID 与 GID），单元测试覆盖 self/root/UID/GID 转换 |
+| T-10 | 任意 UID 向其它用户进程发信号 | 高 | `kill`/`tkill`/`tgkill` 直达 `send_signal_to_*` | `Credentials::can_send_signal_to` 在 `kthread` 投递前校验；内核 `SI_KERNEL` 信号豁免 |
 
 影响等级定义：
 

@@ -30,9 +30,9 @@ fn next_ipc_id() -> i32 {
 }
 
 // IPC command constants
-const IPC_PRIVATE: i32 = 0;
-const IPC_CREAT: i32 = 0o1000;
-const IPC_EXCL: i32 = 0o2000;
+pub(crate) const IPC_PRIVATE: i32 = 0;
+pub(crate) const IPC_CREAT: i32 = 0o1000;
+pub(crate) const IPC_EXCL: i32 = 0o2000;
 const IPC_RMID: i32 = 0;
 const IPC_SET: i32 = 1;
 const IPC_STAT: i32 = 2;

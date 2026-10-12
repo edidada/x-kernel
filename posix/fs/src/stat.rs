@@ -10,8 +10,8 @@ use kerrno::{KError, KResult};
 use kfs::File;
 use kthread::current_process_state;
 use kvfs::{
-    Location, MountFlags, NodePermission, ST_NOATIME, ST_NODEV, ST_NODIRATIME, ST_NOEXEC,
-    ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
+    Location, MountFlags, NodePermission, Permission, ST_NOATIME, ST_NODEV, ST_NODIRATIME,
+    ST_NOEXEC, ST_NOSUID, ST_NOSYMFOLLOW, ST_RDONLY, ST_RELATIME, ST_VALID,
 };
 use linux_raw_sys::general::{
     __kernel_fsid_t, AT_EMPTY_PATH, R_OK, W_OK, X_OK, stat, statfs, statx,
@@ -56,7 +56,8 @@ pub fn sys_fstatat(
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     let loc = resolve_at(dirfd, path.as_deref(), flags)?;
-    statbuf.write_vm(loc.stat()?.into())?;
+    loc.ensure_procfd_dac(Permission::MAY_READ)?;
+    statbuf.write_vm(loc.result.stat()?.into())?;
 
     Ok(0)
 }
@@ -75,7 +76,9 @@ pub fn sys_statx(
         .transpose()?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    statxbuf.write_vm(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
+    let resolved = resolve_at(dirfd, path.as_deref(), flags)?;
+    resolved.ensure_procfd_dac(Permission::MAY_READ)?;
+    statxbuf.write_vm(resolved.result.stat()?.into())?;
 
     Ok(0)
 }
@@ -105,6 +108,18 @@ pub fn sys_faccessat2(
     if mode == 0 {
         return Ok(0);
     }
+    let mut procfd_perm = Permission::empty();
+    if mode & R_OK != 0 {
+        procfd_perm |= Permission::MAY_READ;
+    }
+    if mode & W_OK != 0 {
+        procfd_perm |= Permission::MAY_WRITE;
+    }
+    if mode & X_OK != 0 {
+        procfd_perm |= Permission::MAY_EXEC;
+    }
+    file.ensure_procfd_dac(procfd_perm)?;
+
     let mut required_mode = NodePermission::empty();
     if mode & R_OK != 0 {
         required_mode |= NodePermission::OWNER_READ;
@@ -116,7 +131,7 @@ pub fn sys_faccessat2(
         required_mode |= NodePermission::OWNER_EXEC;
     }
     let required_mode = required_mode.bits();
-    if (file.stat()?.mode as u16 & required_mode) != required_mode {
+    if (file.result.stat()?.mode as u16 & required_mode) != required_mode {
         return Err(KError::PermissionDenied);
     }
 

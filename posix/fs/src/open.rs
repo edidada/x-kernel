@@ -17,7 +17,10 @@ use kvfs::{DirEntry, FileNode, Location, NodeType, Reference};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
 
-use crate::path::{PathSource, resolve_open_path_source, with_fs};
+use crate::{
+    path::{PathSource, resolve_open_path_source, with_fs},
+    procfd_dac::check_procfd_open_dac,
+};
 
 fn current_filesystem_ids() -> (u32, u32) {
     kthread::with_current_credentials(|credentials| (credentials.fsuid(), credentials.fsgid()))
@@ -125,8 +128,10 @@ pub fn sys_openat(
     if let PathSource::Resolved(path) = resolve_open_path_source(dirfd, Some(&path), raw_flags)?
         && path.is_procfd()
     {
+        let loc = path.location().ok_or(KError::InvalidInput)?;
+        check_procfd_open_dac(&loc, raw_flags)?;
         return options
-            .open_loc(path.location().ok_or(KError::InvalidInput)?)
+            .open_loc(loc)
             .and_then(|it| add_to_fd(it, flags as _))
             .map(|fd| fd as isize);
     }

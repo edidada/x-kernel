@@ -35,7 +35,7 @@ use crate::tee::{
         crypto_authenc_enc_final, crypto_authenc_init, crypto_authenc_max_final_output_len,
         crypto_authenc_update_aad, crypto_cipher_final, crypto_cipher_init,
         crypto_cipher_max_output_len, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
-        crypto_xts_cipher_final,
+        crypto_xts_cipher_final, tee_check_des_tdea_prohibited,
     },
     memtag::{memtag_strip_tag, memtag_strip_tag_const},
     rng_software::crypto_rng_read,
@@ -570,6 +570,7 @@ pub fn tee_cryp_state_alloc(
     state: &mut u32,
 ) -> TeeResult {
     let algo = translate_compat_algo(algo);
+    tee_check_des_tdea_prohibited(algo)?;
     let mut cs = TeeCrypState::default();
 
     // 判断密钥对象是否存在，并取出密钥对象
@@ -3114,67 +3115,6 @@ pub mod tests_cryp {
         assert_eq!(result.err(), Some(TEE_ERROR_BAD_STATE));
     }
 
-    fn des3_ecb_encrypt_test_setup(key: &[u8]) -> TeeResult<u32> {
-        let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
-        syscall_cryp_obj_alloc(TEE_TYPE_DES3 as _, 192, obj_id.as_user_ref())?;
-        let obj_id = obj_id.read();
-
-        let obj_arc = tee_obj_get(obj_id as TeeObjIdType)?;
-        let mut obj = obj_arc.lock();
-        let mut secret = TeeCrypObjSecretWrapper::new(24);
-        secret.set_secret_data(key)?;
-        let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ObjSecret(secret));
-        drop(obj);
-
-        let mut state: u32 = 0;
-        tee_cryp_state_alloc(
-            TEE_ALG_DES3_ECB_NOPAD,
-            TEE_OperationMode::TEE_MODE_ENCRYPT,
-            Some(obj_id),
-            None,
-            &mut state,
-        )?;
-        tee_cryp_cipher_init(state, None, CipherPaddingMode::None)?;
-        Ok(state)
-    }
-
-    #[unittest::def_test(custom)]
-    fn test_des3_ecb_2key_cipher_init() {
-        let key = [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff,
-        ];
-        let res = des3_ecb_encrypt_test_setup(&key);
-        assert!(res.is_ok());
-    }
-
-    /// mbedtls `test_vec_ecb` vector for DES-EDE-ECB encrypt.
-    #[unittest::def_test(custom)]
-    fn test_des3_ecb_2key_encrypt() {
-        let key = [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff,
-        ];
-        let plain = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let expect = [0x92, 0x95, 0xb5, 0x9b, 0xb3, 0x84, 0x73, 0x6e];
-
-        let state = des3_ecb_encrypt_test_setup(&key).unwrap();
-        let mut out = [0u8; 8];
-        let len = tee_cryp_cipher_update(state, &plain, &mut out).unwrap();
-        assert_eq!(len, 8);
-        assert_eq!(&out, &expect);
-    }
-
-    #[unittest::def_test(custom)]
-    fn test_des3_ecb_3key_cipher_init() {
-        let key = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
-            0x32, 0x10, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
-        ];
-        let res = des3_ecb_encrypt_test_setup(&key);
-        assert!(res.is_ok());
-    }
-
     fn aes_xts_test_setup_keys(key1: &[u8], key2: &[u8]) -> (TeeObjIdType, TeeObjIdType) {
         let mut obj1_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let mut obj2_id = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -3560,10 +3500,24 @@ pub mod tests_cryp {
     }
 
     #[unittest::def_test(custom)]
-    fn test_des3_ecb_rejects_invalid_key_length() {
-        let key = [0u8; 8];
-        let res = des3_ecb_encrypt_test_setup(&key);
-        assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    fn test_cryp_state_alloc_rejects_des_tdea() {
+        let mut state: u32 = 0;
+        for algo in [
+            TEE_ALG_DES_ECB_NOPAD,
+            TEE_ALG_DES_CBC_NOPAD,
+            TEE_ALG_DES3_ECB_NOPAD,
+            TEE_ALG_DES3_CBC_NOPAD,
+            TEE_ALG_DES3_CMAC,
+        ] {
+            let res = tee_cryp_state_alloc(
+                algo,
+                TEE_OperationMode::TEE_MODE_ENCRYPT,
+                None,
+                None,
+                &mut state,
+            );
+            assert_eq!(res.err(), Some(TEE_ERROR_NOT_SUPPORTED), "algo {algo:#x}");
+        }
     }
 
     #[unittest::def_test(custom)]

@@ -13,6 +13,7 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
+mod at_random;
 mod loader;
 mod lru_cache;
 

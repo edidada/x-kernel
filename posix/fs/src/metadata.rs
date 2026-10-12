@@ -101,7 +101,9 @@ pub fn sys_fchownat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_location()?;
+    let resolved = resolve_at(dirfd, path.as_deref(), flags)?;
+    resolved.ensure_procfd_dac(Permission::MAY_WRITE)?;
+    let loc = resolved.into_location()?;
     let meta = loc.metadata()?;
 
     let new_uid = (uid != -1).then_some(uid as u32);
@@ -145,7 +147,9 @@ pub fn sys_fchmodat(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_location()?;
+    let resolved = resolve_at(dirfd, path.as_deref(), flags)?;
+    resolved.ensure_procfd_dac(Permission::MAY_WRITE)?;
+    let loc = resolved.into_location()?;
     require_chmod_permission(&loc.metadata()?)?;
     loc.update_metadata(MetadataUpdate {
         mode: Some(NodePermission::from_bits_truncate(mode as u16)),
@@ -166,7 +170,9 @@ fn update_times(
         .check_non_null()
         .map(UserConstPtr::load_string)
         .transpose()?;
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?.into_location()?;
+    let resolved = resolve_at(dirfd, path.as_deref(), flags)?;
+    resolved.ensure_procfd_dac(Permission::MAY_WRITE)?;
+    let loc = resolved.into_location()?;
     require_utime_permission(&loc.metadata()?, now_only)?;
     loc.update_metadata(MetadataUpdate {
         atime,

@@ -120,6 +120,37 @@ impl Credentials {
                 .all(|target_gid| target_gid == self.fsgid)
     }
 
+    /// Whether the caller may write `/proc/<pid>/oom_score_adj` for `target`.
+    ///
+    /// Approximates Linux `proc_pid_write_oom_score_adj`: privileged callers
+    /// (`euid == 0` for `CAP_SYS_RESOURCE` / admin), or the caller's effective
+    /// UID matches the target's real or effective UID. Ptrace-style `/proc`
+    /// read access alone is not sufficient.
+    pub fn can_modify_oom_score_adj(&self, target: &Self) -> bool {
+        if self.is_privileged() {
+            return true;
+        }
+        self.euid == target.euid || self.euid == target.ruid
+    }
+
+    /// Whether this caller may deliver a user-originated signal to `target` (`kill_ok` / CAP_KILL).
+    ///
+    /// Privileged callers (`euid == 0`) may signal any process. Unprivileged callers may
+    /// signal only when their real or effective UID matches one of the target's real,
+    /// effective, or saved set-user IDs.
+    pub fn can_send_signal_to(&self, target: &Self) -> bool {
+        if self.is_privileged() {
+            return true;
+        }
+        let caller_uids = [self.ruid, self.euid];
+        let target_uids = [target.ruid, target.euid, target.suid];
+        caller_uids.into_iter().any(|caller_uid| {
+            target_uids
+                .into_iter()
+                .any(|target_uid| caller_uid == target_uid)
+        })
+    }
+
     /// Implements Linux/POSIX `setuid`.
     ///
     /// A privileged process sets real, effective, saved, and filesystem UIDs.

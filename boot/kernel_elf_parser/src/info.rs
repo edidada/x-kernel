@@ -198,7 +198,7 @@ impl<'a> ELFParser<'a> {
         &self,
         pagesz: usize,
         ldso_base: Option<usize>,
-    ) -> Result<impl Iterator<Item = AuxEntry>, &'static str> {
+    ) -> Result<impl Iterator<Item = AuxEntry> + use<>, &'static str> {
         let phdr = self.phdr()?;
         let entry = self.entry()?;
         Ok([

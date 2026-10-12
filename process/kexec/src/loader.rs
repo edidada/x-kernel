@@ -18,7 +18,7 @@ use memspace::AddrSpace;
 use memspace_file::{new_alloc, new_cow};
 use ouroboros::self_referencing;
 
-use super::lru_cache::LruCache;
+use super::{at_random::fill_at_random, lru_cache::LruCache};
 
 fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     let mut mapping_flags = MappingFlags::USER;
@@ -182,7 +182,7 @@ impl ElfLoader {
             .0
             .access(|entry| entry.borrow_cache().location().ptr_eq(&loc))
         {
-            match ElfCacheEntry::load(loc)? {
+            match ElfCacheEntry::load(loc.clone())? {
                 Ok(entry) => {
                     self.0.put(entry);
                 }
@@ -195,54 +195,68 @@ impl ElfLoader {
         uspace.clear();
         ksignal::map_signal_trampoline(uspace)?;
 
-        let entry = self.0.peek_mru().unwrap();
-        let ldso = if let Some(header) = entry
-            .borrow_elf()
-            .ph
-            .iter()
-            .find(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Interp))
-        {
-            let cache = entry.borrow_cache();
-            let mut data = vec![0; header.file_size as usize];
-            let read = cache.read_at(&mut data[..], header.offset)?;
-            // `read_at` returns a short count when the file ends early. A
-            // PT_INTERP `p_filesz` larger than the file is a malformed ELF,
-            // not an internal invariant.
-            if read != data.len() {
+        let ldso_loc: Option<Location> = {
+            let entry = self.0.peek_mru().ok_or(KError::InvalidExecutable)?;
+            if let Some(header) = entry
+                .borrow_elf()
+                .ph
+                .iter()
+                .find(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Interp))
+            {
+                let cache = entry.borrow_cache();
+                let mut data = vec![0; header.file_size as usize];
+                let read = cache.read_at(&mut data[..], header.offset)?;
+                // `read_at` returns a short count when the file ends early. A
+                // PT_INTERP `p_filesz` larger than the file is a malformed ELF,
+                // not an internal invariant.
+                if read != data.len() {
+                    return Err(KError::InvalidExecutable);
+                }
+
+                let ldso = CStr::from_bytes_with_nul(&data)
+                    .ok()
+                    .and_then(|cstr| cstr.to_str().ok())
+                    .ok_or(KError::InvalidInput)?;
+                debug!("Loading dynamic linker: {ldso}");
+                Some(kthread::current_fs_context().lock().resolve(ldso)?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref ldso_loc) = ldso_loc {
+            if ldso_loc.ptr_eq(&loc) {
                 return Err(KError::InvalidExecutable);
             }
-
-            let ldso = CStr::from_bytes_with_nul(&data)
-                .ok()
-                .and_then(|cstr| cstr.to_str().ok())
-                .ok_or(KError::InvalidInput)?;
-            debug!("Loading dynamic linker: {ldso}");
-            Some(ldso.to_owned())
-        } else {
-            None
-        };
-
-        let (elf, ldso) = if let Some(ldso) = ldso {
-            let loc = kthread::current_fs_context().lock().resolve(ldso)?;
             if !self
                 .0
-                .access(|entry| entry.borrow_cache().location().ptr_eq(&loc))
+                .access(|entry| entry.borrow_cache().location().ptr_eq(ldso_loc))
             {
-                let entry = ElfCacheEntry::load(loc)?.map_err(|_| KError::InvalidInput)?;
-                self.0.put(entry);
+                match ElfCacheEntry::load(ldso_loc.clone())? {
+                    Ok(entry) => {
+                        self.0.put(entry);
+                    }
+                    Err(data) => {
+                        return Ok(Err(data));
+                    }
+                }
             }
+        }
 
-            let mut iter = self.0.items();
-            let ldso = iter.next().unwrap();
-            let elf = iter.next().unwrap();
-            (elf, Some(ldso))
-        } else {
-            (entry, None)
-        };
+        let elf_entry = self
+            .0
+            .items()
+            .find(|entry| entry.borrow_cache().location().ptr_eq(&loc))
+            .ok_or(KError::InvalidExecutable)?;
+        let ldso_entry = ldso_loc.as_ref().and_then(|ldso_loc| {
+            self.0
+                .items()
+                .find(|entry| entry.borrow_cache().location().ptr_eq(ldso_loc))
+        });
 
-        let elf = map_elf(uspace, kaddr_layout::USER_SPACE_BASE, elf)?;
-        let ldso = ldso
-            .map(|elf| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, elf))
+        let elf = map_elf(uspace, kaddr_layout::USER_SPACE_BASE, elf_entry)?;
+        let ldso = ldso_entry
+            .map(|entry| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, entry))
             .transpose()?;
 
         let entry_va = ldso
@@ -411,7 +425,9 @@ fn load_user_app_resolved(
         new_alloc(ustack_start, PageSize::Size4K),
     )?;
 
-    let stack_data = app_stack_region(args, envs, &auxv, ustack_top.into())
+    let mut at_random = [0u8; 16];
+    fill_at_random(&mut at_random);
+    let stack_data = app_stack_region(args, envs, &auxv, &at_random, ustack_top.into())
         .map_err(|_| KError::ArgumentListTooLong)?;
     if stack_data.len() > ustack_size {
         return Err(KError::ArgumentListTooLong);

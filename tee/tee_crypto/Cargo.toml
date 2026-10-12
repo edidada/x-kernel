@@ -27,7 +27,7 @@ serde = []
 sha1 = { version = "0.11", default-features = false, features = ["oid"] }
 sha2 = { version = "0.11", default-features = false, features = ["oid"] }
 sm3 = { version = "0.5", default-features = false }
-md5 = { package = "md-5", version = "0.11", default-features = false }
+md5 = { package = "md-5", version = "0.11", default-features = false, features = ["oid"] }
 digest = { version = "0.11", default-features = false }
 
 # Block cipher

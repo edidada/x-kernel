@@ -56,6 +56,7 @@ mod fs_htree_tests;
 mod huk_subkey;
 mod hw_entropy;
 
+mod access;
 mod libutee;
 mod memtag;
 mod otp_stubs;
@@ -88,6 +89,7 @@ mod uuid;
 mod vm;
 pub type TeeResult<T = ()> = Result<T, u32>;
 
+pub use access::{current_process_may_invoke_tee_syscalls, require_tee_ta_caller};
 pub use tee_api_defines_extensions::*;
 #[cfg(unittest)]
 pub use tee_session::set_tee_session_ctx;
@@ -121,6 +123,7 @@ fn tee_syscall_storage_create_extras(uctx: &UserContext) -> (usize, *mut c_uint)
 
 /// Dispatch TEE-specific syscalls from the userspace context
 pub fn dispatch_irq_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
+    require_tee_ta_caller()?;
     // Handle TEE-specific syscalls here
     match sysno {
         Sysno::tee_scn_return => sys_tee_scn_return(uctx.arg0() as _),

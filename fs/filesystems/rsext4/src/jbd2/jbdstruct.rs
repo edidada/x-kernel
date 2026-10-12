@@ -33,6 +33,96 @@ pub struct JBD2DEVSYSTEM {
     pub commit_queue: Vec<Jbd2Update>, // 事务缓存
 }
 
+/// Mount-time limits for journal replay block targets.
+#[derive(Debug, Clone)]
+pub struct JournalReplayLimits {
+    max_block: u32,
+    protected: Vec<(u32, u32)>,
+}
+
+impl JBD2DEVSYSTEM {
+    /// Last in-journal relative block index (inclusive), matching replay/commit wrap logic.
+    pub(super) fn journal_log_last_rel(&self) -> u32 {
+        let first = self.jbd2_super_block.s_first;
+        first.saturating_add(self.max_len.saturating_sub(1))
+    }
+
+    /// Whether `rel` lies in the active log ring (not the superblock slot at rel 0).
+    pub(super) fn journal_rel_in_log(&self, rel: u32) -> bool {
+        let first = self.jbd2_super_block.s_first;
+        if rel < first || rel > self.max_len {
+            return false;
+        }
+        rel <= self.journal_log_last_rel()
+    }
+
+    /// Reject journal superblock fields that would wrap block-number arithmetic.
+    pub fn validate_geometry(&self) -> bool {
+        let sb = &self.jbd2_super_block;
+        if self.max_len == 0 {
+            return false;
+        }
+        if sb.s_maxlen != self.max_len {
+            return false;
+        }
+        if sb.s_first == 0 || sb.s_first > self.max_len {
+            return false;
+        }
+        if sb.s_start != 0 && !self.journal_rel_in_log(sb.s_start) {
+            return false;
+        }
+        // Journal extent on disk: start_block .. start_block + max_len (relative indices).
+        self.start_block.checked_add(self.max_len).is_some()
+    }
+
+    pub(super) fn journal_phys_block(&self, rel: u32) -> Option<u32> {
+        if rel > self.max_len {
+            return None;
+        }
+        self.start_block.checked_add(rel)
+    }
+
+    /// Next relative log block for one commit step: `phys = start_block + rel`.
+    ///
+    /// Uses checked arithmetic on `s_start + head - 1` and wraps within `[s_start, last_rel]`.
+    pub(super) fn next_journal_rel_for_commit(
+        s_start: u32,
+        head: u32,
+        last_rel: u32,
+        max_len: u32,
+    ) -> Option<(u32, u32)> {
+        let new_head = head.checked_add(1)?;
+        let steps_from_start = new_head.checked_sub(1)?;
+        let rel = s_start.checked_add(steps_from_start)?;
+        if rel > last_rel || rel > max_len {
+            Some((0, s_start))
+        } else {
+            Some((new_head, rel))
+        }
+    }
+}
+
+impl JournalReplayLimits {
+    pub fn new(max_block: u32, protected: Vec<(u32, u32)>) -> Self {
+        Self {
+            max_block,
+            protected,
+        }
+    }
+
+    pub fn allows_replay_target(&self, block: u32) -> bool {
+        if block >= self.max_block {
+            return false;
+        }
+        for (start, end) in &self.protected {
+            if block >= *start && block < *end {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct JournalHeaderS {
@@ -448,6 +538,53 @@ mod tests {
         assert_eq!(parsed.s_start, sb.s_start);
         assert_eq!(parsed.s_checksum, sb.s_checksum);
         assert_eq!(&parsed.s_users[..], &sb.s_users[..]);
+    }
+
+    fn sample_jbd_system(sb: JournalSuperBllockS, start_block: u32) -> JBD2DEVSYSTEM {
+        JBD2DEVSYSTEM {
+            jbd2_super_block: sb,
+            start_block,
+            max_len: sb.s_maxlen,
+            head: 0,
+            sequence: sb.s_sequence,
+            commit_queue: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_next_journal_rel_for_commit_checked_and_wrap() {
+        let (h, r) = JBD2DEVSYSTEM::next_journal_rel_for_commit(5, 0, 10, 10).unwrap();
+        assert_eq!((h, r), (1, 5));
+
+        let (h, r) = JBD2DEVSYSTEM::next_journal_rel_for_commit(5, 5, 10, 10).unwrap();
+        assert_eq!((h, r), (6, 10));
+
+        let (h, r) = JBD2DEVSYSTEM::next_journal_rel_for_commit(5, 6, 10, 10).unwrap();
+        assert_eq!((h, r), (0, 5));
+
+        assert!(JBD2DEVSYSTEM::next_journal_rel_for_commit(u32::MAX, 0, 10, 10).is_none());
+        assert!(JBD2DEVSYSTEM::next_journal_rel_for_commit(5, u32::MAX, 10, 10).is_none());
+    }
+
+    #[test]
+    fn test_validate_geometry_rejects_bad_s_start_and_overflow() {
+        let mut sb = JournalSuperBllockS::default();
+        sb.s_maxlen = 100;
+        sb.s_first = 1;
+        sb.s_start = 50;
+        let ok = sample_jbd_system(sb, 1000);
+        assert!(ok.validate_geometry());
+
+        sb.s_start = u32::MAX;
+        let bad_start = sample_jbd_system(sb, 1000);
+        assert!(!bad_start.validate_geometry());
+
+        sb.s_start = 50;
+        let overflow_extent = sample_jbd_system(sb, u32::MAX - 10);
+        assert!(!overflow_extent.validate_geometry());
+
+        assert!(overflow_extent.journal_phys_block(50).is_none());
+        assert!(overflow_extent.journal_phys_block(u32::MAX).is_none());
     }
 
     #[test]

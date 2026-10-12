@@ -22,6 +22,9 @@ pub const JBD2_BUFFER_MAX: usize = 10; //最多10条缓存
 pub const BLOCK_SIZE: usize = 4096; //usize没问题
 pub const BLOCK_SIZE_U32: u32 = BLOCK_SIZE as u32;
 
+/// Maximum on-disk extent tree depth (index levels above leaves).
+pub const EXTENT_TREE_MAX_DEPTH: u16 = 5;
+
 /// Ext4 块大小对数（log2）
 ///
 /// 用于超级块的 s_log_block_size 字段

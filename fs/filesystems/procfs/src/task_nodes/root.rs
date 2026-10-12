@@ -306,6 +306,34 @@ struct ThreadFdDir {
     task: WeakKtaskRef,
 }
 
+/// Whether the current task may inspect `/proc/<pid>/…` for `task`.
+///
+/// Matches Linux `ptrace_may_access` / `PTRACE_MODE_READ_FSCREDS` policy used
+/// for `/proc/<pid>/fd` and `AT_FDCWD` magic links.
+fn can_access_thread_proc(task: &KtaskRef) -> bool {
+    let target = &task.as_thread().proc_state;
+    if target.proc.pid() == kthread::current_thread().pid() {
+        return true;
+    }
+
+    let target_credentials = target.credentials.read();
+    kthread::with_current_credentials(|credentials| {
+        credentials.can_access_process_files(&target_credentials, false)
+    })
+}
+
+fn can_modify_thread_oom_score_adj(task: &KtaskRef) -> bool {
+    let target = &task.as_thread().proc_state;
+    if target.proc.pid() == kthread::current_thread().pid() {
+        return true;
+    }
+
+    let target_credentials = target.credentials.read();
+    kthread::with_current_credentials(|credentials| {
+        credentials.can_modify_oom_score_adj(&target_credentials)
+    })
+}
+
 fn with_accessible_thread_fds<R>(
     task: &KtaskRef,
     f: impl FnOnce(&kthread::ProcessState) -> R,
@@ -474,6 +502,9 @@ impl SimpleDirOps for ThreadDir {
     fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        if !can_access_thread_proc(&task) {
+            return Err(VfsError::PermissionDenied);
+        }
         Ok(match name {
             "stat" => SimpleFile::new_regular(fs, move || {
                 Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
@@ -487,6 +518,9 @@ impl SimpleDirOps for ThreadDir {
                         Ok(Some(format_oom_score_adj(task.as_thread().oom_score_adj())))
                     }
                     SimpleFileOperation::Write(data) => {
+                        if !can_modify_thread_oom_score_adj(&task) {
+                            return Err(VfsError::PermissionDenied);
+                        }
                         if let Some(value) = parse_oom_score_adj_input(data)? {
                             task.as_thread().set_oom_score_adj(value);
                         }
@@ -601,6 +635,9 @@ impl SimpleDirOps for ProcFsHandler {
                 .find_map(|tid| get_task(tid).ok())
                 .ok_or(VfsError::NotFound)?
         };
+        if !can_access_thread_proc(&task) {
+            return Err(VfsError::PermissionDenied);
+        }
         Ok(make_thread_dir(self.fs.clone(), &task))
     }
 

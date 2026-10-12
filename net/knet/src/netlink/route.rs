@@ -147,6 +147,14 @@ pub(super) fn build_ack_response(request: &[u8]) -> Vec<u8> {
     build_nlmsg_error_response(&header, 0, request)
 }
 
+/// RTnetlink message types that mutate global routing/link/neighbor state (CAP_NET_ADMIN).
+pub(super) fn rtnetlink_mutation_requires_net_admin(msg_type: u16) -> bool {
+    matches!(
+        msg_type,
+        RTM_NEWLINK | RTM_NEWADDR | RTM_DELADDR | RTM_NEWROUTE | RTM_DELROUTE | RTM_NEWNEIGH
+    )
+}
+
 pub(super) fn handle_route_request(request: &[u8]) -> Vec<NetlinkPacket> {
     let Some(header) = NlMsgHeader::read(request) else {
         return Vec::new();

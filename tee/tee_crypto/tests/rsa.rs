@@ -422,9 +422,12 @@ mod ops_api {
 }
 
 #[test]
-fn test_rsa_keygen_small_sizes() {
+fn test_rsa_keygen_rejects_weak_sizes() {
     let mut rng = DeterministicRng::seed_from_u64(99);
     for bits in [256usize, 384, 512, 640, 768, 896] {
-        rsa_keygen(&mut rng, bits, 65537).unwrap_or_else(|_| panic!("{bits}-bit RSA keygen"));
+        assert!(
+            rsa_keygen(&mut rng, bits, 65537).is_err(),
+            "{bits}-bit RSA keygen must be rejected"
+        );
     }
 }

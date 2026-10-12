@@ -454,6 +454,25 @@ pub fn crypto_acipher_gen_ecc_key(
     key.generate(key_size_bits)
 }
 
+/// Rejects DES / 3DES (TDEA) TEE algorithms prohibited for data protection (NIST SP 800-131A).
+pub(crate) fn tee_check_des_tdea_prohibited(algo: u32) -> TeeResult {
+    if matches!(
+        algo,
+        TEE_ALG_DES_ECB_NOPAD
+            | TEE_ALG_DES_CBC_NOPAD
+            | TEE_ALG_DES_CBC_MAC_NOPAD
+            | TEE_ALG_DES_CBC_MAC_PKCS5
+            | TEE_ALG_DES3_ECB_NOPAD
+            | TEE_ALG_DES3_CBC_NOPAD
+            | TEE_ALG_DES3_CBC_MAC_NOPAD
+            | TEE_ALG_DES3_CBC_MAC_PKCS5
+            | TEE_ALG_DES3_CMAC
+    ) {
+        return Err(TEE_ERROR_NOT_SUPPORTED);
+    }
+    Ok(())
+}
+
 /// Returns Ok for hash algorithms exposed through the GP TEE API.
 ///
 /// MD5 and SHA-1 are included for legacy interoperability; they are weak and
@@ -590,6 +609,7 @@ pub(crate) fn crypto_hash_final(cs: Arc<Mutex<TeeCrypState>>, hash: &mut [u8]) -
 
 // defining mac operations for cryptographic hashing
 pub(crate) fn crypto_mac_alloc_ctx(algo: u32) -> TeeResult<CrypCtx> {
+    tee_check_des_tdea_prohibited(algo)?;
     match algo {
         TEE_ALG_HMAC_MD5 | TEE_ALG_HMAC_SHA1 | TEE_ALG_HMAC_SHA224 | TEE_ALG_HMAC_SHA256
         | TEE_ALG_HMAC_SHA384 | TEE_ALG_HMAC_SHA512 | TEE_ALG_HMAC_SM3 | TEE_ALG_AES_CMAC
@@ -830,6 +850,7 @@ pub(crate) fn crypto_cipher_init(
 ) -> TeeResult {
     let mut cs_guard = cs.lock();
     let algo = cs_guard.algo;
+    tee_check_des_tdea_prohibited(algo)?;
     let mode = cs_guard.mode;
 
     let direction = match mode {

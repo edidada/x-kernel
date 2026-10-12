@@ -239,18 +239,18 @@ fn rsa_key_components(pk: &rsa::RsaPrivateKey) -> RsaKeyComponents {
     }
 }
 
+/// Minimum RSA modulus size accepted for key generation.
+pub const RSA_MIN_KEY_SIZE_BITS: usize = 1024;
+
 /// Generate an RSA keypair with a specific public exponent.
 pub fn rsa_keygen(rng: &mut dyn CryptoRng, key_size_bits: usize, exp: u32) -> Result<RsaKeypair> {
+    if key_size_bits < RSA_MIN_KEY_SIZE_BITS {
+        return Err(CryptoError::Backend(BackendError::RsaKeygen));
+    }
     let exp_uint = BoxedUint::from_be_slice(&exp.to_be_bytes(), 32)
         .map_err(|_| CryptoError::Backend(BackendError::InvalidExponent))?;
-    // OP-TEE xtest generates 256–896 bit RSA keys (mbedtls allows this).
-    // The `rsa` crate enforces 1024-bit minimum unless hazmat unchecked API is used.
-    let key = if key_size_bits < 1024 {
-        rsa::RsaPrivateKey::new_with_exp_unchecked(rng, key_size_bits, exp_uint)
-    } else {
-        rsa::RsaPrivateKey::new_with_exp(rng, key_size_bits, exp_uint)
-    };
-    key.map(RsaKeypair::from_private_key)
+    rsa::RsaPrivateKey::new_with_exp(rng, key_size_bits, exp_uint)
+        .map(RsaKeypair::from_private_key)
         .map_err(|_| CryptoError::Backend(BackendError::RsaKeygen))
 }
 
@@ -395,7 +395,7 @@ macro_rules! dispatch_hash_sign_pkcs1v15 {
     ($key:expr, $hash:ident, $msg:expr) => {
         match $hash {
             RsaHashAlgo::Md5 => {
-                let scheme = rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed();
+                let scheme = rsa::pkcs1v15::Pkcs1v15Sign::new::<md5::Md5>();
                 $key.sign(scheme, $msg)
             }
             RsaHashAlgo::Sha1 => {
@@ -483,7 +483,7 @@ fn verify_pkcs1v15(
 ) -> Result<()> {
     match hash_algo {
         RsaHashAlgo::Md5 => {
-            let scheme = rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed();
+            let scheme = rsa::pkcs1v15::Pkcs1v15Sign::new::<md5::Md5>();
             key.verify(scheme, msg, sig)
         }
         RsaHashAlgo::Sha1 => {
@@ -602,7 +602,7 @@ pub fn rsa_encrypt_oaep(
             key.as_inner().encrypt(rng, padding, msg)
         }
         RsaHashAlgo::Md5 => {
-            let padding = rsa::oaep::Oaep::<sha2::Sha256>::new_with_label(label);
+            let padding = rsa::oaep::Oaep::<md5::Md5>::new_with_label(label);
             key.as_inner().encrypt(rng, padding, msg)
         }
         RsaHashAlgo::Sha224 => {
@@ -645,7 +645,7 @@ pub fn rsa_decrypt_oaep(
             key.as_inner().decrypt(padding, ciphertext.as_bytes())
         }
         RsaHashAlgo::Md5 => {
-            let padding = rsa::oaep::Oaep::<sha2::Sha256>::new_with_label(label);
+            let padding = rsa::oaep::Oaep::<md5::Md5>::new_with_label(label);
             key.as_inner().decrypt(padding, ciphertext.as_bytes())
         }
         RsaHashAlgo::Sha224 => {

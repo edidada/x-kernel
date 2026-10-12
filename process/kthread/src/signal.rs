@@ -2,12 +2,29 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kcred::Credentials;
 use kerrno::{KError, KResult};
 use kprocess::Pid;
 use ksignal::SignalInfo;
 use ktask::TaskInner;
+use linux_raw_sys::general::SI_KERNEL;
 
-use crate::{AsThread, Thread, get_process_group, get_process_state, get_task};
+use crate::{
+    AsThread, Thread, get_process_group, get_process_state, get_task, with_current_credentials,
+};
+
+fn check_user_signal_delivery(target: &Credentials, sig: &SignalInfo) -> KResult<()> {
+    if sig.code() == SI_KERNEL as i32 {
+        return Ok(());
+    }
+    with_current_credentials(|caller| {
+        if caller.can_send_signal_to(target) {
+            Ok(())
+        } else {
+            Err(KError::OperationNotPermitted)
+        }
+    })
+}
 
 fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) {
     let signo = sig.signo();
@@ -32,6 +49,9 @@ pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo
     }
 
     if let Some(sig) = sig {
+        let target = thread.proc_state.credentials.read();
+        check_user_signal_delivery(&target, &sig)?;
+        drop(target);
         debug!("Send signal {:?} to thread {}", sig.signo(), tid);
         send_signal_thread_inner(&task, thread, sig);
     }
@@ -44,6 +64,9 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> KResult<()> 
     let proc_state = get_process_state(pid)?;
 
     if let Some(sig) = sig {
+        let target = proc_state.credentials.read();
+        check_user_signal_delivery(&target, &sig)?;
+        drop(target);
         let signo = sig.signo();
         debug!("Send signal {signo:?} to process {pid}");
         if let Some(tid) = proc_state.signal.send_signal(sig)

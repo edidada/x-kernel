@@ -225,7 +225,8 @@ unsafe {
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
 | T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
-| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
+| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `posix/net::sys_socket` 创建 `AF_PACKET` 前检查 `is_privileged()` |
+| T-17 | 非特权进程通过 `NETLINK_ROUTE` 修改路由/地址/邻居 | 高 | `send()` 投递 `RTM_NEW*`/`RTM_DEL*` 等到 `handle_route_request` | `NetlinkSocket::handle_request` 对变更类 rtnetlink 要求 `is_privileged()`（CAP_NET_ADMIN 近似）；`RTM_GET*` dump 仍允许 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.lock().sync_netlink`；新增 mutation 需复用该路径 |
 | T-13 | 出站 IP 源地址与路由 `rule.src` 不一致导致 panic | 高 | raw socket 绑定非路由源，或 send 与 dispatch 之间路由表被替换 | `dispatch` 按目的地址选路，源不匹配只记 debug，不 `assert` |

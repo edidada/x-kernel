@@ -28,6 +28,7 @@ use kalloc::GlobalPage;
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::Mutex;
+use kthread::{current_thread, get_process_state, with_current_credentials};
 use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsResult};
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
@@ -321,6 +322,8 @@ pub struct Card0 {
     in_formats_blob: AtomicU32,
     system_blobs_init: Mutex<()>,
     retained_pages: Mutex<BTreeMap<u64, Arc<GlobalPage>>>,
+    /// PID of the process that holds DRM master (`DRM_IOCTL_SET_MASTER`).
+    master_pid: Mutex<Option<u32>>,
 }
 
 impl Card0 {
@@ -344,7 +347,75 @@ impl Card0 {
             in_formats_blob: AtomicU32::new(0),
             system_blobs_init: Mutex::new(()),
             retained_pages: Mutex::new(BTreeMap::new()),
+            master_pid: Mutex::new(None),
         })
+    }
+
+    fn is_session_leader() -> bool {
+        let proc = current_thread().process_state().proc.clone();
+        proc.pid() == proc.group().session().sid()
+    }
+
+    fn caller_may_acquire_master(&self) -> VfsResult<()> {
+        with_current_credentials(|credentials| {
+            if credentials.is_privileged() || Self::is_session_leader() {
+                Ok(())
+            } else {
+                Err(VfsError::PermissionDenied)
+            }
+        })
+    }
+
+    fn live_master_pid(&self) -> Option<u32> {
+        let mut guard = self.master_pid.lock();
+        let pid = (*guard)?;
+        if get_process_state(pid).is_err() {
+            *guard = None;
+            return None;
+        }
+        Some(pid)
+    }
+
+    fn require_modesetting_privilege(&self) -> VfsResult<()> {
+        let caller = current_thread().pid();
+        with_current_credentials(|credentials| {
+            if credentials.is_privileged() {
+                return Ok(());
+            }
+            if self.live_master_pid() == Some(caller) {
+                return Ok(());
+            }
+            Err(VfsError::PermissionDenied)
+        })
+    }
+
+    fn set_master(&self) -> VfsResult<()> {
+        let caller = current_thread().pid();
+        if self.live_master_pid() == Some(caller) {
+            return Ok(());
+        }
+        self.caller_may_acquire_master()?;
+        *self.master_pid.lock() = Some(caller);
+        Ok(())
+    }
+
+    fn drop_master(&self) -> VfsResult<()> {
+        let caller = current_thread().pid();
+        let mut guard = self.master_pid.lock();
+        match *guard {
+            Some(holder) if holder == caller => {
+                *guard = None;
+                Ok(())
+            }
+            _ => with_current_credentials(|credentials| {
+                if credentials.is_privileged() {
+                    *guard = None;
+                    Ok(())
+                } else {
+                    Err(VfsError::PermissionDenied)
+                }
+            }),
+        }
     }
 
     fn ensure_in_formats_blob(&self) -> u32 {
@@ -426,6 +497,26 @@ fn current_mode() -> DrmModeModeInfo {
     }
 }
 
+/// Returns true when the ioctl may change display state or KMS object ownership.
+fn drm_ioctl_requires_master(cmd: u32) -> bool {
+    matches!(
+        cmd,
+        <DrmModeDirtyFB as DrmIoctl>::CMD
+            | <DrmPrimeHandle as DrmIoctl>::CMD
+            | <DrmPrimeFdToHandle as DrmIoctl>::CMD
+            | <DrmModeSetCrtc as DrmIoctl>::CMD
+            | <DrmModeRmFb as DrmIoctl>::CMD
+            | <DrmModeCrtcPageFlip as DrmIoctl>::CMD
+            | <DrmModeCreateDumb as DrmIoctl>::CMD
+            | <DrmModeMapDumb as DrmIoctl>::CMD
+            | <DrmModeDestroyDumb as DrmIoctl>::CMD
+            | <DrmModeAtomic as DrmIoctl>::CMD
+            | <DrmModeCreateBlob as DrmIoctl>::CMD
+            | <DrmModeDestroyBlob as DrmIoctl>::CMD
+            | <DrmModeFbCmd2 as DrmIoctl>::CMD
+    )
+}
+
 impl DeviceFileOps for Card0 {
     fn read_at(&self, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         if buf.is_empty() {
@@ -457,8 +548,13 @@ impl DeviceFileOps for Card0 {
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
-            DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => return Ok(0),
+            DRM_IOCTL_SET_MASTER => return self.set_master().map(|_| 0),
+            DRM_IOCTL_DROP_MASTER => return self.drop_master().map(|_| 0),
             _ => {}
+        }
+
+        if drm_ioctl_requires_master(cmd) {
+            self.require_modesetting_privilege()?;
         }
 
         route_ioctls! {
@@ -498,6 +594,7 @@ impl DeviceFileOps for Card0 {
     }
 
     fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        self.require_modesetting_privilege()?;
         let offset = mapper.offset() as u64;
         let dumbs = self.dumbs.lock();
         let Some(b) = dumbs.values().find(|b| b.offset == offset) else {

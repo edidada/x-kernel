@@ -21,6 +21,27 @@ use crate::{
 /// 用于jbd2日志系统，标识需要有序管理写的函数
 pub trait INeedBlockdevToWrite {}
 
+pub(crate) fn validate_block_range(
+    total_blocks: u64,
+    block_id: u32,
+    count: u32,
+) -> BlockDevResult<()> {
+    if count == 0 {
+        return Err(BlockDevError::InvalidInput);
+    }
+    let start = block_id as u64;
+    let end = start
+        .checked_add(count as u64)
+        .ok_or(BlockDevError::InvalidInput)?;
+    if end > total_blocks {
+        return Err(BlockDevError::BlockOutOfRange {
+            block_id,
+            max_blocks: total_blocks,
+        });
+    }
+    Ok(())
+}
+
 /// 外部需要实现的块设备trait
 ///
 /// 定义了块设备的基本操作接口，用户需要实现此trait来支持不同的存储后端
@@ -219,14 +240,14 @@ impl<B: BlockDevice> Jbd2Dev<B> {
     }
 
     /// 外部重放journal日志入口 注意性能影响
-    pub fn journal_replay(&mut self) {
+    pub fn journal_replay(&mut self, limits: &JournalReplayLimits) {
         if self.journal_use {
             let dev = &mut self.inner.dev;
             let jbd_sys = &mut self
                 .systeam
                 .as_mut()
                 .expect("jbd2dev are not initial,please initial the jbd2dev first!");
-            jbd_sys.replay(&mut *dev);
+            jbd_sys.replay(&mut *dev, limits);
         } else {
             warn!("Journal function not turn ,please turn on this function and retry!");
         }
@@ -451,6 +472,7 @@ impl<B: BlockDevice> BlockDev<B> {
             return Err(BlockDevError::ReadOnly);
         }
 
+        validate_block_range(self.dev.total_blocks(), block_id, 1)?;
         self.dev.write(self.buffer.as_slice(), block_id, 1)?;
         self.cached_block = Some(block_id);
         self.is_dirty = false;
@@ -494,6 +516,7 @@ impl<B: BlockDevice> BlockDev<B> {
             });
         }
 
+        validate_block_range(self.dev.total_blocks(), block_id, count)?;
         self.dev.write(buffer, block_id, count)
     }
 

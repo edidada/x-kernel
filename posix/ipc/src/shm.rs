@@ -6,7 +6,7 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use khal::{
     paging::{MappingFlags, PageSize},
     time::monotonic_time_nanos,
@@ -20,16 +20,29 @@ use memspace::backend::{Backend, SharedPages};
 use osvm::VirtPtr;
 use posix_types::{IpcPerm, UserPtr, shmid_ds};
 
-use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, next_ipc_id};
+use super::{
+    IPC_CREAT, IPC_EXCL, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, has_ipc_permission, next_ipc_id,
+};
 
-fn new_shmid_ds(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_t) -> shmid_ds {
+fn current_ipc_ids() -> (u32, u32) {
+    kthread::with_current_credentials(|credentials| (credentials.euid(), credentials.egid()))
+}
+
+fn new_shmid_ds(
+    key: i32,
+    size: usize,
+    mode: __kernel_mode_t,
+    pid: __kernel_pid_t,
+    uid: u32,
+    gid: u32,
+) -> shmid_ds {
     shmid_ds {
         shm_perm: IpcPerm {
             key,
-            uid: 0,
-            gid: 0,
-            cuid: 0,
-            cgid: 0,
+            uid,
+            gid,
+            cuid: uid,
+            cgid: gid,
             mode,
             seq: 0,
             pad: 0,
@@ -39,7 +52,7 @@ fn new_shmid_ds(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_
         shm_segsz: size as __kernel_size_t,
         shm_atime: 0,
         shm_dtime: 0,
-        shm_ctime: 0,
+        shm_ctime: monotonic_time_nanos() as __kernel_time_t,
         shm_cpid: pid,
         shm_lpid: pid,
         shm_nattch: 0,
@@ -61,7 +74,17 @@ pub struct ShmInner {
 }
 
 impl ShmInner {
-    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, pid: Pid) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        key: i32,
+        shmid: i32,
+        size: usize,
+        mapping_flags: MappingFlags,
+        pid: Pid,
+        uid: u32,
+        gid: u32,
+        ipc_mode: __kernel_mode_t,
+    ) -> Self {
         ShmInner {
             shmid,
             page_num: memaddr::align_up_4k(size) / PAGE_SIZE_4K,
@@ -69,19 +92,17 @@ impl ShmInner {
             phys_pages: None,
             rmid: false,
             mapping_flags,
-            shmid_ds: new_shmid_ds(key, size, mapping_flags.bits() as __kernel_mode_t, pid as _),
+            shmid_ds: new_shmid_ds(key, size, ipc_mode, pid as _, uid, gid),
         }
     }
 
     pub fn try_update(
         &mut self,
         size: usize,
-        mapping_flags: MappingFlags,
+        _mapping_flags: MappingFlags,
         pid: Pid,
     ) -> KResult<isize> {
-        if size as __kernel_size_t != self.shmid_ds.shm_segsz
-            || mapping_flags.bits() as __kernel_mode_t != self.shmid_ds.shm_perm.mode
-        {
+        if size as __kernel_size_t != self.shmid_ds.shm_segsz {
             return Err(KError::InvalidInput);
         }
         self.shmid_ds.shm_lpid = pid as i32;
@@ -353,6 +374,8 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
     }
 
     let cur_pid = kthread::current_thread().pid();
+    let (current_uid, current_gid) = current_ipc_ids();
+    let ipc_mode = (shmflg & 0o777) as __kernel_mode_t;
     let mut shm_manager = SHM_MANAGER.lock();
 
     if key != IPC_PRIVATE
@@ -362,7 +385,25 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
             .get_inner_by_shmid(shmid)
             .ok_or(KError::InvalidInput)?;
         let mut shm_inner = shm_inner.lock();
+        if shm_inner.rmid {
+            return Err(KError::from(LinuxError::EIDRM));
+        }
+        if !has_ipc_permission(
+            &shm_inner.shmid_ds.shm_perm,
+            current_uid,
+            current_gid,
+            false,
+        ) {
+            return Err(KError::from(LinuxError::EACCES));
+        }
+        if (shmflg & IPC_EXCL as usize) != 0 && (shmflg & IPC_CREAT as usize) != 0 {
+            return Err(KError::from(LinuxError::EEXIST));
+        }
         return shm_inner.try_update(size, mapping_flags, cur_pid);
+    }
+
+    if key != IPC_PRIVATE && (shmflg & IPC_CREAT as usize) == 0 {
+        return Err(KError::from(LinuxError::ENOENT));
     }
 
     let shmid = next_ipc_id();
@@ -372,6 +413,9 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         size,
         mapping_flags,
         cur_pid,
+        current_uid,
+        current_gid,
+        ipc_mode,
     )));
     shm_manager.insert_key_shmid(key, shmid);
     shm_manager.insert_shmid_inner(shmid, shm_inner);
@@ -387,11 +431,26 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> KResult<isize> {
             .ok_or(KError::InvalidInput)?
     };
     let mut shm_inner = shm_inner.lock();
+    if shm_inner.rmid {
+        return Err(KError::from(LinuxError::EIDRM));
+    }
+
     let mut mapping_flags = shm_inner.mapping_flags;
     let shm_flg = ShmAtFlags::from_bits_truncate(shmflg);
 
     if shm_flg.contains(ShmAtFlags::SHM_RDONLY) {
         mapping_flags.remove(MappingFlags::WRITE);
+    }
+
+    let (current_uid, current_gid) = current_ipc_ids();
+    let needs_write = mapping_flags.contains(MappingFlags::WRITE);
+    if !has_ipc_permission(
+        &shm_inner.shmid_ds.shm_perm,
+        current_uid,
+        current_gid,
+        needs_write,
+    ) {
+        return Err(KError::from(LinuxError::EACCES));
     }
 
     let proc_state = current_process_state();
@@ -467,15 +526,36 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize
     };
     let mut shm_inner = shm_inner.lock();
 
+    let (current_uid, current_gid) = current_ipc_ids();
+    let is_privileged = current_uid == 0;
     let cmd = cmd as i32;
-    if cmd == IPC_SET {
-        shm_inner.shmid_ds = buf.read_vm()?;
-    } else if cmd == IPC_STAT {
+
+    if cmd == IPC_STAT {
+        if !has_ipc_permission(
+            &shm_inner.shmid_ds.shm_perm,
+            current_uid,
+            current_gid,
+            false,
+        ) {
+            return Err(KError::from(LinuxError::EACCES));
+        }
         if let Some(buf) = buf.check_non_null() {
             buf.write_vm(shm_inner.shmid_ds)?;
         }
-    } else if cmd == IPC_RMID {
-        shm_inner.rmid = true;
+    } else if cmd == IPC_SET || cmd == IPC_RMID {
+        let perm = &shm_inner.shmid_ds.shm_perm;
+        let is_owner = current_uid == perm.uid || current_uid == perm.cuid;
+        if !is_privileged && !is_owner {
+            return Err(KError::from(LinuxError::EPERM));
+        }
+        if cmd == IPC_SET {
+            let user_buf = buf.read_vm()?;
+            shm_inner.shmid_ds.shm_perm.uid = user_buf.shm_perm.uid;
+            shm_inner.shmid_ds.shm_perm.gid = user_buf.shm_perm.gid;
+            shm_inner.shmid_ds.shm_perm.mode = user_buf.shm_perm.mode & 0o777;
+        } else {
+            shm_inner.rmid = true;
+        }
     } else {
         return Err(KError::InvalidInput);
     }
@@ -567,7 +647,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_attach_detach_and_update() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1, 0, 0, 0o600);
         let range = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let vaddr = range.start;
         inner.attach_process(1, range);
@@ -598,7 +678,16 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_map_to_phys_and_mode_mismatch() {
-        let mut inner = ShmInner::new(7, 8, 5000, MappingFlags::READ | MappingFlags::WRITE, 9);
+        let mut inner = ShmInner::new(
+            7,
+            8,
+            5000,
+            MappingFlags::READ | MappingFlags::WRITE,
+            9,
+            0,
+            0,
+            0o660,
+        );
         assert_eq!(inner.page_num, 2);
         assert!(inner.phys_pages.is_none());
         assert!(
@@ -606,7 +695,26 @@ pub mod tests_shm {
                 .try_update(5000, MappingFlags::READ | MappingFlags::WRITE, 10)
                 .is_ok()
         );
-        assert!(inner.try_update(5000, MappingFlags::READ, 10).is_err());
+        assert!(inner.try_update(8192, MappingFlags::READ, 10).is_err());
+    }
+
+    #[def_test]
+    fn test_shm_ipc_permission_denies_other_user() {
+        let perm = IpcPerm {
+            key: 1,
+            uid: 1000,
+            gid: 100,
+            cuid: 1000,
+            cgid: 100,
+            mode: 0o600,
+            seq: 0,
+            pad: 0,
+            unused0: 0,
+            unused1: 0,
+        };
+        assert!(has_ipc_permission(&perm, 1000, 100, false));
+        assert!(!has_ipc_permission(&perm, 2000, 200, false));
+        assert!(!has_ipc_permission(&perm, 2000, 200, true));
     }
 
     #[def_test]
@@ -618,6 +726,9 @@ pub mod tests_shm {
             4096,
             MappingFlags::READ,
             7,
+            0,
+            0,
+            0o600,
         )));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);
@@ -641,6 +752,9 @@ pub mod tests_shm {
             4096,
             MappingFlags::READ,
             7,
+            0,
+            0,
+            0o600,
         )));
         let range = VirtAddrRange::try_from(0x3000usize..0x4000usize).unwrap();
         shm_inner.lock().attach_process(7, range);
@@ -666,7 +780,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_multiple_attaches_same_pid() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1, 0, 0, 0o600);
         let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
 
@@ -693,7 +807,7 @@ pub mod tests_shm {
 
     #[def_test]
     fn test_shminner_detach_all_for_pid() {
-        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1);
+        let mut inner = ShmInner::new(1, 2, 4096, MappingFlags::READ, 1, 0, 0, 0o600);
         let range1 = VirtAddrRange::try_from(0x1000usize..0x2000usize).unwrap();
         let range2 = VirtAddrRange::try_from(0x2000usize..0x3000usize).unwrap();
 

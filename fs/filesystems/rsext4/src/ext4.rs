@@ -416,7 +416,12 @@ impl Ext4FileSystem {
                 block_dev.set_journal_superblock(j_sb, fs.journal_sb_block_start.unwrap());
 
                 // Mount-time journal replay for crash recovery.
-                block_dev.journal_replay(); //这里是在读取超级块之后再进行回放的，目前为了快速开启日志时数据不一致问题已经在写入超级块，块组描述符时直接落盘
+                let replay_limits = fs.journal_replay_limits(
+                    block_dev.total_blocks(),
+                    fs.journal_sb_block_start.unwrap(),
+                    j_sb.s_maxlen,
+                );
+                block_dev.journal_replay(&replay_limits);
             }
         }
 
@@ -548,6 +553,46 @@ impl Ext4FileSystem {
             group_descs.len()
         );
         Ok(group_descs)
+    }
+
+    pub fn journal_replay_limits(
+        &self,
+        device_blocks: u64,
+        journal_start_block: u32,
+        journal_maxlen: u32,
+    ) -> JournalReplayLimits {
+        let fs_blocks = self.superblock.blocks_count();
+        let max_block = u32::try_from(fs_blocks.min(device_blocks)).unwrap_or(u32::MAX);
+
+        let mut protected = Vec::new();
+        protected.push((0, 1));
+
+        let gdt_bytes = self.group_count as u64 * self.layout.desc_size as u64;
+        let gdt_blocks =
+            u32::try_from(gdt_bytes.saturating_add(BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64)
+                .unwrap_or(1)
+                .max(1);
+        protected.push((1, 1 + gdt_blocks));
+
+        let journal_end = journal_start_block.saturating_add(journal_maxlen.saturating_add(2));
+        protected.push((journal_start_block, journal_end));
+
+        let inode_table_blocks = self.layout.inode_table_blocks_per_group;
+        for desc in &self.group_descs {
+            Self::push_protected_block(&mut protected, desc.block_bitmap(), 1);
+            Self::push_protected_block(&mut protected, desc.inode_bitmap(), 1);
+            Self::push_protected_block(&mut protected, desc.inode_table(), inode_table_blocks);
+        }
+
+        JournalReplayLimits::new(max_block, protected)
+    }
+
+    fn push_protected_block(protected: &mut Vec<(u32, u32)>, block: u64, len: u32) {
+        if block > u32::MAX as u64 {
+            return;
+        }
+        let start = block as u32;
+        protected.push((start, start.saturating_add(len)));
     }
 
     fn validate_block_addressability(superblock: &Ext4Superblock) -> Result<(), RSEXT4Error> {
@@ -879,6 +924,9 @@ impl Ext4FileSystem {
         block_dev: &mut Jbd2Dev<B>,
         inode_num: u32,
     ) -> BlockDevResult<Ext4Inode> {
+        if inode_num == 0 || inode_num > self.superblock.s_inodes_count {
+            return Err(BlockDevError::Corrupted);
+        }
         let (group_idx, _idx_in_group) = self.inode_allocator.global_to_group(inode_num);
 
         let inode_table_start = self
@@ -1072,6 +1120,45 @@ impl Ext4FileSystem {
         Ok(v.pop().unwrap())
     }
 
+    fn validate_freeable_data_block<B: BlockDevice>(
+        &self,
+        block_dev: &Jbd2Dev<B>,
+        global_block: u64,
+    ) -> BlockDevResult<()> {
+        if global_block > u32::MAX as u64 {
+            return Err(BlockDevError::Corrupted);
+        }
+        if global_block >= self.superblock.blocks_count() {
+            return Err(BlockDevError::Corrupted);
+        }
+        if global_block >= block_dev.total_blocks() {
+            return Err(BlockDevError::Corrupted);
+        }
+        if global_block == 0 {
+            return Err(BlockDevError::Corrupted);
+        }
+
+        let gdt_bytes = self.group_count as u64 * self.layout.desc_size as u64;
+        let gdt_blocks = gdt_bytes.saturating_add(BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+        if global_block < 1 + gdt_blocks {
+            return Err(BlockDevError::Corrupted);
+        }
+
+        let inode_table_blocks = self.layout.inode_table_blocks_per_group as u64;
+        for desc in &self.group_descs {
+            if global_block == desc.block_bitmap() || global_block == desc.inode_bitmap() {
+                return Err(BlockDevError::Corrupted);
+            }
+            let table_start = desc.inode_table();
+            let table_end = table_start.saturating_add(inode_table_blocks);
+            if global_block >= table_start && global_block < table_end {
+                return Err(BlockDevError::Corrupted);
+            }
+        }
+
+        Ok(())
+    }
+
     /// 根据全局物理块号释放一个数据块
     /// 内部自动计算所属块组和位图位置，并更新块组/超级块计数
     pub fn free_block<B: BlockDevice>(
@@ -1079,6 +1166,7 @@ impl Ext4FileSystem {
         block_dev: &mut Jbd2Dev<B>,
         global_block: u64,
     ) -> BlockDevResult<()> {
+        self.validate_freeable_data_block(block_dev, global_block)?;
         // 通过 BlockAllocator 反推 (group_idx, block_in_group)
         let (group_idx, block_in_group) = self.block_allocator.global_to_group(global_block);
         let bitmap_block;

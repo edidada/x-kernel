@@ -11,11 +11,27 @@ use alloc::{vec, vec::Vec};
 use log::{debug, info, warn};
 
 use crate::{
-    blockdev::*, config::*, disknode::*, endian::*, error::*, ext4::*, file::*, jbd2::jbdstruct::*,
+    blockdev::{validate_block_range, *},
+    config::*,
+    disknode::*,
+    endian::*,
+    error::*,
+    ext4::*,
+    file::*,
+    jbd2::jbdstruct::*,
     loopfile::*,
 };
 
 impl JBD2DEVSYSTEM {
+    fn replay_journal_phys<B: BlockDevice>(&self, block_dev: &B, rel: u32) -> Option<u32> {
+        if !self.journal_rel_in_log(rel) {
+            return None;
+        }
+        let phys = self.journal_phys_block(rel)?;
+        validate_block_range(block_dev.total_blocks(), phys, 1).ok()?;
+        Some(phys)
+    }
+
     fn write_journal_superblock<B: BlockDevice>(&self, block_dev: &mut B) {
         let sb_block = self.start_block;
         let mut sb_data = [0u8; BLOCK_SIZE];
@@ -29,31 +45,40 @@ impl JBD2DEVSYSTEM {
     }
 
     /// 计算下一个日志块的位置(处理回绕),返回当前的（可以直接用，直接写，已经处理过偏移）!
-    pub fn set_next_log_block<B: BlockDevice>(&mut self, block_dev: &mut B) -> u32 {
-        // 处理第一次使用journal提交
-        if self.jbd2_super_block.s_start == 0 {
-            // 更新内存的s_start
-            self.jbd2_super_block.s_start = self.jbd2_super_block.s_first;
-            self.write_journal_superblock(block_dev);
-            self.head += 1;
-            let mut target_use = self.start_block + self.jbd2_super_block.s_start + self.head - 1;
-            // 处理环绕
-            if target_use - self.start_block > self.max_len {
-                self.head = 0;
-                target_use = self.start_block + self.jbd2_super_block.s_start;
-            }
-            target_use
-        } else {
-            // 不是第一次提交
-            self.head += 1;
-            // 处理环绕
-            let mut target_use = self.start_block + self.jbd2_super_block.s_start + self.head - 1;
-            if target_use - self.start_block > self.max_len {
-                self.head = 0;
-                target_use = self.start_block + self.jbd2_super_block.s_start;
-            }
-            target_use
+    pub fn set_next_log_block<B: BlockDevice>(&mut self, block_dev: &mut B) -> BlockDevResult<u32> {
+        if !self.validate_geometry() {
+            return Err(BlockDevError::Corrupted);
         }
+
+        if self.jbd2_super_block.s_start == 0 {
+            let first = self.jbd2_super_block.s_first;
+            if !self.journal_rel_in_log(first) {
+                return Err(BlockDevError::Corrupted);
+            }
+            self.jbd2_super_block.s_start = first;
+            self.write_journal_superblock(block_dev);
+        }
+
+        let s_start = self.jbd2_super_block.s_start;
+        if !self.journal_rel_in_log(s_start) {
+            return Err(BlockDevError::Corrupted);
+        }
+
+        let last_rel = self.journal_log_last_rel();
+        let (new_head, rel) =
+            Self::next_journal_rel_for_commit(s_start, self.head, last_rel, self.max_len)
+                .ok_or(BlockDevError::Corrupted)?;
+        self.head = new_head;
+
+        if !self.journal_rel_in_log(rel) {
+            return Err(BlockDevError::Corrupted);
+        }
+
+        let phys = self
+            .journal_phys_block(rel)
+            .ok_or(BlockDevError::Corrupted)?;
+        validate_block_range(block_dev.total_blocks(), phys, 1)?;
+        Ok(phys)
     }
 
     /// 提交事务
@@ -77,6 +102,10 @@ impl JBD2DEVSYSTEM {
         if self.commit_queue.is_empty() {
             warn!("No thing need to commit");
             return Ok(false);
+        }
+
+        if !self.validate_geometry() {
+            return Err(());
         }
 
         // Ordered-data boundary: file data blocks are written directly outside
@@ -133,7 +162,7 @@ impl JBD2DEVSYSTEM {
         }
 
         // 实际写入盘 这里可以直接写
-        let block_id = self.set_next_log_block(block_dev);
+        let block_id = self.set_next_log_block(block_dev).map_err(|_| ())?;
         debug!("[JBD2 commit] tid={tid} descriptor_block_id={block_id} (absolute)");
         block_dev
             .write(&desc_buffer, block_id, 1)
@@ -155,7 +184,7 @@ impl JBD2DEVSYSTEM {
 
         // 写实际的metadata CORE!!!!!
         for (idx, up) in no_escape.iter().enumerate() {
-            let metadata_journal_block_id = self.set_next_log_block(block_dev);
+            let metadata_journal_block_id = self.set_next_log_block(block_dev).map_err(|_| ())?;
             debug!(
                 "[JBD2 commit] tid={} meta_idx={} journal_block_id={} (absolute) \
                  target_phys_block={}",
@@ -188,7 +217,7 @@ impl JBD2DEVSYSTEM {
         };
 
         commit_block.to_disk_bytes(&mut commit_buffer);
-        let commit_block_id = self.set_next_log_block(block_dev);
+        let commit_block_id = self.set_next_log_block(block_dev).map_err(|_| ())?;
         debug!("[JBD2 commit] tid={tid} commit_block_id={commit_block_id} (absolute)");
         block_dev
             .write(&commit_buffer, commit_block_id, 1)
@@ -199,8 +228,10 @@ impl JBD2DEVSYSTEM {
 
         for update in self.commit_queue.iter() {
             debug!("[JBD2 checkpoint] tid={} home_phys_block={}", tid, update.0);
+            let home = u32::try_from(update.0).map_err(|_| ())?;
+            validate_block_range(block_dev.total_blocks(), home, 1).map_err(|_| ())?;
             block_dev
-                .write(&update.1[..], update.0 as u32, 1)
+                .write(&update.1[..], home, 1)
                 .expect("Checkpoint block write failed!");
         }
         block_dev.flush().expect("Journal checkpoint flush failed!");
@@ -228,13 +259,22 @@ impl JBD2DEVSYSTEM {
     }
 
     /// 事务重放：从当前 superblock 状态开始，尽可能重放连续的完整事务 replay前确保全部commit
-    pub fn replay<B: BlockDevice>(&mut self, block_dev: &mut B) {
+    pub fn replay<B: BlockDevice>(&mut self, block_dev: &mut B, limits: &JournalReplayLimits) {
         // 注意：journal_superblock_s 里的 s_first / s_start 是“日志区内部的相对块号”，
         // 真实物理块号 = self.start_block + rel。
+
+        if !self.validate_geometry() {
+            warn!("[JBD2 replay] invalid journal geometry, aborting");
+            return;
+        }
 
         // 扫描起点（相对块号）：只使用 s_start。s_start==0 表示没有需要重放的事务。
         let mut journal_rel = self.jbd2_super_block.s_start;
         if journal_rel == 0 {
+            return;
+        }
+        if !self.journal_rel_in_log(journal_rel) {
+            warn!("[JBD2 replay] s_start rel={journal_rel} outside journal log range, aborting");
             return;
         }
 
@@ -266,7 +306,10 @@ impl JBD2DEVSYSTEM {
         loop {
             // 1) 读取 descriptor 块并做基本校验
             let mut desc_buf = [0u8; BLOCK_SIZE];
-            let desc_phys = self.start_block + journal_rel; // descriptor 物理块号
+            let Some(desc_phys) = self.replay_journal_phys(block_dev, journal_rel) else {
+                warn!("[JBD2 replay] descriptor block out of range: rel={journal_rel}");
+                return;
+            };
             if let Err(e) = block_dev.read(&mut desc_buf, desc_phys, 1) {
                 debug!(
                     "[JBD2 replay] read descriptor failed at rel_block={journal_rel} \
@@ -294,7 +337,7 @@ impl JBD2DEVSYSTEM {
             let mut tags: Vec<JournalBlockTagS> = Vec::new();
             let mut off = JBD2_DESCRIPTOR_HEADER_SIZE; // 跳过 header
             let mut tag_idx = 0usize;
-            while off + JBD2_TAG_SIZE <= BLOCK_SIZE {
+            while off <= BLOCK_SIZE.saturating_sub(JBD2_TAG_SIZE) {
                 let tag = JournalBlockTagS::from_disk_bytes(&desc_buf[off..off + JBD2_TAG_SIZE]);
 
                 // 注意：t_blocknr==0 在 ext4 上是合法的（例如 superblock/group desc 等元数据），
@@ -316,16 +359,30 @@ impl JBD2DEVSYSTEM {
                 let last = (tag.t_flags & JBD2_FLAG_LAST_TAG) != 0;
                 let same_uuid = (tag.t_flags & JBD2_FLAG_SAME_UUID) != 0;
                 tags.push(tag);
-                off += JBD2_TAG_SIZE;
+                off = match off.checked_add(JBD2_TAG_SIZE) {
+                    Some(v) => v,
+                    None => {
+                        warn!("[JBD2 replay] descriptor tag offset overflow: tid={expect_seq}");
+                        return;
+                    }
+                };
                 if !same_uuid {
-                    if off + JBD2_UUID_SIZE > BLOCK_SIZE {
+                    if off > BLOCK_SIZE.saturating_sub(JBD2_UUID_SIZE) {
                         debug!(
                             "[JBD2 replay] descriptor uuid truncated: tid={} tag_idx={}",
                             expect_seq, tag_idx
                         );
                         return;
                     }
-                    off += JBD2_UUID_SIZE;
+                    off = match off.checked_add(JBD2_UUID_SIZE) {
+                        Some(v) => v,
+                        None => {
+                            warn!(
+                                "[JBD2 replay] descriptor uuid offset overflow: tid={expect_seq}"
+                            );
+                            return;
+                        }
+                    };
                 }
                 tag_idx += 1;
 
@@ -339,12 +396,37 @@ impl JBD2DEVSYSTEM {
                 break;
             }
 
+            if (tags[0].t_flags & JBD2_FLAG_SAME_UUID) == 0 {
+                let uuid_off = JBD2_DESCRIPTOR_HEADER_SIZE + JBD2_TAG_SIZE;
+                if uuid_off + JBD2_UUID_SIZE > BLOCK_SIZE {
+                    warn!("[JBD2 replay] descriptor uuid missing: tid={expect_seq}");
+                    return;
+                }
+                if desc_buf[uuid_off..uuid_off + JBD2_UUID_SIZE] != self.jbd2_super_block.s_uuid {
+                    warn!("[JBD2 replay] descriptor uuid mismatch: tid={expect_seq}");
+                    return;
+                }
+            }
+
+            for tag in &tags {
+                if !limits.allows_replay_target(tag.t_blocknr) {
+                    warn!(
+                        "[JBD2 replay] rejected replay target block {}: tid={expect_seq}",
+                        tag.t_blocknr
+                    );
+                    return;
+                }
+            }
+
             // 3) 读取对应数量的 metadata 日志块
             let mut meta_blocks: Vec<[u8; BLOCK_SIZE]> = Vec::new();
             for (idx, _) in tags.iter().enumerate() {
                 // 下一个 journal 块（相对块号），注意处理回绕
                 advance_rel(&mut journal_rel);
-                let meta_phys = self.start_block + journal_rel;
+                let Some(meta_phys) = self.replay_journal_phys(block_dev, journal_rel) else {
+                    warn!("[JBD2 replay] meta block out of range: rel={journal_rel}");
+                    return;
+                };
                 let mut mbuf = [0u8; BLOCK_SIZE];
                 if let Err(e) = block_dev.read(&mut mbuf, meta_phys, 1) {
                     debug!(
@@ -363,7 +445,10 @@ impl JBD2DEVSYSTEM {
             // 4) 读取 commit 块并验证
             advance_rel(&mut journal_rel);
             let commit_rel = journal_rel;
-            let commit_phys = self.start_block + commit_rel;
+            let Some(commit_phys) = self.replay_journal_phys(block_dev, commit_rel) else {
+                warn!("[JBD2 replay] commit block out of range: rel={commit_rel}");
+                return;
+            };
             let mut cbuf = [0u8; BLOCK_SIZE];
             if let Err(e) = block_dev.read(&mut cbuf, commit_phys, 1) {
                 debug!(
@@ -409,9 +494,19 @@ impl JBD2DEVSYSTEM {
                      (journal data from idx={i})"
                 );
 
-                let _ = block_dev.write(data, phys, 1);
+                if validate_block_range(block_dev.total_blocks(), phys, 1).is_err() {
+                    warn!("[JBD2 replay] block out of range: phys_block={phys}");
+                    return;
+                }
+                if block_dev.write(data, phys, 1).is_err() {
+                    warn!("[JBD2 replay] write failed: phys_block={phys}");
+                    return;
+                }
             }
-            let _ = block_dev.flush();
+            if block_dev.flush().is_err() {
+                warn!("[JBD2 replay] flush failed after applying tid={expect_seq}");
+                return;
+            }
 
             // 6) 更新内存中的 journal superblock 状态
             expect_seq = expect_seq.wrapping_add(1);

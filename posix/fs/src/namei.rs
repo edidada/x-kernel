@@ -7,7 +7,7 @@
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kvfs::path::Path;
+use kvfs::{Permission, path::Path};
 use linux_raw_sys::general::*;
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -35,7 +35,9 @@ pub fn sys_linkat(
         warn!("Unsupported flags: {flags}");
     }
 
-    let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?.into_location()?;
+    let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?;
+    old.ensure_procfd_dac(Permission::MAY_READ)?;
+    let old = old.into_location()?;
     if old.is_dir() {
         return Err(KError::OperationNotPermitted);
     }

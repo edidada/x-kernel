@@ -6,7 +6,10 @@
 //!
 //! 提供文件内容读取、块解析等功能。
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 
 use log::{debug, error};
 
@@ -71,11 +74,11 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
         return Ok(BTreeMap::new());
     }
 
-    fn push_extent_blocks(out: &mut Vec<(u32, u64)>, ext: &Ext4Extent) {
+    fn push_extent_blocks(out: &mut Vec<(u32, u64)>, ext: &Ext4Extent) -> BlockDevResult<()> {
         let raw_len = ext.ee_len as u32;
         // Unwritten extent must be treated as hole when building lbn->pbn map.
         if (raw_len & 0x8000) != 0 {
-            return;
+            return Ok(());
         }
         let mut len = raw_len;
         // 最高位表示 uninitialized 标志，长度使用低 15 位
@@ -83,38 +86,18 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
             len &= 0x7FFF;
         }
         if len == 0 {
-            return;
+            return Ok(());
         }
         let base = ((ext.ee_start_hi as u64) << 32) | ext.ee_start_lo as u64;
         for i in 0..len {
+            let phys = base.checked_add(i as u64).ok_or(BlockDevError::Corrupted)?;
+            if phys > u32::MAX as u64 {
+                return Err(BlockDevError::Corrupted);
+            }
             let lbn = ext.ee_block.saturating_add(i);
-            out.push((lbn, base + i as u64));
+            out.push((lbn, phys));
         }
-    }
-
-    fn walk_node<B: BlockDevice>(
-        dev: &mut Jbd2Dev<B>,
-        node: &ExtentNode,
-        out: &mut Vec<(u32, u64)>,
-    ) -> BlockDevResult<()> {
-        match node {
-            ExtentNode::Leaf { entries, .. } => {
-                for ext in entries {
-                    push_extent_blocks(out, ext);
-                }
-                Ok(())
-            }
-            ExtentNode::Index { entries, .. } => {
-                for idx in entries {
-                    let child_block = ((idx.ei_leaf_hi as u64) << 32) | (idx.ei_leaf_lo as u64);
-                    dev.read_block(child_block as u32)?;
-                    let buf = dev.buffer();
-                    let child = ExtentTree::parse_node(buf).ok_or(BlockDevError::Corrupted)?;
-                    walk_node(dev, &child, out)?;
-                }
-                Ok(())
-            }
-        }
+        Ok(())
     }
 
     let tree = ExtentTree::new(inode);
@@ -123,8 +106,11 @@ pub fn resolve_inode_block_allextend<B: BlockDevice>(
         None => return Ok(BTreeMap::new()),
     };
 
+    let index_depth = ExtentTree::root_index_depth(&root)?;
+    let mut visited = BTreeSet::new();
     let mut blocks: Vec<(u32, u64)> = Vec::new();
-    walk_node(block_dev, &root, &mut blocks)?;
+    let mut collect = |ext: &Ext4Extent| push_extent_blocks(&mut blocks, ext);
+    ExtentTree::walk_extent_leaves(block_dev, &root, &mut visited, index_depth, &mut collect)?;
     blocks.sort_unstable_by_key(|(lbn, _)| *lbn);
     blocks.dedup_by_key(|(lbn, _)| *lbn);
 
@@ -155,11 +141,6 @@ pub fn get_file_inode<B: BlockDevice>(
     let mut current_inode = fs.get_root(block_dev)?;
     let mut current_ino_num: u32 = fs.root_inode;
 
-    // 根目录所在的 inode 表起始块目前按 group0 处理
-    let inode_table_start = match fs.group_descs.first() {
-        Some(desc) => desc.inode_table(),
-        None => return Err(BlockDevError::Corrupted),
-    };
     for name in components {
         if !current_inode.is_dir() {
             // 中间层不是目录，路径非法
@@ -206,19 +187,15 @@ pub fn get_file_inode<B: BlockDevice>(
             None => return Ok(None),
         };
 
+        if inode_num == 0 || inode_num > u32::MAX as u64 {
+            return Err(BlockDevError::Corrupted);
+        }
         let inode_num_u32 = inode_num as u32;
+        if inode_num_u32 > fs.superblock.s_inodes_count {
+            return Err(BlockDevError::Corrupted);
+        }
 
-        let (block_num, offset, _group_idx) = fs.inodetable_cache.calc_inode_location(
-            inode_num_u32,
-            fs.layout.inodes_per_group,
-            inode_table_start,
-            BLOCK_SIZE,
-        );
-
-        let cached_inode = fs
-            .inodetable_cache
-            .get_or_load(block_dev, inode_num, block_num, offset)?;
-        current_inode = cached_inode.inode;
+        current_inode = fs.get_inode_by_num(block_dev, inode_num_u32)?;
         current_ino_num = inode_num_u32;
     }
 

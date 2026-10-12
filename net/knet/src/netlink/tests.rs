@@ -244,6 +244,14 @@ fn test_add_and_replace_neighbour() {
     );
 }
 
+#[def_test]
+fn test_rtnetlink_mutation_requires_net_admin_classification() {
+    assert!(rtnetlink_mutation_requires_net_admin(RTM_NEWROUTE));
+    assert!(rtnetlink_mutation_requires_net_admin(RTM_NEWNEIGH));
+    assert!(!rtnetlink_mutation_requires_net_admin(RTM_GETROUTE));
+    assert!(!rtnetlink_mutation_requires_net_admin(RTM_GETLINK));
+}
+
 #[def_test(serial)]
 fn test_dump_routes_returns_done_message() {
     init_test_state();
