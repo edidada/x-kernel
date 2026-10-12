@@ -445,9 +445,10 @@ mod tests {
 
     use super::*;
 
-    /// Memfds live on per-instance super blocks; cross-superblock
-    /// `copy_file_range` between them is admitted by the shared handler
-    /// identity their operation tables report, not by super-block identity.
+    /// Memfds live on per-instance super blocks; cross-superblock copies
+    /// between them are served by the memfs native chunk primitive, which
+    /// judges its memfs-storage input itself — a real capability, not an
+    /// admission marker.
     #[def_test]
     fn memfd_files_express_file_copy_support() {
         let cred = kcred::initial_cred();
@@ -459,10 +460,11 @@ mod tests {
         assert!(!Arc::ptr_eq(&first_sb, &second_sb));
 
         let first_file = first.into_file(kcred::initial_cred()).unwrap();
-        assert_eq!(
-            first_file.file_copy_handler(),
-            Some(crate::copy_handler_id())
-        );
+        let second_file = second.into_file(kcred::initial_cred()).unwrap();
+        assert!(matches!(
+            second_file.copy_chunk_from(&first_file, 0, 0, 0),
+            Some(Ok(0))
+        ));
     }
 
     #[def_test]

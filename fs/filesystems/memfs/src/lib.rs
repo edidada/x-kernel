@@ -15,8 +15,9 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{borrow::Borrow, cmp::Ordering};
 
 use hashbrown::HashMap;
-use iov_iter::{IovIterDest, IovIterSource};
+use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kcred::Cred;
+use kerrno::{KError, KResult};
 use ksync::Mutex;
 use ktime_types::SystemTime;
 #[cfg(unittest)]
@@ -733,13 +734,30 @@ impl InodeDirOperations for MemoryNode {
     }
 }
 
-/// The dedicated identity token of the memfs copy implementation: equality
-/// of [`copy_handler_id()`] values is pointer identity of this static.
-static COPY_HANDLER: u8 = 0;
-
-/// The native file-copy identity every memfs operation table reports.
-pub fn copy_handler_id() -> kvfs::CopyHandlerId {
-    kvfs::CopyHandlerId::of(&COPY_HANDLER)
+/// The memfs native chunk copy: reads one chunk of `input` storage through
+/// the page-cache generic layer and writes it into `output` storage. Both
+/// sides are already memfs inodes — the caller downcasts before coming here
+/// — so the copy never touches the generic buffered pump.
+fn move_copy_chunk(
+    input: &VfsFile,
+    input_pos: u64,
+    output: &VfsFile,
+    output_pos: u64,
+    len: usize,
+) -> KResult<usize> {
+    let mut buf = alloc::vec![0u8; len];
+    let read = {
+        let mut iocb = Kiocb::new(input, input_pos);
+        let mut iter = iov_iter_kvec_dest(&mut buf);
+        iocb.generic_file_read_iter(&mut iter)?
+    };
+    if read == 0 {
+        return Ok(0);
+    }
+    let mut iocb = Kiocb::new(output, output_pos);
+    let mut iter = iov_iter_kvec_source(&buf[..read]);
+    let written = iocb.generic_file_write_iter(&mut iter)?;
+    Ok(written)
 }
 
 impl FileOperations for MemoryNode {
@@ -764,12 +782,23 @@ impl FileOperations for MemoryNode {
         )
     }
 
-    fn file_copy_handler(&self) -> Option<kvfs::CopyHandlerId> {
-        // Every memfs node is served by this one implementation, so the
-        // shared handler identity admits cross-instance copies the way one
-        // nfs handler serves several nfs filesystem types (Linux
-        // `generic_copy_file_checks` compares handler identity, not mounts).
-        Some(copy_handler_id())
+    fn copy_chunk_from(
+        &self,
+        input: &VfsFile,
+        input_pos: u64,
+        output: &VfsFile,
+        output_pos: u64,
+        len: usize,
+    ) -> Option<KResult<usize>> {
+        // The memfs implementation serves memfs storage only; any other
+        // input store is refused here, not by a VFS identity check.
+        if input.path().inode().downcast::<MemoryNode>().is_err() {
+            return Some(Err(KError::CrossesDevices));
+        }
+        if len == 0 {
+            return Some(Ok(0));
+        }
+        Some(move_copy_chunk(input, input_pos, output, output_pos, len))
     }
 
     fn supports_write(&self) -> bool {

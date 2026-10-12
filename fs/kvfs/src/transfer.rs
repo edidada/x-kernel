@@ -231,37 +231,35 @@ fn pump(
 /// [`copy_file_range`]: one read at the local source position, one write at
 /// the local destination position, the oversized-backend-count guards, and
 /// the accepted-prefix rewind. [`pump`] owns the settlement around it.
-struct FilePairStep<'a> {
-    input: &'a Arc<VfsFile>,
-    output: &'a Arc<VfsFile>,
-    input_pos: &'a mut u64,
-    output_pos: &'a mut u64,
-}
-
-impl FilePairStep<'_> {
-    fn step(&mut self, buf: &mut [u8], chunk: usize) -> KResult<Step> {
-        let mut read_pos = *self.input_pos;
-        let read = self.input.read_from(&mut buf[..chunk], &mut read_pos)?;
-        if read > chunk {
-            return Err(KError::Io);
-        }
-        if read == 0 {
-            return Ok(Step::Eof);
-        }
-        let mut write_pos = *self.output_pos;
-        let written = self.output.write_from(&buf[..read], &mut write_pos)?;
-        if written > read {
-            return Err(KError::Io);
-        }
-        // Only the accepted prefix commits: the tail stays at the source
-        // for the next step to re-read.
-        *self.input_pos += written as u64;
-        *self.output_pos = write_pos;
-        Ok(Step::Data {
-            confirmed: written,
-            stop: written < read,
-        })
+fn file_pair_step(
+    input: &Arc<VfsFile>,
+    output: &Arc<VfsFile>,
+    input_pos: &mut u64,
+    output_pos: &mut u64,
+    buf: &mut [u8],
+    chunk: usize,
+) -> KResult<Step> {
+    let mut read_pos = *input_pos;
+    let read = input.read_from(&mut buf[..chunk], &mut read_pos)?;
+    if read > chunk {
+        return Err(KError::Io);
     }
+    if read == 0 {
+        return Ok(Step::Eof);
+    }
+    let mut write_pos = *output_pos;
+    let written = output.write_from(&buf[..read], &mut write_pos)?;
+    if written > read {
+        return Err(KError::Io);
+    }
+    // Only the accepted prefix commits: the tail stays at the source
+    // for the next step to re-read.
+    *input_pos += written as u64;
+    *output_pos = write_pos;
+    Ok(Step::Data {
+        confirmed: written,
+        stop: written < read,
+    })
 }
 
 /// Transfers up to `len` bytes, committing only bytes accepted by the destination.
@@ -337,13 +335,9 @@ pub fn transfer_files(
     let (input_start, output_start) = positions.starts();
     let mut input_pos = input_start;
     let mut output_pos = output_start;
-    let mut step = FilePairStep {
-        input,
-        output,
-        input_pos: &mut input_pos,
-        output_pos: &mut output_pos,
-    };
-    let result = pump(len, |buf, chunk, _total| step.step(buf, chunk));
+    let result = pump(len, |buf, chunk, _total| {
+        file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk)
+    });
     positions.commit(input_pos, output_pos);
     result
 }
@@ -431,8 +425,11 @@ fn pump_pipe_to_file(
 /// Runs the full Linux check table in order and returns the effective copy
 /// length: directories are rejected with `EISDIR`, every non-regular fd
 /// (pipes, sockets, devices) with `EINVAL`, a destination opened `O_APPEND`
-/// with `EBADF` (the copy would land at the wrong offset), and the pair is
-/// matched against Linux's handler branch (`fs/read_write.c:1436`). The
+/// with `EBADF` (the copy would land at the wrong offset). Pair admission
+/// is not decided here: a destination table with a native chunk-copy
+/// primitive judges its own inputs, and a table without one falls back to
+/// the same-superblock rule (Linux's handler branch, `fs/read_write.c:1436`).
+/// The
 /// range checks then run in Linux's order: an unsigned wrap of the request
 /// is reported as `EOVERFLOW`, the request is shortened to the source EOF,
 /// and the destination's own ceiling applies — a start at or past the
@@ -461,21 +458,6 @@ fn verify_copy_file_range(
     }
     if output.flags().contains(crate::OpenFlags::APPEND) {
         return Err(LinuxError::EBADF.into());
-    }
-    let input_super_block = input_inode.super_block()?;
-    let output_super_block = output_inode.super_block()?;
-    // Linux `generic_copy_file_checks` (fs/read_write.c:1436) branches on
-    // the DESTINATION table: a table that carries a native copy handler
-    // must be paired with the same handler — even within one super
-    // block; only a handler-less destination falls back to the
-    // same-superblock rule.
-    let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
-    let admitted = match output.file_copy_handler() {
-        Some(output_handler) => input.file_copy_handler() == Some(output_handler),
-        None => same_super_block,
-    };
-    if !admitted {
-        return Err(LinuxError::EXDEV.into());
     }
     // Linux reports `EOVERFLOW` when the range wraps its unsigned
     // arithmetic (`pos_in + count < pos_in || pos_out + count <
@@ -556,16 +538,38 @@ pub fn copy_file_range(
     );
     let (input_start, output_start) = positions.starts();
     let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
+    // Linux `generic_copy_file_checks` (fs/read_write.c:1436) branches on the
+    // DESTINATION table: a native primitive serves the pair and judges its
+    // own inputs (`EXDEV` for stores it cannot read); a table without one
+    // falls back to the generic pump under the same-superblock rule.
+    let input_super_block = input.inode().super_block()?;
+    let output_super_block = output.inode().super_block()?;
+    let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
 
     let mut input_pos = input_start;
     let mut output_pos = output_start;
-    let mut step = FilePairStep {
-        input,
-        output,
-        input_pos: &mut input_pos,
-        output_pos: &mut output_pos,
-    };
-    let result = pump(count as usize, |buf, chunk, _total| step.step(buf, chunk));
+    let result = pump(count as usize, |buf, chunk, _total| {
+        match output.copy_chunk_from(input, input_pos, output_pos, chunk) {
+            Some(native) => {
+                let confirmed = native?;
+                if confirmed > chunk {
+                    return Err(KError::Io);
+                }
+                input_pos += confirmed as u64;
+                output_pos += confirmed as u64;
+                Ok(Step::Data {
+                    confirmed,
+                    stop: confirmed < chunk,
+                })
+            }
+            None => {
+                if !same_super_block {
+                    return Err(LinuxError::EXDEV.into());
+                }
+                file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk)
+            }
+        }
+    });
 
     // Position commit belongs to the completion protocol: publish only
     // after real progress — a zero-byte return leaves `f_pos` alone.

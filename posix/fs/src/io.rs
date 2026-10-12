@@ -552,7 +552,7 @@ mod copy_file_range_checks_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use iov_iter::{IovIterDest, IovIterSource};
-    use kvfs::{CopyHandlerId, FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
+    use kvfs::{FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
     use linux_raw_sys::general::{O_APPEND, O_RDONLY, O_RDWR};
 
     use super::*;
@@ -572,11 +572,10 @@ mod copy_file_range_checks_tests {
     }
 
     /// Instrumented backend whose `poisoned_call`-th write fails, modelling
-    /// a destination that runs out of space mid-copy. `handler` controls the
-    /// native-copy identity the table reports: the memfs token stands for an
-    /// instrumented memfs file, `None` for a foreign table.
+    /// a destination that runs out of space mid-copy. The table carries a
+    /// native chunk primitive (read the input, write through this table) so
+    /// pairs ride the native path and the poison lands in it.
     struct CountingBackend {
-        handler: Option<CopyHandlerId>,
         poisoned_call: usize,
         calls: AtomicUsize,
     }
@@ -590,8 +589,24 @@ mod copy_file_range_checks_tests {
             true
         }
 
-        fn file_copy_handler(&self) -> Option<CopyHandlerId> {
-            self.handler
+        fn copy_chunk_from(
+            &self,
+            input: &VfsFile,
+            input_pos: u64,
+            output: &VfsFile,
+            output_pos: u64,
+            len: usize,
+        ) -> Option<KResult<usize>> {
+            Some((|| {
+                let mut buf = alloc::vec![0u8; len];
+                let mut read_pos = input_pos;
+                let read = input.read_from(&mut buf, &mut read_pos)?;
+                if read == 0 {
+                    return Ok(0);
+                }
+                let mut write_pos = output_pos;
+                output.write_from(&buf[..read], &mut write_pos)
+            })())
         }
 
         fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> KResult<usize> {
@@ -616,12 +631,10 @@ mod copy_file_range_checks_tests {
     #[unittest::def_test]
     fn copy_error_after_progress_returns_completed_prefix() {
         let source = Arc::new(CountingBackend {
-            handler: Some(memfs::copy_handler_id()),
             poisoned_call: usize::MAX,
             calls: AtomicUsize::new(0),
         });
         let destination = Arc::new(CountingBackend {
-            handler: Some(memfs::copy_handler_id()),
             poisoned_call: 1,
             calls: AtomicUsize::new(0),
         });
@@ -652,6 +665,32 @@ mod copy_file_range_checks_tests {
         assert_eq!(output_offset, 4096);
         assert_eq!(input.position(), 0);
         assert_eq!(output.position(), 0);
+    }
+
+    /// A backend without a native chunk primitive: its pairs can only ride
+    /// the generic buffered pump, and only within one super block.
+    struct PrimitivelessBackend;
+
+    impl FileOperations for PrimitivelessBackend {
+        fn supports_read(&self) -> bool {
+            true
+        }
+
+        fn supports_write(&self) -> bool {
+            true
+        }
+
+        fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> KResult<usize> {
+            let count = iter.count();
+            iocb.advance(count);
+            Ok(count)
+        }
+
+        fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> KResult<usize> {
+            let count = iter.count();
+            iocb.advance(count);
+            Ok(count)
+        }
     }
 
     /// Linux shortens an oversized request at the source EOF; an unsigned
@@ -843,11 +882,13 @@ mod copy_file_range_checks_tests {
         assert_eq!(output_offset, 0);
     }
 
-    /// Cross-superblock admission follows handler identity: plain memfs
-    /// tables share one handler and copy across instances, while a pair
-    /// carrying a foreign, handler-less table is confined with `EXDEV`.
+    /// Pair admission follows the destination table's native primitive:
+    /// plain memfs tables carry one and serve memfs storage across
+    /// instances — including inputs fronted by a foreign table on memfs
+    /// storage — while a destination without a primitive cannot leave its
+    /// super block (`EXDEV`).
     #[unittest::def_test]
-    fn cross_superblock_pairs_need_matching_handlers() {
+    fn cross_superblock_pairs_need_native_support() {
         let input = memfd_file("xdev-plain-src");
         fill(&input, 16);
         let output = memfd_file("xdev-plain-dst");
@@ -865,17 +906,40 @@ mod copy_file_range_checks_tests {
             Ok(16)
         );
 
-        let backend = Arc::new(CountingBackend {
-            handler: None,
+        // A foreign table fronting memfs storage stays servable: the
+        // destination's primitive judges the storage, not the front table.
+        let frontend = Arc::new(CountingBackend {
             poisoned_call: usize::MAX,
             calls: AtomicUsize::new(0),
         });
-        let source_base = memfd_file("xdev-anon-src");
+        let source_base = memfd_file("xdev-native-src");
         fill(&source_base, 16);
         let input = source_base
-            .alloc_clone(FMode::READ, OpenFlags::empty(), backend)
+            .alloc_clone(FMode::READ, OpenFlags::empty(), frontend)
             .unwrap();
-        let output = memfd_file("xdev-anon-dst");
+        let output = memfd_file("xdev-native-dst");
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Ok(16)
+        );
+
+        // A primitive-less destination cannot copy across super blocks.
+        let backend = Arc::new(PrimitivelessBackend);
+        let input = memfd_file("xdev-anon-src");
+        fill(&input, 16);
+        let output_base = memfd_file("xdev-anon-dst");
+        let output = output_base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), backend)
+            .unwrap();
         let mut input_offset = 0;
         let mut output_offset = 0;
         assert_eq!(
@@ -891,36 +955,33 @@ mod copy_file_range_checks_tests {
         );
     }
 
-    /// Linux branches on the DESTINATION table: a native-handler
-    /// destination demands the same handler on the input even within one
-    /// super block; only a handler-less destination falls back to the
-    /// same-superblock rule. The input here carries a foreign handler-less
-    /// table on the very inode the plain memfs output shares.
+    /// A destination table without a native primitive falls back to the
+    /// generic buffered pump under the same-superblock rule — same inode
+    /// here, so the pair stays servable without any native support.
     #[unittest::def_test]
-    fn same_superblock_pairs_still_need_matching_handlers() {
-        let base = memfd_file("xdev-same-sb");
+    fn handlerless_destination_falls_back_to_same_superblock() {
+        let base = memfd_file("xdev-fallback");
         fill(&base, 16);
-        let backend = Arc::new(CountingBackend {
-            handler: None,
-            poisoned_call: usize::MAX,
-            calls: AtomicUsize::new(0),
-        });
-        let input = base
-            .alloc_clone(FMode::READ, OpenFlags::empty(), backend)
+        let backend = Arc::new(PrimitivelessBackend);
+        let output = base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), backend)
             .unwrap();
+        // Disjoint ranges within the shared inode: [0,8) copies to [8,16).
         let mut input_offset = 0;
-        let mut output_offset = 0;
+        let mut output_offset = 8;
         assert_eq!(
             kvfs::copy_file_range(
-                &input,
-                TransferPosition::At(&mut input_offset),
                 &base,
+                TransferPosition::At(&mut input_offset),
+                &output,
                 TransferPosition::At(&mut output_offset),
-                16,
+                8,
                 false,
             ),
-            Err(KError::from(LinuxError::EXDEV))
+            Ok(8)
         );
+        assert_eq!(input_offset, 8);
+        assert_eq!(output_offset, 16);
     }
 
     /// Both sides `Managed` on one open file description take the shared
