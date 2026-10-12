@@ -151,7 +151,24 @@ pub fn set_pci_config_space(base: u64, bus_end: u8) {
     PCI_BUS_END_OVERRIDE.store(bus_end as u32, Ordering::Relaxed);
 }
 
-pub fn pci_config_space() -> (u64, u8, PciConfigSource) {
+/// The resolved PCI configuration window: everything discovery needs to
+/// address one host — every field is firmware- or config-sourced, never
+/// assumed.
+#[derive(Debug, Clone, Copy)]
+pub struct PciConfigWindow {
+    /// Physical base of the config space window.
+    pub base: u64,
+    /// First bus in the host's `bus-range` (firmware `bus-range`, or the
+    /// platform's `PCI_BUS_START`).
+    pub bus_start: u8,
+    /// Last bus in the host's `bus-range`.
+    pub bus_end: u8,
+    /// PCI segment (domain) number.
+    pub segment: u16,
+    pub source: PciConfigSource,
+}
+
+pub fn pci_config_space() -> PciConfigWindow {
     let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
     let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
     if base != 0 && bus_end != u32::MAX {
@@ -160,37 +177,69 @@ pub fn pci_config_space() -> (u64, u8, PciConfigSource) {
             base,
             bus_end
         );
-        return (base, bus_end as u8, PciConfigSource::RuntimeOverride);
+        return PciConfigWindow {
+            base,
+            // Runtime overrides carry no bus-range/segment of their own
+            // (test/debug entry): segment 0, bus 0-start.
+            bus_start: 0,
+            bus_end: bus_end as u8,
+            segment: 0,
+            source: PciConfigSource::RuntimeOverride,
+        };
     }
 
-    if let Some(host) = fw::pci_host()
-        && host.bus_start == 0
-    {
+    // The firmware host is accepted for ANY bus-range — a non-zero
+    // `bus-range` start is a legitimate firmware statement (the old
+    // `bus_start == 0` gate silently fell back to the static config on
+    // exactly the boards whose firmware described their bus numbering).
+    if let Some(host) = fw::pci_host() {
         log::info!(
-            "PCI host from firmware: cam={:?} ecam={:#x} size={:#x} bus_range={:#x}..={:#x}",
+            "PCI host from firmware: cam={:?} segment={:#x} ecam={:#x} size={:#x} \
+             bus_range={:#x}..={:#x}",
             host.cam,
+            host.segment,
             host.ecam_base,
             host.ecam_size,
             host.bus_start,
             host.bus_end
         );
-        return (host.ecam_base, host.bus_end, PciConfigSource::Firmware);
+        return PciConfigWindow {
+            base: host.ecam_base,
+            bus_start: host.bus_start,
+            bus_end: host.bus_end,
+            segment: host.segment,
+            source: PciConfigSource::Firmware,
+        };
     }
 
     if kbuild_config::PCI_ECAM_BASE == 0 {
         log::info!("PCI: no firmware PCI host and PCI_ECAM_BASE=0; skipping PCI");
-        return (0, 0, PciConfigSource::Static);
+        return PciConfigWindow {
+            base: 0,
+            bus_start: 0,
+            bus_end: 0,
+            segment: 0,
+            source: PciConfigSource::Static,
+        };
     }
-    log::info!(
-        "PCI config from kbuild: ecam={:#x} bus_end={:#x}",
+    // The build-time fallback exists ONLY for boards whose firmware
+    // describes no PCI host at all — every real platform carries its
+    // facts (ECAM base, bus-range, segment) in DT or MCFG, and those are
+    // read above. The fallback therefore assumes the degenerate identity:
+    // segment 0, bus range starting at 0.
+    log::warn!(
+        "PCI: no firmware PCI host (DT/MCFG); using build-time fallback ecam={:#x} bus_end={:#x} \
+         — boards should describe PCI in firmware",
         kbuild_config::PCI_ECAM_BASE as u64,
         kbuild_config::PCI_BUS_END as u8
     );
-    (
-        kbuild_config::PCI_ECAM_BASE as u64,
-        kbuild_config::PCI_BUS_END as u8,
-        PciConfigSource::Static,
-    )
+    PciConfigWindow {
+        base: kbuild_config::PCI_ECAM_BASE as u64,
+        bus_start: 0,
+        bus_end: kbuild_config::PCI_BUS_END as u8,
+        segment: 0,
+        source: PciConfigSource::Static,
+    }
 }
 
 pub fn pci_ecam_size(bus_end: u8, cam: Cam) -> usize {
@@ -263,7 +312,8 @@ unsafe impl Sync for SendPtr {}
 
 impl EcamOwner {
     fn resolve(cam: Cam) -> Self {
-        let (config_base, bus_end, source) = pci_config_space();
+        let window = pci_config_space();
+        let (config_base, bus_end, source) = (window.base, window.bus_end, window.source);
         if config_base == 0 {
             log::info!("PCI: no config space available; skipping PCI bus init");
             return Self::Absent;
@@ -324,7 +374,9 @@ impl EcamOwner {
 pub struct PciHost {
     root: PciRoot<MmioCam<'static>>,
     config_base: u64,
+    bus_start: u8,
     bus_end: u8,
+    segment: u16,
     source: PciConfigSource,
 }
 
@@ -357,6 +409,7 @@ impl PciHost {
     /// [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`] when
     /// the ECAM window cannot be mapped.
     pub fn new(cam: Cam) -> Result<Self, PciInitError> {
+        let window = pci_config_space();
         ECAM_MAPPING.call_once(|| EcamOwner::resolve(cam));
         #[expect(
             clippy::expect_used,
@@ -381,7 +434,9 @@ impl PciHost {
                 Ok(Self {
                     root: PciRoot::new(mmio_cam),
                     config_base: ecam.config_base,
+                    bus_start: window.bus_start,
                     bus_end: ecam.bus_end,
+                    segment: window.segment,
                     source: ecam.source,
                 })
             }
@@ -394,6 +449,16 @@ impl PciHost {
 
     pub fn bus_end(&self) -> u8 {
         self.bus_end
+    }
+
+    /// First bus of this host's firmware-described `bus-range`.
+    pub fn bus_start(&self) -> u8 {
+        self.bus_start
+    }
+
+    /// The firmware-described PCI segment (domain) number.
+    pub fn segment(&self) -> u16 {
+        self.segment
     }
 
     pub fn source(&self) -> PciConfigSource {

@@ -118,21 +118,24 @@ pub fn has_device_description() -> bool {
 
 /// Locate the primary PCI host bridge.
 ///
-/// Tries Device Tree (`pci-host-(e)cam-generic`) first, then ACPI MCFG. Only
-/// segment 0 is considered. Callers that need caching should cache the result
-/// themselves.
+/// Tries Device Tree (`pci-host-(e)cam-generic` — `reg`, `bus-range`,
+/// `linux,pci-domain`) first, then the ACPI MCFG (segment group, bus
+/// range, ECAM base). EVERY field is firmware-sourced; the segment is
+/// threaded through, not assumed. Callers that need caching should cache
+/// the result themselves.
 pub fn pci_host() -> Option<PciHostInfo> {
     if let Some(host) = of::generic_pci_host_info() {
         return Some(host);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "loongarch64"))]
     {
-        if let Some(mcfg) = acpi::find_mcfg_from_init()
-            && mcfg.pci_segment == 0
-        {
+        // The first MCFG allocation entry describes the primary host;
+        // its segment/bus-range/base are the firmware's statement.
+        if let Some(mcfg) = acpi::find_mcfg_from_init() {
             return Some(PciHostInfo {
                 cam: PciHostCam::Ecam,
+                segment: mcfg.pci_segment,
                 ecam_base: mcfg.base_address,
                 ecam_size: ((mcfg.end_bus as u64).saturating_sub(mcfg.start_bus as u64) + 1) << 20,
                 bus_start: mcfg.start_bus,
@@ -155,11 +158,9 @@ pub fn pci_host_source() -> Option<FirmwareSource> {
         return Some(FirmwareSource::DeviceTree);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "loongarch64"))]
     {
-        if let Some(mcfg) = acpi::find_mcfg_from_init()
-            && mcfg.pci_segment == 0
-        {
+        if acpi::find_mcfg_from_init().is_some() {
             return Some(FirmwareSource::Acpi);
         }
     }

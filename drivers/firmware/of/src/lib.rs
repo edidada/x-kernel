@@ -70,6 +70,9 @@ pub enum PciHostCam {
 pub struct PciHostInfo {
     /// Config access mechanism (`Cam` or `Ecam`).
     pub cam: PciHostCam,
+    /// PCI segment (domain) number — DT `linux,pci-domain` when stated,
+    /// 0 otherwise (single-segment hosts). ACPI sources it from MCFG.
+    pub segment: u16,
     /// Physical base of the config space window.
     pub ecam_base: u64,
     /// Size of the config space window in bytes.
@@ -606,8 +609,14 @@ pub fn generic_pci_host_info() -> Option<PciHostInfo> {
     };
     let reg = node.reg()?.next()?;
     let [bus_start, bus_end] = property_u32_cells::<2>(node, "bus-range").unwrap_or([0, 0xff]);
+    // `linux,pci-domain`: the DT binding for the PCI segment number.
+    // Absent means a single-segment host — segment 0.
+    let segment = property_u32_cells::<1>(node, "linux,pci-domain")
+        .map(|[d]| d as u16)
+        .unwrap_or(0);
     Some(PciHostInfo {
         cam,
+        segment,
         ecam_base: reg.starting_address as usize as u64,
         ecam_size: reg.size as u64,
         bus_start: bus_start as u8,

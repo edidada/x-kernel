@@ -353,6 +353,15 @@ config KFEAT_DRIVER_RAMDISK
       ramdisk on the driver-core model: alias-matched board-static device
       publishing a block disk. The zero-filled variant is bring-up only.
 
+config KFEAT_RAMDISK_SIZE
+    hex "ramdisk capacity (zero-filled variant)"
+    default 0x1000000
+    help
+      Capacity of the zero-filled ramdisk (the static-image variant takes
+      its size from the embedded image). A synthetic device carries no
+      firmware description, so its capacity is a platform/build parameter
+      (Linux brd's rd_size).
+
 config KFEAT_DRIVER_SERIAL_NS16550_MMIO
     bool "NS16550 MMIO per-instance serial driver"
     depends on KFEAT_CHAR

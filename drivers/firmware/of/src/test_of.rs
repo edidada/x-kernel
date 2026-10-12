@@ -215,6 +215,7 @@ fn build_test_dtb() -> Vec<u8> {
     builder.prop_u32("#interrupt-cells", 1);
     builder.prop_reg64("reg", &[(0x3000_0000, 0x0100_0000)]);
     builder.prop_u32s("bus-range", &[0, 0xff]);
+    builder.prop_u32("linux,pci-domain", 2);
     builder.prop_u32s(
         "ranges",
         &[
@@ -365,7 +366,11 @@ fn test_generic_pci_host_info(fdt: &'static LinuxFdt<'static>) -> Option<PciHost
     };
     let reg = node.reg()?.next()?;
     let [bus_start, bus_end] = property_u32_cells::<2>(node, "bus-range").unwrap_or([0, 0xff]);
+    let segment = property_u32_cells::<1>(node, "linux,pci-domain")
+        .map(|[d]| d as u16)
+        .unwrap_or(0);
     Some(PciHostInfo {
+        segment,
         cam,
         ecam_base: reg.starting_address as usize as u64,
         ecam_size: reg.size as u64,
@@ -489,6 +494,7 @@ fn pci_host_helpers_cover_ecam_ranges_and_legacy_irq_map() {
     assert_eq!(
         test_generic_pci_host_info(fdt),
         Some(PciHostInfo {
+            segment: 2,
             cam: PciHostCam::Ecam,
             ecam_base: 0x3000_0000,
             ecam_size: 0x0100_0000,

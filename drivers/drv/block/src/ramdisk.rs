@@ -56,9 +56,13 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
             Box<dyn block::BlockDeviceOperations + Send + Sync>,
             alloc::string::String,
         ) = {
-            // 16 MiB zero-filled region.
+            // Capacity is a platform/build parameter (KFEAT_RAMDISK_SIZE,
+            // Linux brd's rd_size): a synthetic device has no firmware
+            // description to read it from.
             (
-                Box::new(block::ramdisk::RamDisk::new(0x100_0000)),
+                Box::new(block::ramdisk::RamDisk::new(
+                    kbuild_config::KFEAT_RAMDISK_SIZE as usize,
+                )),
                 alloc::string::String::from("ramdisk"),
             )
         };

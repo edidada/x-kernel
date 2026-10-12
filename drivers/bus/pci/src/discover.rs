@@ -30,21 +30,25 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
         return;
     };
 
+    let bus_start = pci.bus_start();
     let bus_end = pci.bus_end();
+    let segment = pci.segment();
     let root = pci.root_mut();
 
-    // One ROOT bus instance for this host (segment 0, bus 0): the
-    // addressing anchor every discovered function attaches to
-    // (`pci_dev->bus`). A bridge driver creating a SECONDARY instance
-    // would register it anchored on its own bridge device — removing that
+    // One ROOT bus instance per discovered host, labeled from the
+    // FIRMWARE's own addressing facts (`pci_bus->name` is
+    // "<segment>:<bus>" in Linux): every discovered function attaches to
+    // it (`pci_dev->bus`). A bridge driver creating a SECONDARY instance
+    // registers it anchored on its own bridge device — removing that
     // bridge then ejects the instance's members (the domain's
     // bridge-cascade).
+    let root_label = alloc::format!("{segment:04x}:{bus_start:02x}");
     let root_instance = domain
-        .add_bus_instance(<crate::PciBus as Bus>::ID, None, "0000:00")
+        .add_bus_instance(<crate::PciBus as Bus>::ID, None, &root_label)
         .inspect_err(|err| log::warn!("pci: root bus instance rejected: {err:?}"))
         .ok();
 
-    for bus_nr in 0..=bus_end {
+    for bus_nr in bus_start..=bus_end {
         for (bdf, info) in root.enumerate_bus(bus_nr) {
             if !matches!(info.header_type, HeaderType::Standard) {
                 continue;
@@ -93,7 +97,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
             let descriptor = DeviceDescriptor::new(
                 <crate::PciBus as Bus>::ID,
                 DeviceLocation::Pci {
-                    segment: 0,
+                    segment,
                     bus: bdf.bus,
                     device: bdf.device,
                     function: bdf.function,
@@ -167,43 +171,25 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
         ));
     }
 
-    // Static fallback (no firmware routing): legacy PCI INTx ranges used by
-    // each QEMU virt-style port. x86 reads the programmed interrupt line
-    // from config space; other ports use fixed per-device lines.
-    cfg_select! {
-        target_arch = "x86_64" => {
-            let word = root.configuration_access.read_word(bdf, 0x3C);
-            let irq_line = (word & 0xff) as usize;
-            if irq_line == 0 || irq_line == 0xff {
-                return None;
-            }
-            Some(IrqSpec::firmware(
-                driver_core::IrqController::IoApic,
-                irq_line,
-                driver_core::IrqTrigger::LevelLow,
-            ))
+    // x86 fallback ONLY: the INTERRUPT_LINE register the firmware
+    // (SeaBIOS) programmed into the device — a device-reported fact, not
+    // a platform assumption. Other architectures have NO static fallback:
+    // INTx routing is firmware's job (DT `interrupt-map` via the path
+    // above, ACPI PRT to come); a device with no firmware route simply
+    // gets none and must use MSI.
+    #[cfg(target_arch = "x86_64")]
+    {
+        let word = root.configuration_access.read_word(bdf, 0x3C);
+        let irq_line = (word & 0xff) as usize;
+        if irq_line == 0 || irq_line == 0xff {
+            return None;
         }
-        target_arch = "loongarch64" => {
-            Some(IrqSpec::firmware(
-                driver_core::IrqController::LoongArchExtioi,
-                0x10 + (bdf.device & 3) as usize,
-                driver_core::IrqTrigger::LevelHigh,
-            ))
-        }
-        target_arch = "aarch64" => {
-            Some(IrqSpec::firmware(
-                driver_core::IrqController::Gic,
-                0x23 + (bdf.device & 3) as usize,
-                driver_core::IrqTrigger::LevelHigh,
-            ))
-        }
-        target_arch = "riscv64" => {
-            Some(IrqSpec::firmware(
-                driver_core::IrqController::Plic,
-                0x20 + (bdf.device & 3) as usize,
-                driver_core::IrqTrigger::LevelHigh,
-            ))
-        }
-        _ => None,
+        Some(IrqSpec::firmware(
+            driver_core::IrqController::IoApic,
+            irq_line,
+            driver_core::IrqTrigger::LevelLow,
+        ))
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    None
 }
