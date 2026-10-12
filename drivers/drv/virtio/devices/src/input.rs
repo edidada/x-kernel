@@ -7,7 +7,6 @@ use alloc::{string::String, sync::Arc};
 
 use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
-use kirq::{IrqEvent, IrqHandler};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -33,7 +32,8 @@ use crate::as_driver_error;
 /// ```ignore
 /// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
 /// let input = VirtIoInputDev::<HalImpl, _>::try_new(transport, irq)?;
-/// let handler = input.irq_handler();
+/// // the registration closure a driver passes to DeviceCtx::request_irq:
+/// // move || if input.ack_irq(virq) { IrqAction::Handled } else { IrqAction::NotHandled }
 /// let event = input.read_event()?;
 /// ```
 pub struct VirtIoInputDev<H: Hal, T: Transport> {
@@ -61,30 +61,6 @@ unsafe impl<H: Hal, T: Transport> Send for VirtIoInputState<H, T> {}
 // SAFETY: shared references cannot access `InnerDev` without taking the same
 // IRQ-disabling spin lock, including from the hard-IRQ acknowledgement path.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputState<H, T> {}
-
-struct VirtIoInputIrqHandler<H: Hal, T: Transport> {
-    irq: usize,
-    state: Arc<VirtIoInputState<H, T>>,
-}
-
-impl<H: Hal + 'static, T: Transport + 'static> IrqHandler for VirtIoInputIrqHandler<H, T> {
-    fn handle(&self, irq: usize) -> IrqEvent {
-        if irq != self.irq {
-            return IrqEvent::NOT_HANDLED;
-        }
-        let status = self.state.inner.lock().ack_interrupt();
-        if status.is_empty() {
-            return IrqEvent::NOT_HANDLED;
-        }
-        if status.contains(InterruptStatus::QUEUE_INTERRUPT) {
-            let notifier = self.state.notifier.lock().clone();
-            if let Some(notifier) = notifier {
-                notifier.notify_events();
-            }
-        }
-        IrqEvent::HANDLED
-    }
-}
 
 impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     /// Creates an IRQ-backed driver instance and reads its identity.
@@ -119,19 +95,34 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         })
     }
 
-    /// Returns a hard-IRQ handler that acknowledges this device's transport.
+    /// Acknowledge one interrupt and report whether it was ours.
     ///
-    /// The handler shares the transport lock with task-context event reads. It
-    /// does not consume input events or allocate while handling an interrupt.
-    pub fn irq_handler(&self) -> Arc<dyn IrqHandler>
-    where
-        H: 'static,
-        T: 'static,
-    {
-        Arc::new(VirtIoInputIrqHandler {
-            irq: self.irq,
-            state: self.state.clone(),
-        })
+    /// The family-side half of `DeviceCtx::request_irq` — see
+    /// `VirtIoBlkDev::ack_irq` for why this is an inherent method and not a
+    /// host registration trait.
+    ///
+    /// Unlike blk/rng, this one **does** filter on `irq`: virtio-input shares
+    /// its line, so a handler that acked someone else's interrupt would steal
+    /// it. `irq` is the LOGICAL virq the host dispatches (resolve a firmware
+    /// route with `DeviceCtx::resolve_irq`, never by reading its raw fields).
+    ///
+    /// Runs in hard-IRQ context: shares the transport lock with task-context
+    /// event reads, and neither consumes events nor allocates.
+    pub fn ack_irq(&self, irq: usize) -> bool {
+        if irq != self.irq {
+            return false;
+        }
+        let status = self.state.inner.lock().ack_interrupt();
+        if status.is_empty() {
+            return false;
+        }
+        if status.contains(InterruptStatus::QUEUE_INTERRUPT) {
+            let notifier = self.state.notifier.lock().clone();
+            if let Some(notifier) = notifier {
+                notifier.notify_events();
+            }
+        }
+        true
     }
 
     fn load_event_bits(&self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
@@ -240,10 +231,9 @@ mod tests {
         let ack_count = transport.interrupt_ack_count.clone();
         let device =
             VirtIoInputDev::<MockHal, MockTransport>::try_new(transport, 11, None).unwrap();
-        let handler = device.irq_handler();
 
         assert_eq!(device.irq(), Some(11));
-        assert!(!handler.handle(11).handled());
+        assert!(!device.ack_irq(11));
         assert_eq!(ack_count.load(Ordering::Relaxed), 1);
     }
 
@@ -254,14 +244,13 @@ mod tests {
         let interrupt_status = transport.interrupt_status.clone();
         let device =
             VirtIoInputDev::<MockHal, MockTransport>::try_new(transport, 11, None).unwrap();
-        let handler = device.irq_handler();
 
         for status in [
             InterruptStatus::QUEUE_INTERRUPT,
             InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT,
         ] {
             interrupt_status.store(status.bits() as usize, Ordering::Release);
-            assert!(handler.handle(11).handled());
+            assert!(device.ack_irq(11));
         }
         assert_eq!(ack_count.load(Ordering::Relaxed), 2);
     }
@@ -274,20 +263,19 @@ mod tests {
             VirtIoInputDev::<MockHal, MockTransport>::try_new(transport, 11, None).unwrap();
         let notifier = Arc::new(CountingNotifier(AtomicUsize::new(0)));
         device.set_event_notifier(Some(notifier.clone())).unwrap();
-        let handler = device.irq_handler();
 
         interrupt_status.store(
             InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT.bits() as usize,
             Ordering::Release,
         );
-        assert!(handler.handle(11).handled());
+        assert!(device.ack_irq(11));
         assert_eq!(notifier.0.load(Ordering::Relaxed), 0);
 
         interrupt_status.store(
             InterruptStatus::QUEUE_INTERRUPT.bits() as usize,
             Ordering::Release,
         );
-        assert!(handler.handle(11).handled());
+        assert!(device.ack_irq(11));
         assert_eq!(notifier.0.load(Ordering::Relaxed), 1);
     }
 
@@ -298,13 +286,12 @@ mod tests {
         let interrupt_status = transport.interrupt_status.clone();
         let device =
             VirtIoInputDev::<MockHal, MockTransport>::try_new(transport, 11, None).unwrap();
-        let handler = device.irq_handler();
         interrupt_status.store(
             InterruptStatus::QUEUE_INTERRUPT.bits() as usize,
             Ordering::Release,
         );
 
-        assert!(!handler.handle(12).handled());
+        assert!(!device.ack_irq(12));
         assert_eq!(ack_count.load(Ordering::Relaxed), 0);
     }
 }

@@ -18,7 +18,6 @@ use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use hwrng::completion::RngCompletion;
-use kirq::IrqHandler;
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
@@ -142,7 +141,7 @@ pub fn activate<B: driver_core::Bus>(
         let Some(device) = weak.upgrade() else {
             return IrqAction::NotHandled;
         };
-        if device.handle(0).handled() {
+        if device.ack_irq(0) {
             IrqAction::Handled
         } else {
             IrqAction::NotHandled

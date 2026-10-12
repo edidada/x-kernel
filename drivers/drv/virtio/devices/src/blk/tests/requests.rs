@@ -381,7 +381,7 @@ fn request_read_write_flush_complete_without_driver_copy() {
                     complete: || {
                         let token = hardware.lock().submitted[0];
                         hardware.lock().complete(token, status);
-                        core::assert!(disk.handle(0).handled());
+                        core::assert!(disk.ack_irq(0));
                         disk.process_completed_requests();
                         core::assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
                     },
@@ -403,7 +403,7 @@ fn request_read_write_flush_complete_without_driver_copy() {
                 if kind == 0 {
                     assert!(buffer.iter().all(|byte| *byte == 0xa5));
                 }
-                assert!(!disk.handle(0).handled());
+                assert!(!disk.ack_irq(0));
                 disk.process_completed_requests();
                 assert_eq!(signals.completion.load(Ordering::Relaxed), 1);
             }
@@ -420,7 +420,7 @@ fn request_immediate_completion_and_noop_flush() {
         signals: signals.clone(),
         waits: 0,
         complete: || {
-            core::assert!(disk.handle(0).handled());
+            core::assert!(disk.ack_irq(0));
             disk.process_completed_requests();
         },
     };
@@ -609,7 +609,7 @@ fn close_counts_preparation_and_keeps_retained_device_inert() {
     assert!(!disk.is_inherently_read_only());
     assert_eq!(disk.write_block(0, &[0; SECTOR_SIZE]), Err(DriverError::Io));
     assert_eq!(disk.flush(), Err(DriverError::Io));
-    assert!(!disk.handle(0).handled());
+    assert!(!disk.ack_irq(0));
     disk.process_completed_requests();
     disk.finish_close();
 }

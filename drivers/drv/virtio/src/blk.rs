@@ -180,15 +180,16 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     // same services path virtio-net takes). The handler keeps only a weak
     // device reference (the activation owns the strong one and withdraws
     // the irq before teardown) and marks the reclaimer for deferred I/O
-    // reclaiming when the device claimed the event.
-    let handler: Arc<dyn kirq::IrqHandler> = device.clone();
-    let weak_handler = Arc::downgrade(&handler);
+    // reclaiming when the device claimed the event. `ack_irq` is the family
+    // library's inherent acknowledgement method — the registration itself is
+    // the framework's, which is what keeps the DevIrq guard in `Data`.
+    let weak_device = Arc::downgrade(&device);
     let weak_reclaimer = alloc::sync::Arc::downgrade(&activation.reclaimer);
     activation.irq = Some(dev.request_irq(irq, "virtio-blk", move || {
-        let Some(device) = weak_handler.upgrade() else {
+        let Some(device) = weak_device.upgrade() else {
             return IrqAction::NotHandled;
         };
-        if device.handle(0).handled() {
+        if device.ack_irq(0) {
             if let Some(reclaimer) = weak_reclaimer.upgrade() {
                 reclaimer.mark_pending();
             }

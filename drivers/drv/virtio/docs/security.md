@@ -148,8 +148,9 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
    `if dev_kind == DeviceKind::Net`）。其他家族用 legacy INTx，直到它们的
    中断行为在共享 queue-vector 下被审计过。
 5. **`rng` 的完成等待内联在驱动里**（例外 E-04），未服务化。
-6. **`ktask`/`kpoll`/`kirq`/`driver_host` 依赖**（例外 E-02、E-04），
-   因此本 crate 不是主机无关的。
+6. **`ktask`/`kpoll`/`driver_host` 依赖**（例外 E-02、E-04），因此本 crate
+   不是主机无关的。`kirq` **不在其中**：中断注册全部经
+   `DeviceCtx::request_irq`，家族库只暴露固有方法 `ack_irq`。
 7. **无热插拔模板**：框架支持 `add_device` 增量触发，但 T-07 的在途操作窗口
    未闭合，因此不推荐把 virtio 驱动当热插拔参考实现。
 8. **`vsock`/`virtio_9p`/`gpu`/`input` 的 `remove` 路径未经验证**（同 T-04）。

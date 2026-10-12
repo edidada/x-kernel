@@ -114,10 +114,13 @@ Feature flags 控制编译哪些设备适配器：
   virtio-net IRQ handler 按 resolved IRQ 过滤对应设备 handle，
   ack 设备中断后只调用上层通过 `driver_net::NetRxScheduler`
   attach 的 RX 调度能力，不直接运行协议栈或 socket 唤醒逻辑。
-- **输入设备的 IRQ handler 仅确认中断**：
-  `VirtIoInputIrqHandler` 可在硬中断上下文运行。它获取设备的 `SpinNoIrq`，
-  读取并清除 VirtIO ISR；共享中断线上的 ISR 为空时返回 `NOT_HANDLED`。
-  该处理程序不会消费输入事件、分配内存或进入 VFS；队列消费仍在任务上下文完成。
+- **输入设备的 IRQ 确认仅做 ack**：
+  `VirtIoInputDev::ack_irq(irq)` 可在硬中断上下文运行。它先按解析后的 virq
+  过滤（输入设备共享中断线），再获取设备的 `SpinNoIrq`，
+  读取并清除 VirtIO ISR；ISR 为空时返回 `false`。
+  该方法不会消费输入事件、分配内存或进入 VFS；队列消费仍在任务上下文完成。
+  注册本身由驱动层经 `DeviceCtx::request_irq` 完成——本 crate 不实现任何
+  host 注册 trait。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   blk 使用内部锁保护队列和请求状态；其他非 net 设备主要通过 `&mut self` 独占访问；
   net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
@@ -273,7 +276,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
    - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
-   - 通过 `kirq::try_map()` 将硬件 IRQ 映射为虚拟 IRQ
+   - 通过 provider 的 `IrqOp::map_irq()` 将硬件 IRQ 映射为虚拟 IRQ
+     （实现位于 `core/driver-host/src/provider/irq.rs::resolve_irq_spec`，
+     由 `probe_pci_transport_with` 注入 provider；本 crate 只声明契约）
 4. 其他架构：通过设备树或固定映射获取 IRQ
    - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符
    - riscv64：映射为 PLIC 中断
@@ -411,8 +416,12 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 1. `VirtIoInputDev::try_new(transport, irq)` 初始化两个输入队列，缓存设备标识信息，
    并记录解析后的 IRQ。
-2. host 集成层获取 `irq_handler()`，通过 `DeviceCtx::request_irq` 注册处理程序，
-   随后再发布 class 设备。
+2. `VirtIoInputDev::ack_irq(virq)` 是家族侧的确认入口。**当前的 PCI 驱动
+   （`drv/virtio/src/input.rs`）并不注册中断**——它只发布 class 设备，
+   事件由消费者在任务上下文轮询 `read_event()`；mmio 变体会
+   `DeviceCtx::resolve_irq(0)` 解析出 virq 并存进设备对象供 `ack_irq` 过滤。
+   要接上中断，注册方式与 net 相同：驱动经 `DeviceCtx::request_irq` 注册，
+   闭包捕获设备的 `Weak` 并调用 `ack_irq`。
 3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
    ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
    `InputEventNotifier`；配置中断不会伪造输入事件通知。
@@ -541,7 +550,10 @@ intact. begin_close receives a fresh closing-task signal; finish_close requires
 drained calls/requests and stopped callbacks, takes InnerDev under the lock and
 drops it outside the lock in task context. Retained Gendisk references own only
 inert state; cached geometry/read-only queries never require a live transport.
-No concrete driver imports ktask/kirq.
+No concrete driver imports ktask/kirq, and the blk device layer imports
+neither: its completion wait is injected as `PrepareBlockWait` and its
+interrupt acknowledgement is the inherent `VirtIoBlkDev::ack_irq`, which the
+driver registers through `DeviceCtx::request_irq`.
 
 Request tests live in blk/tests/requests.rs and remain a child of the requests
 module through #[path]. The blk directory holds runtime request code; requests

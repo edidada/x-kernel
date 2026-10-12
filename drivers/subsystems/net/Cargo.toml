@@ -10,7 +10,6 @@ documentation.workspace = true
 description = "This crate provides core interfaces and types for network drivers."
 
 [package.metadata.cargo-shear]
-ignored-paths = ["src/fxmac.rs", "src/ixgbe.rs"]
 
 [features]
 default = []

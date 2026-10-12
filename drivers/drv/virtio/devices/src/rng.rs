@@ -9,7 +9,6 @@ use core::{mem::ManuallyDrop, ops::Range};
 
 use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use hwrng::{HwrngDevice, completion::RngCompletion};
-use kirq::{IrqEvent, IrqHandler};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -183,8 +182,8 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
     /// Construct without registering the completion IRQ — the driver layer
     /// owns registration through its device services (`DeviceCtx::
     /// request_irq`, the single entry point), then calls
-    /// [`Self::enable_completion_irq`]. The device implements
-    /// [`kirq::IrqHandler`] for the registration closure.
+    /// [`Self::enable_completion_irq`]. The registration closure calls
+    /// [`Self::ack_irq`].
     pub fn try_new(
         transport: T,
         completion: Arc<dyn RngCompletion>,
@@ -254,15 +253,24 @@ impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
     }
 }
 
-impl<H: Hal + Send, T: Transport + Send> IrqHandler for VirtIoRngDev<H, T> {
-    fn handle(&self, _irq: usize) -> IrqEvent {
+impl<H: Hal + Send, T: Transport + Send> VirtIoRngDev<H, T> {
+    /// Acknowledge one interrupt and report whether it was ours.
+    ///
+    /// The family-side half of `DeviceCtx::request_irq` — see
+    /// `VirtIoBlkDev::ack_irq` for why this is an inherent method and not a
+    /// host registration trait. `irq` is unused: the RNG function owns its
+    /// line, so there is no shared-line filter to apply.
+    ///
+    /// Runs in hard-IRQ context: acks the transport, completes the pending
+    /// request, and notifies the completion waiter. No allocation.
+    pub fn ack_irq(&self, _irq: usize) -> bool {
         let mut request = self.request.lock();
         let status = request.resources.device.ack_interrupt();
         if status.is_empty() {
-            return IrqEvent::NOT_HANDLED;
+            return false;
         }
         if !status.contains(InterruptStatus::QUEUE_INTERRUPT) {
-            return IrqEvent::HANDLED;
+            return true;
         }
         let completed = request.complete();
         let has_fault = request.fault.is_some();
@@ -270,7 +278,7 @@ impl<H: Hal + Send, T: Transport + Send> IrqHandler for VirtIoRngDev<H, T> {
         if has_fault || completed == Ok(true) {
             self.completion.notify();
         }
-        IrqEvent::HANDLED
+        true
     }
 }
 
@@ -469,19 +477,19 @@ mod tests {
         let (device, queue, irq) = device(completion.clone());
         let mappings = MAPPINGS.load(Ordering::Relaxed);
         assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
-        assert!(!device.handle(0).handled());
+        assert!(!device.ack_irq(0));
         let weak = Arc::downgrade(&device);
         *completion.action.lock() = Some(Box::new(move || {
             let device = weak.upgrade().unwrap();
             irq.store(2, Ordering::Relaxed);
-            core::assert!(device.handle(0).handled()); // Configuration only.
+            core::assert!(device.ack_irq(0)); // Configuration only.
             // SAFETY: the waiting-read predicate published one live request.
             unsafe { finish(&queue.lock(), 13, false) };
             irq.store(1, Ordering::Relaxed);
-            core::assert!(device.handle(0).handled());
+            core::assert!(device.ack_irq(0));
             core::assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
             irq.store(1, Ordering::Relaxed);
-            core::assert!(device.handle(0).handled()); // No duplicate reclaim.
+            core::assert!(device.ack_irq(0)); // No duplicate reclaim.
         }));
         let mut output = [0xff; 8];
         assert_eq!(device.read(&mut output), Ok(8));
@@ -504,7 +512,7 @@ mod tests {
             let device = weak.upgrade().unwrap();
             for _ in 0..4 {
                 irq.store(1, Ordering::Relaxed);
-                core::assert!(device.handle(0).handled());
+                core::assert!(device.ack_irq(0));
                 core::assert!(!device.is_failed());
                 core::assert!(matches!(
                     device.request.lock().state,
@@ -516,7 +524,7 @@ mod tests {
             // SAFETY: empty notifications retained the original live submission.
             unsafe { finish(&queue_for_irq.lock(), 8, false) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
         }));
         let mut output = [0xaa; 8];
         assert_eq!(device.read(&mut output), Ok(8));
@@ -543,7 +551,7 @@ mod tests {
             // SAFETY: the controlled test published one device-owned buffer.
             unsafe { finish(&queue.lock(), 8, false) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
             assert_eq!(device.read(&mut [0; 8]), Err(error));
             assert_eq!(device.request.lock().read(&mut [0; 8]), 8);
         }
@@ -560,7 +568,7 @@ mod tests {
         // SAFETY: the wait error kept the device-owned submission alive.
         unsafe { finish(&queue.lock(), 8, false) };
         irq.store(1, Ordering::Relaxed);
-        device.handle(0);
+        device.ack_irq(0);
         assert_eq!(output, [0xaa; 8]);
         assert!(!device.is_failed());
         assert_eq!(device.read(&mut output), Ok(8));
@@ -593,7 +601,7 @@ mod tests {
             // SAFETY: retry kept the original submitted buffer and token live.
             unsafe { finish(&queue.lock(), 8, false) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
         }));
         assert_eq!(device.read(&mut output), Ok(8));
         assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
@@ -609,7 +617,7 @@ mod tests {
             // SAFETY: the malformed token does not change the live DMA bounds.
             unsafe { finish(&queue.lock(), 8, true) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
         }));
         let mut output = [0xaa; 8];
         assert_eq!(device.read(&mut output), Err(DriverError::BadState));
@@ -628,7 +636,7 @@ mod tests {
             // SAFETY: the request owns the live buffer until IRQ reclamation.
             unsafe { finish(&queue.lock(), len, false) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
             let mut output = [0xaa; 8];
             assert_eq!(device.request.lock().read(&mut output), 0);
             assert_eq!(output, [0xaa; 8]);
@@ -639,7 +647,7 @@ mod tests {
             // SAFETY: the replacement request still owns the same live buffer.
             unsafe { finish(&queue.lock(), 8, false) };
             irq.store(1, Ordering::Relaxed);
-            device.handle(0);
+            device.ack_irq(0);
             assert_eq!(device.request.lock().read(&mut output), 8);
             assert_eq!(completion.notifications.load(Ordering::Relaxed), 2);
             assert_eq!(device.read(&mut []), Ok(0));

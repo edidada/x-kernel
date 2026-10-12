@@ -123,7 +123,7 @@ HAL 级长期映射；现在探测发生在 `MmioDriver::probe` 里，映射由 
 - `probe` / `remove` 在域锁外的任务上下文运行，可睡眠。
   `BlkActivation::drop` 里的 `prepare_block_wait().expect(...)` 与
   `drain.wait_completion()` **依赖这个前提**（带 `CG-021` 例外说明）。
-- **IRQ handler 闭包在硬中断上下文运行**，只做：`Weak::upgrade` → `handle(0)`
+- **IRQ handler 闭包在硬中断上下文运行**，只做：`Weak::upgrade` → `ack_irq(0)`
   → 若 handled 则 `reclaimer.mark_pending()` → 返回 `IrqAction`。
   不取域锁、不分配、不睡眠。
 - handler 捕获 **`Weak`**（不是 `Arc`）：activation 持有强引用并在 teardown 时
@@ -166,7 +166,7 @@ static IDS: &[PciMatch] = &[
 `device_id == 0xFFFF` 的通配给 `Generic`。这里两行都是精确匹配。
 `modalias()` 生成 `pci:v00001AF4d00001042`，经 devnode 进 uevent。
 
-### 依赖 `driver_host` / `kirq` / `ktask` / `kpoll`（登记的例外 E-02、E-04）
+### 依赖 `driver_host` / `ktask` / `kpoll`（登记的例外 E-02、E-04）
 
 - `driver_host::virtio_hal::Hal`：vendored `virtio-drivers` 要求
   `VirtIoHal: 'static` 作为**类型参数**，所以构造 `VirtIoBlkDev<H, T>` 必须
@@ -174,14 +174,18 @@ static IDS: &[PciMatch] = &[
 - `driver_host::virtio_transport::PciTransportService`：`ExtensionService`
   用 `as_any` downcast，调用方必须命名具体类型——这正是 `driver-core` 不认识
   家族的代价。
-- `kirq`：`blk.rs` 里 `Arc<dyn kirq::IrqHandler>` 的 upcast。**这是历史遗留**：
-  该 upcast 只被当作 `Weak` 保活句柄使用，随后调 `.handle(0)`；真实注册走
-  `dev.request_irq` + `driver_core::IrqAction`。
 - `ktask` / `kpoll`：`rng` 的主机完成等待（`HostRngCompletion`）。
   `subsystems/block::dispatch::wait` 已经用同一原语实现了服务化版本；
   hwrng 只有一个消费者，等第二个出现再抽服务。
 
-四条都登记在 `docs/ai/driver-subsystem-boundaries.md` 的例外表里，带退出条件。
+三条都登记在 `docs/ai/driver-subsystem-boundaries.md` 的例外表里，带退出条件。
+
+**`kirq` 不在列表里，也不在 `Cargo.toml` 里**：本 crate 与 `virtio-devices`
+都不依赖它。中断注册全部走 `dev.request_irq(spec, name, closure)` +
+`driver_core::IrqAction`，家族库只提供一个固有方法 `ack_irq(irq) -> bool`
+（net 是 `VirtIoNetIrqWorker::service() -> bool`）。旧模型里设备对象直接
+`impl device_res::IrqHandler` 并被注册进 provider，那个形状遗留下了三个
+**从未被注册**的 `impl kirq::IrqHandler`，已删除。
 
 ### `remove()` 大多是空的
 

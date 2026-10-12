@@ -4,11 +4,17 @@
 
 //! The resource-provider contract (formerly the device-res crate's core).
 //!
-//! Who implements it: the host runtime (driver-runtime's provider module,
+//! Who implements it: the host bridge (`driver-host`'s provider module,
 //! binding to memspace/kirq/kdma). Who consumes it: device-family crates
 //! that probe transports outside DeviceCtx (the virtio PCI path) and the
 //! vendor HAL. Living in driver-core keeps the dependency direction flat —
 //! every consumer already depends on driver-core.
+//!
+//! Note this is a **provider-facing** surface, not a driver-facing one.
+//! Concrete drivers acquire resources through [`crate::DeviceCtx`] so every
+//! guard lands in their `DriverOps::Data`; reaching for these Op traits
+//! directly from `drv/**` is the boundary violation described by rule L1 in
+//! `docs/ai/driver-subsystem-boundaries.md`.
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;

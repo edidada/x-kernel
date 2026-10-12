@@ -4,15 +4,24 @@
 
 //! Virtio device-family constructors over the vendored `virtio-drivers`
 //! transport, implementing the class contracts (`block`, `net`, `char`, ...).
-//! Shared by the `drv/virtio` driver modules and the driver-runtime HAL.
+//! Shared by the `drv/virtio` driver modules and the `driver-host` HAL.
 //!
 //! Like the [`virtio-drivers`] crate, you must implement the [`VirtIoHal`]
 //! trait (alias of `virtio_drivers::Hal`), to allocate DMA regions and
 //! translate between physical addresses (as seen by devices) and virtual
 //! addresses (as seen by your program).
 //!
+//! # Interrupts
+//!
+//! Each device type exposes an inherent `ack_irq(irq) -> bool` (net exposes
+//! `VirtIoNetIrqWorker::service() -> bool`). Those are the family-side half
+//! of an interrupt: **the driver** registers it through
+//! `DeviceCtx::request_irq` and maps the bool to `driver_core::IrqAction` in
+//! its closure. Nothing in this crate implements a host registration trait or
+//! depends on the host IRQ core — that is what keeps the `DevIrq` guard in
+//! the driver's `Data`, where the rollback order is expressible.
+//!
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
-//! [`driver_base`]: driver_base
 
 #![allow(
     clippy::expect_used,

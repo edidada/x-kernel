@@ -46,6 +46,38 @@
 //!   enumerates PCI or platform devices.
 //! * New device services (regulators, pinctrl, ...) plug into
 //!   [`DeviceServices`] the same way the clock service does.
+//!
+//! # Architectural invariants
+//!
+//! Two rules are load-bearing for this crate specifically. They are stated
+//! here, not only in `docs/ai/driver-subsystem-boundaries.md`, because they
+//! are the reason the crate has the shape it has.
+//!
+//! **L0-a — this crate names no device family.** No `virtio`, `nvme`, `ahci`,
+//! `mmc`, `i2c` or `usb` may appear in this crate's API, and no family-specific
+//! method may be added to [`DeviceCtx`] or [`DeviceServices`]. This is a
+//! *fan-in* rule rather than a portability rule: every driver in the tree
+//! shares this crate and its test suite, so a family-specific addition here is
+//! a change that risks all of them. A family that needs host machinery beyond
+//! the capability traits declares an [`ExtensionService`] in its own crate and
+//! recovers it through [`DeviceCtx::extension`] — the extension names the host
+//! type it supports, this crate never does.
+//!
+//! Check: `grep -rni 'virtio|nvme|ahci|mmc|i2c|usb' src/` must return
+//! comments only.
+//!
+//! **L0-b — the contracts here are host-free.** [`DeviceResourceServices`],
+//! [`ClockConsumerServices`] and [`DeviceServices`] must not name a
+//! host-kernel type in their signatures, because that is what lets the model
+//! be exercised against a mock (`domain/tests.rs` runs 19 state-machine tests
+//! on `MockServices`). The one deliberate exception is the IRQ *vocabulary*
+//! re-exported by [`crate::resource`] (`IrqTrigger`, `IrqController`,
+//! `IrqDomainId`): those shapes are defined exactly once in the tree, in
+//! `kirq`, and are data rather than host behaviour.
+//!
+//! Providers — the [`provider`] Op traits — are the host-facing surface and
+//! are *not* covered by L0-b; `driver-host` implements them. Drivers do not
+//! touch them (rule L1: one acquisition path, [`DeviceCtx`]).
 
 #![no_std]
 

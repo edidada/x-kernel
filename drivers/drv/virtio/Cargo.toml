@@ -30,12 +30,10 @@ device_traits = { workspace = true }
 device_class = { workspace = true }
 hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
-kirq = { workspace = true }
 ktask = { workspace = true, optional = true }
 log.workspace = true
 pci = { workspace = true }
 virtio_devices = { workspace = true, features = ["alloc"] }
-
 
 [lints]
 workspace = true

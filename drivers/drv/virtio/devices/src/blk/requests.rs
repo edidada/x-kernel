@@ -10,7 +10,6 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::pin, ptr::NonNull};
 
 use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter, PrepareBlockWait};
-use kirq::{IrqEvent, IrqHandler};
 use linked_list_r4l::{GetLinks, Links, RawList};
 use virtio_drivers::{
     Error,
@@ -404,19 +403,30 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> IrqHandler for VirtIoBlkDev<H, T> {
-    fn handle(&self, _irq: usize) -> IrqEvent {
-        if self
+impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
+    /// Acknowledge one interrupt and report whether it was ours.
+    ///
+    /// The family-side half of `DeviceCtx::request_irq`: the driver's handler
+    /// closure calls this and maps the result to `driver_core::IrqAction`
+    /// (the same shape `VirtIoNetIrqWorker::service` has). This is
+    /// deliberately NOT a host registration trait — nothing in this crate is
+    /// ever registered with the host IRQ core; registration belongs to the
+    /// driver so the returned `DevIrq` guard lands in its `Data`.
+    ///
+    /// `irq` is unused: a virtio-blk function owns its line (legacy INTx) or
+    /// its MSI-X vector, so there is no shared-line filter to apply. The
+    /// parameter stays in the signature to keep the family uniform —
+    /// `VirtIoInputDev::ack_irq` does filter, because input shares lines.
+    ///
+    /// Runs in hard-IRQ context: takes the device lock, acks the transport,
+    /// and returns. No allocation, no device-model calls.
+    pub fn ack_irq(&self, _irq: usize) -> bool {
+        !self
             .state
             .lock()
             .device
             .as_mut()
             .is_none_or(|device| device.ack_interrupt().is_empty())
-        {
-            IrqEvent::NOT_HANDLED
-        } else {
-            IrqEvent::HANDLED
-        }
     }
 }
 
