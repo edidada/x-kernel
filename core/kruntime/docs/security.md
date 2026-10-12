@@ -243,4 +243,4 @@ request even while normal IPI delivery is disabled. The hook uses kipi's existin
 published-slot validation and runs only local TLB invalidation/acknowledgement;
 it does not dispatch arbitrary IPI callbacks. Page-table mutation retains the
 same memspace lock and validation. This prevents the IRQ-off waiter from forcing
-the updater through shootdown's give-up path during concurrent pool creation.
+the updater through shootdown's give-up path during concurrent DMA page-attribute updates.

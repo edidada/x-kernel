@@ -403,53 +403,6 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         Err(AllocError::NoMemory)
     }
 
-    /// Allocate a contiguous buddy block entirely inside the half-open address range.
-    ///
-    /// The range is expressed in the same address space as registered regions.
-    /// Search is confined to existing free blocks; no out-of-range allocation is consumed.
-    ///
-    /// # Errors
-    /// Returns `InvalidInput` for invalid range, count or alignment, and
-    /// `NoMemory` when the rounded buddy block cannot fit the requested range.
-    pub fn allocate_pages_in_range(
-        &mut self,
-        count: usize,
-        align: usize,
-        start: usize,
-        end: usize,
-    ) -> AllocResult<usize> {
-        if count == 0 || !align.is_power_of_two() || align < PAGE_SIZE || start >= end {
-            return Err(AllocError::InvalidInput);
-        }
-        let pages = count
-            .checked_next_power_of_two()
-            .ok_or(AllocError::InvalidInput)?;
-        let order = pages.trailing_zeros() as usize;
-        if order > MAX_ORDER {
-            return Err(AllocError::InvalidInput);
-        }
-        let size = pages
-            .checked_mul(PAGE_SIZE)
-            .ok_or(AllocError::InvalidInput)?;
-        let alignment = align.max(size);
-        for region in self.regions[..self.region_count].iter_mut().flatten() {
-            for source_order in order..=MAX_ORDER {
-                let candidate = region.free_lists[source_order].iter().find_map(|node| {
-                    let block = node as *const FreeNode as usize;
-                    let block_end = block.checked_add(order_size::<PAGE_SIZE>(source_order))?;
-                    let addr = block.max(start).checked_add(alignment - 1)? & !(alignment - 1);
-                    (addr.checked_add(size)? <= block_end.min(end)).then_some((block, addr))
-                });
-                if let Some((block, addr)) = candidate {
-                    region.remove_free::<PAGE_SIZE>(block, source_order);
-                    region.split_towards::<PAGE_SIZE>(block, source_order, addr, order);
-                    return Ok(addr);
-                }
-            }
-        }
-        Err(AllocError::NoMemory)
-    }
-
     fn alloc_aligned<const PS: usize>(
         region: &mut Region,
         order: usize,

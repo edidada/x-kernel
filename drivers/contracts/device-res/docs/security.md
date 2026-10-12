@@ -283,4 +283,4 @@ outgoing bytes for device access; generic no-op defaults apply only when a direc
 coherent provider needs no maintenance. Arc retention prevents provider state
 from disappearing before coherent free; it provides no hardware drain or reset.
 Test coverage checks explicit provider dispatch and resource cleanup; host/queue
-regressions cover context isolation, cancellation and failed mapping rollback.
+regressions cover device masks on a shared backend, cancellation and failed mapping rollback.

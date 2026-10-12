@@ -77,13 +77,3 @@ zero-filled allocations. Callers must initialize pages before exposing them to
 another protection domain. There is no direct user-pointer, device, DMA, firmware
 parser or syscall interface here; trusted callers translate those inputs into
 owned, mapped memory and validated allocation requests.
-
-## Bounded allocation invariants
-
-`buddy_alloc.rs::allocate_pages_in_range` inspects only registered free-list
-nodes under exclusive allocator access. Checked power-of-two rounding, address
-alignment and extent arithmetic precede removal. The whole rounded allocation
-fits one original free block and the supplied half-open interval. Removal and
-`split_towards` reuse the same bitmap/list/count invariants as fixed allocation.
-No pointer to a selected node survives mutation. Rejected searches leave all
-chunks free; free-list traversal adds latency under the caller's lock.

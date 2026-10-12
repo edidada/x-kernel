@@ -6,7 +6,7 @@
 //! traits in the [`driver_base`] series crates.
 //!
 //! Hosts implement [`VirtIoHal`] for MMIO and the legacy DMA backend. With the
-//! `alloc` feature, [`DmaTransport`] binds an OS-neutral [`device_res::DmaOp`]
+//! `alloc` feature, [`dma_provider`] binds an OS-neutral [`device_res::DmaOp`]
 //! provider to one device; its queues and DMA allocations retain that provider.
 //!
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
@@ -72,7 +72,7 @@ use driver_base::{DeviceKind, DriverError};
 #[cfg(feature = "alloc")]
 mod dma;
 #[cfg(feature = "alloc")]
-pub use dma::DmaTransport;
+pub use dma::dma_provider;
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,

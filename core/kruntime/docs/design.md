@@ -318,7 +318,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 `dma_integration` 保持 DMA 页属性和 TLB 协议的 host 接线，页表修改继续由
 `memspace` 管理。等待 kernel layout 锁时通过 `try_lock` 重试并处理 pending TLB
 请求，当前 CPU 在等待期间保持 pinned 和 IRQ-off。该模块提供
-`DmaPageTableIf::poll_pending_tlb`，设备 DMA 锁等待也通过同一入口确认远端请求。
+`DmaPageTableIf::poll_pending_tlb`，共享 DMA 后端锁等待也通过同一入口确认远端请求。
 IPI feature 关闭时，该入口保留空实现。
 
 ### 日志适配放在 `lib.rs`

@@ -47,6 +47,15 @@ type PciMsixStateOption = Option<PciMsixState>;
 type PciMsixStateOption = Option<()>;
 
 impl PciTransport {
+    /// Bind the device's DMA provider before constructing its driver.
+    #[cfg(feature = "alloc")]
+    pub fn set_dma_provider(
+        &mut self,
+        provider: alloc::sync::Arc<dyn virtio_drivers::DmaProvider>,
+    ) {
+        self.inner.set_dma_provider(provider);
+    }
+
     /// Construct a new PCI VirtIO transport.
     pub fn new<H: VirtIoHal, C: ConfigurationAccess>(
         root: &mut PciRoot<C>,
@@ -95,6 +104,11 @@ impl PciTransport {
 }
 
 impl Transport for PciTransport {
+    #[cfg(feature = "alloc")]
+    fn dma_provider(&self) -> Option<alloc::sync::Arc<dyn virtio_drivers::DmaProvider>> {
+        self.inner.dma_provider()
+    }
+
     fn device_type(&self) -> DeviceType {
         self.inner.device_type()
     }

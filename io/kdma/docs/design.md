@@ -1,146 +1,201 @@
 # kdma — Design
 
-## Purpose and scope
+## Purpose
 
-`kdma` owns host DMA constraints, translation and allocation state. All coherent
-allocation, streaming mapping, synchronization and release entry points take a
-`&DmaDeviceContext`. Host integration selects that context using the device
-identified during probe. Reusable drivers consume the OS-neutral `DmaOp`
-contract; they do not import `kdma`.
+`kdma` is the kernel's DMA memory layer: it allocates coherent memory that
+devices can read and write, maps existing CPU buffers into temporary DMA
+transactions through a pooled coherent bounce area, and defines the bus
+address type and physical↔bus conversion shared by all DMA-capable
+drivers. It exposes two flat unsafe entry pairs —
+`allocate_dma_memory`/`deallocate_dma_memory` and
+`map_dma_buffer`/`unmap_dma_buffer` — plus the `DmaPageTableIf` extension
+point for address-space integration.
 
-`device.rs` defines `DmaConstraints`, `DmaWindow` and `DmaDeviceContext`.
-`dma.rs` implements coherent memory and active mapping bookkeeping;
-`bounce_pool.rs` manages bounce suballocations. `lib.rs` exports the public
-unsafe operations, `DmaBusAddress`, `DmaInfo` and the page-table provider hook.
-`tests.rs` exercises constraints, offsets, ownership handoffs and cancellation.
+## Responsibilities
 
-## Constraint sources and architecture
+- Coherent allocation: `allocate_dma_memory(device, layout)` carves page-granular
+  regions from the global allocator (`kalloc`, `UsageKind::Dma`), applies
+  `READ | WRITE | UNCACHED | SHARED` mapping flags through
+  `DmaPageTableIf::protect`, and registers the range with the platform
+  (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
+  steps.
+- Temporary mappings: `map_dma_buffer(device, buffer, direction)` stages the
+  initialized buffer through the coherent bounce pool, copying original bytes
+  for every direction to preserve cancelled receives and partial device writes, tracks the mapping in `active_mappings` keyed by bus
+  address, and fences (`SeqCst`) around the copies. `unmap_dma_buffer`
+  copies data back (unless `DriverToDevice`), removes the tracking entry,
+  and recycles the bounce buffer.
+- Address translation: `p2b` / `b2p` over the linear
+  `kbuild_config::PHYS_BUS_OFFSET` mapping, and `DmaBusAddress` as the
+  `u64` bus address wrapper handed to devices.
+- Result reporting: `DmaInfo { cpu_addr, bus_addr }` pairs the CPU view
+  with the device view of each region.
+- Bounce pool: a lazily created 1024-page coherent region sub-allocated
+  by a TLSF byte allocator (`bounce_pool`), sized once from the same
+  coherent path.
+- Platform hook: `DmaPageTableIf` (a `kiface::interface` trait) lets the
+  address-space owner implement flag updates without a crate cycle.
 
-```text
-probe / host integration identifies device
-    -> Arc<dyn DmaOp> bound on DeviceObject
-        -> XKernelDmaProvider owns DmaDeviceContext
-            -> immutable DmaConstraints + DmaWindow
-            -> SpinNoIrq<DmaAllocator>
-                 -> constrained page allocator + page-table/platform hooks
-                 -> TLSF bounce pool + active mappings
-```
+## Non-Responsibilities
 
-`DmaConstraints` separates the streaming and coherent address masks and records
-minimum bus alignment, maximum streaming segment length and segment boundary.
-Masks consist of contiguous low bits; alignment is a power of two. Validation
-checks the inclusive last byte using checked arithmetic. Streaming segments
-must fit one boundary and one device segment limit.
+- No IOMMU management: bus addresses are direct physical+offset values;
+  IOVA translation and IOMMU programming are out of scope.
+- No cache maintenance beyond the chosen mapping attributes: coherence is
+  achieved with `UNCACHED` mappings plus fences, not architecture cache
+  flush calls.
+- No streaming scatter-gather: `map_dma_buffer` handles one contiguous
+  slice per mapping; descriptors chaining multiple buffers live in
+  drivers.
+- No device ownership policy: the crate cannot tell which device may
+  access which bus address; that obligation stays with callers (see the
+  `# Safety` contracts).
 
-`DmaWindow` records one contiguous physical-to-bus translation. Translation and
-device reachability are separate checks: a valid translated address can exceed
-the device mask. The allocation path intersects the window with the relevant
-bus mask, translates that interval back into a physical range, and searches
-free buddy blocks within the range. Legacy `p2b`/`b2p` retain the platform offset
-conversion for compatibility; mapping decisions use the context's window.
-
-`platform_default` constructs a distinct DMA32 context using `PHYS_BUS_OFFSET`.
-Current VirtIO probe uses this policy for each hardware device. Probe may bind
-a provider configured through `XKernelDmaProvider::new` beforehand. Firmware
-`dma-ranges`, PCI capability negotiation, IOMMU and direct mapping are outside
-this implementation. A device's context identity is carried explicitly; its
-address capabilities remain supplied by trusted host integration.
-
-## Execution context and concurrency
-
-The page allocator, linear map and `DmaPageTableIf` implementation must be
-initialized before use. Allocation and first streaming map can allocate pages,
-change page tables and invoke platform prepare hooks; they belong in task
-context. Map, sync and unmap use the context's IRQ-disabling spin lock and copy
-the requested bytes while holding it. They require exclusive ownership handoff
-and permit no sleeping or recursive acquisition of the same context.
-
-Completion can recycle an existing bounce allocation in IRQ/softirq context
-with the current host hooks. Coherent destruction and context teardown belong
-in task context. This design removes cross-device mapping-table serialization;
-page allocation and page-table changes still share their subsystem locks.
-Copy cost and BTreeMap allocation mean submit/completion latency has no fixed
-microsecond bound.
-
-## Coherent allocation flow
-
-1. Reject empty requests and derive the page-rounded extent.
-2. Intersect the physical translation window with `coherent_mask`, then request
-   pages through `kalloc::alloc_dma_pages_in_range`, bypassing per-CPU caches.
-3. Validate translation for the entire page-rounded extent and apply
-   `READ | WRITE | UNCACHED | SHARED` through `DmaPageTableIf::protect`.
-4. Call `kplat::dma::prepare`, then check requested bus alignment and mask.
-5. Return paired CPU and bus addresses. Callers initialize payload before
-   hardware exposure; the VirtIO adapter zeroes all requested pages.
-
-Release uses the original context and layout, invokes platform release and
-restores normal read/write mapping attributes before returning pages. A failed
-flag transition or platform hook retains pages outside the general allocator,
-since their cache/share state is uncertain. `dma-trace` optionally records
-coherent ownership and reports mismatched releases.
-
-## Streaming state and algorithm
+## Scope
 
 ```text
-caller owns initialized buffer
-    -> map: allocate bounce, copy original bytes, record original arguments
-    -> device owns bounce mapping
-    -> sync for CPU: copy received bytes, retain allocation
-    -> sync for device: copy transmitted bytes, retain allocation
-    -> unmap after DMA stops: copy received bytes, remove record, recycle
+io/kdma/
+├── src/
+│   ├── device.rs       # immutable streaming/coherent masks
+│   ├── lib.rs          # public unsafe API, DmaBusAddress, DmaInfo, p2b/b2p
+│   ├── dma.rs          # DmaAllocator, DmaPageTableIf, coherent paths,
+│   │                   # bounce mapping bookkeeping, dma-trace
+│   └── bounce_pool.rs  # TLSF-backed coherent bounce pool
+└── Cargo.toml
 ```
 
-Every streaming mapping uses bounce memory in this version. The first mapping
-creates a 1024-page pool reachable through `streaming_mask`, independent of the
-coherent mask. Each context pays this 4 MiB cost lazily. TLSF allocates padding
-for final **bus address** alignment and boundary placement. The active record
-keeps both the allocation base used for TLSF free and the aligned DMA pointer.
+## Architecture
 
-All directions copy initialized original bytes at map time. This preserves
-untouched receive bytes when descriptor publication fails or hardware writes
-only part of the buffer. Sync/unmap copy back for DeviceToDriver/Bidirectional;
-DriverToDevice copyback is skipped. Sync for device refreshes outgoing data for
-DriverToDevice/Bidirectional. Direction, original pointer, length and bus address
-must match the active record in the same context.
+```text
+drivers
+  |  allocate_dma_memory(device, layout)          map_dma_buffer(device, buf, dir)
+  v                                              |
+SpinNoIrq<DmaAllocator>  <--- one global lock ---+
+  |  alloc_coherent_pages                             |
+  |    kalloc alloc_dma_pages (UsageKind::Dma)        v
+  |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
+  |    kplat::dma::prepare / release                 TLSF byte allocator
+  |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
+  |                                           active_mappings: BTreeMap<bus, BounceMapping>
+```
 
-Queue integration prepares buffer and indirect-table mappings transactionally
-before descriptor publication. Preparation errors unmap earlier mappings and
-retain queue capacity. Resource ownership retains the provider through cleanup.
+## Execution Context
 
-## Errors and resource release
+- Allocation, mapping, synchronization and release take a `SpinNoIrq` lock: callers must not sleep
+  while holding the API, and the functions are safe from any context
+  where spin locks are legal (task context; not from NMI-level code).
+- Coherent allocation participates in the global page allocator and page
+  table updates, so it must run after `kalloc` and the address-space
+  subsystem are initialized; first use of the bounce path lazily
+  allocates the pool through the same path.
+- `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
+  calling thread; they are intended for driver submit/completion paths.
+- The `dma-trace` feature adds allocation-site bookkeeping for
+  debugging; it is off in production builds.
 
-Invalid masks, alignment, window intervals, zero lengths, segment excess and
-unreachable translated ranges yield `InvalidInput`. A window wholly above the
-mask, unavailable pages, pool exhaustion or platform/flag failure yields
-`NoMemory`. Unmap argument mismatch is an unsafe caller contract violation and
-asserts; synchronization returns `InvalidInput` on mismatched records.
+## Concurrency Model
 
-Dropping a context with no active streaming mappings releases pool backing.
-If mappings remain, backing pages are retained to avoid reuse during unresolved
-DMA. Dropping the context does not stop hardware or unmap original buffers.
-Outstanding coherent allocations require explicit paired release before the
-context is dropped. Arc-owned providers in coherent handles and VirtIO queues
-carry that lifetime through cleanup.
+- One global `SpinNoIrq<DmaAllocator>` serializes coherent allocation,
+  bounce mapping, and the mapping table; critical sections include
+  page allocation, memcpy and BTreeMap operations and have no fixed latency bound.
+- `active_mappings` makes double-map of one bus address an error
+  (`AllocError::InvalidInput`) and keeps `unmap` exact-match; unmapping an
+  inactive address panics — that is a driver contract violation, not a
+  runtime condition.
+- Memory ordering: explicit `fence(SeqCst)` before device handoff and
+  after device ownership returns, bracketing the bounce copies; UNCACHED
+  attributes make the coherent window itself uncached for the device.
 
-## Design limits
+## Error Model
 
-Cache policy is uniformly uncached shared memory. Hardware coherency is not
-inferred from a device boolean: cacheable direct mapping needs proven physical
-contiguity, stable backing and platform cache/ownership rules. One window and
-one segment are supported per mapping; segment overflow returns an error and
-higher layers choose descriptor splitting. Boundary placement reserves up to
-one boundary's padding, so large boundaries can exhaust the fixed pool.
-A reachable window smaller than 4 MiB cannot provide the fixed streaming pool.
-Device contexts separate software ownership; hardware isolation requires an
-IOMMU or equivalent platform enforcement.
+- `AllocResult` (from `alloc-engine`): `NoMemory` when pages, mapping
+  flag updates, or platform prepare fail; `InvalidInput` for zero-length
+  mappings or an already-active bus address.
+- Panics mark contract violations: unmapping a non-active address,
+  pointer, direction or length mismatch between map and unmap, bounce recycling outside the
+  pool, and missing pool during recycle.
+- `deallocate_dma_memory` ignores (logs under `dma-trace`) mismatched
+  frees instead of corrupting the allocator — the trace layer detects and
+  skips duplicate or inconsistent records.
 
-## TLB progress during lock contention
+## External Boundary And Inputs
 
-DMA page attributes are updated with IRQs disabled and can wait for remote TLB
-acknowledgements. A CPU spinning for the same device allocator or the shared
-kernel page-table lock must still acknowledge that request. Context lock wait
-uses try_lock and DmaPageTableIf::poll_pending_tlb; the runtime provider applies
-the same policy while acquiring the kernel layout lock. The provider pins the
-CPU and excludes IRQ reentry while servicing only pending TLB invalidations.
-It executes no arbitrary IPI callback, device callback or scheduler operation.
-This avoids the DMA lock/shootdown wait cycle observed by x86_64 SMP tests.
+- Device-visible bus addresses are the trust boundary: the `# Safety`
+  contracts require callers to expose an allocation's bus address only to
+  devices allowed to DMA that buffer, and to stop device access before
+  `unmap_dma_buffer`.
+- The bounce pool stages all temporary mappings, so driver-owned buffers
+  are exposed through bounce addresses. Software checks do not confine
+  arbitrary hardware DMA to the pool; hardware isolation remains a platform concern.
+- Platform integration (`kplat::dma::prepare`/`release`) treats each
+  page-granular coherent region as shareable; the `SHARED` flag keeps
+  TEE/platform share-unshare hooks balanced per allocation.
+
+## Unsafe Code
+
+All unsafe surface is concentrated in the public DMA operations and their
+internal forwardings, each with `# Safety` sections and matching
+`SAFETY:` comments:
+
+- `allocate_dma_memory` / `deallocate_dma_memory` — exact-once free with
+  identical layout; no forged or offset CPU addresses; bus addresses only
+  to permitted devices.
+- `map_dma_buffer` / `unmap_dma_buffer` — buffer stays live and
+  exclusively owned between the calls; device access stops before
+  unmap; exact-once unmap with the matching address and length.
+- Internal unsafe blocks: `NonNull::new_unchecked` on freshly allocated
+  non-null pages, and `copy_nonoverlapping` between distinct live regions
+  of validated length.
+
+## Design Decisions
+
+- Bounce-staged temporary mappings behind a stable API: staging through
+  pooled coherent memory keeps driver code simple and safe today; a
+  direct-map fast path can be reintroduced later without touching
+  drivers.
+- Page-granular coherent allocations: page-table attribute updates and
+  platform prepare/release hooks stay balanced per allocation, avoiding
+  partial-page flag aliasing between coherent and cached uses.
+- `DmaPageTableIf` via `kiface`: the address-space owner implements flag
+  updates as a provider, breaking the historical
+  `kdma -> mm -> ... -> kdma` dependency cycle while keeping the kernel
+  build platform-agnostic.
+- Tracking map by bus address in a `BTreeMap`: double-mapping and
+  mismatched unmaps are the classic DMA driver bugs; detecting them at
+  the boundary turns silent memory corruption into a loud error or panic.
+- `dma-trace` feature: coherent allocations record their call site and
+  detect duplicate or mismatched frees at runtime, which is the cheapest
+  way to debug DMA leaks without a full MMU tracer.
+
+## Device address policy
+
+Every DMA operation receives `&DmaDeviceContext`. The context holds immutable
+streaming and coherent masks; probe owns the device/provider association. The
+backend, active mapping table and lazy 4 MiB bounce pool remain shared across
+all current contexts using the platform offset and uncached/shared attributes.
+The default context preserves the existing unrestricted address policy; a
+restricted device declares its masks explicitly through `new`.
+
+Allocation checks the whole page-rounded bus interval against the coherent
+mask and checks bus alignment. Streaming checks the complete bounce interval
+against the streaming mask before copying or publishing it. A rejected candidate
+is released. This backend offers no low-address allocation guarantee: an
+unreachable candidate returns `InvalidInput` even when other reachable memory
+exists. Address translation uses checked arithmetic before changing page flags.
+
+`sync_dma_buffer` retains the mapping while copying at CPU/device ownership
+handoffs. Sync and unmap validate the original pointer, length and direction.
+The caller must use the original device/provider and stop the previous owner;
+mask values are policy, not a unique identity or hardware isolation boundary.
+Contexts own no allocator, pool or teardown work. Dropping a context does not
+cancel DMA or release outstanding mappings; retained providers and driver
+cleanup keep the original resources live until hardware access has stopped.
+
+The shared allocator lock wait and runtime page-table lock wait service pending
+TLB acknowledgements through `DmaPageTableIf::poll_pending_tlb`. This preserves
+progress when a lock owner changes page attributes with IRQs disabled. The hook
+pins the CPU and handles only TLB invalidations, not arbitrary IPI callbacks.
+
+Direct mapping, device cache-coherency selection, segment constraints,
+firmware DMA ranges, IOMMU and restricted physical allocation remain separate
+features. Tests cover mask overflow, distinct masks sharing one backend,
+rejected-map rollback, synchronization and receive cancellation.

@@ -584,7 +584,7 @@ Empty reads do no I/O; wait failures leave submitted DMA storage owned by the
 driver. Short reads retain their unused cached suffix.
 
 Completion includes HAL unshare in hard IRQ context. The backend must be
-IRQ-safe and non-sleeping. X-Kernel's backend takes the bound device context
+IRQ-safe and non-sleeping. X-Kernel's backend takes the shared DMA backend
 lock during unmap; one-request reclamation has no fixed IRQ latency bound.
 This change preserves inline reclaim and does not introduce a softirq path.
 
@@ -596,11 +596,13 @@ wait failures, and retention of outstanding storage without real-device timing.
 
 ## Device-bound DMA transport
 
-With `alloc`, `dma.rs::DmaTransport<T>` wraps a transport and retains the device's
-`Arc<dyn device_res::DmaOp>`. It forwards protocol/MMIO operations and supplies
-an OS-neutral `virtio_drivers::DmaProvider`. `DeviceDma` translates direction,
+With `alloc`, `dma.rs::dma_provider` adapts the device's retained
+`Arc<dyn device_res::DmaOp>` into an OS-neutral `virtio_drivers::DmaProvider`.
+Probe binds it directly with the MMIO or PCI transport's `set_dma_provider`
+method before constructing a driver. `DeviceDma` translates directions,
 zeroes coherent pages and pairs allocation/map release on that provider.
-Concrete drivers remain independent of host crates.
+Concrete drivers remain independent of host crates; the existing PCI wrapper
+forwards the provider with its interrupt configuration.
 
 The device-bound kvirtiodrivers extension retains the transport provider in queue
 backends and coherent Dma objects, including GPU framebuffer/cursor allocations.

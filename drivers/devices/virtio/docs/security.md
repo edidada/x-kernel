@@ -396,7 +396,7 @@ freeing or resubmitting storage whose DMA ownership is unresolved.
 The VMM controls bytes, completion length and timing. Length validation protects
 CPU copies but cannot establish entropy quality or force device progress.
 There is no completion timeout and no reset/hotplug protocol. With X-Kernel HAL,
-reclaim uses the bound device context lock. Coherent allocations and page-table
+reclaim uses the shared DMA backend lock. Coherent allocations and page-table
 changes additionally share their host subsystem locks. Lock-wait latency in hard IRQ context is an accepted,
 unbounded-by-this-driver limitation, not a verified latency guarantee.
 

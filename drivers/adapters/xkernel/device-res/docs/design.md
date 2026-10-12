@@ -46,7 +46,7 @@ drivers/adapters/xkernel/device-res/src/
 
 `XKernelResourceProvider` supplies platform MMIO, IRQ, time and compatibility
 DMA operations. `XKernelDmaProvider` owns a distinct device DMA context selected
-by host integration from constraints and an address window. `kdriver::resource` holds a
+by host integration from streaming and coherent masks. `kdriver::resource` holds a
 static `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` inside the driver-facing
 `DeviceResourceExt` methods.
@@ -97,11 +97,13 @@ parallel API that bypasses the provider contract.
 
 ## Device DMA providers
 
-`XKernelDmaProvider::new` validates immutable `DmaConstraints` and `DmaWindow`.
-Each provider owns its mapping namespace and lazy bounce pool. The platform
-constructor creates a distinct DMA32 namespace; current VirtIO probe binds that
-provider through `DeviceObject::bind_dma`. Coherent handles and transports retain
-`Arc<dyn DmaOp>` so release and synchronization reach the original context.
+`XKernelDmaProvider::new` validates streaming and coherent address masks.
+Each provider owns immutable device policy and uses kdma's shared platform
+backend and bounce pool. The default preserves unrestricted addressing;
+restricted devices declare masks explicitly. The device and resources retain
+`Arc<dyn DmaOp>` so allocation, release and synchronization use the original
+provider. Out-of-mask candidates return an error; this backend has no
+low-address allocation guarantee.
 
 The zero-sized `XKernelResourceProvider` delegates legacy DMA calls to a static
 platform compatibility context. The bound VirtIO path uses the per-device

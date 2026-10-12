@@ -14,23 +14,24 @@ static PLATFORM_DMA: XKernelDmaProvider = XKernelDmaProvider {
     context: kdma::DmaDeviceContext::platform_default(),
 };
 
-/// DMA provider whose mappings belong to one device and translation window.
+/// DMA provider binding one device's address limits to the shared platform backend.
 pub struct XKernelDmaProvider {
     context: kdma::DmaDeviceContext,
 }
 
 impl XKernelDmaProvider {
-    /// Build a device DMA provider from validated host constraints and window.
+    /// Build a device DMA provider from its streaming and coherent address masks.
     ///
     /// # Errors
     /// Returns `InvalidResource` when the supplied constraints are invalid.
-    pub fn new(constraints: kdma::DmaConstraints, window: kdma::DmaWindow) -> ResResult<Self> {
+    pub fn new(streaming_mask: u64, coherent_mask: u64) -> ResResult<Self> {
         Ok(Self {
-            context: kdma::DmaDeviceContext::new(constraints, window).map_err(map_dma_error)?,
+            context: kdma::DmaDeviceContext::new(streaming_mask, coherent_mask)
+                .map_err(map_dma_error)?,
         })
     }
 
-    /// Create a distinct device namespace using the current platform DMA32 policy.
+    /// Bind the existing unrestricted platform address policy to a device.
     pub fn platform_default() -> Self {
         Self {
             context: kdma::DmaDeviceContext::platform_default(),

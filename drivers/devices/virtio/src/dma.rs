@@ -2,32 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device-bound DMA injection through an otherwise unchanged transport.
+//! Adapt device-res DMA capabilities for VirtIO transports.
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec};
-use virtio_drivers::{
-    BufferDirection, DmaProvider, Error, PAGE_SIZE, PhysAddr,
-    transport::{DeviceStatus, DeviceType, InterruptStatus, Transport},
-};
-use zerocopy::{FromBytes, Immutable, IntoBytes};
+use virtio_drivers::{BufferDirection, DmaProvider, Error, PAGE_SIZE, PhysAddr};
 
-/// A VirtIO transport retaining the DMA capability of its hardware device.
-pub struct DmaTransport<T> {
-    inner: T,
-    dma: Arc<DeviceDma>,
-}
-
-impl<T> DmaTransport<T> {
-    /// Associate a transport with the provider selected by device probe.
-    pub fn new(inner: T, provider: Arc<dyn DmaOp>) -> Self {
-        Self {
-            inner,
-            dma: Arc::new(DeviceDma { provider }),
-        }
-    }
+/// Adapt one device-res provider for binding to a VirtIO transport at probe.
+pub fn dma_provider(provider: Arc<dyn DmaOp>) -> Arc<dyn DmaProvider> {
+    Arc::new(DeviceDma { provider })
 }
 
 struct DeviceDma {
@@ -114,90 +99,5 @@ unsafe impl DmaProvider for DeviceDma {
                 direction: direction(dir),
             })
         };
-    }
-}
-
-impl<T: Transport> Transport for DmaTransport<T> {
-    fn dma_provider(&self) -> Option<Arc<dyn DmaProvider>> {
-        Some(self.dma.clone())
-    }
-
-    fn device_type(&self) -> DeviceType {
-        self.inner.device_type()
-    }
-
-    fn read_device_features(&mut self) -> u64 {
-        self.inner.read_device_features()
-    }
-
-    fn write_driver_features(&mut self, features: u64) {
-        self.inner.write_driver_features(features);
-    }
-
-    fn max_queue_size(&mut self, queue: u16) -> u32 {
-        self.inner.max_queue_size(queue)
-    }
-
-    fn notify(&mut self, queue: u16) {
-        self.inner.notify(queue);
-    }
-
-    fn get_status(&self) -> DeviceStatus {
-        self.inner.get_status()
-    }
-
-    fn set_status(&mut self, status: DeviceStatus) {
-        self.inner.set_status(status);
-    }
-
-    fn set_guest_page_size(&mut self, size: u32) {
-        self.inner.set_guest_page_size(size);
-    }
-
-    fn requires_legacy_layout(&self) -> bool {
-        self.inner.requires_legacy_layout()
-    }
-
-    fn queue_set(
-        &mut self,
-        queue: u16,
-        size: u32,
-        descriptors: PhysAddr,
-        driver_area: PhysAddr,
-        device_area: PhysAddr,
-    ) {
-        self.inner
-            .queue_set(queue, size, descriptors, driver_area, device_area);
-    }
-
-    fn queue_unset(&mut self, queue: u16) {
-        self.inner.queue_unset(queue);
-    }
-
-    fn queue_used(&mut self, queue: u16) -> bool {
-        self.inner.queue_used(queue)
-    }
-
-    fn ack_interrupt(&mut self) -> InterruptStatus {
-        self.inner.ack_interrupt()
-    }
-
-    fn read_config_generation(&self) -> u32 {
-        self.inner.read_config_generation()
-    }
-
-    fn read_config_space<V: FromBytes + IntoBytes>(
-        &self,
-        offset: usize,
-    ) -> virtio_drivers::Result<V> {
-        self.inner.read_config_space(offset)
-    }
-
-    fn write_config_space<V: IntoBytes + Immutable>(
-        &mut self,
-        offset: usize,
-        value: V,
-    ) -> virtio_drivers::Result<()> {
-        self.inner.write_config_space(offset, value)
     }
 }

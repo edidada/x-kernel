@@ -177,7 +177,7 @@ remain unchanged.
 The host adapter at `drivers/adapters/xkernel/device-res/src/dma.rs` implements
 the unsafe DmaOp contract on `XKernelDmaProvider`, owning one kdma context.
 It validates layouts and passes `&self.context` to allocation, mapping, sync
-and release. Complete bus intervals satisfy device masks and translation;
+and release. Complete bus intervals satisfy device masks after platform translation;
 streaming records retain original pointer, direction and length.
 
 `resource::devm_alloc_coherent` obtains the bound capability, owns a DmaCoherent
@@ -186,7 +186,7 @@ is Copy; ownership rests with the handle, and unsafe free requires unchanged
 original metadata plus stopped hardware/CPU aliases. Hook failure quarantines
 pages in kdma instead of recycling uncertain attributes.
 
-VirtIO probe binds the provider before constructing DmaTransport. The concrete
+VirtIO probe binds the provider before binding the transport DMA provider. The concrete
 adapter `drivers/devices/virtio/src/dma.rs` zeroes coherent pages and forwards all
 queue and GPU DMA operations to the retained provider. Queue preparation is
 transactional, so failed buffer/indirect-table mapping rolls back prior mappings
@@ -196,8 +196,7 @@ provider even if device-core binding is later cleaned up.
 
 `src/driver_registry/virtio/glue.rs::VirtIoHalImpl` retains static MMIO translation
 and a compatibility DMA backend for transports without injection. Legacy ixgbe
-uses that platform backend too. Default VirtIO contexts still describe platform
-DMA32; actual mask and translation declarations remain host/probe responsibility.
+uses that platform backend too. Default VirtIO contexts preserve unrestricted platform addressing; actual mask and translation declarations remain host/probe responsibility.
 Provider Arc lifetime does not drain hardware DMA. Driver removal stops device
 activity and retires queue/storage users before devres release.
 
@@ -401,7 +400,7 @@ Callers:
 | `EnumerationContext` | `Vec<DeviceDesc>` satisfies `Send` | Does not implement `Sync`; used by one thread. |
 | `DriverRegistrar` | Zero-sized type | Accesses shared state only through the global `kdevice` lock. |
 | `device-res-xkernel::XKernelResourceProvider` | Zero-sized type | MMIO/IRQ/time forward to host subsystems; compatibility DMA uses a locked static context. |
-| `device-res-xkernel::XKernelDmaProvider` | Owned context supports cross-thread release | Per-device SpinNoIrq protects mappings and bounce allocation; the provider is retained by Arc. |
+| `device-res-xkernel::XKernelDmaProvider` | Owned context supports cross-thread release | Shared backend SpinNoIrq protects mappings and bounce allocation; the provider is retained by Arc. |
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` satisfies `Send` and `Sync` | `SpinNoPreempt` provides interior mutability. |
 | `PlatformBackend` | The `LocalIdAlloc` field is `Copy` and satisfies `Send` | Does not implement `Sync`; access is serialized by the `BusManager` lock. |
 | `PciBackend` | `Cam` satisfies `Send` | Does not implement `Sync`. |
@@ -557,8 +556,8 @@ registration failures do not establish a device fault.
 Device cleanup drains devres before dropping its DMA capability; each owned
 coherent handle and queue backend independently retains the original provider.
 Binding and resource registration rely on serialized probe/remove execution.
-Each bound context introduces a lazy 4 MiB pool and its own IRQ-disabling mapping
+All current contexts share one lazy 4 MiB pool and one IRQ-disabling mapping
 lock; allocation/page-table locks remain shared. Firmware DMA-ranges, IOMMU and
 cacheable/direct mapping policy are outside the current implementation. Review
-new activation paths for provider wrapping before the first queue allocation,
+new activation paths for provider binding before the first queue allocation,
 accurate device declarations, and stop-before-release teardown ordering.

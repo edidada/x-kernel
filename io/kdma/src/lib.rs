@@ -10,10 +10,10 @@
 //! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
 //! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
 //! [`map_dma_buffer`] / [`unmap_dma_buffer`] stage ordinary buffers
-//! through a device-owned coherent bounce pool for temporary transactions.
+//! through a shared coherent bounce pool for temporary transactions.
 //! Every operation receives a [`DmaDeviceContext`] selected by device probe.
-//! [`DmaWindow`] translates complete physical intervals; [`p2b`] / [`b2p`]
-//! retain the legacy platform conversion. See
+//! Device masks are checked against complete bus intervals; [`p2b`] / [`b2p`]
+//! describe the platform conversion. See
 //! `docs/design.md` for the full boundary contracts.
 //!
 //! # Example
@@ -54,7 +54,7 @@ mod dma;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
-pub use device::{DmaConstraints, DmaDeviceContext, DmaWindow};
+pub use device::DmaDeviceContext;
 pub use dma::DmaPageTableIf;
 use memaddr::PhysAddr;
 
@@ -62,7 +62,7 @@ use memaddr::PhysAddr;
 ///
 /// It assumes that there is a linear mapping with the offset
 /// [`kbuild_config::PHYS_BUS_OFFSET`]. This legacy helper describes the platform
-/// default bus relation; device mappings use [`DmaWindow::translate`]. We have
+/// bus relation used by every device context. We have
 /// `baddr = paddr + PHYS_BUS_OFFSET`.
 #[inline]
 pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
@@ -87,7 +87,8 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 ///
 /// Returns an [`DmaInfo`] structure containing details about the allocated
 /// memory, including CPU and device addresses. The complete page-rounded extent
-/// is allocated in `device`'s translation window and coherent address mask.
+/// must fit `device`'s coherent mask. Unreachable allocations are released and
+/// return an error; the allocator does not search for low-address alternatives.
 ///
 /// # Errors
 ///
@@ -106,8 +107,8 @@ pub unsafe fn allocate_dma_memory(
     device: &DmaDeviceContext,
     layout: Layout,
 ) -> AllocResult<DmaInfo> {
-    // SAFETY: forwards the caller's DMA allocation preconditions to this device's DMA allocator.
-    unsafe { device.lock().allocate_dma_memory(layout) }
+    // SAFETY: forwards the caller's DMA allocation preconditions to the shared DMA backend.
+    unsafe { dma::lock_allocator().allocate_dma_memory(device, layout) }
 }
 
 /// Frees coherent memory previously allocated.
@@ -125,9 +126,9 @@ pub unsafe fn allocate_dma_memory(
 /// `device` and `layout` must exactly match that allocation. Release exactly
 /// once after stopping all hardware access and retiring CPU aliases.
 #[track_caller]
-pub unsafe fn deallocate_dma_memory(device: &DmaDeviceContext, dma: DmaInfo, layout: Layout) {
-    // SAFETY: forwards the caller's matching deallocation contract to this device's DMA allocator.
-    unsafe { device.lock().deallocate_dma_memory(dma, layout) }
+pub unsafe fn deallocate_dma_memory(_device: &DmaDeviceContext, dma: DmaInfo, layout: Layout) {
+    // SAFETY: forwards the caller's matching deallocation contract to the shared DMA backend.
+    unsafe { dma::lock_allocator().deallocate_dma_memory(dma, layout) }
 }
 
 /// Direction for a temporary DMA mapping of an existing buffer.
@@ -150,8 +151,8 @@ pub enum DmaDirection {
 ///
 /// # Errors
 ///
-/// Returns `AllocError::InvalidInput` for zero length, unmet device address,
-/// segment, boundary or alignment constraints, or an already-active address, and
+/// Returns `AllocError::InvalidInput` for zero length, an unmet device address
+/// mask or an already-active address, and
 /// `AllocError::NoMemory` when the bounce pool cannot satisfy the
 /// request.
 ///
@@ -169,7 +170,7 @@ pub unsafe fn map_dma_buffer(
     direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
-    unsafe { device.lock().map_dma_buffer(buffer, direction) }
+    unsafe { dma::lock_allocator().map_dma_buffer(device, buffer, direction) }
 }
 
 /// Unmaps a previously mapped DMA buffer and synchronizes data back if needed.
@@ -191,13 +192,13 @@ pub unsafe fn map_dma_buffer(
 /// matching [`map_dma_buffer`] call — see the crate-level
 /// [example](crate#example) for the full map → device → unmap sequence.
 pub unsafe fn unmap_dma_buffer(
-    device: &DmaDeviceContext,
+    _device: &DmaDeviceContext,
     dma_addr: DmaBusAddress,
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) {
     // SAFETY: forwards the caller's matching mapping contract to the DMA mapper.
-    unsafe { device.lock().unmap_dma_buffer(dma_addr, buffer, direction) }
+    unsafe { dma::lock_allocator().unmap_dma_buffer(dma_addr, buffer, direction) }
 }
 
 /// Owner receiving access to an existing streaming mapping.
@@ -212,25 +213,21 @@ pub enum DmaSyncTarget {
 ///
 /// # Errors
 /// Returns `AllocError::InvalidInput` when the mapping arguments do not match
-/// an active record in this context, before accessing buffer memory.
+/// an active record in the shared backend, before accessing buffer memory.
 ///
 /// # Safety
 /// The original buffer must remain initialized, live and exclusively owned.
 /// Stop the previous owner's accesses before calling, and restrict subsequent
 /// accesses to the selected owner until the next handoff or unmap.
 pub unsafe fn sync_dma_buffer(
-    device: &DmaDeviceContext,
+    _device: &DmaDeviceContext,
     dma_addr: DmaBusAddress,
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
     target: DmaSyncTarget,
 ) -> AllocResult<()> {
     // SAFETY: the caller establishes the original mapping and ownership handoff contract.
-    unsafe {
-        device
-            .lock()
-            .sync_dma_buffer(dma_addr, buffer, direction, target)
-    }
+    unsafe { dma::lock_allocator().sync_dma_buffer(dma_addr, buffer, direction, target) }
 }
 
 /// A bus memory address.
@@ -276,6 +273,3 @@ pub struct DmaInfo {
     /// controller uses this address to directly access memory.
     pub bus_addr: DmaBusAddress,
 }
-
-#[cfg(unittest)]
-mod tests;

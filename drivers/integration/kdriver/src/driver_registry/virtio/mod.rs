@@ -197,7 +197,7 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         .map(|(_, info)| info)
         .ok_or(DriverError::BadState)?;
 
-    let (ty, transport, irq) =
+    let (ty, mut transport, irq) =
         virtio::probe_pci_device::<glue::VirtIoHalImpl, pci::MmioCam<'static>>(
             root,
             bdf,
@@ -211,12 +211,12 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         return Err(DriverError::Unsupported);
     }
 
+    transport.set_dma_provider(virtio::dma_provider(
+        device.dma().map_err(crate::resource::map_res_err)?,
+    ));
+
     #[cfg(feature = "virtio-input")]
     if device_kind == DeviceKind::Input {
-        let transport = virtio::DmaTransport::new(
-            transport,
-            device.dma().map_err(crate::resource::map_res_err)?,
-        );
         return input::activate_pci(device, transport, irq, config, bdf);
     }
 
@@ -234,12 +234,16 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
     let irq = device.first_irq().map(|resource| resource.number);
     // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
     // physical MMIO region, and `size` matches the region size.
-    let (ty, transport) =
+    let (ty, mut transport) =
         unsafe { virtio::probe_mmio_device(regs.as_ptr(), size) }.ok_or(DriverError::BadState)?;
 
     if ty != device_kind {
         return Err(DriverError::Unsupported);
     }
+
+    transport.set_dma_provider(virtio::dma_provider(
+        device.dma().map_err(crate::resource::map_res_err)?,
+    ));
 
     dispatch_virtio_try_new(device, device_kind, transport, irq)
 }
@@ -251,10 +255,6 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
     transport: T,
     irq: Option<usize>,
 ) -> DriverResult<()> {
-    let transport = virtio::DmaTransport::new(
-        transport,
-        parent.dma().map_err(crate::resource::map_res_err)?,
-    );
     match kind {
         #[cfg(feature = "virtio-net")]
         DeviceKind::Net => {

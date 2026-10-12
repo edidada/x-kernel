@@ -10,11 +10,12 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
 use khal::{mem::v2p, paging::MappingFlags};
+use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 
 use crate::{
-    DmaBusAddress, DmaConstraints, DmaDirection, DmaInfo, DmaWindow,
+    DmaBusAddress, DmaDeviceContext, DmaDirection, DmaInfo,
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
 };
 
@@ -32,9 +33,22 @@ pub trait DmaPageTableIf {
     fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> kerrno::KResult;
 }
 
+static_lock! {
+    static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
+}
+
+pub(crate) fn lock_allocator() -> kspin::SpinNoIrqGuard<'static, DmaAllocator> {
+    loop {
+        if let Some(guard) = ALLOCATOR.try_lock() {
+            return guard;
+        }
+        // The owner can be waiting for this IRQ-off CPU to acknowledge a page-attribute change.
+        DmaPageTableIf::poll_pending_tlb();
+        core::hint::spin_loop();
+    }
+}
+
 pub(crate) struct DmaAllocator {
-    constraints: DmaConstraints,
-    window: DmaWindow,
     bounce_pool: Option<BouncePool>,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
@@ -58,10 +72,8 @@ struct CoherentAllocation {
 }
 
 impl DmaAllocator {
-    pub(crate) const fn new(constraints: DmaConstraints, window: DmaWindow) -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
-            constraints,
-            window,
             bounce_pool: None,
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
@@ -82,11 +94,18 @@ impl DmaAllocator {
     /// offset the returned CPU address, and only hand the bus address to a
     /// device that is allowed to DMA that range.
     #[track_caller]
-    pub(crate) unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
-        let dma = self.alloc_coherent_pages(layout, self.constraints.coherent_mask)?;
-        let checked = self
-            .constraints
-            .check_range(dma.bus_addr.as_u64(), layout.size(), false)
+    pub(crate) unsafe fn allocate_dma_memory(
+        &mut self,
+        device: &DmaDeviceContext,
+        layout: Layout,
+    ) -> AllocResult<DmaInfo> {
+        let dma = self.alloc_coherent_pages(layout)?;
+        let checked = device
+            .check_range(
+                dma.bus_addr.as_u64(),
+                layout_pages(&layout) * PAGE_SIZE_4K,
+                false,
+            )
             .and_then(|()| {
                 if dma.bus_addr.as_u64().is_multiple_of(layout.align() as u64) {
                     Ok(())
@@ -95,7 +114,7 @@ impl DmaAllocator {
                 }
             });
         if let Err(error) = checked {
-            // SAFETY: this allocation has not been exposed to a device and retains its original layout.
+            // SAFETY: this allocation retains its original layout and has never been exposed to hardware.
             unsafe { self.deallocate_dma_memory(dma, layout) };
             return Err(error);
         }
@@ -103,19 +122,14 @@ impl DmaAllocator {
     }
 
     #[track_caller]
-    fn alloc_coherent_pages(&mut self, layout: Layout, mask: u64) -> AllocResult<DmaInfo> {
+    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         if layout.size() == 0 {
             return Err(AllocError::InvalidInput);
         }
         let num_pages = layout_pages(&layout);
-        let (phys_start, phys_end) = self.window.physical_range(mask)?;
-        let vaddr_raw = global_allocator().alloc_dma_pages_in_range(
+        let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
-            PAGE_SIZE_4K
-                .max(layout.align())
-                .max(self.constraints.min_addr_align_bytes),
-            phys_start,
-            phys_end,
+            PAGE_SIZE_4K.max(layout.align()),
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
@@ -123,16 +137,18 @@ impl DmaAllocator {
             | MappingFlags::WRITE
             | MappingFlags::UNCACHED
             | MappingFlags::SHARED;
-        let bus_addr = match self
-            .window
-            .translate(v2p(vaddr).as_usize() as u64, num_pages * PAGE_SIZE_4K)
-        {
-            Ok(addr) => addr,
-            Err(error) => {
-                global_allocator().dealloc_dma_pages(vaddr_raw, num_pages, UsageKind::Dma);
-                return Err(error);
-            }
+        let bus_addr = (v2p(vaddr).as_usize() as u64)
+            .checked_add(kbuild_config::PHYS_BUS_OFFSET as u64)
+            .filter(|start| {
+                start
+                    .checked_add((num_pages * PAGE_SIZE_4K - 1) as u64)
+                    .is_some()
+            });
+        let Some(bus_addr) = bus_addr else {
+            global_allocator().dealloc_dma_pages(vaddr_raw, num_pages, UsageKind::Dma);
+            return Err(AllocError::InvalidInput);
         };
+        let bus_addr = DmaBusAddress::new(bus_addr);
         // A failed update can leave uncertain cache/share attributes. Quarantine
         // these pages rather than return them to the general allocator.
         self.update_flags(vaddr, num_pages, flags)?;
@@ -210,18 +226,23 @@ impl DmaAllocator {
     /// access the returned bus address after unmapping.
     pub(crate) unsafe fn map_dma_buffer(
         &mut self,
+        device: &DmaDeviceContext,
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
     ) -> AllocResult<DmaInfo> {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
-        if len == 0 || len > self.constraints.max_segment_len_bytes {
+        if len == 0 {
             return Err(AllocError::InvalidInput);
         }
 
         fence(Ordering::SeqCst);
-        let (dma_info, layout, allocation_cpu_addr) = self.alloc_bounce_buffer(len)?;
+        let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
+        if let Err(error) = device.check_range(dma_info.bus_addr.as_u64(), len, true) {
+            self.recycle_bounce_buffer(dma_info.cpu_addr.as_ptr() as usize, layout);
+            return Err(error);
+        }
 
         {
             // Preserve untouched bytes on cancellation and short device writes.
@@ -242,13 +263,12 @@ impl DmaAllocator {
             .contains_key(&dma_info.bus_addr.as_u64())
         {
             error!("DMA mapping is already active: {:?}", dma_info.bus_addr);
-            self.recycle_bounce_buffer(allocation_cpu_addr, layout);
+            self.recycle_bounce_buffer(dma_info.cpu_addr.as_ptr() as usize, layout);
             return Err(AllocError::InvalidInput);
         }
         self.active_mappings.insert(
             dma_info.bus_addr.as_u64(),
             BounceMapping {
-                allocation_cpu_addr,
                 cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
                 len,
                 layout,
@@ -312,7 +332,7 @@ impl DmaAllocator {
             fence(Ordering::SeqCst);
         }
 
-        self.recycle_bounce_buffer(mapping.allocation_cpu_addr, mapping.layout);
+        self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
     /// Synchronize an active bounce mapping without releasing its allocation.
@@ -362,10 +382,8 @@ impl DmaAllocator {
         Ok(())
     }
 
-    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout, usize)> {
-        let constraints = self.constraints;
-        let pool = self.bounce_pool_mut()?;
-        pool.allocate(len, constraints)
+    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
+        self.bounce_pool_mut()?.allocate(len)
     }
 
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
@@ -383,10 +401,7 @@ impl DmaAllocator {
 
     fn bounce_pool_mut(&mut self) -> AllocResult<&mut BouncePool> {
         if self.bounce_pool.is_none() {
-            let dma = self.alloc_coherent_pages(
-                layout_for_pages(DMA_BOUNCE_POOL_PAGES),
-                self.constraints.streaming_mask,
-            )?;
+            let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
             self.bounce_pool = Some(BouncePool::new(dma, bounce_pool_size()));
         }
         #[expect(
@@ -395,18 +410,6 @@ impl DmaAllocator {
                       pool or returns the allocation error before reaching this expression"
         )]
         Ok(self.bounce_pool.as_mut().unwrap())
-    }
-
-    pub(crate) fn release_bounce_pool(&mut self) {
-        if !self.active_mappings.is_empty() {
-            error!("DMA context dropped with active mappings; retaining backing pages");
-            return;
-        }
-        // Retire TLSF bookkeeping before returning its backing pages to the allocator.
-        if let Some(backing) = self.bounce_pool.take().map(|pool| pool.backing()) {
-            // SAFETY: the pool has no active mappings and owns this original allocation.
-            unsafe { self.deallocate_dma_memory(backing, layout_for_pages(DMA_BOUNCE_POOL_PAGES)) };
-        }
     }
 
     #[cfg(feature = "dma-trace")]
@@ -540,3 +543,7 @@ fn layout_for_pages(num_pages: usize) -> Layout {
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }
+
+#[cfg(unittest)]
+#[path = "tests.rs"]
+mod tests;

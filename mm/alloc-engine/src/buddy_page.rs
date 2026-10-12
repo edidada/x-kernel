@@ -18,17 +18,6 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
             inner: BuddyAllocator::new(),
         }
     }
-
-    /// Allocate a buddy block wholly within a half-open allocator address interval.
-    pub fn allocate_pages_in_range(
-        &mut self,
-        count: usize,
-        align: usize,
-        start: usize,
-        end: usize,
-    ) -> AllocResult<usize> {
-        self.inner.allocate_pages_in_range(count, align, start, end)
-    }
 }
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {

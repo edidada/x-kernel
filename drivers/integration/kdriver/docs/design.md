@@ -709,10 +709,11 @@ The `hwrng` feature compiles this provider for injection into concrete drivers.
 
 VirtIO MMIO and PCI activation bind a distinct
 `XKernelDmaProvider::platform_default` when the device has no provider yet, then
-wrap the transport in `DmaTransport` before runtime driver construction. The
-PCI input fast path uses the same wrapper. A provider supplied beforehand by
-probe/glue is preserved. Current platform defaults describe DMA32, uncached
-shared memory and one PHYS_BUS_OFFSET window; automatic firmware DMA-range and
+bind the adapted `dma_provider` directly to the MMIO or PCI transport before
+runtime driver construction. The PCI input fast path uses the same binding.
+A provider supplied beforehand by probe/glue is preserved. Current platform
+defaults describe unrestricted addressing, uncached shared memory and the
+PHYS_BUS_OFFSET translation; automatic firmware DMA-range and
 PCI-width negotiation are outside this change.
 
 `resource::devm_alloc_coherent` obtains `device.dma`, allocates an Arc-retaining

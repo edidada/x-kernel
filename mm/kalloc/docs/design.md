@@ -256,10 +256,8 @@ free 到 per-CPU cache 的对象。
 区间是否低于 4 GiB。区间不满足限制时立即归还并返回 `NoMemory`。该接口只负责内存
 位置；页属性切换、平台 share/unshare 和设备生命周期由 `kdma` 等上层完成。
 
-`alloc_dma_pages_in_range()` 接收物理半开区间，将其裁剪到内核 linear map 后转成
-页 allocator 使用的虚拟区间，直接搜索区间内的 buddy 空闲块。该路径绕过 PCP，
-按照设备地址窗口分配并记录 `UsageKind`，释放沿用原页分配接口。旧
-`alloc_dma_pages()` 保留分配后的 DMA32 检查行为。
+当前 page allocator 没有独立 DMA32 zone，因此它采用“先分配、后检查”，不能保证在
+存在低端空闲页时一定找到它们。
 
 ### `GlobalPage`
 

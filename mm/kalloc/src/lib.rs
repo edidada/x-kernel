@@ -647,45 +647,6 @@ impl GlobalAllocator {
         Ok(addr)
     }
 
-    /// Allocate contiguous pages inside a half-open physical address interval.
-    ///
-    /// The DMA owner translates device reachability into this interval. The
-    /// interval is intersected with the kernel's linear physical-memory mapping.
-    ///
-    /// # Errors
-    /// Returns `InvalidInput` for invalid bounds, count or alignment, and
-    /// `NoMemory` if no free block fits the mapped interval.
-    pub fn alloc_dma_pages_in_range(
-        &self,
-        num_pages: usize,
-        align_pow2: usize,
-        phys_start: usize,
-        phys_end: usize,
-        kind: UsageKind,
-    ) -> AllocResult<usize> {
-        if phys_start >= phys_end {
-            return Err(AllocError::InvalidInput);
-        }
-        let phys_end = phys_end.min(kaddr_layout::LINEAR_MAP_VSIZE);
-        if phys_start >= phys_end {
-            return Err(AllocError::NoMemory);
-        }
-        let start = phys_start
-            .checked_add(kaddr_layout::PAGE_OFFSET)
-            .ok_or(AllocError::InvalidInput)?;
-        let end = phys_end
-            .checked_add(kaddr_layout::PAGE_OFFSET)
-            .ok_or(AllocError::InvalidInput)?;
-        let addr = self
-            .palloc
-            .lock()
-            .allocate_pages_in_range(num_pages, align_pow2, start, end)?;
-        if !matches!(kind, UsageKind::RustHeap) {
-            self.record_usage_alloc(kind, pages_to_bytes(num_pages));
-        }
-        Ok(addr)
-    }
-
     /// Allocates contiguous pages starting from the given address.
     ///
     /// It allocates `num_pages` pages from the page allocator starting from the
