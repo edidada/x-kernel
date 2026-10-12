@@ -15,14 +15,16 @@
 extern crate alloc;
 
 mod dma;
+pub use dma::XKernelDmaProvider;
 mod irq;
 mod mmio;
 mod time;
 
 /// X-Kernel implementation of the OS-agnostic resource provider traits.
 ///
-/// The type is intentionally stateless. The driver framework owns the
-/// long-lived instance and passes it explicitly to `device_res`.
+/// MMIO, IRQ and time operations are stateless. DMA operations use a retained
+/// platform compatibility context. New device integrations bind a distinct
+/// [`XKernelDmaProvider`] and pass that capability through `device_res`.
 #[derive(Debug, Default)]
 pub struct XKernelResourceProvider;
 

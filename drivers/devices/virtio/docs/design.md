@@ -584,8 +584,8 @@ Empty reads do no I/O; wait failures leave submitted DMA storage owned by the
 driver. Short reads retain their unused cached suffix.
 
 Completion includes HAL unshare in hard IRQ context. The backend must be
-IRQ-safe and non-sleeping. X-Kernel's backend takes the global kdma allocator
-lock during unmap; one-request reclamation does not imply bounded IRQ latency.
+IRQ-safe and non-sleeping. X-Kernel's backend takes the bound device context
+lock during unmap; one-request reclamation has no fixed IRQ latency bound.
 This change preserves inline reclaim and does not introduce a softirq path.
 
 Device removal/rebinding is unsupported. Dropping a Pending request retains
@@ -593,3 +593,19 @@ its queue and buffer rather than freeing live DMA storage; normal idle/readable
 requests are released. Tests emulate ring completion and IRQ delivery to check
 reclaim-before-wake, short reads, spurious interrupts, malformed completions,
 wait failures, and retention of outstanding storage without real-device timing.
+
+## Device-bound DMA transport
+
+With `alloc`, `dma.rs::DmaTransport<T>` wraps a transport and retains the device's
+`Arc<dyn device_res::DmaOp>`. It forwards protocol/MMIO operations and supplies
+an OS-neutral `virtio_drivers::DmaProvider`. `DeviceDma` translates direction,
+zeroes coherent pages and pairs allocation/map release on that provider.
+Concrete drivers remain independent of host crates.
+
+The vendored kvirtiodrivers extension retains the transport provider in queue
+backends and coherent Dma objects, including GPU framebuffer/cursor allocations.
+Buffer and indirect descriptor mapping errors propagate as DmaError before
+publication, with earlier mappings rolled back and queue capacity preserved.
+Every successful unshare uses the backend selected at queue construction.
+Transports without a bound provider retain the static Hal fallback. Host probe
+binds DMA policy independently from the static MMIO Hal implementation.

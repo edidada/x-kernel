@@ -68,6 +68,13 @@ impl DeviceDriver for VirtioDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        if device.dma().is_err() {
+            device
+                .bind_dma(Arc::new(
+                    device_res_xkernel::XKernelDmaProvider::platform_default(),
+                ))
+                .map_err(crate::resource::map_res_err)?;
+        }
         activate_virtio_device(device, self.kind, self.device_type)
     }
 
@@ -206,6 +213,10 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
 
     #[cfg(feature = "virtio-input")]
     if device_kind == DeviceKind::Input {
+        let transport = virtio::DmaTransport::new(
+            transport,
+            device.dma().map_err(crate::resource::map_res_err)?,
+        );
         return input::activate_pci(device, transport, irq, config, bdf);
     }
 
@@ -240,6 +251,10 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
     transport: T,
     irq: Option<usize>,
 ) -> DriverResult<()> {
+    let transport = virtio::DmaTransport::new(
+        transport,
+        parent.dma().map_err(crate::resource::map_res_err)?,
+    );
     match kind {
         #[cfg(feature = "virtio-net")]
         DeviceKind::Net => {

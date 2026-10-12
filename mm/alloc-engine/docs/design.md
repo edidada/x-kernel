@@ -67,3 +67,18 @@ live page contents, recovery of maximal coalesced blocks, inline and reserved
 bitmaps, overlapping registration, non-power-of-two region edges, alignment,
 fixed-address splitting and reset. Timing and scaling measurements belong in
 external benchmarks, not timing assertions in unit tests.
+
+## Bounded buddy allocation
+
+`allocate_pages_in_range` takes a half-open interval in the registered address
+space. It checks count, power-of-two alignment and arithmetic, rounds count to
+a buddy order, and scans free chunks from that order upward. For each chunk it
+aligns max(chunk start, interval start) and requires the entire rounded block to
+fit both the chunk and interval end. The selected node is removed and split
+through existing bitmap/list primitives. Unselected chunks are never allocated.
+The page adapter exposes this method to host physical-window allocation.
+
+The search is linear in inspected free nodes, unlike indexed coalescing. It is
+used for constrained DMA requests and changes neither ordinary allocation nor
+free complexity. Tests retain an outside live allocation, allocate an exact
+window, reject an undersized end, free the range and verify recovered capacity.

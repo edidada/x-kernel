@@ -415,3 +415,45 @@ fn multiple_regions_and_reinit_conserve_capacity() {
         );
     }
 }
+
+#[test]
+fn constrained_allocation_searches_inside_free_blocks() {
+    let backing = BackingStorage::new(64);
+    let mut allocator = BuddyAllocator::<PAGE>::new();
+    allocator
+        .add_region(backing.base(), backing.size())
+        .unwrap();
+    let original = allocator.free_pages();
+    let outside = allocator
+        .allocate_pages_at(backing.base(), 1, PAGE)
+        .unwrap();
+    // SAFETY: outside is a live exclusive page retained while the bounded search runs.
+    unsafe { (outside as *mut u8).write_bytes(0xa5, PAGE) };
+    let start = backing.base() + 17 * PAGE;
+    let end = backing.base() + 32 * PAGE;
+    let address = allocator
+        .allocate_pages_in_range(3, PAGE, start, end)
+        .unwrap();
+    assert!(address >= start && address + 4 * PAGE <= end);
+    assert_eq!(address % (4 * PAGE), 0);
+    allocator.deallocate_pages(address, 3);
+    assert_eq!(allocator.free_pages(), original - 1);
+    assert!(
+        allocator
+            .allocate_pages_in_range(4, PAGE, start, start + 3 * PAGE)
+            .is_err()
+    );
+    assert_eq!(allocator.free_pages(), original - 1);
+    assert!(
+        allocator
+            .allocate_pages_in_range(usize::MAX, PAGE, start, end)
+            .is_err()
+    );
+    // SAFETY: the outside page remains live and exclusively owned by this fixture.
+    let contents = unsafe { std::slice::from_raw_parts(outside as *const u8, PAGE) };
+    assert!(contents.iter().all(|&byte| byte == 0xa5));
+    allocator.deallocate_pages(outside, 1);
+    assert_eq!(allocator.free_pages(), original);
+    assert_eq!(allocator.allocate_pages(64, PAGE).unwrap(), backing.base());
+    allocator.deallocate_pages(backing.base(), 64);
+}

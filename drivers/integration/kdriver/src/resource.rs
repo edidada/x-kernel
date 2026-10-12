@@ -112,8 +112,11 @@ pub(crate) fn devm_alloc_coherent(
     device: &DeviceObject,
     spec: DmaSpec,
 ) -> DriverResult<(NonNull<u8>, u64)> {
-    device_res::devm_alloc_coherent_with_provider(resource_provider(), device, spec)
-        .map_err(map_res_err)
+    let dma = device_res::DmaCoherent::alloc_owned(device.dma().map_err(map_res_err)?, spec)
+        .map_err(map_res_err)?;
+    let result = (dma.cpu_ptr(), dma.bus_addr());
+    device.add_cleanup(move || drop(dma));
+    Ok(result)
 }
 
 /// Driver-facing device-managed resource methods.

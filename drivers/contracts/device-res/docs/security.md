@@ -31,7 +31,7 @@ Driver code (trusted)
 │  device-res                                                  │
 │                                                              │
 │  ┌── unsafe boundaries ───────────────────────────────────┐ │
-│  │ unsafe impl Send for MmioMapping, DmaAllocation        │ │
+│  │ unsafe DmaOp host contract and paired release         │ │
 │  │ Io::access_ptr → ptr.add(offset)                       │ │
 │  │ Io read*/write* → ptr.read_volatile / write_volatile   │ │
 │  └─────────────────────────────────────────────────────────┘ │
@@ -90,18 +90,14 @@ release returns to the provider that created the handle.
 never shared across threads. A `MmioMapping` is created when the `Io` is
 constructed and consumed in `Io::drop`; ownership is singular.
 
-### 2. `unsafe impl Send for DmaAllocation` (`src/lib.rs`)
-
-```rust
-unsafe impl Send for DmaAllocation {}
-```
-
-**Invariant**: `DmaAllocation` carries the coherent buffer's address
-values; ownership is exclusive to the `DmaCoherent` handle, and release
-returns to the provider that created the handle.
-
-**Why sound**: same argument — `DmaCoherent` is not `Sync`; when the
-handle moves between threads, buffer ownership moves with it.
+`DmaOp` is an unsafe Send + Sync provider trait. Implementations guarantee
+non-null live exclusive allocations aligned to the requested spec and valid
+device mappings. Free, map, unmap and sync have explicit unsafe contracts;
+mapping retains initialized source bytes and release waits for hardware access
+to stop. `DmaCoherent::drop` calls unsafe free only with its original allocation
+and retained provider. The driver retires hardware and aliases before dropping
+the handle. Metadata such as `DmaAllocation` and `DmaMapping` is copyable and
+does not itself release storage or prove uniqueness.
 
 ### 3. `Io::access_ptr` raw-pointer offset (`src/lib.rs`)
 
@@ -164,8 +160,8 @@ The following must hold at all times:
 
 6. **Provider lifetime**: the provider passed by the caller stays valid
    longer than every RAII handle and devres cleanup callback it created.
-   The API requires `&'static dyn ...` providers, encoding the constraint
-   in the type.
+   Static providers carry a static reference. Owned DMA providers are retained
+   by Arc through the allocation's release, independently of device binding.
 
 7. **MSI message origin**: `MsiResource::message` is produced by the host
    IRQ core or its backend provider. Drivers must not build messages from
@@ -277,3 +273,14 @@ When modifying `device-res`, verify:
   cleanup callback (no empty callbacks on failure).
 - [ ] New provider trait methods document their execution-context
   constraints.
+
+## Streaming handoff and retained providers
+
+Map, unmap and sync require the same provider, unchanged CPU pointer, bus address,
+length and direction. The unsafe caller stops the previous owner's accesses
+before each handoff. Bounce providers copy received bytes for CPU access and
+outgoing bytes for device access; generic no-op defaults apply only when a direct
+coherent provider needs no maintenance. Arc retention prevents provider state
+from disappearing before coherent free; it provides no hardware drain or reset.
+Test coverage checks explicit provider dispatch and resource cleanup; host/queue
+regressions cover context isolation, cancellation and failed mapping rollback.

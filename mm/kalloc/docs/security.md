@@ -59,7 +59,7 @@ boot memory map / kernel callers / C components / DMA users
 |------|------|----------|----------|
 | 启动内存 | `kruntime` 从 firmware/boot memory 描述中筛选的 free region，经 `p2v` 传入 | 底层 buddy 拒绝未页对齐、过小、超出 region 数上限或与既有 region 重叠的输入；首个 region 建立 page/byte allocator | 无法验证地址是否真实映射、可写、属于 free RAM 或与 allocator 外部 owner 冲突；端点算术仍依赖可信范围 |
 | Rust 内核 caller | `Layout`、raw allocation pointer、页数、alignment、固定地址、`UsageKind` | allocation 返回 `Result`；部分大小计算和汇总 usage subtraction 使用 checked arithmetic | safe 外观的部分 deallocation API 仍依赖 caller contract，错误参数可能导致 UB |
-| DMA / 设备 | 连续页数量、alignment、虚实地址转换结果 | allocation 后检查整个物理区间低于 4 GiB，不满足则归还 | 没有 DMA32 zone；错误 `v2p`、区间溢出或设备越权仍可导致错误 DMA |
+| DMA / 设备 | 连续页数量、alignment、虚实地址转换结果 | 新接口在指定物理区间搜索，旧接口保留 DMA32 事后检查 | 页位置由本层验证，设备总线转换和访问授权由上层管理 |
 | Tracking/观测 | enable/disable、generation range、visitor | feature-gated、全局锁和递归 guard | backtrace/地址可能泄露内核布局；visitor 重入 tracking API 可能死锁或 panic |
 
 本 crate 不直接解析用户地址，不直接访问 MMIO/PIO，也不直接处理文件系统、网络或 IPC
@@ -261,7 +261,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
    nonblocking/reclaim flags；slow path 可能持中央锁、批量循环并扩展 heap。
 5. **无 NUMA、memory cgroup 或 pressure-aware 水位**：所有中央内存共用一个 page buddy
    和一个 byte allocator。
-6. **DMA32 采用 allocation 后检查**：没有低端 zone 或定向搜索，可能出现可用低端页
+6. **旧 DMA32 接口采用 allocation 后检查**：旧接口保留原分配策略，存在可用低端页
    尚存但请求仍失败的情况。
 7. **deallocation provenance 不做 production 验证**：错误 pointer、layout、页数、
    `UsageKind` 或 double free 主要依赖 caller contract；部分公开 safe 方法的约束无法由
@@ -301,3 +301,18 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - [ ] tracking visitor 是否在持锁期间调用，是否存在递归 state lock 或敏感地址泄露？
 - [ ] 新增统计是否明确计量单位和层次，且没有被用作 allocator correctness/reclaim 条件？
 - [ ] 新增 cache 或 allocator 状态是否同步更新初始化、CPU hotplug、reclaim 和关机策略？
+
+## Bounded physical DMA allocation
+
+`src/lib.rs::alloc_dma_pages_in_range` validates a nonempty physical interval,
+clips its end to LINEAR_MAP_VSIZE and uses checked PAGE_OFFSET arithmetic.
+The locked buddy allocator searches only free chunks whose rounded allocation
+fits that interval. Invalid intervals return InvalidInput; an interval outside
+the linear map or lacking a fitting free block returns NoMemory. Accounting is
+updated only after success. Translation and bus-mask checks belong to kdma.
+
+The legacy `alloc_dma_pages` still checks DMA32 after allocation. The new bounded
+path avoids consuming unrelated high pages while searching reachable memory;
+free-list scanning remains a lock-latency cost, and pages held in PCP/byte caches
+are outside this search. Regression coverage checks exact interval endpoints,
+outside live allocations and successful coalescing after bounded free.

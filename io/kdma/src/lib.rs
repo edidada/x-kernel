@@ -10,29 +10,31 @@
 //! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
 //! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
 //! [`map_dma_buffer`] / [`unmap_dma_buffer`] stage ordinary buffers
-//! through a coherent bounce pool for temporary transactions; [`p2b`] /
-//! [`b2p`] convert between physical and bus addresses. See
+//! through a device-owned coherent bounce pool for temporary transactions.
+//! Every operation receives a [`DmaDeviceContext`] selected by device probe.
+//! [`DmaWindow`] translates complete physical intervals; [`p2b`] / [`b2p`]
+//! retain the legacy platform conversion. See
 //! `docs/design.md` for the full boundary contracts.
 //!
 //! # Example
 //!
-//! Map a driver-owned buffer for a device read (DeviceToDriver), then
+//! Map an initialized driver-owned receive buffer for device writes, then
 //! unmap it once the device is done. Kernel code only; this crate cannot
 //! compile in a host doctest environment, so the example is `ignore`.
 //!
 //! ```ignore
 //! use core::ptr::NonNull;
-//! use kdma::{map_dma_buffer, unmap_dma_buffer, DmaDirection};
+//! use kdma::{map_dma_buffer, unmap_dma_buffer, DmaDirection, DmaDeviceContext};
 //!
-//! # fn stage(buffer: NonNull<[u8]>) -> Result<(), alloc_engine::AllocError> {
+//! # fn stage(device: &DmaDeviceContext, buffer: NonNull<[u8]>) -> Result<(), alloc_engine::AllocError> {
 //! // 1. Stage the driver-owned buffer through the coherent bounce pool.
-//! let dma = unsafe { map_dma_buffer(buffer, DmaDirection::DeviceToDriver) }?;
+//! let dma = unsafe { map_dma_buffer(device, buffer, DmaDirection::DeviceToDriver) }?;
 //!
 //! // 2. Program the device with dma.bus_addr and wait for completion.
 //! // device.submit(dma.bus_addr, buffer.len());
 //!
 //! // 3. Unmap exactly once with the same address and buffer.
-//! unsafe { unmap_dma_buffer(dma.bus_addr, buffer, DmaDirection::DeviceToDriver) };
+//! unsafe { unmap_dma_buffer(device, dma.bus_addr, buffer, DmaDirection::DeviceToDriver) };
 //! # Ok(())
 //! # }
 //! ```
@@ -46,21 +48,21 @@
 extern crate alloc;
 
 mod bounce_pool;
+mod device;
 mod dma;
 
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
+pub use device::{DmaConstraints, DmaDeviceContext, DmaWindow};
 pub use dma::DmaPageTableIf;
 use memaddr::PhysAddr;
-
-use self::dma::ALLOCATOR;
 
 /// Converts a physical address to a bus address.
 ///
 /// It assumes that there is a linear mapping with the offset
-/// [`kbuild_config::PHYS_BUS_OFFSET`], that maps all the physical memory
-/// to the virtual space at the address plus the offset. So we have
+/// [`kbuild_config::PHYS_BUS_OFFSET`]. This legacy helper describes the platform
+/// default bus relation; device mappings use [`DmaWindow::translate`]. We have
 /// `baddr = paddr + PHYS_BUS_OFFSET`.
 #[inline]
 pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
@@ -84,23 +86,28 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 ///   requirements of the requested memory.
 ///
 /// Returns an [`DmaInfo`] structure containing details about the allocated
-/// memory, such as the starting address and size. If it's not possible to
-/// allocate memory meeting the criteria, returns [`None`].
+/// memory, including CPU and device addresses. The complete page-rounded extent
+/// is allocated in `device`'s translation window and coherent address mask.
 ///
 /// # Errors
 ///
-/// Returns `AllocError::NoMemory` when pages cannot be allocated, the
+/// Returns `AllocError::InvalidInput` for a zero-sized layout or an unmet device
+/// address/alignment constraint. Returns `AllocError::NoMemory` when pages cannot be allocated, the
 /// mapping-attribute update fails, or the platform `prepare` hook fails.
 ///
 /// # Safety
 ///
 /// The caller must free the returned allocation exactly once with
-/// [`deallocate_dma_memory`] using the same `layout`, and must only expose the
-/// returned bus address to devices that are allowed to DMA that buffer.
+/// [`deallocate_dma_memory`] using the same `device` and `layout`, and keep the
+/// context alive until release. Only the represented device may use the returned
+/// bus address, and all DMA and CPU accesses must stop before release.
 #[track_caller]
-pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
-    // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
+pub unsafe fn allocate_dma_memory(
+    device: &DmaDeviceContext,
+    layout: Layout,
+) -> AllocResult<DmaInfo> {
+    // SAFETY: forwards the caller's DMA allocation preconditions to this device's DMA allocator.
+    unsafe { device.lock().allocate_dma_memory(layout) }
 }
 
 /// Frees coherent memory previously allocated.
@@ -109,17 +116,18 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 /// marked as coherent. It ensures proper deallocation and management of resources
 /// associated with the memory block.
 ///
-/// - `dma_info`: An instance of [`DmaInfo`] containing the details of the memory
-///   block to be freed, such as its starting address and size.
+/// `dma` carries the original CPU and bus addresses, and `layout` carries the
+/// original requested size and alignment.
 ///
 /// # Safety
 ///
 /// `dma` must come from a prior successful [`allocate_dma_memory`] call, and
-/// `layout` must exactly match that allocation.
+/// `device` and `layout` must exactly match that allocation. Release exactly
+/// once after stopping all hardware access and retiring CPU aliases.
 #[track_caller]
-pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
-    // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
+pub unsafe fn deallocate_dma_memory(device: &DmaDeviceContext, dma: DmaInfo, layout: Layout) {
+    // SAFETY: forwards the caller's matching deallocation contract to this device's DMA allocator.
+    unsafe { device.lock().deallocate_dma_memory(dma, layout) }
 }
 
 /// Direction for a temporary DMA mapping of an existing buffer.
@@ -142,22 +150,26 @@ pub enum DmaDirection {
 ///
 /// # Errors
 ///
-/// Returns `AllocError::InvalidInput` for a zero-length buffer or a bus
-/// address that is already actively mapped, and
+/// Returns `AllocError::InvalidInput` for zero length, unmet device address,
+/// segment, boundary or alignment constraints, or an already-active address, and
 /// `AllocError::NoMemory` when the bounce pool cannot satisfy the
 /// request.
 ///
 /// # Safety
 ///
-/// `buffer` must remain live and exclusively owned until it is later passed to
-/// [`unmap_dma_buffer`]. The caller must not let the device keep using the
-/// returned bus address after unmapping.
+/// `buffer` must contain initialized bytes and remain live and exclusively owned
+/// until [`unmap_dma_buffer`] on the same `device` with the same direction.
+/// CPU access while mapped requires an ownership handoff with [`sync_dma_buffer`].
+/// Keep the context alive, expose the address only to its represented device,
+/// and stop hardware access before unmapping. Receive mappings preserve original
+/// bytes for cancellation and partial writes by copying them into the bounce buffer.
 pub unsafe fn map_dma_buffer(
+    device: &DmaDeviceContext,
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
-    unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
+    unsafe { device.lock().map_dma_buffer(buffer, direction) }
 }
 
 /// Unmaps a previously mapped DMA buffer and synchronizes data back if needed.
@@ -165,12 +177,12 @@ pub unsafe fn map_dma_buffer(
 /// # Safety
 ///
 /// `dma_addr` must be the still-active bus address previously returned by
-/// [`map_dma_buffer`] for the same `buffer`, and unmapping must happen exactly
-/// once for that mapping.
+/// [`map_dma_buffer`] on the same `device`, for the same `buffer` and direction.
+/// Stop hardware accesses, retire CPU aliases, and unmap exactly once.
 /// # Panics
 ///
 /// Panics when `dma_addr` is not an active mapping or when `buffer`'s
-/// length does not match the length recorded at [`map_dma_buffer`] time;
+/// pointer, length or direction differs from the recorded mapping;
 /// both are caller contract violations, not runtime conditions.
 ///
 /// # Example
@@ -179,15 +191,45 @@ pub unsafe fn map_dma_buffer(
 /// matching [`map_dma_buffer`] call — see the crate-level
 /// [example](crate#example) for the full map → device → unmap sequence.
 pub unsafe fn unmap_dma_buffer(
+    device: &DmaDeviceContext,
     dma_addr: DmaBusAddress,
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) {
     // SAFETY: forwards the caller's matching mapping contract to the DMA mapper.
+    unsafe { device.lock().unmap_dma_buffer(dma_addr, buffer, direction) }
+}
+
+/// Owner receiving access to an existing streaming mapping.
+pub enum DmaSyncTarget {
+    /// CPU may access the original buffer after device completion.
+    Cpu,
+    /// Device may access the DMA buffer after CPU access stops.
+    Device,
+}
+
+/// Synchronize a mapping for an ownership handoff while retaining it.
+///
+/// # Errors
+/// Returns `AllocError::InvalidInput` when the mapping arguments do not match
+/// an active record in this context, before accessing buffer memory.
+///
+/// # Safety
+/// The original buffer must remain initialized, live and exclusively owned.
+/// Stop the previous owner's accesses before calling, and restrict subsequent
+/// accesses to the selected owner until the next handoff or unmap.
+pub unsafe fn sync_dma_buffer(
+    device: &DmaDeviceContext,
+    dma_addr: DmaBusAddress,
+    buffer: NonNull<[u8]>,
+    direction: DmaDirection,
+    target: DmaSyncTarget,
+) -> AllocResult<()> {
+    // SAFETY: the caller establishes the original mapping and ownership handoff contract.
     unsafe {
-        ALLOCATOR
+        device
             .lock()
-            .unmap_dma_buffer(dma_addr, buffer, direction)
+            .sync_dma_buffer(dma_addr, buffer, direction, target)
     }
 }
 
@@ -234,3 +276,6 @@ pub struct DmaInfo {
     /// controller uses this address to directly access memory.
     pub bus_addr: DmaBusAddress,
 }
+
+#[cfg(unittest)]
+mod tests;

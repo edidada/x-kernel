@@ -48,11 +48,14 @@ unsafe impl IxgbeHal for IxgbeHalImpl {
 
     unsafe fn dma_dealloc(paddr: IxgbePhysAddr, vaddr: NonNull<u8>, size: usize) -> i32 {
         let spec = DmaSpec::new(size, 8);
-        crate::resource::resource_provider().free_coherent(DmaAllocation {
-            cpu_addr: vaddr.as_ptr() as usize,
-            bus_addr: paddr as u64,
-            spec,
-        });
+        // SAFETY: the driver returns the original allocation after stopping device access.
+        unsafe {
+            crate::resource::resource_provider().free_coherent(DmaAllocation {
+                cpu_addr: vaddr.as_ptr() as usize,
+                bus_addr: paddr as u64,
+                spec,
+            })
+        };
         0
     }
 

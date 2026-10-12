@@ -517,3 +517,19 @@ lock is simple but slow; nesting deadlocks easily.
   by `remove_device_managed` (devres LIFO).
 - `DeviceRegistry` does not implement `Drop` — it is a global static.
 - `DeviceTopology` is a plain data snapshot; dropping it frees the `Vec`s.
+
+## Bound DMA capability
+
+`DeviceObjectState` stores an optional `Arc<dyn device_res::DmaOp>` beside the
+existing locked identity state. Probe calls `bind_dma` before DMA acquisition;
+a second binding returns Busy. `dma` clones the capability or returns Unsupported.
+The core stores an OS-neutral capability; mask negotiation and platform address
+translation remain host/probe policy.
+
+`run_cleanups` runs detached devres callbacks in LIFO order while the device's
+DMA capability is still available, then takes and drops that reference outside
+the state lock. A later probe can bind another provider. Outstanding resource
+handles retain their own references and release through their original provider.
+Provider ownership must not point strongly back to the device, which would form
+an Arc cycle. The regression fixture checks binding, cleanup order, independent
+retention and binding after cleanup.

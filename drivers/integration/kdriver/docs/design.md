@@ -207,7 +207,7 @@ are unchanged. Request-local waiting remains separately owned in block_completio
 
 ### DMA And Execution Context
 
-Ordinary block completion follows `complete_* -> pop_used -> Hal::unshare ->
+Ordinary block completion follows `complete_* -> pop_used -> retained DmaProvider::unshare ->
 device_res::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
 removes its mapping, copies reads back and returns bounce storage to the TLSF
 pool. Pool creation is on map, not unmap; pool recycling and indirect descriptor
@@ -704,3 +704,20 @@ buffer. The current entropy integration uses one worker per selected VirtIO RNG 
 issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
+
+## Device DMA policy during VirtIO probe
+
+VirtIO MMIO and PCI activation bind a distinct
+`XKernelDmaProvider::platform_default` when the device has no provider yet, then
+wrap the transport in `DmaTransport` before runtime driver construction. The
+PCI input fast path uses the same wrapper. A provider supplied beforehand by
+probe/glue is preserved. Current platform defaults describe DMA32, uncached
+shared memory and one PHYS_BUS_OFFSET window; automatic firmware DMA-range and
+PCI-width negotiation are outside this change.
+
+`resource::devm_alloc_coherent` obtains `device.dma`, allocates an Arc-retaining
+DmaCoherent and registers its cleanup. Other resource methods retain the existing
+platform MMIO/IRQ/time provider. The static VirtIoHal continues to provide MMIO
+and legacy DMA fallback, and legacy ixgbe/other integration remains on the
+compatibility DMA provider. Bound queues carry the device provider through
+completion and destruction, including indirect tables and GPU allocations.

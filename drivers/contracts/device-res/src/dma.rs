@@ -6,6 +6,7 @@
 //! capability trait, the [`DmaCoherent`] RAII handle, and the typed containers
 //! [`CoherentBox`] / [`CoherentArray`].
 
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use crate::{ResError, ResResult};
@@ -79,16 +80,24 @@ pub struct DmaMapping {
 /// DMA capability: coherent allocation, streaming mapping, and cache
 /// maintenance for non-coherent hosts.
 ///
-/// A host kernel implements this and passes it to its driver framework. The
-/// streaming / cache methods have default no-op / `Unsupported`
-/// implementations so a host only overrides what its DMA model needs (e.g. a
-/// bounce-buffer host leaves cache sync empty).
-pub trait DmaOp: Sync {
+/// A host kernel implements this and passes it to its driver framework.
+/// Streaming mapping defaults to `Unsupported`. A provider supporting mappings
+/// must implement matching release and ownership synchronization operations.
+/// Bounce providers copy data at handoffs; direct coherent providers can use
+/// the default synchronization operations when no maintenance is required.
+/// # Safety
+/// Implementations must return non-null, live, exclusive coherent allocations
+/// aligned to the requested spec, and valid mappings for their device. Release and synchronization must use the same
+/// device domain and preserve the declared direction and allocation extent.
+pub unsafe trait DmaOp: Send + Sync {
     /// Allocate a coherent DMA buffer.
     fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation>;
 
     /// Free a coherent DMA buffer previously returned by [`Self::alloc_coherent`].
-    fn free_coherent(&self, alloc: DmaAllocation);
+    /// # Safety
+    /// Allocation must be the unchanged result from this provider, freed exactly
+    /// once. Hardware access must have stopped and all CPU aliases must be retired.
+    unsafe fn free_coherent(&self, alloc: DmaAllocation);
 
     /// Map an existing caller-owned buffer for streaming DMA.
     ///
@@ -96,7 +105,9 @@ pub trait DmaOp: Sync {
     /// layer; the mapping is temporary and reversed by [`Self::unmap_streaming`].
     /// Hosts without explicit streaming support may implement this via bounce
     /// buffering. Default: [`Unsupported`](ResError::Unsupported).
-    fn map_streaming(
+    /// # Safety
+    /// Buffer must be initialized, live and exclusively owned until matching unmap.
+    unsafe fn map_streaming(
         &self,
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
@@ -107,19 +118,26 @@ pub trait DmaOp: Sync {
 
     /// Release a streaming mapping previously established by
     /// [`Self::map_streaming`]. Default: no-op.
-    fn unmap_streaming(&self, mapping: DmaMapping) {
+    /// # Safety
+    /// Mapping must be the unchanged active result from this provider, released
+    /// exactly once, with hardware accesses stopped.
+    unsafe fn unmap_streaming(&self, mapping: DmaMapping) {
         let _ = mapping;
     }
 
     /// Synchronise a streaming mapping before the device reads it (CPU →
-    /// device). Default: no-op (coherent / bounce hosts need no maintenance).
-    fn sync_for_device(&self, mapping: DmaMapping) {
+    /// device). Default: no-op for direct coherent hosts.
+    /// # Safety
+    /// Mapping must be active on this provider; CPU accesses must stop before handoff.
+    unsafe fn sync_for_device(&self, mapping: DmaMapping) {
         let _ = mapping;
     }
 
     /// Synchronise a streaming mapping before the CPU reads it (device → CPU).
-    /// Default: no-op (coherent / bounce hosts need no maintenance).
-    fn sync_for_cpu(&self, mapping: DmaMapping) {
+    /// Default: no-op for direct coherent hosts.
+    /// # Safety
+    /// Mapping must be active on this provider and device access must have stopped.
+    unsafe fn sync_for_cpu(&self, mapping: DmaMapping) {
         let _ = mapping;
     }
 
@@ -138,20 +156,46 @@ pub trait DmaOp: Sync {
     }
 }
 
-/// RAII handle to a coherent DMA buffer.
+enum DmaProviderRef {
+    Static(&'static dyn DmaOp),
+    Owned(Arc<dyn DmaOp>),
+}
+
+impl DmaProviderRef {
+    fn get(&self) -> &dyn DmaOp {
+        match self {
+            Self::Static(provider) => *provider,
+            Self::Owned(provider) => provider.as_ref(),
+        }
+    }
+}
+
+/// Owned coherent allocation retaining its original DMA provider through cleanup.
 ///
-/// Dropping the handle frees the buffer through the provider that created it.
+/// Retire hardware access and CPU aliases before dropping the handle.
 pub struct DmaCoherent {
-    provider: Option<&'static dyn DmaOp>,
+    provider: Option<DmaProviderRef>,
     allocation: Option<DmaAllocation>,
 }
 
 impl DmaCoherent {
+    /// Allocate through a device-bound provider retained until the allocation is freed.
+    ///
+    /// # Errors
+    /// Propagates allocation or resource errors reported by the provider.
+    pub fn alloc_owned(provider: Arc<dyn DmaOp>, spec: DmaSpec) -> ResResult<Self> {
+        let allocation = provider.alloc_coherent(spec)?;
+        Ok(Self {
+            provider: Some(DmaProviderRef::Owned(provider)),
+            allocation: Some(allocation),
+        })
+    }
+
     /// Allocate a coherent DMA buffer with an explicit provider.
     pub fn alloc_with(provider: &'static dyn DmaOp, spec: DmaSpec) -> ResResult<Self> {
         let allocation = provider.alloc_coherent(spec)?;
         Ok(Self {
-            provider: Some(provider),
+            provider: Some(DmaProviderRef::Static(provider)),
             allocation: Some(allocation),
         })
     }
@@ -226,7 +270,8 @@ impl DmaCoherent {
 impl Drop for DmaCoherent {
     fn drop(&mut self) {
         if let (Some(allocation), Some(provider)) = (self.allocation.take(), self.provider.take()) {
-            provider.free_coherent(allocation);
+            // SAFETY: this handle owns the original allocation; callers retire hardware and CPU aliases before Drop.
+            unsafe { provider.get().free_coherent(allocation) };
         }
     }
 }

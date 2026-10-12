@@ -5,8 +5,9 @@
 This analysis covers the entire crate: `src/lib.rs`
 (`XKernelResourceProvider`), `src/mmio.rs`, `src/dma.rs`, `src/irq.rs`,
 and `src/time.rs` — the five provider-trait adapters. No modules are
-excluded; the crate adds no state of its own and forwards to `memspace`
-/ `kirq` / `kdma`, whose own security documents cover those subsystems.
+excluded; device DMA providers own kdma contexts while MMIO, IRQ and time
+forward to their host subsystems. Their security documents cover implementation
+invariants below the adapter boundary.
 
 
 ## Trust Model
@@ -34,7 +35,7 @@ device-res-xkernel
   before devres cleanup runs.
 
 The crate exposes no driver-facing `devm_*` helpers and never installs a
-global provider itself; resource acquisition must go through the
+global provider-selection policy; resource acquisition goes through the
 `device_res` provider contract. `kdriver::resource` holds the static
 `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` and to internal adaptation paths
@@ -78,9 +79,10 @@ Invariants:
 
 ## Concurrency And Lifecycle
 
-- The provider itself has no mutable shared state; `kdriver::resource`
-  holds the static provider reference and passes it explicitly at
-  acquisition time.
+- `XKernelDmaProvider` owns a device-specific IRQ-locked context; retained Arc
+  references bind every allocation/mapping to its original provider.
+- The zero-sized compatibility provider forwards DMA to a static platform
+  context, while `kdriver::resource` obtains bound DMA through `DeviceObject`.
 - IRQ action-list synchronization is protected by `kirq`.
 - `TimeOp::monotonic_time()` keeps no crate state and forwards to the
   X-Kernel time source.
@@ -95,3 +97,20 @@ Invariants:
   `ResError::Unsupported`.
 - MSI-X is implemented on the x86_64 backend only; other architectures
   return `ResError::Unsupported`.
+
+## Device DMA trust and cleanup
+
+The unsafe `DmaOp` implementation guarantees non-null live allocations and valid
+whole device intervals. Mapping requires initialized caller storage retained
+exclusively until exact unmap. Sync verifies the original mapping in this
+provider's context before copying; unmap checks original pointer, length and
+direction. Free, map, sync and unmap carry unsafe caller contracts. The coherent
+RAII handle owns allocation release, while copyable allocation metadata alone
+carries no ownership proof. Driver teardown must stop DMA before dropping pages.
+
+Constraints and translation supplied by probe remain trusted platform inputs.
+Current defaults describe DMA32 and one platform-offset window. Software device
+namespaces provide no hardware isolation. Hook or page-attribute failure retains
+uncertain backing pages in kdma; failed queue preparation cancels mappings before
+publication. All receive bytes must be initialized because map copies them even
+when a descriptor will be written by hardware.

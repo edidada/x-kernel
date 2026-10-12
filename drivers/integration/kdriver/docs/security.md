@@ -172,143 +172,34 @@ borrow into the protected state. Preparation is now an injected function, not
 a factory object; task binding, notification lifetime and allocation policy
 remain unchanged.
 
-### 1. device-res-xkernel — DMA Allocation
+### Device-bound DMA allocation, streaming and release
 
-Location: `drivers/adapters/xkernel/device-res/src/dma.rs`
+The host adapter at `drivers/adapters/xkernel/device-res/src/dma.rs` implements
+the unsafe DmaOp contract on `XKernelDmaProvider`, owning one kdma context.
+It validates layouts and passes `&self.context` to allocation, mapping, sync
+and release. Complete bus intervals satisfy device masks and translation;
+streaming records retain original pointer, direction and length.
 
-```rust
-let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
-```
+`resource::devm_alloc_coherent` obtains the bound capability, owns a DmaCoherent
+in devres, and retains the provider through exact release. DmaAllocation metadata
+is Copy; ownership rests with the handle, and unsafe free requires unchanged
+original metadata plus stopped hardware/CPU aliases. Hook failure quarantines
+pages in kdma instead of recycling uncertain attributes.
 
-Invariants:
+VirtIO probe binds the provider before constructing DmaTransport. The concrete
+adapter `drivers/devices/virtio/src/dma.rs` zeroes coherent pages and forwards all
+queue and GPU DMA operations to the retained provider. Queue preparation is
+transactional, so failed buffer/indirect-table mapping rolls back prior mappings
+before publication. CPU receive storage is initialized before map; this preserves
+bytes during cancellation and partial writes. Queue completion uses the original
+provider even if device-core binding is later cleaned up.
 
-- `layout` is constructed through `Layout::from_size_align(spec.len, spec.align)`,
-  which validates the allocation layout.
-- The returned `DmaAllocation` is owned exclusively by devres and released through
-  `free_coherent` when the `DeviceObject` is removed.
-- `cpu_addr` and `bus_addr` describe the same physical memory.
-
-Safety rationale:
-
-- `alloc_coherent` validates the size/alignment through `Layout` before calling
-  `allocate_dma_memory`.
-- `DmaAllocation` has no public destruction path; release is routed through
-  `free_coherent` in the devres callback.
-- The safety contract of `kdma::allocate_dma_memory` requires a valid layout and
-  exclusive caller ownership of the returned buffer.
-
-Callers:
-
-- Driver probe paths through `devm_alloc_coherent`.
-
-### 2. device-res-xkernel — DMA Release
-
-Location: `drivers/adapters/xkernel/device-res/src/dma.rs`
-
-```rust
-unsafe { kdma::deallocate_dma_memory(info, layout) };
-```
-
-Invariants:
-
-- `info` and `layout` match the original `alloc_coherent` call.
-- Each `DmaAllocation` is released once, through devres LIFO cleanup and exclusive ownership.
-- Device DMA has stopped before release, as guaranteed by the driver's remove callback.
-
-Safety rationale:
-
-- `free_coherent` reconstructs the layout using the same `Layout::from_size_align`
-  arguments as `alloc_coherent`.
-- `DmaAllocation` does not implement `Clone`; devres holds the sole ownership.
-
-Callers:
-
-- The `free_coherent` method of the `device-res-xkernel` provider, triggered by
-  `device_res::DmaAllocation` destruction or devres release.
-
-### 3. VirtIoHalImpl — Unsafe Trait Implementation
-
-Location: `src/driver_registry/virtio/glue.rs:139`
-
-```rust
-unsafe impl VirtIoHal for VirtIoHalImpl { ... }
-```
-
-Overall invariants:
-
-- `dma_alloc` and `dma_dealloc` use matching `(paddr, vaddr, pages)` tuples.
-- `mmio_phys_to_virt` is called only for physical addresses aligned to `PAGE_SIZE_4K`.
-- `share` and `unshare` are paired with matching directions.
-- `dma_alloc` zeroes newly allocated memory through `write_bytes(0)` so the device
-  cannot read residual kernel data.
-
-Individual operations:
-
-#### 3a. `dma_alloc`
-
-Location: `src/driver_registry/virtio/glue.rs:148,150`
-
-- Constructs `Layout::from_size_align(pages * PAGE_SIZE_4K, PAGE_SIZE_4K)` before
-  calling `allocate_dma_memory`.
-- Zeroes the allocation through `write_bytes(0)`:
-  `unsafe { core::ptr::write_bytes(dma_info.cpu_addr.as_ptr(), 0, size) }`.
-- Returns `(0, NonNull::dangling())` on failure; the VirtIO transport detects and
-  reports the error.
-
-#### 3b. `dma_dealloc`
-
-Location: `src/driver_registry/virtio/glue.rs:165,178`
-
-- Uses the same `Layout` as allocation: `pages * PAGE_SIZE_4K` bytes aligned to `PAGE_SIZE_4K`.
-- Reconstructs `DmaInfo` from `paddr` and `vaddr` before calling `deallocate_dma_memory`.
-
-#### 3c. `mmio_phys_to_virt`
-
-Location: `src/driver_registry/virtio/glue.rs:183`
-
-```rust
-unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
-    iomap_mmio(paddr as usize, size, "virtio-mmio-hal")
-        .expect("failed to iomap virtio MMIO region")
-}
-```
-
-- `iomap_mmio` calls `memspace::iomap_device` through the standard MMIO validation path.
-- Mapping failure panics. This path runs only after the VirtIO transport has confirmed
-  that the device exists, so failure indicates a platform configuration error.
-
-#### 3d. `share`
-
-Location: `src/driver_registry/virtio/glue.rs:190,195`
-
-```rust
-unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, ...) -> PhysAddr {
-    unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
-        .expect(...)
-        .bus_addr.as_u64() as PhysAddr
-}
-```
-
-- `buffer` is a valid buffer supplied to the VirtIO transport by `dma_alloc` or an upper layer.
-- `direction` is correctly translated into `kdma::DmaDirection`.
-
-#### 3e. `unshare`
-
-Location: `src/driver_registry/virtio/glue.rs:203,209`
-
-```rust
-unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection, ...) {
-    unsafe { kdma::unmap_dma_buffer(DmaBusAddress::new(paddr), buffer, dma_direction(direction)) };
-}
-```
-
-- `paddr` and `buffer` come from the same `share` operation.
-- The `virtio` transport guarantees paired calls.
-
-Callers:
-
-- The `virtio` transport layer: `VirtIoNetDev`, `VirtIoBlkDev`, `VirtIoGpuDev`,
-  `VirtIoInputDev`, `VirtIoSocketDev`, and `VirtIo9pDev`.
+`src/driver_registry/virtio/glue.rs::VirtIoHalImpl` retains static MMIO translation
+and a compatibility DMA backend for transports without injection. Legacy ixgbe
+uses that platform backend too. Default VirtIO contexts still describe platform
+DMA32; actual mask and translation declarations remain host/probe responsibility.
+Provider Arc lifetime does not drain hardware DMA. Driver removal stops device
+activity and retires queue/storage users before devres release.
 
 ### 4. VirtIO MMIO Discovery During Platform Enumeration
 
@@ -478,7 +369,7 @@ Callers:
 1. **MMIO virtual address lifetime:** The `NonNull<u8>` returned by `devm_iomap` is valid
    only while the `DeviceObject` is alive. Probe failure or device removal releases
    the mapping through `iounmap`.
-2. **Exclusive DMA buffer ownership:** The `DmaAllocation` returned by
+2. **Exclusive DMA buffer ownership:** The `DmaCoherent` handle created by
    `devm_alloc_coherent` is owned exclusively by devres and has no public clone/copy interface.
 3. **Paired DMA allocation/free:** `alloc_coherent` and `free_coherent` reconstruct
    `Layout` from the same `DmaSpec`, preserving size and alignment.
@@ -509,7 +400,8 @@ Callers:
 | `BusManager` | `Vec<(BusId, Box<dyn BusBackend>)>` satisfies `Send` | Shared access is protected by `SpinNoPreempt`. |
 | `EnumerationContext` | `Vec<DeviceDesc>` satisfies `Send` | Does not implement `Sync`; used by one thread. |
 | `DriverRegistrar` | Zero-sized type | Accesses shared state only through the global `kdevice` lock. |
-| `device-res-xkernel::XKernelResourceProvider` | Zero-sized type | The provider has no internally mutable state; `kirq` protects IRQ action state. |
+| `device-res-xkernel::XKernelResourceProvider` | Zero-sized type | MMIO/IRQ/time forward to host subsystems; compatibility DMA uses a locked static context. |
+| `device-res-xkernel::XKernelDmaProvider` | Owned context supports cross-thread release | Per-device SpinNoIrq protects mappings and bounce allocation; the provider is retained by Arc. |
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` satisfies `Send` and `Sync` | `SpinNoPreempt` provides interior mutability. |
 | `PlatformBackend` | The `LocalIdAlloc` field is `Copy` and satisfies `Send` | Does not implement `Sync`; access is serialized by the `BusManager` lock. |
 | `PciBackend` | `Cam` satisfies `Send` | Does not implement `Sync`. |
@@ -522,7 +414,7 @@ Callers:
 | T-01 | Invalid firmware physical addresses cause MMIO mappings to overwrite critical kernel data | High | DT/ACPI describes malicious addresses that `memspace::iomap_device` does not reject | `iomap_device` checks platform MMIO window membership and returns `InvalidRange` for invalid ranges. |
 | T-02 | A PCI BAR remains zero after allocation, causing a page-zero mapping | High | The BAR allocator is exhausted or its range is uninitialized, and configuration fails to reject zero addresses | `configure_pci_device_if_needed` returns `NoMemory` on allocation failure; enumeration pass 3 skips BARs with `address == 0`. |
 | T-03 | IRQ registration races with interrupt arrival, invoking an unready handler | High | The interrupt reaches the virtual IRQ before its action is installed | `kirq` installs the action in its IRQ descriptor before enabling the line according to policy; the threaded default-primary entry enforces generic `ONESHOT`. |
-| T-04 | DMA double-free corrupts memory | High | `free_coherent` is called more than once or the layout does not match | `DmaAllocation` does not implement `Clone`; devres has exclusive ownership, and allocation/free reconstruct `Layout` from the same `DmaSpec`. |
+| T-04 | DMA double-free corrupts memory | High | `free_coherent` is called more than once or the layout does not match | `DmaCoherent` owns the single release and retains the original provider; copied allocation metadata can be freed only under the unsafe matching-allocation contract. |
 | T-05 | A VirtIO device accesses unauthorized kernel memory through malicious DMA descriptors | High | A malicious or faulty VirtIO device constructs an invalid descriptor chain | Individual VirtIO devices currently lack IOMMU isolation; `dma_alloc` zeroing prevents information disclosure, and `kdma` manages `share`/`unshare`. |
 | T-06 | Firmware spoofs a device compatible string and binds the wrong driver | Medium | A false DT compatible string matches a registered `FirmwareMatchSpec` | An unresponsive device fails probe and enters the unclaimed list. |
 | T-07 | A PCI device spoofs its vendor:device ID and matches the wrong VirtIO type | Medium | A malicious PCI device advertises the Red Hat vendor ID and a known VirtIO device ID | `probe_pci_device` validates the transport response again during activation and returns `Unsupported` on mismatch. |
@@ -659,3 +551,14 @@ spurious wakes only trigger another check. The driver must call IRQ-safe
 `notify` after releasing its request lock, and its predicate must not sleep.
 The provider retains neither the predicate nor DMA storage. Invalid context and
 registration failures do not establish a device fault.
+
+## DMA capability retention and limits
+
+Device cleanup drains devres before dropping its DMA capability; each owned
+coherent handle and queue backend independently retains the original provider.
+Binding and resource registration rely on serialized probe/remove execution.
+Each bound context introduces a lazy 4 MiB pool and its own IRQ-disabling mapping
+lock; allocation/page-table locks remain shared. Firmware DMA-ranges, IOMMU and
+cacheable/direct mapping policy are outside the current implementation. Review
+new activation paths for provider wrapping before the first queue allocation,
+accurate device declarations, and stop-before-release teardown ordering.

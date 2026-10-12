@@ -44,9 +44,9 @@ drivers/adapters/xkernel/device-res/src/
 └── time.rs  # TimeOp -> khal::time
 ```
 
-`XKernelResourceProvider` is the crate's only public type. It implements
-the provider traits required by `device_res`, but it does not own the
-driver framework's provider-selection policy. `kdriver::resource` holds a
+`XKernelResourceProvider` supplies platform MMIO, IRQ, time and compatibility
+DMA operations. `XKernelDmaProvider` owns a distinct device DMA context selected
+by host integration from constraints and an address window. `kdriver::resource` holds a
 static `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` inside the driver-facing
 `DeviceResourceExt` methods.
@@ -94,3 +94,19 @@ parallel API that bypasses the provider contract.
 - `kdriver` owns device discovery, matching, probe/remove, provider
   custody, and the `DriverResult` wrapper; it does not implement provider
   traits.
+
+## Device DMA providers
+
+`XKernelDmaProvider::new` validates immutable `DmaConstraints` and `DmaWindow`.
+Each provider owns its mapping namespace and lazy bounce pool. The platform
+constructor creates a distinct DMA32 namespace; current VirtIO probe binds that
+provider through `DeviceObject::bind_dma`. Coherent handles and transports retain
+`Arc<dyn DmaOp>` so release and synchronization reach the original context.
+
+The zero-sized `XKernelResourceProvider` delegates legacy DMA calls to a static
+platform compatibility context. The bound VirtIO path uses the per-device
+provider for queue pages, GPU pages, buffers and indirect descriptors. Address
+zero is a valid successful provider result; fallibility is represented by Result.
+Streaming sync performs bounce copies through kdma instead of inherited no-ops.
+`InvalidInput` maps to `InvalidResource`; allocation/hook exhaustion maps to
+`NoMemory`. Cache policy remains uncached/shared for all devices.

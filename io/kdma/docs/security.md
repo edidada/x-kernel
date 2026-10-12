@@ -1,139 +1,88 @@
 # kdma — Security And Reliability
 
-## Scope
+## Trust model and external boundaries
 
-This analysis covers the entire crate: `src/lib.rs` (public unsafe API
-and address translation), `src/dma.rs` (`DmaAllocator`, mapping
-bookkeeping, `DmaPageTableIf`), and `src/bounce_pool.rs` (the TLSF-backed
-coherent pool). No modules are excluded; the private modules are reachable
-only through the four public unsafe entry points audited below.
+Trusted probe/glue supplies device masks, alignment, segment limits and physical
+to bus translation. Context validation proves representable intervals and
+requested address reachability, while correctness of those declarations depends
+on platform and driver capability knowledge. Returned addresses must be
+programmed only into the selected device. A per-device namespace provides
+software ownership separation; an unrestricted device can still DMA outside
+its granted interval in the absence of hardware isolation.
 
-## Trust Model
+Raw buffer pointers enter the unsafe map, sync and unmap APIs. Callers retain
+initialized, live, nonoverlapping storage and serialize CPU/device access.
+DMA memory carries network, filesystem or other I/O payload; this crate parses
+none of those protocols and never directly accesses userspace pointers or MMIO.
+Page-table and platform prepare/release providers are trusted host boundaries.
 
-The crate guards the kernel-device memory boundary: it decides which
-kernel memory becomes device-visible and for how long. Drivers are
-trusted kernel components, but the crate is designed so that driver
-mistakes (double map, mismatched unmap, wrong layout) surface as loud
-errors or panics instead of silent corruption. Devices are untrusted
-writers within the regions explicitly granted to them — and today, all
-temporary grants are confined to the bounce pool.
+## Unsafe inventory and invariants
 
-## External Boundaries
+| Path | File | Invariant and guard |
+| --- | --- | --- |
+| allocate/deallocate entry points | `src/lib.rs`, `src/dma.rs` | Original context, addresses and Layout identify one live allocation; free exactly once after hardware and CPU aliases retire |
+| map copy-in | `src/dma.rs` | Caller-provided initialized source covers len bytes; constrained bounce allocation is a separate live region |
+| sync and unmap copyback | `src/dma.rs` | Active record matches context, bus address, original CPU pointer, length and direction; previous owner has stopped |
+| padded bounce pointer | `src/bounce_pool.rs` | Padding is bounded by alignment minus one and fits the allocated padded Layout |
+| TLSF release | `src/bounce_pool.rs` | Allocation base belongs to this pool and uses its original padded Layout |
 
-- **Device-visible memory**: bus addresses returned by
-  `allocate_dma_memory` (coherent regions) and `map_dma_buffer`
-  (bounce copies). Devices are allowed to DMA exactly those ranges;
-  the `# Safety` contracts put enforcement on callers.
-- **The bounce pool**: a 1024-page coherent region sub-allocated by
-  TLSF. Driver buffers are never directly device-visible on the mapping
-  path, bounding the blast radius of a mis-programmed device to the
-  pool.
-- **Platform hooks** (`kplat::dma::prepare`/`release`): called with
-  page-granular ranges for share/unshare bookkeeping; a hook failure
-  fails the allocation (`AllocError::NoMemory`), never proceeds
-  silently.
+Page allocation validates the whole rounded extent inside the translated mask
+window. Requested coherent alignment applies to CPU and bus addresses.
+Streaming masks and segment limits apply to the whole requested interval.
+Exclusive IRQ-disabling locking protects each context's pool and mapping table.
+Fences order ownership copies; platform uncached/shared mappings supply the
+cache policy. Memory barriers alone do not authorize concurrent CPU/DMA access.
 
-### External Input Entries
+Coherent trace metadata is diagnostic and feature-gated. Production frees trust
+the unsafe caller's original context, pointer and layout. Streaming records are
+always tracked. DmaInfo and bus addresses are copyable values, not unique owners.
 
-All raw-pointer inputs enter through exactly four public unsafe functions
-in `src/lib.rs`; every parameter is kernel-caller supplied (there are no
-device callbacks, user pointers, or network/file inputs in this crate):
+## Threat analysis
 
-| Entry | Pointer-bearing parameters | Source | Checked properties and failure results |
-|---|---|---|---|
-| `allocate_dma_memory(layout)` | none (size/align only) | driver, at probe/init | page allocation, flag update, platform `prepare` must succeed → `AllocError::NoMemory` |
-| `deallocate_dma_memory(dma, layout)` | `DmaInfo.cpu_addr: NonNull<u8>` | returned by a prior `allocate_dma_memory` | exact-once, layout must match; mismatched frees detected and skipped under `dma-trace` |
-| `map_dma_buffer(buffer, direction)` | `buffer: NonNull<[u8]>` | driver-owned kernel buffer (TX/RX staging) | non-zero length; bus address not already active → `AllocError::InvalidInput`; pool capacity → `AllocError::NoMemory` |
-| `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
+| ID | Threat | Impact | Trigger | Implemented control and residual risk |
+| --- | --- | --- | --- | --- |
+| T-01 | Address truncation or translation outside a device window | High | Low DMA mask, nonzero bus offset, end crossing limit | Checked whole-interval translation, independent masks and bounded physical allocation; declarations must describe actual hardware |
+| T-02 | Wrong-device release or stale mapping arguments | High | Context/provider replaced before completion | Device-bound retained provider; streaming original pointer, length and direction checks; coherent matching requires unsafe contract |
+| T-03 | Copyback reads stale pool contents | High | Cancelled receive mapping or short device write | Copy initialized original bytes for every direction before publication, including receive buffers |
+| T-04 | Device overwrites unrelated memory | High | Malicious device exceeds programmed extent | Declared addresses are constrained in software; hardware DMA isolation remains absent |
+| T-05 | Freed pages retain uncertain cache/share attributes | High | Page-table or platform hook failure | Quarantine backing on failed transition; accepted memory loss until reboot |
+| T-06 | Original buffer disappears during DMA | High | Caller drops or accesses pending storage | Unsafe lifetime/ownership contract plus queue/provider retention; context Drop retains unresolved backing but cannot preserve caller-owned original storage |
 
-A production call site exercising `allocate_dma_memory` /
-`deallocate_dma_memory` is the device-res provider adapter
-`drivers/adapters/xkernel/device-res/src/dma.rs`
-(`alloc_coherent` / `free_coherent`), which drivers reach through the
-`DmaCoherent` contract.
+## Failure modes and handling
 
-Devices never pass pointers into this crate; they only read/write the
-ranges the drivers granted (see Threat T-02).
+| Failure | Local effect | Handling |
+| --- | --- | --- |
+| Invalid constraints/window/segment | Mapping cannot be published | InvalidInput before hardware handoff |
+| No suitable physical block or bounce capacity | I/O/probe fails | NoMemory; prepared queue mappings roll back |
+| Platform prepare or page protection fails | Allocation fails with uncertain page state | Log and quarantine pages |
+| Platform release or attribute restoration fails | Backing remains allocated | Log and retain pages; general allocator never reuses them |
+| Active mapping mismatch on unmap | Kernel contract violation | Assertion prevents wrong-buffer copy/recycle |
+| Context dropped with active mappings | Outstanding transaction loses software owner | Log and retain pool; caller must separately stop DMA and retain original buffers |
 
-## Unsafe Code
+## Privacy, limitations and audit
 
-Concentrated in four public unsafe functions plus internal forwardings,
-each with `# Safety` sections and `SAFETY:` comments:
+Coherent pages are uninitialized until the consumer initializes them. VirtIO
+zeroes coherent pages before publication; streaming copies the full initialized
+original range. Freed pages are not scrubbed. Each lazy pool reserves 4 MiB and
+large boundary padding can reduce useful capacity; reachable windows smaller
+than the pool cannot create streaming mappings. Bound searches scan free
+lists under the page allocator lock. Firmware DMA ranges, IOMMU, SG splitting,
+cacheable coherent policy and direct buffer mapping are outside the current
+implementation.
 
-- `allocate_dma_memory(layout)` — hands out coherent, device-reachable
-  memory. Caller obligations: deallocate exactly once with the same
-  layout, never forge or offset the CPU address, expose the bus address
-  only to devices permitted to DMA it.
-- `deallocate_dma_memory(dma, layout)` — matching release; the layout
-  must match the allocation.
-- `map_dma_buffer(buffer, direction)` — stages the buffer through the
-  bounce pool. Caller obligations: buffer stays live and exclusively
-  owned until `unmap_dma_buffer`, device access stops before unmap.
-- `unmap_dma_buffer(dma_addr, buffer, direction)` — exact-once, matching
-  address and length.
-- Internal blocks: `NonNull::new_unchecked` on freshly allocated (never
-  null) pages; `copy_nonoverlapping` between distinct live regions of
-  caller-declared length; TLSF pool deallocation with a containment
-  assert.
+Review each new consumer for accurate device capability selection, retained
+provider lifetime, initialization before map/exposure, stop-DMA-before-release,
+exact original unmap arguments and rollback before descriptor publication.
+Review platform failures for quarantine before general reuse, and avoid treating
+software mask checks as hardware protection against an untrusted device.
 
-## Protected Resources
+## TLB progress during lock contention
 
-- `active_mappings: BTreeMap<u64, BounceMapping>` — the single source of
-  truth for in-flight mappings; keyed by bus address, guarded by the
-  global `SpinNoIrq`.
-- The coherent region bookkeeping: `dma-trace` records every coherent
-  allocation with its call site and rejects duplicate records; mismatched
-  frees are detected and skipped rather than corrupting the allocator.
-- Page-table attributes: coherent pages are mapped
-  `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored
-  before the pages return to the general allocator, so cached-vs-coherent
-  aliasing cannot occur.
-
-## Invariants
-
-- A bus address is mapped at most once at a time; a duplicate
-  `map_dma_buffer` is rejected (`AllocError::InvalidInput`) and the
-  bounce buffer recycled.
-- `unmap_dma_buffer` asserts the length matches the recorded mapping;
-  unmapping an unknown address panics (contract violation, not a runtime
-  condition).
-- Coherent allocations are page-granular, so attribute updates and
-  platform prepare/release hooks always cover whole pages.
-- Copies are bracketed by `fence(SeqCst)` before device handoff and after
-  device ownership returns.
-
-## Threat Analysis
-
-| ID | Threat | Impact | Trigger | Existing control |
-|----|--------|--------|---------|------------------|
-| T-01 | Driver exposes a coherent bus address to a device that must not read it | Medium — kernel data disclosure to a device | Caller violates the `# Safety` contract | Contract documentation; allocation is the only path to device-reachable memory and is explicit. Residual risk accepted at the driver trust level. |
-| T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Grant sizes are page-exact and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
-| T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
-| T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted because the pages are returned to the DMA-only pool, not the general allocator. |
-
-## Failure Modes
-
-| ID | Failure mode | Local effect | System effect | Severity | Handling |
-|----|--------------|--------------|---------------|----------|----------|
-| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Checked allocation; pages returned on the failure path. |
-| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release logs and continues | Share/unshare accounting skew on TEE platforms | 3 | Allocation aborts; release cannot roll back and is logged. |
-| F-03 | Zero-length map request | `AllocError::InvalidInput` | Caller fixes the request | 4 | Explicit input validation. |
-| F-04 | Unmap of an inactive address | Panic | Kernel aborts the offending path | 2 | Contract violation — loud failure preferred over silent corruption. |
-
-## Known Limitations
-
-- No IOMMU: the crate cannot prevent a device from DMA-ing outside its
-  grant; isolation depends on hardware and descriptor correctness.
-- Temporary mappings always copy (bounce); large transfers pay the copy
-  cost by design.
-- The bounce pool is fixed at 1024 pages; concurrent mappings beyond its
-  capacity fail with `NoMemory` rather than growing.
-
-## Audit Checklist
-
-- Every new unsafe block cites the mapping table or containment assert it
-  relies on.
-- Attribute updates remain page-granular and paired with platform hooks.
-- The `active_mappings` map remains the only place bus addresses are
-  handed out for temporary mappings.
+DMA page attributes are updated with IRQs disabled and can wait for remote TLB
+acknowledgements. A CPU spinning for the same device allocator or the shared
+kernel page-table lock must still acknowledge that request. Context lock wait
+uses try_lock and DmaPageTableIf::poll_pending_tlb; the runtime provider applies
+the same policy while acquiring the kernel layout lock. The provider pins the
+CPU and excludes IRQ reentry while servicing only pending TLB invalidations.
+It executes no arbitrary IPI callback, device callback or scheduler operation.
+This avoids the DMA lock/shootdown wait cycle observed by x86_64 SMP tests.

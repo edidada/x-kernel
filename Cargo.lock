@@ -1189,6 +1189,7 @@ dependencies = [
 name = "device-res-xkernel"
 version = "0.3.0-dev"
 dependencies = [
+ "alloc-engine",
  "device-res",
  "kdma",
  "khal",
@@ -2236,6 +2237,7 @@ dependencies = [
  "kspin",
  "log",
  "memaddr",
+ "unittest",
 ]
 
 [[package]]
@@ -3211,8 +3213,6 @@ dependencies = [
 [[package]]
 name = "kvirtiodrivers"
 version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595ef5ddca8cc67ca73adf936e6374d2826a59d602559e948b5b5fb9e751eee1"
 dependencies = [
  "bitflags 2.13.2",
  "enumn",

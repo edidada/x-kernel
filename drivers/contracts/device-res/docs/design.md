@@ -119,8 +119,9 @@ drivers/contracts/device-res/
 `device-res` keeps no global provider state. The driver framework holds the
 provider instance supplied by the host kernel and calls
 `Io::map_with()`, `Irq::request_with()`, `DmaCoherent::alloc_with()`, or
-`devm_*_with_provider()`. RAII handles remember the provider that created
-them and return to that same provider for release on drop.
+`devm_*_with_provider()`. DMA additionally supports
+`DmaCoherent::alloc_owned(Arc<dyn DmaOp>, spec)`. RAII handles retain their static
+reference or owned Arc and return to the same provider for release on drop.
 
 ## Calling Constraints / Execution Context
 
@@ -274,3 +275,18 @@ allocation cookies. Those are internal state of the host IRQ core and its
 backends. In x-kernel this provider is implemented by
 `device-res-xkernel`, which forwards to `kirq::alloc_msix()`; `device-res`
 itself stays OS-neutral and does not depend on `kirq`.
+
+## Device-bound DMA ownership
+
+`DmaOp` is an unsafe host contract with Send + Sync provider implementations.
+It separates fallible coherent allocation and streaming mapping from unsafe
+release and ownership synchronization. Mapping borrows initialized raw storage;
+the caller retains it through completion. Bounce providers implement both sync
+handoffs by copying, while direct coherent providers can retain no-op sync.
+
+`DmaCoherent` privately stores either a static provider or owned Arc. Allocation
+metadata remains copyable for transport glue, while the handle owns the single
+release and retains the creating provider until afterward. Device-managed host
+helpers may capture this handle in cleanup callbacks. Provider lifetime keeps
+software state alive; the driver's hardware stop protocol controls DMA lifetime.
+This contract introduces no dependency on a host DMA context or platform crate.

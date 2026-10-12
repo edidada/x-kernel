@@ -13,6 +13,7 @@ documentation.workspace = true
 name = "device_res_xkernel"
 
 [dependencies]
+alloc-engine.workspace = true
 device_res = { workspace = true }
 kdma = { workspace = true }
 kirq = { workspace = true }

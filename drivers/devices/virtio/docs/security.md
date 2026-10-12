@@ -396,6 +396,24 @@ freeing or resubmitting storage whose DMA ownership is unresolved.
 The VMM controls bytes, completion length and timing. Length validation protects
 CPU copies but cannot establish entropy quality or force device progress.
 There is no completion timeout and no reset/hotplug protocol. With X-Kernel HAL,
-reclaim competes for the global kdma lock, also used by other DMA operations and
-page-table changes. Lock-wait latency in hard IRQ context is an accepted,
+reclaim uses the bound device context lock. Coherent allocations and page-table
+changes additionally share their host subsystem locks. Lock-wait latency in hard IRQ context is an accepted,
 unbounded-by-this-driver limitation, not a verified latency guarantee.
+
+## DMA provider and publication safety
+
+`dma.rs::DeviceDma` implements the unsafe VirtIO DmaProvider contract using the
+same retained device-res provider for all operations. Page counts are checked
+before allocation and coherent pages are zeroed before publication. Streaming
+sources are initialized and retained exclusively until completion or rollback.
+The queue freezes the original pointer, length and direction for matching unmap.
+
+The vendored queue extension maps every buffer and indirect table before making
+the chain available to hardware. Any preparation failure releases only mappings
+already created and leaves queue bookkeeping unchanged. Receive map copies
+initialized original bytes, preserving cancellation and unwritten bytes on
+partial completions. Arc retention carries provider lifetime through queue and
+GPU allocation destruction. Hardware DMA stop remains the consumer's cleanup
+obligation; masks and separate contexts provide software checks, while unrestricted
+hardware DMA still requires a platform isolation mechanism. Vendor tests exercise
+two providers, delayed owner destruction and failed preparation rollback.

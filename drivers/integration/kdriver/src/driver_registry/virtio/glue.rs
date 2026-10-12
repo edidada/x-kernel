@@ -177,11 +177,14 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         _access_platform: bool,
     ) -> i32 {
         let spec = DmaSpec::new(pages * PAGE_SIZE_4K, PAGE_SIZE_4K);
-        crate::resource::resource_provider().free_coherent(DmaAllocation {
-            cpu_addr: vaddr.as_ptr() as usize,
-            bus_addr: paddr,
-            spec,
-        });
+        // SAFETY: the HAL receives the original allocation after hardware access stops.
+        unsafe {
+            crate::resource::resource_provider().free_coherent(DmaAllocation {
+                cpu_addr: vaddr.as_ptr() as usize,
+                bus_addr: paddr,
+                spec,
+            })
+        };
         0
     }
 
@@ -229,7 +232,10 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         direction: BufferDirection,
         _access_platform: bool,
     ) -> PhysAddr {
-        match crate::resource::resource_provider().map_streaming(buffer, hal_direction(direction)) {
+        // SAFETY: share forwards the caller's live, exclusive buffer until unshare.
+        match unsafe {
+            crate::resource::resource_provider().map_streaming(buffer, hal_direction(direction))
+        } {
             Ok(m) => m.bus_addr as PhysAddr,
             Err(err) => {
                 log::error!("virtio share failed: err={:?}", err);
@@ -255,12 +261,15 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         // from a prior `share` call, so reconstructing the mapping reverses it.
         let slice = unsafe { buffer.as_ref() };
         let cpu_addr = NonNull::from(slice).cast::<u8>();
-        p.unmap_streaming(DmaMapping {
-            cpu_addr: cpu_addr.as_ptr() as usize,
-            bus_addr: paddr,
-            len: slice.len(),
-            direction: dir,
-        });
+        // SAFETY: unshare receives the active mapping and hardware has stopped.
+        unsafe {
+            p.unmap_streaming(DmaMapping {
+                cpu_addr: cpu_addr.as_ptr() as usize,
+                bus_addr: paddr,
+                len: slice.len(),
+                direction: dir,
+            })
+        };
     }
 }
 

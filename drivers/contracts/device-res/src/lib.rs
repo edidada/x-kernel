@@ -102,9 +102,9 @@ mod tests {
     use unittest::def_test;
 
     use crate::{
-        DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
-        IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
-        ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
+        DeviceResource, DmaAllocation, DmaCoherent, DmaOp, DmaSpec, IrqEvent, IrqHandler,
+        IrqHandlerToken, IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp,
+        MmioRegion, ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
         devm_iomap_with_provider, devm_request_irq_with_provider,
     };
 
@@ -205,7 +205,8 @@ mod tests {
         }
     }
 
-    impl DmaOp for TestProvider {
+    // SAFETY: tests retain the fixed backing storage and serialize access through state.
+    unsafe impl DmaOp for TestProvider {
         fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
             let mut state = self.state.lock();
             state.events.push(Event::AllocCoherent(spec));
@@ -219,7 +220,7 @@ mod tests {
             })
         }
 
-        fn free_coherent(&self, alloc: DmaAllocation) {
+        unsafe fn free_coherent(&self, alloc: DmaAllocation) {
             self.state
                 .lock()
                 .events
@@ -349,7 +350,8 @@ mod tests {
 
         let dma = provider.alloc_coherent(spec).unwrap();
         assert_eq!(dma.bus_addr, 0xfeed_cafe);
-        provider.free_coherent(dma);
+        // SAFETY: dma is the live allocation just returned by this provider.
+        unsafe { provider.free_coherent(dma) };
 
         let device = TestDevice::new(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
         assert_eq!(device.resources().len(), 2);
@@ -370,6 +372,24 @@ mod tests {
                 Event::FreeCoherent(spec),
             ]
         );
+    }
+
+    #[def_test]
+    fn owned_coherent_handle_keeps_provider_until_original_release() {
+        let provider = Arc::new(TestProvider::new());
+        let weak = Arc::downgrade(&provider);
+        let spec = DmaSpec::new(16, 1);
+        let handle = DmaCoherent::alloc_owned(provider.clone(), spec).unwrap();
+        drop(provider);
+        let retained = weak.upgrade().unwrap();
+        assert_eq!(retained.events(), vec![Event::AllocCoherent(spec)]);
+        drop(handle);
+        assert_eq!(
+            retained.events(),
+            vec![Event::AllocCoherent(spec), Event::FreeCoherent(spec)]
+        );
+        drop(retained);
+        assert!(weak.upgrade().is_none());
     }
 
     #[def_test]

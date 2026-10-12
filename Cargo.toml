@@ -14,6 +14,7 @@ members = [
     "tee/xdice",
 ]
 exclude = [
+    "third-party/kvirtiodrivers",
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
@@ -295,7 +296,7 @@ smoltcp = { version = "=0.13.0", default-features = false }
 smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 syn = { version = "2.0", features = ["full"] }
-virtio-drivers = { version = "0.13.4", default-features = false, package = "kvirtiodrivers" }
+virtio-drivers = { path = "third-party/kvirtiodrivers", version = "0.13.4", default-features = false, package = "kvirtiodrivers" }
 # Pinned: 0.15.5's `nightly`->`step_trait` (pulled in by `x2apic`) needs Step methods absent from rustc 1.95.0; bump after nightly-2026-07-10+.
 x86_64 = { version = "=0.15.4", features = ["instructions"] }
 ktracepoint = "0.5"

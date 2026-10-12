@@ -159,7 +159,8 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
   softirq/worker setup, IRQ enable, watchdog/PMU setup, and completion publication.
   They must not wait for primary driver initialization or local runnable tasks
   during this phase. The primary would otherwise wait for an AP that cannot finish.
-- `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
+- `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().try_lock()` 串行化
+  内核页表属性更新，等待期间仅处理 pending TLB shootdown 请求。
 
 ## 威胁分析
 
@@ -232,3 +233,14 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable，raw per-CPU 访问仍只发生在不可迁移上下文。
 - [ ] 修改 DMA protect 接线时，确认仍由 `memspace` 统一持锁和校验内核页表范围。
 - [ ] 修改启动日志时，评估是否新增物理地址、设备映射或任务身份泄露。
+
+## DMA lock wait and TLB acknowledgements
+
+`dma_integration.rs` supplies `DmaPageTableIf::poll_pending_tlb` under a
+NoPreemptIrqSave guard. DMA allocator lock contention and kernel layout lock
+contention invoke this hook to acknowledge a page-attribute updater's remote
+request even while normal IPI delivery is disabled. The hook uses kipi's existing
+published-slot validation and runs only local TLB invalidation/acknowledgement;
+it does not dispatch arbitrary IPI callbacks. Page-table mutation retains the
+same memspace lock and validation. This prevents the IRQ-off waiter from forcing
+the updater through shootdown's give-up path during concurrent pool creation.

@@ -23,6 +23,7 @@ use crate::{
 /// The lifecycle state is kept outside this struct in an `AtomicU8` so hot
 /// read paths can read it without taking the lock.
 struct DeviceObjectState {
+    dma: Option<Arc<dyn device_res::DmaOp>>,
     parent: Option<DeviceId>,
     children: Vec<DeviceId>,
     /// Bus instance this device produces, if it is a bus controller / bridge.
@@ -105,6 +106,7 @@ impl DeviceObject {
             usage: AtomicUsize::new(0),
             devres: SpinNoPreempt::new(Vec::new()),
             state: SpinNoPreempt::new(DeviceObjectState {
+                dma: None,
                 parent: None,
                 children: Vec::new(),
                 child_bus: None,
@@ -113,6 +115,35 @@ impl DeviceObject {
                 device_kind: None,
             }),
         }
+    }
+
+    /// Bind the DMA capability during probe, before creating DMA resources.
+    ///
+    /// Binding is write-once during a probe activation. Cleanup releases the device's
+    /// reference after draining devres; outstanding resources retain their own references.
+    /// Call from task-context probe, serialized with device cleanup.
+    ///
+    /// # Errors
+    /// Returns `ResError::Busy` if a capability is already bound.
+    pub fn bind_dma(&self, dma: Arc<dyn device_res::DmaOp>) -> device_res::ResResult<()> {
+        let mut state = self.state.lock();
+        if state.dma.is_some() {
+            return Err(device_res::ResError::Busy);
+        }
+        state.dma = Some(dma);
+        Ok(())
+    }
+
+    /// Get this device's DMA capability, retaining it through resource cleanup.
+    ///
+    /// # Errors
+    /// Returns `ResError::Unsupported` if probe has not bound a capability.
+    pub fn dma(&self) -> device_res::ResResult<Arc<dyn device_res::DmaOp>> {
+        self.state
+            .lock()
+            .dma
+            .clone()
+            .ok_or(device_res::ResError::Unsupported)
     }
 
     /// Unique device ID.
@@ -381,6 +412,8 @@ impl DeviceObject {
         while let Some(cleanup) = cleanups.pop() {
             cleanup();
         }
+        let dma = self.state.lock().dma.take();
+        drop(dma);
     }
 
     /// Mark this device as active.
@@ -474,5 +507,60 @@ impl Deref for DeviceUse {
 impl Drop for DeviceUse {
     fn drop(&mut self) {
         self.device.usage.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use device_res::{DmaAllocation, DmaOp, DmaSpec, ResError, ResResult};
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    struct UnavailableDma;
+
+    // SAFETY: this fixture rejects every allocation and creates no live DMA mappings.
+    unsafe impl DmaOp for UnavailableDma {
+        fn alloc_coherent(&self, _spec: DmaSpec) -> ResResult<DmaAllocation> {
+            Err(ResError::Unsupported)
+        }
+
+        unsafe fn free_coherent(&self, _allocation: DmaAllocation) {}
+    }
+
+    #[def_test]
+    fn dma_binding_retains_provider_through_cleanup_and_allows_reprobe() {
+        let device = Arc::new(DeviceObject::new_bound_for_test(
+            DeviceId::new(0),
+            DeviceKind::Block,
+        ));
+        let provider: Arc<dyn DmaOp> = Arc::new(UnavailableDma);
+        let weak = Arc::downgrade(&provider);
+        assert!(device.dma().is_err());
+        device.bind_dma(provider.clone()).unwrap();
+        assert_eq!(
+            device.bind_dma(provider.clone()).unwrap_err(),
+            ResError::Busy
+        );
+        let retained = device.dma().unwrap();
+        assert!(Arc::ptr_eq(&retained, &provider));
+        let cleanup_device = Arc::downgrade(&device);
+        let was_available = Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let cleanup_result = was_available.clone();
+        device.add_cleanup(move || {
+            cleanup_result.store(
+                cleanup_device.upgrade().unwrap().dma().is_ok(),
+                Ordering::Relaxed,
+            );
+        });
+        drop(provider);
+        device.run_cleanups();
+        assert!(was_available.load(Ordering::Relaxed));
+        assert!(device.dma().is_err());
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+        device.bind_dma(Arc::new(UnavailableDma)).unwrap();
+        device.run_cleanups();
     }
 }

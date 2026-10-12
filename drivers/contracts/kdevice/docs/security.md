@@ -279,3 +279,19 @@ When modifying this module, verify:
   complete.
 - New `DeviceMatcher` implementations keep `matches()` pure (no side
   effects, no lock acquisition).
+
+## Device DMA capability lifetime
+
+The new `DeviceObject::bind_dma` and `dma` paths in `src/device/object.rs` use
+safe Arc cloning under the existing state lock. Binding is write-once until
+core-controlled cleanup. Devres callbacks run before the device drops its DMA
+reference, and provider destruction happens outside the state lock. Host probe
+owns the actual capability declarations; the core cannot verify hardware masks.
+
+Probe/remove lifecycle serialization must cover capability binding and resource
+registration. Retained resource references keep their original provider across
+cleanup/reprobe. Strong provider-to-device references would leak both through an
+Arc cycle, so providers keep device identity without owning the device. Provider
+retention proves software lifetime; hardware access must separately stop before
+memory release. Callback panic and concurrent teardown remain governed by the
+existing device lifecycle contract.
