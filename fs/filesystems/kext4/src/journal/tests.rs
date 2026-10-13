@@ -4,7 +4,7 @@
 
 //! Journal lifecycle tests executed in the kernel with in-memory storage.
 
-use block::DriverError;
+use block::KError;
 use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;
@@ -125,7 +125,7 @@ fn failed_space_reclamation_keeps_the_prefix_and_suffix_pending() {
         device.fail_flush_at(device.flush_count() + failure);
         assert_eq!(
             filesystem.commit_metadata_transaction(transaction),
-            Err(Ext4Error::Device(DriverError::Io))
+            Err(Ext4Error::Device(KError::Io))
         );
         assert_eq!(pending_checkpoint_count(&filesystem), 3);
         assert_eq!(journal.superblock().sequence(), original.sequence());
@@ -454,7 +454,7 @@ fn failed_checkpoint_batch_keeps_all_pending_work() {
         }
         assert_eq!(
             filesystem.run_checkpoint_worker(),
-            Err(Ext4Error::Device(DriverError::Io))
+            Err(Ext4Error::Device(KError::Io))
         );
         assert_eq!(device.flush_count(), flushes_before + failure);
         assert_eq!(pending_checkpoint_count(&filesystem), 2);

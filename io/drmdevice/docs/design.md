@@ -50,7 +50,7 @@ The implemented protocol covers legacy libdrm and atomic KMS paths used by
 compositors. It is KMS-only: there is no render node or command submission.
 
 The `display` contract crate provides the `DisplayDevice` interface, concrete
-display drivers publish implementations through `kclass`, and `kclass`
+display drivers publish implementations through `device-class`, and `device-class`
 forwards the contract through `ClassDevice<DisplayDeviceImpl>`. `DrmCard` is
 the consumer. The scanout call direction is therefore `DrmCard` -> bound
 `ClassDevice<DisplayDeviceImpl>` -> `DisplayDevice` for display information,

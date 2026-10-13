@@ -6,13 +6,13 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_base::{DriverError, DriverResult};
+use kerrno::{KError, KResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use ktask::future::PreparedTaskWait;
 
 use crate::completion::{BlockSignals, BlockWaiter};
 
-pub fn prepare_block_wait() -> DriverResult<Box<dyn BlockWaiter>> {
+pub fn prepare_block_wait() -> KResult<Box<dyn BlockWaiter>> {
     Ok(Box::new(HostBlockWaiter::prepare()?))
 }
 
@@ -39,8 +39,8 @@ struct HostBlockWaiter {
 }
 
 impl HostBlockWaiter {
-    fn prepare() -> DriverResult<Self> {
-        let task = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
+    fn prepare() -> KResult<Self> {
+        let task = PreparedTaskWait::prepare().map_err(|_| KError::InvalidInput)?;
         let signals = Arc::new(HostSignals {
             admission: Completion::new(),
             terminal: Completion::new(),
@@ -63,7 +63,7 @@ impl BlockWaiter for HostBlockWaiter {
         self.signals.clone()
     }
 
-    fn wait_admission(&mut self) -> DriverResult<()> {
+    fn wait_admission(&mut self) -> KResult<()> {
         let waker = self.task.waker();
         loop {
             if self.signals.admission.try_wait() {
@@ -90,9 +90,9 @@ impl BlockWaiter for HostBlockWaiter {
     }
 }
 
-fn registration_error(error: PollRegisterError) -> DriverError {
+fn registration_error(error: PollRegisterError) -> KError {
     match error {
-        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => DriverError::NoMemory,
-        PollRegisterError::InvalidState => DriverError::InvalidInput,
+        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
+        PollRegisterError::InvalidState => KError::InvalidInput,
     }
 }

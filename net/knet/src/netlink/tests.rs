@@ -47,7 +47,7 @@ fn valid_ipv4_cidr(address: crate::ip::Ipv4Address, prefix_len: u8) -> crate::ip
 
 struct TestDevice {
     link: LinkSnapshot,
-    device_id: Option<kdevice::DeviceId>,
+    device_id: Option<device_class::ClassDeviceId>,
     neighbors: Vec<crate::ip::IpAddress>,
 }
 
@@ -60,7 +60,7 @@ impl TestDevice {
         }
     }
 
-    fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
+    fn with_device_id(mut self, device_id: device_class::ClassDeviceId) -> Self {
         self.device_id = Some(device_id);
         self
     }
@@ -98,7 +98,7 @@ impl NetDevice for TestDevice {
         }
     }
 
-    fn device_id(&self) -> Option<kdevice::DeviceId> {
+    fn device_id(&self) -> Option<device_class::ClassDeviceId> {
         self.device_id
     }
 
@@ -195,7 +195,7 @@ fn init_test_state() {
                 hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
                 broadcast_addr: [0xff; 6],
             })
-            .with_device_id(kdevice::DeviceId::new(2)),
+            .with_device_id(device_class::ClassDeviceId::from_raw(2)),
         ))
         .unwrap();
     router
@@ -515,7 +515,7 @@ fn test_device_removal_refreshes_views() {
     )
     .unwrap();
 
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev(device_class::ClassDeviceId::from_raw(2)));
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
@@ -1293,7 +1293,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             hardware_addr: [0x02, 0, 0, 0, 0, ifindex as u8],
             broadcast_addr: [0xff; 6],
         })
-        .with_device_id(kdevice::DeviceId::new(id))
+        .with_device_id(device_class::ClassDeviceId::from_raw(id))
     };
     let mut router = Router::new();
     router
@@ -1343,7 +1343,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
     }
 
     // Removing eth0 preserves eth1's interface ID and address.
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev(device_class::ClassDeviceId::from_raw(2)));
     assert_eq!(
         crate::interface_ipv4_addr("eth1"),
         Ok(core::net::Ipv4Addr::new(10, 0, 0, 2))
@@ -1369,7 +1369,7 @@ fn test_removed_interface_id_is_not_reused() {
             hardware_addr: [0; 6],
             broadcast_addr: [0xff; 6],
         })
-        .with_device_id(kdevice::DeviceId::new(model_id))
+        .with_device_id(device_class::ClassDeviceId::from_raw(model_id))
     };
     let mut router = Router::new();
     let eth0 = router.add_device(Box::new(ethernet("eth0", 2))).unwrap();
@@ -1385,7 +1385,7 @@ fn test_removed_interface_id_is_not_reused() {
         .unwrap();
 
     router
-        .remove_device_by_model_id(kdevice::DeviceId::new(2))
+        .remove_device_by_model_id(device_class::ClassDeviceId::from_raw(2))
         .unwrap();
     let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(10, 0, 0, 3));
     assert_eq!(

@@ -6,7 +6,7 @@
 //! implemented for `ClassDevice<T>` — admission-gated data-plane
 //! forwarding (`with_available`/`is_available`) over the shared runtime.
 
-use driver_base::{Device, DeviceKind};
+use kerrno::KResult;
 
 use super::*;
 
@@ -15,44 +15,17 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "char")]
-impl Device for ClassDevice<CharDeviceImpl> {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Char
-    }
-}
-
-// Legacy-contracts bridge (splits 4-6): a ClassDevice that forwards as a
-// CharDevice must first be a Device. The kind is the static one the
-// forwarding type already carries — the type system says it, no stored
-// runtime tag. These impls retire with the contracts in split 7.
-
-#[cfg(feature = "char")]
 impl CharDevice for ClassDevice<CharDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         self.with_available(|device| device.read(buf))
     }
 
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         self.with_available(|device| device.write(buf))
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         self.with_available(|device| device.flush())
-    }
-}
-
-#[cfg(feature = "display")]
-impl Device for ClassDevice<DisplayDeviceImpl> {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Display
     }
 }
 
@@ -66,7 +39,7 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         self.with(|device| device.need_flush())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         self.with_available(|device| device.flush())
     }
 
@@ -75,36 +48,25 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
         resource: display::ScanoutResource,
         paddr: u64,
         length: u32,
-    ) -> DriverResult {
+    ) -> KResult {
         self.with_available(|device| device.create_scanout_resource(resource, paddr, length))
     }
 
-    fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
+    fn destroy_scanout_resource(&self, resource_id: u32) -> KResult {
         self.with_available(|device| device.destroy_scanout_resource(resource_id))
     }
 
-    fn present_scanout_resource(
-        &self,
-        resource_id: u32,
-        rect: display::ScanoutRect,
-    ) -> DriverResult {
+    fn present_scanout_resource(&self, resource_id: u32, rect: display::ScanoutRect) -> KResult {
         self.with_available(|device| device.present_scanout_resource(resource_id, rect))
     }
 }
 
 #[cfg(feature = "input")]
-impl Device for ClassDevice<InputDeviceImpl> {
+impl InputDevice for ClassDevice<InputDeviceImpl> {
     fn name(&self) -> &str {
         self.name()
     }
 
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Input
-    }
-}
-
-#[cfg(feature = "input")]
-impl InputDevice for ClassDevice<InputDeviceImpl> {
     fn device_id(&self) -> InputDeviceId {
         self.with(|device| device.device_id())
     }
@@ -117,23 +79,12 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
         self.input_unique_id()
     }
 
-    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> KResult<bool> {
         self.with_available(|device| device.get_event_bits(ty, out))
     }
 
-    fn read_event(&self) -> DriverResult<Event> {
+    fn read_event(&self) -> KResult<Event> {
         self.with_available(|device| device.read_event())
-    }
-}
-
-#[cfg(feature = "net")]
-impl Device for ClassDevice<NetDeviceImpl> {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Net
     }
 }
 
@@ -162,39 +113,28 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
         self.with(|device| device.tx_queue_len())
     }
 
-    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> KResult {
         self.with_available(|device| device.recycle_rx(rx_buf))
     }
 
-    fn recycle_tx(&self) -> DriverResult {
+    fn recycle_tx(&self) -> KResult {
         self.with_available(|device| device.recycle_tx())
     }
 
-    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
+    fn send(&self, tx_buf: NetBufHandle) -> KResult {
         self.with_available(|device| device.send(tx_buf))
     }
 
-    fn recv(&self) -> DriverResult<NetBufHandle> {
+    fn recv(&self) -> KResult<NetBufHandle> {
         self.with_available(|device| device.recv())
     }
 
-    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
+    fn alloc_tx_buf(&self, size: usize) -> KResult<NetBufHandle> {
         self.with_available(|device| device.alloc_tx_buf(size))
     }
 
-    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
+    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> KResult {
         self.with_available(|device| device.set_rx_scheduler(scheduler))
-    }
-}
-
-#[cfg(feature = "vsock")]
-impl Device for ClassDevice<VsockDeviceImpl> {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Vsock
     }
 }
 
@@ -212,34 +152,34 @@ impl VsockDevice for ClassDevice<VsockDeviceImpl> {
         self.with(|device| device.unlisten(port));
     }
 
-    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn connect(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_available(|device| device.connect(info))
     }
 
-    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn accept(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_available(|device| device.accept(info))
     }
 
-    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn force_close(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_available(|device| device.force_close(info))
     }
 
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> KResult<usize> {
         self.with_available(|device| device.send(info, buf))
     }
 
-    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn shutdown(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_available(|device| device.shutdown(info))
     }
 
-    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn credit_update(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_available(|device| device.credit_update(info))
     }
 
     fn poll_event(
         &self,
-        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
-    ) -> DriverResult<bool> {
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> KResult<()>,
+    ) -> KResult<bool> {
         self.with_available(|device| device.poll_event(handler))
     }
 }
@@ -252,23 +192,12 @@ impl ClassDevice<Virtio9pDeviceImpl> {
 }
 
 #[cfg(feature = "virtio-9p")]
-impl Device for ClassDevice<Virtio9pDeviceImpl> {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Fs9p
-    }
-}
-
-#[cfg(feature = "virtio-9p")]
 impl Virtio9pDevice for ClassDevice<Virtio9pDeviceImpl> {
     fn mount_tag(&self) -> String {
         self.mount_tag()
     }
 
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> KResult<usize> {
         self.with_available(|device| device.request(req, resp))
     }
 }

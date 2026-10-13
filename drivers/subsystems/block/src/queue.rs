@@ -4,7 +4,7 @@
 
 //! Block request-queue geometry and topology.
 
-use driver_base::{DriverError, DriverResult};
+use kerrno::{KError, KResult};
 
 /// Shift from bytes to Linux block sectors.
 pub const SECTOR_SHIFT: u32 = 9;
@@ -39,15 +39,15 @@ impl QueueLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] unless `logical_block_size` is
+    /// Returns [`KError::InvalidInput`] unless `logical_block_size` is
     /// between 512 and 4096 bytes inclusive and is a power of two.
-    pub fn new(logical_block_size: usize) -> DriverResult<Self> {
+    pub fn new(logical_block_size: usize) -> KResult<Self> {
         let logical_block_size =
-            u32::try_from(logical_block_size).map_err(|_| DriverError::InvalidInput)?;
+            u32::try_from(logical_block_size).map_err(|_| KError::InvalidInput)?;
         if !(SECTOR_SIZE..=MAX_BLOCK_SIZE).contains(&logical_block_size)
             || !logical_block_size.is_power_of_two()
         {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         Ok(Self {

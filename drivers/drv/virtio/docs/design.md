@@ -45,7 +45,7 @@ probe/remove/发布/资源所有权。
         └─ dev.extension::<driver_host::virtio_transport               │
                              ::PciTransportService>()                   │
              └─ service.probe(descriptor)                               │
-                  → (DeviceKind, virtio_devices::PciTransport, Option<virq>)
+                  → (VirtioDeviceKind, virtio_devices::PciTransport, Option<virq>)
    2. 校验 kind 与本驱动一致（否则 Fatal(Unsupported)）                   │
    3. IRQ spec：transport 绑定的向量优先，否则 dev.irq(0) 的固件路由       │
    4. activate(dev, transport, spec, mmio_regs)  ◄───────────────────────┘
@@ -139,11 +139,11 @@ HAL 级长期映射；现在探测发生在 `MmioDriver::probe` 里，映射由 
 
 ## 设计决策
 
-### 每个家族校验 `DeviceKind`
+### 每个家族校验 the family kind vocabulary
 
 ```rust
 let (kind, transport, irq) = crate::common::pci_transport(dev)?;
-if !matches!(kind, DeviceKind::Block) {
+if !matches!(kind, VirtioDeviceKind::Block) {
     return Err(ProbeError::Fatal(RuntimeError::Unsupported));
 }
 ```

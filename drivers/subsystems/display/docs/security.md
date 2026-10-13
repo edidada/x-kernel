@@ -50,8 +50,8 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Scanout capability absent | `DriverError::Unsupported` from the default methods | Callers fall back to plain flush | 4 | Default trait implementations. |
-| F-02 | Flush hardware failure | `DriverError` returned | Frame not presented; retry by caller | 3 | Error propagation via `DriverResult`. |
+| F-01 | Scanout capability absent | `KError::Unsupported` from the default methods | Callers fall back to plain flush | 4 | Default trait implementations. |
+| F-02 | Flush hardware failure | `KError` returned | Frame not presented; retry by caller | 3 | Error propagation via `KResult`. |
 | F-03 | Unknown resource id on destroy/present | Driver-specific error | No effect on other resources | 4 | Driver returns an error; no implicit cleanup. |
 
 ## Known Limitations

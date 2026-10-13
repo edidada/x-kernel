@@ -12,7 +12,7 @@ description = "Top-level feature selection for x-kernel"
 [package.metadata.cargo-shear]
 # kfeat owns top-level feature forwarding. These optional crates are selected
 # through feature edges rather than direct code references.
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
 
 [features]
 default = []
@@ -46,7 +46,7 @@ vmm = [
 
 # Interrupts
 ipi = ["dep:kipi", "kruntime/ipi", "ktask?/ipi"]
-dma-trace = ["kdriver/dma-trace"]
+dma-trace = ["kdma/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = [
     "dep:tee_kernel",
@@ -60,7 +60,7 @@ arm_timer_resume_fixup = [
     "ktask?/arm-timer-resume-fixup",
 ]
 rootfs_secondary_block = ["kruntime/rootfs-secondary-block"]
-pci_non_ecam = ["kdriver/pci-non-ecam"]
+pci_non_ecam = ["pci/pci-non-ecam"]
 
 # Platform wiring
 platform_kplat_aarch64 = ["dep:kplat-aarch64", "fp-simd", "smp", "dev_log"]
@@ -114,31 +114,28 @@ rtc = ["kruntime/rtc"]
 # independently (via Kconfig or by hand). They use underscores so they map
 # directly from `KFEAT_DRIVER_*` Kconfig symbols (see
 # `scripts/make/kfeat_features.sh`).
-driver_virtio_blk = ["kdriver/virtio-blk"]
-driver_virtio_net = ["kdriver/virtio-net"]
-driver_virtio_gpu = ["kdriver/virtio-gpu"]
-driver_virtio_input = ["kdriver/virtio-input"]
-driver_virtio_socket = ["kdriver/virtio-socket"]
-driver_virtio_9p = ["kdriver/virtio-9p"]
-driver_virtio_rng = ["kdriver/virtio-rng"]
-entropy_virtio_rng = ["dep:entropy", "entropy/entropy_virtio_rng"]
+driver_virtio_blk = ["dep:drv-virtio", "drv-virtio/blk", "driver-compose/virtio-blk", "char"]
+driver_virtio_net = ["dep:drv-virtio", "drv-virtio/net", "driver-compose/virtio-net", "net"]
+driver_virtio_gpu = ["dep:drv-virtio", "drv-virtio/gpu", "driver-compose/virtio-gpu", "display"]
+driver_virtio_input = ["dep:drv-virtio", "drv-virtio/input", "driver-compose/virtio-input", "input"]
+driver_virtio_socket = ["dep:drv-virtio", "drv-virtio/vsock", "driver-compose/virtio-vsock", "vsock"]
+driver_virtio_9p = ["dep:drv-virtio", "drv-virtio/fs9p", "driver-compose/virtio-9p", "fs_9p", "dep:device_class", "device_class/virtio-9p"]
+# Hardware driver and trusted-source connection are separate knobs (main's
+# !916 split): the driver can exist without feeding the entropy pool.
+driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-compose/virtio-rng", "dep:device_class", "device_class/hwrng"]
+entropy_virtio_rng = ["driver_virtio_rng", "dep:entropy", "entropy/entropy_virtio_rng"]
+driver_virtio_mmio = ["dep:drv-virtio", "drv-virtio/mmio", "driver-compose/virtio-mmio"]
 entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
 entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
 entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
-driver_ixgbe = ["kdriver/ixgbe"]
-driver_fxmac = ["kdriver/fxmac"]
-driver_ahci = ["kdriver/ahci"]
-driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
-driver_sdmmc = ["kdriver/sdmmc"]
-driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-compose/serial-pl011", "driver-compose/fixed-clock", "char", "dep:console_driver", "console_driver/pl011"]
-driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-compose/serial-ns16550-mmio", "char", "dep:console_driver", "console_driver/ns16550-mmio"]
-driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-compose/serial-ns16550-ioport", "char", "dep:console_driver", "console_driver/ns16550-ioport"]
-driver_ramdisk = ["kdriver/ramdisk"]
-driver_ramdisk_static = ["kdriver/ramdisk-static"]
+driver_ramdisk = ["dep:drv-block", "driver-compose/ramdisk", "char"]
+driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-compose/ramdisk-static"]
 driver_console_pl011 = ["dep:console_driver", "console_driver/pl011"]
 driver_console_ns16550_mmio = ["dep:console_driver", "console_driver/ns16550-mmio"]
 driver_console_ns16550_ioport = ["dep:console_driver", "console_driver/ns16550-ioport"]
-
+driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-compose/serial-pl011", "driver-compose/fixed-clock", "char", "dep:console_driver", "console_driver/pl011"]
+driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-compose/serial-ns16550-mmio", "char", "dep:console_driver", "console_driver/ns16550-mmio"]
+driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-compose/serial-ns16550-ioport", "char", "dep:console_driver", "console_driver/ns16550-ioport"]
 
 # Backtrace
 # In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
@@ -204,11 +201,15 @@ kalloc = { workspace = true, optional = true }
 backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 fat = { workspace = true, optional = true }
-kdriver.workspace = true
 driver-compose.workspace = true
+drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
+drv-block = { workspace = true, optional = true }
+device_class = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
+kdma.workspace = true
+pci = { workspace = true }
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
 kplat-aarch64 = { workspace = true, optional = true, features = [

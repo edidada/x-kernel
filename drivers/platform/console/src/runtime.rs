@@ -10,13 +10,13 @@
 //! console view and the adopted stdout identity, without a public console
 //! selection mechanism.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use device_class::{
     CharDeviceImpl, ClassDevice, ClassDeviceId, char_devices, find_char_device, publish_char,
     subscribe_char_available, subscribe_char_removed,
 };
-use driver_base::DriverResult;
+use kerrno::KResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -158,7 +158,8 @@ fn ensure_console_bridge() {
 pub fn register_stdout_console(
     parent: impl Into<device_class::ClassParent>,
     runtime: CharDeviceImpl,
-) -> DriverResult<()> {
+    name: impl Into<String>,
+) -> KResult<()> {
     ensure_console_bridge();
     // Rebind: withdraw the PREVIOUS stdout publication before publishing
     // the replacement — one stdout identity carries exactly one class
@@ -173,7 +174,7 @@ pub fn register_stdout_console(
             device_class::unpublish_char(previous);
         }
     }
-    let handle = publish_char(parent, runtime)?;
+    let handle = publish_char(parent, runtime, name)?;
     let id = handle.id();
     console_subsystem().lock().stdout = Some(id);
     // This runs inside the driver's `probe_device`, so the device is usually
@@ -196,11 +197,12 @@ pub fn register_stdout_console(
 pub fn register_console_parented(
     parent: impl Into<device_class::ClassParent>,
     runtime: CharDeviceImpl,
-) -> DriverResult<()> {
+    name: impl Into<String>,
+) -> KResult<()> {
     // Thin alias of [`register_stdout_console`] kept as the serial drivers'
     // naming (parent-shaped entry); the semantics are identical — see
     // register_stdout_console for the full contract.
-    register_stdout_console(parent, runtime)
+    register_stdout_console(parent, runtime, name)
 }
 
 /// Snapshot the available runtime device associated with boot stdout.

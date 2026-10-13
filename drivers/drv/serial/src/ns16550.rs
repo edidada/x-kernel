@@ -15,11 +15,11 @@ use alloc::{boxed::Box, sync::Arc};
 use char_driver::CharDevice;
 use console_driver::serial::{SerialIdent, SerialPort, SerialRole, take_early_port};
 use device_class::{ClassParent, publish_char};
-use driver_base::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
+use kerrno::KResult;
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]
@@ -59,26 +59,12 @@ pub struct SerialData {
 
 struct SerialCharDev(Arc<SerialPort>);
 
-impl Device for SerialCharDev {
-    fn name(&self) -> &str {
-        "serial"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Char
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
-
 impl CharDevice for SerialCharDev {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         Ok(self.0.read_data(buf))
     }
 
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         self.0.write_data(buf);
         Ok(buf.len())
     }
@@ -97,12 +83,14 @@ fn publish(
         SerialRole::Stdout => console_driver::runtime::register_console_parented(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
+            "serial",
         )
         .map(|_| None) // console continuity: no withdrawal guard
         .map_err(crate::probe_error::map_driver_error),
         SerialRole::Auxiliary => publish_char(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
+            "serial",
         )
         .map(|handle| Some(device_class::char_withdraw(&handle)))
         .map_err(crate::probe_error::map_driver_error),

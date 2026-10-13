@@ -943,7 +943,7 @@ impl Service {
     ///
     /// Callers must hold [`crate::control::network_config_lock`] so device
     /// removal cannot interleave with other control-plane mutations.
-    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
+    pub(crate) fn remove_device_by_model_id(&self, id: device_class::ClassDeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
         router.remove_device_by_model_id(id)?;

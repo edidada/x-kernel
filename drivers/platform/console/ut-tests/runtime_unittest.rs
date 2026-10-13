@@ -4,7 +4,7 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{Device, DeviceKind};
+
 use device_class::CharDevice;
 use unittest::def_test;
 
@@ -12,26 +12,12 @@ use super::*;
 
 struct DummyConsole;
 
-impl Device for DummyConsole {
-    fn name(&self) -> &str {
-        "console-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Char
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
-
 impl CharDevice for DummyConsole {
-    fn read(&self, _: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, _: &mut [u8]) -> KResult<usize> {
         panic!("identity test must not perform device I/O")
     }
 
-    fn write(&self, _: &[u8]) -> DriverResult<usize> {
+    fn write(&self, _: &[u8]) -> KResult<usize> {
         panic!("identity test must not perform device I/O")
     }
 }
@@ -48,13 +34,7 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     );
     parent.mark_offline();
     let runtime: CharDeviceImpl = Box::new(DummyConsole);
-    let stdout = ClassDevice::try_new_with_info(
-        parent,
-        runtime,
-        "console-test".into(),
-        None,
-    )
-    .unwrap();
+    let stdout = ClassDevice::try_new_with_info(parent, runtime, "console-test".into()).unwrap();
     assert!(!stdout.is_available());
     let id = stdout.id();
     let mut subsystem = ConsoleSubsystem::new();

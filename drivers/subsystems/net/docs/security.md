@@ -55,7 +55,7 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 - A slot's contents are exclusively owned by its `NetBuf`; mutable access
   requires `&mut self`.
 - Frame lengths stay within the slot: `set_hdr_len` / `set_payload_len`
-  reject header+payload overflow (`DriverError::InvalidInput`).
+  reject header+payload overflow (`KError::InvalidInput`).
 - Buffer lifetime is RAII: `Drop` returns the offset to the pool, so a
   dropped buffer is immediately reusable but never aliased.
 
@@ -64,7 +64,7 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
 | T-01 | Forged or double-consumed `NetBufHandle` | High — UB via `Box::from_raw` | A driver fabricates a handle or recycles one twice | Documented single-consumption `# Safety` contract on `from_handle`; drivers are in-crate trusted code. Residual risk accepted by the driver trust model. |
-| T-02 | Out-of-bounds header/payload sizing | Medium — out-of-bounds slice access | Caller sets `hdr_len + payload_len` beyond the slot | Checked arithmetic and `DriverError::InvalidInput` in `set_hdr_len`/`set_payload_len` before any slice is formed. |
+| T-02 | Out-of-bounds header/payload sizing | Medium — out-of-bounds slice access | Caller sets `hdr_len + payload_len` beyond the slot | Checked arithmetic and `KError::InvalidInput` in `set_hdr_len`/`set_payload_len` before any slice is formed. |
 | T-03 | Device writes past its buffer into the pool | High — corruption of neighboring slots | Mis-programmed DMA on the device side | Out of scope here: drivers size DMA descriptors from slot geometry; the pool keeps one slot per buffer to bound the blast radius. Residual risk sits with the driver/device boundary. |
 | T-04 | Unbounded pool exhaustion | Low — allocation failure, no progress | All slots checked out and dropped buffers leaked | RAII drop returns slots deterministically; `alloc_buf` returns `None` instead of blocking or panicking. |
 
@@ -73,8 +73,8 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
 | F-01 | Pool exhausted (`alloc_buf` → `None`) | Caller cannot allocate a buffer | Packet drop / backpressure at the caller | 3 | Callers retry or drop; no blocking in the pool. |
-| F-02 | Invalid pool parameters in `NetBufPool::new` | `DriverError::InvalidInput` | Driver init fails, device not registered | 3 | Explicit validation of slot count and buffer length range. |
-| F-03 | `set_rx_scheduler` on a poll-only driver | `DriverError::Unsupported` | Network stack falls back to polling | 4 | Default trait implementation documents the condition. |
+| F-02 | Invalid pool parameters in `NetBufPool::new` | `KError::InvalidInput` | Driver init fails, device not registered | 3 | Explicit validation of slot count and buffer length range. |
+| F-03 | `set_rx_scheduler` on a poll-only driver | `KError::Unsupported` | Network stack falls back to polling | 4 | Default trait implementation documents the condition. |
 
 ## Known Limitations
 

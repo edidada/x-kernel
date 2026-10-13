@@ -6,7 +6,7 @@
 mice, tablets) and the kernel input layer: Linux-evdev-compatible event
 types and payloads (`EventType`, `Event`, `InputDeviceId`, `AbsInfo`) and
 the `InputDevice` trait that drivers implement on top of the shared
-`driver_base::Device` base.
+`Send + Sync` bounds directly.
 
 ## Responsibilities
 
@@ -31,7 +31,7 @@ the `InputDevice` trait that drivers implement on top of the shared
 - No user-space interface: `/dev/input` node exposure and the evdev
   `ioctl` surface belong to the device/fs layers; this crate only fixes
   the data layout.
-- No device discovery or binding: the `device-traits` pipeline owns probe
+- No device discovery or binding: the `kerrno` pipeline owns probe
   and activation.
 - No bitmap storage: `get_event_bits` fills a caller-provided buffer; the
   crate does not allocate or cache capability bitmaps.
@@ -48,7 +48,7 @@ drivers/subsystems/input/
 ## Architecture
 
 ```text
-device-traits (Device base, DriverError/Result, discovery pipeline)
+kerrno (KError/KResult, discovery pipeline)
       ^
       |  impl InputDevice for <driver>
       |
@@ -76,7 +76,7 @@ copies a complete `input_event` record to userspace.
 ## Execution Context
 
 - `read_event` is non-blocking: no events means
-  `Err(DriverError::WouldBlock)`, so the input layer decides how to wait.
+  `Err(KError::WouldBlock)`, so the input layer decides how to wait.
 - `InputEventNotifier::notify_events` is hard-IRQ safe. It only schedules
   task-context processing; it must not sleep, allocate, or read the driver.
 - The input layer attaches the notifier and checks once for events that
@@ -103,12 +103,12 @@ copies a complete `input_event` record to userspace.
 
 ## Error Model
 
-All fallible operations return `driver_base::DriverResult`:
+All fallible operations return `kerrno::KResult`:
 
 - `get_event_bits` — `Ok(true)` when the event type is supported and the
   bitmap was written into `out`; `Ok(false)` when the type is not
-  supported; a `DriverError` when the hardware query itself fails.
-- `read_event` — `Ok(Event)` or `Err(DriverError::WouldBlock)` when no
+  supported; a `KError` when the hardware query itself fails.
+- `read_event` — `Ok(Event)` or `Err(KError::WouldBlock)` when no
   event is pending.
 - `set_event_notifier` — accepts attach or detach, or returns a driver error
   if the device cannot provide event notifications. Its default returns
@@ -128,5 +128,5 @@ All fallible operations return `driver_base::DriverResult`:
   of drivers.
 - An IRQ-safe notifier follows the existing network receive scheduler
   contract and keeps host workerqueue policy in the input subsystem.
-- Re-export `device-traits` types: one vocabulary and one import root for
+- Re-export `kerrno` types: one vocabulary and one import root for
   implementers, matching the sibling contract crates.

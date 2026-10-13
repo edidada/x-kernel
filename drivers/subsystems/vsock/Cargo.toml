@@ -15,7 +15,7 @@ categories.workspace = true
 default = []
 
 [dependencies]
-driver_base = { workspace = true }
+kerrno.workspace = true
 
 [lints]
 workspace = true

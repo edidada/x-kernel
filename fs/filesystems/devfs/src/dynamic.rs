@@ -6,12 +6,10 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-use kclass::find_display_device;
 #[cfg(feature = "input")]
-use kclass::find_input_device;
-use kdevice::{
-    DeviceId as CoreDeviceId, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
-};
+use device_class::find_input_device;
+use device_class::{ClassDeviceId, find_display_device};
+use devnode::{DevNode, DevNodeEvent, subscribe};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
@@ -25,15 +23,15 @@ use crate::{DeviceFile, device_dentry};
 
 type DeviceRemovalCallback = Arc<dyn Fn() + Send + Sync>;
 
-struct DeviceNodeRecord {
-    node: DeviceNode,
+struct DevNodeRecord {
+    node: DevNode,
     file: Arc<DeviceFile>,
     on_remove: DeviceRemovalCallback,
 }
 
 struct DeviceProjection {
     fs: Arc<SimpleFs>,
-    records: BTreeMap<CoreDeviceId, DeviceNodeRecord>,
+    records: BTreeMap<ClassDeviceId, DevNodeRecord>,
 }
 
 impl DeviceProjection {
@@ -63,16 +61,16 @@ fn projection() -> &'static Mutex<DeviceProjection> {
 fn input_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
-    id: CoreDeviceId,
-) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
-    let Some(device) = find_input_device(id) else {
-        return Ok(None);
-    };
+    id: ClassDeviceId,
+) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
+    let device = find_input_device(id)?;
+    // The endpoint keeps the driver's event queue draining even with no
+    // open fd (main !887); the EventDev pairs view + endpoint.
     let endpoint = match inputdev::input_endpoint(device.clone()) {
         Ok(endpoint) => endpoint,
         Err(error) => {
             warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
-            return Ok(None);
+            return None;
         }
     };
     let event = Arc::new(EventDev::new(device, endpoint));
@@ -82,20 +80,18 @@ fn input_file(
             event.detach();
         }
     });
-    Ok(Some((
-        DeviceFile::new_character(fs, number, event)?,
+    Some((
+        DeviceFile::new_character(fs, number, event).ok()?,
         on_remove,
-    )))
+    ))
 }
 
 fn display_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
-    id: CoreDeviceId,
-) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
-    let Some(device) = find_display_device(id) else {
-        return Ok(None);
-    };
+    id: ClassDeviceId,
+) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
+    let device = find_display_device(id)?;
     let card = drmdevice::DrmCard::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
@@ -103,45 +99,44 @@ fn display_file(
             card.notify_removed();
         }
     });
-    Ok(Some((
-        DeviceFile::new_character(fs, number, card)?,
-        on_remove,
-    )))
+    Some((DeviceFile::new_character(fs, number, card).ok()?, on_remove))
 }
 
-fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
-    if projection.records.contains_key(&node.core_id()) {
+fn node_key(node: &DevNode) -> ClassDeviceId {
+    // Node ids ARE the publishing class device's raw id (device_class passes
+    // `parent_ref().id().raw()`), so the record key must preserve it:
+    // `find_input_device`/`find_display_device` look the CLASS registry up
+    // by this id, and a hashed derivation would never match — the /dev
+    // input/drm projections silently never materialized.
+    ClassDeviceId::from_raw(node.id())
+}
+
+fn add_device(projection: &mut DeviceProjection, node: DevNode) {
+    if projection.records.contains_key(&node_key(&node)) {
         return;
     }
     let number = node.device_number();
     let number = DeviceId::new(number.major(), number.minor());
-    let file = match node.kind() {
+    let file = match node.subsystem() {
         #[cfg(feature = "input")]
-        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id()),
-        #[cfg(not(feature = "input"))]
-        DeviceNodeKind::Input => Ok(None),
-        DeviceNodeKind::Drm => display_file(projection.fs.clone(), number, node.core_id()),
-    };
-    let file = match file {
-        Ok(file) => file,
-        Err(error) => {
-            warn!(
-                "devtmpfs: cannot register device {:?}: {error:?}",
-                node.core_id()
-            );
-            return;
+        "input" => input_file(projection.fs.clone(), number, node_key(&node)),
+        "drm" => display_file(projection.fs.clone(), number, node_key(&node)),
+        "block" => {
+            let file = DeviceFile::new_block(projection.fs.clone(), number);
+            Some((file, Arc::new(|| {}) as DeviceRemovalCallback))
         }
+        _ => None,
     };
     let Some((file, on_remove)) = file else {
         warn!(
             "devtmpfs: class device for node {:?} is unavailable",
-            node.core_id()
+            node_key(&node)
         );
         return;
     };
     projection.records.insert(
-        node.core_id(),
-        DeviceNodeRecord {
+        node_key(&node),
+        DevNodeRecord {
             node,
             file,
             on_remove,
@@ -149,10 +144,10 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
     );
 }
 
-fn remove_device(node: &DeviceNode) {
+fn remove_device(node: &DevNode) {
     let record = {
         let mut projection = projection().lock();
-        let Some(record) = projection.records.get(&node.core_id()) else {
+        let Some(record) = projection.records.get(&node_key(node)) else {
             return;
         };
         if record.node != *node {
@@ -165,21 +160,27 @@ fn remove_device(node: &DeviceNode) {
         )]
         projection
             .records
-            .remove(&node.core_id())
+            .remove(&node_key(node))
             .expect("checked device projection must remain present")
     };
     (record.on_remove)();
-    let number = node.device_number();
-    if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
-        warn!("devtmpfs: missing character device during removal: {number:?}");
+    // Only character-class nodes registered through cdev_add; block nodes
+    // carry just an inode (DeviceFile::new_block) — a cdev_del on their
+    // dev_t would miss (warning spam) or, worse, evict an unrelated
+    // character device that happens to share the number.
+    if node.subsystem() != "block" {
+        let number = node.device_number();
+        if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
+            warn!("devtmpfs: missing character device during removal: {number:?}");
+        }
     }
 }
 
-fn handle_device_event(event: DeviceNodeEvent) {
+fn handle_device_event(event: DevNodeEvent) {
     match event {
-        DeviceNodeEvent::Added(node) => add_device(&mut projection().lock(), node),
-        DeviceNodeEvent::Removing(_) => {}
-        DeviceNodeEvent::Removed(node) => remove_device(&node),
+        DevNodeEvent::Added(node) => add_device(&mut projection().lock(), node),
+        DevNodeEvent::Removing(_) => {}
+        DevNodeEvent::Removed(node) => remove_device(&node),
     }
 }
 
@@ -189,7 +190,7 @@ pub(crate) fn initialize(fs: Arc<SimpleFs>) {
 
         let callback = Arc::new(handle_device_event);
         let mut projection = projection().lock();
-        let nodes = subscribe_device_nodes(callback);
+        let nodes = subscribe(callback);
         for node in nodes {
             add_device(&mut projection, node);
         }
@@ -198,24 +199,20 @@ pub(crate) fn initialize(fs: Arc<SimpleFs>) {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DynamicDeviceDir {
-    kind: DeviceNodeKind,
+    subsystem: &'static str,
 }
 
 impl DynamicDeviceDir {
     pub(crate) const fn input() -> Self {
-        Self {
-            kind: DeviceNodeKind::Input,
-        }
+        Self { subsystem: "input" }
     }
 
     pub(crate) const fn drm() -> Self {
-        Self {
-            kind: DeviceNodeKind::Drm,
-        }
+        Self { subsystem: "drm" }
     }
 
-    fn local_name<'a>(&self, node: &'a DeviceNode) -> Option<&'a str> {
-        if node.kind() != self.kind {
+    fn local_name<'a>(&self, node: &'a DevNode) -> Option<&'a str> {
+        if node.subsystem() != self.subsystem {
             return None;
         }
         node.devname().rsplit('/').next()

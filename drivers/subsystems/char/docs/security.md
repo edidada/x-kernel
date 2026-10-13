@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs`, the `CharDevice`
-trait plus the `device-traits` re-exports. The crate defines no other
+trait plus the `kerrno` re-exports. The crate defines no other
 modules and holds no state; obligations placed on implementers are
 recorded because this contract layer cannot enforce them itself.
 
@@ -47,8 +47,8 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Hardware error during read/write | `DriverError` variants returned | Caller retries or reports | 3 | Error propagation via `DriverResult`. |
-| F-02 | No data available | `DriverError::WouldBlock` | Caller decides to wait or drop | 3 | Explicit non-blocking contract. |
+| F-01 | Hardware error during read/write | `KError` variants returned | Caller retries or reports | 3 | Error propagation via `KResult`. |
+| F-02 | No data available | `KError::WouldBlock` | Caller decides to wait or drop | 3 | Explicit non-blocking contract. |
 
 ## Known Limitations
 

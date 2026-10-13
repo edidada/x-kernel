@@ -21,8 +21,8 @@ use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
-use kclass::{
-    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
+use device_class::{
+    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::KError, virtio_9p_devices,
 };
 #[cfg(feature = "fs9p")]
 use kerrno::KError;
@@ -53,7 +53,7 @@ const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
 /// independent of when userspace mounts sysfs.
 pub fn init_device_discovery() {
     sysfs::init_device_projection();
-    kdevice_uevent::init();
+    uevent_netlink::init();
 }
 
 #[cfg(feature = "fs9p")]
@@ -69,17 +69,17 @@ impl p9::P9Transport for Virtio9pTransport {
 }
 
 #[cfg(feature = "fs9p")]
-fn map_9p_driver_error(error: DriverError) -> KError {
+fn map_9p_driver_error(error: KError) -> KError {
     match error {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::BadState => KError::BadState,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
-        DriverError::NoMemory => KError::NoMemory,
-        DriverError::ReadOnly => KError::ReadOnlyFilesystem,
-        DriverError::ResourceBusy => KError::ResourceBusy,
-        DriverError::Unsupported => KError::OperationNotSupported,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::BadState => KError::BadState,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::Io => KError::Io,
+        KError::NoMemory => KError::NoMemory,
+        KError::ReadOnlyFilesystem => KError::ReadOnlyFilesystemFilesystem,
+        KError::ResourceBusy => KError::ResourceBusy,
+        KError::Unsupported => KError::OperationNotSupported,
     }
 }
 
@@ -465,7 +465,7 @@ fn mount_root_file_system(boot: &BootVfs) {
 
     let mut block_devs = block::block_devices()
         .into_iter()
-        .filter(|device| device.num_sectors() != 0)
+        .filter(|device| device.num_blocks() != 0)
         .collect();
     let handle = select_root_block(&mut block_devs);
     let source = format!("/dev/{}", handle.name());

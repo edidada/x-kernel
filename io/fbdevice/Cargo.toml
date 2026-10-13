@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 display.workspace = true
 kalloc.workspace = true
-kclass = { workspace = true, features = ["display"] }
+device_class = { workspace = true, features = ["display"] }
 khal.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true

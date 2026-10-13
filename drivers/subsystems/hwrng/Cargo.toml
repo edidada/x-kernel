@@ -14,7 +14,7 @@ categories.workspace = true
 ignored = ["kspin"]
 
 [dependencies]
-driver_base = { workspace = true }
+kerrno.workspace = true
 kspin.workspace = true
 unittest.workspace = true
 

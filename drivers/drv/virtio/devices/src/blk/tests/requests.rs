@@ -294,8 +294,8 @@ impl Transport for QueueTransport {
 }
 
 type Disk = VirtIoBlkDev<TrackedHal, QueueTransport>;
-fn unavailable_wait() -> DriverResult<Box<dyn BlockWaiter>> {
-    Err(DriverError::NoMemory)
+fn unavailable_wait() -> KResult<Box<dyn BlockWaiter>> {
+    Err(KError::NoMemory)
 }
 fn disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware>>) {
     block_test_disk(features, is_immediate, unavailable_wait)
@@ -350,8 +350,8 @@ impl<F: FnMut()> BlockWaiter for Waiter<F> {
         self.signals.clone()
     }
 
-    fn wait_admission(&mut self) -> DriverResult {
-        Err(DriverError::NoMemory)
+    fn wait_admission(&mut self) -> KResult {
+        Err(KError::NoMemory)
     }
 
     fn wait_completion(&mut self) {
@@ -391,8 +391,8 @@ fn request_read_write_flush_complete_without_driver_copy() {
                     result,
                     match status {
                         0 => Ok(()),
-                        1 => Err(DriverError::Io),
-                        _ => Err(DriverError::Unsupported),
+                        1 => Err(KError::Io),
+                        _ => Err(KError::Unsupported),
                     }
                 );
                 assert_eq!(signals.completion.load(Ordering::Relaxed), 1);
@@ -480,8 +480,8 @@ fn request_fifo_exceeds_descriptors_and_cancels_head_and_middle() {
             );
         }
         assert_eq!(queue.pending.iter().count(), 19);
-        queue.cancel_pending(&requests[5], DriverError::NoMemory);
-        queue.cancel_pending(&requests[12], DriverError::NoMemory);
+        queue.cancel_pending(&requests[5], KError::NoMemory);
+        queue.cancel_pending(&requests[12], KError::NoMemory);
         assert!(core::ptr::eq(
             queue.pending.iter().next().unwrap(),
             &*requests[6]
@@ -495,7 +495,7 @@ fn request_fifo_exceeds_descriptors_and_cancels_head_and_middle() {
     };
     assert_eq!(
         disk.run_request(Operation::Flush, &mut waiter),
-        Err(DriverError::NoMemory)
+        Err(KError::NoMemory)
     );
     let mut completed_count = 0;
     loop {
@@ -549,19 +549,16 @@ fn request_validation_and_wait_preparation_precede_submission() {
     let (disk, hardware) = disk(1 << 5, false);
     assert_eq!(
         disk.write_block(0, &[0; SECTOR_SIZE]),
-        Err(DriverError::ReadOnly)
+        Err(KError::ReadOnlyFilesystem)
     );
-    assert_eq!(
-        disk.read_block(0, &mut [0; 3]),
-        Err(DriverError::InvalidInput)
-    );
+    assert_eq!(disk.read_block(0, &mut [0; 3]), Err(KError::InvalidInput));
     assert_eq!(
         disk.read_block(1024, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::InvalidInput)
+        Err(KError::InvalidInput)
     );
     assert_eq!(
         disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::NoMemory)
+        Err(KError::NoMemory)
     );
     assert!(hardware.lock().submitted.is_empty());
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
@@ -594,10 +591,7 @@ fn close_counts_preparation_and_keeps_retained_device_inert() {
     let signal = Arc::new(Signals::default());
     disk.begin_close(signal.clone());
     assert_eq!(signal.completion.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::Io)
-    );
+    assert_eq!(disk.read_block(0, &mut [0; SECTOR_SIZE]), Err(KError::Io));
     assert!(hardware.lock().is_queue_live());
     drop(call);
     assert_eq!(signal.completion.load(Ordering::Relaxed), 1);
@@ -607,8 +601,8 @@ fn close_counts_preparation_and_keeps_retained_device_inert() {
     assert_eq!(disk.num_blocks(), 1024);
     assert_eq!(disk.block_size(), SECTOR_SIZE);
     assert!(!disk.is_inherently_read_only());
-    assert_eq!(disk.write_block(0, &[0; SECTOR_SIZE]), Err(DriverError::Io));
-    assert_eq!(disk.flush(), Err(DriverError::Io));
+    assert_eq!(disk.write_block(0, &[0; SECTOR_SIZE]), Err(KError::Io));
+    assert_eq!(disk.flush(), Err(KError::Io));
     assert!(!disk.ack_irq(0));
     disk.process_completed_requests();
     disk.finish_close();
@@ -619,7 +613,7 @@ fn preparation_error_retires_admission_before_close() {
     let (disk, hardware) = disk(0, false);
     assert_eq!(
         disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::NoMemory)
+        Err(KError::NoMemory)
     );
     let signal = Arc::new(Signals::default());
     disk.begin_close(signal.clone());

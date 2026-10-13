@@ -40,6 +40,69 @@ pub fn init() {
     drv_clk::fixed_clock::register();
     #[cfg(feature = "serial-pl011")]
     drv_serial::pl011::register();
+    #[cfg(feature = "virtio-blk")]
+    {
+        block::dispatch::reclaimer::init();
+        drv_virtio::blk::register();
+    }
+    #[cfg(feature = "virtio-net")]
+    drv_virtio::net::register();
+    #[cfg(feature = "virtio-rng")]
+    drv_virtio::rng::register();
+    #[cfg(feature = "virtio-gpu")]
+    drv_virtio::gpu::register();
+    #[cfg(feature = "virtio-input")]
+    drv_virtio::input::register();
+    #[cfg(feature = "virtio-vsock")]
+    drv_virtio::vsock::register();
+    #[cfg(feature = "virtio-9p")]
+    drv_virtio::virtio_9p::register();
+    #[cfg(feature = "serial-ns16550-mmio")]
+    drv_serial::ns16550::register_mmio();
+    #[cfg(feature = "serial-ns16550-ioport")]
+    drv_serial::ns16550::register_ioport();
+    #[cfg(feature = "virtio-mmio")]
+    drv_virtio::mmio::register();
+    #[cfg(feature = "ramdisk")]
+    {
+        block::dispatch::reclaimer::init();
+        drv_block::ramdisk::register();
+    }
+
+    enumerate_firmware_devices();
+    enumerate_static_devices();
+    #[cfg(any(
+        feature = "virtio-blk",
+        feature = "virtio-net",
+        feature = "virtio-rng",
+        feature = "virtio-gpu",
+        feature = "virtio-input",
+        feature = "virtio-vsock",
+        feature = "virtio-9p"
+    ))]
+    pci_discover();
+
+    let domain = global_domain();
+    let devices = domain.devices();
+    let active = devices
+        .iter()
+        .filter(|snapshot| snapshot.state == driver_core::DeviceState::Active)
+        .count();
+    log::info!(
+        "driver-core: {} firmware descriptor(s), {active} active",
+        devices.len()
+    );
+
+    // Probe-phase end: every driver and provider for this build registered.
+    // Devices still deferred are stuck — report and convert to Unclaimed
+    // with a warning instead of parking them silently forever.
+    let stuck = domain.deferred_report();
+    if !stuck.is_empty() {
+        for (id, dep) in &stuck {
+            log::warn!("driver-core: device {id} still deferred on {dep} at boot end");
+        }
+        domain.finish_probe_phase(false);
+    }
 }
 
 /// Translate the firmware device tree into domain descriptors.
@@ -47,11 +110,6 @@ pub fn init() {
 /// Every firmware node becomes a descriptor; nodes without a matching driver
 /// end up `Unclaimed` (visible in introspection, harmless). This is the
 /// enumeration path for the device domain.
-#[expect(
-    dead_code,
-    reason = "CG-024-lint-exceptions: split-7 wires the DT/static enumeration into init(); \
-              split-6 composes serial/clk only"
-)]
 fn enumerate_firmware_devices() {
     // The khal `for_each_compatible` matcher must echo a `&'static str` (it
     // selects the firmware id from driver tables); enumerating *every* node
@@ -242,12 +300,21 @@ static COM_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 /// Board-static devices (no firmware description): the compose layer is
 /// the only registrar since the legacy backend went away — the ramdisk and
 /// the x86 COM ports both live here.
-#[expect(
-    dead_code,
-    reason = "CG-024-lint-exceptions: split-7 wires the DT/static enumeration into init(); \
-              split-6 composes serial/clk only"
-)]
 fn enumerate_static_devices() {
+    #[cfg(feature = "ramdisk")]
+    {
+        // Board-static devices carry no DT compatible list; drivers
+        // claim them by alias, not by of-match.
+        let descriptor = DeviceDescriptor::new(
+            <PlatformBus as Bus>::ID,
+            alloc::boxed::Box::new(PlatformBusData::static_config(0, "ramdisk")),
+        );
+        match global_domain().add_device(descriptor) {
+            Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+            Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+        }
+    }
+
     // Each ISA COM port becomes a platform-static device carrying its I/O
     // port range; Ns16550IoPortDriver claims them by alias and reads the
     // range from the resource table.

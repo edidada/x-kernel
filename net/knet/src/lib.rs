@@ -45,9 +45,8 @@ pub use control::{
     set_interface_ipv4_netmask,
 };
 #[cfg(feature = "vsock")]
-use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
-use kclass::{NetDevice, net_devices};
-use kdevice::subscribe_device_removed;
+use device_class::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
+use device_class::{NetDevice, net_devices};
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
@@ -173,9 +172,9 @@ pub fn init_network() {
     SERVICE.start_timer();
 }
 
-fn subscribe_network_unregister(id: kdevice::DeviceId) {
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id {
+fn subscribe_network_unregister(id: device_class::ClassDeviceId) {
+    device_class::subscribe_net_removed(Arc::new(move |removed| {
+        if removed.id() != id {
             return;
         }
         if unregister_netdev(id) {
@@ -188,7 +187,7 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 ///
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
-pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+pub(crate) fn unregister_netdev(id: device_class::ClassDeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
@@ -236,8 +235,8 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id == id && unregister_vsock_dev(id) {
+    device_class::subscribe_vsock_removed(Arc::new(move |removed| {
+        if removed.id() == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }
     }));

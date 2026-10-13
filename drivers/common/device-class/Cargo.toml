@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-driver_base = { workspace = true }
+kerrno.workspace = true
 devnode.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
@@ -22,6 +22,7 @@ hwrng = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
+virtio_devices = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 
 [features]
@@ -33,7 +34,7 @@ display = ["dep:display"]
 input = ["dep:input"]
 net = ["dep:net"]
 vsock = ["dep:vsock"]
-virtio-9p = []
+virtio-9p = ["dep:virtio_devices"]
 
 [lints]
 workspace = true

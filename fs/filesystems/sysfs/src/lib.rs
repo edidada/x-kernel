@@ -4,7 +4,7 @@
 
 //! Linux-compatible, read-mostly device discovery filesystem.
 //!
-//! This crate projects [`kdevice::DeviceNode`] registrations into dynamic
+//! This crate projects [`devnode::DevNode`] registrations into dynamic
 //! `/sys/devices`, `/sys/class`, `/sys/dev/char`, and `/sys/bus` trees. It also
 //! exposes device attributes and accepts validated user-triggered kobject
 //! uevents for device-management clients.
@@ -37,10 +37,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kdevice::{
-    DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
-};
-use kdevice_uevent::{self, UeventAction, UeventScope};
+use devnode::{DevNode, DevNodeEvent, subscribe, uevent};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
 use kvfs::{
@@ -49,6 +46,7 @@ use kvfs::{
     SuperBlock, SuperBlockFlags, VfsError, VfsResult, get_tree_nodev,
 };
 use lazyinit::LazyInit;
+use uevent_netlink::UeventAction;
 
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const READ_ONLY_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o444);
@@ -59,21 +57,20 @@ static DEVICE_PROJECTION_INITIALIZATION: Once<()> = Once::new();
 static DEVICE_PROJECTION: LazyInit<Mutex<DeviceProjection>> = LazyInit::new();
 static DEVICE_PROJECTION_EVENTS: LazyInit<Mutex<()>> = LazyInit::new();
 
-#[derive(Debug)]
 struct ProjectedDevice {
-    node: DeviceNode,
+    node: DevNode,
     access: RwLock<()>,
 }
 
 impl ProjectedDevice {
-    fn new(node: DeviceNode) -> Self {
+    fn new(node: DevNode) -> Self {
         Self {
             node,
             access: RwLock::new(()),
         }
     }
 
-    fn with_available<R>(&self, operation: impl FnOnce(&DeviceNode) -> R) -> VfsResult<R> {
+    fn with_available<R>(&self, operation: impl FnOnce(&DevNode) -> R) -> VfsResult<R> {
         if !self.node.is_available() {
             return Err(VfsError::NoSuchDevice);
         }
@@ -98,52 +95,39 @@ impl DirectoryEntry {
 #[derive(Clone)]
 enum TreeEntry {
     Directory(Arc<DirectoryEntry>),
-    CharacterAttribute(kvfs::CharacterDeviceRegistration, Vec<u8>),
     Attribute(Arc<ProjectedDevice>, Vec<u8>),
     Symlink(String),
-    Uevent(Arc<ProjectedDevice>, UeventScope),
+    Uevent(Arc<ProjectedDevice>),
 }
 
 impl TreeEntry {
     fn has_same_identity(&self, other: &Self) -> bool {
         match (self, other) {
-            (
-                Self::CharacterAttribute(left, left_data),
-                Self::CharacterAttribute(right, right_data),
-            ) => left.same_registration(right) && left_data == right_data,
             (Self::Directory(left), Self::Directory(right)) => Arc::ptr_eq(left, right),
             (Self::Attribute(left, left_data), Self::Attribute(right, right_data)) => {
                 Arc::ptr_eq(left, right) && left_data == right_data
             }
             (Self::Symlink(left), Self::Symlink(right)) => left == right,
-            (Self::Uevent(left, left_scope), Self::Uevent(right, right_scope)) => {
-                Arc::ptr_eq(left, right) && left_scope == right_scope
-            }
+            (Self::Uevent(left), Self::Uevent(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
 }
 
 struct DeviceProjection {
-    nodes: BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
-    characters: Vec<kvfs::CharacterDeviceRegistration>,
+    nodes: BTreeMap<u64, Arc<ProjectedDevice>>,
     tree: BTreeMap<String, TreeEntry>,
 }
 
 impl DeviceProjection {
     fn new() -> Self {
         let nodes = BTreeMap::new();
-        let characters = Vec::new();
-        let tree = build_tree(&nodes, &characters);
-        Self {
-            nodes,
-            characters,
-            tree,
-        }
+        let tree = build_tree(&nodes);
+        Self { nodes, tree }
     }
 
     fn rebuild_tree(&mut self) -> Vec<String> {
-        let mut tree = build_tree(&self.nodes, &self.characters);
+        let mut tree = build_tree(&self.nodes);
         for (path, entry) in &mut tree {
             if let TreeEntry::Directory(directory) = entry
                 && let Some(TreeEntry::Directory(previous)) = self.tree.get(path)
@@ -190,75 +174,65 @@ pub fn init_device_projection() {
         DEVICE_PROJECTION_EVENTS.init_once(Mutex::new(()));
 
         let mut projection = device_projection().lock();
-        // kdevice installs the subscriber and captures the snapshot under its
+        // devnode installs the subscriber and captures the snapshot under its
         // registry lock, but invokes callbacks only after releasing that lock.
         // Holding this mutex therefore serializes callbacks without creating a
         // lock cycle and prevents a stale snapshot from overtaking removal.
-        let nodes = subscribe_device_nodes(Arc::new(handle_device_event));
+        let nodes = subscribe(Arc::new(handle_device_event));
         for node in nodes {
             projection
                 .nodes
-                .entry(node.core_id())
+                .entry(node.id())
                 .or_insert_with(|| Arc::new(ProjectedDevice::new(node)));
         }
-        projection.characters = kvfs::subscribe_character_devices(Arc::new(handle_character_event));
         projection.rebuild_tree();
         drop(projection);
     });
 }
 
-fn handle_character_event() {
-    let _event = device_projection_events().lock();
-    let mut projection = device_projection().lock();
-    projection.characters = kvfs::registered_character_devices();
-    let changed = projection.rebuild_tree();
-    drop(projection);
-    invalidate_changed_paths(&changed);
-}
-
-fn handle_device_event(event: DeviceNodeEvent) {
+fn handle_device_event(event: DevNodeEvent) {
     let _event = device_projection_events().lock();
     match event {
-        DeviceNodeEvent::Added(node) => {
+        DevNodeEvent::Added(node) => {
             let mut projection = device_projection().lock();
             let is_same_publication = projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.id())
                 .is_some_and(|projected| projected.node == node);
             if !is_same_publication {
                 projection
                     .nodes
-                    .insert(node.core_id(), Arc::new(ProjectedDevice::new(node)));
+                    .insert(node.id(), Arc::new(ProjectedDevice::new(node)));
             }
             let changed = projection.rebuild_tree();
             drop(projection);
             invalidate_changed_paths(&changed);
         }
-        DeviceNodeEvent::Removing(node) => {
+        DevNodeEvent::Removing(node) => {
             let projected = device_projection()
                 .lock()
                 .nodes
-                .get(&node.core_id())
+                .get(&node.id())
                 .filter(|projected| projected.node == node)
                 .cloned();
             if let Some(projected) = projected {
-                // `kdevice` marks the node unavailable before this callback.
+                // devnode marks the node unavailable before this callback.
                 // The exclusive guard waits for reads or uevent writes that
                 // already passed their availability check.
                 let _access = projected.access.write();
             }
         }
-        DeviceNodeEvent::Removed(node) => {
+        DevNodeEvent::Removed(node) => {
             let mut projection = device_projection().lock();
             // A device with the same core ID may have been republished while
             // removal callbacks ran. Do not let the stale event delete its
             // replacement projection.
             if projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.id())
                 .is_some_and(|projected| projected.node == node)
             {
-                projection.nodes.remove(&node.core_id());
+                projection.nodes.remove(&node.id());
                 let changed = projection.rebuild_tree();
                 drop(projection);
                 invalidate_changed_paths(&changed);
@@ -441,10 +415,11 @@ fn relative_symlink(source: &str, target: &str) -> String {
     }
 }
 
-fn bus_name(location: DeviceLocation) -> &'static str {
-    match location {
-        DeviceLocation::Pci { .. } | DeviceLocation::Bridge { .. } => "pci",
-        _ => "platform",
+fn bus_name(physical_path: &str) -> &'static str {
+    if physical_path.starts_with("pci") {
+        "pci"
+    } else {
+        "platform"
     }
 }
 
@@ -455,7 +430,7 @@ fn append_line(value: &str) -> Vec<u8> {
 }
 
 fn bitmap_text(bytes: &[u8]) -> Vec<u8> {
-    append_line(&kdevice_uevent::bitmap_value(bytes))
+    append_line(&uevent::bitmap_value(bytes))
 }
 
 fn add_common_device_entries(
@@ -476,7 +451,7 @@ fn add_common_device_entries(
     add_entry(
         tree,
         format!("{leaf}/uevent"),
-        TreeEntry::Uevent(projected.clone(), UeventScope::Device),
+        TreeEntry::Uevent(projected.clone()),
     );
     let subsystem_link = format!("{leaf}/subsystem");
     add_entry(
@@ -484,7 +459,7 @@ fn add_common_device_entries(
         subsystem_link.clone(),
         TreeEntry::Symlink(relative_symlink(
             &subsystem_link,
-            &format!("class/{}", kdevice_uevent::subsystem_name(node)),
+            &format!("class/{}", node.subsystem()),
         )),
     );
     let character_device_link = format!("dev/char/{}:{}", number.major(), number.minor());
@@ -497,10 +472,18 @@ fn add_common_device_entries(
 
 fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    let physical = kdevice_uevent::physical_device_path(node.location());
-    let input = format!("devices/{physical}/input/input{}", node.index());
-    let event = format!("{input}/event{}", node.index());
+    // Both paths come from the node's canonical sysfs path (set by the
+    // publisher, shared with the uevent DEVPATH): the event device IS that
+    // path, the input parent is it minus the last segment. No local
+    // re-derivation — a second path construction would drift again.
+    let sysfs = node.sysfs_path();
+    let event = format!("devices/{sysfs}");
+    let input = match sysfs.rsplit_once('/') {
+        Some((parent, _)) => format!("devices/{parent}"),
+        None => event.clone(),
+    };
     add_directory(tree, &event);
+    add_directory(tree, &input);
     add_common_device_entries(tree, projected, &event);
     let event_device_link = format!("{event}/device");
     add_entry(
@@ -508,13 +491,18 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         event_device_link.clone(),
         TreeEntry::Symlink(relative_symlink(&event_device_link, &input)),
     );
-    let input_class_link = format!("class/input/input{}", node.index());
+    // In-class names for the class links come from the canonical path's
+    // segments: `.../inputN/eventN` → class/input/inputN and
+    // class/input/eventN.
+    let input_name = input.rsplit('/').next().unwrap_or(&input);
+    let event_name = event.rsplit('/').next().unwrap_or(&event);
+    let input_class_link = format!("class/input/{input_name}");
     add_entry(
         tree,
         input_class_link.clone(),
         TreeEntry::Symlink(relative_symlink(&input_class_link, &input)),
     );
-    let event_class_link = format!("class/input/event{}", node.index());
+    let event_class_link = format!("class/input/{event_name}");
     add_entry(
         tree,
         event_class_link.clone(),
@@ -526,76 +514,66 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         input_subsystem_link.clone(),
         TreeEntry::Symlink(relative_symlink(&input_subsystem_link, "class/input")),
     );
-    add_entry(
-        tree,
-        format!("{input}/uevent"),
-        TreeEntry::Uevent(projected.clone(), UeventScope::InputParent),
-    );
-
-    let Some(metadata) = node.input_metadata() else {
-        return;
-    };
-    add_entry(
-        tree,
-        format!("{input}/name"),
-        TreeEntry::Attribute(projected.clone(), append_line(metadata.name())),
-    );
-    add_entry(
-        tree,
-        format!("{input}/phys"),
-        TreeEntry::Attribute(projected.clone(), append_line(metadata.physical_location())),
-    );
-    add_entry(
-        tree,
-        format!("{input}/uniq"),
-        TreeEntry::Attribute(projected.clone(), append_line(metadata.unique_id())),
-    );
-    add_entry(
-        tree,
-        format!("{input}/properties"),
-        TreeEntry::Attribute(projected.clone(), append_line("0")),
-    );
-    let id = metadata.device_id();
-    for (name, value) in [
-        ("bustype", id.bus_type),
-        ("vendor", id.vendor),
-        ("product", id.product),
-        ("version", id.version),
-    ] {
-        add_entry(
-            tree,
-            format!("{input}/id/{name}"),
-            TreeEntry::Attribute(projected.clone(), append_line(&format!("{value:04x}"))),
-        );
+    // Input-parent attributes come from the class properties the device_class
+    // publisher already produces (single data source: NAME/PHYS/UNIQ,
+    // PRODUCT = bustype/vendor/product/version hex, and the capability
+    // bitmaps EV/KEY/REL/ABS/...). `sysfs:`-prefixed properties, when a
+    // producer adds them later, take precedence for the same file.
+    let mut file_attrs: Vec<(String, String)> = Vec::new();
+    for (key, value) in node.properties() {
+        match key.as_str() {
+            "NAME" => file_attrs.push((String::from("name"), value.clone())),
+            "PHYS" => file_attrs.push((String::from("phys"), value.clone())),
+            "UNIQ" => file_attrs.push((String::from("uniq"), value.clone())),
+            "PROP" => file_attrs.push((String::from("properties"), value.clone())),
+            "EV" | "KEY" | "REL" | "ABS" | "MSC" | "SW" | "LED" | "SND" | "FF" | "FF_STATUS" => {
+                file_attrs.push((
+                    format!("capabilities/{}", key.to_lowercase()),
+                    value.clone(),
+                ));
+            }
+            "PRODUCT" => {
+                // bustype/vendor/product/version, slash-separated hex.
+                let parts: Vec<&str> = value.split('/').collect();
+                if parts.len() == 4 {
+                    for (file, part) in [
+                        ("bustype", 0),
+                        ("vendor", 1),
+                        ("product", 2),
+                        ("version", 3),
+                    ] {
+                        file_attrs.push((format!("id/{file}"), String::from(parts[part])));
+                    }
+                }
+            }
+            _ => {
+                if let Some(file) = key.strip_prefix("sysfs:") {
+                    file_attrs.push((String::from(file), value.clone()));
+                }
+            }
+        }
     }
-    add_entry(
-        tree,
-        format!("{input}/capabilities/ev"),
-        TreeEntry::Attribute(projected.clone(), bitmap_text(metadata.event_types())),
-    );
-    for (event_type, name) in [
-        (1, "key"),
-        (2, "rel"),
-        (3, "abs"),
-        (4, "msc"),
-        (5, "sw"),
-        (0x11, "led"),
-        (0x12, "snd"),
-        (0x15, "ff"),
-    ] {
-        let bits = metadata.event_codes(event_type).unwrap_or(&[0]);
+    for (file, value) in file_attrs {
         add_entry(
             tree,
-            format!("{input}/capabilities/{name}"),
-            TreeEntry::Attribute(projected.clone(), bitmap_text(bits)),
+            format!("{input}/{file}"),
+            TreeEntry::Attribute(projected.clone(), append_line(&value)),
         );
     }
 }
 
 fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    let physical = kdevice_uevent::physical_device_path(node.location());
-    let card = format!("devices/{physical}/drm/card{}", node.index());
+    let physical = node.physical_path();
+    // The canonical sysfs path (`{phys}/drm/cardN`, shared with the uevent
+    // DEVPATH) is carried by the node; the in-class name for the
+    // `class/drm` link is its last segment.
+    let card = format!("devices/{}", node.sysfs_path());
+    let sysfs_name = node
+        .sysfs_path()
+        .rsplit('/')
+        .next()
+        .unwrap_or(node.sysfs_path());
     add_directory(tree, &card);
     add_common_device_entries(tree, projected, &card);
     let physical_device = format!("devices/{physical}");
@@ -605,7 +583,7 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
         card_device_link.clone(),
         TreeEntry::Symlink(relative_symlink(&card_device_link, &physical_device)),
     );
-    let class_link = format!("class/drm/card{}", node.index());
+    let class_link = format!("class/drm/{sysfs_name}");
     add_entry(
         tree,
         class_link.clone(),
@@ -613,10 +591,7 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
     );
 }
 
-fn build_tree(
-    nodes: &BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
-    characters: &[kvfs::CharacterDeviceRegistration],
-) -> BTreeMap<String, TreeEntry> {
+fn build_tree(nodes: &BTreeMap<u64, Arc<ProjectedDevice>>) -> BTreeMap<String, TreeEntry> {
     let mut tree = BTreeMap::new();
     for directory in [
         "devices",
@@ -631,66 +606,14 @@ fn build_tree(
         add_directory(&mut tree, directory);
     }
 
-    for registration in characters {
-        if !registration.is_registered() {
-            continue;
-        }
-        let device = registration.device_id();
-        let class = format!("class/{}", registration.class());
-        let leaf = format!(
-            "devices/virtual/{}/{}",
-            registration.class(),
-            registration.name()
-        );
-        add_directory(&mut tree, &class);
-        add_directory(&mut tree, &leaf);
-        add_entry(
-            &mut tree,
-            format!("{leaf}/dev"),
-            TreeEntry::CharacterAttribute(
-                registration.clone(),
-                append_line(&format!("{}:{}", device.major(), device.minor())),
-            ),
-        );
-        add_entry(
-            &mut tree,
-            format!("{leaf}/uevent"),
-            TreeEntry::CharacterAttribute(
-                registration.clone(),
-                format!(
-                    "MAJOR={}\nMINOR={}\nDEVNAME={}\n",
-                    device.major(),
-                    device.minor(),
-                    registration.name()
-                )
-                .into_bytes(),
-            ),
-        );
-        for (source, target) in [
-            (format!("{class}/{}", registration.name()), leaf.clone()),
-            (
-                format!("dev/char/{}:{}", device.major(), device.minor()),
-                leaf.clone(),
-            ),
-            (format!("{leaf}/subsystem"), class),
-        ] {
-            add_entry(
-                &mut tree,
-                source.clone(),
-                TreeEntry::Symlink(relative_symlink(&source, &target)),
-            );
-        }
-    }
-
     for projected in nodes.values() {
         let node = &projected.node;
-        let physical = kdevice_uevent::physical_device_path(node.location());
-        let bus = bus_name(node.location());
+        let physical = node.physical_path();
+        let bus = bus_name(node.physical_path());
         add_directory(&mut tree, &format!("devices/{physical}"));
-        add_directory(
-            &mut tree,
-            &format!("bus/{bus}/drivers/{}", node.driver_name()),
-        );
+        if let Some(driver) = node.driver_name() {
+            add_directory(&mut tree, &format!("bus/{bus}/drivers/{driver}"));
+        }
         let subsystem_link = format!("devices/{physical}/subsystem");
         add_entry(
             &mut tree,
@@ -703,12 +626,16 @@ fn build_tree(
             driver_link.clone(),
             TreeEntry::Symlink(relative_symlink(
                 &driver_link,
-                &format!("bus/{bus}/drivers/{}", node.driver_name()),
+                &format!(
+                    "bus/{bus}/drivers/{}",
+                    node.driver_name().unwrap_or("(none)")
+                ),
             )),
         );
-        match node.kind() {
-            DeviceNodeKind::Input => add_input_entries(&mut tree, projected),
-            DeviceNodeKind::Drm => add_drm_entries(&mut tree, projected),
+        match node.subsystem() {
+            "input" => add_input_entries(&mut tree, projected),
+            "drm" => add_drm_entries(&mut tree, projected),
+            _ => {}
         }
     }
     tree
@@ -777,20 +704,6 @@ impl SimpleDirOps for SysfsDirectory {
             .cloned()
             .ok_or(VfsError::NotFound)?;
         match entry {
-            TreeEntry::CharacterAttribute(registration, contents) => lookup.file(
-                name,
-                SimpleFile::new_regular_with_permission(
-                    self.fs.clone(),
-                    READ_ONLY_PERMISSION,
-                    move || {
-                        if registration.is_registered() {
-                            Ok(contents.clone())
-                        } else {
-                            Err(VfsError::NoSuchDevice)
-                        }
-                    },
-                ),
-            ),
             TreeEntry::Directory(directory) => {
                 Ok(lookup.dir_from_inode(name, directory.inode(self.fs.clone(), path)))
             }
@@ -808,13 +721,11 @@ impl SimpleDirOps for SysfsDirectory {
                     Ok(target.clone())
                 }),
             ),
-            TreeEntry::Uevent(projected, scope) => {
+            TreeEntry::Uevent(projected) => {
                 let file = CommandFile::new(move |operation| -> VfsResult<Option<Vec<u8>>> {
                     match operation {
                         SimpleFileOperation::Read => projected
-                            .with_available(|node| {
-                                kdevice_uevent::uevent_file_contents(node, scope)
-                            })
+                            .with_available(uevent::uevent_file_contents)
                             .map(Some),
                         SimpleFileOperation::Write { data, .. } => projected
                             .with_available(|node| -> VfsResult<()> {
@@ -823,7 +734,7 @@ impl SimpleDirOps for SysfsDirectory {
                                     .trim_matches(['\0', '\n', '\r', ' ']);
                                 let action = UeventAction::try_from(action)
                                     .map_err(|()| VfsError::InvalidInput)?;
-                                kdevice_uevent::publish(action, node, scope);
+                                uevent_netlink::publish(action, node);
                                 Ok(())
                             })
                             .and_then(|result| result)
@@ -845,20 +756,16 @@ impl SimpleDirOps for SysfsDirectory {
 
 #[unittest::mod_test]
 mod tests {
-    use unittest::{assert_eq, assert_ne, def_test};
+    use unittest::{assert_eq, def_test};
 
     use super::*;
 
     #[def_test]
     fn pci_paths_are_derived_from_bus_location() {
-        let path = kdevice_uevent::physical_device_path(DeviceLocation::Pci {
-            segment: 0,
-            bus: 4,
-            device: 2,
-            function: 1,
-        });
+        // The physical-path formatting is owned by devnode now; anchor its
+        // PCI form here too.
+        let path = devnode::physical_path_pci(0, 4, 2, 1);
         assert_eq!(path, "pci0000:04/0000:04:02.1");
-        assert_ne!(path.as_str(), "platform/simpledrm");
     }
 
     #[def_test]
@@ -913,38 +820,6 @@ mod tests {
             panic!("cgroup mountpoint must remain a directory");
         };
         assert!(Arc::ptr_eq(&before, after));
-    }
-
-    #[def_test]
-    fn virtual_character_projection_tracks_registration_and_retirement() {
-        struct Backend;
-        impl kvfs::DeviceFileOps for Backend {}
-        init_device_projection();
-        let device = kvfs::DeviceId::new(245, 900001);
-        let registration = kvfs::cdev_add_named(
-            device,
-            String::from("projection_test"),
-            String::from("registration_test"),
-            Arc::new(Backend),
-        )
-        .unwrap();
-        let path = "devices/virtual/registration_test/projection_test/dev";
-        let entry = device_projection().lock().tree.get(path).cloned().unwrap();
-        let TreeEntry::CharacterAttribute(identity, data) = entry else {
-            panic!("named cdev must have an attribute projection");
-        };
-        assert!(identity.same_registration(&registration));
-        assert_eq!(data, b"245:900001\n");
-        assert!(
-            device_projection()
-                .lock()
-                .tree
-                .contains_key("class/registration_test/projection_test")
-        );
-        kvfs::cdev_del(device, 1).unwrap();
-        assert!(!identity.is_registered());
-        assert!(!device_projection().lock().tree.contains_key(path));
-        assert!(!build_tree(&BTreeMap::new(), &[registration]).contains_key(path));
     }
 
     #[def_test]

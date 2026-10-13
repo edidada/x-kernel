@@ -21,7 +21,6 @@ ramdisk-static = []
 [dependencies]
 memaddr.workspace = true
 bitflags = { workspace = true }
-driver_base = { workspace = true }
 kerrno = { workspace = true }
 klazy = { workspace = true }
 ksync = { workspace = true }

@@ -303,9 +303,9 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-04 | scanout resource backing 悬空 | 高 | backing 在 `destroy_scanout_resource` 前被释放 | backing 由 `GlobalPage` 持有，生命周期覆盖 attach 到 destroy 全程，由 DRM/fbdev 层保证；destroy 失败会记录日志而非静默吞掉 |
 | T-05 | 中断上下文与正常路径并发访问 net 设备导致数据竞争 | 中 | IRQ 回调与 `send`/`recv` 同时执行 | `InnerDev` 被 `SpinNoIrq` 包裹，所有访问通过 `lock()` 互斥 |
 | T-06 | IRQ 注册失败后仍使用设备 | 中 | `register_virtio_net_irq` 返回 `ResourceBusy` | `try_new()` 传播错误，设备不会被创建 |
-| T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `DriverError::NoMemory`，上层应等待 `recycle_tx` 后重试 |
+| T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `KError::NoMemory`，上层应等待 `recycle_tx` 后重试 |
 | T-08 | `probe_mmio_device` 传入空指针 | 高 | `reg_base` 为 null | `NonNull::new(...).unwrap()` 会 panic；调用者应确保地址非空 |
-| T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `DriverError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
+| T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `KError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
 | T-12 | VirtIO 块设备的只读能力未被上层执行 | 中 | VMM 协商 `VIRTIO_BLK_F_RO`，但 block core 仍把磁盘视为可写 | `VirtIoBlkDev` 把固有只读能力传播给 block core，并在底层写入口再次拒绝写请求 |
@@ -316,26 +316,26 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 设备初始化失败 | VirtIO feature 协商失败、DMA 分配失败 | 设备不可用 | 对应子系统无法使用该设备 | 2 | `try_new()` 返回错误，上层可尝试其他设备或降级运行 |
-| F-02 | 块设备读写失败 | 设备返回 IO 错误 | 单次读写失败 | 文件系统可能标记为只读 | 3 | 返回 `DriverError::Io`，上层文件系统处理错误 |
+| F-02 | 块设备读写失败 | 设备返回 IO 错误 | 单次读写失败 | 文件系统可能标记为只读 | 3 | 返回 `KError::Io`，上层文件系统处理错误 |
 | F-03 | 网络设备收发丢包 | VirtIO 队列满或缓冲区不足 | 丢包 | 网络通信质量下降 | 4 | 返回 `WouldBlock`/`NoMemory`，上层协议栈重传 |
 | F-04 | 网络设备 IRQ 未响应 | 中断未注册或硬件故障 | 无法及时收到数据 | 网络延迟增大或完全不可用 | 2 | 轮询模式作为降级方案；日志记录中断状态 |
-| F-05 | GPU 帧缓冲区刷新失败 | 设备 flush 返回错误 | 画面不更新 | 显示异常 | 3 | 返回 `DriverError`，上层可重试 |
+| F-05 | GPU 帧缓冲区刷新失败 | 设备 flush 返回错误 | 画面不更新 | 显示异常 | 3 | 返回 `KError`，上层可重试 |
 | F-06 | vsock 连接断开 | 对端关闭或传输错误 | 连接丢失 | vsock 通信中断 | 3 | `poll_event` 返回 `Disconnected`，上层重建连接 |
 | F-07 | 9p 请求超时 | 设备无响应 | 文件操作挂起 | 文件系统不可用 | 2 | 当前无超时机制，依赖上层超时处理 |
 | F-08 | `probe_mmio_device` panic | 传入空指针 | 初始化中断 | 系统启动失败 | 1 | 调用者必须验证地址有效性 |
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
 | F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
-| F-11 | 对固有只读块设备发起写请求 | 上层绕过或尚未建立 block-device view | 单次写入被拒绝 | 文件系统保持只读且介质不被修改 | 3 | `write_block()` 的轮询和 IRQ 请求路径均在提交前返回 `DriverError::ReadOnly` |
+| F-11 | 对固有只读块设备发起写请求 | 上层绕过或尚未建立 block-device view | 单次写入被拒绝 | 文件系统保持只读且介质不被修改 | 3 | `write_block()` 的轮询和 IRQ 请求路径均在提交前返回 `KError::ReadOnly` |
 | F-12 | 输入设备 IRQ 注册失败 | IRQ 缺失、无效或共享 action 数量达到上限 | 输入设备无法唤醒读取者 | 键盘或鼠标不会发布 | 3 | host 激活流程传播注册错误，且 VirtIO 输入设备不提供轮询降级路径 |
 
 ## 故障管理
 
 - **错误码**：所有设备操作通过 `as_driver_error()` 将 `virtio_drivers::Error` 映射为
-  `DriverError`，上层统一处理。
+  `KError`，上层统一处理。
 - **Panic 策略**：
   - `probe_mmio_device` 中 `reg_base` 为 null 时 panic（启动阶段，不可恢复）。
   - `try_new()` 中 `receive_begin` 返回的 token 与预期不符时 panic（内部一致性错误）。
-  - 其他路径不主动 panic，通过 `DriverResult` 传播错误。
+  - 其他路径不主动 panic，通过 `KResult` 传播错误。
 - **故障恢复**：
   - 网络设备：`recycle_tx`/`recycle_rx` 回收缓冲区后可继续操作。
   - 其他设备：单次操作失败后可重试，设备状态由 `virtio-drivers` 管理。

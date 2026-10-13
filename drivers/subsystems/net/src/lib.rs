@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 // #[cfg(feature = "ixgbe")]
 // /// ixgbe NIC device driver.
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
 
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};
@@ -37,7 +37,7 @@ pub trait NetRxScheduler: Send + Sync {
 }
 
 /// Operations that require a network device (NIC) driver to implement.
-pub trait NetDevice: Device {
+pub trait NetDevice: Send + Sync {
     /// The hardware address of the NIC.
     fn mac(&self) -> MacAddress;
 
@@ -57,14 +57,14 @@ pub trait NetDevice: Device {
     ///
     /// `rx_buf` should be the same as the one returned by
     /// [`NetDevice::recv`].
-    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult;
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> KResult;
 
     /// Poll the transmit queue and gives back the buffers for previous transmissions.
-    /// returns [`DriverResult`].
-    fn recycle_tx(&self) -> DriverResult;
+    /// returns [`KResult`].
+    fn recycle_tx(&self) -> KResult;
 
     /// Transmits a packet in the buffer to the network, without blocking.
-    fn send(&self, tx_buf: NetBufHandle) -> DriverResult;
+    fn send(&self, tx_buf: NetBufHandle) -> KResult;
 
     /// Receives a packet from the network and stores it in the [`NetBuf`].
     ///
@@ -72,18 +72,18 @@ pub trait NetDevice: Device {
     /// in the receive queue by [`NetDevice::recycle_rx`].
     ///
     /// If currently no incoming packets, returns an error with type
-    /// [`DriverError::WouldBlock`].
-    fn recv(&self) -> DriverResult<NetBufHandle>;
+    /// [`KError::WouldBlock`].
+    fn recv(&self) -> KResult<NetBufHandle>;
 
     /// Allocate a memory buffer of a specified size for network transmission.
-    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle>;
+    fn alloc_tx_buf(&self, size: usize) -> KResult<NetBufHandle>;
 
     /// Attach or detach the network subsystem's RX scheduler.
     ///
     /// Drivers that support interrupt-driven RX should store `scheduler` and
     /// call it from their IRQ handler after device interrupt acknowledgement.
     /// Poll-only drivers may keep the default unsupported implementation.
-    fn set_rx_scheduler(&self, _scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
-        Err(DriverError::Unsupported)
+    fn set_rx_scheduler(&self, _scheduler: Option<Arc<dyn NetRxScheduler>>) -> KResult {
+        Err(KError::Unsupported)
     }
 }

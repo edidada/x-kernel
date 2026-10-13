@@ -7,8 +7,7 @@ homepage.workspace = true
 
 [dependencies]
 bitmaps = { version = "3.2.1", default-features = false }
-kclass = { workspace = true, features = ["input"] }
-kdevice = { workspace = true }
+device_class = { workspace = true, features = ["input"] }
 ksync.workspace = true
 ktime.workspace = true
 ktime_types.workspace = true

@@ -5,11 +5,11 @@
 use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
-use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
-use kclass::{
+use device_class::{
     ClassDevice,
     prelude::{Event, EventType, InputDevice, InputDeviceImpl},
 };
+use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;

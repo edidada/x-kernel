@@ -8,7 +8,7 @@
 #![cfg_attr(doc, feature(doc_cfg))]
 
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
 
 /// Vsock address.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,7 +85,7 @@ impl VsockConnectionInfo {
 /// Implementors only need to know how to move virtio-vsock packets between the
 /// guest and the host. Connection state, listen tables, accept queues, and
 /// receive buffering live in the connection manager that consumes this trait.
-pub trait VsockDevice: Device {
+pub trait VsockDevice: Send + Sync {
     /// Returns the CID which has been assigned to this guest.
     fn guest_cid(&self) -> u64;
 
@@ -96,10 +96,10 @@ pub trait VsockDevice: Device {
     fn unlisten(&self, port: u32);
 
     /// Send a connection request to the peer.
-    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+    fn connect(&self, info: &VsockConnectionInfo) -> KResult<()>;
 
     /// Accept an incoming connection request from the peer.
-    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+    fn accept(&self, info: &VsockConnectionInfo) -> KResult<()>;
 
     /// Forcibly close or reject a connection by sending an RST packet.
     ///
@@ -109,22 +109,22 @@ pub trait VsockDevice: Device {
     ///
     /// The full connection info is required because the underlying vsock header
     /// carries `buf_alloc` and `fwd_cnt` even in RST packets.
-    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+    fn force_close(&self, info: &VsockConnectionInfo) -> KResult<()>;
 
     /// Send a packet body to the peer.
     ///
-    /// Returns the number of bytes sent, or [`DriverError::WouldBlock`] if the
+    /// Returns the number of bytes sent, or [`KError::WouldBlock`] if the
     /// peer has no credit available.
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize>;
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> KResult<usize>;
 
     /// Request a clean shutdown of the connection.
     ///
     /// The full connection info is required because the underlying vsock header
     /// carries `buf_alloc` and `fwd_cnt` even in shutdown packets.
-    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+    fn shutdown(&self, info: &VsockConnectionInfo) -> KResult<()>;
 
     /// Send a credit update to the peer.
-    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+    fn credit_update(&self, info: &VsockConnectionInfo) -> KResult<()>;
 
     /// Poll the receive virtqueue for the next raw event.
     ///
@@ -135,8 +135,8 @@ pub trait VsockDevice: Device {
     /// without deadlocking.
     fn poll_event(
         &self,
-        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
-    ) -> DriverResult<bool>;
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> KResult<()>,
+    ) -> KResult<bool>;
 }
 
 /// A raw event delivered by the low-level vsock transport.

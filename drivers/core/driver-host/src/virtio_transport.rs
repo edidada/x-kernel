@@ -31,8 +31,14 @@ impl PciTransportService {
         &self,
         data: &dyn BusDeviceData,
         resources: &driver_core::ResourceMap,
-    ) -> Result<(DeviceKind, virtio_devices::PciTransport, Option<usize>), driver_core::RuntimeError>
-    {
+    ) -> Result<
+        (
+            virtio_devices::VirtioDeviceKind,
+            virtio_devices::PciTransport,
+            Option<usize>,
+        ),
+        driver_core::RuntimeError,
+    > {
         crate::probe_pci_transport_with(self.provider, data, resources)
     }
 }

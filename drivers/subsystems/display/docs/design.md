@@ -23,8 +23,8 @@ drivers that can scan out guest memory directly.
   height in pixels), `ScanoutFormat` (currently `Bgra8888`, the 32-bit
   BGRA/XRGB layout consumed by virtio-gpu 2D resources), and
   `ScanoutResource` (id, width, height, pitch, format).
-- Re-export the `device-traits` vocabulary (`Device`, `DeviceKind`,
-  `DriverError`, `DriverResult`) so display drivers import one contract
+- Re-export the error vocabulary (
+  `KError`, `KResult`) so display drivers import one contract
   root.
 
 ## Non-Responsibilities
@@ -52,7 +52,7 @@ drivers/subsystems/display/
 ## Architecture
 
 ```text
-device-traits (Device base, DriverError/Result, discovery pipeline)
+kerrno (KError/KResult, discovery pipeline)
       ^
       |  impl DisplayDevice for <driver>   e.g. virtio-gpu
       |
@@ -99,12 +99,12 @@ ownership protocol over host-visible 2D resources:
 
 ## Error Model
 
-All fallible operations return `driver_base::DriverResult`:
+All fallible operations return `kerrno::KResult`:
 
 - `flush` — hardware-level failure to push the frame.
 - `create_scanout_resource`, `destroy_scanout_resource`,
   `present_scanout_resource` — default
-  `DriverError::Unsupported` for drivers without the capability;
+  `KError::Unsupported` for drivers without the capability;
   implementers return their own errors for invalid descriptors, resource
   exhaustion, or an unknown resource id.
 
@@ -120,6 +120,6 @@ All fallible operations return `driver_base::DriverResult`:
 - Single `Bgra8888` format initially: it is the layout virtio-gpu 2D
   resources and simple framebuffers agree on; widening `ScanoutFormat`
   is additive and does not change the trait.
-- Re-export `device-traits` types: consistent with the sibling contract
+- Re-export `kerrno` types: consistent with the sibling contract
   crates (`char`, `input`, `net`, `block`), one error vocabulary and one
   import root for implementers.

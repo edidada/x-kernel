@@ -5,7 +5,7 @@
 //! Common VFS data types.
 
 /// Device number stored in special inodes (`dev_t`).
-pub use kdevice::DeviceNumber as DeviceId;
+pub use devnode::DeviceNumber as DeviceId;
 use ktime_types::SystemTime;
 
 /// Filesystem node type values.

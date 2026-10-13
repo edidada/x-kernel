@@ -10,8 +10,9 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-kdevice.workspace = true
-kdevice_uevent.workspace = true
+devnode = { workspace = true }
+
+uevent_netlink.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 klazy.workspace = true

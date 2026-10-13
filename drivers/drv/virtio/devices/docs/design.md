@@ -3,7 +3,7 @@
 ## 定位
 
 本模块是 x-kernel 的 VirtIO 驱动适配层，将 [`virtio-drivers`] crate 提供的各类
-VirtIO 设备封装为 [`device-traits`] 系列 trait 的实现。块设备、网络、显示、输入、
+VirtIO 设备封装为 [`kerrno`] 系列 trait 的实现。块设备、网络、显示、输入、
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
@@ -14,7 +14,7 @@ contract（由 `driver-host` 绑定到主机）传入。
 
 x-kernel 运行在裸机 `no_std` 环境中，需要通过 VirtIO 协议与虚拟机监控器（VMM）
 通信来使用虚拟设备。`virtio-drivers` crate 提供了 VirtIO 协议的基础实现（队列管理、
-配置空间访问等），但其接口与 x-kernel 的驱动框架（`device-traits` 系列 trait）不一致，
+配置空间访问等），但其接口与 x-kernel 的驱动框架（`kerrno` 系列 trait）不一致，
 因此需要本适配层进行桥接，使上层子系统无需关心 VirtIO 协议细节。
 
 ## 范围
@@ -77,7 +77,7 @@ Feature flags 控制编译哪些设备适配器：
 
 | 组件 | 职责 |
 |------|------|
-| `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
+| `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `KError` 的转换、公共类型 re-export |
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev`，在 IRQ 中确认 ISR 并通知输入层延迟取事件 |
@@ -200,7 +200,7 @@ Empty ──设备产生事件──> HasEvent ──read_event──> Empty
 |----|----|----------|
 | Empty | HasEvent | 设备产生输入事件，VirtIO 队列中存在待读取事件 |
 | HasEvent | Empty | `read_event()` 成功弹出事件 |
-| Empty | WouldBlock | `read_event()` 调用时队列无事件，返回 `DriverError::WouldBlock` |
+| Empty | WouldBlock | `read_event()` 调用时队列无事件，返回 `KError::WouldBlock` |
 | WouldBlock | HasEvent | 设备产生新事件 |
 
 > 输入设备为轮询模型：`read_event()` 非阻塞地从 VirtIO 队列弹出事件，
@@ -272,7 +272,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 ### PCI 设备探测
 
 1. 读取 PCI 配置空间，获取设备类型信息
-2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
+2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 the family kind vocabulary
 3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
    - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
@@ -284,15 +284,15 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
    - riscv64：映射为 PLIC 中断
    - loongarch64：直接使用硬件 IRQ 号
 5. 屏蔽输入设备及当前仅轮询的 vsock 路径所使用的 legacy INTx，随后返回
-   `(DeviceKind, PciTransport, irq)`。host 集成层仅在输入设备的共享中断处理程序
+   `(VirtioDeviceKind, PciTransport, irq)`。host 集成层仅在输入设备的共享中断处理程序
    注册完成后解除其 INTx 屏蔽；vsock 的 INTx 保持屏蔽。
 
 ### MMIO 设备探测
 
 1. 将内存基地址转换为 `VirtIOHeader` 指针（`NonNull::new` 确保非空）
 2. 创建 `MmioTransport`，验证魔数（`0x74726976`）和版本（仅支持版本 2）
-3. 映射设备类型为 `DeviceKind`（通过 `as_device_kind()`）
-4. 返回 `(DeviceKind, MmioTransport)`
+3. 映射设备类型为 the family kind vocabulary（通过 `as_device_kind()`）
+4. 返回 `(VirtioDeviceKind, MmioTransport)`
 
 ### Block Reads, Writes And Flushes
 
@@ -368,7 +368,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 1. 调用 `read_event()` → `inner.pop_pending_event()`
 2. 若队列有待读取事件：返回 `Event { event_type, code, value }`
-3. 若队列为空：返回 `DriverError::WouldBlock`；`inputdev` 在设备通知后负责延迟取事件
+3. 若队列为空：返回 `KError::WouldBlock`；`inputdev` 在设备通知后负责延迟取事件
 
 **能力查询流程**：
 
@@ -509,7 +509,7 @@ host IRQ 核心或工作队列。
 ### 为什么用适配器模式而非直接实现
 
 `virtio-drivers` crate 的设备类型（如 `VirtIOBlk<H, T>`）是泛型结构体，
-直接为其实现 `device-traits` 的 trait 会违反孤儿规则（orphan rule）。
+直接为其实现 `kerrno` 的 trait 会违反孤儿规则（orphan rule）。
 因此采用 newtype 适配器模式，在每个子模块中定义自己的包装类型。
 
 ### 为什么手动实现 Send/Sync

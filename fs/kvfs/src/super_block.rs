@@ -1372,15 +1372,15 @@ mod tests {
             512
         }
 
-        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::DriverResult {
+        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::KResult {
             Ok(())
         }
 
-        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::DriverResult {
+        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::KResult {
             Ok(())
         }
 
-        fn flush(&self) -> block::DriverResult {
+        fn flush(&self) -> block::KResult {
             Ok(())
         }
     }
@@ -1448,10 +1448,11 @@ mod tests {
         })
     }
 
-    fn add_test_disk(name: &str, major: u32) -> (block::GendiskRef, Arc<block::BlockDevice>) {
-        let disk =
-            block::Gendisk::alloc(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
-                .expect("valid superblock test disk");
+    fn add_test_disk(name: &str, major: u32) -> (Arc<block::Gendisk>, Arc<block::BlockDevice>) {
+        let disk = Arc::new(
+            block::Gendisk::new(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
+                .expect("valid superblock test disk"),
+        );
         let block_device = block::add_disk(disk.clone()).expect("publish superblock test disk");
         (disk, block_device)
     }

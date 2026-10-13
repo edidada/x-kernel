@@ -5,7 +5,7 @@
 //! VirtIO 9p driver adapter.
 use alloc::string::{String, ToString};
 
-use driver_base::{Device, DeviceKind, DriverResult};
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 use virtio_drivers::{Hal, device::virtio_9p::VirtIO9p as InnerDev, transport::Transport};
 
@@ -20,7 +20,7 @@ pub trait Virtio9pDevice: Device {
     fn mount_tag(&self) -> String;
 
     /// Sends a raw 9p request and waits for the response.
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize>;
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> KResult<usize>;
 }
 
 /// The VirtIO 9p device driver.
@@ -68,8 +68,8 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns `DriverError` if the VirtIO 9p device fails to initialize.
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
+    /// Returns `KError` if the VirtIO 9p device fails to initialize.
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
         let inner = InnerDev::new(transport).map_err(as_driver_error)?;
         let mount_tag = inner.mount_tag().to_string();
         Ok(Self {
@@ -103,24 +103,14 @@ impl<H: Hal, T: Transport> Virtio9pDevice for VirtIo9pDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns `DriverError` if the request fails (device error, buffer too
+    /// Returns `KError` if the request fails (device error, buffer too
     /// small, etc.).
-    fn request(&self, req: &[u8], resp: &mut [u8]) -> DriverResult<usize> {
+    fn request(&self, req: &[u8], resp: &mut [u8]) -> KResult<usize> {
         self.inner
             .lock()
             .request(req, resp)
             .map(|written| written as usize)
             .map_err(as_driver_error)
-    }
-}
-
-impl<H: Hal, T: Transport> Device for VirtIo9pDev<H, T> {
-    fn name(&self) -> &str {
-        "virtio-9p"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Fs9p
     }
 }
 

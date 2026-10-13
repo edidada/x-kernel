@@ -174,7 +174,7 @@ Severity levels:
 
 ## Failure Management
 
-- Publish validation failures return `DriverError` (`BadState`,
+- Publish validation failures return `KError` (`BadState`,
   `InvalidInput`, `AlreadyExists`); nothing panics.
 - devices, find, subscribe, and remove are infallible; publish reports
   duplicate identity explicitly.

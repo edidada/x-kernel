@@ -28,12 +28,11 @@ use block::{
     dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
 };
 use device_class::{ClassParent, publish_block};
-use driver_base::Device as _;
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
-use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal};
+use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and
 /// transitional 0x1001. Note the transitional series is type-indexed
@@ -65,7 +64,7 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<BlkData, ProbeError> {
         let (kind, transport, irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Block) {
+        if !matches!(kind, VirtioDeviceKind::Block) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -219,7 +218,8 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     let location = crate::common::physical_path(dev);
     let publication = publish_block(
         ClassParent::detached(dev.id().raw(), "virtio-blk", location),
-        disk,
+        disk.clone(),
+        disk.name(),
     )
     .map_err(crate::common::map_driver_error)?;
     activation.publication = Some(device_class::block_withdraw(&publication));

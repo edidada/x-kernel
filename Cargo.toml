@@ -10,13 +10,13 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "drivers/core/driver-core",
+    "drivers/core/driver-host",
+    "drivers/core/driver-compose",
+    "drivers/common/devnode",
+    "drivers/drv/*",
     "tee/tee_crypto",
     "tee/xdice",
-    "drivers/core/driver-core",
-    "core/kclk",
-    "drivers/common/devnode",
-    "drivers/common/device-class",
-    "drivers/integration/uevent-netlink",
 ]
 exclude = [
     # Preserved upstream crate, with its own standalone host test workspace.
@@ -194,39 +194,34 @@ ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
-block = { path = "drivers/contracts/block" }
-hwrng = { path = "drivers/contracts/hwrng" }
+block = { path = "drivers/subsystems/block" }
 char_driver = { path = "drivers/subsystems/char" }
-display = { path = "drivers/contracts/display" }
-driver_base = { path = "drivers/contracts/driver_base" }
-device_res = { path = "drivers/contracts/device-res", package = "device-res" }
-kclass = { path = "drivers/contracts/kclass" }
-device_class = { path = "drivers/common/device-class", package = "device-class" }
+display = { path = "drivers/subsystems/display" }
+hwrng = { path = "drivers/subsystems/hwrng" }
+kclk = { path = "core/kclk" }
+driver-core = { path = "drivers/core/driver-core" }
+driver_host = { path = "drivers/core/driver-host", package = "driver-host" }
 driver-compose = { path = "drivers/core/driver-compose" }
+drv-virtio = { path = "drivers/drv/virtio" }
 drv-serial = { path = "drivers/drv/serial" }
 drv-clk = { path = "drivers/drv/clk" }
-driver-core = { path = "drivers/core/driver-core" }
-kclk = { path = "core/kclk" }
-driver_host = { path = "drivers/core/driver-host", package = "driver-host" }
+drv-block = { path = "drivers/drv/block" }
 devnode = { path = "drivers/common/devnode" }
-
-kdevice = { path = "drivers/contracts/kdevice" }
-input = { path = "drivers/contracts/input" }
-net = { path = "drivers/contracts/net" }
-vsock = { path = "drivers/contracts/vsock" }
+device_class = { path = "drivers/common/device-class", package = "device-class" }
+input = { path = "drivers/subsystems/input" }
+net = { path = "drivers/subsystems/net" }
+vsock = { path = "drivers/subsystems/vsock" }
 
 # Internal: portable concrete drivers
-virtio = { path = "drivers/devices/virtio" }
+virtio_devices = { path = "drivers/drv/virtio/devices", package = "virtio-devices" }
 
 # Internal: driver adapters and integration
-device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
-kdriver = { path = "drivers/integration/kdriver" }
-kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
+uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
 console_driver = { path = "drivers/platform/console", package = "console-driver" }
-pci = { path = "drivers/platform/pci" }
+pci = { path = "drivers/bus/pci" }
 rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
 acpi = { path = "drivers/firmware/acpi" }
 of = { path = "drivers/firmware/of" }
@@ -291,7 +286,6 @@ zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = { version = "1.9", default-features = false }
 uuid = { version = "0.8", default-features = false }
 chrono = { version = "0.4", default-features = false }
-crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
 etherparse = { version = "0.20.2", default-features = false }
 event-listener = { version = "=5.4.1", default-features = false }

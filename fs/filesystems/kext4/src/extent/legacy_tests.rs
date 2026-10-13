@@ -6,7 +6,7 @@
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
-use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, KError, KResult};
 use unittest::def_test;
 
 use crate::{
@@ -21,16 +21,6 @@ use crate::{
 // adding configurable geometry or write/fault state to the shared fixture.
 struct ReadOnlyDevice(Vec<u8>);
 
-impl Device for ReadOnlyDevice {
-    fn name(&self) -> &str {
-        "legacy-mapping-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-}
-
 impl BlockDeviceOperations for ReadOnlyDevice {
     fn num_blocks(&self) -> u64 {
         (self.0.len() / 512) as u64
@@ -40,23 +30,23 @@ impl BlockDeviceOperations for ReadOnlyDevice {
         512
     }
 
-    fn read_block(&self, block: u64, output: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block: u64, output: &mut [u8]) -> KResult {
         let start = usize::try_from(block)
             .ok()
             .and_then(|block| block.checked_mul(512))
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         let end = start
             .checked_add(output.len())
-            .ok_or(DriverError::InvalidInput)?;
-        output.copy_from_slice(self.0.get(start..end).ok_or(DriverError::InvalidInput)?);
+            .ok_or(KError::InvalidInput)?;
+        output.copy_from_slice(self.0.get(start..end).ok_or(KError::InvalidInput)?);
         Ok(())
     }
 
-    fn write_block(&self, _: u64, _: &[u8]) -> DriverResult {
-        Err(DriverError::Unsupported)
+    fn write_block(&self, _: u64, _: &[u8]) -> KResult {
+        Err(KError::Unsupported)
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
     }
 }

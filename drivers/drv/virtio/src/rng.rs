@@ -13,15 +13,15 @@
 use alloc::sync::{Arc, Weak};
 
 use device_class::{ClassParent, publish_hwrng};
-use driver_base::DriverError;
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use hwrng::completion::RngCompletion;
+use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
-use virtio_devices::VirtIoRngDev;
+use virtio_devices::{VirtIoRngDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
 /// modern 0x1044 (0x1040 + entropy device type 4).
@@ -48,7 +48,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<RngData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Hwrng) {
+        if !matches!(kind, VirtioDeviceKind::Hwrng) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -74,7 +74,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 /// [`RngCompletion::wait_until`] **must run in task context**. It calls
 /// [`PreparedTaskWait::prepare`], which parks the *current task*; from hard-IRQ
 /// or softirq context there is no task to park, and `prepare()` fails — the
-/// error surfaces as [`DriverError::InvalidInput`], not as a hang, but the
+/// error surfaces as [`KError::InvalidInput`], not as a hang, but the
 /// entropy read fails. [`RngCompletion::notify`] is the IRQ-side half and is
 /// safe from interrupt context: it only wakes.
 ///
@@ -110,8 +110,8 @@ impl HostRngCompletion {
 impl RngCompletion for HostRngCompletion {
     /// Block until `ready()` holds. **Task context only** — see the
     /// execution-context note on [`HostRngCompletion`].
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> driver_base::DriverResult {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult {
+        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| KError::InvalidInput)?;
         if ready() {
             return Ok(());
         }
@@ -134,10 +134,10 @@ impl RngCompletion for HostRngCompletion {
     }
 }
 
-fn registration_error(error: PollRegisterError) -> DriverError {
+fn registration_error(error: PollRegisterError) -> KError {
     match error {
-        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => DriverError::NoMemory,
-        PollRegisterError::InvalidState => DriverError::InvalidInput,
+        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
+        PollRegisterError::InvalidState => KError::InvalidInput,
     }
 }
 
@@ -182,6 +182,7 @@ pub fn activate<B: driver_core::Bus>(
     let publication = publish_hwrng(
         ClassParent::detached(dev.id().raw(), "virtio-rng", location),
         device,
+        "virtio-rng",
     )
     .map_err(crate::common::map_driver_error)?;
     Ok((publication, irq))

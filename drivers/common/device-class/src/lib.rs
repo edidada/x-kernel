@@ -21,10 +21,9 @@ extern crate alloc;
 
 #[cfg(feature = "input")]
 use alloc::collections::BTreeMap;
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
-#[cfg(feature = "char")]
-use driver_base::DriverResult;
+use kerrno::KResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -101,7 +100,7 @@ pub use hwrng::HwrngDevice;
 
 #[cfg(feature = "hwrng")]
 impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         self.with_available(|device| device.read(buf))
     }
 
@@ -132,7 +131,7 @@ trait ClassRuntimeMetadata {
         ClassDeviceMetadata::empty()
     }
 
-    fn publish_class(&self) -> DriverResult<()> {
+    fn publish_class(&self) -> KResult<()> {
         Ok(())
     }
 
@@ -165,7 +164,7 @@ pub struct InputNodeMetadata {
 
 #[cfg(feature = "block")]
 impl ClassRuntimeMetadata for BlockDeviceImpl {
-    fn publish_class(&self) -> DriverResult<()> {
+    fn publish_class(&self) -> KResult<()> {
         block::add_disk(self.clone()).map(drop)
     }
 
@@ -260,12 +259,13 @@ macro_rules! class_api {
         pub fn $publish_fn(
             parent: impl Into<ClassParent>,
             runtime: $ty,
-        ) -> DriverResult<ClassDevice<$ty>> {
-            let name = runtime.name().into();
-            let irq = runtime.irq();
+            name: impl Into<String>,
+        ) -> KResult<ClassDevice<$ty>> {
+            // The name arrives explicitly: the driver built it, it owns it.
+            // No runtime-tag extraction — the registry's type is the class.
+            let name = name.into();
             let metadata = runtime.class_metadata();
-            let device =
-                ClassDevice::try_new_with_class_metadata(parent, runtime, name, irq, metadata)?;
+            let device = ClassDevice::try_new_with_class_metadata(parent, runtime, name, metadata)?;
             device.with(ClassRuntimeMetadata::publish_class)?;
             let id = device.id();
             let is_active = device.is_available();
@@ -614,8 +614,7 @@ mod node_compat {
 pub mod prelude {
     #[cfg(feature = "block")]
     pub use block::BlockDeviceOperations;
-    #[cfg(feature = "char")]
-    pub use driver_base::DriverResult;
+    pub use kerrno::{KError, KResult};
 
     #[cfg(feature = "block")]
     pub use crate::BlockDeviceImpl;

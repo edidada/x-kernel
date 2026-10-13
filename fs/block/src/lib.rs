@@ -15,7 +15,7 @@ extern crate alloc;
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
-use block::{BlockDevice, DriverResult};
+use block::{BlockDevice, KResult};
 
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
@@ -80,7 +80,7 @@ impl SeekableDisk {
     }
 
     /// Sets the current byte position.
-    pub fn set_position(&mut self, pos: u64) -> DriverResult<()> {
+    pub fn set_position(&mut self, pos: u64) -> KResult<()> {
         self.flush()?;
         self.block_id = pos >> self.block_size_log2;
         self.offset = pos as usize & (self.block_size() - 1);
@@ -88,7 +88,7 @@ impl SeekableDisk {
     }
 
     /// Writes pending buffered data and flushes the backing device.
-    pub fn flush(&mut self) -> DriverResult<()> {
+    pub fn flush(&mut self) -> KResult<()> {
         if self.write_buffer_dirty {
             self.dev.write_block(self.block_id, &self.write_buffer)?;
             self.write_buffer_dirty = false;
@@ -96,7 +96,7 @@ impl SeekableDisk {
         self.dev.flush()
     }
 
-    fn read_partial(&mut self, buf: &mut &mut [u8]) -> DriverResult<usize> {
+    fn read_partial(&mut self, buf: &mut &mut [u8]) -> KResult<usize> {
         self.flush()?;
         self.dev.read_block(self.block_id, &mut self.read_buffer)?;
 
@@ -113,7 +113,7 @@ impl SeekableDisk {
     }
 
     /// Reads bytes at the current cursor and advances it.
-    pub fn read(&mut self, mut buf: &mut [u8]) -> DriverResult<usize> {
+    pub fn read(&mut self, mut buf: &mut [u8]) -> KResult<usize> {
         let mut read = 0;
         if self.offset != 0 {
             read += self.read_partial(&mut buf)?;
@@ -132,7 +132,7 @@ impl SeekableDisk {
         Ok(read)
     }
 
-    fn write_partial(&mut self, buf: &mut &[u8]) -> DriverResult<usize> {
+    fn write_partial(&mut self, buf: &mut &[u8]) -> KResult<usize> {
         if !self.write_buffer_dirty {
             self.dev.read_block(self.block_id, &mut self.write_buffer)?;
             self.write_buffer_dirty = true;
@@ -152,7 +152,7 @@ impl SeekableDisk {
     }
 
     /// Writes bytes at the current cursor and advances it.
-    pub fn write(&mut self, mut buf: &[u8]) -> DriverResult<usize> {
+    pub fn write(&mut self, mut buf: &[u8]) -> KResult<usize> {
         let mut written = 0;
         if self.offset != 0 {
             written += self.write_partial(&mut buf)?;

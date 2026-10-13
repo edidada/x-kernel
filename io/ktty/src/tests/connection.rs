@@ -5,7 +5,7 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use char_driver::{Device, DeviceKind, DriverError, DriverResult};
+use char_driver::{KError, KResult};
 use console_driver::serial::test_support::SerialPortFixture;
 use unittest::def_test;
 
@@ -16,34 +16,21 @@ struct RuntimeIo {
     fails: bool,
 }
 
-impl Device for RuntimeIo {
-    fn name(&self) -> &str {
-        "tty-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Char
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
 
 impl CharDevice for RuntimeIo {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.fails {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         buf.fill(b'r');
         Ok(buf.len())
     }
 
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.fails {
-            Err(DriverError::BadState)
+            Err(KError::BadState)
         } else {
             Ok(buf.len())
         }
@@ -76,7 +63,7 @@ fn connection(
         parent.mark_offline();
     }
     let handle =
-        ClassDevice::try_new_with_info(parent, runtime, "tty-test".into(), None)
+        ClassDevice::try_new_with_info(parent, runtime, "tty-test".into())
             .unwrap();
     let connection = ConsoleConnection {
         boot_port,

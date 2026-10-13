@@ -111,7 +111,7 @@ fn input_irq_binding_initial_pass_duplicate_and_stop() {
     let passes = &observer.passes;
     assert_eq!(
         port.attach_input_waker(waker.clone()),
-        Err(DriverError::BadState)
+        Err(KError::BadState)
     );
     assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
     port.prepare_irq_input().unwrap();
@@ -130,7 +130,7 @@ fn input_irq_binding_initial_pass_duplicate_and_stop() {
     assert_eq!(passes.load(Ordering::Acquire), 1);
     assert_eq!(
         port.attach_input_waker(waker.clone()),
-        Err(DriverError::AlreadyExists)
+        Err(KError::AlreadyExists)
     );
     assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
     assert_eq!(passes.load(Ordering::Acquire), 1);

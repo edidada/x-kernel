@@ -28,6 +28,7 @@ use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IoMap, ProbeError, RuntimeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
+use virtio_devices::VirtioDeviceKind;
 
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("virtio,mmio"))];
 
@@ -123,11 +124,10 @@ impl DriverOps<PlatformBus> for MmioDriver {
 
 fn dispatch<T: virtio_devices::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
-    kind: driver_base::DeviceKind,
+    kind: VirtioDeviceKind,
     transport: T,
     builder: ActivationBuilder,
 ) -> Result<MmioData, ProbeError> {
-    use driver_base::DeviceKind;
     match kind {
         DeviceKind::Net => {
             #[cfg(feature = "net")]

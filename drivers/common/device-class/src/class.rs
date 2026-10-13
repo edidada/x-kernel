@@ -10,7 +10,7 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
-use driver_base::{DriverError, DriverResult};
+use kerrno::{KError, KResult};
 
 /// Opaque handle of one class-device publication.
 ///
@@ -120,7 +120,8 @@ pub struct DetachedParent {
     /// real pointer; id arithmetic silently decouples the two counters).
     pub owner: u64,
     pub driver_name: &'static str,
-    pub physical_path: alloc::string::String,
+    /// The parent's physical path (bus-vtable derived at publication).
+    pub physical_path: String,
     /// Flipped when the composition root removes the owning device (after
     /// the quiesce callbacks returned). Shared by every [`ClassDevice`]
     /// clone through the inner `Arc`, so a consumer holding a stale clone
@@ -135,11 +136,7 @@ impl ClassParent {
     /// `owner` is the publishing device's driver-core id (`DeviceCtx::id()`);
     /// the composition root's remove notifier uses it to find this
     /// publication when that device goes away.
-    pub fn detached(
-        owner: u64,
-        driver_name: &'static str,
-        physical_path: alloc::string::String,
-    ) -> Self {
+    pub fn detached(owner: u64, driver_name: &'static str, physical_path: String) -> Self {
         Self::Detached(DetachedParent {
             id: ClassDeviceId::new_detached(),
             owner,
@@ -203,7 +200,6 @@ struct ClassDeviceInner<T> {
     parent: ClassParent,
     runtime: T,
     name: String,
-    irq: Option<usize>,
     metadata: ClassDeviceMetadata,
     /// Device-usage protocol (Linux `device usage`/`try_acquire`
     /// analogue): in-flight operations count here, and `class_remove`
@@ -257,20 +253,18 @@ impl<T> ClassDevice<T> {
         parent: impl Into<ClassParent>,
         inner: T,
         name: String,
-        irq: Option<usize>,
-    ) -> DriverResult<Self> {
-        Self::try_new_with_class_metadata(parent, inner, name, irq, ClassDeviceMetadata::empty())
+    ) -> KResult<Self> {
+        Self::try_new_with_class_metadata(parent, inner, name, ClassDeviceMetadata::empty())
     }
 
     pub fn try_new_with_class_metadata(
         parent: impl Into<ClassParent>,
         inner: T,
         name: String,
-        irq: Option<usize>,
         metadata: ClassDeviceMetadata,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         let parent = parent.into();
-        parent.driver_name().ok_or(DriverError::BadState)?;
+        parent.driver_name().ok_or(KError::BadState)?;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 uses: core::sync::atomic::AtomicUsize::new(0),
@@ -278,7 +272,6 @@ impl<T> ClassDevice<T> {
                 parent,
                 runtime: inner,
                 name,
-                irq,
                 metadata,
             }),
         })
@@ -297,11 +290,6 @@ impl<T> ClassDevice<T> {
     /// Stable runtime device name.
     pub fn name(&self) -> &str {
         &self.inner.name
-    }
-
-    /// Optional IRQ associated with the runtime capability.
-    pub fn irq(&self) -> Option<usize> {
-        self.inner.irq
     }
 
     /// Where the device lives on the bus topology.
@@ -353,15 +341,15 @@ impl<T> ClassDevice<T> {
 
     /// Run a data-plane operation, refusing once the device is offline.
     ///
-    /// Every consumer-facing class operation that returns a [`DriverResult`]
+    /// Every consumer-facing class operation that returns a [`KResult`]
     /// goes through here: after the composition root removed the owning
     /// device (offline flips once the quiesce callbacks returned), the
-    /// operation fails with [`DriverError::BadState`] instead of touching
+    /// operation fails with [`KError::BadState`] instead of touching
     /// the possibly-torn-down runtime object. Internal teardown paths keep
     /// using [`Self::with`] — they run before the offline flag flips.
-    pub fn with_available<R>(&self, f: impl FnOnce(&T) -> DriverResult<R>) -> DriverResult<R> {
+    pub fn with_available<R>(&self, f: impl FnOnce(&T) -> KResult<R>) -> KResult<R> {
         if !self.is_available() {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         let _use = self.acquire_use()?;
         f(&self.inner.runtime)
@@ -373,14 +361,14 @@ impl<T> ClassDevice<T> {
     /// decrements on drop. Long-running consumers (workers holding the
     /// device across awaits) hold THIS instead of a bare clone so removal
     /// observability is real: `in_flight()` reports the count.
-    pub fn acquire_use(&self) -> Result<ClassUse<T>, DriverError> {
+    pub fn acquire_use(&self) -> Result<ClassUse<T>, KError> {
         if !self.is_available()
             || self
                 .inner
                 .draining
                 .load(core::sync::atomic::Ordering::Acquire)
         {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         self.inner
             .uses
@@ -427,7 +415,7 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClassDevice")
             .field("id", &self.id())
-            .field("location", &self.location())
+            .field("physical_path", &self.location())
             .field("driver_name", &self.driver_name())
             .finish()
     }
@@ -460,10 +448,10 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
-    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
+    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> KResult<()> {
         let id = device.id();
         if self.devices.iter().any(|existing| existing.id() == id) {
-            return Err(DriverError::AlreadyExists);
+            return Err(KError::AlreadyExists);
         }
         self.devices.push(device);
         Ok(())
@@ -569,23 +557,11 @@ mod tests {
     /// the console, which needs the full composition root — those run
     /// under boot-time removal instead. Forgetting a branch still turns
     /// this red through hwrng/net.
-    // split-6: the drain test needs hwrng or net publishers; both features
-    // arrive with the virtio family in split 7 (char/display/input are
-    // excluded by design — see the doc comment above).
-    #[cfg(any(feature = "hwrng", feature = "net"))]
     #[def_test(serial)]
     fn remove_all_detached_drains_every_enabled_class() {
         use crate::remove_all_detached;
 
-        #[cfg_attr(
-            not(any(feature = "hwrng", feature = "net")),
-            expect(
-                dead_code,
-                reason = "split-6: sentinel publishers arrive with the hwrng/net features in \
-                          split 7"
-            )
-        )]
-        fn loc(id: u16) -> alloc::string::String {
+        fn loc(id: u32) -> alloc::string::String {
             alloc::format!("platform/static{id}")
         }
 
@@ -595,13 +571,8 @@ mod tests {
         #[cfg(feature = "hwrng")]
         {
             struct SentinelHwrng;
-            impl hwrng::Device for SentinelHwrng {
-                fn name(&self) -> &str {
-                    "drain-sentinel"
-                }
-            }
             impl hwrng::HwrngDevice for SentinelHwrng {
-                fn read(&self, _buf: &mut [u8]) -> driver_base::DriverResult<usize> {
+                fn read(&self, _buf: &mut [u8]) -> KResult<usize> {
                     Ok(0)
                 }
 
@@ -612,6 +583,7 @@ mod tests {
             crate::publish_hwrng(
                 ClassParent::detached(owner, "drain-test", loc(1)),
                 alloc::sync::Arc::new(SentinelHwrng),
+                "drain-sentinel",
             )
             .unwrap();
             published += 1;
@@ -620,11 +592,6 @@ mod tests {
         #[cfg(feature = "net")]
         {
             struct SentinelNet;
-            impl driver_base::Device for SentinelNet {
-                fn name(&self) -> &str {
-                    "net-sentinel"
-                }
-            }
             impl net::NetDevice for SentinelNet {
                 fn mac(&self) -> net::MacAddress {
                     net::MacAddress([0; 6])
@@ -646,32 +613,30 @@ mod tests {
                     0
                 }
 
-                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
                     Ok(())
                 }
 
-                fn recycle_tx(&self) -> driver_base::DriverResult {
+                fn recycle_tx(&self) -> KResult {
                     Ok(())
                 }
 
-                fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
-                    Err(driver_base::DriverError::Unsupported)
+                fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+                    Err(KError::Unsupported)
                 }
 
-                fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
-                    Err(driver_base::DriverError::Unsupported)
+                fn recv(&self) -> KResult<net::NetBufHandle> {
+                    Err(KError::Unsupported)
                 }
 
-                fn alloc_tx_buf(
-                    &self,
-                    _size: usize,
-                ) -> driver_base::DriverResult<net::NetBufHandle> {
-                    Err(driver_base::DriverError::Unsupported)
+                fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+                    Err(KError::Unsupported)
                 }
             }
             crate::publish_net(
                 ClassParent::detached(owner, "drain-test", loc(3)),
                 alloc::boxed::Box::new(SentinelNet),
+                "drain-sentinel",
             )
             .unwrap();
             published += 1;
@@ -707,14 +672,12 @@ mod tests {
             ClassParent::detached(9, "test", loc(0)),
             1u32,
             alloc::string::String::from("a"),
-            None,
         )
         .unwrap();
         let b = ClassDevice::try_new_with_info(
             ClassParent::detached(9, "test", loc(1)),
             2u32,
             alloc::string::String::from("b"),
-            None,
         )
         .unwrap();
         registry.publish(a).unwrap();
@@ -770,11 +733,6 @@ mod tests {
         struct SentinelNet {
             _lease: LeaseOnDrop,
         }
-        impl driver_base::Device for SentinelNet {
-            fn name(&self) -> &str {
-                "lease-sentinel"
-            }
-        }
         impl NetDevice for SentinelNet {
             fn mac(&self) -> net::MacAddress {
                 net::MacAddress([0; 6])
@@ -796,31 +754,31 @@ mod tests {
                 0
             }
 
-            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
                 Ok(())
             }
 
-            fn recycle_tx(&self) -> driver_base::DriverResult {
+            fn recycle_tx(&self) -> KResult {
                 Ok(())
             }
 
-            fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
-                Err(driver_base::DriverError::Unsupported)
+            fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+                Err(KError::Unsupported)
             }
 
-            fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
-                Err(driver_base::DriverError::Unsupported)
+            fn recv(&self) -> KResult<net::NetBufHandle> {
+                Err(KError::Unsupported)
             }
 
-            fn alloc_tx_buf(&self, _size: usize) -> driver_base::DriverResult<net::NetBufHandle> {
-                Err(driver_base::DriverError::Unsupported)
+            fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+                Err(KError::Unsupported)
             }
 
             fn set_rx_scheduler(
                 &self,
                 _scheduler: Option<Arc<dyn net::NetRxScheduler>>,
-            ) -> driver_base::DriverResult {
-                Err(driver_base::DriverError::Unsupported)
+            ) -> KResult {
+                Err(KError::Unsupported)
             }
         }
 
@@ -831,6 +789,7 @@ mod tests {
         let publication = crate::publish_net(
             ClassParent::detached(0x1eaf, "lease-test", loc(0x1eaf)),
             runtime,
+            "lease-sentinel",
         )
         .unwrap();
 

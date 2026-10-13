@@ -2,10 +2,18 @@
 
 ## Trust boundaries
 
-`inputdev` receives hardware-origin event type, code, and value fields through
-the `InputDevice` class contract. It receives device identity and lifecycle
-notifications from `kclass` and `kdevice`. It does not access userspace memory
-or hardware registers directly and contains no unsafe code.
+This analysis covers the whole crate, which currently consists of
+`src/lib.rs`. No source module or test-only path is excluded.
+
+## Trust model
+
+The crate receives class handles and removal ids from trusted kernel driver
+infrastructure. `devnode` and `device-class` create and validate those handles and
+ids; `inputdev` trusts that contract and does not independently revalidate
+their provenance or internal identity. Its local validation is limited to
+deduplicating registration by id and removing the matching lifecycle entry.
+It has no user-memory, MMIO, DMA, network, or filesystem boundary and contains
+no unsafe code.>>>>>>> 9f18a37dd (docs: purge old-framework references from every module's docs)
 
 ## Invariants and thread safety
 

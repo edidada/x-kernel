@@ -4,7 +4,7 @@
 
 This analysis covers the entire crate: `src/lib.rs`, `src/card0.rs`,
 `src/drm.rs`, and `src/consts.rs`. No source module is excluded. KVFS typed
-user-copy and mmap primitives, `kclass` device-handle validity, and the display
+user-copy and mmap primitives, `device-class` device-handle validity, and the display
 backend contract remain the responsibility of their provider crates. The crate
 has no separate test-only source modules.
 

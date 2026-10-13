@@ -5,7 +5,7 @@
 //! Persistent versus buffered fault models shared by component recovery tests.
 use alloc::vec::Vec;
 
-use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, KError, KResult};
 
 use crate::sync::Mutex;
 const DEVICE_BLOCK_SIZE: usize = 512;
@@ -68,16 +68,6 @@ impl BufferedFaultDevice {
     }
 }
 
-impl Device for WriteThroughFaultDevice {
-    fn name(&self) -> &str {
-        "kext4-write-through-faulty-test-image"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-}
-
 impl BlockDeviceOperations for WriteThroughFaultDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().len() / DEVICE_BLOCK_SIZE) as u64
@@ -87,51 +77,39 @@ impl BlockDeviceOperations for WriteThroughFaultDevice {
         DEVICE_BLOCK_SIZE
     }
 
-    fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, output: &mut [u8]) -> KResult {
         let start = block_start(block_id)?;
         let end = start
             .checked_add(output.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         output.copy_from_slice(
             self.bytes
                 .lock()
                 .get(start..end)
-                .ok_or(DriverError::InvalidInput)?,
+                .ok_or(KError::InvalidInput)?,
         );
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, input: &[u8]) -> KResult {
         let mut write_count = self.write_count.lock();
         *write_count += 1;
         if self.fail_write_at == Some(*write_count) {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
 
         let start = block_start(block_id)?;
-        let end = start
-            .checked_add(input.len())
-            .ok_or(DriverError::InvalidInput)?;
+        let end = start.checked_add(input.len()).ok_or(KError::InvalidInput)?;
         self.bytes
             .lock()
             .get_mut(start..end)
-            .ok_or(DriverError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
             .copy_from_slice(input);
         Ok(())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
-    }
-}
-
-impl Device for BufferedFaultDevice {
-    fn name(&self) -> &str {
-        "kext4-faulty-buffered-test-image"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
     }
 }
 
@@ -144,22 +122,22 @@ impl BlockDeviceOperations for BufferedFaultDevice {
         DEVICE_BLOCK_SIZE
     }
 
-    fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, output: &mut [u8]) -> KResult {
         let start = block_start(block_id)?;
         let end = start
             .checked_add(output.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         output.copy_from_slice(
             self.committed
                 .lock()
                 .get(start..end)
-                .ok_or(DriverError::InvalidInput)?,
+                .ok_or(KError::InvalidInput)?,
         );
 
         for (pending_start, pending_bytes) in self.pending.lock().iter() {
             let pending_end = pending_start
                 .checked_add(pending_bytes.len())
-                .ok_or(DriverError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             let overlap_start = start.max(*pending_start);
             let overlap_end = end.min(pending_end);
             if overlap_start < overlap_end {
@@ -173,50 +151,46 @@ impl BlockDeviceOperations for BufferedFaultDevice {
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, input: &[u8]) -> KResult {
         let mut write_count = self.write_count.lock();
         *write_count += 1;
         if self.fail_write_at == Some(*write_count) {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
 
         let start = block_start(block_id)?;
-        let end = start
-            .checked_add(input.len())
-            .ok_or(DriverError::InvalidInput)?;
+        let end = start.checked_add(input.len()).ok_or(KError::InvalidInput)?;
         if end > self.committed.lock().len() {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         self.pending.lock().push((start, input.to_vec()));
         Ok(())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         let mut flush_count = self.flush_count.lock();
         *flush_count += 1;
         if self.fail_flush_at == Some(*flush_count) {
             self.pending.lock().clear();
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
 
         let mut committed = self.committed.lock();
         let mut pending = self.pending.lock();
         for (start, bytes) in pending.drain(..) {
-            let end = start
-                .checked_add(bytes.len())
-                .ok_or(DriverError::InvalidInput)?;
+            let end = start.checked_add(bytes.len()).ok_or(KError::InvalidInput)?;
             committed
                 .get_mut(start..end)
-                .ok_or(DriverError::InvalidInput)?
+                .ok_or(KError::InvalidInput)?
                 .copy_from_slice(&bytes);
         }
         Ok(())
     }
 }
 
-fn block_start(block_id: u64) -> Result<usize, DriverError> {
+fn block_start(block_id: u64) -> Result<usize, KError> {
     usize::try_from(block_id)
-        .map_err(|_| DriverError::InvalidInput)?
+        .map_err(|_| KError::InvalidInput)?
         .checked_mul(DEVICE_BLOCK_SIZE)
-        .ok_or(DriverError::InvalidInput)
+        .ok_or(KError::InvalidInput)
 }

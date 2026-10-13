@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 
 use ksync::Mutex;
 
-use crate::{DriverError, DriverResult};
+use crate::{KError, KResult};
 
 /// A raw buffer handle for network devices.
 pub struct NetBufHandle {
@@ -179,14 +179,14 @@ impl NetBuf {
     }
 
     /// Set the length of the header part.
-    pub fn set_hdr_len(&mut self, hdr_len: usize) -> DriverResult {
+    pub fn set_hdr_len(&mut self, hdr_len: usize) -> KResult {
         check_frame_len(hdr_len, self.payload_len, self.buf_len)?;
         self.hdr_len = hdr_len;
         Ok(())
     }
 
     /// Set the length of the payload part.
-    pub fn set_payload_len(&mut self, payload_len: usize) -> DriverResult {
+    pub fn set_payload_len(&mut self, payload_len: usize) -> KResult {
         check_frame_len(self.hdr_len, payload_len, self.buf_len)?;
         self.payload_len = payload_len;
         Ok(())
@@ -232,12 +232,12 @@ impl NetBuf {
     }
 }
 
-fn check_frame_len(hdr_len: usize, payload_len: usize, buf_len: usize) -> DriverResult {
+fn check_frame_len(hdr_len: usize, payload_len: usize, buf_len: usize) -> KResult {
     let frame_len = hdr_len
         .checked_add(payload_len)
-        .ok_or(DriverError::InvalidInput)?;
+        .ok_or(KError::InvalidInput)?;
     if frame_len > buf_len {
-        return Err(DriverError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     Ok(())
 }
@@ -262,12 +262,12 @@ pub struct NetBufPool {
 impl NetBufPool {
     /// Creates a new pool with the given `slot_count`, and all buffer lengths are
     /// set to `buf_len`.
-    pub fn new(slot_count: usize, buf_len: usize) -> DriverResult<Arc<Self>> {
+    pub fn new(slot_count: usize, buf_len: usize) -> KResult<Arc<Self>> {
         if slot_count == 0 {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         if !(MIN_BUFFER_LEN..=MAX_BUFFER_LEN).contains(&buf_len) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         let storage = vec![0; slot_count * buf_len];

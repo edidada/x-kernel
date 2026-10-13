@@ -10,7 +10,7 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-driver_base = { workspace = true }
+kerrno.workspace = true
 
 [lints]
 workspace = true

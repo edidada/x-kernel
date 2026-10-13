@@ -245,7 +245,7 @@ fn external_xattr_write_and_flush_failures_preserve_old_state_and_allow_retry() 
                 &value,
                 Ext4Timestamp::new(9, 0)
             ),
-            Err(Ext4Error::Device(block::DriverError::Io) | Ext4Error::JournalAborted)
+            Err(Ext4Error::Device(block::KError::Io) | Ext4Error::JournalAborted)
         ));
         drop(filesystem);
         let retry = Arc::new(TestDevice::new(device.committed_bytes()));

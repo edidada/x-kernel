@@ -22,7 +22,7 @@ be notified in IRQ context without allocation or sleeping.
 | Malformed device length | Buffer overrun | Driver validates length; successful count cannot exceed buffer |
 | Device never completes and reports no fault | Reader remains asleep | No timeout or task-interruption exit exists in this contract; hardware progress needs separate monitoring |
 
-`DriverError::InvalidInput` and `NoMemory` can arise from the wait provider
+`KError::InvalidInput` and `NoMemory` can arise from the wait provider
 without a hardware fault. Since the shared error no longer records its origin,
 a consumer must check `HwrngDevice::is_failed` before permanently disabling
 the source on a read error. Terminal state is monotonic; host wait failures

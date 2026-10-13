@@ -345,14 +345,18 @@ name = "block"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "driver_base",
- "kdevice",
+ "devnode",
+ "kbuild_config",
  "kerrno",
+ "khal",
+ "kirq",
  "klazy",
+ "kpoll",
  "kspin",
  "ksync",
+ "ktask",
+ "linked_list_r4l",
  "linux-raw-sys",
- "log",
  "memaddr",
  "unittest",
 ]
@@ -519,7 +523,7 @@ dependencies = [
 name = "char_driver"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
+ "kerrno",
 ]
 
 [[package]]
@@ -662,7 +666,7 @@ dependencies = [
  "device-class",
  "devnode",
  "driver-core",
- "driver_base",
+ "kerrno",
  "khal",
  "kiface",
  "kirq",
@@ -755,17 +759,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4266f1bd910c087ff8c7848882217b2b079742877b21d29614c11c16087d70"
 dependencies = [
  "bitmaps",
-]
-
-[[package]]
-name = "crate_interface"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51e5c7109dea31fc91ab584e99752baa997f76d46e49bab0a17b5e9679248df7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1131,8 +1124,8 @@ dependencies = [
  "chrono",
  "console-driver",
  "device-class",
+ "devnode",
  "dice-driver",
- "driver_base",
  "drmdevice",
  "entropy",
  "fbdevice",
@@ -1140,9 +1133,7 @@ dependencies = [
  "inherit-methods-macro",
  "inputdev",
  "kalloc",
- "kclass",
  "kcred",
- "kdevice",
  "kerrno",
  "kexec",
  "khal",
@@ -1177,40 +1168,16 @@ dependencies = [
  "char_driver",
  "devnode",
  "display",
- "driver_base",
  "hwrng",
  "input",
+ "kerrno",
  "kspin",
  "lazyinit",
  "log",
  "net",
  "unittest",
+ "virtio-devices",
  "vsock",
-]
-
-[[package]]
-name = "device-res"
-version = "0.3.0-dev"
-dependencies = [
- "kspin",
- "ktime_types",
- "smallvec",
- "unittest",
-]
-
-[[package]]
-name = "device-res-xkernel"
-version = "0.3.0-dev"
-dependencies = [
- "device-res",
- "kdma",
- "khal",
- "kirq",
- "ktime_types",
- "log",
- "memaddr",
- "memspace",
- "unittest",
 ]
 
 [[package]]
@@ -1261,7 +1228,7 @@ dependencies = [
 name = "display"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
+ "kerrno",
  "unittest",
 ]
 
@@ -1269,13 +1236,17 @@ dependencies = [
 name = "driver-compose"
 version = "0.3.0-dev"
 dependencies = [
+ "block",
  "driver-core",
  "driver-host",
+ "drv-block",
  "drv-clk",
  "drv-serial",
+ "drv-virtio",
  "khal",
  "log",
  "of",
+ "pci",
 ]
 
 [[package]]
@@ -1303,20 +1274,17 @@ dependencies = [
  "memspace",
  "pci",
  "unittest",
+ "virtio-devices",
 ]
-
-[[package]]
-name = "driver_base"
-version = "0.3.0-dev"
 
 [[package]]
 name = "drmdevice"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
+ "device-class",
  "display",
  "kalloc",
- "kclass",
  "kcred",
  "khal",
  "kpoll",
@@ -1328,6 +1296,18 @@ dependencies = [
  "macros",
  "memaddr",
  "posix-types",
+]
+
+[[package]]
+name = "drv-block"
+version = "0.3.0-dev"
+dependencies = [
+ "block",
+ "device-class",
+ "devnode",
+ "driver-core",
+ "kbuild_config",
+ "kerrno",
 ]
 
 [[package]]
@@ -1348,9 +1328,26 @@ dependencies = [
  "console-driver",
  "device-class",
  "driver-core",
- "driver_base",
+ "kerrno",
  "log",
  "memaddr",
+]
+
+[[package]]
+name = "drv-virtio"
+version = "0.3.0-dev"
+dependencies = [
+ "block",
+ "device-class",
+ "driver-core",
+ "driver-host",
+ "hwrng",
+ "kerrno",
+ "kpoll",
+ "ktask",
+ "log",
+ "pci",
+ "virtio-devices",
 ]
 
 [[package]]
@@ -1440,10 +1437,11 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entropy"
 version = "0.3.0-dev"
 dependencies = [
+ "device-class",
+ "devnode",
+ "driver-core",
  "hwrng",
  "karch",
- "kclass",
- "kdevice",
  "khal",
  "klazy",
  "kplat-aarch64",
@@ -1579,9 +1577,9 @@ dependencies = [
 name = "fbdevice"
 version = "0.3.0-dev"
 dependencies = [
+ "device-class",
  "display",
  "kalloc",
- "kclass",
  "khal",
  "kspin",
  "lazyinit",
@@ -1687,11 +1685,10 @@ dependencies = [
  "bpffs",
  "cgroup2fs",
  "devfs",
+ "device-class",
  "fs_context",
  "kbuild_config",
- "kclass",
  "kcred",
- "kdevice-uevent",
  "kerrno",
  "kvfs",
  "log",
@@ -1701,6 +1698,7 @@ dependencies = [
  "pipefs",
  "procfs",
  "sysfs",
+ "uevent-netlink",
  "v9fs",
 ]
 
@@ -1943,7 +1941,7 @@ dependencies = [
 name = "hwrng"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
+ "kerrno",
  "kspin",
  "unittest",
 ]
@@ -2033,7 +2031,7 @@ dependencies = [
 name = "input"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
+ "kerrno",
  "strum",
 ]
 
@@ -2042,8 +2040,7 @@ name = "inputdev"
 version = "0.3.0-dev"
 dependencies = [
  "bitmaps",
- "kclass",
- "kdevice",
+ "device-class",
  "ksync",
  "ktime",
  "ktime_types",
@@ -2207,24 +2204,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kclass"
-version = "0.3.0-dev"
-dependencies = [
- "block",
- "display",
- "driver_base",
- "hwrng",
- "input",
- "kdevice",
- "kspin",
- "lazyinit",
- "log",
- "net",
- "virtio",
- "vsock",
-]
-
-[[package]]
 name = "kclk"
 version = "0.3.0-dev"
 dependencies = [
@@ -2299,28 +2278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kdevice"
-version = "0.3.0-dev"
-dependencies = [
- "device-res",
- "driver_base",
- "kspin",
- "lazyinit",
- "log",
- "unittest",
-]
-
-[[package]]
-name = "kdevice-uevent"
-version = "0.3.0-dev"
-dependencies = [
- "kdevice",
- "klazy",
- "knet",
- "unittest",
-]
-
-[[package]]
 name = "kdma"
 version = "0.3.0-dev"
 dependencies = [
@@ -2334,47 +2291,6 @@ dependencies = [
  "kspin",
  "log",
  "memaddr",
-]
-
-[[package]]
-name = "kdriver"
-version = "0.3.0-dev"
-dependencies = [
- "block",
- "cfg-if",
- "console-driver",
- "crate_interface",
- "device-res",
- "device-res-xkernel",
- "display",
- "driver_base",
- "hwrng",
- "input",
- "kalloc",
- "karch",
- "kbuild_config",
- "kclass",
- "kcpu_id_map",
- "kdevice",
- "kdma",
- "khal",
- "kirq",
- "kpoll",
- "kspin",
- "ksync",
- "ktask",
- "ktime_types",
- "lazyinit",
- "linked_list_r4l",
- "log",
- "memaddr",
- "memspace",
- "net",
- "pci",
- "smallvec",
- "unittest",
- "virtio",
- "vsock",
 ]
 
 [[package]]
@@ -2521,16 +2437,19 @@ dependencies = [
  "backtrace",
  "console-driver",
  "devfs",
+ "device-class",
  "driver-compose",
+ "drv-block",
  "drv-clk",
  "drv-serial",
+ "drv-virtio",
  "entropy",
  "fat",
  "fbdevice",
  "inputdev",
  "kalloc",
  "kbpf",
- "kdriver",
+ "kdma",
  "kexec",
  "kext4",
  "khal",
@@ -2551,6 +2470,7 @@ dependencies = [
  "kworkng",
  "linux_sysno",
  "memspace",
+ "pci",
  "procfs",
  "tee_kernel",
  "tee_task_iface",
@@ -2716,15 +2636,14 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bitflags 2.13.2",
+ "device-class",
  "entropy",
  "enum_dispatch",
  "etherparse",
  "event-listener",
  "hashbrown 0.16.1",
- "kclass",
  "kcpu_id_map",
  "kcred",
- "kdevice",
  "kerrno",
  "khal",
  "kio",
@@ -2983,6 +2902,7 @@ name = "kruntime"
 version = "0.3.0-dev"
 dependencies = [
  "backtrace",
+ "block",
  "boot-info",
  "chrono",
  "device-class",
@@ -2999,7 +2919,6 @@ dependencies = [
  "kcpu",
  "kcpu_id_map",
  "kdma",
- "kdriver",
  "kernel-boot",
  "kerrno",
  "khal",
@@ -3297,12 +3216,12 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
+ "devnode",
  "hashbrown 0.15.5",
  "inherit-methods-macro",
  "intrusive-collections",
  "iov_iter",
  "kcred",
- "kdevice",
  "kerrno",
  "klazy",
  "kpoll",
@@ -3659,10 +3578,8 @@ dependencies = [
 name = "net"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
- "kspin",
+ "kerrno",
  "ksync",
- "log",
  "unittest",
 ]
 
@@ -3920,9 +3837,13 @@ dependencies = [
 name = "pci"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-core",
  "kbuild_config",
+ "kerrno",
  "khal",
+ "kspin",
  "kvirtiodrivers",
+ "lazyinit",
  "log",
  "memspace",
  "tock-registers 0.10.1",
@@ -4294,12 +4215,12 @@ dependencies = [
 name = "procfs"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-core",
  "kaddr_layout",
  "kalloc",
  "kbuild_config",
  "kcpu_id_map",
  "kcred",
- "kdevice",
  "khal",
  "klockstat",
  "klogger",
@@ -5105,13 +5026,13 @@ dependencies = [
 name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
- "kdevice",
- "kdevice-uevent",
+ "devnode",
  "klazy",
  "ksync",
  "kvfs",
  "lazyinit",
  "macros",
+ "uevent-netlink",
  "unittest",
 ]
 
@@ -5694,16 +5615,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "virtio"
+name = "virtio-devices"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
- "device-res",
  "display",
- "driver_base",
+ "driver-core",
  "hwrng",
  "input",
+ "kerrno",
  "kspin",
  "kvirtiodrivers",
  "linked_list_r4l",
@@ -5734,7 +5655,7 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 name = "vsock"
 version = "0.3.0-dev"
 dependencies = [
- "driver_base",
+ "kerrno",
 ]
 
 [[package]]

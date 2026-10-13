@@ -20,7 +20,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
 
 /// Operations a character device driver must implement.
 ///
@@ -28,26 +28,26 @@ pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 /// intentionally minimal so that a wide range of devices (random sources,
 /// expansion UARTs, ...) can implement it without taking on policy decisions
 /// that belong to higher layers.
-pub trait CharDevice: Device {
+pub trait CharDevice: Send + Sync {
     /// Read up to `buf.len()` bytes from the device into `buf`.
     ///
     /// Returns the number of bytes actually read. A return value of `Ok(0)`
     /// indicates end-of-stream when the device has a finite source; for
-    /// open-ended sources, drivers should return [`DriverError::WouldBlock`]
+    /// open-ended sources, drivers should return [`KError::WouldBlock`]
     /// instead so the caller can decide whether to retry or sleep.
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize>;
+    fn read(&self, buf: &mut [u8]) -> KResult<usize>;
 
     /// Write up to `buf.len()` bytes from `buf` to the device.
     ///
     /// Returns the number of bytes actually accepted. Drivers that cannot
     /// make progress without blocking should return
-    /// [`DriverError::WouldBlock`] rather than spinning internally.
-    fn write(&self, buf: &[u8]) -> DriverResult<usize>;
+    /// [`KError::WouldBlock`] rather than spinning internally.
+    fn write(&self, buf: &[u8]) -> KResult<usize>;
 
     /// Flush any buffered output to the underlying hardware.
     ///
     /// Default implementation is a no-op for stateless devices.
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
     }
 }

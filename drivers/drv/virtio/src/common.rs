@@ -8,19 +8,20 @@
 use alloc::string::String;
 
 use driver_core::{ProbeError, RuntimeError};
+use kerrno::KError;
+use virtio_devices::VirtioDeviceKind;
 
-pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
+pub(crate) fn map_driver_error(err: KError) -> ProbeError {
     let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
-            RuntimeError::Invalid
-        }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
-            RuntimeError::Busy
-        }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
+        KError::InvalidInput | KError::ReadOnlyFilesystem => RuntimeError::Invalid,
+        KError::NoMemory => RuntimeError::NoMemory,
+        KError::ResourceBusy | KError::AlreadyExists => RuntimeError::Busy,
+        KError::BadState => RuntimeError::BadState,
+        KError::Io | KError::WouldBlock => RuntimeError::Io,
+        KError::Unsupported => RuntimeError::Unsupported,
+        // The class layer's vocabulary is the former DriverError set; any
+        // other kerrno code is foreign here — treat it as an I/O failure.
+        _ => RuntimeError::Io,
     };
     ProbeError::Fatal(error)
 }
@@ -40,7 +41,7 @@ pub(crate) fn pci_transport<B: driver_core::Bus>(
     dev: &mut driver_core::DeviceCtx<'_, B>,
 ) -> Result<
     (
-        driver_base::DeviceKind,
+        VirtioDeviceKind,
         virtio_devices::PciTransport,
         Option<usize>,
     ),

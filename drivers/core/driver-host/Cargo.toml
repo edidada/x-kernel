@@ -17,14 +17,14 @@ memspace = { workspace = true }
 kdma = { workspace = true }
 kclk.workspace = true
 pci.workspace = true
-# split-4 introduces device-traits; DeviceKind arrives with it
+virtio_devices = { workspace = true, optional = true }
 memaddr.workspace = true
 kspin.workspace = true
 log.workspace = true
 unittest = { workspace = true }
 
 [features]
-virtio-hal = []
+virtio-hal = ["dep:virtio_devices"]
 
 [lints]
 workspace = true

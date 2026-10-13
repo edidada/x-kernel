@@ -286,10 +286,6 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
-    kdriver::init_drivers();
-    // Migration bridge (split 6->9): the legacy root still inits the un-ported
-    // drivers (virtio et al); the new composition root inits the golden set.
-    // Split 9 removes the kdriver call.
     driver_compose::init();
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
