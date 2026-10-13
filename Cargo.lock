@@ -2141,6 +2141,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kclk"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "kspin",
+ "ksync",
+ "ktask",
+ "unittest",
+]
+
+[[package]]
 name = "kcpu"
 version = "0.3.0-dev"
 dependencies = [

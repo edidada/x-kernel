@@ -13,6 +13,7 @@ members = [
     "tee/tee_crypto",
     "tee/xdice",
     "drivers/core/driver-core",
+    "core/kclk",
 ]
 exclude = [
     # Preserved upstream crate, with its own standalone host test workspace.
