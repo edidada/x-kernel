@@ -13,6 +13,7 @@ unittest = [
     "dep:kworkqueue_ng",
     "dep:kworkng",
     "dep:unittest",
+    "dep:driver-core",
     "dep:unittest_support",
 ]
 dma-trace = ["kfeat/dma-trace"]
@@ -40,6 +41,7 @@ kworkerpool_ng = { workspace = true, optional = true }
 kworkqueue_ng = { workspace = true, optional = true, features = ["stall-check", "self-wait-check"] }
 kworkng = { workspace = true, optional = true, features = ["self-wait-check"] }
 unittest = { workspace = true, optional = true }
+driver-core = { workspace = true, optional = true }
 unittest_support = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
