@@ -23,15 +23,13 @@ use smoltcp::{
     wire::{HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr},
 };
 
+use super::rx::{self, IngressBatch};
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{self, IpAddress},
-    network::{
-        ipv4::ingress::{IngressBatch, Ipv4Ingress},
-        router::Rule,
-    },
+    network::{ipv4::ingress::Ipv4Ingress, router::Rule},
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router},
     stack::{
@@ -174,7 +172,8 @@ impl Service {
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
 
-        let ipv4_expiration = self.ipv4_ingress.expire_fragments(
+        let ipv4_expiration = rx::expire_fragments(
+            &self.ipv4_ingress,
             device_timestamp,
             budget.timer_events,
             &mut control_packets,
@@ -351,7 +350,8 @@ impl Service {
         let mut progress = DeviceRxProgress::default();
         let mut packets_since_time_check = 0;
 
-        if !self.ipv4_ingress.try_process_rx_batch(
+        if !rx::try_process_rx_batch(
+            &self.ipv4_ingress,
             device_timestamp,
             rx_batch,
             accepted_packets,
@@ -395,7 +395,8 @@ impl Service {
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
-            if !self.ipv4_ingress.try_process_rx_batch(
+            if !rx::try_process_rx_batch(
+                &self.ipv4_ingress,
                 device_timestamp,
                 rx_batch,
                 accepted_packets,
@@ -1064,13 +1065,10 @@ mod tests {
     #[def_test]
     fn unrelated_ingress_lock_contention_is_not_ipv4_timer_work() {
         let service = Service::new(Router::new());
-        let mut control_packets = Vec::new();
         let progress = service.ipv4_ingress.with_state_locked_for_test(|| {
-            service.ipv4_ingress.expire_fragments(
-                monotonic_time(),
-                TEST_POLL_BUDGET.timer_events,
-                &mut control_packets,
-            )
+            service
+                .ipv4_ingress
+                .expire_fragments(monotonic_time(), TEST_POLL_BUDGET.timer_events)
         });
 
         assert_eq!(progress.timer_events, 0);

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Local IPv4 admission and fragment reassembly state, serialized by the processor.
+//! Local IPv4 admission and fragment reassembly state, serialized by the ingress state lock.
 
 use alloc::vec::Vec;
 
@@ -21,13 +21,13 @@ use crate::{
 ///
 /// Only admission can construct this value. The address decision remains valid
 /// for delivery even if the configured addresses change after admission.
-pub(super) struct AdmittedIpv4Packet {
+pub(crate) struct AdmittedIpv4Packet {
     packet: PacketBuf,
     header: Ipv4Header,
 }
 
 impl AdmittedIpv4Packet {
-    pub(super) fn into_parts(self) -> (PacketBuf, Ipv4Header) {
+    pub(crate) fn into_parts(self) -> (PacketBuf, Ipv4Header) {
         (self.packet, self.header)
     }
 }

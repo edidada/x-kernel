@@ -5,5 +5,6 @@
 //! Network runtime service, polling, and queue ownership.
 
 pub(crate) mod poller;
+mod rx;
 pub(crate) mod service;
 pub(crate) mod tx_queue;
