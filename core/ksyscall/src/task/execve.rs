@@ -109,7 +109,7 @@ pub(super) fn exec_owned(
 /// The final symlink is followed unless `AT_SYMLINK_NOFOLLOW` is set, in
 /// which case a symlink target is rejected like Linux. Unknown flag bits are
 /// rejected with `EINVAL`.
-pub fn sys_execveat(
+pub(crate) fn sys_execveat(
     uctx: &mut UserContext,
     dirfd: c_int,
     pathname: *const c_char,

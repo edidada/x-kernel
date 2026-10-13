@@ -338,7 +338,7 @@ impl ProcessRuntime {
     }
 
     /// Returns the opened backing executable file, if any.
-    pub fn exe_file(&self) -> Option<Arc<kvfs::VfsFile>> {
+    pub(crate) fn exe_file(&self) -> Option<Arc<kvfs::VfsFile>> {
         self.exec_metadata().exe_file()
     }
 

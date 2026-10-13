@@ -270,7 +270,7 @@ fn wait_on_matching_children(
 /// exit. The optional `rusage` argument is accepted but not populated (runc's
 /// `isWaitable` probe passes `NULL`). On success returns 0 with the child
 /// status in `siginfo`, matching Linux.
-pub fn sys_waitid(
+pub(crate) fn sys_waitid(
     idtype: u32,
     id: u32,
     siginfo: UserPtr<siginfo_t>,

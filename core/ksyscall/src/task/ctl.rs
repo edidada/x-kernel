@@ -11,7 +11,7 @@
 
 use core::ffi::c_char;
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use ksignal::MAX_SIGNALS;
 use ktask::current;
 use kuaccess::vm_load_string;
@@ -91,6 +91,11 @@ pub(crate) fn sys_get_mempolicy(
 /// `ENOSYS` for strict/filter mode and `EINVAL` for any other mode. The mode
 /// retains its full `unsigned long` ABI width. No filter pointer is accessed
 /// and no seccomp or no-new-privileges state is changed on this path.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: prctl dispatches many unrelated Linux operations; \
+              splitting the match would scatter the shared errno policy"
+)]
 pub(crate) fn sys_prctl(
     option: u32,
     arg2: usize,
@@ -242,7 +247,7 @@ pub(crate) fn sys_prctl(
 
 #[unittest::mod_test]
 mod tests {
-    use kerrno::KError;
+    use kerrno::{KError, LinuxError};
     use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 

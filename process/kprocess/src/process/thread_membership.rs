@@ -244,6 +244,7 @@ impl Process {
     /// user-memory cleanup first and perform no subsequent user access.
     pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
         task.as_thread().capture_exit_address_space();
+        let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
             if !group_exit.group_exited {
