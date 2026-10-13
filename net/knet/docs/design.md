@@ -49,7 +49,14 @@ net/knet/
     │   └── wire.rs
     ├── network/
     │   ├── ipv4/
-    │   │   ├── ingress.rs
+    │   │   ├── ingress/
+    │   │   │   ├── admission.rs
+    │   │   │   ├── batch.rs
+    │   │   │   ├── delivery.rs
+    │   │   │   ├── mod.rs
+    │   │   │   ├── processor.rs
+    │   │   │   ├── tests.rs
+    │   │   │   └── timer.rs
     │   │   ├── mod.rs
     │   │   └── process.rs
     │   ├── fragment.rs
@@ -549,7 +556,7 @@ flowchart LR
 | Device link configuration | Updated device link configuration | `RTM_NEWLINK` updates the target `NetDevice` through `Service::update_device_link`. |
 | Device link configuration | `RTM_NEWLINK` response | An `RTM_GETLINK` dump reads all `LinkSnapshot` values; a single-object query reads the matching snapshot by interface index or name. |
 | Initial IPv4 address entry | `Router::ipv4_addrs` | `init_network` registers the address through `Router::add_ipv4_addr`; Router also creates the corresponding local and connected routes. |
-| IPv4 address entry | smoltcp, `Ipv4IngressState`, and device address projections | `Service` refreshes all derived views when an address is added, removed, or its owning device is removed. |
+| IPv4 address entry | smoltcp, `Ipv4Admission`, and device address projections | `Service` refreshes all derived views when an address is added, removed, or its owning device is removed. |
 | Last owner of an IPv4 address | Router configured routes | When the address is removed, configured routes using that address as `prefsrc` are also removed. |
 | Removed device | Router routes and device neighbor state | `unregister_netdev` holds `network_config_lock`; Router removes routes and neighbors associated with the interface and renumbers subsequent interface indices. |
 | `RTM_GETADDR` | Router address snapshot | rtnetlink reads `Service::ipv4_addr_snapshots` directly and returns only the specified device's addresses when the request includes an interface index. |
@@ -718,7 +725,7 @@ The 1 ms limit is a soft bound checked between work batches. Maintenance and one
 
 A background callback runs at most four rounds, each with fresh budgets; assist runs at most one. Completion reschedules immediate work or notifications received during execution. The periodic timer callback checks protocol and reassembly deadlines, wakes waiters, and publishes timer work. Future deadlines alone do not set `has_more`.
 
-Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`IPv4 ingress`](../src/network/ipv4/ingress.rs), [`smoltcp ingress preparation`](../src/stack/ingress.rs), and [`Router`](../src/stack/router.rs).
+Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`IPv4 ingress`](../src/network/ipv4/ingress/processor.rs), [`smoltcp ingress preparation`](../src/stack/ingress.rs), and [`Router`](../src/stack/router.rs).
 
 ### TX Routing
 
@@ -777,7 +784,7 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 ### Protocol Progress
 
-The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `Ipv4IngressState`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
+The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `Ipv4Admission`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
 
 `NetworkPoller` represents this execution right with two locked booleans (`is_running`, `has_pending`) corresponding to four conceptual states: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A prepared kworkng background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
@@ -806,7 +813,7 @@ Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__
 
 The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
 
-`Service::ipv4_ingress` owns an `Ipv4Ingress`, whose `state` mutex protects the local IPv4 address view and `Ipv4IngressState::ipv4_reassembler` queues. Its state lock and atomic reassembly deadline are private. `Ipv4Ingress::try_process_rx_batch` acquires the lock without blocking, admits IPv4 input and reassembles fragments, and publishes the reassembly deadline before releasing the lock. `IngressBatch` keeps raw and prepared packet storage under the service's existing RX-batch mutex; the prepared storage is reserved before taking the input-state lock and reused across rounds. UDP delivery, socket wakeups, ICMP error inspection and response construction, and IPv6 handoff run after releasing the input-state lock. Address admission applies to the whole batch before delivery, so a concurrent address change does not retroactively reject an admitted packet. Contention retains the entire raw RX batch for retry. Fragment expiration removes expired queues and publishes the next timer state under the input-state lock, then constructs timeout ICMP responses from the detached results after releasing it. The runtime timer samples the deadline through `handle_timer_tick`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
+`Service::ipv4_ingress` owns an `Ipv4Ingress`, whose `state` mutex protects the local IPv4 address view and `Ipv4Admission::ipv4_reassembler` queues. `ingress/mod.rs` declares the private modules and re-exports the runtime entry points. `ingress::processor` owns synchronization and phase ordering; `ingress::admission` encapsulates address matching, packet validation, and reassembly. Only admission can construct an `AdmittedIpv4Packet`, which carries the validated packet and header into delivery. `ingress::batch` owns reusable raw and admitted storage and preserves admission order without implementing protocol policy. The input-state lock and atomic reassembly deadline are private. `Ipv4Ingress::try_process_rx_batch` acquires the lock without blocking, admits IPv4 input and reassembles fragments, and publishes the reassembly deadline before releasing the lock. `IngressBatch` keeps raw and prepared packet storage under the service's existing RX-batch mutex; the prepared storage is reserved before taking the input-state lock and reused across rounds. UDP delivery, socket wakeups, ICMP error inspection and response construction, and IPv6 handoff run after releasing the input-state lock. Address admission applies to the whole batch before delivery, so a concurrent address change does not retroactively reject an admitted packet. Contention retains the entire raw RX batch for retry. Fragment expiration removes expired queues and publishes the next timer state under the input-state lock, then constructs timeout ICMP responses from the detached results after releasing it. The private `ingress::timer::ReassemblyTimer` owns atomic deadline encoding and pending-state transitions; `Ipv4Ingress` publishes and completes timer work while holding its input-state lock. The private `ingress::delivery` module handles transport delivery and ICMP response queuing after that lock is released. The runtime timer samples the deadline through `handle_timer_tick`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 
 The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the peer endpoint uses `SpinNoIrq` for softirq lookup. The asynchronous-error queue has its own mutex; error status, shutdown flags, and receive-error enablement use atomics. Socket-local waiter sets report data, errors, write readiness, and shutdown independently of device RX notifications.
 
@@ -870,7 +877,7 @@ The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share o
 
 Loopback UDP is delivered directly to the PCB within the transmit path's bottom-half window, following the Linux sequence from `dev_queue_xmit` through `loopback_xmit` and `__netif_rx` to softirq processing at `local_bh_enable`. TCP, ICMP, and IPv6 use the poller's TX-then-RX rounds.
 
-RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `Ipv4IngressState` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
+RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `Ipv4Admission` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
 TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
@@ -880,7 +887,7 @@ Devices own link configuration and expose interface names, MTUs, administrative 
 
 `Router` owns `Ipv4AddrEntry` values with `dev`, `addr`, `scope`, and optional `broadcast` fields. The broadcast override is exposed as `ifa_broadcast` in rtnetlink. Broadcast addresses default to the CIDR-derived value. Insertion validates the device, unicast address, and smoltcp address capacity. Legacy address and netmask ioctls update the primary entry while preserving other addresses on the device. Netmask updates retain the scope and recompute the broadcast address only when its previous value was mask-derived.
 
-Each address produces a `/32` local route and a connected route for its network. Address removal clears derived routes, routes whose preferred source becomes invalid, and the device's pending TX. `Service` projects Router addresses into the smoltcp `Interface`, `Ipv4IngressState`, and devices; Ethernet uses them for ARP, directed broadcasts, and packets awaiting neighbor resolution.
+Each address produces a `/32` local route and a connected route for its network. Address removal clears derived routes, routes whose preferred source becomes invalid, and the device's pending TX. `Service` projects Router addresses into the smoltcp `Interface`, `Ipv4Admission`, and devices; Ethernet uses them for ARP, directed broadcasts, and packets awaiting neighbor resolution.
 
 Configured routes belong to `Router`, where `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds `network_config_lock` while Router removes the device's routes, addresses, and neighbors and renumbers subsequent interface indices.
 
