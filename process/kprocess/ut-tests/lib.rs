@@ -25,7 +25,7 @@ use crate::{
     ProcessExitPublication, ProcessForkConfig, build_process_thread,
     process::INIT_PROC,
     process_exit, process_signals, procfs,
-    publication::{prepare_user_task, process_publication, task_identity_matches_thread},
+    publication::{prepare_user_task, process_publication},
     publish_user_task, scheduler, wait_reap,
 };
 
@@ -2120,39 +2120,6 @@ fn test_publish_user_task_exposes_handle_before_activation() {
             .all(|member| member.pid() != process.pid()),
         "aborting a never-started child must remove it from its provisional process-group \
          membership"
-    );
-}
-
-#[def_test(serial)]
-fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
-    let task_number = kidentity::allocate_root_pid_handle().expect("task identity should allocate");
-    let mismatched_number =
-        kidentity::allocate_root_pid_handle().expect("mismatched identity should allocate");
-    let process = Process::new_init_with_task_number(task_number.clone());
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
-    ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
-
-    let thread = build_process_thread(
-        process,
-        mismatched_number,
-        String::from("[mismatch-test]"),
-        Arc::new(vec![]),
-        Arc::new(ksync::Mutex::new(aspace)),
-        fs_context::copy_init_fs_struct(),
-        ksignal::api::SignalActions::default(),
-        initial_cred(),
-    );
-
-    let task = TaskInner::new_user(
-        || {},
-        String::from("mismatched-user-thread"),
-        task_number.clone(),
-        thread,
-    );
-    let task = prepare_task(task);
-    assert!(
-        !task_identity_matches_thread(&task),
-        "publication must reject inconsistent task/thread identities before visibility changes"
     );
 }
 

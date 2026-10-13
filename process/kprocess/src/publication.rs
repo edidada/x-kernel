@@ -293,7 +293,7 @@ pub(crate) fn task_identity_matches_thread(task: &KtaskRef) -> bool {
     let Some(task_number) = task.task_number() else {
         return false;
     };
-    Arc::ptr_eq(task_number, thread.task_number())
+    Arc::ptr_eq(&task_number, &thread.task_number())
 }
 
 impl PreparedUserTask {

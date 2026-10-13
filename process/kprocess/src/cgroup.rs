@@ -19,7 +19,7 @@ pub fn cgroup_member_process_ids(cgroup: &Cgroup) -> Vec<Pid> {
         let Ok(task) = procfs::thread_task(identity.root_nr()) else {
             continue;
         };
-        if Arc::ptr_eq(task.as_thread().task_number(), &identity) {
+        if Arc::ptr_eq(&task.as_thread().task_number(), &identity) {
             process_ids.insert(task.as_thread().process().pid());
         }
     }

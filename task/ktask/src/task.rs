@@ -38,17 +38,15 @@ enum TaskIdentity {
         task_number: Arc<kidentity::PidHandle>,
     },
     User {
-        task_number: Arc<kidentity::PidHandle>,
         user_runtime: UserRuntimeSlot,
     },
 }
 
 impl TaskIdentity {
-    fn thread_pid(&self) -> Option<&Arc<kidentity::PidHandle>> {
+    fn thread_pid(&self) -> Option<Arc<kidentity::PidHandle>> {
         match self {
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                Some(task_number)
-            }
+            Self::KernelThread { task_number, .. } => Some(task_number.clone()),
+            Self::User { user_runtime } => user_runtime.get().map(UserTaskRuntime::task_number),
             Self::Idle | Self::Internal => None,
         }
     }
@@ -56,15 +54,16 @@ impl TaskIdentity {
     fn trace_id(&self) -> u64 {
         match self {
             Self::Idle | Self::Internal => 0,
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                task_number.root_nr() as u64
+            Self::KernelThread { task_number, .. } => task_number.root_nr() as u64,
+            Self::User { user_runtime } => {
+                user_runtime.get().map_or(0, |runtime| runtime.tid() as u64)
             }
         }
     }
 
     fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
         match self {
-            Self::User { user_runtime, .. } => user_runtime.get(),
+            Self::User { user_runtime } => user_runtime.get(),
             Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
         }
     }
@@ -103,6 +102,16 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
         None
     }
+
+    /// Returns the task's current number binding.
+    ///
+    /// The binding is stable for the life of the task except for an `exec`
+    /// leader takeover, which moves the thread-group number onto the surviving
+    /// thread. Registries key on the task object, not on this number.
+    fn task_number(&self) -> Arc<kidentity::PidHandle>;
+
+    /// Returns the current numeric TID as a lock-free snapshot.
+    fn tid(&self) -> u32;
 
     /// Returns this runtime as [`Any`] for process-domain type recovery.
     fn as_any(&self) -> &dyn Any;
@@ -381,19 +390,22 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
+        assert!(
+            Arc::ptr_eq(&task_number, &user_runtime.task_number()),
+            "a user task's identity must match its runtime number"
+        );
         Self::new_with_identity(
             entry,
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
-                task_number,
                 user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
         )
     }
 
-    /// Returns the shared task-number handle, if the task has one.
-    pub fn task_number(&self) -> Option<&Arc<kidentity::PidHandle>> {
+    /// Returns the current task-number handle, if the task has one.
+    pub fn task_number(&self) -> Option<Arc<kidentity::PidHandle>> {
         self.identity.thread_pid()
     }
 
@@ -403,10 +415,12 @@ impl TaskInner {
     }
 
     /// Returns the scheduler-internal owner key.
+    ///
+    /// The key is the task's own address, which stays stable across an `exec`
+    /// leader takeover, so a lock owner remains identifiable after the number
+    /// moves.
     pub fn owner_key(&self) -> u64 {
-        self.task_number()
-            .map(|task_number| task_number.root_nr() as u64)
-            .unwrap_or_else(|| self as *const _ as usize as u64)
+        self as *const _ as usize as u64
     }
 
     /// Gets the name of the task.
@@ -421,7 +435,7 @@ impl TaskInner {
 
     /// Get a combined string of the task ID and name.
     pub fn id_name(&self) -> alloc::string::String {
-        alloc::format!("Task({}, {:?})", self.owner_key(), self.name())
+        alloc::format!("Task({}, {:?})", self.trace_id(), self.name())
     }
 
     /// Wait for the task to exit, and return the exit code.

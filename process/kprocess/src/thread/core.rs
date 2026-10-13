@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
@@ -156,7 +156,14 @@ impl SchedulerState {
 
 /// Task-bound user-thread state, credentials, signals and shared process runtime.
 pub struct Thread {
-    task_number: Arc<kidentity::PidHandle>,
+    /// Current number binding for this thread. It is stable for the task's life
+    /// except for an `exec` leader takeover, which moves the thread-group
+    /// number onto the surviving thread; registries key on the task object, not
+    /// on this number.
+    task_number: SpinNoIrq<Arc<kidentity::PidHandle>>,
+    /// Lock-free snapshot of the current numeric TID, kept in step with
+    /// `task_number` by the same critical section that moves it.
+    tid: AtomicU32,
     process: Arc<Process>,
     runtime: Arc<ProcessRuntime>,
     // Installed once before membership retirement; released only with Thread.
@@ -208,7 +215,8 @@ impl Thread {
         let tid = task_number.root_nr();
         let cgroup = charge.commit(task_number.clone())?;
         Ok(Box::new(Thread {
-            task_number,
+            task_number: SpinNoIrq::new(task_number),
+            tid: AtomicU32::new(tid),
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
             runtime,
@@ -310,7 +318,7 @@ impl Thread {
 
     /// Returns the user-visible thread identifier.
     pub fn tid(&self) -> Tid {
-        self.task_number.root_nr()
+        self.tid.load(Ordering::Relaxed)
     }
 
     /// Returns the task's canonical cgroup node.
@@ -533,8 +541,8 @@ impl Thread {
         &self.signal
     }
 
-    pub(crate) fn task_number(&self) -> &Arc<kidentity::PidHandle> {
-        &self.task_number
+    pub(crate) fn task_number(&self) -> Arc<kidentity::PidHandle> {
+        self.task_number.lock().clone()
     }
 
     pub(crate) fn process_runtime(&self) -> Arc<ProcessRuntime> {
