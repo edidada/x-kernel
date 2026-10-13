@@ -47,10 +47,10 @@ device callbacks, user pointers, or network/file inputs in this crate):
 | `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
 
 A production call site exercising `allocate_dma_memory` /
-`deallocate_dma_memory` is the device-res provider adapter
-`drivers/adapters/xkernel/device-res/src/dma.rs`
-(`alloc_coherent` / `free_coherent`), which drivers reach through the
-`DmaCoherent` contract.
+`deallocate_dma_memory` is the driver-host provider
+`drivers/core/driver-host/src/provider/dma.rs`
+(`alloc_coherent` / `free_coherent`), which drivers reach through
+`DeviceCtx::alloc_coherent` (the `CoherentMem` guard).
 
 Devices never pass pointers into this crate; they only read/write the
 ranges the drivers granted (see Threat T-02).

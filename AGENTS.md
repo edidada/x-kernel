@@ -54,7 +54,20 @@ Major areas:
 - `boot/`: boot protocol handoff, boot stubs, and loaders.
 - `core/`: core runtime, syscall, tracing, and services.
 - `mm/`: memory management and address-space abstractions.
-- `drivers/`: shared hardware drivers and device subsystems.
+- `drivers/`: the driver framework and concrete drivers.
+  - `core/`: device model (`driver-core`), host service bridge
+    (`driver-host`), composition root (`driver-compose`).
+  - `common/`: cross-subsystem foundations (`device-class`, `devnode`).
+  - `subsystems/`: per-class APIs and services
+    (block/char/display/hwrng/input/net/vsock).
+  - `drv/`: concrete drivers, one subsystem crate per family, one module
+    per driver (`drv/virtio`, `drv/serial`, `drv/clk`, `drv/block`). The
+    shared virtio family library is `drv/virtio/devices` (package
+    `virtio-devices`).
+  - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing.
+  - `integration/`: framework -> kernel facilities (`uevent-netlink`); the
+    kernel-capabilities -> framework direction is implemented by the
+    provider inside `core/driver-host`.
 - `platforms/`: platform glue and defconfigs.
 - `process/`, `task/`, `fs/`, `io/`, `net/`, and `tee/`: subsystem crates.
 - `util/`: shared utility crates such as `klazy`.
@@ -78,19 +91,25 @@ ownership boundaries.
   forks.
 - Treat `kirq` as X-Kernel's common interrupt core. Generic IRQ descriptor,
   mapping, registration, dispatch, context, softirq, workerqueue, and threaded
-  IRQ semantics belong in `kirq`, not in `khal`, `device_res`, or irqchip
-  drivers.
+  IRQ semantics belong in `kirq`, not in `khal` or irqchip drivers.
 - Keep irqchip drivers below `kirq`: they implement concrete controller
   behavior such as configure, mask/unmask, claim, complete, priority, and IPI
   delivery through `kirq::IntrManagerIf`.
-- Keep `device_res` OS-agnostic. The driver framework exposes kernel IRQ
-  capability to drivers by adapting devres IRQ resources to `kirq` in
-  `kdriver::resource`; `kirq` must not depend on `device_res`.
+- The driver framework is single-host: cross-host portability is not a goal.
+  What is still required is that `driver-core` names no device family, that
+  class/subsystem *contracts* stay host-free so the model runs on mocks, and
+  that drivers acquire resources only through `DeviceCtx`. The framework
+  exposes kernel IRQ capability to drivers by adapting provider IRQ resources
+  to `kirq` in `driver-host` (the `DeviceServices` bridge over
+  `kirq`/`kdma`/`memspace`); `kirq` must not depend on driver-subsystem crates.
 - Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
-  driver work. Concrete reusable drivers must depend on driver subsystem
-  contracts, not host-kernel crates such as `khal`, `kirq`, `memspace`,
-  `kdma`, `kruntime`, `ktask`, or `kwork`. Host-specific crates may use those
-  APIs only while implementing provider contracts or integration glue.
+  driver work. It states the rules (L0-a family-agnostic core, L0-b
+  host-free contracts, L1 single resource acquisition path) and the exception
+  register (L2). `bus/`, `firmware/`, `platform/`, `core/driver-host`,
+  `core/driver-compose`, and `integration/` are host-side trees by role and
+  are out of scope for L0/L1. `kirq`'s type vocabulary (`IrqTrigger`,
+  `IrqController`, `IrqDomainId`) is common and may be used anywhere; its
+  registration API may not be called from `drv/**`.
 - Keep refactoring commits separate from feature or behavior commits.
 
 ## Build And Validation
@@ -113,6 +132,12 @@ make UNITTEST=y run
 make unittest
 cargo +nightly-2026-03-08 fmt --all
 ```
+
+`make clippy` also runs the tree hygiene checks (`check_deps`, `check_header`,
+`check_lints`) and `check_boundaries`, the mechanical half of
+`docs/ai/driver-subsystem-boundaries.md`. `make check_boundaries` runs that one
+on its own; it is pure grep, needs no build, and fails if a `drv/**` crate
+gains an unregistered host dependency.
 
 Do not use bare `cargo check -p <crate>` as the main validation path.
 The project relies on Kconfig-generated features and `.cargo/.xconfig.toml`,
