@@ -97,6 +97,12 @@ impl FrameMeta {
             }) {
             Ok(_) => Ok(()),
             Err(MAX_REFERENCES) => Err(AllocError::NoMemory),
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: An existing borrowed frame \
+                          reference keeps the count positive; special states require a violated \
+                          allocation or raw-transfer invariant"
+            )]
             Err(_) => panic!("only a live frame reference can be cloned"),
         }
     }

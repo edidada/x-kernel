@@ -100,7 +100,7 @@ struct FramePlan {
 }
 
 impl FramePlan {
-    pub fn new(input: &[FrameRegion]) -> AllocResult<Self> {
+    fn new(input: &[FrameRegion]) -> AllocResult<Self> {
         let mut plan = Self {
             regions: [FrameRegion::EMPTY; MAX_REGIONS],
             count: 0,

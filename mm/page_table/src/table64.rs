@@ -672,6 +672,12 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         } else {
             self.map(destination, paddr, size, flags)?;
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The source leaf was queried under \
+                      this exclusive mutation guard and successful destination installation \
+                      cannot remove it"
+        )]
         self.unmap(source)
             .expect("source leaf remains present under exclusive table access");
         Ok(size)

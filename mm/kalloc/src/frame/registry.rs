@@ -144,7 +144,10 @@ impl FrameRegistry {
             // SAFETY: the checked capacity and alignment select an in-bounds
             // slot in the caller's exclusive storage. Each slot is written once
             // before any references to descriptors are published.
-            unsafe { descriptors.as_ptr().add(index).write(FrameMeta::new(false)) };
+            let slot = unsafe { descriptors.as_ptr().add(index) };
+            // SAFETY: the checked slot is aligned, writable and exclusively
+            // owned; constructing it does not read uninitialized storage.
+            unsafe { slot.write(FrameMeta::new(false)) };
         }
         Ok(Self {
             layout,
@@ -157,7 +160,10 @@ impl FrameRegistry {
         let index = segment.first_index + (pfn - segment.start_pfn);
         // SAFETY: the physical directory selects an initialized slot within
         // supplied storage, whose lifetime covers this registry borrow.
-        Some(unsafe { &*self.descriptors.as_ptr().add(index) })
+        let slot = unsafe { self.descriptors.as_ptr().add(index) };
+        // SAFETY: initialization constructed this selected slot and the backing
+        // outlives the registry borrow. State changes use atomics only.
+        Some(unsafe { &*slot })
     }
 
     pub(crate) fn validate_raw_release(&self, start_pfn: usize, pages: usize) -> AllocResult {
@@ -178,7 +184,10 @@ impl FrameRegistry {
         for index in first..first + pages {
             // SAFETY: the checked range lies within one initialized segment;
             // descriptor storage remains valid and only atomics are read.
-            let meta = unsafe { &*self.descriptors.as_ptr().add(index) };
+            let slot = unsafe { self.descriptors.as_ptr().add(index) };
+            // SAFETY: the selected slot was initialized and its backing remains
+            // valid; sharing it only exposes atomic lifetime state.
+            let meta = unsafe { &*slot };
             if meta.refs.load(Ordering::Acquire) != UNSHARED {
                 return Err(AllocError::NotAllocated);
             }

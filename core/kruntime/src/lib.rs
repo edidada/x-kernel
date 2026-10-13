@@ -661,9 +661,9 @@ fn init_allocator() {
     for region in memory_regions().filter(|r| r.flags.contains(MemFlags::FREE)) {
         #[expect(
             clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware RAM exceeds \
-                      the page registry's fixed capacity; this initialization path has no \
-                      recovery or error-return channel"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware RAM exceeds the \
+                      page registry's fixed capacity; this initialization path has no recovery or \
+                      error-return channel"
         )]
         regions
             .push(kalloc::FrameRegion::new(
@@ -675,8 +675,8 @@ fn init_allocator() {
     }
     #[expect(
         clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: physical page metadata \
-                  and allocator setup failed; runtime cannot proceed without a page allocator"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: physical page metadata and \
+                  allocator setup failed; runtime cannot proceed without a page allocator"
     )]
     // SAFETY: khal removed kernel and firmware reservations from these RAM
     // ranges. Boot mappings make them writable, they are not yet allocated,

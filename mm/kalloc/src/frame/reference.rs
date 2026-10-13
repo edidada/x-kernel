@@ -164,6 +164,11 @@ mod tests {
     }
 
     impl Fixture {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: test scenario: reserve and initialize \
+                      exclusive fixture RAM before testing lifetime operations"
+        )]
         fn new() -> Self {
             let storage = GlobalPage::alloc_contiguous(64, PAGE).unwrap();
             let base = storage.start_va();
