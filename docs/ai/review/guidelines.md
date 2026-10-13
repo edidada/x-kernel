@@ -8,11 +8,22 @@
 
 1. `docs/ai/review/common.md`；
 2. `docs/ai/skills/code-guidelines/SKILL.md`；
-3. driver 相关变更还必须读取 `docs/ai/driver-subsystem-boundaries.md`；
-4. 根据本文件路由出的相关主题文件。
+3. `docs/code-guidelines/README.md` 的规则表和例外政策，以及
+   `docs/code-guidelines/` 下 frontmatter `checks` 含 `backend: ai` 的全部
+   `CG-*.md` 规则文件（规则表 Backend 列含 `ai` 的行）；
+4. driver 相关变更还必须读取 `docs/ai/driver-subsystem-boundaries.md`；
+5. 根据本文件路由出的相关主题文件。
 
 `code-guidelines/SKILL.md` 是编码规范的权威入口。
 本文件定义如何在自动 review 中应用它，不复制并替代完整规范。
+
+已迁移的规则以 `docs/code-guidelines/CG-*.md` 为准，迁移后其正文已从
+skill 主题文件中删除，只读主题文件会漏审这些规则。对每个带 `ai` check 的
+CG 文件：先用 `paths` 判断变更文件是否适用（`triggers` 可辅助定位相关的新增
+或修改行），再按 **Rule** 判断是否违反、按 **Scope** 确定范围、按
+**Exceptions** 排除合规例外。只有 `rustc`、`clippy` 或 `dylint` check 的
+CG 文件由 lint 执行，不重复审查；同时带 lint 与 `ai` check 的文件只审查
+lint 覆盖不到的判断部分。
 
 ## 强制工作流
 
@@ -30,6 +41,9 @@
 - rustdoc、`design.md`、`security.md` 和工作流文档。
 
 ### 2. 加载相关规范
+
+先按上一节选出适用的 `ai` CG 规则，再按下表加载仍保留未迁移规则和场景指导的
+主题文件：
 
 | 变更内容 | 必读主题文件 |
 |---|---|
@@ -263,7 +277,9 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 ## 输出要求
 
 遵循 `common.md` 的 finding JSON 格式。
-每条评论应明确指出违反的规范名称或主题，说明实际维护/安全影响，并给出具体建议。
+每条评论应明确指出违反的规范：命中 CG 规则时写完整规则 id（如
+`CG-013-no-sleep-under-spinlock`），否则写主题文件名；说明实际维护/安全影响，
+并给出具体建议。
 对重命名、可见性收窄、workspace 依赖、下划线参数、单行错误处理和注释同步，
 能可靠单行修复时必须提供 suggestion。
 没有明确规范问题时输出 `未发现问题`。
