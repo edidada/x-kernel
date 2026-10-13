@@ -20,9 +20,9 @@
 #[macro_export]
 macro_rules! nmi_if_impl {
     () => {
-        use irq_driver::gic;
+        use irqchip_driver::gic;
         #[cfg(any(feature = "nmi-pseudo", feature = "nmi-hardware"))]
-        use irq_driver::gic::GicVersion;
+        use irqchip_driver::gic::GicVersion;
         use kplat::nm_irq::{NmiMode, NmiSourceInfo};
         use lazyinit::LazyInit;
 

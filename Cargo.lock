@@ -2038,7 +2038,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "irq-driver"
+name = "irqchip-driver"
 version = "0.3.0-dev"
 dependencies = [
  "aarch64-cpu 10.0.0",
@@ -2745,7 +2745,7 @@ dependencies = [
  "aarch64-pmuv3",
  "console-driver",
  "heapless",
- "irq-driver",
+ "irqchip-driver",
  "karch",
  "kbuild_config",
  "kcpu",
@@ -2811,7 +2811,7 @@ name = "kplat-riscv64"
 version = "0.3.0-dev"
 dependencies = [
  "console-driver",
- "irq-driver",
+ "irqchip-driver",
  "karch",
  "kcpu",
  "kcpu_id_map",
@@ -2836,7 +2836,7 @@ dependencies = [
  "acpi",
  "boot-info",
  "console-driver",
- "irq-driver",
+ "irqchip-driver",
  "karch",
  "kbuild_config",
  "kcpu",

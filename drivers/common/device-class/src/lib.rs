@@ -23,7 +23,9 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
-use driver_base::{DriverError, DriverResult};
+#[cfg(feature = "char")]
+use driver_base::DriverResult as _CharDriverResult;
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -237,6 +239,7 @@ macro_rules! class_api {
     (
         $feature:literal,
         $ty:ty,
+        $kind:expr,
         $registry:ident,
         $registry_fn:ident,
         $publish_fn:ident,
@@ -255,16 +258,28 @@ macro_rules! class_api {
         }
 
         #[cfg(feature = $feature)]
-        #[doc = concat!("Publish a runtime capability into the `", $feature, "` class.")]
+        #[doc = concat!("Publish a runtime capability into the `", stringify!($kind), "` class.")]
         pub fn $publish_fn(
             parent: impl Into<ClassParent>,
             runtime: $ty,
         ) -> DriverResult<ClassDevice<$ty>> {
+            let kind = $kind;
             let name = runtime.name().into();
+            let device_kind = runtime.device_kind();
             let irq = runtime.irq();
+            if device_kind != kind {
+                log::warn!(
+                    "device class '{}': runtime kind {:?} does not match registry kind {:?}",
+                    kind.as_str(),
+                    device_kind,
+                    kind,
+                );
+                return Err(DriverError::InvalidInput);
+            }
             let metadata = runtime.class_metadata();
-            let device =
-                ClassDevice::try_new_with_class_metadata(parent, runtime, name, irq, metadata)?;
+            let device = ClassDevice::try_new_with_class_metadata(
+                parent, runtime, name, kind, irq, metadata,
+            )?;
             device.with(ClassRuntimeMetadata::publish_class)?;
             let id = device.id();
             let is_active = device.is_available();
@@ -274,7 +289,7 @@ macro_rules! class_api {
             }
             log::debug!(
                 "device class '{}': published {:?} (driver={})",
-                $feature,
+                kind.as_str(),
                 id,
                 device.driver_name(),
             );
@@ -285,7 +300,7 @@ macro_rules! class_api {
         }
 
         #[cfg(feature = $feature)]
-        #[doc = concat!("Return every currently available `", $feature, "` device.")]
+        #[doc = concat!("Return every currently available `", stringify!($kind), "` device.")]
         pub fn $devices_fn() -> Vec<ClassDevice<$ty>> {
             $registry_fn().lock().devices()
         }
@@ -370,6 +385,7 @@ fn class_remove<T: ClassRuntimeMetadata>(
 class_api!(
     "net",
     NetDeviceImpl,
+    DeviceKind::Net,
     NET_DEVICES,
     net_class_registry,
     publish_net,
@@ -382,6 +398,7 @@ class_api!(
 class_api!(
     "hwrng",
     HwrngDeviceImpl,
+    DeviceKind::Hwrng,
     HWRNG_DEVICES,
     hwrng_class_registry,
     publish_hwrng,
@@ -394,6 +411,7 @@ class_api!(
 class_api!(
     "block",
     BlockDeviceImpl,
+    DeviceKind::Block,
     BLOCK_DEVICES,
     block_class_registry,
     publish_block,
@@ -406,6 +424,7 @@ class_api!(
 class_api!(
     "char",
     CharDeviceImpl,
+    DeviceKind::Char,
     CHAR_DEVICES,
     char_class_registry,
     publish_char,
@@ -418,6 +437,7 @@ class_api!(
 class_api!(
     "display",
     DisplayDeviceImpl,
+    DeviceKind::Display,
     DISPLAY_DEVICES,
     display_class_registry,
     publish_display,
@@ -430,6 +450,7 @@ class_api!(
 class_api!(
     "input",
     InputDeviceImpl,
+    DeviceKind::Input,
     INPUT_DEVICES,
     input_class_registry,
     publish_input,
@@ -442,6 +463,7 @@ class_api!(
 class_api!(
     "vsock",
     VsockDeviceImpl,
+    DeviceKind::Vsock,
     VSOCK_DEVICES,
     vsock_class_registry,
     publish_vsock,
@@ -614,7 +636,9 @@ mod node_compat {
 pub mod prelude {
     #[cfg(feature = "block")]
     pub use block::BlockDeviceOperations;
-    pub use driver_base::{DriverError, DriverResult};
+    #[cfg(feature = "char")]
+    use driver_base::DriverResult as _CharDriverResult;
+    pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
     #[cfg(feature = "block")]
     pub use crate::BlockDeviceImpl;

@@ -17,7 +17,7 @@ vmm = []
 [dependencies]
 log = "0.4"
 
-irq_driver = { workspace = true }
+irqchip_driver = { workspace = true }
 khal = { workspace = true }
 ktime = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-mmio"] }

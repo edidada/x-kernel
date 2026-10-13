@@ -1,5 +1,5 @@
 [package]
-name = "irq-driver"
+name = "irqchip-driver"
 description = "IRQ chip drivers with kplat-compatible integration"
 version.workspace = true
 edition.workspace = true

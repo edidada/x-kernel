@@ -85,13 +85,13 @@ impl PlatformBackend {
             },
             |dev| {
                 let mut resources: ResourceSet = smallvec![];
-                if let Some(mmio) = dev.mmio {
+                if let Some(mmio) = dev.mmios.first() {
                     resources.push(ResourceDesc::Mmio(MmioRegion {
                         base: mmio.base,
                         size: mmio.size,
                     }));
                 }
-                if let Some(irq) = dev.irq {
+                if let Some(irq) = dev.irqs.first() {
                     resources.push(ResourceDesc::Irq(IrqResource::new(
                         irq.irq,
                         super::irq_trigger_from_firmware(irq.trigger),
@@ -99,9 +99,9 @@ impl PlatformBackend {
                 }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
-                    match dev.mmio {
+                    match dev.mmios.first() {
                         #[cfg(feature = "virtio")]
-                        Some(mmio) => virtio_mmio_registration(mmio),
+                        Some(mmio) => virtio_mmio_registration(*mmio),
                         #[cfg(not(feature = "virtio"))]
                         Some(_) => None,
                         None => {

@@ -39,7 +39,7 @@ topology (MADT), PCI ECAM windows (MCFG), the PCI host bridge memory window
 ## Scope
 
 ```text
-drivers/platform/acpi/
+drivers/firmware/acpi/
 ├── src/
 │   └── lib.rs        # descriptors, table lookup, MADT/MCFG/DSDT/FADT parsing
 └── Cargo.toml

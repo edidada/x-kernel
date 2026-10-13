@@ -49,7 +49,7 @@ which adds kernel-specific semantics.
 ## Scope
 
 ```text
-drivers/platform/rs-fdtree/
+drivers/firmware/rs-fdtree/
 ├── src/
 │   ├── lib.rs            # LinuxFdt, MemReserveIter, re-exports
 │   ├── header.rs         # FdtHeader layout, magic and block ranges

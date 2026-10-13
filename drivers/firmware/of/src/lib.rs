@@ -6,6 +6,9 @@
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;
@@ -14,6 +17,229 @@ pub use rs_fdtree::{
     Chosen, Dice, FdtError, FdtNode, InterruptController, LinuxFdt, MemoryRegion, NodeProperty,
     RegIter,
 };
+
+/// Firmware-stated DMA view facts of one bus/device, decoded from
+/// `dma-ranges` and `dma-coherent`.
+///
+/// * `offset`: cumulative `dma-ranges` translation such that
+///   `dma_addr = cpu_paddr - offset` (signed: device ids may sit ABOVE the
+///   CPU window).
+/// * `size_mask`: device-usable address bits derived from the range window
+///   size (`min(64, ilog2(size))` bits) — the `dev->dma_mask` floor a bus
+///   narrower than RAM imposes.
+/// * `coherent`: `Some(true)`/`Some(false)` only when firmware STATED
+///   coherency via `dma-coherent`; `None` = not stated (caller applies
+///   its architecture default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaFacts {
+    pub offset: i64,
+    pub size_mask: u64,
+    pub coherent: Option<bool>,
+}
+
+impl DmaFacts {
+    /// No translation stated: identity view, full 64-bit mask, coherency
+    /// un-stated. What a bus without `dma-ranges` says (and the common
+    /// case — QEMU virt).
+    pub const IDENTITY: Self = Self {
+        offset: 0,
+        size_mask: u64::MAX,
+        coherent: None,
+    };
+}
+
+/// One firmware node property, eagerly typed when the byte encoding is
+/// unambiguous (`of_property_read_u32`-style views come from these).
+///
+/// Multi-cell payloads stay [`PropValue::Bytes`] — length alone cannot
+/// prove list intent; consumers reinterpret with the same rules the
+/// device-tree specification states for the specific property they know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropValue {
+    /// Zero-length property — presence is the information.
+    Empty,
+    /// One NUL-terminated string.
+    Str(&'static str),
+    /// NUL-separated string list.
+    StrList(Vec<&'static str>),
+    /// One big-endian u32 cell.
+    U32(u32),
+    /// One big-endian u64 value.
+    U64(u64),
+    /// Everything else (raw cells, mixed payloads).
+    Bytes(&'static [u8]),
+}
+
+/// Decode one property payload. Typing follows the device-tree
+/// specification's disambiguation rule (the same one
+/// `of_property_read_string` applies): a payload whose LAST byte is NUL is
+/// a string/stringlist; otherwise it is cells (4 → u32, 8 → u64, else raw
+/// bytes). Ambiguities remain only where firmware itself encoded
+/// string-looking cell values — `of_property_read_u32` callers get those
+/// through [`PropValue::Bytes`] reinterpretation by property NAME, which
+/// is how Linux resolves typing too.
+fn decode_prop_value(value: &'static [u8]) -> PropValue {
+    if value.is_empty() {
+        return PropValue::Empty;
+    }
+    // The strings encoding is ENTIRE NUL-separated UTF-8 segments ending
+    // in a NUL — anything else is cells.
+    if value[value.len() - 1] == 0
+        && let Some(list) = decode_string_list(value)
+    {
+        return if list.len() == 1 {
+            PropValue::Str(list[0])
+        } else {
+            PropValue::StrList(list)
+        };
+    }
+    if value.len() == 4 {
+        return PropValue::U32(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+    }
+    if value.len() == 8 {
+        let cells = [
+            u32::from_be_bytes([value[0], value[1], value[2], value[3]]),
+            u32::from_be_bytes([value[4], value[5], value[6], value[7]]),
+        ];
+        return PropValue::U64((cells[0] as u64) << 32 | cells[1] as u64);
+    }
+    PropValue::Bytes(value)
+}
+
+fn decode_string_list(value: &'static [u8]) -> Option<Vec<&'static str>> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    loop {
+        let Some(pos) = rest.iter().position(|&byte| byte == 0) else {
+            // Non-NUL-terminated tail: not a stringlist.
+            if rest.is_empty() {
+                break;
+            }
+            return None;
+        };
+        out.push(core::str::from_utf8(&rest[..pos]).ok()?);
+        rest = &rest[pos + 1..];
+    }
+    Some(out)
+}
+
+/// Every property of a node, in firmware order, typed per
+/// [`decode_prop_value`] — the snapshot a bus backend hands to the device
+/// model so probe code can read quirk properties (`of_find_property` /
+/// `of_property_read_*` surface, minus a live tree).
+pub fn node_properties(node: FdtNode<'static, 'static>) -> Vec<(&'static str, PropValue)> {
+    node.properties()
+        .map(|prop| (prop.name, decode_prop_value(prop.value)))
+        .collect()
+}
+
+/// Decode the DMA facts a bus node states for its CHILDREN — `dma-ranges`
+/// and `dma-coherent` ON the given bus/bridge node (the PCI host-bridge
+/// spelling: the node IS the parent bus).
+///
+/// `dma-ranges` rows are `<child-addr> <parent-addr> <size>` triples: the
+/// child address space is the DMA (device) space, the parent space is CPU
+/// physical, so `dma_addr = paddr - (parent - child)`. Returns `None` when
+/// the node states no translation at all (identity — the caller's default).
+pub fn bus_dma_facts(bus_node: FdtNode<'static, 'static>) -> Option<DmaFacts> {
+    // Own #address-cells sizes the child (DMA) side; the parent hop sizes
+    // the CPU side; own #size-cells sizes the window. All three reachable
+    // from a bus node under the one-hop API.
+    let child_cells = bus_node.property_u32("#address-cells")? as usize;
+    let parent_cells = bus_node
+        .parent_property_u32("#address-cells")
+        .unwrap_or(child_cells as u32) as usize;
+    let size_cells = bus_node.property_u32("#size-cells")? as usize;
+    let coherent = bus_node.property("dma-coherent").map(|_| true);
+    let ranges = bus_node.property("dma-ranges")?;
+    decode_dma_ranges(
+        ranges.value,
+        child_cells,
+        parent_cells,
+        size_cells,
+        coherent,
+    )
+}
+
+/// Decode the DMA facts for a DEVICE node: translation from its direct
+/// parent bus (`dma-ranges` on the parent), coherency from the node itself
+/// or that parent (`of_dma_is_coherent`'s reachable levels).
+///
+/// Geometry: the parent's own `#address-cells` sizes the child (DMA) side
+/// and — per the device-tree specification's root/one-level convention —
+/// also the CPU side; a mixed-cell nesting would fail the row-divisibility
+/// check inside and be ignored with a warning rather than half-decoded.
+/// Returns `None` when neither the node nor its parent states anything —
+/// the caller keeps its architecture default.
+pub fn device_dma_facts(node: FdtNode<'static, 'static>) -> Option<DmaFacts> {
+    let coherent = if node.property("dma-coherent").is_some() {
+        Some(true)
+    } else {
+        node.parent_property("dma-coherent").map(|_| true)
+    };
+    let ranges = node.parent_property("dma-ranges")?;
+    let cells = node.parent_property_u32("#address-cells").unwrap_or(2) as usize;
+    let size_cells = node.parent_property_u32("#size-cells").unwrap_or(2) as usize;
+    decode_dma_ranges(ranges.value, cells, cells, size_cells, coherent)
+}
+
+/// Decode `dma-ranges` payloads: rows of `(child, parent, size)` big-endian
+/// cell triples. `offset = Σ(parent - child)` (signed); the device-usable
+/// mask is the smallest window-derived `ilog2` bound (Linux
+/// `of_dma_configure`'s mask derivation).
+fn decode_dma_ranges(
+    value: &[u8],
+    child_cells: usize,
+    parent_cells: usize,
+    size_cells: usize,
+    coherent: Option<bool>,
+) -> Option<DmaFacts> {
+    let row_cells = child_cells + parent_cells + size_cells;
+    if row_cells == 0
+        || !value
+            .len()
+            .is_multiple_of(row_cells * core::mem::size_of::<u32>())
+    {
+        log::warn!(
+            "of: dma-ranges cell geometry invalid (child={child_cells} parent={parent_cells} \
+             size={size_cells}) — ignoring"
+        );
+        return None;
+    }
+    let cells = value
+        .chunks_exact(4)
+        .map(|cell| u32::from_be_bytes([cell[0], cell[1], cell[2], cell[3]]) as u64)
+        .collect::<Vec<_>>();
+    let mut offset: i64 = 0;
+    let mut mask: u64 = u64::MAX;
+    for row in cells.chunks_exact(row_cells) {
+        let child = cells_to_u64(&row[..child_cells]);
+        let parent = cells_to_u64(&row[child_cells..child_cells + parent_cells]);
+        let size = cells_to_u64(&row[child_cells + parent_cells..]);
+        offset += parent as i64 - child as i64;
+        if size > 0 {
+            let bits = (u64::BITS - 1 - size.leading_zeros()).min(64);
+            mask = mask.min(if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            });
+        }
+    }
+    Some(DmaFacts {
+        offset,
+        size_mask: mask,
+        coherent,
+    })
+}
+
+fn cells_to_u64(cells: &[u64]) -> u64 {
+    let mut value: u64 = 0;
+    for cell in cells {
+        value = (value << 32) | cell;
+    }
+    value
+}
 
 /// Failure to initialize the global device-tree handle.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +293,9 @@ pub enum PciHostCam {
 pub struct PciHostInfo {
     /// Config access mechanism (`Cam` or `Ecam`).
     pub cam: PciHostCam,
+    /// PCI segment (domain) number — DT `linux,pci-domain` when stated,
+    /// 0 otherwise (single-segment hosts). ACPI sources it from MCFG.
+    pub segment: u16,
     /// Physical base of the config space window.
     pub ecam_base: u64,
     /// Size of the config space window in bytes.
@@ -107,6 +336,14 @@ pub struct NamedMemoryRegion {
     pub region: crate::MemoryRegion,
     /// Node name or `dtb memreserve` tag the region came from.
     pub name: &'static str,
+}
+
+/// Parse a byte slice into big-endian u32 words; `None` if not 4-byte aligned.
+fn be_u32_words(value: &[u8]) -> Option<Vec<u32>> {
+    value
+        .chunks_exact(4)
+        .map(|w| Some(u32::from_be_bytes(w.try_into().ok()?)))
+        .collect()
 }
 
 fn property_u32_cells<const N: usize>(node: FdtNode<'_, '_>, name: &str) -> Option<[u32; N]> {
@@ -403,6 +640,114 @@ pub fn syscon_poweroff() -> Option<SysconControl> {
     })
 }
 
+/// Reads a property as a NUL-separated string list (e.g. `reg-names`,
+/// `interrupt-names`). Trailing garbage after the last NUL is rejected by
+/// FDT conventions; we tolerate a missing final NUL.
+pub fn string_list(node: FdtNode<'static, 'static>, name: &str) -> Option<Vec<&'static str>> {
+    let value = node.property(name)?.value;
+    if value.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(pos) = rest.iter().position(|&b| b == 0) {
+        let s = core::str::from_utf8(&rest[..pos]).ok()?;
+        out.push(s);
+        rest = &rest[pos + 1..];
+    }
+    if !rest.is_empty() {
+        // Non-NUL-terminated tail: malformed by FDT rules — reject the list.
+        return None;
+    }
+    Some(out)
+}
+
+/// Returns every interrupt specifier for a device node, in DT order.
+///
+/// Handles the two DT spellings: a flat `interrupts` property (uniform
+/// specifier width under the node's interrupt parent — GIC-style 3-cell
+/// and simple 1-cell) and `interrupts-extended` (per-entry phandle +
+/// `#interrupt-cells` of the referenced controller).
+/// `first_interrupt_desc` remains the `interrupt_descs().first()` special
+/// case for existing single-irq callers.
+pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
+    let mut out = Vec::new();
+
+    // Flat `interrupts`: the specifier width comes from the interrupt
+    // parent's `#interrupt-cells` (Linux of_irq_parse_one does the same —
+    // never guessed from the property length: a PLIC node with three
+    // one-cell interrupts <5 6 7> is length 3 and must not parse as one
+    // three-cell specifier).
+    if let Some(parent) = interrupt_parent_node(node) {
+        let controller = controller_kind(parent);
+        if let Some(cells_width) = property_u32(parent, "#interrupt-cells") {
+            if cells_width == 0 {
+                // A zero-width specifier is malformed firmware data; the
+                // modulo and chunks_exact below would otherwise panic.
+                log::warn!(
+                    "DT node '{}': interrupt parent declares #interrupt-cells=<0>; interrupts \
+                     skipped",
+                    node.name
+                );
+            } else if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
+                let width = cells_width as usize;
+                if !value.is_empty() && value.len() % (width * 4) == 0 {
+                    out.extend(
+                        value
+                            .chunks_exact(width * 4)
+                            .filter_map(be_u32_words)
+                            .filter_map(|cells| parse_interrupt_by_controller(controller, &cells)),
+                    );
+                    return out;
+                }
+                if !value.is_empty() {
+                    log::warn!(
+                        "DT node '{}': interrupts property is {} bytes, not a multiple of \
+                         #interrupt-cells={} — skipped",
+                        node.name,
+                        value.len(),
+                        width
+                    );
+                }
+            }
+        } else {
+            log::warn!(
+                "DT node '{}': interrupt parent has no #interrupt-cells — interrupts skipped",
+                node.name
+            );
+        }
+    }
+
+    if let Some(value) = node.property("interrupts-extended").map(|prop| prop.value)
+        && let Some(words) = be_u32_words(value)
+    {
+        // Each entry: controller phandle, then that controller's
+        // `#interrupt-cells` specifiers.
+        let mut idx = 0usize;
+        while idx < words.len() {
+            let Some(controller_node) = find_node_by_phandle(words[idx]) else {
+                break;
+            };
+            let Some(cells) = property_u32(controller_node, "#interrupt-cells") else {
+                break;
+            };
+            let cells = cells as usize;
+            let end = (idx + 1 + cells).min(words.len());
+            if end > idx + 1
+                && let Some(info) = parse_interrupt_by_controller(
+                    controller_kind(controller_node),
+                    &words[idx + 1..end],
+                )
+            {
+                out.push(info);
+            }
+            idx = end;
+        }
+    }
+
+    out
+}
+
 /// Returns the first interrupt specifier for a device node.
 pub fn first_interrupt_desc(node: FdtNode<'static, 'static>) -> Option<InterruptInfo> {
     if let Some(parent) = interrupt_parent_node(node) {
@@ -487,8 +832,14 @@ pub fn generic_pci_host_info() -> Option<PciHostInfo> {
     };
     let reg = node.reg()?.next()?;
     let [bus_start, bus_end] = property_u32_cells::<2>(node, "bus-range").unwrap_or([0, 0xff]);
+    // `linux,pci-domain`: the DT binding for the PCI segment number.
+    // Absent means a single-segment host — segment 0.
+    let segment = property_u32_cells::<1>(node, "linux,pci-domain")
+        .map(|[d]| d as u16)
+        .unwrap_or(0);
     Some(PciHostInfo {
         cam,
+        segment,
         ecam_base: reg.starting_address as usize as u64,
         ecam_size: reg.size as u64,
         bus_start: bus_start as u8,
@@ -835,7 +1186,13 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
         ))
 }
 
+mod clocks;
 #[unittest::mod_test]
 mod unittest_tests {
-    include!("../ut-tests/of_unittest.rs");
+    include!("tests.rs");
 }
+
+pub use clocks::{
+    ClockSpec, clock_output_name, device_clock_index_by_name, device_clock_names,
+    device_clock_spec_by_name, device_clock_specs, device_fixed_clock_hz,
+};
