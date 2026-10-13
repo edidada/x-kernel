@@ -538,6 +538,7 @@ Device removal must also delete the device's routes and neighbors and renumber s
 While holding global execution ownership, the poller may acquire Router, Ipv4IngressState, the smoltcp Interface, and socket-set locks only through `try_lock`.
 Handing off an admitted-packet batch must acquire socket-set before Router. A batch containing only control packets skips socket-set.
 Contention must return `has_more`.
+`Ipv4Ingress` keeps its state lock and reassembly deadline private. Its batch-processing API publishes the deadline while still holding the state lock, so each reassembly-state update is paired with timer publication. Input-lock contention returns before consuming any RX packet.
 If an expired IPv4 reassembly event encounters Ipv4IngressState contention, it retains its pending state and allows TX and protocol processing to continue for the current round.
 The expiration path does not acquire this lock when no reassembly queue exists or no queue has expired.
 Raw-packet batches already taken from devices, admitted-packet batches awaiting smoltcp, and control-packet batches awaiting transmission must retain ownership until handoff succeeds. TCP listener preparation and enqueueing of the admitted-packet batch must occur within the same successful handoff.

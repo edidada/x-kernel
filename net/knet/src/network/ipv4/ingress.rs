@@ -21,7 +21,7 @@ use crate::{
     udp, udp_err,
 };
 
-pub(crate) const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
+const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
 const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
 
 #[derive(Default)]
@@ -32,8 +32,8 @@ pub(crate) struct Ipv4ExpirationProgress {
 
 /// Owns IPv4 input state and the timer sampled by the runtime.
 pub(crate) struct Ipv4Ingress {
-    pub(crate) state: Mutex<Ipv4IngressState>,
-    pub(crate) reassembly_deadline_micros: AtomicU64,
+    state: Mutex<Ipv4IngressState>,
+    reassembly_deadline_micros: AtomicU64,
 }
 
 impl Ipv4Ingress {
@@ -42,6 +42,45 @@ impl Ipv4Ingress {
             state: Mutex::new(Ipv4IngressState::new()),
             reassembly_deadline_micros: AtomicU64::new(0),
         }
+    }
+
+    /// Processes a received IP batch and publishes its reassembly deadline under one lock.
+    ///
+    /// IPv6 packets pass through to the shared stack. Returns `false` on input-state
+    /// contention, retaining the entire batch for retry.
+    pub(crate) fn try_process_rx_batch(
+        &self,
+        device_timestamp: MonotonicInstant,
+        rx_batch: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<PacketBuf>,
+        control_packets: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        if rx_batch.is_empty() {
+            return true;
+        }
+
+        let Some(mut ingress) = self.state.try_lock() else {
+            return false;
+        };
+        for packet in rx_batch.drain(..) {
+            let Some(ip_packet) = packet.network_packet() else {
+                continue;
+            };
+            match crate::ipv4::ip_version(ip_packet) {
+                Some(4) => ingress.process_packet(
+                    device_timestamp,
+                    packet,
+                    accepted_packets,
+                    control_packets,
+                ),
+                Some(6) => accepted_packets.push(packet),
+                _ => debug!("Dropping packet with invalid IP version"),
+            }
+        }
+        let next_deadline = ingress.ipv4_reassembly_deadline();
+        self.update_reassembly_deadline(next_deadline);
+        drop(ingress);
+        true
     }
 
     pub(crate) fn set_ipv4_addrs(&self, addrs: &[Ipv4Cidr]) {
@@ -64,7 +103,7 @@ impl Ipv4Ingress {
                 .is_ok()
     }
 
-    pub(crate) fn update_reassembly_deadline(&self, next: Option<MonotonicInstant>) {
+    fn update_reassembly_deadline(&self, next: Option<MonotonicInstant>) {
         let next_state = ipv4_reassembly_timer_state(next);
         let mut current = self.reassembly_deadline_micros.load(Ordering::Acquire);
         loop {
@@ -83,6 +122,17 @@ impl Ipv4Ingress {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn set_reassembly_deadline_for_test(&self, next: MonotonicInstant) {
+        self.update_reassembly_deadline(Some(next));
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn with_state_locked_for_test<R>(&self, action: impl FnOnce() -> R) -> R {
+        let _state = self.state.lock();
+        action()
     }
 
     fn complete_expiration(&self, next: Option<MonotonicInstant>, has_more: bool) {
@@ -138,7 +188,7 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
         .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
 }
 
-pub(crate) struct Ipv4IngressState {
+struct Ipv4IngressState {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
     ipv4_reassembler: Ipv4Reassembler,
 }
@@ -156,7 +206,7 @@ impl Ipv4IngressState {
         self.local_ipv4_addrs.extend_from_slice(addrs);
     }
 
-    pub(crate) fn ipv4_reassembly_deadline(&self) -> Option<MonotonicInstant> {
+    fn ipv4_reassembly_deadline(&self) -> Option<MonotonicInstant> {
         self.ipv4_reassembler.expiration_deadline()
     }
 
@@ -182,7 +232,7 @@ impl Ipv4IngressState {
     }
 
     /// Processes IPv4 input before accepted packets enter the shared stack.
-    pub(crate) fn process_packet(
+    fn process_packet(
         &mut self,
         timestamp: MonotonicInstant,
         mut packet: PacketBuf,
@@ -288,4 +338,94 @@ fn should_emit_protocol_unreachable(header: Ipv4Header) -> bool {
             header.protocol(),
             ipv4::PROTOCOL_TCP | ipv4::PROTOCOL_UDP | ipv4::PROTOCOL_ICMP
         )
+}
+
+#[unittest::mod_test]
+mod tests {
+    use etherparse::{IpNumber, Ipv4Header as EtherIpv4Header};
+    use ktime_types::TimeSpan;
+    use unittest::def_test;
+
+    use super::*;
+    use crate::buf::PacketOwner;
+
+    #[def_test]
+    fn received_fragment_publishes_expiration_deadline() {
+        let ingress = Ipv4Ingress::new();
+        ingress.set_ipv4_addrs(&[Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24).unwrap()]);
+        let payload = b"abcdefgh";
+        let mut header = EtherIpv4Header::new(
+            payload.len() as u16,
+            64,
+            IpNumber(ipv4::PROTOCOL_UDP),
+            [192, 0, 2, 1],
+            [192, 0, 2, 2],
+        )
+        .unwrap();
+        header.dont_fragment = false;
+        header.more_fragments = true;
+        header.header_checksum = header.calc_header_checksum();
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(payload);
+        let mut rx_batch = alloc::vec![PacketBuf::from_ip_packet_vec(
+            1,
+            bytes,
+            PacketOwner::DeviceRx,
+        )];
+        let mut accepted_packets = Vec::new();
+        let mut control_packets = Vec::new();
+        let timestamp = monotonic_time();
+
+        assert!(ingress.try_process_rx_batch(
+            timestamp,
+            &mut rx_batch,
+            &mut accepted_packets,
+            &mut control_packets,
+        ));
+        assert!(rx_batch.is_empty());
+        assert!(accepted_packets.is_empty());
+        assert!(control_packets.is_empty());
+        let after_expiration = timestamp + TimeSpan::from_secs(60);
+        assert!(ingress.handle_timer_tick(
+            u64::try_from(after_expiration.span_since_origin().as_micros()).unwrap()
+        ));
+        let progress = ingress.expire_fragments(after_expiration, 1, &mut control_packets);
+        assert_eq!(progress.timer_events, 1);
+        assert!(!progress.has_more);
+        assert_eq!(control_packets.len(), 1);
+        assert!(!ingress.has_pending_timer());
+    }
+
+    #[def_test]
+    fn contended_input_retains_batch_for_retry() {
+        let ingress = Ipv4Ingress::new();
+        let mut rx_batch = alloc::vec![PacketBuf::from_ip_packet_vec(
+            1,
+            alloc::vec![0x60; 40],
+            PacketOwner::DeviceRx,
+        )];
+        let mut accepted_packets = Vec::new();
+        let mut control_packets = Vec::new();
+        let timestamp = monotonic_time();
+        let was_processed = ingress.with_state_locked_for_test(|| {
+            ingress.try_process_rx_batch(
+                timestamp,
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+            )
+        });
+        assert!(!was_processed);
+        assert_eq!(rx_batch.len(), 1);
+        assert!(accepted_packets.is_empty());
+        assert!(control_packets.is_empty());
+        assert!(ingress.try_process_rx_batch(
+            timestamp,
+            &mut rx_batch,
+            &mut accepted_packets,
+            &mut control_packets,
+        ));
+        assert!(rx_batch.is_empty());
+        assert_eq!(accepted_packets.len(), 1);
+    }
 }

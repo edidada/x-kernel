@@ -702,9 +702,9 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 26 | &emsp;&emsp;`try_lock` Router, or return retry |
 | 27 | &emsp;&emsp;pull a bounded batch, limited by smoltcp ingress capacity |
 | 28 | &emsp;&emsp;release Router |
-| 29 | &emsp;&emsp;`try_lock` Ipv4IngressState, or retain batch and return retry |
+| 29 | &emsp;&emsp;call `Ipv4Ingress::try_process_rx_batch`, or retain batch and return retry |
 | 30 | &emsp;&emsp;validate/filter IPv4, reassemble fragments, deliver UDP, collect ICMP responses and packets accepted for smoltcp |
-| 31 | &emsp;&emsp;release Ipv4IngressState |
+| 31 | &emsp;&emsp;publish the reassembly deadline before releasing the internal input-state lock |
 | 32 | &emsp;&emsp;flush accepted/control batches, or return retry |
 | 33 | &emsp;&emsp;**stop** when device draining reports no more work |
 | 34 | **Procedure** `flush accepted/control batches` |
@@ -806,7 +806,7 @@ Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__
 
 The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
 
-`Service::ipv4_ingress` owns an `Ipv4Ingress`, whose `state` mutex protects the local IPv4 address view and `Ipv4IngressState::ipv4_reassembler` queues. Its atomic reassembly deadline is sampled by the runtime timer. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
+`Service::ipv4_ingress` owns an `Ipv4Ingress`, whose `state` mutex protects the local IPv4 address view and `Ipv4IngressState::ipv4_reassembler` queues. Its state lock and atomic reassembly deadline are private. `Ipv4Ingress::try_process_rx_batch` acquires the lock without blocking, forwards IPv6 packets to the shared stack, processes IPv4 input, and publishes the reassembly deadline before releasing the lock. Contention retains the entire RX batch for retry. The runtime timer samples the deadline through `handle_timer_tick`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 
 The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the peer endpoint uses `SpinNoIrq` for softirq lookup. The asynchronous-error queue has its own mutex; error status, shutdown flags, and receive-error enablement use atomics. Socket-local waiter sets report data, errors, write readiness, and shutdown independently of device RX notifications.
 
