@@ -251,6 +251,9 @@ Prefer:
 
 - a narrow boundary where raw boot entry, linker-defined symbols,
   naked assembly, and CPU-mode transitions are localized;
+- explicit `# Safety` docs stating entry-state assumptions:
+  calling convention, register/stack state, linker layout,
+  MMU/exception-level state, and control-transfer behavior;
 - safe helpers beneath the entry boundary once invariants
   have been materialized into typed values.
 

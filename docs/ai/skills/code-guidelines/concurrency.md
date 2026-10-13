@@ -45,6 +45,12 @@ make clippy   # or make build / make run
 `make clippy` follows `.config`; do not special-case the feature
 in the build tool.
 
+### Heap and lazy runtime init
+
+Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
+`Lazy::new(|| Mutex::new(...))`). With `stats` they bind a per-init-site
+class via `#[track_caller]` and are **not** `const`.
+
 ## Workerqueue Usage
 
 - use `kworkng` when hardirq, softirq, timer, or other non-sleepable paths need
