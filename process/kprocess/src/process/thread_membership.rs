@@ -10,6 +10,7 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult};
+use kidentity::TaskIdentityToken;
 use kspin::SpinNoIrq;
 use ktask::{KtaskRef, WeakKtaskRef};
 
@@ -17,24 +18,28 @@ use super::Process;
 use crate::{AsThread, Tid, process_domain, publication::process_publication};
 
 /// Published tasks and unreleased group-leader membership tracked per process.
+///
+/// Members are keyed by the task's stable [`TaskIdentityToken`], not by its
+/// current TID, so an `exec` leader takeover that moves a number does not have
+/// to re-index or migrate membership.
 #[derive(Default)]
 pub(super) struct ThreadMembership {
-    members: BTreeMap<Tid, Arc<ThreadMemberSlot>>,
+    members: BTreeMap<TaskIdentityToken, Arc<ThreadMemberSlot>>,
 }
 
 impl ThreadMembership {
-    pub(super) fn reserve_slot(&mut self, tid: Tid) -> Arc<ThreadMemberSlot> {
+    pub(super) fn reserve_slot(&mut self, token: TaskIdentityToken) -> Arc<ThreadMemberSlot> {
         // Runtime kidentity allocation is monotonic and checked: numbers are
         // never recycled on exit/drop or wrapped at exhaustion. Fixed-number
         // replacement fixtures exercise stale identity guards, not allocation.
         self.members
-            .entry(tid)
+            .entry(token)
             .or_insert_with(|| Arc::new(ThreadMemberSlot::new()))
             .clone()
     }
 
     fn exit_task(&mut self, task: &KtaskRef, is_leader: bool) {
-        if let Some(slot) = self.members.get(&task.as_thread().tid()) {
+        if let Some(slot) = self.members.get(&task.as_thread().identity_token()) {
             slot.exit_task(task, is_leader);
         }
         self.prune_stale();
@@ -57,8 +62,9 @@ impl ThreadMembership {
 
     fn thread_ids(&self) -> Vec<Tid> {
         self.members
-            .iter()
-            .filter_map(|(tid, slot)| slot.snapshot().map(|_| *tid))
+            .values()
+            .filter_map(|slot| slot.snapshot())
+            .map(|task| task.as_thread().tid())
             .collect()
     }
 
@@ -78,8 +84,9 @@ impl ThreadMembership {
 
     fn contains_published_tid(&self, tid: Tid) -> bool {
         self.members
-            .get(&tid)
-            .is_some_and(|slot| slot.snapshot().is_some())
+            .values()
+            .filter_map(|slot| slot.snapshot())
+            .any(|task| task.as_thread().tid() == tid)
     }
 
     fn representative_task(&self) -> KResult<KtaskRef> {
@@ -166,8 +173,11 @@ impl ThreadMemberSlot {
 }
 
 impl Process {
-    pub(crate) fn reserve_thread_member_slot(&self, tid: Tid) -> Arc<ThreadMemberSlot> {
-        self.thread_membership.lock().reserve_slot(tid)
+    pub(crate) fn reserve_thread_member_slot(
+        &self,
+        token: TaskIdentityToken,
+    ) -> Arc<ThreadMemberSlot> {
+        self.thread_membership.lock().reserve_slot(token)
     }
 
     /// Publishes a thread task into this [`Process`]'s membership table.
@@ -208,7 +218,6 @@ impl Process {
     /// user-memory cleanup first and perform no subsequent user access.
     pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
         task.as_thread().capture_exit_address_space();
-        let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
             if !group_exit.group_exited {

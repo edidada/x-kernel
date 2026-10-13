@@ -156,6 +156,10 @@ impl SchedulerState {
 
 /// Task-bound user-thread state, credentials, signals and shared process runtime.
 pub struct Thread {
+    /// Stable identity token, allocated once and unchanged across an `exec`
+    /// leader takeover. Registries that must not be re-indexed when the number
+    /// moves (thread membership, cgroup membership) key on this token.
+    identity_token: kidentity::TaskIdentityToken,
     /// Current number binding for this thread. It is stable for the task's life
     /// except for an `exec` leader takeover, which moves the thread-group
     /// number onto the surviving thread; registries key on the task object, not
@@ -213,8 +217,10 @@ impl Thread {
         no_new_privileges: bool,
     ) -> KResult<Box<Self>> {
         let tid = task_number.root_nr();
-        let cgroup = charge.commit(task_number.clone())?;
+        let identity_token = kidentity::TaskIdentityToken::allocate();
+        let cgroup = charge.commit(identity_token)?;
         Ok(Box::new(Thread {
+            identity_token,
             task_number: SpinNoIrq::new(task_number),
             tid: AtomicU32::new(tid),
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
@@ -543,6 +549,11 @@ impl Thread {
 
     pub(crate) fn task_number(&self) -> Arc<kidentity::PidHandle> {
         self.task_number.lock().clone()
+    }
+
+    /// Returns the stable identity token for this thread.
+    pub fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        self.identity_token
     }
 
     pub(crate) fn process_runtime(&self) -> Arc<ProcessRuntime> {

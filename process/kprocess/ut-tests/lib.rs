@@ -2287,9 +2287,16 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
         "retiring an older task must not disturb a republished live TID slot"
     );
 
+    // Membership is keyed by stable identity, so the forced-retired `first`
+    // task is still a live process member even though its TID slot was reused
+    // by `second`. Exiting `second` therefore must not be the last-member exit.
     assert!(
-        process.exit_thread(&second, 0),
-        "live reused tid owner must still be able to exit cleanly"
+        !process.exit_thread(&second, 0),
+        "an older live member must keep the process alive"
+    );
+    assert!(
+        process.exit_thread(&first, 0),
+        "the last live member must be able to exit cleanly"
     );
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();

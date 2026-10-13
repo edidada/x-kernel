@@ -113,6 +113,9 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     /// Returns the current numeric TID as a lock-free snapshot.
     fn tid(&self) -> u32;
 
+    /// Returns the task's stable identity token.
+    fn identity_token(&self) -> kidentity::TaskIdentityToken;
+
     /// Returns this runtime as [`Any`] for process-domain type recovery.
     fn as_any(&self) -> &dyn Any;
 }

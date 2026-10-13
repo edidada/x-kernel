@@ -252,6 +252,10 @@ impl<T> PublicationSlotEffect<T> {
 /// Global publication owner for the process domain.
 pub(crate) struct ProcessPublication {
     tables: &'static RwLock<PublicationTables>,
+    /// Stable identity-token directory: token -> task. Registries that must not
+    /// be re-indexed when a numeric TID moves (cgroup membership reads) resolve
+    /// the token here and read the current number from the task on demand.
+    identities: &'static RwLock<BTreeMap<kidentity::TaskIdentityToken, WeakKtaskRef>>,
 }
 
 static_lock! {
@@ -263,8 +267,15 @@ static_lock! {
     });
 }
 
+static_lock! {
+    static PROCESS_PUBLICATION_IDENTITIES:
+        RwLock<BTreeMap<kidentity::TaskIdentityToken, WeakKtaskRef>> =
+        RwLock::new(BTreeMap::new());
+}
+
 static PROCESS_PUBLICATION: ProcessPublication = ProcessPublication {
     tables: &PROCESS_PUBLICATION_TABLES,
+    identities: &PROCESS_PUBLICATION_IDENTITIES,
 };
 
 /// Returns the global process-publication owner.
@@ -382,6 +393,9 @@ impl ProcessPublication {
     /// remains as a safety net for group/session weak entries and any retired
     /// slots left behind by unusual abort paths.
     pub(crate) fn cleanup(&self) {
+        self.identities
+            .write()
+            .retain(|_, weak_task| weak_task.upgrade().is_some());
         let mut tables = self.tables.write();
         tables.task_table.retain(|_, slot| {
             !slot.can_cleanup()
@@ -559,13 +573,19 @@ impl ProcessPublication {
             .entry(tid)
             .or_insert_with(|| Arc::new(PublicationSlot::new()))
             .clone();
-        let member_slot = proc.reserve_thread_member_slot(tid);
+        let member_slot = proc.reserve_thread_member_slot(thread.identity_token());
         let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
         let thread_binding = ThreadPublicationBinding::reserve(tid, task_slot, member_slot);
 
         let domain = process_domain::write_lock();
         thread_binding.publish(&domain, proc, task);
         Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
+        drop(domain);
+        // Register the stable identity so token-indexed registries (cgroup
+        // membership reads) can resolve a task without a numeric key.
+        self.identities
+            .write()
+            .insert(task.as_thread().identity_token(), Arc::downgrade(task));
         Ok(PublicationRollback {
             process: proc.clone(),
             thread_binding,
@@ -628,9 +648,21 @@ impl ProcessPublication {
         if !slot.retire_if_publishes(task) {
             return false;
         }
+        self.identities.write().remove(&thread.identity_token());
         let mut tables = self.tables.write();
         Self::remove_slot_if_retired(&mut tables.task_table, tid, &slot);
         true
+    }
+
+    /// Resolves a task by its stable identity token.
+    ///
+    /// Returns the live task if it is still published; callers read the current
+    /// numeric TID from the task, never from a cached number.
+    pub(crate) fn task_by_identity_token(
+        &self,
+        token: kidentity::TaskIdentityToken,
+    ) -> Option<KtaskRef> {
+        self.identities.read().get(&token).and_then(Weak::upgrade)
     }
 
     /// Retires a TID slot without removing the map entry (unittest reuse probe).

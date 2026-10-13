@@ -33,6 +33,10 @@ impl UserTaskRuntime for Thread {
         Thread::tid(self)
     }
 
+    fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        Thread::identity_token(self)
+    }
+
     fn on_enter(&self) {
         // Exit cleanup can block after the final CPU time was published.
         if !self.is_exiting() {
