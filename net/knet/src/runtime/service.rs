@@ -28,7 +28,10 @@ use crate::{
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{self, IpAddress},
-    network::{ipv4::ingress::Ipv4Ingress, router::Rule},
+    network::{
+        ipv4::ingress::{IngressBatch, Ipv4Ingress},
+        router::Rule,
+    },
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router},
     stack::{
@@ -105,7 +108,7 @@ pub(crate) struct Service {
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
     ipv4_ingress: Ipv4Ingress,
-    rx_batch: Mutex<Vec<PacketBuf>>,
+    rx_batch: Mutex<IngressBatch>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
@@ -124,7 +127,7 @@ impl Service {
             iface: Mutex::new(iface),
             router: Mutex::new(router),
             ipv4_ingress: Ipv4Ingress::new(),
-            rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
+            rx_batch: Mutex::new(IngressBatch::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
             timeout_deadline_micros: AtomicU64::new(0),
@@ -341,7 +344,7 @@ impl Service {
         device_timestamp: MonotonicInstant,
         round_started_at: MonotonicInstant,
         budget: usize,
-        rx_batch: &mut Vec<PacketBuf>,
+        rx_batch: &mut IngressBatch,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> DeviceRxProgress {
@@ -380,7 +383,11 @@ impl Service {
             if batch_budget == 0 {
                 break;
             }
-            let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
+            let drain = router.drain_rx_budgeted_into(
+                device_timestamp,
+                batch_budget,
+                &mut rx_batch.packets,
+            );
             drop(router);
             if let Some((ifindex, error)) = &drain.error {
                 warn!("network RX poll failed on ifindex {ifindex}: {error:?}");

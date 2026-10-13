@@ -24,6 +24,26 @@ use crate::{
 const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
 const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
 
+/// Reusable RX storage for admission under the input lock and delivery after release.
+pub(crate) struct IngressBatch {
+    pub(crate) packets: Vec<PacketBuf>,
+    prepared: Vec<PreparedIpPacket>,
+}
+
+impl IngressBatch {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            packets: Vec::with_capacity(capacity),
+            prepared: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+enum PreparedIpPacket {
+    Ipv4(PacketBuf, Ipv4Header),
+    Ipv6(PacketBuf),
+}
+
 #[derive(Default)]
 pub(crate) struct Ipv4ExpirationProgress {
     pub(crate) timer_events: usize,
@@ -44,42 +64,55 @@ impl Ipv4Ingress {
         }
     }
 
-    /// Processes a received IP batch and publishes its reassembly deadline under one lock.
+    /// Admits a batch and publishes its reassembly deadline under one input lock.
     ///
-    /// IPv6 packets pass through to the shared stack. Returns `false` on input-state
-    /// contention, retaining the entire batch for retry.
+    /// Transport delivery and ICMP processing run after releasing the lock, in
+    /// admission order. IPv6 packets pass through to the shared stack. Returns
+    /// `false` on input-state contention, retaining the entire batch for retry.
     pub(crate) fn try_process_rx_batch(
         &self,
         device_timestamp: MonotonicInstant,
-        rx_batch: &mut Vec<PacketBuf>,
+        rx_batch: &mut IngressBatch,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
-        if rx_batch.is_empty() {
+        if rx_batch.packets.is_empty() {
             return true;
         }
 
+        // Reserve outside the state lock. Runtime batches reuse this allocation.
+        rx_batch.prepared.reserve(rx_batch.packets.len());
         let Some(mut ingress) = self.state.try_lock() else {
             return false;
         };
-        for packet in rx_batch.drain(..) {
+        for packet in rx_batch.packets.drain(..) {
             let Some(ip_packet) = packet.network_packet() else {
                 continue;
             };
             match crate::ipv4::ip_version(ip_packet) {
-                Some(4) => ingress.process_packet(
-                    device_timestamp,
-                    packet,
-                    accepted_packets,
-                    control_packets,
-                ),
-                Some(6) => accepted_packets.push(packet),
+                Some(4) => {
+                    if let Some((packet, header)) = ingress.prepare_packet(device_timestamp, packet)
+                    {
+                        rx_batch
+                            .prepared
+                            .push(PreparedIpPacket::Ipv4(packet, header));
+                    }
+                }
+                Some(6) => rx_batch.prepared.push(PreparedIpPacket::Ipv6(packet)),
                 _ => debug!("Dropping packet with invalid IP version"),
             }
         }
         let next_deadline = ingress.ipv4_reassembly_deadline();
         self.update_reassembly_deadline(next_deadline);
         drop(ingress);
+        for packet in rx_batch.prepared.drain(..) {
+            match packet {
+                PreparedIpPacket::Ipv4(packet, header) => {
+                    deliver_ipv4_packet(packet, header, accepted_packets, control_packets);
+                }
+                PreparedIpPacket::Ipv6(packet) => accepted_packets.push(packet),
+            }
+        }
         true
     }
 
@@ -164,13 +197,24 @@ impl Ipv4Ingress {
                 has_more: true,
             };
         };
-        let timer_events = ingress.expire_ipv4_fragments(timestamp, timer_budget, control_packets);
+        let expired = ingress
+            .ipv4_reassembler
+            .remove_expired(timestamp, timer_budget);
         let next_deadline = ingress.ipv4_reassembly_deadline();
         let has_more = next_deadline.is_some_and(|deadline| deadline <= timestamp);
         self.complete_expiration(next_deadline, has_more);
         drop(ingress);
+        for fragment in expired.fragments {
+            queue_icmpv4_error(
+                control_packets,
+                Icmpv4Error::FragmentReassemblyTimeout,
+                fragment.packet_type,
+                fragment.header,
+                &fragment.packet,
+            );
+        }
         Ipv4ExpirationProgress {
-            timer_events,
+            timer_events: expired.timer_events,
             has_more: self.has_pending_timer(),
         }
     }
@@ -210,100 +254,26 @@ impl Ipv4IngressState {
         self.ipv4_reassembler.expiration_deadline()
     }
 
-    fn expire_ipv4_fragments(
-        &mut self,
-        timestamp: MonotonicInstant,
-        timer_budget: usize,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) -> usize {
-        let expired = self
-            .ipv4_reassembler
-            .remove_expired(timestamp, timer_budget);
-        for fragment in expired.fragments {
-            queue_icmpv4_error(
-                control_packets,
-                Icmpv4Error::FragmentReassemblyTimeout,
-                fragment.packet_type,
-                fragment.header,
-                &fragment.packet,
-            );
-        }
-        expired.timer_events
-    }
-
-    /// Processes IPv4 input before accepted packets enter the shared stack.
-    fn process_packet(
+    /// Validates local input and completes reassembly before transport delivery.
+    fn prepare_packet(
         &mut self,
         timestamp: MonotonicInstant,
         mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) {
+    ) -> Option<(PacketBuf, Ipv4Header)> {
         let header = match Ipv4Header::validate_input_packet(&mut packet) {
             Ok(header) => header,
-            Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return,
+            Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return None,
         };
-
         if !self.is_local_ipv4_destination(header.dst_addr()) {
-            return;
+            return None;
         }
-
         if header.is_fragmented() {
-            match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
-                Ipv4ReassemblyResult::Complete(packet) => {
-                    self.process_packet(timestamp, packet, accepted_packets, control_packets)
-                }
-                Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
-            }
-            return;
-        }
-
-        if header.protocol() == ipv4::PROTOCOL_UDP {
-            let packet_type = packet.packet_type();
-            let packet = match udp::prepare_ipv4_packet(header, packet) {
-                Ok(packet) => packet,
-                Err(_) => return,
+            return match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
+                Ipv4ReassemblyResult::Complete(packet) => self.prepare_packet(timestamp, packet),
+                Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => None,
             };
-            let (disposition, returned_packet) = udp::deliver_ipv4_packet(packet);
-            match disposition {
-                udp::InputDisposition::Accepted => return,
-                udp::InputDisposition::NoSocket if !header.is_broadcast_or_multicast() => {
-                    let Some(packet) = returned_packet else {
-                        return;
-                    };
-                    let Some(ip_packet) = packet.packet().network_packet() else {
-                        return;
-                    };
-                    queue_icmpv4_error(
-                        control_packets,
-                        Icmpv4Error::PortUnreachable,
-                        packet_type,
-                        header,
-                        ip_packet,
-                    );
-                    return;
-                }
-                udp::InputDisposition::NoSocket => return,
-            }
         }
-
-        if should_emit_protocol_unreachable(header) {
-            if let Some(ip_packet) = packet.network_packet() {
-                queue_icmpv4_error(
-                    control_packets,
-                    Icmpv4Error::ProtocolUnreachable,
-                    packet.packet_type(),
-                    header,
-                    ip_packet,
-                );
-            }
-            return;
-        }
-
-        if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
-        }
-        accepted_packets.push(packet);
+        Some((packet, header))
     }
 
     fn is_local_ipv4_destination(&self, dst_addr: Ipv4Address) -> bool {
@@ -314,6 +284,62 @@ impl Ipv4IngressState {
                 .iter()
                 .any(|addr| addr.address() == dst_addr || addr.broadcast() == Some(dst_addr))
     }
+}
+
+// The packet has passed local-address admission and is no longer fragmented.
+// Socket locks, wakeups and ICMP allocation must stay outside the input lock.
+fn deliver_ipv4_packet(
+    packet: PacketBuf,
+    header: Ipv4Header,
+    accepted_packets: &mut Vec<PacketBuf>,
+    control_packets: &mut Vec<Vec<u8>>,
+) {
+    if header.protocol() == ipv4::PROTOCOL_UDP {
+        let packet_type = packet.packet_type();
+        let packet = match udp::prepare_ipv4_packet(header, packet) {
+            Ok(packet) => packet,
+            Err(_) => return,
+        };
+        let (disposition, returned_packet) = udp::deliver_ipv4_packet(packet);
+        match disposition {
+            udp::InputDisposition::Accepted => return,
+            udp::InputDisposition::NoSocket if !header.is_broadcast_or_multicast() => {
+                let Some(packet) = returned_packet else {
+                    return;
+                };
+                let Some(ip_packet) = packet.packet().network_packet() else {
+                    return;
+                };
+                queue_icmpv4_error(
+                    control_packets,
+                    Icmpv4Error::PortUnreachable,
+                    packet_type,
+                    header,
+                    ip_packet,
+                );
+                return;
+            }
+            udp::InputDisposition::NoSocket => return,
+        }
+    }
+
+    if should_emit_protocol_unreachable(header) {
+        if let Some(ip_packet) = packet.network_packet() {
+            queue_icmpv4_error(
+                control_packets,
+                Icmpv4Error::ProtocolUnreachable,
+                packet.packet_type(),
+                header,
+                ip_packet,
+            );
+        }
+        return;
+    }
+
+    if let Some(ip_packet) = packet.network_packet() {
+        udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
+    }
+    accepted_packets.push(packet);
 }
 
 fn queue_icmpv4_error(
@@ -342,39 +368,134 @@ fn should_emit_protocol_unreachable(header: Ipv4Header) -> bool {
 
 #[unittest::mod_test]
 mod tests {
-    use etherparse::{IpNumber, Ipv4Header as EtherIpv4Header};
+    use alloc::{sync::Arc, task::Wake};
+    use core::{
+        net::SocketAddrV4,
+        sync::atomic::{AtomicBool, AtomicUsize},
+        task::{Context, Waker},
+    };
+
+    use kpoll::{IoEvents, PollRegistrations, Pollable};
     use ktime_types::TimeSpan;
     use unittest::def_test;
 
     use super::*;
-    use crate::buf::PacketOwner;
+    use crate::{SocketAddrEx, SocketOps, buf::PacketOwner};
+
+    struct IngressWakeProbe {
+        ingress: Arc<Ipv4Ingress>,
+        wakes: AtomicUsize,
+        has_locked_wake: AtomicBool,
+    }
+
+    impl Wake for IngressWakeProbe {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::Relaxed);
+            if self.ingress.state.try_lock().is_none() {
+                self.has_locked_wake.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn input_packet(bytes: Vec<u8>) -> PacketBuf {
+        PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx)
+    }
+
+    fn udp_packet(port: u16, payload: &[u8]) -> Vec<u8> {
+        let mut udp = etherparse::UdpHeader::without_ipv4_checksum(4321, port, payload.len())
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        udp.extend_from_slice(payload);
+        ipv4::build_ipv4_packet(
+            Ipv4Address::new(192, 0, 2, 1),
+            Ipv4Address::new(192, 0, 2, 2),
+            ipv4::PROTOCOL_UDP,
+            64,
+            &udp,
+        )
+        .unwrap()
+    }
+
+    // Serial: the socket owns a shared UDP registry entry and unregisters on Drop.
+    #[def_test(serial)]
+    fn udp_delivery_releases_input_lock() {
+        let ingress = Arc::new(Ipv4Ingress::new());
+        let local_addr = Ipv4Address::new(192, 0, 2, 2);
+        ingress.set_ipv4_addrs(&[Ipv4Cidr::new(local_addr, 24).unwrap()]);
+        let socket = udp::UdpSocket::new();
+        socket
+            .bind(SocketAddrEx::Ip(
+                SocketAddrV4::new(local_addr.into(), 0).into(),
+            ))
+            .unwrap();
+        let port = socket.local_addr().unwrap().into_ip().unwrap().port();
+        let probe = Arc::new(IngressWakeProbe {
+            ingress: ingress.clone(),
+            wakes: AtomicUsize::new(0),
+            has_locked_wake: AtomicBool::new(false),
+        });
+        let waker = Waker::from(probe.clone());
+        let context = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        socket
+            .register(&mut registrations.context(&context), IoEvents::IN)
+            .unwrap();
+
+        let mut rx_batch = IngressBatch::with_capacity(2);
+        rx_batch
+            .packets
+            .push(input_packet(udp_packet(port, b"first")));
+        rx_batch
+            .packets
+            .push(input_packet(udp_packet(port, b"second")));
+        let mut accepted = Vec::new();
+        let mut control = Vec::new();
+        assert!(ingress.try_process_rx_batch(
+            monotonic_time(),
+            &mut rx_batch,
+            &mut accepted,
+            &mut control,
+        ));
+        assert!(rx_batch.packets.is_empty());
+        assert!(accepted.is_empty());
+        assert!(control.is_empty());
+        assert!(probe.wakes.load(Ordering::Relaxed) > 0);
+        assert!(!probe.has_locked_wake.load(Ordering::Relaxed));
+        for expected in [b"first".as_slice(), b"second".as_slice()] {
+            let mut bytes = [0; 32];
+            let (len, _) = socket.recv_datagram_now(&mut bytes).unwrap().unwrap();
+            assert_eq!(&bytes[..len], expected);
+        }
+    }
 
     #[def_test]
     fn received_fragment_publishes_expiration_deadline() {
         let ingress = Ipv4Ingress::new();
         ingress.set_ipv4_addrs(&[Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24).unwrap()]);
-        let payload = b"abcdefgh";
-        let mut header = EtherIpv4Header::new(
-            payload.len() as u16,
-            64,
-            IpNumber(ipv4::PROTOCOL_UDP),
-            [192, 0, 2, 1],
-            [192, 0, 2, 2],
-        )
-        .unwrap();
-        header.dont_fragment = false;
-        header.more_fragments = true;
-        header.header_checksum = header.calc_header_checksum();
-        let mut bytes = header.to_bytes().to_vec();
-        bytes.extend_from_slice(payload);
-        let mut rx_batch = alloc::vec![PacketBuf::from_ip_packet_vec(
-            1,
-            bytes,
-            PacketOwner::DeviceRx,
-        )];
+        let mut fragments = ipv4::fragment_output_packet(&udp_packet(9, b"fragment"), 28, 1)
+            .unwrap()
+            .into_iter();
+        let mut rx_batch = IngressBatch::with_capacity(1);
+        rx_batch
+            .packets
+            .push(input_packet(fragments.next().unwrap()));
         let mut accepted_packets = Vec::new();
         let mut control_packets = Vec::new();
         let timestamp = monotonic_time();
+
+        let was_processed = ingress.with_state_locked_for_test(|| {
+            ingress.try_process_rx_batch(
+                timestamp,
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+            )
+        });
+        assert!(!was_processed);
+        assert_eq!(rx_batch.packets.len(), 1);
+        assert!(accepted_packets.is_empty());
+        assert!(control_packets.is_empty());
 
         assert!(ingress.try_process_rx_batch(
             timestamp,
@@ -382,7 +503,7 @@ mod tests {
             &mut accepted_packets,
             &mut control_packets,
         ));
-        assert!(rx_batch.is_empty());
+        assert!(rx_batch.packets.is_empty());
         assert!(accepted_packets.is_empty());
         assert!(control_packets.is_empty());
         let after_expiration = timestamp + TimeSpan::from_secs(60);
@@ -394,38 +515,5 @@ mod tests {
         assert!(!progress.has_more);
         assert_eq!(control_packets.len(), 1);
         assert!(!ingress.has_pending_timer());
-    }
-
-    #[def_test]
-    fn contended_input_retains_batch_for_retry() {
-        let ingress = Ipv4Ingress::new();
-        let mut rx_batch = alloc::vec![PacketBuf::from_ip_packet_vec(
-            1,
-            alloc::vec![0x60; 40],
-            PacketOwner::DeviceRx,
-        )];
-        let mut accepted_packets = Vec::new();
-        let mut control_packets = Vec::new();
-        let timestamp = monotonic_time();
-        let was_processed = ingress.with_state_locked_for_test(|| {
-            ingress.try_process_rx_batch(
-                timestamp,
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-            )
-        });
-        assert!(!was_processed);
-        assert_eq!(rx_batch.len(), 1);
-        assert!(accepted_packets.is_empty());
-        assert!(control_packets.is_empty());
-        assert!(ingress.try_process_rx_batch(
-            timestamp,
-            &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
-        ));
-        assert!(rx_batch.is_empty());
-        assert_eq!(accepted_packets.len(), 1);
     }
 }
