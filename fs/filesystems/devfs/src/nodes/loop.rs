@@ -298,15 +298,17 @@ mod tests {
         use block::BlockOpenMode as Mode;
         use linux_raw_sys::ioctl::{BLKFRASET, BLKRASET};
 
-        let disk = block::Gendisk::alloc(
-            "test-loop-ioctl".into(),
-            7,
-            0,
-            1,
-            Box::new(Arc::new(LoopDevice::new(0))),
-        )
-        .expect("valid unpublished loop disk");
-        let device = disk.part0();
+        let disk = alloc::sync::Arc::new(
+            block::Gendisk::new(
+                "test-loop-ioctl".into(),
+                240,
+                0,
+                1,
+                Box::new(Arc::new(LoopDevice::new(0))),
+            )
+            .expect("valid loop disk"),
+        );
+        let device = block::add_disk(disk.clone()).expect("publish loop ioctl test disk");
         for (cmd, mode, has_sys_admin, error) in [
             (
                 LOOP_SET_STATUS,
@@ -338,5 +340,6 @@ mod tests {
                 Err(error)
             );
         }
+        block::del_gendisk(disk.device_number()).expect("remove loop ioctl test disk");
     }
 }

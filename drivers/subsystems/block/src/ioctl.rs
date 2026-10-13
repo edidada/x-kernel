@@ -44,14 +44,16 @@ impl BlockDevice {
         read_int: impl FnOnce() -> KResult<i32>,
         write_arg: impl FnOnce(&[u8]) -> KResult<()>,
     ) -> KResult<usize> {
-        let limits = self.queue().limits();
+        // The block core owns no request queue: geometry reports through the
+        // device's block size (Linux's single-queue fallback semantics).
+        let block_size = self.block_size();
         match cmd {
-            BLKSSZGET => write_arg(&(limits.logical_block_size() as i32).to_ne_bytes())?,
-            BLKPBSZGET => write_arg(&limits.physical_block_size().to_ne_bytes())?,
-            BLKIOMIN => write_arg(&limits.io_min().to_ne_bytes())?,
-            BLKIOOPT => write_arg(&limits.io_opt().to_ne_bytes())?,
-            // Only whole-disk views exist; their offset is the queue offset.
-            BLKALIGNOFF => write_arg(&(limits.alignment_offset() as i32).to_ne_bytes())?,
+            BLKSSZGET => write_arg(&(block_size as i32).to_ne_bytes())?,
+            BLKPBSZGET => write_arg(&(block_size as u32).to_ne_bytes())?,
+            BLKIOMIN => write_arg(&(block_size as u32).to_ne_bytes())?,
+            BLKIOOPT => write_arg(&(block_size as u32).to_ne_bytes())?,
+            // Only whole-disk views exist; their offset is zero.
+            BLKALIGNOFF => write_arg(&0i32.to_ne_bytes())?,
             BLKGETSIZE => {
                 let sectors =
                     usize::try_from(self.num_sectors()).map_err(|_| KError::FileTooLarge)?;
