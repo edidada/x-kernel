@@ -28,11 +28,11 @@ use crate::{
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{self, IpAddress},
-    network::router::Rule,
+    network::{ipv4::ingress::Ipv4Ingress, router::Rule},
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router},
     stack::{
-        ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        ingress::prepare_smoltcp_ingress,
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
 };
@@ -41,8 +41,6 @@ const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
 const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
-const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
-const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
 
 #[derive(Default)]
 struct SmoltcpIngressProgress {
@@ -58,28 +56,10 @@ struct DeviceRxProgress {
     has_lock_contention: bool,
 }
 
-#[derive(Default)]
-struct Ipv4ExpirationProgress {
-    timer_events: usize,
-    has_more: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExistingIpv4AddrAction {
     Keep,
     Reject,
-}
-
-fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
-    let Some(next) = next else {
-        return 0;
-    };
-    if next <= monotonic_time() {
-        return IPV4_REASSEMBLY_TIMER_PENDING;
-    }
-    u64::try_from(next.span_since_origin().as_micros())
-        .unwrap_or(u64::MAX)
-        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
 }
 
 struct NetworkTimer;
@@ -124,12 +104,11 @@ pub(crate) struct Service {
     timer: ktask::Timer<NetworkTimer>,
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
-    ingress: Mutex<IngressProcessor>,
+    ipv4_ingress: Ipv4Ingress,
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
-    ipv4_reassembly_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
     #[cfg(unittest)]
     rebuild_count: AtomicUsize,
@@ -144,12 +123,11 @@ impl Service {
             timer: ktask::Timer::new(NetworkTimer),
             iface: Mutex::new(iface),
             router: Mutex::new(router),
-            ingress: Mutex::new(IngressProcessor::new()),
+            ipv4_ingress: Ipv4Ingress::new(),
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
             timeout_deadline_micros: AtomicU64::new(0),
-            ipv4_reassembly_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
@@ -193,7 +171,7 @@ impl Service {
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
 
-        let ipv4_expiration = self.try_expire_ipv4_fragments(
+        let ipv4_expiration = self.ipv4_ingress.expire_fragments(
             device_timestamp,
             budget.timer_events,
             &mut control_packets,
@@ -354,7 +332,7 @@ impl Service {
                 || tx_has_more
                 || timer_has_more
                 || ipv4_expiration.has_more
-                || self.has_pending_ipv4_reassembly_expiration(),
+                || self.ipv4_ingress.has_pending_timer(),
         }
     }
 
@@ -438,32 +416,6 @@ impl Service {
         progress
     }
 
-    fn try_expire_ipv4_fragments(
-        &self,
-        timestamp: MonotonicInstant,
-        timer_budget: usize,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) -> Ipv4ExpirationProgress {
-        if !self.has_pending_ipv4_reassembly_expiration() {
-            return Ipv4ExpirationProgress::default();
-        }
-        let Some(mut ingress) = self.ingress.try_lock() else {
-            return Ipv4ExpirationProgress {
-                timer_events: 0,
-                has_more: true,
-            };
-        };
-        let timer_events = ingress.expire_ipv4_fragments(timestamp, timer_budget, control_packets);
-        let next_deadline = ingress.ipv4_reassembly_deadline();
-        let has_more = next_deadline.is_some_and(|deadline| deadline <= timestamp);
-        self.complete_ipv4_reassembly_expiration(next_deadline, has_more);
-        drop(ingress);
-        Ipv4ExpirationProgress {
-            timer_events,
-            has_more: self.has_pending_ipv4_reassembly_expiration(),
-        }
-    }
-
     fn try_process_rx_batch(
         &self,
         device_timestamp: MonotonicInstant,
@@ -475,17 +427,26 @@ impl Service {
             return true;
         }
 
-        let Some(mut ingress) = self.ingress.try_lock() else {
+        let Some(mut ingress) = self.ipv4_ingress.state.try_lock() else {
             return false;
         };
-        ingress.handle_rx_packets(
-            device_timestamp,
-            rx_batch,
-            accepted_packets,
-            control_packets,
-        );
+        for packet in rx_batch.drain(..) {
+            let Some(ip_packet) = packet.network_packet() else {
+                continue;
+            };
+            match crate::ipv4::ip_version(ip_packet) {
+                Some(4) => ingress.process_packet(
+                    device_timestamp,
+                    packet,
+                    accepted_packets,
+                    control_packets,
+                ),
+                Some(6) => accepted_packets.push(packet),
+                _ => debug!("Dropping packet with invalid IP version"),
+            }
+        }
         let next_deadline = ingress.ipv4_reassembly_deadline();
-        self.update_ipv4_reassembly_timeout(next_deadline);
+        self.ipv4_ingress.update_reassembly_deadline(next_deadline);
         drop(ingress);
         true
     }
@@ -651,42 +612,6 @@ impl Service {
             .store(deadline, Ordering::Release);
     }
 
-    fn update_ipv4_reassembly_timeout(&self, next: Option<MonotonicInstant>) {
-        let next_state = ipv4_reassembly_timer_state(next);
-        let mut current = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
-        loop {
-            // A timer tick owns the pending state until the poller consumes
-            // the due queues. A concurrent RX refresh must not disarm it.
-            if current == IPV4_REASSEMBLY_TIMER_PENDING {
-                return;
-            }
-            match self.ipv4_reassembly_deadline_micros.compare_exchange_weak(
-                current,
-                next_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    fn complete_ipv4_reassembly_expiration(&self, next: Option<MonotonicInstant>, has_more: bool) {
-        let next_state = if has_more {
-            IPV4_REASSEMBLY_TIMER_PENDING
-        } else {
-            ipv4_reassembly_timer_state(next)
-        };
-        self.ipv4_reassembly_deadline_micros
-            .store(next_state, Ordering::Release);
-    }
-
-    fn has_pending_ipv4_reassembly_expiration(&self) -> bool {
-        self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire)
-            == IPV4_REASSEMBLY_TIMER_PENDING
-    }
-
     pub(crate) fn handle_timer_tick(&self) {
         let current_micros = u64::try_from(now().total_micros()).unwrap_or(0);
         let protocol_deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
@@ -697,19 +622,7 @@ impl Service {
                 .compare_exchange(protocol_deadline, 0, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
 
-        let reassembly_deadline = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
-        let has_reassembly_expired = reassembly_deadline > IPV4_REASSEMBLY_TIMER_PENDING
-            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
-                >= reassembly_deadline
-            && self
-                .ipv4_reassembly_deadline_micros
-                .compare_exchange(
-                    reassembly_deadline,
-                    IPV4_REASSEMBLY_TIMER_PENDING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok();
+        let has_reassembly_expired = self.ipv4_ingress.handle_timer_tick(current_micros);
 
         if has_protocol_expired || has_reassembly_expired {
             self.publish_timer_expiration();
@@ -727,7 +640,7 @@ impl Service {
     }
 
     fn replace_local_ipv4_views(&self, addrs: &[crate::ip::Ipv4Cidr]) {
-        self.ingress.lock().update_local_ipv4_addrs(addrs);
+        self.ipv4_ingress.set_ipv4_addrs(addrs);
         self.iface.lock().update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
             for addr in addrs {
@@ -1103,7 +1016,7 @@ mod tests {
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
         ipv4,
-        network::router::ROUTE_SCOPE_HOST,
+        network::{ipv4::ingress::IPV4_REASSEMBLY_TIMER_PENDING, router::ROUTE_SCOPE_HOST},
         router::Ipv4AddrEntry,
     };
 
@@ -1164,16 +1077,20 @@ mod tests {
     fn protocol_deadline_update_preserves_ipv4_reassembly_timer_source() {
         let service = Service::new(Router::new());
         let reassembly_deadline = monotonic_time() + TimeSpan::from_secs(30);
-        service.update_ipv4_reassembly_timeout(Some(reassembly_deadline));
+        service
+            .ipv4_ingress
+            .update_reassembly_deadline(Some(reassembly_deadline));
         let reassembly_state = service
-            .ipv4_reassembly_deadline_micros
+            .ipv4_ingress
+            .reassembly_deadline_micros
             .load(Ordering::Acquire);
 
         service.update_poll_timeout(now(), None);
 
         assert_eq!(
             service
-                .ipv4_reassembly_deadline_micros
+                .ipv4_ingress
+                .reassembly_deadline_micros
                 .load(Ordering::Acquire),
             reassembly_state
         );
@@ -1182,10 +1099,10 @@ mod tests {
     #[def_test]
     fn unrelated_ingress_lock_contention_is_not_ipv4_timer_work() {
         let service = Service::new(Router::new());
-        let _ingress = service.ingress.lock();
+        let _ingress = service.ipv4_ingress.state.lock();
         let mut control_packets = Vec::new();
 
-        let progress = service.try_expire_ipv4_fragments(
+        let progress = service.ipv4_ingress.expire_fragments(
             monotonic_time(),
             TEST_POLL_BUDGET.timer_events,
             &mut control_packets,
@@ -1265,9 +1182,10 @@ mod tests {
             .unwrap();
         let service = Service::new(router);
         service
-            .ipv4_reassembly_deadline_micros
+            .ipv4_ingress
+            .reassembly_deadline_micros
             .store(IPV4_REASSEMBLY_TIMER_PENDING, Ordering::Release);
-        let _ingress = service.ingress.lock();
+        let _ingress = service.ipv4_ingress.state.lock();
 
         let progress = service.poll_budgeted(TEST_POLL_BUDGET);
 

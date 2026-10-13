@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Native IPv4 packet parsing, construction, and fragmentation.
+//! Native IPv4 input processing, parsing, construction, and fragmentation.
 
+pub(crate) mod ingress;
 mod process;
 
 pub(crate) use process::{
