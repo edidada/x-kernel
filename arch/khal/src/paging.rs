@@ -19,6 +19,18 @@ use crate::mem::p2v;
 pub struct PagingHandlerImpl;
 
 impl PagingHandler for PagingHandlerImpl {
+    type MappingReference = kalloc::FrameRef<'static>;
+
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        reference.phys_addr()
+    }
+
+    fn try_clone_mapping_reference(
+        reference: &Self::MappingReference,
+    ) -> PagingResult<Self::MappingReference> {
+        reference.try_clone_ref().map_err(|_| PagingError::NoMemory)
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         assert!(
             kalloc::is_page_allocator_ready(),

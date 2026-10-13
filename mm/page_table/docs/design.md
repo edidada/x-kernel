@@ -466,4 +466,41 @@ required hardware/software walkers and borrowed users are excluded. It does not
 release the user-data pages described by leaf entries. X-Kernel's HAL adapter now
 pairs a FrameRef raw transfer with restoration at this hook; other test providers
 retain their own allocation contracts. The page_table crate remains independent
-of kalloc and does not acquire generic user-PTE references as part of this change.
+of kalloc. Managed data mappings use the separate provider-defined reference
+capability below.
+
+
+## Owned Data Mappings
+
+`PagingHandler::MappingReference` is a provider-defined lifetime capability.
+The HAL supplies `FrameRef<'static>`; generic test handlers can use an uninhabited
+reference type. `map_owned` consumes one hold and installs a 4 KiB leaf. An
+ordered `BTreeMap<VA, MappingReference>` belongs to each page table, preserving
+the original allocator instance without encoding software ownership in hardware
+PTE bits. Mapping bookkeeping is installed before the leaf; failure drops only
+the supplied hold. Raw `map` retains its external-backing contract.
+
+Unmap, sparse invalidation and protection that clears an entry remove the hold
+from the VA index and transfer it into a fixed-capacity retirement array. The
+index normalizes addresses to a base-page boundary, including unaligned query
+addresses accepted by the old mutation APIs. `finish()` completes all required
+TLB invalidations before dropping the batch. If the retirement array fills, its
+current hold stays live while an intermediate finish makes space. Table
+mutation remains exclusive; the retirement path does not allocate a new queue.
+
+`move_mapping` clones a destination hold before installing its PTE, then retires
+the old source hold. Failed destination installation preserves the source.
+`MmSpace::move_pages` uses this operation for mremap. Raw physical replacement
+of an owned leaf is rejected; permission-only remap remains supported. Future
+owned COW replacement must explicitly provide its replacement capability.
+
+Borrowed top-level entries continue to rely on the source table lifetime and
+its data holds. Shared managed mappings require source-side invalidation for all
+borrowers, as provided by kernel-root broadcast policy. Destination owned
+mappings must be unmapped and retired before raw `copy_from` overwrites their
+subtree. Copying over owned subtrees is an inactive-root construction operation.
+
+The lifetime index adds per-mapped-page heap bookkeeping and O(log n) lookup.
+It does not allocate another reference-count control block. Current heap OOM
+policy still applies to index-node allocation; this change does not implement
+fallible kernel heap allocation or claim a measured performance improvement.

@@ -110,3 +110,12 @@ and required hardware/software table retirement is already complete. Resident
 metadata does not infer those conditions from PA alone. The unit fixture checks
 one reference survives raw transfer and is released at handler retirement without
 installing a live hardware table.
+
+
+## Mapped Data Holds
+
+The data capability supplied by `PagingHandlerImpl` is an existing live
+FrameRef. Address lookup and cloning use that hold, never a bare descriptor
+snapshot. Final destruction returns to its recorded allocator instance.
+PageTableMut retains the capability through required TLB completion. Page
+contents and file invalidation semantics require their separate caller protocols.

@@ -314,3 +314,11 @@ dirty tracking.
 File-backed page faults classify backend capacity exhaustion (`StorageFull`)
 as `BusError`, alongside backend data and I/O failures. User runtime therefore
 delivers `SIGBUS`; this conversion does not change write syscall errno mapping.
+
+## Relocation of Managed Data Mappings
+
+`move_pages` delegates leaf transfer to `PageTableMut::move_mapping`. Managed
+leaves acquire a destination hold before source removal, and source references
+remain in the TLB retirement batch. Raw leaves preserve their prior external
+backing ownership. Lazy pages remain skipped. This keeps mapped file storage
+alive across mremap without relying on source VMA metadata retaining the page.

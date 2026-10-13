@@ -201,7 +201,7 @@ tables, huge leaves, invalid ranges, and deferred flush state.
 
 | Type | `Send` condition | `Sync` condition |
 |------|------------------|------------------|
-| `PageTable64<M, PTE, H>` | Automatically `Send` when `M, PTE, H: Send`. | Automatically `Sync` when `M, PTE, H: Sync`; there is no internal lock. |
+| `PageTable64<M, PTE, H>` | Automatically `Send` when `M, PTE, H: Send`; the handler reference capability is also `Send`. | Automatically `Sync` when `M, PTE, H: Sync`; the reference capability is `Sync`, but there is no internal lock. |
 | `PageTableMut<M, PTE, H>` | Requires `PageTable64: Send` and `M::VirtAddr: Send`. | Requires `PageTable64: Sync` and `M::VirtAddr: Sync`; mutation still requires exclusive access. |
 | `PagingFlags` | Automatically `Send` for its scalar representation. | Automatically `Sync` for its scalar representation. |
 | `PageSize` | Automatically `Send` for its fieldless enum representation. | Automatically `Sync` for its fieldless enum representation. |
@@ -408,3 +408,33 @@ release the user-data pages described by leaf entries. X-Kernel's HAL adapter no
 pairs a FrameRef raw transfer with restoration at this hook; other test providers
 retain their own allocation contracts. The page_table crate remains independent
 of kalloc and does not acquire generic user-PTE references as part of this change.
+
+
+## Managed Data Lifetime
+
+`PagingHandler::MappingReference` must keep its advertised aligned physical
+page alive until destruction. Cloning must acquire another hold on the same
+allocation and preserve the original on failure. `map_owned` records that
+capability before publishing a leaf. It does not authorize concurrent payload
+access or file validity; those protocols remain with the content owner.
+
+`PageTableMut::retire_mapping_reference` transfers a removed mapping's hold to
+a fixed array. Clearing PTEs is not its release boundary. `finish` releases only
+after architecture/provider TLB invalidation returns; a local current reference
+protects the page when a full array triggers an intermediate finish. Unaligned
+leaf addresses are normalized before indexing ownership, preventing a raw
+mutation from bypassing the hold check. Sparse teardown handles partial-error
+prefixes through the same guard finalization.
+
+Raw remap/conditional replacement cannot redirect a managed leaf to a different
+page without a replacement capability. Move clones the destination hold before
+source withdrawal and keeps source holds through invalidation. Failed mapping
+or cloning leaves the source valid. `copy_from` checks that destination owned
+mappings have been explicitly withdrawn before its raw subtree replacement.
+Its existing source lifetime and shared-root invalidation obligations still apply.
+
+The table destructor releases remaining data capabilities only under the same
+stop-hardware-use contract required for table storage destruction. Registered
+AArch64 ASIDs are invalidated before destruction. Forgetting a mutation guard
+can leak references; callers must finalize pending TLB work before hardware
+reuse of an address space.

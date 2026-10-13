@@ -1377,15 +1377,10 @@ impl MmSpace {
         let mut modify = self.pgtbl.modify();
         for vaddr in crate::backend::pages_in(range, page_size)? {
             let dst_vaddr = dst + (vaddr - src);
-            if let Ok((paddr, flags, _)) = modify.query(vaddr) {
+            if modify.query(vaddr).is_ok() {
                 modify
-                    .map(dst_vaddr, paddr, page_size, flags)
+                    .move_mapping(vaddr, dst_vaddr)
                     .map_err(|_| KError::NoMemory)?;
-                // Safe: we just confirmed the mapping exists via query(), and we
-                // hold exclusive access to the page table through the modify guard.
-                modify
-                    .unmap(vaddr)
-                    .expect("unmap must succeed after successful query");
             }
         }
         modify.finish();

@@ -173,3 +173,12 @@
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
   `MmUserHandle` 延长用户映射生命周期。
+
+
+## Managed Mapping Relocation
+
+A PA-only map/unmap sequence cannot move a managed mapping's ownership.
+`move_pages` uses the page-table ownership-preserving move operation. Failed
+destination installation leaves source PTE and hold intact; successful transfer
+retains both holds until source invalidation completes. File cache residency
+and physical-page lifetime are not used as substitutes for view invalidation.

@@ -201,6 +201,18 @@ static FRAME_POOL: FramePool = FramePool(UnsafeCell::new(
 struct TestHandler;
 
 impl PagingHandler for TestHandler {
+    type MappingReference = core::convert::Infallible;
+
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        match *reference {}
+    }
+
+    fn try_clone_mapping_reference(
+        reference: &Self::MappingReference,
+    ) -> crate::PtResult<Self::MappingReference> {
+        match *reference {}
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         let index = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
         if index >= TEST_FRAME_COUNT {
@@ -226,6 +238,18 @@ impl PagingHandler for TestHandler {
 struct OffsetTestHandler;
 #[cfg(any(target_arch = "aarch64", target_arch = "loongarch64"))]
 impl PagingHandler for OffsetTestHandler {
+    type MappingReference = core::convert::Infallible;
+
+    fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        match *reference {}
+    }
+
+    fn try_clone_mapping_reference(
+        reference: &Self::MappingReference,
+    ) -> crate::PtResult<Self::MappingReference> {
+        match *reference {}
+    }
+
     fn alloc_frame() -> Option<PhysAddr> {
         TestHandler::alloc_frame()
             .map(|frame| paddr(frame.as_usize() - FRAME_POOL.0.get() as usize + PAGE_SIZE_4K))
@@ -848,6 +872,18 @@ mod aarch64_drop {
     struct DropHandler;
 
     impl PagingHandler for DropHandler {
+        type MappingReference = core::convert::Infallible;
+
+        fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+            match *reference {}
+        }
+
+        fn try_clone_mapping_reference(
+            reference: &Self::MappingReference,
+        ) -> crate::PtResult<Self::MappingReference> {
+            match *reference {}
+        }
+
         fn alloc_frame() -> Option<PhysAddr> {
             TestHandler::alloc_frame()
         }

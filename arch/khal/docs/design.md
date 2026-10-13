@@ -139,3 +139,12 @@ and required hardware/software table retirement is already complete. Resident
 metadata does not infer those conditions from PA alone. The unit fixture checks
 one reference survives raw transfer and is released at handler retirement without
 installing a live hardware table.
+
+
+## Mapped Data References
+
+`PagingHandlerImpl::MappingReference` is `FrameRef<'static>`, separate from the
+raw table-storage transfer. The handler advertises the held physical address
+and provides checked cloning for relocation. Generic `page_table::map_owned`
+retains the supplied instance-bound hold through PTE/TLB retirement. It does
+not reconstruct a data hold from an unprotected PFN.
