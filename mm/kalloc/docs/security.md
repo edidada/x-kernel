@@ -319,10 +319,21 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 调用者证明每个 VA 是对应 RAM 的稳定可写映射、storage 独占且覆盖 allocator 的全部寿命。
 算术验证不能证明硬件映射或 firmware ownership；kruntime 的 FREE 分类承担这一边界。
 
-规划完全不写 RAM。它检查端点/描述符字节数溢出、页内偏移、统一线性偏移、重叠和
-目录容量，并从 region 尾部选择 page-aligned backing。没有足够大的连续范围时返回
-NoMemory，不静默退回无描述符模式。指针初始化逐项构造原子对象，不把全零字节当作
-任意 Rust 对象。FrameRegistry 的 Send/Sync 依赖目录不可变、backing 不被归还及状态原子访问。
+`frame_bootstrap::FramePlan` 规划完全不写 RAM。它检查端点/描述符字节数溢出、
+页内偏移、重叠与目录容量；PA 和 VA 同时相邻才合并后端交接区间。纯物理
+`FrameLayout` 另行整理 PA/PFN 覆盖范围，不读取被描述物理页的内容。
+`LinearFrameMapping` 在写 RAM 前校验当前交接所需的统一偏移，限制不进入目录。
+连续 descriptor backing 不足时明确返回 NoMemory。启动层拥有 backing 的选择与
+保留义务，向 `FrameRegistry::initialize` 显式提供指针和容量。该 unsafe 边界要求
+存储独占、可写且在 allocator 存续期间有效；初始化检查对齐、容量和指针运算长度，
+逐项构造原子对象，不把全零字节当作任意 Rust 对象。FrameRegistry 的 Send/Sync
+依赖目录不可变、backing 不被归还及状态原子访问。
+
+过渡 `buddy_frame_adapter` 集中旧 VA 后端与物理生命周期的转换。注册区间的位图
+保留页推算依赖旧 buddy 的“首部保留、total_pages 排除保留页”契约。后端改成
+PA/PFN 时必须同时删除适配调用及只为适配使用的反向转换，更新保留范围接口；
+正常内容访问映射仍要保持有效。裸释放先在适配层转换为 PA，再由注册表按 PFN
+检查完整范围，确认通过后才允许 accounting/PCP/buddy 修改。
 
 描述符 backing 和 buddy 位图页均为 permanent，注册时排除；运行时内核映射继续覆盖它们。
 `frame_meta` 的借用只证明槽位存储有效，不授权访问内容、free 或重新取得已复用页的引用。

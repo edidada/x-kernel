@@ -5,12 +5,11 @@
 use core::{ptr::NonNull, sync::atomic::Ordering};
 
 use alloc_engine::{AllocError, AllocResult};
-use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use memaddr::{PAGE_SIZE_4K, PhysAddr};
 
-use super::{
-    FrameMeta, PERMANENT, UNSHARED,
-    region::{FramePlan, MAX_REGIONS},
-};
+use super::{FrameMeta, PERMANENT, UNSHARED};
+
+pub(crate) const MAX_FRAME_REGIONS: usize = 64;
 
 #[derive(Clone, Copy)]
 struct Segment {
@@ -27,107 +26,158 @@ impl Segment {
     };
 }
 
-pub(crate) struct FrameRegistry {
-    segments: [Segment; MAX_REGIONS],
+/// Physical coverage and packed descriptor indexes, independent of RAM mappings.
+pub(crate) struct FrameLayout {
+    segments: [Segment; MAX_FRAME_REGIONS],
     count: usize,
-    descriptors: NonNull<FrameMeta>,
-    linear_offset: usize,
+    described_pages: usize,
 }
 
-// SAFETY: the directory is immutable after construction. The initialized
-// descriptor backing remains valid for the owning allocator's lifetime, and
-// mutable descriptor state is accessed only through atomics.
-unsafe impl Send for FrameRegistry {}
-// SAFETY: shared lookups borrow initialized descriptors from permanently
-// reserved storage; no non-atomic mutable state is exposed after publication.
-unsafe impl Sync for FrameRegistry {}
+impl FrameLayout {
+    pub(crate) const EMPTY: Self = Self {
+        segments: [Segment::EMPTY; MAX_FRAME_REGIONS],
+        count: 0,
+        described_pages: 0,
+    };
 
-impl FrameRegistry {
-    /// # Safety
-    /// Every planned region must be exclusively owned writable RAM at its
-    /// described mapping, and the backing must outlive the owning allocator.
-    /// No allocator or caller may use the descriptor backing after handoff.
-    pub(super) unsafe fn initialize(plan: &FramePlan) -> Self {
-        let descriptors = NonNull::new(plan.backing.vaddr.as_mut_ptr().cast::<FrameMeta>())
-            .expect("validated descriptor backing must be non-null");
-        let mut registry = Self {
-            segments: [Segment::EMPTY; MAX_REGIONS],
-            count: plan.count,
-            descriptors,
-            linear_offset: plan.linear_offset,
-        };
-        let mut index = 0;
-        for (segment, region) in registry.segments[..plan.count]
-            .iter_mut()
-            .zip(&plan.regions[..plan.count])
-        {
-            let start_pfn = region.paddr.as_usize() / PAGE_SIZE_4K;
-            let pages = region.size_bytes / PAGE_SIZE_4K;
-            *segment = Segment {
-                start_pfn,
-                end_pfn: start_pfn + pages,
-                first_index: index,
-            };
-            for _ in 0..pages {
-                // SAFETY: planning reserved a page-aligned array large enough
-                // for every covered slot. Exclusive boot ownership permits
-                // initializing each descriptor once before publication.
-                unsafe { descriptors.as_ptr().add(index).write(FrameMeta::new(false)) };
-                index += 1;
+    pub(crate) fn new(ranges: impl Iterator<Item = (PhysAddr, usize)>) -> AllocResult<Self> {
+        let mut layout = Self::EMPTY;
+        for (start, size_bytes) in ranges.filter(|(_, size)| *size != 0) {
+            if !start.as_usize().is_multiple_of(PAGE_SIZE_4K)
+                || !size_bytes.is_multiple_of(PAGE_SIZE_4K)
+            {
+                return Err(AllocError::InvalidInput);
             }
+            let end = start
+                .as_usize()
+                .checked_add(size_bytes)
+                .ok_or(AllocError::InvalidInput)?;
+            if layout.count == MAX_FRAME_REGIONS {
+                return Err(AllocError::NoMemory);
+            }
+            layout.segments[layout.count] = Segment {
+                start_pfn: start.as_usize() / PAGE_SIZE_4K,
+                end_pfn: end / PAGE_SIZE_4K,
+                first_index: 0,
+            };
+            layout.count += 1;
         }
-        registry.reserve(plan.backing.vaddr, plan.backing.size_bytes / PAGE_SIZE_4K);
-        registry
+        if layout.count == 0 {
+            return Err(AllocError::NoMemory);
+        }
+        layout.segments[..layout.count].sort_unstable_by_key(|s| s.start_pfn);
+        let mut merged = 0;
+        for index in 0..layout.count {
+            let segment = layout.segments[index];
+            if merged != 0 {
+                let previous = &mut layout.segments[merged - 1];
+                if segment.start_pfn < previous.end_pfn {
+                    return Err(AllocError::MemoryOverlap);
+                }
+                if segment.start_pfn == previous.end_pfn {
+                    previous.end_pfn = segment.end_pfn;
+                    continue;
+                }
+            }
+            layout.segments[merged] = segment;
+            merged += 1;
+        }
+        layout.count = merged;
+        for segment in &mut layout.segments[..layout.count] {
+            segment.first_index = layout.described_pages;
+            layout.described_pages = layout
+                .described_pages
+                .checked_add(segment.end_pfn - segment.start_pfn)
+                .ok_or(AllocError::InvalidInput)?;
+        }
+        Ok(layout)
     }
 
-    pub(crate) fn lookup(&self, pfn: usize) -> Option<&FrameMeta> {
+    pub(crate) fn described_pages(&self) -> usize {
+        self.described_pages
+    }
+
+    fn segment_for_pfn(&self, pfn: usize) -> Option<&Segment> {
         let segments = &self.segments[..self.count];
         let upper = segments.partition_point(|segment| segment.start_pfn <= pfn);
         let segment = segments.get(upper.checked_sub(1)?)?;
-        if pfn >= segment.end_pfn {
-            return None;
+        (pfn < segment.end_pfn).then_some(segment)
+    }
+}
+
+pub(crate) struct FrameRegistry {
+    layout: FrameLayout,
+    descriptors: NonNull<FrameMeta>,
+}
+
+// SAFETY: the directory is immutable after construction. The supplied descriptor
+// storage remains valid for the allocator's lifetime, and state uses atomics.
+unsafe impl Send for FrameRegistry {}
+// SAFETY: shared lookups borrow initialized descriptors from permanently reserved
+// storage; no non-atomic mutable state is exposed after publication.
+unsafe impl Sync for FrameRegistry {}
+
+impl FrameRegistry {
+    /// Initializes descriptors in storage supplied by the boot owner.
+    ///
+    /// # Safety
+    /// The pointer must identify exclusive writable storage of backing_bytes
+    /// bytes, valid for the allocator's lifetime. The caller must permanently
+    /// exclude that storage from allocation. Covered physical pages need not
+    /// have a kernel content mapping for descriptor initialization or lookup.
+    pub(crate) unsafe fn initialize(
+        layout: FrameLayout,
+        descriptors: NonNull<FrameMeta>,
+        backing_bytes: usize,
+    ) -> AllocResult<Self> {
+        let bytes = layout
+            .described_pages
+            .checked_mul(core::mem::size_of::<FrameMeta>())
+            .ok_or(AllocError::InvalidInput)?;
+        if bytes > backing_bytes
+            || bytes > isize::MAX as usize
+            || !descriptors.as_ptr().is_aligned()
+        {
+            return Err(AllocError::InvalidInput);
         }
+        for index in 0..layout.described_pages {
+            // SAFETY: the checked capacity and alignment select an in-bounds
+            // slot in the caller's exclusive storage. Each slot is written once
+            // before any references to descriptors are published.
+            unsafe { descriptors.as_ptr().add(index).write(FrameMeta::new(false)) };
+        }
+        Ok(Self {
+            layout,
+            descriptors,
+        })
+    }
+
+    pub(crate) fn lookup(&self, pfn: usize) -> Option<&FrameMeta> {
+        let segment = self.layout.segment_for_pfn(pfn)?;
         let index = segment.first_index + (pfn - segment.start_pfn);
-        // SAFETY: the segment bounds select an initialized slot in the
-        // reserved array, whose lifetime covers this registry borrow.
+        // SAFETY: the physical directory selects an initialized slot within
+        // supplied storage, whose lifetime covers this registry borrow.
         Some(unsafe { &*self.descriptors.as_ptr().add(index) })
     }
 
-    pub(crate) fn pfn_for_va(&self, vaddr: VirtAddr) -> Option<usize> {
-        let pa = vaddr.as_usize().checked_sub(self.linear_offset)?;
-        if !pa.is_multiple_of(PAGE_SIZE_4K) {
-            return None;
-        }
-        let pfn = pa / PAGE_SIZE_4K;
-        self.lookup(pfn).map(|_| pfn)
-    }
-
-    pub(crate) fn mapped_address(&self, pfn: usize) -> VirtAddr {
-        debug_assert!(self.lookup(pfn).is_some());
-        VirtAddr::from_usize(pfn * PAGE_SIZE_4K + self.linear_offset)
-    }
-
-    pub(crate) fn physical_address(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
-        self.pfn_for_va(vaddr)
-            .map(|pfn| PhysAddr::from_usize(pfn * PAGE_SIZE_4K))
-    }
-
-    pub(crate) fn validate_raw_release(&self, start: VirtAddr, pages: usize) -> AllocResult {
+    pub(crate) fn validate_raw_release(&self, start_pfn: usize, pages: usize) -> AllocResult {
         if pages == 0 {
             return Ok(());
         }
-        let pfn = self.pfn_for_va(start).ok_or(AllocError::NotFound)?;
-        let end_pfn = pfn.checked_add(pages).ok_or(AllocError::InvalidInput)?;
-        let segments = &self.segments[..self.count];
-        let upper = segments.partition_point(|segment| segment.start_pfn <= pfn);
-        let segment = &segments[upper - 1];
+        let segment = self
+            .layout
+            .segment_for_pfn(start_pfn)
+            .ok_or(AllocError::NotFound)?;
+        let end_pfn = start_pfn
+            .checked_add(pages)
+            .ok_or(AllocError::InvalidInput)?;
         if end_pfn > segment.end_pfn {
             return Err(AllocError::NotFound);
         }
-        let first = segment.first_index + pfn - segment.start_pfn;
+        let first = segment.first_index + start_pfn - segment.start_pfn;
         for index in first..first + pages {
             // SAFETY: the checked range lies within one initialized segment;
-            // metadata backing outlives the registry and only atomics are read.
+            // descriptor storage remains valid and only atomics are read.
             let meta = unsafe { &*self.descriptors.as_ptr().add(index) };
             if meta.refs.load(Ordering::Acquire) != UNSHARED {
                 return Err(AllocError::NotAllocated);
@@ -136,15 +186,69 @@ impl FrameRegistry {
         Ok(())
     }
 
-    pub(crate) fn reserve(&self, start: VirtAddr, pages: usize) {
-        let pfn = self
-            .pfn_for_va(start)
+    pub(crate) fn reserve(&self, start_pfn: usize, pages: usize) {
+        if pages == 0 {
+            return;
+        }
+        let segment = self
+            .layout
+            .segment_for_pfn(start_pfn)
             .expect("reserved range must be covered");
+        assert!(
+            start_pfn
+                .checked_add(pages)
+                .is_some_and(|end| end <= segment.end_pfn)
+        );
         for index in 0..pages {
-            self.lookup(pfn + index)
+            self.lookup(start_pfn + index)
                 .expect("reserved range must remain covered")
                 .refs
                 .store(PERMANENT, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use core::ptr::NonNull;
+
+    use memaddr::{PAGE_SIZE_4K as PAGE, PhysAddr};
+    use unittest::def_test;
+
+    use super::{FrameLayout, FrameRegistry};
+    use crate::{FrameMeta, GlobalPage};
+
+    #[def_test]
+    fn physical_directory_does_not_require_page_content_mappings() {
+        let storage = GlobalPage::alloc_contiguous(1, PAGE).unwrap();
+        // These physical identities are deliberately unrelated to the mapped
+        // descriptor backing. Lookup must never access their page contents.
+        let ranges = [
+            (PhysAddr::from_usize(512 * PAGE), 64 * PAGE),
+            (PhysAddr::from_usize(256 * PAGE), 32 * PAGE),
+            (PhysAddr::from_usize(288 * PAGE), 32 * PAGE),
+        ];
+        let layout = FrameLayout::new(ranges.into_iter()).unwrap();
+        assert_eq!(layout.count, 2);
+        assert_eq!(layout.described_pages(), 128);
+        let descriptors = NonNull::new(storage.start_va().as_mut_ptr().cast()).unwrap();
+        // SAFETY: storage is exclusive, page aligned, large enough, and remains
+        // allocated until after registry destruction. Only metadata is accessed;
+        // the synthetic physical coverage does not require content mappings.
+        let registry = unsafe { FrameRegistry::initialize(layout, descriptors, PAGE) }.unwrap();
+        assert!(registry.lookup(255).is_none());
+        assert!(registry.lookup(256).is_some());
+        assert!(registry.lookup(319).is_some());
+        assert!(registry.lookup(320).is_none());
+        assert!(registry.lookup(511).is_none());
+        assert!(registry.lookup(576).is_none());
+        let meta = registry.lookup(525).unwrap();
+        assert_eq!(
+            meta as *const FrameMeta as usize,
+            storage.start_va().as_usize() + 77 * core::mem::size_of::<FrameMeta>()
+        );
+        registry.reserve(575, 1);
+        assert!(registry.lookup(575).unwrap().is_permanent());
+        assert!(!registry.lookup(574).unwrap().is_permanent());
     }
 }

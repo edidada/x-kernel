@@ -46,12 +46,16 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
     v2p(vaddr)
 }
 
+mod buddy_frame_adapter;
 mod frame;
+mod frame_bootstrap;
+mod frame_mapping;
 mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
-pub use frame::{FrameBootstrapInfo, FrameMeta, FrameRef, FrameRegion, FrameState};
+pub use frame::{FrameMeta, FrameRef, FrameState};
+pub use frame_bootstrap::{FrameBootstrapInfo, FrameRegion};
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -307,6 +311,7 @@ pub struct GlobalAllocator {
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
     frames: Once<frame::FrameRegistry>,
+    frame_mapping: Once<frame_mapping::LinearFrameMapping>,
 }
 
 impl Default for GlobalAllocator {
@@ -324,6 +329,7 @@ impl GlobalAllocator {
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
             frames: Once::new(),
+            frame_mapping: Once::new(),
         }
     }
 
@@ -365,8 +371,9 @@ impl GlobalAllocator {
     /// Initializes resident descriptors and the complete boot page inventory.
     ///
     /// Descriptor backing and buddy bitmaps are permanently excluded from
-    /// allocations. This entry does not initialize the byte heap. All regions
-    /// must use one linear VA-to-PA offset; partial edge pages are excluded.
+    /// allocations. This entry does not initialize the byte heap. The current
+    /// VA-based buddy handoff requires one linear VA-to-PA offset; physical
+    /// descriptor coverage is independent of it. Partial edge pages are excluded.
     /// Subsequent calls to the legacy region-extension APIs are rejected.
     ///
     /// # Errors
@@ -386,13 +393,17 @@ impl GlobalAllocator {
         regions: &[FrameRegion],
     ) -> AllocResult<FrameBootstrapInfo> {
         let mut pages = self.palloc.lock();
-        if self.page_ready.load(Ordering::Acquire) || self.frames.get().is_some() {
+        if self.page_ready.load(Ordering::Acquire)
+            || self.frames.get().is_some()
+            || self.frame_mapping.get().is_some()
+        {
             return Err(AllocError::AlreadyInitialized);
         }
         // SAFETY: the caller supplies exclusive, valid mapped RAM and keeps
         // it alive. The page lock serializes initialization, and readiness has
         // not yet been published to any allocation path.
-        let (registry, info) = unsafe { frame::bootstrap(regions, &mut pages) }?;
+        let (registry, mapping, info) = unsafe { frame_bootstrap::bootstrap(regions, &mut pages) }?;
+        self.frame_mapping.call_once(|| mapping);
         self.frames.call_once(|| registry);
         self.page_ready.store(true, Ordering::Release);
         Ok(info)
@@ -683,11 +694,8 @@ impl GlobalAllocator {
         if !self.page_ready.load(Ordering::Acquire) {
             return Err(AllocError::NotInitialized);
         }
-        let registry = self.frames.get().ok_or(AllocError::NotInitialized)?;
-        let va = self.alloc_pages(1, PAGE_SIZE_4K, kind)?;
-        let paddr = registry
-            .physical_address(va.into())
-            .expect("allocator returned a page outside resident frame coverage");
+        self.frames.get().ok_or(AllocError::NotInitialized)?;
+        let paddr = buddy_frame_adapter::allocate_frame(self, kind)?;
         // SAFETY: alloc_pages returned exclusive one-page storage from this
         // allocator. It is still unpublished and has no other live owner.
         let frame = unsafe { FrameRef::from_allocation(self, paddr, kind) };
@@ -724,10 +732,12 @@ impl GlobalAllocator {
     }
 
     fn validate_raw_page_release(&self, va: usize, num_pages: usize) -> AllocResult {
-        if let Some(registry) = self.frames.get() {
-            registry.validate_raw_release(va.into(), num_pages)?;
-        }
-        Ok(())
+        buddy_frame_adapter::validate_raw_release(self, va, num_pages)
+    }
+
+    /// Completes one physical frame's retirement through the current backend.
+    fn release_frame(&self, paddr: memaddr::PhysAddr, kind: UsageKind) {
+        buddy_frame_adapter::release_frame(self, paddr, kind);
     }
 
     /// Allocates contiguous DMA pages.

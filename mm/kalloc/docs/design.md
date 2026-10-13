@@ -53,7 +53,10 @@ mm/kalloc/
 ├── src/
 │   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
 │   ├── page.rs         # GlobalPage RAII 封装
-│   ├── frame/          # 常驻基础页描述符、启动规划与 PFN 索引
+│   ├── frame/          # 常驻描述符、纯物理 PFN 目录与生命周期
+│   ├── frame_bootstrap.rs # 启动区间整理、描述符存储预留与交接
+│   ├── frame_mapping.rs # 物理页内容的永久访问映射
+│   ├── buddy_frame_adapter.rs # VA buddy 的过渡桥接，改 PA/PFN 接口时删除
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
@@ -136,7 +139,8 @@ Other paths:
 | `palloc` | `SpinNoIrq` | 4 KiB page buddy |
 | `heap_ready` | `AtomicBool` | byte allocator 是否已获得首个 heap region |
 | `page_ready` | `AtomicBool` | page inventory 已发布；descriptor 模式下目录也已初始化 |
-| `frames` | `klazy::Once` | immutable PFN 目录和永久 backing |
+| `frames` | `klazy::Once` | immutable PFN 目录和永久描述符 backing |
+| `frame_mapping` | `klazy::Once` | 独立的页内容访问映射，与 PFN 目录分别发布 |
 | per-CPU usage counters | 每 CPU、每 `UsageKind` 两个累计 atomic | caller-live 诊断计数 |
 
 ## 初始化状态
@@ -161,15 +165,26 @@ Descriptor-backed allocator -- add_memory() --> AlreadyInitialized
 
 实际启动路径由 `kruntime` 一次性交付全部 FREE RAM：
 
-1. 固件和 `khal` 排除内核/固件保留区；启动线性映射已经可写。
-2. `FrameRegion` 记录 PA、对应 VA 和字节数；规划向内页对齐、排序、合并相邻范围，
-   拒绝重叠、溢出、超过 buddy region 容量或不同线性偏移的输入。
-3. 用固定容量目录和一块紧凑的 `FrameMeta` 数组覆盖这些 PFN；物理空洞没有描述符。
-   在一个足够大的 RAM 范围尾部预留描述符 backing，不依赖普通堆。
-4. 描述符逐项构造后，仅把剩余范围注册给 buddy。buddy 自己保留的位图前缀也标为
-   permanent；覆盖总页数 = 描述符页 + buddy 元数据页 + 可分配页。
-5. 完整目录通过 `klazy::Once` 发布，再 Release 发布 page_ready，最后建立 byte heap。
-   运行时页表仍映射原来的 RAM 范围，因此切换页表不会丢失描述符 backing。
+1. 固件和 `khal` 排除内核/固件保留区；启动映射已经可写。
+2. `frame_bootstrap` 的 `FramePlan` 整理 PA、对应访问 VA 和字节数：向内页对齐、
+   排序并拒绝重叠/溢出；仅在 PA 和访问 VA 都相邻时合并交给旧 buddy 的区间。
+3. `FrameLayout` 只接受 PA 与字节数，独立合并相邻物理范围，建立紧凑 PFN 目录；
+   它不要求被描述页有内容映射，也不为物理空洞创建描述符。
+4. 启动层计算数组大小，在足够大的连续 RAM 范围尾部预留存储，将映射指针和容量
+   显式提供给 `FrameRegistry::initialize`。注册表仅验证存储容量/对齐并构造描述符，
+   不选择或分配自己的 backing。启动层按 PFN 标记描述符 backing 为 permanent。
+5. `LinearFrameMapping` 在写 RAM 之前检查当前后端所需的统一映射偏移；这项限制
+   属于启动交接与内容访问，不属于物理描述符目录。
+6. 仅将剩余区间通过 `buddy_frame_adapter` 注册给旧 buddy。该后端保留的位图前缀
+   由适配层统计，启动层按 PA/PFN 标记 permanent；覆盖总页数仍然守恒。
+7. 先发布内容映射，再发布完整目录，最后 Release 发布 page_ready 并建立 byte heap。
+   运行时页表继续覆盖原来的 RAM，因此切换页表不会丢失描述符 backing。
+
+`buddy_frame_adapter` 是显式过渡方案：集中旧 buddy 的 VA 注册、单页分配结果
+VA→PA、最终归还 PA→VA，以及旧裸 VA 释放检查的转换。模块 TODO 指定删除条件：
+buddy 注册/分配/释放改成 PA/PFN 且裸 VA 使用者完成迁移时，同步删除模块及调用点、
+`LinearFrameMapping` 中只为桥接使用的反向转换。页内容访问映射独立保留；改用物理
+分配身份不会免除 CPU 访问页内容/管理信息所需的映射。
 
 `frame_meta(pfn)` 对目录二分查找，只返回描述符借用；没有条目表示 NotManaged，
 不代表该 PFN 不是 RAM。常驻槽位不证明当前页的所有权，permanent 页不进入库存。
@@ -419,8 +434,10 @@ Clone is checked against the reference limit and never allocates another control
 The protocol is Unshared → Initializing → Shared(n) → Retiring → Unshared. Unshared
 is not free-state certification: raw owners, heaps and PCP still use that state.
 The last holder wins a single CAS into Retiring, acquiring earlier holders' releases.
-It captures provenance, resets to Unshared before inventory publication, then returns
-one page and records one free. No metadata reset occurs after a page is reusable.
+It captures the allocation category, resets to Unshared before inventory publication, then returns
+one physical page through its allocator instance and records one free. The instance
+uses the transitional backend adapter for inventory release. No metadata reset occurs
+after a page is reusable.
 
 `FrameRef` provides PA, PFN and kernel-address values, not arbitrary mutable Rust
 slices. It guarantees lifetime, not content exclusivity, COW eligibility or mapping
@@ -430,7 +447,8 @@ is finished. This change does not migrate user-PTE ownership or repair truncate.
 Raw page and DMA release validate the whole range before accounting or PCP/buddy
 mutation. A Shared, Initializing, Retiring or Permanent slot is rejected. This is an
 admission guard, not proof of legacy raw provenance or complete double-free detection.
-The range check is linear in the number of base pages, with one segment lookup.
+The old VA entry is translated only in the adapter; the registry checks a PFN
+range. The range check is linear in the number of base pages, with one segment lookup.
 Global PCP belongs only to GLOBAL_ALLOCATOR; independently initialized allocators
 use their central inventory, so fixtures and private owners cannot exchange pages.
 

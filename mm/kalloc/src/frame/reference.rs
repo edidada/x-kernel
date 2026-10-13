@@ -63,10 +63,11 @@ impl<'a> FrameRef<'a> {
     /// the content-access protocol when using a pointer derived from it.
     pub fn kernel_addr(&self) -> VirtAddr {
         self.allocator
-            .frames
+            .frame_mapping
             .get()
-            .expect("live frame must have a registry")
-            .mapped_address(self.pfn())
+            .expect("live frame must have a content mapping")
+            .kernel_address(self.paddr)
+            .expect("registered frame address must not overflow")
     }
 
     /// Allocation category charged until the last lifetime reference ends.
@@ -137,9 +138,8 @@ impl Drop for FrameRef<'_> {
     fn drop(&mut self) {
         if self.meta.remove_reference() {
             let kind = self.usage_kind();
-            let va = self.kernel_addr().as_usize();
             self.meta.finish_retirement();
-            self.allocator.dealloc_pages_inner(va, 1, kind);
+            self.allocator.release_frame(self.paddr, kind);
         }
     }
 }
@@ -260,14 +260,7 @@ mod tests {
             fixture.allocator.validate_raw_page_release(va, 1),
             Err(AllocError::NotAllocated)
         );
-        if fixture
-            .allocator
-            .frames
-            .get()
-            .unwrap()
-            .pfn_for_va((va - PAGE).into())
-            .is_some()
-        {
+        if fixture.allocator.frame_meta(owner.pfn() - 1).is_some() {
             assert!(
                 fixture
                     .allocator
@@ -282,7 +275,10 @@ mod tests {
             .unwrap();
         assert!(backing.is_permanent());
         assert_eq!(
-            registry.validate_raw_release(fixture.storage.start_va() + 63 * PAGE, 1),
+            registry.validate_raw_release(
+                kaddr_layout::v2p(fixture.storage.start_va().as_usize()) / PAGE + 63,
+                1
+            ),
             Err(AllocError::NotAllocated)
         );
     }
