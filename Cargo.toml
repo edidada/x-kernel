@@ -14,6 +14,9 @@ members = [
     "tee/xdice",
     "drivers/core/driver-core",
     "core/kclk",
+    "drivers/common/devnode",
+    "drivers/common/device-class",
+    "drivers/integration/uevent-netlink",
 ]
 exclude = [
     # Preserved upstream crate, with its own standalone host test workspace.
@@ -201,6 +204,8 @@ kclass = { path = "drivers/contracts/kclass" }
 driver-core = { path = "drivers/core/driver-core" }
 kclk = { path = "core/kclk" }
 driver_host = { path = "drivers/core/driver-host", package = "driver-host" }
+devnode = { path = "drivers/common/devnode" }
+
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }
 net = { path = "drivers/contracts/net" }

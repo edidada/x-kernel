@@ -1168,6 +1168,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-class"
+version = "0.3.0-dev"
+dependencies = [
+ "block",
+ "char_driver",
+ "devnode",
+ "display",
+ "driver_base",
+ "hwrng",
+ "input",
+ "kspin",
+ "lazyinit",
+ "log",
+ "net",
+ "unittest",
+ "vsock",
+]
+
+[[package]]
 name = "device-res"
 version = "0.3.0-dev"
 dependencies = [
@@ -1189,6 +1208,17 @@ dependencies = [
  "log",
  "memaddr",
  "memspace",
+ "unittest",
+]
+
+[[package]]
+name = "devnode"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-core",
+ "kspin",
+ "ksync",
+ "log",
  "unittest",
 ]
 
@@ -5454,6 +5484,16 @@ checksum = "7f64fe59e11af447d12fd60a403c74106eb104309f34b4c6dbce6e927d97da9d"
 dependencies = [
  "bitflags 2.13.2",
  "uguid",
+]
+
+[[package]]
+name = "uevent-netlink"
+version = "0.3.0-dev"
+dependencies = [
+ "devnode",
+ "klazy",
+ "knet",
+ "unittest",
 ]
 
 [[package]]
