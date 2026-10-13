@@ -217,3 +217,17 @@ Not supported by the current filemap runtime:
 - readahead/fault-around;
 - hole-punch/collapse-range;
 - DAX, THP, reclaim, swap, memcg, NUMA.
+
+
+## Shared File Mapping Holds
+
+A not-present shared-file fault runs under `AddressSpace::with_folio_or_create`
+and clones the folio's physical-storage hold before leaving the protected folio
+scope. It passes that capability to `PageTableMut::map_owned`, not just PA.
+The page table owns the hold through ordinary unmap, sparse invalidation,
+PROT_NONE teardown and address relocation. Filemap does not keep a second
+cache or retain whole Folio objects solely for mapped-page lifetime.
+
+Shared write-fault remap changes permissions on the same held page. EOF/seal
+checks, page_mkwrite, dirty state and view invalidation remain their existing
+protocols; physical lifetime alone does not implement truncate semantics.

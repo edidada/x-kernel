@@ -87,3 +87,14 @@ to `posix/mm`.
   accounting and filemap runtime registration.
 - Advanced Linux behavior such as DAX, THP, readahead, reclaim, swap, memcg,
   and NUMA is out of scope.
+
+
+## Shared File Data Lifetime
+
+`handle_fault_impl` clones a frame hold while the current folio is borrowed,
+then transfers it to the page table before exposing the mapping. Failure drops
+only the new hold. Cache eviction or inode teardown cannot return this storage
+while the mapped hold remains. Ordinary/sparse unmap and protection clear retire
+holds after TLB completion; mremap carries ownership to its destination through
+`move_mapping`. Filesystem notification and file-content validity are separate
+requirements and remain necessary even though physical reuse is prevented.

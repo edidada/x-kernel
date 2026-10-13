@@ -1,7 +1,8 @@
 # 物理页分配收口：后续迁移范围
 
-本文记录本次 FrameMeta/FrameRef review 后确认的下一阶段工作。当前只完成描述符、
-启动准备、内容映射与旧 buddy 过渡适配的职责拆分；使用者迁移尚未完成。
+本文记录 FrameMeta/FrameRef review 后确认的使用者迁移。描述符、启动准备、内容
+映射和旧 buddy 适配已拆分；首批迁移覆盖页缓存 Folio 与共享文件 PTE，其他使用者
+仍需按下列协议继续推进。
 
 ## 目标
 
@@ -40,3 +41,16 @@
 每条迁移路径检查最后持有结束后只归还一次、共享期间不提前归还、失败路径不丢失
 持有，以及旧映射无法访问已经复用的存储。终版运行相关内核单测和 harness；不要求
 每个中间提交重复完整 harness。按使用者和协议边界拆分提交，便于后续拆小 PR。
+
+
+## 首批迁移：页缓存与共享文件映射
+
+- Folio 通过 alloc_zeroed_frame 取得一份 FrameRef，Drop 自动结束缓存持有。
+- 共享文件缺页在 folio 借用内取得另一份持有，交给 map_owned。
+- 页表按 VA 保存 provider-defined MappingReference；unmap、稀疏失效与 PROT_NONE
+  清除 PTE 后把持有交给有界批次，finish 完成 TLB 失效后结束持有。
+- move_mapping 先取得目标持有，再撤销源 PTE，确保 mremap 搬移时不丢失生命周期。
+- 旧 raw map 仍保持外部 backing 契约。GlobalPage、匿名/共享内容、连续多页、DMA
+  和字节堆 backing 的收口尚未完成；这些路径按整段持有与映射协议继续迁移。
+- 映射索引增加 heap bookkeeping 成本，尚未给出性能改善结论；全量可失败堆分配
+  与后续 reclaim 仍是独立工作。

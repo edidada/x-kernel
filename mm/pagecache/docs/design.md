@@ -221,3 +221,15 @@ are reported as None from that snapshot and never reserved or initialized. This
 allows a filesystem to own its sparse algorithm without a cache policy flag.
 Callbacks may stop before the next page; errors retain earlier callback progress.
 The fixed FolioBatch and index array allocate no additional heap storage.
+## Folio Backing Lifetime
+
+Folio now owns one PageCache-category FrameRef instead of a raw VA allocation.
+Allocation uses the zeroed frame interface; physical addresses come from that
+hold and payload access uses its content mapping. Folio destruction performs
+its dirty/writeback diagnostics and then ends the cache hold automatically.
+
+`try_clone_frame()` exposes a physical-storage lifetime capability to the VFS/MM
+bridge. It does not retain the Folio object, cache residency or dirty/writeback
+state. Shared file mappings keep their own holds in the page table, including
+through retirement batches; removing a folio cannot return its RAM while those
+holds survive. Cache removal still does not implement file-mapping invalidation.

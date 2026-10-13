@@ -14,6 +14,8 @@ use memaddr::PAGE_SIZE_4K;
 
 use crate::{Folio, MappingPages, PageIndex};
 
+#[path = "../src/tests/frame_lifetime.rs"]
+mod frame_lifetime;
 #[path = "mapping_pages_unittest.rs"]
 mod mapping_pages;
 #[path = "residency_unittest.rs"]

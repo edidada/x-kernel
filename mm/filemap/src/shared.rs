@@ -310,12 +310,7 @@ impl FileSharedRuntime {
             Err(PagingError::NotMapped) => {
                 address_space.with_folio_or_create(pn, |folio| {
                     pgtbl
-                        .map(
-                            addr,
-                            folio.paddr(),
-                            PageSize::Size4K,
-                            flags - MappingFlags::WRITE,
-                        )
+                        .map_owned(addr, folio.try_clone_frame()?, flags - MappingFlags::WRITE)
                         .map_err(map_paging_err)?;
                     populated = 1;
                     Ok(())

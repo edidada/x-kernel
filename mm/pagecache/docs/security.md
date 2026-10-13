@@ -22,7 +22,7 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 ## 内存安全不变量
 
 - 写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
-- 每个 `Folio` 独占一页；
+- 每个 `Folio` 持有一份基础页生命周期引用；映射或其他使用者可另持有 FrameRef；
 - `FolioBatch` 只持有有界、按遍历顺序排列的引用；引用存活不等于 mapping identity 仍有效；
 - batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；
 - 遍历候选和待完成批次各最多 31 页，连续写回数据最多 31 页；临时内存不随
@@ -134,3 +134,11 @@ before exposing data; initialization errors are preserved. The owner holds
 invalidation shared through the batch, including EOF checks and user copies.
 Only one folio is locked at a time; callbacks cannot reenter this mapping or
 wait for another folio. An initialized hit takes no additional index lock.
+## Cache Removal and Mapping Holds
+
+`try_clone_frame` requires a live folio borrow and increments the held
+allocation's reference, so it cannot acquire a different incarnation from a
+stale PFN. Folio Drop ends only the cache hold. Required invalidation, dirty
+state and filesystem validity remain separate. Tests cover cache Drop before
+PTE removal, TLB-delayed final release, sparse/protection retirement, failed
+relocation, bounded batches and inactive-table destruction.
