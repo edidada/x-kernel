@@ -348,7 +348,7 @@ impl Service {
         let mut progress = DeviceRxProgress::default();
         let mut packets_since_time_check = 0;
 
-        if !self.try_process_rx_batch(
+        if !self.ipv4_ingress.try_process_rx_batch(
             device_timestamp,
             rx_batch,
             accepted_packets,
@@ -388,7 +388,7 @@ impl Service {
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
-            if !self.try_process_rx_batch(
+            if !self.ipv4_ingress.try_process_rx_batch(
                 device_timestamp,
                 rx_batch,
                 accepted_packets,
@@ -414,21 +414,6 @@ impl Service {
             progress.has_reached_time_limit = true;
         }
         progress
-    }
-
-    fn try_process_rx_batch(
-        &self,
-        device_timestamp: MonotonicInstant,
-        rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) -> bool {
-        self.ipv4_ingress.try_process_rx_batch(
-            device_timestamp,
-            rx_batch,
-            accepted_packets,
-            control_packets,
-        )
     }
 
     fn try_flush_ingress_batches(
