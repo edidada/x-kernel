@@ -77,6 +77,18 @@ impl ThreadSignalManager {
         this
     }
 
+    /// Re-keys this thread's entry in the process signal registry after an
+    /// `exec` leader takeover moved its numeric TID.
+    ///
+    /// Routing selects threads by number, so the registry entry follows the
+    /// moved number; per-thread delivery itself is unchanged.
+    pub fn rebind_after_exec(&self, old_tid: u32, new_tid: u32) {
+        let mut children = self.proc.children.lock();
+        if let Some(entry) = children.iter_mut().find(|(tid, _)| *tid == old_tid) {
+            entry.0 = new_tid;
+        }
+    }
+
     /// Dequeues a signal from the thread's pending signals.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {

@@ -180,6 +180,32 @@ impl Process {
         self.thread_membership.lock().reserve_slot(token)
     }
 
+    /// Moves the thread-group identity onto `task` after a non-leader `exec`.
+    ///
+    /// `task` must be the process's sole surviving published thread. The number
+    /// directory entry moves once and the thread adopts the group number;
+    /// membership and cgroup key on the stable identity and need no change.
+    /// Signal routing still keys threads by number, so its registry entry is
+    /// re-keyed here. Call in sleepable context, before the new image is
+    /// installed; returns `false` when the precondition or directory move fails.
+    pub fn assume_leader_identity(&self, task: &KtaskRef) -> bool {
+        let thread = task.as_thread();
+        let old_tid = thread.tid();
+        let pid = self.pid();
+        if old_tid == pid {
+            return true;
+        }
+        if self.thread_count() != 1 || !self.contains_published_tid(old_tid) {
+            return false;
+        }
+        if !process_publication().move_task_number(task, old_tid, pid) {
+            return false;
+        }
+        thread.adopt_task_number(self.leader_task_number.clone());
+        thread.signal_manager().rebind_after_exec(old_tid, pid);
+        true
+    }
+
     /// Publishes a thread task into this [`Process`]'s membership table.
     pub(crate) fn publish_thread_task_locked(
         &self,

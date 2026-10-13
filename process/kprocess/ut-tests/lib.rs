@@ -2306,6 +2306,37 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
 }
 
 #[def_test(serial)]
+fn test_exec_leader_takeover_moves_number_onto_survivor() {
+    let (process, leader_task) = build_prepared_test_user_task();
+    let published_leader = prepare_user_task(leader_task).publish().unwrap();
+    let leader = published_leader.task().clone();
+    let pid = process.pid();
+    assert_eq!(leader.as_thread().tid(), pid);
+
+    let survivor = publish_test_thread(&process, 1_175);
+    let survivor_tid = survivor.as_thread().tid();
+    assert_ne!(survivor_tid, pid);
+
+    // The `exec` sibling sweep retires the leader from the process first.
+    assert!(!process.exit_thread(&leader, 0));
+    assert_eq!(process.thread_count(), 1);
+
+    assert!(process.assume_leader_identity(&survivor));
+    assert_eq!(survivor.as_thread().tid(), pid);
+    assert!(
+        process_publication()
+            .task(pid)
+            .is_ok_and(|task| Arc::ptr_eq(&task, &survivor)),
+        "the group number must resolve to the surviving thread"
+    );
+    assert!(
+        process_publication().task(survivor_tid).is_err(),
+        "the survivor's old number entry must be gone"
+    );
+    assert_eq!(process.threads(), vec![pid]);
+}
+
+#[def_test(serial)]
 fn test_unpublish_process_if_matches_preserves_different_identity() {
     let init = ensure_init();
     let published = init.fork(1_160);

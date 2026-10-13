@@ -353,6 +353,15 @@ pub fn exec_de_thread() {
     let mut kill_mask = SignalSet::default();
     kill_mask.add(Signo::SIGKILL);
     while manager.dequeue_signal(&kill_mask).is_some() {}
+
+    // If the surviving thread is not the group leader, move the thread-group
+    // identity onto it here, while this phase can still sleep. The number
+    // directory entry moves once and the thread adopts the group number;
+    // membership and cgroup key on the stable identity and need no change, so
+    // the address-space exchange below stays a pure pointer swap.
+    if !process.assume_leader_identity(&current()) {
+        error!("exec_de_thread: leader identity takeover failed after the sibling sweep");
+    }
 }
 
 /// Tears down the current user thread and optionally terminates its siblings.

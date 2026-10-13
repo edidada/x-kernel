@@ -665,6 +665,40 @@ impl ProcessPublication {
         self.identities.read().get(&token).and_then(Weak::upgrade)
     }
 
+    /// Moves `task`'s number directory entry from `from` to `to`.
+    ///
+    /// Used by the `exec` leader takeover: the surviving thread adopts the
+    /// thread-group number and the single number-indexed table follows in one
+    /// step. Membership and cgroup tables key on the stable identity and need
+    /// no change. Returns `false` when `from` no longer publishes `task`.
+    pub(crate) fn move_task_number(&self, task: &KtaskRef, from: Tid, to: Tid) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut tables = self.tables.write();
+        let Some(from_slot) = tables.task_table.get(&from).cloned() else {
+            return false;
+        };
+        if !from_slot.retire_if_publishes(task) {
+            return false;
+        }
+        let to_slot = tables
+            .task_table
+            .entry(to)
+            .or_insert_with(|| Arc::new(PublicationSlot::new()))
+            .clone();
+        if to_slot.is_published() {
+            // The previous leader's slot is already dead when the survivor takes
+            // over; retire it so the directory entry can be republished. The
+            // caller guarantees the process has a single surviving thread.
+            to_slot.retire();
+        }
+        to_slot.reserve_vacant_task_slot();
+        to_slot.publish(Arc::downgrade(task));
+        Self::remove_slot_if_retired(&mut tables.task_table, from, &from_slot);
+        true
+    }
+
     /// Retires a TID slot without removing the map entry (unittest reuse probe).
     #[cfg(unittest)]
     pub(crate) fn retire_task_slot_keep_entry_for_test(&self, tid: Tid) {

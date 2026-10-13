@@ -74,9 +74,17 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
 
 ## Memory and lifecycle invariants
 
-- A published task must carry the same stable handle as its Thread. Numeric ID
-  equality alone does not protect against reuse; retire/delete paths check object
-  identity and current slot state.
+- A task's identity is the task object; the numeric TID is a movable binding it
+  owns. `TaskIdentityToken` is allocated once per thread and never reused. The
+  number directory (`ProcessPublication::task_table`) is the only
+  number-indexed table; thread and cgroup membership key on the token. Retire
+  and delete paths still check slot object identity, so a reused number cannot
+  retire an unrelated task.
+- A number binding moves only in the sole-survivor `exec` takeover, in the
+  sleepable `exec_de_thread` phase after the sibling sweep and before the image
+  swap: the directory link moves once, the survivor adopts the group number,
+  and its signal-registry entry is re-keyed. No other path changes a live
+  task's number.
 - Parent link, child list, exit signal and reserved reparent slot form one
   relation. Mutate them under the domain write lock, never by independent updates.
 - Running → Zombie/Dead and Zombie → Dead consumption are domain transactions.

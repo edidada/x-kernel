@@ -206,6 +206,30 @@ the opened backing executable file (`with_exe_file`), replacing/inheriting the
 display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
 across exec, fork, and the init process created via `fork` + `execve`.
 
+## Task identity and the number binding
+
+A task's *identity* is the task object itself; the numeric TID/PID is a
+*binding* it owns. `kidentity::TaskIdentityToken` is allocated once per thread
+and never reused, and `Thread` stores its current number in
+`SpinNoIrq<Arc<PidHandle>>` with an `AtomicU32` snapshot, so `tid()` is a
+lock-free read while the binding can change in one critical section.
+
+The single number-indexed table is `ProcessPublication::task_table` (TID →
+task). Registries that must not be re-indexed when a number moves key on the
+stable token instead: `ThreadMembership` (per-process thread membership) and
+`kcgroup`'s `member_tasks`. `ProcessPublication` also keeps a token → task
+directory so those registries resolve a live task and read the current number
+on demand.
+
+A non-leader `exec` therefore performs an O(1) takeover in the sleepable
+`exec_de_thread` phase: the survivor retires the dead leader's directory link
+and republishes its own under the group number
+(`ProcessPublication::move_task_number`), adopts the group number
+(`Thread::adopt_task_number`), and re-keys its process signal registry entry
+(routing still selects threads by number). Membership and cgroup need no
+change, and the address-space exchange stays a pure pointer swap in
+`replace_current_address_space`, with no identity work in its callback.
+
 ## Concurrency model
 
 Last-thread POSIX cleanup calls `exit_signal_handlers` before process completion,

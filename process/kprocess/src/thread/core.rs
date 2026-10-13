@@ -551,6 +551,18 @@ impl Thread {
         self.task_number.lock().clone()
     }
 
+    /// Adopts `number` as this thread's current number binding.
+    ///
+    /// Used by the `exec` leader takeover after the global number directory has
+    /// been moved; only the thread-local binding is updated here. The numeric
+    /// snapshot is written in the same critical section so `tid()` never sees
+    /// the two apart.
+    pub(crate) fn adopt_task_number(&self, number: Arc<kidentity::PidHandle>) {
+        let mut current = self.task_number.lock();
+        *current = number;
+        self.tid.store(current.root_nr(), Ordering::Relaxed);
+    }
+
     /// Returns the stable identity token for this thread.
     pub fn identity_token(&self) -> kidentity::TaskIdentityToken {
         self.identity_token
