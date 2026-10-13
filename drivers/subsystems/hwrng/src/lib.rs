@@ -50,5 +50,4 @@ pub trait HwrngDevice: Device {
 }
 
 #[cfg(unittest)]
-#[path = "../ut-tests/hwrng_unittest.rs"]
-mod hwrng_unittest_tests;
+mod tests;

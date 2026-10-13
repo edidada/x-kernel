@@ -85,5 +85,4 @@ pub trait DisplayDevice: Device {
     }
 }
 
-#[path = "../ut-tests/display_contract.rs"]
-mod display_contract_tests;
+mod tests;
