@@ -37,9 +37,6 @@ impl DeviceManager {
         #[cfg(feature = "virtio")]
         driver_registry::virtio::register_all(&mut self.driver_registrar);
 
-        #[cfg(feature = "char")]
-        driver_registry::char::register_all(&mut self.driver_registrar);
-
         driver_registry::register_platform_drivers(&mut self.driver_registrar);
     }
 

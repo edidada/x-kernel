@@ -1,0 +1,29 @@
+[package]
+name = "drv-serial"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core serial drivers: PL011 and NS16550 (MMIO + x86 I/O-port)"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "serial", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+pl011 = ["console_driver/pl011"]
+ns16550-mmio = ["console_driver/ns16550-mmio"]
+ns16550-ioport = ["console_driver/ns16550-ioport"]
+
+[dependencies]
+console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
+driver-core = { workspace = true }
+driver_base = { workspace = true }
+device_class = { workspace = true, features = ["char"] }
+memaddr = { workspace = true }
+char_driver = { workspace = true }
+log.workspace = true
+
+[lints]
+workspace = true

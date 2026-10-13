@@ -1,0 +1,37 @@
+[package]
+name = "driver-compose"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Composition root for the driver-core model: runtime install, DT enumeration, driver registration"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+serial-pl011 = ["dep:drv-serial", "drv-serial/pl011", "dep:drv-clk", "drv-clk/fixed-clock"]
+serial-ns16550-mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio"]
+serial-ns16550-ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport"]
+fixed-clock = ["dep:drv-clk"]
+virtio-blk = []
+virtio-net = []
+virtio-rng = []
+virtio-gpu = []
+virtio-input = []
+virtio-vsock = []
+virtio-9p = []
+
+[dependencies]
+driver-core.workspace = true
+driver_host.workspace = true
+khal.workspace = true
+of.workspace = true
+log.workspace = true
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+
+[lints]
+workspace = true

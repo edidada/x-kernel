@@ -122,6 +122,10 @@ pub struct XKernelRuntime {
 impl XKernelRuntime {
     /// The resource provider handle (for service extensions that need
     /// direct provider access without going through the global runtime).
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: split-7 wires the virtio family onto the provider;                   split-6 composes serial/clk only"
+    )]
     pub(crate) fn static_provider(&self) -> &'static XKernelResourceProvider {
         self.provider
     }

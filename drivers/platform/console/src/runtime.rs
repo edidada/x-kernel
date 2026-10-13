@@ -12,18 +12,19 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use driver_base::DriverResult;
-use kclass::{
-    CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
-    subscribe_char_available,
+use device_class::{
+    CharDeviceImpl, ClassDevice, ClassDeviceId, char_devices, find_char_device, publish_char,
+    subscribe_char_available, subscribe_char_removed,
 };
-use kdevice::{DeviceId, DeviceObject, subscribe_device_removed};
+use driver_base::DriverResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
-    stdout: Option<DeviceId>,
+    stdout: Option<ClassDeviceId>,
+    /// The adopted stdout's transferred guards (see [`StdoutBinding`]).
+    stdout_binding: Option<StdoutBinding>,
 }
 
 impl ConsoleSubsystem {
@@ -31,6 +32,7 @@ impl ConsoleSubsystem {
         Self {
             devices: Vec::new(),
             stdout: None,
+            stdout_binding: None,
         }
     }
 
@@ -47,7 +49,7 @@ impl ConsoleSubsystem {
         self.devices.push(handle);
     }
 
-    fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
+    fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
         if self.stdout == Some(id) {
             self.stdout = None;
         }
@@ -68,6 +70,41 @@ impl ConsoleSubsystem {
 
 static CONSOLE_SUBSYS: LazyInit<SpinNoPreempt<ConsoleSubsystem>> = LazyInit::new();
 static CONSOLE_CLASS_BRIDGE: LazyInit<()> = LazyInit::new();
+
+/// The adopted stdout binding: THE explicit cross-binding owner of the
+/// boot console — publication identity, input IRQ, and (for cold-start
+/// ports) the register mapping, held for the KERNEL's lifetime.
+///
+/// This is the console-continuity policy as ONE type instead of a
+/// special case leaking through the driver: the serial driver's stdout
+/// probe TRANSFERS its guards here (`adopt_stdout_guards`) and keeps no
+/// withdrawal guard in its Data — the binding's entire runtime instance
+/// survives driver removal together, or it does not survive at all (a
+/// publication outliving its IRQ would read as an available console
+/// that can never receive input).
+///
+/// A same-port rebind REPLACES the binding: the previous publication is
+/// withdrawn (see `register_stdout_console`) and the previous guards
+/// release with this assignment.
+#[expect(
+    dead_code,
+    reason = "CG-024-lint-exceptions: ownership-only fields — the guards exist               for \
+              their Drop (released at rebind replacement or subsystem               teardown), \
+              never for reads"
+)]
+struct StdoutBinding {
+    irq: Option<driver_core::DevIrq>,
+    regs: Option<driver_core::IoMap>,
+}
+
+/// Transfer the adopted stdout port's binding guards to the console
+/// subsystem (call from a successful stdout probe, AFTER publication).
+/// Takes ownership: the caller's `Data` keeps `None` for these fields.
+pub fn adopt_stdout_guards(irq: Option<driver_core::DevIrq>, regs: Option<driver_core::IoMap>) {
+    // Replace: releasing the previous pair handles the rebind case (the
+    // old registration/handlers belong to the superseded binding).
+    console_subsystem().lock().stdout_binding = Some(StdoutBinding { irq, regs });
+}
 
 fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
     CONSOLE_SUBSYS.call_once(|| SpinNoPreempt::new(ConsoleSubsystem::new()));
@@ -102,8 +139,10 @@ fn ensure_console_bridge() {
             add_console_device(handle);
         }
         subscribe_char_available(Arc::new(add_console_device));
-        subscribe_device_removed(Arc::new(|id| {
-            let _ = unregister_console_device(id);
+        // Class-layer removal subscription replaces the old device-model
+        // removal event: the console keeps no stale handles.
+        subscribe_char_removed(Arc::new(|handle| {
+            let _ = unregister_console_device(handle.id());
         }));
     });
 }
@@ -117,12 +156,25 @@ fn ensure_console_bridge() {
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
 pub fn register_stdout_console(
-    parent: Arc<DeviceObject>,
+    parent: impl Into<device_class::ClassParent>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
-    let id = parent.id();
-    publish_char(parent, runtime)?;
+    // Rebind: withdraw the PREVIOUS stdout publication before publishing
+    // the replacement — one stdout identity carries exactly one class
+    // publication. Without this, a same-port rebind left the old
+    // publication live in the char registry while the console pointed at
+    // the new one (and STDOUT_GUARDS had already released the old
+    // binding's irq/mapping): a stale handle any consumer could still
+    // find, referencing dead hardware.
+    {
+        let mut subsystem = console_subsystem().lock();
+        if let Some(previous) = subsystem.stdout.take() {
+            device_class::unpublish_char(previous);
+        }
+    }
+    let handle = publish_char(parent, runtime)?;
+    let id = handle.id();
     console_subsystem().lock().stdout = Some(id);
     // This runs inside the driver's `probe_device`, so the device is usually
     // not active yet and `find_char_device()` (which filters on availability)
@@ -133,6 +185,22 @@ pub fn register_stdout_console(
         return Ok(());
     }
     Ok(())
+}
+
+/// Publish the boot stdout port's runtime wrapper under the caller's class
+/// parent and register it as THE console.
+///
+/// New-model serial drivers call this for their stdout role (the old
+/// `Arc<DeviceObject>` parent became a `ClassParent`); auxiliary ports use
+/// plain `publish_char` and stay out of the console subsystem.
+pub fn register_console_parented(
+    parent: impl Into<device_class::ClassParent>,
+    runtime: CharDeviceImpl,
+) -> DriverResult<()> {
+    // Thin alias of [`register_stdout_console`] kept as the serial drivers'
+    // naming (parent-shaped entry); the semantics are identical — see
+    // register_stdout_console for the full contract.
+    register_stdout_console(parent, runtime)
 }
 
 /// Snapshot the available runtime device associated with boot stdout.
@@ -149,12 +217,12 @@ pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
 ///
 /// Task context. Available after publication, including before activation;
 /// cleared on removal. This identifies the port, not its I/O availability.
-pub fn stdout_console_id() -> Option<DeviceId> {
+pub fn stdout_console_id() -> Option<ClassDeviceId> {
     console_subsystem().lock().stdout
 }
 
 /// Remove a runtime console from the console subsystem.
-pub fn unregister_console_device(id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
+pub fn unregister_console_device(id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
     console_subsystem().lock().remove(id)
 }
 

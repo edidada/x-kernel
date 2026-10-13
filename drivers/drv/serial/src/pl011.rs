@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! PL011 serial driver on the driver-core model — the golden
+//! template for **consumer drivers**.
+//!
+//! Translated from the Linux `drivers/tty/serial/amba-pl011.c` shape and the
+//! golden template, it demonstrates every framework facility in
+//! one file:
+//!
+//! * id table (`of_device_id` → [`IDS`])
+//! * named resources (`reg`, `interrupts`, `clocks`/`clock-names`)
+//! * early-console adoption via `take_early_port` (printk keeps flowing)
+//! * clock consumption with automatic `-EPROBE_DEFER` (`dev.clk`)
+//! * interrupt registration with the `dev_id` capture pattern
+//! * guards-in-`Data` ownership (drop order is the release order)
+//!
+//! Runtime console/char publication goes through the class layer
+//! (`device_class::publish_*` with a detached `ClassParent`): the stdout port
+//! registers as the console subsystem's device, auxiliary ports publish
+//! as char devices. Console output never stops — the early-stdout port
+//! this driver adopts is the same hardware instance printk keeps using.
+
+use alloc::{boxed::Box, sync::Arc};
+
+use char_driver::CharDevice;
+use console_driver::{
+    runtime::register_console_parented,
+    serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
+};
+use device_class::{ClassParent, publish_char};
+use driver_base::{Device, DeviceKind, DriverResult};
+use driver_core::{
+    BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
+    platform::{OfMatch, PlatformBus, PlatformId},
+};
+use memaddr::{PhysAddr, VirtAddr};
+
+/// `static const struct of_device_id pl011_of_match[]`.
+static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
+
+/// Driver-private data (`struct uart_amba_port`).
+///
+/// Field order is the release order: the interrupt is freed first, then the
+/// port is quiesced, then the (cold-start) mapping is torn down, and the
+/// clock reference goes last.
+pub struct Pl011Data {
+    /// The Data-owned char publication (auxiliary ports): dropping
+    /// unpublishes. FIRST field — before every guard below. The stdout
+    /// port deliberately holds none (console continuity across rebind).
+    _publication: Option<device_class::ClassWithdraw>,
+    _irq: Option<DevIrq>,
+    _port: Arc<SerialPort>,
+    _regs: Option<IoMap>,
+    _clk: Option<ClkHandle>,
+    /// The enabled-state token for auxiliary ports: dropping it balances
+    /// the prepare/enable pair (disable + unprepare) — the structural
+    /// counterpart of the stdout port's `keep_running` escape hatch. The
+    /// stdout path stores `None` (its token was consumed at probe).
+    _enabled_clk: Option<driver_core::EnabledClock>,
+}
+
+/// The driver ops (`struct amba_pl011_driver`).
+pub struct Pl011Driver;
+
+/// Acquire and enable the port's baud clock. Returns the handle plus the
+/// ENABLED-state token, which the caller keeps alive through every fallible
+/// probe step (IRQ registration, publication) — a failure drops it and the
+/// pair rolls back. See `Pl011Data::_enabled_clk` for the success policy.
+fn enable_baud_clock(
+    dev: &mut DeviceCtx<'_, PlatformBus>,
+) -> Result<Option<(ClkHandle, driver_core::EnabledClock)>, ProbeError> {
+    match dev
+        .resources()
+        .clk_by_name("uartclk")
+        .or_else(|| dev.resources().clk_at(0))
+    {
+        Some(spec) => {
+            let clk = dev.clk_spec(spec)?;
+            let enabled = clk
+                .prepare_enable()
+                .map_err(ProbeError::from)
+                .inspect_err(|_| log::warn!("pl011: failed to enable clock"))?;
+            Ok(Some((clk, enabled)))
+        }
+        None => {
+            log::debug!("pl011: no clock input described by firmware");
+            Ok(None)
+        }
+    }
+}
+
+impl DriverOps<PlatformBus> for Pl011Driver {
+    type Data = Pl011Data;
+
+    fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<Pl011Data, ProbeError> {
+        let mmio = dev.mmio(0)?;
+        let paddr = PhysAddr::from_usize(mmio.base);
+        let ident = SerialIdent::Mmio {
+            paddr,
+            size: mmio.size,
+        };
+
+        // Adopt the early-boot stdout instance when this node is it: printk
+        // keeps writing through the shared `Arc<SerialPort>`, so console
+        // output never stops. Cold-start ports get a fresh mapping instead.
+        let (port, regs) = match take_early_port(&ident) {
+            Some(port) => (port, None),
+            None => {
+                let regs = dev.iomap(0)?;
+                // SAFETY: `regs` covers exactly the `mmio` window reported by
+                // firmware, is 32-bit aligned per the PL011 spec, and stays
+                // alive for the port's lifetime inside `Pl011Data`.
+                let port = unsafe {
+                    SerialPort::new_mmio_pl011(
+                        VirtAddr::from_usize(regs.as_ptr() as usize),
+                        paddr,
+                        mmio.size,
+                        SerialRole::Auxiliary,
+                    )
+                };
+                (Arc::new(port), Some(regs))
+            }
+        };
+
+        // Clock inputs (`clocks = <&phandle>`, `clock-names = "uartclk" ...`).
+        // Defers cleanly while the provider has not probed yet. The token
+        // stays alive through every fallible step below; only a fully
+        // successful probe hands the enabled state onward.
+        let clk = enable_baud_clock(dev)?;
+
+        // Interrupt: !920 semantics — the port's handler acknowledges and
+        // collects input internally and wakes the attached tty waker
+        // (ack_interrupt no longer exists as a public API).
+        let irq = match dev.irq(0) {
+            Ok(spec) => {
+                let handler_port = port.clone();
+                Some(dev.request_irq(spec, "pl011", move || {
+                    if handler_port.handle_input_irq().handled() {
+                        IrqAction::Handled
+                    } else {
+                        IrqAction::NotHandled
+                    }
+                })?)
+            }
+            Err(_) => None,
+        };
+
+        // Publish the runtime capability: the stdout port joins the console
+        // subsystem (/dev/console backing), auxiliary ports become char
+        // devices. Both use a detached class parent — the class layer is
+        // model-agnostic since the class-layer decoupling.
+        use driver_core::BusDeviceData as _;
+        let location = dev.bus_data().path_component();
+        let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+        let mut publication: Option<device_class::ClassWithdraw> = None;
+        match port.role() {
+            SerialRole::Stdout => {
+                register_console_parented(
+                    ClassParent::detached(dev.id().raw(), "pl011-serial", location),
+                    char_dev,
+                )
+                .map_err(crate::probe_error::map_driver_error)?;
+            }
+            SerialRole::Auxiliary => {
+                let handle = publish_char(
+                    ClassParent::detached(dev.id().raw(), "pl011-serial", location),
+                    char_dev,
+                )
+                .map_err(crate::probe_error::map_driver_error)?;
+                publication = Some(device_class::char_withdraw(&handle));
+            }
+        }
+
+        log::info!(
+            "pl011: probed {} (paddr {:#x}, clk {}, irq {})",
+            if regs.is_none() {
+                "[early-console adopted]"
+            } else {
+                ""
+            },
+            mmio.base,
+            clk.as_ref().map(|(c, _)| c.get_rate()).unwrap_or(0),
+            // Log the hardware line (the descriptor's hwirq): for
+            // route-style specs the DevIrq number is 0 until the domain
+            // mapping resolves it.
+            dev.irq(0)
+                .ok()
+                .and_then(|spec| spec.hwirq())
+                .unwrap_or(usize::MAX),
+        );
+        // The enabled-clock policy resolves only now, after EVERY fallible
+        // step has succeeded: stdout consumes the token (the adopted
+        // console keeps its clock past removal — explicit continuity
+        // policy); auxiliary ports carry the token in Data, and its Drop
+        // balances the prepare/enable pair at remove.
+        let (clk, enabled_clk) = match clk {
+            Some((handle, token)) => {
+                if matches!(port.role(), SerialRole::Stdout) {
+                    token.keep_running();
+                    (Some(handle), None)
+                } else {
+                    (Some(handle), Some(token))
+                }
+            }
+            None => (None, None),
+        };
+        // Console continuity, ownership side: the stdout publication
+        // survives this binding (no withdrawal guard), so its runtime
+        // instance must survive with it — the input IRQ and (for a
+        // cold-start port) the register mapping transfer to the console
+        // subsystem here instead of dying at Data drop. A publication
+        // that outlives its IRQ would read as an available console that
+        // can never receive input.
+        let is_stdout = matches!(port.role(), SerialRole::Stdout);
+        let (mut irq, mut regs) = (irq, regs);
+        if is_stdout {
+            console_driver::runtime::adopt_stdout_guards(irq.take(), regs.take());
+        }
+        Ok(Pl011Data {
+            _publication: publication,
+            _irq: irq,
+            _port: port,
+            _regs: regs,
+            _clk: clk,
+            _enabled_clk: enabled_clk,
+        })
+    }
+
+    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, Pl011Data>) {
+        // Guards in `Data` release after this in field order. The clock
+        // balance is structural: `_enabled_clk`'s Drop disables + unprepares
+        // auxiliary ports; the adopted stdout port deliberately keeps
+        // running (its token was consumed via `keep_running` at probe —
+        // console continuity across rebind).
+    }
+}
+
+/// `module_platform_driver()` equivalent.
+pub fn register() {
+    driver_core::global_domain().register_driver(DriverDesc::new("pl011-serial", IDS, Pl011Driver));
+}
+
+/// Char-device runtime wrapper over a `SerialPort` (the `/dev` view).
+struct SerialCharDev(Arc<SerialPort>);
+
+impl Device for SerialCharDev {
+    fn name(&self) -> &str {
+        "serial"
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+
+    fn irq(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl CharDevice for SerialCharDev {
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+        Ok(self.0.read_data(buf))
+    }
+
+    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+        self.0.write_data(buf);
+        Ok(buf.len())
+    }
+}

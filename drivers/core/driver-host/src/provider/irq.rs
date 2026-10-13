@@ -196,6 +196,10 @@ pub(crate) fn to_runtime_controller(controller: driver_core::IrqController) -> k
 ///
 /// Returns `None` when the route cannot be mapped (no domain registered for
 /// the controller, or the hwirq is already claimed).
+#[expect(
+    dead_code,
+    reason = "CG-024-lint-exceptions: split-7 wires the PCI INTx fallback onto the host bridge;               split-6 composes serial/clk only"
+)]
 pub(crate) fn resolve_irq_spec(
     provider: &XKernelResourceProvider,
     spec: &driver_core::IrqSpec,

@@ -10,7 +10,7 @@ use console_driver::{
     runtime::stdout_console,
     serial::{self, SerialPort},
 };
-use kclass::{CharDeviceImpl, ClassDevice};
+use device_class::{CharDeviceImpl, ClassDevice};
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;

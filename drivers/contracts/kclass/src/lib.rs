@@ -243,9 +243,6 @@ pub type NetDeviceImpl = Box<dyn NetDevice + Send + Sync>;
 /// Concrete runtime type for registered generic disks.
 #[cfg(feature = "block")]
 pub type BlockDeviceImpl = block::GendiskRef;
-/// Concrete runtime type for character devices.
-#[cfg(feature = "char")]
-pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
 /// Shared hardware entropy source, also retained by its host activation owner.
 ///
 /// Publish only after the driver can receive completion IRQs and accept reads.
@@ -268,9 +265,6 @@ pub type Virtio9pDeviceImpl = Box<dyn Virtio9pDevice + Send + Sync>;
 /// Re-export the generic disk type used by block-class publishers.
 #[cfg(feature = "block")]
 pub use block::Gendisk;
-/// Re-export character device trait.
-#[cfg(feature = "char")]
-pub use char_driver::CharDevice;
 /// Re-export display device trait and framebuffer metadata.
 #[cfg(feature = "display")]
 pub use display::{DisplayDevice, DisplayInfo};
@@ -319,9 +313,6 @@ impl ClassRuntimeMetadata for BlockDeviceImpl {
         block::del_gendisk(self.device_number());
     }
 }
-
-#[cfg(feature = "char")]
-impl ClassRuntimeMetadata for CharDeviceImpl {}
 
 #[cfg(feature = "hwrng")]
 impl ClassRuntimeMetadata for HwrngDeviceImpl {}
@@ -377,21 +368,6 @@ impl ClassRuntimeMetadata for VsockDeviceImpl {}
 
 #[cfg(feature = "virtio-9p")]
 impl ClassRuntimeMetadata for Virtio9pDeviceImpl {}
-
-#[cfg(feature = "char")]
-impl CharDevice for ClassDevice<CharDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with(|device| device.read(buf))
-    }
-
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
-        self.with(|device| device.write(buf))
-    }
-
-    fn flush(&self) -> DriverResult {
-        self.with(|device| device.flush())
-    }
-}
 
 #[cfg(feature = "hwrng")]
 impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
@@ -601,17 +577,6 @@ class_registries! {
     subscribe_block_available,
     notify_block_available,
     remove_block_device;
-    "char",
-    CharDeviceImpl,
-    DeviceKind::Char,
-    CHAR_DEVICES,
-    char_class_registry,
-    publish_char,
-    char_devices,
-    find_char_device,
-    subscribe_char_available,
-    notify_char_available,
-    remove_char_device;
     "hwrng",
     HwrngDeviceImpl,
     DeviceKind::Hwrng,
@@ -677,8 +642,6 @@ pub mod prelude {
 
     #[cfg(feature = "block")]
     pub use crate::BlockDeviceImpl;
-    #[cfg(feature = "char")]
-    pub use crate::{CharDevice, CharDeviceImpl};
     #[cfg(feature = "display")]
     pub use crate::{DisplayDevice, DisplayDeviceImpl, DisplayInfo};
     #[cfg(feature = "input")]

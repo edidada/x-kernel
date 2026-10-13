@@ -51,9 +51,10 @@ impl CharDevice for RuntimeIo {
 }
 
 fn connection(
-    parent: Arc<kdevice::DeviceObject>,
+    _parent: &device_class::ClassParent,
     fails: bool,
     boot_port: Option<Arc<SerialPort>>,
+    offline: bool,
 ) -> (Arc<ConsoleConnection>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     // Reuse live identity metadata without publishing or changing global state.
@@ -62,8 +63,20 @@ fn connection(
         calls: calls.clone(),
         fails,
     });
+    // A fresh detached parent per test device: sharing the stdout parent's
+    // snapshot would alias its offline flag between test and live device.
+    // `offline` expresses the removed-device state (the main-side test used
+    // a bound-but-inactive device object for the same effect).
+    let parent = device_class::ClassParent::detached(
+        0x7e57,
+        "tty-test",
+        alloc::string::String::from("platform/static0x7e57"),
+    );
+    if offline {
+        parent.mark_offline();
+    }
     let handle =
-        ClassDevice::try_new_with_info(parent, runtime, "tty-test".into(), DeviceKind::Char, None)
+        ClassDevice::try_new_with_info(parent, runtime, "tty-test".into(), None)
             .unwrap();
     let connection = ConsoleConnection {
         boot_port,
@@ -80,7 +93,8 @@ fn runtime_connection_is_shared_by_read_write_and_repeated_handoff() {
         unittest::ktest_println!("SKIP: no adopted runtime stdout in this configuration");
         return unittest::TestResult::Ignored;
     };
-    let (mut connection, calls) = connection(stdout.parent(), false, serial::stdout_port());
+    let (mut connection, calls) =
+        connection(stdout.parent_ref(), false, serial::stdout_port(), false);
     connection.try_handoff();
     let mut bytes = [0; 3];
     assert_eq!(TtyRead::read(&mut connection, &mut bytes), 3);
@@ -98,7 +112,8 @@ fn runtime_errors_return_both_directions_to_the_boot_port() {
     };
     for write_first in [false, true] {
         let fixture = SerialPortFixture::new(b"boot-input");
-        let (mut connection, calls) = connection(stdout.parent(), true, Some(fixture.port()));
+        let (mut connection, calls) =
+            connection(stdout.parent_ref(), true, Some(fixture.port()), false);
         let mut prefix = [0; 4];
         if write_first {
             assert_eq!(TtyWrite::write(&connection, b"first"), Ok(5));
@@ -121,16 +136,18 @@ fn runtime_errors_return_both_directions_to_the_boot_port() {
 
 #[def_test]
 fn unavailable_runtime_clears_handle_and_uses_boot_port() {
-    use kdevice::{DeviceId, DeviceObject};
-
-    // This bound device is never published or activated, so the test
-    // exercises availability without changing any global device lifecycle.
-    let parent = Arc::new(DeviceObject::new_bound_for_test(
-        DeviceId::new(1),
-        DeviceKind::Char,
-    ));
+    // A detached class parent never touches any registry: the test
+    // connection exercises availability without global device lifecycle.
+    let parent = device_class::ClassParent::detached(
+        1,
+        "tty-test",
+        alloc::string::String::from("platform/static1"),
+    );
+    // The main-side equivalent used a bound-but-inactive device object;
+    // the class model expresses unavailability as an offline parent
+    // (passed as the `offline` flag to `connection`).
     let fixture = SerialPortFixture::new(b"boot");
-    let (mut connection, calls) = connection(parent, false, Some(fixture.port()));
+    let (mut connection, calls) = connection(&parent, false, Some(fixture.port()), true);
     assert!(connection.runtime_handle().is_none());
     assert!(connection.runtime.lock().is_none());
     let mut bytes = [0; 4];

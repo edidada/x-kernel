@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Shared helpers for the block driver modules.
+
+use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
+
+pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
+    let error = match err {
+        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
+            RuntimeError::Invalid
+        }
+        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
+        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
+            RuntimeError::Busy
+        }
+        driver_base::DriverError::BadState => RuntimeError::BadState,
+        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
+        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
+    };
+    ProbeError::Fatal(error)
+}
+
+/// Physical sysfs path for a device location (parent path for the disk's
+/// devnode publication — mirrors the virtio-side helper).
+pub(crate) fn physical_path(location: DeviceLocation) -> alloc::string::String {
+    devnode::physical_path(&location)
+}

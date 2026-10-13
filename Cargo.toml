@@ -196,11 +196,15 @@ watchdog = { path = "io/watchdog" }
 # Internal: driver contracts and model
 block = { path = "drivers/contracts/block" }
 hwrng = { path = "drivers/contracts/hwrng" }
-char_driver = { path = "drivers/contracts/char" }
+char_driver = { path = "drivers/subsystems/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
 device_res = { path = "drivers/contracts/device-res", package = "device-res" }
 kclass = { path = "drivers/contracts/kclass" }
+device_class = { path = "drivers/common/device-class", package = "device-class" }
+driver-compose = { path = "drivers/core/driver-compose" }
+drv-serial = { path = "drivers/drv/serial" }
+drv-clk = { path = "drivers/drv/clk" }
 driver-core = { path = "drivers/core/driver-core" }
 kclk = { path = "core/kclk" }
 driver_host = { path = "drivers/core/driver-host", package = "driver-host" }

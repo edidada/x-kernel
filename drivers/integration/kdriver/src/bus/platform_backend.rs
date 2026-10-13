@@ -244,39 +244,11 @@ impl PlatformBackend {
         reason = "CG-024-lint-exceptions: unused_variables: Static enumeration inputs are used \
                   only when a matching platform driver feature is enabled"
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "CG-028-focused-functions: TODO(cg): legacy static platform enumeration; split \
-                  per device class"
-    )]
     fn enumerate_static(
         &mut self,
         context: &mut EnumerationContext,
         bus_id: BusId,
     ) -> DriverResult {
-        // --- NS16550 I/O-port (x86 ISA COM, no device tree) ---
-        // Always adopt the early stdout instance; the serial driver matches
-        // this alias and reuses the port printk already drives.
-        #[cfg(feature = "serial-ns16550-ioport")]
-        {
-            use kdevice::{
-                DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
-            };
-            context.register_device(
-                bus_id,
-                DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc()?,
-                },
-                DiscoveryOrigin::PlatformStatic,
-                DeviceIdentity::Platform(PlatformIdentity {
-                    alias: Some("serial-ns16550-ioport"),
-                    firmware_id: None,
-                }),
-                None,
-                ResourceSet::new(),
-            )?;
-        }
-
         // --- ramdisk ---
         #[cfg(feature = "ramdisk")]
         {

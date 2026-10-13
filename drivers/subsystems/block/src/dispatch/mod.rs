@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Block-class dispatch services: portable waiting, deferred completion
+//! reclaiming, and IRQ wiring. Model-agnostic — usable by drivers on both
+//! all drivers on the driver-core model.
+
+pub mod reclaimer;
+pub mod wait;

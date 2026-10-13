@@ -1,0 +1,43 @@
+[package]
+name = "block"
+description = "Common traits and types for block storage drivers"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[package.metadata.cargo-shear]
+
+[features]
+# bcm2835-sdhci = ["dep:bcm2835-sdhci"]
+ramdisk = []
+ramdisk-static = []
+# sdmmc = ["dep:simple-sdmmc"]
+# ahci = ["dep:simple-ahci"]
+
+[dependencies]
+memaddr.workspace = true
+bitflags = { workspace = true }
+driver_base = { workspace = true }
+kerrno = { workspace = true }
+klazy = { workspace = true }
+ksync = { workspace = true }
+kbuild_config = { workspace = true }
+devnode = { workspace = true }
+khal = { workspace = true }
+kirq = { workspace = true }
+kpoll = { workspace = true }
+ktask = { workspace = true }
+linked_list_r4l = { workspace = true }
+# bcm2835-sdhci = { git = "https://github.com/lhw2002426/bcm2835-sdhci.git", rev = "e974f16", optional = true }
+kspin = { workspace = true }
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
+# simple-sdmmc = { git = "https://github.com/Starry-OS/simple-sdmmc.git", rev = "9e6420c", optional = true }
+# simple-ahci = { git = "https://github.com/Starry-OS/simple-ahci.git", rev = "36d0979", optional = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

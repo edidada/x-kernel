@@ -6,11 +6,29 @@
 //! implemented for `ClassDevice<T>` — admission-gated data-plane
 //! forwarding (`with_available`/`is_available`) over the shared runtime.
 
+use driver_base::{Device, DeviceKind};
+
 use super::*;
 
 // ---------------------------------------------------------------------------
 // CharDevice impl for ClassDevice (console/serial consumers)
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "char")]
+impl Device for ClassDevice<CharDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+}
+
+// Legacy-contracts bridge (splits 4-6): a ClassDevice that forwards as a
+// CharDevice must first be a Device. The kind is the static one the
+// forwarding type already carries — the type system says it, no stored
+// runtime tag. These impls retire with the contracts in split 7.
 
 #[cfg(feature = "char")]
 impl CharDevice for ClassDevice<CharDeviceImpl> {
@@ -24,6 +42,17 @@ impl CharDevice for ClassDevice<CharDeviceImpl> {
 
     fn flush(&self) -> DriverResult {
         self.with_available(|device| device.flush())
+    }
+}
+
+#[cfg(feature = "display")]
+impl Device for ClassDevice<DisplayDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Display
     }
 }
 
@@ -64,6 +93,17 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
 }
 
 #[cfg(feature = "input")]
+impl Device for ClassDevice<InputDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Input
+    }
+}
+
+#[cfg(feature = "input")]
 impl InputDevice for ClassDevice<InputDeviceImpl> {
     fn device_id(&self) -> InputDeviceId {
         self.with(|device| device.device_id())
@@ -83,6 +123,17 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
 
     fn read_event(&self) -> DriverResult<Event> {
         self.with_available(|device| device.read_event())
+    }
+}
+
+#[cfg(feature = "net")]
+impl Device for ClassDevice<NetDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Net
     }
 }
 
@@ -137,6 +188,17 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
 }
 
 #[cfg(feature = "vsock")]
+impl Device for ClassDevice<VsockDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Vsock
+    }
+}
+
+#[cfg(feature = "vsock")]
 impl VsockDevice for ClassDevice<VsockDeviceImpl> {
     fn guest_cid(&self) -> u64 {
         self.with(|device| device.guest_cid())
@@ -186,6 +248,17 @@ impl VsockDevice for ClassDevice<VsockDeviceImpl> {
 impl ClassDevice<Virtio9pDeviceImpl> {
     pub fn mount_tag(&self) -> String {
         self.with(|device| device.mount_tag())
+    }
+}
+
+#[cfg(feature = "virtio-9p")]
+impl Device for ClassDevice<Virtio9pDeviceImpl> {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Fs9p
     }
 }
 

@@ -125,19 +125,20 @@ entropy_virtio_rng = ["dep:entropy", "entropy/entropy_virtio_rng"]
 entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
 entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
 entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
-driver_ramdisk = ["kdriver/ramdisk"]
-driver_ramdisk_static = ["kdriver/ramdisk-static"]
 driver_ixgbe = ["kdriver/ixgbe"]
 driver_fxmac = ["kdriver/fxmac"]
 driver_ahci = ["kdriver/ahci"]
 driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
 driver_sdmmc = ["kdriver/sdmmc"]
-driver_console_pl011 = ["kdriver/console-pl011"]
-driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
-driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
-driver_serial_pl011 = ["kdriver/serial-pl011"]
-driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
-driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
+driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-compose/serial-pl011", "driver-compose/fixed-clock", "char", "dep:console_driver", "console_driver/pl011"]
+driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-compose/serial-ns16550-mmio", "char", "dep:console_driver", "console_driver/ns16550-mmio"]
+driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-compose/serial-ns16550-ioport", "char", "dep:console_driver", "console_driver/ns16550-ioport"]
+driver_ramdisk = ["kdriver/ramdisk"]
+driver_ramdisk_static = ["kdriver/ramdisk-static"]
+driver_console_pl011 = ["dep:console_driver", "console_driver/pl011"]
+driver_console_ns16550_mmio = ["dep:console_driver", "console_driver/ns16550-mmio"]
+driver_console_ns16550_ioport = ["dep:console_driver", "console_driver/ns16550-ioport"]
+
 
 # Backtrace
 # In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
@@ -204,6 +205,10 @@ backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 fat = { workspace = true, optional = true }
 kdriver.workspace = true
+driver-compose.workspace = true
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+console_driver = { workspace = true, optional = true }
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
 kplat-aarch64 = { workspace = true, optional = true, features = [

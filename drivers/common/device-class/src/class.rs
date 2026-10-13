@@ -120,8 +120,7 @@ pub struct DetachedParent {
     /// real pointer; id arithmetic silently decouples the two counters).
     pub owner: u64,
     pub driver_name: &'static str,
-    /// The parent's physical path (bus-vtable derived at publication).
-    pub physical_path: String,
+    pub physical_path: alloc::string::String,
     /// Flipped when the composition root removes the owning device (after
     /// the quiesce callbacks returned). Shared by every [`ClassDevice`]
     /// clone through the inner `Arc`, so a consumer holding a stale clone
@@ -136,7 +135,11 @@ impl ClassParent {
     /// `owner` is the publishing device's driver-core id (`DeviceCtx::id()`);
     /// the composition root's remove notifier uses it to find this
     /// publication when that device goes away.
-    pub fn detached(owner: u64, driver_name: &'static str, physical_path: String) -> Self {
+    pub fn detached(
+        owner: u64,
+        driver_name: &'static str,
+        physical_path: alloc::string::String,
+    ) -> Self {
         Self::Detached(DetachedParent {
             id: ClassDeviceId::new_detached(),
             owner,
@@ -256,14 +259,7 @@ impl<T> ClassDevice<T> {
         name: String,
         irq: Option<usize>,
     ) -> DriverResult<Self> {
-        Self::try_new_with_class_metadata(
-            parent,
-            inner,
-            name,
-            device_kind,
-            irq,
-            ClassDeviceMetadata::empty(),
-        )
+        Self::try_new_with_class_metadata(parent, inner, name, irq, ClassDeviceMetadata::empty())
     }
 
     pub fn try_new_with_class_metadata(
@@ -431,7 +427,7 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClassDevice")
             .field("id", &self.id())
-            .field("physical_path", &self.location())
+            .field("location", &self.location())
             .field("driver_name", &self.driver_name())
             .finish()
     }
@@ -573,11 +569,23 @@ mod tests {
     /// the console, which needs the full composition root — those run
     /// under boot-time removal instead. Forgetting a branch still turns
     /// this red through hwrng/net.
+    // split-6: the drain test needs hwrng or net publishers; both features
+    // arrive with the virtio family in split 7 (char/display/input are
+    // excluded by design — see the doc comment above).
+    #[cfg(any(feature = "hwrng", feature = "net"))]
     #[def_test(serial)]
     fn remove_all_detached_drains_every_enabled_class() {
         use crate::remove_all_detached;
 
-        fn loc(id: u32) -> alloc::string::String {
+        #[cfg_attr(
+            not(any(feature = "hwrng", feature = "net")),
+            expect(
+                dead_code,
+                reason = "split-6: sentinel publishers arrive with the hwrng/net features in \
+                          split 7"
+            )
+        )]
+        fn loc(id: u16) -> alloc::string::String {
             alloc::format!("platform/static{id}")
         }
 
@@ -638,27 +646,27 @@ mod tests {
                     0
                 }
 
-                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> device_traits::DriverResult {
+                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
                     Ok(())
                 }
 
-                fn recycle_tx(&self) -> device_traits::DriverResult {
+                fn recycle_tx(&self) -> driver_base::DriverResult {
                     Ok(())
                 }
 
-                fn send(&self, _tx_buf: net::NetBufHandle) -> device_traits::DriverResult {
-                    Err(device_traits::DriverError::Unsupported)
+                fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                    Err(driver_base::DriverError::Unsupported)
                 }
 
-                fn recv(&self) -> device_traits::DriverResult<net::NetBufHandle> {
-                    Err(device_traits::DriverError::Unsupported)
+                fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
+                    Err(driver_base::DriverError::Unsupported)
                 }
 
                 fn alloc_tx_buf(
                     &self,
                     _size: usize,
-                ) -> device_traits::DriverResult<net::NetBufHandle> {
-                    Err(device_traits::DriverError::Unsupported)
+                ) -> driver_base::DriverResult<net::NetBufHandle> {
+                    Err(driver_base::DriverError::Unsupported)
                 }
             }
             crate::publish_net(
@@ -699,7 +707,6 @@ mod tests {
             ClassParent::detached(9, "test", loc(0)),
             1u32,
             alloc::string::String::from("a"),
-            ::Char,
             None,
         )
         .unwrap();
@@ -707,7 +714,6 @@ mod tests {
             ClassParent::detached(9, "test", loc(1)),
             2u32,
             alloc::string::String::from("b"),
-            ::Char,
             None,
         )
         .unwrap();
@@ -790,31 +796,31 @@ mod tests {
                 0
             }
 
-            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> device_traits::DriverResult {
+            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
                 Ok(())
             }
 
-            fn recycle_tx(&self) -> device_traits::DriverResult {
+            fn recycle_tx(&self) -> driver_base::DriverResult {
                 Ok(())
             }
 
-            fn send(&self, _tx_buf: net::NetBufHandle) -> device_traits::DriverResult {
-                Err(device_traits::DriverError::Unsupported)
+            fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                Err(driver_base::DriverError::Unsupported)
             }
 
-            fn recv(&self) -> device_traits::DriverResult<net::NetBufHandle> {
-                Err(device_traits::DriverError::Unsupported)
+            fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
+                Err(driver_base::DriverError::Unsupported)
             }
 
-            fn alloc_tx_buf(&self, _size: usize) -> device_traits::DriverResult<net::NetBufHandle> {
-                Err(device_traits::DriverError::Unsupported)
+            fn alloc_tx_buf(&self, _size: usize) -> driver_base::DriverResult<net::NetBufHandle> {
+                Err(driver_base::DriverError::Unsupported)
             }
 
             fn set_rx_scheduler(
                 &self,
                 _scheduler: Option<Arc<dyn net::NetRxScheduler>>,
-            ) -> device_traits::DriverResult {
-                Err(device_traits::DriverError::Unsupported)
+            ) -> driver_base::DriverResult {
+                Err(driver_base::DriverError::Unsupported)
             }
         }
 

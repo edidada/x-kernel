@@ -659,9 +659,10 @@ name = "console-driver"
 version = "0.3.0-dev"
 dependencies = [
  "arm_pl011",
+ "device-class",
+ "devnode",
+ "driver-core",
  "driver_base",
- "kclass",
- "kdevice",
  "khal",
  "kiface",
  "kirq",
@@ -1129,6 +1130,7 @@ dependencies = [
  "block",
  "chrono",
  "console-driver",
+ "device-class",
  "dice-driver",
  "driver_base",
  "drmdevice",
@@ -1264,6 +1266,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-compose"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-core",
+ "driver-host",
+ "drv-clk",
+ "drv-serial",
+ "khal",
+ "log",
+ "of",
+]
+
+[[package]]
 name = "driver-core"
 version = "0.3.0-dev"
 dependencies = [
@@ -1313,6 +1328,29 @@ dependencies = [
  "macros",
  "memaddr",
  "posix-types",
+]
+
+[[package]]
+name = "drv-clk"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-core",
+ "driver-host",
+ "kclk",
+ "log",
+]
+
+[[package]]
+name = "drv-serial"
+version = "0.3.0-dev"
+dependencies = [
+ "char_driver",
+ "console-driver",
+ "device-class",
+ "driver-core",
+ "driver_base",
+ "log",
+ "memaddr",
 ]
 
 [[package]]
@@ -2173,7 +2211,6 @@ name = "kclass"
 version = "0.3.0-dev"
 dependencies = [
  "block",
- "char_driver",
  "display",
  "driver_base",
  "hwrng",
@@ -2305,7 +2342,6 @@ version = "0.3.0-dev"
 dependencies = [
  "block",
  "cfg-if",
- "char_driver",
  "console-driver",
  "crate_interface",
  "device-res",
@@ -2483,7 +2519,11 @@ version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
  "backtrace",
+ "console-driver",
  "devfs",
+ "driver-compose",
+ "drv-clk",
+ "drv-serial",
  "entropy",
  "fat",
  "fbdevice",
@@ -2945,6 +2985,8 @@ dependencies = [
  "backtrace",
  "boot-info",
  "chrono",
+ "device-class",
+ "driver-compose",
  "entropy",
  "fbdevice",
  "fs_boot",
@@ -3207,11 +3249,10 @@ dependencies = [
  "bytemuck",
  "char_driver",
  "console-driver",
+ "device-class",
  "intrusive-collections",
- "kclass",
  "kcpu_id_map",
  "kcred",
- "kdevice",
  "kerrno",
  "khal",
  "klazy",

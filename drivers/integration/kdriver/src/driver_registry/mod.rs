@@ -10,8 +10,6 @@ use driver_base::{DeviceKind, DriverResult};
 use kdevice::{DeviceDriver, DeviceId};
 
 pub(crate) mod block;
-#[cfg(feature = "char")]
-pub(crate) mod char;
 pub(crate) mod firmware_specs;
 pub(crate) mod net;
 pub(crate) mod virtio;

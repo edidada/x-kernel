@@ -1,0 +1,27 @@
+[package]
+name = "drv-block"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core block drivers: ramdisk and future storage targets"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "block", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+ramdisk-static = ["block/ramdisk-static"]
+
+[dependencies]
+block = { workspace = true, features = ["ramdisk"] }
+kbuild_config = { workspace = true }
+devnode = { workspace = true }
+driver-core = { workspace = true }
+driver_base = { workspace = true }
+device_class = { workspace = true, features = ["block"] }
+
+
+[lints]
+workspace = true

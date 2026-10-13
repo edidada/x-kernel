@@ -16,7 +16,7 @@ workqueue-bench = ["kworkng/bench"]
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi", "ktask/ipi"]
 
-char = ["kdriver/char", "dep:ktty"]
+char = ["dep:ktty", "dep:device_class", "device_class/char"]
 display = ["kdriver/display", "dep:fbdevice"]
 input = ["kdriver/input", "dep:inputdev"]
 fs = ["kdriver/block", "dep:fs_boot"]
@@ -41,6 +41,8 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
+device_class = { workspace = true, optional = true }
+driver-compose.workspace = true
 kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }

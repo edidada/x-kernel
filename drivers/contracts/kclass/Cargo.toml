@@ -16,7 +16,6 @@ kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 block = { workspace = true, optional = true }
-char_driver = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
@@ -27,7 +26,6 @@ vsock = { workspace = true, optional = true }
 [features]
 default = []
 block = ["dep:block"]
-char = ["dep:char_driver"]
 hwrng = ["dep:hwrng"]
 display = ["dep:display"]
 input = ["dep:input"]
