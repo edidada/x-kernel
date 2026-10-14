@@ -147,13 +147,16 @@ pub(crate) fn sys_execveat(
         }
         let display = alloc::format!("/proc/self/fd/{dirfd}");
         debug!("sys_execveat <= fd {dirfd} (AT_EMPTY_PATH), args: {args:?}");
-        return exec_resolved(
+        // Execute the file already open on `dirfd`, not a path re-resolution:
+        // this is what makes `fexecve` on an anonymous `memfd`, or on a file
+        // renamed after opening, execute the opened image.
+        let entry_name = file.path().name();
+        let request = ExecRequest::from_file(file, display.clone(), args, envs, cred);
+        return exec_request(
             uctx,
-            file.path().clone(),
+            request,
             display,
-            args,
-            envs,
-            cred,
+            entry_name,
             #[cfg(unittest)]
             None,
         );
@@ -224,25 +227,42 @@ fn exec_resolved(
     args: Vec<String>,
     envs: Vec<String>,
     cred: Arc<kcred::Cred>,
+    #[cfg(unittest)] probe: Option<&mut lifecycle_tests::ExecProbe>,
+) -> KResult<isize> {
+    let absolute_path = loc
+        .absolute_path()
+        .map(|path| path.to_string())
+        .unwrap_or_else(|_| display_path.clone());
+    let entry_name = loc.name();
+    let request = ExecRequest::from_resolved_with_display(loc, display_path, args, envs, cred);
+    exec_request(
+        uctx,
+        request,
+        absolute_path,
+        entry_name,
+        #[cfg(unittest)]
+        probe,
+    )
+}
+
+/// Executes a prepared request by swapping the caller's address space and
+/// register context for the new program.
+///
+/// `absolute_path` and `entry_name` describe the image for process metadata and
+/// the task name; the argument vector is read from `request`.
+fn exec_request(
+    uctx: &mut UserContext,
+    request: ExecRequest,
+    absolute_path: String,
+    entry_name: String,
     #[cfg(unittest)] mut probe: Option<&mut lifecycle_tests::ExecProbe>,
 ) -> KResult<isize> {
     let curr = current();
     let thread = kprocess::current_user_thread();
     let process = thread.process().clone();
 
-    let absolute_path = loc
-        .absolute_path()
-        .map(|path| path.to_string())
-        .unwrap_or_else(|_| display_path.clone());
-    let entry_name = loc.name();
-
-    let prepared = prepare_user_app_request(ExecRequest::from_resolved_with_display(
-        loc,
-        display_path,
-        args.clone(),
-        envs,
-        cred,
-    ))?;
+    let args = request.args().to_vec();
+    let prepared = prepare_user_app_request(request)?;
     // Everything that can still fail with a plain errno must run before the
     // first irreversible step. `de_thread()` is that step: once the siblings
     // are gone the old program cannot be resumed, so allocate the new address
