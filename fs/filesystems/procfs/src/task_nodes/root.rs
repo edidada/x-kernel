@@ -509,7 +509,17 @@ impl ProcExeLink {
 
     fn display_target(&self) -> VfsResult<String> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        task.as_thread().process().exe_path()
+        let process = task.as_thread().process();
+        // Render from the opened backing file so `readlink` and `follow` name
+        // the same object even when the exec display path is synthetic (e.g.
+        // `execveat(AT_EMPTY_PATH)` on a memfd).
+        let Some(file) = process.exe_file().ok().flatten() else {
+            return process.exe_path();
+        };
+        file.path()
+            .absolute_path()
+            .map(|path| path.to_string())
+            .or_else(|_| process.exe_path())
     }
 
     fn target_len(&self) -> VfsResult<u64> {
