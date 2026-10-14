@@ -22,9 +22,9 @@ use crate::{GlobalAllocator, UsageKind};
 /// Allocation and final release have the allocator's context restrictions:
 /// they may run in ordinary or IRQ context, never NMI, and do not sleep.
 pub struct FrameRef<'a> {
-    allocator: &'a GlobalAllocator,
-    meta: &'a FrameMeta,
-    paddr: PhysAddr,
+    pub(super) allocator: &'a GlobalAllocator,
+    pub(super) meta: &'a FrameMeta,
+    pub(super) paddr: PhysAddr,
 }
 
 impl<'a> FrameRef<'a> {

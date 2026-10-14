@@ -457,4 +457,29 @@ changing its count. Unsafe `frame_from_raw` consumes that precise outstanding re
 a descriptor lookup or a raw alloc_pages address is insufficient. Per-page accounting
 survives the last holder changing CPU; clone/transfer do not account again. FrameRef
 allocations charge a complete page even for RustHeap, unlike byte-heap backing requests.
-Multi-page/huge-page ownership and compound-page splitting remain outside this API.
+Single FrameRef remains a base-page capability. Contiguous runs use the separate
+FrameRun protocol below; compound-page and huge-folio splitting remain outside it.
+
+
+## Contiguous FrameRun Ownership
+
+`alloc_frame_run` validates nonzero, representable counts and physical alignment,
+rounds the backing count to a power of two, then asks the transitional buddy
+adapter for that complete block. Every backing descriptor is claimed before
+publication. A non-RustHeap category is charged by the existing inventory path;
+RustHeap is explicitly charged for actual backing. No new control block or heap
+array is allocated for the run.
+
+`FrameRun::try_clone_frame(index)` creates an independent base-page hold only
+from the live run. Drop ends one hold per backing page; the per-page last holder
+returns a base page, allowing retained siblings to survive. The buddy coalesces
+free base pages while PCP can cache them. Releasing a run is O(backing pages) and
+may perform one inventory operation per final page, a known throughput cost;
+this first migration has no measured performance claim or batched run-return
+optimization. Usage is charged until the last hold on each actual page ends.
+
+Raw run transfer is restricted to static allocators, keeps counts unchanged and
+requires exact-once restoration for the original allocation of every backing
+page. Run lengths and addresses do not prove provenance on their own. The
+current VA adapter rejects an alignment not preserved by its mapping offset;
+a future PA/PFN buddy backend removes that transitional constraint.

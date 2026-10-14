@@ -10,12 +10,14 @@
 
 mod reference;
 mod registry;
+mod run;
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use alloc_engine::{AllocError, AllocResult};
 pub use reference::FrameRef;
 pub(crate) use registry::{FrameLayout, FrameRegistry, MAX_FRAME_REGIONS};
+pub use run::FrameRun;
 
 use crate::UsageKind;
 

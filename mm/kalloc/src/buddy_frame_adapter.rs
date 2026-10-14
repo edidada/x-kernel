@@ -76,3 +76,34 @@ pub(crate) fn validate_raw_release(
     }
     Ok(())
 }
+
+/// Allocates a complete power-of-two block, including every backing page.
+pub(crate) fn allocate_run(
+    allocator: &GlobalAllocator,
+    num_frames: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+) -> AllocResult<PhysAddr> {
+    let mapping = allocator
+        .frame_mapping
+        .get()
+        .ok_or(AllocError::NotInitialized)?;
+    // Old buddy aligns its VA. Reject mappings that cannot preserve the
+    // requested physical alignment; do not silently return misaligned RAM.
+    if !mapping.preserves_alignment(align_pow2) {
+        return Err(AllocError::InvalidInput);
+    }
+    let va = allocator.alloc_pages(num_frames, align_pow2, kind)?;
+    let paddr = mapping
+        .physical_address(va.into())
+        .expect("buddy returned an invalid mapped block");
+    // Allocation supplied exclusive inventory. Any referenced/permanent or
+    // missing slot here means the backend violated the boot coverage contract.
+    allocator
+        .frames
+        .get()
+        .expect("frame allocation requires a published registry")
+        .validate_raw_release(paddr.as_usize() / PAGE_SIZE_4K, num_frames)
+        .expect("buddy returned a run outside unshared physical inventory");
+    Ok(paddr)
+}

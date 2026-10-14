@@ -368,3 +368,24 @@ inferred from a positive count; the caller retains these separate obligations.
 Tests cover clone/last release with real inventory reuse, whole-range raw rejection,
 permanent backing, zeroing, category accounting, overflow, and exactly-once raw transfer.
 Usage assertions use guarded per-CPU deltas instead of unstable global snapshots.
+
+
+## Contiguous Runs and Rounded Backing
+
+The run allocation boundary rejects zero counts, count/byte overflow and invalid
+alignment before inventory mutation. The adapter requests the complete power-of-two
+block, verifies physical coverage/state, and rejects mappings that cannot preserve
+physical alignment. Every backing slot is claimed, including rounding slack, so
+raw release cannot bypass hidden pages. Internal coverage failure is a backend
+invariant violation, not a legitimate out-of-memory result.
+
+An existing run is the acquisition authority for a base-page clone. Run teardown
+uses each slot's unique retirement transition before publishing reusable inventory.
+It performs no later metadata write for a returned page. Retained siblings remain
+charged/live and cannot be merged as free buddies until their last holds end.
+The static raw-transfer contract preserves all holds with exact backing size and
+allocator identity; checks cannot detect every stale or forged transfer.
+
+New run tests cover rounded coverage, independently retained slack, complete
+inventory reuse, overflow, physical alignment, accounting, raw transfer and
+raw-release rejection. GlobalPage consumer migration follows separately.

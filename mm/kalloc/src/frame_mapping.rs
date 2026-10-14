@@ -34,6 +34,10 @@ impl LinearFrameMapping {
         Ok(Self { offset })
     }
 
+    pub(crate) fn preserves_alignment(&self, alignment: usize) -> bool {
+        self.offset.is_multiple_of(alignment)
+    }
+
     pub(crate) fn kernel_address(&self, paddr: PhysAddr) -> Option<VirtAddr> {
         paddr
             .as_usize()

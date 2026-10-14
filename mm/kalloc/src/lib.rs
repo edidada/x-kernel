@@ -54,7 +54,7 @@ mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
-pub use frame::{FrameMeta, FrameRef, FrameState};
+pub use frame::{FrameMeta, FrameRef, FrameRun, FrameState};
 pub use frame_bootstrap::{FrameBootstrapInfo, FrameRegion};
 pub use page::GlobalPage;
 
@@ -707,6 +707,49 @@ impl GlobalAllocator {
         Ok(frame)
     }
 
+    /// Allocates at least num_pages contiguous base pages with lifetime holds.
+    ///
+    /// The returned FrameRun owns every page in the power-of-two backing block,
+    /// including rounding slack. All pages are accounted until their own last
+    /// holds end. No separate control block or reference array is allocated.
+    /// Page contents are uninitialized. This is not a compound-page API.
+    ///
+    /// # Errors
+    /// Returns NotInitialized before descriptor-backed handoff, InvalidInput
+    /// for zero/overflowing counts, invalid alignment or a current backend
+    /// mapping that cannot preserve physical alignment, and NoMemory when the
+    /// backing cannot be obtained. No reclaim is attempted.
+    pub fn alloc_frame_run(
+        &self,
+        num_pages: usize,
+        align_pow2: usize,
+        kind: UsageKind,
+    ) -> AllocResult<FrameRun<'_>> {
+        if !self.page_ready.load(Ordering::Acquire) || self.frames.get().is_none() {
+            return Err(AllocError::NotInitialized);
+        }
+        if num_pages == 0 || !align_pow2.is_power_of_two() || align_pow2 < PAGE_SIZE_4K {
+            return Err(AllocError::InvalidInput);
+        }
+        let num_frames = num_pages
+            .checked_next_power_of_two()
+            .ok_or(AllocError::InvalidInput)?;
+        let bytes = num_frames
+            .checked_mul(PAGE_SIZE_4K)
+            .ok_or(AllocError::InvalidInput)?;
+        if bytes > isize::MAX as usize {
+            return Err(AllocError::InvalidInput);
+        }
+        let paddr = buddy_frame_adapter::allocate_run(self, num_frames, align_pow2, kind)?;
+        // SAFETY: the adapter returned the complete exclusive allocation and
+        // validated every base-page descriptor before any owner was published.
+        let run = unsafe { FrameRun::from_allocation(self, paddr, num_frames, kind) };
+        if matches!(kind, UsageKind::RustHeap) {
+            self.record_usage_alloc(kind, bytes);
+        }
+        Ok(run)
+    }
+
     /// Allocates one zero-filled base page with a shared lifetime reference.
     pub fn alloc_zeroed_frame(&self, kind: UsageKind) -> AllocResult<FrameRef<'_>> {
         let frame = self.alloc_frame(kind)?;
@@ -729,6 +772,23 @@ impl GlobalAllocator {
         // SAFETY: the caller owns the exact outstanding reference transferred
         // by into_raw on this static allocator and consumes it only once.
         unsafe { FrameRef::from_transferred_reference(self, paddr) }
+    }
+
+    /// Restores a transferred run without changing any reference counts.
+    ///
+    /// # Safety
+    /// The PA and actual backing count must identify one outstanding transfer
+    /// from FrameRun::into_raw on this allocator. Every page must belong to the
+    /// same live allocation incarnation. Restoration consumes that transfer
+    /// exactly once; required hardware-use retirement precedes final release.
+    pub unsafe fn frame_run_from_raw(
+        &'static self,
+        paddr: memaddr::PhysAddr,
+        num_frames: usize,
+    ) -> FrameRun<'static> {
+        // SAFETY: the caller owns the complete outstanding run transfer from
+        // this static allocator and consumes exactly those page holds once.
+        unsafe { FrameRun::from_transferred_reference(self, paddr, num_frames) }
     }
 
     fn validate_raw_page_release(&self, va: usize, num_pages: usize) -> AllocResult {
@@ -1086,3 +1146,5 @@ pub fn is_page_allocator_ready() -> bool {
 }
 
 unittest::path_mod_test!(pub mod tests_kalloc, "../ut-tests/lib.rs");
+
+unittest::path_mod_test!(tests_frame_run, "../ut-tests/frame_run.rs");
