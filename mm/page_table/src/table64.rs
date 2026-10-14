@@ -464,30 +464,34 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
     }
 
+    fn mapping_reference_key(&self, address: usize) -> Option<usize> {
+        let (&start, reference) = self.inner.mapping_refs.range(..=address).next_back()?;
+        (address - start < H::mapping_reference_bytes(reference)).then_some(start)
+    }
+
+    fn queue_retired_reference(&mut self, reference: H::MappingReference) {
+        if self.retired_mapping_refs.is_full() {
+            // The current hold remains live in this local while finishing all
+            // pending invalidations and retiring the previous batch.
+            self.finish();
+        }
+        self.retired_mapping_refs.push(reference);
+    }
+
     fn retire_mapping_reference(&mut self, vaddr: usize) {
-        let page_start = vaddr & !(PAGE_SIZE_4K - 1);
-        if let Some(reference) = self.inner.mapping_refs.remove(&page_start) {
-            if self.retired_mapping_refs.is_full() {
-                // The current removed PTE is already in the flush batch. Keep
-                // its reference in this local until that invalidation returns;
-                // earlier references can then be released to make batch space.
-                self.finish();
-            }
-            self.retired_mapping_refs.push(reference);
+        if let Some(key) = self.mapping_reference_key(vaddr)
+            && let Some(reference) = self.inner.mapping_refs.remove(&key)
+        {
+            self.queue_retired_reference(reference);
         }
     }
 
     fn check_mapping_reference(&self, vaddr: usize, paddr: PhysAddr) -> PtResult {
-        let page_start = vaddr & !(PAGE_SIZE_4K - 1);
-        if self
-            .inner
-            .mapping_refs
-            .get(&page_start)
-            .is_some_and(|reference| H::mapping_reference_paddr(reference) != paddr.align_down_4k())
-        {
-            // A physical replacement must carry a new hold. Raw remap is
-            // permitted only for permission changes of an owned mapping.
-            return Err(PtError::InvalidAddress);
+        if let Some(key) = self.mapping_reference_key(vaddr) {
+            let reference = &self.inner.mapping_refs[&key];
+            if H::mapping_reference_paddr(reference) != paddr.align_down_4k() {
+                return Err(PtError::InvalidAddress);
+            }
         }
         Ok(())
     }
@@ -617,26 +621,91 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     pub fn map_owned(
         &mut self,
         vaddr: M::VirtAddr,
+        reference: impl Into<H::MappingReference>,
+        flags: PagingFlags,
+    ) -> PtResult {
+        self.map_owned_sized(vaddr, reference.into(), PageSize::Size4K, flags)
+    }
+
+    /// Maps one leaf with a hold covering exactly its contiguous physical size.
+    ///
+    /// The reference covers every backing base page of a 4 KiB or larger leaf.
+    /// It is retired after invalidation, without splitting a huge leaf or using
+    /// reference counts as a compound-page protocol.
+    ///
+    /// # Errors
+    /// Returns NotAligned for mismatched reference size or alignment, and the
+    /// same errors as map for invalid addresses, occupied leaves or allocation.
+    pub fn map_owned_sized(
+        &mut self,
+        vaddr: M::VirtAddr,
         reference: H::MappingReference,
+        size: PageSize,
         flags: PagingFlags,
     ) -> PtResult {
         let address = vaddr.into();
         let paddr = H::mapping_reference_paddr(&reference);
-        if !PageSize::Size4K.is_aligned(address) || !paddr.is_aligned(PageSize::Size4K) {
+        if H::mapping_reference_bytes(&reference) != size as usize
+            || !size.is_aligned(address)
+            || !paddr.is_aligned(size)
+        {
             return Err(PtError::NotAligned);
         }
         if !M::vaddr_is_valid(address) || !M::paddr_is_valid(paddr.as_usize()) {
             return Err(PtError::InvalidAddress);
         }
-        if self.inner.mapping_refs.contains_key(&address) {
+        if self.mapping_reference_key(address).is_some() {
             return Err(PtError::AlreadyMapped);
         }
         self.inner.mapping_refs.insert(address, reference);
-        if let Err(error) = self.map(vaddr, paddr, PageSize::Size4K, flags) {
+        if let Err(error) = self.map(vaddr, paddr, size, flags) {
             self.inner.mapping_refs.remove(&address);
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Replaces a matching leaf and its data hold as one mapping transaction.
+    ///
+    /// The new hold is retained before PTE mutation. A compare failure restores
+    /// the previous hold; success keeps the previous hold in the TLB retirement
+    /// batch until finish returns. The replacement must preserve the leaf size.
+    ///
+    /// # Errors
+    /// Returns Changed on a stale snapshot or PageTable for invalid size/address.
+    pub fn replace_owned_if_same(
+        &mut self,
+        vaddr: M::VirtAddr,
+        expected: PteSnapshot,
+        reference: H::MappingReference,
+        flags: PagingFlags,
+    ) -> Result<PteSnapshot, PteReplaceError> {
+        let size = expected.page_size();
+        let address = vaddr.into();
+        let paddr = H::mapping_reference_paddr(&reference);
+        if H::mapping_reference_bytes(&reference) != size as usize
+            || !size.is_aligned(address)
+            || !paddr.is_aligned(size)
+        {
+            return Err(PteReplaceError::PageTable(PtError::NotAligned));
+        }
+        let previous = self.inner.mapping_refs.insert(address, reference);
+        match self.replace_if_same(vaddr, expected, paddr, flags) {
+            Ok(snapshot) => {
+                if let Some(previous) = previous {
+                    self.queue_retired_reference(previous);
+                }
+                Ok(snapshot)
+            }
+            Err(error) => {
+                if let Some(previous) = previous {
+                    self.inner.mapping_refs.insert(address, previous);
+                } else {
+                    self.inner.mapping_refs.remove(&address);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Moves one present leaf within this page table, preserving data ownership.
@@ -668,7 +737,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             .map(H::try_clone_mapping_reference)
             .transpose()?;
         if let Some(reference) = reference {
-            self.map_owned(destination, reference, flags)?;
+            self.map_owned_sized(destination, reference, size, flags)?;
         } else {
             self.map(destination, paddr, size, flags)?;
         }

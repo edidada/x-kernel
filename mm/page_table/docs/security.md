@@ -413,7 +413,7 @@ of kalloc and does not acquire generic user-PTE references as part of this chang
 ## Managed Data Lifetime
 
 `PagingHandler::MappingReference` must keep its advertised aligned physical
-page alive until destruction. Cloning must acquire another hold on the same
+range alive until destruction, with a stable, truthful byte count. Cloning must acquire another hold on the same
 allocation and preserve the original on failure. `map_owned` records that
 capability before publishing a leaf. It does not authorize concurrent payload
 access or file validity; those protocols remain with the content owner.
@@ -421,9 +421,12 @@ access or file validity; those protocols remain with the content owner.
 `PageTableMut::retire_mapping_reference` transfers a removed mapping's hold to
 a fixed array. Clearing PTEs is not its release boundary. `finish` releases only
 after architecture/provider TLB invalidation returns; a local current reference
-protects the page when a full array triggers an intermediate finish. Unaligned
-leaf addresses are normalized before indexing ownership, preventing a raw
-mutation from bypassing the hold check. Sparse teardown handles partial-error
+protects the page when a full array triggers an intermediate finish. Containing-leaf lookup covers interior huge-page addresses as well as
+unaligned base-page addresses, preventing a raw mutation from bypassing the hold
+check. `map_owned_sized` rejects size/alignment mismatches before publishing a
+PTE. `replace_owned_if_same` restores the previous capability on failed compare;
+success puts the previous capability in the same retirement batch as its TLB
+invalidation. Sparse teardown handles partial-error
 prefixes through the same guard finalization.
 
 Raw remap/conditional replacement cannot redirect a managed leaf to a different

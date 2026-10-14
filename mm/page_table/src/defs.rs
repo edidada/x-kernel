@@ -406,7 +406,7 @@ pub trait TlbFlushIf {
 /// - The virtual address returned by `p2v()` must point to a valid,
 ///   4K-sized, read-write mapping of the physical frame.
 pub trait PagingHandler: Sized {
-    /// One lifetime hold on mapped data, distinct from page-table storage.
+    /// One lifetime hold on a contiguous data range, distinct from table storage.
     ///
     /// Dropping this value must end only this hold. It is retained until the
     /// mapping's required TLB invalidation completes. Handlers that do not
@@ -415,6 +415,12 @@ pub trait PagingHandler: Sized {
 
     /// Returns the aligned physical address kept alive by this reference.
     fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr;
+
+    /// Number of contiguous bytes kept alive from mapping_reference_paddr.
+    ///
+    /// Address and size must remain stable and describe the whole held range;
+    /// cloning must retain exactly that range, including every backing page.
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize;
 
     /// Acquires another hold on the same live allocation for mapping relocation.
     ///

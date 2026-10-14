@@ -473,8 +473,10 @@ capability below.
 ## Owned Data Mappings
 
 `PagingHandler::MappingReference` is a provider-defined lifetime capability.
-The HAL supplies `FrameRef<'static>`; generic test handlers can use an uninhabited
-reference type. `map_owned` consumes one hold and installs a 4 KiB leaf. An
+The HAL supplies `FrameRun<'static>`; generic test handlers can use an uninhabited
+reference type. `map_owned` accepts a base-page hold (including `FrameRef` via
+conversion). `map_owned_sized` validates an exactly sized, aligned hold for a
+4 KiB, 2 MiB or 1 GiB leaf. An
 ordered `BTreeMap<VA, MappingReference>` belongs to each page table, preserving
 the original allocator instance without encoding software ownership in hardware
 PTE bits. Mapping bookkeeping is installed before the leaf; failure drops only
@@ -482,8 +484,8 @@ the supplied hold. Raw `map` retains its external-backing contract.
 
 Unmap, sparse invalidation and protection that clears an entry remove the hold
 from the VA index and transfer it into a fixed-capacity retirement array. The
-index normalizes addresses to a base-page boundary, including unaligned query
-addresses accepted by the old mutation APIs. `finish()` completes all required
+index finds the containing leaf's start and physical coverage, including
+interior huge-page addresses accepted by the old mutation APIs. `finish()` completes all required
 TLB invalidations before dropping the batch. If the retirement array fills, its
 current hold stays live while an intermediate finish makes space. Table
 mutation remains exclusive; the retirement path does not allocate a new queue.
@@ -491,8 +493,9 @@ mutation remains exclusive; the retirement path does not allocate a new queue.
 `move_mapping` clones a destination hold before installing its PTE, then retires
 the old source hold. Failed destination installation preserves the source.
 `MmSpace::move_pages` uses this operation for mremap. Raw physical replacement
-of an owned leaf is rejected; permission-only remap remains supported. Future
-owned COW replacement must explicitly provide its replacement capability.
+of an owned leaf is rejected; permission-only remap remains supported. `replace_owned_if_same` installs the new capability before the conditional PTE
+replacement, restores the old capability on compare failure, and retires the
+old one after success. Anonymous and private-file COW use this transaction.
 
 Borrowed top-level entries continue to rely on the source table lifetime and
 its data holds. Shared managed mappings require source-side invalidation for all

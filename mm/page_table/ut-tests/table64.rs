@@ -207,6 +207,10 @@ impl PagingHandler for TestHandler {
         match *reference {}
     }
 
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
+        match *reference {}
+    }
+
     fn try_clone_mapping_reference(
         reference: &Self::MappingReference,
     ) -> crate::PtResult<Self::MappingReference> {
@@ -241,6 +245,10 @@ impl PagingHandler for OffsetTestHandler {
     type MappingReference = core::convert::Infallible;
 
     fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+        match *reference {}
+    }
+
+    fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
         match *reference {}
     }
 
@@ -875,6 +883,10 @@ mod aarch64_drop {
         type MappingReference = core::convert::Infallible;
 
         fn mapping_reference_paddr(reference: &Self::MappingReference) -> PhysAddr {
+            match *reference {}
+        }
+
+        fn mapping_reference_bytes(reference: &Self::MappingReference) -> usize {
             match *reference {}
         }
 
