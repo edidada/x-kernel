@@ -81,7 +81,7 @@ fn exit_thread_snapshot_stays_on_old_binding_until_task_drop() {
     assert_eq!(process.thread_count(), 1);
     assert!(process.exit_thread(&task, 0));
     assert!(thread.has_exit_address_space());
-    assert!(!thread.is_exiting());
+    assert!(thread.is_exiting());
     assert_eq!(process.thread_count(), 0);
     assert!(crate::lookup::task(thread.tid()).is_err());
 
@@ -96,7 +96,7 @@ fn exit_thread_snapshot_stays_on_old_binding_until_task_drop() {
             &mut replacement,
         );
         drop(replacement);
-        assert!(process.exit_thread(&task, 0));
+        assert!(!process.exit_thread(&task, 0));
         thread.set_process_mm_resident_cpu(cpu);
         assert!(old_residency.snapshot().get(cpu.as_usize()));
         assert!(!new_residency.snapshot().get(cpu.as_usize()));

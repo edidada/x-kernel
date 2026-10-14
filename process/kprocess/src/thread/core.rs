@@ -533,7 +533,7 @@ impl Thread {
     }
 
     /// Marks the thread as exiting.
-    pub fn set_exit(&self) {
+    pub(crate) fn set_exit(&self) {
         self.is_exiting.store(true, Ordering::Release);
     }
 
@@ -699,6 +699,14 @@ impl Thread {
     /// Must not be called from interrupt context.
     pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
         self.time.lock().sample(khal::time::monotonic_time())
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn set_cpu_time_for_test(&self, user_ns: u64, system_ns: u64) {
+        *self.time.lock() = CpuTimeStatistics::committed_for_test(
+            TimeSpan::from_nanos(user_ns),
+            TimeSpan::from_nanos(system_ns),
+        );
     }
 
     /// Returns the sum of user and kernel CPU time consumed by this thread.

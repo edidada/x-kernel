@@ -6,20 +6,20 @@ use alloc::sync::Arc;
 
 use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Signo};
 use ktask::KtaskRef;
-use ktime_types::TimeSpan;
 
 use crate::{Process, ProcessExitPublication, process_signals, wait_reap};
 
-/// Removes an exiting thread from its process and publishes the exit code when needed.
-///
-/// `task` must be the exiting published task so TID directory unpublish can
-/// identity-check against the live publication slot before retiring it. See
-/// the visibility contract below: the global TID entry
-/// is removed before later teardown steps such as fd/mm cleanup complete.
-/// The thread captures its structural MM pin and scheduling metadata before
-/// retirement. Finish all user-memory cleanup before this call; after it returns,
-/// the exiting continuation must not access user memory or return to user mode.
-/// The pin preserves the root until task destruction, not live user mappings.
+/// Starts thread exit, retiring external TID visibility while retaining accounting.
+/// Complete user-memory cleanup before this call. Its MM pin permits scheduling
+/// during subsequent resource teardown, but not further user-memory access.
+/// Returns whether this is the last live thread, which owns process cleanup.
+pub fn begin_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
+    process.begin_thread_exit(task, exit_code)
+}
+
+/// Completes cleanup and atomically releases nonleader membership and CPU totals.
+/// Returns true for the last completed member, which must publish process exit.
+/// A leader remains an accounting member until wait/autoreap releases its identity.
 pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
     process.exit_thread(task, exit_code)
 }
@@ -27,11 +27,6 @@ pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i3
 /// Marks the process thread group as group-exited.
 pub fn mark_group_exited(process: &Process) {
     process.group_exit();
-}
-
-/// Records CPU time accumulated by a thread that has just exited.
-pub fn record_exited_thread_cpu_time(process: &Process, utime: TimeSpan, stime: TimeSpan) {
-    process.accumulate_exited_thread_time(utime, stime);
 }
 
 /// Transitions the process into waitable zombie state and reparents surviving children.

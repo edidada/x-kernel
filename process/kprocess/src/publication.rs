@@ -193,9 +193,15 @@ impl ThreadPublicationBinding {
         self.task_slot.publish(Arc::downgrade(task));
     }
 
-    fn retire(&self) {
-        self.task_slot.retire();
-        self.member_slot.retire();
+    fn retire(&self, process: &Process, task: &KtaskRef) {
+        let matches = self
+            .task_slot
+            .snapshot()
+            .is_some_and(|published| Weak::ptr_eq(&published, &Arc::downgrade(task)));
+        if matches {
+            self.task_slot.retire();
+        }
+        process.rollback_thread_member(&self.member_slot, task);
     }
 }
 
@@ -358,7 +364,7 @@ impl PublishedUserTask {
 
     fn rollback_publication(&mut self) {
         if let Some(rollback) = self.rollback.take() {
-            process_publication().rollback_task_publication(rollback);
+            process_publication().rollback_task_publication(rollback, &self.task);
         }
     }
 }
@@ -597,7 +603,7 @@ impl ProcessPublication {
         })
     }
 
-    fn rollback_task_publication(&self, rollback: PublicationRollback) {
+    fn rollback_task_publication(&self, rollback: PublicationRollback, task: &KtaskRef) {
         let tid = rollback.thread_binding.tid;
         let task_slot = rollback.thread_binding.task_slot.clone();
         let process_slot = rollback.process.published_pid_slot();
@@ -614,7 +620,7 @@ impl ProcessPublication {
             if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
                 rollback.process.clear_published_identity_locked(&domain);
             }
-            rollback.thread_binding.retire();
+            rollback.thread_binding.retire(&rollback.process, task);
             if rollback.process_effect.inserted() && !rollback.process.is_exited_locked(&domain) {
                 rollback.process.discard_unpublished_locked(&domain);
             }
@@ -762,6 +768,9 @@ impl ProcessPublication {
         };
         if !should_remove {
             return false;
+        }
+        if proc.is_exited() {
+            proc.release_exited_thread_members();
         }
 
         let mut tables = self.tables.write();

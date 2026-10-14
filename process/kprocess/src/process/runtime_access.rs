@@ -903,16 +903,21 @@ impl Process {
 
     /// Returns sampled user and system CPU time.
     pub fn process_cpu_times(&self) -> (TimeSpan, TimeSpan) {
-        let (utime, stime) = self.exited_thread_time();
-        self.thread_tasks()
-            .into_iter()
-            .fold((utime, stime), |(utime, stime), task| {
-                let (thread_utime, thread_stime) = task.as_thread().sample_cpu_time();
-                (
-                    utime.saturating_add(thread_utime),
-                    stime.saturating_add(thread_stime),
-                )
-            })
+        let (utime, stime, _) = self.thread_membership.lock().cpu_times();
+        (utime, stime)
+    }
+
+    /// Returns group execution time, including retained and released members.
+    /// Refreshes the caller when it belongs to this group before locking the
+    /// group. Other CPUs contribute their committed scheduler counters.
+    pub fn process_execution_runtime_ns(&self) -> u64 {
+        if ktask::current_may_uninit().is_some_and(|task| {
+            task.try_as_thread()
+                .is_some_and(|thread| core::ptr::eq(thread.process().as_ref(), self))
+        }) {
+            ktask::refresh_current_execution_runtime_ns();
+        }
+        self.thread_membership.lock().cpu_times().2
     }
 
     /// Returns the total sampled CPU time.

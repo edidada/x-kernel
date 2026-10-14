@@ -38,10 +38,7 @@ impl UserTaskRuntime for Thread {
     }
 
     fn on_enter(&self) {
-        // Exit cleanup can block after the final CPU time was published.
-        if !self.is_exiting() {
-            self.set_cpu_state(CpuTimeState::Kernel);
-        }
+        self.set_cpu_state(CpuTimeState::Kernel);
     }
 
     fn on_leave(&self) {

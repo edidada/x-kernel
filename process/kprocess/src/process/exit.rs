@@ -234,24 +234,23 @@ impl Process {
         self.lifecycle.exit_event()
     }
 
-    /// Adds exited-thread CPU time to this process's accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.lifecycle.accumulate_exited_thread_time(utime, stime);
-    }
-
-    /// Returns accumulated exited-thread user and kernel time.
+    /// Returns accumulated user and system time of released members.
     pub fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
-        self.lifecycle.exited_thread_time()
+        let group = self.thread_membership.lock();
+        (group.exited_utime, group.exited_stime)
     }
 
-    /// Adds reaped-child CPU time to this process's accumulated counters.
+    /// Adds a consumed child's time under group accounting ownership.
     pub(crate) fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.lifecycle.accumulate_child_time(utime, stime);
+        let mut group = self.thread_membership.lock();
+        group.child_utime = group.child_utime.saturating_add(utime);
+        group.child_stime = group.child_stime.saturating_add(stime);
     }
 
-    /// Returns accumulated reaped-children user and kernel time.
+    /// Returns accumulated reaped-children user and system time.
     pub fn child_time(&self) -> (TimeSpan, TimeSpan) {
-        self.lifecycle.child_time()
+        let group = self.thread_membership.lock();
+        (group.child_utime, group.child_stime)
     }
 
     /// Terminates the [`Process`] with the requested publication mode.
@@ -471,6 +470,8 @@ impl Process {
         self.exit_state
             .store(ProcessExitState::Dead, Ordering::Release);
         self.clear_published_identity_locked(&domain);
+        drop(domain);
+        self.release_exited_thread_members();
         true
     }
 
@@ -511,14 +512,20 @@ impl Process {
         };
 
         let exit_code = child.exit_code();
-        let (thread_utime, thread_stime) = child.exited_thread_time();
-        let (child_utime, child_stime) = child.child_time();
+        let (total_utime, total_stime) = {
+            let group = child.thread_membership.lock();
+            let (utime, stime, _) = group.cpu_times();
+            (
+                utime.saturating_add(group.child_utime),
+                stime.saturating_add(group.child_stime),
+            )
+        };
         let waited = WaitedChild {
             process: child.clone(),
             pid,
             exit_code,
-            total_utime: thread_utime.saturating_add(child_utime),
-            total_stime: thread_stime.saturating_add(child_stime),
+            total_utime,
+            total_stime,
             consumed: mode == WaitReapMode::Consume,
         };
 
@@ -528,6 +535,11 @@ impl Process {
                 .exit_state
                 .store(ProcessExitState::Dead, Ordering::Release);
             child.clear_published_identity_locked(&domain);
+            self.accumulate_child_time(total_utime, total_stime);
+        }
+        drop(domain);
+        if mode == WaitReapMode::Consume {
+            child.release_exited_thread_members();
         }
 
         WaitChildScan::Ready(waited)
@@ -567,6 +579,10 @@ impl Process {
         let detached = Self::remove_child_from_parent_locked(&domain, &parent, self);
         if detached {
             self.clear_published_identity_locked(&domain);
+        }
+        drop(domain);
+        if detached {
+            self.release_exited_thread_members();
         }
         detached
     }

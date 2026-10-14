@@ -9,15 +9,6 @@ pub use crate::process::{
 };
 use crate::{Process, lookup};
 
-/// Records a reaped child's CPU time into its parent.
-pub fn record_reaped_child_cpu_time(
-    parent: &Process,
-    utime: ktime_types::TimeSpan,
-    stime: ktime_types::TimeSpan,
-) {
-    parent.accumulate_child_time(utime, stime);
-}
-
 /// Releases a zombie process from its parent relation and PID directory.
 ///
 /// Returns `true` only when this call successfully consumes the waitable
@@ -73,8 +64,6 @@ pub fn scan_waitable_child(
     if let WaitChildScan::Ready(waited) = &scan
         && waited.was_consumed()
     {
-        let (utime, stime) = waited.total_cpu_time();
-        record_reaped_child_cpu_time(parent, utime, stime);
         // Identity was already retired in-process-domain; this drops the map
         // entry when the PID has not been reused under a different slot.
         lookup::unpublish_process_if_matches(waited.process());

@@ -487,17 +487,7 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // publish process completion while a sibling still owns descriptors.
     thr.files().exit_files();
     thr.detach_cgroup();
-    let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
-
-    // `finish_thread_exit()` removes the current task from the process membership
-    // table and the global TID directory. External TID lookup/signal delivery
-    // already observes NoSuchProcess for this tid, but `thr` still holds the
-    // current thread object for local teardown. Close its CPU-accounting
-    // interval before any parent waiter can observe and reap the zombie.
-    thr.set_exit();
-    thr.set_cpu_state(CpuTimeState::Inactive);
-    let (thread_utime, thread_stime) = thr.sample_cpu_time();
-    process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
+    let is_last_thread = process_exit::begin_thread_exit(process, &curr, exit_code);
 
     if is_last_thread {
         if let Err(err) = process.exit_signal_handlers() {
@@ -526,8 +516,6 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.close_all_tipc_handles() {
             error!("close_all_tipc_handles on process exit failed: {err:?}");
         }
-
-        process_exit::complete_process_exit(process);
     }
 
     // A `de_thread` sweep target killed by the sweep's fatal signal must not
@@ -539,14 +527,16 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     if group_exit && !sweep_exempt && !process.is_group_exited() {
         process_exit::mark_group_exited(process);
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
-        // `finish_thread_exit()` removed the current thread from the process
-        // member table before group-exit delivery, so this broadcast targets
-        // only surviving sibling threads.
+        // The live view excludes exiting members while their counters remain
+        // visible until cleanup completes.
         for task in kprocess::scheduler::process_tasks(process.as_ref()) {
             let tid = task.as_thread().tid();
             // A sibling may already have exited and needs no delivery.
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
+    }
+    if process_exit::finish_thread_exit(process, &curr, exit_code) {
+        process_exit::complete_process_exit(process);
     }
 }
 

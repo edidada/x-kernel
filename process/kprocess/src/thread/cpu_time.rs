@@ -42,6 +42,15 @@ impl CpuTimeStatistics {
         }
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn committed_for_test(utime: TimeSpan, stime: TimeSpan) -> Self {
+        Self {
+            utime,
+            stime,
+            ..Self::new()
+        }
+    }
+
     /// Returns the committed user and system CPU time.
     pub(crate) fn output(&self) -> (TimeSpan, TimeSpan) {
         (self.utime, self.stime)

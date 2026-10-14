@@ -1500,7 +1500,7 @@ fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
     wait_reap::assert_reap_zombie_process(&parent);
 }
 
-#[def_test(serial)]
+#[def_test(user, serial)]
 fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     let init = ensure_init();
     let proc = init.fork(500);
@@ -1534,7 +1534,9 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     let init = ensure_init();
     let child = init.fork(580);
     let _leader_task = publish_test_thread(&child, 580);
-    child.accumulate_exited_thread_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
+    let exited = publish_test_thread(&child, 581);
+    exited.as_thread().set_cpu_time_for_test(77, 88);
+    assert!(!child.exit_thread(&exited, 0));
 
     let parent_counter = new_wake_counter();
     let parent_waker = counter_waker(parent_counter);
@@ -1879,8 +1881,12 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     let init = ensure_init();
     let proc = init.fork(600);
 
-    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(11), TimeSpan::from_nanos(22));
-    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(33), TimeSpan::from_nanos(44));
+    let first = publish_test_thread(&proc, 601);
+    let second = publish_test_thread(&proc, 602);
+    first.as_thread().set_cpu_time_for_test(11, 22);
+    second.as_thread().set_cpu_time_for_test(33, 44);
+    assert!(!proc.exit_thread(&first, 0));
+    assert!(proc.exit_thread(&second, 0));
     proc.accumulate_child_time(TimeSpan::from_nanos(55), TimeSpan::from_nanos(66));
     proc.accumulate_child_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
 
@@ -2029,7 +2035,7 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
         "published sibling thread removal must not tear down the whole process"
     );
     assert!(sibling_task.as_thread().has_exit_address_space());
-    assert!(!sibling_task.as_thread().is_exiting());
+    assert!(sibling_task.as_thread().is_exiting());
     assert!(!process.contains_published_tid(tid));
     assert!(crate::lookup::task(tid).is_err());
     assert_eq!(process.thread_count(), 1);
@@ -2558,6 +2564,9 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
     let survivor_tid = survivor.as_thread().tid();
     assert_ne!(survivor_tid, pid);
 
+    leader.as_thread().set_cpu_time_for_test(7, 11);
+    survivor.as_thread().set_cpu_time_for_test(13, 17);
+
     // The `exec` sibling sweep retires the leader from the process first.
     assert!(!process.exit_thread(&leader, 0));
     assert_eq!(process.thread_count(), 1);
@@ -2575,6 +2584,13 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
         "the survivor's old number entry must be gone"
     );
     assert_eq!(process.threads(), vec![pid]);
+    let expected = (TimeSpan::from_nanos(20), TimeSpan::from_nanos(28));
+    assert_eq!(process.process_cpu_times(), expected);
+    assert!(process.exit_thread(&survivor, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    assert_eq!(process.unreleased_thread_count(), 0);
+    assert_eq!(process.process_cpu_times(), expected);
 }
 
 #[def_test(serial)]
@@ -2832,4 +2848,96 @@ fn task_files_unshare_preserves_siblings_and_clone_files_policy() {
     assert!(Arc::ptr_eq(&private.files().get_file(fd).unwrap(), &file));
     private.files().exit_files();
     process.discard_unpublished();
+}
+
+#[def_test(serial)]
+fn test_group_accounting_retains_exiting_members_until_cleanup_completes() {
+    let proc = ensure_init().fork(8_810);
+    let leader = publish_test_thread(&proc, 8_810);
+    let worker = publish_test_thread(&proc, 8_811);
+    leader.as_thread().set_cpu_time_for_test(10, 20);
+    worker.as_thread().set_cpu_time_for_test(30, 40);
+    assert!(!proc.begin_thread_exit(&worker, 0));
+    assert!(!proc.threads().contains(&8_811));
+    assert_eq!(proc.process_cpu_times(), (TimeSpan::from_nanos(40), TimeSpan::from_nanos(60)));
+    worker.as_thread().set_cpu_time_for_test(30, 55);
+    let before = proc.process_cpu_times();
+    assert!(!proc.exit_thread(&worker, 0));
+    assert_eq!(proc.process_cpu_times(), before);
+    assert!(!proc.exit_thread(&worker, 0));
+    assert_eq!(proc.process_cpu_times(), before);
+    assert!(proc.exit_thread(&leader, 0));
+    assert_eq!(proc.process_cpu_times(), before);
+    proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    proc.free();
+    assert_eq!(proc.process_cpu_times(), before);
+}
+
+#[def_test(serial)]
+fn test_group_completion_waits_for_every_cleanup_not_just_live_count() {
+    let proc = ensure_init().fork(8_820);
+    let leader = publish_test_thread(&proc, 8_820);
+    let worker = publish_test_thread(&proc, 8_821);
+    assert!(!proc.begin_thread_exit(&worker, 0));
+    assert!(proc.begin_thread_exit(&leader, 0));
+    assert!(proc.threads().is_empty());
+    assert!(!proc.exit_thread(&leader, 0));
+    assert!(proc.exit_thread(&worker, 0));
+    assert!(!proc.exit_thread(&worker, 0));
+    proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    proc.free();
+}
+
+#[def_test(serial)]
+fn test_exited_leader_retains_task_until_reap_without_tid_visibility() {
+    let proc = ensure_init().fork(8_830);
+    let leader = publish_test_thread(&proc, 8_830);
+    leader.as_thread().set_cpu_time_for_test(17, 23);
+    let weak = Arc::downgrade(&leader);
+    assert!(proc.exit_thread(&leader, 0));
+    drop(leader);
+    assert!(weak.upgrade().is_some());
+    assert!(proc.threads().is_empty());
+    assert_eq!(proc.process_cpu_times(), (TimeSpan::from_nanos(17), TimeSpan::from_nanos(23)));
+    proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    proc.free();
+    assert!(weak.upgrade().is_none());
+    assert_eq!(proc.process_cpu_times(), (TimeSpan::from_nanos(17), TimeSpan::from_nanos(23)));
+}
+
+
+#[def_test(serial)]
+fn test_wait_peek_preserves_group_time_and_consume_charges_parent_once() {
+    let parent = ensure_init().fork(8_840);
+    let child = parent.fork(8_841);
+    let leader = publish_test_thread(&child, 8_841);
+    let worker = publish_test_thread(&child, 8_842);
+    leader.as_thread().set_cpu_time_for_test(7, 11);
+    worker.as_thread().set_cpu_time_for_test(13, 17);
+    child.accumulate_child_time(TimeSpan::from_nanos(19), TimeSpan::from_nanos(23));
+    assert!(!child.exit_thread(&leader, 0));
+    assert!(child.exit_thread(&worker, 0));
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    let expected = (TimeSpan::from_nanos(39), TimeSpan::from_nanos(51));
+    for _ in 0..2 {
+        let crate::wait_reap::WaitChildScan::Ready(waited) = parent.scan_waitable_child(
+            crate::wait_reap::WaitChildSelector::Pid(child.pid()), crate::wait_reap::WaitChildKind::Any,
+            crate::wait_reap::WaitReapMode::Peek,
+        ) else { panic!("child must remain waitable"); };
+        assert_eq!(waited.total_cpu_time(), expected);
+        assert_eq!(parent.child_time(), (TimeSpan::ZERO, TimeSpan::ZERO));
+    }
+    let crate::wait_reap::WaitChildScan::Ready(waited) = parent.scan_waitable_child(
+        crate::wait_reap::WaitChildSelector::Pid(child.pid()), crate::wait_reap::WaitChildKind::Any,
+        crate::wait_reap::WaitReapMode::Consume,
+    ) else { panic!("child must be consumed once"); };
+    assert_eq!(waited.total_cpu_time(), expected);
+    assert_eq!(parent.child_time(), expected);
+    assert!(matches!(parent.scan_waitable_child(
+        crate::wait_reap::WaitChildSelector::Pid(child.pid()), crate::wait_reap::WaitChildKind::Any,
+        crate::wait_reap::WaitReapMode::Consume,
+    ), crate::wait_reap::WaitChildScan::NoMatchingChild));
+    assert_eq!(parent.child_time(), expected);
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
 }

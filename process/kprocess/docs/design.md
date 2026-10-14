@@ -194,11 +194,12 @@ still-running unpublished child relation; it does not retire an unrelated
 existing process identity. Retired slot deletion checks pointer identity and
 state to tolerate numeric ID reuse.
 
-Every exiting thread detaches its files before retiring thread membership, so
-last-thread completion cannot overtake a sibling's descriptor cleanup.
-Last-thread cleanup is orchestrated by `posix-process`: remove thread visibility,
-record final CPU time, detach mm/fs/ns and optional resources, then call
-`complete_process_exit`. SIGCHLD preparation occurs outside the domain lock;
+Every exiting thread detaches its files before retiring live membership.
+Exit cleanup is orchestrated by `posix-process`: `begin_thread_exit` retires
+external TID visibility but keeps accounting membership. The last live thread
+detaches mm/fs/ns and optional resources. `finish_thread_exit` commits
+completed cleanup; the last completion calls `complete_process_exit`. Cleanup
+execution remains chargeable, with off-CPU intervals excluded. SIGCHLD preparation occurs outside the domain lock;
 parent/exit-signal changes cause retry. The domain transaction commits exit,
 autoreap and reparent; only then are signal queueing and parent wakeup performed.
 Default SIGCHLD, explicit ignore and no-child-wait policy come from `ksignal`.
@@ -207,9 +208,13 @@ thread credential snapshot exists at payload construction, the current code
 uses UID zero. Non-SIGCHLD exit signals use the generic process-send path.
 
 Wait scans/matches/consumes under the domain write lock and returns a stable
-`WaitedChild`. The wrapper adds child CPU totals and removes the retired directory
-entry outside that lock. `finish_thread_exit` retires TID visibility before later
-resource teardown, so external thread lookup stops targeting exit-tail tasks.
+`WaitedChild`; consuming a child also updates the parent's child totals in that
+transaction. The wrapper removes the retired directory entry afterwards.
+ThreadMembership owns members, released user/system/runtime totals and child
+totals under one lock. Sampling and nonleader removal/transfer share that lock;
+leader accounting remains attached until wait/autoreap. Scheduler refresh occurs
+before acquiring the group lock. Retired task references drop outside both the
+group and process-domain locks.
 
 Exec initializes the new image's heap marker when constructing its MM binding.
 The caller unshares its files and closes close-on-exec descriptors. The subsequent
