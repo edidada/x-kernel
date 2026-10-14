@@ -18,6 +18,7 @@ entropy.workspace = true
 anon_inodefs.workspace = true
 unittest = { workspace = true }
 device_class = { workspace = true, features = ["net"] }
+device_traits = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
@@ -29,7 +30,6 @@ kcpu_id_map.workspace = true
 kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }
-device_traits = { workspace = true }
 kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }

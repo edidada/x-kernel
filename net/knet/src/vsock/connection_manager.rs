@@ -8,7 +8,7 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use device_class::{ClassDevice, ClassDeviceId, prelude::*};
+use device_class::{ClassDevice, prelude::*};
 use device_traits::{Device, DeviceKind};
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
@@ -857,7 +857,7 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     Ok(())
 }
 
-pub(crate) fn unregister_vsock_dev(id: ClassDeviceId) -> bool {
+pub(crate) fn unregister_vsock_dev(id: device_class::ClassDeviceId) -> bool {
     let mut guard = VSOCK_DEV.lock();
     if guard.as_ref().is_none_or(|dev| dev.id() != id) {
         return false;
