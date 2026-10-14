@@ -340,6 +340,10 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let process = current_user_process();
     let cred = kprocess::current_cred();
     let target = lookup_mount_path(&process, &target, &cred)?;
+    // `umount` acts on the mounted path, so resolve to the topmost covering
+    // mount: after `pivot_root(".", ".")`, `umount(".", MNT_DETACH)` must
+    // detach the relocated old root, not the new root underneath it.
+    let target = target.resolve_final_mount();
     // Lookup errors keep their priority, but no namespace state may change
     // before authorization; Linux `can_umount()` checks the same privilege
     // before validating the mount point.

@@ -1642,8 +1642,13 @@ impl Path {
         Ok(())
     }
 
-    /// Resolves overmounts visible from this path.
-    pub(crate) fn resolve_final_mount(self) -> Self {
+    /// Resolves overmounts visible from this path, returning the path bound to
+    /// the topmost covering mount.
+    ///
+    /// `umount` acts on the mounted path, so it resolves this before detaching;
+    /// `pivot_root` deliberately keeps the unresolved path for the relocated
+    /// filesystem root.
+    pub fn resolve_final_mount(self) -> Self {
         let mut path = self;
         while let Some(mountpoint) = path.mnt.child_mount_at(&path.dentry) {
             let entry = mountpoint.mnt.mnt_root.clone();
@@ -2494,6 +2499,36 @@ mod tests {
         namespace
             .detach_tree(&namespace.visible_root_path())
             .unwrap();
+        assert!(Arc::ptr_eq(namespace.visible_root_path().mount(), &new_mnt));
+    }
+
+    #[def_test]
+    fn test_unresolved_root_path_resolves_covering_mount_after_pivot() {
+        // `umount` receives a `.`-style lookup that does not cross a covering
+        // mount; it must resolve the covering mount before detaching, as
+        // `sys_umount2` now does, so `umount(".", MNT_DETACH)` after
+        // `pivot_root(".", ".")` detaches the relocated old root.
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let old_visible_root = namespace.visible_root_path();
+        let old_root_mount = old_visible_root.mount().clone();
+
+        let mnt_dir = lookup_child_in_mount(&old_visible_root, "mnt").unwrap();
+        let new_mnt = namespace.attach(&mnt_dir, &new_root_fs).unwrap();
+        let new_root_path = new_mnt.root_path();
+
+        namespace
+            .pivot_root(&new_root_path, &new_root_path)
+            .unwrap();
+
+        // The unresolved path still names the new root...
+        assert!(Arc::ptr_eq(new_root_path.mount(), &new_mnt));
+        // ...while resolving follows the covering old root that `umount` must
+        // detach instead.
+        let covering = new_root_path.resolve_final_mount();
+        assert!(Arc::ptr_eq(covering.mount(), &old_root_mount));
+        namespace.detach_tree(&covering).unwrap();
         assert!(Arc::ptr_eq(namespace.visible_root_path().mount(), &new_mnt));
     }
 
