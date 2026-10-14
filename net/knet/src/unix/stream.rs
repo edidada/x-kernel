@@ -7,7 +7,7 @@
 mod channel;
 mod listener;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    ConnectOptions, RecvOptions, SendOptions, Shutdown,
+    AncillaryData, ConnectOptions, RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -261,7 +261,24 @@ impl UnixTransportOps for StreamTransport {
                     }
                     count
                 };
-                {
+                // Take the record payload before taking any lock: `mem::take`
+                // is O(1) and the option doubles as the registration state, so
+                // a send replayed over several poll rounds registers its
+                // record exactly once. A zero-byte round keeps the payload for
+                // the round that actually publishes bytes; a send that never
+                // publishes drops it with `options`, as with Linux stream
+                // sendmsg (no skb is queued and the cmsg fds are released).
+                let mut pending = (count > 0 && !options.ancillary.is_empty())
+                    .then(|| core::mem::take(&mut options.ancillary));
+                // Attach ancillary records BEFORE publishing the bytes: a
+                // concurrent receiver cannot consume unpublished bytes, so
+                // enqueue-then-publish makes a record visible no later than
+                // its first byte. Publishing first would let an SMP receiver
+                // consume the range before the record is enqueued, deferring
+                // or losing the fd. A rejected admission leaves the round's
+                // bytes unpublished: the send fails (or returns the partial
+                // `total`) and the caller retries from there.
+                let rejection = {
                     let _tx_order = self.endpoint.tx_order.lock();
                     if self.endpoint.tx_closed.load(Ordering::Acquire)
                         || chan.peer_endpoint.rx_closed.load(Ordering::Acquire)
@@ -269,38 +286,32 @@ impl UnixTransportOps for StreamTransport {
                     {
                         return finish_send_on_error(total, KError::BrokenPipe);
                     }
-                    // A zero-byte send carries no stream position, so its
-                    // ancillary records would never become reachable; as with
-                    // Linux stream sendmsg (no skb is queued and the cmsg fds
-                    // are released), they are dropped and Ok(0) returned.
-                    if count > 0 {
-                        // Attach ancillary records BEFORE publishing the
-                        // bytes: a concurrent receiver cannot consume
-                        // unpublished bytes, so enqueue-then-publish makes a
-                        // record visible no later than its first byte.
-                        // Publishing first would let an SMP receiver consume
-                        // the range before the record is enqueued, deferring
-                        // or losing the fd.
-                        let mut anc = chan.tx_anc.lock();
-                        let start = anc.sent_total;
-                        anc.sent_total += count as u64;
-                        if !options.ancillary.is_empty() {
-                            // Record the fd-bearing segment actually
-                            // committed by this send: [start, start+count).
-                            // Reads stop at `end` (the SCM_RIGHTS barrier)
-                            // even when later plain-data sends leave no
-                            // record boundary to infer it from.
-                            anc.records.push_back((
-                                start,
-                                start + count as u64,
-                                core::mem::take(&mut options.ancillary),
-                            ));
-                        }
+                    let rejection = if count > 0 {
+                        register_pending(chan, &mut pending, count).err()
+                    } else {
+                        None
+                    };
+                    if rejection.is_none() {
+                        // SAFETY: `count` is the sum of bytes written into the vacant
+                        // slices above, so it never exceeds the producer capacity that
+                        // was exposed while the channel lock excluded other producers.
+                        unsafe { chan.tx.advance_write_index(count) };
                     }
-                    // SAFETY: `count` is the sum of bytes written into the vacant
-                    // slices above, so it never exceeds the producer capacity that
-                    // was exposed while the channel lock excluded other producers.
-                    unsafe { chan.tx.advance_write_index(count) };
+                    rejection
+                };
+                // Both guards are gone: the rejected payload drops here,
+                // where releasing the last file reference may close a file
+                // that takes a sleepable mutex.
+                if let Some((error, payload)) = rejection {
+                    drop(payload);
+                    return match error {
+                        channel::EnqueueError::ConsumerClosed => {
+                            finish_send_on_error(total, KError::BrokenPipe)
+                        }
+                        channel::EnqueueError::QuotaExceeded => {
+                            finish_send_on_error(total, KError::from(LinuxError::ENOBUFS))
+                        }
+                    };
                 }
                 total += count;
                 if count > 0 {
@@ -503,6 +514,41 @@ fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
     if total > 0 { Ok(total) } else { Err(error) }
 }
 
+/// Registers `pending`'s payload for the byte range this round publishes, or
+/// advances the write cursor for a plain-data round.
+///
+/// Called under the producer's `tx_order` lock with the round's `count`
+/// known. On admission rejection the payload is returned to the caller,
+/// which must drop it only after the guards are released: dropping the last
+/// file reference can close a file that takes a sleepable mutex.
+fn register_pending(
+    chan: &mut Channel,
+    pending: &mut Option<Vec<AncillaryData>>,
+    count: usize,
+) -> Result<(), (channel::EnqueueError, Vec<AncillaryData>)> {
+    let mut anc = chan.tx_anc.lock();
+    let start = anc.sent_total;
+    let end = start + count as u64;
+    match pending.take() {
+        // Plain data round: advance the cursor only.
+        None => {
+            anc.sent_total = end;
+            Ok(())
+        }
+        // Record the fd-bearing segment actually committed by this send:
+        // [start, end). Reads stop at `end` (the SCM_RIGHTS barrier) even
+        // when later plain-data sends leave no record boundary to infer it
+        // from.
+        Some(payload) => {
+            let result = anc.enqueue_record(start, end, payload);
+            if result.is_ok() {
+                anc.sent_total = end;
+            }
+            result
+        }
+    }
+}
+
 impl Pollable for StreamTransport {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
@@ -605,7 +651,10 @@ mod tests {
 
     use super::{
         StreamTransport, UnixTransportOps,
-        channel::{STREAM_BUF_BYTES, STREAM_WRITABLE_MAX_OCCUPIED_BYTES},
+        channel::{
+            MAX_PENDING_ANCILLARY, MAX_PENDING_RECORDS, STREAM_BUF_BYTES,
+            STREAM_WRITABLE_MAX_OCCUPIED_BYTES,
+        },
     };
     use crate::{
         AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendFlags, SendOptions, Shutdown,
@@ -1706,5 +1755,141 @@ mod tests {
         );
         assert_eq!(recv, Ok(2));
         assert!(!discarded);
+    }
+
+    /// Opaque control payload for the quota tests. The transport treats
+    /// `AncillaryData` as type-erased; tests downcast to verify that a record
+    /// was delivered rather than dropped or duplicated.
+    #[derive(Debug, PartialEq)]
+    struct TestControl(u32);
+
+    fn control(id: u32) -> AncillaryData {
+        Box::new(TestControl(id)) as AncillaryData
+    }
+
+    fn received_controls(ancillary: &[AncillaryData]) -> Vec<u32> {
+        ancillary
+            .iter()
+            .filter_map(|item| item.downcast_ref::<TestControl>().map(|control| control.0))
+            .collect()
+    }
+
+    #[def_test]
+    fn unix_stream_pending_record_quota_rejects_sends_until_drained() {
+        let (left, right) = StreamTransport::new_pair(1);
+        let one_fd = |id: u32| SendOptions {
+            ancillary: vec![control(id)],
+            ..SendOptions::default()
+        };
+        let enobufs = KError::from(LinuxError::ENOBUFS);
+
+        // One-byte sends each pin one retained record; the quota accepts
+        // exactly MAX_PENDING_RECORDS of them, then fails the send.
+        for id in 0..MAX_PENDING_RECORDS as u32 {
+            assert_eq!(left.send(&b"x"[..], one_fd(id)), Ok(1));
+        }
+        assert_eq!(left.send(&b"x"[..], one_fd(u32::MAX)), Err(enobufs));
+
+        // Plain data is not subject to the record quota.
+        assert_eq!(left.send(&b"yy"[..], SendOptions::default()), Ok(2));
+
+        // Retiring one record frees its retention; the next cmsg send
+        // succeeds again.
+        let mut data = [0_u8; 1];
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: RecvFlags::DONT_WAIT,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Ok(1)
+        );
+        assert_eq!(received_controls(&ancillary), vec![0]);
+        assert_eq!(left.send(&b"x"[..], one_fd(999)), Ok(1));
+    }
+
+    #[def_test]
+    fn unix_stream_oversized_control_batch_rejects_with_enobufs() {
+        let (left, _right) = StreamTransport::new_pair(1);
+
+        // A single message whose entries exceed the retention bound is
+        // rejected even on an empty queue; each entry is one control message
+        // whose descriptor count `posix-net` caps at `SCM_MAX_FD` (253).
+        let oversized = SendOptions {
+            ancillary: (0..=MAX_PENDING_ANCILLARY as u32).map(control).collect(),
+            ..SendOptions::default()
+        };
+        assert_eq!(
+            left.send(&b"x"[..], oversized),
+            Err(KError::from(LinuxError::ENOBUFS))
+        );
+    }
+
+    #[def_test]
+    fn unix_stream_blocking_send_registers_its_record_once() {
+        let (left, right) = StreamTransport::new_pair(1);
+        let left = Arc::new(left);
+        let send_result = Arc::new(Mutex::new(None));
+        // Larger than the ring buffer, so the blocking send is replayed over
+        // several `poll_io` rounds and must still register one record.
+        let payload = vec![b'x'; STREAM_BUF_BYTES + 16];
+
+        let send_task = ktask::spawn({
+            let left = left.clone();
+            let send_result = send_result.clone();
+            move || {
+                let options = SendOptions {
+                    ancillary: vec![control(7)],
+                    ..SendOptions::default()
+                };
+                let result = left.send(&payload[..], options);
+                // Close the write side so an early send failure cannot leave
+                // the reader blocked.
+                left.shutdown(Shutdown::Write).unwrap();
+                *send_result.lock() = Some(result);
+            }
+        });
+
+        let mut buf = vec![0_u8; 4096];
+        let mut received = 0;
+        let mut first_controls = None;
+        let mut later_controls = Vec::new();
+        loop {
+            let mut ancillary = Vec::new();
+            let count = right
+                .recv(
+                    &mut buf[..],
+                    RecvOptions {
+                        ancillary: Some(&mut ancillary),
+                        ..RecvOptions::default()
+                    },
+                )
+                .unwrap();
+            if count == 0 {
+                break;
+            }
+            if first_controls.is_none() {
+                first_controls = Some(received_controls(&ancillary));
+            } else {
+                later_controls.extend(received_controls(&ancillary));
+            }
+            received += count;
+        }
+        send_task.join();
+
+        assert_eq!(
+            send_result.lock().take().unwrap(),
+            Ok(STREAM_BUF_BYTES + 16)
+        );
+        assert_eq!(received, STREAM_BUF_BYTES + 16);
+        // The one record is delivered with the first recv that reaches the
+        // send's first byte, even though the send was replayed over several
+        // poll rounds.
+        assert_eq!(first_controls, Some(vec![7]));
+        assert!(later_controls.is_empty());
     }
 }
