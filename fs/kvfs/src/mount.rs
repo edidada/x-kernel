@@ -449,10 +449,12 @@ impl MntNamespace {
     ///
     /// # Errors
     ///
-    /// Returns [`VfsError::InvalidInput`] for namespace-degenerate pivots (no
-    /// stacked visible root, `new_root` equal to the visible root, `put_old`
-    /// unreachable from `new_root`) and [`VfsError::NotADirectory`] when
-    /// `put_old` is not a directory.
+    /// Returns [`VfsError::ResourceBusy`] when `new_root` or `put_old` lies on
+    /// the current root filesystem (Linux `EBUSY`, "loop, on the same file
+    /// system"), [`VfsError::InvalidInput`] for other namespace-degenerate
+    /// pivots (no stacked visible root, `new_root` equal to the visible root,
+    /// `put_old` unreachable from `new_root`), and [`VfsError::NotADirectory`]
+    /// when `put_old` is not a directory.
     pub fn pivot_root(&self, new_root: &Path, put_old: &Path) -> VfsResult<()> {
         let mounts = self.mounts.lock();
         let new_mnt = Self::registered_mount_at(&mounts, new_root)?.clone();
@@ -468,7 +470,7 @@ impl MntNamespace {
         // Linux: `new_mnt == root_mnt || old_mnt == root_mnt` -> EBUSY ("loop,
         // on the same file system").
         if Arc::ptr_eq(&new_mnt, &old_mnt) || Arc::ptr_eq(put_old.mount(), &old_mnt) {
-            return Err(VfsError::InvalidInput);
+            return Err(VfsError::ResourceBusy);
         }
         if !put_old.is_dir() {
             return Err(VfsError::NotADirectory);
@@ -2442,7 +2444,7 @@ mod tests {
 
         assert_eq!(
             namespace.pivot_root(&new_mnt.root_path(), &put_old_mountpoint),
-            Err(VfsError::InvalidInput),
+            Err(VfsError::ResourceBusy),
             "put_old inside the old root's filesystem is a loop (Linux EBUSY)"
         );
     }
@@ -2525,8 +2527,8 @@ mod tests {
 
         assert_eq!(
             namespace.pivot_root(&namespace.visible_root_path(), &put_old),
-            Err(VfsError::InvalidInput),
-            "pivoting onto the current visible root is degenerate"
+            Err(VfsError::ResourceBusy),
+            "pivoting onto the current visible root is the same-filesystem loop (Linux EBUSY)"
         );
     }
 
