@@ -605,13 +605,10 @@ impl Process {
     ///
     /// # Errors
     ///
-    /// Returns `KError::NoSuchProcess` for an unreachable runtime and forwards
-    /// `kresources::ProcessResources::close_cloexec_files` errors. Earlier
-    /// signal and timer updates are not rolled back on that error; executable
-    /// metadata is published only after cleanup succeeds.
+    /// Returns `KError::NoSuchProcess` for an unreachable runtime.
     /// In unittest builds, a selected request may return `NoMemory` after
     /// publication; this exercises the caller's fatal policy, not rollback.
-    pub fn apply_exec_update(&self, update: ProcessExecUpdate) -> KResult<()> {
+    pub(crate) fn apply_exec_update(&self, update: ProcessExecUpdate) -> KResult<()> {
         let runtime = self.runtime()?;
 
         #[cfg(feature = "tee")]
@@ -620,7 +617,6 @@ impl Process {
         });
         runtime.reset_signal_actions()?;
         runtime.clear_posix_timers();
-        runtime.resources().close_cloexec_files()?;
         #[cfg(feature = "tipc")]
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
@@ -665,17 +661,6 @@ impl Process {
         self.runtime().map(|runtime| runtime.clear_posix_timers())
     }
 
-    /// Releases this process's file descriptor table owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
-    /// reachable.
-    pub fn exit_files(&self) -> KResult<()> {
-        self.runtime()?.resources().exit_files();
-        Ok(())
-    }
-
     /// Releases this process's filesystem context owner.
     ///
     /// # Errors
@@ -696,16 +681,6 @@ impl Process {
     pub fn exit_namespaces(&self) -> KResult<()> {
         self.runtime()?.exit_namespaces();
         Ok(())
-    }
-
-    /// Closes all process file descriptors marked `FD_CLOEXEC`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `KError::NoSuchProcess` for an unreachable runtime and forwards
-    /// `kresources::ProcessResources::close_cloexec_files` errors.
-    pub fn close_cloexec_files(&self) -> KResult<()> {
-        self.runtime()?.resources().close_cloexec_files()
     }
 
     /// Closes every TIPC handle owned by this process.

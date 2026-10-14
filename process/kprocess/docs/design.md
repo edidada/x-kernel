@@ -8,7 +8,10 @@ process-runtime capabilities, signal targeting and timer-delivery integration.
 `Process` is a stable identity that can outlive runnable threads; its weak
 `ProcessRuntime` reference is separate from the externally visible exited state.
 `Thread` owns a strong runtime reference and its own objective/subjective
-credential pointers. `ProcessRuntime` is crate-private; external users operate
+credential pointers and `TaskFiles` binding. Threads share the underlying table
+only with `CLONE_FILES`; unshare and exec replace only the caller's binding.
+`current_files()` pins the current thread and applies its process's live limit,
+without storing a second binding or limit. `ProcessRuntime` is crate-private; external users operate
 through `Process`, `Thread` and the semantic facade modules.
 
 Syscall ABI decoding belongs to `ksyscall`; image loading belongs to `kexec`;
@@ -144,7 +147,8 @@ namespaces, allocates a root identity and validates/attaches the child relation.
 Shared fs while its parent is in exec returns WouldBlock; namespace errors map
 to InvalidInput/Unsupported or a mount error. `CallerParent` inherits the
 caller's current parent and exit-signal contract, rechecking it under the domain
-lock. Runtime preparation then clones/shares mm, signal actions and fd table;
+lock. Thread preparation clones/shares the caller's fd table; runtime preparation
+then clones/shares mm and signal actions;
 `AttachedForkProcess` rolls back the attached relation if preparation fails.
 The new thread starts from the caller's subjective credential snapshot and
 inherits no-new-privileges. Its restart-block starts empty; clone does not
@@ -174,8 +178,10 @@ still-running unpublished child relation; it does not retire an unrelated
 existing process identity. Retired slot deletion checks pointer identity and
 state to tolerate numeric ID reuse.
 
+Every exiting thread detaches its files before retiring thread membership, so
+last-thread completion cannot overtake a sibling's descriptor cleanup.
 Last-thread cleanup is orchestrated by `posix-process`: remove thread visibility,
-record final CPU time, detach mm/files/fs/ns and optional resources, then call
+record final CPU time, detach mm/fs/ns and optional resources, then call
 `complete_process_exit`. SIGCHLD preparation occurs outside the domain lock;
 parent/exit-signal changes cause retry. The domain transaction commits exit,
 autoreap and reparent; only then are signal queueing and parent wakeup performed.
@@ -190,8 +196,9 @@ entry outside that lock. `finish_thread_exit` retires TID visibility before late
 resource teardown, so external thread lookup stops targeting exit-tail tasks.
 
 Exec initializes the new image's heap marker when constructing its MM binding.
-The subsequent process update handles optional TA context, signal dispositions, POSIX timers,
-close-on-exec files and optional IPC/private state, then publishes path/cmdline
+The caller unshares its files and closes close-on-exec descriptors. The subsequent
+process update handles optional TA context, signal dispositions, POSIX timers
+and optional IPC/private state, then publishes path/cmdline
 under one `ExecMetadata` lock. A failure closing descriptors can occur after
 earlier changes: the operation is not an all-state rollback transaction. The
 combined metadata update is atomic, but separate path and cmdline calls need not

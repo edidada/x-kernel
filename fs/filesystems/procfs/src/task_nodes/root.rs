@@ -370,8 +370,7 @@ impl ProcFdLink {
     fn display_target(&self) -> VfsResult<String> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         task.as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -472,8 +471,7 @@ impl MagicLinkOps for ProcFdLink {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let snapshot = task
             .as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -619,9 +617,7 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Ok(Box::new(iter::empty()));
         };
-        let Ok(resources) = task.as_thread().process().resources() else {
-            return Ok(Box::new(iter::empty()));
-        };
+        let resources = task.as_thread().files();
         let Ok(fd_table) = resources.fd_table() else {
             return Ok(Box::new(iter::empty()));
         };
@@ -638,8 +634,7 @@ impl SimpleDirOps for ThreadFdDir {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
         task.as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {

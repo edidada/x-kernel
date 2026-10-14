@@ -515,7 +515,6 @@ pub(crate) fn fork_process_runtime(
         fs_namespaces,
         address_space,
         signal_manager,
-        config,
     )?;
     attached_process.commit();
 
@@ -580,7 +579,6 @@ fn finish_fork_runtime(
     fs_namespaces: ForkFsNamespaces,
     address_space: ForkAddressSpaceState,
     signal_manager: ProcessSignalManager,
-    config: ProcessForkConfig,
 ) -> KResult<Arc<ProcessRuntime>> {
     let exec_metadata = parent.exec_metadata();
     let process_runtime = ProcessRuntime::new_with_nsproxy_and_mm_user(
@@ -603,11 +601,6 @@ fn finish_fork_runtime(
         exec_metadata.cmdline().clone(),
         exec_metadata.exe_file(),
     );
-
-    let files = parent
-        .resources()
-        .fork_fd_table(matches!(config.fd_table, ForkFdTable::Shared))?;
-    process_runtime.resources().replace_fd_table(files)?;
 
     Ok(process_runtime)
 }

@@ -139,7 +139,7 @@ pub(crate) fn sys_execveat(
     let path = vm_load_string(pathname)?;
 
     if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
-        let file = kprocess::current_resources().get_file(dirfd)?;
+        let file = kprocess::current_files().get_file(dirfd)?;
         let display = alloc::format!("/proc/self/fd/{dirfd}");
         debug!("sys_execveat <= fd {dirfd} (AT_EMPTY_PATH), args: {args:?}");
         return exec_resolved(
@@ -167,7 +167,7 @@ pub(crate) fn sys_execveat(
             &cred,
         )?
     } else {
-        let dir_file = kprocess::current_resources().get_file(dirfd)?;
+        let dir_file = kprocess::current_files().get_file(dirfd)?;
         if !dir_file.is_dir() {
             return Err(KError::NotADirectory);
         }
@@ -313,7 +313,7 @@ fn exec_resolved(
             load_prepared_user_app(&mut aspace.lock(), prepared)?
         };
         curr.set_name(entry_name.as_str());
-        let updated = process.apply_exec_update(exec_update);
+        let updated = thread.apply_exec_update(exec_update);
         #[cfg(unittest)]
         if let Some(probe) = probe {
             probe.observe_update(&process, image.0.as_usize(), image.1.as_usize());

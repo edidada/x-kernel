@@ -421,6 +421,9 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
+    // Release files before retiring membership so the last thread cannot
+    // publish process completion while a sibling still owns descriptors.
+    thr.files().exit_files();
     thr.detach_cgroup();
     let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
 
@@ -451,9 +454,6 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             error!("clear_tee_runtime_private on process exit failed: {err:?}");
         }
 
-        if let Err(err) = process.exit_files() {
-            error!("exit_files on process exit failed: {err:?}");
-        }
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }

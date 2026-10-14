@@ -941,8 +941,8 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
 
 #[def_test(serial)]
 fn test_exit_owners_detach_before_process_exit_publication() {
-    let (proc, _task) = process_with_address_space(8_137, mapped_test_address_space());
-    let resources = proc.resources().expect("runtime must expose resources");
+    let (proc, task) = process_with_address_space(8_137, mapped_test_address_space());
+    let resources = task.as_thread().files();
     let signals = proc.signal_manager().unwrap();
 
     assert!(proc.address_space().is_ok());
@@ -958,7 +958,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     );
     proc.exit_signal_handlers().unwrap();
     proc.exit_mm().expect("runtime must be attached");
-    proc.exit_files().expect("runtime must be attached");
+    task.as_thread().files().exit_files();
     proc.exit_fs().expect("runtime must be attached");
     proc.exit_namespaces().expect("runtime must be attached");
 
@@ -976,7 +976,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     assert_eq!(proc.uts_ns().err(), Some(kerrno::KError::NoSuchProcess));
 
     assert!(!proc.exit_mm().expect("owner release must be idempotent"));
-    proc.exit_files().expect("owner release must be idempotent");
+    task.as_thread().files().exit_files();
     proc.exit_fs().expect("owner release must be idempotent");
     proc.exit_namespaces()
         .expect("owner release must be idempotent");
@@ -1233,7 +1233,7 @@ fn abandoned_clone_releases_handlers_despite_retained_manager() {
 fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
     let (parent, parent_task) = process_with_address_space(8_138, mapped_test_address_space());
     let child_count_before = parent.children().len();
-    parent.exit_files().expect("runtime must be attached");
+    parent_task.as_thread().files().exit_files();
 
     let err = match parent_task
         .as_thread()
@@ -2543,14 +2543,13 @@ fn process_with_tipc_handle(
 #[def_test(serial)]
 fn test_tipc_handles_close_before_process_exit_publication() {
     let handle = Arc::new(ExitObservingHandle::new());
-    let (process, _task, handle_id) = process_with_tipc_handle(8_140, handle.clone());
+    let (process, task, handle_id) = process_with_tipc_handle(8_140, handle.clone());
 
-    // Mirror the last-thread release sequence of `do_exit()`
-    // (posix/process/src/runtime.rs): mm, files, fs, and namespaces are
-    // released, then the TIPC handle table is closed, and only then is the
-    // process exit published.
+    // Check the exit publication contract of `do_exit()`: mm, files, fs,
+    // and namespaces are released before closing TIPC handles and publishing
+    // process completion.
     process.exit_mm().expect("runtime must be attached");
-    process.exit_files().expect("runtime must be attached");
+    task.as_thread().files().exit_files();
     process.exit_fs().expect("runtime must be attached");
     process.exit_namespaces().expect("runtime must be attached");
     process
@@ -2571,4 +2570,25 @@ fn test_tipc_handles_close_before_process_exit_publication() {
     assert!(handle.is_closed());
 
     wait_reap::assert_reap_zombie_process(&process);
+}
+
+#[def_test(user, serial)]
+fn task_files_unshare_preserves_siblings_and_clone_files_policy() {
+    let (process, task) = build_prepared_test_user_task();
+    let leader = task.as_thread();
+    let file = crate::PidFd::new_file(&process, kvfs::OpenFlags::READ_WRITE.bits(), initial_cred()).unwrap();
+    let fd = leader.files().add_file(1024, file.clone(), false).unwrap();
+    let sibling = leader.clone_thread_in_process().unwrap();
+    sibling.files().unshare_fd_table().unwrap();
+    sibling.files().close_file(fd).unwrap();
+    assert!(Arc::ptr_eq(&leader.files().get_file(fd).unwrap(), &file));
+    assert_eq!(sibling.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+
+    let private = leader.prepare_thread_clone_with_files(false).unwrap().into_parts().0;
+    let shared = leader.clone_thread_in_process().unwrap();
+    shared.files().close_file(fd).unwrap();
+    assert_eq!(leader.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+    assert!(Arc::ptr_eq(&private.files().get_file(fd).unwrap(), &file));
+    private.files().exit_files();
+    process.discard_unpublished();
 }

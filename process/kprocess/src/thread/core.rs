@@ -170,6 +170,7 @@ pub struct Thread {
     tid: AtomicU32,
     process: Arc<Process>,
     runtime: Arc<ProcessRuntime>,
+    files: kresources::TaskFiles,
     // Installed once before membership retirement; released only with Thread.
     exit_address_space: SpinNoIrq<Option<ExitAddressSpace>>,
     real_cred: RwLock<Arc<Cred>>,
@@ -190,6 +191,25 @@ pub struct Thread {
 }
 
 impl Thread {
+    /// Returns this task's descriptor-table binding.
+    pub fn files(&self) -> &kresources::TaskFiles {
+        &self.files
+    }
+
+    /// Applies the caller's files transition and process-shared post-exec update.
+    ///
+    /// Unsharing first keeps close-on-exec from changing another task's files
+    /// or closing that table's descriptors. Call after retiring sibling threads.
+    ///
+    /// # Errors
+    /// Forwards detached-files and process-update errors. The caller must treat
+    /// failure after image commit as fatal; this operation does not roll back.
+    pub fn apply_exec_update(&self, update: crate::ProcessExecUpdate) -> KResult<()> {
+        self.files.unshare_fd_table()?;
+        self.files.close_cloexec_files()?;
+        self.process.apply_exec_update(update)
+    }
+
     /// Creates a new [`Thread`].
     pub(crate) fn new(
         process: Arc<Process>,
@@ -204,8 +224,16 @@ impl Thread {
             .root()
             .reserve_task()
             .expect("initial process must fit in the root cgroup");
-        Self::new_with_charge(process, runtime, task_number, cred, charge, false)
-            .expect("initial task identity must be unique")
+        Self::new_with_charge(
+            process,
+            runtime,
+            task_number,
+            cred,
+            charge,
+            false,
+            kresources::TaskFiles::new(kfd::FdTableOwner::new_shared()),
+        )
+        .expect("initial task identity must be unique")
     }
 
     fn new_with_charge(
@@ -215,6 +243,7 @@ impl Thread {
         cred: Arc<Cred>,
         charge: TaskCharge,
         no_new_privileges: bool,
+        files: kresources::TaskFiles,
     ) -> KResult<Box<Self>> {
         let tid = task_number.root_nr();
         let identity_token = kidentity::TaskIdentityToken::allocate();
@@ -226,6 +255,7 @@ impl Thread {
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
             runtime,
+            files,
             exit_address_space: SpinNoIrq::new(None),
             real_cred: RwLock::new(cred.clone()),
             cred: RwLock::new(cred),
@@ -269,6 +299,9 @@ impl Thread {
     pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
+        let files = self
+            .files
+            .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;
         let (process_runtime, task_number) = fork_process_runtime(&self.process_runtime(), config)?;
         let thread = Self::new_with_charge(
             process_runtime.process().clone(),
@@ -277,6 +310,7 @@ impl Thread {
             self.subjective_cred(),
             charge,
             self.no_new_privileges(),
+            files,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {
@@ -304,6 +338,14 @@ impl Thread {
     /// Forwards cgroup reservation/commit and root thread-identity allocation
     /// errors. The sibling shares its process runtime and is not activated.
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
+        self.prepare_thread_clone_with_files(true)
+    }
+
+    /// Prepares a sibling, sharing the table only when `CLONE_FILES` is set.
+    ///
+    /// # Errors
+    /// Forwards clone preparation and detached-files errors.
+    pub fn prepare_thread_clone_with_files(&self, is_shared: bool) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
         let task_number = allocate_thread_task_number()?;
@@ -314,6 +356,7 @@ impl Thread {
             self.subjective_cred(),
             charge,
             self.no_new_privileges(),
+            self.files.fork(is_shared)?,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {

@@ -312,7 +312,7 @@ pub(crate) fn sys_waitid(
             if fd < 0 {
                 return Err(KError::from(LinuxError::EINVAL));
             }
-            let file = kprocess::current_resources().get_file(fd)?;
+            let file = kprocess::current_files().get_file(fd)?;
             let pidfd =
                 kprocess::PidFd::from_file(&file).map_err(|_| KError::from(LinuxError::EINVAL))?;
             WaitPid::Pid(pidfd.process().pid())

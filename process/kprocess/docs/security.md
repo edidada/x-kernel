@@ -18,7 +18,7 @@ manager for observation or prepared notification does not retain that ownership;
 configuration operations reject inactive owners rather than recreating defaults.
 
 Protected assets are stable PID/TID bindings, parent/child membership, exit
-visibility, runtime mm/files/fs/ns ownership, objective/subjective credentials,
+visibility, runtime mm/fs/ns and per-thread files ownership, objective/subjective credentials,
 cgroup charge, signal recipients, timer generations and controlling-terminal
 identity. Possession of a `Process` reference is not by itself syscall authority.
 
@@ -158,7 +158,7 @@ missing targets are ignored by delivery glue rather than reviving retired tasks.
 | T-01 | PID/TID reuse causes wrong-task removal or signal targeting | High | Old exit/rollback races a new numeric ID binding | Stable slots and Arc identity checks gate retirement/deletion; Reserved slots are not deleted as retired. Syscall target authorization remains external. |
 | T-02 | Double reap or inconsistent parent relation | Medium | Multiple waiters, reparent and exit race | Domain write transaction scans, claims Zombie, detaches and retires identity once; callers rescan after failed claim. |
 | T-03 | Intrusive-list removal corrupts memory | High | A foreign or concurrently unlinked slot is removed | Guard token, parent list lock and exact membership check enforce the documented unsafe preconditions. |
-| T-04 | Runtime references retain resources through zombie lifetime | Medium | Parent observes completion before files/fs/ns/mm detach | Lifecycle caller must detach owners first; weak runtime identity avoids owning the runtime. Existing live capabilities can deliberately prolong active-mm lifetime. |
+| T-04 | Runtime references retain resources through zombie lifetime | Medium | Parent observes completion before task files and runtime fs/ns/mm detach | Lifecycle caller must detach owners first; weak runtime identity avoids owning the runtime. Existing live capabilities can deliberately prolong active-mm lifetime. |
 | T-05 | Credential confusion permits cross-task inspection | High | Caller/target credentials differ or subjective override exists | Ptrace checks real credentials and commit rejects override; UID-zero privilege approximation and absent full capability/dumpability model are residual limitations. |
 | T-06 | Half-published fork becomes runnable | Medium | Parent writeback or cgroup migration fails | Staged publication and commit-before-activation; Drop rolls back. Already-exited/unusual rollback paths retain conservative state rather than deleting another identity. |
 | T-07 | Exit signal exposes state before autoreap commits | Medium | Signal handler/waiter runs while parent contract changes | Prepare outside domain, revalidate parent/exit-signal and retry, commit state before signal queueing/wakeup. Failed notification is logged; UID fallback can reduce payload accuracy. |
