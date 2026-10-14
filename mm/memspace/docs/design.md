@@ -322,3 +322,20 @@ leaves acquire a destination hold before source removal, and source references
 remain in the TLB retirement batch. Raw leaves preserve their prior external
 backing ownership. Lazy pages remain skipped. This keeps mapped file storage
 alive across mremap without relying on source VMA metadata retaining the page.
+
+
+## Anonymous backing lifetime
+
+Private anonymous pages, including private-file result pages, consume an owned
+`FrameRun` in `AnonPrivateObject`. First-touch and fork install independent
+PTE holds with `map_owned_sized`; COW uses `replace_owned_if_same` to replace
+both the leaf and its hold. Failure drops unpublished backing automatically.
+Object-slot sharing remains separate from physical lifetime. Detached results
+are owning handles; finishing their release never calls raw page deallocation.
+
+Shared anonymous `SharedPages` stores owned runs rather than raw physical
+addresses. Every mapped leaf clones the complete run, so backend destruction
+cannot return backing still referenced by a PTE. Fault rematerialization clones
+another hold; unmap and PROT_NONE retire it after invalidation. Existing huge
+leaf support is preserved by exact size/alignment checks; this does not add
+transparent huge pages or splitting support.

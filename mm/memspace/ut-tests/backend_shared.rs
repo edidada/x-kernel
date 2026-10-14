@@ -27,3 +27,31 @@ fn shared_backend_reuses_explicit_shared_owner_identity() {
     assert_eq!(left_id, object.id());
     assert_eq!(right_id, object.id());
 }
+#[def_test]
+fn shared_backing_survives_backend_drop_and_tlb_retirement() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let start = va!(0x1200000);
+    let backend =
+        SharedBackend::new_anonymous(start, memaddr::PAGE_SIZE_4K, PageSize::Size4K).unwrap();
+    let pa = backend.pages.frames[0].phys_addr();
+    let meta = kalloc::global_allocator()
+        .frame_meta(pa.as_usize() / memaddr::PAGE_SIZE_4K)
+        .unwrap();
+    let mut table = khal::paging::PageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    BackendOps::map(
+        &backend,
+        memaddr::VirtAddrRange::from_start_size(start, memaddr::PAGE_SIZE_4K),
+        khal::paging::MappingFlags::READ,
+        &mut edit,
+    )
+    .unwrap();
+    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 2 });
+    drop(backend);
+    assert_eq!(edit.query(start).unwrap().0, pa);
+    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 1 });
+    edit.unmap(start).unwrap();
+    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 1 });
+    edit.finish();
+    assert_eq!(meta.state(), kalloc::FrameState::Unshared);
+}

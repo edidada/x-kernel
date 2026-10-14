@@ -182,3 +182,15 @@ A PA-only map/unmap sequence cannot move a managed mapping's ownership.
 destination installation leaves source PTE and hold intact; successful transfer
 retains both holds until source invalidation completes. File cache residency
 and physical-page lifetime are not used as substitutes for view invalidation.
+
+
+## Owned anonymous page boundaries
+
+`backend::alloc_owned_frame` returns an unpublished owned run. Zero filling and private
+file population happen before mapping publication, bounded by that run. Copying
+COW source bytes keeps an `AnonPrivatePageHandle` snapshot alive. Content access
+still relies on address-space/runtime serialization and the existing COW rules.
+Each present managed leaf has an independent run of the same size and alignment;
+replacement retires the old run only after TLB invalidation. Failed object or PTE
+publication drops new backing and preserves old capabilities. Mapping-index and
+Arc/Vec allocations still follow the current kernel heap OOM policy.

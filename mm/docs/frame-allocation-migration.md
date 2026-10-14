@@ -50,7 +50,7 @@
 - 页表按 VA 保存 provider-defined MappingReference；unmap、稀疏失效与 PROT_NONE
   清除 PTE 后把持有交给有界批次，finish 完成 TLB 失效后结束持有。
 - move_mapping 先取得目标持有，再撤销源 PTE，确保 mremap 搬移时不丢失生命周期。
-- 旧 raw map 仍保持外部 backing 契约。匿名/共享内容、DMA 和字节堆 backing 的收口尚未完成；这些路径按整段持有与
+- 旧 raw map 仍保持外部 backing 契约。DMA 和字节堆 backing 的收口尚未完成；这些路径按整段持有与
   映射协议继续迁移。GlobalPage 与连续多页支持见下。
 - 映射索引增加 heap bookkeeping 成本，尚未给出性能改善结论；全量可失败堆分配
   与后续 reclaim 仍是独立工作。
@@ -64,5 +64,22 @@
   into_raw/from_raw 改为明确的物理所有权转移，不能收养裸 alloc_pages 结果。
 - VMM 页表的原始持有显式转移，销毁按 PA 恢复；guest RAM 保留也持有 FrameRun。
   第二阶段 mapper 先析构，reservation 后释放，vCPU 的 VM 引用必须已结束使用。
-- 本批逐页释放为 O(backing 页数)，未实现 run 批量归还或复合页协议。匿名/共享
-  内容、DMA、字节堆 backing、启动期临时页仍需分别迁移。
+- 本批逐页释放为 O(backing 页数)，未实现 run 批量归还或复合页协议。DMA、字节堆 backing、启动期临时页仍需分别迁移。
+
+
+## 第三批迁移：匿名页、私有文件页与共享匿名页
+
+- 匿名私有页状态保存 FrameRun，所有权随 first-touch/COW commit 转移；失败自动
+  结束持有。快照与 detached result 持有状态，避免对象槽位移除后复制源提前归还。
+- 对象槽位的 COW refs 与物理引用分开，PTE/临时句柄不影响 COW 独占判断。
+  对象 Drop 结束剩余槽位计数，避免父对象退出后子对象仍被误判为共享。
+- 首次缺页、fork、重新建立映射均通过 map_owned_sized 建立独立映射持有。
+  COW 使用 replace_owned_if_same：compare 失败恢复旧持有，成功把旧持有送入
+  TLB 退役批次。物理归还不再依靠 memspace 的裸 dealloc_frame。
+- 私有文件结果页使用相同匿名对象和映射协议，文件读取失败自动归还未发布 backing。
+  文件截断、失效通知与内容同步协议仍独立存在。
+- 共享匿名 SharedPages 保存 FrameRun，每个 PTE 克隆完整 backing 的持有。
+  HAL 使用 FrameRun 作为映射 capability，精确覆盖现有大页 leaf；目录按包含地址
+  找到 leaf 持有，从大页中间地址撤映射也会退役全部基础页。
+- 此处保持已有显式大页 leaf 能力，不实现 THP、拆分/合并或复合页元数据。
+  FrameRun 克隆、归还均为 O(基础页数)；BTreeMap/Vec/Arc 的可失败堆分配仍待推进。
