@@ -38,7 +38,7 @@ use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
     addr::SocketAddrExt,
-    cmsg::{CMsg, CMsgBuilder, push_ip_recverr_cmsg},
+    cmsg::{CMsg, CMsgBuilder, ScmFdBudget, push_ip_recverr_cmsg},
 };
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
@@ -112,6 +112,7 @@ fn parse_send_cmsgs(
 
     let mut ptr = control_ptr;
     let ptr_end = ptr.checked_add(control_len).ok_or(KError::InvalidInput)?;
+    let mut fd_budget = ScmFdBudget::default();
 
     while let Some(next) = ptr.checked_add(size_of::<cmsghdr>()) {
         if next > ptr_end {
@@ -124,7 +125,11 @@ fn parse_send_cmsgs(
             return Err(KError::InvalidInput);
         }
 
-        ancillary.push(Box::new(CMsg::parse(resources, hdr_ptr, hdr)?) as AncillaryData);
+        let cmsg = CMsg::parse(resources, hdr_ptr, hdr)?;
+        // Linux caps the descriptors of one `sendmsg` across all of its
+        // `SCM_RIGHTS` messages, not only within each message.
+        fd_budget.charge(cmsg.fd_count())?;
+        ancillary.push(Box::new(cmsg) as AncillaryData);
         ptr += hdr.cmsg_len;
     }
 
