@@ -399,6 +399,23 @@ impl MntNamespace {
             .ok_or(VfsError::InvalidInput)
     }
 
+    /// Returns whether a mount other than `path`'s own is attached at or below
+    /// `path` in this namespace.
+    ///
+    /// `Path::has_child_mount()` only sees a mount rooted exactly at `path`, so
+    /// recursive bind consults this to decide whether cloning a single mount
+    /// would flatten a source subtree.
+    pub fn has_mount_under(&self, path: &Path) -> bool {
+        let source = path.mount();
+        let mounts = self.mounts.lock();
+        mounts.values().any(|mount| {
+            !Arc::ptr_eq(mount, source)
+                && mount
+                    .location()
+                    .is_some_and(|loc| Self::is_reachable_from(&loc, path))
+        })
+    }
+
     /// Unmounts one visible mount from this namespace.
     pub fn detach(&self, path: &Path) -> VfsResult<()> {
         let mut mounts = self.mounts.lock();

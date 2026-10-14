@@ -231,12 +231,12 @@ fn do_loopback(
         .ok_or(KError::InvalidInput)?;
     let old_path = lookup_mount_path(process, old_name, cred)?;
     // Linux `do_loopback()` clones the whole source subtree for a recursive
-    // bind. KVFS clones a single mount, which only matches Linux's result
-    // while the source subtree has no mounts attached anywhere below it;
-    // reject the request otherwise instead of silently flattening the cloned
-    // tree. `Path::has_child_mount()` only sees a mount rooted exactly at the
-    // bind source, so consult the mount's full child list here.
-    if recursive && !old_path.mount().children().is_empty() {
+    // bind. KVFS clones a single mount, which only matches Linux's result while
+    // the source subtree has no mounts attached below it; reject the request
+    // otherwise instead of silently flattening the cloned tree. The namespace
+    // query looks at mounts at or below the bind source, not at every child of
+    // the containing mount.
+    if recursive && namespace.has_mount_under(&old_path) {
         return Err(KError::InvalidInput);
     }
     namespace.attach_bind(&old_path, mountpoint)?;
