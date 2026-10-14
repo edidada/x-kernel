@@ -56,7 +56,16 @@ impl PendingSignals {
             self.info_rt[signo as usize - 32].push_back(sig);
         } else {
             if !added {
-                // At most one standard signal can be pending.
+                // At most one standard signal can be pending. Prefer a
+                // user-originated instance over a kernel-originated one, so
+                // `exec_de_thread` can drop only its own kernel group kill
+                // without losing a concurrent user `kill(2)`/`tgkill(2)`.
+                let slot = &mut self.info_std[signo as usize];
+                let pending_is_kernel = slot.as_ref().is_some_and(|pending| pending.code() > 0);
+                if sig.code() <= 0 && pending_is_kernel {
+                    *slot = Some(Box::new(sig));
+                    return true;
+                }
                 return false;
             }
             self.info_std[signo as usize] = Some(Box::new(sig));

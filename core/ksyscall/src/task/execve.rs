@@ -141,8 +141,9 @@ pub(crate) fn sys_execveat(
     if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
         let file = kprocess::current_files().get_file(dirfd)?;
         // Linux exec's a regular file: an `AT_EMPTY_PATH` request naming a
-        // directory descriptor is `EACCES`, not a path re-resolution.
-        if file.path().is_dir() {
+        // non-regular descriptor (directory, FIFO, device, socket) is `EACCES`,
+        // not a path re-resolution.
+        if !file.path().is_regular_file() {
             return Err(KError::from(LinuxError::EACCES));
         }
         let display = alloc::format!("/proc/self/fd/{dirfd}");
@@ -273,8 +274,11 @@ fn exec_request(
     // binary format is confirmed. Go runtimes (runc init) keep helper threads
     // alive at exec time, so this is the normal path.
     let was_multithread = kprocess::scheduler::process_task_count(process.as_ref()) > 1;
-    if was_multithread {
-        exec_de_thread();
+    if was_multithread && exec_de_thread() {
+        // The takeover failed and the current thread was made to exit. Do not
+        // swap the address space or install the image: continuing would return
+        // to the fatal path and run the thread teardown a second time.
+        return Ok(0);
     }
     // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
     // consumed by installation.

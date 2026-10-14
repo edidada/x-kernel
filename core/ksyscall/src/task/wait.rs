@@ -306,8 +306,8 @@ pub(crate) fn sys_waitid(
         }
         3 => {
             // P_PIDFD: `id` is a pidfd file descriptor referring to a process.
-            // Linux: a negative or closed descriptor is `EBADF`, a valid
-            // descriptor that is not a pidfd is `EINVAL`.
+            // Linux: a negative `id` is `EINVAL`, a closed or invalid descriptor
+            // is `EBADF`, and a valid descriptor that is not a pidfd is `EINVAL`.
             let fd = id as i32;
             if fd < 0 {
                 return Err(KError::from(LinuxError::EINVAL));

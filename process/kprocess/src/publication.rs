@@ -164,6 +164,7 @@ struct ThreadPublicationBinding {
     tid: Tid,
     task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
     member_slot: Arc<crate::process::ThreadMemberSlot>,
+    identity_token: kidentity::TaskIdentityToken,
 }
 
 impl ThreadPublicationBinding {
@@ -171,12 +172,14 @@ impl ThreadPublicationBinding {
         tid: Tid,
         task_slot: Arc<PublicationSlot<WeakKtaskRef>>,
         member_slot: Arc<crate::process::ThreadMemberSlot>,
+        identity_token: kidentity::TaskIdentityToken,
     ) -> Self {
         task_slot.reserve_vacant_task_slot();
         Self {
             tid,
             task_slot,
             member_slot,
+            identity_token,
         }
     }
 
@@ -575,7 +578,8 @@ impl ProcessPublication {
             .clone();
         let member_slot = proc.reserve_thread_member_slot(thread.identity_token());
         let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
-        let thread_binding = ThreadPublicationBinding::reserve(tid, task_slot, member_slot);
+        let thread_binding =
+            ThreadPublicationBinding::reserve(tid, task_slot, member_slot, thread.identity_token());
 
         let domain = process_domain::write_lock();
         thread_binding.publish(&domain, proc, task);
@@ -597,6 +601,7 @@ impl ProcessPublication {
         let tid = rollback.thread_binding.tid;
         let task_slot = rollback.thread_binding.task_slot.clone();
         let process_slot = rollback.process.published_pid_slot();
+        let identity_token = rollback.thread_binding.identity_token;
         {
             let domain = process_domain::write_lock();
             // Only clear a process identity this transaction inserted, and only
@@ -615,6 +620,7 @@ impl ProcessPublication {
             }
         }
 
+        self.identities.write().remove(&identity_token);
         let mut tables = self.tables.write();
         Self::remove_slot_if_retired(&mut tables.task_table, tid, &task_slot);
         if rollback.process_effect.inserted()

@@ -402,9 +402,10 @@ impl MntNamespace {
     /// Returns whether a mount other than `path`'s own is attached at or below
     /// `path` in this namespace.
     ///
-    /// `Path::has_child_mount()` only sees a mount rooted exactly at `path`, so
-    /// recursive bind consults this to decide whether cloning a single mount
-    /// would flatten a source subtree.
+    /// Recursive bind consults this to decide whether cloning a single mount
+    /// would flatten a source subtree. It walks the namespace's registered
+    /// mounts and tests each mountpoint against `path`, rather than only the
+    /// source mount's direct children.
     pub fn has_mount_under(&self, path: &Path) -> bool {
         let source = path.mount();
         let mounts = self.mounts.lock();
@@ -935,11 +936,6 @@ impl Path {
     /// Returns the underlying directory entry.
     pub(crate) fn dentry(&self) -> &Dentry {
         &self.dentry
-    }
-
-    /// Returns whether a child mount is attached at this location.
-    pub fn has_child_mount(&self) -> bool {
-        self.mnt.child_mount_at(&self.dentry).is_some()
     }
 
     /// Returns a cached child inode or inserts a filesystem-created child.

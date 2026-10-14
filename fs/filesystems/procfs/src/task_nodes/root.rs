@@ -509,7 +509,15 @@ impl ProcExeLink {
 
     fn display_target(&self) -> VfsResult<String> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        let process = task.as_thread().process();
+        let target = task.as_thread();
+        // Every outlet that exposes the display target checks read access here,
+        // covering `readlink`, `getattr`/size and `get_link`. A kernel task has
+        // no user credentials to compare and is treated as privileged.
+        if let Some(caller) = ktask::current().try_as_thread() {
+            kprocess::ptrace::check_read_real_creds_access(caller, target)
+                .map_err(|_| VfsError::OperationNotPermitted)?;
+        }
+        let process = target.process();
         // Render from the opened backing file so `readlink` and `follow` name
         // the same object even when the exec display path is synthetic (e.g.
         // `execveat(AT_EMPTY_PATH)` on a memfd).
@@ -589,10 +597,6 @@ impl FileOperations for ProcExeLink {
 
 impl MagicLinkOps for ProcExeLink {
     fn readlink_display(&self) -> VfsResult<String> {
-        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        let caller = kprocess::current_user_thread();
-        kprocess::ptrace::check_read_real_creds_access(&caller, task.as_thread())
-            .map_err(|_| VfsError::OperationNotPermitted)?;
         self.display_target()
     }
 
@@ -602,9 +606,10 @@ impl MagicLinkOps for ProcExeLink {
         }
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let target = task.as_thread();
-        let caller = kprocess::current_user_thread();
-        kprocess::ptrace::check_read_real_creds_access(&caller, target)
-            .map_err(|_| VfsError::OperationNotPermitted)?;
+        if let Some(caller) = ktask::current().try_as_thread() {
+            kprocess::ptrace::check_read_real_creds_access(caller, target)
+                .map_err(|_| VfsError::OperationNotPermitted)?;
+        }
         let exe_file = target
             .process()
             .exe_file()

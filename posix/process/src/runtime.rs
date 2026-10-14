@@ -322,7 +322,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
 ///
 /// Call only in the current user thread's sleepable context; `join` blocks
 /// until every sibling has fully exited.
-pub fn exec_de_thread() {
+pub fn exec_de_thread() -> bool {
     let thr = current_user_thread();
     let process = thr.process();
     let tid = thr.tid();
@@ -375,7 +375,9 @@ pub fn exec_de_thread() {
     if !process.assume_leader_identity(&current()) {
         error!("exec_de_thread: leader identity takeover failed after the sibling sweep");
         do_exit(Signo::SIGSEGV as i32, true);
+        return true;
     }
+    false
 }
 
 /// Tears down the current user thread and optionally terminates its siblings.
