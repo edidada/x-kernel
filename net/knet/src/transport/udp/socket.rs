@@ -94,6 +94,7 @@ impl UdpSocket {
                 flags: RecvFlags::DONT_WAIT,
                 ancillary: None,
                 out_flags: None,
+                ancillary_discarded: None,
             },
         ) {
             Ok(len) => Ok(Some((len, from.into_ip()?))),
@@ -449,6 +450,7 @@ impl SocketOps for UdpSocket {
             flags,
             ancillary,
             mut out_flags,
+            ..
         } = options;
         if !flags.contains(RecvFlags::ERROR_QUEUE) {
             return self

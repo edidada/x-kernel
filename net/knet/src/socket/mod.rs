@@ -214,6 +214,14 @@ pub struct RecvOptions<'a> {
     pub flags: RecvFlags,
     pub ancillary: Option<&'a mut Vec<AncillaryData>>,
     pub out_flags: Option<&'a mut RecvFlags>,
+    /// Reports that control data reached the caller while `ancillary` was
+    /// `None` and was therefore dropped: a Unix stream control record that was
+    /// reached (a consuming receive drops it) or, on a Unix datagram, the
+    /// message's passed file descriptions or the sender credentials exposed by
+    /// `SO_PASSCRED`, which are consumed with the message. The caller must
+    /// report the loss as `MSG_CTRUNC`, mirroring `__scm_recv_common` and
+    /// `scm_detach_fds`. Other transports never set it.
+    pub ancillary_discarded: Option<&'a mut bool>,
 }
 impl Debug for RecvOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,6 +229,10 @@ impl Debug for RecvOptions<'_> {
             .field("from", &self.from)
             .field("flags", &self.flags)
             .field("out_flags", &self.out_flags.as_ref().map(|_| ()))
+            .field(
+                "ancillary_discarded",
+                &self.ancillary_discarded.as_deref().map(|_| ()),
+            )
             .finish()
     }
 }

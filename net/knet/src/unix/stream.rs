@@ -396,7 +396,17 @@ impl UnixTransportOps for StreamTransport {
                                 sink.extend(data);
                             }
                         }
-                        None => drop(popped),
+                        // The consuming receive has no control buffer: the
+                        // reached record is dropped either way, so report the
+                        // loss for `MSG_CTRUNC` (`scm_detach_fds`).
+                        None => {
+                            if popped.is_some()
+                                && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
+                            {
+                                *discarded = true;
+                            }
+                            drop(popped);
+                        }
                     }
                     return Ok(count);
                 }
@@ -1648,5 +1658,53 @@ mod tests {
         let n = receiver.recv(&mut buf[..], RecvOptions::default()).unwrap();
         assert_eq!(n, 4);
         assert_eq!(&buf[..4], b"POST");
+    }
+
+    #[def_test]
+    fn unix_stream_recv_without_control_buffer_reports_discard() {
+        let (left, right) = StreamTransport::new_pair(1);
+
+        assert_eq!(
+            left.send(
+                &b"abc"[..],
+                SendOptions {
+                    ancillary: vec![Box::new(9_u32) as AncillaryData],
+                    ..SendOptions::default()
+                }
+            ),
+            Ok(3)
+        );
+
+        // Consuming the record's segment without a control buffer drops the
+        // record and reports the loss (MSG_CTRUNC) to the caller.
+        let nonblocking = RecvFlags::DONT_WAIT;
+        let mut data = [0_u8; 1];
+        let mut discarded = false;
+        let recv = right.recv(
+            &mut data[..],
+            RecvOptions {
+                flags: nonblocking,
+                ancillary: None,
+                ancillary_discarded: Some(&mut discarded),
+                ..RecvOptions::default()
+            },
+        );
+        assert_eq!(recv, Ok(1));
+        assert!(discarded);
+
+        // Plain data afterwards reaches no record, so the flag stays clear.
+        let mut data = [0_u8; 2];
+        let mut discarded = false;
+        let recv = right.recv(
+            &mut data[..],
+            RecvOptions {
+                flags: nonblocking,
+                ancillary: None,
+                ancillary_discarded: Some(&mut discarded),
+                ..RecvOptions::default()
+            },
+        );
+        assert_eq!(recv, Ok(2));
+        assert!(!discarded);
     }
 }

@@ -361,7 +361,22 @@ fn recv_impl(
 
     let mut ancillary = Vec::new();
     let mut reported_flags = RecvFlags::empty();
+    let mut ancillary_discarded = false;
 
+    // A Unix socket without a control buffer must let the transport decide the
+    // fate of the arrived control data: on a stream the read reaches a pending
+    // control record, so the record must be dropped instead of being kept for a
+    // later `recvmsg` (which would inherit stale ancillary data), and on a
+    // datagram the message's descriptors are dropped along with it. Both report
+    // the loss through `ancillary_discarded` for `MSG_CTRUNC`. Other socket
+    // types keep populating the vector because a caller can still recover flags
+    // or diagnostic data from it.
+    let ancillary_sink =
+        if output.cmsg_builder.is_none() && matches!(socket.as_ref(), Socket::Unix(_)) {
+            None
+        } else {
+            Some(&mut ancillary)
+        };
     let mut remote_addr =
         (!output.addr.is_null()).then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
     let recv = socket.recv(
@@ -369,8 +384,9 @@ fn recv_impl(
         RecvOptions {
             from: remote_addr.as_mut(),
             flags: recv_flags,
-            ancillary: Some(&mut ancillary),
+            ancillary: ancillary_sink,
             out_flags: Some(&mut reported_flags),
+            ancillary_discarded: Some(&mut ancillary_discarded),
         },
     )?;
     if let Some(out_flags) = output.out_flags {
@@ -412,7 +428,10 @@ fn recv_impl(
         if flags & MSG_ERRQUEUE != 0 {
             *msg_flags |= MSG_ERRQUEUE;
         }
-        if cmsg_truncated {
+        if cmsg_truncated || ancillary_discarded {
+            // `scm_detach_fds` reports MSG_CTRUNC whenever fd-carrying control
+            // data could not be emitted, including the empty-buffer case:
+            // `scm_max_fds` yields zero and the arrived fds are dropped.
             *msg_flags |= MSG_CTRUNC;
         }
     }
