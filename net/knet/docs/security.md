@@ -475,6 +475,11 @@ Modifications after sharing use copy-on-write. Protocol offsets and validated UD
 
 Before local delivery, the version, header length, total length, and header checksum must be validated, and trailing data must be trimmed according to `total_len`.
 
+`Ipv4PacketView` keeps the parsed header paired with its borrowed packet bytes.
+Input views exclude trailing padding; output views use the supplied slice length
+until the header is finalized. The borrow prevents mutation of those bytes while
+consumers use the view. ICMP quotes retain their separate truncated-input parser.
+
 ### 15. Network Type Boundary
 
 `RouteTable` and `NetDevice` do not expose smoltcp address or time types.

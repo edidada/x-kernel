@@ -212,7 +212,7 @@ fn test_icmpv4_error_accepts_truncated_original_datagram() {
     )
     .unwrap();
 
-    inspect_icmpv4_error(&error, 1);
+    inspect_icmpv4_error(Ipv4PacketView::parse_input(&error).unwrap(), 1);
 
     assert_eq!(
         connected.consume_socket_error(),

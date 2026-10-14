@@ -85,6 +85,57 @@ pub(crate) struct Ipv4Header {
     is_fragmented: bool,
 }
 
+/// A borrowed IPv4 packet whose header and payload bounds belong to the same bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Ipv4PacketView<'a> {
+    header: Ipv4Header,
+    packet: &'a [u8],
+}
+
+impl<'a> Ipv4PacketView<'a> {
+    /// Checks the incoming header checksum and excludes trailing link-layer padding.
+    pub(crate) fn parse_input(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
+        Self::from_header(packet, Ipv4Header::parse_input(packet)?)
+    }
+
+    /// Uses the full outgoing slice before its checksum and total length are finalized.
+    pub(crate) fn parse_output(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
+        Self::from_header(packet, Ipv4Header::parse_output(packet)?)
+    }
+
+    /// Validates and trims a receive buffer, then borrows its IPv4 packet.
+    pub(crate) fn validate_input_packet(packet: &'a mut PacketBuf) -> Result<Self, Ipv4Error> {
+        let header =
+            Ipv4PacketView::parse_input(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?
+                .header();
+        let header = header.apply_to_packet(packet)?;
+        Self::from_header(packet.network_packet().ok_or(Ipv4Error::Malformed)?, header)
+    }
+
+    pub(crate) fn header(self) -> Ipv4Header {
+        self.header
+    }
+
+    pub(crate) fn packet(self) -> &'a [u8] {
+        self.packet
+    }
+
+    pub(crate) fn payload(self) -> &'a [u8] {
+        &self.packet[self.header.header_len..]
+    }
+
+    pub(crate) fn packet_len(self) -> usize {
+        self.packet.len()
+    }
+
+    fn from_header(packet: &'a [u8], header: Ipv4Header) -> Result<Self, Ipv4Error> {
+        Ok(Self {
+            header,
+            packet: packet.get(..header.total_len).ok_or(Ipv4Error::Malformed)?,
+        })
+    }
+}
+
 impl Ipv4Header {
     pub(crate) fn parse_input(packet: &[u8]) -> Result<Self, Ipv4Error> {
         Self::parse(packet, true)
@@ -108,11 +159,6 @@ impl Ipv4Header {
         }
 
         Ok(Self::from_slice(&header_slice, total_len))
-    }
-
-    pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        let header = Self::parse_input(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
-        header.apply_to_packet(packet)
     }
 
     pub(crate) fn prepare_output_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
@@ -327,12 +373,13 @@ pub(crate) fn build_ipv4_packet_dont_fragment(
 }
 
 pub(crate) fn fragment_output_packet(
-    packet: &[u8],
+    view: Ipv4PacketView<'_>,
     path_mtu: usize,
     identification: u16,
 ) -> Result<Vec<Vec<u8>>, Ipv4FragmentError> {
-    let header = Ipv4Header::parse_output(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
-    if packet.len() <= path_mtu {
+    let header = view.header();
+    let packet = view.packet();
+    if view.packet_len() <= path_mtu {
         return Ok(vec![packet.to_vec()]);
     }
     if header.dont_fragment() {
@@ -347,7 +394,7 @@ pub(crate) fn fragment_output_packet(
     // so every non-final fragment must carry a payload length aligned to that
     // unit. Stack-generated IPv4 output packets currently use a 20-byte header;
     // callers that introduce IPv4 options must add option-copy handling here.
-    let payload = payload(packet, &header).ok_or(Ipv4FragmentError::Malformed)?;
+    let payload = view.payload();
     let max_payload_len = path_mtu
         .checked_sub(header.header_len())
         .ok_or(Ipv4FragmentError::MtuTooSmall)?;

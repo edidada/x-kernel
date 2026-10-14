@@ -39,7 +39,9 @@ fn fragment_with_id(
     let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
     bytes.extend_from_slice(payload);
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let header = ipv4::Ipv4PacketView::validate_input_packet(&mut packet)
+        .unwrap()
+        .header();
     (packet, header)
 }
 

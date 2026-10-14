@@ -38,14 +38,16 @@ fn dont_fragment_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
 
 #[def_test]
 fn test_validate_input_packet_accepts_valid_checksum() {
-    let mut packet = PacketBuf::from_ip_packet_vec(
-        1,
-        ipv4_packet(PROTOCOL_UDP, &[1, 2]),
-        PacketOwner::DeviceRx,
-    );
+    let mut bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2]);
+    bytes.extend_from_slice(&[0; 16]);
+    let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let view = Ipv4PacketView::validate_input_packet(&mut packet).unwrap();
+    let header = view.header();
 
+    assert_eq!(view.payload(), &[1, 2]);
+    assert_eq!(view.packet_len(), IPV4_MIN_HEADER_LEN + 2);
+    assert_eq!(view.packet().len(), header.total_len());
     assert_eq!(header.protocol(), PROTOCOL_UDP);
     assert_eq!(header.header_len(), IPV4_MIN_HEADER_LEN);
     assert_eq!(header.total_len(), IPV4_MIN_HEADER_LEN + 2);
@@ -62,7 +64,9 @@ fn test_validate_input_packet_marks_fragment() {
     bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let header = Ipv4PacketView::validate_input_packet(&mut packet)
+        .unwrap()
+        .header();
 
     assert!(header.is_fragmented());
 }
@@ -74,7 +78,7 @@ fn test_validate_input_packet_rejects_bad_checksum() {
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
     assert_eq!(
-        Ipv4Header::validate_input_packet(&mut packet),
+        Ipv4PacketView::validate_input_packet(&mut packet),
         Err(Ipv4Error::BadChecksum)
     );
 }
@@ -93,11 +97,34 @@ fn test_prepare_output_packet_repairs_checksum() {
 }
 
 #[def_test]
+fn test_output_view_accepts_unfinalized_header() {
+    let mut bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2, 3]);
+    bytes[2..4].fill(0);
+    bytes[10..12].fill(0);
+
+    let view = Ipv4PacketView::parse_output(&bytes).unwrap();
+
+    assert_eq!(view.packet(), bytes.as_slice());
+    assert_eq!(view.packet_len(), IPV4_MIN_HEADER_LEN + 3);
+    assert_eq!(view.header().total_len(), view.packet_len());
+    assert_eq!(view.payload(), &[1, 2, 3]);
+    assert_eq!(
+        Ipv4PacketView::parse_input(&bytes),
+        Err(Ipv4Error::Malformed)
+    );
+}
+
+#[def_test]
 fn test_fragment_output_packet_splits_on_aligned_payload() {
     let original_payload: Vec<u8> = (0..40).collect();
     let packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
 
-    let fragments = fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 18, 0x1234).unwrap();
+    let fragments = fragment_output_packet(
+        Ipv4PacketView::parse_output(&packet).unwrap(),
+        IPV4_MIN_HEADER_LEN + 18,
+        0x1234,
+    )
+    .unwrap();
 
     assert_eq!(fragments.len(), 3);
     let mut reassembled = Vec::new();
@@ -117,7 +144,11 @@ fn test_fragment_output_packet_rejects_dont_fragment() {
     let packet = dont_fragment_ipv4_packet(PROTOCOL_UDP, &[0u8; 32]);
 
     assert_eq!(
-        fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 16, 0x1234),
+        fragment_output_packet(
+            Ipv4PacketView::parse_output(&packet).unwrap(),
+            IPV4_MIN_HEADER_LEN + 16,
+            0x1234,
+        ),
         Err(Ipv4FragmentError::DontFragment)
     );
 }

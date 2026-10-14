@@ -969,6 +969,12 @@ Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRx
 
 Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, IPv4 validation, fragment reassembly, output fragmentation, and ICMPv4 errors. TCP, raw IP, and IPv6 use the smoltcp socket set, driven by `knet-poller` and explicit `NetworkPoller::assist_once` calls. This boundary keeps UDP independent of smoltcp socket handles while preserving TCP and raw-socket semantics.
 
+`Ipv4PacketView` binds a parsed IPv4 header to a borrowed packet slice. Receive
+processing passes the validated view to ICMP error inspection; output routing
+passes its view to fragmentation. These consumers reuse the header and payload
+bounds established at the boundary. The view adds no allocation or persistent
+cache to `PacketBuf`.
+
 ### Budgeted Processing
 
 The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share one `NetworkPoller`. Its IRQ-safe state lock protects pending demand and grants execution to a single owner through `PollState::claim`. Notifications received during execution set `RUNNING_PENDING`, causing completion to schedule another batch. Assist only consumes scheduled work; it neither creates events nor waits for ownership.

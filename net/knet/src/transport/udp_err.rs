@@ -11,7 +11,7 @@ use kerrno::LinuxError;
 use super::udp::{self, UdpSocketQueuedError};
 use crate::{
     SocketErrorInfo, SocketErrorOrigin,
-    ipv4::{self, Ipv4Header},
+    ipv4::{self, Ipv4Header, Ipv4PacketView},
 };
 
 const ICMPV4_DST_UNREACHABLE: u8 = 3;
@@ -98,25 +98,22 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
     }
 }
 
-/// Inspect an IPv4 ICMP error and queue it for the affected UDP socket.
+/// Inspects a validated IPv4 ICMP error and queues it for the affected UDP socket.
 ///
 /// ICMP errors quote the packet that triggered the error, so this path parses
-/// the outer IPv4 and ICMP headers, then the quoted IPv4 and UDP headers. The
+/// the ICMP header, then the quoted IPv4 and UDP headers. The
 /// quoted UDP 4-tuple and `ingress_ifindex` determine the receiving socket: a
 /// connected socket that matches the peer is preferred, and an unconnected
 /// socket bound to the local endpoint is used as a fallback.
 ///
 /// This mirrors Linux's UDP ICMP error lookup in
 /// `net/ipv4/udp.c::__udp4_lib_err()`.
-pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
-    let ip_packet = match Ipv4Header::parse_input(packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
-        _ => return,
-    };
-    let icmp_packet = match ipv4::payload(packet, &ip_packet) {
-        Some(payload) => payload,
-        _ => return,
-    };
+pub(crate) fn inspect_icmpv4_error(packet: Ipv4PacketView<'_>, ingress_ifindex: i32) {
+    let ip_packet = packet.header();
+    if ip_packet.protocol() != ipv4::PROTOCOL_ICMP {
+        return;
+    }
+    let icmp_packet = packet.payload();
     let icmp = match Icmpv4Slice::from_slice(icmp_packet) {
         Ok(icmp) => icmp,
         Err(_) => return,

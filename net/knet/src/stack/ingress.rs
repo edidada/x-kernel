@@ -18,7 +18,7 @@ use crate::{
     ip::{Ipv4Address, Ipv4Cidr},
     network::{
         fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-        ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
+        ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header, Ipv4PacketView},
     },
     udp, udp_err,
 };
@@ -108,11 +108,14 @@ impl IngressProcessor {
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
-        let header = match Ipv4Header::validate_input_packet(&mut packet) {
-            Ok(header) => header,
+        let packet_type = packet.packet_type();
+        let ifindex = packet.ifindex();
+        let view = match Ipv4PacketView::validate_input_packet(&mut packet) {
+            Ok(view) => view,
             Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return,
         };
 
+        let header = view.header();
         if !self.is_local_ipv4_destination(header.dst_addr()) {
             return;
         }
@@ -128,7 +131,6 @@ impl IngressProcessor {
         }
 
         if header.protocol() == ipv4::PROTOCOL_UDP {
-            let packet_type = packet.packet_type();
             let packet = match udp::prepare_ipv4_packet(header, packet) {
                 Ok(packet) => packet,
                 Err(_) => return,
@@ -157,21 +159,17 @@ impl IngressProcessor {
         }
 
         if should_emit_protocol_unreachable(header) {
-            if let Some(ip_packet) = packet.network_packet() {
-                queue_icmpv4_error(
-                    control_packets,
-                    Icmpv4Error::ProtocolUnreachable,
-                    packet.packet_type(),
-                    header,
-                    ip_packet,
-                );
-            }
+            queue_icmpv4_error(
+                control_packets,
+                Icmpv4Error::ProtocolUnreachable,
+                packet_type,
+                header,
+                view.packet(),
+            );
             return;
         }
 
-        if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
-        }
+        udp_err::inspect_icmpv4_error(view, ifindex);
         accepted_packets.push(packet);
     }
 

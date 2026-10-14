@@ -769,8 +769,8 @@ impl Router {
     }
 
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
-        let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
-        let dst_addr = IpAddress::Ipv4(header.dst_addr());
+        let view = ipv4::Ipv4PacketView::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
+        let dst_addr = IpAddress::Ipv4(view.header().dst_addr());
         let Some(mtu) = self.route_mtu(&dst_addr) else {
             return Ok(vec![packet]);
         };
@@ -780,7 +780,7 @@ impl Router {
 
         let identification = self.next_ipv4_identification;
         self.next_ipv4_identification = self.next_ipv4_identification.wrapping_add(1).max(1);
-        ipv4::fragment_output_packet(&packet, mtu, identification).map_err(|err| match err {
+        ipv4::fragment_output_packet(view, mtu, identification).map_err(|err| match err {
             ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
             ipv4::Ipv4FragmentError::DontFragment | ipv4::Ipv4FragmentError::MtuTooSmall => {
                 LinuxError::EMSGSIZE.into()
