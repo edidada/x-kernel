@@ -339,7 +339,7 @@ impl DeviceResourceServices for NoServices {
         _: u64,
         _: MmioRegion,
         _: &'static str,
-    ) -> Result<crate::iomap::IoMap, RuntimeError> {
+    ) -> Result<crate::handle::IoMap, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -348,7 +348,7 @@ impl DeviceResourceServices for NoServices {
         _: u64,
         _: IrqSpec,
         _: &'static str,
-        _: crate::services::IrqHandlerFn,
+        _: crate::handle::IrqHandlerFn,
     ) -> Result<crate::handle::DevIrq, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }

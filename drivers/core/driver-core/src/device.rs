@@ -11,10 +11,9 @@ use crate::{
     bus::Bus,
     desc::{DeviceDescriptor, FirmwareProp},
     error::{DepSource, ProbeError, RuntimeError},
-    handle::{ClkHandle, CoherentMem, DevIrq},
-    iomap::IoMap,
+    handle::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction},
     resource::{ClkSpec, IrqSpec, MmioRegion},
-    services::{DeviceServices, ExtensionService, IrqAction},
+    services::{DeviceServices, ExtensionService},
 };
 
 /// Domain-allocated device identity (monotonic, per-`DeviceDomain`).

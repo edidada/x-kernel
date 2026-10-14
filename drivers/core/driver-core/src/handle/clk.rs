@@ -2,107 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Driver-side runtime resource handles (guards-in-`Data` family).
-//!
-//! Each handle owns everything a live resource needs and releases it in
-//! the Linux remove order on drop: MMIO mappings stay valid while any
-//! guard lives, IRQs detach their handler, clocks release prepare/enable,
-//! coherent memory unmaps.
+//! The clock family: an acquired clock input and its prepare+enable guard.
 
 use alloc::sync::Arc;
 use core::fmt;
 
-use crate::{error::RuntimeError, services::ClkOps};
-
-/// Deferred resource release hook carried by every guard.
-pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
-
-/// A registered device interrupt; released (handler freed, line freed) on
-/// drop.
-pub struct DevIrq {
-    number: usize,
-    release: Option<ReleaseHook>,
-}
-
-impl fmt::Debug for DevIrq {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DevIrq")
-            .field("number", &self.number)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DevIrq {
-    /// Constructed by [`DeviceServices`] implementations.
-    pub fn new(number: usize, release: Option<ReleaseHook>) -> Self {
-        Self { number, release }
-    }
-
-    pub const fn number(&self) -> usize {
-        self.number
-    }
-}
-
-impl Drop for DevIrq {
-    fn drop(&mut self) {
-        if let Some(release) = self.release.take() {
-            release();
-        }
-    }
-}
-
-/// Coherent DMA memory; freed on drop.
-pub struct CoherentMem {
-    cpu: usize,
-    bus: u64,
-    len: usize,
-    release: Option<ReleaseHook>,
-}
-
-impl fmt::Debug for CoherentMem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CoherentMem")
-            .field("bus", &self.bus)
-            .field("len", &self.len)
-            .finish_non_exhaustive()
-    }
-}
-
-impl CoherentMem {
-    /// Constructed by [`DeviceServices`] implementations.
-    pub fn new(cpu: usize, bus: u64, len: usize, release: Option<ReleaseHook>) -> Self {
-        Self {
-            cpu,
-            bus,
-            len,
-            release,
-        }
-    }
-
-    pub fn as_ptr(&self) -> *mut u8 {
-        self.cpu as *mut u8
-    }
-
-    pub const fn bus_addr(&self) -> u64 {
-        self.bus
-    }
-
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-impl Drop for CoherentMem {
-    fn drop(&mut self) {
-        if let Some(release) = self.release.take() {
-            release();
-        }
-    }
-}
+use super::ReleaseHook;
+use crate::{error::RuntimeError, provider::ClkOps};
 
 /// An acquired clock input (`struct clk *`); drops the reference on drop.
 ///

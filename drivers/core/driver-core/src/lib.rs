@@ -93,7 +93,6 @@ mod resource;
 
 pub mod desc;
 mod handle;
-mod iomap;
 mod services;
 
 pub use bus::{Bus, BusId, BusInstanceId, IdMatchEntry, MatchScore};
@@ -109,15 +108,16 @@ pub use domain::{
 };
 pub use driver::{DriverDesc, DriverOps};
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
-pub use handle::{ClkHandle, CoherentMem, DevIrq, EnabledClock, ReleaseHook};
-pub use iomap::IoMap;
+pub use handle::{
+    ClkHandle, CoherentMem, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn, ReleaseHook,
+};
+pub use provider::ClkOps;
 pub use resource::{
     ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
     ResourceEntry, ResourceKind, ResourceMap,
 };
 pub use services::{
-    ClkOps, ClockConsumerServices, DeviceResourceServices, DeviceServices, ExtensionService,
-    IrqAction, IrqHandlerFn, ServiceError,
+    ClockConsumerServices, DeviceResourceServices, DeviceServices, ExtensionService, ServiceError,
 };
 
 pub mod platform {

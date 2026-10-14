@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The MMIO mapping handle: `devm_ioremap`-style ownership in one object.
+//! The MMIO family: the mapping handle (`devm_ioremap` ownership).
 
 use core::{
     fmt, ptr,

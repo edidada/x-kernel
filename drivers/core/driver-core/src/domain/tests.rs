@@ -14,10 +14,9 @@ use crate::{
     bus::{BusInstanceId, PlatformId},
     desc::DeviceDescriptor,
     driver::{DriverDesc, DriverOps},
-    handle::{ClkHandle, DevIrq},
-    iomap::IoMap,
+    handle::{ClkHandle, DevIrq, IoMap, IrqAction},
     platform::{OfMatch, PlatformBus},
-    services::{ClkOps, IrqAction},
+    provider::ClkOps,
 };
 
 struct FixedClk {
@@ -109,7 +108,7 @@ impl DeviceResourceServices for MockServices {
         _: u64,
         spec: IrqSpec,
         _: &'static str,
-        _: crate::services::IrqHandlerFn,
+        _: crate::handle::IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
         Ok(DevIrq::new(
             match spec {

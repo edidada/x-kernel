@@ -36,12 +36,11 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/desc.rs` | 总线枚举的描述词汇：`DeviceDescriptor` / `DeviceIdentity` / `DeviceLocation` / `FirmwareProp` / `FirmwareNodeInfo` |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc` |
 | `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCtx`（probe 侧表面，驱动持有的唯一对象）、`BoundDevice` |
-| `src/services.rs` | 服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` / `ExtensionService` / `IrqAction` / `ServiceError` / `ClkOps` |
-| `src/iomap.rs` | MMIO 映射句柄 `IoMap`（`devm_ioremap` 语义 + 访问 API） |
-| `src/handle.rs` | 驱动侧运行时资源句柄（guards-in-Data 家族）：`DevIrq` / `CoherentMem` / `ClkHandle` / `EnabledClock` |
+| `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
+| `src/handle/` | 驱动侧运行时资源句柄，按资源家族一文件（guards-in-Data 契约在 mod.rs）：`iomap.rs`（`IoMap`）/ `irq.rs`（`DevIrq` + `IrqAction`/`IrqHandlerFn`）/ `dma.rs`（`CoherentMem`）/ `clk.rs`（`ClkHandle` / `EnabledClock`） |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
 | `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec` |
-| `src/provider.rs` | 主机实现的 Op 契约：`MmioOp`/`IrqOp`/`DmaOp` + `IrqRouteDesc`/`MsiResource` |
+| `src/provider.rs` | 主机实现的 Op 契约（每资源家族一个 vtable）：`MmioOp`/`IrqOp`/`DmaOp`/`ClkOps` + `IrqRouteDesc`/`MsiResource` |
 | `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`DeviceLifecycleObserver`、`global_domain()` |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |

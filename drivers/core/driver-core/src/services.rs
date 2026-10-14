@@ -7,31 +7,11 @@
 //! The host implements these over its kernel capabilities; mock services
 //! in tests keep the model host-free (L0-b).
 
-use alloc::sync::Arc;
-
 use crate::{
     error::{DepSource, ProbeError, RuntimeError},
-    handle::{ClkHandle, CoherentMem, DevIrq},
-    iomap::IoMap,
+    handle::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqHandlerFn},
     resource::{ClkSpec, DmaInfo, IrqSpec, MmioRegion},
 };
-
-/// Outcome of an interrupt handler invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqAction {
-    /// The interrupt was ours and has been acked.
-    Handled,
-    /// Not ours (shared line).
-    NotHandled,
-}
-
-// NOTE: there is deliberately no `WakeThread` variant. kirq has no
-// threaded-handler vocabulary yet; a half-supported variant whose
-// "wake the thread" half silently degrades to Handled at the runtime
-// adapter would let drivers believe they run work in task context while
-// actually running it in IRQ context. Re-add it together with a real
-// threaded-IRQ path (DeviceServices::request_threaded_irq + a scheduler
-// handoff), never as a silent degradation.
 
 /// Service errors, including deferred dependencies.
 ///
@@ -49,13 +29,6 @@ impl From<RuntimeError> for ServiceError {
         Self::Fatal(err)
     }
 }
-
-/// Type-erased interrupt handler registered by [`DeviceCtx::request_irq`].
-///
-/// The handler carries its own context (the `dev_id` pattern): drivers close
-/// over a `Weak` handle into their own `Data`; there is no global irq-to-
-/// device routing table anywhere in the framework.
-pub type IrqHandlerFn = Arc<dyn Fn() -> IrqAction + Send + Sync>;
 
 /// A family-specific service extension (virtio transport probing, future
 /// controller abstractions). The family declares the trait and teaches it
@@ -142,33 +115,6 @@ pub trait DeviceServices: DeviceResourceServices + ClockConsumerServices + Send 
     /// The runtime's concrete type, for extension-trait downcasts. The core
     /// stays family-agnostic: extensions name the runtime type they support.
     fn as_any(&self) -> &dyn core::any::Any;
-}
-
-/// Provider-side clock operations behind a [`ClkHandle`].
-///
-/// The `kclk` subsystem (the common clock framework core, ported from the `clk/tail` branch
-/// acceptance) implements this for real hardware clocks; tests implement it
-/// with fixed-rate fakes.
-pub trait ClkOps: Send + Sync {
-    fn name(&self) -> &str;
-
-    fn get_rate(&self) -> u64;
-
-    fn round_rate(&self, rate: u64) -> Result<u64, RuntimeError>;
-
-    fn set_rate(&self, rate: u64) -> Result<u64, RuntimeError>;
-
-    fn prepare(&self) -> Result<(), RuntimeError>;
-
-    fn unprepare(&self);
-
-    fn enable(&self) -> Result<(), RuntimeError>;
-
-    fn disable(&self);
-
-    fn is_prepared(&self) -> bool;
-
-    fn is_enabled(&self) -> bool;
 }
 
 impl From<ServiceError> for ProbeError {

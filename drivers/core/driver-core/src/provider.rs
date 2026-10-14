@@ -21,10 +21,12 @@ use core::ptr::NonNull;
 
 use kirq::{IrqEvent, IrqHandler};
 
+use crate::error::RuntimeError;
 pub use crate::resource::{IrqController, IrqDomainId, IrqTrigger, MmioRegion};
 
 /// Device-visible MSI message returned by the host IRQ core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
 pub struct MsiMessage {
     /// Message address programmed into the device.
     pub address: u64,
@@ -420,4 +422,31 @@ pub enum DmaDirection {
     DeviceToDriver,
     /// Bidirectional (host flushes and invalidates as needed).
     Bidirectional,
+}
+
+/// Provider-side clock operations behind a [`ClkHandle`].
+///
+/// The `kclk` subsystem (the common clock framework core, ported from the `clk/tail` branch
+/// acceptance) implements this for real hardware clocks; tests implement it
+/// with fixed-rate fakes.
+pub trait ClkOps: Send + Sync {
+    fn name(&self) -> &str;
+
+    fn get_rate(&self) -> u64;
+
+    fn round_rate(&self, rate: u64) -> Result<u64, RuntimeError>;
+
+    fn set_rate(&self, rate: u64) -> Result<u64, RuntimeError>;
+
+    fn prepare(&self) -> Result<(), RuntimeError>;
+
+    fn unprepare(&self);
+
+    fn enable(&self) -> Result<(), RuntimeError>;
+
+    fn disable(&self);
+
+    fn is_prepared(&self) -> bool;
+
+    fn is_enabled(&self) -> bool;
 }
