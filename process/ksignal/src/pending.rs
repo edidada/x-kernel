@@ -61,8 +61,13 @@ impl PendingSignals {
                 // `exec_de_thread` can drop only its own kernel group kill
                 // without losing a concurrent user `kill(2)`/`tgkill(2)`.
                 let slot = &mut self.info_std[signo as usize];
+                // Only `SIGKILL` needs the source distinction: `exec_de_thread`
+                // discards its own kernel group kill and must not also drop a
+                // concurrent user `kill(2)`/`tgkill(2)`. Other positive codes
+                // (e.g. `CLD_*` on a pending SIGCHLD) are real payloads and
+                // keep standard-signal coalescing.
                 let pending_is_kernel = slot.as_ref().is_some_and(|pending| pending.code() > 0);
-                if sig.code() <= 0 && pending_is_kernel {
+                if signo == Signo::SIGKILL && sig.code() <= 0 && pending_is_kernel {
                     *slot = Some(Box::new(sig));
                     return true;
                 }

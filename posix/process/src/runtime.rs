@@ -345,6 +345,8 @@ pub fn exec_de_thread() -> bool {
 
         let kill = SignalInfo::new_kernel(Signo::SIGKILL);
         for task in &siblings {
+            // `send_to_thread` interrupts the target as well, so a sibling in
+            // interruptible sleep wakes to take the uncatchable SIGKILL.
             let _ =
                 process_signals::send_to_thread(None, task.as_thread().tid(), Some(kill.clone()));
         }

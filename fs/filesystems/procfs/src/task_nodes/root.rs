@@ -507,17 +507,24 @@ impl ProcExeLink {
         })
     }
 
-    fn display_target(&self) -> VfsResult<String> {
+    /// Requires the same real-cred read access as a ptrace read.
+    ///
+    /// Only the outlets that expose the link's target content call this, matching
+    /// Linux's `proc_pid_get_link`; `getattr`/lstat does not. A kernel task has
+    /// no user credentials to compare and is treated as privileged.
+    fn check_access(&self) -> VfsResult<()> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let target = task.as_thread();
-        // Every outlet that exposes the display target checks read access here,
-        // covering `readlink`, `getattr`/size and `get_link`. A kernel task has
-        // no user credentials to compare and is treated as privileged.
         if let Some(caller) = ktask::current().try_as_thread() {
             kprocess::ptrace::check_read_real_creds_access(caller, target)
                 .map_err(|_| VfsError::OperationNotPermitted)?;
         }
-        let process = target.process();
+        Ok(())
+    }
+
+    fn display_target(&self) -> VfsResult<String> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let process = task.as_thread().process();
         // Render from the opened backing file so `readlink` and `follow` name
         // the same object even when the exec display path is synthetic (e.g.
         // `execveat(AT_EMPTY_PATH)` on a memfd).
@@ -530,8 +537,13 @@ impl ProcExeLink {
             .or_else(|_| process.exe_path())
     }
 
+    /// Returns the symlink's reported size.
+    ///
+    /// Linux's proc pid symlink inode keeps `i_size == 0`; the target string is
+    /// produced only by the access-checked read paths, so `stat` neither fails
+    /// nor reveals the target length.
     fn target_len(&self) -> VfsResult<u64> {
-        Ok(self.display_target()?.len() as u64)
+        Ok(0)
     }
 }
 
@@ -569,6 +581,7 @@ impl InodeSymlinkOperations for ProcExeLink {
         _inode: &kvfs::VfsInode,
         _done: &mut kvfs::DelayedCall,
     ) -> VfsResult<String> {
+        self.check_access()?;
         self.display_target()
     }
 }
@@ -579,6 +592,7 @@ impl FileOperations for ProcExeLink {
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        self.check_access()?;
         let target = self.display_target()?;
         let data = target.as_bytes();
         if offset >= data.len() as u64 {
@@ -597,6 +611,7 @@ impl FileOperations for ProcExeLink {
 
 impl MagicLinkOps for ProcExeLink {
     fn readlink_display(&self) -> VfsResult<String> {
+        self.check_access()?;
         self.display_target()
     }
 
@@ -604,12 +619,9 @@ impl MagicLinkOps for ProcExeLink {
         if flags.rejects_magic_links() || !flags.follows_final() {
             return Err(VfsError::FilesystemLoop);
         }
+        self.check_access()?;
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let target = task.as_thread();
-        if let Some(caller) = ktask::current().try_as_thread() {
-            kprocess::ptrace::check_read_real_creds_access(caller, target)
-                .map_err(|_| VfsError::OperationNotPermitted)?;
-        }
         let exe_file = target
             .process()
             .exe_file()
