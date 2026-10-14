@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 
-use crate::{MAX_SIGNALS, SignalInfo, SignalSet};
+use crate::{MAX_SIGNALS, SignalInfo, SignalSet, Signo};
 
 /// Queue for managing pending signals awaiting delivery.
 ///
@@ -78,5 +78,24 @@ impl PendingSignals {
                 self.info_std[signo as usize].take().map(|boxed| *boxed)
             }
         })
+    }
+
+    /// Removes a pending standard signal only when its queued instance is
+    /// kernel-originated (`si_code > 0`), leaving a user-originated instance
+    /// queued. Returns whether an entry was removed.
+    ///
+    /// `exec` de_thread uses this to drop only the group-kill its sibling
+    /// sweep produced, not a concurrent user `kill(2)`/`tgkill(2)`.
+    pub fn discard_kernel_standard(&mut self, signo: Signo) -> bool {
+        if signo.is_realtime() {
+            return false;
+        }
+        let slot = &mut self.info_std[signo as usize];
+        if slot.as_ref().is_some_and(|sig| sig.code() > 0) {
+            slot.take();
+            self.set.remove(signo);
+            return true;
+        }
+        false
     }
 }

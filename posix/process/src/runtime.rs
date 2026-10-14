@@ -359,11 +359,10 @@ pub fn exec_de_thread() {
         // The first sibling's death marked the group as exited and queued a
         // group-kill `SIGKILL` for this thread too; undo both so this thread
         // survives the next signal check and reports its own exit code later.
+        // Remove only the kernel-originated group kill: a concurrent user
+        // `kill(2)`/`tgkill(2)` must survive the exec.
         process.reset_group_exit();
-        let manager = thr.signal_manager();
-        let mut kill_mask = SignalSet::default();
-        kill_mask.add(Signo::SIGKILL);
-        while manager.dequeue_signal(&kill_mask).is_some() {}
+        thr.signal_manager().discard_kernel_signal(Signo::SIGKILL);
     }
 
     // If the surviving thread is not the group leader, move the thread-group
