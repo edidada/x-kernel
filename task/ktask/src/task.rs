@@ -61,6 +61,13 @@ impl TaskIdentity {
         }
     }
 
+    fn identity_token(&self) -> Option<kidentity::TaskIdentityToken> {
+        match self {
+            Self::User { user_runtime } => user_runtime.get().map(UserTaskRuntime::identity_token),
+            Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
+        }
+    }
+
     fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
         match self {
             Self::User { user_runtime } => user_runtime.get(),
@@ -419,11 +426,13 @@ impl TaskInner {
 
     /// Returns the scheduler-internal owner key.
     ///
-    /// The key is the task's own address, which stays stable across an `exec`
-    /// leader takeover, so a lock owner remains identifiable after the number
-    /// moves.
+    /// The key is the task's never-reused identity token, so it survives an
+    /// `exec` number takeover and cannot alias a later task at a reused
+    /// address; kernel, idle, and internal tasks fall back to their address.
     pub fn owner_key(&self) -> u64 {
-        self as *const _ as usize as u64
+        self.identity
+            .identity_token()
+            .map_or(self as *const _ as usize as u64, |token| token.as_u64())
     }
 
     /// Gets the name of the task.

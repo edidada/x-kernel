@@ -192,11 +192,14 @@ impl Process {
         let thread = task.as_thread();
         let old_tid = thread.tid();
         let pid = self.pid();
-        if old_tid == pid {
-            return true;
-        }
+        // Verify the sole-survivor invariant for the leader case too, so a
+        // sibling published during the sweep is refused instead of being left
+        // running against the old address space.
         if self.thread_count() != 1 || !self.contains_published_tid(old_tid) {
             return false;
+        }
+        if old_tid == pid {
+            return true;
         }
         if !process_publication().move_task_number(task, old_tid, pid) {
             return false;

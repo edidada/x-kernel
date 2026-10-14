@@ -327,40 +327,55 @@ pub fn exec_de_thread() {
     let process = thr.process();
     let tid = thr.tid();
 
-    let siblings: Vec<_> = scheduler::process_tasks(process.as_ref())
-        .into_iter()
-        .filter(|task| task.as_thread().tid() != tid)
-        .collect();
-    if siblings.is_empty() {
-        return;
+    // A sibling can publish between the snapshot and the joins, so sweep until
+    // only this thread remains. Linux `de_thread` likewise waits for every
+    // other thread to exit; a thread that publishes after the sweep makes the
+    // leader-takeover precondition below fail, and that is fatal rather than a
+    // silent stale-image survivor.
+    let mut swept = false;
+    loop {
+        let siblings: Vec<_> = scheduler::process_tasks(process.as_ref())
+            .into_iter()
+            .filter(|task| task.as_thread().tid() != tid)
+            .collect();
+        if siblings.is_empty() {
+            break;
+        }
+        swept = true;
+
+        let kill = SignalInfo::new_kernel(Signo::SIGKILL);
+        for task in &siblings {
+            let _ =
+                process_signals::send_to_thread(None, task.as_thread().tid(), Some(kill.clone()));
+        }
+        // Wait for every sibling to fully exit before touching the shared
+        // address space, mirroring Linux waiting on each thread's exit.
+        for task in siblings {
+            let _ = task.join();
+        }
     }
 
-    let kill = SignalInfo::new_kernel(Signo::SIGKILL);
-    for task in &siblings {
-        let _ = process_signals::send_to_thread(None, task.as_thread().tid(), Some(kill.clone()));
+    if swept {
+        // The first sibling's death marked the group as exited and queued a
+        // group-kill `SIGKILL` for this thread too; undo both so this thread
+        // survives the next signal check and reports its own exit code later.
+        process.reset_group_exit();
+        let manager = thr.signal_manager();
+        let mut kill_mask = SignalSet::default();
+        kill_mask.add(Signo::SIGKILL);
+        while manager.dequeue_signal(&kill_mask).is_some() {}
     }
-    // Wait for every sibling to fully exit before touching the shared
-    // address space, mirroring Linux waiting on each thread's exit.
-    for task in siblings {
-        let _ = task.join();
-    }
-
-    // The first sibling's death marked the group as exited and queued a
-    // group-kill `SIGKILL` for this thread too; undo both so this thread
-    // survives the next signal check and reports its own exit code later.
-    process.reset_group_exit();
-    let manager = thr.signal_manager();
-    let mut kill_mask = SignalSet::default();
-    kill_mask.add(Signo::SIGKILL);
-    while manager.dequeue_signal(&kill_mask).is_some() {}
 
     // If the surviving thread is not the group leader, move the thread-group
     // identity onto it here, while this phase can still sleep. The number
     // directory entry moves once and the thread adopts the group number;
     // membership and cgroup key on the stable identity and need no change, so
-    // the address-space exchange below stays a pure pointer swap.
+    // the address-space exchange below stays a pure pointer swap. Takeover also
+    // re-verifies the single-survivor invariant; failing it is fatal, otherwise
+    // a late sibling would keep running against the old image.
     if !process.assume_leader_identity(&current()) {
         error!("exec_de_thread: leader identity takeover failed after the sibling sweep");
+        do_exit(Signo::SIGSEGV as i32, true);
     }
 }
 
