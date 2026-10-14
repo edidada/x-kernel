@@ -6,29 +6,57 @@
 use kerrno::KResult;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
-use crate::{UsageKind, global_allocator};
+use crate::{FrameRun, UsageKind, global_allocator};
 
 /// A RAII wrapper for contiguous 4K-sized pages.
 ///
-/// Automatically deallocates the pages when dropped.
+/// Owns the complete backing through the common frame lifetime. Its safe data
+/// views cover only the requested pages; buddy rounding slack is also retained
+/// and released. This wrapper does not expose shared mutable page ownership.
 #[derive(Debug)]
 pub struct GlobalPage {
-    start_va: VirtAddr,
+    frames: FrameRun<'static>,
     num_pages: usize,
 }
 
 impl GlobalPage {
-    /// Reconstruct a `GlobalPage` from a known VA and page count.
+    /// Restores a previously transferred physical allocation.
     ///
     /// # Safety
     ///
-    /// `start_va` must have been returned by a prior `alloc_pages` with the
-    /// same `num_pages`, and no other `GlobalPage` currently owns it.
-    pub unsafe fn from_raw(start_va: VirtAddr, num_pages: usize) -> Self {
-        Self {
-            start_va,
-            num_pages,
+    /// The PA and requested page count must come from one outstanding
+    /// GlobalPage::into_raw transfer (or an intentionally retained GlobalPage
+    /// whose destruction was suppressed). It must be restored exactly once,
+    /// with no other data owner, after the required hardware/mapping retirement.
+    /// Raw alloc_pages addresses and bare PFNs do not satisfy this contract.
+    pub unsafe fn from_raw(paddr: PhysAddr, num_pages: usize) -> Self {
+        assert!(num_pages > 0);
+        let backing = num_pages
+            .checked_next_power_of_two()
+            .expect("transferred global page count must not overflow");
+        // SAFETY: the caller transfers exactly this GlobalPage's outstanding
+        // holds on every rounded backing page from the static global allocator.
+        let frames = unsafe { global_allocator().frame_run_from_raw(paddr, backing) };
+        for index in 0..backing {
+            let meta = global_allocator()
+                .frame_meta(paddr.as_usize() / PAGE_SIZE_4K + index)
+                .expect("restored global page must be fully described");
+            assert!(
+                matches!(meta.state(), crate::FrameState::Shared { references: 1 }),
+                "GlobalPage data access requires unique ownership"
+            );
         }
+        Self { frames, num_pages }
+    }
+
+    /// Transfers ownership as a physical address and requested page count.
+    ///
+    /// Counts are unchanged. The recipient must restore this transfer exactly
+    /// once with from_raw, retaining it through any hardware/mapping retirement.
+    pub fn into_raw(self) -> (PhysAddr, usize) {
+        let Self { frames, num_pages } = self;
+        let (paddr, _) = frames.into_raw();
+        (paddr, num_pages)
     }
 
     /// Allocates one 4K-sized page.
@@ -50,15 +78,12 @@ impl GlobalPage {
 
     /// Get the start virtual address of the page.
     pub fn start_va(&self) -> VirtAddr {
-        self.start_va
+        self.frames.kernel_addr()
     }
 
-    /// Get the start physical address by converting the virtual address.
-    pub fn start_pa<F>(&self, v2p: F) -> PhysAddr
-    where
-        F: FnOnce(VirtAddr) -> PhysAddr,
-    {
-        v2p(self.start_va)
+    /// Returns the allocation's physical identity without address conversion.
+    pub fn start_pa(&self) -> PhysAddr {
+        self.frames.phys_addr()
     }
 
     /// Get the total size (in bytes) of these pages.
@@ -68,12 +93,12 @@ impl GlobalPage {
 
     /// Convert the start virtual address to a raw pointer.
     pub fn as_ptr(&self) -> *const u8 {
-        self.start_va.as_ptr()
+        self.start_va().as_ptr()
     }
 
     /// Convert the start virtual address to a mutable raw pointer.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.start_va.as_mut_ptr()
+        self.start_va().as_mut_ptr()
     }
 
     /// Fills the allocated pages with a specific byte value.
@@ -106,37 +131,17 @@ impl GlobalPage {
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size()) }
     }
 
-    /// Internal function to allocate pages.
     fn alloc_pages(num_pages: usize) -> KResult<Self> {
-        let va = global_allocator()
-            .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Global)
-            .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
-                _ => kerrno::KError::InvalidInput,
-            })?;
-        Ok(Self {
-            start_va: va.into(),
-            num_pages,
-        })
+        Self::alloc_pages_with_alignment(num_pages, PAGE_SIZE_4K)
     }
 
-    /// Internal function to allocate pages with specific alignment.
     fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> KResult<Self> {
-        let va = global_allocator()
-            .alloc_pages(num_pages, align_pow2, UsageKind::Global)
+        let frames = global_allocator()
+            .alloc_frame_run(num_pages, align_pow2, UsageKind::Global)
             .map_err(|e| match e {
                 alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
                 _ => kerrno::KError::InvalidInput,
             })?;
-        Ok(Self {
-            start_va: va.into(),
-            num_pages,
-        })
-    }
-}
-
-impl Drop for GlobalPage {
-    fn drop(&mut self) {
-        global_allocator().dealloc_pages(self.start_va.into(), self.num_pages, UsageKind::Global);
+        Ok(Self { frames, num_pages })
     }
 }

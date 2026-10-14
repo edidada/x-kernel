@@ -122,7 +122,7 @@ mm/kalloc/
 Other paths:
   large Rust allocation ---------------------------> page allocator
   DMA32 / alloc_pages_at --------------------------> page allocator directly
-  GlobalPage --------------------------------------> page APIs + Drop
+  GlobalPage --------------------------------------> FrameRun + base-page holds
   tracking ----------------------------------------> wraps Rust GlobalAlloc path
 ```
 
@@ -301,10 +301,15 @@ free 到 per-CPU cache 的对象。
 
 `GlobalPage` 是连续 4 KiB 页的 RAII owner：
 
-- `alloc()`、`alloc_zero()` 和 `alloc_contiguous()` 通过全局 page API 申请；
-- `fill()`、`zero()`、`as_slice()` 和 `as_slice_mut()` 在 owner 范围内提供字节访问；
-- `Drop` 使用相同页数和 `UsageKind::Global` 自动归还；
-- `from_raw()` 用于从已知唯一 ownership 的 raw allocation 重建 owner，因此是 unsafe。
+- `alloc()`、`alloc_zero()` 和 `alloc_contiguous()` 通过 `alloc_frame_run` 申请；
+- 内部 `FrameRun` 持有每个实际 backing 页；请求 3 页时 buddy 给出的 4 页全部纳入
+  描述符和统计，safe 字节视图只暴露请求的 3 页；
+- `fill()`、`zero()`、`as_slice()` 和 `as_slice_mut()` 保留唯一内容 owner 协议，
+  GlobalPage 不暴露可以与 safe slice 并存的共享页克隆；
+- 字段析构逐个结束 backing 页持有，最后持有结束时归还所属分配器；
+- `start_pa()` 直接返回物理身份，不接受外部 VA→PA 回调；
+- `into_raw()` 显式转移 PA 和请求页数；unsafe `from_raw()` 只恢复同一未结束的
+  transfer，并校验全部 backing 页为唯一持有，不再接受裸页分配地址。
 
 ### Usage accounting
 

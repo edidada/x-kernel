@@ -126,12 +126,14 @@ allocator 使用相同 class layout 分配；current-CPU mutable reference 不�
 位置：`src/page.rs` 中 `GlobalPage::from_raw()`、`fill()`、`as_slice()`、
 `as_slice_mut()`。
 
-主要操作：从 raw VA/page count 重建 RAII owner，使用 `write_bytes`，并从 raw pointer
-构造 slice。
+主要操作：从明确转移的 raw PA/requested count 恢复 FrameRun owner，使用
+`write_bytes`，并从其内容映射构造 slice。裸 alloc_pages 地址不满足恢复契约。
 
 依赖不变量：`GlobalPage` 唯一拥有从 `start_va` 开始的 `num_pages * 4096` 字节 live
-allocation；该范围保持映射，且 `&mut self` 时不存在 aliasing access。safe constructors
-由 page allocator 建立这些条件；unsafe `from_raw()` 的 caller 必须自行建立。
+allocation；全部向上取整的 backing 页均由 FrameRun 保持存活。内容范围持续映射，
+且 safe slice 借用期间不存在冲突访问。GlobalPage 不提供共享页克隆；unsafe from_raw
+要求消耗其原始 exact-once 转移，并检查所有 backing 页只有一份持有。正计数和
+一致大小仍不能证明原始 transfer 的来源，caller 必须保证来源、唯一性与硬件退休。
 
 ### U-05：per-CPU usage shared references
 
@@ -386,6 +388,8 @@ charged/live and cannot be merged as free buddies until their last holds end.
 The static raw-transfer contract preserves all holds with exact backing size and
 allocator identity; checks cannot detect every stale or forged transfer.
 
-New run tests cover rounded coverage, independently retained slack, complete
-inventory reuse, overflow, physical alignment, accounting, raw transfer and
-raw-release rejection. GlobalPage consumer migration follows separately.
+GlobalPage safe data views remain uniquely owned. Its raw transfer consumes that
+wrapper without dropping its FrameRun and restoration requires unique held backing;
+callers must retire hardware use before restoration/destruction. New tests cover
+rounded coverage, independently retained slack, complete inventory reuse, overflow,
+physical alignment, accounting, raw transfer and raw-release rejection.

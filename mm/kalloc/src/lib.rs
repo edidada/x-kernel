@@ -1148,3 +1148,5 @@ pub fn is_page_allocator_ready() -> bool {
 unittest::path_mod_test!(pub mod tests_kalloc, "../ut-tests/lib.rs");
 
 unittest::path_mod_test!(tests_frame_run, "../ut-tests/frame_run.rs");
+
+unittest::path_mod_test!(tests_global_page, "../ut-tests/global_page.rs");
