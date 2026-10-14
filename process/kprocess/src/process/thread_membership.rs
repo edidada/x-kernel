@@ -205,7 +205,7 @@ impl Process {
             return false;
         }
         thread.adopt_task_number(self.leader_task_number.clone());
-        thread.signal_manager().rebind_after_exec(old_tid, pid);
+        thread.signal_manager().rebind_after_exec(pid);
         true
     }
 
@@ -260,6 +260,9 @@ impl Process {
             // Check the real boundary, including direct kprocess test callers.
             #[cfg(unittest)]
             assert!(task.as_thread().has_exit_address_space());
+            // Signal eligibility ends with live membership, not with the last
+            // external reference to the exiting task or a later sibling exec.
+            task.as_thread().signal_manager().exit();
             thread_membership.exit_task(task, tid == self.pid());
             thread_membership.has_no_published_tasks()
         };

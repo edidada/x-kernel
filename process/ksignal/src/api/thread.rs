@@ -77,16 +77,35 @@ impl ThreadSignalManager {
         this
     }
 
-    /// Re-keys this thread's entry in the process signal registry after an
-    /// `exec` leader takeover moved its numeric TID.
+    /// Rebinds this thread's delivery target after an `exec` identity takeover.
     ///
     /// Routing selects threads by number, so the registry entry follows the
-    /// moved number; per-thread delivery itself is unchanged.
-    pub fn rebind_after_exec(&self, old_tid: u32, new_tid: u32) {
+    /// moved number; other registered managers retain their own identities and
+    /// lifecycle. The lookup compares object identity, so a reused TID cannot
+    /// rebind a successor's entry.
+    pub fn rebind_after_exec(self: &Arc<Self>, tid: u32) {
+        let this = Arc::downgrade(self);
         let mut children = self.proc.children.lock();
-        if let Some(entry) = children.iter_mut().find(|(tid, _)| *tid == old_tid) {
-            entry.0 = new_tid;
+        if let Some((number, _)) = children
+            .iter_mut()
+            .find(|(_, child)| alloc::sync::Weak::ptr_eq(child, &this))
+        {
+            *number = tid;
         }
+    }
+
+    /// Removes this thread from process-directed signal selection at exit.
+    ///
+    /// Call before retiring thread-group membership. A retained manager
+    /// reference must not keep an exited thread eligible for delivery. The
+    /// removal is idempotent and identity-compared, so a reused TID cannot
+    /// remove a successor.
+    pub fn exit(self: &Arc<Self>) {
+        let this = Arc::downgrade(self);
+        self.proc
+            .children
+            .lock()
+            .retain(|(_, child)| !alloc::sync::Weak::ptr_eq(child, &this));
     }
 
     /// Dequeues a signal from the thread's pending signals.
