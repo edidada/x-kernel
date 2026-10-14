@@ -109,15 +109,19 @@ fn test_validate_input_packet_rejects_bad_checksum() {
 
 #[def_test]
 fn test_prepare_output_packet_repairs_checksum() {
-    let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[]);
-    bytes[10] = 0;
-    bytes[11] = 0;
+    let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[1, 2, 3]);
+    bytes[2..4].fill(0);
+    bytes[10..12].fill(0);
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
 
     Ipv4Header::prepare_output_packet(&mut packet).unwrap();
 
-    let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
-    assert_eq!(header.protocol(), PROTOCOL_ICMP);
+    let view = Ipv4PacketView::parse_input(packet.network_packet().unwrap()).unwrap();
+    assert_eq!(view.header().protocol(), PROTOCOL_ICMP);
+    assert_eq!(view.header().total_len(), IPV4_MIN_HEADER_LEN + 3);
+    assert_eq!(view.payload(), &[1, 2, 3]);
+    assert_eq!(packet.transport_offset(), Some(IPV4_MIN_HEADER_LEN));
+    assert_eq!(packet.checksum_state(), ChecksumState::Verified);
 }
 
 #[def_test]
@@ -141,7 +145,9 @@ fn test_output_view_accepts_unfinalized_header() {
 #[def_test]
 fn test_fragment_output_packet_splits_on_aligned_payload() {
     let original_payload: Vec<u8> = (0..40).collect();
-    let packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
+    let mut packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
+    packet[2..4].fill(0);
+    packet[10..12].fill(0);
 
     let fragments = fragment_output_packet(
         Ipv4PacketView::parse_output(&packet).unwrap(),

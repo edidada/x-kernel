@@ -975,7 +975,9 @@ ICMP error inspection, and TCP listener preparation; output routing passes its
 view to fragmentation. These consumers reuse the header and payload
 bounds established at the boundary. The view adds no allocation or persistent
 cache to `PacketBuf`. UDP parsing extracts receive metadata before the packet
-handle is moved into a `PreparedUdpPacket`.
+handle is moved into a `PreparedUdpPacket`. Output preparation derives routing
+metadata and the finalized wire header from one parse. Fragmentation reuses the
+packet view and a single wire-header template for all fragments.
 
 ### Budgeted Processing
 

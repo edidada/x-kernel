@@ -166,20 +166,22 @@ impl Ipv4Header {
     }
 
     pub(crate) fn prepare_output_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        let header = Self::parse_output(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
-        {
-            let data = packet.network_packet_mut().ok_or(Ipv4Error::Malformed)?;
+        let (header, mut ether_header) = {
+            let data = packet.network_packet().ok_or(Ipv4Error::Malformed)?;
             let total_len = u16::try_from(data.len()).map_err(|_| Ipv4Error::Malformed)?;
-            data[2..4].copy_from_slice(&total_len.to_be_bytes());
-            let header_data = data
-                .get_mut(..header.header_len)
-                .ok_or(Ipv4Error::Malformed)?;
-            let mut ether_header = Ipv4HeaderSlice::from_slice(header_data)
-                .map_err(|_| Ipv4Error::Malformed)?
-                .to_header();
-            ether_header.header_checksum = ether_header.calc_header_checksum();
-            header_data.copy_from_slice(&ether_header.to_bytes());
-        }
+            let header_slice =
+                Ipv4HeaderSlice::from_slice(data).map_err(|_| Ipv4Error::Malformed)?;
+            let header = Self::from_slice(&header_slice, data.len());
+            let mut ether_header = header_slice.to_header();
+            ether_header.total_len = total_len;
+            (header, ether_header)
+        };
+        ether_header.header_checksum = ether_header.calc_header_checksum();
+        packet
+            .network_packet_mut()
+            .and_then(|data| data.get_mut(..header.header_len))
+            .ok_or(Ipv4Error::Malformed)?
+            .copy_from_slice(&ether_header.to_bytes());
         header.apply_to_packet(packet)
     }
 
@@ -404,6 +406,12 @@ pub(crate) fn fragment_output_packet(
         return Err(Ipv4FragmentError::MtuTooSmall);
     }
 
+    // Preserve the complete wire header, including options, across fragments.
+    let mut fragment_header = Ipv4HeaderSlice::from_slice(view.packet())
+        .map_err(|_| Ipv4FragmentError::Malformed)?
+        .to_header();
+    fragment_header.identification = identification;
+    fragment_header.dont_fragment = false;
     let mut fragments = Vec::new();
     let mut offset = 0;
     while offset < payload.len() {
@@ -415,13 +423,11 @@ pub(crate) fn fragment_output_packet(
         };
         let more_fragments = offset + fragment_payload_len < payload.len();
         fragments.push(build_ipv4_fragment(
-            packet,
-            &header,
-            payload,
+            view,
+            &mut fragment_header,
             offset,
             fragment_payload_len,
             more_fragments,
-            identification,
         )?);
         offset += fragment_payload_len;
     }
@@ -525,17 +531,13 @@ fn write_ipv4_header(
 }
 
 fn build_ipv4_fragment(
-    packet: &[u8],
-    header: &Ipv4Header,
-    payload: &[u8],
+    view: Ipv4PacketView<'_>,
+    ether_header: &mut EtherIpv4Header,
     offset: usize,
     fragment_payload_len: usize,
     more_fragments: bool,
-    identification: u16,
 ) -> Result<Vec<u8>, Ipv4FragmentError> {
-    let header_slice =
-        Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
-    let mut ether_header = header_slice.to_header();
+    let header = view.header();
     let total_len = header
         .header_len()
         .checked_add(fragment_payload_len)
@@ -546,8 +548,6 @@ fn build_ipv4_fragment(
         IpFragOffset::try_new(offset_units as u16).map_err(|_| Ipv4FragmentError::Malformed)?;
 
     ether_header.total_len = total_len;
-    ether_header.identification = identification;
-    ether_header.dont_fragment = false;
     ether_header.more_fragments = more_fragments;
     ether_header.fragment_offset = fragment_offset;
     ether_header.header_checksum = ether_header.calc_header_checksum();
@@ -555,7 +555,7 @@ fn build_ipv4_fragment(
     let mut fragment = vec![0u8; header.header_len() + fragment_payload_len];
     fragment[..header.header_len()].copy_from_slice(&ether_header.to_bytes());
     fragment[header.header_len()..].copy_from_slice(
-        payload
+        view.payload()
             .get(offset..offset + fragment_payload_len)
             .ok_or(Ipv4FragmentError::Malformed)?,
     );
