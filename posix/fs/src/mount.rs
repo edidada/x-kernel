@@ -381,17 +381,31 @@ pub fn sys_pivot_root(
     let new_root = lookup_mount_path(&process, &new_root, &cred)?;
     let put_old = lookup_mount_path(&process, &put_old, &cred)?;
 
-    let namespace = process.mnt_ns()?;
-    namespace.pivot_root(&new_root, &put_old)?;
-
-    // Linux `chroot_fs_refs(&root, &new)`: the caller's root and pwd move to
-    // the new root path. When `put_old` coincided with `new_root` (runc's
-    // `pivot_root(".", ".")`), the relocated old root covers this path until
-    // the caller umounts it, so it must stay unresolved to the topmost mount.
     let fs_context = process.fs_context()?;
-    fs_context
-        .lock()
-        .replace_root_and_pwd(new_root.clone(), new_root)?;
+    let (old_root, _old_pwd) = fs_context.lock().root_and_pwd();
+
+    let namespace = process.mnt_ns()?;
+    namespace.pivot_root(&new_root, &put_old, &old_root)?;
+
+    // Linux `chroot_fs_refs(&old_root, &new_root)`: a context rooted or cwd'd
+    // exactly at the old root moves to the new root, and anything else is left
+    // alone, so a cwd outside the old root is preserved instead of being
+    // reset. When `put_old` coincided with `new_root` (runc's
+    // `pivot_root(".", ".")`), the relocated old root covers this path until
+    // the caller umounts it, so the stored path must stay unresolved to the
+    // topmost mount.
+    //
+    // Only this caller's `FsStruct` is reachable here; sibling contexts in the
+    // same namespace are not tracked in a registry, so they keep the old root
+    // until they `chdir` or exit. See `kprocess` process/fs-context ownership
+    // for where such a registry would live.
+    let mut fs = fs_context.lock();
+    if fs.root_and_pwd().0.ptr_eq(&old_root) {
+        fs.set_root(new_root.clone())?;
+    }
+    if fs.root_and_pwd().1.ptr_eq(&old_root) {
+        fs.set_pwd(new_root)?;
+    }
     Ok(0)
 }
 

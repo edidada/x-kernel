@@ -472,16 +472,29 @@ impl MntNamespace {
     /// pivots (no stacked visible root, `new_root` equal to the visible root,
     /// `put_old` unreachable from `new_root`), and [`VfsError::NotADirectory`]
     /// when `put_old` is not a directory.
-    pub fn pivot_root(&self, new_root: &Path, put_old: &Path) -> VfsResult<()> {
+    pub fn pivot_root(
+        &self,
+        new_root: &Path,
+        put_old: &Path,
+        current_root: &Path,
+    ) -> VfsResult<()> {
         let mounts = self.mounts.lock();
         let new_mnt = Self::registered_mount_at(&mounts, new_root)?.clone();
-        let old_mnt = self.root_path().resolve_final_mount().mnt.clone();
+        // Linux resolves `pivot_root(2)` against the caller's root, which may
+        // differ from the namespace root after `chroot(2)`.
+        let old_mnt = current_root.clone().resolve_final_mount().mnt.clone();
         let root_mount = self.root.clone();
 
-        // The namespace must have a visible root stacked over a structural
-        // root mount (initial tree and every clone qualify). A bare root mount
-        // has nothing to pivot away from.
+        // The caller's root must overmount the structural root: a bare root
+        // mount has nothing to pivot away from.
         if Arc::ptr_eq(&old_mnt, &root_mount) {
+            return Err(VfsError::InvalidInput);
+        }
+        // The surgery below rearranges the namespace root stack, so it requires
+        // the caller's visible root to be the namespace's visible root. A
+        // caller root moved by `chroot(2)` is not supported yet; reject it
+        // instead of rearranging an unrelated mount.
+        if !Arc::ptr_eq(&old_mnt, &self.root_path().resolve_final_mount().mnt) {
             return Err(VfsError::InvalidInput);
         }
         // Linux: `new_mnt == root_mnt || old_mnt == root_mnt` -> EBUSY ("loop,
@@ -2402,7 +2415,11 @@ mod tests {
             .unwrap();
 
         namespace
-            .pivot_root(&new_mnt.root_path(), &put_old)
+            .pivot_root(
+                &new_mnt.root_path(),
+                &put_old,
+                &namespace.visible_root_path(),
+            )
             .unwrap();
 
         // `/` now resolves to the new root's filesystem.
@@ -2437,7 +2454,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            namespace.pivot_root(&plain_dir, &put_old),
+            namespace.pivot_root(&plain_dir, &put_old, &namespace.visible_root_path()),
             Err(VfsError::InvalidInput),
             "new_root must be a mount root"
         );
@@ -2465,7 +2482,11 @@ mod tests {
         namespace.attach(&put_old_mountpoint, &put_old_fs).unwrap();
 
         assert_eq!(
-            namespace.pivot_root(&new_mnt.root_path(), &put_old_mountpoint),
+            namespace.pivot_root(
+                &new_mnt.root_path(),
+                &put_old_mountpoint,
+                &namespace.visible_root_path()
+            ),
             Err(VfsError::ResourceBusy),
             "put_old inside the old root's filesystem is a loop (Linux EBUSY)"
         );
@@ -2486,7 +2507,11 @@ mod tests {
         let new_root_path = new_mnt.root_path();
 
         namespace
-            .pivot_root(&new_root_path, &new_root_path)
+            .pivot_root(
+                &new_root_path,
+                &new_root_path,
+                &namespace.visible_root_path(),
+            )
             .unwrap();
 
         // The old root now overmounts the new root's own root dentry, so `/`
@@ -2519,7 +2544,11 @@ mod tests {
         let new_root_path = new_mnt.root_path();
 
         namespace
-            .pivot_root(&new_root_path, &new_root_path)
+            .pivot_root(
+                &new_root_path,
+                &new_root_path,
+                &namespace.visible_root_path(),
+            )
             .unwrap();
 
         // The unresolved path still names the new root...
@@ -2562,7 +2591,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            namespace.pivot_root(&new_mnt.root_path(), &put_old),
+            namespace.pivot_root(
+                &new_mnt.root_path(),
+                &put_old,
+                &namespace.visible_root_path()
+            ),
             Err(VfsError::InvalidInput),
             "put_old must be reachable from new_root"
         );
@@ -2578,7 +2611,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            namespace.pivot_root(&namespace.visible_root_path(), &put_old),
+            namespace.pivot_root(
+                &namespace.visible_root_path(),
+                &put_old,
+                &namespace.visible_root_path()
+            ),
             Err(VfsError::ResourceBusy),
             "pivoting onto the current visible root is the same-filesystem loop (Linux EBUSY)"
         );
