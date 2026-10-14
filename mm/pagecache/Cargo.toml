@@ -20,3 +20,7 @@ unittest = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# IRQ/preemption guards are used only by cfg(unittest) lifetime tests in ut-tests.
+ignored = ["kspin"]
