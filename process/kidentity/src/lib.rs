@@ -118,6 +118,14 @@ impl TaskIdentityToken {
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Returns the reserved token for runtimes without a user identity.
+    ///
+    /// Never handed out by [`Self::allocate`]; only test or kernel-only
+    /// runtimes that never join a token-indexed registry use it.
+    pub const fn unknown() -> Self {
+        Self(0)
+    }
+
     /// Returns the raw token value for tracing and diagnostics.
     pub fn as_u64(self) -> u64 {
         self.0

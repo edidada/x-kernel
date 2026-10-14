@@ -114,14 +114,21 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     ///
     /// The binding is stable for the life of the task except for an `exec`
     /// leader takeover, which moves the thread-group number onto the surviving
-    /// thread. Registries key on the task object, not on this number.
-    fn task_number(&self) -> Arc<kidentity::PidHandle>;
+    /// thread. Registries key on the task object, not on this number. The
+    /// default is for runtimes that never carry a user-visible number.
+    fn task_number(&self) -> Arc<kidentity::PidHandle> {
+        kidentity::PidHandle::fixed_root(0)
+    }
 
     /// Returns the current numeric TID as a lock-free snapshot.
-    fn tid(&self) -> u32;
+    fn tid(&self) -> u32 {
+        0
+    }
 
     /// Returns the task's stable identity token.
-    fn identity_token(&self) -> kidentity::TaskIdentityToken;
+    fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        kidentity::TaskIdentityToken::unknown()
+    }
 
     /// Returns this runtime as [`Any`] for process-domain type recovery.
     fn as_any(&self) -> &dyn Any;
@@ -400,10 +407,12 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
-        assert!(
-            Arc::ptr_eq(&task_number, &user_runtime.task_number()),
-            "a user task's identity must match its runtime number"
-        );
+        if user_runtime.identity_token() != kidentity::TaskIdentityToken::unknown() {
+            assert!(
+                Arc::ptr_eq(&task_number, &user_runtime.task_number()),
+                "a user task's identity must match its runtime number"
+            );
+        }
         Self::new_with_identity(
             entry,
             name,
