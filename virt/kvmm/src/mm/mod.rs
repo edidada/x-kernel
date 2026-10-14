@@ -18,29 +18,25 @@ pub fn alloc_vmid() -> u32 {
 ///
 /// Dropping this handle returns the reserved pages to the host allocator.
 pub struct GuestRamReservation {
-    start_va: usize,
-    npages: usize,
-    hpa_base: u64,
+    frames: kalloc::FrameRun<'static>,
 }
 
 impl Drop for GuestRamReservation {
     fn drop(&mut self) {
         log::info!(
             "[kvmm] releasing guest RAM reservation VA {:#x} ({} pages)",
-            self.start_va,
-            self.npages,
+            self.frames.kernel_addr().as_usize(),
+            self.frames.frame_count(),
         );
-        kalloc::global_allocator().dealloc_pages(
-            self.start_va,
-            self.npages,
-            kalloc::UsageKind::VirtMem,
-        );
+        // The frame-run field ends every backing hold after diagnostics. The
+        // owning VmGuestMemory drops its second-stage mapper first, after vCPU
+        // owners have stopped using the guest address space.
     }
 }
 
 impl GuestRamReservation {
     pub fn hpa_base(&self) -> u64 {
-        self.hpa_base
+        self.frames.phys_addr().as_usize() as u64
     }
 }
 
@@ -48,13 +44,22 @@ impl GuestRamReservation {
 ///
 /// The guest RAM range starts at `mem_base` in the guest physical address space.
 /// The backing host physical range is allocator-chosen and may differ from the
-/// guest base; [`GuestMem::gpa_to_hpa`] translates between them.
+/// guest base; [`GuestMem::gpa_to_hpa`] translates between them. A zero,
+/// non-page-aligned or unrepresentable size is rejected. Rounded backing pages
+/// remain owned even when they are outside the guest-visible range.
 pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> Option<GuestRamReservation> {
-    let npages = (mem_size as usize) / PAGE_SIZE_4K;
-
-    match kalloc::global_allocator().alloc_pages(npages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
-        Ok(addr) => {
-            let size = npages * PAGE_SIZE_4K;
+    let size = usize::try_from(mem_size).ok()?;
+    if size == 0 || !size.is_multiple_of(PAGE_SIZE_4K) {
+        return None;
+    }
+    let npages = size / PAGE_SIZE_4K;
+    match kalloc::global_allocator().alloc_frame_run(
+        npages,
+        PAGE_SIZE_4K,
+        kalloc::UsageKind::VirtMem,
+    ) {
+        Ok(frames) => {
+            let addr = frames.kernel_addr().as_usize();
             // SAFETY: `addr` points to `npages` pages just allocated from the
             // host page allocator, so the full reservation is valid to zero.
             unsafe {
@@ -64,14 +69,10 @@ pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> Option<GuestRamReserva
                 "[kvmm] reserved guest RAM GPA {:#x}+{:#x} backed by HPA {:#x} ({} pages)",
                 mem_base,
                 mem_size,
-                kaddr_layout::v2p(addr),
-                npages,
+                frames.phys_addr().as_usize(),
+                frames.frame_count(),
             );
-            Some(GuestRamReservation {
-                start_va: addr,
-                npages,
-                hpa_base: kaddr_layout::v2p(addr) as u64,
-            })
+            Some(GuestRamReservation { frames })
         }
         Err(err) => {
             log::error!(
@@ -101,16 +102,18 @@ pub mod mmio;
 /// # Safety
 ///
 /// `pa` must be the physical address of a page originally allocated by
-/// `GlobalPage::alloc*` and not currently owned by another `GlobalPage`.
+/// `GlobalPage::alloc*` and transferred by into_raw (or intentionally retained
+/// without destruction). No other GlobalPage may own it, and hardware walkers
+/// must have retired before restoring and dropping the allocation.
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "x86_64",
     target_arch = "riscv64"
 ))]
 pub(crate) unsafe fn free_pt_page(pa: u64) {
-    let va = kaddr_layout::p2v(pa as usize);
-    // SAFETY: caller guarantees `pa` came from GlobalPage::alloc and is uniquely owned.
-    drop(unsafe { kalloc::GlobalPage::from_raw(va.into(), 1) });
+    // SAFETY: the caller transfers one outstanding GlobalPage reference for
+    // this table PA, exactly once after hardware walkers have retired.
+    drop(unsafe { kalloc::GlobalPage::from_raw(khal::mem::PhysAddr::from_usize(pa as usize), 1) });
 }
 
 /// Guest memory permission attributes.
@@ -154,3 +157,5 @@ pub trait GuestMem: Sized {
         false
     }
 }
+
+unittest::path_mod_test!(tests_frame_owners, "../../ut-tests/frame_owners.rs");

@@ -61,7 +61,7 @@ pub struct Stage2 {
 
 impl Stage2 {
     fn root_pa(&self) -> u64 {
-        kaddr_layout::v2p(self.l1_page.as_ptr() as usize) as u64
+        self.l1_page.start_pa().as_usize() as u64
     }
 
     fn destroy(&mut self) {
@@ -128,8 +128,8 @@ impl Stage2 {
             Err(_) => return core::ptr::null_mut(),
         };
         let l3_va = l3_page.as_mut_ptr() as *mut u64;
-        let l3_pa = kaddr_layout::v2p(l3_va as usize) as u64;
-        core::mem::forget(l3_page);
+        let l3_pa = l3_page.start_pa().as_usize() as u64;
+        let _ = l3_page.into_raw();
 
         if l2_entry & LPAE_VALID != 0 {
             // 2 MiB block → populate the L3 with 512 identity 4 KiB pages so
@@ -175,15 +175,14 @@ impl GuestMem for Stage2 {
         // Allocate L1 page (4 entries, but we need a full 4KB page)
         let mut l1_page = kalloc::GlobalPage::alloc_zero().ok()?;
         let l1_va = l1_page.as_mut_ptr() as *mut u64;
-        let l1_pa = kaddr_layout::v2p(l1_va as usize) as u64;
+        let l1_pa = l1_page.start_pa().as_usize() as u64;
 
         // Allocate 4 L2 pages (one per L1 entry)
         let mut l2_pas = [0u64; L1_ENTRIES];
         for l2_pa in &mut l2_pas {
-            let mut page = kalloc::GlobalPage::alloc_zero().ok()?;
-            let va = page.as_mut_ptr() as usize;
-            *l2_pa = kaddr_layout::v2p(va) as u64;
-            core::mem::forget(page);
+            let page = kalloc::GlobalPage::alloc_zero().ok()?;
+            *l2_pa = page.start_pa().as_usize() as u64;
+            let _ = page.into_raw();
         }
 
         // Fill L1 → L2 table entries

@@ -50,7 +50,19 @@
 - 页表按 VA 保存 provider-defined MappingReference；unmap、稀疏失效与 PROT_NONE
   清除 PTE 后把持有交给有界批次，finish 完成 TLB 失效后结束持有。
 - move_mapping 先取得目标持有，再撤销源 PTE，确保 mremap 搬移时不丢失生命周期。
-- 旧 raw map 仍保持外部 backing 契约。GlobalPage、匿名/共享内容、连续多页、DMA
-  和字节堆 backing 的收口尚未完成；这些路径按整段持有与映射协议继续迁移。
+- 旧 raw map 仍保持外部 backing 契约。匿名/共享内容、DMA 和字节堆 backing 的收口尚未完成；这些路径按整段持有与
+  映射协议继续迁移。GlobalPage 与连续多页支持见下。
 - 映射索引增加 heap bookkeeping 成本，尚未给出性能改善结论；全量可失败堆分配
   与后续 reclaim 仍是独立工作。
+
+
+## 第二批迁移：GlobalPage 和 VMM backing
+
+- FrameRun 为完整的 power-of-two backing 建立每个基础页的持有，实际页数包含
+  buddy 向上取整的 slack。可以从 live run 取得单页 FrameRef，最终逐页归还。
+- GlobalPage 内部持有 FrameRun，safe 字节视图只暴露请求范围。PA 直接从持有返回，
+  into_raw/from_raw 改为明确的物理所有权转移，不能收养裸 alloc_pages 结果。
+- VMM 页表的原始持有显式转移，销毁按 PA 恢复；guest RAM 保留也持有 FrameRun。
+  第二阶段 mapper 先析构，reservation 后释放，vCPU 的 VM 引用必须已结束使用。
+- 本批逐页释放为 O(backing 页数)，未实现 run 批量归还或复合页协议。匿名/共享
+  内容、DMA、字节堆 backing、启动期临时页仍需分别迁移。

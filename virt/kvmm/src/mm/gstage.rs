@@ -47,7 +47,7 @@ pub struct GStage {
 
 impl GStage {
     fn root_pa(&self) -> u64 {
-        kaddr_layout::v2p(self.root_page.as_ptr() as usize) as u64
+        self.root_page.start_pa().as_usize() as u64
     }
 
     fn destroy(&mut self) {
@@ -81,7 +81,7 @@ impl GuestMem for GStage {
         // Sv39x4 root: 4 contiguous 4KB pages (16KB, 16KB-aligned)
         let mut root_page = kalloc::GlobalPage::alloc_contiguous(4, 4 * 4096).ok()?;
         let root_va = root_page.as_mut_ptr() as *mut u64;
-        let root_pa = kaddr_layout::v2p(root_va as usize) as u64;
+        let root_pa = root_page.start_pa().as_usize() as u64;
 
         // Zero the full 16KB root
         // SAFETY: root_va points to 16KB of owned memory.
@@ -93,8 +93,8 @@ impl GuestMem for GStage {
         for i in 0..L2_ENTRIES {
             let mut l1_page = kalloc::GlobalPage::alloc_zero().ok()?;
             let l1_va = l1_page.as_mut_ptr() as *mut u64;
-            let l1_pa = kaddr_layout::v2p(l1_va as usize) as u64;
-            core::mem::forget(l1_page);
+            let l1_pa = l1_page.start_pa().as_usize() as u64;
+            let _ = l1_page.into_raw();
 
             // Root entry: non-leaf (V=1, R=W=X=0) pointing to L1
             let root_pte = ((l1_pa >> 12) << 10) | PTE_V;

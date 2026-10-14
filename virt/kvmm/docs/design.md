@@ -640,3 +640,21 @@ Implement MMIO/PIO trap-and-emulate for basic devices:
 Support VMs with multiple vCPUs belonging to the same VM:
 - Inter-vCPU interrupt delivery (virtual IPI)
 - vCPU migration between physical CPUs
+
+
+## Host Backing Lifetime
+
+GlobalPage allocations retain every actual backing base page through FrameRun,
+including buddy rounding slack. Child table installation uses into_raw to transfer
+one held allocation to the table tree; free_pt_page restores that allocation by
+physical identity after walkers are retired. VMXON deliberately retains its raw
+hold while hardware virtualization remains enabled. A transfer does not authorize
+concurrent payload access or replace the architecture's retirement protocol.
+
+GuestRamReservation owns a VirtMem-category FrameRun and zeroes only the visible,
+page-aligned guest range before publication. Zero/unaligned/unrepresentable sizes
+are rejected. VmGuestMemory field order destroys its second-stage mapper before
+its reservation ends backing holds. vCPU-held VM Arcs prevent teardown while the
+VM is still being used. Rounded pages outside the guest range are still accounted
+and held until reservation release. Failed mapper construction releases reservation
+through RAII; partial table construction retains its existing failure contracts.

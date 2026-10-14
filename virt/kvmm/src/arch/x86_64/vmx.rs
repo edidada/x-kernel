@@ -397,7 +397,7 @@ pub fn vmx_percpu_init() -> bool {
     };
 
     let vmxon_ptr = page.as_mut_ptr();
-    let vmxon_pa = kaddr_layout::v2p(vmxon_ptr as usize) as u64;
+    let vmxon_pa = page.start_pa().as_usize() as u64;
     // SAFETY: page is a zeroed 4K-aligned allocation; writing revision ID.
     unsafe {
         (vmxon_ptr as *mut u32).write(basic.revision);
@@ -409,7 +409,7 @@ pub fn vmx_percpu_init() -> bool {
     }
 
     // Leak the page — VMXON region must remain valid while VMX is active.
-    core::mem::forget(page);
+    let _ = page.into_raw();
 
     VMXON_DONE.write(&guard, true);
     log::info!("[VMX] VMXON success (revision={:#x})", basic.revision);
@@ -431,12 +431,12 @@ fn build_guest_identity_pt(vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>) -> Optio
     // PML4 page
     let mut pml4 = kalloc::GlobalPage::alloc_zero().ok()?;
     let pml4_va = pml4.as_mut_ptr() as *mut u64;
-    let pml4_pa = kaddr_layout::v2p(pml4_va as usize) as u64;
+    let pml4_pa = pml4.start_pa().as_usize() as u64;
 
     // PDPT page
     let mut pdpt = kalloc::GlobalPage::alloc_zero().ok()?;
     let pdpt_va = pdpt.as_mut_ptr() as *mut u64;
-    let pdpt_pa = kaddr_layout::v2p(pdpt_va as usize) as u64;
+    let pdpt_pa = pdpt.start_pa().as_usize() as u64;
 
     // PML4[0] → PDPT
     // SAFETY: pml4_va is a valid zeroed 4 KiB page.
@@ -446,7 +446,7 @@ fn build_guest_identity_pt(vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>) -> Optio
     for i in 0..4usize {
         let mut pd = kalloc::GlobalPage::alloc_zero().ok()?;
         let pd_va = pd.as_mut_ptr() as *mut u64;
-        let pd_pa = kaddr_layout::v2p(pd_va as usize) as u64;
+        let pd_pa = pd.start_pa().as_usize() as u64;
 
         // PDPT[i] → PD
         // SAFETY: i < 4, so the offset stays inside the PDPT page.
@@ -496,7 +496,7 @@ pub fn vmcs_init_vcpu(
     };
 
     let vmcs_ptr = page.as_mut_ptr();
-    let vmcs_pa = kaddr_layout::v2p(vmcs_ptr as usize) as u64;
+    let vmcs_pa = page.start_pa().as_usize() as u64;
     // SAFETY: page is a zeroed 4K-aligned allocation; writing revision ID.
     unsafe {
         (vmcs_ptr as *mut u32).write(basic.revision);
