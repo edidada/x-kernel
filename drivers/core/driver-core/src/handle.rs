@@ -108,7 +108,6 @@ impl Drop for CoherentMem {
 ///
 /// `prepare`/`enable` are not undone automatically: quiesce belongs to
 /// `remove()`, mirroring Linux ownership rules.
-#[derive(Clone)]
 pub struct ClkHandle {
     ops: Arc<dyn ClkOps>,
     release: Option<ReleaseHook>,

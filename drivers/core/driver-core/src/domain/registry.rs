@@ -14,7 +14,8 @@ use kspin::SpinNoPreempt;
 use super::*;
 use crate::{
     bus::{Bus, BusId, BusInstanceId, MatchScore},
-    desc::{DeviceDescriptor, DeviceId},
+    desc::DeviceDescriptor,
+    device::DeviceId,
     error::DepSource,
     services::DeviceServices,
 };

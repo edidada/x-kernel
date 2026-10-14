@@ -58,8 +58,8 @@ use lazyinit::LazyInit;
 
 use crate::{
     bus::{Bus, BusId, IdMatchEntry, MatchScore},
-    desc::{DeviceDescriptor, DeviceId},
-    device::{BoundDevice, DeviceCtx},
+    desc::DeviceDescriptor,
+    device::{BoundDevice, DeviceCtx, DeviceId},
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
     services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},

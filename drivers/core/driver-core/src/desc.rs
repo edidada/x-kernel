@@ -5,7 +5,7 @@
 //! Device description vocabulary: what a bus backend hands to the model
 //! before any driver binds.
 //!
-//! One place for identity (`DeviceId`, `DeviceIdentity`), placement
+//! One place for bus-stated identity (`DeviceIdentity`), placement
 //! (`DeviceLocation`), firmware facts (`FirmwareProp`, `FirmwareNodeInfo`)
 //! and the assembled [`DeviceDescriptor`] — the enumeration product.
 
@@ -13,6 +13,7 @@ use alloc::{string::String, vec::Vec};
 
 use crate::{
     bus::{BusId, BusInstanceId},
+    device::DeviceId,
     resource::{DmaInfo, ResourceMap},
 };
 
@@ -174,30 +175,6 @@ impl FirmwareNodeInfo {
             .iter()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| value)
-    }
-}
-
-/// The product of bus enumeration: everything the model knows about a device
-/// before any driver binds. Ids are assigned by the
-/// [`DeviceDomain`](crate::DeviceDomain) on insertion.
-/// Domain-allocated device identity (monotonic, per-`DeviceDomain`).
-///
-/// A newtype: device ids, class publication ids and devnode ids are three
-/// DISTINCT u64 spaces — bare `u64` at every boundary is how the class
-/// layer once derived an owner from the wrong space (the off-by-one bug).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DeviceId(pub(crate) u64);
-
-impl DeviceId {
-    /// Raw value (diagnostics, record keys that tag the space explicitly).
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-impl core::fmt::Display for DeviceId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 

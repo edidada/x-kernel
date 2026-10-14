@@ -98,10 +98,10 @@ mod services;
 
 pub use bus::{Bus, BusId, BusInstanceId, IdMatchEntry, MatchScore};
 pub use desc::{
-    DeviceDescriptor, DeviceId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
+    DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
     FirmwareProp, PciIdentity, PlatformIdentity,
 };
-pub use device::{BoundDevice, DeviceCtx};
+pub use device::{BoundDevice, DeviceCtx, DeviceId};
 pub use device_traits::DeviceKind;
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
