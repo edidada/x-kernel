@@ -263,7 +263,7 @@ impl UnixTransportOps for DgramTransport {
                     if self.options.pass_credentials()
                         && let Some(credentials) = unix_sender_credentials
                     {
-                        dst.push(Box::new(crate::KernelAncillaryData::Credentials(
+                        dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
                             credentials,
                         )));
                     }
@@ -390,7 +390,7 @@ mod tests {
             .unwrap()
             .downcast::<KernelAncillaryData>()
             .unwrap();
-        let KernelAncillaryData::Credentials(credentials) = *credentials else {
+        let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
             panic!("expected sender credentials");
         };
         assert_eq!(credentials.pid, 42);
@@ -449,7 +449,7 @@ mod tests {
                 .unwrap()
                 .downcast::<KernelAncillaryData>()
                 .unwrap();
-            let KernelAncillaryData::Credentials(credentials) = *credentials else {
+            let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
                 panic!("expected sender credentials");
             };
             assert_eq!(credentials.pid, pid);
@@ -485,7 +485,7 @@ mod tests {
             .send(
                 &b"x"[..],
                 SendOptions {
-                    ancillary: alloc::vec![Box::new(PassedFiles) as AncillaryData],
+                    ancillary: alloc::vec![Arc::new(PassedFiles) as AncillaryData],
                     ..SendOptions::default()
                 },
             )

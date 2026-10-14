@@ -10,7 +10,7 @@
 //! - Out-of-band data handling
 //! - Ancillary data (control messages)
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::TypeId,
     mem::{offset_of, size_of},
@@ -129,7 +129,7 @@ fn parse_send_cmsgs(
         // Linux caps the descriptors of one `sendmsg` across all of its
         // `SCM_RIGHTS` messages, not only within each message.
         fd_budget.charge(cmsg.fd_count())?;
-        ancillary.push(Box::new(cmsg) as AncillaryData);
+        ancillary.push(Arc::new(cmsg) as AncillaryData);
         ptr += hdr.cmsg_len;
     }
 
@@ -145,20 +145,22 @@ enum SocketAncillary {
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
     // `AncillaryData` is the type-erased boundary between `posix-net` and `knet`.
     // Send-side cmsgs carry `posix-net`-owned `CMsg`, while receive-side
-    // asynchronous errors are produced by `knet` as `KernelAncillaryData`.
-    let type_id = ancillary.as_ref().type_id();
+    // asynchronous errors are produced by `knet` as `KernelAncillaryData`. The
+    // `Arc` payload is shared; each delivery clones the handle reference so a
+    // `MSG_PEEK` duplicates the open file descriptions without reopening them.
+    let type_id = (*ancillary).type_id();
     if type_id == TypeId::of::<CMsg>() {
-        let ancillary = ancillary.downcast::<CMsg>().ok()?;
-        return Some(match *ancillary {
-            CMsg::Rights { fds } => SocketAncillary::Rights { fds },
+        let ancillary = ancillary.clone().downcast::<CMsg>().ok()?;
+        return Some(match ancillary.as_ref() {
+            CMsg::Rights { fds } => SocketAncillary::Rights { fds: fds.clone() },
         });
     }
     if type_id == TypeId::of::<KernelAncillaryData>() {
-        let ancillary = ancillary.downcast::<KernelAncillaryData>().ok()?;
-        return Some(match *ancillary {
-            KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err),
+        let ancillary = ancillary.clone().downcast::<KernelAncillaryData>().ok()?;
+        return Some(match ancillary.as_ref() {
+            KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err.clone()),
             KernelAncillaryData::Credentials(credentials) => {
-                SocketAncillary::Credentials(credentials)
+                SocketAncillary::Credentials(credentials.clone())
             }
         });
     }

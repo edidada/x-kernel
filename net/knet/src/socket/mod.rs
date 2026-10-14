@@ -13,7 +13,7 @@ mod test_options;
 #[cfg(unittest)]
 mod test_state;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     fmt::{self, Debug},
@@ -145,7 +145,14 @@ impl RecvFlags {
     }
 }
 
-pub type AncillaryData = Box<dyn Any + Send + Sync>;
+/// Type-erased ancillary data carried between the socket layer and its
+/// callers.
+///
+/// An `Arc` is used instead of a `Box` so a control message can be duplicated
+/// without knowing its concrete type: on Unix stream sockets a `MSG_PEEK` that
+/// reaches a control-message boundary must return the same open file
+/// descriptions again (`scm_fp_dup`) without consuming the pending record.
+pub type AncillaryData = Arc<dyn Any + Send + Sync>;
 
 /// Options for initiating a socket connection.
 #[derive(Default, Debug, Clone, Copy)]

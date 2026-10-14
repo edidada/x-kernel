@@ -151,7 +151,11 @@ pub(super) struct DirectionAncillary {
     /// stream position just past the sendmsg that carried the fds: reads
     /// stop there (the SCM_RIGHTS barrier), even when later plain-data
     /// sends leave no record boundary to infer it from.
-    pub(super) records: VecDeque<(u64, u64, Vec<AncillaryData>)>,
+    pub(super) records: VecDeque<(u64, u64, Arc<Vec<AncillaryData>>)>,
+    /// The entries live behind one `Arc` so a `MSG_PEEK` duplicates the
+    /// record by cloning a single handle: no entry buffer is copied or
+    /// re-allocated while the control guard is held, and every delivered
+    /// reference shares the peer's open file description.
     /// Sum of `record.2.len()` across pending records. Counts retained
     /// control messages and, together with the per-message `SCM_MAX_FD` cap,
     /// bounds the file references the queue holds for a consumer that has
@@ -188,8 +192,8 @@ impl DirectionAncillary {
         &mut self,
         start: u64,
         end: u64,
-        payload: Vec<AncillaryData>,
-    ) -> Result<(), (EnqueueError, Vec<AncillaryData>)> {
+        payload: Arc<Vec<AncillaryData>>,
+    ) -> Result<(), (EnqueueError, Arc<Vec<AncillaryData>>)> {
         if self.consumer_closed {
             return Err((EnqueueError::ConsumerClosed, payload));
         }
@@ -211,13 +215,26 @@ impl DirectionAncillary {
     /// has reached, or `None` when the cursor has not reached any record
     /// yet. A record whose first byte sits exactly at the cursor is not
     /// reached until the cursor moves past it.
-    pub(super) fn pop_reached(&mut self) -> Option<(u64, u64, Vec<AncillaryData>)> {
+    pub(super) fn pop_reached(&mut self) -> Option<(u64, u64, Arc<Vec<AncillaryData>>)> {
         if self.records.front()?.0 >= self.recv_total {
             return None;
         }
         let (start, end, payload) = self.records.pop_front()?;
         self.retained_ancillary -= payload.len();
         Some((start, end, payload))
+    }
+
+    /// Duplicates the oldest record whose first byte lies before
+    /// `cursor_end`, without touching the queue or the cursor: a `MSG_PEEK`
+    /// shares the sender's entry handles (`scm_fp_dup`) and keeps the record
+    /// for the later consuming receive. Cloning the shared handle bumps
+    /// reference counts and never allocates, so it stays inside the guard.
+    pub(super) fn peek_reached(&self, cursor_end: u64) -> Option<Arc<Vec<AncillaryData>>> {
+        let (start, _, payload) = self.records.front()?;
+        if *start >= cursor_end {
+            return None;
+        }
+        Some(Arc::clone(payload))
     }
 
     /// Closes this direction's consumer side: pending records can no longer
@@ -230,7 +247,7 @@ impl DirectionAncillary {
     /// drop the returned records after releasing its guards, because
     /// dropping the last reference of a passed file (for example a pipe write
     /// end) takes a sleepable mutex.
-    pub(super) fn close_consumer(&mut self) -> VecDeque<(u64, u64, Vec<AncillaryData>)> {
+    pub(super) fn close_consumer(&mut self) -> VecDeque<(u64, u64, Arc<Vec<AncillaryData>>)> {
         self.consumer_closed = true;
         self.retained_ancillary = 0;
         mem::take(&mut self.records)
@@ -297,7 +314,7 @@ impl Drop for Channel {
 
 #[unittest::mod_test]
 mod tests {
-    use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+    use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 
     use unittest::{assert, assert_eq, def_test};
 
@@ -313,8 +330,11 @@ mod tests {
             consumer_closed: false,
         };
         for (start, end, tag) in records {
-            anc.records
-                .push_back((*start, *end, vec![Box::new(*tag) as AncillaryData]));
+            anc.records.push_back((
+                *start,
+                *end,
+                Arc::new(vec![Arc::new(*tag) as AncillaryData]),
+            ));
         }
         anc
     }
@@ -385,12 +405,12 @@ mod tests {
         // and hands the payload back to the caller.
         for id in 0..MAX_PENDING_RECORDS as u32 {
             assert!(
-                anc.enqueue_record(0, 1, vec![Box::new(id) as AncillaryData])
+                anc.enqueue_record(0, 1, Arc::new(vec![Arc::new(id) as AncillaryData]))
                     .is_ok()
             );
         }
         let (error, payload) = anc
-            .enqueue_record(0, 1, vec![Box::new(u32::MAX) as AncillaryData])
+            .enqueue_record(0, 1, Arc::new(vec![Arc::new(u32::MAX) as AncillaryData]))
             .unwrap_err();
         assert_eq!(error, EnqueueError::QuotaExceeded);
         assert_eq!(payload.len(), 1);
@@ -410,9 +430,11 @@ mod tests {
         // rejected even with nothing queued; each entry is one control
         // message whose descriptor count `posix-net` caps at `SCM_MAX_FD`
         // (253).
-        let oversized: Vec<AncillaryData> = (0..=MAX_PENDING_ANCILLARY as u32)
-            .map(|id| Box::new(id) as AncillaryData)
-            .collect();
+        let oversized = Arc::new(
+            (0..=MAX_PENDING_ANCILLARY as u32)
+                .map(|id| Arc::new(id) as AncillaryData)
+                .collect::<Vec<_>>(),
+        );
         let (error, payload) = anc.enqueue_record(0, 1, oversized).unwrap_err();
         assert_eq!(error, EnqueueError::QuotaExceeded);
         assert_eq!(payload.len(), MAX_PENDING_ANCILLARY + 1);
@@ -428,14 +450,17 @@ mod tests {
             consumer_closed: false,
         };
         assert!(
-            anc.enqueue_record(1, 2, vec![Box::new(1_u32) as AncillaryData])
+            anc.enqueue_record(1, 2, Arc::new(vec![Arc::new(1_u32) as AncillaryData]))
                 .is_ok()
         );
         assert!(
             anc.enqueue_record(
                 3,
                 4,
-                vec![Box::new(2_u32) as AncillaryData, Box::new(3_u32)]
+                Arc::new(vec![
+                    Arc::new(2_u32) as AncillaryData,
+                    Arc::new(3_u32) as AncillaryData,
+                ])
             )
             .is_ok()
         );
@@ -449,7 +474,7 @@ mod tests {
         // payload back: the endpoint close drained everything that could
         // ever be delivered.
         let (error, payload) = anc
-            .enqueue_record(5, 6, vec![Box::new(4_u32) as AncillaryData])
+            .enqueue_record(5, 6, Arc::new(vec![Arc::new(4_u32) as AncillaryData]))
             .unwrap_err();
         assert_eq!(error, EnqueueError::ConsumerClosed);
         assert_eq!(payload.len(), 1);

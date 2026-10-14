@@ -23,7 +23,7 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    AncillaryData, ConnectOptions, RecvOptions, SendOptions, Shutdown,
+    AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -269,7 +269,7 @@ impl UnixTransportOps for StreamTransport {
                 // publishes drops it with `options`, as with Linux stream
                 // sendmsg (no skb is queued and the cmsg fds are released).
                 let mut pending = (count > 0 && !options.ancillary.is_empty())
-                    .then(|| core::mem::take(&mut options.ancillary));
+                    .then(|| Arc::new(core::mem::take(&mut options.ancillary)));
                 // Attach ancillary records BEFORE publishing the bytes: a
                 // concurrent receiver cannot consume unpublished bytes, so
                 // enqueue-then-publish makes a record visible no later than
@@ -328,6 +328,7 @@ impl UnixTransportOps for StreamTransport {
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
         let is_zero_length = dst.remaining_mut() == 0;
+        let is_peek = options.flags.contains(RecvFlags::PEEK);
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 let mut guard = self.channel.lock();
@@ -369,55 +370,54 @@ impl UnixTransportOps for StreamTransport {
                     if count >= left.len() {
                         count += dst.write(right)?;
                     }
-                    // SAFETY: `count` is the sum of bytes copied out of the
-                    // occupied slices returned by `as_slices`, so advancing by this
-                    // amount stays within the consumer's readable region.
-                    unsafe { chan.rx.advance_read_index(count) };
+                    if !is_peek {
+                        // SAFETY: `count` is the sum of bytes copied out of the
+                        // occupied slices returned by `as_slices`, bounded by the
+                        // SCM_RIGHTS barrier below the next record's segment end,
+                        // so advancing by this amount stays within the consumer's
+                        // readable region. A peek never reaches this line: it
+                        // copies data and control references without moving the
+                        // cursor.
+                        unsafe { chan.rx.advance_read_index(count) };
+                    }
                     count
                 };
                 if count > 0 {
-                    let occupied_after = occupied_before - count;
-                    if !channel::is_stream_writable(occupied_before)
-                        && channel::is_stream_writable(occupied_after)
-                    {
-                        chan.peer_endpoint.polls.writable.wake();
-                    }
-                    // Pop the (at most one, barrier-capped) reached record
-                    // under the spin guard — deque pops only. Two things
-                    // stay outside the guard, for different reasons: the
-                    // sink merge can allocate for a large fd list (the
-                    // peer's send spins on this lock while the no-preempt
-                    // section runs), and the disposal of unsunk records
-                    // genuinely blocks (VfsFile::release takes a
-                    // ksync::Mutex on pipe close).
-                    // The barrier capped the read at the first fd-bearing
-                    // segment, so at most one record is reached: its fds go
-                    // to the sink (or the record is disposed) together with
-                    // the segment this recvmsg consumed.
-                    let popped = {
-                        let mut anc = chan.rx_anc.lock();
-                        anc.recv_total += count as u64;
-                        anc.pop_reached()
-                    };
-                    match options.ancillary.as_mut() {
-                        // The record keeps the sender cmsg boundary: it is
-                        // installed as one SCM_RIGHTS cmsg of its own.
-                        Some(sink) => {
-                            if let Some((_, _, data)) = popped {
-                                sink.extend(data);
-                            }
+                    // A peek preserves the byte stream: it does not advance
+                    // the read index, update the receive cursor, or wake the
+                    // peer's writable poll set.
+                    if !is_peek {
+                        let occupied_after = occupied_before - count;
+                        if !channel::is_stream_writable(occupied_before)
+                            && channel::is_stream_writable(occupied_after)
+                        {
+                            chan.peer_endpoint.polls.writable.wake();
                         }
-                        // The consuming receive has no control buffer: the
-                        // reached record is dropped either way, so report the
-                        // loss for `MSG_CTRUNC` (`scm_detach_fds`).
-                        None => {
-                            if popped.is_some()
-                                && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
-                            {
-                                *discarded = true;
-                            }
-                            drop(popped);
-                        }
+                        // Pop the (at most one, barrier-capped) reached record
+                        // under the spin guard — deque pops only. The barrier
+                        // capped the read at the first fd-bearing segment, so
+                        // at most one record is reached: its entries go to the
+                        // sink (or the record is disposed) together with the
+                        // segment this recvmsg consumed.
+                        let popped = {
+                            let mut anc = chan.rx_anc.lock();
+                            anc.recv_total += count as u64;
+                            anc.pop_reached()
+                        };
+                        deliver_reached(popped, &mut options);
+                    } else {
+                        // A peek duplicates the record it touched: the shared
+                        // entry handles go to the sink (`scm_fp_dup`) and the
+                        // record stays queued for the later consuming recv.
+                        // Without a control buffer the duplication cannot be
+                        // emitted, so the loss is reported even though the
+                        // record is kept.
+                        let touched = {
+                            let anc = chan.rx_anc.lock();
+                            let cursor_end = anc.recv_total + count as u64;
+                            anc.peek_reached(cursor_end)
+                        };
+                        deliver_peeked(touched, &mut options);
                     }
                     return Ok(count);
                 }
@@ -514,6 +514,53 @@ fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
     if total > 0 { Ok(total) } else { Err(error) }
 }
 
+/// Delivers or disposes the reached record after the control guard is
+/// released.
+///
+/// The record keeps the sender cmsg boundary: its entries are installed as
+/// one `SCM_RIGHTS` cmsg of their own. A consuming receive without a control
+/// buffer drops the reached record either way and reports the loss for
+/// `MSG_CTRUNC` (`scm_detach_fds`), so a later `recvmsg` cannot inherit
+/// stale control data. Both the sink merge (it allocates) and the disposal
+/// (closing the last file reference may take a sleepable mutex) must stay
+/// outside the guards.
+fn deliver_reached(
+    popped: Option<(u64, u64, Arc<Vec<AncillaryData>>)>,
+    options: &mut RecvOptions<'_>,
+) {
+    match options.ancillary.as_deref_mut() {
+        Some(sink) => popped
+            .into_iter()
+            .for_each(|(_, _, payload)| sink.extend(payload.iter().cloned())),
+        None => {
+            if popped.is_some()
+                && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
+            {
+                *discarded = true;
+            }
+            drop(popped);
+        }
+    }
+}
+
+/// Duplicates the record a peek touched, or reports the loss when the peek
+/// cannot emit the entries. The record stays queued for the later consuming
+/// receive either way.
+fn deliver_peeked(touched: Option<Arc<Vec<AncillaryData>>>, options: &mut RecvOptions<'_>) {
+    match options.ancillary.as_deref_mut() {
+        Some(sink) => touched
+            .into_iter()
+            .for_each(|payload| sink.extend(payload.iter().cloned())),
+        None => {
+            if touched.is_some()
+                && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
+            {
+                *discarded = true;
+            }
+        }
+    }
+}
+
 /// Registers `pending`'s payload for the byte range this round publishes, or
 /// advances the write cursor for a plain-data round.
 ///
@@ -523,9 +570,9 @@ fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
 /// file reference can close a file that takes a sleepable mutex.
 fn register_pending(
     chan: &mut Channel,
-    pending: &mut Option<Vec<AncillaryData>>,
+    pending: &mut Option<Arc<Vec<AncillaryData>>>,
     count: usize,
-) -> Result<(), (channel::EnqueueError, Vec<AncillaryData>)> {
+) -> Result<(), (channel::EnqueueError, Arc<Vec<AncillaryData>>)> {
     let mut anc = chan.tx_anc.lock();
     let start = anc.sent_total;
     let end = start + count as u64;
@@ -629,7 +676,6 @@ impl Drop for StreamTransport {
 #[unittest::mod_test]
 mod tests {
     use alloc::{
-        boxed::Box,
         sync::{Arc, Weak},
         task::Wake,
         vec,
@@ -1426,7 +1472,7 @@ mod tests {
             .set_option(SetSocketOption::NonBlocking(&true))
             .unwrap();
         let send_options = SendOptions {
-            ancillary: vec![Box::new(7_u32) as AncillaryData, Box::new(8_u32)],
+            ancillary: vec![Arc::new(7_u32) as AncillaryData, Arc::new(8_u32)],
             ..SendOptions::default()
         };
         sender.send(&b"xy"[..], send_options).unwrap();
@@ -1469,7 +1515,7 @@ mod tests {
             .set_option(SetSocketOption::NonBlocking(&true))
             .unwrap();
         let send_options = SendOptions {
-            ancillary: vec![Box::new(9_u32) as AncillaryData],
+            ancillary: vec![Arc::new(9_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"a"[..], send_options).unwrap();
@@ -1481,7 +1527,7 @@ mod tests {
 
         // a later sink-consuming recv must not see the dropped record
         let send_options = SendOptions {
-            ancillary: vec![Box::new(10_u32) as AncillaryData],
+            ancillary: vec![Arc::new(10_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"b"[..], send_options).unwrap();
@@ -1515,7 +1561,7 @@ mod tests {
         let (sender, receiver) = StreamTransport::new_pair(7);
         let flag = Arc::new(AtomicBool::new(false));
         let send_options = SendOptions {
-            ancillary: vec![Box::new(DropFlag(flag.clone())) as AncillaryData],
+            ancillary: vec![Arc::new(DropFlag(flag.clone())) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"a"[..], send_options).unwrap();
@@ -1537,12 +1583,12 @@ mod tests {
 
         // two sendmsg boundaries, each carrying its own record
         let so1 = SendOptions {
-            ancillary: vec![Box::new(1_u32) as AncillaryData],
+            ancillary: vec![Arc::new(1_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"a"[..], so1).unwrap();
         let so2 = SendOptions {
-            ancillary: vec![Box::new(2_u32) as AncillaryData],
+            ancillary: vec![Arc::new(2_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"bb"[..], so2).unwrap();
@@ -1628,13 +1674,13 @@ mod tests {
             .unwrap();
 
         let so1 = SendOptions {
-            ancillary: vec![Box::new(1_u32) as AncillaryData],
+            ancillary: vec![Arc::new(1_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"A"[..], so1).unwrap();
         sender.send(&b"MID"[..], SendOptions::default()).unwrap();
         let so2 = SendOptions {
-            ancillary: vec![Box::new(2_u32) as AncillaryData],
+            ancillary: vec![Arc::new(2_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"B"[..], so2).unwrap();
@@ -1683,7 +1729,7 @@ mod tests {
 
         sender.send(&b"PRE"[..], SendOptions::default()).unwrap();
         let so = SendOptions {
-            ancillary: vec![Box::new(7_u32) as AncillaryData],
+            ancillary: vec![Arc::new(7_u32) as AncillaryData],
             ..SendOptions::default()
         };
         sender.send(&b"A"[..], so).unwrap();
@@ -1717,7 +1763,7 @@ mod tests {
             left.send(
                 &b"abc"[..],
                 SendOptions {
-                    ancillary: vec![Box::new(9_u32) as AncillaryData],
+                    ancillary: vec![Arc::new(9_u32) as AncillaryData],
                     ..SendOptions::default()
                 }
             ),
@@ -1757,6 +1803,163 @@ mod tests {
         assert!(!discarded);
     }
 
+    #[def_test]
+    fn unix_stream_peek_duplicates_control_data_and_preserves_data() {
+        let (left, right) = StreamTransport::new_pair(1);
+        right
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+
+        assert_eq!(left.send(&b"abc"[..], SendOptions::default()), Ok(3));
+        assert_eq!(
+            left.send(
+                &b"def"[..],
+                SendOptions {
+                    ancillary: vec![control(7)],
+                    ..SendOptions::default()
+                }
+            ),
+            Ok(3)
+        );
+
+        // The peek window reaches the record's segment: it duplicates the
+        // shared entry references without consuming the record or the data,
+        // and stops at the segment end like a consuming recv.
+        let peek = RecvFlags::PEEK | RecvFlags::DONT_WAIT;
+        let mut data = [0_u8; 6];
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: peek,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Ok(6)
+        );
+        assert_eq!(&data[..6], b"abcdef");
+        assert_eq!(received_controls(&ancillary), vec![7]);
+
+        // A second peek duplicates the same control data again.
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: peek,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Ok(6)
+        );
+        assert_eq!(received_controls(&ancillary), vec![7]);
+
+        // A consuming recv still receives both the data and the record.
+        let nonblocking = RecvFlags::DONT_WAIT;
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: nonblocking,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Ok(6)
+        );
+        assert_eq!(&data[..6], b"abcdef");
+        assert_eq!(received_controls(&ancillary), vec![7]);
+
+        // The record is retired after the consuming recv; the stream is then
+        // empty.
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: nonblocking,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Err(KError::WouldBlock)
+        );
+        assert!(received_controls(&ancillary).is_empty());
+    }
+
+    #[def_test]
+    fn unix_stream_peek_without_control_buffer_reports_discard_and_keeps_batch() {
+        let (left, right) = StreamTransport::new_pair(1);
+        right
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+
+        assert_eq!(
+            left.send(
+                &b"abc"[..],
+                SendOptions {
+                    ancillary: vec![control(9)],
+                    ..SendOptions::default()
+                }
+            ),
+            Ok(3)
+        );
+
+        // A peek without a control buffer cannot emit the reached entries
+        // either, so the loss is reported even though the peek keeps the
+        // record queued for the consuming receive. A one-byte buffer keeps
+        // the partial-touch path: reaching only the record's first byte
+        // already duplicates -- and here reports -- the record.
+        let peek = RecvFlags::PEEK | RecvFlags::DONT_WAIT;
+        let mut data = [0_u8; 1];
+        let mut discarded = false;
+        let recv = right.recv(
+            &mut data[..],
+            RecvOptions {
+                flags: peek,
+                ancillary: None,
+                ancillary_discarded: Some(&mut discarded),
+                ..RecvOptions::default()
+            },
+        );
+        assert_eq!(recv, Ok(1));
+        assert_eq!(data[0], b'a');
+        assert!(discarded);
+
+        // The record is still delivered by the later consuming receive.
+        let nonblocking = RecvFlags::DONT_WAIT;
+        let mut data = [0_u8; 3];
+        let mut ancillary = Vec::new();
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: nonblocking,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Ok(3)
+        );
+        assert_eq!(&data[..3], b"abc");
+        assert_eq!(received_controls(&ancillary), vec![9]);
+        assert_eq!(
+            right.recv(
+                &mut data[..],
+                RecvOptions {
+                    flags: nonblocking,
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            ),
+            Err(KError::WouldBlock)
+        );
+    }
+
     /// Opaque control payload for the quota tests. The transport treats
     /// `AncillaryData` as type-erased; tests downcast to verify that a record
     /// was delivered rather than dropped or duplicated.
@@ -1764,7 +1967,7 @@ mod tests {
     struct TestControl(u32);
 
     fn control(id: u32) -> AncillaryData {
-        Box::new(TestControl(id)) as AncillaryData
+        Arc::new(TestControl(id)) as AncillaryData
     }
 
     fn received_controls(ancillary: &[AncillaryData]) -> Vec<u32> {
