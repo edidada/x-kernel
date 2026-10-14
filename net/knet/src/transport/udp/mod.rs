@@ -14,7 +14,7 @@ mod state;
 mod wait;
 
 pub(crate) use self::{
-    input::{InputDisposition, deliver_ipv4_packet, prepare_ipv4_packet},
+    input::{InputDisposition, deliver_ipv4_packet, parse_ipv4_datagram},
     pcb::PreparedUdpPacket,
     registry::{init_udp_registry, lookup_udp_error_state},
     state::UdpSocketQueuedError,

@@ -291,10 +291,6 @@ pub(crate) fn ip_version(packet: &[u8]) -> Option<u8> {
     packet.first().map(|byte| byte >> 4)
 }
 
-pub(crate) fn payload<'a>(packet: &'a [u8], header: &Ipv4Header) -> Option<&'a [u8]> {
-    packet.get(header.header_len..header.total_len)
-}
-
 pub(crate) fn build_icmpv4_error_packet(
     error: Icmpv4Error,
     packet_type: PacketType,
@@ -450,8 +446,9 @@ fn can_send_icmpv4_error(
         return true;
     }
 
-    let Some(icmp_type) =
-        payload(offending_packet, &offending_header).and_then(|payload| payload.first().copied())
+    let Some(icmp_type) = Ipv4PacketView::from_header(offending_packet, offending_header)
+        .ok()
+        .and_then(|view| view.payload().first().copied())
     else {
         return false;
     };

@@ -34,7 +34,7 @@ use lazyinit::LazyInit;
 use crate::{
     buf::PacketBuf,
     consts::SOCKET_BUFFER_SIZE,
-    ipv4::{self, Ipv4Header},
+    ipv4::{self, Ipv4PacketView},
     udp,
 };
 
@@ -103,15 +103,21 @@ pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
         !kirq::context::is_in_interrupt_context(),
         "prepare_for_enqueue requires task context"
     );
-    let udp_header = packet
+    let udp_view = packet
         .network_packet()
-        .and_then(|ip_packet| Ipv4Header::parse_input(ip_packet).ok())
-        .filter(|header| header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented());
-    match udp_header {
-        Some(header) => match udp::prepare_ipv4_packet(header, packet) {
-            Ok(prepared) => Some(prepared.into_packet()),
-            Err(_) => None,
-        },
+        .and_then(|ip_packet| Ipv4PacketView::parse_input(ip_packet).ok())
+        .filter(|view| {
+            let header = view.header();
+            header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented()
+        });
+    match udp_view {
+        Some(view) => {
+            let metadata = udp::parse_ipv4_datagram(view)?;
+            match udp::PreparedUdpPacket::new(packet, metadata) {
+                Ok(prepared) => Some(prepared.into_packet()),
+                Err(_) => None,
+            }
+        }
         None => Some(packet),
     }
 }

@@ -970,10 +970,12 @@ Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRx
 Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, IPv4 validation, fragment reassembly, output fragmentation, and ICMPv4 errors. TCP, raw IP, and IPv6 use the smoltcp socket set, driven by `knet-poller` and explicit `NetworkPoller::assist_once` calls. This boundary keeps UDP independent of smoltcp socket handles while preserving TCP and raw-socket semantics.
 
 `Ipv4PacketView` binds a parsed IPv4 header to a borrowed packet slice. Receive
-processing passes the validated view to ICMP error inspection; output routing
-passes its view to fragmentation. These consumers reuse the header and payload
+processing passes the validated view to UDP parsing, fragment reassembly,
+ICMP error inspection, and TCP listener preparation; output routing passes its
+view to fragmentation. These consumers reuse the header and payload
 bounds established at the boundary. The view adds no allocation or persistent
-cache to `PacketBuf`.
+cache to `PacketBuf`. UDP parsing extracts receive metadata before the packet
+handle is moved into a `PreparedUdpPacket`.
 
 ### Budgeted Processing
 

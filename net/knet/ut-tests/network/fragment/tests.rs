@@ -11,7 +11,7 @@ use unittest::def_test;
 use super::*;
 use crate::{buf::PacketOwner, ipv4};
 
-fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> (PacketBuf, Ipv4Header) {
+fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> PacketBuf {
     fragment_with_id(0x1234, offset, more_fragments, payload)
 }
 
@@ -20,7 +20,7 @@ fn fragment_with_id(
     offset: usize,
     more_fragments: bool,
     payload: &[u8],
-) -> (PacketBuf, Ipv4Header) {
+) -> PacketBuf {
     let offset_units = u16::try_from(offset / 8).unwrap();
     let mut header = EtherIpv4Header::new(
         payload.len() as u16,
@@ -39,10 +39,17 @@ fn fragment_with_id(
     let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
     bytes.extend_from_slice(payload);
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-    let header = ipv4::Ipv4PacketView::validate_input_packet(&mut packet)
-        .unwrap()
-        .header();
-    (packet, header)
+    ipv4::Ipv4PacketView::validate_input_packet(&mut packet).unwrap();
+    packet
+}
+
+fn reassemble_fragment(
+    reassembler: &mut Ipv4Reassembler,
+    packet: PacketBuf,
+    now: MonotonicInstant,
+) -> Ipv4ReassemblyResult {
+    let view = Ipv4PacketView::parse_input(packet.network_packet().unwrap()).unwrap();
+    reassembler.reassemble(view, packet.packet_type(), packet.ifindex(), now)
 }
 
 fn reassemble(parts: &[(usize, bool, &[u8])]) -> Ipv4ReassemblyResult {
@@ -50,8 +57,8 @@ fn reassemble(parts: &[(usize, bool, &[u8])]) -> Ipv4ReassemblyResult {
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
     let mut result = Ipv4ReassemblyResult::Pending;
     for (offset, more, payload) in parts {
-        let (packet, header) = fragment(*offset, *more, payload);
-        result = reassembler.reassemble(packet, header, now);
+        let packet = fragment(*offset, *more, payload);
+        result = reassemble_fragment(&mut reassembler, packet, now);
     }
     result
 }
@@ -64,9 +71,9 @@ fn test_ipv4_reassembly_accepts_in_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
-    assert!(!header.is_fragmented());
-    assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
+    let view = Ipv4PacketView::parse_input(ip_packet).unwrap();
+    assert!(!view.header().is_fragmented());
+    assert_eq!(view.payload(), b"abcdefghijkl");
 }
 
 #[def_test]
@@ -77,8 +84,8 @@ fn test_ipv4_reassembly_accepts_reverse_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
-    assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
+    let view = Ipv4PacketView::parse_input(ip_packet).unwrap();
+    assert_eq!(view.payload(), b"abcdefghijkl");
 }
 
 #[def_test]
@@ -92,22 +99,22 @@ fn test_ipv4_reassembly_drops_overlapping_fragments() {
 fn test_ipv4_reassembly_keeps_queue_on_duplicate_fragment() {
     let mut reassembler = Ipv4Reassembler::new();
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
-    let (packet, header) = fragment(0, true, b"abcdefgh");
-    let retained_bytes = header.header_len() + b"abcdefgh".len();
+    let packet = fragment(0, true, b"abcdefgh");
+    let retained_bytes = packet.network_packet().unwrap().len();
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
     assert_eq!(reassembler.memory_bytes, retained_bytes);
-    let (packet, header) = fragment(0, true, b"abcdefgh");
+    let packet = fragment(0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
     assert_eq!(reassembler.memory_bytes, retained_bytes);
-    let (packet, header) = fragment(8, false, b"ijkl");
+    let packet = fragment(8, false, b"ijkl");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Complete(_)
     ));
     assert_eq!(reassembler.expiration_deadline(), None);
@@ -118,17 +125,17 @@ fn test_ipv4_reassembly_keeps_queue_on_duplicate_fragment() {
 fn test_ipv4_reassembly_deadline_is_fixed_at_queue_creation() {
     let mut reassembler = Ipv4Reassembler::new();
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
-    let (packet, header) = fragment(0, true, b"abcdefgh");
+    let packet = fragment(0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
     let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
     assert_eq!(reassembler.expiration_deadline(), Some(expires_at));
 
-    let (packet, header) = fragment(0, true, b"abcdefgh");
+    let packet = fragment(0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now + TimeSpan::from_secs(1)),
+        reassemble_fragment(&mut reassembler, packet, now + TimeSpan::from_secs(1)),
         Ipv4ReassemblyResult::Pending
     ));
     assert_eq!(reassembler.expiration_deadline(), Some(expires_at));
@@ -138,9 +145,9 @@ fn test_ipv4_reassembly_deadline_is_fixed_at_queue_creation() {
 fn test_ipv4_reassembly_expires_first_fragment() {
     let mut reassembler = Ipv4Reassembler::new();
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
-    let (packet, header) = fragment(0, true, b"abcdefgh");
+    let packet = fragment(0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
 
@@ -151,7 +158,9 @@ fn test_ipv4_reassembly_expires_first_fragment() {
     assert_eq!(reassembler.expiration_deadline(), None);
     assert_eq!(expired.fragments[0].header.fragment_offset(), 0);
     assert_eq!(
-        ipv4::payload(&expired.fragments[0].packet, &expired.fragments[0].header).unwrap(),
+        Ipv4PacketView::parse_input(&expired.fragments[0].packet)
+            .unwrap()
+            .payload(),
         b"abcdefgh"
     );
 }
@@ -160,15 +169,15 @@ fn test_ipv4_reassembly_expires_first_fragment() {
 fn test_ipv4_reassembly_expire_advances_to_the_next_queue_deadline() {
     let mut reassembler = Ipv4Reassembler::new();
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
-    let (packet, header) = fragment_with_id(0x1234, 0, true, b"abcdefgh");
+    let packet = fragment_with_id(0x1234, 0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
     let later = now + TimeSpan::from_secs(5);
-    let (packet, header) = fragment_with_id(0x1235, 0, true, b"ijklmnop");
+    let packet = fragment_with_id(0x1235, 0, true, b"ijklmnop");
     assert!(matches!(
-        reassembler.reassemble(packet, header, later),
+        reassemble_fragment(&mut reassembler, packet, later),
         Ipv4ReassemblyResult::Pending
     ));
 
@@ -187,14 +196,14 @@ fn test_ipv4_reassembly_expire_advances_to_the_next_queue_deadline() {
 fn test_ipv4_reassembly_expiration_respects_timer_budget() {
     let mut reassembler = Ipv4Reassembler::new();
     let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
-    let (packet, header) = fragment_with_id(0x1234, 0, true, b"abcdefgh");
+    let packet = fragment_with_id(0x1234, 0, true, b"abcdefgh");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
-    let (packet, header) = fragment_with_id(0x1235, 0, true, b"ijklmnop");
+    let packet = fragment_with_id(0x1235, 0, true, b"ijklmnop");
     assert!(matches!(
-        reassembler.reassemble(packet, header, now),
+        reassemble_fragment(&mut reassembler, packet, now),
         Ipv4ReassemblyResult::Pending
     ));
 

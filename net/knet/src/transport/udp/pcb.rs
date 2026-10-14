@@ -39,30 +39,27 @@ pub(crate) struct PreparedUdpPacket {
 }
 
 impl PreparedUdpPacket {
-    pub(super) fn new(
+    /// Attaches validated UDP metadata to its owning packet in task context.
+    ///
+    /// `metadata` must come from [`super::input::parse_ipv4_datagram`] for this
+    /// packet, whose bytes must remain unchanged between parsing and attachment.
+    pub(crate) fn new(
         mut packet: PacketBuf,
-        payload_offset: usize,
-        payload_len: usize,
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
+        metadata: UdpPacketMetadata,
     ) -> Result<Self, PacketBuf> {
-        let Some(payload_end) = payload_offset.checked_add(payload_len) else {
-            return Err(packet);
-        };
+        debug_assert!(
+            !kirq::context::is_in_interrupt_context(),
+            "PreparedUdpPacket::new requires task context"
+        );
         if packet
             .network_packet()
-            .and_then(|data| data.get(payload_offset..payload_end))
+            .and_then(|data| data.get(metadata.payload_range()))
             .is_none()
         {
             return Err(packet);
         }
 
-        packet.set_udp_metadata(UdpPacketMetadata::new(
-            local_addr,
-            remote_addr,
-            payload_offset,
-            payload_end,
-        ));
+        packet.set_udp_metadata(metadata);
         Ok(Self { packet })
     }
 
@@ -82,7 +79,7 @@ impl PreparedUdpPacket {
         self.packet
     }
 
-    /// Rebuilds a validated view from a packet stamped by [`super::input::prepare_ipv4_packet`].
+    /// Rebuilds a validated view from a packet stamped by [`Self::new`].
     pub(crate) fn from_stamped(packet: PacketBuf) -> Result<Self, PacketBuf> {
         if packet.udp_metadata().is_none() {
             return Err(packet);

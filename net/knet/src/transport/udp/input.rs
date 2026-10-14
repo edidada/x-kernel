@@ -11,37 +11,13 @@ use super::{
     pcb::PreparedUdpPacket,
     registry,
 };
-use crate::{buf::PacketBuf, ipv4};
+use crate::{buf::UdpPacketMetadata, ipv4};
 
 /// Result of UDP input delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputDisposition {
     Accepted,
     NoSocket,
-}
-
-/// Validates an IPv4 UDP packet and records its receive metadata.
-///
-/// This function must run in task context. Loopback stamps packets before
-/// disabling BH; ordinary ingress is already processed by a task. The existing
-/// reference-counted `PacketBuf` is retained without another allocation.
-pub(crate) fn prepare_ipv4_packet(
-    header: ipv4::Ipv4Header,
-    packet: PacketBuf,
-) -> Result<PreparedUdpPacket, PacketBuf> {
-    debug_assert!(
-        !kirq::context::is_in_interrupt_context(),
-        "prepare_ipv4_packet requires task context"
-    );
-    let Some((local_addr, remote_addr, payload_offset, payload_len)) = packet
-        .network_packet()
-        .and_then(|ip_packet| parse_udp_datagram(header, ip_packet))
-    else {
-        return Err(packet);
-    };
-    let packet =
-        PreparedUdpPacket::new(packet, payload_offset, payload_len, local_addr, remote_addr)?;
-    Ok(packet)
 }
 
 /// Delivers a prepared packet through the non-sleeping PCB lookup path.
@@ -64,11 +40,14 @@ pub(crate) fn deliver_ipv4_packet(
     (InputDisposition::Accepted, None)
 }
 
-fn parse_udp_datagram(
-    header: ipv4::Ipv4Header,
-    ip_packet: &[u8],
-) -> Option<(SocketAddr, SocketAddr, usize, usize)> {
-    let udp_packet = ipv4::payload(ip_packet, &header)?;
+/// Validates UDP input within an IPv4 view and extracts receive metadata.
+///
+/// The caller must select an unfragmented IPv4 UDP packet. Attach the returned
+/// metadata to the same packet in task context before transferring its ownership
+/// to the receive queue.
+pub(crate) fn parse_ipv4_datagram(view: ipv4::Ipv4PacketView<'_>) -> Option<UdpPacketMetadata> {
+    let header = view.header();
+    let udp_packet = view.payload();
     let udp_header = UdpHeaderSlice::from_slice(udp_packet).ok()?;
     let udp_len = udp_header.length() as usize;
     if udp_len < UDP_HEADER_LEN || udp_len > udp_packet.len() {
@@ -89,10 +68,10 @@ fn parse_udp_datagram(
         udp_header.destination_port(),
     ));
 
-    Some((
+    Some(UdpPacketMetadata::new(
         local,
         remote,
         header.header_len() + UDP_HEADER_LEN,
-        udp_len - UDP_HEADER_LEN,
+        header.header_len() + udp_len,
     ))
 }

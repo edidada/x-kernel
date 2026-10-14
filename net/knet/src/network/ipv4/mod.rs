@@ -9,7 +9,7 @@ mod process;
 pub(crate) use process::{
     Icmpv4Error, Ipv4Error, Ipv4FragmentError, Ipv4Header, Ipv4PacketView, PROTOCOL_ICMP,
     PROTOCOL_TCP, PROTOCOL_UDP, build_icmpv4_error_packet, fragment_output_packet, ip_version,
-    payload, rewrite_reassembled_header, write_ipv4_packet_header,
+    rewrite_reassembled_header, write_ipv4_packet_header,
 };
 #[cfg(unittest)]
 pub(crate) use process::{build_ipv4_packet, build_ipv4_packet_dont_fragment};

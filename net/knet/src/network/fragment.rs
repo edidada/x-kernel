@@ -20,7 +20,7 @@ use alloc::{
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use super::ipv4::{self, Ipv4Header};
+use super::ipv4::{self, Ipv4Header, Ipv4PacketView};
 use crate::buf::{PacketBuf, PacketOwner, PacketType};
 
 const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
@@ -108,24 +108,21 @@ impl Ipv4Reassembler {
 
     pub(crate) fn reassemble(
         &mut self,
-        packet: PacketBuf,
-        header: Ipv4Header,
+        view: Ipv4PacketView<'_>,
+        packet_type: PacketType,
+        ifindex: i32,
         now: MonotonicInstant,
     ) -> Ipv4ReassemblyResult {
+        let header = view.header();
         let key = Ipv4FragKey {
             src_addr: header.src_addr().octets(),
             dst_addr: header.dst_addr().octets(),
             identification: header.identification(),
             protocol: header.protocol(),
-            ifindex: packet.ifindex(),
+            ifindex,
         };
-        let Some(ip_packet) = packet.network_packet() else {
-            return Ipv4ReassemblyResult::Dropped;
-        };
-        let Some(payload) = ipv4::payload(ip_packet, &header) else {
-            self.remove_queue(&key);
-            return Ipv4ReassemblyResult::Dropped;
-        };
+        let ip_packet = view.packet();
+        let payload = view.payload();
 
         let offset = header.fragment_offset();
         let payload_len = aligned_payload_len(payload.len(), header.more_fragments());
@@ -147,7 +144,7 @@ impl Ipv4Reassembler {
                 let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
                 self.expirations.insert(Ipv4Expiration { expires_at, key });
                 entry.insert(Ipv4ReassemblyQueue {
-                    packet_type: packet.packet_type(),
+                    packet_type,
                     first_header: None,
                     fragments: BTreeMap::new(),
                     received_len: 0,

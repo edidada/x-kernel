@@ -121,7 +121,11 @@ impl IngressProcessor {
         }
 
         if header.is_fragmented() {
-            match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
+            let result = self
+                .ipv4_reassembler
+                .reassemble(view, packet_type, ifindex, timestamp);
+            drop(packet);
+            match result {
                 Ipv4ReassemblyResult::Complete(packet) => {
                     self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets)
                 }
@@ -131,7 +135,10 @@ impl IngressProcessor {
         }
 
         if header.protocol() == ipv4::PROTOCOL_UDP {
-            let packet = match udp::prepare_ipv4_packet(header, packet) {
+            let Some(metadata) = udp::parse_ipv4_datagram(view) else {
+                return;
+            };
+            let packet = match udp::PreparedUdpPacket::new(packet, metadata) {
                 Ok(packet) => packet,
                 Err(_) => return,
             };
@@ -196,17 +203,15 @@ pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut Socke
         };
         match ipv4::ip_version(ip_packet) {
             Some(4) => {
-                let Ok(header) = Ipv4Header::parse_input(ip_packet) else {
+                let Ok(view) = Ipv4PacketView::parse_input(ip_packet) else {
                     continue;
                 };
-                let Some(payload) = ipv4::payload(ip_packet, &header) else {
-                    continue;
-                };
+                let header = view.header();
                 snoop_tcp_segment(
                     header.protocol(),
                     SmoltcpIpAddress::Ipv4(header.src_addr().into()),
                     SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
-                    payload,
+                    view.payload(),
                     sockets,
                 );
             }

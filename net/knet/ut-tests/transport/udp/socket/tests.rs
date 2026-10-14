@@ -30,7 +30,8 @@ impl Wake for WakeCounter {
 fn received_packet(ifindex: i32, local: IpEndpoint) -> PreparedUdpPacket {
     let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 4321).into();
     let packet = PacketBuf::from_ip_packet_vec(ifindex, vec![42], PacketOwner::Ipv4Stack);
-    PreparedUdpPacket::new(packet, 0, 1, local.into(), remote).unwrap()
+    let metadata = crate::buf::UdpPacketMetadata::new(local.into(), remote, 0, 1);
+    PreparedUdpPacket::new(packet, metadata).unwrap()
 }
 
 // Serial: exercises the shared UDP registry; socket Drop unregisters both PCBs.

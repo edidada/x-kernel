@@ -129,12 +129,13 @@ fn test_fragment_output_packet_splits_on_aligned_payload() {
     assert_eq!(fragments.len(), 3);
     let mut reassembled = Vec::new();
     for (idx, fragment) in fragments.iter().enumerate() {
-        let header = Ipv4Header::parse_input(fragment).unwrap();
+        let view = Ipv4PacketView::parse_input(fragment).unwrap();
+        let header = view.header();
         assert_eq!(header.identification(), 0x1234);
         assert_eq!(header.fragment_offset(), idx * 16);
         assert_eq!(header.more_fragments(), idx != 2);
         assert!(!header.dont_fragment());
-        reassembled.extend_from_slice(payload(fragment, &header).unwrap());
+        reassembled.extend_from_slice(view.payload());
     }
     assert_eq!(reassembled, original_payload);
 }
