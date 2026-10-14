@@ -91,15 +91,17 @@ mod error;
 pub mod provider;
 mod resource;
 
-pub use bus::{
-    Bus, BusId, BusInstanceId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
-    FirmwareProp, IdMatchEntry, MatchScore,
+pub mod desc;
+mod handle;
+mod iomap;
+mod services;
+
+pub use bus::{Bus, BusId, BusInstanceId, IdMatchEntry, MatchScore};
+pub use desc::{
+    DeviceDescriptor, DeviceId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
+    FirmwareProp, PciIdentity, PlatformIdentity,
 };
-pub use device::{
-    BoundDevice, ClkHandle, ClkOps, ClockConsumerServices, CoherentMem, DevIrq, DeviceCtx,
-    DeviceResourceServices, DeviceServices, EnabledClock, ExtensionService, IoMap, IrqAction,
-    IrqHandlerFn, ReleaseHook, ServiceError,
-};
+pub use device::{BoundDevice, DeviceCtx};
 pub use device_traits::DeviceKind;
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
@@ -107,19 +109,16 @@ pub use domain::{
 };
 pub use driver::{DriverDesc, DriverOps};
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
+pub use handle::{ClkHandle, CoherentMem, DevIrq, EnabledClock, ReleaseHook};
+pub use iomap::IoMap;
 pub use resource::{
     ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
     ResourceEntry, ResourceKind, ResourceMap,
 };
-
-pub mod desc {
-    //! Enumeration products handed to the model by bus backends.
-
-    pub use crate::bus::{
-        DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
-        FirmwareProp, PciIdentity, PlatformIdentity,
-    };
-}
+pub use services::{
+    ClkOps, ClockConsumerServices, DeviceResourceServices, DeviceServices, ExtensionService,
+    IrqAction, IrqHandlerFn, ServiceError,
+};
 
 pub mod platform {
     //! Reference implementation of the platform ("firmware node") bus.

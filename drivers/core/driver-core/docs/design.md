@@ -32,9 +32,13 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | 文件 | 职责 |
 |---|---|
 | `src/lib.rs` | crate 门面 + Linux↔x-kernel 映射表 + 所有权模型说明 |
-| `src/bus.rs` | `Bus` / `BusId` / `BusInstanceId` / `IdMatchEntry` / `MatchScore` / `DeviceDescriptor` / `DeviceIdentity` / `DeviceLocation`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch` |
+| `src/bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `IdMatchEntry` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch` |
+| `src/desc.rs` | 设备描述词汇（枚举产物）：`DeviceDescriptor` / `DeviceId` / `DeviceIdentity` / `DeviceLocation` / `FirmwareProp` / `FirmwareNodeInfo` |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc` |
-| `src/device.rs` | probe 侧表面：`DeviceCtx`、`BoundDevice`、guards（`IoMap`/`DevIrq`/`CoherentMem`/`ClkHandle`/`EnabledClock`）、服务契约（`DeviceResourceServices`/`ClockConsumerServices`/`DeviceServices`/`ExtensionService`） |
+| `src/device.rs` | probe 侧表面：`DeviceCtx`（驱动持有的唯一对象）、`BoundDevice` |
+| `src/services.rs` | 服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` / `ExtensionService` / `IrqAction` / `ServiceError` / `ClkOps` |
+| `src/iomap.rs` | MMIO 映射句柄 `IoMap`（`devm_ioremap` 语义 + 访问 API） |
+| `src/handle.rs` | 驱动侧运行时资源句柄（guards-in-Data 家族）：`DevIrq` / `CoherentMem` / `ClkHandle` / `EnabledClock` |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
 | `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec` |
 | `src/provider.rs` | 主机实现的 Op 契约：`MmioOp`/`IrqOp`/`DmaOp` + `IrqRouteDesc`/`MsiResource` |
@@ -266,7 +270,7 @@ pub trait ExtensionService: Sized {
 
 ### `IrqAction` 没有 `WakeThread` 变体
 
-`device.rs` 里有整段注释说明：`kirq` 目前没有线程化 handler 词汇，一个"唤醒
+`services.rs` 里有整段注释说明：`kirq` 目前没有线程化 handler 词汇，一个"唤醒
 线程"的半支持变体会在主机适配层静默降级成 `Handled`，让驱动以为自己跑在任务
 上下文、实际跑在中断上下文。要加就和一个真的 threaded-IRQ 通道一起加。
 

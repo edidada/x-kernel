@@ -57,13 +57,12 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 use crate::{
-    bus::{Bus, BusId, BusInstanceId, DeviceDescriptor, DeviceId, IdMatchEntry, MatchScore},
-    device::{
-        BoundDevice, ClockConsumerServices, DeviceCtx, DeviceResourceServices, DeviceServices,
-        ServiceError,
-    },
+    bus::{Bus, BusId, IdMatchEntry, MatchScore},
+    desc::{DeviceDescriptor, DeviceId},
+    device::{BoundDevice, DeviceCtx},
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
+    services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
 };
 
 /// Erased driver-private data (DriverOps::Data boxed by the framework).
@@ -260,7 +259,7 @@ fn driver_key(driver: &Arc<dyn AnyDriver>) -> usize {
     Arc::as_ptr(driver) as *const u8 as usize
 }
 
-/// One concrete bus instance (see [`BusInstanceId`]): created by a bus
+/// One concrete bus instance (see [`BusInstanceId`](crate::BusInstanceId)): created by a bus
 /// controller/bridge driver (or the composition root for a root bus),
 /// anchoring the devices discovered on it. Removing the BRIDGE device
 /// cascades the instance's member devices — the Linux bridge-eject
@@ -340,7 +339,7 @@ impl DeviceResourceServices for NoServices {
         _: u64,
         _: MmioRegion,
         _: &'static str,
-    ) -> Result<crate::device::IoMap, RuntimeError> {
+    ) -> Result<crate::iomap::IoMap, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -349,8 +348,8 @@ impl DeviceResourceServices for NoServices {
         _: u64,
         _: IrqSpec,
         _: &'static str,
-        _: crate::device::IrqHandlerFn,
-    ) -> Result<crate::device::DevIrq, RuntimeError> {
+        _: crate::services::IrqHandlerFn,
+    ) -> Result<crate::handle::DevIrq, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -360,7 +359,7 @@ impl DeviceResourceServices for NoServices {
         _: crate::DmaInfo,
         _: usize,
         _: usize,
-    ) -> Result<crate::device::CoherentMem, RuntimeError> {
+    ) -> Result<crate::handle::CoherentMem, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -370,7 +369,7 @@ impl DeviceResourceServices for NoServices {
 }
 
 impl ClockConsumerServices for NoServices {
-    fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::device::ClkHandle, ServiceError> {
+    fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::handle::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }

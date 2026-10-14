@@ -11,10 +11,13 @@ use unittest::{assert_eq, def_test};
 
 use super::*;
 use crate::{
-    bus::{DeviceDescriptor, PlatformId},
-    device::{ClkHandle, ClkOps, DevIrq, IoMap, IrqAction},
+    bus::{BusInstanceId, PlatformId},
+    desc::DeviceDescriptor,
     driver::{DriverDesc, DriverOps},
+    handle::{ClkHandle, DevIrq},
+    iomap::IoMap,
     platform::{OfMatch, PlatformBus},
+    services::{ClkOps, IrqAction},
 };
 
 struct FixedClk {
@@ -106,7 +109,7 @@ impl DeviceResourceServices for MockServices {
         _: u64,
         spec: IrqSpec,
         _: &'static str,
-        _: crate::device::IrqHandlerFn,
+        _: crate::services::IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
         Ok(DevIrq::new(
             match spec {
@@ -125,13 +128,13 @@ impl DeviceResourceServices for MockServices {
         dma: crate::DmaInfo,
         _: usize,
         _: usize,
-    ) -> Result<crate::device::CoherentMem, RuntimeError> {
+    ) -> Result<crate::handle::CoherentMem, RuntimeError> {
         // Test mock: fake identity allocator honoring the device's DMA
         // view through the same translate() the real host uses, so the
         // mask/offset contract is exercised in tests too.
         let paddr = 0x4000_0000u64 + self.mapped.load(Ordering::Relaxed) as u64;
         match dma.translate(paddr) {
-            Some(bus) => Ok(crate::device::CoherentMem::new(
+            Some(bus) => Ok(crate::handle::CoherentMem::new(
                 paddr as usize,
                 bus,
                 0x1000,
@@ -243,8 +246,8 @@ fn test_descriptor() -> DeviceDescriptor {
     );
     DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::bus::DeviceLocation::FirmwareNode { id: 1 },
-        crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+        crate::desc::DeviceLocation::FirmwareNode { id: 1 },
+        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("test,serial")),
             compatibles: alloc::vec![alloc::string::String::from("test,serial")],
             alias: None,
@@ -335,7 +338,7 @@ fn late_driver_registration_claims_unclaimed_device() {
 fn late_driver_registration_skips_unmatched_unclaimed() {
     let (domain, _services) = fresh_domain();
     let mut desc = test_descriptor();
-    desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
         firmware_id: Some(alloc::string::String::from("nobody,matches")),
         compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
         alias: None,
@@ -388,8 +391,8 @@ fn remove_cascades_children_first() {
 
     let parent_desc = DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::bus::DeviceLocation::FirmwareNode { id: 1 },
-        crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+        crate::desc::DeviceLocation::FirmwareNode { id: 1 },
+        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("topo,parent")),
             compatibles: alloc::vec![alloc::string::String::from("topo,parent")],
             alias: None,
@@ -405,8 +408,8 @@ fn remove_cascades_children_first() {
 
     let child_desc = DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::bus::DeviceLocation::FirmwareNode { id: 2 },
-        crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+        crate::desc::DeviceLocation::FirmwareNode { id: 2 },
+        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("topo,child")),
             compatibles: alloc::vec![alloc::string::String::from("topo,child")],
             alias: None,
@@ -437,7 +440,7 @@ fn remove_cascades_children_first() {
 /// new children, and complete on retry.
 #[def_test(serial)]
 fn parent_teardown_waits_for_probing_child() {
-    use crate::bus::DeviceLocation;
+    use crate::desc::DeviceLocation;
 
     static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
     struct ChildDriver {
@@ -491,7 +494,7 @@ fn parent_teardown_waits_for_probing_child() {
         DeviceDescriptor::new(
             PlatformBus::ID,
             DeviceLocation::FirmwareNode { id: firmware },
-            crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+            crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
                 firmware_id: Some(alloc::string::String::from(compatible)),
                 compatibles: alloc::vec![alloc::string::String::from(compatible)],
                 alias: None,
@@ -572,13 +575,13 @@ fn parent_teardown_waits_for_probing_child() {
 /// bridge-eject semantics).
 #[def_test(serial)]
 fn bus_instances_validate_query_and_bridge_eject() {
-    use crate::bus::DeviceLocation;
+    use crate::desc::DeviceLocation;
 
     fn pci_function(_vendor: u16, firmware: u32) -> DeviceDescriptor {
         DeviceDescriptor::new(
             crate::platform::PlatformBus::ID, // 类型故意用 platform（测类型一致性）
             DeviceLocation::FirmwareNode { id: firmware },
-            crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+            crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
                 firmware_id: Some(alloc::string::String::from("bus,test")),
                 compatibles: alloc::vec![alloc::string::String::from("bus,test")],
                 alias: None,
@@ -828,7 +831,7 @@ fn removing_unbound_device_frees_entry_and_worklists() {
 
     // Unclaimed device (no driver for it).
     let mut desc = test_descriptor();
-    desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
         firmware_id: Some(alloc::string::String::from("nobody,matches")),
         compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
         alias: None,
@@ -896,7 +899,7 @@ fn fatal_failure_falls_through_to_next_candidate() {
 fn unmatched_descriptor_is_unclaimed() {
     let (domain, _services) = fresh_domain();
     let mut desc = test_descriptor();
-    desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
         firmware_id: Some(alloc::string::String::from("nobody,matches")),
         compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
         alias: None,
