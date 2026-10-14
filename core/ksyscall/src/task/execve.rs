@@ -140,6 +140,11 @@ pub(crate) fn sys_execveat(
 
     if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
         let file = kprocess::current_files().get_file(dirfd)?;
+        // Linux exec's a regular file: an `AT_EMPTY_PATH` request naming a
+        // directory descriptor is `EACCES`, not a path re-resolution.
+        if file.path().is_dir() {
+            return Err(KError::from(LinuxError::EACCES));
+        }
         let display = alloc::format!("/proc/self/fd/{dirfd}");
         debug!("sys_execveat <= fd {dirfd} (AT_EMPTY_PATH), args: {args:?}");
         return exec_resolved(
