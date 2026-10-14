@@ -244,7 +244,7 @@ These owned values are prepared for later rule construction and packet evaluatio
 
 * **vsock startup and callbacks**
 
-  `init_vsock` installs the available raw transport and registers availability/removal callbacks. `start_vsock_bridge` must run after all scheduler run queues are initialized because it starts bridge tasks. Device availability and removal callbacks take sleepable locks. `publish_kobject_uevent`, `send_link_frame`, and relay operations also allocate or acquire sleepable locks and belong in task context. The periodic `Service::handle_timer_tick` callback uses atomic deadline checks, waiter notification, and IRQ-safe poller scheduling.
+  `init_vsock` installs the available raw transport and registers availability/removal callbacks. `start_vsock_bridge` must run after all scheduler run queues are initialized because it starts bridge tasks. Device availability and removal callbacks take sleepable locks. `publish_kobject_uevent`, `send_link_frame`, and relay operations also allocate or acquire sleepable locks and belong in task context. The periodic `Service::handle_timer_tick` callback uses an atomic protocol-deadline check and a short IRQ-safe reassembly-state check, followed by waiter notification and IRQ-safe poller scheduling.
 
 * **Normal protocol processing runs in task context**
 
@@ -788,7 +788,7 @@ The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smol
 
 `NetworkPoller` represents this execution right with two locked booleans (`is_running`, `has_pending`) corresponding to four conceptual states: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A prepared kworkng background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
-Protocol and IPv4 reassembly deadlines use separate `AtomicU64` fields owned by `Service` and `Ipv4Ingress`, respectively. The periodic sampling callback is deliberately small: it checks the atomic deadline, wakes waiters, and notifies the poller. Each successful staged smoltcp poll refreshes the protocol timer through `Interface::poll_at`, so TCP retransmission and similar deadlines continue to advance even when socket waiters are blocked.
+The protocol deadline uses an `AtomicU64` owned by `Service`. IPv4 reassembly uses a `ReassemblyTimerState` enum protected by a short `SpinNoIrq` lock inside `Ipv4Ingress`. The enum directly stores a disarmed state, pending work, or an armed monotonic deadline without integer sentinel encoding. The periodic sampling callback checks these independent sources, releases the reassembly timer lock, wakes waiters, and notifies the poller. Each successful staged smoltcp poll refreshes the protocol timer through `Interface::poll_at`, so TCP retransmission and similar deadlines continue to advance even when socket waiters are blocked.
 
 `Service` owns a `ktask::Timer<NetworkTimer>`, constructed once and started
 after the global `SERVICE` and poller are published. The IRQ handler accesses
@@ -830,7 +830,7 @@ UDP socket lookup and enqueue remain in `transport::udp::input`; the runtime han
 Only ICMP packets enter UDP ICMP-error inspection.
 
 Fragment expiration detaches expired results and publishes the next timer state under the ingress state lock, then returns those results to `runtime::rx::expire_fragments` for timeout-response queuing outside the lock.
-The private `ingress::timer::ReassemblyTimer` owns atomic deadline encoding and pending-state transitions.
+The private `ingress::timer::ReassemblyTimer` owns the `Disarmed`, `Pending`, and `Armed { deadline }` states under `SpinNoIrq`. Publication and completion acquire the ingress state mutex before the timer lock; IRQ sampling acquires only the timer lock. These critical sections contain only state inspection and updates. Queue processing, response construction, and wakeups run outside the timer lock. RX deadline updates preserve `Pending` until the poller consumes expiration work.
 The runtime timer samples it through `Ipv4Ingress::handle_timer_tick`.
 The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 
@@ -898,7 +898,7 @@ Loopback UDP is delivered directly to the PCB within the transmit path's bottom-
 
 RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `Ipv4Admission` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
-TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
+TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate deadline sources track protocol and deferred-close timers through an atomic value and IPv4 reassembly through its IRQ-safe timer state. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
 ### Control-Plane State Ownership
 

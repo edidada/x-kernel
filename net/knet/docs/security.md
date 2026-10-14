@@ -498,7 +498,7 @@ Each processing round has a soft time limit of 1 ms. The kworkng poller callback
 ### 20. Protocol Timer Conditions
 
 After each round of `poll_maintenance`, `poll_ingress_single`, and `poll_egress`, `poll_at` must refresh the next deadline.
-IPv4 reassembly queues publish their earliest deadline through a separate atomic source.
+IPv4 reassembly queues publish their earliest deadline through a separate enum state protected by `SpinNoIrq`.
 `has_immediate_timer_work` and `update_poll_timeout` must reread monotonic time at the end of the round and check absolute deadlines. Timers that have not expired must not contribute to `PollProgress::has_more`; expiration must publish work through `notify(PollReason::Timer)`.
 
 ### 21. TX and Receive-Window Handoff Conditions
@@ -516,7 +516,7 @@ The 60-second reclamation deadline applies only to `FIN_WAIT_2` handles detached
 
 ### 23. Network Timer Conditions
 
-Protocol timers and deferred-close processing share an atomic deadline source. IPv4 reassembly uses a separate atomic source for its deadline and pending state.
+Protocol timers and deferred-close processing share an atomic deadline source. IPv4 reassembly uses a separate `SpinNoIrq<ReassemblyTimerState>` for its deadline and pending state. The lock order is ingress state mutex followed by timer lock; the IRQ sampler takes only the timer lock and releases it before waking waiters or notifying the poller. Timer critical sections perform no allocation, queue processing, or blocking operations. RX updates preserve pending expiration work.
 The periodic sampling callback may only perform bounded deadline checks, wakeups, and IRQ-safe poller notifications. It must not acquire sleeping mutexes, allocate futures, or access the timer wheel.
 Expired IPv4 queues are consumed in batches according to `PollBudget::timer_events`.
 

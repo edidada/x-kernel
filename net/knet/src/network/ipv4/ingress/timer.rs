@@ -2,93 +2,80 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Atomic publication of fragment deadlines between input processing and timer ticks.
-
-use core::sync::atomic::{AtomicU64, Ordering};
+//! IRQ-safe publication of fragment deadlines between input processing and timer ticks.
 
 use khal::time::monotonic_time;
+use kspin::SpinNoIrq;
 use ktime_types::MonotonicInstant;
 
-const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
-const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
+#[derive(Clone, Copy)]
+enum ReassemblyTimerState {
+    Disarmed,
+    Pending,
+    Armed { deadline: MonotonicInstant },
+}
 
-/// Encodes a disarmed timer, pending work, or a future deadline.
+impl ReassemblyTimerState {
+    fn from_deadline(next: Option<MonotonicInstant>) -> Self {
+        match next {
+            None => Self::Disarmed,
+            Some(deadline) if deadline <= monotonic_time() => Self::Pending,
+            Some(deadline) => Self::Armed { deadline },
+        }
+    }
+}
+
+/// Shares reassembly timer state with IRQ sampling through a short critical section.
 ///
-/// Input processing serializes publication and completion under its state lock;
-/// timer ticks only mark due work through the atomic state.
+/// Publication and completion take the ingress state lock before this lock.
+/// Timer sampling takes only this lock. No queue processing, allocation, or
+/// wakeup runs while it is held.
 pub(super) struct ReassemblyTimer {
-    reassembly_deadline_micros: AtomicU64,
+    state: SpinNoIrq<ReassemblyTimerState>,
 }
 
 impl ReassemblyTimer {
     pub(super) fn new() -> Self {
         Self {
-            reassembly_deadline_micros: AtomicU64::new(0),
+            state: SpinNoIrq::new(ReassemblyTimerState::Disarmed),
         }
     }
 
-    /// Marks due fragment work without taking the input-state lock.
+    /// Marks due work from task or IRQ context without taking the ingress lock.
     pub(super) fn handle_timer_tick(&self, current_micros: u64) -> bool {
-        let reassembly_deadline = self.reassembly_deadline_micros.load(Ordering::Acquire);
-        reassembly_deadline > IPV4_REASSEMBLY_TIMER_PENDING
-            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET) >= reassembly_deadline
-            && self
-                .reassembly_deadline_micros
-                .compare_exchange(
-                    reassembly_deadline,
-                    IPV4_REASSEMBLY_TIMER_PENDING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-    }
-
-    /// Publishes the next deadline while the caller holds the input-state lock.
-    pub(super) fn update_reassembly_deadline(&self, next: Option<MonotonicInstant>) {
-        let next_state = ipv4_reassembly_timer_state(next);
-        let mut current = self.reassembly_deadline_micros.load(Ordering::Acquire);
-        loop {
-            // A timer tick owns the pending state until the poller consumes
-            // the due queues. A concurrent RX refresh must not disarm it.
-            if current == IPV4_REASSEMBLY_TIMER_PENDING {
-                return;
+        let mut state = self.state.lock();
+        match *state {
+            ReassemblyTimerState::Armed { deadline }
+                if deadline.span_since_origin().as_micros() <= u128::from(current_micros) =>
+            {
+                *state = ReassemblyTimerState::Pending;
+                true
             }
-            match self.reassembly_deadline_micros.compare_exchange_weak(
-                current,
-                next_state,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
+            _ => false,
         }
     }
 
-    /// Consumes pending expiration work while the caller holds the input-state lock.
+    /// Publishes the next deadline while the caller holds the ingress state lock.
+    pub(super) fn update_reassembly_deadline(&self, next: Option<MonotonicInstant>) {
+        let next_state = ReassemblyTimerState::from_deadline(next);
+        let mut state = self.state.lock();
+        // RX must leave pending work for the poller to consume.
+        if !matches!(*state, ReassemblyTimerState::Pending) {
+            *state = next_state;
+        }
+    }
+
+    /// Completes expiration while the caller holds the ingress state lock.
     pub(super) fn complete_expiration(&self, next: Option<MonotonicInstant>, has_more: bool) {
         let next_state = if has_more {
-            IPV4_REASSEMBLY_TIMER_PENDING
+            ReassemblyTimerState::Pending
         } else {
-            ipv4_reassembly_timer_state(next)
+            ReassemblyTimerState::from_deadline(next)
         };
-        self.reassembly_deadline_micros
-            .store(next_state, Ordering::Release);
+        *self.state.lock() = next_state;
     }
 
     pub(super) fn has_pending_timer(&self) -> bool {
-        self.reassembly_deadline_micros.load(Ordering::Acquire) == IPV4_REASSEMBLY_TIMER_PENDING
+        matches!(*self.state.lock(), ReassemblyTimerState::Pending)
     }
-}
-
-fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
-    let Some(next) = next else {
-        return 0;
-    };
-    if next <= monotonic_time() {
-        return IPV4_REASSEMBLY_TIMER_PENDING;
-    }
-    u64::try_from(next.span_since_origin().as_micros())
-        .unwrap_or(u64::MAX)
-        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
 }
