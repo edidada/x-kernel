@@ -326,4 +326,33 @@ mod tests {
         );
         drop(second);
     }
+    #[def_test]
+    fn run_clone_failure_rolls_back_acquired_prefix() {
+        let fixture = Fixture::new();
+        let owner = fixture
+            .allocator
+            .alloc_frame_run(4, PAGE, UsageKind::Global)
+            .unwrap();
+        let first = owner.phys_addr().as_usize() / PAGE;
+        let limit = fixture.allocator.frame_meta(first + 2).unwrap();
+        // Only this fixture owns the run; restore the artificial count before Drop.
+        limit.refs.store(MAX_REFERENCES, Ordering::Relaxed);
+        assert!(matches!(owner.try_clone_run(), Err(AllocError::NoMemory)));
+        for index in [0, 1, 3] {
+            assert_eq!(
+                fixture.allocator.frame_meta(first + index).unwrap().state(),
+                FrameState::Shared { references: 1 }
+            );
+        }
+        limit.refs.store(1, Ordering::Relaxed);
+        let clone = owner.try_clone_run().unwrap();
+        drop(owner);
+        for index in 0..4 {
+            assert_eq!(
+                fixture.allocator.frame_meta(first + index).unwrap().state(),
+                FrameState::Shared { references: 1 }
+            );
+        }
+        drop(clone);
+    }
 }

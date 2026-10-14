@@ -488,3 +488,13 @@ requires exact-once restoration for the original allocation of every backing
 page. Run lengths and addresses do not prove provenance on their own. The
 current VA adapter rejects an alignment not preserved by its mapping offset;
 a future PA/PFN buddy backend removes that transitional constraint.
+
+
+### Cloning contiguous holds
+
+`FrameRun::try_clone_run` acquires one hold on every covered base page without
+allocating a separate control block. If any count reaches its limit, the
+partially built run drops its acquired prefix and the original stays intact.
+`From<FrameRef>` transfers a single-page hold into a run without changing its
+count. These operations allow the HAL's data-mapping capability to cover both
+base-page and huge leaves; they do not introduce compound-page or folio rules.

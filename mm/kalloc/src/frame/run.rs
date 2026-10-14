@@ -69,6 +69,28 @@ impl<'a> FrameRun<'a> {
             .expect("registered run address must not overflow")
     }
 
+    /// Clones all holds in this live run without allocating a control block.
+    ///
+    /// # Errors
+    /// Returns NoMemory at a reference-count limit. Any acquired prefix is
+    /// rolled back on error, leaving this run intact.
+    pub fn try_clone_run(&self) -> AllocResult<Self> {
+        let mut cloned = Self {
+            allocator: self.allocator,
+            paddr: self.paddr,
+            num_frames: 0,
+        };
+        let first = self.paddr.as_usize() / memaddr::PAGE_SIZE_4K;
+        for index in 0..self.num_frames {
+            self.allocator
+                .frame_meta(first + index)
+                .expect("live run must be fully described")
+                .add_reference()?;
+            cloned.num_frames += 1;
+        }
+        Ok(cloned)
+    }
+
     /// Acquires another lifetime hold on one page without allocating metadata.
     ///
     /// # Errors
@@ -163,6 +185,17 @@ impl Drop for FrameRun<'_> {
                 self.allocator
                     .release_frame(self.paddr + index * memaddr::PAGE_SIZE_4K, kind);
             }
+        }
+    }
+}
+
+impl<'a> From<FrameRef<'a>> for FrameRun<'a> {
+    fn from(frame: FrameRef<'a>) -> Self {
+        let frame = ManuallyDrop::new(frame);
+        Self {
+            allocator: frame.allocator,
+            paddr: frame.paddr,
+            num_frames: 1,
         }
     }
 }

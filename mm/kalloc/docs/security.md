@@ -393,3 +393,12 @@ wrapper without dropping its FrameRun and restoration requires unique held backi
 callers must retire hardware use before restoration/destruction. New tests cover
 rounded coverage, independently retained slack, complete inventory reuse, overflow,
 physical alignment, accounting, raw transfer and raw-release rejection.
+
+
+### Contiguous clone rollback
+
+A clone is derived only from a live `FrameRun`. The source keeps every covered
+page alive while counts are acquired. The partial clone records its acquired
+prefix, so its normal destructor reverses that prefix on count overflow.
+`From<FrameRef>` suppresses the consumed handle's destructor and transfers its
+one hold, with no raw address adoption or payload aliasing permission.
