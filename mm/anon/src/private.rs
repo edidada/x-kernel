@@ -5,6 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 
+use kalloc::FrameRun;
 use kerrno::{KError, KResult};
 use khal::{mem::PhysAddr, paging::PageSize};
 use kspin::SpinNoIrq;
@@ -22,7 +23,7 @@ struct RegisteredView {
 }
 
 struct AnonPrivatePageState {
-    pa: PhysAddr,
+    frame: FrameRun<'static>,
     size: PageSize,
     refs: u32,
 }
@@ -34,9 +35,14 @@ pub struct AnonPrivatePageHandle {
 }
 
 impl AnonPrivatePageHandle {
-    fn new(pa: PhysAddr, size: PageSize) -> Self {
+    fn new(frame: FrameRun<'static>, size: PageSize) -> Self {
+        assert_eq!(frame.frame_count() * khal::mem::PAGE_SIZE_4K, size as usize);
         Self {
-            inner: Arc::new(SpinNoIrq::new(AnonPrivatePageState { pa, size, refs: 1 })),
+            inner: Arc::new(SpinNoIrq::new(AnonPrivatePageState {
+                frame,
+                size,
+                refs: 1,
+            })),
         }
     }
 
@@ -52,8 +58,7 @@ impl AnonPrivatePageHandle {
         state.refs -= 1;
         if state.refs == 0 {
             Some(AnonPrivateReleasedPage {
-                pa: state.pa,
-                size: state.size,
+                handle: self.clone(),
             })
         } else {
             None
@@ -62,7 +67,19 @@ impl AnonPrivatePageHandle {
 
     /// Returns the backing frame address.
     pub fn phys_addr(&self) -> PhysAddr {
-        self.inner.lock().pa
+        self.inner.lock().frame.phys_addr()
+    }
+
+    /// Acquires physical lifetime holds independent of object-slot sharing.
+    ///
+    /// # Errors
+    /// Returns NoMemory at a base-page reference-count limit.
+    pub fn try_clone_frame(&self) -> KResult<FrameRun<'static>> {
+        self.inner
+            .lock()
+            .frame
+            .try_clone_run()
+            .map_err(|_| KError::NoMemory)
     }
 
     /// Returns the page size of this private page slot.
@@ -80,22 +97,23 @@ impl AnonPrivatePageHandle {
     }
 }
 
-/// One released private page whose last object reference just disappeared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Keeps detached physical backing alive after its last object slot is removed.
+///
+/// Drop ends this handle's physical hold. Other snapshots and mapping holds
+/// can independently keep the allocation alive through copying or retirement.
 pub struct AnonPrivateReleasedPage {
-    pa: PhysAddr,
-    size: PageSize,
+    handle: AnonPrivatePageHandle,
 }
 
 impl AnonPrivateReleasedPage {
-    /// Returns the released frame address.
-    pub const fn phys_addr(self) -> PhysAddr {
-        self.pa
+    /// Returns the detached physical address without consuming the hold.
+    pub fn phys_addr(&self) -> PhysAddr {
+        self.handle.phys_addr()
     }
 
-    /// Returns the released page size.
-    pub const fn page_size(self) -> PageSize {
-        self.size
+    /// Returns the page size of the detached backing.
+    pub fn page_size(&self) -> PageSize {
+        self.handle.page_size()
     }
 }
 
@@ -217,15 +235,19 @@ pub struct PreparedAnonPrivatePage {
 impl PreparedAnonPrivatePage {
     /// Commits the newly materialized page into the owning anonymous object.
     ///
-    /// The caller owns the physical frame until this method succeeds. If this
-    /// method returns an error, the caller must tear down any visible PTE and
-    /// release the frame itself.
-    pub fn commit(self, pa: PhysAddr, size: PageSize) -> KResult<AnonPrivatePageHandle> {
+    /// Consumes backing ownership. Failure drops this backing hold; the caller
+    /// must withdraw any installed mapping, whose independent hold protects
+    /// hardware access until retirement finishes.
+    pub fn commit(
+        self,
+        frame: FrameRun<'static>,
+        size: PageSize,
+    ) -> KResult<AnonPrivatePageHandle> {
         let mut pages = self.object.pages.lock();
         if pages.contains_key(&self.object_start) {
             return Err(KError::AlreadyExists);
         }
-        let handle = AnonPrivatePageHandle::new(pa, size);
+        let handle = AnonPrivatePageHandle::new(frame, size);
         pages.insert(self.object_start, handle.clone());
         Ok(handle)
     }
@@ -422,14 +444,14 @@ impl AnonPrivateObject {
     fn install_page(
         &self,
         object_start: u64,
-        pa: PhysAddr,
+        frame: FrameRun<'static>,
         size: PageSize,
     ) -> KResult<AnonPrivatePageHandle> {
         let mut pages = self.pages.lock();
         if pages.contains_key(&object_start) {
             return Err(KError::AlreadyExists);
         }
-        let handle = AnonPrivatePageHandle::new(pa, size);
+        let handle = AnonPrivatePageHandle::new(frame, size);
         pages.insert(object_start, handle.clone());
         Ok(handle)
     }
@@ -439,11 +461,11 @@ impl AnonPrivateObject {
     fn replace_page(
         &self,
         object_start: u64,
-        pa: PhysAddr,
+        frame: FrameRun<'static>,
         size: PageSize,
     ) -> KResult<Option<AnonPrivateReleasedPage>> {
         let mut pages = self.pages.lock();
-        let new_handle = AnonPrivatePageHandle::new(pa, size);
+        let new_handle = AnonPrivatePageHandle::new(frame, size);
         let old = pages.insert(object_start, new_handle);
         Ok(old.and_then(|slot| slot.release()))
     }
@@ -453,12 +475,14 @@ impl AnonPrivateObject {
     /// `commit` is executed while the object slot is locked and still matches
     /// the expected page. Runtime code uses this to perform the page-table
     /// compare/replace step without letting the object slot change between the
-    /// object check and object publication.
+    /// object check and object publication. Consumes the new backing hold;
+    /// a stale slot or failed commit drops it without replacing the old slot.
+    /// The closure must install its independent mapping hold before publishing.
     pub fn replace_page_if_same_after<E>(
         &self,
         object_start: u64,
         expected: &AnonPrivatePageHandle,
-        pa: PhysAddr,
+        frame: FrameRun<'static>,
         size: PageSize,
         commit: impl FnOnce() -> Result<(), E>,
     ) -> Result<Option<AnonPrivateReleasedPage>, AnonPrivatePageCommitError<E>> {
@@ -469,7 +493,7 @@ impl AnonPrivateObject {
         if !current.is_same_slot(expected) {
             return Err(AnonPrivatePageCommitError::Changed);
         }
-        let new_handle = AnonPrivatePageHandle::new(pa, size);
+        let new_handle = AnonPrivatePageHandle::new(frame, size);
         commit().map_err(AnonPrivatePageCommitError::Commit)?;
         #[expect(
             clippy::expect_used,
@@ -571,6 +595,17 @@ impl AnonPrivateObject {
             pages: copied,
             committed: false,
         })
+    }
+}
+
+impl Drop for AnonPrivateObject {
+    fn drop(&mut self) {
+        let mut pages = self.pages.lock();
+        let owned = core::mem::take(&mut *pages);
+        drop(pages);
+        for (_, page) in owned {
+            let _ = page.release();
+        }
     }
 }
 

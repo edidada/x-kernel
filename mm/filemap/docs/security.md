@@ -98,3 +98,15 @@ while the mapped hold remains. Ordinary/sparse unmap and protection clear retire
 holds after TLB completion; mremap carries ownership to its destination through
 `move_mapping`. Filesystem notification and file-content validity are separate
 requirements and remain necessary even though physical reuse is prevented.
+
+
+## Owned anonymous page boundaries
+
+`backend::alloc_owned_frame` returns an unpublished owned run. Zero filling and private
+file population happen before mapping publication, bounded by that run. Copying
+COW source bytes keeps an `AnonPrivatePageHandle` snapshot alive. Content access
+still relies on address-space/runtime serialization and the existing COW rules.
+Each present managed leaf has an independent run of the same size and alignment;
+replacement retires the old run only after TLB invalidation. Failed object or PTE
+publication drops new backing and preserves old capabilities. Mapping-index and
+Arc/Vec allocations still follow the current kernel heap OOM policy.

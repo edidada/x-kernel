@@ -49,8 +49,9 @@ Runtime role:
 - private-anon page-state updates are transactional:
   - prepare first-touch page publication in `mm/anon`, install the PTE in the
     runtime, then commit the page slot into `AnonPrivateObject`;
-  - detach object slots before unmapping, but only release frames after the
-    runtime finishes tearing down visible PTEs;
+  - detach object slots before unmapping and finalize COW slot counts after the
+    runtime finishes tearing down visible PTEs; physical lifetime also has
+    independent mapping holds;
   - prepare fork-shared page state first, then commit it into the child
     object only after parent write-protect, child page-table installation, and
     the page-table finalization boundary succeed.
@@ -61,9 +62,9 @@ First-touch contract:
   offset is currently empty but does not publish a page slot.
 - `PreparedAnonPrivatePage::commit()` publishes the frame into the object only
   after the runtime has installed the PTE.
-- the runtime owns the freshly allocated frame until commit succeeds; on read,
-  map, or commit failure it must tear down any visible PTE and release the
-  frame.
+- the runtime transfers its freshly allocated `FrameRun` into commit. Failure
+  drops this object hold automatically. A visible PTE has its own cloned hold
+  and must still be withdrawn and invalidated by the runtime.
 - direct page-slot installation is not part of the public object API; external
   runtime code must use the prepare/commit path.
 
@@ -86,3 +87,22 @@ COW replacement contract:
   fault instead of overwriting the competing slot.
 - the runtime-provided commit closure performs the page-table compare/replace
   step; object publication happens only after that closure succeeds.
+
+
+Physical lifetime and COW sharing:
+
+- `AnonPrivatePageState` owns a `FrameRun`. Its `refs` counts object slots and
+  prepared fork slots, solely for COW exclusivity; it does not count PTEs or
+  transient `AnonPrivatePageHandle` snapshots.
+- Cloned handles keep the state and backing alive for copying even after its
+  last object slot is detached. `try_clone_frame` creates an independent mapping
+  hold covering the entire leaf. PTE removal keeps that hold until TLB retirement.
+- `AnonPrivateReleasedPage` is an owning deferred handle, not an address to free.
+  Ending it or a snapshot releases backing only when all state and mapping holds
+  are gone. Runtime cleanup drops these handles rather than calling raw buddy.
+- `AnonPrivateObject::drop` decrements every remaining slot count outside its
+  page-map lock. This restores a surviving child's COW exclusivity and ends the
+  destroyed object's state holds; independent PTE holds remain valid.
+- COW publication consumes new backing and uses `replace_owned_if_same` for the
+  PTE transaction. Old mapping holds remain live through the flush, while old
+  object/snapshot holds protect the source during copying and publication.

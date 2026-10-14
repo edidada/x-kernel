@@ -22,7 +22,7 @@ use vmobj::{
     ObjectViewHit,
 };
 
-use super::{alloc_frame, dealloc_frame, map_paging_err};
+use super::{alloc_owned_frame, map_paging_err};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
@@ -93,21 +93,21 @@ impl PrivateBackend {
     fn alloc_new_at(&self, va: VirtAddr, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
         let object_start = self.object_offset_for(va)?;
         let prepared = self.object.prepare_first_touch_page(object_start)?;
-        let frame = alloc_frame(true, self.size)?;
-        if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
-            dealloc_frame(frame, self.size);
-            return Err(map_paging_err(err));
-        }
+        let frame = alloc_owned_frame(true, self.size)?;
+        let pa = frame.phys_addr();
+        let mapping = frame.try_clone_run().map_err(|_| KError::NoMemory)?;
+        pgtbl
+            .map_owned_sized(va, mapping, self.size, flags)
+            .map_err(map_paging_err)?;
         if let Err(err) = prepared.commit(frame, self.size) {
             if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(va) {
                 assert_eq!(page_size, self.size);
                 pgtbl.finish();
             }
-            dealloc_frame(frame, self.size);
             return Err(err);
         }
         if flags.contains(MappingFlags::EXECUTE) {
-            karch::flush_icache_range(p2v(frame), self.size.into());
+            karch::flush_icache_range(p2v(pa), self.size.into());
         }
         Ok(())
     }
@@ -341,9 +341,7 @@ impl VmRuntimeOps for PrivateBackend {
 /// Releases detached private-anon frames after the caller finished tearing
 /// down every visible PTE that referenced them.
 pub fn release_private_object_pages(pages: Vec<AnonPrivateReleasedPage>) {
-    for page in pages {
-        dealloc_frame(page.phys_addr(), page.page_size());
-    }
+    drop(pages);
 }
 
 pub enum PrivateCowResult {
@@ -391,29 +389,29 @@ pub fn cow_private_object_page(
     if expected.paddr() != page.phys_addr() || expected.page_size() != size {
         return Ok(PrivateCowResult::Retry);
     }
-    let new_frame = alloc_frame(false, size)?;
-    copy_private_page(&page, new_frame, size);
+    let new_frame = alloc_owned_frame(false, size)?;
+    copy_private_page(&page, new_frame.phys_addr(), size);
+    let pa = new_frame.phys_addr();
+    let mapping = new_frame.try_clone_run().map_err(|_| KError::NoMemory)?;
     let released =
         match object.replace_page_if_same_after(object_start, &page, new_frame, size, || {
             pgtbl
-                .replace_if_same(addr, expected, new_frame, flags)
+                .replace_owned_if_same(addr, expected, mapping, flags)
                 .map(|_| ())
         }) {
             Ok(released) => released,
             Err(AnonPrivatePageCommitError::Changed)
             | Err(AnonPrivatePageCommitError::Commit(PteReplaceError::Changed { .. })) => {
-                dealloc_frame(new_frame, size);
                 return Ok(PrivateCowResult::Retry);
             }
             Err(AnonPrivatePageCommitError::Commit(PteReplaceError::PageTable(err))) => {
-                dealloc_frame(new_frame, size);
                 return Err(super::map_paging_err(err));
             }
         };
     pgtbl.finish();
     release_private_object_pages(released.into_iter().collect());
     if flags.contains(MappingFlags::EXECUTE) {
-        karch::flush_icache_range(p2v(new_frame), size.into());
+        karch::flush_icache_range(p2v(pa), size.into());
     }
     Ok(PrivateCowResult::Resolved)
 }
@@ -424,9 +422,10 @@ fn copy_private_page(
     size: PageSize,
 ) {
     assert_eq!(source.page_size(), size);
-    // SAFETY: both source and destination are valid kernel direct-map pages of
-    // `size` bytes. `new_frame` was freshly allocated with the same `size`
-    // and does not overlap the source private page.
+    // SAFETY: the source handle retains its shared state's live run throughout
+    // copying; object/runtime locking and COW write protection prevent source
+    // mutation. The caller retains a fresh unpublished destination run of size
+    // bytes, with a writable direct mapping and no overlap with the source.
     unsafe {
         core::ptr::copy_nonoverlapping(
             p2v(source.phys_addr()).as_ptr(),
@@ -445,27 +444,27 @@ fn cow_unmapped_private_object_page(
     size: PageSize,
     pgtbl: &mut PageTableMut,
 ) -> KResult<PrivateCowResult> {
-    let new_frame = alloc_frame(false, size)?;
-    copy_private_page(page, new_frame, size);
+    let new_frame = alloc_owned_frame(false, size)?;
+    copy_private_page(page, new_frame.phys_addr(), size);
+    let pa = new_frame.phys_addr();
+    let mapping = new_frame.try_clone_run().map_err(|_| KError::NoMemory)?;
     let released =
         match object.replace_page_if_same_after(object_start, page, new_frame, size, || {
-            pgtbl.map(addr, new_frame, size, flags)
+            pgtbl.map_owned_sized(addr, mapping, size, flags)
         }) {
             Ok(released) => released,
             Err(AnonPrivatePageCommitError::Changed)
             | Err(AnonPrivatePageCommitError::Commit(PagingError::AlreadyMapped)) => {
-                dealloc_frame(new_frame, size);
                 return Ok(PrivateCowResult::Retry);
             }
             Err(AnonPrivatePageCommitError::Commit(err)) => {
-                dealloc_frame(new_frame, size);
                 return Err(super::map_paging_err(err));
             }
         };
     pgtbl.finish();
     release_private_object_pages(released.into_iter().collect());
     if flags.contains(MappingFlags::EXECUTE) {
-        karch::flush_icache_range(p2v(new_frame), size.into());
+        karch::flush_icache_range(p2v(pa), size.into());
     }
     Ok(PrivateCowResult::Resolved)
 }
@@ -505,7 +504,7 @@ pub fn map_existing_private_object_page(
             install_flags - MappingFlags::WRITE
         };
         pgtbl
-            .map(addr, page.phys_addr(), size, page_flags)
+            .map_owned_sized(addr, page.try_clone_frame()?, size, page_flags)
             .map_err(super::map_paging_err)?;
     }
     Ok(ExistingPrivatePageResult::Resolved)
@@ -613,12 +612,12 @@ pub fn clone_private_object_pages_for_fork(
                     )?;
                     return Err(super::map_paging_err(err));
                 }
-                if let Err(err) = new_pgtbl.map(
-                    vaddr,
-                    shared.handle().phys_addr(),
-                    ctx.page_size,
-                    ctx.cow_flags,
-                ) {
+                let install = shared.handle().try_clone_frame().and_then(|mapping| {
+                    new_pgtbl
+                        .map_owned_sized(vaddr, mapping, ctx.page_size, ctx.cow_flags)
+                        .map_err(super::map_paging_err)
+                });
+                if let Err(err) = install {
                     rollback_private_fork_pages(
                         &mapped,
                         Some((vaddr, parent_flags)),
@@ -626,7 +625,7 @@ pub fn clone_private_object_pages_for_fork(
                         old_pgtbl,
                         new_pgtbl,
                     )?;
-                    return Err(super::map_paging_err(err));
+                    return Err(err);
                 }
                 mapped.push(ForkMappedPage {
                     vaddr,

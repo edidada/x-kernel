@@ -501,12 +501,13 @@ fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
 fn clear_tolerates_zapped_linear_mapping() {
     let start = VirtAddr::from_usize(0x4000);
     let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
-    let frame = crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate linear frame");
+    let frame = crate::backend::alloc_owned_frame(true, PageSize::Size4K)
+        .expect("allocate linear frame");
     let mut aspace =
         MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
 
     aspace
-        .map_linear(start, frame, PAGE_SIZE_4K, flags)
+        .map_linear(start, frame.phys_addr(), PAGE_SIZE_4K, flags)
         .expect("map linear page");
     assert!(aspace.page_table().query(start).is_ok());
     aspace
@@ -518,5 +519,5 @@ fn clear_tolerates_zapped_linear_mapping() {
     );
 
     aspace.clear();
-    crate::backend::dealloc_frame(frame, PageSize::Size4K);
+    drop(frame);
 }

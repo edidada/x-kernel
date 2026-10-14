@@ -26,10 +26,11 @@ Invariants:
   offsets exactly; they must not reuse file-backed truncate/EOF rounding rules;
 - first-touch private pages must not become object-visible until the runtime
   has installed the corresponding PTE; if PTE installation or object commit
-  fails, the runtime remains responsible for releasing the uncommitted frame;
-- private-anon unmap and `MADV_DONTNEED` must not free a frame before the
-  relevant present PTEs have been torn down; object-side detach and final page
-  release therefore happen in separate phases;
+  fails, the consumed `FrameRun` ends its hold automatically; runtime code must
+  withdraw any visible mapping, whose independent hold survives to TLB retirement;
+- private-anon unmap and `MADV_DONTNEED` separate content/COW slot updates from
+  hardware retirement. Mapping holds protect every present or not-yet-invalidated
+  PTE independently of object and snapshot destruction;
 - fork/COW sharing into a child object must not commit new child page slots
   before parent write-protect, child page-table installation, and the relevant
   page-table finalization boundary succeed; failed fork preparation must roll
@@ -42,3 +43,18 @@ Invariants:
 - runtime code must not infer anonymous object identity or private page
   ownership from ad hoc runtime-local frame tables when an explicit
   `Anon*Object` is available.
+
+
+Lifetime constraints:
+
+- `refs` is an object-slot sharing count. Physical reference counts cannot replace
+  it: a PTE or copying snapshot must not spuriously require COW.
+- Each slot retains backing through its shared state; detached results and
+  snapshots retain that state. Its destructor ends one `FrameRun` hold per base
+  page. PTEs retain independent runs until invalidation completes.
+- New backing is consumed on failed publication, stale object checks and failed
+  conditional PTE replacement. The old object and PTE capabilities survive those
+  failures. Object destruction must release slot counts, including fork children.
+- These holds guarantee storage lifetime, not payload synchronization or anonymous
+  discard semantics. Existing object locks, runtime serialization and notifier
+  protocols still apply.

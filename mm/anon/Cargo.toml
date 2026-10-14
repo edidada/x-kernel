@@ -8,6 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kalloc.workspace = true
 kerrno = { workspace = true }
 khal = { workspace = true }
 kspin = { workspace = true }

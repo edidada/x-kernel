@@ -13,12 +13,12 @@ use khal::{
 };
 use ksync::Mutex;
 use kvfs::{AddressSpaceViewGuard, VfsFile};
-use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, MmSpace, VmArea, VmBackingInfo,
     VmBackingKind, VmRuntimeOps, VmRuntimeRef,
     backend::{
-        FaultCompletion, FaultCompletionResult, alloc_frame, dealloc_frame,
+        FaultCompletion, FaultCompletionResult, alloc_owned_frame,
         private::{
             PrivateForkMaterialize, clone_private_object_pages_for_fork, cow_private_object_page,
             discard_private_object_range, map_existing_private_object_page,
@@ -56,8 +56,8 @@ impl FilePrivateRuntime {
         self.file_end.unwrap_or_else(|| self.file.size())
     }
 
-    fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
-        alloc_frame(zeroed, self.size)
+    fn alloc_new_frame(&self, zeroed: bool) -> KResult<kalloc::FrameRun<'static>> {
+        alloc_owned_frame(zeroed, self.size)
     }
 
     fn object_offset_for(&self, addr: VirtAddr) -> KResult<u64> {
@@ -78,10 +78,13 @@ impl FilePrivateRuntime {
         let object_start = self.object_offset_for(va)?;
         let prepared = self.anon.prepare_first_touch_page(object_start)?;
         let frame = self.alloc_new_frame(true)?;
+        let pa = frame.phys_addr();
 
-        // SAFETY: `frame` was freshly allocated for this page and has at
-        // least `self.size` bytes of kernel-mapped storage.
-        let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
+        // SAFETY: the unpublished run owns exactly self.size writable mapped
+        // bytes. No snapshot or PTE hold has been published, so this temporary
+        // mutable slice is exclusive and remains bounded by the live frame.
+        let buf =
+            unsafe { slice::from_raw_parts_mut(frame.kernel_addr().as_mut_ptr(), self.size as _) };
         let start =
             page_data_offset.unwrap_or_else(|| self.start.as_usize().saturating_sub(va.as_usize()));
         assert!(start < self.size as _);
@@ -101,31 +104,27 @@ impl FilePrivateRuntime {
             let index = object_offset / PAGE_SIZE_4K as u64;
             let page_off = (object_offset % PAGE_SIZE_4K as u64) as usize;
             let step = (max_read - copied).min(PAGE_SIZE_4K - page_off);
-            if let Err(err) = address_space.with_folio_or_create(index, |folio| {
+            address_space.with_folio_or_create(index, |folio| {
                 buf[start + copied..start + copied + step]
                     .copy_from_slice(&folio.data()[page_off..page_off + step]);
                 Ok(())
-            }) {
-                dealloc_frame(frame, self.size);
-                return Err(err);
-            }
+            })?;
             copied += step;
         }
-        if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
-            dealloc_frame(frame, self.size);
-            return Err(memspace::backend::map_paging_err(err));
-        }
+        let mapping = frame.try_clone_run().map_err(|_| KError::NoMemory)?;
+        pgtbl
+            .map_owned_sized(va, mapping, self.size, flags)
+            .map_err(memspace::backend::map_paging_err)?;
         if let Err(err) = prepared.commit(frame, self.size) {
             if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(va) {
                 assert_eq!(page_size, self.size);
                 pgtbl.finish();
             }
-            dealloc_frame(frame, self.size);
             return Err(err);
         }
 
         if flags.contains(MappingFlags::EXECUTE) {
-            karch::flush_icache_range(p2v(frame), self.size.into());
+            karch::flush_icache_range(p2v(pa), self.size.into());
         }
         Ok(())
     }

@@ -231,3 +231,13 @@ cache or retain whole Folio objects solely for mapped-page lifetime.
 Shared write-fault remap changes permissions on the same held page. EOF/seal
 checks, page_mkwrite, dirty state and view invalidation remain their existing
 protocols; physical lifetime alone does not implement truncate semantics.
+
+
+## Anonymous backing lifetime
+
+Private anonymous pages, including private-file result pages, consume an owned
+`FrameRun` in `AnonPrivateObject`. First-touch and fork install independent
+PTE holds with `map_owned_sized`; COW uses `replace_owned_if_same` to replace
+both the leaf and its hold. Failure drops unpublished backing automatically.
+Object-slot sharing remains separate from physical lifetime. Detached results
+are owning handles; finishing their release never calls raw page deallocation.

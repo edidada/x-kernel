@@ -378,6 +378,9 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
         .expect("parent should own one page");
     let child_object = backend.object.fork_child();
     let mut child_pt = PageTable::try_new().expect("allocate child page table");
+    let replacement =
+        super::alloc_owned_frame(true, PageSize::Size4K).expect("competing backing");
+    let replacement_pa = replacement.phys_addr();
     {
         let mut old_pgtbl = parent_pt.modify();
         let mut new_pgtbl = child_pt.modify();
@@ -396,9 +399,9 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
         )
         .expect("fork private page");
 
-        let replacement = PhysAddr::from_usize(0x90_0000);
+        let current = old_pgtbl.query_entry(start).expect("current PTE snapshot");
         old_pgtbl
-            .remap(start, replacement, flags - MappingFlags::WRITE)
+            .replace_owned_if_same(start, current, replacement, flags - MappingFlags::WRITE)
             .expect("simulate competing PTE replacement");
         let result = cow_private_object_page(
             &backend.object,
@@ -423,7 +426,7 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
             .query(start)
             .expect("competing PTE should remain installed")
             .0,
-        PhysAddr::from_usize(0x90_0000)
+        replacement_pa
     );
 }
 
