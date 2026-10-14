@@ -191,11 +191,11 @@ fn wait_on_matching_children_with(
     proc: &Arc<Process>,
     selector: WaitPid,
     options: WaitOptions,
-    on_ready: impl Fn(&WaitedChild) -> KResult<()>,
+    mut on_ready: impl FnMut(&WaitedChild) -> KResult<()>,
 ) -> KResult<isize> {
     let current = current();
 
-    let check_children = || match scan_waitable_child(proc, selector, options)? {
+    let mut check_children = || match scan_waitable_child(proc, selector, options)? {
         WaitScanResult::Ready(waited) => {
             on_ready(&waited)?;
             Ok(Some(waited.pid() as _))
@@ -278,9 +278,11 @@ pub(crate) fn sys_waitid(
     _rusage: UserConstPtr<core::ffi::c_void>,
 ) -> KResult<isize> {
     // Linux exit.c: reject unknown bits and a request that names no report
-    // class at all (`WSTOPPED` shares the `WUNTRACED` bit).
+    // class at all (`WSTOPPED` shares the `WUNTRACED` bit). Only exit reports
+    // are implemented, so a request that asks solely for stop/continue is
+    // rejected rather than reporting and consuming an exit it did not ask for.
     const WAITID_KNOWN: u32 = WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT;
-    if options & !WAITID_KNOWN != 0 || options & (WEXITED | WUNTRACED | WCONTINUED) == 0 {
+    if options & !WAITID_KNOWN != 0 || options & WEXITED == 0 {
         return Err(KError::from(LinuxError::EINVAL));
     }
 
@@ -321,6 +323,7 @@ pub(crate) fn sys_waitid(
 
     let current_thread = kprocess::current_user_thread();
     let proc = current_thread.process();
+    let mut report: Option<siginfo_t> = None;
     wait_on_matching_children_with(proc, selector, options, |waited| {
         // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
         let cred = waited
@@ -335,12 +338,25 @@ pub(crate) fn sys_waitid(
             utime,
             stime,
         );
-        let info =
-            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child).into_signal_info();
-        siginfo.write_vm(info.0)?;
+        report = Some(
+            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child)
+                .into_signal_info()
+                .0,
+        );
         Ok(())
-    })
-    .map(|_pid| 0)
+    })?;
+    if !siginfo.is_null() {
+        match report {
+            Some(value) => siginfo.write_vm(value)?,
+            None => {
+                // Linux writes a zeroed report for a `WNOHANG` poll with no
+                // waitable child (`si_pid = 0`); a `NULL` pointer is a no-op.
+                let zeros = [0_u8; core::mem::size_of::<siginfo_t>()];
+                UserPtr::<u8>::from(siginfo.as_ptr() as usize).write_vm_slice(&zeros)?;
+            }
+        }
+    }
+    Ok(0)
 }
 
 pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
