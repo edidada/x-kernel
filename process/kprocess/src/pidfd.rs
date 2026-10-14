@@ -69,9 +69,15 @@ impl PidFd {
 
     /// Gets a descriptor from the referenced thread-group leader's files.
     ///
+    /// The leader's own binding is used because threads may hold different
+    /// file tables; there is deliberately no fallback to another live thread.
+    ///
     /// # Errors
-    /// Returns `NoSuchProcess` after the leader retires or detaches its files,
-    /// and `BadFileDescriptor` for an absent descriptor.
+    ///
+    /// Returns `NoSuchProcess` (ESRCH) when the leader has no resolvable task
+    /// or has detached its files -- including after the leader exits but before
+    /// a surviving thread takes over the group identity in `exec` -- and
+    /// `BadFileDescriptor` for an absent descriptor.
     pub fn get_file(&self, fd: i32) -> KResult<Arc<VfsFile>> {
         let task = lookup::task(self.live_process()?.pid())?;
         let thread = task.as_thread();

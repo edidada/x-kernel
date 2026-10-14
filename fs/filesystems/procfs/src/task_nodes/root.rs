@@ -579,6 +579,10 @@ impl FileOperations for ProcExeLink {
 
 impl MagicLinkOps for ProcExeLink {
     fn readlink_display(&self) -> VfsResult<String> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let caller = kprocess::current_user_thread();
+        kprocess::ptrace::check_read_real_creds_access(&caller, task.as_thread())
+            .map_err(|_| VfsError::OperationNotPermitted)?;
         self.display_target()
     }
 
@@ -587,8 +591,12 @@ impl MagicLinkOps for ProcExeLink {
             return Err(VfsError::FilesystemLoop);
         }
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        let process = task.as_thread().process();
-        let exe_file = process
+        let target = task.as_thread();
+        let caller = kprocess::current_user_thread();
+        kprocess::ptrace::check_read_real_creds_access(&caller, target)
+            .map_err(|_| VfsError::OperationNotPermitted)?;
+        let exe_file = target
+            .process()
             .exe_file()
             .ok()
             .flatten()
