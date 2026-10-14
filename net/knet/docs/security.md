@@ -476,6 +476,8 @@ Modifications after sharing use copy-on-write. Protocol offsets and validated UD
 Before local delivery, the version, header length, total length, and header checksum must be validated, and trailing data must be trimmed according to `total_len`.
 
 `Ipv4PacketView` keeps the parsed header paired with its borrowed packet bytes.
+Construction enforces `header_len <= total_len <= packet.len()` before creating
+the view, so payload access stays within the retained packet slice.
 Input views exclude trailing padding; output views use the supplied slice length
 until the header is finalized. The borrow prevents mutation of those bytes while
 consumers use the view. UDP parsing, fragment reassembly, ICMP error inspection,

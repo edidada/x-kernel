@@ -56,6 +56,30 @@ fn test_validate_input_packet_accepts_valid_checksum() {
 }
 
 #[def_test]
+fn test_packet_view_enforces_payload_bounds() {
+    let bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2]);
+    let header = Ipv4Header::parse_input(&bytes).unwrap();
+
+    for total_len in [header.header_len() - 1, bytes.len() + 1] {
+        let invalid_header = Ipv4Header {
+            total_len,
+            ..header
+        };
+        assert_eq!(
+            Ipv4PacketView::from_header(&bytes, invalid_header),
+            Err(Ipv4Error::Malformed)
+        );
+    }
+
+    let empty_payload_header = Ipv4Header {
+        total_len: header.header_len(),
+        ..header
+    };
+    let view = Ipv4PacketView::from_header(&bytes, empty_payload_header).unwrap();
+    assert!(view.payload().is_empty());
+}
+
+#[def_test]
 fn test_validate_input_packet_marks_fragment() {
     let mut bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2]);
     let mut header = Ipv4HeaderSlice::from_slice(&bytes).unwrap().to_header();

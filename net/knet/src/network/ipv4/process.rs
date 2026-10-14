@@ -129,6 +129,10 @@ impl<'a> Ipv4PacketView<'a> {
     }
 
     fn from_header(packet: &'a [u8], header: Ipv4Header) -> Result<Self, Ipv4Error> {
+        if header.header_len > header.total_len {
+            return Err(Ipv4Error::Malformed);
+        }
+
         Ok(Self {
             header,
             packet: packet.get(..header.total_len).ok_or(Ipv4Error::Malformed)?,
