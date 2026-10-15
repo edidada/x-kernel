@@ -402,3 +402,14 @@ page alive while counts are acquired. The partial clone records its acquired
 prefix, so its normal destructor reverses that prefix on count overflow.
 `From<FrameRef>` suppresses the consumed handle's destructor and transfers its
 one hold, with no raw address adoption or payload aliasing permission.
+
+
+### Owned DMA32 bounds
+
+`alloc_dma_frame_run` shares zero/count/alignment/byte-overflow validation with
+`alloc_frame_run`. The temporary buddy adapter checks the checked physical end of
+the actual power-of-two backing before accounting or descriptor claim; rejection
+returns the entire unclaimed block. DMA selection bypasses PCP, preserving the
+old DMA path's inventory boundary. The resulting FrameRun controls storage only:
+its caller must finish device use, platform release and mapping restoration before
+ending the hold, or retain it if that retirement cannot complete.

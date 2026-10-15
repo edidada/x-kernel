@@ -83,6 +83,7 @@ pub(crate) fn allocate_run(
     num_frames: usize,
     align_pow2: usize,
     kind: UsageKind,
+    max_paddr_exclusive: Option<usize>,
 ) -> AllocResult<PhysAddr> {
     let mapping = allocator
         .frame_mapping
@@ -93,10 +94,32 @@ pub(crate) fn allocate_run(
     if !mapping.preserves_alignment(align_pow2) {
         return Err(AllocError::InvalidInput);
     }
-    let va = allocator.alloc_pages(num_frames, align_pow2, kind)?;
+    let va = if max_paddr_exclusive.is_some() {
+        // Preserve DMA's direct buddy selection; PCP may contain higher RAM.
+        allocator
+            .palloc
+            .lock()
+            .allocate_pages(num_frames, align_pow2)?
+    } else {
+        allocator.alloc_pages(num_frames, align_pow2, kind)?
+    };
     let paddr = mapping
         .physical_address(va.into())
         .expect("buddy returned an invalid mapped block");
+    if let Some(limit) = max_paddr_exclusive {
+        let bytes = num_frames * PAGE_SIZE_4K; // checked by alloc_frame_run_below
+        if paddr
+            .as_usize()
+            .checked_add(bytes)
+            .is_none_or(|end| end > limit)
+        {
+            allocator.palloc.lock().deallocate_pages(va, num_frames);
+            return Err(AllocError::NoMemory);
+        }
+        if !matches!(kind, UsageKind::RustHeap) {
+            allocator.record_usage_alloc(kind, bytes);
+        }
+    }
     // Allocation supplied exclusive inventory. Any referenced/permanent or
     // missing slot here means the backend violated the boot coverage contract.
     allocator

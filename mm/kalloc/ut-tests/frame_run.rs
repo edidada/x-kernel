@@ -184,3 +184,36 @@ fn backend_mapping_checks_physical_alignment_independently_of_virtual_alignment(
     assert!(mapping.preserves_alignment(PAGE));
     assert!(!mapping.preserves_alignment(2 * PAGE));
 }
+
+
+#[def_test]
+fn dma_run_tracks_rounding_slack_and_survives_independent_holders() {
+    let fixture = Fixture::new();
+    let before = fixture.allocator.available_pages();
+    let run = fixture.allocator.alloc_dma_frame_run(3, PAGE, UsageKind::Dma).unwrap();
+    assert_eq!(run.frame_count(), 4);
+    assert!(run.phys_addr().as_usize() + 4 * PAGE <= 0x1_0000_0000);
+    let retained = run.try_clone_frame(3).unwrap();
+    drop(run);
+    assert_eq!(fixture.allocator.available_pages(), before - 1);
+    assert_eq!(retained.usage_kind(), UsageKind::Dma);
+    drop(retained);
+    assert_eq!(fixture.allocator.available_pages(), before);
+}
+
+#[def_test]
+fn dma_run_rejects_high_physical_inventory_without_claiming_it() {
+    let storage = GlobalPage::alloc_contiguous(64, PAGE).unwrap();
+    let allocator = GlobalAllocator::new();
+    // The fixture's CPU mapping stays real; only its modeled PA range is high.
+    let region = FrameRegion::new(PhysAddr::from_usize(0x1_0000_0000), storage.start_va(), storage.size());
+    // SAFETY: exclusively owned mapped storage outlives the local allocator;
+    // the modeled PA range is disjoint from all other inventory of this instance.
+    unsafe { allocator.init_page_allocator_with_regions(&[region]) }.unwrap();
+    let before = allocator.available_pages();
+    assert!(matches!(allocator.alloc_dma_frame_run(3, PAGE, UsageKind::Dma), Err(AllocError::NoMemory)));
+    assert_eq!(allocator.available_pages(), before);
+    let unrestricted = allocator.alloc_frame_run(4, PAGE, UsageKind::Global).unwrap();
+    assert!(unrestricted.phys_addr().as_usize() >= 0x1_0000_0000);
+    assert_eq!(unrestricted.frame_count(), 4);
+}

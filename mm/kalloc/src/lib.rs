@@ -725,6 +725,35 @@ impl GlobalAllocator {
         align_pow2: usize,
         kind: UsageKind,
     ) -> AllocResult<FrameRun<'_>> {
+        self.alloc_frame_run_below(num_pages, align_pow2, kind, None)
+    }
+
+    /// Allocates a lifetime-managed contiguous run entirely below 4 GiB.
+    ///
+    /// The bound covers the complete power-of-two backing, including slack.
+    /// Physical alignment and reference accounting follow alloc_frame_run.
+    /// Selection bypasses PCP as the old DMA path did. The current buddy does
+    /// not search a DMA zone: an out-of-range candidate returns NoMemory.
+    ///
+    /// # Errors
+    /// Returns the validation/allocation errors of alloc_frame_run, and NoMemory
+    /// if the selected backing crosses the exclusive 4 GiB physical bound.
+    pub fn alloc_dma_frame_run(
+        &self,
+        num_pages: usize,
+        align_pow2: usize,
+        kind: UsageKind,
+    ) -> AllocResult<FrameRun<'_>> {
+        self.alloc_frame_run_below(num_pages, align_pow2, kind, Some(0x1_0000_0000))
+    }
+
+    fn alloc_frame_run_below(
+        &self,
+        num_pages: usize,
+        align_pow2: usize,
+        kind: UsageKind,
+        max_paddr_exclusive: Option<usize>,
+    ) -> AllocResult<FrameRun<'_>> {
         if !self.page_ready.load(Ordering::Acquire) || self.frames.get().is_none() {
             return Err(AllocError::NotInitialized);
         }
@@ -740,7 +769,13 @@ impl GlobalAllocator {
         if bytes > isize::MAX as usize {
             return Err(AllocError::InvalidInput);
         }
-        let paddr = buddy_frame_adapter::allocate_run(self, num_frames, align_pow2, kind)?;
+        let paddr = buddy_frame_adapter::allocate_run(
+            self,
+            num_frames,
+            align_pow2,
+            kind,
+            max_paddr_exclusive,
+        )?;
         // SAFETY: the adapter returned the complete exclusive allocation and
         // validated every base-page descriptor before any owner was published.
         let run = unsafe { FrameRun::from_allocation(self, paddr, num_frames, kind) };

@@ -498,3 +498,16 @@ partially built run drops its acquired prefix and the original stays intact.
 `From<FrameRef>` transfers a single-page hold into a run without changing its
 count. These operations allow the HAL's data-mapping capability to cover both
 base-page and huge leaves; they do not introduce compound-page or folio rules.
+
+
+### DMA32 owned backing
+
+`alloc_dma_frame_run` is the descriptor-backed DMA allocation entry. It validates
+and rounds the requested page count before changing inventory, bypasses PCP, and
+checks the complete backing's physical end against the exclusive 4 GiB bound.
+An out-of-range candidate returns to buddy before references or usage accounting
+are published. Every accepted base page, including slack, has a FrameMeta hold.
+Allocation identity and alignment use the allocator's registered mapping, not a
+caller-side VA-to-PA conversion. Attribute changes, device retirement and platform
+share/unshare remain `kdma` responsibilities. The allocator still selects first
+and checks afterward; this does not introduce a DMA zone or a low-RAM search.
