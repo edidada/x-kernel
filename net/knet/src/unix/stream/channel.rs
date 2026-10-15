@@ -174,8 +174,10 @@ impl DirectionAncillary {
             recv_total: 0,
             // Reserve the whole quota so registering a record never grows the
             // deque under the control guard. The cost is bounded at
-            // `MAX_PENDING_RECORDS` entries per direction (~4 KiB), small
-            // next to the 64 KiB ring buffer of the same direction.
+            // `MAX_PENDING_RECORDS` entries per direction (a
+            // `(u64, u64, Arc<Vec<_>>)` element is 24 bytes, ~6 KiB per
+            // direction and ~12 KiB per duplex channel), small next to the
+            // 64 KiB ring buffer of the same direction.
             records: VecDeque::with_capacity(MAX_PENDING_RECORDS),
             retained_ancillary: 0,
             consumer_closed: false,
