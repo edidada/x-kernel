@@ -658,3 +658,17 @@ its reservation ends backing holds. vCPU-held VM Arcs prevent teardown while the
 VM is still being used. Rounded pages outside the guest range are still accounted
 and held until reservation release. Failed mapper construction releases reservation
 through RAII; partial table construction retains its existing failure contracts.
+
+
+### Transactional child-table allocation
+
+Stage-2, EPT and G-stage constructors acquire their complete fixed-size child
+batch before publishing any child raw ownership. The stack-resident Option array
+owns every acquired prefix while allocation can fail. A failure drops the prefix
+and the still-owned root/PDPT; successful conversion returns owned GlobalPage
+values for the non-fallible linking phase. No new heap bookkeeping is needed.
+Normal tree destruction retains its existing stop-hardware-use contract.
+
+A table's single initial physical hold expresses ownership, not dynamic sharing.
+Reference-state naming now uses Referenced even at count one; this does not add
+per-walker reference operations or change the hardware retirement boundary.

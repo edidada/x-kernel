@@ -40,3 +40,17 @@ second-stage table construction or prove all existing VMM retirement paths. Test
 exercise reservation rounding/zeroing and inactive raw table retirement without
 entering guest hardware. FrameRun teardown is per-base-page and may add release
 cost for large reservations; no measured performance claim is made.
+
+
+### Construction failure before raw ownership publication
+
+The three host table constructors use mm::alloc_table_batch before any child
+GlobalPage is converted to raw ownership. Previously, failure after an earlier
+child transfer returned None before a tree owner existed to restore it. The new
+fixed stack batch drops every acquired owner on each allocation failure position;
+parent tables remain ordinary owned values during that stage. After the batch
+succeeds, initialization/linking performs no further fallible allocations.
+The helper's invariant unwrap is reachable only after every slot is initialized.
+Tests inject failures at each slot with real pages from an isolated allocator and
+check exact inventory recovery; no global fault hook or hardware activation is
+used. Normal destruction still requires stopped vCPUs and retired table walkers.

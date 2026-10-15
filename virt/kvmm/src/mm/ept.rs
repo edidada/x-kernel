@@ -20,7 +20,7 @@
 //! We build an identity map using 2 MiB large pages at PD level
 //! to cover `[0, 4 GiB)`.
 
-use super::{GuestMem, GuestPerm, free_pt_page};
+use super::{GuestMem, GuestPerm, alloc_table_batch, free_pt_page};
 
 // EPT PTE permission bits
 const EPT_READ: u64 = 1 << 0;
@@ -110,6 +110,9 @@ impl GuestMem for Ept {
         let mut pdpt_page = kalloc::GlobalPage::alloc_zero().ok()?;
         let pdpt_va = pdpt_page.as_mut_ptr() as *mut u64;
         let pdpt_pa = pdpt_page.start_pa().as_usize() as u64;
+        // Do not publish any raw child ownership before the entire batch can
+        // be built. An error still drops the root, PDPT and acquired PD prefix.
+        let pd_pages = alloc_table_batch::<L1_ENTRIES>()?;
         let _ = pdpt_page.into_raw();
 
         // PML4[0] → PDPT
@@ -119,8 +122,7 @@ impl GuestMem for Ept {
         }
 
         // Allocate 4 PD pages (one per PDPT entry, covering 1 GiB each)
-        for i in 0..L1_ENTRIES {
-            let mut pd_page = kalloc::GlobalPage::alloc_zero().ok()?;
+        for (i, mut pd_page) in pd_pages.into_iter().enumerate() {
             let pd_va = pd_page.as_mut_ptr() as *mut u64;
             let pd_pa = pd_page.start_pa().as_usize() as u64;
             let _ = pd_page.into_raw();

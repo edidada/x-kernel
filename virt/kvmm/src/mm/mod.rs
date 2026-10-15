@@ -97,6 +97,27 @@ pub mod gstage;
 
 pub mod mmio;
 
+/// Allocates an owned batch before any child page is published into a table.
+/// Failure drops the acquired prefix through each page's normal destructor.
+fn try_alloc_table_batch<T, const N: usize>(
+    mut allocate: impl FnMut() -> Option<T>,
+) -> Option<[T; N]> {
+    let mut pages = [const { None }; N];
+    for page in &mut pages {
+        *page = Some(allocate()?);
+    }
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: every slot was filled above; failures \
+                  return early"
+    )]
+    Some(pages.map(|page| page.expect("the complete table batch is initialized")))
+}
+
+fn alloc_table_batch<const N: usize>() -> Option<[kalloc::GlobalPage; N]> {
+    try_alloc_table_batch(|| kalloc::GlobalPage::alloc_zero().ok())
+}
+
 /// Free a page-table page given its physical address.
 ///
 /// # Safety
@@ -159,3 +180,5 @@ pub trait GuestMem: Sized {
 }
 
 unittest::path_mod_test!(tests_frame_owners, "../../ut-tests/frame_owners.rs");
+
+unittest::path_mod_test!(tests_table_batch, "../../ut-tests/table_batch.rs");

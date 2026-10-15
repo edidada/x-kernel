@@ -14,7 +14,7 @@
 //! L2: 4 × 512 entries × 2 MiB blocks
 //! ```
 
-use super::{GuestMem, GuestPerm, free_pt_page};
+use super::{GuestMem, GuestPerm, alloc_table_batch, free_pt_page};
 
 const L1_ENTRIES: usize = 4;
 const L2_ENTRIES: usize = 512;
@@ -177,16 +177,14 @@ impl GuestMem for Stage2 {
         let l1_va = l1_page.as_mut_ptr() as *mut u64;
         let l1_pa = l1_page.start_pa().as_usize() as u64;
 
-        // Allocate 4 L2 pages (one per L1 entry)
+        // Keep all children owned until allocation succeeds. After the batch
+        // is complete, building and linking the unpublished tree cannot fail.
+        let l2_pages = alloc_table_batch::<L1_ENTRIES>()?;
         let mut l2_pas = [0u64; L1_ENTRIES];
-        for l2_pa in &mut l2_pas {
-            let page = kalloc::GlobalPage::alloc_zero().ok()?;
-            *l2_pa = page.start_pa().as_usize() as u64;
+        for (i, page) in l2_pages.into_iter().enumerate() {
+            let l2_pa = page.start_pa().as_usize() as u64;
+            l2_pas[i] = l2_pa;
             let _ = page.into_raw();
-        }
-
-        // Fill L1 → L2 table entries
-        for (i, &l2_pa) in l2_pas.iter().enumerate() {
             // SAFETY: i < L1_ENTRIES, so the offset stays inside the owned L1 page.
             let entry_ptr = unsafe { l1_va.add(i) };
             // SAFETY: entry_ptr is aligned in the unpublished L1 page we own.

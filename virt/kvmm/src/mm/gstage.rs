@@ -14,7 +14,7 @@
 //! we only need the first 4 entries, each pointing to a L1 table
 //! that uses 2 MiB superpage entries.
 
-use super::{GuestMem, GuestPerm, free_pt_page};
+use super::{GuestMem, GuestPerm, alloc_table_batch, free_pt_page};
 
 // RISC-V PTE bits (same for S-stage and G-stage)
 const PTE_V: u64 = 1 << 0;
@@ -89,9 +89,10 @@ impl GuestMem for GStage {
             core::ptr::write_bytes(root_va, 0, 2048);
         }
 
-        // Allocate 4 L1 tables and fill root entries
-        for i in 0..L2_ENTRIES {
-            let mut l1_page = kalloc::GlobalPage::alloc_zero().ok()?;
+        // Retain the whole child batch until allocation succeeds; failure
+        // returns every acquired child and the still-owned root automatically.
+        let l1_pages = alloc_table_batch::<L2_ENTRIES>()?;
+        for (i, mut l1_page) in l1_pages.into_iter().enumerate() {
             let l1_va = l1_page.as_mut_ptr() as *mut u64;
             let l1_pa = l1_page.start_pa().as_usize() as u64;
             let _ = l1_page.into_raw();
