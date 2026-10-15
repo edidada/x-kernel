@@ -282,9 +282,10 @@ fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
             if is_ofd {
                 break;
             }
-            // Main still has a process-wide files binding. Validate both the
-            // binding and descriptor after waiting; a replaced table must not
-            // turn an installation on an obsolete owner into success.
+            // The files binding is per-thread. Validate both the binding and
+            // descriptor after waiting; a table this thread unshared while
+            // blocked must not turn an installation on an obsolete owner into
+            // success.
             let installed = kprocess::current_files().with_fd_table(|current| {
                 let descriptors = current.read();
                 let is_current = descriptors.lock_owner() == request.owner();
