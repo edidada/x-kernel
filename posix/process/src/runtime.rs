@@ -391,15 +391,21 @@ pub fn exec_de_thread() -> bool {
         }
     }
 
-    // A concurrent genuine termination must win over this exec: `exit_group(2)`
-    // marks the group exited, and a `kill`/`tgkill` fatal signal bumps the
-    // fatal-signal epoch. Sweep kills are excluded from both, so they cannot
-    // abort the exec they belong to.
-    let aborted = process.is_group_exited()
-        || process
-            .signal_manager()
-            .is_ok_and(|manager| manager.fatal_signal_epoch() != fatal_epoch);
-    if aborted {
+    // A concurrent genuine termination must win over this exec: a delivered
+    // fatal signal bumps the epoch. Sweep kills are excluded from it, so they
+    // cannot abort the exec they belong to. Terminate with the racing signal so
+    // the parent observes the real `WIFSIGNALED` status instead of a clean exit
+    // or the sweep's own SIGKILL.
+    let racing_signal = process.signal_manager().ok().and_then(|manager| {
+        (manager.fatal_signal_epoch() != fatal_epoch).then(|| manager.last_fatal_signo())
+    });
+    if let Some(signo) = racing_signal {
+        do_exit_from_signal(signo as i32);
+        return true;
+    }
+    // A group exit already marked without an epoch bump is `exit_group(2)`; its
+    // own exit code is authoritative.
+    if process.is_group_exited() {
         do_exit(process.exit_code(), true);
         return true;
     }

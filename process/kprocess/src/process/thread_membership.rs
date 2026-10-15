@@ -250,7 +250,10 @@ impl Process {
         let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
-            if !group_exit.group_exited {
+            // A `de_thread` sweep target dies of the execing thread's SIGKILL,
+            // not of its own exit status, so it must not become the process exit
+            // code.
+            if !group_exit.group_exited && !task.as_thread().is_exec_sweep_target() {
                 group_exit.exit_code = exit_code;
             }
         }

@@ -108,6 +108,10 @@ pub struct ProcessSignalManager {
     /// sibling sweep, so a genuine fatal signal delivered to an already-marked
     /// sweep target still terminates the process instead of being absorbed.
     fatal_signal_epoch: AtomicU32,
+
+    /// Signal number of the last accepted fatal signal, paired with
+    /// [`Self::fatal_signal_epoch`].
+    last_fatal_signo: AtomicU32,
 }
 
 /// Prepared Linux-style `SIGCHLD` child-exit notification.
@@ -157,6 +161,7 @@ impl ProcessSignalManager {
             children: SpinNoIrq::new(Vec::new()),
             has_pending: AtomicBool::new(false),
             fatal_signal_epoch: AtomicU32::new(0),
+            last_fatal_signo: AtomicU32::new(0),
         }
     }
 
@@ -386,10 +391,12 @@ impl ProcessSignalManager {
         if ignored && !has_blocked_thread {
             return None;
         }
-        // A fatal group signal terminates the whole process; record it before
-        // the queue so a concurrent `exec` sibling sweep cannot absorb it.
-        if fatal {
-            self.note_fatal_signal();
+        // A fatal group signal terminates the whole process when some thread can
+        // actually take it; record it before the queue so a concurrent `exec`
+        // sibling sweep cannot absorb it. A signal every thread blocks stays
+        // pending (and survives `execve`) without marking the process as dying.
+        if fatal && target_tid.is_some() {
+            self.note_fatal_signal(signo);
         }
         self.put_pending_signal(sig);
         let source = handlers.pending_changed.clone();
@@ -629,7 +636,11 @@ pub(super) fn signal_is_fatal(actions: &SignalActions, signo: Signo) -> bool {
 
 impl ProcessSignalManager {
     /// Records that a fatal signal was accepted for delivery.
-    pub fn note_fatal_signal(&self) {
+    ///
+    /// `signo` is stored before the counter is bumped, so `exec_de_thread`
+    /// observes the matching signal with the new epoch.
+    pub fn note_fatal_signal(&self, signo: Signo) {
+        self.last_fatal_signo.store(signo as u32, Ordering::Release);
         self.fatal_signal_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -639,6 +650,11 @@ impl ProcessSignalManager {
     /// genuine fatal signal raced the sweep and must win over the exec.
     pub fn fatal_signal_epoch(&self) -> u32 {
         self.fatal_signal_epoch.load(Ordering::Acquire)
+    }
+
+    /// Returns the signal number paired with the latest epoch bump.
+    pub fn last_fatal_signo(&self) -> u32 {
+        self.last_fatal_signo.load(Ordering::Acquire)
     }
 
     /// Finds a suitable thread and reports whether any live thread blocks it.

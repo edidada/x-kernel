@@ -342,10 +342,12 @@ impl ThreadSignalManager {
             return false;
         }
 
-        // A fatal signal delivered to this thread terminates the whole process;
-        // record it so a concurrent `exec` sibling sweep cannot absorb it.
-        if fatal {
-            self.proc.note_fatal_signal();
+        // A fatal signal delivered to this thread terminates the whole process
+        // when it is not blocked; a blocked one stays pending (and survives
+        // `execve`) without marking the process as dying. Record it so a
+        // concurrent `exec` sibling sweep cannot absorb it.
+        if fatal && !is_blocked {
+            self.proc.note_fatal_signal(signo);
         }
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);

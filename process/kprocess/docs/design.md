@@ -215,10 +215,12 @@ group-exit marking and group-kill broadcast, and the sweep runs whenever the
 execing thread is not the group leader — including when the leader already
 exited and this is the sole surviving non-leader, so the group pid moves onto
 the survivor. A genuine concurrent `exit_group()` still marks the group exited,
-and a genuine fatal `kill`/`tgkill` bumps the process signal manager's
-fatal-signal epoch (Linux `complete_signal` marking `SIGNAL_GROUP_EXIT`); the
-sweep's own kill bypasses that counter, and `exec_de_thread` aborts the exec
-when either changed instead of undoing it.
+and a delivered fatal `kill`/`tgkill` bumps the process signal manager's
+fatal-signal epoch (Linux `complete_signal` marking `SIGNAL_GROUP_EXIT`); a
+fatal signal every thread blocks stays pending and does not count. The sweep's
+own kill bypasses the counter, and `exec_de_thread` aborts the exec when either
+changed, terminating with the racing signal so the parent observes
+`WIFSIGNALED` instead of a clean exit or the sweep's SIGKILL.
 `execve` also installs
 the opened backing executable file (`with_exe_file`), replacing/inheriting the
 display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
