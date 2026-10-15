@@ -328,12 +328,13 @@ impl ThreadSignalManager {
         let Some(handlers) = owner.as_ref() else {
             return false;
         };
-        let (ignored, is_blocked) = {
+        let (ignored, is_blocked, fatal) = {
             let actions = handlers.actions.lock();
             let is_blocked = self.signal_blocked(signo);
             (
                 super::process::signal_ignored_by(&actions, signo),
                 is_blocked,
+                super::process::signal_is_fatal(&actions, signo),
             )
         };
 
@@ -341,6 +342,11 @@ impl ThreadSignalManager {
             return false;
         }
 
+        // A fatal signal delivered to this thread terminates the whole process;
+        // record it so a concurrent `exec` sibling sweep cannot absorb it.
+        if fatal {
+            self.proc.note_fatal_signal();
+        }
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);
         }
@@ -348,6 +354,31 @@ impl ThreadSignalManager {
         drop(owner);
         source.wake();
         !is_blocked
+    }
+
+    /// Delivers the `de_thread` sibling sweep's uncatchable kill.
+    ///
+    /// Unlike [`Self::send_signal`], it does not bump the fatal-signal epoch:
+    /// the execing thread orchestrates the sweep and must survive it, so this
+    /// kill must not abort its own exec. Returns whether the target should be
+    /// woken.
+    #[must_use]
+    pub fn deliver_sweep_kill(&self) -> bool {
+        let owner = self.proc.handlers.lock();
+        let Some(handlers) = owner.as_ref() else {
+            return false;
+        };
+        let source = handlers.pending_changed.clone();
+        if self
+            .pending
+            .lock()
+            .put_signal(SignalInfo::new_kernel(Signo::SIGKILL))
+        {
+            self.possibly_has_signal.store(true, Ordering::Release);
+        }
+        drop(owner);
+        source.wake();
+        true
     }
 
     /// Captures this thread's current shared arrival source without retaining it.

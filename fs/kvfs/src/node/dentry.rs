@@ -1437,10 +1437,10 @@ impl RenameData<'_> {
                 return Ok((true, Some(new_ancestor)));
             }
             if parent.ptr_eq(&old_root) {
-                // Unrelated directories. Order them by the same stable key
-                // `pivot_root` uses so every multi-inode namespace-lock
-                // acquisition shares one total order instead of the role-based
-                // old-first order, which could ABBA against it.
+                // Unrelated directories. Order them ancestor-first then by a
+                // stable pointer key, the same rule `pivot_root` uses for its
+                // parent-directory locks, instead of the role-based old-first
+                // order.
                 return Ok((
                     self.old_parent.namespace_lock_key() < self.new_parent.namespace_lock_key(),
                     None,

@@ -335,7 +335,7 @@ pub fn exec_de_thread() -> bool {
     // Serialize concurrent `exec` before touching the thread group, matching
     // Linux `cred_guard_mutex`: a losing thread waits here and the winner's
     // sweep kills it, instead of two threads joining each other in a deadlock.
-    let Some(_gate) = process.acquire_exec_gate(&current()) else {
+    let Some(_gate) = process.acquire_exec_gate(&current(), &thr) else {
         // Interrupted while waiting for the winner's takeover: its sweep SIGKILL
         // is pending, so terminate through the signal path (a sweep target is
         // exempt from the group-exit marking) rather than resume the old image.
@@ -349,6 +349,14 @@ pub fn exec_de_thread() -> bool {
         do_exit(process.exit_code(), true);
         return true;
     }
+
+    // Snapshot the fatal-signal counter: a genuine fatal signal delivered to an
+    // already-marked sweep target must abort this exec instead of being absorbed
+    // by the sweep exemption.
+    let fatal_epoch = process
+        .signal_manager()
+        .map(|manager| manager.fatal_signal_epoch())
+        .unwrap_or_default();
 
     // A sibling can publish between the snapshot and the joins, so sweep until
     // only this thread remains. Linux `de_thread` likewise waits for every
@@ -370,12 +378,11 @@ pub fn exec_de_thread() -> bool {
             // sweep and must survive it.
             task.as_thread().mark_exec_sweep_target();
         }
-        let kill = SignalInfo::new_kernel(Signo::SIGKILL);
         for task in &siblings {
-            // `send_to_thread` interrupts the target as well, so a sibling in
-            // interruptible sleep wakes to take the uncatchable SIGKILL.
-            let _ =
-                process_signals::send_to_thread(None, task.as_thread().tid(), Some(kill.clone()));
+            // Delivers the uncatchable kill and interrupts the target, so a
+            // sibling in interruptible sleep wakes to take it. The delivery
+            // bypasses the fatal-signal epoch so it cannot abort this exec.
+            let _ = process_signals::send_sweep_kill(task);
         }
         // Wait for every sibling to fully exit before touching the shared
         // address space, mirroring Linux waiting on each thread's exit.
@@ -384,10 +391,15 @@ pub fn exec_de_thread() -> bool {
         }
     }
 
-    // A concurrent `exit_group()` or fatal signal marks the group exited through
-    // the genuine path (sweep targets skip it), so that termination must win
-    // over `exec` rather than being undone by the sweep.
-    if process.is_group_exited() {
+    // A concurrent genuine termination must win over this exec: `exit_group(2)`
+    // marks the group exited, and a `kill`/`tgkill` fatal signal bumps the
+    // fatal-signal epoch. Sweep kills are excluded from both, so they cannot
+    // abort the exec they belong to.
+    let aborted = process.is_group_exited()
+        || process
+            .signal_manager()
+            .is_ok_and(|manager| manager.fatal_signal_epoch() != fatal_epoch);
+    if aborted {
         do_exit(process.exit_code(), true);
         return true;
     }

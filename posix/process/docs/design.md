@@ -84,11 +84,11 @@ stored deadline is kept.
 Signals that arrive after that single rescan keep their interrupt notification
 for the next interruptible wait or trap.
 
-`exec_de_thread` (Linux `de_thread()`): `execve` on a multi-threaded process
-SIGKILLs every sibling thread and joins them, so only the execing thread
-swaps the address space. The first sibling's death marks the group exited
-and queues a group-kill `SIGKILL` for the execing thread; the group-exit
-bookkeeping (`reset_group_exit`) and the queued signal are both undone.
+`exec_de_thread` (Linux `de_thread()`): `execve` serializes on the process
+`exec` gate, then SIGKILLs every sibling thread and joins them, so only the
+execing thread swaps the address space. Swept targets are marked so their fatal
+death does not mark the group exited or broadcast a group kill, and a genuine
+concurrent `exit_group()`/fatal signal aborts the exec instead of being undone.
 Go runtimes always have helper threads alive at exec time, so without this
 every Go program that execs (runc init, containerd-shim) fails.
 

@@ -10,7 +10,7 @@ use alloc::{
 use core::{
     array,
     ops::{Index, IndexMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use kerrno::{KError, KResult};
@@ -101,6 +101,13 @@ pub struct ProcessSignalManager {
 
     /// Fast path indicator for pending signals
     pub(crate) has_pending: AtomicBool,
+
+    /// Monotonic counter bumped whenever a fatal signal is accepted for delivery.
+    ///
+    /// `exec_de_thread` snapshots it and aborts the exec if it changed during the
+    /// sibling sweep, so a genuine fatal signal delivered to an already-marked
+    /// sweep target still terminates the process instead of being absorbed.
+    fatal_signal_epoch: AtomicU32,
 }
 
 /// Prepared Linux-style `SIGCHLD` child-exit notification.
@@ -149,6 +156,7 @@ impl ProcessSignalManager {
             default_restorer,
             children: SpinNoIrq::new(Vec::new()),
             has_pending: AtomicBool::new(false),
+            fatal_signal_epoch: AtomicU32::new(0),
         }
     }
 
@@ -359,7 +367,7 @@ impl ProcessSignalManager {
         let signo = sig.signo();
         let owner = self.handlers.lock();
         let handlers = owner.as_ref()?;
-        let (ignored, target_tid, has_blocked_thread) = {
+        let (ignored, fatal, target_tid, has_blocked_thread) = {
             let actions = handlers.actions.lock();
 
             // Keep the disposition snapshot and target-thread scan in one
@@ -369,6 +377,7 @@ impl ProcessSignalManager {
             let (target_tid, has_blocked_thread) = self.find_target_thread(signo);
             (
                 signal_ignored_by(&actions, signo),
+                signal_is_fatal(&actions, signo),
                 target_tid,
                 has_blocked_thread,
             )
@@ -376,6 +385,11 @@ impl ProcessSignalManager {
 
         if ignored && !has_blocked_thread {
             return None;
+        }
+        // A fatal group signal terminates the whole process; record it before
+        // the queue so a concurrent `exec` sibling sweep cannot absorb it.
+        if fatal {
+            self.note_fatal_signal();
         }
         self.put_pending_signal(sig);
         let source = handlers.pending_changed.clone();
@@ -595,6 +609,36 @@ impl ProcessSignalManager {
         if self.pending.lock().put_signal(sig) {
             self.has_pending.store(true, Ordering::Release);
         }
+    }
+}
+
+/// Returns whether `signo`'s current disposition would terminate the process.
+///
+/// Mirrors Linux's `complete_signal` fatal branch: only a default
+/// terminate/core disposition is fatal; an ignored or user-handled signal is
+/// not.
+pub(super) fn signal_is_fatal(actions: &SignalActions, signo: Signo) -> bool {
+    match actions[signo].disposition {
+        SignalDisposition::Ignore | SignalDisposition::Handler(_) => false,
+        SignalDisposition::Default => matches!(
+            signo.default_action(),
+            DefaultSignalAction::Terminate | DefaultSignalAction::CoreDump
+        ),
+    }
+}
+
+impl ProcessSignalManager {
+    /// Records that a fatal signal was accepted for delivery.
+    pub fn note_fatal_signal(&self) {
+        self.fatal_signal_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Returns the current fatal-signal counter.
+    ///
+    /// `exec_de_thread` snapshots it around the sibling sweep; a change means a
+    /// genuine fatal signal raced the sweep and must win over the exec.
+    pub fn fatal_signal_epoch(&self) -> u32 {
+        self.fatal_signal_epoch.load(Ordering::Acquire)
     }
 
     /// Finds a suitable thread and reports whether any live thread blocks it.

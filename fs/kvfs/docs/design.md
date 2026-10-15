@@ -448,7 +448,7 @@ VFS 采用 Linux directory-locking ownership model：
 - same-directory rename 按 parent dentry identity 判定并只锁一次父目录；
 - cross-directory rename 先获取 superblock topology mutex，再按拓扑顺序锁父目录。无祖先关系
   时改用 `Dentry::namespace_lock_key()`（祖先 inode 指针链，再按指针）定序；`pivot_root`
-  的多个 inode 取锁使用同一全序，避免与 rename 形成 ABBA。
+  的多个 inode 取锁使用同一规则。rename 的 participant inode 是其后的独立阶段，不属该全序。
 
 Slow lookup 对应 Linux `d_alloc_parallel()`：cache miss 的任务建立唯一 hashed negative
 dentry，设置 parallel-lookup 状态并持有该 dentry 的 lookup mutex 后调用 filesystem

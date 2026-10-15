@@ -321,8 +321,6 @@ impl Process {
         self.group_exit.lock().group_exited = true;
     }
 
-    /// Clears group-exit bookkeeping after a `de_thread()` sibling sweep.
-    ///
     /// The parent-death signal recorded by `prctl(PR_SET_PDEATHSIG)` — the
     /// signal this process should receive when its parent dies first. Zero
     /// when unset. Storage only: the parent-exit delivery path is not wired

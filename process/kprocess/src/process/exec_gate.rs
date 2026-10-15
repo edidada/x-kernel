@@ -21,6 +21,8 @@ use core::{
 use kpoll::{PollRegistrations, PollSet};
 use ktask::{KtaskRef, future::block_on};
 
+use crate::Thread;
+
 /// Serializes concurrent `exec` within one process.
 pub(crate) struct ExecGate {
     in_progress: AtomicBool,
@@ -48,34 +50,47 @@ impl ExecGate {
 
     /// Acquires the gate, waiting interruptibly.
     ///
-    /// Returns `false` when `current` was interrupted while waiting, which means
-    /// the winner's sweep has a fatal signal pending for it; the caller must
-    /// terminate rather than proceed with `exec`.
-    fn acquire(&self, current: &KtaskRef) -> bool {
-        if self.try_acquire() {
-            return true;
+    /// Returns `false` only when the *winning exec's* sweep is killing `thread`
+    /// (it is a marked `exec` sweep target). Any other wake — a non-fatal
+    /// signal, an unrelated interrupt, or registration pressure — is not
+    /// authoritative and the wait continues, so it cannot be mistaken for the
+    /// winner's kill.
+    fn acquire(&self, current: &KtaskRef, thread: &Thread) -> bool {
+        loop {
+            if self.try_acquire() {
+                return true;
+            }
+            let mut release_registrations = PollRegistrations::new();
+            let mut interrupt_registrations = PollRegistrations::new();
+            let woken = block_on(poll_fn(|cx| {
+                if self.try_acquire() {
+                    return Poll::Ready(false);
+                }
+                let mut context = release_registrations.context(cx);
+                if context.register(&self.released).is_err() {
+                    return Poll::Ready(true);
+                }
+                drop(context);
+                if self.try_acquire() {
+                    return Poll::Ready(false);
+                }
+                let mut interrupt_context = interrupt_registrations.context(cx);
+                match current.poll_interrupt(&mut interrupt_context) {
+                    Ok(Poll::Ready(())) => Poll::Ready(true),
+                    Ok(Poll::Pending) => Poll::Pending,
+                    Err(_) => Poll::Ready(true),
+                }
+            }));
+            if !woken {
+                return true;
+            }
+            if thread.is_exec_sweep_target() {
+                return false;
+            }
+            // Spurious or non-fatal wake, or registration pressure: back off and
+            // re-register to close the check/wait race.
+            ktask::yield_now();
         }
-        let mut release_registrations = PollRegistrations::new();
-        let mut interrupt_registrations = PollRegistrations::new();
-        block_on(poll_fn(|cx| {
-            if self.try_acquire() {
-                return Poll::Ready(true);
-            }
-            let mut context = release_registrations.context(cx);
-            if context.register(&self.released).is_err() {
-                return Poll::Ready(false);
-            }
-            drop(context);
-            if self.try_acquire() {
-                return Poll::Ready(true);
-            }
-            let mut interrupt_context = interrupt_registrations.context(cx);
-            match current.poll_interrupt(&mut interrupt_context) {
-                Ok(Poll::Ready(())) => Poll::Ready(false),
-                Ok(Poll::Pending) => Poll::Pending,
-                Err(_) => Poll::Ready(false),
-            }
-        }))
     }
 }
 
@@ -93,11 +108,14 @@ impl Drop for ExecGateGuard<'_> {
 impl super::Process {
     /// Acquires the process-wide `exec` gate, waiting interruptibly.
     ///
-    /// Returns `None` when interrupted while waiting (a fatal signal such as the
-    /// winning exec's sweep `SIGKILL`), in which case the caller must terminate
-    /// instead of proceeding with `exec`.
-    pub fn acquire_exec_gate(&self, current: &KtaskRef) -> Option<ExecGateGuard<'_>> {
-        if self.exec_gate.acquire(current) {
+    /// Returns `None` only when the winning exec's sweep killed `thread`; the
+    /// caller must terminate instead of proceeding with `exec`.
+    pub fn acquire_exec_gate(
+        &self,
+        current: &KtaskRef,
+        thread: &Thread,
+    ) -> Option<ExecGateGuard<'_>> {
+        if self.exec_gate.acquire(current, thread) {
             Some(ExecGateGuard {
                 gate: &self.exec_gate,
             })
