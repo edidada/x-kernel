@@ -10,7 +10,7 @@
 use alloc::boxed::Box;
 
 use device_class::{ClassParent, publish_vsock};
-use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
+use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
 use virtio_devices::VirtioDeviceKind;
 
@@ -51,10 +51,10 @@ impl DriverOps<PciBus> for VsockDriver {
 
 /// Construct and publish the device for a probed transport — shared by the
 /// PCI driver above and the virtio-mmio transport driver.
-pub fn activate<B: driver_core::Bus>(
+pub fn activate<B: driver_base::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio_devices::Transport + 'static,
-    mmio_regs: Option<driver_core::IoMap>,
+    mmio_regs: Option<driver_base::IoMap>,
 ) -> Result<device_class::ClassWithdraw, ProbeError> {
     let device = virtio_devices::VirtIoVsockDev::<driver_host::virtio_hal::Hal, _>::try_new(
         transport, mmio_regs,
@@ -74,7 +74,7 @@ pub fn activate<B: driver_core::Bus>(
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
 pub fn activate_mmio(
-    dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
+    dev: &mut driver_base::DeviceCtx<'_, driver_base::platform::PlatformBus>,
     transport: impl virtio_devices::Transport + 'static,
     mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
@@ -100,5 +100,5 @@ pub fn activate_mmio(
 
 /// `module_pci_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new("virtio-vsock", IDS, VsockDriver));
+    driver_base::global_domain().register_driver(DriverDesc::new("virtio-vsock", IDS, VsockDriver));
 }

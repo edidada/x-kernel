@@ -28,14 +28,12 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 mod class;
-mod forwarding;
 mod removal;
 
-pub use class::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassWithdraw,
-    DetachedParent,
+pub use driver_base::class::{
+    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassDeviceMetadata, ClassParent,
+    ClassRegistry, ClassRemovalCallback, ClassUse, ClassWithdraw, DetachedParent,
 };
-use class::{ClassDeviceMetadata, ClassRegistry, ClassRemovalCallback};
 pub use removal::remove_all_detached;
 #[cfg(feature = "block")]
 pub use removal::{block_withdraw, unpublish_block};
@@ -97,19 +95,6 @@ pub use char_driver::CharDevice;
 pub use display::{DisplayDevice, DisplayInfo};
 #[cfg(feature = "hwrng")]
 pub use hwrng::HwrngDevice;
-
-#[cfg(feature = "hwrng")]
-impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
-        self.with_available(|device| device.read(buf))
-    }
-
-    fn is_failed(&self) -> bool {
-        // Query on cached state; a post-removal clone answers its last
-        // known terminal state.
-        self.with(|device| device.is_failed())
-    }
-}
 #[cfg(feature = "input")]
 pub use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
 #[cfg(feature = "net")]

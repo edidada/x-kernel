@@ -15,7 +15,7 @@ use alloc::{boxed::Box, sync::Arc};
 use char_driver::CharDevice;
 use console_driver::serial::{SerialIdent, SerialPort, SerialRole, take_early_port};
 use device_class::{ClassParent, publish_char};
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
@@ -24,17 +24,17 @@ use kerrno::KResult;
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]
 static MMIO_IDS: &[PlatformId] = &[
-    PlatformId::Of(driver_core::platform::OfMatch::compatible("ns16550a")),
-    PlatformId::Of(driver_core::platform::OfMatch::compatible("ns16550")),
-    PlatformId::Of(driver_core::platform::OfMatch::compatible(
+    PlatformId::Of(driver_base::platform::OfMatch::compatible("ns16550a")),
+    PlatformId::Of(driver_base::platform::OfMatch::compatible("ns16550")),
+    PlatformId::Of(driver_base::platform::OfMatch::compatible(
         "snps,dw-apb-uart",
     )),
-    PlatformId::Of(driver_core::platform::OfMatch::compatible("mrvl,mmp-uart")),
+    PlatformId::Of(driver_base::platform::OfMatch::compatible("mrvl,mmp-uart")),
 ];
 
 /// `struct platform_device_id` (x86 static alias).
 #[cfg(feature = "ns16550-ioport")]
-static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatch::new(
+static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatch::new(
     "serial-ns16550-ioport",
 ))];
 
@@ -54,7 +54,7 @@ pub struct SerialData {
         dead_code,
         reason = "CG-024-lint-exceptions: the guard exists for its Drop, never for reads"
     )]
-    regs: Option<driver_core::IoMap>,
+    regs: Option<driver_base::IoMap>,
 }
 
 struct SerialCharDev(Arc<SerialPort>);
@@ -76,7 +76,7 @@ fn publish(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     port: Arc<SerialPort>,
 ) -> Result<Option<device_class::ClassWithdraw>, ProbeError> {
-    use driver_core::BusDeviceData as _;
+    use driver_base::BusDeviceData as _;
     let location = dev.bus_data().path_component();
     let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
@@ -118,7 +118,7 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
 
         // Adopt the early stdout instance when this node is it; cold-start
         // ports map their own window (the guard lives in `Data`).
-        let (port, regs): (Arc<SerialPort>, Option<driver_core::IoMap>) =
+        let (port, regs): (Arc<SerialPort>, Option<driver_base::IoMap>) =
             match take_early_port(&ident) {
                 Some(port) => (port, None),
                 None => {
@@ -171,7 +171,7 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
     type Data = SerialData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<SerialData, ProbeError> {
-        use driver_core::ResourceKind;
+        use driver_base::ResourceKind;
 
         // x86 port I/O needs no mapping: read the range from resources.
         let port_base = dev
@@ -215,7 +215,7 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
 /// `module_platform_driver()` equivalents.
 #[cfg(feature = "ns16550-mmio")]
 pub fn register_mmio() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "serial-ns16550-mmio",
         MMIO_IDS,
         Ns16550MmioDriver,
@@ -224,7 +224,7 @@ pub fn register_mmio() {
 
 #[cfg(feature = "ns16550-ioport")]
 pub fn register_ioport() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "serial-ns16550-ioport",
         IOPORT_IDS,
         Ns16550IoPortDriver,

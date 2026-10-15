@@ -16,7 +16,7 @@
 //! Each device type exposes an inherent `ack_irq(irq) -> bool` (net exposes
 //! `VirtIoNetIrqWorker::service() -> bool`). Those are the family-side half
 //! of an interrupt: **the driver** registers it through
-//! `DeviceCtx::request_irq` and maps the bool to `driver_core::IrqAction` in
+//! `DeviceCtx::request_irq` and maps the bool to `driver_base::IrqAction` in
 //! its closure. Nothing in this crate implements a host registration trait or
 //! depends on the host IRQ core — that is what keeps the `DevIrq` guard in
 //! the driver's `Data`, where the rollback order is expressible.
@@ -75,6 +75,8 @@ mod virtio_9p;
 #[cfg(feature = "virtio-9p")]
 pub use self::virtio_9p::{VirtIo9pDev, Virtio9pDevice};
 
+#[cfg(feature = "virtio-9p")]
+pub mod forwarding_9p;
 #[cfg(unittest)]
 pub mod mock_virtio;
 #[cfg(feature = "socket")]

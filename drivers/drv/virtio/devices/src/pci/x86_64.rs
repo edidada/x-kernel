@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use driver_core::provider::{IrqOp, MsiResource};
+use driver_base::devres::provider::{IrqOp, MsiResource};
 use pci::msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT};
 use safe_mmio::{UniqueMmioPointer, field, field_shared, fields::ReadPureWrite};
 use virtio_drivers::{

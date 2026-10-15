@@ -93,14 +93,14 @@ static CONSOLE_CLASS_BRIDGE: LazyInit<()> = LazyInit::new();
               never for reads"
 )]
 struct StdoutBinding {
-    irq: Option<driver_core::DevIrq>,
-    regs: Option<driver_core::IoMap>,
+    irq: Option<driver_base::DevIrq>,
+    regs: Option<driver_base::IoMap>,
 }
 
 /// Transfer the adopted stdout port's binding guards to the console
 /// subsystem (call from a successful stdout probe, AFTER publication).
 /// Takes ownership: the caller's `Data` keeps `None` for these fields.
-pub fn adopt_stdout_guards(irq: Option<driver_core::DevIrq>, regs: Option<driver_core::IoMap>) {
+pub fn adopt_stdout_guards(irq: Option<driver_base::DevIrq>, regs: Option<driver_base::IoMap>) {
     // Replace: releasing the previous pair handles the rebind case (the
     // old registration/handlers belong to the superseded binding).
     console_subsystem().lock().stdout_binding = Some(StdoutBinding { irq, regs });

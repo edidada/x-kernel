@@ -171,7 +171,7 @@ pub struct VirtIoRngDev<H: Hal, T: Transport> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     request: SpinNoIrq<RngRequest<H, T>>,
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
@@ -187,7 +187,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
     pub fn try_new(
         transport: T,
         completion: Arc<dyn RngCompletion>,
-        mmio_regs: Option<driver_core::IoMap>,
+        mmio_regs: Option<driver_base::IoMap>,
     ) -> KResult<Arc<Self>> {
         Ok(Arc::new(Self::new(transport, completion, mmio_regs)?))
     }
@@ -203,7 +203,7 @@ impl<H: Hal, T: Transport> VirtIoRngDev<H, T> {
     fn new(
         transport: T,
         completion: Arc<dyn RngCompletion>,
-        mmio_regs: Option<driver_core::IoMap>,
+        mmio_regs: Option<driver_base::IoMap>,
     ) -> KResult<Self> {
         Ok(Self {
             _mmio_regs: mmio_regs,

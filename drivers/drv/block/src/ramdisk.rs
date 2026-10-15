@@ -13,13 +13,13 @@ use alloc::{boxed::Box, sync::Arc};
 
 use block::Gendisk;
 use device_class::{ClassParent, publish_block};
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError,
     platform::{PlatformBus, PlatformId},
 };
 
 /// `struct platform_device_id ramdisk_ids[]`: one board alias row.
-static IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatch::new(
+static IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatch::new(
     "ramdisk",
 ))];
 
@@ -92,5 +92,5 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
 
 /// `module_platform_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new("ramdisk", IDS, RamdiskDriver));
+    driver_base::global_domain().register_driver(DriverDesc::new("ramdisk", IDS, RamdiskDriver));
 }

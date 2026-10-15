@@ -23,7 +23,7 @@ virtio-9p = ["alloc"]
 
 [dependencies]
 kerrno.workspace = true
-driver-core = { workspace = true }
+driver_base = { workspace = true }
 bitflags = { workspace = true }
 block = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }

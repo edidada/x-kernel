@@ -112,7 +112,7 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     state: SpinNoIrq<BlockState<H, T>>,
     prepare_wait: Option<PrepareBlockWait>,
     num_blocks: u64,
@@ -142,7 +142,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     ///
     /// Returns `KError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_base::IoMap>) -> KResult<Self> {
         let device = Self::init_device(transport)?;
         Ok(Self::from_device(device, None, mmio_regs))
     }
@@ -166,7 +166,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     pub fn try_new_irq_with_regs(
         transport: T,
         prepare_wait: PrepareBlockWait,
-        mmio_regs: Option<driver_core::IoMap>,
+        mmio_regs: Option<driver_base::IoMap>,
     ) -> KResult<Self> {
         if cfg!(panic = "unwind") {
             return Err(KError::Unsupported);
@@ -183,7 +183,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     fn from_device(
         device: InnerDev<H, T>,
         prepare_wait: Option<PrepareBlockWait>,
-        mmio_regs: Option<driver_core::IoMap>,
+        mmio_regs: Option<driver_base::IoMap>,
     ) -> Self {
         let num_blocks = device.capacity();
         let is_read_only = device.readonly();

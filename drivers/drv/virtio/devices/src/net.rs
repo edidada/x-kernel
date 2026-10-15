@@ -89,7 +89,7 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     bufs: SpinNoPreempt<NetBufState<QS>>,
     // Kept alive so that `NetBufBox`es in `bufs` remain valid.
     #[expect(
@@ -147,7 +147,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// Panics if `receive_begin` returns a token that does not match the
     /// expected sequential index (asserts internal consistency).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_base::IoMap>) -> KResult<Self> {
         // 0. Create a new driver instance.
         const NONE_BUF: Option<NetBufBox> = None;
         let inner = Arc::new(SpinNoIrq::new(

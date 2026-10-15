@@ -16,6 +16,8 @@ use alloc::sync::Arc;
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod forwarding;
+
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};
 

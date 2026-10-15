@@ -14,7 +14,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use device_class::{ClassParent, publish_net};
-use driver_core::{
+use driver_base::{
     BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
@@ -65,7 +65,7 @@ impl DriverOps<PciBus> for VirtioNetDriver {
 /// Construct and publish the NIC for a probed transport — shared by the PCI
 /// driver above and the virtio-mmio transport driver. Returns the registered
 /// interrupt guard.
-pub fn activate<B: driver_core::Bus>(
+pub fn activate<B: driver_base::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio_devices::Transport + 'static,
     msi_irq: Option<usize>,
@@ -79,11 +79,11 @@ pub fn activate<B: driver_core::Bus>(
 
 /// Construct and publish the NIC, returning the publication handle and the
 /// registered IRQ guard (shared by the PCI driver and the mmio transport).
-fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static>(
+fn activate_with_irq<B: driver_base::Bus, T: virtio_devices::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     msi_irq: Option<usize>,
-    mmio_regs: Option<driver_core::IoMap>,
+    mmio_regs: Option<driver_base::IoMap>,
 ) -> Result<
     (
         device_class::ClassDevice<device_class::NetDeviceImpl>,
@@ -107,7 +107,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static
     // so a handler on the descriptor's legacy line would never fire.
     let irq = match msi_irq.map(|number| {
         dev.request_irq(
-            driver_core::IrqSpec::resolved(number, driver_core::IrqTrigger::Unknown(0)),
+            driver_base::IrqSpec::resolved(number, driver_base::IrqTrigger::Unknown(0)),
             "virtio-net",
             {
                 let worker = worker.clone();
@@ -158,7 +158,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static
 /// close() unpublishes first (consumers stop), then releases the IRQ, so
 /// nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<B: driver_core::Bus, T: virtio_devices::Transport + 'static>(
+pub fn activate_mmio<B: driver_base::Bus, T: virtio_devices::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     mut builder: crate::mmio::ActivationBuilder,
@@ -187,7 +187,7 @@ pub fn activate_mmio<B: driver_core::Bus, T: virtio_devices::Transport + 'static
 
 /// `module_pci_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "virtio-net",
         IDS,
         VirtioNetDriver,

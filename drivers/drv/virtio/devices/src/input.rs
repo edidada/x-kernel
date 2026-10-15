@@ -41,7 +41,7 @@ pub struct VirtIoInputDev<H: Hal, T: Transport> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     state: Arc<VirtIoInputState<H, T>>,
     device_id: InputDeviceId,
     name: String,
@@ -71,7 +71,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     pub fn try_new(
         transport: T,
         irq: usize,
-        mmio_regs: Option<driver_core::IoMap>,
+        mmio_regs: Option<driver_base::IoMap>,
     ) -> KResult<Self> {
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));

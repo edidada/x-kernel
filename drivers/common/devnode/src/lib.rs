@@ -32,11 +32,11 @@ use kspin::SpinNoPreempt;
 pub mod uevent;
 
 /// Device topology location — owned by the device model
-/// (`driver_core::BusDeviceData`), re-exported here so devnode consumers
+/// (`driver_base::BusDeviceData`), re-exported here so devnode consumers
 /// keep a single import path. There is exactly ONE path derivation in the
 /// tree: the pre-refactor duplicate (kept so the projection stayed
 /// model-agnostic across two device models) died with the old model.
-pub use driver_core::BusDeviceData;
+pub use driver_base::BusDeviceData;
 pub use uevent::bitmap_value;
 
 /// Packed `dev_t`: the same layout the block core and devfs use

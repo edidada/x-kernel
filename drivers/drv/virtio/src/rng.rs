@@ -13,7 +13,7 @@
 use alloc::sync::{Arc, Weak};
 
 use device_class::{ClassParent, publish_hwrng};
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use hwrng::completion::RngCompletion;
@@ -37,7 +37,7 @@ pub struct RngData {
     /// The Data-owned publication: dropping unpublishes (first field —
     /// before the IRQ guard below releases).
     _publication: device_class::ClassWithdraw,
-    _irq: driver_core::DevIrq,
+    _irq: driver_base::DevIrq,
 }
 
 /// The driver ops.
@@ -143,14 +143,14 @@ fn registration_error(error: PollRegisterError) -> KError {
 
 /// Construct and publish the device for a probed transport — shared by the
 /// PCI driver above and the virtio-mmio transport driver.
-pub fn activate<B: driver_core::Bus>(
+pub fn activate<B: driver_base::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio_devices::Transport + Send + 'static,
-    mmio_regs: Option<driver_core::IoMap>,
+    mmio_regs: Option<driver_base::IoMap>,
 ) -> Result<
     (
         device_class::ClassDevice<device_class::HwrngDeviceImpl>,
-        driver_core::DevIrq,
+        driver_base::DevIrq,
     ),
     ProbeError,
 > {
@@ -192,7 +192,7 @@ pub fn activate<B: driver_core::Bus>(
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
 pub fn activate_mmio(
-    dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
+    dev: &mut driver_base::DeviceCtx<'_, driver_base::platform::PlatformBus>,
     transport: impl virtio_devices::Transport + Send + 'static,
     mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
@@ -208,7 +208,7 @@ pub fn activate_mmio(
         // then the IRQ guard releases, and the mmio mapping goes with the
         // device object (the last ClassDevice clone).
         _withdraw: device_class::ClassWithdraw,
-        _irq: driver_core::DevIrq,
+        _irq: driver_base::DevIrq,
     }
 
     impl crate::mmio::MmioActivation for RngActivation {
@@ -225,7 +225,7 @@ pub fn activate_mmio(
 
 /// `module_pci_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "virtio-rng",
         IDS,
         VirtioRngDriver,

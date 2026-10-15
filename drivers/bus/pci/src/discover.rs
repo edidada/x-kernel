@@ -9,7 +9,7 @@
 //! root calls [`discover`] and nothing else. The bus layer owns the full
 //! pipeline from "scan the ECAM window" to "descriptor is in the domain".
 
-use driver_core::{Bus, IrqSpec, MmioRegion, ResourceKind, ResourceMap, desc::DeviceDescriptor};
+use driver_base::{Bus, IrqSpec, MmioRegion, ResourceKind, ResourceMap, desc::DeviceDescriptor};
 use khal::firmware::devices as fw;
 
 use crate::{HeaderType, PciHost, device_setup};
@@ -22,7 +22,7 @@ use crate::{HeaderType, PciHost, device_setup};
 /// - Legacy INTx IRQ (when routed by firmware)
 ///
 /// Bridge devices and functions with unassignable BARs are logged and skipped.
-pub fn discover(domain: &driver_core::DeviceDomain) {
+pub fn discover(domain: &driver_base::DeviceDomain) {
     let Ok(mut pci) = PciHost::new(device_setup::pci_cam_kind()) else {
         log::warn!("pci: bus access unavailable");
         return;
@@ -81,7 +81,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
                         )));
                     }
                     crate::BarInfo::IO { address, size } if size > 0 && address > 0 => {
-                        resources.push_kind(ResourceKind::IoPort(driver_core::IoPortRange {
+                        resources.push_kind(ResourceKind::IoPort(driver_base::IoPortRange {
                             base: (address & 0xffff) as u16,
                             size: (size & 0xffff) as u16,
                         }));
@@ -140,14 +140,14 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
 /// (strict reading: identity, full mask, non-coherent — firmware had its
 /// chance); no firmware description at all (static-device default +
 /// explicit warning, the same policy as every other static fallback).
-fn host_dma_view(segment: u16) -> driver_core::DmaInfo {
+fn host_dma_view(segment: u16) -> driver_base::DmaInfo {
     match fw::pci_dma_info() {
-        Some(facts) => driver_core::DmaInfo {
+        Some(facts) => driver_base::DmaInfo {
             mask: facts.size_mask,
             offset: facts.offset,
             coherent: facts.coherent.unwrap_or(false),
         },
-        None if fw::pci_host_source().is_some() => driver_core::DmaInfo {
+        None if fw::pci_host_source().is_some() => driver_base::DmaInfo {
             mask: u64::MAX,
             offset: 0,
             coherent: false,
@@ -157,19 +157,19 @@ fn host_dma_view(segment: u16) -> driver_core::DmaInfo {
                 "pci: no firmware DMA description for host {segment:04x} — defaulting to identity \
                  64-bit coherent (board-static fallback)"
             );
-            driver_core::DmaInfo::DEFAULT
+            driver_base::DmaInfo::DEFAULT
         }
     }
 }
 
-fn map_trigger(trigger: crate::InterruptTrigger) -> driver_core::IrqTrigger {
+fn map_trigger(trigger: crate::InterruptTrigger) -> driver_base::IrqTrigger {
     use crate::InterruptTrigger as T;
     match trigger {
-        T::EdgeRising => driver_core::IrqTrigger::EdgeRising,
-        T::EdgeFalling => driver_core::IrqTrigger::EdgeFalling,
-        T::LevelHigh => driver_core::IrqTrigger::LevelHigh,
-        T::LevelLow => driver_core::IrqTrigger::LevelLow,
-        T::Unknown(_) => driver_core::IrqTrigger::Unknown(0),
+        T::EdgeRising => driver_base::IrqTrigger::EdgeRising,
+        T::EdgeFalling => driver_base::IrqTrigger::EdgeFalling,
+        T::LevelHigh => driver_base::IrqTrigger::LevelHigh,
+        T::LevelLow => driver_base::IrqTrigger::LevelLow,
+        T::Unknown(_) => driver_base::IrqTrigger::Unknown(0),
     }
 }
 
@@ -191,9 +191,9 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
         // firmware stated (or did not) maps to Unknown and the provider
         // falls back to its default resolution.
         let controller = match route.controller {
-            crate::fw::InterruptControllerKind::Gic => driver_core::IrqController::Gic,
-            crate::fw::InterruptControllerKind::Plic => driver_core::IrqController::Plic,
-            crate::fw::InterruptControllerKind::Unknown => driver_core::IrqController::Unknown,
+            crate::fw::InterruptControllerKind::Gic => driver_base::IrqController::Gic,
+            crate::fw::InterruptControllerKind::Plic => driver_base::IrqController::Plic,
+            crate::fw::InterruptControllerKind::Unknown => driver_base::IrqController::Unknown,
         };
         return Some(IrqSpec::firmware(
             controller,
@@ -216,9 +216,9 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
             return None;
         }
         Some(IrqSpec::firmware(
-            driver_core::IrqController::IoApic,
+            driver_base::IrqController::IoApic,
             irq_line,
-            driver_core::IrqTrigger::LevelLow,
+            driver_base::IrqTrigger::LevelLow,
         ))
     }
     #[cfg(not(target_arch = "x86_64"))]

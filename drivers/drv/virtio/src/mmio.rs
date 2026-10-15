@@ -24,7 +24,7 @@
 //! — so nothing outlives the mapping it dereferences. Field order alone
 //! never carries this contract; the explicit close sequence does.
 
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IoMap, ProbeError, RuntimeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
@@ -212,5 +212,5 @@ simple_family_dispatch!(dispatch_simple_9p, "fs9p", virtio_9p);
 
 /// `module_platform_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new("virtio-mmio", IDS, MmioDriver));
+    driver_base::global_domain().register_driver(DriverDesc::new("virtio-mmio", IDS, MmioDriver));
 }

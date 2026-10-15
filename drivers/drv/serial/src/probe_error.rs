@@ -4,7 +4,7 @@
 
 //! Shared helpers for the serial driver modules.
 
-use driver_core::{ProbeError, RuntimeError};
+use driver_base::{ProbeError, RuntimeError};
 use kerrno::KError;
 
 pub(crate) fn map_driver_error(err: KError) -> ProbeError {

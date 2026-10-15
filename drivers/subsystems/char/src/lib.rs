@@ -22,6 +22,8 @@
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod forwarding;
+
 /// Operations a character device driver must implement.
 ///
 /// Character devices expose a byte-stream view to user space; the trait stays

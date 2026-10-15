@@ -39,7 +39,7 @@ impl SeqIterator for DevicesIter {
         let mut block = Vec::new();
         let mut other = Vec::new();
 
-        for device in driver_core::global_topology_summary() {
+        for device in driver_base::global_topology_summary() {
             let driver = device.driver.unwrap_or("<none>");
             let identity = device
                 .identity
@@ -51,7 +51,7 @@ impl SeqIterator for DevicesIter {
                 identity,
                 driver,
             );
-            if device.state == driver_core::DeviceState::Active {
+            if device.state == driver_base::DeviceState::Active {
                 block.push(line);
             } else {
                 other.push(line);
@@ -111,7 +111,7 @@ impl SeqIterator for BusDevicesIter {
         self.done = false;
 
         let s = &mut self.text;
-        for device in driver_core::global_topology_summary() {
+        for device in driver_base::global_topology_summary() {
             let identity = device.identity.unwrap_or_default();
             let driver = device.driver.unwrap_or("<none>");
             let _ = core::writeln!(

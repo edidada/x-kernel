@@ -24,7 +24,7 @@ mmio = []
 [dependencies]
 kerrno.workspace = true
 block = { workspace = true, optional = true }
-driver-core = { workspace = true }
+driver_base = { workspace = true }
 driver_host = { workspace = true, features = ["virtio-hal"] }
 device_class = { workspace = true }
 hwrng = { workspace = true }

@@ -7,7 +7,7 @@
 //! # Host-side surface (registered exception E-01)
 //!
 //! This module is the one place under `drv/` that names
-//! [`driver_core::provider::IrqOp`]. That is deliberate and registered:
+//! [`driver_base::devres::provider::IrqOp`]. That is deliberate and registered:
 //!
 //! * the MSI-X **config vector belongs to the transport**, not to a device
 //!   driver's `Data` — Linux keeps it in `virtio_pci_modern.c` for the same
@@ -27,7 +27,7 @@
 
 use alloc::vec::Vec;
 
-use driver_core::provider::IrqOp;
+use driver_base::devres::provider::IrqOp;
 use pci::MmioCam;
 
 #[cfg(target_arch = "x86_64")]
@@ -59,7 +59,7 @@ pub struct PciTransport {
     /// mappings are released). The mapping lives exactly as long as this
     /// transport — and therefore as long as any class publication still
     /// holding the device.
-    mmio_leases: Vec<driver_core::IoMap>,
+    mmio_leases: Vec<driver_base::IoMap>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -110,7 +110,7 @@ impl PciTransport {
 
     /// Take ownership of the MMIO mapping leases gathered during the
     /// probe scope. Called once by the runtime right after construction.
-    pub fn retain_mappings(&mut self, leases: Vec<driver_core::IoMap>) {
+    pub fn retain_mappings(&mut self, leases: Vec<driver_base::IoMap>) {
         debug_assert!(self.mmio_leases.is_empty(), "mappings retained twice");
         self.mmio_leases = leases;
     }

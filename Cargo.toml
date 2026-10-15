@@ -10,9 +10,9 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
-    "drivers/core/driver-core",
-    "drivers/core/driver-host",
-    "drivers/core/driver-compose",
+    "drivers/base",
+    "drivers/host",
+    "drivers/init",
     "drivers/common/devnode",
     "drivers/drv/*",
     "tee/tee_crypto",
@@ -199,9 +199,9 @@ char_driver = { path = "drivers/subsystems/char" }
 display = { path = "drivers/subsystems/display" }
 hwrng = { path = "drivers/subsystems/hwrng" }
 kclk = { path = "core/kclk" }
-driver-core = { path = "drivers/core/driver-core" }
-driver_host = { path = "drivers/core/driver-host", package = "driver-host" }
-driver-compose = { path = "drivers/core/driver-compose" }
+driver_base = { path = "drivers/base", package = "driver-base" }
+driver_host = { path = "drivers/host", package = "driver-host" }
+driver-init = { path = "drivers/init", package = "driver-init" }
 drv-virtio = { path = "drivers/drv/virtio" }
 drv-serial = { path = "drivers/drv/serial" }
 drv-clk = { path = "drivers/drv/clk" }

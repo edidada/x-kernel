@@ -35,7 +35,7 @@ pub mod msix;
 
 pub mod discover;
 
-use driver_core::{Bus, BusDeviceData, BusId, MatchScore};
+use driver_base::{Bus, BusDeviceData, BusId, MatchScore};
 
 /// The PCI bus type in the driver-core device model — the single authority
 /// (Linux keeps `pci_bus_type` with the PCI subsystem in `drivers/pci`,

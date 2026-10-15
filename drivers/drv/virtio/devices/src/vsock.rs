@@ -39,7 +39,7 @@ pub struct VirtIoVsockDev<H: Hal, T: Transport, const RX_BUF_SIZE: usize = RX_BU
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     inner: SpinNoIrq<VirtIOSocket<H, T, RX_BUF_SIZE>>,
     guest_cid: u64,
 }
@@ -74,7 +74,7 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF
     ///
     /// Returns an error if the device fails to initialize (feature
     /// negotiation, queue allocation, etc.).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_base::IoMap>) -> KResult<Self> {
         let inner = VirtIOSocket::<H, T, RX_BUF_SIZE>::new(transport).map_err(as_driver_error)?;
         let guest_cid = inner.guest_cid();
         Ok(Self {

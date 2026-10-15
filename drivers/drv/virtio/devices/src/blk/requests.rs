@@ -408,7 +408,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Acknowledge one interrupt and report whether it was ours.
     ///
     /// The family-side half of `DeviceCtx::request_irq`: the driver's handler
-    /// closure calls this and maps the result to `driver_core::IrqAction`
+    /// closure calls this and maps the result to `driver_base::IrqAction`
     /// (the same shape `VirtIoNetIrqWorker::service` has). This is
     /// deliberately NOT a host registration trait — nothing in this crate is
     /// ever registered with the host IRQ core; registration belongs to the

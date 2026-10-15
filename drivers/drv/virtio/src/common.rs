@@ -7,7 +7,7 @@
 
 use alloc::string::String;
 
-use driver_core::{ProbeError, RuntimeError};
+use driver_base::{ProbeError, RuntimeError};
 use kerrno::KError;
 use virtio_devices::VirtioDeviceKind;
 
@@ -29,30 +29,30 @@ pub(crate) fn map_driver_error(err: KError) -> ProbeError {
 /// Format the DEVPATH physical path from the device's bus data (the same
 /// string the devnode registry stores): the bus vtable's derivation, no
 /// per-driver copies.
-pub(crate) fn physical_path(dev: &driver_core::DeviceCtx<'_, impl driver_core::Bus>) -> String {
-    driver_core::BusDeviceData::path_component(dev.bus_data())
+pub(crate) fn physical_path(dev: &driver_base::DeviceCtx<'_, impl driver_base::Bus>) -> String {
+    driver_base::BusDeviceData::path_component(dev.bus_data())
 }
 
 /// Probe this device's virtio PCI transport through the runtime's
 /// `PciTransportService` extension: kind + concrete transport + irq, with
 /// the PCI/provider boilerplate owned by the service. Compile-time typed —
 /// the wrong transport type cannot get past the compiler.
-pub(crate) fn pci_transport<B: driver_core::Bus>(
-    dev: &mut driver_core::DeviceCtx<'_, B>,
+pub(crate) fn pci_transport<B: driver_base::Bus>(
+    dev: &mut driver_base::DeviceCtx<'_, B>,
 ) -> Result<
     (
         VirtioDeviceKind,
         virtio_devices::PciTransport,
         Option<usize>,
     ),
-    driver_core::ProbeError,
+    driver_base::ProbeError,
 > {
     let service = dev
         .extension::<driver_host::virtio_transport::PciTransportService>()
-        .ok_or(driver_core::ProbeError::Fatal(
-            driver_core::RuntimeError::Unsupported,
+        .ok_or(driver_base::ProbeError::Fatal(
+            driver_base::RuntimeError::Unsupported,
         ))?;
     service
         .probe(dev.bus_data(), dev.resources())
-        .map_err(driver_core::ProbeError::Fatal)
+        .map_err(driver_base::ProbeError::Fatal)
 }

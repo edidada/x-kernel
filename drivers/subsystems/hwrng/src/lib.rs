@@ -17,6 +17,8 @@ pub mod completion;
 
 pub use kerrno::{KError, KResult};
 
+pub mod forwarding;
+
 /// A raw entropy source, implemented by a concrete device driver.
 ///
 /// Report [`DeviceKind::Hwrng`]. Concurrent reads must not consume the same

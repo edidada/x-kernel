@@ -1,0 +1,44 @@
+[package]
+name = "driver-init"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Composition root for the driver-core model: runtime install, DT enumeration, driver registration"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+serial-pl011 = ["dep:drv-serial", "drv-serial/pl011", "dep:drv-clk", "drv-clk/fixed-clock"]
+serial-ns16550-mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio"]
+serial-ns16550-ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport"]
+virtio-blk = ["dep:drv-virtio", "drv-virtio/blk"]
+virtio-net = ["dep:drv-virtio", "drv-virtio/net"]
+virtio-rng = ["dep:drv-virtio", "drv-virtio/rng"]
+virtio-gpu = ["dep:drv-virtio", "drv-virtio/gpu"]
+virtio-input = ["dep:drv-virtio", "drv-virtio/input"]
+virtio-vsock = ["dep:drv-virtio", "drv-virtio/vsock"]
+virtio-9p = ["dep:drv-virtio", "drv-virtio/fs9p"]
+virtio-mmio = ["dep:drv-virtio", "drv-virtio/blk", "drv-virtio/net", "drv-virtio/gpu", "drv-virtio/input", "drv-virtio/rng", "drv-virtio/vsock", "drv-virtio/fs9p", "drv-virtio/mmio"]
+ramdisk = ["dep:drv-block"]
+ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
+fixed-clock = ["dep:drv-clk"]
+
+[dependencies]
+driver_base = { workspace = true }
+driver_host.workspace = true
+khal.workspace = true
+pci.workspace = true
+of.workspace = true
+log.workspace = true
+block = { workspace = true }
+drv-virtio = { workspace = true, optional = true }
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+drv-block = { workspace = true, optional = true }
+
+[lints]
+workspace = true

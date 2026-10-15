@@ -24,7 +24,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
@@ -106,7 +106,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
 
 /// `module_platform_driver()` equivalent: register with the global domain.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "fixed-clock",
         IDS,
         FixedClockDriver,

@@ -28,7 +28,7 @@ pub struct VirtIoGpuDev<H: Hal, T: Transport> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     info: DisplayInfo,
     inner: SpinNoIrq<VirtIoGpu2d<H, T>>,
 }
@@ -43,7 +43,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and reads the display resolution.
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_base::IoMap>) -> KResult<Self> {
         let mut device = VirtIoGpu2d::new(transport).map_err(crate::as_driver_error)?;
         let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
 

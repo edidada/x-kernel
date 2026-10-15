@@ -30,7 +30,7 @@ use console_driver::{
     serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
 };
 use device_class::{ClassParent, publish_char};
-use driver_core::{
+use driver_base::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
@@ -58,7 +58,7 @@ pub struct Pl011Data {
     /// the prepare/enable pair (disable + unprepare) — the structural
     /// counterpart of the stdout port's `keep_running` escape hatch. The
     /// stdout path stores `None` (its token was consumed at probe).
-    _enabled_clk: Option<driver_core::EnabledClock>,
+    _enabled_clk: Option<driver_base::EnabledClock>,
 }
 
 /// The driver ops (`struct amba_pl011_driver`).
@@ -70,7 +70,7 @@ pub struct Pl011Driver;
 /// pair rolls back. See `Pl011Data::_enabled_clk` for the success policy.
 fn enable_baud_clock(
     dev: &mut DeviceCtx<'_, PlatformBus>,
-) -> Result<Option<(ClkHandle, driver_core::EnabledClock)>, ProbeError> {
+) -> Result<Option<(ClkHandle, driver_base::EnabledClock)>, ProbeError> {
     match dev
         .resources()
         .clk_by_name("uartclk")
@@ -151,7 +151,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // subsystem (/dev/console backing), auxiliary ports become char
         // devices. Both use a detached class parent — the class layer is
         // model-agnostic since the class-layer decoupling.
-        use driver_core::BusDeviceData as _;
+        use driver_base::BusDeviceData as _;
         let location = dev.bus_data().path_component();
         let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
         let mut publication: Option<device_class::ClassWithdraw> = None;
@@ -241,7 +241,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
 
 /// `module_platform_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new("pl011-serial", IDS, Pl011Driver));
+    driver_base::global_domain().register_driver(DriverDesc::new("pl011-serial", IDS, Pl011Driver));
 }
 
 /// Char-device runtime wrapper over a `SerialPort` (the `/dev` view).

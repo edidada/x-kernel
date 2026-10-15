@@ -4,7 +4,7 @@
 
 //! Shared helpers for the block driver modules.
 
-use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
+use driver_base::{ProbeError, RuntimeError, desc::DeviceLocation};
 use kerrno::KError;
 
 pub(crate) fn map_driver_error(err: KError) -> ProbeError {

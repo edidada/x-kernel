@@ -15,7 +15,7 @@ default = []
 fixed-clock = []
 
 [dependencies]
-driver-core = { workspace = true }
+driver_base = { workspace = true }
 driver_host = { workspace = true }
 kclk = { workspace = true }
 log.workspace = true

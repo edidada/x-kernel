@@ -28,7 +28,7 @@ use block::{
     dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
 };
 use device_class::{ClassParent, publish_block};
-use driver_core::{
+use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
@@ -73,7 +73,7 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
         // irq domain. Either way `activate` receives the full spec.
         let spec = irq
             .map(|number| {
-                driver_core::IrqSpec::resolved(number, driver_core::IrqTrigger::Unknown(0))
+                driver_base::IrqSpec::resolved(number, driver_base::IrqTrigger::Unknown(0))
             })
             .or_else(|| dev.irq(0).ok());
         let activation = match spec {
@@ -104,7 +104,7 @@ impl Drop for BlkData {
 /// value owned by the device.
 struct BlkActivation<H: VirtIoHal, T: Transport> {
     device: Arc<VirtIoBlkDev<H, T>>,
-    irq: Option<driver_core::DevIrq>,
+    irq: Option<driver_base::DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<Arc<Gendisk>>,
     /// The Data-owned publication: taken and dropped at the exact
@@ -150,11 +150,11 @@ impl<H: VirtIoHal + 'static, T: Transport + 'static> Activation for BlkActivatio
 
 /// Construct and publish the block device for a probed transport — shared
 /// by the PCI driver above and the virtio-mmio transport driver.
-pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
+pub fn activate<B: driver_base::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
-    irq: driver_core::IrqSpec,
-    mmio_regs: Option<driver_core::IoMap>,
+    irq: driver_base::IrqSpec,
+    mmio_regs: Option<driver_base::IoMap>,
 ) -> Result<Box<dyn Activation>, ProbeError> {
     let device = Arc::new(
         VirtIoBlkDev::<driver_host::virtio_hal::Hal, T>::try_new_irq_with_regs(
@@ -232,10 +232,10 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
 /// the mapping drops after close returns, so the transport never outlives
 /// its window.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<B: driver_core::Bus, T: Transport + 'static>(
+pub fn activate_mmio<B: driver_base::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
-    irq: driver_core::IrqSpec,
+    irq: driver_base::IrqSpec,
     mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
     // The MMIO register mapping follows the device object (Linux BAR
@@ -257,7 +257,7 @@ pub fn activate_mmio<B: driver_core::Bus, T: Transport + 'static>(
 
 /// `module_pci_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
+    driver_base::global_domain().register_driver(DriverDesc::new(
         "virtio-blk",
         IDS,
         VirtioBlkDriver,

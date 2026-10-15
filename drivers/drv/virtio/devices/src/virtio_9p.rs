@@ -49,7 +49,7 @@ pub struct VirtIo9pDev<H: Hal, T: Transport> {
     /// reference to this device object (class publication, consumer clones)
     /// lives — the last drop releases the mapping (Linux: pci_release_regions
     /// runs after the last put_device).
-    _mmio_regs: Option<driver_core::IoMap>,
+    _mmio_regs: Option<driver_base::IoMap>,
     inner: SpinNoIrq<InnerDev<H, T>>,
     mount_tag: String,
 }
@@ -69,7 +69,7 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     /// # Errors
     ///
     /// Returns `KError` if the VirtIO 9p device fails to initialize.
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_base::IoMap>) -> KResult<Self> {
         let inner = InnerDev::new(transport).map_err(as_driver_error)?;
         let mount_tag = inner.mount_tag().to_string();
         Ok(Self {
