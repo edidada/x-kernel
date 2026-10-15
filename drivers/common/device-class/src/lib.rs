@@ -502,7 +502,7 @@ pub fn remove_net_device(id: ClassDeviceId) {
 mod node_compat {
     use alloc::{format, string::String, vec::Vec};
 
-    use devnode::{DevNodeType, DeviceLocation, bitmap_value};
+    use devnode::{DevNodeType, bitmap_value};
 
     use super::InputNodeMetadata;
 
@@ -551,9 +551,9 @@ mod node_compat {
         id: u64,
         metadata: InputNodeMetadata,
         driver_name: &str,
-        location: DeviceLocation,
+        parent_path: &str,
     ) {
-        let physical = devnode::physical_path(&location);
+        let physical = String::from(parent_path);
         let mut properties = Vec::new();
         properties.push((
             String::from("PRODUCT"),
@@ -604,8 +604,8 @@ mod node_compat {
     }
 
     /// Build the drm node publication (cardN).
-    pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) {
-        let physical = devnode::physical_path(&location);
+    pub(super) fn drm_node(id: u64, driver_name: &str, parent_path: &str) {
+        let physical = String::from(parent_path);
         // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
         // device ownership); losing it changes /dev/dri/cardN handling.
         let properties = alloc::vec![(String::from("DEVTYPE"), String::from("drm_minor"))];

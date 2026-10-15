@@ -90,7 +90,8 @@ fn publish(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     port: Arc<SerialPort>,
 ) -> Result<Option<device_class::ClassWithdraw>, ProbeError> {
-    let location = dev.descriptor().location;
+    use driver_core::BusDeviceData as _;
+    let location = dev.bus_data().path_component();
     let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(

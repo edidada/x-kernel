@@ -70,7 +70,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<FixedClockData, ProbeError> {
         let firmware = dev
-            .descriptor()
+            .bus_data()
             .firmware
             .as_ref()
             .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;

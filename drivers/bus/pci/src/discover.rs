@@ -9,10 +9,7 @@
 //! root calls [`discover`] and nothing else. The bus layer owns the full
 //! pipeline from "scan the ECAM window" to "descriptor is in the domain".
 
-use driver_core::{
-    Bus, IrqSpec, MmioRegion, ResourceKind, ResourceMap,
-    desc::{DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PciIdentity},
-};
+use driver_core::{Bus, IrqSpec, MmioRegion, ResourceKind, ResourceMap, desc::DeviceDescriptor};
 use khal::firmware::devices as fw;
 
 use crate::{HeaderType, PciHost, device_setup};
@@ -103,20 +100,17 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
 
             let descriptor = DeviceDescriptor::new(
                 <crate::PciBus as Bus>::ID,
-                DeviceLocation::Pci {
+                alloc::boxed::Box::new(crate::PciBusData {
                     segment,
                     bus: bdf.bus,
                     device: bdf.device,
                     function: bdf.function,
-                },
-                DeviceIdentity::Pci(PciIdentity {
                     vendor_id: info.vendor_id,
                     device_id: info.device_id,
                     class: info.class,
                     subclass: info.subclass,
                 }),
             )
-            .with_origin(DiscoveryOrigin::PlatformStatic)
             .with_resources(resources)
             .with_dma(host_dma);
             let descriptor = match root_instance {

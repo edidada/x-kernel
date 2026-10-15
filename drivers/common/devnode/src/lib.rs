@@ -32,11 +32,11 @@ use kspin::SpinNoPreempt;
 pub mod uevent;
 
 /// Device topology location — owned by the device model
-/// (`driver_core::DeviceLocation`), re-exported here so devnode consumers
-/// keep a single import path. There is exactly ONE DeviceLocation in the
+/// (`driver_core::BusDeviceData`), re-exported here so devnode consumers
+/// keep a single import path. There is exactly ONE path derivation in the
 /// tree: the pre-refactor duplicate (kept so the projection stayed
 /// model-agnostic across two device models) died with the old model.
-pub use driver_core::DeviceLocation;
+pub use driver_core::BusDeviceData;
 pub use uevent::bitmap_value;
 
 /// Packed `dev_t`: the same layout the block core and devfs use
@@ -612,19 +612,8 @@ fn dispatch_added(
 /// THE single derivation: the block driver, the virtio drivers and the
 /// device_class projections must all call this — independent copies drifted
 /// before (DEVPATH vs sysfs tree mismatch).
-pub fn physical_path(location: &DeviceLocation) -> String {
-    match location {
-        DeviceLocation::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => physical_path_pci(*segment, *bus, *device, *function),
-        DeviceLocation::Mmio { base, .. } => format!("platform/{base:x}.mmio"),
-        DeviceLocation::FirmwareNode { id } => format!("platform/firmware{id}"),
-        DeviceLocation::PlatformStatic { id } => format!("platform/static{id}"),
-        DeviceLocation::Bridge { domain } => format!("pci{domain:04x}:00"),
-    }
+pub fn physical_path(data: &dyn BusDeviceData) -> String {
+    data.path_component()
 }
 
 pub fn physical_path_pci(segment: u16, bus: u8, device: u8, function: u8) -> String {

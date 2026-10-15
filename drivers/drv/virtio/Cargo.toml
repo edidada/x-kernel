@@ -23,7 +23,6 @@ mmio = []
 
 [dependencies]
 block = { workspace = true, optional = true }
-devnode = { workspace = true }
 driver-core = { workspace = true }
 driver_host = { workspace = true, features = ["virtio-hal"] }
 device_traits = { workspace = true }

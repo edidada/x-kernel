@@ -292,7 +292,7 @@ mod tests {
                 device_class::ClassParent::detached(
                     index as u64,
                     "entropy-collector-test",
-                    devnode::DeviceLocation::PlatformStatic { id: index as u16 },
+                    alloc::string::String::from("ram-disk"), // 板静态别名占位
                 ),
                 hardware.clone(),
             )

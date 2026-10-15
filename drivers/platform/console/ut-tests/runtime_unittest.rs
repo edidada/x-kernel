@@ -44,7 +44,7 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     let parent = device_class::ClassParent::detached(
         1,
         "console-test",
-        devnode::DeviceLocation::PlatformStatic { id: 1 },
+        alloc::string::String::from("platform/static1"),
     );
     parent.mark_offline();
     let runtime: CharDeviceImpl = Box::new(DummyConsole);

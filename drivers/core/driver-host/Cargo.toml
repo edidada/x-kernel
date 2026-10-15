@@ -12,6 +12,7 @@ categories = ["os", "no-std"]
 
 [dependencies]
 driver-core.workspace = true
+device_traits.workspace = true
 kirq = { workspace = true }
 memspace = { workspace = true }
 kdma = { workspace = true }

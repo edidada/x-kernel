@@ -41,7 +41,7 @@ impl DeviceDomain {
                     .devices
                     .get(&id)
                     .map_or(0, |e| e.lifecycle.generation);
-                match driver.probe(&desc, id, services.as_ref()) {
+                match driver.probe(&desc, crate::device::DeviceId(id), services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
                         match inner.devices.get_mut(&id) {
@@ -51,9 +51,9 @@ impl DeviceDomain {
                                 entry.binding.data = Some(data);
                                 stats.activated += 1;
                                 log::debug!(
-                                    "driver-core: `{}` activated device {id} ({:?})",
+                                    "driver-core: `{}` activated device {id} ({})",
                                     driver.name(),
-                                    desc.identity
+                                    desc.data.display_identity()
                                 );
                             }
                             // Stale probe: the device's generation moved
@@ -113,7 +113,7 @@ impl DeviceDomain {
                 .drivers
                 .iter()
                 .filter(|driver| !attempted.contains(&driver_key(driver)))
-                .map(|driver| (driver.clone(), driver.matches(&desc)))
+                .map(|driver| (driver.clone(), driver.matches(desc.data.as_ref())))
                 .filter(|(_, score)| *score != MatchScore::NoMatch)
                 .max_by_key(|(_, score)| *score)
                 .map(|(driver, _)| driver);

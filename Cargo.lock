@@ -1259,7 +1259,6 @@ dependencies = [
 name = "driver-core"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
  "kirq",
  "kspin",
  "lazyinit",
@@ -1271,6 +1270,7 @@ dependencies = [
 name = "driver-host"
 version = "0.3.0-dev"
 dependencies = [
+ "device-traits",
  "driver-core",
  "kclk",
  "kdma",
@@ -1347,7 +1347,6 @@ dependencies = [
  "block",
  "device-class",
  "device-traits",
- "devnode",
  "driver-core",
  "driver-host",
  "hwrng",
@@ -3178,7 +3177,6 @@ dependencies = [
  "char_driver",
  "console-driver",
  "device-class",
- "devnode",
  "intrusive-collections",
  "kcpu_id_map",
  "kcred",

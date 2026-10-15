@@ -35,26 +35,88 @@ pub mod msix;
 
 pub mod discover;
 
-use driver_core::{
-    Bus, BusId, IdMatchEntry, MatchScore,
-    desc::{DeviceDescriptor, DeviceIdentity},
-};
+use driver_core::{Bus, BusDeviceData, BusId, MatchScore};
 
 /// The PCI bus type in the driver-core device model — the single authority
 /// (Linux keeps `pci_bus_type` with the PCI subsystem in `drivers/pci`,
 /// not in the driver core).
 ///
-/// Matches descriptors with `DeviceLocation::Pci` against [`PciMatch`] id
+/// Owns its device-data vocabulary ([`PciBusData`]: BDF placement +
+/// vendor/device identity) and its matching rule against [`PciMatch`] id
 /// tables. The discovery pipeline lives in [`discover`].
 pub struct PciBus;
 
+/// The PCI bus's device data: placement (BDF) and identity in one payload.
+#[derive(Debug, Clone)]
+pub struct PciBusData {
+    /// Bus-device-function placement (the `pci_dev->devfn` address).
+    pub segment: u16,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    /// Vendor/device identity for id-table matching and modalias.
+    pub vendor_id: u16,
+    pub device_id: u16,
+    /// Class/subclass (diagnostics and modalias).
+    pub class: u8,
+    pub subclass: u8,
+}
+
+impl BusDeviceData for PciBusData {
+    fn bus_id(&self) -> BusId {
+        PciBus::ID
+    }
+
+    fn path_component(&self) -> alloc::string::String {
+        alloc::format!(
+            "pci{:04x}:{:02x}/{:04x}:{:02x}:{:02x}.{}",
+            self.segment,
+            self.bus,
+            self.segment,
+            self.bus,
+            self.device,
+            self.function
+        )
+    }
+
+    fn modalias(&self) -> Option<alloc::string::String> {
+        Some(alloc::format!(
+            "pci:v{:08X}d{:08X}",
+            self.vendor_id,
+            self.device_id
+        ))
+    }
+
+    fn display_identity(&self) -> alloc::string::String {
+        alloc::format!("{:04x}:{:04x}", self.vendor_id, self.device_id)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn clone_erased(&self) -> alloc::boxed::Box<dyn BusDeviceData> {
+        alloc::boxed::Box::new(self.clone())
+    }
+}
+
 impl Bus for PciBus {
+    type DeviceData = PciBusData;
     type IdEntry = PciMatch;
 
-    const ID: BusId = BusId::new("pci");
+    const ID: BusId = BusId("pci");
 
-    fn accepts(desc: &DeviceDescriptor) -> bool {
-        matches!(desc.location, driver_core::DeviceLocation::Pci { .. })
+    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore {
+        let device_match = entry.device_id == u16::MAX || entry.device_id == data.device_id;
+        if entry.vendor_id == data.vendor_id && device_match {
+            if entry.device_id == data.device_id {
+                MatchScore::Exact
+            } else {
+                MatchScore::Generic
+            }
+        } else {
+            MatchScore::NoMatch
+        }
     }
 }
 
@@ -83,29 +145,14 @@ impl PciMatch {
     }
 }
 
-impl IdMatchEntry for PciMatch {
-    fn modalias(&self) -> Option<alloc::string::String> {
+impl PciMatch {
+    /// The MODALIAS this row would publish (uevent/module loading).
+    pub fn modalias(&self) -> Option<alloc::string::String> {
         Some(alloc::format!(
             "pci:v{vendor:08X}d{device:08X}",
             vendor = self.vendor_id,
             device = self.device_id
         ))
-    }
-
-    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
-        let DeviceIdentity::Pci(pci) = &desc.identity else {
-            return MatchScore::NoMatch;
-        };
-        let device_match = self.device_id == u16::MAX || self.device_id == pci.device_id;
-        if self.vendor_id == pci.vendor_id && device_match {
-            if self.device_id == pci.device_id {
-                MatchScore::Exact
-            } else {
-                MatchScore::Generic
-            }
-        } else {
-            MatchScore::NoMatch
-        }
     }
 }
 

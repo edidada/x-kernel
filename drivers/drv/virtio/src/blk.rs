@@ -200,7 +200,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     })?);
 
     let modalias = dev.modalias().map(alloc::string::String::from);
-    let parent_path = crate::common::physical_path(dev.descriptor().location);
+    let parent_path = crate::common::physical_path(dev);
     let disk = Arc::new(
         Gendisk::new(
             device.name().into(),
@@ -216,7 +216,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
 
     device.enable_interrupts();
 
-    let location = dev.descriptor().location;
+    let location = crate::common::physical_path(dev);
     let publication = publish_block(
         ClassParent::detached(dev.id().raw(), "virtio-blk", location),
         disk,

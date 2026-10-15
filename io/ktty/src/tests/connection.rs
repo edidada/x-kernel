@@ -70,7 +70,7 @@ fn connection(
     let parent = device_class::ClassParent::detached(
         0x7e57,
         "tty-test",
-        devnode::DeviceLocation::PlatformStatic { id: 0x7e57 },
+        alloc::string::String::from("platform/static0x7e57"),
     );
     if offline {
         parent.mark_offline();
@@ -141,7 +141,7 @@ fn unavailable_runtime_clears_handle_and_uses_boot_port() {
     let parent = device_class::ClassParent::detached(
         1,
         "tty-test",
-        devnode::DeviceLocation::PlatformStatic { id: 1 },
+        alloc::string::String::from("platform/static1"),
     );
     // The main-side equivalent used a bound-but-inactive device object;
     // the class model expresses unavailability as an offline parent

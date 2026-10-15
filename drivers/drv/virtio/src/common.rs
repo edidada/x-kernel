@@ -7,7 +7,7 @@
 
 use alloc::string::String;
 
-use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
+use driver_core::{ProbeError, RuntimeError};
 
 pub(crate) fn map_driver_error(err: device_traits::DriverError) -> ProbeError {
     let error = match err {
@@ -25,13 +25,11 @@ pub(crate) fn map_driver_error(err: device_traits::DriverError) -> ProbeError {
     ProbeError::Fatal(error)
 }
 
-/// Format the DEVPATH physical path from a location (the same string the
-/// devnode registry stores).
-pub(crate) fn physical_path(location: DeviceLocation) -> String {
-    // The DEVPATH format lives in devnode exactly once. `devnode` re-exports
-    // the location type from driver-core, so this passes the SAME type
-    // straight through — no adapter or conversion layer.
-    devnode::physical_path(&location)
+/// Format the DEVPATH physical path from the device's bus data (the same
+/// string the devnode registry stores): the bus vtable's derivation, no
+/// per-driver copies.
+pub(crate) fn physical_path(dev: &driver_core::DeviceCtx<'_, impl driver_core::Bus>) -> String {
+    driver_core::BusDeviceData::path_component(dev.bus_data())
 }
 
 /// Probe this device's virtio PCI transport through the runtime's
@@ -42,7 +40,7 @@ pub(crate) fn pci_transport<B: driver_core::Bus>(
     dev: &mut driver_core::DeviceCtx<'_, B>,
 ) -> Result<
     (
-        driver_core::DeviceKind,
+        device_traits::DeviceKind,
         virtio_devices::PciTransport,
         Option<usize>,
     ),
@@ -54,6 +52,6 @@ pub(crate) fn pci_transport<B: driver_core::Bus>(
             driver_core::RuntimeError::Unsupported,
         ))?;
     service
-        .probe(dev.descriptor())
+        .probe(dev.bus_data(), dev.resources())
         .map_err(driver_core::ProbeError::Fatal)
 }

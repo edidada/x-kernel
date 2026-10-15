@@ -11,7 +11,6 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 use device_traits::{Device, DeviceKind, DriverError, DriverResult};
-use devnode::DeviceLocation;
 
 /// Opaque handle of one class-device publication.
 ///
@@ -121,7 +120,8 @@ pub struct DetachedParent {
     /// real pointer; id arithmetic silently decouples the two counters).
     pub owner: u64,
     pub driver_name: &'static str,
-    pub location: DeviceLocation,
+    /// The parent's physical path (bus-vtable derived at publication).
+    pub physical_path: String,
     /// Flipped when the composition root removes the owning device (after
     /// the quiesce callbacks returned). Shared by every [`ClassDevice`]
     /// clone through the inner `Arc`, so a consumer holding a stale clone
@@ -136,13 +136,13 @@ impl ClassParent {
     /// `owner` is the publishing device's driver-core id (`DeviceCtx::id()`);
     /// the composition root's remove notifier uses it to find this
     /// publication when that device goes away.
-    pub fn detached(owner: u64, driver_name: &'static str, location: DeviceLocation) -> Self {
+    pub fn detached(owner: u64, driver_name: &'static str, physical_path: String) -> Self {
         Self::Detached(DetachedParent {
             id: ClassDeviceId::new_detached(),
             owner,
             offline: core::sync::atomic::AtomicBool::new(false),
             driver_name,
-            location,
+            physical_path,
         })
     }
 
@@ -158,9 +158,9 @@ impl ClassParent {
         }
     }
 
-    pub fn location(&self) -> DeviceLocation {
+    pub fn location(&self) -> &str {
         match self {
-            Self::Detached(detached) => detached.location,
+            Self::Detached(detached) => detached.physical_path.as_str(),
         }
     }
 
@@ -318,7 +318,7 @@ impl<T> ClassDevice<T> {
     }
 
     /// Where the device lives on the bus topology.
-    pub fn location(&self) -> DeviceLocation {
+    pub fn location(&self) -> &str {
         self.inner.parent.location()
     }
 
@@ -457,7 +457,7 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClassDevice")
             .field("id", &self.id())
-            .field("location", &self.location())
+            .field("physical_path", &self.location())
             .field("driver_name", &self.driver_name())
             .finish()
     }
@@ -569,8 +569,8 @@ mod tests {
 
     use super::*;
 
-    fn loc(id: u32) -> DeviceLocation {
-        DeviceLocation::FirmwareNode { id }
+    fn loc(id: u32) -> alloc::string::String {
+        alloc::format!("platform/firmware{id}")
     }
 
     #[def_test(serial)]
@@ -603,8 +603,8 @@ mod tests {
     fn remove_all_detached_drains_every_enabled_class() {
         use crate::remove_all_detached;
 
-        fn loc(id: u16) -> DeviceLocation {
-            DeviceLocation::PlatformStatic { id }
+        fn loc(id: u32) -> alloc::string::String {
+            alloc::format!("platform/static{id}")
         }
 
         let owner: u64 = 0xfeed_beef;
@@ -724,8 +724,8 @@ mod tests {
         // remove_all_detached loops on; pin it here.
         use crate::class::ClassRegistry;
 
-        fn loc(id: u32) -> DeviceLocation {
-            DeviceLocation::FirmwareNode { id }
+        fn loc(id: u32) -> alloc::string::String {
+            alloc::format!("platform/firmware{id}")
         }
 
         let mut registry: ClassRegistry<u32> = ClassRegistry::default();

@@ -21,7 +21,9 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_core::{ClkHandle, ClkOps, ClkSpec, DepSource, RuntimeError, ServiceError};
+use driver_core::{
+    ClkHandle, ClkOps, ClkSpec, DepSource, RuntimeError, ServiceError, platform::PlatformBusData,
+};
 use kclk::{ClkError, ClkLookup};
 
 /// Newtype adapting a [`kclk::ClkHandle`] to the device-model clock
@@ -128,7 +130,7 @@ mod tests {
     use driver_core::{
         BoundDevice, DeviceCtx, DeviceDomain, DeviceState, DriverDesc, DriverOps, ProbeError,
         ResourceKind, ResourceMap,
-        desc::{DeviceDescriptor, DeviceIdentity, DeviceLocation, PlatformIdentity},
+        desc::DeviceDescriptor,
         platform::{OfMatch, PlatformBus, PlatformId},
     };
     use kclk::{ClkBuilder, ClkTable, FixedRate, ProviderId};
@@ -193,12 +195,11 @@ mod tests {
         );
         DeviceDescriptor::new(
             <PlatformBus as driver_core::Bus>::ID,
-            DeviceLocation::FirmwareNode { id: 1 },
-            DeviceIdentity::Platform(PlatformIdentity {
-                firmware_id: Some(alloc::string::String::from("test,serial")),
-                compatibles: alloc::vec![alloc::string::String::from("test,serial")],
-                alias: None,
-            }),
+            alloc::boxed::Box::new(PlatformBusData::firmware_node(
+                1,
+                &["test,serial"],
+                driver_core::platform::FirmwareNodeInfo::EMPTY,
+            )),
         )
         .with_resources(resources)
     }

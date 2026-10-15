@@ -168,7 +168,7 @@ impl XKernelRuntime {
 impl DeviceResourceServices for XKernelRuntime {
     fn iomap(
         &self,
-        _device: u64,
+        _device: driver_core::DeviceId,
         region: driver_core::MmioRegion,
         _name: &'static str,
     ) -> Result<IoMap, RuntimeError> {
@@ -184,7 +184,7 @@ impl DeviceResourceServices for XKernelRuntime {
 
     fn request_irq(
         &self,
-        _device: u64,
+        _device: driver_core::DeviceId,
         spec: driver_core::IrqSpec,
         name: &'static str,
         handler: IrqHandlerFn,
@@ -233,7 +233,7 @@ impl DeviceResourceServices for XKernelRuntime {
 
     fn alloc_coherent(
         &self,
-        _device: u64,
+        _device: driver_core::DeviceId,
         dma: driver_core::DmaInfo,
         len: usize,
         align: usize,
@@ -280,7 +280,11 @@ impl DeviceResourceServices for XKernelRuntime {
         ))
     }
 
-    fn map_irq(&self, _device: u64, spec: driver_core::IrqSpec) -> Result<usize, RuntimeError> {
+    fn map_irq(
+        &self,
+        _device: driver_core::DeviceId,
+        spec: driver_core::IrqSpec,
+    ) -> Result<usize, RuntimeError> {
         match spec {
             driver_core::IrqSpec::ResolvedVirq { number, .. } => Ok(number),
             driver_core::IrqSpec::FirmwareRoute {
@@ -304,7 +308,11 @@ impl DeviceResourceServices for XKernelRuntime {
 }
 
 impl ClockConsumerServices for XKernelRuntime {
-    fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
+    fn clk_get(
+        &self,
+        _device: driver_core::DeviceId,
+        spec: driver_core::ClkSpec,
+    ) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
     }
 }
@@ -322,16 +330,17 @@ impl XKernelRuntime {
     #[cfg(feature = "virtio-hal")]
     pub fn probe_pci_transport(
         &self,
-        descriptor: &driver_core::desc::DeviceDescriptor,
+        data: &dyn driver_core::BusDeviceData,
+        resources: &driver_core::ResourceMap,
     ) -> Result<
         (
-            driver_core::DeviceKind,
+            device_traits::DeviceKind,
             virtio_devices::PciTransport,
             Option<usize>,
         ),
         RuntimeError,
     > {
-        crate::probe_pci_transport_with(self.provider, descriptor)
+        crate::probe_pci_transport_with(self.provider, data, resources)
     }
 }
 
@@ -341,45 +350,38 @@ impl XKernelRuntime {
 #[cfg(feature = "virtio-hal")]
 pub fn probe_pci_transport_with(
     provider: &'static XKernelResourceProvider,
-    descriptor: &driver_core::desc::DeviceDescriptor,
+    data: &dyn driver_core::BusDeviceData,
+    resources: &driver_core::ResourceMap,
 ) -> Result<
     (
-        driver_core::DeviceKind,
+        device_traits::DeviceKind,
         virtio_devices::PciTransport,
         Option<usize>,
     ),
     RuntimeError,
 > {
     {
-        use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
-        use pci::{DeviceFunction, DeviceFunctionInfo, PciHost};
+        use pci::{DeviceFunction, DeviceFunctionInfo, PciBusData, PciHost};
 
-        let Loc::Pci {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-            ..
-        } = descriptor.location
-        else {
+        // The PCI bus owns this device's vocabulary — recover it through
+        // the vtable (bus_id was checked at match time).
+        let Some(pci_data) = data.as_any().downcast_ref::<PciBusData>() else {
             return Err(RuntimeError::Invalid);
         };
         let bdf = DeviceFunction {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
+            bus: pci_data.bus,
+            device: pci_data.device,
+            function: pci_data.function,
         };
 
         // Identity comes from the descriptor (filled once at discovery) —
         // no bus re-enumeration here. prog_if/revision/header/multifunction
         // are not consumed by virtio transport setup.
-        let DeviceIdentity::Pci(pci_identity) = &descriptor.identity else {
-            return Err(RuntimeError::Invalid);
-        };
         let dev_info = DeviceFunctionInfo {
-            vendor_id: pci_identity.vendor_id,
-            device_id: pci_identity.device_id,
-            class: pci_identity.class,
-            subclass: pci_identity.subclass,
+            vendor_id: pci_data.vendor_id,
+            device_id: pci_data.device_id,
+            class: pci_data.class,
+            subclass: pci_data.subclass,
             prog_if: 0,
             revision: 0,
             header_type: pci::HeaderType::Standard,
@@ -412,8 +414,7 @@ pub fn probe_pci_transport_with(
         // through the controller's irq domain here, in the host bridge —
         // the family library no longer carries provider vocabulary.
         let irq = transport_irq.or_else(|| {
-            descriptor
-                .resources
+            resources
                 .irq(0)
                 .and_then(|spec| crate::provider::irq::resolve_irq_spec(provider, &spec))
         });

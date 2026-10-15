@@ -144,7 +144,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static
     if irq.is_some() {
         device.mark_irq_backed();
     }
-    let location = dev.descriptor().location;
+    let location = crate::common::physical_path(dev);
     let handle = publish_net(
         ClassParent::detached(dev.id().raw(), "virtio-net", location),
         Box::new(device),

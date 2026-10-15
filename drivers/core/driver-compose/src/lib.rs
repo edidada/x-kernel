@@ -25,13 +25,10 @@ extern crate alloc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use driver_core::{
-    Bus, DmaInfo, FirmwareProp, IrqTrigger, ResourceKind, ResourceMap,
-    desc::{
-        DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
-        PlatformIdentity,
-    },
+    Bus, DmaInfo, IrqTrigger, ResourceKind, ResourceMap,
+    desc::DeviceDescriptor,
     global_domain,
-    platform::PlatformBus,
+    platform::{FirmwareNodeInfo, FirmwareProp, PlatformBus, PlatformBusData},
 };
 use khal::firmware::devices as firmware;
 
@@ -280,27 +277,15 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
     let Some(node_id) = next_firmware_node_id() else {
         return;
     };
-    let descriptor = DeviceDescriptor::new(
-        <PlatformBus as Bus>::ID,
-        DeviceLocation::FirmwareNode { id: node_id },
-        DeviceIdentity::Platform(PlatformIdentity {
-            firmware_id: Some(alloc::string::String::from(dev.firmware_id)),
-            // The full compatible list: matching iterates it (of_device_id
-            // any-match semantics); modalias reports the primary entry.
-            compatibles: dev
-                .all_compatibles
-                .iter()
-                .map(|c| alloc::string::String::from(*c))
-                .collect(),
-            alias: None,
-        }),
-    )
-    .with_origin(DiscoveryOrigin::DeviceTree)
-    .with_resources(resources)
-    .with_dma(dma_info_from_facts(dev.dma));
-    // A firmware-described device ALWAYS carries its node snapshot now —
+    // A firmware-described device ALWAYS carries its node snapshot —
     // the property bag is the quirk surface, not a provider-only extra.
-    let descriptor = descriptor.with_firmware(firmware_info);
+    let mut data = PlatformBusData::firmware_node(node_id, &dev.all_compatibles, firmware_info);
+    // The full compatible list: matching iterates it (of_device_id
+    // any-match semantics); modalias reports the primary entry.
+    data.identity.firmware_id = Some(alloc::string::String::from(dev.firmware_id));
+    let descriptor = DeviceDescriptor::new(<PlatformBus as Bus>::ID, alloc::boxed::Box::new(data))
+        .with_resources(resources)
+        .with_dma(dma_info_from_facts(dev.dma));
 
     match global_domain().add_device(descriptor) {
         Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
@@ -318,16 +303,11 @@ static COM_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 fn enumerate_static_devices() {
     #[cfg(feature = "ramdisk")]
     {
+        // Board-static devices carry no DT compatible list; drivers
+        // claim them by alias, not by of-match.
         let descriptor = DeviceDescriptor::new(
             <PlatformBus as Bus>::ID,
-            DeviceLocation::PlatformStatic { id: 0 },
-            DeviceIdentity::Platform(PlatformIdentity {
-                firmware_id: None,
-                // Board-static devices carry no DT compatible list; drivers
-                // claim them by alias, not by of-match.
-                compatibles: alloc::vec::Vec::new(),
-                alias: Some(alloc::string::String::from("ramdisk")),
-            }),
+            alloc::boxed::Box::new(PlatformBusData::static_config(0, "ramdisk")),
         );
         match global_domain().add_device(descriptor) {
             Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
@@ -347,14 +327,11 @@ fn enumerate_static_devices() {
         }));
         let descriptor = DeviceDescriptor::new(
             <PlatformBus as Bus>::ID,
-            DeviceLocation::PlatformStatic { id: 1 + idx as u16 },
-            DeviceIdentity::Platform(PlatformIdentity {
-                firmware_id: None,
-                compatibles: alloc::vec::Vec::new(),
-                alias: Some(alloc::string::String::from("serial-ns16550-ioport")),
-            }),
+            alloc::boxed::Box::new(PlatformBusData::static_config(
+                1 + idx as u16,
+                "serial-ns16550-ioport",
+            )),
         )
-        .with_origin(DiscoveryOrigin::PlatformStatic)
         .with_resources(resources);
         match global_domain().add_device(descriptor) {
             Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
