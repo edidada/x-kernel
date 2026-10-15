@@ -2242,6 +2242,7 @@ dependencies = [
  "kspin",
  "log",
  "memaddr",
+ "unittest",
 ]
 
 [[package]]

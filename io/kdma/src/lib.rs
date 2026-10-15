@@ -46,6 +46,7 @@
 extern crate alloc;
 
 mod bounce_pool;
+mod coherent;
 mod dma;
 
 use core::{alloc::Layout, ptr::NonNull};
@@ -115,7 +116,10 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 /// # Safety
 ///
 /// `dma` must come from a prior successful [`allocate_dma_memory`] call, and
-/// `layout` must exactly match that allocation.
+/// `layout` must exactly match that allocation. All device access and any
+/// software users must have ended before this call; a physical hold alone
+/// cannot stop an active device. Failed platform or attribute retirement keeps
+/// the backing reserved rather than returning it for reuse.
 #[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
     // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
@@ -224,7 +228,11 @@ impl core::fmt::Debug for DmaBusAddress {
     }
 }
 
-/// Represents information related to a DMA operation.
+/// Address view for a coherent allocation or an active bounce mapping.
+///
+/// Copying this view does not clone ownership. For coherent allocations exactly
+/// one FrameRun hold has been transferred behind the addresses, including all
+/// rounded backing pages; deallocate_dma_memory consumes that transfer once.
 #[derive(Debug, Clone, Copy)]
 pub struct DmaInfo {
     /// The address at which the CPU accesses this memory region. This address

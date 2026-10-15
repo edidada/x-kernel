@@ -4,7 +4,8 @@
 
 This analysis covers the entire crate: `src/lib.rs` (public unsafe API
 and address translation), `src/dma.rs` (`DmaAllocator`, mapping
-bookkeeping, `DmaPageTableIf`), and `src/bounce_pool.rs` (the TLSF-backed
+bookkeeping, `DmaPageTableIf`), `src/coherent.rs` (physical holds and retirement),
+and `src/bounce_pool.rs` (the TLSF-backed
 coherent pool). No modules are excluded; the private modules are reachable
 only through the four public unsafe entry points audited below.
 
@@ -71,10 +72,14 @@ each with `# Safety` sections and `SAFETY:` comments:
   owned until `unmap_dma_buffer`, device access stops before unmap.
 - `unmap_dma_buffer(dma_addr, buffer, direction)` — exact-once, matching
   address and length.
-- Internal blocks: `NonNull::new_unchecked` on freshly allocated (never
-  null) pages; `copy_nonoverlapping` between distinct live regions of
-  caller-declared length; TLSF pool deallocation with a containment
-  assert.
+- `src/dma.rs::DmaAllocator::deallocate_dma_memory` calls frame_run_from_raw
+  only for the exact original transfer emitted by coherent::prepare_allocation.
+  The allocator, bus address, original layout and allocation incarnation must
+  match; caller-side exact-once free and stopped hardware/software use enforce
+  this. FrameMeta lookup is diagnostic and cannot establish those preconditions.
+- Other internal blocks perform bounce copies between distinct live regions of
+  caller-declared length and TLSF pointer deallocation with a containment assert.
+  Coherent NonNull construction is checked and requires no unsafe block.
 
 ## Protected Resources
 
@@ -110,14 +115,14 @@ each with `# Safety` sections and `SAFETY:` comments:
 | T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Grant sizes are page-exact and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
 | T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
 | T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted because the pages are returned to the DMA-only pool, not the general allocator. |
+| T-05 | Unresolved shared/cache state reaches ordinary RAM users | High — stale shared or wrong-cache memory reused | Platform release or mapping restoration fails | coherent::retire_allocation retains every backing hold on failure and logs the range; it never returns unresolved backing to buddy. No automatic quarantine reclaim exists. |
 
 ## Failure Modes
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Checked allocation; pages returned on the failure path. |
-| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release logs and continues | Share/unshare accounting skew on TEE platforms | 3 | Allocation aborts; release cannot roll back and is logged. |
+| F-01 | Page allocation or flag update fails | Allocation error | Driver init/probe fails | 3 | Validate input before allocation; restore possibly changed attributes before ending backing holds; retain if restoration fails. |
+| F-02 | Platform prepare/release hook fails | NoMemory on allocation; failed retirement retains backing | RAM may remain reserved | 3 | Failed preparation attempts release; release failure stops cached restoration and storage retirement. The AArch64 KVM provider reports a range error if any page fails. |
 | F-03 | Zero-length map request | `AllocError::InvalidInput` | Caller fixes the request | 4 | Explicit input validation. |
 | F-04 | Unmap of an inactive address | Panic | Kernel aborts the offending path | 2 | Contract violation — loud failure preferred over silent corruption. |
 
@@ -137,3 +142,26 @@ each with `# Safety` sections and `SAFETY:` comments:
 - Attribute updates remain page-granular and paired with platform hooks.
 - The `active_mappings` map remains the only place bus addresses are
   handed out for temporary mappings.
+
+
+## Descriptor-Backed Coherent Lifetime
+
+All actual backing pages, including rounding slack, remain referenced from setup
+until successful retirement. Hooks cover only the requested page-granular extent;
+slack is not granted to the device. The DMA32 physical-bound check covers the
+complete backing and uses checked endpoints before descriptor claim.
+
+On allocation failure, rollback distinguishes attribute setup from possibly
+partial platform preparation. `src/coherent.rs::retire_allocation` ends physical
+holds only after successful release and synchronous cached-mapping restoration.
+Failed cleanup creates an intentionally outstanding raw run transfer; metadata
+continues to prevent raw freeing or reuse. There is no recovery queue and repeated
+failures can exhaust RAM. Providers must report partial failures truthfully;
+`platforms/kplat-aarch64/src/dma.rs` aggregates per-page failures over the whole
+range instead of logging and returning success.
+
+Storage holds do not stop a device, revoke unrelated mappings or establish payload
+access exclusivity. The unsafe free contract still requires stopped device and
+software use. `dma-trace` remains optional diagnostics, not an ownership authority
+or a replacement for those contracts. Failure-injection tests verify holds through
+each callback and recover test-only transfers without issuing real hypercalls.

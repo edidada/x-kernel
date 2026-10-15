@@ -14,11 +14,12 @@ point for address-space integration.
 ## Responsibilities
 
 - Coherent allocation: `allocate_dma_memory(layout)` carves page-granular
-  regions from the global allocator (`kalloc`, `UsageKind::Dma`), applies
+  regions through `kalloc::alloc_dma_frame_run` (`UsageKind::Dma`), applies
   `READ | WRITE | UNCACHED | SHARED` mapping flags through
   `DmaPageTableIf::protect`, and registers the range with the platform
-  (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
-  steps.
+  (`kplat::dma::prepare`). The complete rounded backing stays held throughout
+  setup, device use and retirement. `deallocate_dma_memory` ends the hold only
+  after platform release and synchronous attribute restoration succeed.
 - Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
   buffer through the coherent bounce pool (copy-in unless the direction is
   `DeviceToDriver`), tracks the mapping in `active_mappings` keyed by bus
@@ -58,6 +59,7 @@ io/kdma/
 │   ├── lib.rs          # public unsafe API, DmaBusAddress, DmaInfo, p2b/b2p
 │   ├── dma.rs          # DmaAllocator, DmaPageTableIf, coherent paths,
 │   │                   # bounce mapping bookkeeping, dma-trace
+│   ├── coherent.rs     # setup/rollback/retirement with retained FrameRun
 │   └── bounce_pool.rs  # TLSF-backed coherent bounce pool
 └── Cargo.toml
 ```
@@ -70,7 +72,7 @@ drivers
   v                                              |
 SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |  alloc_coherent_pages                             |
-  |    kalloc alloc_dma_pages (UsageKind::Dma)        v
+  |    kalloc alloc_dma_frame_run (UsageKind::Dma)        v
   |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
   |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
@@ -94,8 +96,9 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 ## Concurrency Model
 
 - One global `SpinNoIrq<DmaAllocator>` serializes coherent allocation,
-  bounce mapping, and the mapping table; critical sections are short
-  (page allocation, memcpy, BTreeMap ops).
+  bounce mapping, and the mapping table. Critical sections include page
+  allocation, platform and page-table hooks, memcpy and BTreeMap operations;
+  their latency depends on allocation size and the provider.
 - `active_mappings` makes double-map of one bus address an error
   (`AllocError::InvalidInput`) and keeps `unmap` exact-match; unmapping an
   inactive address panics — that is a driver contract violation, not a
@@ -108,7 +111,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 
 - `AllocResult` (from `alloc-engine`): `NoMemory` when pages, mapping
   flag updates, or platform prepare fail; `InvalidInput` for zero-length
-  mappings or an already-active bus address.
+  coherent allocations/mappings, invalid frame requests, or an already-active
+  bus address. Pre-bootstrap allocation can return `NotInitialized`.
 - Panics mark contract violations: unmapping a non-active address,
   length mismatch between map and unmap, bounce recycling outside the
   pool, and missing pool during recycle.
@@ -141,9 +145,12 @@ internal forwardings, each with `# Safety` sections and matching
 - `map_dma_buffer` / `unmap_dma_buffer` — buffer stays live and
   exclusively owned between the calls; device access stops before
   unmap; exact-once unmap with the matching address and length.
-- Internal unsafe blocks: `NonNull::new_unchecked` on freshly allocated
-  non-null pages, and `copy_nonoverlapping` between distinct live regions
-  of validated length.
+- `DmaAllocator::deallocate_dma_memory` restores exactly the complete raw run
+  transferred by successful setup. Bus-address conversion identifies that
+  transfer only under the caller's original-address/layout contract; a PFN
+  lookup alone never authorizes restoration.
+- Other internal unsafe blocks include bounce `copy_nonoverlapping` and TLSF
+  pointer deallocation; coherent CPU address construction uses checked NonNull.
 
 ## Design Decisions
 
@@ -164,3 +171,32 @@ internal forwardings, each with `# Safety` sections and matching
 - `dma-trace` feature: coherent allocations record their call site and
   detect duplicate or mismatched frees at runtime, which is the cheapest
   way to debug DMA leaks without a full MMU tracer.
+
+
+## Physical Hold Protocol
+
+`coherent::prepare_allocation` receives an owned FrameRun. Mapping and platform
+hooks cover the requested whole-page extent; references/accounting cover every
+base page of the actual power-of-two backing, including unused rounding slack.
+Setup retains the run while callbacks execute. On success `into_raw` transfers
+one outstanding hold per backing page behind DmaInfo's address view. DmaInfo is
+Copy; copying it does not create another hold or another right to free.
+
+Deallocation restores that exact transfer using the original bus address and
+layout-derived backing count. `coherent::retire_allocation` releases platform
+sharing first, restores READ|WRITE synchronously through DmaPageTableIf, then drops
+the run. Device access and software use must already have stopped. The FrameRun
+cannot enforce device quiescence or payload synchronization.
+
+A failed attribute update may have changed a prefix, so failed setup restores the
+whole requested extent. A failed platform prepare may have shared a prefix, so
+rollback also attempts full platform release. If release or attribute restoration
+fails, into_raw retains all backing indefinitely and logs PA/count. It is never
+returned to buddy in an unresolved state; there is no production quarantine retry
+or reclaim API. This can retain memory after repeated platform failures.
+
+The lazy bounce pool is allocated through this same coherent path. Its raw
+physical hold remains resident with the global pool; returning a TLSF sub-buffer
+ends only that temporary transaction. This migration does not add pool shrinking,
+DMA scatter-gather, zone search, or IOMMU support. Cloning/retirement of a run is
+O(backing base pages), and no performance improvement is claimed.

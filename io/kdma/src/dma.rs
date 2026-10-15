@@ -9,15 +9,15 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
-use khal::{mem::v2p, paging::MappingFlags};
+use khal::paging::MappingFlags;
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
-use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
+use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
 use crate::{
-    DmaBusAddress, DmaDirection, DmaInfo,
+    DmaBusAddress, DmaDirection, DmaInfo, b2p,
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
-    p2b,
+    coherent::{PlatformDmaMemoryOps, PreparationStage, prepare_allocation, retire_allocation},
 };
 
 /// Interface for updating page table flags.
@@ -84,57 +84,18 @@ impl DmaAllocator {
 
     #[track_caller]
     fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
-        let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_dma_pages(
+        let num_pages = layout_pages(&layout)?;
+        let frames = global_allocator().alloc_dma_frame_run(
             num_pages,
             PAGE_SIZE_4K.max(layout.align()),
             UsageKind::Dma,
         )?;
-        let vaddr = va!(vaddr_raw);
-        let flags = MappingFlags::READ
-            | MappingFlags::WRITE
-            | MappingFlags::UNCACHED
-            | MappingFlags::SHARED;
-        self.update_flags(vaddr, num_pages, flags)?;
-        self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
-        let dma_info = DmaInfo {
-            // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
-            // and therefore cannot be null.
-            cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
-            bus_addr: v2b(vaddr),
-        };
+        let dma_info = prepare_allocation(frames, num_pages, &PlatformDmaMemoryOps)?;
         self.trace_coherent_alloc(dma_info, num_pages);
         Ok(dma_info)
     }
 
-    fn update_flags(
-        &mut self,
-        vaddr: VirtAddr,
-        num_pages: usize,
-        flags: MappingFlags,
-    ) -> AllocResult<()> {
-        let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaPageTableIf::protect(vaddr, expand_size, flags).map_err(|_| {
-            error!("change table flag fail");
-            AllocError::NoMemory
-        })
-    }
-
-    fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma prepare failed");
-            AllocError::NoMemory
-        })
-    }
-
-    fn release_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma release failed");
-            AllocError::NoMemory
-        })
-    }
-
-    /// Gives back the allocated region to the byte allocator.
+    /// Ends the coherent allocation's transferred physical holds after retirement.
     ///
     /// # Safety
     ///
@@ -142,20 +103,29 @@ impl DmaAllocator {
     /// this allocator, and `layout` must exactly match that allocation.
     #[track_caller]
     pub(crate) unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
-        let num_pages = layout_pages(&layout);
+        let Ok(num_pages) = layout_pages(&layout) else {
+            error!("coherent DMA free has an invalid layout");
+            return;
+        };
         if !self.trace_coherent_free(dma, num_pages) {
             return;
         }
-        let virt_raw = dma.cpu_addr.as_ptr() as usize;
-        let size = num_pages * PAGE_SIZE_4K;
-        let vaddr = va!(virt_raw);
-
-        // Deallocation cannot fail; the helper already logs platform release errors.
-        let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_flags already logs restoration errors.
-        let _ = self.update_flags(vaddr, num_pages, MappingFlags::READ | MappingFlags::WRITE);
-
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        let Some(backing_pages) = num_pages.checked_next_power_of_two() else {
+            error!("coherent DMA free has an overflowing backing count");
+            return;
+        };
+        // SAFETY: the caller returns exactly the original address/layout pair
+        // from this allocator. prepare_allocation transferred one complete run
+        // after setup succeeded; this is its unique restoration after device
+        // and software users have stopped. An arbitrary PFN is not sufficient.
+        let frames =
+            unsafe { global_allocator().frame_run_from_raw(b2p(dma.bus_addr), backing_pages) };
+        let _ = retire_allocation(
+            frames,
+            num_pages,
+            PreparationStage::Platform,
+            &PlatformDmaMemoryOps,
+        );
     }
 
     /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.
@@ -411,13 +381,15 @@ impl core::fmt::Display for TraceSite {
     }
 }
 
-fn v2b(addr: VirtAddr) -> DmaBusAddress {
-    let paddr = v2p(addr);
-    p2b(paddr)
-}
-
-const fn layout_pages(layout: &Layout) -> usize {
-    memaddr::align_up_4k(layout.size()) / PAGE_SIZE_4K
+fn layout_pages(layout: &Layout) -> AllocResult<usize> {
+    if layout.size() == 0 {
+        return Err(AllocError::InvalidInput);
+    }
+    layout
+        .size()
+        .checked_add(PAGE_SIZE_4K - 1)
+        .map(|size| size / PAGE_SIZE_4K)
+        .ok_or(AllocError::InvalidInput)
 }
 
 fn layout_for_pages(num_pages: usize) -> Layout {
@@ -429,3 +401,5 @@ fn layout_for_pages(num_pages: usize) -> Layout {
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }
+
+unittest::path_mod_test!(dma_unittest, "../ut-tests/dma_unittest.rs");
