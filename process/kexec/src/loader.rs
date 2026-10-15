@@ -222,9 +222,14 @@ impl ExecRequest {
     /// permission check using the supplied credential snapshot. No address space is modified.
     pub fn prepare(self) -> KResult<BinPrm> {
         let (location, display_path) = self.source.resolve(&self.cred)?;
+        // Linux `alloc_bprm()` → `do_open_execat()` reopens the executable
+        // through its path, so an `O_PATH` descriptor — which carries no read
+        // permission — still executes the file it names. A readable descriptor
+        // keeps executing the file as opened, which is what makes a `memfd` or a
+        // file renamed after opening execute the opened image.
         let executable = match &self.source {
-            ExecSource::File { file, .. } => file.clone(),
-            ExecSource::Path(_) | ExecSource::Resolved { .. } => {
+            ExecSource::File { file, .. } if !file.is_path() => file.clone(),
+            ExecSource::File { .. } | ExecSource::Path(_) | ExecSource::Resolved { .. } => {
                 open_exec_file(&location, self.cred.clone())?
             }
         };

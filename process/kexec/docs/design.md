@@ -161,7 +161,9 @@ an anonymous stack, populates/writes its pages, and maps an anonymous heap. The
 returned tuple is entry address and user SP. The pinned backing executable is
 exposed through `PreparedExecImage::executable_file()`; exec installs it as the
 process `ExecMetadata` so `/proc/<pid>/exe` follows the same file that pinned the
-image, including `execveat(AT_EMPTY_PATH)` on a memfd.
+image, including `execveat(AT_EMPTY_PATH)` on a memfd. An `O_PATH` descriptor
+carries no read permission, so it is reopened through its recorded path like
+Linux `do_open_execat()` instead of being read through the descriptor.
 
 ## Commit boundary and error handling
 
