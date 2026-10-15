@@ -450,7 +450,9 @@ impl GlobalAllocator {
         }
 
         #[cfg(feature = "slab")]
-        if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
+        if core::ptr::eq(self, &GLOBAL_ALLOCATOR)
+            && let Some(size_class) = alloc_engine::SizeClass::from_layout(layout)
+        {
             let object = self.alloc_from_percpu_slab(size_class)?;
             self.record_usage_alloc(UsageKind::RustHeap, layout.size());
             return Ok(object);
@@ -597,7 +599,9 @@ impl GlobalAllocator {
             self.record_usage_dealloc(UsageKind::RustHeap, layout.size());
 
             #[cfg(feature = "slab")]
-            if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
+            if core::ptr::eq(self, &GLOBAL_ALLOCATOR)
+                && let Some(size_class) = alloc_engine::SizeClass::from_layout(layout)
+            {
                 let mut local_owner = AllocLocalOwner::acquire();
                 // SAFETY: every eligible allocation is obtained from the
                 // central allocator with this class's canonical layout. Local
@@ -1143,3 +1147,5 @@ unittest::path_mod_test!(pub mod tests_kalloc, "../ut-tests/lib.rs");
 unittest::path_mod_test!(tests_frame_run, "../ut-tests/frame_run.rs");
 
 unittest::path_mod_test!(tests_global_page, "../ut-tests/global_page.rs");
+
+unittest::path_mod_test!(tests_heap_handoff, "../ut-tests/heap_handoff.rs");

@@ -120,6 +120,8 @@ canonical layout 调用中央 deallocation。
 依赖不变量：中央 allocator lock 已由 caller 持有；所有 cached object 最初由同一中央
 allocator 使用相同 class layout 分配；current-CPU mutable reference 不发生同 CPU
 重入。违反这些条件可能把对象放进错误 freelist 或制造 mutable alias。
+全局 per-CPU cache 只接收 `GLOBAL_ALLOCATOR` 的对象；独立实例的 allocation 和
+deallocation 都绕过该 cache，防止在其 backing 释放后全局 cache 仍保留悬垂地址。
 
 ### U-04：`GlobalPage` raw ownership 和 slice 构造
 

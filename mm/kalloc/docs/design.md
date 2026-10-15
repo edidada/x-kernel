@@ -38,6 +38,10 @@ per-CPU slab cache 是当前 object-cache 设计的初版。它减少稳定小�
 byte allocator 锁的竞争，但不取代中央 allocator，也不提供完整 reclaim、CPU
 hotplug 或 NMI 支持。
 
+页级 PCP 和 slab object cache 只服务 `GLOBAL_ALLOCATOR`。独立
+`GlobalAllocator` 实例直接访问各自的中央 allocator；分配和释放两侧都必须检查实例
+身份，避免把一个实例拥有的对象交给另一个实例的 freelist。
+
 PCP 和 slab cache 的可变访问统一经 crate-private `AllocLocalOwner`。owner 持有
 `IrqSave`，把“固定在当前 CPU 且禁止本地 IRQ 重入”的条件贯穿一次同步 cache 操作；
 PCP/slab 模块不再自行读取 raw per-CPU base，也不向调用者返回 cache 引用。owner
