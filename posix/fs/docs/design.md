@@ -376,8 +376,8 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    校验非法 flags 组合）；shared 和 unbindable 请求仍被显式拒绝。
 9. `sys_pivot_root()` 解析两个路径后在 `MntNamespace::pivot_root()` 上执行 Linux
    `do_pivot_root()` 语义（`put_old` 可与 `new_root` 重合，失败前置校验后单次更新
-   fs root 与 pwd），再把调用方 `FsStruct` 的 root/pwd 重定向到 `new_root`，镜像 Linux
-   `chroot_fs_refs()`。
+   fs root 与 pwd），再按 Linux `chroot_fs_refs()` 语义遍历所有存活进程，把 root/pwd 恰为旧根
+   的 `FsStruct` 重定向到 `new_root`。
 10. `sys_umount2()` 支持 `MNT_DETACH`：经 `detach_tree()` 摘下整棵挂载子树而不做
     busy 检查（OCI runtime 在 `pivot_root` 后用其卸载旧 root）；`MNT_FORCE`、
     `MNT_EXPIRE`、`UMOUNT_NOFOLLOW` 仍被拒绝。

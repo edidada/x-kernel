@@ -315,8 +315,8 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
 - [ ] `MS_PRIVATE`/`MS_SLAVE` 传播请求按各自 flags 集合校验（可带 `MS_REC`/`MS_SILENT`，
   其余组合 `EINVAL`）；`MS_REC` 不伴随 `MS_BIND`/传播位时仍被拒绝。
-- [ ] `pivot_root` 在调用前完成全部 URL 校验，并把调用方 fs root/pwd 重定向到 `new_root`；
-  `umount2(MNT_DETACH)` 经 `detach_tree` 摘除而非静默同步卸载。
+- [ ] `pivot_root` 在调用前完成全部 URL 校验，并按 `chroot_fs_refs()` 语义把所有 root/pwd 恰为旧根的
+  进程 `FsStruct` 重定向到 `new_root`（不仅调用方）；`umount2(MNT_DETACH)` 经 `detach_tree` 摘除而非静默同步卸载。
 - [ ] mount data 是否在 syscall 边界按一页 opaque bytes 有界复制，且 filesystem 只保存解析后的状态？
 - [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
   与 `/proc/filesystems` 分离的名称表。

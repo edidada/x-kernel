@@ -387,24 +387,29 @@ pub fn sys_pivot_root(
     let namespace = process.mnt_ns()?;
     namespace.pivot_root(&new_root, &put_old, &old_root)?;
 
-    // Linux `chroot_fs_refs(&old_root, &new_root)`: a context rooted or cwd'd
-    // exactly at the old root moves to the new root, and anything else is left
-    // alone, so a cwd outside the old root is preserved instead of being
-    // reset. When `put_old` coincided with `new_root` (runc's
-    // `pivot_root(".", ".")`), the relocated old root covers this path until
-    // the caller umounts it, so the stored path must stay unresolved to the
+    // Linux `chroot_fs_refs(&old_root, &new_root)`: every process whose root or
+    // cwd is exactly the old root moves to the new root, and anything else is
+    // left alone, so a cwd outside the old root is preserved instead of being
+    // reset. Processes in other mount namespaces can never match `old_root`, so
+    // no namespace check is needed. When `put_old` coincided with `new_root`
+    // (runc's `pivot_root(".", ".")`), the relocated old root covers this path
+    // until it is umounted, so the stored path must stay unresolved to the
     // topmost mount.
-    //
-    // Only this caller's `FsStruct` is reachable here; sibling contexts in the
-    // same namespace are not tracked in a registry, so they keep the old root
-    // until they `chdir` or exit. See `kprocess` process/fs-context ownership
-    // for where such a registry would live.
-    let mut fs = fs_context.lock();
-    if fs.root_and_pwd().0.ptr_eq(&old_root) {
-        fs.set_root(new_root.clone())?;
-    }
-    if fs.root_and_pwd().1.ptr_eq(&old_root) {
-        fs.set_pwd(new_root)?;
+    for proc in kprocess::scheduler::processes() {
+        let Ok(fs_context) = proc.fs_context() else {
+            continue;
+        };
+        let mut fs = fs_context.lock();
+        if fs.root_and_pwd().0.ptr_eq(&old_root) {
+            fs.set_root(new_root.clone()).unwrap_or_else(|err| {
+                warn!("pivot_root: failed to move process root: {err:?}");
+            });
+        }
+        if fs.root_and_pwd().1.ptr_eq(&old_root) {
+            fs.set_pwd(new_root.clone()).unwrap_or_else(|err| {
+                warn!("pivot_root: failed to move process cwd: {err:?}");
+            });
+        }
     }
     Ok(0)
 }

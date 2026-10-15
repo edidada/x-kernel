@@ -513,29 +513,31 @@ impl MntNamespace {
         }
 
         // Serialize against concurrent mount-tree mutation on every inode the
-        // surgery touches, in a fixed order (old root's parent first). Inodes
-        // are never taken twice because `lock_namespace_exclusive` is a
-        // non-reentrant write lock.
-        let mut inodes: Vec<Arc<VfsInode>> = Vec::new();
+        // surgery touches. Take the locks in the same total order as the rename
+        // path (an ancestor before its descendant, then a stable pointer
+        // tiebreak), so a concurrent multi-inode acquisition cannot ABBA against
+        // this surgery. Inodes are never taken twice because
+        // `lock_namespace_exclusive` is a non-reentrant write lock.
         let new_parent_path = new_mnt.location().ok_or(VfsError::InvalidInput)?;
         // Linux `root_parent`/`root_mp`: the old root's own parent mount and
         // mountpoint, where `new_mnt` takes over. The visible root may sit
         // anywhere in the stack over the structural root, not only at the
         // direct child position.
         let old_parent_path = old_mnt.location().ok_or(VfsError::InvalidInput)?;
-        inodes.push(old_parent_path.inode());
-        // The mount containing `new_mnt` and the mount containing `put_old`
-        // may coincide with the old root's parent inode; dedupe by Arc.
-        let mut push_inode = |inode: Arc<VfsInode>| {
-            if !inodes.iter().any(|held| Arc::ptr_eq(held, &inode)) {
-                inodes.push(inode);
+        let mut targets: Vec<(Arc<VfsInode>, Vec<usize>)> = Vec::new();
+        let mut push_target = |path: &Path| {
+            let inode = path.inode();
+            if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
+                targets.push((inode, path.dentry.namespace_lock_key()));
             }
         };
-        push_inode(new_parent_path.inode());
-        push_inode(put_old.inode());
-        let _guards: Vec<_> = inodes
+        push_target(&old_parent_path);
+        push_target(&new_parent_path);
+        push_target(put_old);
+        targets.sort_by(|left, right| left.1.cmp(&right.1));
+        let _guards: Vec<_> = targets
             .iter()
-            .map(|inode| inode.lock_namespace_exclusive())
+            .map(|(inode, _)| inode.lock_namespace_exclusive())
             .collect();
 
         // 1. Detach `new_mnt` from its old parent, restoring whatever mount it
