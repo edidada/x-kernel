@@ -20,7 +20,7 @@ use core::{
 
 use kcred::initial_cred;
 use kerrno::{KError, KResult};
-use khal::{mem::v2p, paging::MappingFlags};
+use khal::paging::MappingFlags;
 use kidentity::PidHandle;
 use kprocess::{AsThread, LiveAddressSpace, Pid, Thread, build_process_thread, start_user_task};
 use ksignal::api::SignalActions;
@@ -121,8 +121,6 @@ pub struct TestUserBuffer {
     aspace: LiveAddressSpace,
     user_addr: usize,
     mapped_size: usize,
-    kernel_va: usize,
-    num_pages: usize,
     len: usize,
 }
 
@@ -134,42 +132,35 @@ impl TestUserBuffer {
             .process()
             .address_space()
             .map_err(|_| KError::BadState)?;
-        let mapped_size = len.max(1).next_multiple_of(PAGE_SIZE_4K);
+        let mapped_size = len
+            .max(1)
+            .checked_add(PAGE_SIZE_4K - 1)
+            .map(|size| size & !(PAGE_SIZE_4K - 1))
+            .ok_or(KError::InvalidInput)?;
         let num_pages = mapped_size / PAGE_SIZE_4K;
-        let kernel_va = kalloc::global_allocator()
-            .alloc_pages(num_pages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
+        let frames = kalloc::global_allocator()
+            .alloc_frame_run(num_pages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
             .map_err(|_| KError::NoMemory)?;
+        // SAFETY: this unpublished run owns at least mapped_size writable bytes
+        // and has no content aliases or PTEs. Initialize only the visible prefix.
+        unsafe { core::ptr::write_bytes(frames.kernel_addr().as_mut_ptr(), 0, mapped_size) };
 
-        // SAFETY: `kernel_va` names a freshly allocated kernel mapping of
-        // `mapped_size` bytes that may be zero-initialized in place.
-        unsafe {
-            core::ptr::write_bytes(kernel_va as *mut u8, 0, mapped_size);
-        }
-
-        let user_addr = NEXT_TEST_USER_ADDR.fetch_add(mapped_size, Ordering::Relaxed);
-        aspace
-            .lock()
-            .map_linear(
-                VirtAddr::from_usize(user_addr),
-                v2p(VirtAddr::from_usize(kernel_va)),
-                mapped_size,
-                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            )
-            .map_err(|_| {
-                kalloc::global_allocator().dealloc_pages(
-                    kernel_va,
-                    num_pages,
-                    kalloc::UsageKind::VirtMem,
-                );
-                KError::NoMemory
-            })?;
+        let user_addr = NEXT_TEST_USER_ADDR
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |address| {
+                address.checked_add(mapped_size)
+            })
+            .map_err(|_| KError::NoMemory)?;
+        aspace.lock().map_owned_linear(
+            VirtAddr::from_usize(user_addr),
+            frames,
+            mapped_size,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+        )?;
 
         Ok(Self {
             aspace,
             user_addr,
             mapped_size,
-            kernel_va,
-            num_pages,
             len,
         })
     }
@@ -337,10 +328,9 @@ impl Drop for TestUserBuffer {
             .lock()
             .unmap(VirtAddr::from_usize(self.user_addr), self.mapped_size)
             .expect("test buffer mapping must remain owned until teardown");
-        kalloc::global_allocator().dealloc_pages(
-            self.kernel_va,
-            self.num_pages,
-            kalloc::UsageKind::VirtMem,
-        );
+        // VMA and PTE owners end their own holds through the normal MM path;
+        // forked mappings retain independent ownership beyond this fixture.
     }
 }
+
+unittest::path_mod_test!(tests_user_buffer, "../ut-tests/user_buffer.rs");
