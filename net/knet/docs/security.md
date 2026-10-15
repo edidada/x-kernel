@@ -403,16 +403,16 @@ All reads and writes to `SocketSet` must acquire the `SOCKET_SET.inner` mutex.
 ### 3. `Service` Mutual Exclusion
 
 Draining device receive queues, accessing routing state, and dispatching
-transmissions require the Router mutex. Service owns admitted RX and data TX
-queues under a separate stack-queue mutex. IPv4 validation, reassembly, and UDP
-delivery run outside Router; smoltcp processing holds the socket-set,
-stack-queue, and Interface locks without Router.
+transmissions require the Router mutex. The smoltcp backend protects its
+Interface, admitted RX, and MTU together; the shared data TX queue has a separate
+mutex. IPv4 validation, reassembly, and UDP delivery run outside Router.
+smoltcp processing holds socket-set, TX-queue, and backend locks without Router.
 
-When nested, the order is socket set, Router, stack queues, then Interface.
-Queue holders must release the queue mutex before acquiring Router. MTU changes
-hold Router, stack queues, and Interface to update adapter and cached Interface
-capabilities together. TX capacity notifications occur after both Router and
-stack-queue guards are released.
+When nested, the order is socket set, Router, TX queue, then smoltcp backend.
+TX queue and backend holders must release their locks before acquiring Router.
+MTU changes hold Router, TX queue, and backend to rebuild cached capabilities
+while preserving addresses and pending input. TX capacity notifications occur
+after both Router and TX-queue guards are released.
 
 `StackDevice` borrows only the RX and data TX queues plus the MTU. Its TX token
 retains an exclusive queue borrow from the capacity check through enqueue;
@@ -458,7 +458,7 @@ A per-socket send-transaction lock serializes capacity prechecks, mutation execu
 Batches mixing queries and mutations must be rejected before any state update.
 Before executing a mutation-only batch, response-queue space must be checked for the entire batch.
 A mutation-only batch is processed message by message. A later validation or operation error does not roll back earlier successful mutations. Capacity preflight reserves room for mutation responses on that socket, but does not provide all-or-nothing transaction semantics.
-Responses are generated outside the receive-queue lock. The fixed lock order is send-transaction lock, `network_config_lock`, Router, ingress processing or stack queues, Interface, and netlink receive queue, skipping locks that are not involved.
+Responses are generated outside the receive-queue lock. The fixed lock order is send-transaction lock, `network_config_lock`, Router, ingress processing or TX queue, smoltcp backend, and netlink receive queue, skipping locks that are not involved.
 
 ### 9. Route Index Boundary
 
@@ -527,7 +527,7 @@ IPv4 reassembly queues publish their earliest deadline through a separate atomic
 
 Sockets and Router must publish newly generated TX work through `notify(PollReason::Tx)`.
 After TCP consumes data from a receive buffer whose free space is below the maximum window-scaling quantum, it must publish zero-window recovery work through `notify(PollReason::RxWindow)`.
-An increase in available data-TX slots must wake the queue's capacity waiters after releasing both Router and stack-queue locks, even when a later stage defers the round. Capacity wakeups require an actual increase in available slots. Senders must recheck readiness after registration to close the check/register race.
+An increase in available data-TX slots must wake the queue's capacity waiters after releasing both Router and TX-queue locks, even when a later stage defers the round. Capacity wakeups require an actual increase in available slots. Senders must recheck readiness after registration to close the check/register race.
 
 ### 22. TCP Close Lifecycle
 
@@ -557,8 +557,8 @@ Device removal must delete the device's routes, addresses, and neighbors while p
 
 ### 26. Poller Handoff Under Lock Contention
 
-While holding global execution ownership, the poller may acquire Router, IngressProcessor, the smoltcp Interface, and socket-set locks only through `try_lock`.
-Handing off an admitted-packet batch must acquire socket-set before Router. A batch containing only control packets skips socket-set.
+While holding global execution ownership, the poller may acquire Router, IngressProcessor, TX-queue, smoltcp-backend, and socket-set locks only through `try_lock`.
+Handing off an admitted-packet batch acquires socket-set, Router, then smoltcp backend. A batch containing only control packets skips socket-set.
 Contention must return `has_more`.
 If an expired IPv4 reassembly event encounters IngressProcessor contention, it retains its pending state and allows TX and protocol processing to continue for the current round.
 The expiration path does not acquire this lock when no reassembly queue exists or no queue has expired.
@@ -605,7 +605,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | `RawSocket` | All fields satisfy Send | `RwLock`, atomics, and immutable handles protect shared state |
 | `StreamTransport` | All fields satisfy Send | `Mutex<Option<Channel>>` serializes local endpoint operations; the `ListenerState` mutex serializes the pending queue, capacity reservations, listening, and closure; a `SpinNoPreempt` lock for each send direction orders data publication, half-close, and EOF checks; a per-direction `DirectionAncillary` with a `SpinNoPreempt` guard protects the byte-marked control records and byte totals; three `PollSet` groups manage read, write, and connection-state waiters separately |
 | `NetlinkSocket` | All fields satisfy Send | `Arc<NetlinkSocketInner>` internally uses `RwLock`, a send-transaction `Mutex`, a receive-queue `Mutex`, and `PollSet`; each send explicitly carries caller credentials, and the socket does not retain an authorization identity |
-| `Service` | All fields satisfy Send | Separate internal `Mutex` instances protect Interface, Router, StackQueues, IngressProcessor, and reusable batches; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
+| `Service` | All fields satisfy Send | Separate internal `Mutex` instances protect SmoltcpStack, Router, DataTxQueue, IngressProcessor, and reusable batches; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
 | `Router` | Used within `Service` | Shared indirectly through the Router mutex in `Service` |
 
 ## Threat Analysis
@@ -647,7 +647,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-31 | TCP zero-window recovery lacks background processing | Medium | The application reads the TCP receive buffer while the advertised window is still encoded as zero, without publishing window-recovery work | The peer continues to observe a closed receive window, stalling transmission. | Reads call `notify(PollReason::RxWindow)` when receive-buffer free space is below the maximum window-scaling quantum; after that quantum is reached, RX and registered protocol timers drive further window growth |
 | T-32 | New events are lost during poller execution | Medium | RX, TX, or timer notifications race with the completion state update | Pending RX, TX, or timer work is stranded after the executor finishes. | NetRx softirq, TX, and timer notifications share the same `NetworkPoller` state machine; work arriving during execution is published as `RUNNING_PENDING`; one IRQ-safe state lock serializes notifications with completion, and submission follows outside the lock |
 | T-33 | A compound link update commits partially | Medium | Renaming succeeds before MTU or flag validation fails | The device is renamed while other requested configuration fields remain unchanged. | `Router::update_device_link` validates the target device, name format and uniqueness, and MTU range before writing; the rtnetlink entry point ignores `IFF_VOLATILE` changes and rejects actual changes to unsupported writable bits; device setters receive only validated values |
-| T-34 | Shared mutexes held by ordinary tasks retain poller execution ownership for an extended period | Medium | After acquiring `RUNNING`, the poller waits for Router, IngressProcessor, Interface, or socket-set held by another socket or control-plane task | Other network work cannot progress while the sole poller waits for a shared lock. | Polling rounds use `try_lock` for these shared locks; contention preserves batches awaiting handoff, returns `has_more`, and schedules later rounds through the existing four-state machine; IPv4 reassembly attempts the IngressProcessor lock only when expired events are pending and continues TX after contention; assisted processing remains limited to one round and checks execution ownership once under the short poller state lock |
+| T-34 | Shared mutexes held by ordinary tasks retain poller execution ownership for an extended period | Medium | After acquiring `RUNNING`, the poller waits for Router, IngressProcessor, TX queue, smoltcp backend, or socket-set held by another socket or control-plane task | Other network work cannot progress while the sole poller waits for a shared lock. | Polling rounds use `try_lock` for these shared locks; contention preserves batches awaiting handoff, returns `has_more`, and schedules later rounds through the existing four-state machine; IPv4 reassembly attempts the IngressProcessor lock only when expired events are pending and continues TX after contention; assisted processing remains limited to one round and checks execution ownership once under the short poller state lock |
 | T-35 | Loopback UDP delivery depends on poller ownership | Medium | `sendto` only queues the packet for transmission, and a short `SO_RCVTIMEO` expires while poller execution ownership is occupied | A locally sent datagram misses the receive deadline and causes a user-visible timeout. | The loopback send path writes validated UDP metadata before disabling BH, enqueues the packet in `NET_RX_QUEUE`, and triggers `NetRx`; when BH is restored, complete IPv4 UDP packets enter the PCB; TCP/ICMP and UDP packets without a matching socket continue through the poller |
 | T-36 | Pending Unix stream listener connections exhaust kernel memory | Medium | An attacker continuously connects while the server does not call `accept` | Queued connections retain ring buffers and exhaust memory available to the kernel. | The backlog is converted according to Linux counting rules and capped at `LISTEN_QUEUE_SIZE`; capacity is reserved before ring-buffer allocation; nonblocking connections return `EAGAIN`, while blocking connections wait for capacity according to `SO_SNDTIMEO` and return `EAGAIN` on timeout; shutdown and Drop wake waiters |
 | T-37 | A UDP socket receives ICMP errors from another device | Medium | ICMP error lookup loses the ingress interface index and treats an unknown device as a wildcard | A device-bound socket reports an asynchronous error for traffic from another interface. | Ingress processing passes `PacketBuf::ifindex` to UDP PCB lookup; a device-bound PCB matches only the same interface index |
@@ -695,7 +695,7 @@ Impact levels:
 | F-21 | RX or TX backlogs monopolize the processing task | A sustained packet rate exceeds the per-round budget | A round reaches its budget or 1 ms soft time limit with work still pending | Scheduling delays for other tasks or reduced network throughput | 3 | Device RX, stack ingress, stack egress, and Router TX check time after at most 32 work items; each batch runs at most four consecutive rounds, then reschedules and releases execution ownership, leaving remaining work for the next batch |
 | F-22 | A TCP peer does not send FIN after the local file closes | The peer acknowledges the local FIN, but the protocol handle remains in `FIN_WAIT_2` after detachment from the user file object | The deferred-close registry keeps socket buffers alive | Network memory grows with unresponsive connections | 3 | Set a 60-second deadline on entry to `FIN_WAIT_2`, include it in the unified poll timer, and reclaim the handle on expiration |
 | F-23 | The IPv4 output device is administratively down | `RTM_NEWLINK` clears `IFF_UP` on the device selected by the matching route | The current UDP or raw IP send fails | The application receives `ENETUNREACH` | 4 | UDP and raw IP validate the output route and device administrative state through `SERVICE` before committing the send buffer |
-| F-24 | Data-plane shared-lock contention | A socket or control-plane task holds Router, IngressProcessor, Interface, or socket-set | The current polling round ends early and retains its batches | Network work is deferred to the next round | 3 | Return `has_more`; the sole executor publishes `SCHEDULED` through the completion state update; raw, admitted, and control-packet batches retain ownership and resume from their saved positions in the next round |
+| F-24 | Data-plane shared-lock contention | A socket or control-plane task holds Router, IngressProcessor, TX queue, smoltcp backend, or socket-set | The current polling round ends early and retains its batches | Network work is deferred to the next round | 3 | Return `has_more`; the sole executor publishes `SCHEDULED` through the completion state update; raw, admitted, and control-packet batches retain ownership and resume from their saved positions in the next round |
 | F-25 | Short-timeout loopback UDP loses packets while the poller is busy | `sendto` only notifies the poller, and the 1-jiffy `recvfrom` timeout expires first | Concurrent libc-test `socket.exe` runs intermittently report `ETIMEDOUT` | A user-visible functional regression | 3 | `NetRx` delivers loopback UDP to the PCB within the send path's BH window; the poller no longer performs this delivery; stress tests cover four concurrent short-timeout operations with SMP=1 and SMP=4 |
 | F-26 | A TCP child connection remains in the SYN queue indefinitely | The packet marker is consumed before the child becomes acceptable, and later ingress processing or timer polling does not refresh the listener | The accept queue stays empty | The server remains blocked in `accept` after connection establishment | 2 | Refresh listeners with nonempty SYN queues after each actual network poll; wake waiters only after a child enters the accept queue; SYN queues do not request continuous polling |
 | F-27 | Connect or accept waits indefinitely after Unix listener shutdown | A listener state change does not notify capacity and request events | Blocking `connect` or `accept` cannot return | Application threads remain asleep indefinitely | 2 | Both `shutdown(SHUT_RD)` and Drop notify `capacity_available` and `request_available`; queued requests are delivered first, and blocking `accept` on an empty queue returns `EINVAL`; blocking `connect` with `SO_SNDTIMEO` returns `EAGAIN` when its capacity wait times out |
@@ -744,7 +744,7 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 - IPv4 output fragmentation supports only packets generated within the stack without IP options. IP option copying semantics are not yet implemented.
 - Route dumps read configured routes and address-derived routes from Router.
 - smoltcp maintenance and each egress operation have bounded work, while ingress advances packet by packet through `poll_ingress_single`. Protocol processing for one packet or a single egress operation can still briefly exceed the soft time limit.
-- Nonblocking retry on Router, IngressProcessor, Interface, and socket-set contention preserves the poller ownership boundary. Short critical sections within transports, the listen table, and device callbacks can still briefly exceed the soft time limit.
+- Nonblocking retry on Router, IngressProcessor, TX queue, smoltcp backend, and socket-set contention preserves the poller ownership boundary. Short critical sections within transports, the listen table, and device callbacks can still briefly exceed the soft time limit.
 - Each UDP receive queue reserves 1024 pointer-sized slots at PCB creation, so idle sockets still incur this fixed metadata overhead.
 - Address and route dumps read Router directly; link dumps read live device snapshots directly.
 - The syscall layer controls raw socket creation permissions; `knet` constructors themselves take no process-credential argument.

@@ -4,6 +4,7 @@
 
 //! Network stack orchestration around smoltcp.
 
+pub(crate) mod backend;
 pub(crate) mod device;
 pub(crate) mod ingress;
 pub(crate) mod router;

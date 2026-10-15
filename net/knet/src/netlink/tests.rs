@@ -519,7 +519,7 @@ fn test_device_removal_refreshes_views() {
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
-        service.iface.lock().ip_addrs(),
+        service.stack.lock().ip_addrs(),
         &[IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
             Ipv4Address::new(127, 0, 0, 1),
             8,
