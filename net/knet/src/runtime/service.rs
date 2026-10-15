@@ -36,7 +36,7 @@ use crate::{
     router::{NeighborUpdatePolicy, Router},
     stack::{
         device::StackDevice,
-        ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        ingress::{AcceptedPacket, IngressProcessor, prepare_smoltcp_ingress},
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
 };
@@ -115,7 +115,7 @@ pub(crate) struct Service {
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
     rx_batch: Mutex<Vec<PacketBuf>>,
-    accepted_batch: Mutex<Vec<PacketBuf>>,
+    accepted_batch: Mutex<Vec<AcceptedPacket>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
@@ -357,7 +357,7 @@ impl Service {
         round_started_at: MonotonicInstant,
         budget: usize,
         rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> DeviceRxProgress {
         let mut progress = DeviceRxProgress::default();
@@ -461,7 +461,7 @@ impl Service {
         &self,
         device_timestamp: MonotonicInstant,
         rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
         if rx_batch.is_empty() {
@@ -485,7 +485,7 @@ impl Service {
 
     fn try_flush_ingress_batches(
         &self,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
         if accepted_packets.is_empty() && control_packets.is_empty() {
@@ -508,7 +508,9 @@ impl Service {
             // socket set. A failed nonblocking acquisition leaves the complete
             // batch available for an identical retry in a later poll round.
             prepare_smoltcp_ingress(accepted_packets, sockets);
-            router.enqueue_ingress_packets(accepted_packets);
+            router.enqueue_ingress_packets(
+                accepted_packets.drain(..).map(AcceptedPacket::into_packet),
+            );
         }
         for packet in control_packets.drain(..) {
             if let Err(err) = router.queue_control_ipv4_packet(packet) {

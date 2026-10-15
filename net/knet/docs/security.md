@@ -485,6 +485,13 @@ and TCP listener preparation access IPv4 payloads through this view. UDP receive
 metadata is extracted before transferring the packet handle into the receive
 queue. ICMP quotes retain their separate truncated-input parser.
 
+Only ingress constructs `AcceptedPacket` after IPv4 validation and reassembly.
+The wrapper keeps admitted bytes immutable until shared-stack delivery, allowing
+listener preparation to skip the repeated IPv4 checksum while still checking
+header and payload bounds. Retaining a batch across lock contention preserves
+this invariant; consuming the wrapper transfers the packet to the router.
+IPv6 packets remain subject to the shared stack's validation.
+
 ### 15. Network Type Boundary
 
 `RouteTable` and `NetDevice` do not expose smoltcp address or time types.

@@ -80,6 +80,23 @@ fn test_packet_view_enforces_payload_bounds() {
 }
 
 #[def_test]
+fn test_verified_checksum_view_preserves_payload_bounds() {
+    let mut bytes = ipv4_packet(PROTOCOL_TCP, &[1, 2]);
+    bytes.extend_from_slice(&[0; 16]);
+    let view = Ipv4PacketView::parse_input_with_verified_checksum(&bytes).unwrap();
+    assert_eq!(view, Ipv4PacketView::parse_input(&bytes).unwrap());
+    assert_eq!(view.payload(), &[1, 2]);
+
+    for total_len in [IPV4_MIN_HEADER_LEN - 1, bytes.len() + 1] {
+        bytes[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        assert_eq!(
+            Ipv4PacketView::parse_input_with_verified_checksum(&bytes),
+            Err(Ipv4Error::Malformed)
+        );
+    }
+}
+
+#[def_test]
 fn test_validate_input_packet_marks_fragment() {
     let mut bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2]);
     let mut header = Ipv4HeaderSlice::from_slice(&bytes).unwrap().to_header();

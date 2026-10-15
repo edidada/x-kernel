@@ -127,7 +127,7 @@ fn smoltcp_ingress_keeps_packets_after_reaching_budget() {
         PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
         PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
     ]);
-    router.enqueue_ingress_packets(&mut packets);
+    router.enqueue_ingress_packets(packets.drain(..));
     let mut sockets = SocketSet::new(vec![]);
 
     let progress = poll_smoltcp_ingress_budgeted(

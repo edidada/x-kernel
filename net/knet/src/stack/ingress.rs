@@ -23,6 +23,21 @@ use crate::{
     udp, udp_err,
 };
 
+/// An admitted packet retained unchanged until shared-stack delivery.
+///
+/// IPv4 packets have passed checksum validation, trimming, and reassembly.
+/// IPv6 packets retain their existing validation boundary in the shared stack.
+/// Only ingress can construct this wrapper; consumers can only consume the handle.
+pub(crate) struct AcceptedPacket {
+    packet: PacketBuf,
+}
+
+impl AcceptedPacket {
+    pub(crate) fn into_packet(self) -> PacketBuf {
+        self.packet
+    }
+}
+
 pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
     ipv4_reassembler: Ipv4Reassembler,
@@ -74,7 +89,7 @@ impl IngressProcessor {
         &mut self,
         timestamp: MonotonicInstant,
         packets: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         for packet in packets.drain(..) {
@@ -86,7 +101,7 @@ impl IngressProcessor {
         &mut self,
         timestamp: MonotonicInstant,
         packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
@@ -95,7 +110,7 @@ impl IngressProcessor {
         match ipv4::ip_version(ip_packet) {
             Some(4) => self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets),
             Some(6) => {
-                accepted_packets.push(packet);
+                accepted_packets.push(AcceptedPacket { packet });
             }
             _ => debug!("Dropping packet with invalid IP version"),
         }
@@ -105,7 +120,7 @@ impl IngressProcessor {
         &mut self,
         timestamp: MonotonicInstant,
         mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<AcceptedPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         let packet_type = packet.packet_type();
@@ -177,7 +192,7 @@ impl IngressProcessor {
         }
 
         udp_err::inspect_icmpv4_error(view, ifindex);
-        accepted_packets.push(packet);
+        accepted_packets.push(AcceptedPacket { packet });
     }
 
     fn is_local_ipv4_destination(&self, dst_addr: Ipv4Address) -> bool {
@@ -196,14 +211,16 @@ impl IngressProcessor {
 /// smoltcp socket-set lock. This keeps custom UDP ingress independent from
 /// unrelated TCP socket operations while preserving listener setup before a
 /// TCP SYN reaches smoltcp.
-pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSet<'_>) {
+pub(crate) fn prepare_smoltcp_ingress(packets: &[AcceptedPacket], sockets: &mut SocketSet<'_>) {
     for packet in packets {
-        let Some(ip_packet) = packet.network_packet() else {
+        let Some(ip_packet) = packet.packet.network_packet() else {
             continue;
         };
         match ipv4::ip_version(ip_packet) {
             Some(4) => {
-                let Ok(view) = Ipv4PacketView::parse_input(ip_packet) else {
+                // Admission checked the checksum, and AcceptedPacket keeps those
+                // bytes unchanged while shared destination locks are contended.
+                let Ok(view) = Ipv4PacketView::parse_input_with_verified_checksum(ip_packet) else {
                     continue;
                 };
                 let header = view.header();
@@ -285,3 +302,5 @@ fn snoop_tcp_segment(
         LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/stack/ingress/tests.rs");

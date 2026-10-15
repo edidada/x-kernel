@@ -98,6 +98,14 @@ impl<'a> Ipv4PacketView<'a> {
         Self::from_header(packet, Ipv4Header::parse_input(packet)?)
     }
 
+    /// Rebuilds a view after input checksum validation without repeating that checksum.
+    ///
+    /// The caller must retain the validated bytes unchanged, including across queues
+    /// and retries. Structural and payload bounds are still checked here.
+    pub(crate) fn parse_input_with_verified_checksum(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
+        Self::from_header(packet, Ipv4Header::parse(packet, false)?)
+    }
+
     /// Uses the full outgoing slice before its checksum and total length are finalized.
     pub(crate) fn parse_output(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
         Self::from_header(packet, Ipv4Header::parse_output(packet)?)

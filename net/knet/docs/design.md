@@ -971,13 +971,18 @@ Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, I
 
 `Ipv4PacketView` binds a parsed IPv4 header to a borrowed packet slice. Receive
 processing passes the validated view to UDP parsing, fragment reassembly,
-ICMP error inspection, and TCP listener preparation; output routing passes its
-view to fragmentation. These consumers reuse the header and payload
-bounds established at the boundary. The view adds no allocation or persistent
+and ICMP error inspection; output routing passes its view to fragmentation.
+These consumers reuse the header and payload bounds established at the boundary. The view adds no allocation or persistent
 cache to `PacketBuf`. UDP parsing extracts receive metadata before the packet
 handle is moved into a `PreparedUdpPacket`. Output preparation derives routing
 metadata and the finalized wire header from one parse. Fragmentation reuses the
 packet view and a single wire-header template for all fragments.
+
+Accepted ingress batches own `AcceptedPacket` handles. IPv4 admission validates
+and trims each packet before wrapping it; the wrapper exposes no mutable packet
+access. TCP listener preparation rebuilds a bounded view without repeating the
+IPv4 checksum, including after a contended-lock retry. The wrapper adds no packet
+allocation or cached header. IPv6 validation remains in the shared stack.
 
 ### Budgeted Processing
 

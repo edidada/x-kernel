@@ -605,9 +605,12 @@ impl Router {
         }
     }
 
-    pub(crate) fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
+    pub(crate) fn enqueue_ingress_packets(
+        &mut self,
+        packets: impl ExactSizeIterator<Item = PacketBuf>,
+    ) {
         debug_assert!(packets.len() <= self.ingress_capacity());
-        self.rx_queue.extend(packets.drain(..));
+        self.rx_queue.extend(packets);
     }
 
     pub(crate) fn ingress_capacity(&self) -> usize {
