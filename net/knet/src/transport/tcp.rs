@@ -439,8 +439,8 @@ impl SocketOps for TcpSocket {
 
                 let result = {
                     let mut sockets = SOCKET_SET.inner.lock();
-                    let mut stack = crate::SERVICE.stack.lock();
-                    let context = stack.context();
+                    let mut iface = crate::SERVICE.iface.lock();
+                    let context = iface.context();
                     let socket = sockets.get_mut::<smol::Socket>(self.handle);
                     socket
                         .connect(context, remote_endpoint, bound_endpoint)

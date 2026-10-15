@@ -10,7 +10,7 @@ use kpoll::{PollContext, PollRegisterError, PollSet};
 
 use crate::buf::PacketBuf;
 
-/// Owns queued packets and capacity registrations under the enclosing I/O lock.
+/// Owns queued packets and capacity registrations under the dedicated Service TX mutex.
 pub(crate) struct DataTxQueue {
     packets: VecDeque<PacketBuf>,
     capacity: usize,

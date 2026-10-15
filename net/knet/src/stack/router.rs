@@ -28,6 +28,7 @@ use crate::{
         },
     },
     runtime::tx_queue::DataTxQueue,
+    stack::device::StackDevice,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -61,6 +62,7 @@ pub(crate) struct Ipv4AddrSnapshot {
 }
 
 pub(crate) struct Router {
+    rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
@@ -80,6 +82,7 @@ pub(crate) struct RxDrain {
 impl Router {
     pub(crate) fn new() -> Self {
         Self {
+            rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
@@ -88,6 +91,11 @@ impl Router {
             table: RouteTable::new(),
             effective_mtu: STANDARD_MTU,
         }
+    }
+
+    /// Borrows admitted RX and shared data TX for one smoltcp operation.
+    pub(crate) fn stack_device<'a>(&'a mut self, tx: &'a mut DataTxQueue) -> StackDevice<'a> {
+        StackDevice::new(&mut self.rx_queue, tx, self.effective_mtu)
     }
 
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
@@ -831,6 +839,19 @@ impl Router {
             has_more: false,
             error: None,
         }
+    }
+
+    pub(crate) fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
+        debug_assert!(packets.len() <= self.ingress_capacity());
+        self.rx_queue.extend(packets.drain(..));
+    }
+
+    pub(crate) fn ingress_capacity(&self) -> usize {
+        SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len())
+    }
+
+    pub(crate) fn has_pending_ingress(&self) -> bool {
+        !self.rx_queue.is_empty()
     }
 
     pub(crate) fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
