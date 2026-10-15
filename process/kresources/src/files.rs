@@ -31,6 +31,14 @@ impl TaskFiles {
         }
     }
 
+    /// Creates an empty private binding with a fresh table.
+    ///
+    /// Convenience for process and thread construction, which do not otherwise
+    /// need the `kfd` owner type in scope.
+    pub fn new_shared() -> Self {
+        Self::new(FdTableOwner::new_shared())
+    }
+
     /// Prepares a child's table binding, following `CLONE_FILES`.
     ///
     /// # Errors

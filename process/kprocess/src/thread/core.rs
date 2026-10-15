@@ -237,7 +237,7 @@ impl Thread {
             cred,
             charge,
             false,
-            kresources::TaskFiles::new(kfd::FdTableOwner::new_shared()),
+            kresources::TaskFiles::new_shared(),
         )
         .expect("initial task identity must be unique")
     }

@@ -89,18 +89,19 @@ fn blocked_posix_lock_does_not_force_files_unshare() {
     let file = kprocess::current_files().get_file(fd).unwrap();
     let held_fd = memfd();
     let held_file = kprocess::current_files().get_file(held_fd).unwrap();
-    let files = ktask::current().as_thread().files();
+    let waiter = ktask::current().clone();
+    let files = waiter.as_thread().files();
     let original_table = files.fd_table().unwrap();
     let mut lock = TestUserValue::from_value(flock(F_WRLCK, 0, 0, 0)).unwrap();
     let arg = lock.as_user_ptr() as usize;
     sys_fcntl(held_fd, F_SETLK as _, arg).unwrap();
     sys_fcntl(fd, F_OFD_SETLK as _, arg).unwrap();
-    let waiter = ktask::current().clone();
     let observed_wait = Arc::new(AtomicBool::new(false));
     let released_before_wake = Arc::new(AtomicBool::new(false));
     let worker = ktask::spawn({
         let observed_wait = observed_wait.clone();
         let released_before_wake = released_before_wake.clone();
+        let waiter = waiter.clone();
         move || {
             // The held OFD lock prevents completion until this worker unlocks.
             // Bound failure and still release it so a regression cannot hang QEMU.
@@ -112,7 +113,11 @@ fn blocked_posix_lock_does_not_force_files_unshare() {
                 ktask::yield_now();
             }
             waiter.as_thread().files().unshare_fd_table().unwrap();
-            waiter.as_thread().files().close_range(held_fd, held_fd).unwrap();
+            waiter
+                .as_thread()
+                .files()
+                .close_range(held_fd, held_fd)
+                .unwrap();
             let probe = FileLock::new(
                 kvfs::FileLockOwner::ofd(&held_file),
                 0,
