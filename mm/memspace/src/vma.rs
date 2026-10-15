@@ -195,6 +195,14 @@ impl VmRuntimeRef {
         Self::Linear(LinearBackend::new(offset))
     }
 
+    pub(crate) fn new_owned_linear(
+        start: VirtAddr,
+        frames: kalloc::FrameRun<'static>,
+        size: usize,
+    ) -> KResult<Self> {
+        Ok(Self::Linear(LinearBackend::new_owned(start, frames, size)?))
+    }
+
     pub fn new_anon_shared(start: VirtAddr, size: usize, pgsize: PageSize) -> KResult<Self> {
         Ok(Self::AnonShared(SharedBackend::new_anonymous(
             start, size, pgsize,

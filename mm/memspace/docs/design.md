@@ -339,3 +339,28 @@ cannot return backing still referenced by a PTE. Fault rematerialization clones
 another hold; unmap and PROT_NONE retire it after invalidation. Existing huge
 leaf support is preserved by exact size/alignment checks; this does not add
 transparent huge pages or splitting support.
+
+
+## Optional owned linear RAM mappings
+
+`MmSpace::map_owned_linear(start, frames, size, flags)` consumes a FrameRun while
+exposing only its requested whole-page prefix. LinearBackend keeps an optional
+Arc-owned run; existing externally owned RAM/MMIO mappings have no such hold.
+Both retain their original linear inheritance, backing metadata and futex rules.
+A cloned/split runtime shares the owner, and each managed leaf acquires a separate
+base-page hold with map_owned. No raw PFN adoption or physical descriptor change
+is involved.
+
+The mapped prefix must fit the run; backing slack remains owned but cannot be
+mapped or faulted through this runtime. Before user publication, callers initialize
+the bytes they expose. A failed multi-page map withdraws only its installed prefix
+and finishes invalidation, preserving a pre-existing conflicting mapping. The run
+is automatically released if construction fails before publication.
+
+Fork inherits the same contents and installs independent PTE holds. Removing the
+parent VMA or dropping an external fixture therefore cannot free pages retained
+by the child. PROT_NONE retires PTE holds while the runtime retains the source for
+later faults. Unmap still finishes the TLB batch before VMA ownership is removed.
+Owned linear relocation remains unsupported, as for existing linear runtimes.
+Bookkeeping uses one Arc per backing runtime plus the normal PTE index and VMA
+metadata; this does not implement fallible heap bookkeeping or vmalloc.

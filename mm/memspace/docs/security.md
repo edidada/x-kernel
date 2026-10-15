@@ -194,3 +194,25 @@ Each present managed leaf has an independent run of the same size and alignment;
 replacement retires the old run only after TLB invalidation. Failed object or PTE
 publication drops new backing and preserves old capabilities. Mapping-index and
 Arc/Vec allocations still follow the current kernel heap OOM policy.
+
+
+## Managed linear backing
+
+`LinearBackend::new_owned` accepts only a nonempty aligned prefix within a live
+run and a representable constant address offset. PA translation is checked, and
+owned translation rejects addresses outside that prefix, including buddy slack.
+Cloning derives only from the run's existing live holds. Neither descriptor lookup
+nor an arbitrary PA can create runtime ownership.
+
+`map_owned_linear` validates the mm extent and VMA overlap before publication.
+During mapping, per-page holds protect newly installed leaves; failure withdraws
+only the known successful prefix and completes its invalidation. Conflicting
+existing leaves retain their original holds. Clear/unmap releases PTE capabilities
+through the page-table batch and then ends VMA owner references. Kernel/borrowed
+linear mappings retain their external-backing contract and need no dynamic holds.
+
+The runtime does not zero or exclusively lock payload bytes. The producer must
+initialize user-visible contents before mapping; mappings and forked aliases need
+the caller's normal data synchronization. Whole-run ownership covers rounding
+slack even when only a prefix is visible. A final alias may retain the allocation
+until its runtime ends, rather than implementing per-range reclaim here.

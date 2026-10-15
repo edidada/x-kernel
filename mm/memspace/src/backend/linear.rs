@@ -5,10 +5,11 @@
 //! Linear mapping backend.
 use alloc::sync::Arc;
 
+use kalloc::{FrameRef, FrameRun};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
-use memaddr::{MemoryAddr, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
@@ -16,19 +17,56 @@ use crate::{
     vma::VmRuntimeOps,
 };
 
-/// Linear mapping backend.
+struct OwnedLinearPages {
+    frames: FrameRun<'static>,
+    visible_size: usize,
+}
+
+/// Constant-offset physical mapping, optionally retaining managed RAM backing.
 ///
-/// The offset between the virtual address and the physical address is
-/// constant, which is specified by `pa_va_offset`. For example, the virtual
-/// address `vaddr` is mapped to the physical address `vaddr - pa_va_offset`.
+/// External mappings rely on their caller's backing lifetime. Owned mappings
+/// keep the source run and acquire independent PTE holds, including after fork.
 #[derive(Clone)]
 pub struct LinearBackend {
     offset: isize,
+    backing: Option<Arc<OwnedLinearPages>>,
 }
 
 impl LinearBackend {
     pub fn new(offset: isize) -> Self {
-        Self { offset }
+        Self {
+            offset,
+            backing: None,
+        }
+    }
+
+    /// Consumes RAM backing while exposing only the requested page-aligned prefix.
+    /// The original linear mapping classification and fork sharing are retained.
+    pub(crate) fn new_owned(
+        start: VirtAddr,
+        frames: FrameRun<'static>,
+        size: usize,
+    ) -> KResult<Self> {
+        if size == 0
+            || !start.is_aligned_4k()
+            || !size.is_multiple_of(PAGE_SIZE_4K)
+            || size / PAGE_SIZE_4K > frames.frame_count()
+            || start.as_usize().checked_add(size).is_none()
+        {
+            return Err(KError::InvalidInput);
+        }
+        let physical =
+            isize::try_from(frames.phys_addr().as_usize()).map_err(|_| KError::InvalidInput)?;
+        let offset = (start.as_usize() as isize)
+            .checked_sub(physical)
+            .ok_or(KError::InvalidInput)?;
+        Ok(Self {
+            offset,
+            backing: Some(Arc::new(OwnedLinearPages {
+                frames,
+                visible_size: size,
+            })),
+        })
     }
 
     pub fn clone_for_fork_runtime(
@@ -43,12 +81,69 @@ impl LinearBackend {
         Ok(self.clone())
     }
 
-    fn pa(&self, va: VirtAddr) -> PhysAddr {
-        let pa = (va.as_usize() as isize)
+    fn pa(&self, va: VirtAddr) -> KResult<PhysAddr> {
+        let translated = (va.as_usize() as isize)
             .checked_sub(self.offset)
-            .expect("linear address translation overflow");
-        assert!(pa >= 0, "linear address translation produced negative PA");
-        PhysAddr::from(pa as usize)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(KError::BadAddress)?;
+        if let Some(backing) = &self.backing {
+            let offset = translated
+                .checked_sub(backing.frames.phys_addr().as_usize())
+                .ok_or(KError::BadAddress)?;
+            if offset >= backing.visible_size {
+                return Err(KError::BadAddress);
+            }
+        }
+        Ok(PhysAddr::from(translated))
+    }
+
+    fn clone_mapping_frame(&self, va: VirtAddr) -> KResult<FrameRef<'static>> {
+        let backing = self.backing.as_ref().ok_or(KError::BadState)?;
+        let offset = self.pa(va)?.as_usize() - backing.frames.phys_addr().as_usize();
+        backing
+            .frames
+            .try_clone_frame(offset / PAGE_SIZE_4K)
+            .map_err(|_| KError::NoMemory)
+    }
+
+    fn map_page(&self, va: VirtAddr, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
+        if self.backing.is_some() {
+            pgtbl
+                .map_owned(va, self.clone_mapping_frame(va)?, flags)
+                .map_err(map_paging_err)
+        } else {
+            pgtbl
+                .map(va, self.pa(va)?, PageSize::Size4K, flags)
+                .map_err(map_paging_err)
+        }
+    }
+
+    fn map_owned_range(
+        &self,
+        range: VirtAddrRange,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+    ) -> KResult {
+        let pages = pages_in(range, PageSize::Size4K)?;
+        if range.size() > 0 {
+            self.pa(range.start)?;
+            self.pa(range.end - PAGE_SIZE_4K)?;
+        }
+        let mut mapped_bytes = 0;
+        for va in pages {
+            if let Err(error) = self.map_page(va, flags, pgtbl) {
+                // Only withdraw the successfully installed prefix; an occupied
+                // conflicting leaf belongs to its prior owner. Keep its hold.
+                let rollback = pgtbl
+                    .unmap_sparse_region(range.start, mapped_bytes, PageSize::Size4K)
+                    .map_err(map_paging_err);
+                pgtbl.finish();
+                rollback?;
+                return Err(error);
+            }
+            mapped_bytes += PAGE_SIZE_4K;
+        }
+        Ok(())
     }
 }
 
@@ -62,16 +157,27 @@ impl BackendOps for LinearBackend {
     }
 
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
-        let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
-        debug!("Linear::map: {range:?} -> {pa_range:?} {flags:?}");
+        if self.backing.is_some() {
+            return self.map_owned_range(range, flags, pgtbl);
+        }
+        // External RAM/MMIO mappings keep their existing backing contract.
+        let first_pa = self.pa(range.start)?;
+        if range.size() > 0 {
+            self.pa(range.end - 1)?;
+        }
         pgtbl
-            .map_region(range.start, |va| self.pa(va), range.size(), flags, false)
-            .map_err(map_paging_err)?;
-        Ok(())
+            .map_region(
+                range.start,
+                |va| first_pa + (va - range.start),
+                range.size(),
+                flags,
+                false,
+            )
+            .map_err(map_paging_err)
     }
 
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
-        let pa_range = PhysAddrRange::from_start_size(self.pa(range.start), range.size());
+        let pa_range = PhysAddrRange::from_start_size(self.pa(range.start)?, range.size());
         debug!("Linear::unmap: {range:?} -> {pa_range:?}");
         for vaddr in pages_in(range, PageSize::Size4K)? {
             match pgtbl.unmap(vaddr) {
@@ -89,7 +195,7 @@ impl BackendOps for LinearBackend {
         pgtbl: &mut PageTableMut,
     ) -> FaultCompletionResult {
         let addr = ctx.address().align_down(self.page_size());
-        let expected = self.pa(addr);
+        let expected = self.pa(addr)?;
         match pgtbl.query(addr) {
             Ok((paddr, page_flags, _)) => {
                 if paddr != expected {
@@ -100,9 +206,7 @@ impl BackendOps for LinearBackend {
                 }
             }
             Err(PagingError::NotMapped) => {
-                pgtbl
-                    .map(addr, expected, self.page_size(), flags)
-                    .map_err(map_paging_err)?;
+                self.map_page(addr, flags, pgtbl)?;
             }
             Err(_) => return Err(KError::BadAddress),
         }
@@ -162,3 +266,8 @@ impl VmRuntimeOps for LinearBackend {
         Ok(Arc::new(self.clone()))
     }
 }
+
+unittest::path_mod_test!(
+    owned_linear_unittest,
+    "../../ut-tests/owned_linear_unittest.rs"
+);

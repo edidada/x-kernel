@@ -1025,6 +1025,47 @@ impl MmSpace {
         self.map_runtime_vma(vma, false, runtime)
     }
 
+    /// Maps the requested prefix of owned contiguous RAM with managed PTE holds.
+    ///
+    /// Consumes the run, including backing slack. Forked linear mappings share
+    /// its runtime ownership and acquire independent data-page holds. Removing
+    /// a VMA ends only its holds; PTE holds survive until TLB retirement. The
+    /// range keeps linear inheritance and futex classification. Callers must
+    /// initialize user-visible bytes before publishing a USER mapping; this
+    /// method does not zero backing or synchronize payload accesses.
+    ///
+    /// # Errors
+    /// Rejects unaligned/out-of-range/overlapping mappings and invalid prefix
+    /// sizes. Failed mapping withdraws its installed prefix and ends unpublished
+    /// backing ownership while preserving any pre-existing conflicting leaves.
+    pub fn map_owned_linear(
+        &mut self,
+        start: VirtAddr,
+        frames: kalloc::FrameRun<'static>,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult {
+        self.drain_pending_invalidations();
+        self.validate_region(start, size)?;
+        if self
+            .vmas
+            .overlaps(VirtAddrRange::from_start_size(start, size))
+        {
+            return Err(KError::AlreadyExists);
+        }
+        let runtime = VmRuntimeRef::new_owned_linear(start, frames, size)?;
+        let vma = VmArea::new(
+            start,
+            size,
+            flags,
+            Self::kernel_linear_max_flags(flags),
+            runtime.backing_info(),
+            0,
+            None,
+        );
+        self.map_runtime_vma(vma, false, runtime)
+    }
+
     /// Map a region using the provided runtime execution reference and flags.
     pub fn map(
         &mut self,
@@ -1664,3 +1705,5 @@ impl Drop for MmSpace {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/aspace.rs");
+
+unittest::path_mod_test!(tests_owned_linear, "../ut-tests/owned_linear_aspace.rs");
