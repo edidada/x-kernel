@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! The platform bus: firmware-node devices and board-static devices.
+//!
+//! This is the reference bus implementation — the `struct bus_type
+//! platform_bus_type` translation. Its vocabulary (identity, firmware
+//! property snapshot, static slots, id tables) lives HERE and nowhere
+//! else; the model core knows only the [`PlatformBusData`] vtable.
+//!
+//! Two enumeration sources:
+//!
+//! - **Firmware nodes** — DT/ACPI-discovered devices (`platform_device`
+//!   from `of_node`). Identity is the node's `compatible` list; the
+//!   firmware property snapshot rides with the data.
+//! - **Board-static devices** — devices the platform describes by fixed
+//!   board configuration instead of firmware discovery (`ramdisk`,
+//!   ISA COM ports). They are addressed by a board-assigned slot and
+//!   claim drivers by board alias, never by compatible.
+
+use alloc::{boxed::Box, format, string::String, vec::Vec};
+
+use super::{Bus, BusDeviceData, BusId, MatchScore};
+
+// ---------------------------------------------------------------------------
+// Device data
+// ---------------------------------------------------------------------------
+
+/// How a platform device was enumerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformOrigin {
+    /// A firmware (DT/ACPI) node discovered by enumeration. The id is the
+    /// enumerator's node handle — monotonic per boot, stable within it.
+    FirmwareNode { id: u32 },
+    /// A board-configured device: not firmware-discovered, addressed by a
+    /// fixed board slot. Claimed by board alias, never by compatible.
+    StaticConfig { slot: u16 },
+}
+
+/// Platform-bus identity: what a driver's id table matches against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformBusIdentity {
+    /// Primary (first) `compatible` value, e.g. `"vendor,generic-ip"`. This is
+    /// what modalias and diagnostics report.
+    pub firmware_id: Option<String>,
+    /// The node's full compatible list (`firmware_id` is its first entry).
+    /// Matching iterates this list — Linux `of_device_id` semantics: a DT
+    /// node `compatible = "vendor,soc-widget", "vendor,generic-ip"` matches a driver
+    /// table entry naming EITHER string.
+    pub compatibles: Vec<String>,
+    /// Board-level alias, e.g. `"serial0"`. Set for board-static devices
+    /// and for firmware nodes carrying an `aliases` entry.
+    pub alias: Option<String>,
+}
+
+/// The platform bus's device data: enumeration source, identity, and —
+/// for firmware nodes — the eagerly-typed property snapshot.
+#[derive(Debug, Clone)]
+pub struct PlatformBusData {
+    /// How (and from where) this device was enumerated.
+    pub origin: PlatformOrigin,
+    /// Matching identity.
+    pub identity: PlatformBusIdentity,
+    /// The firmware property snapshot (`of_property_read_*` surface),
+    /// present for DT-discovered nodes.
+    pub firmware: Option<FirmwareNodeInfo>,
+}
+
+impl PlatformBusData {
+    /// A DT-discovered node: compatibles in DT order, plus its property
+    /// snapshot.
+    pub fn firmware_node(node_id: u32, compatibles: &[&str], firmware: FirmwareNodeInfo) -> Self {
+        Self {
+            origin: PlatformOrigin::FirmwareNode { id: node_id },
+            identity: PlatformBusIdentity {
+                firmware_id: compatibles.first().map(|c| String::from(*c)),
+                compatibles: compatibles.iter().map(|c| String::from(*c)).collect(),
+                alias: None,
+            },
+            firmware: Some(firmware),
+        }
+    }
+
+    /// A board-configured device addressed by slot and claimed by alias.
+    pub fn static_config(slot: u16, alias: &str) -> Self {
+        Self {
+            origin: PlatformOrigin::StaticConfig { slot },
+            identity: PlatformBusIdentity {
+                firmware_id: None,
+                compatibles: Vec::new(),
+                alias: Some(String::from(alias)),
+            },
+            firmware: None,
+        }
+    }
+}
+
+impl BusDeviceData for PlatformBusData {
+    fn bus_id(&self) -> BusId {
+        PlatformBus::ID
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn clone_erased(&self) -> Box<dyn BusDeviceData> {
+        Box::new(self.clone())
+    }
+
+    fn path_component(&self) -> String {
+        match self.origin {
+            PlatformOrigin::FirmwareNode { id } => format!("platform/firmware{id}"),
+            PlatformOrigin::StaticConfig { slot } => format!("platform/static{slot}"),
+        }
+    }
+
+    fn modalias(&self) -> Option<String> {
+        // of_modalias: derived from the DEVICE's first compatible — the
+        // same string module loading matches. Board-static devices have
+        // no modalias.
+        self.identity
+            .firmware_id
+            .as_ref()
+            .map(|compatible| format!("of:NcompatT(null)C{compatible}"))
+    }
+
+    fn display_identity(&self) -> String {
+        match &self.identity.firmware_id {
+            Some(id) => id.clone(),
+            None => self.identity.alias.clone().unwrap_or_default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Firmware property snapshot
+// ---------------------------------------------------------------------------
+
+/// One firmware node property, eagerly typed when the byte encoding is
+/// unambiguous (`of_property_read_u32`-style views come from these).
+///
+/// Multi-cell payloads stay [`FirmwareProp::Bytes`] — length alone cannot
+/// prove list intent; consumers reinterpret with the rules the
+/// device-tree specification states for the property they know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirmwareProp {
+    /// Zero-length property — presence is the information.
+    Empty,
+    /// One NUL-terminated string.
+    Str(&'static str),
+    /// NUL-separated string list.
+    StrList(Vec<&'static str>),
+    /// One big-endian u32 cell.
+    U32(u32),
+    /// One big-endian u64 value.
+    U64(u64),
+    /// Everything else (raw cells, mixed payloads).
+    Bytes(&'static [u8]),
+}
+
+impl FirmwareProp {
+    /// Reinterpret as one u32 cell; `None` unless the encoding is exactly
+    /// one 4-byte cell.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::U32(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Reinterpret a raw-cells payload as a big-endian u32 list. `None`
+    /// unless the payload is whole 4-byte cells — the parse never
+    /// guesses at list intent.
+    pub fn u32_list(&self) -> Option<alloc::vec::Vec<u32>> {
+        let bytes = match self {
+            Self::Bytes(bytes) => *bytes,
+            _ => return None,
+        };
+        if bytes.len() % core::mem::size_of::<u32>() != 0 {
+            return None;
+        }
+        Some(
+            bytes
+                .chunks_exact(4)
+                .map(|cell| u32::from_be_bytes([cell[0], cell[1], cell[2], cell[3]]))
+                .collect(),
+        )
+    }
+}
+
+/// The firmware node's snapshot: the facts a driver can read at probe
+/// time WITHOUT re-walking firmware.
+#[derive(Debug, Clone)]
+pub struct FirmwareNodeInfo {
+    /// DT `phandle` (also used as the clock [`ProviderId`](kclk)).
+    pub phandle: Option<u32>,
+    /// `clock-frequency` property, in Hz (`fixed-clock` nodes).
+    pub clock_frequency: Option<u32>,
+    /// `#clock-cells`; `Some(_)` marks the node as a clock provider.
+    pub clock_cells: Option<u32>,
+    /// First `clock-output-names` entry, if present.
+    pub clock_output_name: Option<&'static str>,
+    /// The node's own properties, firmware order, eagerly typed — the
+    /// `of_property_read_*` surface minus a live device-tree. The four
+    /// clock fields above are the extracted fast path; everything a
+    /// driver's quirk table needs (`vendor,foo-capability`, ...) lives
+    /// here.
+    pub properties: Vec<(&'static str, FirmwareProp)>,
+}
+
+impl FirmwareNodeInfo {
+    /// An empty snapshot (a node with no extractable facts).
+    pub const EMPTY: Self = Self {
+        phandle: None,
+        clock_frequency: None,
+        clock_cells: None,
+        clock_output_name: None,
+        properties: Vec::new(),
+    };
+
+    /// Look up one property snapshot entry by name.
+    pub fn prop(&self, name: &str) -> Option<&FirmwareProp> {
+        self.properties
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Id tables
+// ---------------------------------------------------------------------------
+
+/// One row of a driver's platform id table: a firmware compatible string.
+///
+/// Translating a Linux match table is a data edit:
+///
+/// ```ignore
+/// static const struct of_device_id foo_of_match[] = {
+///     { .compatible = "vendor,generic-ip" }, {}
+/// };
+/// ```
+///
+/// becomes `static IDS: &[OfMatch] = &[OfMatch::compatible("vendor,generic-ip")];`.
+#[derive(Debug, Clone, Copy)]
+pub struct OfMatch {
+    pub compatible: &'static str,
+}
+
+impl OfMatch {
+    pub const fn compatible(compatible: &'static str) -> Self {
+        Self { compatible }
+    }
+}
+
+/// One board-static alias row (`ramdisk`, `serial0`, ...): matches the
+/// device's board alias exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct AliasMatch {
+    pub alias: &'static str,
+}
+
+impl AliasMatch {
+    pub const fn new(alias: &'static str) -> Self {
+        Self { alias }
+    }
+}
+
+/// The platform bus's id table row (the `platform_device_id` union shape).
+#[derive(Debug, Clone, Copy)]
+pub enum PlatformId {
+    Of(OfMatch),
+    Alias(AliasMatch),
+}
+
+// ---------------------------------------------------------------------------
+// The bus
+// ---------------------------------------------------------------------------
+
+/// The platform bus: firmware nodes + board-static devices.
+///
+/// The reference implementation of [`Bus`]; a dedicated crate eventually.
+pub struct PlatformBus;
+
+impl Bus for PlatformBus {
+    type DeviceData = PlatformBusData;
+    type IdEntry = PlatformId;
+
+    const ID: BusId = BusId("platform");
+
+    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore {
+        match entry {
+            PlatformId::Of(of) => {
+                // of_device_id semantics: the driver entry matches if it
+                // names ANY of the node's compatible strings (a
+                // SoC-specific entry followed by the generic IP name is
+                // the common DT spelling).
+                if data.identity.compatibles.iter().any(|c| c == of.compatible) {
+                    MatchScore::Exact
+                } else {
+                    MatchScore::NoMatch
+                }
+            }
+            PlatformId::Alias(alias) => match &data.identity.alias {
+                Some(candidate) if candidate == alias.alias => MatchScore::Exact,
+                _ => MatchScore::NoMatch,
+            },
+        }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    //! of_device_id matching semantics: a driver entry matches if it names
+    //! ANY of the node's compatible strings — SoC DT nodes commonly spell
+    //! `compatible = "vendor,soc-widget", "vendor,generic-ip"` and the generic IP
+    //! driver must still claim the device.
+
+    use unittest::{assert_eq, def_test};
+
+    use super::{FirmwareNodeInfo, MatchScore, OfMatch, PlatformBus, PlatformBusData, PlatformId};
+    use crate::bus::Bus;
+
+    fn node(compatibles: &[&str]) -> PlatformBusData {
+        PlatformBusData::firmware_node(0, compatibles, FirmwareNodeInfo::EMPTY)
+    }
+
+    #[def_test(serial)]
+    fn of_match_hits_any_compatible_not_just_primary() {
+        // Neutral fixture strings on purpose: rule L0-a says this crate
+        // names no device family, and the check is mechanical.
+        let data = node(&["vendor,soc-widget", "vendor,generic-ip"]);
+        let row = PlatformId::Of(OfMatch::compatible("vendor,generic-ip"));
+        assert_eq!(PlatformBus::match_device(&data, &row), MatchScore::Exact);
+    }
+
+    #[def_test(serial)]
+    fn of_match_misses_when_no_compatible_agrees() {
+        let data = node(&["vendor,soc-uart"]);
+        let row = PlatformId::Of(OfMatch::compatible("vendor,other-uart"));
+        assert_eq!(PlatformBus::match_device(&data, &row), MatchScore::NoMatch);
+    }
+
+    #[def_test(serial)]
+    fn alias_match_hits_only_board_static_identity() {
+        let data = PlatformBusData::static_config(0, "board-alias0");
+        let hit = PlatformId::Alias(super::AliasMatch::new("board-alias0"));
+        let miss = PlatformId::Of(OfMatch::compatible("serial0"));
+        assert_eq!(PlatformBus::match_device(&data, &hit), MatchScore::Exact);
+        assert_eq!(PlatformBus::match_device(&data, &miss), MatchScore::NoMatch);
+    }
+
+    #[def_test(serial)]
+    fn modalias_follows_first_compatible() {
+        use crate::bus::BusDeviceData as _;
+        let data = node(&["vendor,generic-ip"]);
+        let modalias = data.modalias();
+        assert_eq!(
+            modalias.as_deref(),
+            Some("of:NcompatT(null)Cvendor,generic-ip")
+        );
+        let static_data = PlatformBusData::static_config(0, "ramdisk");
+        let none = static_data.modalias();
+        assert_eq!(none, None);
+    }
+}

@@ -11,7 +11,7 @@ use unittest::{assert_eq, def_test};
 
 use super::*;
 use crate::{
-    bus::{BusInstanceId, PlatformId},
+    bus::{BusInstanceId, PlatformId, platform_bus::PlatformBusData},
     desc::DeviceDescriptor,
     driver::{DriverDesc, DriverOps},
     handle::{ClkHandle, DevIrq, IoMap, IrqAction},
@@ -96,7 +96,12 @@ impl MockServices {
 }
 
 impl DeviceResourceServices for MockServices {
-    fn iomap(&self, _: u64, region: MmioRegion, _: &'static str) -> Result<IoMap, RuntimeError> {
+    fn iomap(
+        &self,
+        _: crate::device::DeviceId,
+        region: MmioRegion,
+        _: &'static str,
+    ) -> Result<IoMap, RuntimeError> {
         self.mapped.fetch_add(1, Ordering::Relaxed);
         // SAFETY: test mock — the handle is never accessed, only
         // carried; the vaddr is a dummy that satisfies alignment.
@@ -105,7 +110,7 @@ impl DeviceResourceServices for MockServices {
 
     fn request_irq(
         &self,
-        _: u64,
+        _: crate::device::DeviceId,
         spec: IrqSpec,
         _: &'static str,
         _: crate::handle::IrqHandlerFn,
@@ -123,7 +128,7 @@ impl DeviceResourceServices for MockServices {
 
     fn alloc_coherent(
         &self,
-        _: u64,
+        _: crate::device::DeviceId,
         dma: crate::DmaInfo,
         _: usize,
         _: usize,
@@ -143,7 +148,11 @@ impl DeviceResourceServices for MockServices {
         }
     }
 
-    fn map_irq(&self, _: u64, spec: crate::resource::IrqSpec) -> Result<usize, RuntimeError> {
+    fn map_irq(
+        &self,
+        _: crate::device::DeviceId,
+        spec: crate::resource::IrqSpec,
+    ) -> Result<usize, RuntimeError> {
         // Test mock: identity resolution — firmware routes "map" to
         // their hwirq (the identity domain), resolved virqs pass
         // through.
@@ -155,7 +164,11 @@ impl DeviceResourceServices for MockServices {
 }
 
 impl ClockConsumerServices for MockServices {
-    fn clk_get(&self, _: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
+    fn clk_get(
+        &self,
+        _: crate::device::DeviceId,
+        spec: ClkSpec,
+    ) -> Result<ClkHandle, ServiceError> {
         // Bind the lookup OUTSIDE the match: a match scrutinee's
         // temporary lock guard lives for the whole match arm, and the
         // mid-check hook re-enters publish_clk (same clk_providers
@@ -230,7 +243,7 @@ impl DriverOps<PlatformBus> for PickyDriver {
     }
 }
 
-fn test_descriptor() -> DeviceDescriptor {
+fn test_resources() -> crate::resource::ResourceMap {
     let mut resources = crate::resource::ResourceMap::new();
     resources.push_kind(crate::resource::ResourceKind::Mmio(MmioRegion::new(
         0x1000, 0x100,
@@ -243,14 +256,18 @@ fn test_descriptor() -> DeviceDescriptor {
         "baudclk",
         crate::resource::ResourceKind::Clk(ClkSpec::by_phandle_index(0x42, 0)),
     );
+    resources
+}
+
+fn test_descriptor() -> DeviceDescriptor {
+    let resources = test_resources();
     DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::desc::DeviceLocation::FirmwareNode { id: 1 },
-        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-            firmware_id: Some(alloc::string::String::from("test,serial")),
-            compatibles: alloc::vec![alloc::string::String::from("test,serial")],
-            alias: None,
-        }),
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            1,
+            &["test,serial"],
+            crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+        )),
     )
     .with_resources(resources)
 }
@@ -337,11 +354,11 @@ fn late_driver_registration_claims_unclaimed_device() {
 fn late_driver_registration_skips_unmatched_unclaimed() {
     let (domain, _services) = fresh_domain();
     let mut desc = test_descriptor();
-    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-        firmware_id: Some(alloc::string::String::from("nobody,matches")),
-        compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
-        alias: None,
-    });
+    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(
+        1,
+        &["nobody,matches"],
+        crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+    ));
     let id = domain.add_device(desc).expect("add device");
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 
@@ -390,12 +407,11 @@ fn remove_cascades_children_first() {
 
     let parent_desc = DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::desc::DeviceLocation::FirmwareNode { id: 1 },
-        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-            firmware_id: Some(alloc::string::String::from("topo,parent")),
-            compatibles: alloc::vec![alloc::string::String::from("topo,parent")],
-            alias: None,
-        }),
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            1,
+            &["topo,parent"],
+            crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+        )),
     );
     let parent_id = domain.add_device(parent_desc.clone()).expect("add device");
     let _ = domain.probe_pending();
@@ -407,12 +423,11 @@ fn remove_cascades_children_first() {
 
     let child_desc = DeviceDescriptor::new(
         PlatformBus::ID,
-        crate::desc::DeviceLocation::FirmwareNode { id: 2 },
-        crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-            firmware_id: Some(alloc::string::String::from("topo,child")),
-            compatibles: alloc::vec![alloc::string::String::from("topo,child")],
-            alias: None,
-        }),
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            2,
+            &["topo,child"],
+            crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+        )),
     )
     .with_parent(Some(parent_id));
     let child_id = domain.add_device(child_desc).expect("add device");
@@ -439,8 +454,6 @@ fn remove_cascades_children_first() {
 /// new children, and complete on retry.
 #[def_test(serial)]
 fn parent_teardown_waits_for_probing_child() {
-    use crate::desc::DeviceLocation;
-
     static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
     struct ChildDriver {
         domain: &'static DeviceDomain,
@@ -492,12 +505,11 @@ fn parent_teardown_waits_for_probing_child() {
     fn gated_descriptor(compatible: &str, firmware: u32) -> DeviceDescriptor {
         DeviceDescriptor::new(
             PlatformBus::ID,
-            DeviceLocation::FirmwareNode { id: firmware },
-            crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-                firmware_id: Some(alloc::string::String::from(compatible)),
-                compatibles: alloc::vec![alloc::string::String::from(compatible)],
-                alias: None,
-            }),
+            alloc::boxed::Box::new(PlatformBusData::firmware_node(
+                firmware,
+                &[compatible],
+                crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+            )),
         )
     }
 
@@ -574,17 +586,14 @@ fn parent_teardown_waits_for_probing_child() {
 /// bridge-eject semantics).
 #[def_test(serial)]
 fn bus_instances_validate_query_and_bridge_eject() {
-    use crate::desc::DeviceLocation;
-
     fn pci_function(_vendor: u16, firmware: u32) -> DeviceDescriptor {
         DeviceDescriptor::new(
             crate::platform::PlatformBus::ID, // 类型故意用 platform（测类型一致性）
-            DeviceLocation::FirmwareNode { id: firmware },
-            crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-                firmware_id: Some(alloc::string::String::from("bus,test")),
-                compatibles: alloc::vec![alloc::string::String::from("bus,test")],
-                alias: None,
-            }),
+            alloc::boxed::Box::new(PlatformBusData::firmware_node(
+                firmware,
+                &["bus,test"],
+                crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+            )),
         )
     }
 
@@ -830,11 +839,11 @@ fn removing_unbound_device_frees_entry_and_worklists() {
 
     // Unclaimed device (no driver for it).
     let mut desc = test_descriptor();
-    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-        firmware_id: Some(alloc::string::String::from("nobody,matches")),
-        compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
-        alias: None,
-    });
+    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(
+        1,
+        &["nobody,matches"],
+        crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+    ));
     let unclaimed = domain.add_device(desc).expect("add device");
     assert_eq!(
         domain.snapshot(unclaimed).unwrap().state,
@@ -898,11 +907,11 @@ fn fatal_failure_falls_through_to_next_candidate() {
 fn unmatched_descriptor_is_unclaimed() {
     let (domain, _services) = fresh_domain();
     let mut desc = test_descriptor();
-    desc.identity = crate::desc::DeviceIdentity::Platform(crate::desc::PlatformIdentity {
-        firmware_id: Some(alloc::string::String::from("nobody,matches")),
-        compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
-        alias: None,
-    });
+    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(
+        1,
+        &["nobody,matches"],
+        crate::bus::platform_bus::FirmwareNodeInfo::EMPTY,
+    ));
     let id = domain.add_device(desc).expect("add device");
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 }
@@ -943,31 +952,45 @@ fn dma_view_translate_applies_offset_and_enforces_mask() {
 
 #[def_test]
 fn probe_reads_firmware_property_snapshot() {
-    use crate::device::DeviceCtx;
+    use crate::{
+        bus::platform_bus::{FirmwareNodeInfo, FirmwareProp},
+        device::DeviceCtx,
+    };
 
     let (domain, services) = fresh_domain();
-    let mut desc = test_descriptor();
-    desc.firmware = Some(crate::desc::FirmwareNodeInfo {
+    let firmware = FirmwareNodeInfo {
         phandle: None,
         clock_frequency: Some(24_000_000),
         clock_cells: None,
         clock_output_name: None,
         properties: alloc::vec![
-            ("vendor,quirk-cap", crate::FirmwareProp::U32(7)),
-            ("vendor,label", crate::FirmwareProp::Str("rev-b")),
-            ("dma-coherent", crate::FirmwareProp::Empty),
+            ("vendor,quirk-cap", FirmwareProp::U32(7)),
+            ("vendor,label", FirmwareProp::Str("rev-b")),
+            ("dma-coherent", FirmwareProp::Empty),
             (
                 "vendor,dma-window",
-                crate::FirmwareProp::Bytes(&[0, 0, 0, 1, 0, 0, 0, 2]),
+                FirmwareProp::Bytes(&[0, 0, 0, 1, 0, 0, 0, 2]),
             ),
             // The extracted clock fast-fact ALSO lives in the bag — the
             // enumeration snapshot captures every property.
-            ("clock-frequency", crate::FirmwareProp::U32(24_000_000)),
+            ("clock-frequency", FirmwareProp::U32(24_000_000)),
         ],
-    });
+    };
+    let data = PlatformBusData::firmware_node(1, &["test,serial"], firmware);
+    let desc = DeviceDescriptor::new(PlatformBus::ID, alloc::boxed::Box::new(data))
+        .with_resources(test_resources());
     let _ = domain;
 
-    let ctx = DeviceCtx::<PlatformBus>::new(&desc, 1, &*services);
+    let ctx = DeviceCtx::<PlatformBus>::new(
+        desc.data
+            .as_any()
+            .downcast_ref::<PlatformBusData>()
+            .unwrap(),
+        crate::device::DeviceId(1),
+        &desc.resources,
+        desc.dma,
+        &*services,
+    );
     assert_eq!(ctx.fw_u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw_str("vendor,label"), Some("rev-b"));
     assert!(ctx.fw_flag("dma-coherent"));
@@ -997,7 +1020,18 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         coherent: false,
     };
 
-    let mut ctx = DeviceCtx::<PlatformBus>::new(&desc, 1, &*services);
+    let data = desc
+        .data
+        .as_any()
+        .downcast_ref::<PlatformBusData>()
+        .unwrap();
+    let mut ctx = DeviceCtx::<PlatformBus>::new(
+        data,
+        crate::device::DeviceId(1),
+        &desc.resources,
+        desc.dma,
+        &*services,
+    );
     let mem = ctx.alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
@@ -1008,6 +1042,17 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         offset: 0,
         coherent: true,
     };
-    let mut ctx = DeviceCtx::<PlatformBus>::new(&desc, 2, &*services);
+    let data = desc
+        .data
+        .as_any()
+        .downcast_ref::<PlatformBusData>()
+        .unwrap();
+    let mut ctx = DeviceCtx::<PlatformBus>::new(
+        data,
+        crate::device::DeviceId(2),
+        &desc.resources,
+        desc.dma,
+        &*services,
+    );
     assert!(ctx.alloc_coherent(0x1000, 0x1000).is_err());
 }

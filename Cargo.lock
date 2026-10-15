@@ -1193,10 +1193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "device-traits"
-version = "0.3.0-dev"
-
-[[package]]
 name = "dice-driver"
 version = "0.3.0-dev"
 dependencies = [
@@ -1241,7 +1237,6 @@ dependencies = [
 name = "driver-core"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
  "kirq",
  "kspin",
  "lazyinit",

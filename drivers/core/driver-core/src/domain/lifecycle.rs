@@ -126,7 +126,7 @@ impl DeviceDomain {
         }
 
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
-            driver.remove(&desc, id.raw(), data.as_mut(), services.as_ref());
+            driver.remove(&desc, id, data.as_mut(), services.as_ref());
         }
 
         // `device_removed` fires AFTER the final state flip — the name
@@ -229,6 +229,7 @@ impl DeviceDomain {
             return;
         };
         let Some(parent) = parent else { return };
+        let parent = parent.raw();
         if let Some(parent_entry) = inner.devices.get_mut(&parent) {
             parent_entry.topology.children.retain(|child| child != id);
         }

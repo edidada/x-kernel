@@ -83,7 +83,7 @@ impl DeviceDomain {
                 .filter(|(_, entry)| {
                     inner.drivers.iter().any(|candidate| {
                         !entry.binding.attempted.contains(&driver_key(candidate))
-                            && candidate.matches(&entry.desc) != MatchScore::NoMatch
+                            && candidate.matches(entry.desc.data.as_ref()) != MatchScore::NoMatch
                     })
                 })
                 .map(|(id, _)| *id)
@@ -208,7 +208,7 @@ impl DeviceDomain {
             if let Some(parent) = desc.parent {
                 let parent_state = inner
                     .devices
-                    .get(&parent)
+                    .get(&parent.raw())
                     .map(|entry| entry.lifecycle.state);
                 match parent_state {
                     Some(
@@ -226,7 +226,7 @@ impl DeviceDomain {
                         {
                             inner
                                 .devices
-                                .get_mut(&parent)
+                                .get_mut(&parent.raw())
                                 .expect("parent present")
                                 .topology
                                 .children
@@ -235,11 +235,11 @@ impl DeviceDomain {
                     }
                     Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
                         return Err(AddDeviceError::ParentUnavailable {
-                            parent,
+                            parent: parent.raw(),
                             state: state.as_str(),
                         });
                     }
-                    None => return Err(AddDeviceError::ParentMissing(parent)),
+                    None => return Err(AddDeviceError::ParentMissing(parent.raw())),
                 }
             }
             inner.devices.insert(

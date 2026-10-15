@@ -83,7 +83,7 @@
 
 extern crate alloc;
 
-mod bus;
+pub mod bus;
 mod device;
 mod domain;
 mod driver;
@@ -95,13 +95,9 @@ pub mod desc;
 mod handle;
 mod services;
 
-pub use bus::{Bus, BusId, BusInstanceId, IdMatchEntry, MatchScore};
-pub use desc::{
-    DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
-    FirmwareProp, PciIdentity, PlatformIdentity,
-};
+pub use bus::{Bus, BusDeviceData, BusId, BusInstanceId, MatchScore};
+pub use desc::DeviceDescriptor;
 pub use device::{BoundDevice, DeviceCtx, DeviceId};
-pub use device_traits::DeviceKind;
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
@@ -121,10 +117,11 @@ pub use services::{
 };
 
 pub mod platform {
-    //! Reference implementation of the platform ("firmware node") bus.
-    //!
-    //! This belongs in a dedicated `bus-platform` crate eventually; it stays
-    //! here while only the compose root enumerates.
+    //! The platform bus's public vocabulary (moved to
+    //! [`crate::bus::platform_bus`]); re-exported for driver-side imports.
 
-    pub use crate::bus::{AliasMatch, OfMatch, PlatformBus, PlatformId};
+    pub use crate::bus::platform_bus::{
+        AliasMatch, FirmwareNodeInfo, FirmwareProp, OfMatch, PlatformBus, PlatformBusData,
+        PlatformBusIdentity, PlatformId,
+    };
 }

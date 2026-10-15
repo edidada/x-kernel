@@ -57,7 +57,7 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 use crate::{
-    bus::{Bus, BusId, IdMatchEntry, MatchScore},
+    bus::{Bus, BusDeviceData, BusId, MatchScore},
     desc::DeviceDescriptor,
     device::{BoundDevice, DeviceCtx, DeviceId},
     error::{DepSource, ProbeError, RuntimeError},
@@ -160,25 +160,31 @@ pub struct DeviceSnapshot {
     pub bus: BusId,
     pub state: DeviceState,
     pub driver: Option<&'static str>,
-    /// Device kind, when a driver is bound (the class view of the device).
-    pub kind: Option<crate::DeviceKind>,
-    /// Firmware identity string for `/proc` style listings.
+    /// One-line device identity for `/proc` style listings (the bus's own
+    /// vocabulary, via [`BusDeviceData::display_identity`]).
     pub identity: Option<alloc::string::String>,
 }
 
 trait AnyDriver: Send + Sync {
     fn name(&self) -> &'static str;
-    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore;
+    /// The bus this driver is registered for — the cheap rejection before
+    /// any vocabulary work.
+    #[expect(
+        dead_code,
+        reason = "reserved: pre-filter before the vtable call once hot"
+    )]
+    fn bus_id(&self) -> BusId;
+    fn matches(&self, data: &dyn BusDeviceData) -> MatchScore;
     fn probe(
         &self,
         desc: &DeviceDescriptor,
-        id: u64,
+        id: DeviceId,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError>;
     fn remove(
         &self,
         desc: &DeviceDescriptor,
-        id: u64,
+        id: DeviceId,
         data: &mut DataBox,
         services: &dyn DeviceServices,
     );
@@ -193,44 +199,63 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         self.desc.name
     }
 
-    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
+    fn bus_id(&self) -> BusId {
+        B::ID
+    }
+
+    fn matches(&self, data: &dyn BusDeviceData) -> MatchScore {
         // Bus identity first (Linux separates bus_type matching from
         // structural checks): a driver registered for one bus never sees
-        // another bus's devices, even when their location shapes overlap.
-        // accepts() only validates the descriptor's structural fit.
-        if desc.bus != B::ID || !B::accepts(desc) {
+        // another bus's devices.
+        if data.bus_id() != B::ID {
             return MatchScore::NoMatch;
         }
-        self.desc
-            .ids
-            .iter()
-            .map(|entry| entry.matches(desc))
-            .max()
+        // The one downcast in the match path, guarded by the bus_id check
+        // above: recover this driver's bus vocabulary and let the bus's
+        // own rule score its table.
+        data.as_any()
+            .downcast_ref::<B::DeviceData>()
+            .map(|typed| {
+                self.desc
+                    .ids
+                    .iter()
+                    .map(|entry| B::match_device(typed, entry))
+                    .max()
+                    .unwrap_or(MatchScore::NoMatch)
+            })
             .unwrap_or(MatchScore::NoMatch)
     }
 
     fn probe(
         &self,
         desc: &DeviceDescriptor,
-        id: u64,
+        id: DeviceId,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError> {
-        // MODALIAS: the alias of the BEST-SCORING matching id row — the
-        // same row `matches()` selects the driver by. A first-match pick
-        // here could pair an exact-match device with a generic row's
-        // alias (uevent/module loading would see the wrong identity).
-        let modalias = self
-            .desc
-            .ids
-            .iter()
-            .filter_map(|entry| {
-                let score = entry.matches(desc);
-                (score != MatchScore::NoMatch).then(|| (score, entry.modalias()))
-            })
-            .max_by_key(|(score, _)| *score)
-            .and_then(|(_, alias)| alias);
-        let modalias_ref = modalias.as_deref();
-        let mut ctx = DeviceCtx::with_modalias(desc, id, modalias_ref, services);
+        // MODALIAS is DEVICE-derived (of_modalias semantics: the first
+        // compatible string), not id-row-derived — module loading matches
+        // the same string the bus published.
+        let modalias = desc.data.modalias();
+        // The bus_id check happened in matches(); probe runs on a device
+        // this driver bound, so the downcast is total. A mismatching bus
+        // is a domain-internal invariant violation, not a driver error.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is                       a domain-internal invariant violation, not a driver error"
+        )]
+        let typed = desc
+            .data
+            .as_any()
+            .downcast_ref::<B::DeviceData>()
+            .expect("the domain only probes devices the driver matched");
+        let mut ctx = DeviceCtx::with_modalias(
+            typed,
+            id,
+            &desc.resources,
+            desc.dma,
+            modalias.as_deref(),
+            services,
+        );
         let data = self.desc.ops.probe(&mut ctx)?;
         Ok(Box::new(data))
     }
@@ -238,7 +263,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
     fn remove(
         &self,
         desc: &DeviceDescriptor,
-        id: u64,
+        id: DeviceId,
         data: &mut DataBox,
         services: &dyn DeviceServices,
     ) {
@@ -250,7 +275,16 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         let data = data
             .downcast_mut::<P::Data>()
             .expect("device data belongs to the driver that probed it");
-        let mut bound = BoundDevice::new(desc, id, data, services);
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
+        )]
+        let typed = desc
+            .data
+            .as_any()
+            .downcast_ref::<B::DeviceData>()
+            .expect("the domain only removes devices the driver bound");
+        let mut bound = BoundDevice::new(typed, id, data, services);
         self.desc.ops.remove(&mut bound);
     }
 }
@@ -336,7 +370,7 @@ struct NoServices;
 impl DeviceResourceServices for NoServices {
     fn iomap(
         &self,
-        _: u64,
+        _: crate::device::DeviceId,
         _: MmioRegion,
         _: &'static str,
     ) -> Result<crate::handle::IoMap, RuntimeError> {
@@ -345,7 +379,7 @@ impl DeviceResourceServices for NoServices {
 
     fn request_irq(
         &self,
-        _: u64,
+        _: crate::device::DeviceId,
         _: IrqSpec,
         _: &'static str,
         _: crate::handle::IrqHandlerFn,
@@ -355,7 +389,7 @@ impl DeviceResourceServices for NoServices {
 
     fn alloc_coherent(
         &self,
-        _: u64,
+        _: crate::device::DeviceId,
         _: crate::DmaInfo,
         _: usize,
         _: usize,
@@ -363,13 +397,21 @@ impl DeviceResourceServices for NoServices {
         Err(RuntimeError::Unsupported)
     }
 
-    fn map_irq(&self, _: u64, _: crate::resource::IrqSpec) -> Result<usize, RuntimeError> {
+    fn map_irq(
+        &self,
+        _: crate::device::DeviceId,
+        _: crate::resource::IrqSpec,
+    ) -> Result<usize, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 }
 
 impl ClockConsumerServices for NoServices {
-    fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::handle::ClkHandle, ServiceError> {
+    fn clk_get(
+        &self,
+        _: crate::device::DeviceId,
+        _: ClkSpec,
+    ) -> Result<crate::handle::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }
@@ -456,18 +498,7 @@ fn snapshot_of(id: DeviceId, entry: &DeviceEntry) -> DeviceSnapshot {
         bus: entry.desc.bus,
         state: entry.lifecycle.state,
         driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
-        kind: None,
-        identity: match &entry.desc.identity {
-            crate::desc::DeviceIdentity::Platform(platform) => platform
-                .firmware_id
-                .clone()
-                .or_else(|| platform.alias.clone()),
-            crate::desc::DeviceIdentity::Pci(pci) => Some(alloc::format!(
-                "pci {:#06x}:{:#06x}",
-                pci.vendor_id,
-                pci.device_id
-            )),
-        },
+        identity: Some(entry.desc.data.display_identity()),
     }
 }
 

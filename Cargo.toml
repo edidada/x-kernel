@@ -13,7 +13,6 @@ members = [
     "tee/tee_crypto",
     "tee/xdice",
     "drivers/core/driver-core",
-    "drivers/common/device-traits",
 ]
 exclude = [
     # Preserved upstream crate, with its own standalone host test workspace.
@@ -198,7 +197,6 @@ display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
 device_res = { path = "drivers/contracts/device-res", package = "device-res" }
 kclass = { path = "drivers/contracts/kclass" }
-device_traits = { path = "drivers/common/device-traits", package = "device-traits" }
 driver-core = { path = "drivers/core/driver-core" }
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }

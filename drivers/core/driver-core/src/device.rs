@@ -9,10 +9,9 @@ use core::marker::PhantomData;
 
 use crate::{
     bus::Bus,
-    desc::{DeviceDescriptor, FirmwareProp},
     error::{DepSource, ProbeError, RuntimeError},
     handle::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction},
-    resource::{ClkSpec, IrqSpec, MmioRegion},
+    resource::{ClkSpec, IrqSpec, MmioRegion, ResourceMap},
     services::{DeviceServices, ExtensionService},
 };
 
@@ -42,8 +41,12 @@ impl core::fmt::Display for DeviceId {
 /// Every method either succeeds, fails fatally, or — for dependency-backed
 /// resources — returns [`ProbeError::Deferred`].
 pub struct DeviceCtx<'a, B: Bus> {
-    descriptor: &'a DeviceDescriptor,
-    id: u64,
+    /// The bus's own data vocabulary — typed: probe runs where the bus is
+    /// statically known, so drivers read bus facts without any erasure.
+    data: &'a B::DeviceData,
+    id: DeviceId,
+    resources: &'a ResourceMap,
+    dma: crate::resource::DmaInfo,
     modalias: Option<&'a str>,
     services: &'a dyn DeviceServices,
     _bus: PhantomData<fn(&B)>,
@@ -52,51 +55,53 @@ pub struct DeviceCtx<'a, B: Bus> {
 impl<'a, B: Bus> DeviceCtx<'a, B> {
     /// Constructed by the domain when it probes a device.
     pub fn new(
-        descriptor: &'a DeviceDescriptor,
-        id: u64,
+        data: &'a B::DeviceData,
+        id: DeviceId,
+        resources: &'a ResourceMap,
+        dma: crate::resource::DmaInfo,
         services: &'a dyn DeviceServices,
     ) -> Self {
-        Self {
-            descriptor,
-            id,
-            modalias: None,
-            services,
-            _bus: PhantomData,
-        }
+        Self::with_modalias(data, id, resources, dma, None, services)
     }
 
-    /// Constructed by the domain with the matched id row's `MODALIAS`.
+    /// Constructed by the domain with the device's `MODALIAS`.
     pub fn with_modalias(
-        descriptor: &'a DeviceDescriptor,
-        id: u64,
+        data: &'a B::DeviceData,
+        id: DeviceId,
+        resources: &'a ResourceMap,
+        dma: crate::resource::DmaInfo,
         modalias: Option<&'a str>,
         services: &'a dyn DeviceServices,
     ) -> Self {
         Self {
-            descriptor,
+            data,
             id,
+            resources,
+            dma,
             modalias,
             services,
             _bus: PhantomData,
         }
     }
 
-    /// The `MODALIAS` derived from the id-table row this device matched
-    /// (published through uevent so userland can load drivers by alias).
+    /// The `MODALIAS` derived from the device's own bus data (published
+    /// through uevent so userland can load drivers by alias).
     pub fn modalias(&self) -> Option<&str> {
         self.modalias
     }
 
     pub const fn id(&self) -> DeviceId {
-        DeviceId(self.id)
+        self.id
     }
 
-    pub const fn descriptor(&self) -> &'a DeviceDescriptor {
-        self.descriptor
+    /// The bus's device data — typed: probe runs where the bus is
+    /// statically known.
+    pub const fn bus_data(&self) -> &'a B::DeviceData {
+        self.data
     }
 
-    pub fn resources(&self) -> &crate::resource::ResourceMap {
-        &self.descriptor.resources
+    pub fn resources(&self) -> &ResourceMap {
+        self.resources
     }
 
     /// `platform_get_resource(pdev, IORESOURCE_MEM, n)`.
@@ -198,41 +203,14 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
     }
 
     /// `dmam_alloc_coherent(dev, size, dma_handle, gfp)` — the device's own
-    /// DMA view (mask/offset/coherency from the descriptor) travels with
+    /// DMA view (mask/offset/coherency from enumeration) travels with
     /// the request; the returned `CoherentMem::bus_addr` is the
     /// DEVICE-visible address (CPU-physical translated through
     /// `dma-ranges`), not the host allocation's raw paddr.
     pub fn alloc_coherent(&mut self, len: usize, align: usize) -> Result<CoherentMem, ProbeError> {
         self.services
-            .alloc_coherent(self.id, self.descriptor.dma, len, align)
+            .alloc_coherent(self.id, self.dma, len, align)
             .map_err(ProbeError::Fatal)
-    }
-
-    /// Look up one firmware node property by name (`of_property_read_*`):
-    /// the enumeration-time snapshot of the node, eagerly typed. Returns
-    /// `None` for devices with no firmware description (static devices)
-    /// or when the property is absent — the `vendor,foo-capability` quirk
-    /// path, answerable at probe without re-walking firmware.
-    pub fn fw_prop(&self, name: &str) -> Option<&FirmwareProp> {
-        self.descriptor.firmware.as_ref()?.prop(name)
-    }
-
-    /// `of_property_read_u32` on the snapshot.
-    pub fn fw_u32(&self, name: &str) -> Option<u32> {
-        self.fw_prop(name).and_then(FirmwareProp::as_u32)
-    }
-
-    /// `of_property_read_string` on the snapshot.
-    pub fn fw_str(&self, name: &str) -> Option<&'static str> {
-        match self.fw_prop(name)? {
-            FirmwareProp::Str(value) => Some(*value),
-            _ => None,
-        }
-    }
-
-    /// `of_property_read_bool` on the snapshot: presence is the value.
-    pub fn fw_flag(&self, name: &str) -> bool {
-        self.fw_prop(name).is_some()
     }
 
     /// `clk_get(dev, id)`: resolves a `clock-names` entry and acquires the
@@ -273,9 +251,9 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
 /// quiesce here (stop queues, mask interrupts at the device, drain work)
 /// exactly as they do in Linux.
 pub struct BoundDevice<'a, B: Bus, D> {
-    descriptor: &'a DeviceDescriptor,
-    id: u64,
-    data: &'a mut D,
+    data: &'a B::DeviceData,
+    id: DeviceId,
+    driver_data: &'a mut D,
     services: &'a dyn DeviceServices,
     _bus: PhantomData<fn(&B)>,
 }
@@ -283,37 +261,68 @@ pub struct BoundDevice<'a, B: Bus, D> {
 impl<'a, B: Bus, D> BoundDevice<'a, B, D> {
     /// Constructed by the domain when it removes a device.
     pub fn new(
-        descriptor: &'a DeviceDescriptor,
-        id: u64,
-        data: &'a mut D,
+        data: &'a B::DeviceData,
+        id: DeviceId,
+        driver_data: &'a mut D,
         services: &'a dyn DeviceServices,
     ) -> Self {
         Self {
-            descriptor,
-            id,
             data,
+            id,
+            driver_data,
             services,
             _bus: PhantomData,
         }
     }
 
     pub const fn id(&self) -> DeviceId {
-        DeviceId(self.id)
+        self.id
     }
 
-    pub const fn descriptor(&self) -> &'a DeviceDescriptor {
-        self.descriptor
+    /// The bus's device data — typed, as in probe.
+    pub const fn bus_data(&self) -> &'a B::DeviceData {
+        self.data
     }
 
     pub const fn data(&self) -> &D {
-        self.data
+        self.driver_data
     }
 
     pub fn data_mut(&mut self) -> &mut D {
-        self.data
+        self.driver_data
     }
 
     pub fn services(&self) -> &'a dyn DeviceServices {
         self.services
+    }
+}
+
+/// Platform-bus extension: the DT property surface.
+///
+/// `of_property_read_*` in Linux works on the device's OF node —
+/// platform-bus vocabulary, reachable only where the bus type is known.
+impl<'a> DeviceCtx<'a, crate::bus::platform_bus::PlatformBus> {
+    /// `of_property_read_*` on the snapshot.
+    pub fn fw_prop(&self, name: &str) -> Option<&crate::bus::platform_bus::FirmwareProp> {
+        self.bus_data().firmware.as_ref()?.prop(name)
+    }
+
+    /// `of_property_read_u32` on the snapshot.
+    pub fn fw_u32(&self, name: &str) -> Option<u32> {
+        self.fw_prop(name)
+            .and_then(crate::bus::platform_bus::FirmwareProp::as_u32)
+    }
+
+    /// `of_property_read_string` on the snapshot.
+    pub fn fw_str(&self, name: &str) -> Option<&'static str> {
+        match self.fw_prop(name)? {
+            crate::bus::platform_bus::FirmwareProp::Str(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// `of_property_read_bool` on the snapshot: presence is the value.
+    pub fn fw_flag(&self, name: &str) -> bool {
+        self.fw_prop(name).is_some()
     }
 }
