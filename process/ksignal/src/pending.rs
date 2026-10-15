@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, collections::vec_deque::VecDeque};
 use core::array;
 
-use crate::{MAX_SIGNALS, SignalInfo, SignalSet, Signo};
+use crate::{MAX_SIGNALS, SignalInfo, SignalSet};
 
 /// Queue for managing pending signals awaiting delivery.
 ///
@@ -56,21 +56,8 @@ impl PendingSignals {
             self.info_rt[signo as usize - 32].push_back(sig);
         } else {
             if !added {
-                // At most one standard signal can be pending. Prefer a
-                // user-originated instance over a kernel-originated one, so
-                // `exec_de_thread` can drop only its own kernel group kill
-                // without losing a concurrent user `kill(2)`/`tgkill(2)`.
-                let slot = &mut self.info_std[signo as usize];
-                // Only `SIGKILL` needs the source distinction: `exec_de_thread`
-                // discards its own kernel group kill and must not also drop a
-                // concurrent user `kill(2)`/`tgkill(2)`. Other positive codes
-                // (e.g. `CLD_*` on a pending SIGCHLD) are real payloads and
-                // keep standard-signal coalescing.
-                let pending_is_kernel = slot.as_ref().is_some_and(|pending| pending.code() > 0);
-                if signo == Signo::SIGKILL && sig.code() <= 0 && pending_is_kernel {
-                    *slot = Some(Box::new(sig));
-                    return true;
-                }
+                // At most one standard signal instance stays pending; the
+                // first one wins, matching Linux standard-signal coalescing.
                 return false;
             }
             self.info_std[signo as usize] = Some(Box::new(sig));
@@ -92,24 +79,5 @@ impl PendingSignals {
                 self.info_std[signo as usize].take().map(|boxed| *boxed)
             }
         })
-    }
-
-    /// Removes a pending standard signal only when its queued instance is
-    /// kernel-originated (`si_code > 0`), leaving a user-originated instance
-    /// queued. Returns whether an entry was removed.
-    ///
-    /// `exec` de_thread uses this to drop only the group-kill its sibling
-    /// sweep produced, not a concurrent user `kill(2)`/`tgkill(2)`.
-    pub fn discard_kernel_standard(&mut self, signo: Signo) -> bool {
-        if signo.is_realtime() {
-            return false;
-        }
-        let slot = &mut self.info_std[signo as usize];
-        if slot.as_ref().is_some_and(|sig| sig.code() > 0) {
-            slot.take();
-            self.set.remove(signo);
-            return true;
-        }
-        false
     }
 }

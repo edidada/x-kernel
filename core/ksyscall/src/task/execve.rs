@@ -273,8 +273,13 @@ fn exec_request(
     // Linux, which only reaches `de_thread()` inside `begin_new_exec` after the
     // binary format is confirmed. Go runtimes (runc init) keep helper threads
     // alive at exec time, so this is the normal path.
-    let was_multithread = kprocess::scheduler::process_task_count(process.as_ref()) > 1;
-    if was_multithread && exec_de_thread() {
+    // `de_thread()` is also required when the group leader already exited and
+    // this is the sole surviving non-leader thread: the group pid must move onto
+    // it before the image is installed, or number-indexed lookups (pidfd,
+    // procfs, `tgkill`) would keep missing the survivor.
+    let needs_takeover = kprocess::scheduler::process_task_count(process.as_ref()) > 1
+        || thread.tid() != process.pid();
+    if needs_takeover && exec_de_thread() {
         // The takeover failed and the current thread was made to exit. Do not
         // swap the address space or install the image: continuing would return
         // to the fatal path and run the thread teardown a second time.
@@ -322,7 +327,7 @@ fn exec_request(
         )
     };
     if let Err(error) = replaced {
-        if was_multithread {
+        if needs_takeover {
             error!("sys_execve: address-space swap failed after de_thread; terminating: {error}");
             posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
             return Ok(0);

@@ -108,16 +108,6 @@ impl ThreadSignalManager {
             .retain(|(_, child)| !alloc::sync::Weak::ptr_eq(child, &this));
     }
 
-    /// Drops a kernel-originated pending signal from this thread and from the
-    /// process queue, leaving user-originated instances queued.
-    ///
-    /// `exec` de_thread uses this to remove only the group-kill its sibling
-    /// sweep produced; a concurrent user `kill(2)`/`tgkill(2)` must survive.
-    pub fn discard_kernel_signal(&self, signo: Signo) {
-        self.pending.lock().discard_kernel_standard(signo);
-        self.proc.discard_kernel_signal(signo);
-    }
-
     /// Dequeues a signal from the thread's pending signals.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {

@@ -597,11 +597,6 @@ impl ProcessSignalManager {
         }
     }
 
-    /// Drops a kernel-originated pending signal, leaving a user-originated one.
-    pub(crate) fn discard_kernel_signal(&self, signo: Signo) {
-        self.pending.lock().discard_kernel_standard(signo);
-    }
-
     /// Finds a suitable thread and reports whether any live thread blocks it.
     fn find_target_thread(&self, signo: Signo) -> (Option<u32>, bool) {
         let mut target_tid = None;

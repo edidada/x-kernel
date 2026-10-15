@@ -323,20 +323,6 @@ impl Process {
 
     /// Clears group-exit bookkeeping after a `de_thread()` sibling sweep.
     ///
-    /// `execve` on a multithreaded process SIGKILLs and reaps its sibling
-    /// threads; the first death marks the whole group exited and records that
-    /// thread's status. `de_thread` then undoes the exit marking so the execing
-    /// thread survives the next signal check and reports its own exit code.
-    ///
-    /// The recorded `exit_code` is kept: it can belong to a concurrent
-    /// `exit_group()` that raced the sweep, and clearing it would make the
-    /// group's termination unobservable. A later exit overwrites it only while
-    /// `group_exited` is again unset.
-    pub fn reset_group_exit(&self) {
-        let mut group = self.group_exit.lock();
-        group.group_exited = false;
-    }
-
     /// The parent-death signal recorded by `prctl(PR_SET_PDEATHSIG)` — the
     /// signal this process should receive when its parent dies first. Zero
     /// when unset. Storage only: the parent-exit delivery path is not wired

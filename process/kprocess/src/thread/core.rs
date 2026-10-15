@@ -182,6 +182,12 @@ pub struct Thread {
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
+    /// Set while this thread is a `de_thread` sibling-sweep target.
+    ///
+    /// Its fatal-signal death must not mark the whole group exited or broadcast
+    /// a group kill; the execing thread orchestrates the sweep and must survive
+    /// it. See `exec_de_thread`.
+    exec_sweep_target: AtomicBool,
     accessing_user_memory: AtomicBool,
     pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
@@ -265,6 +271,7 @@ impl Thread {
             nice: AtomicI32::new(NiceValue::default().as_i32()),
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
+            exec_sweep_target: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
             restart_block: Mutex::new(RestartSlot::empty()),
             no_new_privileges: AtomicBool::new(no_new_privileges),
@@ -519,6 +526,19 @@ impl Thread {
     /// Marks the thread as exiting.
     pub fn set_exit(&self) {
         self.is_exiting.store(true, Ordering::Release);
+    }
+
+    /// Marks this thread as a `de_thread` sibling-sweep target.
+    ///
+    /// A sweep target's fatal death skips the group-exit marking and group-kill
+    /// broadcast in `do_exit`, so the execing thread survives the sweep.
+    pub fn mark_exec_sweep_target(&self) {
+        self.exec_sweep_target.store(true, Ordering::Release);
+    }
+
+    /// Returns whether this thread is a `de_thread` sibling-sweep target.
+    pub fn is_exec_sweep_target(&self) -> bool {
+        self.exec_sweep_target.load(Ordering::Acquire)
     }
 
     /// Returns whether the thread is currently performing a user-memory access.

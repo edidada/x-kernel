@@ -204,11 +204,19 @@ earlier changes: the operation is not an all-state rollback transaction. The
 combined metadata update is atomic, but separate path and cmdline calls need not
 observe the same generation across a concurrent exec.
 
-`de_thread`: `execve` on a multi-threaded process (Go runtimes, OCI container
-init) first SIGKILLs every sibling thread and joins them, so only the execing
-thread reaches the shared address-space swap. The first sibling's death marked
-the group exited and queued a group-kill `SIGKILL` for the execing thread;
-`reset_group_exit` and a queued-signal drain undo both. `execve` also installs
+`de_thread`: `execve` serializes on the process-wide `exec` gate
+(`Process::acquire_exec_gate`, Linux `cred_guard_mutex`), so two sibling execs
+cannot SIGKILL and join each other in a mutual deadlock; the loser waits
+interruptibly and is killed by the winner's sweep. A multi-threaded process (Go
+runtimes, OCI container init) then SIGKILLs every sibling thread and joins them,
+so only the execing thread reaches the shared address-space swap. Each swept
+target is marked (`Thread::mark_exec_sweep_target`) so its fatal death skips the
+group-exit marking and group-kill broadcast, and the sweep runs whenever the
+execing thread is not the group leader — including when the leader already
+exited and this is the sole surviving non-leader, so the group pid moves onto
+the survivor. A genuine concurrent `exit_group()` still marks the group exited,
+and `exec_de_thread` aborts the exec in that case instead of undoing it.
+`execve` also installs
 the opened backing executable file (`with_exe_file`), replacing/inheriting the
 display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
 across exec, fork, and the init process created via `fork` + `execve`.
