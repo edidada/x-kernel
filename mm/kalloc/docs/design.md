@@ -125,7 +125,7 @@ mm/kalloc/
 
 Other paths:
   large Rust allocation ---------------------------> page allocator
-  DMA32 / alloc_pages_at --------------------------> page allocator directly
+  DMA32 ------------------------------------------> page allocator directly
   GlobalPage --------------------------------------> FrameRun + base-page holds
   tracking ----------------------------------------> wraps Rust GlobalAlloc path
 ```
@@ -241,7 +241,8 @@ allocator。
 block 直接归还 buddy。特殊对齐取得的小 block 在 free 后也可以作为普通同页数 block
 进入 PCP，因为其地址至少满足普通页对齐。
 
-`alloc_pages_at()` 需要指定起始虚拟地址，因此绕过 PCP，直接调用 buddy 的定址接口。
+定址算法接口保留在 `alloc-engine::PageAllocator`，供底层算法使用与测试；`kalloc`
+不再提供没有生命周期接管的 `alloc_pages_at` 包装。
 
 ### 页级 PCP
 
@@ -295,7 +296,7 @@ cache 中对象仍被中央 `SlabByteAllocator` 视为 allocated。该 ownership
 每次 fast-path free 都修改中央 freelist，但意味着中央 `used_bytes()` 包含 caller 已经
 free 到 per-CPU cache 的对象。
 
-### DMA32 与定址页
+### DMA32 页
 
 `alloc_dma_frame_run()` 绕过 PCP，先从全局 buddy 取得连续 backing，再通过注册的
 内容映射检查完整 backing 的物理结束地址是否不超过 4 GiB。区间不满足限制时，
@@ -389,7 +390,7 @@ C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内
 | 数据或路径 | 同步 | 备注 |
 |------------|------|------|
 | 中央 byte allocator | `SpinNoIrq` | 所有 allocator metadata mutation 串行化 |
-| 全局 page buddy | `SpinNoIrq` | page slow path、DMA 和定址请求串行化 |
+| 全局 page buddy | `SpinNoIrq` | page slow path 和 DMA 请求串行化 |
 | 当前 CPU PCP | local IRQ off + current-CPU access | 不允许 remote mutation |
 | 当前 CPU slab cache | local IRQ off + current-CPU access | cache hit 不取 `balloc` 锁 |
 | `page_ready` / `heap_ready` | Acquire/Release atomics | page 初始化由 page lock 串行；heap 检查与初始化由 `balloc` 串行 |

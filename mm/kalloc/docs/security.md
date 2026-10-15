@@ -63,7 +63,7 @@ boot memory map / kernel callers / C components / DMA users
 | 边界 | 输入 | 当前处理 | 剩余风险 |
 |------|------|----------|----------|
 | 启动内存 | `kruntime` 从 firmware/boot memory 描述中筛选的 free region，经 `p2v` 传入 | 底层 buddy 拒绝未页对齐、过小、超出 region 数上限或与既有 region 重叠的输入；首个 region 建立 page/byte allocator | 无法验证地址是否真实映射、可写、属于 free RAM 或与 allocator 外部 owner 冲突；端点算术仍依赖可信范围 |
-| Rust 内核 caller | `Layout`、raw allocation pointer、页数、alignment、固定地址、`UsageKind` | allocation 返回 `Result`；部分大小计算和汇总 usage subtraction 使用 checked arithmetic | safe 外观的部分 deallocation API 仍依赖 caller contract，错误参数可能导致 UB |
+| Rust 内核 caller | `Layout`、raw allocation pointer、页数、alignment、`UsageKind` | allocation 返回 `Result`；部分大小计算和汇总 usage subtraction 使用 checked arithmetic | safe 外观的部分 deallocation API 仍依赖 caller contract，错误参数可能导致 UB |
 | DMA / 设备 | 连续页数量、alignment、虚实地址转换结果 | allocation 后检查整个物理区间低于 4 GiB，不满足则归还 | 没有 DMA32 zone；错误 `v2p`、区间溢出或设备越权仍可导致错误 DMA |
 | Tracking/观测 | enable/disable、generation range、visitor | feature-gated、全局锁和递归 guard | backtrace/地址可能泄露内核布局；visitor 重入 tracking API 可能死锁或 panic |
 
@@ -230,7 +230,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 
 ## 故障管理
 
-- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_frame_run,alloc_pages_at,add_memory}` 使用
+- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_frame_run,add_memory}` 使用
   `AllocResult` 报告 `NoMemory`、`InvalidInput` 等错误。
 - Rust `GlobalAlloc::alloc` 不能把普通失败静默传给大多数 Rust allocation；它记录
   layout 和中央 heap 状态后调用 `handle_alloc_error()`。
