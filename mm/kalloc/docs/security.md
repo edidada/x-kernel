@@ -157,7 +157,8 @@ allocation；全部向上取整的 backing 页均由 FrameRun 保持存活。内
 2. 每个 allocation 在任意时刻只有一个 owner：caller、某个 per-CPU cache，或中央
    allocator freelist；不能同时处于两个状态。
 3. byte heap backing page 一旦交给 `balloc`，在其整个生命周期内不得再由 `palloc`
-   分配给其他用途。
+   分配给其他用途。 注册失败时 backing 尚未被接收，必须整块归还页库存；这不是
+   caller 的释放事件，不更新 caller usage。内部 backing 没有公共页引用也不表示空闲。
 4. page allocation/free 使用相同起始地址和页数；byte allocation/free 使用能映射到
    同一底层分配类别的 layout。
 5. PCP 中每个地址都表示对应 `NR_PAGES` 的完整、页对齐、连续 block；3 页等非
@@ -179,7 +180,7 @@ allocation；全部向上取整的 backing 页均由 FrameRun 保持存活。内
 | `BuddyPageAllocator` | `palloc: SpinNoIrq<_>` | NMI 重入、错误 region/page contract |
 | PCP | local IRQ off + current-CPU storage | NMI、CPU offline/remote inspection |
 | slab object cache | local IRQ off + current-CPU storage | NMI、CPU offline/remote inspection |
-| ready flags | Release store / Acquire load | 并发重复初始化的高层协议错误 |
+| ready flags | Release store / Acquire load；heap 检查与初始化持有 `balloc` | page 初始化仍遵守注册与发布协议 |
 | 各类 usage | per-CPU cumulative atomics；free Release / snapshot Acquire | 跨 CPU/跨种类线性化快照、allocator metadata publication、即时 wrong-kind free 检测 |
 | tracking map | `SpinNoIrq<GlobalState>` + per-CPU recursion guard | visitor 对 tracking state 的递归获取 |
 

@@ -553,7 +553,13 @@ impl GlobalAllocator {
                 heap_addr + req_size
             );
             if heap_ready {
-                balloc.add_region(heap_addr, req_size)?;
+                if let Err(error) = balloc.add_region(heap_addr, req_size) {
+                    // Failed registration adopts no storage. Return this exact
+                    // unpublished backing block without inventing a caller free:
+                    // RustHeap raw backing requests were never usage-charged.
+                    self.release_pages_to_inventory(heap_addr, req_size / PAGE_SIZE_4K);
+                    return Err(error);
+                }
             } else {
                 balloc.init_region(heap_addr, req_size);
                 self.heap_ready.store(true, Ordering::Release);
@@ -884,7 +890,12 @@ impl GlobalAllocator {
 
     fn dealloc_pages_inner(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
+        self.release_pages_to_inventory(va, num_pages);
+    }
 
+    /// Returns exclusively owned raw pages without changing caller usage.
+    /// Internal heap handoff rollback was never charged as a byte allocation.
+    fn release_pages_to_inventory(&self, va: usize, num_pages: usize) {
         // Fast path: 1–4 pages -> try to cache them per-CPU.
         if core::ptr::eq(self, &GLOBAL_ALLOCATOR) && (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
             let mut local_owner = AllocLocalOwner::acquire();
@@ -931,6 +942,9 @@ impl GlobalAllocator {
     }
 
     fn bootstrap_heap_if_needed(&self) -> AllocResult {
+        // Serialize readiness, allocation and initialization with ordinary heap
+        // growth. The lock order is balloc -> PCP/palloc throughout both paths.
+        let mut balloc = self.balloc.lock();
         if self.heap_ready.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -939,7 +953,7 @@ impl GlobalAllocator {
             PAGE_SIZE_4K,
             UsageKind::RustHeap,
         )?;
-        self.balloc.lock().init_region(heap_addr, MIN_HEAP_SIZE);
+        balloc.init_region(heap_addr, MIN_HEAP_SIZE);
         self.heap_ready.store(true, Ordering::Release);
         Ok(())
     }

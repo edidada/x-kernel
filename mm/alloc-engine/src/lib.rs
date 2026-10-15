@@ -128,6 +128,10 @@ pub trait BaseAllocator {
     fn init_region(&mut self, base: usize, size: usize);
 
     /// Add a free memory region to the allocator.
+    ///
+    /// On success, the allocator may retain and use the supplied storage until
+    /// it is retired. On error, no part of the region is adopted: the caller
+    /// retains exclusive ownership and may return it to its backing allocator.
     fn add_region(&mut self, base: usize, size: usize) -> AllocResult;
 }
 

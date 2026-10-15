@@ -59,7 +59,9 @@ independent atomic cache and must never be updated outside this protocol.
 | Ownership or bookkeeping corrupted | Double free or an external overwrite can corrupt lists and allow overlapping allocations | Debug assertions and permutation/forged-header tests detect regressions; there is no recovery from arbitrary kernel memory corruption |
 
 Invalid registration and overlaps return `AllocError` before writing new bitmap
-storage. Allocation exhaustion returns `NoMemory`; no partial allocation is
+storage. All `BaseAllocator::add_region` implementations must leave rejected
+storage unadopted; higher-level heap growth relies on this contract to return the
+backing to the page allocator on error. Allocation exhaustion returns `NoMemory`; no partial allocation is
 published. Metadata reservation reduces allocatable capacity and may alter the
 largest available block. Freeing does not scrub old payload: initialization and
 confidentiality before reuse remain the caller's responsibility.

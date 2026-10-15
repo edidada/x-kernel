@@ -219,7 +219,10 @@ page allocator 已完成交接，调用者不得重复初始化。该启动失�
 
 byte heap 首次建立至少使用 32 KiB。后续增长请求参考当前 heap 总量和本次 layout，
 取 power-of-two 大小；page allocation 失败时逐步减半，直到一页或能够容纳 layout 的
-最小 region。byte heap 已取得的 backing region 不主动归还 page allocator。
+最小 region。`add_region` 成功后 backing 由 byte heap 独占，目前不主动归还 page
+allocator；若注册失败，按 `BaseAllocator` 的未接收契约把整块 backing 归还页库存。
+这类内部交接没有增加 caller usage，回滚也不增加 caller 的释放统计。零页引用不表示
+这些 backing 空闲：byte allocator 自己维护内部对象和空闲块的所有权。
 
 deallocation 必须携带原 allocation 的 pointer 和 layout。超过 1 MiB 的大对象返回 page
 allocator；slab-cache-eligible 对象优先进入当前 CPU cache；其他对象返回中央 byte
@@ -389,13 +392,15 @@ C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内
 | 全局 page buddy | `SpinNoIrq` | page slow path、DMA 和定址请求串行化 |
 | 当前 CPU PCP | local IRQ off + current-CPU access | 不允许 remote mutation |
 | 当前 CPU slab cache | local IRQ off + current-CPU access | cache hit 不取 `balloc` 锁 |
-| `page_ready` / `heap_ready` | Acquire/Release atomics | 发布初始化状态；初始化流程仍要求串行 |
+| `page_ready` / `heap_ready` | Acquire/Release atomics | page 初始化由 page lock 串行；heap 检查与初始化由 `balloc` 串行 |
 | 各类 usage | current-CPU cumulative atomics；free Release / snapshot Acquire | 支持跨 CPU free，只提供诊断值 |
 | tracking state | `SpinNoIrq` + per-CPU recursion guard | 仅 `tracking` feature |
 
 byte heap 扩容时允许在持有 `balloc` 后进入 page allocation，形成 `balloc -> palloc` 的
-锁顺序。其他路径不得在持有 `palloc` 时再获取 `balloc`；bootstrap 会先释放 page lock，
-再初始化 byte allocator。usage accounting 不引入额外的 allocator 锁顺序。
+锁顺序。首次 heap bootstrap 同样先持有 `balloc`，在锁内检查 `heap_ready`、申请
+backing、初始化并发布 ready，防止并发路径重复初始化已有 freelist。其他路径不得
+在持有 `palloc` 时再获取 `balloc`；page 初始化交接先释放 page lock 再进入 heap
+bootstrap。usage accounting 不引入额外的 allocator 锁顺序。
 
 ## 设计决策
 

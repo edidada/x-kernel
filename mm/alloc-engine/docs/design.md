@@ -17,6 +17,9 @@ their existing algorithms. This document describes the buddy implementation.
 The caller owns memory discovery, virtual mappings, backing-storage lifetime,
 synchronization and permission to reuse a page. PCP policy belongs to `kalloc`.
 TLB invalidation, page pinning and VMA/object lifetimes belong to higher MM layers.
+`BaseAllocator::add_region` transfers storage into the allocator only on success.
+On error no part is adopted, so the caller can return unpublished backing without
+leaving addresses in any allocator freelist.
 
 ## State and representation
 
