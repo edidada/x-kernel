@@ -710,7 +710,12 @@ impl VmArea {
         self.runtime.as_ref().map(VmRuntimeRef::kind)
     }
 
-    fn has_same_known_runtime_kind(&self, next: &Self) -> bool {
+    fn has_compatible_runtime(&self, next: &Self) -> bool {
+        if let (Some(VmRuntimeRef::Linear(left)), Some(VmRuntimeRef::Linear(right))) =
+            (&self.runtime, &next.runtime)
+        {
+            return left.can_merge_with(right);
+        }
         matches!(
             (self.runtime_kind(), next.runtime_kind()),
             (Some(left), Some(right)) if left == right
@@ -773,7 +778,7 @@ impl VmArea {
             && self.backing == next.backing
             && self.next_page_offset() == Some(next.page_offset)
             && self.file_mapping_contiguous_with(next)
-            && self.has_same_known_runtime_kind(next)
+            && self.has_compatible_runtime(next)
     }
 
     /// Returns a relocated copy of this VMA metadata.

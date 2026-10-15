@@ -37,3 +37,28 @@ fn owned_linear_child_retains_storage_after_parent_unmaps() {
     drop(child);
     assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
 }
+
+
+#[def_test]
+fn adjacent_owned_linear_sources_do_not_merge_or_lose_refault_backing() {
+    let start = VirtAddr::from_usize(0x500000);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let mut space = MmSpace::new_empty_user(start, 64 * PAGE).unwrap();
+    let original = global_allocator().alloc_frame_run(4, PAGE, UsageKind::VirtMem).unwrap();
+    space.map_owned_linear(start, original, 4 * PAGE, flags).unwrap();
+    space.write(start + 2 * PAGE, b"original").unwrap();
+    space.unmap(start, 2 * PAGE).unwrap();
+    let replacement = global_allocator().alloc_frame_run(2, PAGE, UsageKind::VirtMem).unwrap();
+    space.map_owned_linear(start, replacement, 2 * PAGE, flags).unwrap();
+    space.write(start, b"replaced").unwrap();
+    space.vmas.merge_adjacent(start).unwrap();
+    assert_eq!(space.vmas().count(), 2,
+        "different backing owners must not merge after trimming the adjacent source");
+    space.invalidate_present(start, 4 * PAGE).unwrap();
+    space.populate_area(start, 4 * PAGE, flags).unwrap();
+    let mut data = [0u8; 8];
+    space.read(start, &mut data).unwrap();
+    assert_eq!(&data, b"replaced");
+    space.read(start + 2 * PAGE, &mut data).unwrap();
+    assert_eq!(&data, b"original");
+}

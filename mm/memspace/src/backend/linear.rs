@@ -69,6 +69,17 @@ impl LinearBackend {
         })
     }
 
+    pub(crate) fn can_merge_with(&self, other: &Self) -> bool {
+        if self.offset != other.offset {
+            return false;
+        }
+        match (&self.backing, &other.backing) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
     pub fn clone_for_fork_runtime(
         &self,
         _range: VirtAddrRange,

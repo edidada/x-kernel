@@ -364,3 +364,11 @@ later faults. Unmap still finishes the TLB batch before VMA ownership is removed
 Owned linear relocation remains unsupported, as for existing linear runtimes.
 Bookkeeping uses one Arc per backing runtime plus the normal PTE index and VMA
 metadata; this does not implement fallible heap bookkeeping or vmalloc.
+
+
+Linear VMA coalescing also checks the address offset and backing identity. Two
+owned runtimes can merge only when they share the same Arc owner; owned and
+external runtimes cannot merge. External runtimes require the same offset. Merely
+matching Linear kind and page-offset continuity is insufficient after a leading
+range was unmapped and a different allocation filled that hole. Keeping owners
+distinct preserves the correct source when PTEs are invalidated and faulted again.

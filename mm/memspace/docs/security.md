@@ -216,3 +216,10 @@ initialize user-visible contents before mapping; mappings and forked aliases nee
 the caller's normal data synchronization. Whole-run ownership covers rounding
 slack even when only a prefix is visible. A final alias may retain the allocation
 until its runtime ends, rather than implementing per-range reclaim here.
+
+Adjacent VMAs with different linear backing must not be coalesced into one runtime:
+matching kinds/page offsets cannot authorize dropping another backing owner or
+reconstructing its PTEs through the wrong source. The merge predicate checks the
+physical translation offset and managed-owner identity. A regression trims the
+front of one allocation, maps different backing into the hole, requests semantic
+merge, then invalidates/refaults both ranges and verifies their separate contents.
