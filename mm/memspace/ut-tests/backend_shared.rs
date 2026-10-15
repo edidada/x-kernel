@@ -46,12 +46,21 @@ fn shared_backing_survives_backend_drop_and_tlb_retirement() {
         &mut edit,
     )
     .unwrap();
-    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 2 });
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 2 }
+    );
     drop(backend);
     assert_eq!(edit.query(start).unwrap().0, pa);
-    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 1 });
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 1 }
+    );
     edit.unmap(start).unwrap();
-    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 1 });
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 1 }
+    );
     edit.finish();
-    assert_eq!(meta.state(), kalloc::FrameState::Unshared);
+    assert_eq!(meta.state(), kalloc::FrameState::Unreferenced);
 }

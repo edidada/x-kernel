@@ -7,7 +7,7 @@ use core::{ptr::NonNull, sync::atomic::Ordering};
 use alloc_engine::{AllocError, AllocResult};
 use memaddr::{PAGE_SIZE_4K, PhysAddr};
 
-use super::{FrameMeta, PERMANENT, UNSHARED};
+use super::{FrameMeta, PERMANENT, UNREFERENCED};
 
 pub(crate) const MAX_FRAME_REGIONS: usize = 64;
 
@@ -188,7 +188,7 @@ impl FrameRegistry {
             // SAFETY: the selected slot was initialized and its backing remains
             // valid; sharing it only exposes atomic lifetime state.
             let meta = unsafe { &*slot };
-            if meta.refs.load(Ordering::Acquire) != UNSHARED {
+            if meta.refs.load(Ordering::Acquire) != UNREFERENCED {
                 return Err(AllocError::NotAllocated);
             }
         }

@@ -12,6 +12,7 @@ use crate::{GlobalAllocator, UsageKind};
 
 /// One hold on every base page in a physically contiguous allocation.
 ///
+/// A run may have only one owner; holding a run does not require cloning it.
 /// The backing count is a power of two, including buddy rounding slack. Each
 /// page has an independent FrameMeta and can be retained by a FrameRef. Dropping
 /// the run ends its holds; retained pages are returned only after their own last
@@ -147,7 +148,7 @@ impl FrameRun<'static> {
                 .frame_meta(pa / memaddr::PAGE_SIZE_4K)
                 .expect("transferred run must be fully described");
             assert!(
-                matches!(meta.state(), super::FrameState::Shared { .. }),
+                matches!(meta.state(), super::FrameState::Referenced { .. }),
                 "transferred run must remain live"
             );
         }

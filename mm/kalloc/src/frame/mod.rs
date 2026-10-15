@@ -5,8 +5,10 @@
 //! Resident descriptors for allocator-managed base pages.
 //!
 //! A descriptor identifies a physical slot. Finding one does not acquire
-//! ownership of the current allocation, and an unshared slot is not necessarily
-//! free: legacy allocations and allocator caches still own unshared pages.
+//! ownership of the current allocation. Shared references are one supported
+//! lifetime protocol, not the descriptor's identity or a universal requirement.
+//! Zero reference count does not imply free inventory: raw allocations, byte
+//! heaps and allocator caches can own unreferenced pages under their protocols.
 
 mod reference;
 mod registry;
@@ -21,26 +23,28 @@ pub use run::FrameRun;
 
 use crate::UsageKind;
 
-const UNSHARED: usize = 0;
+const UNREFERENCED: usize = 0;
 const PERMANENT: usize = usize::MAX;
 const RETIRING: usize = usize::MAX - 1;
 const INITIALIZING: usize = usize::MAX - 2;
 const MAX_REFERENCES: usize = isize::MAX as usize;
 
-/// Diagnostic snapshot of a resident descriptor's lifetime state.
+/// Diagnostic snapshot of the descriptor's reference protocol.
 ///
-/// An unshared page may be held by a raw allocation or PCP. These snapshots
-/// are not allocation admission checks, and do not acquire a page reference.
+/// This is not a complete page-use or buddy-inventory state. An unreferenced
+/// page may still belong to a raw allocation, byte heap or PCP. Referenced
+/// includes one exclusive owner as well as several shared holders. Reading a
+/// snapshot never acquires ownership or authorizes allocation or release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameState {
-    /// Lifetime is not managed by a `FrameRef` at this instant.
-    Unshared,
+    /// No common lifetime references; this does not establish that RAM is free.
+    Unreferenced,
     /// Descriptor or buddy metadata storage, never allocatable.
     Permanent,
     /// The allocator is publishing the new allocation's initial reference.
     Initializing,
-    /// The current allocation has this many lifetime references.
-    Shared {
+    /// The current allocation has this many lifetime holds, possibly only one.
+    Referenced {
         /// Snapshot of the number of live holders.
         references: usize,
     },
@@ -52,7 +56,10 @@ pub enum FrameState {
 ///
 /// The storage outlives all allocations of the physical page. This descriptor
 /// is not itself a live-page reference; its existence never authorizes a free
-/// or access to the page contents.
+/// or access to the page contents. Allocation users may select an exclusive
+/// owner, shared references or an allocator-internal protocol; the resident
+/// descriptor is common to those choices. Current fields implement references
+/// and accounting only, not object occupancy, page type, COW or device state.
 pub struct FrameMeta {
     refs: AtomicUsize,
     kind: AtomicU8,
@@ -61,25 +68,35 @@ pub struct FrameMeta {
 impl FrameMeta {
     fn new(is_permanent: bool) -> Self {
         Self {
-            refs: AtomicUsize::new(if is_permanent { PERMANENT } else { UNSHARED }),
+            refs: AtomicUsize::new(if is_permanent {
+                PERMANENT
+            } else {
+                UNREFERENCED
+            }),
             kind: AtomicU8::new(UsageKind::Global as u8),
         }
     }
 
-    /// Snapshot of the current lifetime state, without acquiring ownership.
+    /// Reference-protocol snapshot; it neither acquires ownership nor proves
+    /// that the page is free, exclusively usable, or safe to reclaim.
     pub fn state(&self) -> FrameState {
         match self.refs.load(Ordering::Acquire) {
-            UNSHARED => FrameState::Unshared,
+            UNREFERENCED => FrameState::Unreferenced,
             PERMANENT => FrameState::Permanent,
             RETIRING => FrameState::Retiring,
             INITIALIZING => FrameState::Initializing,
-            references => FrameState::Shared { references },
+            references => FrameState::Referenced { references },
         }
     }
 
     fn claim(&self, kind: UsageKind) {
         self.refs
-            .compare_exchange(UNSHARED, INITIALIZING, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(
+                UNREFERENCED,
+                INITIALIZING,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .expect("allocator returned an already referenced or permanent frame");
         // Allocation ownership excludes old holders. Publishing the first
         // reference releases the category initialized for this incarnation.
@@ -149,7 +166,7 @@ impl FrameMeta {
         assert_eq!(self.refs.load(Ordering::Relaxed), RETIRING);
         // No new reference can be acquired from a bare descriptor. Inventory
         // is published only after this store, and nothing resets it afterward.
-        self.refs.store(UNSHARED, Ordering::Release);
+        self.refs.store(UNREFERENCED, Ordering::Release);
     }
 
     /// Whether this slot backs permanent allocator metadata.

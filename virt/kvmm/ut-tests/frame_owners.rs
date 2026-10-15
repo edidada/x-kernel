@@ -17,7 +17,7 @@ fn guest_ram_reservation_owns_rounded_backing_and_zeroes_visible_bytes() {
     let pfn = reservation.hpa_base() as usize / PAGE;
     for index in 0..4 {
         let meta = global_allocator().frame_meta(pfn + index).unwrap();
-        assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
     }
     let mapping = reservation.frames.kernel_addr();
     // SAFETY: this unpublished reservation owns the entire mapped backing and
@@ -29,7 +29,7 @@ fn guest_ram_reservation_owns_rounded_backing_and_zeroes_visible_bytes() {
     assert_eq!(retained.phys_addr(), PhysAddr::from_usize((pfn + 3) * PAGE));
     assert_eq!(
         global_allocator().frame_meta(pfn + 3).unwrap().state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     drop(retained);
     drop(guard);
@@ -50,7 +50,7 @@ fn table_raw_owner_is_restored_and_retired_without_va_identity() {
             .frame_meta(pa.as_usize() / PAGE)
             .unwrap()
             .state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     // SAFETY: raw transfers this exact one-page allocation once. The fixture
     // never gives its table to hardware, so all walkers are already excluded.
@@ -60,6 +60,6 @@ fn table_raw_owner_is_restored_and_retired_without_va_identity() {
             .frame_meta(pa.as_usize() / PAGE)
             .unwrap()
             .state(),
-        FrameState::Unshared
+        FrameState::Unreferenced
     );
 }

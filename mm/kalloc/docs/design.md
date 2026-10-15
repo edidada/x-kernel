@@ -438,10 +438,10 @@ category is immutable while references exist; release publication of the initial
 reference and acquisition when reconstructing a transferred raw reference publish it.
 Clone is checked against the reference limit and never allocates another control block.
 
-The protocol is Unshared → Initializing → Shared(n) → Retiring → Unshared. Unshared
+The protocol is Unreferenced → Initializing → Referenced(n) → Retiring → Unreferenced. Unreferenced
 is not free-state certification: raw owners, heaps and PCP still use that state.
 The last holder wins a single CAS into Retiring, acquiring earlier holders' releases.
-It captures the allocation category, resets to Unshared before inventory publication, then returns
+It captures the allocation category, resets to Unreferenced before inventory publication, then returns
 one physical page through its allocator instance and records one free. The instance
 uses the transitional backend adapter for inventory release. No metadata reset occurs
 after a page is reusable.
@@ -449,10 +449,11 @@ after a page is reusable.
 `FrameRef` provides PA, PFN and kernel-address values, not arbitrary mutable Rust
 slices. It guarantees lifetime, not content exclusivity, COW eligibility or mapping
 invalidation. Consumers must keep references until their I/O/device/translation use
-is finished. This change does not migrate user-PTE ownership or repair truncate.
+is finished. FrameRef itself does not install PTEs or implement truncate:
+managed PTE holders and file invalidation protocols remain separate users.
 
 Raw page release validates the whole range before accounting or PCP/buddy
-mutation. A Shared, Initializing, Retiring or Permanent slot is rejected. This is an
+mutation. A Referenced, Initializing, Retiring or Permanent slot is rejected. This is an
 admission guard, not proof of legacy raw provenance or complete double-free detection.
 The old VA entry is translated only in the adapter; the registry checks a PFN
 range. The range check is linear in the number of base pages, with one segment lookup.
@@ -520,3 +521,27 @@ on retirement as well as selection. This keeps those pages available for DMA32
 allocation and lets a fully retired run coalesce immediately; independent retained
 siblings still block only their own pages. Other kinds retain the ordinary PCP
 policy. DMA retirement remains O(base pages), without a bulk free protocol.
+
+
+## Resident descriptors and ownership protocols
+
+FrameMeta is the resident identity/metadata for each covered base page, analogous
+in role to Linux struct page. FrameRef is one lifetime protocol over it, and
+FrameRun groups one hold per backing base page. Their existence does not require
+every owner to dynamically share pages or every allocator pool to use references.
+No new fields, per-pool control allocations or per-object reference changes are
+introduced here.
+
+FrameState reports the current reference protocol, not an authoritative page-use
+or free-inventory classification. Referenced includes a single exclusive owner;
+Unreferenced includes raw allocations, heap backing, PCP inventory and free pages.
+UsageKind is allocation accounting, not a reclaim predicate or a complete role.
+Only the allocator's inventory protocol can decide whether a page is allocatable.
+Existing descriptor coverage remains the boot FREE ranges handed to the allocator;
+it is not a promise that every possible system PFN has a descriptor.
+
+GlobalPage, table storage, VMM RAM and coherent DMA may use one initial hold as an
+exclusive owner. They do not need an extra clone merely because metadata exists.
+Folio/data-object and independent PTE holders keep sharing their existing holds;
+TLB, COW, file validity and device retirement remain separate protocols. Slab
+backing/reclaim design is outside this adjustment.

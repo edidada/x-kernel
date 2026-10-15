@@ -42,7 +42,10 @@ impl GlobalPage {
                 .frame_meta(paddr.as_usize() / PAGE_SIZE_4K + index)
                 .expect("restored global page must be fully described");
             assert!(
-                matches!(meta.state(), crate::FrameState::Shared { references: 1 }),
+                matches!(
+                    meta.state(),
+                    crate::FrameState::Referenced { references: 1 }
+                ),
                 "GlobalPage data access requires unique ownership"
             );
         }

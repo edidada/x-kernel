@@ -35,9 +35,9 @@ fn mapped_folio_outlives_cache_owner_until_flush() {
         )
         .unwrap();
     modify.finish();
-    assert_eq!(meta.state(), FrameState::Shared { references: 2 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
     drop(folio);
-    assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
     assert_eq!(modify.query(address(1)).unwrap().0, pa);
     // SAFETY: this inactive table still holds the initialized page, and the
     // fixture has no concurrent payload writer or outstanding data borrow.
@@ -45,9 +45,9 @@ fn mapped_folio_outlives_cache_owner_until_flush() {
     assert_eq!(byte, 0x5a);
     modify.unmap(address(1) + 1).unwrap();
     assert_eq!(modify.query(address(1)), Err(PagingError::NotMapped));
-    assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
     assert!(modify.finish().had_pending());
-    assert_eq!(meta.state(), FrameState::Unshared);
+    assert_eq!(meta.state(), FrameState::Unreferenced);
 }
 
 #[def_test]
@@ -84,11 +84,11 @@ fn sparse_invalidation_and_protection_retire_mapping_holds() {
     modify
         .unmap_sparse_region(address(1), 3 * PAGE, PageSize::Size4K)
         .unwrap();
-    assert_eq!(first_meta.state(), FrameState::Shared { references: 2 });
-    assert_eq!(second_meta.state(), FrameState::Shared { references: 2 });
+    assert_eq!(first_meta.state(), FrameState::Referenced { references: 2 });
+    assert_eq!(second_meta.state(), FrameState::Referenced { references: 2 });
     modify.finish();
-    assert_eq!(first_meta.state(), FrameState::Shared { references: 1 });
-    assert_eq!(second_meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(first_meta.state(), FrameState::Referenced { references: 1 });
+    assert_eq!(second_meta.state(), FrameState::Referenced { references: 1 });
 }
 
 #[def_test]
@@ -124,16 +124,16 @@ fn move_mapping_preserves_destination_and_failure_keeps_source() {
         Err(PagingError::AlreadyMapped)
     );
     assert_eq!(modify.query(address(1)).unwrap().0, source.paddr());
-    assert_eq!(meta.state(), FrameState::Shared { references: 2 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
     modify.move_mapping(address(1), address(4)).unwrap();
     assert_eq!(modify.query(address(1)), Err(PagingError::NotMapped));
     assert_eq!(modify.query(address(4)).unwrap().0, source.paddr());
-    assert_eq!(meta.state(), FrameState::Shared { references: 3 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 3 });
     modify.finish();
-    assert_eq!(meta.state(), FrameState::Shared { references: 2 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
     modify.unmap(address(4)).unwrap();
     modify.finish();
-    assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
 }
 
 #[def_test]
@@ -198,7 +198,7 @@ fn large_retirement_batch_balances_every_hold() {
         let meta = global_allocator()
             .frame_meta(folio.paddr().as_usize() / PAGE)
             .unwrap();
-        assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
     }
 }
 
@@ -218,8 +218,8 @@ fn dropping_inactive_table_releases_remaining_data_holds() {
             MappingFlags::READ,
         )
         .unwrap();
-    assert_eq!(meta.state(), FrameState::Shared { references: 2 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
     // No hardware CPU ever used this root; the table's destruction contract holds.
     drop(table);
-    assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
 }

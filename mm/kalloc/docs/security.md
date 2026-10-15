@@ -419,3 +419,14 @@ retired pages could be hidden in a cache that the constrained allocator never
 consults, delaying whole-run coalescing and producing avoidable allocation
 failures. A final-reference test pins one CPU and verifies that ending a DMA run
 and its independent last holder does not alter that CPU's PCP contents.
+
+
+## Descriptor and reference-state distinction
+
+FrameState::Unreferenced is not proof of buddy ownership, and Referenced does not
+imply multiple owners. A single allocation owner is represented by one reference.
+Bare PFN lookup acquires no hold and cannot resurrect any allocation. UsageKind
+must not be used to infer a page's current free/allocated, slab occupancy, COW,
+DMA-completion or mapping-validity state. These contracts allow the same resident
+descriptor foundation to support exclusive and shared ownership without conflating
+storage lifetime with subsystem-specific safe-reuse conditions.

@@ -22,7 +22,7 @@ fn global_page_owns_rounding_slack_and_raw_roundtrip_keeps_requested_size() {
     for index in 0..4 {
         assert_eq!(
             global_allocator().frame_meta(pfn + index).unwrap().state(),
-            FrameState::Shared { references: 1 }
+            FrameState::Referenced { references: 1 }
         );
     }
     let before = crate::current_cpu_allocated_bytes_for_test(&guard);
@@ -31,7 +31,7 @@ fn global_page_owns_rounding_slack_and_raw_roundtrip_keeps_requested_size() {
     assert_eq!(count, 3);
     assert_eq!(
         global_allocator().frame_meta(pfn + 3).unwrap().state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     // SAFETY: exactly the original GlobalPage transfer is consumed once, with
     // no other owners, payload borrows or hardware users of this allocation.

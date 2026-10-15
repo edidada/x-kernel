@@ -102,11 +102,11 @@ mod tests_frame_refs {
         let meta = global_allocator()
             .frame_meta(pa.as_usize() / PAGE_SIZE_4K)
             .unwrap();
-        assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
         // The fixture never installs this frame as an active hardware table,
         // so no translation retirement is needed before ending its ownership.
         PagingHandlerImpl::dealloc_frame(pa);
-        assert_eq!(meta.state(), FrameState::Unshared);
+        assert_eq!(meta.state(), FrameState::Unreferenced);
     }
     #[def_test]
     fn owned_replacement_keeps_old_backing_until_tlb_finish() {
@@ -128,7 +128,7 @@ mod tests_frame_refs {
         let snapshot = edit.query_entry(address).unwrap();
         edit.replace_owned_if_same(address, snapshot, new, flags)
             .unwrap();
-        assert_eq!(old_meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(old_meta.state(), FrameState::Referenced { references: 1 });
         let rejected = allocator
             .alloc_frame_run(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
             .unwrap();
@@ -136,13 +136,13 @@ mod tests_frame_refs {
             edit.replace_owned_if_same(address, snapshot, rejected, flags),
             Err(page_table::PteReplaceError::Changed { .. })
         ));
-        assert_eq!(new_meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(new_meta.state(), FrameState::Referenced { references: 1 });
         edit.finish();
-        assert_eq!(old_meta.state(), FrameState::Unshared);
+        assert_eq!(old_meta.state(), FrameState::Unreferenced);
         edit.unmap(address).unwrap();
-        assert_eq!(new_meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(new_meta.state(), FrameState::Referenced { references: 1 });
         edit.finish();
-        assert_eq!(new_meta.state(), FrameState::Unshared);
+        assert_eq!(new_meta.state(), FrameState::Unreferenced);
     }
 
     #[def_test]
@@ -171,14 +171,14 @@ mod tests_frame_refs {
         for index in 0..size as usize / PAGE_SIZE_4K {
             assert_eq!(
                 allocator.frame_meta(first + index).unwrap().state(),
-                FrameState::Shared { references: 2 }
+                FrameState::Referenced { references: 2 }
             );
         }
         edit.finish();
         for index in 0..size as usize / PAGE_SIZE_4K {
             assert_eq!(
                 allocator.frame_meta(first + index).unwrap().state(),
-                FrameState::Shared { references: 1 }
+                FrameState::Referenced { references: 1 }
             );
         }
         drop(observer);

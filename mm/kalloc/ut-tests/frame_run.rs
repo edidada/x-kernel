@@ -55,7 +55,7 @@ fn rounded_run_describes_all_backing_and_retains_one_page_independently() {
                 .frame_meta(first_pfn + index)
                 .unwrap()
                 .state(),
-            FrameState::Shared { references: 1 }
+            FrameState::Referenced { references: 1 }
         );
     }
     assert!(matches!(
@@ -70,7 +70,7 @@ fn rounded_run_describes_all_backing_and_retains_one_page_independently() {
     assert_eq!(retained.usage_kind(), UsageKind::Global);
     assert_eq!(
         fixture.allocator.frame_meta(first_pfn + 3).unwrap().state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     // Exhaust the private inventory to prove that partial retirement cannot
     // hand the retained page to a new owner.
@@ -135,7 +135,7 @@ fn run_accounts_actual_backing_and_raw_transfer_preserves_counts() {
     let (pa, count) = run.into_raw();
     assert_eq!(
         allocator.frame_meta(pfn + 7).unwrap().state(),
-        FrameState::Shared { references: 2 }
+        FrameState::Referenced { references: 2 }
     );
     // SAFETY: this exactly consumes the complete run transfer above; all page
     // holds are still live and the fixture never exposes them to hardware.
@@ -143,11 +143,11 @@ fn run_accounts_actual_backing_and_raw_transfer_preserves_counts() {
     drop(restored);
     assert_eq!(
         allocator.frame_meta(pfn).unwrap().state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     assert_eq!(
         allocator.frame_meta(pfn + 7).unwrap().state(),
-        FrameState::Shared { references: 1 }
+        FrameState::Referenced { references: 1 }
     );
     drop(first_peer);
     drop(peer);

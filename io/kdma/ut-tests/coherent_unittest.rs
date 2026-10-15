@@ -61,7 +61,7 @@ impl Ops {
         for index in 0..self.backing {
             assert_eq!(
                 global_allocator().frame_meta(self.paddr.as_usize() / PAGE + index).unwrap().state(),
-                FrameState::Shared { references }
+                FrameState::Referenced { references }
             );
         }
     }

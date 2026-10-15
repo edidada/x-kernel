@@ -12,7 +12,9 @@ use crate::{GlobalAllocator, UsageKind};
 
 /// One lifetime reference to an allocator-managed 4 KiB physical page.
 ///
-/// Cloning shares the same allocation without allocating a control block.
+/// This is a lifetime capability, distinct from the resident FrameMeta. One
+/// reference can implement an exclusive allocation owner; cloning shares the
+/// same allocation without allocating a control block.
 /// The last reference returns the page to its allocator exactly once. This
 /// capability keeps storage alive; it does not grant exclusive content access
 /// or authorize installing or removing a hardware mapping.
@@ -103,7 +105,7 @@ impl FrameRef<'static> {
             .frame_meta(paddr.as_usize() / memaddr::PAGE_SIZE_4K)
             .expect("raw frame reference must belong to this allocator");
         assert!(
-            matches!(meta.state(), super::FrameState::Shared { .. }),
+            matches!(meta.state(), super::FrameState::Referenced { .. }),
             "raw reference must still be live"
         );
         Self {
@@ -204,9 +206,9 @@ mod tests {
         let va = owner.kernel_addr();
         let meta = fixture.allocator.frame_meta(owner.pfn()).unwrap();
         let second = owner.try_clone_ref().unwrap();
-        assert_eq!(meta.state(), FrameState::Shared { references: 2 });
+        assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
         drop(owner);
-        assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
         // A raw caller cannot put the same physical storage into PCP/buddy.
         assert_eq!(
             fixture
@@ -216,7 +218,7 @@ mod tests {
         );
         assert_eq!(counters(UsageKind::Global), (before.0 + PAGE, before.1));
         drop(second);
-        assert_eq!(meta.state(), FrameState::Unshared);
+        assert_eq!(meta.state(), FrameState::Unreferenced);
         assert_eq!(
             counters(UsageKind::Global),
             (before.0 + PAGE, before.1 + PAGE)
@@ -298,7 +300,7 @@ mod tests {
         assert!(matches!(owner.try_clone_ref(), Err(AllocError::NoMemory)));
         assert_eq!(
             owner.meta.state(),
-            FrameState::Shared {
+            FrameState::Referenced {
                 references: MAX_REFERENCES
             }
         );
@@ -314,7 +316,7 @@ mod tests {
         let raw = owner.into_raw();
         assert_eq!(
             allocator.frame_meta(pfn).unwrap().state(),
-            FrameState::Shared { references: 2 }
+            FrameState::Referenced { references: 2 }
         );
         // SAFETY: raw owns precisely the reference just transferred by
         // into_raw, from this same static allocator and allocation instance.
@@ -322,7 +324,7 @@ mod tests {
         drop(restored);
         assert_eq!(
             allocator.frame_meta(pfn).unwrap().state(),
-            FrameState::Shared { references: 1 }
+            FrameState::Referenced { references: 1 }
         );
         drop(second);
     }
@@ -341,7 +343,7 @@ mod tests {
         for index in [0, 1, 3] {
             assert_eq!(
                 fixture.allocator.frame_meta(first + index).unwrap().state(),
-                FrameState::Shared { references: 1 }
+                FrameState::Referenced { references: 1 }
             );
         }
         limit.refs.store(1, Ordering::Relaxed);
@@ -350,7 +352,7 @@ mod tests {
         for index in 0..4 {
             assert_eq!(
                 fixture.allocator.frame_meta(first + index).unwrap().state(),
-                FrameState::Shared { references: 1 }
+                FrameState::Referenced { references: 1 }
             );
         }
         drop(clone);

@@ -102,7 +102,10 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Kinds of memory usage for tracking.
+/// Allocation accounting categories, not authoritative current page-use types.
+///
+/// A category is retained for an allocation's lifetime. It does not determine
+/// whether a page is free, a slab is empty, or hardware access has retired.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, VariantArray, IntoStaticStr)]
 pub enum UsageKind {

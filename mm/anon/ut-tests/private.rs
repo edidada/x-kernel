@@ -224,9 +224,15 @@ fn snapshot_and_mapping_outlive_detached_object_slot() {
     drop(released);
     drop(object);
     assert!(!page.is_exclusive());
-    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 2 });
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 2 }
+    );
     drop(page);
-    assert_eq!(meta.state(), kalloc::FrameState::Shared { references: 1 });
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 1 }
+    );
     drop(mapping);
 }
 

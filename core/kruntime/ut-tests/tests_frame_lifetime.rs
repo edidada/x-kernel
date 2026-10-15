@@ -45,6 +45,6 @@ fn frame_references_balance_across_cpus_without_clone_allocations() {
     for task in &tasks {
         assert_eq!(task.join(), 0);
     }
-    assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+    assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
     drop(owner);
 }

@@ -103,3 +103,14 @@
   继续尝试其余页，避免一处失败阻止后续清理。上层不再被假成功误导而复用页。
 - 剩余裸路径包括字节堆/slab backing、测试基础设施和 legacy fxmac 集成 shim。
   这些分别处理，不把 slab 空闲对象计数或设备完成协议合并为物理页引用。
+
+
+## 定位审查后的边界调整
+
+- FrameMeta 定位为常驻基础页描述符。FrameRef/FrameRun 提供一种存活持有协议，
+  并不要求每种页用途动态共享，也不要求为每个 slab 对象增减物理页引用。
+- FrameState::Referenced 包括单个独占 owner；Unreferenced 仅表示公共引用为零，
+  不能判断 RAM 已经空闲。UsageKind 仍是分配记账分类，不是完整页类型或回收条件。
+- 保留文件/匿名页和 PTE 之间的独立持有与 TLB 退役边界。GlobalPage、页表存储、
+  VMM reservation 和 DMA 可以继续使用一份初始持有表达独占所有权。
+- 本次不迁移大块堆分配或 slab pool；pool 所有权与整页回收继续作为独立设计。
