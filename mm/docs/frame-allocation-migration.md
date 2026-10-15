@@ -83,3 +83,22 @@
   找到 leaf 持有，从大页中间地址撤映射也会退役全部基础页。
 - 此处保持已有显式大页 leaf 能力，不实现 THP、拆分/合并或复合页元数据。
   FrameRun 克隆、归还均为 O(基础页数)；BTreeMap/Vec/Arc 的可失败堆分配仍待推进。
+
+
+## 第四批迁移：DMA coherent 与 bounce backing
+
+- kalloc 的 alloc_dma_frame_run 为完整 power-of-two backing 建立基础页持有，
+  DMA32 校验覆盖全部 backing；错误候选在计数与 usage 发布前归还。保留先选择
+  后检查的策略，不新增 DMA zone。旧 alloc_dma_pages/dealloc_dma_pages 已删除。
+- kdma 在持有 FrameRun 期间设置属性和平台共享；成功后显式 into_raw 转交整段
+  持有，原始 DmaInfo/layout 的唯一释放恢复该转移。复制 DmaInfo 不克隆引用。
+- 设备与软件使用者必须先结束使用。随后 release 平台共享、同步恢复 cached
+  属性，最后结束物理持有；任何收尾失败均保留整段 backing 并记录日志。
+  此处没有实现 quarantine 自动重试，持续失败可造成 RAM 永久保留。
+- setup 的部分属性修改与部分平台共享失败也走对应 rollback；属性和共享只覆盖
+  请求的完整页范围，slack 仅受持有保护，不交给设备。bounce pool 使用同一分配
+  路径，其 backing 伴随全局池常驻，TLSF 子块释放不释放整池。
+- AArch64 KVM share/unshare 将任何基础页 hypercall 失败上报为 range 错误；
+  继续尝试其余页，避免一处失败阻止后续清理。上层不再被假成功误导而复用页。
+- 剩余裸路径包括字节堆/slab backing、测试基础设施和 legacy fxmac 集成 shim。
+  这些分别处理，不把 slab 空闲对象计数或设备完成协议合并为物理页引用。

@@ -202,7 +202,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 | T-02 | wrong-layout、wrong-count、double free 或跨 allocator free 损坏 freelist | 高 | kernel caller 违反 allocation/deallocation 配对 | API rustdoc 和 RAII `GlobalPage` 限制正常路径，usage 汇总 underflow 可发现部分总量错误；没有即时或完整 provenance 检测，残余风险仍为高 |
 | T-03 | slab intrusive link 被越界写、重复插入或并发修改 | 高 | stale alias、错误 size class、double free、NMI 重入 | canonical layout、compile-time link-size check、local IRQ guard 和中央锁保护正常路径；NMI 和伪造 pointer 明确不支持 |
 | T-04 | PCP 保存错误页地址或页数，随后重复分配/错误合并 | 高 | caller 用错误 `num_pages` free，或 CPU-local 并发约束被破坏 | 固定的 1–4 页 cache 类型和 `split_to_chunks` 保持内部 bookkeeping；输入 provenance 仍由 caller 保证 |
-| T-05 | DMA 地址超出设备可寻址范围或指向错误物理页 | 高 | `v2p` 错误、地址区间算术异常、caller/device 生命周期错误 | `alloc_dma_pages()` 检查结束地址低于 4 GiB 并在失败时归还；上层 `kdma` 管理页属性和平台 share/release，仍依赖正确设备授权 |
+| T-05 | DMA 地址超出设备可寻址范围或指向错误物理页 | 高 | `v2p` 错误、地址区间算术异常、caller/device 生命周期错误 | `alloc_dma_frame_run()` 检查完整 backing 结束地址不超过 4 GiB，在失败时归还未 claim 库存；上层 `kdma` 管理页属性和平台 share/release，仍依赖正确设备授权 |
 | T-06 | 锁递归、锁顺序反转或 NMI 打断导致永久自旋 | 中 | allocator 在 NMI 中使用，新增路径形成 `palloc -> balloc`，或 tracking visitor 再锁 tracking state | `SpinNoIrq` 排除普通 IRQ、文档固定锁序、tracker 有 allocation recursion guard；NMI 与 tracking callback 重入仍是剩余限制 |
 | T-07 | per-CPU cache 隐藏可复用内存，促使中央 allocator 提前扩容或 OOM | 中 | CPU/class 工作集不均衡、内存压力、CPU 停止运行 | PCP 固定 entry 容量；slab cache 使用最多 32 对象的 batch 和不足两个 batch 的高水位；没有全 CPU reclaim，风险只做到有界而未消除 |
 | T-08 | 大小、页数、usage 或地址算术溢出 | 中 | 极端 caller 输入、错误 region 或 accounting 不配对 | `pages_to_bytes`、per-CPU 累计量和 usage 汇总 subtraction 使用 checked arithmetic，`Layout` 验证部分输入；部分地址端点计算仍依赖可信内核范围 |
@@ -227,7 +227,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 
 ## 故障管理
 
-- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_pages,alloc_pages_at,add_memory}` 使用
+- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_frame_run,alloc_pages_at,add_memory}` 使用
   `AllocResult` 报告 `NoMemory`、`InvalidInput` 等错误。
 - Rust `GlobalAlloc::alloc` 不能把普通失败静默传给大多数 Rust allocation；它记录
   layout 和中央 heap 状态后调用 `handle_alloc_error()`。

@@ -290,9 +290,11 @@ free 到 per-CPU cache 的对象。
 
 ### DMA32 与定址页
 
-`alloc_dma_pages()` 绕过 PCP，先从全局 buddy 取得连续页，再通过 `v2p` 检查整个物理
-区间是否低于 4 GiB。区间不满足限制时立即归还并返回 `NoMemory`。该接口只负责内存
-位置；页属性切换、平台 share/unshare 和设备生命周期由 `kdma` 等上层完成。
+`alloc_dma_frame_run()` 绕过 PCP，先从全局 buddy 取得连续 backing，再通过注册的
+内容映射检查完整 backing 的物理结束地址是否不超过 4 GiB。区间不满足限制时，
+在引用和 usage 发布前立即归还并返回 `NoMemory`。接受的 backing 全部基础页拥有
+生命周期持有，包括向上取整的 slack。裸 DMA 分配/归还 API 已删除；页属性切换、
+平台 share/unshare 和设备生命周期仍由 `kdma` 等上层完成。
 
 当前 page allocator 没有独立 DMA32 zone，因此它采用“先分配、后检查”，不能保证在
 存在低端空闲页时一定找到它们。

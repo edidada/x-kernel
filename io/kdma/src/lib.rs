@@ -85,8 +85,8 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 ///   requirements of the requested memory.
 ///
 /// Returns an [`DmaInfo`] structure containing details about the allocated
-/// memory, such as the starting address and size. If it's not possible to
-/// allocate memory meeting the criteria, returns [`None`].
+/// memory, such as the CPU and bus starting addresses. Returns an error if the
+/// requested layout or backing cannot satisfy the allocation requirements.
 ///
 /// # Errors
 ///
@@ -110,7 +110,7 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 /// marked as coherent. It ensures proper deallocation and management of resources
 /// associated with the memory block.
 ///
-/// - `dma_info`: An instance of [`DmaInfo`] containing the details of the memory
+/// - `dma`: An instance of [`DmaInfo`] containing the details of the memory
 ///   block to be freed, such as its starting address and size.
 ///
 /// # Safety

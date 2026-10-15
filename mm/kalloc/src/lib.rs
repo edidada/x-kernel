@@ -24,7 +24,6 @@ use core::{
 use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
-use kaddr_layout::v2p;
 use kcpu_slot::{CpuId, CpuPin, cpu_slot_cell};
 use klazy::Once;
 use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
@@ -40,10 +39,6 @@ fn pages_to_bytes(num_pages: usize) -> usize {
     num_pages
         .checked_mul(PAGE_SIZE_4K)
         .expect("page count byte size overflow")
-}
-
-fn kernel_virt_to_phys(vaddr: usize) -> usize {
-    v2p(vaddr)
 }
 
 mod buddy_frame_adapter;
@@ -835,38 +830,6 @@ impl GlobalAllocator {
         buddy_frame_adapter::release_frame(self, paddr, kind);
     }
 
-    /// Allocates contiguous DMA pages.
-    ///
-    /// DMA allocations must come from physical memory below 4 GiB.
-    /// The page allocator only knows virtual addresses, so the
-    /// DMA32 filtering happens here using `v2p` translation.
-    pub fn alloc_dma_pages(
-        &self,
-        num_pages: usize,
-        align_pow2: usize,
-        kind: UsageKind,
-    ) -> AllocResult<usize> {
-        debug_assert!(
-            self.page_ready.load(Ordering::Acquire),
-            "page allocator is not initialized"
-        );
-        const DMA32_LIMIT: usize = 0x1_0000_0000;
-
-        let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
-
-        let phys = kernel_virt_to_phys(addr);
-        let size = pages_to_bytes(num_pages);
-        if phys + size > DMA32_LIMIT {
-            self.palloc.lock().deallocate_pages(addr, num_pages);
-            return Err(AllocError::NoMemory);
-        }
-
-        if !matches!(kind, UsageKind::RustHeap) {
-            self.record_usage_alloc(kind, size);
-        }
-        Ok(addr)
-    }
-
     /// Allocates contiguous pages starting from the given address.
     ///
     /// It allocates `num_pages` pages from the page allocator starting from the
@@ -933,14 +896,6 @@ impl GlobalAllocator {
         }
 
         // Slow path: multi-page.
-        self.palloc.lock().deallocate_pages(va, num_pages);
-    }
-
-    /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
-    pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.validate_raw_page_release(va, num_pages)
-            .expect("raw DMA deallocation cannot return a referenced or permanent frame");
-        self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
