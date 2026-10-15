@@ -18,7 +18,6 @@ entropy.workspace = true
 anon_inodefs.workspace = true
 unittest = { workspace = true }
 device_class = { workspace = true, features = ["net"] }
-device_traits = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }

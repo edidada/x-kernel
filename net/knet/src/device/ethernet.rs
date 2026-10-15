@@ -298,7 +298,7 @@ impl EthernetDevice {
             });
             match inner.set_rx_scheduler(Some(scheduler)) {
                 Ok(()) => Some(rx_source),
-                Err(DriverError::Unsupported) => {
+                Err(KError::Unsupported) => {
                     warn!("Ethernet driver does not support interrupt-driven RX scheduling");
                     unregister_net_rx_source(rx_source.id);
                     None
@@ -646,7 +646,7 @@ impl NetDeviceOps for EthernetDevice {
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
-                Err(DriverError::WouldBlock) => return Ok(None),
+                Err(KError::WouldBlock) => return Ok(None),
                 Err(err) => return Err(map_dev_err(err)),
             };
             trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
@@ -828,13 +828,13 @@ impl Drop for EthernetDevice {
     }
 }
 
-fn map_dev_err(err: DriverError) -> KError {
+fn map_dev_err(err: KError) -> KError {
     match err {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::NoMemory => LinuxError::ENOBUFS.into(),
-        DriverError::Io => KError::Io,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::NoMemory => LinuxError::ENOBUFS.into(),
+        KError::Io => KError::Io,
         _ => KError::BadState,
     }
 }

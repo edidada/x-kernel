@@ -15,7 +15,7 @@ categories.workspace = true
 default = []
 
 [dependencies]
-device_traits.workspace = true
+kerrno.workspace = true
 
 [lints]
 workspace = true

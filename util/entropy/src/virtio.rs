@@ -218,12 +218,12 @@ mod tests {
 
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use hwrng::{Device, DeviceKind, DriverError, DriverResult};
+    use hwrng::{KError, KResult};
 
     #[derive(Default)]
     struct HardwareState {
         is_ready: bool,
-        fault: Option<DriverError>,
+        fault: Option<KError>,
         is_failed: bool,
     }
     struct Hardware {
@@ -243,18 +243,9 @@ mod tests {
             self.ready.notify_all(false);
         }
 
-        fn fail(&self, error: DriverError) {
+        fn fail(&self, error: KError) {
             self.state.lock().fault = Some(error);
             self.ready.notify_all(false);
-        }
-    }
-    impl Device for Hardware {
-        fn name(&self) -> &str {
-            "virtio-rng-test"
-        }
-
-        fn device_kind(&self) -> DeviceKind {
-            DeviceKind::Hwrng
         }
     }
     impl HwrngDevice for Hardware {
@@ -262,7 +253,7 @@ mod tests {
             self.state.lock().is_failed
         }
 
-        fn read(&self, output: &mut [u8]) -> DriverResult<usize> {
+        fn read(&self, output: &mut [u8]) -> KResult<usize> {
             self.reads.fetch_add(1, Ordering::Release);
             self.entered.notify_all(false);
             self.ready.wait_until(|| {
@@ -295,6 +286,7 @@ mod tests {
                     alloc::string::String::from("ram-disk"), // 板静态别名占位
                 ),
                 hardware.clone(),
+                "virtio-rng-test",
             )
             .unwrap();
             let source = VirtioEntropySource::new(class.clone()).unwrap();
@@ -316,9 +308,9 @@ mod tests {
             source.request();
             hardware.wait_reads(3);
             let error = match index {
-                0 => DriverError::WouldBlock,
-                1 => DriverError::NoMemory,
-                _ => DriverError::InvalidInput,
+                0 => KError::WouldBlock,
+                1 => KError::NoMemory,
+                _ => KError::InvalidInput,
             };
             // Retry without a new demand, beyond the old three-error cutoff.
             for attempt in 0..4 {
@@ -331,7 +323,7 @@ mod tests {
             assert_eq!(hardware.reads.load(Ordering::Acquire), 7);
 
             hardware.state.lock().is_failed = true;
-            hardware.fail(DriverError::Io);
+            hardware.fail(KError::Io);
             source.request();
             source.work.flush().unwrap();
             assert!(source.collector.state.lock().is_failed);

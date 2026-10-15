@@ -7,8 +7,8 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use hwrng::{HwrngDevice, completion::RngCompletion};
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -35,7 +35,7 @@ struct RequestResources<H: Hal, T: Transport> {
 struct RngRequest<H: Hal, T: Transport> {
     resources: ManuallyDrop<RequestResources<H, T>>,
     state: RequestState,
-    fault: Option<DriverError>,
+    fault: Option<KError>,
 }
 
 // SAFETY: H supplies kernel-global mappings through dma_alloc and
@@ -47,7 +47,7 @@ struct RngRequest<H: Hal, T: Transport> {
 unsafe impl<H: Hal + Send, T: Transport + Send> Send for RngRequest<H, T> {}
 
 impl<H: Hal, T: Transport> RngRequest<H, T> {
-    fn new(transport: T) -> DriverResult<Self> {
+    fn new(transport: T) -> KResult<Self> {
         let buffer = vec![0; MAX_REQUEST_BYTES].into_boxed_slice();
         let device = VirtIORng::new(transport).map_err(as_driver_error)?;
         Ok(Self {
@@ -58,7 +58,7 @@ impl<H: Hal, T: Transport> RngRequest<H, T> {
     }
 
     /// Only the waiting-read path submits; cached or in-flight data is preserved.
-    fn submit(&mut self) -> DriverResult {
+    fn submit(&mut self) -> KResult {
         if let Some(error) = self.fault {
             return Err(error);
         }
@@ -90,7 +90,7 @@ impl<H: Hal, T: Transport> RngRequest<H, T> {
 
     /// Attempts one reclamation. The IRQ adapter, never a reader, calls this.
     /// Returns true only when an outstanding request was actually reclaimed.
-    fn complete(&mut self) -> DriverResult<bool> {
+    fn complete(&mut self) -> KResult<bool> {
         let RequestState::Pending(token) = self.state else {
             return Ok(false);
         };
@@ -188,7 +188,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
         transport: T,
         completion: Arc<dyn RngCompletion>,
         mmio_regs: Option<driver_core::IoMap>,
-    ) -> DriverResult<Arc<Self>> {
+    ) -> KResult<Arc<Self>> {
         Ok(Arc::new(Self::new(transport, completion, mmio_regs)?))
     }
 
@@ -204,7 +204,7 @@ impl<H: Hal, T: Transport> VirtIoRngDev<H, T> {
         transport: T,
         completion: Arc<dyn RngCompletion>,
         mmio_regs: Option<driver_core::IoMap>,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         Ok(Self {
             _mmio_regs: mmio_regs,
             request: SpinNoIrq::new(RngRequest::new(transport)?),
@@ -213,22 +213,12 @@ impl<H: Hal, T: Transport> VirtIoRngDev<H, T> {
     }
 }
 
-impl<H: Hal + Send, T: Transport + Send> Device for VirtIoRngDev<H, T> {
-    fn name(&self) -> &str {
-        "virtio-rng"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Hwrng
-    }
-}
-
 impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
     fn is_failed(&self) -> bool {
         self.request.lock().fault.is_some()
     }
 
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -427,14 +417,14 @@ mod tests {
 
     #[derive(Default)]
     struct Completion {
-        before: Option<DriverError>,
-        after: Option<DriverError>,
+        before: Option<KError>,
+        after: Option<KError>,
         has_returned_error: AtomicBool,
         action: SpinNoIrq<Option<Action>>,
         notifications: AtomicUsize,
     }
     impl RngCompletion for Completion {
-        fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
+        fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult {
             if let Some(error) = self.before {
                 return Err(error);
             }
@@ -538,7 +528,7 @@ mod tests {
 
     #[def_test(serial)]
     fn hwrng_wait_failure_preserves_dma_and_validates_before_consuming() {
-        for error in [DriverError::InvalidInput, DriverError::NoMemory] {
+        for error in [KError::InvalidInput, KError::NoMemory] {
             let completion = Arc::new(Completion {
                 before: Some(error),
                 ..Default::default()
@@ -556,13 +546,13 @@ mod tests {
             assert_eq!(device.request.lock().read(&mut [0; 8]), 8);
         }
         let completion = Arc::new(Completion {
-            after: Some(DriverError::NoMemory),
+            after: Some(KError::NoMemory),
             ..Default::default()
         });
         let (device, queue, irq) = device(completion);
         let mut output = [0xaa; 8];
         let mappings = MAPPINGS.load(Ordering::Relaxed);
-        assert_eq!(device.read(&mut output), Err(DriverError::NoMemory));
+        assert_eq!(device.read(&mut output), Err(KError::NoMemory));
         assert_eq!(output, [0xaa; 8]);
         assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings + 1);
         // SAFETY: the wait error kept the device-owned submission alive.
@@ -579,13 +569,13 @@ mod tests {
     #[def_test(serial)]
     fn hwrng_wait_retry_joins_pending_request() {
         let completion = Arc::new(Completion {
-            after: Some(DriverError::NoMemory),
+            after: Some(KError::NoMemory),
             ..Default::default()
         });
         let (device, queue, irq) = device(completion.clone());
         let mappings = MAPPINGS.load(Ordering::Relaxed);
         let mut output = [0xaa; 8];
-        assert_eq!(device.read(&mut output), Err(DriverError::NoMemory));
+        assert_eq!(device.read(&mut output), Err(KError::NoMemory));
         assert!(!device.is_failed());
         let token = match device.request.lock().state {
             RequestState::Pending(token) => token,
@@ -620,9 +610,9 @@ mod tests {
             device.ack_irq(0);
         }));
         let mut output = [0xaa; 8];
-        assert_eq!(device.read(&mut output), Err(DriverError::BadState));
+        assert_eq!(device.read(&mut output), Err(KError::BadState));
         assert!(device.is_failed());
-        assert_eq!(device.read(&mut output), Err(DriverError::BadState));
+        assert_eq!(device.read(&mut output), Err(KError::BadState));
         assert_eq!(output, [0xaa; 8]);
     }
 

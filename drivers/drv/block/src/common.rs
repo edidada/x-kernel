@@ -5,19 +5,19 @@
 //! Shared helpers for the block driver modules.
 
 use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
+use kerrno::KError;
 
-pub(crate) fn map_driver_error(err: device_traits::DriverError) -> ProbeError {
+pub(crate) fn map_driver_error(err: KError) -> ProbeError {
     let error = match err {
-        device_traits::DriverError::InvalidInput | device_traits::DriverError::ReadOnly => {
-            RuntimeError::Invalid
-        }
-        device_traits::DriverError::NoMemory => RuntimeError::NoMemory,
-        device_traits::DriverError::ResourceBusy | device_traits::DriverError::AlreadyExists => {
-            RuntimeError::Busy
-        }
-        device_traits::DriverError::BadState => RuntimeError::BadState,
-        device_traits::DriverError::Io | device_traits::DriverError::WouldBlock => RuntimeError::Io,
-        device_traits::DriverError::Unsupported => RuntimeError::Unsupported,
+        KError::InvalidInput | KError::ReadOnlyFilesystem => RuntimeError::Invalid,
+        KError::NoMemory => RuntimeError::NoMemory,
+        KError::ResourceBusy | KError::AlreadyExists => RuntimeError::Busy,
+        KError::BadState => RuntimeError::BadState,
+        KError::Io | KError::WouldBlock => RuntimeError::Io,
+        KError::Unsupported => RuntimeError::Unsupported,
+        // The class layer's vocabulary is the former DriverError set; any
+        // other kerrno code is foreign here — treat it as an I/O failure.
+        _ => RuntimeError::Io,
     };
     ProbeError::Fatal(error)
 }

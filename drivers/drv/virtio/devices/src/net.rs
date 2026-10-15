@@ -6,10 +6,10 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
+use kerrno::{KError, KResult};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -138,7 +138,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// # Errors
     ///
-    /// Returns `DriverError` if:
+    /// Returns `KError` if:
     /// - Device initialization fails (feature negotiation, queue setup).
     /// - Buffer pool allocation fails (`NoMemory`).
     /// - IRQ registration fails (`ResourceBusy`).
@@ -147,7 +147,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// Panics if `receive_begin` returns a token that does not match the
     /// expected sequential index (asserts internal consistency).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
         // 0. Create a new driver instance.
         const NONE_BUF: Option<NetBufBox> = None;
         let inner = Arc::new(SpinNoIrq::new(
@@ -160,7 +160,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         // 1. Fill all rx buffers.
         for (i, rx_buf_place) in rx_buffers.iter_mut().enumerate() {
-            let mut rx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+            let mut rx_buf = buf_pool.alloc_boxed().ok_or(KError::NoMemory)?;
             // SAFETY: `receive_begin` requires exclusive access to the buffer
             // for the duration it is in the VirtIO queue. The buffer is owned
             // by `rx_buf` and stored in `rx_buffers[i]` immediately after,
@@ -177,12 +177,12 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         // 2. Allocate all tx buffers.
         for _ in 0..QS {
-            let mut tx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+            let mut tx_buf = buf_pool.alloc_boxed().ok_or(KError::NoMemory)?;
             // Fill header
             let hdr_len = inner
                 .lock()
                 .fill_buffer_header(tx_buf.buffer_mut())
-                .or(Err(DriverError::InvalidInput))?;
+                .or(Err(KError::InvalidInput))?;
             tx_buf.set_hdr_len(hdr_len)?;
             free_tx_bufs.push(tx_buf);
         }
@@ -247,20 +247,6 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     }
 }
 
-impl<H: Hal, T: Transport, const QS: usize> Device for VirtIoNetDev<H, T, QS> {
-    fn name(&self) -> &str {
-        "virtio-net"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Net
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
-
 impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS> {
     #[inline]
     fn mac(&self) -> MacAddress {
@@ -288,7 +274,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         QS
     }
 
-    fn recycle_rx(&self, rx_buf: NetBufHandle) -> DriverResult {
+    fn recycle_rx(&self, rx_buf: NetBufHandle) -> KResult {
         // SAFETY: `from_handle` converts a handle back to an owned `NetBuf`.
         // The caller guarantees the handle is valid and not used elsewhere.
         let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
@@ -306,13 +292,13 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         // `rx_buffers[new_token]` is expected to be `None` since it was taken
         // away at `Self::recv()` and has not been added back.
         if bufs.rx_buffers[new_token as usize].is_some() {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         bufs.rx_buffers[new_token as usize] = Some(rx_buf);
         Ok(())
     }
 
-    fn recycle_tx(&self) -> DriverResult {
+    fn recycle_tx(&self) -> KResult {
         loop {
             let token = {
                 let mut inner = self.inner.lock();
@@ -327,7 +313,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             let mut bufs = self.bufs.lock();
             let tx_buf = bufs.tx_buffers[token as usize]
                 .take()
-                .ok_or(DriverError::BadState)?;
+                .ok_or(KError::BadState)?;
             // SAFETY: `transmit_complete` requires that the buffer frame
             // matches the token's previously submitted buffer. We obtained
             // `tx_buf` from `tx_buffers[token]`, which was placed there by
@@ -344,7 +330,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         Ok(())
     }
 
-    fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
+    fn send(&self, tx_buf: NetBufHandle) -> KResult {
         // SAFETY: `from_handle` converts a handle back to an owned `NetBuf`.
         // The caller guarantees the handle is valid and not used elsewhere.
         let tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
@@ -363,7 +349,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         Ok(())
     }
 
-    fn recv(&self) -> DriverResult<NetBufHandle> {
+    fn recv(&self) -> KResult<NetBufHandle> {
         if !self.irq_backed.load(Ordering::Acquire) {
             // Task context owns ISR acknowledgment when no IRQ handler exists.
             self.inner.lock().ack_interrupt();
@@ -378,7 +364,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         if let Some(token) = token {
             let mut rx_buf = bufs.rx_buffers[token as usize]
                 .take()
-                .ok_or(DriverError::BadState)?;
+                .ok_or(KError::BadState)?;
             // SAFETY: `receive_complete` requires that the buffer matches the
             // token's previously submitted buffer. We obtained `rx_buf` from
             // `rx_buffers[token]`, which was placed there during `try_new()`
@@ -394,18 +380,18 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
 
             Ok(rx_buf.into_handle())
         } else {
-            Err(DriverError::WouldBlock)
+            Err(KError::WouldBlock)
         }
     }
 
-    fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
+    fn alloc_tx_buf(&self, size: usize) -> KResult<NetBufHandle> {
         // 0. Allocate a buffer from the queue.
         let mut net_buf = self
             .bufs
             .lock()
             .free_tx_bufs
             .pop()
-            .ok_or(DriverError::NoMemory)?;
+            .ok_or(KError::NoMemory)?;
         let pkt_len = size;
 
         net_buf.set_payload_len(pkt_len)?;
@@ -413,11 +399,11 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         Ok(net_buf.into_handle())
     }
 
-    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> DriverResult {
+    fn set_rx_scheduler(&self, scheduler: Option<Arc<dyn NetRxScheduler>>) -> KResult {
         // Only meaningful with interrupt delivery: a scheduler without an
         // IRQ worker would never run.
         if scheduler.is_some() && !self.irq_backed.load(Ordering::Acquire) {
-            return Err(DriverError::Unsupported);
+            return Err(KError::Unsupported);
         }
         *self.rx_scheduler.lock() = scheduler;
         Ok(())
@@ -466,7 +452,7 @@ mod tests {
         // Without an interrupt worker there is nothing to drive the scheduler.
         assert_eq!(
             dev.set_rx_scheduler(Some(scheduler.clone())),
-            Err(DriverError::Unsupported)
+            Err(KError::Unsupported)
         );
 
         // The worker alone does NOT mark the device interrupt-backed —
@@ -475,7 +461,7 @@ mod tests {
         let worker = dev.irq_worker();
         assert_eq!(
             dev.set_rx_scheduler(Some(scheduler.clone())),
-            Err(DriverError::Unsupported)
+            Err(KError::Unsupported)
         );
         dev.mark_irq_backed();
         assert_eq!(dev.set_rx_scheduler(Some(scheduler.clone())), Ok(()));
@@ -486,7 +472,7 @@ mod tests {
     #[def_test]
     fn test_recv_acknowledges_interrupt_in_poll_mode() {
         let (dev, interrupt_ack_count) = net_dev();
-        assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
+        assert!(matches!(dev.recv(), Err(KError::WouldBlock)));
         assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 1);
     }
 
@@ -496,7 +482,7 @@ mod tests {
         let worker = dev.irq_worker();
         dev.mark_irq_backed();
 
-        assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
+        assert!(matches!(dev.recv(), Err(KError::WouldBlock)));
         assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 0);
         drop(worker);
     }

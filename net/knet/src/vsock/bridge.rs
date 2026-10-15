@@ -24,8 +24,8 @@ use core::{
     task::Poll,
 };
 
-use device_class::prelude::DriverError;
-use kerrno::{KError, KResult};
+use device_class::prelude::KError;
+use kerrno::KResult;
 use klazy::Lazy;
 use kpoll::{PollRegisterError, PollRegistrations, PollSet};
 use ksync::Mutex;
@@ -758,14 +758,14 @@ fn port_handle_id(index: usize) -> i32 {
     -1 - index as i32
 }
 
-fn map_dev_err(err: DriverError) -> KError {
+fn map_dev_err(err: KError) -> KError {
     match err {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
-        DriverError::Unsupported => KError::Unsupported,
-        DriverError::ResourceBusy => KError::ResourceBusy,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::Io => KError::Io,
+        KError::Unsupported => KError::Unsupported,
+        KError::ResourceBusy => KError::ResourceBusy,
         _ => KError::BadState,
     }
 }

@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 #[doc(no_inline)]
-pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
 use strum::FromRepr;
 
 /// Input event categories defined by the Linux input subsystem.
@@ -159,9 +159,13 @@ pub trait InputEventNotifier: Send + Sync {
 }
 
 /// Operations that require an input device driver to implement.
-pub trait InputDevice: Device {
+pub trait InputDevice: Send + Sync {
     /// Returns the device ID of the input device.
     fn device_id(&self) -> InputDeviceId;
+
+    /// Returns the input device's product name (the `input_dev->name`
+    /// analogue — one of the name/phys/uniq identity triple).
+    fn name(&self) -> &str;
 
     /// Returns the physical location of the input device.
     fn physical_location(&self) -> &str;
@@ -174,12 +178,12 @@ pub trait InputDevice: Device {
     ///
     /// Returns true if the event type is supported and the bitmap is written to
     /// `out`.
-    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool>;
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> KResult<bool>;
 
     /// Reads an input event from the device.
     ///
-    /// If no events are available, `Err(DriverError::WouldBlock)` is returned.
-    fn read_event(&self) -> DriverResult<Event>;
+    /// If no events are available, `Err(KError::WouldBlock)` is returned.
+    fn read_event(&self) -> KResult<Event>;
 
     /// Attach or detach the input layer's event notification capability.
     ///
@@ -196,7 +200,7 @@ pub trait InputDevice: Device {
     /// # Errors
     ///
     /// Returns `Unsupported` if the driver does not provide notifications.
-    fn set_event_notifier(&self, _notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {
-        Err(DriverError::Unsupported)
+    fn set_event_notifier(&self, _notifier: Option<Arc<dyn InputEventNotifier>>) -> KResult {
+        Err(KError::Unsupported)
     }
 }

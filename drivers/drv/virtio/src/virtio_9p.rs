@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use device_class::{ClassParent, publish_virtio_9p};
 use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
+use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_9p_id_table[]`.
 static IDS: &[PciMatch] = &[
@@ -33,7 +34,7 @@ impl DriverOps<PciBus> for NinepDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<NinepData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, device_traits::DeviceKind::Fs9p) {
+        if !matches!(kind, VirtioDeviceKind::Fs9p) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -64,6 +65,7 @@ pub fn activate<B: driver_core::Bus>(
     let handle = publish_virtio_9p(
         ClassParent::detached(dev.id().raw(), "virtio-9p", location),
         Box::new(device),
+        "virtio-9p",
     )
     .map_err(crate::common::map_driver_error)?;
     // The Data-owned publication: dropping the guard unpublishes (the

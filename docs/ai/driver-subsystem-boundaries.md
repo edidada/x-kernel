@@ -55,7 +55,7 @@ core/driver-host (the host bridge)
 | Tree | Host-side by definition? | Rules |
 |---|---|---|
 | `core/driver-core` | no — must stay host-agnostic AND family-agnostic | L0-a, L0-b |
-| `common/` (`device-traits`, `device-class`, `devnode`) | no | L0-b, L1 |
+| `common/` (`device-class`, `devnode`) | no | L0-b, L1 |
 | `subsystems/` **contracts** (traits, published types) | no | L0-b |
 | `subsystems/` **services** (e.g. `block::dispatch`) | yes — see L0-b | L1 |
 | `drv/` (concrete drivers + family libraries) | no | L1, L2 |
@@ -97,7 +97,7 @@ The distinction that makes the model testable:
 | `driver-core::DeviceServices` and friends | ✅ (this is why `MockServices` exists) | — |
 | `subsystems/block` `BlockCompletionOperations`, `BlockWaiter`, `BlockSignals` | ✅ | — |
 | `subsystems/block::dispatch::{wait,reclaimer}` | — | ✅ |
-| `common/{device-traits,device-class,devnode}` | ✅ | — |
+| `common/{device-class,devnode}` | ✅ | — |
 
 A **contract** is a trait a driver implements or a type it publishes. A
 **service** is an implementation the subsystem owns and runs. Contracts stay
@@ -192,9 +192,8 @@ See `drivers/README.md` for the current inventory.
 - **`core/`** — `driver-core` (model), `driver-host` (services + extensions +
   the resource provider), `driver-compose` (composition root, called once from
   `kruntime`).
-- **`common/`** — cross-subsystem foundations only: `device-traits` (error /
-  result / base device trait), `device-class` (typed class publication),
-  `devnode` (userland node projection).
+- **`common/`** — cross-subsystem foundations only: `device-class` (typed
+  class publication), `devnode` (userland node projection).
 - **`subsystems/`** — per-class APIs and class services: `block`, `char`,
   `display`, `hwrng`, `input`, `net`, `vsock`.
 - **`drv/`** — concrete drivers, one subsystem crate per family, one module

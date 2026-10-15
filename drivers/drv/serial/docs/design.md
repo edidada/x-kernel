@@ -20,7 +20,7 @@ driver-core 模型下的串口驱动聚合 crate，含两个 UART 家族、三�
 | `src/lib.rs` | crate 门面 + feature 门控的模块声明 |
 | `src/pl011.rs` | `Pl011Driver` / `Pl011Data`（6 字段）/ `SerialCharDev` / `enable_baud_clock` / `register()` |
 | `src/ns16550.rs` | `Ns16550MmioDriver` + `Ns16550IoPortDriver`（共享 `SerialData` 与 `publish()`）/ `register_mmio()` / `register_ioport()` |
-| `src/probe_error.rs` | `map_driver_error`：`device_traits::DriverError` → `ProbeError::Fatal(RuntimeError)` |
+| `src/probe_error.rs` | `map_driver_error`：`kerrno::KError` → `ProbeError::Fatal(RuntimeError)` |
 
 ## 架构
 

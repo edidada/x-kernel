@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec};
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
 use crate::BlockDeviceOperations;
@@ -58,17 +58,6 @@ impl From<&[u8]> for RamDisk {
         ramdisk
     }
 }
-
-impl Device for RamDisk {
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-
-    fn name(&self) -> &str {
-        "ramdisk"
-    }
-}
-
 impl BlockDeviceOperations for RamDisk {
     #[inline]
     fn num_blocks(&self) -> u64 {
@@ -80,33 +69,33 @@ impl BlockDeviceOperations for RamDisk {
         BLOCK_SIZE
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         if !buf.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buf.len() > self.len {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         let storage = self.storage.lock();
         buf.copy_from_slice(&storage[offset..offset + buf.len()]);
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         if !buf.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buf.len() > self.len {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         let mut storage = self.storage.lock();
         storage[offset..offset + buf.len()].copy_from_slice(buf);
         Ok(())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
     }
 }
@@ -128,7 +117,6 @@ mod tests_ramdisk {
     fn test_ramdisk_basic_operations() {
         // Test creation with different sizes
         let disk = RamDisk::new(1024);
-        assert_eq!(disk.device_kind(), DeviceKind::Block);
         assert_eq!(disk.name(), "ramdisk");
         assert_eq!(disk.block_size(), 512);
         assert_eq!(disk.num_blocks(), 2);
@@ -172,25 +160,25 @@ mod tests_ramdisk {
 
         // Test reading beyond disk boundary
         let mut buf = vec![0; 512];
-        assert_eq!(disk.read_block(3, &mut buf), Err(DriverError::Io));
-        assert_eq!(disk.read_block(100, &mut buf), Err(DriverError::Io));
+        assert_eq!(disk.read_block(3, &mut buf), Err(KError::Io));
+        assert_eq!(disk.read_block(100, &mut buf), Err(KError::Io));
 
         // Test writing beyond disk boundary
         let data = vec![0xFF; 512];
-        assert_eq!(disk.write_block(3, &data), Err(DriverError::Io));
-        assert_eq!(disk.write_block(100, &data), Err(DriverError::Io));
+        assert_eq!(disk.write_block(3, &data), Err(KError::Io));
+        assert_eq!(disk.write_block(100, &data), Err(KError::Io));
 
         // Test invalid buffer sizes (not multiple of block size)
         let mut invalid_buf = vec![0; 510]; // Not aligned to block size
         assert_eq!(
             disk.read_block(0, &mut invalid_buf),
-            Err(DriverError::InvalidInput)
+            Err(KError::InvalidInput)
         );
 
         let invalid_data = vec![0xFF; 510];
         assert_eq!(
             disk.write_block(0, &invalid_data),
-            Err(DriverError::InvalidInput)
+            Err(KError::InvalidInput)
         );
 
         // Test multi-block operations at boundaries
@@ -205,8 +193,8 @@ mod tests_ramdisk {
         assert!(disk.write_block(1, &multi_buf).is_ok());
 
         // This should fail (blocks 2-3, but only block 2 exists)
-        assert_eq!(disk.read_block(2, &mut multi_buf), Err(DriverError::Io));
-        assert_eq!(disk.write_block(2, &multi_buf), Err(DriverError::Io));
+        assert_eq!(disk.read_block(2, &mut multi_buf), Err(KError::Io));
+        assert_eq!(disk.write_block(2, &multi_buf), Err(KError::Io));
 
         // Test edge case: exactly at boundary
         let edge_data = vec![0xCC; 512];

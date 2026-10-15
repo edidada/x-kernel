@@ -16,8 +16,8 @@ ns16550-mmio = []
 ns16550-ioport = ["dep:uart_16550"]
 
 [dependencies]
+kerrno.workspace = true
 driver-core = { workspace = true }
-device_traits = { workspace = true }
 device_class = { workspace = true, features = ["char"] }
 devnode = { workspace = true }
 khal = { workspace = true }

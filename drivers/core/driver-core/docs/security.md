@@ -116,7 +116,7 @@
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |---|---|---|---|---|---|---|
 | F-01 | `add_device` 被拒 | 父设备不存在 / 正在拆 / bus instance 缺失或类型不符 | 该设备不进入模型 | 该设备无驱动；`driver-compose` `log::warn` 后继续枚举其余节点 | 3 | 返回结构化 `AddDeviceError`，四种原因可区分；compose 侧不 panic |
-| F-02 | 探测返回 `Fatal` | 驱动判定自己不该认领（如 virtio-blk 发现 `DeviceKind != Block`） | 驱动进 `attempted` | 同一轮换下一个候选；穷尽则 `Unclaimed` | 4 | 正常控制流，`log::debug` |
+| F-02 | 探测返回 `Fatal` | 驱动判定自己不该认领（如 virtio-blk 发现 `VirtioDeviceKind != Block`） | 驱动进 `attempted` | 同一轮换下一个候选；穷尽则 `Unclaimed` | 4 | 正常控制流，`log::debug` |
 | F-03 | 探测返回 `Deferred` | clock/irq-domain/gpio/regulator provider 未就绪 | 设备 parked | provider 发布时被精确唤醒；阶段结束仍未唤醒则报告 + 降级 `Unclaimed` | 3 | 见 T-07 / T-08 |
 | F-04 | 服务未安装就取资源 | `set_services` 之前调用，或某个域没有自己的 runtime | 所有资源获取返回 `RuntimeError::Unsupported` | 该域上所有驱动 probe 失败 → `Unclaimed` | 2 | 刻意的"响亮失败"：`NoServices` 是一个真实类型而不是 `Option::None` 静默路径；启动日志会显示 0 active |
 | F-05 | MMIO 访问越界 / 未对齐 | 驱动偏移算错 | **panic** | 内核 panic（`panic = "abort"` 配置下即停机） | 2 | 刻意选择 panic 而不是 UB 或静默截断；panic 消息带 vaddr、offset、要求对齐 |

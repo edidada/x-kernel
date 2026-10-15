@@ -197,7 +197,6 @@ watchdog = { path = "io/watchdog" }
 block = { path = "drivers/subsystems/block" }
 char_driver = { path = "drivers/subsystems/char" }
 display = { path = "drivers/subsystems/display" }
-device_traits = { path = "drivers/common/device-traits", package = "device-traits" }
 hwrng = { path = "drivers/subsystems/hwrng" }
 kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }

@@ -18,7 +18,7 @@ use driver_core::{
     BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
-use virtio_devices::VirtIoNetDev;
+use virtio_devices::{VirtIoNetDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and
 /// modern 0x1041.
@@ -45,7 +45,7 @@ impl DriverOps<PciBus> for VirtioNetDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<NetData, ProbeError> {
         let (kind, transport, msi_irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, device_traits::DeviceKind::Net) {
+        if !matches!(kind, VirtioDeviceKind::Net) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -148,6 +148,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static
     let handle = publish_net(
         ClassParent::detached(dev.id().raw(), "virtio-net", location),
         Box::new(device),
+        "virtio-net",
     )
     .map_err(crate::common::map_driver_error)?;
     Ok((handle, irq))

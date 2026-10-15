@@ -15,7 +15,6 @@ use alloc::{format, sync::Arc};
 
 use console_driver::runtime::stdout_console_id;
 use device_class::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
-use device_traits::DriverError;
 use kerrno::KError;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
@@ -76,9 +75,9 @@ impl DeviceFileOps for SerialDev {
     }
 }
 
-fn map_err(err: DriverError) -> KError {
+fn map_err(err: KError) -> KError {
     match err {
-        DriverError::WouldBlock => KError::WouldBlock,
+        KError::WouldBlock => KError::WouldBlock,
         _ => KError::Io,
     }
 }

@@ -80,7 +80,7 @@ before raising terminal notification.
 | Invalid logical block size or initial sector capacity | `InvalidInput`; no partial object is constructed |
 | Existing exclusive holder | `ResourceBusy`; no second holder is created |
 | Invalid, unaligned, or out-of-range I/O | `InvalidInput`; backend not called |
-| Backend I/O/flush failure | `DriverError` propagated unchanged |
+| Backend I/O/flush failure | `KError` propagated unchanged |
 | Write to a read-only disk | `ReadOnly`; KVFS maps it to Linux `EPERM` |
 | `BLKROSET 0` on an inherently read-only disk | Success; administrative state is cleared, inherent read-only remains effective |
 | Unknown disk-specific ioctl | `NotATty` |

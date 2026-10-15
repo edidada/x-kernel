@@ -5,7 +5,7 @@
 //! Shared PCI helper routines used by the compose enumeration and driver
 //! activation paths.
 
-use device_traits::{DriverError, DriverResult};
+use kerrno::{KError, KResult};
 use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 use lazyinit::LazyInit;
 
@@ -91,20 +91,20 @@ fn has_unassigned_memory_bar<C: crate::ConfigurationAccess>(
 /// If all memory BARs are already assigned, the shared allocator is not
 /// touched; the call only refreshes the device command bits. If any memory BAR
 /// is unassigned and no allocation range is available, returns
-/// [`DriverError::NoMemory`].
+/// [`KError::NoMemory`].
 pub fn configure_pci_device_if_needed<C: crate::ConfigurationAccess>(
     root: &mut crate::PciRoot<C>,
     bdf: crate::DeviceFunction,
-) -> DriverResult {
+) -> KResult {
     let any_unassigned_memory_bar = has_unassigned_memory_bar(root, bdf);
     if !any_unassigned_memory_bar {
         let mut no_allocator = None;
         return crate::configure_device(root, bdf, &mut no_allocator).map_err(|err| {
             warn!("failed to configure PCI device {:?}: {:?}", bdf, err);
             match err {
-                crate::PciInitError::NoMemory => DriverError::NoMemory,
-                crate::PciInitError::InvalidRange => DriverError::InvalidInput,
-                crate::PciInitError::MappingFailed => DriverError::Io,
+                crate::PciInitError::NoMemory => KError::NoMemory,
+                crate::PciInitError::InvalidRange => KError::InvalidInput,
+                crate::PciInitError::MappingFailed => KError::Io,
             }
         });
     }
@@ -115,15 +115,15 @@ pub fn configure_pci_device_if_needed<C: crate::ConfigurationAccess>(
             "PCI device {:?} has unassigned memory BARs but no allocation range",
             bdf
         );
-        return Err(DriverError::NoMemory);
+        return Err(KError::NoMemory);
     }
 
     crate::configure_device(root, bdf, &mut allocator).map_err(|err| {
         warn!("failed to configure PCI device {:?}: {:?}", bdf, err);
         match err {
-            crate::PciInitError::NoMemory => DriverError::NoMemory,
-            crate::PciInitError::InvalidRange => DriverError::InvalidInput,
-            crate::PciInitError::MappingFailed => DriverError::Io,
+            crate::PciInitError::NoMemory => KError::NoMemory,
+            crate::PciInitError::InvalidRange => KError::InvalidInput,
+            crate::PciInitError::MappingFailed => KError::Io,
         }
     })
 }

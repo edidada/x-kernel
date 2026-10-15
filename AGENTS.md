@@ -57,8 +57,7 @@ Major areas:
 - `drivers/`: the driver framework and concrete drivers.
   - `core/`: device model (`driver-core`), host service bridge
     (`driver-host`), composition root (`driver-compose`).
-  - `common/`: cross-subsystem foundations (`device-traits`, `device-class`,
-    `devnode`).
+  - `common/`: cross-subsystem foundations (`device-class`, `devnode`).
   - `subsystems/`: per-class APIs and services
     (block/char/display/hwrng/input/net/vsock).
   - `drv/`: concrete drivers, one subsystem crate per family, one module

@@ -10,7 +10,6 @@
 //! fails at compile time, not at probe — and driver-core stays free of any
 //! device-family knowledge.
 
-use device_traits::DeviceKind;
 use driver_core::{BusDeviceData, ExtensionService};
 
 use crate::XKernelRuntime;
@@ -32,8 +31,14 @@ impl PciTransportService {
         &self,
         data: &dyn BusDeviceData,
         resources: &driver_core::ResourceMap,
-    ) -> Result<(DeviceKind, virtio_devices::PciTransport, Option<usize>), driver_core::RuntimeError>
-    {
+    ) -> Result<
+        (
+            virtio_devices::VirtioDeviceKind,
+            virtio_devices::PciTransport,
+            Option<usize>,
+        ),
+        driver_core::RuntimeError,
+    > {
         crate::probe_pci_transport_with(self.provider, data, resources)
     }
 }

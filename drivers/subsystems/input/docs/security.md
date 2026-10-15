@@ -57,8 +57,8 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | No event pending | `DriverError::WouldBlock` | Consumer parks or polls | 3 | Explicit non-blocking contract. |
-| F-02 | Hardware query failure in `get_event_bits` | `DriverError` returned | Consumer treats device as unknown-capability | 3 | Error propagation via `DriverResult`. |
+| F-01 | No event pending | `KError::WouldBlock` | Consumer parks or polls | 3 | Explicit non-blocking contract. |
+| F-02 | Hardware query failure in `get_event_bits` | `KError` returned | Consumer treats device as unknown-capability | 3 | Error propagation via `KResult`. |
 | F-03 | Unsupported event type queried | `Ok(false)` | Consumer skips bitmap | 4 | Documented tri-state result. |
 
 ## Known Limitations

@@ -5,8 +5,8 @@
 //! VirtIO input driver adapter.
 use alloc::{string::String, sync::Arc};
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -67,12 +67,12 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns `DriverError` if device initialization or ID query fails.
+    /// Returns `KError` if device initialization or ID query fails.
     pub fn try_new(
         transport: T,
         irq: usize,
         mmio_regs: Option<driver_core::IoMap>,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));
         let name = String::from(name.trim_end_matches('\0'));
@@ -125,7 +125,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         true
     }
 
-    fn load_event_bits(&self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
+    fn load_event_bits(&self, event_type: EventType, out: &mut [u8]) -> KResult<bool> {
         let written = self
             .state
             .inner
@@ -136,21 +136,24 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> Device for VirtIoInputDev<H, T> {
-    fn name(&self) -> &str {
-        self.name.as_str()
+impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
+    /// The input product name (from the virtio device IDs) — the same
+    /// string the class publication and the devnode uevent carry.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Input
-    }
-
-    fn irq(&self) -> Option<usize> {
+    /// The device's IRQ line (the ack protocol's source of truth).
+    pub fn irq(&self) -> Option<usize> {
         Some(self.irq)
     }
 }
 
 impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn device_id(&self) -> InputDeviceId {
         self.device_id
     }
@@ -163,13 +166,13 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
         "virtio"
     }
 
-    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
+    fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> KResult<bool> {
         self.load_event_bits(ty, out)
     }
 
-    fn read_event(&self) -> DriverResult<Event> {
+    fn read_event(&self) -> KResult<Event> {
         let Some(event) = self.state.inner.lock().pop_pending_event() else {
-            return Err(DriverError::WouldBlock);
+            return Err(KError::WouldBlock);
         };
         Ok(Event {
             event_type: event.event_type,
@@ -178,7 +181,7 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
         })
     }
 
-    fn set_event_notifier(&self, notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {
+    fn set_event_notifier(&self, notifier: Option<Arc<dyn InputEventNotifier>>) -> KResult {
         *self.state.notifier.lock() = notifier;
         Ok(())
     }

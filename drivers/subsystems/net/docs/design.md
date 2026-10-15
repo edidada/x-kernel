@@ -6,8 +6,8 @@
 the `NetDevice` trait that a NIC driver implements, the `NetRxScheduler` hook
 the network stack attaches to interrupt-driven drivers, and the pooled
 `NetBuf` buffer family exchanged across that boundary. The crate also
-re-exports the shared driver vocabulary (`Device`, `DeviceKind`,
-`DriverError`, `DriverResult`) from `device-traits` so that NIC drivers depend
+re-exports the shared error vocabulary (
+`KError`, `KResult`) from `kerrno` so that NIC drivers depend
 on a single contract crate.
 
 ## Responsibilities
@@ -60,7 +60,7 @@ network stack (caller)                NIC driver (implementer)
                                    `NetBufPool` (fixed slots, RAII)
 ```
 
-- `NetDevice` extends `device_traits::Device`; every NIC driver implements it
+- `NetDevice` extends `kerrno::Device`; every NIC driver implements it
   and the network stack is its consumer.
 - `NetRxScheduler::schedule_rx` is provided by the network stack, attached
   through `NetDevice::set_rx_scheduler`, and called by the driver from its
@@ -75,13 +75,13 @@ network stack (caller)                NIC driver (implementer)
 `NetBufPool::new(slot_count, buf_len)` allocates one contiguous
 `slot_count * buf_len` storage and a free-offset list. Creation rejects a
 zero `slot_count` and any `buf_len` outside `1526..=65535` with
-`DriverError::InvalidInput`.
+`KError::InvalidInput`.
 
 - Construction: `alloc_buf` / `alloc_boxed` pop one slot offset from the
   free list and wrap it in a `NetBuf` that keeps an `Arc<NetBufPool>`.
 - Use: header and payload regions are addressed by `hdr_len` / `payload_len`
   inside the slot; `set_hdr_len` / `set_payload_len` validate the combined
-  frame length against the slot and return `DriverError::InvalidInput` on
+  frame length against the slot and return `KError::InvalidInput` on
   overflow or out-of-bounds sizes.
 - Release: `Drop for NetBuf` returns the slot offset to the pool; no manual
   free call exists. `into_handle` / `from_handle` convert between the owned
@@ -93,7 +93,7 @@ zero `slot_count` and any `buf_len` outside `1526..=65535` with
 - `NetRxScheduler` implementations must be safe from hardirq context: no
   sleeping, no hot-path allocation, no callbacks into driver receive paths.
 - `NetDevice::send` is non-blocking by contract; `recv` returns
-  `DriverError::WouldBlock` when no packet is pending.
+  `KError::WouldBlock` when no packet is pending.
 - `NetBufPool` allocation takes an internal spin lock and is safe to call
   from any context that may not sleep; the network stack decides where
   buffers are allocated.
@@ -113,15 +113,15 @@ zero `slot_count` and any `buf_len` outside `1526..=65535` with
 
 ## Error Model
 
-All fallible operations return `device_traits::DriverResult`; no crate-local
+All fallible operations return `kerrno::KResult`; no crate-local
 error type is defined. Documented failure results:
 
-- `NetBufPool::new` — `DriverError::InvalidInput` for a zero slot count or
+- `NetBufPool::new` — `KError::InvalidInput` for a zero slot count or
   an out-of-range buffer length.
-- `NetBuf::set_hdr_len` / `set_payload_len` — `DriverError::InvalidInput`
+- `NetBuf::set_hdr_len` / `set_payload_len` — `KError::InvalidInput`
   when header plus payload overflows or exceeds the slot length.
-- `NetDevice::recv` — `DriverError::WouldBlock` when no packet is available.
-- `NetDevice::set_rx_scheduler` — default `DriverError::Unsupported` for
+- `NetDevice::recv` — `KError::WouldBlock` when no packet is available.
+- `NetDevice::set_rx_scheduler` — default `KError::Unsupported` for
   poll-only drivers.
 
 ## Design Decisions
@@ -137,5 +137,5 @@ error type is defined. Documented failure results:
 - Contract-only crate: hardware knowledge stays in driver crates; keeping the
   dormant `fxmac`/`ixgbe` sources here is historical and they compile only if
   their module declarations and features are re-enabled.
-- `device-traits` types are re-exported (not redefined) so the NIC driver
+- `kerrno` types are re-exported (not redefined) so the NIC driver
   surface has one import root and error semantics stay defined in one place.

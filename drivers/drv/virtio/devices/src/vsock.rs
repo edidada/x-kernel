@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use device_traits::{Device, DeviceKind, DriverResult};
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -74,7 +74,7 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF
     ///
     /// Returns an error if the device fails to initialize (feature
     /// negotiation, queue allocation, etc.).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
         let inner = VirtIOSocket::<H, T, RX_BUF_SIZE>::new(transport).map_err(as_driver_error)?;
         let guest_cid = inner.guest_cid();
         Ok(Self {
@@ -135,16 +135,6 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF
     }
 }
 
-impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> Device for VirtIoVsockDev<H, T, RX_BUF_SIZE> {
-    fn name(&self) -> &str {
-        "virtio-socket"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Vsock
-    }
-}
-
 impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VsockDevice
     for VirtIoVsockDev<H, T, RX_BUF_SIZE>
 {
@@ -161,22 +151,22 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VsockDevice
         // Raw transport does not track listen ports.
     }
 
-    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn connect(&self, info: &VsockConnectionInfo) -> KResult<()> {
         let ci = Self::to_connection_info(info);
         self.inner.lock().connect(&ci).map_err(as_driver_error)
     }
 
-    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn accept(&self, info: &VsockConnectionInfo) -> KResult<()> {
         let ci = Self::to_connection_info(info);
         self.inner.lock().accept(&ci).map_err(as_driver_error)
     }
 
-    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn force_close(&self, info: &VsockConnectionInfo) -> KResult<()> {
         let ci = Self::to_connection_info(info);
         self.inner.lock().force_close(&ci).map_err(as_driver_error)
     }
 
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> KResult<usize> {
         let mut ci = Self::to_connection_info(info);
         self.inner
             .lock()
@@ -185,12 +175,12 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VsockDevice
         Ok(buf.len())
     }
 
-    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn shutdown(&self, info: &VsockConnectionInfo) -> KResult<()> {
         let ci = Self::to_connection_info(info);
         self.inner.lock().shutdown(&ci).map_err(as_driver_error)
     }
 
-    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn credit_update(&self, info: &VsockConnectionInfo) -> KResult<()> {
         let ci = Self::to_connection_info(info);
         self.inner
             .lock()
@@ -200,8 +190,8 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VsockDevice
 
     fn poll_event(
         &self,
-        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
-    ) -> DriverResult<bool> {
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> KResult<()>,
+    ) -> KResult<bool> {
         let mut got_event = false;
         // Remove scratch SpinNoIrq field from VirtIoVsockDev that caused
         // can_preempt(2) panic; revert poll_event to local Vec

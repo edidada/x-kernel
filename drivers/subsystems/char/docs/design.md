@@ -7,7 +7,7 @@ The package name is `char_driver` (directory `drivers/subsystems/char/`).
 `char_driver` defines the minimal contract for character device drivers that join
 the unified discover → bind → activate driver pipeline: the `CharDevice`
 trait, a byte-stream read/write/flush surface implemented on top of the
-shared `device_traits::Device` base. Typical implementers are `hwrng`
+direct `Send + Sync` bounds. Typical implementers are `hwrng`
 sources, secondary serial/UART expansion cards, and runtime wrappers that
 hand a boot-initialized device to the generic pipeline.
 
@@ -17,8 +17,8 @@ hand a boot-initialized device to the generic pipeline.
   read, `Ok(0)` meaning end-of-stream for finite sources),
   `write` (bounded byte write), and `flush` (no-op default for stateless
   devices).
-- Re-export the shared driver vocabulary — `Device`, `DeviceKind`,
-  `DriverError`, `DriverResult` — from `device-traits` (`#[doc(no_inline)]`)
+- Re-export the shared error vocabulary —
+  `KError`, `KResult` — from `kerrno` (`#[doc(no_inline)]`)
   so char drivers import one contract root.
 
 ## Non-Responsibilities
@@ -40,14 +40,14 @@ hand a boot-initialized device to the generic pipeline.
 ```text
 drivers/subsystems/char/
 ├── src/
-│   └── lib.rs        # CharDevice trait, device-traits re-exports
+│   └── lib.rs        # CharDevice trait, kerrno re-exports
 └── Cargo.toml
 ```
 
 ## Architecture
 
 ```text
-device-traits (Device, DriverError/Result, discovery pipeline)
+kerrno (KError/KResult, discovery pipeline)
       ^
       |  impl CharDevice for <driver>
       |
@@ -69,16 +69,16 @@ registry, and no object type.
 - `read`/`write` take `&self`, so implementations must be internally
   synchronized if the device is shared.
 - No early-boot restriction: implementers may exist only after the driver
-  pipeline is up, per the pipeline contract in `device-traits`.
+  pipeline is up, per the pipeline contract in `kerrno`.
 
 ## Error Model
 
-All results are `device_traits::DriverResult`:
+All results are `kerrno::KResult`:
 
 - `read` — `Ok(n)` with `n <= buf.len()`; `Ok(0)` is end-of-stream for
-  finite sources; open-ended sources return `Err(DriverError::WouldBlock)`
+  finite sources; open-ended sources return `Err(KError::WouldBlock)`
   so the caller decides retry versus sleep.
-- `write` — `Ok(n)` bytes accepted; `Err(DriverError::WouldBlock)` when
+- `write` — `Ok(n)` bytes accepted; `Err(KError::WouldBlock)` when
   progress requires blocking; drivers must not spin internally.
 - `flush` — defaults to `Ok(())`.
 
@@ -89,7 +89,7 @@ All results are `device_traits::DriverResult`:
 - Non-blocking contract with `WouldBlock`: kernel callers need explicit
   control over waiting; hidden spinning inside drivers would couple driver
   implementations to scheduler state.
-- Re-export `device-traits` types instead of redefining errors: one error
+- Re-export `kerrno` types instead of redefining errors: one error
   vocabulary across all driver contract crates, one import root for
   implementers.
 - Boot console stays outside this contract: the console must work before

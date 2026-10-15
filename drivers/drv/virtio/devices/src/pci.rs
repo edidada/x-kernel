@@ -27,7 +27,6 @@
 
 use alloc::vec::Vec;
 
-use device_traits::DeviceKind;
 use driver_core::provider::IrqOp;
 use pci::MmioCam;
 
@@ -48,7 +47,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[cfg(target_arch = "x86_64")]
 use self::x86_64::{PciIrqState, PciMsixState, setup_msix};
-use crate::{VirtIoHal, as_device_kind};
+use crate::{VirtIoHal, VirtioDeviceKind, as_device_kind};
 
 /// PCI transport wrapper with x86 MSI-X queue-vector setup.
 pub struct PciTransport {
@@ -278,7 +277,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
     irq_provider: &'static dyn IrqOp,
-) -> Option<(DeviceKind, PciTransport, Option<usize>)> {
+) -> Option<(VirtioDeviceKind, PciTransport, Option<usize>)> {
     let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
 
     // x86_64: MSI-X setup is limited to network devices for the virtio-net
@@ -288,7 +287,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     // The transport-bound irq (MSI-X config vector) when MSI-X is active;
     // the caller falls back to the descriptor's legacy route otherwise.
     #[cfg(target_arch = "x86_64")]
-    let (msix, transport_irq) = if dev_kind == DeviceKind::Net {
+    let (msix, transport_irq) = if dev_kind == VirtioDeviceKind::Net {
         match setup_msix::<H>(root, bdf, irq_provider) {
             Some((irq, msix)) => (Some(msix), Some(irq)),
             None => (None, None),
@@ -306,7 +305,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     let msix = None;
 
     let transport = PciTransport::new_with_msix::<H>(root, bdf, msix).ok()?;
-    if matches!(dev_kind, DeviceKind::Vsock | DeviceKind::Input) {
+    if matches!(dev_kind, VirtioDeviceKind::Vsock | VirtioDeviceKind::Input) {
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
     }

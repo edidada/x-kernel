@@ -17,9 +17,9 @@ ns16550-mmio = ["console_driver/ns16550-mmio"]
 ns16550-ioport = ["console_driver/ns16550-ioport"]
 
 [dependencies]
+kerrno.workspace = true
 console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
 driver-core = { workspace = true }
-device_traits = { workspace = true }
 device_class = { workspace = true, features = ["char"] }
 memaddr = { workspace = true }
 char_driver = { workspace = true }

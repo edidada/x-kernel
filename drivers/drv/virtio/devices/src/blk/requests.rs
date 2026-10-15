@@ -10,6 +10,7 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::pin, ptr::NonNull};
 
 use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter, PrepareBlockWait};
+use kerrno::{KError, KResult};
 use linked_list_r4l::{GetLinks, Links, RawList};
 use virtio_drivers::{
     Error,
@@ -30,7 +31,7 @@ enum RequestState {
     Prepared,
     Pending,
     Submitted(u16),
-    Done(DriverResult),
+    Done(KResult),
 }
 
 struct Request {
@@ -120,7 +121,7 @@ impl BlockRequests {
         unsafe { *request.state.get() = RequestState::Pending };
     }
 
-    fn finish(request: &Request, result: DriverResult) {
+    fn finish(request: &Request, result: KResult) {
         // SAFETY: callers hold the device lock and have removed all list/token
         // references after successful reclamation, or before any submission.
         unsafe { *request.operation.get() = None };
@@ -129,7 +130,7 @@ impl BlockRequests {
         unsafe { *request.state.get() = RequestState::Done(result) };
     }
 
-    fn cancel_pending(&mut self, request: &Request, error: DriverError) {
+    fn cancel_pending(&mut self, request: &Request, error: KError) {
         // SAFETY: only the submitting caller can cancel; it has not submitted
         // this Pending node, and holds its device lock and pinned lifetime.
         assert_eq!(unsafe { *request.state.get() }, RequestState::Pending);
@@ -265,8 +266,8 @@ impl BlockRequests {
             // the pinned dependency. NotReady is ambiguous and must fail closed.
             let result = match completed {
                 Ok(()) => Ok(()),
-                Err(Error::IoError) => Err(DriverError::Io),
-                Err(Error::Unsupported) => Err(DriverError::Unsupported),
+                Err(Error::IoError) => Err(KError::Io),
+                Err(Error::Unsupported) => Err(KError::Unsupported),
                 #[expect(
                     clippy::panic,
                     reason = "CG-021-no-panic-on-reachable-failure: After a successful pop_used \
@@ -285,16 +286,16 @@ impl BlockRequests {
 }
 
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
-    fn checked_sector(&self, sector: u64, len: usize) -> DriverResult<usize> {
+    fn checked_sector(&self, sector: u64, len: usize) -> KResult<usize> {
         if len == 0
             || !len.is_multiple_of(SECTOR_SIZE)
             || sector
                 .checked_add((len / SECTOR_SIZE) as u64)
                 .is_none_or(|end| end > self.num_blocks)
         {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
-        usize::try_from(sector).map_err(|_| DriverError::InvalidInput)
+        usize::try_from(sector).map_err(|_| KError::InvalidInput)
     }
 
     pub(super) fn read_request(
@@ -302,7 +303,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         sector: u64,
         buffer: &mut [u8],
         prepare: PrepareBlockWait,
-    ) -> DriverResult {
+    ) -> KResult {
         let sector = self.checked_sector(sector, buffer.len())?;
         self.run_request(
             Operation::Read(sector, NonNull::from(buffer)),
@@ -315,9 +316,9 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         sector: u64,
         buffer: &[u8],
         prepare: PrepareBlockWait,
-    ) -> DriverResult {
+    ) -> KResult {
         if self.is_inherently_read_only() {
-            return Err(DriverError::ReadOnly);
+            return Err(KError::ReadOnlyFilesystem);
         }
         let sector = self.checked_sector(sector, buffer.len())?;
         self.run_request(
@@ -326,13 +327,13 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         )
     }
 
-    pub(super) fn flush_request(&self, prepare: PrepareBlockWait) -> DriverResult {
+    pub(super) fn flush_request(&self, prepare: PrepareBlockWait) -> KResult {
         self.run_request(Operation::Flush, prepare()?.as_mut())
     }
 
     // Only the synchronous borrowed-buffer entry points above construct an
     // Operation. The pointer cannot escape this call's pinned-node lifetime.
-    fn run_request(&self, operation: Operation, waiter: &mut dyn BlockWaiter) -> DriverResult {
+    fn run_request(&self, operation: Operation, waiter: &mut dyn BlockWaiter) -> KResult {
         let request = pin!(Request::new(operation, waiter.signals()));
         let request = request.as_ref().get_ref();
         {

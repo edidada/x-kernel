@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use device_class::{ClassParent, publish_display};
 use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
+use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_gpu_id_table[]`.
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1050)];
@@ -31,7 +32,7 @@ impl DriverOps<PciBus> for GpuDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<GpuData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, device_traits::DeviceKind::Display) {
+        if !matches!(kind, VirtioDeviceKind::Display) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -62,6 +63,7 @@ pub fn activate<B: driver_core::Bus>(
     let handle = publish_display(
         ClassParent::detached(dev.id().raw(), "virtio-gpu", location),
         Box::new(device),
+        "virtio-gpu",
     )
     .map_err(crate::common::map_driver_error)?;
     // The Data-owned publication: dropping the guard unpublishes (the

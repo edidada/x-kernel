@@ -205,43 +205,39 @@ impl block::BlockDeviceOperations for LoopDevice {
         512
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::DriverResult<()> {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
-        let file = self
-            .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
+            .ok_or(block::KError::InvalidInput)?;
+        let file = self.clone_file().map_err(|_| block::KError::BadState)?;
         let mut position = offset;
         let read = file
             .read_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
+            .map_err(|_| block::KError::Io)?;
         if read != buf.len() {
-            return Err(block::DriverError::Io);
+            return Err(block::KError::Io);
         }
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> block::DriverResult<()> {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
-        let file = self
-            .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
+            .ok_or(block::KError::InvalidInput)?;
+        let file = self.clone_file().map_err(|_| block::KError::BadState)?;
         let mut position = offset;
         let written = file
             .write_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
+            .map_err(|_| block::KError::Io)?;
         if written != buf.len() {
-            return Err(block::DriverError::Io);
+            return Err(block::KError::Io);
         }
         Ok(())
     }
 
-    fn flush(&self) -> block::DriverResult<()> {
+    fn flush(&self) -> block::KResult<()> {
         if let Some(file) = self.file.lock().as_ref() {
-            file.fsync(false).map_err(|_| block::DriverError::Io)?;
+            file.fsync(false).map_err(|_| block::KError::Io)?;
         }
         Ok(())
     }

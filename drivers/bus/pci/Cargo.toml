@@ -15,12 +15,12 @@ categories.workspace = true
 pci-non-ecam = []
 
 [dependencies]
+kerrno.workspace = true
 virtio-drivers = { workspace = true }
 kbuild_config = { workspace = true }
 log.workspace = true
 memspace.workspace = true
 khal = { workspace = true }
-device_traits = { workspace = true }
 driver-core = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }

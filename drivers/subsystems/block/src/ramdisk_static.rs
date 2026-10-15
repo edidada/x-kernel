@@ -4,7 +4,7 @@
 
 //! A RAM disk driver implemented with a static slice as storage.
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
 use crate::BlockDeviceOperations;
@@ -70,17 +70,6 @@ impl RamDisk {
         f(data)
     }
 }
-
-impl Device for RamDisk {
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-
-    fn name(&self) -> &str {
-        "ramdisk"
-    }
-}
-
 impl BlockDeviceOperations for RamDisk {
     /// Returns the number of blocks the RAM disk can hold.
     #[inline]
@@ -95,14 +84,14 @@ impl BlockDeviceOperations for RamDisk {
     }
 
     /// Reads a single block from the RAM disk into the provided buffer.
-    fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> KResult {
         if !buffer.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buffer.len() > self.len {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
 
         self.with_data(|data| {
@@ -112,14 +101,14 @@ impl BlockDeviceOperations for RamDisk {
     }
 
     /// Writes a single block to the RAM disk from the provided buffer.
-    fn write_block(&self, block_id: u64, buffer: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buffer: &[u8]) -> KResult {
         if !buffer.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
 
         let offset = block_id as usize * BLOCK_SIZE;
         if offset + buffer.len() > self.len {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
 
         self.with_data(|data| {
@@ -129,7 +118,7 @@ impl BlockDeviceOperations for RamDisk {
     }
 
     /// No operation needed for flushing RAM disk.
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
     }
 }
@@ -170,7 +159,6 @@ pub mod tests_ramdisk_static {
         let disk = RamDisk::new(buffer);
 
         // Test driver properties
-        assert_eq!(disk.device_kind(), DeviceKind::Block);
         assert_eq!(disk.name(), "ramdisk");
         assert_eq!(disk.block_size(), 512);
         assert_eq!(disk.num_blocks(), 4);
@@ -224,22 +212,22 @@ pub mod tests_ramdisk_static {
         assert!(disk.write_block(1, &test_data).is_ok());
 
         // Invalid operations - beyond disk boundary
-        assert_eq!(disk.read_block(2, &mut test_buf), Err(DriverError::Io));
-        assert_eq!(disk.read_block(100, &mut test_buf), Err(DriverError::Io));
-        assert_eq!(disk.write_block(2, &test_data), Err(DriverError::Io));
-        assert_eq!(disk.write_block(100, &test_data), Err(DriverError::Io));
+        assert_eq!(disk.read_block(2, &mut test_buf), Err(KError::Io));
+        assert_eq!(disk.read_block(100, &mut test_buf), Err(KError::Io));
+        assert_eq!(disk.write_block(2, &test_data), Err(KError::Io));
+        assert_eq!(disk.write_block(100, &test_data), Err(KError::Io));
 
         // Test buffer size validation - must be multiple of block size
         let mut invalid_buf = vec![0; 511]; // One byte short
         assert_eq!(
             disk.read_block(0, &mut invalid_buf),
-            Err(DriverError::InvalidInput)
+            Err(KError::InvalidInput)
         );
 
         let invalid_data = vec![0xAA; 513]; // One byte over
         assert_eq!(
             disk.write_block(0, &invalid_data),
-            Err(DriverError::InvalidInput)
+            Err(KError::InvalidInput)
         );
 
         // Test multi-block operations
@@ -253,13 +241,13 @@ pub mod tests_ramdisk_static {
 
         // Invalid multi-block operation - extends beyond disk
         let mut oversized_buf = vec![0; 1536]; // 3 blocks, but disk only has 2
-        assert_eq!(disk.read_block(0, &mut oversized_buf), Err(DriverError::Io));
+        assert_eq!(disk.read_block(0, &mut oversized_buf), Err(KError::Io));
 
         let oversized_data = vec![0xDD; 1536];
-        assert_eq!(disk.write_block(0, &oversized_data), Err(DriverError::Io));
+        assert_eq!(disk.write_block(0, &oversized_data), Err(KError::Io));
 
         // Test edge case: read/write starting from block 1 with 2-block buffer
         let mut edge_buf = vec![0; 1024]; // 2 blocks
-        assert_eq!(disk.read_block(1, &mut edge_buf), Err(DriverError::Io)); // Would read blocks 1-2, but block 2 doesn't exist
+        assert_eq!(disk.read_block(1, &mut edge_buf), Err(KError::Io)); // Would read blocks 1-2, but block 2 doesn't exist
     }
 }

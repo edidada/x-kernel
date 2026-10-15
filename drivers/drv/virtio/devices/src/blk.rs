@@ -10,7 +10,7 @@ use block::{
     BlockDeviceOperations,
     completion::{BlockSignals, PrepareBlockWait},
 };
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -140,9 +140,9 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     ///
     /// # Errors
     ///
-    /// Returns `DriverError` if the device fails to initialize (e.g. feature
+    /// Returns `KError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
         let device = Self::init_device(transport)?;
         Ok(Self::from_device(device, None, mmio_regs))
     }
@@ -157,7 +157,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// # Errors
     /// Returns initialization errors from the transport, or Unsupported when
     /// built with unwinding: submitted stack nodes cannot unwind through DMA.
-    pub fn try_new_irq(transport: T, prepare_wait: PrepareBlockWait) -> DriverResult<Self> {
+    pub fn try_new_irq(transport: T, prepare_wait: PrepareBlockWait) -> KResult<Self> {
         Self::try_new_irq_with_regs(transport, prepare_wait, None)
     }
 
@@ -167,9 +167,9 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         transport: T,
         prepare_wait: PrepareBlockWait,
         mmio_regs: Option<driver_core::IoMap>,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         if cfg!(panic = "unwind") {
-            return Err(DriverError::Unsupported);
+            return Err(KError::Unsupported);
         }
         let mut device = Self::init_device(transport)?;
         device.disable_interrupts();
@@ -281,10 +281,10 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         drop(device);
     }
 
-    fn admit_call(&self) -> DriverResult<BlockCall<'_, H, T>> {
+    fn admit_call(&self) -> KResult<BlockCall<'_, H, T>> {
         let mut state = self.state.lock();
         if !state.is_accepting {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         state.active_calls = state
             .active_calls
@@ -299,18 +299,16 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         self.index
     }
 
-    fn init_device(transport: T) -> DriverResult<InnerDev<H, T>> {
+    fn init_device(transport: T) -> KResult<InnerDev<H, T>> {
         InnerDev::new(transport).map_err(as_driver_error)
     }
 }
 
-impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
-    fn name(&self) -> &str {
+impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
+    /// The disk name this device publishes under (the `vd*` lineage —
+    /// Linux names block disks in the driver, gendisk only stores it).
+    pub fn name(&self) -> &str {
         &self.name
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
     }
 }
 
@@ -329,7 +327,7 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
         self.is_read_only
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         let _call = self.admit_call()?;
         if let Some(prepare) = self.prepare_wait {
             return self.read_request(block_id, buf, prepare);
@@ -343,14 +341,14 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
             .map_err(as_driver_error)
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         let _call = self.admit_call()?;
         if let Some(prepare) = self.prepare_wait {
             return self.write_request(block_id, buf, prepare);
         }
         let mut state = self.state.lock();
         if self.is_read_only {
-            return Err(DriverError::ReadOnly);
+            return Err(KError::ReadOnlyFilesystem);
         }
         state
             .device
@@ -360,7 +358,7 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
             .map_err(as_driver_error)
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         let _call = self.admit_call()?;
         if let Some(prepare) = self.prepare_wait {
             return self.flush_request(prepare);
@@ -392,7 +390,6 @@ mod tests {
         if let Ok(d) = dev {
             assert!(d.name().starts_with("vd"));
             assert!(d.name().len() >= 3);
-            assert_eq!(d.device_kind(), DeviceKind::Block);
             assert_eq!(d.block_size(), 512);
         } else {
             assert!(dev.is_err());
@@ -427,7 +424,7 @@ mod tests {
         assert!(dev.is_inherently_read_only());
         assert_eq!(
             dev.write_block(0, &[0; SECTOR_SIZE]).unwrap_err(),
-            DriverError::ReadOnly
+            KError::ReadOnlyFilesystem
         );
     }
 }

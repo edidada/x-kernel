@@ -6,8 +6,8 @@
 
 use alloc::boxed::Box;
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal, PAGE_SIZE,
@@ -43,7 +43,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and reads the display resolution.
-    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> KResult<Self> {
         let mut device = VirtIoGpu2d::new(transport).map_err(crate::as_driver_error)?;
         let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
 
@@ -52,16 +52,6 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
             info: DisplayInfo { width, height },
             inner: SpinNoIrq::new(device),
         })
-    }
-}
-
-impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
-    fn name(&self) -> &str {
-        "virtio-gpu"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Display
     }
 }
 
@@ -74,7 +64,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         false
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         Ok(())
     }
 
@@ -83,9 +73,9 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         resource: ScanoutResource,
         paddr: u64,
         length: u32,
-    ) -> DriverResult {
+    ) -> KResult {
         if length == 0 || resource.pitch == 0 {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         self.inner
             .lock()
@@ -93,14 +83,14 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             .map_err(crate::as_driver_error)
     }
 
-    fn destroy_scanout_resource(&self, resource_id: u32) -> DriverResult {
+    fn destroy_scanout_resource(&self, resource_id: u32) -> KResult {
         self.inner
             .lock()
             .destroy_resource(resource_id)
             .map_err(crate::as_driver_error)
     }
 
-    fn present_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> DriverResult {
+    fn present_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> KResult {
         self.inner
             .lock()
             .present_resource(resource_id, rect)

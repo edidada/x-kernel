@@ -58,7 +58,6 @@ tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 device_class = { workspace = true, features = ["display"] }
 inputdev = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
-device_traits.workspace = true
 
 unittest.workspace = true
 

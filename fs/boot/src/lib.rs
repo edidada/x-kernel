@@ -22,7 +22,7 @@ use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
 use device_class::{
-    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
+    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::KError, virtio_9p_devices,
 };
 #[cfg(feature = "fs9p")]
 use kerrno::KError;
@@ -69,17 +69,17 @@ impl p9::P9Transport for Virtio9pTransport {
 }
 
 #[cfg(feature = "fs9p")]
-fn map_9p_driver_error(error: DriverError) -> KError {
+fn map_9p_driver_error(error: KError) -> KError {
     match error {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::BadState => KError::BadState,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
-        DriverError::NoMemory => KError::NoMemory,
-        DriverError::ReadOnly => KError::ReadOnlyFilesystem,
-        DriverError::ResourceBusy => KError::ResourceBusy,
-        DriverError::Unsupported => KError::OperationNotSupported,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::BadState => KError::BadState,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::Io => KError::Io,
+        KError::NoMemory => KError::NoMemory,
+        KError::ReadOnlyFilesystem => KError::ReadOnlyFilesystemFilesystem,
+        KError::ResourceBusy => KError::ResourceBusy,
+        KError::Unsupported => KError::OperationNotSupported,
     }
 }
 

@@ -10,7 +10,7 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
-use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use kerrno::{KError, KResult};
 
 /// Opaque handle of one class-device publication.
 ///
@@ -200,8 +200,6 @@ struct ClassDeviceInner<T> {
     parent: ClassParent,
     runtime: T,
     name: String,
-    device_kind: DeviceKind,
-    irq: Option<usize>,
     metadata: ClassDeviceMetadata,
     /// Device-usage protocol (Linux `device usage`/`try_acquire`
     /// analogue): in-flight operations count here, and `class_remove`
@@ -255,29 +253,18 @@ impl<T> ClassDevice<T> {
         parent: impl Into<ClassParent>,
         inner: T,
         name: String,
-        device_kind: DeviceKind,
-        irq: Option<usize>,
-    ) -> DriverResult<Self> {
-        Self::try_new_with_class_metadata(
-            parent,
-            inner,
-            name,
-            device_kind,
-            irq,
-            ClassDeviceMetadata::empty(),
-        )
+    ) -> KResult<Self> {
+        Self::try_new_with_class_metadata(parent, inner, name, ClassDeviceMetadata::empty())
     }
 
     pub fn try_new_with_class_metadata(
         parent: impl Into<ClassParent>,
         inner: T,
         name: String,
-        device_kind: DeviceKind,
-        irq: Option<usize>,
         metadata: ClassDeviceMetadata,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         let parent = parent.into();
-        parent.driver_name().ok_or(DriverError::BadState)?;
+        parent.driver_name().ok_or(KError::BadState)?;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 uses: core::sync::atomic::AtomicUsize::new(0),
@@ -285,8 +272,6 @@ impl<T> ClassDevice<T> {
                 parent,
                 runtime: inner,
                 name,
-                device_kind,
-                irq,
                 metadata,
             }),
         })
@@ -305,16 +290,6 @@ impl<T> ClassDevice<T> {
     /// Stable runtime device name.
     pub fn name(&self) -> &str {
         &self.inner.name
-    }
-
-    /// Runtime capability kind.
-    pub fn device_kind(&self) -> DeviceKind {
-        self.inner.device_kind
-    }
-
-    /// Optional IRQ associated with the runtime capability.
-    pub fn irq(&self) -> Option<usize> {
-        self.inner.irq
     }
 
     /// Where the device lives on the bus topology.
@@ -366,15 +341,15 @@ impl<T> ClassDevice<T> {
 
     /// Run a data-plane operation, refusing once the device is offline.
     ///
-    /// Every consumer-facing class operation that returns a [`DriverResult`]
+    /// Every consumer-facing class operation that returns a [`KResult`]
     /// goes through here: after the composition root removed the owning
     /// device (offline flips once the quiesce callbacks returned), the
-    /// operation fails with [`DriverError::BadState`] instead of touching
+    /// operation fails with [`KError::BadState`] instead of touching
     /// the possibly-torn-down runtime object. Internal teardown paths keep
     /// using [`Self::with`] — they run before the offline flag flips.
-    pub fn with_available<R>(&self, f: impl FnOnce(&T) -> DriverResult<R>) -> DriverResult<R> {
+    pub fn with_available<R>(&self, f: impl FnOnce(&T) -> KResult<R>) -> KResult<R> {
         if !self.is_available() {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         let _use = self.acquire_use()?;
         f(&self.inner.runtime)
@@ -386,14 +361,14 @@ impl<T> ClassDevice<T> {
     /// decrements on drop. Long-running consumers (workers holding the
     /// device across awaits) hold THIS instead of a bare clone so removal
     /// observability is real: `in_flight()` reports the count.
-    pub fn acquire_use(&self) -> Result<ClassUse<T>, DriverError> {
+    pub fn acquire_use(&self) -> Result<ClassUse<T>, KError> {
         if !self.is_available()
             || self
                 .inner
                 .draining
                 .load(core::sync::atomic::Ordering::Acquire)
         {
-            return Err(DriverError::BadState);
+            return Err(KError::BadState);
         }
         self.inner
             .uses
@@ -436,23 +411,6 @@ impl<T> ClassDevice<T> {
     }
 }
 
-impl<T> Device for ClassDevice<T>
-where
-    T: Send + Sync,
-{
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        self.device_kind()
-    }
-
-    fn irq(&self) -> Option<usize> {
-        self.irq()
-    }
-}
-
 impl<T> core::fmt::Debug for ClassDevice<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClassDevice")
@@ -490,10 +448,10 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
-    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
+    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> KResult<()> {
         let id = device.id();
         if self.devices.iter().any(|existing| existing.id() == id) {
-            return Err(DriverError::AlreadyExists);
+            return Err(KError::AlreadyExists);
         }
         self.devices.push(device);
         Ok(())
@@ -613,17 +571,8 @@ mod tests {
         #[cfg(feature = "hwrng")]
         {
             struct SentinelHwrng;
-            impl hwrng::Device for SentinelHwrng {
-                fn name(&self) -> &str {
-                    "drain-sentinel"
-                }
-
-                fn device_kind(&self) -> device_traits::DeviceKind {
-                    device_traits::DeviceKind::Hwrng
-                }
-            }
             impl hwrng::HwrngDevice for SentinelHwrng {
-                fn read(&self, _buf: &mut [u8]) -> device_traits::DriverResult<usize> {
+                fn read(&self, _buf: &mut [u8]) -> KResult<usize> {
                     Ok(0)
                 }
 
@@ -634,6 +583,7 @@ mod tests {
             crate::publish_hwrng(
                 ClassParent::detached(owner, "drain-test", loc(1)),
                 alloc::sync::Arc::new(SentinelHwrng),
+                "drain-sentinel",
             )
             .unwrap();
             published += 1;
@@ -642,15 +592,6 @@ mod tests {
         #[cfg(feature = "net")]
         {
             struct SentinelNet;
-            impl device_traits::Device for SentinelNet {
-                fn name(&self) -> &str {
-                    "net-sentinel"
-                }
-
-                fn device_kind(&self) -> device_traits::DeviceKind {
-                    device_traits::DeviceKind::Net
-                }
-            }
             impl net::NetDevice for SentinelNet {
                 fn mac(&self) -> net::MacAddress {
                     net::MacAddress([0; 6])
@@ -672,32 +613,30 @@ mod tests {
                     0
                 }
 
-                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> device_traits::DriverResult {
+                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
                     Ok(())
                 }
 
-                fn recycle_tx(&self) -> device_traits::DriverResult {
+                fn recycle_tx(&self) -> KResult {
                     Ok(())
                 }
 
-                fn send(&self, _tx_buf: net::NetBufHandle) -> device_traits::DriverResult {
-                    Err(device_traits::DriverError::Unsupported)
+                fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+                    Err(KError::Unsupported)
                 }
 
-                fn recv(&self) -> device_traits::DriverResult<net::NetBufHandle> {
-                    Err(device_traits::DriverError::Unsupported)
+                fn recv(&self) -> KResult<net::NetBufHandle> {
+                    Err(KError::Unsupported)
                 }
 
-                fn alloc_tx_buf(
-                    &self,
-                    _size: usize,
-                ) -> device_traits::DriverResult<net::NetBufHandle> {
-                    Err(device_traits::DriverError::Unsupported)
+                fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+                    Err(KError::Unsupported)
                 }
             }
             crate::publish_net(
                 ClassParent::detached(owner, "drain-test", loc(3)),
                 alloc::boxed::Box::new(SentinelNet),
+                "drain-sentinel",
             )
             .unwrap();
             published += 1;
@@ -733,16 +672,12 @@ mod tests {
             ClassParent::detached(9, "test", loc(0)),
             1u32,
             alloc::string::String::from("a"),
-            device_traits::DeviceKind::Char,
-            None,
         )
         .unwrap();
         let b = ClassDevice::try_new_with_info(
             ClassParent::detached(9, "test", loc(1)),
             2u32,
             alloc::string::String::from("b"),
-            device_traits::DeviceKind::Char,
-            None,
         )
         .unwrap();
         registry.publish(a).unwrap();
@@ -798,15 +733,6 @@ mod tests {
         struct SentinelNet {
             _lease: LeaseOnDrop,
         }
-        impl device_traits::Device for SentinelNet {
-            fn name(&self) -> &str {
-                "lease-sentinel"
-            }
-
-            fn device_kind(&self) -> device_traits::DeviceKind {
-                device_traits::DeviceKind::Net
-            }
-        }
         impl NetDevice for SentinelNet {
             fn mac(&self) -> net::MacAddress {
                 net::MacAddress([0; 6])
@@ -828,31 +754,31 @@ mod tests {
                 0
             }
 
-            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> device_traits::DriverResult {
+            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
                 Ok(())
             }
 
-            fn recycle_tx(&self) -> device_traits::DriverResult {
+            fn recycle_tx(&self) -> KResult {
                 Ok(())
             }
 
-            fn send(&self, _tx_buf: net::NetBufHandle) -> device_traits::DriverResult {
-                Err(device_traits::DriverError::Unsupported)
+            fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+                Err(KError::Unsupported)
             }
 
-            fn recv(&self) -> device_traits::DriverResult<net::NetBufHandle> {
-                Err(device_traits::DriverError::Unsupported)
+            fn recv(&self) -> KResult<net::NetBufHandle> {
+                Err(KError::Unsupported)
             }
 
-            fn alloc_tx_buf(&self, _size: usize) -> device_traits::DriverResult<net::NetBufHandle> {
-                Err(device_traits::DriverError::Unsupported)
+            fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+                Err(KError::Unsupported)
             }
 
             fn set_rx_scheduler(
                 &self,
                 _scheduler: Option<Arc<dyn net::NetRxScheduler>>,
-            ) -> device_traits::DriverResult {
-                Err(device_traits::DriverError::Unsupported)
+            ) -> KResult {
+                Err(KError::Unsupported)
             }
         }
 
@@ -863,6 +789,7 @@ mod tests {
         let publication = crate::publish_net(
             ClassParent::detached(0x1eaf, "lease-test", loc(0x1eaf)),
             runtime,
+            "lease-sentinel",
         )
         .unwrap();
 

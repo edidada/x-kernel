@@ -345,7 +345,6 @@ name = "block"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "device-traits",
  "devnode",
  "kbuild_config",
  "kerrno",
@@ -524,7 +523,7 @@ dependencies = [
 name = "char_driver"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
 ]
 
 [[package]]
@@ -665,9 +664,9 @@ version = "0.3.0-dev"
 dependencies = [
  "arm_pl011",
  "device-class",
- "device-traits",
  "devnode",
  "driver-core",
+ "kerrno",
  "khal",
  "kiface",
  "kirq",
@@ -1125,7 +1124,6 @@ dependencies = [
  "chrono",
  "console-driver",
  "device-class",
- "device-traits",
  "devnode",
  "dice-driver",
  "drmdevice",
@@ -1168,11 +1166,11 @@ version = "0.3.0-dev"
 dependencies = [
  "block",
  "char_driver",
- "device-traits",
  "devnode",
  "display",
  "hwrng",
  "input",
+ "kerrno",
  "kspin",
  "lazyinit",
  "log",
@@ -1181,10 +1179,6 @@ dependencies = [
  "virtio-devices",
  "vsock",
 ]
-
-[[package]]
-name = "device-traits"
-version = "0.3.0-dev"
 
 [[package]]
 name = "devnode"
@@ -1234,7 +1228,7 @@ dependencies = [
 name = "display"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
  "unittest",
 ]
 
@@ -1270,7 +1264,6 @@ dependencies = [
 name = "driver-host"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
  "driver-core",
  "kclk",
  "kdma",
@@ -1311,10 +1304,10 @@ version = "0.3.0-dev"
 dependencies = [
  "block",
  "device-class",
- "device-traits",
  "devnode",
  "driver-core",
  "kbuild_config",
+ "kerrno",
 ]
 
 [[package]]
@@ -1334,8 +1327,8 @@ dependencies = [
  "char_driver",
  "console-driver",
  "device-class",
- "device-traits",
  "driver-core",
+ "kerrno",
  "log",
  "memaddr",
 ]
@@ -1346,10 +1339,10 @@ version = "0.3.0-dev"
 dependencies = [
  "block",
  "device-class",
- "device-traits",
  "driver-core",
  "driver-host",
  "hwrng",
+ "kerrno",
  "kpoll",
  "ktask",
  "log",
@@ -1948,7 +1941,7 @@ dependencies = [
 name = "hwrng"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
  "kspin",
  "unittest",
 ]
@@ -2038,7 +2031,7 @@ dependencies = [
 name = "input"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
  "strum",
 ]
 
@@ -2644,7 +2637,6 @@ dependencies = [
  "async-trait",
  "bitflags 2.13.2",
  "device-class",
- "device-traits",
  "entropy",
  "enum_dispatch",
  "etherparse",
@@ -3586,7 +3578,7 @@ dependencies = [
 name = "net"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
  "ksync",
  "unittest",
 ]
@@ -3845,9 +3837,9 @@ dependencies = [
 name = "pci"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
  "driver-core",
  "kbuild_config",
+ "kerrno",
  "khal",
  "kspin",
  "kvirtiodrivers",
@@ -5628,11 +5620,11 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
- "device-traits",
  "display",
  "driver-core",
  "hwrng",
  "input",
+ "kerrno",
  "kspin",
  "kvirtiodrivers",
  "linked_list_r4l",
@@ -5663,7 +5655,7 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 name = "vsock"
 version = "0.3.0-dev"
 dependencies = [
- "device-traits",
+ "kerrno",
 ]
 
 [[package]]

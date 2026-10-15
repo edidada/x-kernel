@@ -26,7 +26,7 @@ The normative rules are in
  (cross-          (per-class contracts      (one module      (PCI access,
   subsystem        + class services,        per driver,      DT/ACPI/FDT
   foundations:     e.g. block dispatch)     family crates)   parsing)
-  device-traits,        │                    │
+         │                    │
   device-class,         └────► driver-host provider ◄────────┘
   devnode)                     (capability backend bridge:
                                 memspace / kirq / kdma / khal)
@@ -57,7 +57,6 @@ host-kernel-free (rule L0-b), which is what lets the model be tested against
 
 | Crate | Package | Role |
 |------|------|------|
-| `common/device-traits` | `device-traits` | Common driver error/result, `DeviceKind`, and the base `Device` trait. |
 | `common/devnode` | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, and the udev-visible uevent payload format. |
 | `common/device-class` | `device-class` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions, the `with_available` data-plane gate. |
 

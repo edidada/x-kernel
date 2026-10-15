@@ -88,8 +88,8 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |---|---|---|---|---|
 | T-01 | 恶意/故障 VMM 在 used ring 里给出越界的 `id` 或超前的 `idx`，驱动据此访问请求池外的内存 | 高 | VMM 被攻破，或 QEMU 设备模拟 bug | **不在本 crate**。校验在 `virtio-devices/src/blk/requests.rs`（`in_flight: Box<[Option<NonNull<Request>>]>` 的索引检查、`is_empty` 判定），有 6 个 `def_test` 覆盖。**本 crate 的责任**是保证 teardown 顺序不让校验失效（不变量 4） |
-| T-02 | `probe_mmio_device` 读到的 header 与真实设备不符（VMM 中途改变 device id），驱动按错误的家族激活 | 中 | 恶意 VMM | **部分实现**：`dispatch` 按 `DeviceKind` 分派，家族 feature 关闭时返回 `Fatal(Unsupported)`；PCI 路径另有 `kind` 校验（`matches!(kind, DeviceKind::Block)`）。**残余风险**：MMIO 路径**没有**二次校验 kind——它直接信任 header。加固建议：在 `dispatch` 之后、`activate` 之内加一次 kind 断言，与 PCI 路径对称 |
-| T-03 | `IDS` 表的 transitional id 写错一行，驱动认领了别的家族的设备 | 中 | 转写错误 | **已实现**：`common::pci_transport` 返回的 `kind` 与驱动期望的 `DeviceKind` 不符即 `Fatal(Unsupported)`。`blk.rs` 的 `IDS` 注释明确写了 "0x1000 is *network*——a wrong row here silently steals another driver's device" |
+| T-02 | `probe_mmio_device` 读到的 header 与真实设备不符（VMM 中途改变 device id），驱动按错误的家族激活 | 中 | 恶意 VMM | **部分实现**：`dispatch` 按 the family kind vocabulary 分派，家族 feature 关闭时返回 `Fatal(Unsupported)`；PCI 路径另有 `kind` 校验（`matches!(kind, VirtioDeviceKind::Block)`）。**残余风险**：MMIO 路径**没有**二次校验 kind——它直接信任 header。加固建议：在 `dispatch` 之后、`activate` 之内加一次 kind 断言，与 PCI 路径对称 |
+| T-03 | `IDS` 表的 transitional id 写错一行，驱动认领了别的家族的设备 | 中 | 转写错误 | **已实现**：`common::pci_transport` 返回的 `kind` 与驱动期望的 the family kind vocabulary 不符即 `Fatal(Unsupported)`。`blk.rs` 的 `IDS` 注释明确写了 "0x1000 is *network*——a wrong row here silently steals another driver's device" |
 | T-04 | teardown 顺序错误：IRQ 在 transport 销毁之后才释放 → 中断打到已释放的队列 | 高 | 修改 `BlkActivation::drop` 的顺序 | **已实现**：不变量 4 的显式顺序 + `disable_interrupts()` 在 `drop(irq)` **之前**（先让设备停止产生，再释放主机侧处理）。**残余风险**：这个顺序没有测试钉住（remove 路径的测试覆盖是整个框架的已知弱点，见 `docs/driver-framework-review.md` §8.4 教训 2）。加固建议：加一个 mock transport 的 close 顺序断言测试 |
 | T-05 | handler 在设备消失后被调用，`Weak::upgrade` 成功但 transport 已销毁 | 高 | IRQ 释放与 transport 销毁的顺序颠倒 | **已实现**：不变量 2 + teardown 顺序（`drop(irq)` 在 `finish_close()` 之前）。`upgrade()` 返回 `None` 时报 `NotHandled`，这是安全默认值（共享线上让别人处理） |
 | T-06 | `del_gendisk` 之后仍有在途 I/O 完成，写回已注销的请求 | 高 | drain 缺失或顺序错误 | **已实现**：`begin_close(drain.signals())` 先登记在途请求，`del_gendisk` 撤销设备号，然后 `drain.wait_completion()` 等干净。这正是 `BlockActivation::drop` 里两个 `prepare_block_wait().expect(...)` 的用途（带 `CG-021` 说明：remove 在任务上下文，分配失败不可恢复） |
@@ -145,7 +145,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 3. **`probe_mmio_device` 是唯一绕过 `IoMap` 边界检查的访问**，其安全性依赖
    "只读固定偏移的 header"这个当前事实。
 4. **MSI-X 只在 x86_64、只对 net 启用**（`devices/src/pci.rs` 的
-   `if dev_kind == DeviceKind::Net`）。其他家族用 legacy INTx，直到它们的
+   `if dev_kind == VirtioDeviceKind::Net`）。其他家族用 legacy INTx，直到它们的
    中断行为在共享 queue-vector 下被审计过。
 5. **`rng` 的完成等待内联在驱动里**（例外 E-04），未服务化；执行上下文
    前提写在 `HostRngCompletion` 的 rustdoc 里，类型上没有 barrier。
@@ -164,7 +164,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 - [ ] `Data` 新增字段时，是否保持了"发布 guard 在最前"？
 - [ ] IRQ handler 闭包是否仍然只捕获 `Weak`？改成 `Arc` 会让 activation 永远
       无法释放（handler 持有强引用，而 handler 由 activation 的 IRQ guard 持有）。
-- [ ] 新增家族时是否加了 `DeviceKind` 校验？（T-02、T-03）
+- [ ] 新增家族时是否加了 the family kind vocabulary 校验？（T-02、T-03）
 - [ ] `IDS` 表的 transitional 行是否核对过类型索引？（0x1000=net、0x1001=blk、
       0x1005=rng；modern = 0x1040 + type）
 - [ ] 新增的 `activate_mmio` 是否调用了 `builder.take_regs()` 并把映射交给

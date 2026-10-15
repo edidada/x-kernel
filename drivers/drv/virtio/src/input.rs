@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use device_class::{ClassParent, publish_input};
 use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
+use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_input_id_table[]`.
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];
@@ -30,7 +31,7 @@ impl DriverOps<PciBus> for InputDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<InputData, ProbeError> {
         let (kind, transport, irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, device_traits::DeviceKind::Input) {
+        if !matches!(kind, VirtioDeviceKind::Input) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
         let publication = activate(dev, transport, irq.unwrap_or(0), None)?;
@@ -57,9 +58,11 @@ pub fn activate<B: driver_core::Bus>(
     )
     .map_err(crate::common::map_driver_error)?;
     let location = crate::common::physical_path(dev);
+    let name = alloc::string::String::from(device.name());
     let handle = publish_input(
         ClassParent::detached(dev.id().raw(), "virtio-input", location),
         Box::new(device),
+        name,
     )
     .map_err(crate::common::map_driver_error)?;
     Ok(device_class::input_withdraw(&handle))

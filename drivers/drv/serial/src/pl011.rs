@@ -30,11 +30,11 @@ use console_driver::{
     serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
 };
 use device_class::{ClassParent, publish_char};
-use device_traits::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
+use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
 
 /// `static const struct of_device_id pl011_of_match[]`.
@@ -160,6 +160,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 register_console_parented(
                     ClassParent::detached(dev.id().raw(), "pl011-serial", location),
                     char_dev,
+                    "serial",
                 )
                 .map_err(crate::probe_error::map_driver_error)?;
             }
@@ -167,6 +168,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 let handle = publish_char(
                     ClassParent::detached(dev.id().raw(), "pl011-serial", location),
                     char_dev,
+                    "serial",
                 )
                 .map_err(crate::probe_error::map_driver_error)?;
                 publication = Some(device_class::char_withdraw(&handle));
@@ -245,26 +247,12 @@ pub fn register() {
 /// Char-device runtime wrapper over a `SerialPort` (the `/dev` view).
 struct SerialCharDev(Arc<SerialPort>);
 
-impl Device for SerialCharDev {
-    fn name(&self) -> &str {
-        "serial"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Char
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
-
 impl CharDevice for SerialCharDev {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         Ok(self.0.read_data(buf))
     }
 
-    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         self.0.write_data(buf);
         Ok(buf.len())
     }

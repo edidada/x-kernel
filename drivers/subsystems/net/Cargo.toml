@@ -17,7 +17,7 @@ default = []
 # fxmac = ["dep:fxmac_rs"]
 
 [dependencies]
-device_traits = { workspace = true }
+kerrno.workspace = true
 # fxmac_rs = { git = "https://github.com/elliott10/fxmac_rs.git", rev = "0dbc3916", optional = true }
 # ixgbe-driver = { git = "https://github.com/KuangjuX/ixgbe-driver.git", rev = "8e5eb74", optional = true }
 ksync = { workspace = true }

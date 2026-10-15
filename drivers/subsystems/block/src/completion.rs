@@ -6,7 +6,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use crate::DriverResult;
+use crate::KResult;
 
 /// Driver operations for reclaiming a block device's completed I/O requests.
 ///
@@ -64,7 +64,7 @@ pub trait BlockWaiter {
     /// # Errors
     /// A registration failure may be returned before submission. The caller
     /// must unlink its pending request and hand admission to the next caller.
-    fn wait_admission(&mut self) -> DriverResult<()>;
+    fn wait_admission(&mut self) -> KResult<()>;
 
     /// Waits non-interruptibly for the permanent terminal notification.
     ///
@@ -82,4 +82,4 @@ pub trait BlockWaiter {
 /// Returns InvalidInput for invalid context and a driver error for a
 /// recoverable preparation failure, before any device ownership starts.
 /// Infallible allocation follows the host kernel's OOM policy.
-pub type PrepareBlockWait = fn() -> DriverResult<Box<dyn BlockWaiter>>;
+pub type PrepareBlockWait = fn() -> KResult<Box<dyn BlockWaiter>>;

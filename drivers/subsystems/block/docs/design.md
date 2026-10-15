@@ -285,14 +285,14 @@ the duration of outstanding I/O instead of waiting for a completion event.
   general block path.
 - Behavior: invalid block size or extent requests are rejected according to
   existing block behavior. Writes rejected because the effective block device is
-  read-only are observed as `DriverError::ReadOnly`.
+  read-only are observed as `KError::ReadOnly`.
 - Acceptance: existing block validation and read-only tests remain valid; tests
   or review evidence show the IRQ-capable virtio-blk path cannot change these
   caller-visible outcomes.
 
 ### REQ-BLKIRQ-07: Preserve caller-visible error meaning.
 
-- Source: current `DriverError` contract and PR review discussion.
+- Source: current `KError` contract and PR review discussion.
 - Behavior: ordinary device I/O failures are reported as I/O failures.
   Temporary inability to accept more device work is reported as a retryable or
   backpressure condition, not as internal state corruption.

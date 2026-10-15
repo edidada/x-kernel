@@ -32,14 +32,13 @@ pub mod ramdisk_image;
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use devnode::DeviceNumber;
 // #[cfg(feature = "bcm2835-sdhci")]
 
 // #[cfg(feature = "ahci")]
 // #[cfg(feature = "sdmmc")]
 #[doc(no_inline)]
-pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
-use devnode::DeviceNumber;
-use kerrno::{KError, KResult};
+pub use kerrno::{KError, KResult};
 use klazy::Lazy;
 use ksync::Mutex;
 
@@ -89,16 +88,16 @@ pub trait BlockDeviceOperations: Send + Sync {
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be read.
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult;
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult;
 
     /// Writes blocked data to the given block.
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be written.
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult;
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult;
 
     /// Flushes the device to write all pending data to the storage.
-    fn flush(&self) -> DriverResult;
+    fn flush(&self) -> KResult;
 
     /// Opens a block-device view through this disk.
     fn open(&self, _device: &BlockDevice, _mode: BlockOpenMode) -> KResult<()> {
@@ -143,15 +142,15 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
         (**self).is_inherently_read_only()
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         (**self).read_block(block_id, buf)
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         (**self).write_block(block_id, buf)
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         (**self).flush()
     }
 
@@ -203,7 +202,7 @@ impl Gendisk {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] for an empty name, an invalid
+    /// Returns [`KError::InvalidInput`] for an empty name, an invalid
     /// minor range, a zero block size, or a byte capacity that overflows `u64`.
     pub fn new(
         name: String,
@@ -211,7 +210,7 @@ impl Gendisk {
         first_minor: u32,
         minors: u32,
         operations: Box<dyn BlockDeviceOperations + Send + Sync>,
-    ) -> DriverResult<Self> {
+    ) -> KResult<Self> {
         let block_size = operations.block_size();
         let capacity_is_valid = u64::try_from(block_size)
             .ok()
@@ -223,7 +222,7 @@ impl Gendisk {
             || first_minor.checked_add(minors - 1).is_none()
             || !capacity_is_valid
         {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let is_inherently_read_only = operations.is_inherently_read_only();
         Ok(Self {
@@ -302,21 +301,6 @@ impl Gendisk {
         self
     }
 }
-
-impl Device for Gendisk {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-
-    fn irq(&self) -> Option<usize> {
-        None
-    }
-}
-
 impl BlockDeviceOperations for Gendisk {
     fn num_blocks(&self) -> u64 {
         self.operations.num_blocks()
@@ -330,15 +314,15 @@ impl BlockDeviceOperations for Gendisk {
         self.is_inherently_read_only
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         self.operations.read_block(block_id, buf)
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         self.operations.write_block(block_id, buf)
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         self.operations.flush()
     }
 
@@ -438,7 +422,7 @@ impl BlockDevice {
     /// `&BlockDevice` receiver finds THIS one first): validate alignment
     /// and capacity, translate through the view's `start_block` — never a
     /// raw forward into the driver ops.
-    pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         self.read_block_checked(block_id, buf)
     }
 
@@ -447,12 +431,12 @@ impl BlockDevice {
     /// Same semantics as the trait method, including the read-only check:
     /// `&BlockDevice` callers (kvfs `read_block_device`, fs/block) resolve
     /// here, so an unvalidated forward would give one API two semantics.
-    pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    pub fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         self.write_block_checked(block_id, buf)
     }
 
     /// Flushes pending writes through the driver operations table.
-    pub fn flush(&self) -> DriverResult {
+    pub fn flush(&self) -> KResult {
         self.disk.operations.flush()
     }
 
@@ -531,13 +515,13 @@ impl BlockDevice {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] when the resulting byte capacity
+    /// Returns [`KError::InvalidInput`] when the resulting byte capacity
     /// cannot be represented in `u64`.
-    pub fn set_capacity(&self, num_blocks: u64) -> DriverResult<()> {
-        let block_size = u64::try_from(self.block_size()).map_err(|_| DriverError::InvalidInput)?;
+    pub fn set_capacity(&self, num_blocks: u64) -> KResult<()> {
+        let block_size = u64::try_from(self.block_size()).map_err(|_| KError::InvalidInput)?;
         num_blocks
             .checked_mul(block_size)
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         self.num_blocks.store(num_blocks, Ordering::Release);
         Ok(())
     }
@@ -611,60 +595,43 @@ impl BlockDevice {
     /// view's `start_block`, then forward to the driver ops. The single
     /// implementation behind BOTH the inherent method and the trait
     /// method — one API, one semantics.
-    fn read_block_checked(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block_checked(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         self.validate_io(block_id, buf.len())?;
         let backend_block = self
             .start_block
             .checked_add(block_id)
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         self.disk.read_block(backend_block, buf)
     }
 
     /// Checked write: read-only gate, validate, `start_block` translation,
     /// then forward. See [`Self::read_block_checked`].
-    fn write_block_checked(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block_checked(&self, block_id: u64, buf: &[u8]) -> KResult {
         if self.is_read_only() {
-            return Err(DriverError::ReadOnly);
+            return Err(KError::ReadOnlyFilesystem);
         }
         self.validate_io(block_id, buf.len())?;
         let backend_block = self
             .start_block
             .checked_add(block_id)
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         self.disk.write_block(backend_block, buf)
     }
 
-    fn validate_io(&self, block_id: u64, len: usize) -> DriverResult<()> {
+    fn validate_io(&self, block_id: u64, len: usize) -> KResult<()> {
         let block_size = self.block_size();
         if block_size == 0 || !len.is_multiple_of(block_size) {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
-        let blocks = u64::try_from(len / block_size).map_err(|_| DriverError::InvalidInput)?;
-        let end = block_id
-            .checked_add(blocks)
-            .ok_or(DriverError::InvalidInput)?;
+        let blocks = u64::try_from(len / block_size).map_err(|_| KError::InvalidInput)?;
+        let end = block_id.checked_add(blocks).ok_or(KError::InvalidInput)?;
         let capacity = self.num_blocks();
         if block_id > capacity || end > capacity {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         Ok(())
     }
 }
-
-impl Device for BlockDevice {
-    fn name(&self) -> &str {
-        self.disk.name()
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-
-    fn irq(&self) -> Option<usize> {
-        self.disk.irq()
-    }
-}
-
 impl BlockDeviceOperations for BlockDevice {
     fn num_blocks(&self) -> u64 {
         self.num_blocks()
@@ -678,15 +645,15 @@ impl BlockDeviceOperations for BlockDevice {
         self.disk.is_inherently_read_only
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
         self.read_block_checked(block_id, buf)
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
         self.write_block_checked(block_id, buf)
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         self.disk.flush()
     }
 
@@ -734,12 +701,12 @@ static BLOCK_DEVICES: Lazy<Mutex<BTreeMap<DeviceNumber, Arc<BlockDevice>>>> =
 ///
 /// # Errors
 ///
-/// Returns [`DriverError::InvalidInput`] when no major has been assigned, or
-/// [`DriverError::AlreadyExists`] when the device-number range conflicts with
+/// Returns [`KError::InvalidInput`] when no major has been assigned, or
+/// [`KError::AlreadyExists`] when the device-number range conflicts with
 /// an existing disk.
-pub fn add_disk(disk: Arc<Gendisk>) -> DriverResult<Arc<BlockDevice>> {
+pub fn add_disk(disk: Arc<Gendisk>) -> KResult<Arc<BlockDevice>> {
     if disk.major() == 0 {
-        return Err(DriverError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     let device_number = disk.device_number();
     let part0 = Arc::new(BlockDevice::whole(disk.clone()));
@@ -756,7 +723,7 @@ pub fn add_disk(disk: Arc<Gendisk>) -> DriverResult<Arc<BlockDevice>> {
         first_minor <= registered_last && registered_first <= last_minor
     });
     if conflicts || devices.contains_key(&device_number) {
-        return Err(DriverError::AlreadyExists);
+        return Err(KError::AlreadyExists);
     }
     devices.insert(device_number, part0.clone());
     drop(devices);
@@ -834,31 +801,25 @@ mod tests {
             BLOCK_SIZE
         }
 
-        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
             let start = block_id as usize * BLOCK_SIZE;
-            let end = start
-                .checked_add(buf.len())
-                .ok_or(DriverError::InvalidInput)?;
+            let end = start.checked_add(buf.len()).ok_or(KError::InvalidInput)?;
             let storage = self.0.lock();
-            let source = storage.get(start..end).ok_or(DriverError::InvalidInput)?;
+            let source = storage.get(start..end).ok_or(KError::InvalidInput)?;
             buf.copy_from_slice(source);
             Ok(())
         }
 
-        fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
             let start = block_id as usize * BLOCK_SIZE;
-            let end = start
-                .checked_add(buf.len())
-                .ok_or(DriverError::InvalidInput)?;
+            let end = start.checked_add(buf.len()).ok_or(KError::InvalidInput)?;
             let mut storage = self.0.lock();
-            let target = storage
-                .get_mut(start..end)
-                .ok_or(DriverError::InvalidInput)?;
+            let target = storage.get_mut(start..end).ok_or(KError::InvalidInput)?;
             target.copy_from_slice(buf);
             Ok(())
         }
 
-        fn flush(&self) -> DriverResult {
+        fn flush(&self) -> KResult {
             Ok(())
         }
     }
@@ -872,15 +833,15 @@ mod tests {
             self.block_size
         }
 
-        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> DriverResult {
-            Err(DriverError::Unsupported)
+        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> KResult {
+            Err(KError::Unsupported)
         }
 
-        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> DriverResult {
-            Err(DriverError::Unsupported)
+        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> KResult {
+            Err(KError::Unsupported)
         }
 
-        fn flush(&self) -> DriverResult {
+        fn flush(&self) -> KResult {
             Ok(())
         }
     }
@@ -898,15 +859,15 @@ mod tests {
             true
         }
 
-        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
             self.0.read_block(block_id, buf)
         }
 
-        fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
             self.0.write_block(block_id, buf)
         }
 
-        fn flush(&self) -> DriverResult {
+        fn flush(&self) -> KResult {
             self.0.flush()
         }
     }
@@ -1138,7 +1099,7 @@ mod tests {
         assert!(Arc::ptr_eq(&part0, &first.part0().expect("gendisk part0")));
 
         let overlap = disk("test-range-overlap", 240, 70, 1);
-        assert!(matches!(add_disk(overlap), Err(DriverError::AlreadyExists)));
+        assert!(matches!(add_disk(overlap), Err(KError::AlreadyExists)));
 
         let adjacent = disk("test-range-b", 240, 80, 1);
         add_disk(adjacent.clone()).expect("adjacent range is valid");
@@ -1153,11 +1114,11 @@ mod tests {
         let mut two_blocks = vec![0; BLOCK_SIZE * 2];
         assert_eq!(
             device.read_block(7, &mut two_blocks).unwrap_err(),
-            DriverError::InvalidInput
+            KError::InvalidInput
         );
         assert_eq!(
             device.write_block(0, &[0; BLOCK_SIZE - 1]).unwrap_err(),
-            DriverError::InvalidInput
+            KError::InvalidInput
         );
         assert!(device.read_block(8, &mut []).is_ok());
         del_gendisk(disk.device_number()).expect("remove bounds disk");
@@ -1186,7 +1147,7 @@ mod tests {
                 block_size: 0,
             }),
         );
-        assert!(matches!(zero_block_size, Err(DriverError::InvalidInput)));
+        assert!(matches!(zero_block_size, Err(KError::InvalidInput)));
 
         let overflowing_size = Gendisk::new(
             String::from("overflowing-size"),
@@ -1198,7 +1159,7 @@ mod tests {
                 block_size: 2,
             }),
         );
-        assert!(matches!(overflowing_size, Err(DriverError::InvalidInput)));
+        assert!(matches!(overflowing_size, Err(KError::InvalidInput)));
     }
 
     #[def_test(serial)]
@@ -1248,11 +1209,11 @@ mod tests {
         assert!(device.is_read_only());
         assert_eq!(
             device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
-            DriverError::ReadOnly
+            KError::ReadOnlyFilesystem
         );
         assert_eq!(
             BlockDeviceOperations::write_block(device.as_ref(), 0, &[0; BLOCK_SIZE]).unwrap_err(),
-            DriverError::ReadOnly
+            KError::ReadOnlyFilesystem
         );
         device
             .as_ref()
@@ -1298,7 +1259,7 @@ mod tests {
         assert!(device.is_read_only());
         assert_eq!(
             device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
-            DriverError::ReadOnly
+            KError::ReadOnlyFilesystem
         );
 
         del_gendisk(disk.device_number()).expect("remove inherently read-only disk");

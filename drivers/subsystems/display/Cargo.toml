@@ -10,7 +10,7 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-device_traits = { workspace = true }
+kerrno.workspace = true
 unittest.workspace = true
 
 [lints]

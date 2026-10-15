@@ -7,7 +7,7 @@
 #![no_std]
 
 #[doc(no_inline)]
-pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
 
 /// The information of the graphics display device.
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +54,7 @@ pub struct ScanoutResource {
 }
 
 /// Operations that require a graphics device driver to implement.
-pub trait DisplayDevice: Device {
+pub trait DisplayDevice: Send + Sync {
     /// Get the display information.
     fn info(&self) -> DisplayInfo;
 
@@ -62,7 +62,7 @@ pub trait DisplayDevice: Device {
     fn need_flush(&self) -> bool;
 
     /// Flush framebuffer to the screen.
-    fn flush(&self) -> DriverResult;
+    fn flush(&self) -> KResult;
 
     /// Create a host-visible 2D resource backed by guest memory.
     fn create_scanout_resource(
@@ -70,18 +70,18 @@ pub trait DisplayDevice: Device {
         _resource: ScanoutResource,
         _paddr: u64,
         _length: u32,
-    ) -> DriverResult {
-        Err(DriverError::Unsupported)
+    ) -> KResult {
+        Err(KError::Unsupported)
     }
 
     /// Destroy a previously created scanout resource.
-    fn destroy_scanout_resource(&self, _resource_id: u32) -> DriverResult {
-        Err(DriverError::Unsupported)
+    fn destroy_scanout_resource(&self, _resource_id: u32) -> KResult {
+        Err(KError::Unsupported)
     }
 
     /// Transfer resource contents to the host and make it the active scanout.
-    fn present_scanout_resource(&self, _resource_id: u32, _rect: ScanoutRect) -> DriverResult {
-        Err(DriverError::Unsupported)
+    fn present_scanout_resource(&self, _resource_id: u32, _rect: ScanoutRect) -> KResult {
+        Err(KError::Unsupported)
     }
 }
 

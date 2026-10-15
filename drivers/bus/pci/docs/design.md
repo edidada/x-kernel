@@ -114,7 +114,7 @@ cam offset math is duplicated deliberately, documented on the type.
 - `PciInitError` (`NoMemory`, `InvalidRange`, `MappingFailed`, `InvalidBar`) covers bus
   construction, mapping (mapped from `memspace::IoMapError`), and BAR
   assignment. Invalid device BAR encodings return `InvalidBar`; the host adapter
-  maps it to `DriverError::InvalidInput` and skips device configuration.
+  maps it to `KError::InvalidInput` and skips device configuration.
 - Absence is `Option`: no config space (`(0, 0, Static)` sentinel meaning
   "PCI skipped"), no firmware BAR range, no programmed INTx pin, no
   MSI-X capability.

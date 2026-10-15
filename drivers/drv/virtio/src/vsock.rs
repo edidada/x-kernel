@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use device_class::{ClassParent, publish_vsock};
 use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
+use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_vsock_id_table[]`.
 static IDS: &[PciMatch] = &[
@@ -33,7 +34,7 @@ impl DriverOps<PciBus> for VsockDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<VsockData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, device_traits::DeviceKind::Vsock) {
+        if !matches!(kind, VirtioDeviceKind::Vsock) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -63,6 +64,7 @@ pub fn activate<B: driver_core::Bus>(
     let handle = publish_vsock(
         ClassParent::detached(dev.id().raw(), "virtio-vsock", location),
         Box::new(device),
+        "virtio-socket",
     )
     .map_err(crate::common::map_driver_error)?;
     Ok(device_class::vsock_withdraw(&handle))

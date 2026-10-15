@@ -5,7 +5,7 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use block::{BlockDeviceOperations, Device, DeviceKind, DriverError, DriverResult};
+use block::{BlockDeviceOperations, KError, KResult};
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
@@ -48,16 +48,6 @@ impl TestDevice {
     }
 }
 
-impl Device for TestDevice {
-    fn name(&self) -> &str {
-        "kext4-metadata-cache-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-}
-
 impl BlockDeviceOperations for TestDevice {
     fn num_blocks(&self) -> u64 {
         (self.bytes.lock().len() / TEST_BLOCK_SIZE) as u64
@@ -67,7 +57,7 @@ impl BlockDeviceOperations for TestDevice {
         TEST_BLOCK_SIZE
     }
 
-    fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, output: &mut [u8]) -> KResult {
         self.read_count.fetch_add(1, Ordering::Relaxed);
         if self
             .failures_remaining
@@ -76,42 +66,40 @@ impl BlockDeviceOperations for TestDevice {
             })
             .is_ok()
         {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         ktask::sleep(self.delay);
         let start = usize::try_from(block_id)
-            .map_err(|_| DriverError::InvalidInput)?
+            .map_err(|_| KError::InvalidInput)?
             .checked_mul(TEST_BLOCK_SIZE)
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         let end = start
             .checked_add(output.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         let bytes = self.bytes.lock();
-        output.copy_from_slice(bytes.get(start..end).ok_or(DriverError::InvalidInput)?);
+        output.copy_from_slice(bytes.get(start..end).ok_or(KError::InvalidInput)?);
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, input: &[u8]) -> KResult {
         self.write_count.fetch_add(1, Ordering::Relaxed);
         if input.len() != TEST_BLOCK_SIZE {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         }
         let start = usize::try_from(block_id)
-            .map_err(|_| DriverError::InvalidInput)?
+            .map_err(|_| KError::InvalidInput)?
             .checked_mul(TEST_BLOCK_SIZE)
-            .ok_or(DriverError::InvalidInput)?;
-        let end = start
-            .checked_add(input.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
+        let end = start.checked_add(input.len()).ok_or(KError::InvalidInput)?;
         let mut bytes = self.bytes.lock();
         bytes
             .get_mut(start..end)
-            .ok_or(DriverError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
             .copy_from_slice(input);
         Ok(())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         self.flush_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -183,7 +171,7 @@ fn failed_reads_are_removed_and_can_be_retried() {
 
     assert!(matches!(
         cache.read(FilesystemBlock::new(1)),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     ));
     assert_eq!(cache.cached_block_count(), 0);
     cache.read(FilesystemBlock::new(1)).unwrap();
@@ -391,11 +379,11 @@ fn writeback_failure_records_buffer_error() {
     drop(access);
 
     let writeback = cache.start_writeback(block, transaction).unwrap();
-    writeback.fail(Ext4Error::Device(DriverError::Io));
+    writeback.fail(Ext4Error::Device(KError::Io));
 
     assert!(matches!(
         cache.read(block),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     ));
     assert_eq!(cache.reclaim_unused(1), 0);
     assert_eq!(cache.cached_block_count(), 1);
@@ -484,7 +472,7 @@ fn journal_abort_does_not_rewind_successful_prior_metadata_update() {
         .unwrap();
     drop(second);
 
-    journal.abort(Ext4Error::Device(DriverError::Io));
+    journal.abort(Ext4Error::Device(KError::Io));
     second_handle.stop().unwrap();
     assert_eq!(
         metadata_io.read_block(first_block).unwrap().as_ref()[7],

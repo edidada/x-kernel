@@ -25,7 +25,7 @@ a wait. There is no polling timeout.
 
 ## Failures and resource lifecycle
 
-Reads and host waits return the shared `DriverError`. `InvalidInput` identifies
+Reads and host waits return the shared `KError`. `InvalidInput` identifies
 a context that cannot sleep, while `NoMemory` can mean wait registration
 failed. These errors alone do not establish device failure, and the error type
 does not encode whether a failure came from the host or the device. Entropy

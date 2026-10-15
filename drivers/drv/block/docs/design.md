@@ -14,7 +14,7 @@ driver-core 模型下的块设备驱动聚合 crate。一个模块一个驱动�
 | 文件 | 内容 |
 |---|---|
 | `src/lib.rs` | crate 门面（`mod common; pub mod ramdisk;`） |
-| `src/common.rs` | `map_driver_error`（`DriverError` → `ProbeError::Fatal(RuntimeError)`）、`physical_path`（转发 `devnode::physical_path`） |
+| `src/common.rs` | `map_driver_error`（`KError` → `ProbeError::Fatal(RuntimeError)`）、`physical_path`（转发 `devnode::physical_path`） |
 | `src/ramdisk.rs` | `RamdiskDriver` + `RamdiskData` + `IDS` + `register()` |
 
 ## 架构

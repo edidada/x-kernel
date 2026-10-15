@@ -82,7 +82,7 @@ mod vsock;
 use core::{fmt::Debug, ops::BitAnd};
 
 use bitflags::Flags;
-use device_traits::{DeviceKind, DriverError};
+use kerrno::KError;
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,
@@ -104,7 +104,7 @@ pub use self::vsock::VirtIoVsockDev;
 ///
 /// # Returns
 ///
-/// `Some((DeviceKind, MmioTransport))` if the device is a recognized VirtIO
+/// `Some((VirtioDeviceKind, MmioTransport))` if the device is a recognized VirtIO
 /// device, or `None` if the region does not contain a valid VirtIO header.
 ///
 /// # Safety
@@ -238,7 +238,7 @@ impl Transport for SendMmioTransport {
 pub unsafe fn probe_mmio_device(
     reg_base: *mut u8,
     reg_size: usize,
-) -> Option<(DeviceKind, SendMmioTransport)> {
+) -> Option<(VirtioDeviceKind, SendMmioTransport)> {
     use core::ptr::NonNull;
 
     use virtio_drivers::transport::mmio::VirtIOHeader;
@@ -252,16 +252,32 @@ pub unsafe fn probe_mmio_device(
     Some((dev_kind, transport))
 }
 
-const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
+/// The virtio family's own device-kind vocabulary: what the probe
+/// discovers and the family dispatcher routes on. It belongs here, with
+/// the family — not to a global device vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioDeviceKind {
+    Block,
+    Net,
+    Hwrng,
+    Display,
+    Input,
+    Vsock,
+    Fs9p,
+}
+
+/// Map a virtio transport device type onto the family kind. Returns
+/// `None` for console and other kinds the family does not carry.
+pub const fn as_device_kind(t: VirtIoDevType) -> Option<VirtioDeviceKind> {
     use VirtIoDevType::*;
     match t {
-        Block => Some(DeviceKind::Block),
-        Network => Some(DeviceKind::Net),
-        EntropySource => Some(DeviceKind::Hwrng),
-        GPU => Some(DeviceKind::Display),
-        Input => Some(DeviceKind::Input),
-        Socket => Some(DeviceKind::Vsock),
-        _9P => Some(DeviceKind::Fs9p),
+        Block => Some(VirtioDeviceKind::Block),
+        Network => Some(VirtioDeviceKind::Net),
+        EntropySource => Some(VirtioDeviceKind::Hwrng),
+        GPU => Some(VirtioDeviceKind::Display),
+        Input => Some(VirtioDeviceKind::Input),
+        Socket => Some(VirtioDeviceKind::Vsock),
+        _9P => Some(VirtioDeviceKind::Fs9p),
         _ => None,
     }
 }
@@ -277,29 +293,27 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     feature = "socket",
     feature = "virtio-9p",
 ))]
-pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
+pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> KError {
     use virtio_drivers::{Error::*, device::socket::SocketError::*};
     match e {
-        QueueFull => DriverError::BadState,
-        NotReady => DriverError::WouldBlock,
-        WrongToken => DriverError::BadState,
-        AlreadyUsed => DriverError::AlreadyExists,
-        InvalidParam => DriverError::InvalidInput,
-        DmaError => DriverError::NoMemory,
-        IoError => DriverError::Io,
-        Unsupported => DriverError::Unsupported,
-        ConfigSpaceTooSmall => DriverError::BadState,
-        ConfigSpaceMissing => DriverError::BadState,
+        QueueFull => KError::BadState,
+        NotReady => KError::WouldBlock,
+        WrongToken => KError::BadState,
+        AlreadyUsed => KError::AlreadyExists,
+        InvalidParam => KError::InvalidInput,
+        DmaError => KError::NoMemory,
+        IoError => KError::Io,
+        Unsupported => KError::Unsupported,
+        ConfigSpaceTooSmall => KError::BadState,
+        ConfigSpaceMissing => KError::BadState,
         SocketDeviceError(e) => match e {
-            ConnectionExists => DriverError::AlreadyExists,
-            NotConnected => DriverError::BadState,
-            InvalidOperation | InvalidNumber | UnknownOperation(_) => DriverError::InvalidInput,
-            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => {
-                DriverError::InvalidInput
-            }
-            UnexpectedDataInPacket | PeerSocketShutdown => DriverError::Io,
-            InsufficientBufferSpaceInPeer => DriverError::WouldBlock,
-            RecycledWrongBuffer => DriverError::BadState,
+            ConnectionExists => KError::AlreadyExists,
+            NotConnected => KError::BadState,
+            InvalidOperation | InvalidNumber | UnknownOperation(_) => KError::InvalidInput,
+            OutputBufferTooShort(_) | BufferTooShort | BufferTooLong(..) => KError::InvalidInput,
+            UnexpectedDataInPacket | PeerSocketShutdown => KError::Io,
+            InsufficientBufferSpaceInPeer => KError::WouldBlock,
+            RecycledWrongBuffer => KError::BadState,
         },
     }
 }

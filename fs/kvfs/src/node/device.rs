@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use block::{BlockDevice, BlockOpenMode, DriverError};
+use block::{BlockDevice, BlockOpenMode};
 use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
@@ -335,17 +335,20 @@ fn file_block_device(file: &VfsFile) -> VfsResult<Arc<BlockDevice>> {
     block::lookup_block_device(file.inode().rdev()).ok_or_else(|| VfsError::from(LinuxError::ENXIO))
 }
 
-fn map_block_error(error: DriverError) -> VfsError {
+fn map_block_error(error: KError) -> VfsError {
     match error {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::BadState => KError::BadState,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
-        DriverError::NoMemory => KError::NoMemory,
-        DriverError::ReadOnly => KError::OperationNotPermitted,
-        DriverError::ResourceBusy => KError::ResourceBusy,
-        DriverError::Unsupported => KError::OperationNotSupported,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::BadState => KError::BadState,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::Io => KError::Io,
+        KError::NoMemory => KError::NoMemory,
+        KError::ReadOnlyFilesystem => KError::OperationNotPermitted,
+        KError::ResourceBusy => KError::ResourceBusy,
+        KError::Unsupported => KError::OperationNotSupported,
+        // The block layer's vocabulary is the former DriverError set; any
+        // other kerrno code is foreign to this boundary — treat it as I/O.
+        _ => KError::Io,
     }
 }
 
@@ -1075,11 +1078,11 @@ mod tests {
             self.block_size
         }
 
-        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::DriverResult {
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::KResult {
             self.reads
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if self.fail_io.load(core::sync::atomic::Ordering::Relaxed) {
-                return Err(DriverError::Io);
+                return Err(KError::Io);
             }
             let start = block_id as usize * self.block_size;
             let end = start + buf.len();
@@ -1087,11 +1090,11 @@ mod tests {
             Ok(())
         }
 
-        fn write_block(&self, block_id: u64, buf: &[u8]) -> block::DriverResult {
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> block::KResult {
             self.writes
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if self.fail_io.load(core::sync::atomic::Ordering::Relaxed) {
-                return Err(DriverError::Io);
+                return Err(KError::Io);
             }
             let start = block_id as usize * self.block_size;
             let prefix = self
@@ -1100,14 +1103,14 @@ mod tests {
             if prefix != usize::MAX {
                 let written = prefix.min(buf.len());
                 self.storage.lock()[start..start + written].copy_from_slice(&buf[..written]);
-                return Err(DriverError::Io);
+                return Err(KError::Io);
             }
             let end = start + buf.len();
             self.storage.lock()[start..end].copy_from_slice(buf);
             Ok(())
         }
 
-        fn flush(&self) -> block::DriverResult {
+        fn flush(&self) -> block::KResult {
             self.flushes
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(())

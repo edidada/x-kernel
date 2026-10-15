@@ -1372,15 +1372,15 @@ mod tests {
             512
         }
 
-        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::DriverResult {
+        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::KResult {
             Ok(())
         }
 
-        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::DriverResult {
+        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::KResult {
             Ok(())
         }
 
-        fn flush(&self) -> block::DriverResult {
+        fn flush(&self) -> block::KResult {
             Ok(())
         }
     }

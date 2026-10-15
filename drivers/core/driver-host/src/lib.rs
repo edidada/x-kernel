@@ -334,7 +334,7 @@ impl XKernelRuntime {
         resources: &driver_core::ResourceMap,
     ) -> Result<
         (
-            device_traits::DeviceKind,
+            virtio_devices::VirtioDeviceKind,
             virtio_devices::PciTransport,
             Option<usize>,
         ),
@@ -354,7 +354,7 @@ pub fn probe_pci_transport_with(
     resources: &driver_core::ResourceMap,
 ) -> Result<
     (
-        device_traits::DeviceKind,
+        virtio_devices::VirtioDeviceKind,
         virtio_devices::PciTransport,
         Option<usize>,
     ),

@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-device_traits.workspace = true
+kerrno.workspace = true
 devnode.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true

@@ -12,19 +12,19 @@ use unittest::{assert_eq, def_test};
 use super::{completion::*, *};
 
 struct ScriptedCompletion {
-    error: Option<DriverError>,
+    error: Option<KError>,
     produce: Box<dyn Fn() + Send + Sync>,
 }
 
 impl RngCompletion for ScriptedCompletion {
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult {
         if let Some(error) = self.error {
             return Err(error);
         }
         if !ready() {
             (self.produce)();
             if !ready() {
-                return Err(DriverError::InvalidInput);
+                return Err(KError::InvalidInput);
             }
         }
         Ok(())
@@ -37,44 +37,33 @@ struct TestDevice {
     bytes: Arc<SpinNoIrq<Vec<u8>>>,
     completion: Box<dyn RngCompletion>,
 }
-
-impl Device for TestDevice {
-    fn name(&self) -> &str {
-        "test-hwrng"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Hwrng
-    }
-}
-
 impl HwrngDevice for TestDevice {
     fn is_failed(&self) -> bool {
         false
     }
 
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let mut result = Err(DriverError::WouldBlock);
+        let mut result = Err(KError::WouldBlock);
         self.completion.wait_until(&mut || {
             let mut bytes = self.bytes.lock();
             if bytes.is_empty() {
-                result = Err(DriverError::WouldBlock);
+                result = Err(KError::WouldBlock);
                 return false;
             }
             let count = buf.len().min(bytes.len());
             buf[..count].copy_from_slice(&bytes[..count]);
             bytes.drain(..count);
             result = Ok(count);
-            result != Err(DriverError::WouldBlock)
+            result != Err(KError::WouldBlock)
         })?;
         result
     }
 }
 
-fn device(error: Option<DriverError>) -> TestDevice {
+fn device(error: Option<KError>) -> TestDevice {
     let bytes = Arc::new(SpinNoIrq::new(Vec::new()));
     let completion_bytes = bytes.clone();
     TestDevice {
@@ -93,12 +82,11 @@ fn consumer_reads_short_data_through_device_contract() {
     let mut buf = [0xcc; 4];
     assert_eq!(source.read(&mut buf), Ok(2));
     assert_eq!(buf, [7, 9, 0xcc, 0xcc]);
-    assert_eq!(source.device_kind().as_str(), "hwrng");
 }
 
 #[def_test]
 fn waiting_errors_do_not_consume_bytes() {
-    for error in [DriverError::InvalidInput, DriverError::NoMemory] {
+    for error in [KError::InvalidInput, KError::NoMemory] {
         let device = device(Some(error));
         device.bytes.lock().push(17);
         let mut buf = [0xcc];

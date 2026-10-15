@@ -24,9 +24,9 @@ use core::task::Waker;
 
 #[cfg(feature = "pl011")]
 use arm_pl011::Pl011Uart;
-use device_traits::DriverError;
 use emergency::EmergencyTx;
 use input::SerialInput;
+use kerrno::KError;
 use khal::mem::PhysAddr;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::VirtAddr;
@@ -403,14 +403,14 @@ impl SerialPort {
     /// # Errors
     /// Returns `BadState` without prepared storage, or `AlreadyExists` when
     /// another processor is attached.
-    pub fn attach_input_waker(&self, waker: Waker) -> Result<(), DriverError> {
+    pub fn attach_input_waker(&self, waker: Waker) -> Result<(), KError> {
         // IRQ snapshots must not invoke a user-defined Waker clone under io.
         let waker = Arc::new(waker);
         {
             let mut io = self.io.lock();
-            let input = io.input.as_mut().ok_or(DriverError::BadState)?;
+            let input = io.input.as_mut().ok_or(KError::BadState)?;
             if input.waker.is_some() {
-                return Err(DriverError::AlreadyExists);
+                return Err(KError::AlreadyExists);
             }
             input.waker = Some(waker.clone());
         }
