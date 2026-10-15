@@ -172,9 +172,11 @@ Reassembly / UDP delivery
 Error handling")
         end
 
+        QUEUES("StackQueues
+Admitted RX / data TX")
         ROUTER("Router
 Routes / TX fragmentation
-RX-TX queues")
+Control TX / device dispatch")
 
         subgraph DEVICE["Devices · NetDevice"]
             LOOP("LoopbackDevice")
@@ -192,7 +194,7 @@ virtio-vsock driver")
     API --> TCP & UDP & PACKET & UNIX & NETLINK & VSOCK
     TCP --> SMOL
     UDP --> IPV4
-    SMOL --> ROUTER
+    SMOL --> QUEUES --> ROUTER
     IPV4 --> ROUTER
     PACKET -->|link TX| ROUTER
     NETLINK -.->|rtnetlink configuration| ROUTER
@@ -219,19 +221,24 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
+| Service / NetworkPoller | Coordinates device I/O, protocol processing, and timers through budgeted task-context rounds. |
+| Router | Owns routes and local addresses, fragments outgoing IPv4 packets, and coordinates device RX and TX dispatch. |
+| StackQueues | Owns admitted smoltcp input, shared data output, and the adapter MTU independently of routing state. |
 | StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
 | kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
 | kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
 
-`Router::stack_device()` constructs a temporary `StackDevice` for interface
-initialization, ingress, and egress. Router still owns and serializes the queues;
-this boundary separates the smoltcp adapter from routing and device dispatch
-without changing lock order, queue capacity, or loopback delivery. A later queue
-ownership change can replace the adapter's backing owner without exposing the
-routing table to smoltcp again.
+`Service` coordinates protocol processing, routing, and device I/O through
+packet queues. `StackQueues` owns admitted smoltcp input and the data TX queue
+shared by smoltcp and non-loopback UDP output. `StackDevice` exposes these queues
+and the MTU to smoltcp without access to routes or physical devices. Router owns
+the control TX queue and dispatches control traffic before data traffic.
+
+smoltcp processing runs without the Router lock, allowing route queries to
+proceed independently. Device dispatch still holds Router and the queue lock,
+and the poller permits only one protocol-progress executor at a time.
 
 ### IPv4 Filter Table Model
 
@@ -711,28 +718,28 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 3 | &emsp;lock reusable RX, accepted, and control batches |
 | 4 | &emsp;try to expire pending IPv4 fragments within $B_{\mathrm{timer}}$ |
 | 5 | &emsp;flush retained batches, or return retry |
-| 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ |
+| 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ under Router and stack-queue locks; release both before waking capacity waiters |
 | 7 | &emsp;drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
-| 8 | &emsp;`try_lock` socket set, then Router, then Interface; otherwise return retry |
+| 8 | &emsp;`try_lock` socket set, then stack queues, then Interface; otherwise return retry |
 | 9 | &emsp;`Interface.poll_maintenance()` |
 | 10 | &emsp;**if** time limit has not been reached: |
 | 11 | &emsp;&emsp;poll smoltcp ingress within $B_{\mathrm{rx}}$ |
 | 12 | &emsp;call `Interface.poll_egress()` at least once |
 | 13 | &emsp;**repeat** while progress continues, within $\max(B_{\mathrm{tx}}, 1)$ passes and the soft time limit |
 | 14 | &emsp;reap deferred TCP closes and read `Interface.poll_at()` |
-| 15 | &emsp;release Interface; refresh TCP acceptors; release socket set |
-| 16 | &emsp;dispatch queued TX within remaining TX budget if time remains |
-| 17 | &emsp;release Router |
+| 15 | &emsp;release Interface and stack queues; refresh TCP acceptors; release socket set |
+| 16 | &emsp;`try_lock` Router, then stack queues; dispatch within remaining TX budget if time remains |
+| 17 | &emsp;release stack queues and Router; wake TX capacity waiters |
 | 18 | &emsp;**if** time and device-RX budget remain: |
 | 19 | &emsp;&emsp;drain_device_rx(remaining device-RX budget) |
 | 20 | &emsp;publish the earliest protocol / deferred-close deadline |
-| 21 | &emsp;`try_lock` Router, or return retry |
+| 21 | &emsp;`try_lock` Router, then stack queues, or return retry |
 | 22 | &emsp;**return** progress with `has_more` for pending RX, ingress, TX, immediately due protocol work, or pending reassembly expiration |
 | 23 | **Procedure** `drain_device_rx(remaining)` |
 | 24 | &emsp;process retained RX batch and flush accepted/control batches |
 | 25 | &emsp;**while** budget and time remain: |
-| 26 | &emsp;&emsp;`try_lock` Router, or return retry |
-| 27 | &emsp;&emsp;pull a bounded batch, limited by smoltcp ingress capacity |
+| 26 | &emsp;&emsp;`try_lock` Router, then stack queues, or return retry |
+| 27 | &emsp;&emsp;read smoltcp ingress capacity; release stack queues; pull a batch limited by that capacity |
 | 28 | &emsp;&emsp;release Router |
 | 29 | &emsp;&emsp;`try_lock` IngressProcessor, or retain batch and return retry |
 | 30 | &emsp;&emsp;validate/filter IPv4, reassemble fragments, deliver UDP, collect ICMP responses and packets accepted for smoltcp |
@@ -741,7 +748,7 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 33 | &emsp;&emsp;**stop** when device draining reports no more work |
 | 34 | **Procedure** `flush accepted/control batches` |
 | 35 | &emsp;`try_lock` socket set if accepted batch is nonempty |
-| 36 | &emsp;`try_lock` Router; on failure retain both batches and return retry |
+| 36 | &emsp;`try_lock` Router, then stack queues; on failure retain both batches and return retry |
 | 37 | &emsp;prepare TCP listeners and enqueue accepted packets |
 | 38 | &emsp;enqueue control packets; drop a control packet if its TX queue is full |
 | 39 | &emsp;release acquired locks |
@@ -769,7 +776,7 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 3 | &emsp;check broadcast permission and select an active output route |
 | 4 | &emsp;source = bound_source if set, otherwise route-selected source |
 | 5 | &emsp;**if** output device is not loopback: |
-| 6 | &emsp;&emsp;check data-queue capacity for the expected packet count |
+| 6 | &emsp;&emsp;lock stack queues; check capacity for the expected packet count |
 | 7 | &emsp;build UDP checksum and IPv4 header |
 | 8 | &emsp;choose DF from `IP_MTU_DISCOVER` and route MTU |
 | 9 | &emsp;fragment oversized IPv4 output; return `EMSGSIZE` if DF forbids it |
@@ -777,7 +784,7 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 11 | &emsp;&emsp;dispatch fragments immediately |
 | 12 | &emsp;**else**: |
 | 13 | &emsp;&emsp;enqueue all fragments with the bound interface, or return `WouldBlock` |
-| 14 | &emsp;release Router |
+| 14 | &emsp;release stack queues if held, then Router |
 | 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
 | 17 | &emsp;**repeat** up to $B_{\mathrm{tx}}$ times: |
@@ -861,7 +868,14 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 ### Protocol Progress
 
-The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
+When nested, lock order is socket set, Router, stack queues, then Interface.
+smoltcp polling uses only socket set, stack queues, and Interface; it releases
+them before reacquiring Router for dispatch. Queue holders never acquire Router.
+MTU changes hold Router, stack queues, and Interface while updating both the
+adapter MTU and the Interface's cached capabilities. TX capacity waiters are
+woken only after releasing both Router and stack queues.
+
+The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `StackQueues`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the component locks with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
 
 `NetworkPoller` represents this execution right with two locked booleans (`is_running`, `has_pending`) corresponding to four conceptual states: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A prepared kworkng background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
@@ -880,7 +894,7 @@ The global `SOCKET_SET` wraps `SocketSetState` in a single mutex. The smoltcp so
 
 ### Receive Path and UDP Queues
 
-The Router lock covers RX device pulls and TX dispatch. IPv4 validation, filtering, and UDP demultiplexing run after both the Router lock and the smoltcp socket-set lock have been released. TCP snooping runs once the accepted batch holds both locks, keeping listener side effects within the same batch handoff. The smoltcp ingress queue has fixed capacity, and each call to `poll_ingress_single` consumes one packet. Packets left behind because a budget or time limit was reached, or because a shared lock was contended, remain available for a later round.
+The Router lock covers RX device pulls and TX dispatch. IPv4 validation, filtering, and UDP demultiplexing run after both the Router lock and the smoltcp socket-set lock have been released. TCP snooping runs once the accepted batch holds the Router, socket-set, and stack-queue locks, keeping listener side effects within the same batch handoff. The smoltcp ingress queue has fixed capacity, and each call to `poll_ingress_single` consumes one packet. Packets left behind because a budget or time limit was reached, or because a shared lock was contended, remain available for a later round.
 
 `UDP_PCB_REGISTRY` contains 256 port-based buckets. Each bucket uses `SpinNoIrq` because `NetRx` performs PCB lookups in softirq context. The receive queue and connected peer of each PCB use the same lock type. Sleepable bind and connect state updates remain outside the bucket lock.
 
@@ -926,7 +940,7 @@ Readable, writable, and connection-state events use separate `PollSet` instances
 
 The Router owns configured routes, address-derived routes, and dynamic source-selection state. Route rules, attributes, and table lookup are defined in `network/router.rs`; Router state remains in `stack/router.rs`. Each device owns its neighbor table. Netlink handles protocol parsing and live-snapshot encoding, then calls the appropriate owner.
 
-`control::network_config_lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has mutexes for its send transaction and RX queue and an `RwLock` for its local address. The global `UEVENT_SUBSCRIBERS` mutex protects weak subscriber references, and `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send-transaction lock covers capacity preflight, mutation execution, and response enqueueing for one socket. Responses are generated outside the RX-queue lock; that lock is taken only to check capacity and enqueue the result. The fixed acquisition order is the send-transaction lock, `network_config_lock`, Router, ingress, Interface, and netlink RX queue, omitting any lock that the operation does not use.
+`control::network_config_lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has mutexes for its send transaction and RX queue and an `RwLock` for its local address. The global `UEVENT_SUBSCRIBERS` mutex protects weak subscriber references, and `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send-transaction lock covers capacity preflight, mutation execution, and response enqueueing for one socket. Responses are generated outside the RX-queue lock; that lock is taken only to check capacity and enqueue the result. The fixed acquisition order is the send-transaction lock, `network_config_lock`, Router, ingress or stack queues, Interface, and netlink RX queue, omitting any lock that the operation does not use.
 
 `GeneralOptions` stores device binding in `bound_dev_if: AtomicI32`. UDP lookup and transmission and TCP/raw RX-device selection read this field with Relaxed ordering. Binding and unbinding use an atomic exchange; an actual change notifies `device_binding_changed: PollEvent`, whose Release/Acquire version ordering publishes the preceding field update. Repeated writes of the same interface index remain silent.
 
@@ -954,9 +968,9 @@ The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share o
 
 Loopback UDP is delivered directly to the PCB within the transmit path's bottom-half window, following the Linux sequence from `dev_queue_xmit` through `loopback_xmit` and `__netif_rx` to softirq processing at `local_bh_enable`. TCP, ICMP, and IPv6 use the poller's TX-then-RX rounds.
 
-RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `IngressProcessor` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
+RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, stack-queue, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `IngressProcessor` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
-TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
+TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the stack-queue mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and both queue and Router locks; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
 ### Control-Plane State Ownership
 

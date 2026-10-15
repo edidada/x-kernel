@@ -4,7 +4,7 @@
 
 //! Queue-only smoltcp adapter; it has no route or physical-device access.
 
-use alloc::{collections::VecDeque, vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
@@ -16,6 +16,42 @@ use crate::{
     consts::SOCKET_BUFFER_SIZE,
     runtime::tx_queue::DataTxQueue,
 };
+
+/// Owns the queues and MTU used by smoltcp under the service's queue mutex.
+///
+/// Queue users must not acquire Router while holding this mutex.
+pub(crate) struct StackQueues {
+    rx: VecDeque<PacketBuf>,
+    pub(crate) tx: DataTxQueue,
+    pub(crate) mtu: usize,
+}
+
+impl StackQueues {
+    pub(crate) fn new(mtu: usize) -> Self {
+        Self {
+            rx: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            tx: DataTxQueue::with_capacity(SOCKET_BUFFER_SIZE),
+            mtu,
+        }
+    }
+
+    pub(crate) fn device(&mut self) -> StackDevice<'_> {
+        StackDevice::new(&mut self.rx, &mut self.tx, self.mtu)
+    }
+
+    pub(crate) fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
+        debug_assert!(packets.len() <= self.ingress_capacity());
+        self.rx.extend(packets.drain(..));
+    }
+
+    pub(crate) fn ingress_capacity(&self) -> usize {
+        SOCKET_BUFFER_SIZE.saturating_sub(self.rx.len())
+    }
+
+    pub(crate) fn has_pending_ingress(&self) -> bool {
+        !self.rx.is_empty()
+    }
+}
 
 /// Borrows queue ownership for one synchronous smoltcp operation.
 ///

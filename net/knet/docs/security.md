@@ -402,13 +402,24 @@ All reads and writes to `SocketSet` must acquire the `SOCKET_SET.inner` mutex.
 
 ### 3. `Service` Mutual Exclusion
 
-Draining device receive queues, accessing routing state and inbound queues, and dispatching transmissions must acquire the internal Router mutex. The smoltcp Interface must be protected by a separate mutex.
-IPv4 validation and snooping run outside the Router lock.
-`StackDevice` borrows only the RX and data TX queues plus the MTU. The Router guard
-remains held while the service uses this adapter. Its TX token retains an exclusive
-queue borrow from the capacity check through enqueue; receiving also requires a
-TX slot so an admitted input can produce a response. Dropping an unused token does
-not consume capacity. The adapter cannot invoke physical-device operations.
+Draining device receive queues, accessing routing state, and dispatching
+transmissions require the Router mutex. Service owns admitted RX and data TX
+queues under a separate stack-queue mutex. IPv4 validation, reassembly, and UDP
+delivery run outside Router; smoltcp processing holds the socket-set,
+stack-queue, and Interface locks without Router.
+
+When nested, the order is socket set, Router, stack queues, then Interface.
+Queue holders must release the queue mutex before acquiring Router. MTU changes
+hold Router, stack queues, and Interface to update adapter and cached Interface
+capabilities together. TX capacity notifications occur after both Router and
+stack-queue guards are released.
+
+`StackDevice` borrows only the RX and data TX queues plus the MTU. Its TX token
+retains an exclusive queue borrow from the capacity check through enqueue;
+receiving also requires a TX slot so an admitted input can produce a response.
+Dropping an unused token does not consume capacity. The adapter cannot invoke
+physical-device operations. Contention during ingress handoff preserves both
+accepted and control batches before listener preparation changes socket state.
 
 
 ### 4. Ring-Buffer Publication Rules
@@ -447,7 +458,7 @@ A per-socket send-transaction lock serializes capacity prechecks, mutation execu
 Batches mixing queries and mutations must be rejected before any state update.
 Before executing a mutation-only batch, response-queue space must be checked for the entire batch.
 A mutation-only batch is processed message by message. A later validation or operation error does not roll back earlier successful mutations. Capacity preflight reserves room for mutation responses on that socket, but does not provide all-or-nothing transaction semantics.
-Responses are generated outside the receive-queue lock. The fixed lock order is send-transaction lock, `network_config_lock`, Router, ingress processing, Interface, and netlink receive queue, skipping locks that are not involved.
+Responses are generated outside the receive-queue lock. The fixed lock order is send-transaction lock, `network_config_lock`, Router, ingress processing or stack queues, Interface, and netlink receive queue, skipping locks that are not involved.
 
 ### 9. Route Index Boundary
 
@@ -516,7 +527,7 @@ IPv4 reassembly queues publish their earliest deadline through a separate atomic
 
 Sockets and Router must publish newly generated TX work through `notify(PollReason::Tx)`.
 After TCP consumes data from a receive buffer whose free space is below the maximum window-scaling quantum, it must publish zero-window recovery work through `notify(PollReason::RxWindow)`.
-An increase in available data-TX slots must wake the queue's capacity waiters after releasing the Router lock, even when a later stage defers the round. Capacity wakeups require an actual increase in available slots. Senders must recheck readiness after registration to close the check/register race.
+An increase in available data-TX slots must wake the queue's capacity waiters after releasing both Router and stack-queue locks, even when a later stage defers the round. Capacity wakeups require an actual increase in available slots. Senders must recheck readiness after registration to close the check/register race.
 
 ### 22. TCP Close Lifecycle
 
@@ -594,7 +605,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | `RawSocket` | All fields satisfy Send | `RwLock`, atomics, and immutable handles protect shared state |
 | `StreamTransport` | All fields satisfy Send | `Mutex<Option<Channel>>` serializes local endpoint operations; the `ListenerState` mutex serializes the pending queue, capacity reservations, listening, and closure; a `SpinNoPreempt` lock for each send direction orders data publication, half-close, and EOF checks; a per-direction `DirectionAncillary` with a `SpinNoPreempt` guard protects the byte-marked control records and byte totals; three `PollSet` groups manage read, write, and connection-state waiters separately |
 | `NetlinkSocket` | All fields satisfy Send | `Arc<NetlinkSocketInner>` internally uses `RwLock`, a send-transaction `Mutex`, a receive-queue `Mutex`, and `PollSet`; each send explicitly carries caller credentials, and the socket does not retain an authorization identity |
-| `Service` | All fields satisfy Send | Separate internal `Mutex` instances protect Interface, Router, IngressProcessor, timeouts, and reusable batches; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
+| `Service` | All fields satisfy Send | Separate internal `Mutex` instances protect Interface, Router, StackQueues, IngressProcessor, and reusable batches; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
 | `Router` | Used within `Service` | Shared indirectly through the Router mutex in `Service` |
 
 ## Threat Analysis
@@ -629,7 +640,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-24 | A netlink batch commits only some mutations | High | A single send mixes queries and mutations, or the response queue runs out of space midway through the batch | The caller observes only part of its intended configuration update. | The send-transaction lock serializes mutation batches on the same socket; mutations remain per-message operations without rollback; the complete batch is classified first; mixed batches return syscall `EOPNOTSUPP`; mutation-only batches check space for all responses before execution; a truncated or invalid subsequent header only stops splitting and does not roll back processed messages |
 | T-25 | New events are lost during poller execution | Medium | RX, TX, or timer notifications race with the completion state update | Pending network work is stranded, causing stalls or connection timeouts. | `NetworkPoller` publishes notifications received during execution as `RUNNING_PENDING`; one IRQ-safe state lock serializes notification with completion; submission occurs after releasing that lock |
 | T-26 | smoltcp protocol timers lack a progress event | Medium | A TCP retransmission or keepalive deadline arrives without a device IRQ or socket call | TCP retransmission and keepalive work stalls until another unrelated event arrives. | Each Interface poll registers a timer through `poll_at`; the end of each round checks the absolute deadline against freshly read monotonic time; expiration calls `notify(PollReason::Timer)` and wakes socket waiters; future deadlines do not trigger immediate repolling |
-| T-27 | Socket TX work lacks background processing | Medium | connect, send, receive-window updates, or close update only socket state | Queued transmission remains pending and applications encounter IO stalls or timeouts. | Paths that actually generate TX work call `notify(PollReason::Tx)`; TCP and raw sockets register smoltcp send wakers; increases in Router data transmit-queue capacity wake global TX waiters |
+| T-27 | Socket TX work lacks background processing | Medium | connect, send, receive-window updates, or close update only socket state | Queued transmission remains pending and applications encounter IO stalls or timeouts. | Paths that actually generate TX work call `notify(PollReason::Tx)`; TCP and raw sockets register smoltcp send wakers; increases in Service data transmit-queue capacity wake global TX waiters |
 | T-28 | TCP file closure loses data already accepted for transmission | Medium | `write` copies data into the smoltcp buffer and asynchronously publishes TX work, but file Drop removes the handle before the poller processes it | Payload already accepted by write is discarded before protocol transmission completes. | Drop transfers handles with incomplete protocol closure to the deferred-close registry; the poller reclaims them after data transmission, FIN processing, and retransmission complete; the 60-second deadline only limits resource retention by `FIN_WAIT_2` handles detached from user file objects |
 | T-29 | Concurrent socket waits block network-timer updates | Medium | Socket wait registration manually polls an asynchronous sleep object under the timeout-state mutex, and waiting for the timer-wheel lock blocks the poller | Blocked timer updates delay protocol work and socket wakeups. | Deadlines are published atomically; after expiration, the periodic sampling callback directly wakes waiters and notifies the poller without holding the timeout-state mutex or creating or polling timer futures |
 | T-30 | TCP close follows the FIN path despite unread data, notifying the peer of an orderly shutdown and losing the RST semantics expected by Linux | Medium | File-object release omits the receive-queue check, and protocol close directly enters FIN_WAIT1 | The peer receives an orderly close despite unread data being discarded. | Drop checks the smoltcp receive queue; unread data triggers abort, and the handle is retained until RST dispatch completes |
@@ -703,7 +714,7 @@ Severity levels:
 - netlink batch splitting stops when fewer than a header's worth of bytes remain, or when `nlmsg_len` is smaller than the header or larger than the remaining bytes. Already processed messages are not rolled back, and trailing padding may contain nonzero values. Payload or attribute errors detected after batch splitting return `NLMSG_ERROR`.
 - Unauthorized netlink mutations return `NLMSG_ERROR` with `EPERM` through the receive queue. Batches mixing queries and mutations return syscall `EOPNOTSUPP` before any state mutation.
 - Malformed packets are rejected by the RX parsers and their callers. Logging depends on the path: malformed ARP uses a debug log, while some parser failures return `None` or an error without a dedicated log. Trace logging records Ethernet frame bytes before protocol parsing.
-- Full UDP PCB receive queues and Router TX queues result in packet drops or `WouldBlock`; the poller waits for IO readiness events.
+- Full UDP PCB receive queues and network TX queues result in packet drops or `WouldBlock`; the poller waits for IO readiness events.
 - Full smoltcp buffers and Unix stream ring buffers return `WouldBlock`, and the poller waits for IO readiness events. A nonblocking Unix stream send returns a partial byte count if it has already made progress. When a Unix listener backlog is full, nonblocking `connect` returns `WouldBlock`; blocking connections wait according to `SO_SNDTIMEO` for `accept` to release capacity or for the backlog limit to increase, and return `WouldBlock` on timeout.
 - Full loopback and Ethernet queues drop packets and log warnings. When the shared `NetRx` queue is full, loopback send still returns success, matching Linux `loopback_xmit`, which returns `NETDEV_TX_OK` even when `__netif_rx` returns `NET_RX_DROP`.
 - Panic paths include initialization order, violated internal invariants, `expect` assertions. New public entry points should validate inputs and return errors through `KError` before entering paths that contain internal assertions.

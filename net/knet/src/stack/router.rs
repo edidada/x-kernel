@@ -7,7 +7,6 @@
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
-use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
@@ -29,11 +28,9 @@ use crate::{
         },
     },
     runtime::tx_queue::DataTxQueue,
-    stack::device::StackDevice,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
-const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 
 /// Conditions under which a control-plane neighbor update may be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,9 +61,7 @@ pub(crate) struct Ipv4AddrSnapshot {
 }
 
 pub(crate) struct Router {
-    rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
-    data_tx_queue: DataTxQueue,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     next_ipv4_identification: u16,
@@ -85,9 +80,7 @@ pub(crate) struct RxDrain {
 impl Router {
     pub(crate) fn new() -> Self {
         Self {
-            rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
-            data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
             next_ipv4_identification: 1,
@@ -95,18 +88,6 @@ impl Router {
             table: RouteTable::new(),
             effective_mtu: STANDARD_MTU,
         }
-    }
-
-    /// Borrows only the packet queues and capabilities required by smoltcp.
-    ///
-    /// The enclosing Router guard still serializes queue access. The adapter
-    /// cannot access routing, device state, or dispatch packets to a device.
-    pub(crate) fn stack_device(&mut self) -> StackDevice<'_> {
-        StackDevice::new(
-            &mut self.rx_queue,
-            &mut self.data_tx_queue,
-            self.effective_mtu,
-        )
     }
 
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
@@ -167,38 +148,19 @@ impl Router {
         }
     }
 
-    pub(crate) fn can_enqueue_tx_packet(&self) -> bool {
-        !self.data_tx_queue.is_full()
-    }
-
-    pub(crate) fn available_tx_packet_slots(&self) -> usize {
-        self.data_tx_queue.available()
-    }
-
-    pub(crate) fn register_tx_waker(
-        &self,
-        context: &mut PollContext<'_>,
-    ) -> Result<(), PollRegisterError> {
-        self.data_tx_queue.register_capacity_waker(context)
-    }
-
-    pub(crate) fn tx_capacity_poll(&self) -> PollSet {
-        self.data_tx_queue.capacity_poll()
-    }
-
-    pub(crate) fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
-        self.data_tx_queue.can_push(packet_count)
-    }
-
-    pub(crate) fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
+    pub(crate) fn queue_ipv4_packet(
+        &mut self,
+        tx: &mut DataTxQueue,
+        packet: Vec<u8>,
+        oif: i32,
+    ) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
-        self.data_tx_queue
-            .try_extend(
-                packets.into_iter().map(|packet| {
-                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
-                }),
-            )
-            .map_err(|_| KError::WouldBlock)
+        tx.try_extend(
+            packets
+                .into_iter()
+                .map(|packet| PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)),
+        )
+        .map_err(|_| KError::WouldBlock)
     }
 
     /// Returns whether `dst` is routed through a loopback device.
@@ -871,19 +833,6 @@ impl Router {
         }
     }
 
-    pub(crate) fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
-        debug_assert!(packets.len() <= self.ingress_capacity());
-        self.rx_queue.extend(packets.drain(..));
-    }
-
-    pub(crate) fn ingress_capacity(&self) -> usize {
-        SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len())
-    }
-
-    pub(crate) fn has_pending_ingress(&self) -> bool {
-        !self.rx_queue.is_empty()
-    }
-
     pub(crate) fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
         let dev_id = NetDeviceId::new(ifindex).ok_or(KError::InvalidInput)?;
         let dev = self
@@ -895,17 +844,18 @@ impl Router {
 
     pub(crate) fn dispatch_budgeted(
         &mut self,
+        tx: &mut DataTxQueue,
         timestamp: MonotonicInstant,
         budget: usize,
     ) -> (usize, bool) {
         if budget == 0 {
-            return (0, self.has_queued_tx_packets());
+            return (0, self.has_queued_tx_packets(tx));
         }
 
         let mut work_done = 0;
         let mut poll_next = false;
         while work_done < budget {
-            let Some(mut packet) = self.pop_tx_packet() else {
+            let Some(mut packet) = self.pop_tx_packet(tx) else {
                 break;
             };
             work_done += 1;
@@ -961,7 +911,7 @@ impl Router {
                 _ => debug!("Dropping packet with invalid IP version"),
             }
         }
-        (work_done, poll_next || self.has_queued_tx_packets())
+        (work_done, poll_next || self.has_queued_tx_packets(tx))
     }
 
     /// Dispatches one IPv4 packet onto the selected device.
@@ -1072,14 +1022,12 @@ impl Router {
         Ok(())
     }
 
-    fn pop_tx_packet(&mut self) -> Option<PacketBuf> {
-        self.control_tx_queue
-            .pop_front()
-            .or_else(|| self.data_tx_queue.pop_front())
+    fn pop_tx_packet(&mut self, tx: &mut DataTxQueue) -> Option<PacketBuf> {
+        self.control_tx_queue.pop_front().or_else(|| tx.pop_front())
     }
 
-    fn has_queued_tx_packets(&self) -> bool {
-        !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
+    fn has_queued_tx_packets(&self, tx: &DataTxQueue) -> bool {
+        !self.control_tx_queue.is_empty() || !tx.is_empty()
     }
 
     pub(crate) fn has_immediate_rx_work(&self) -> bool {
@@ -1110,6 +1058,7 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 
+    use kpoll::{PollContext, PollRegisterError};
     use ktime_types::MonotonicInstant;
     use unittest::{assert, assert_eq, def_test};
 
@@ -1250,33 +1199,30 @@ mod tests {
 
     #[def_test]
     fn control_dispatch_does_not_free_data_tx_capacity() {
+        let mut tx = DataTxQueue::with_capacity(SOCKET_BUFFER_SIZE);
         let mut router = Router::new();
         router
             .control_tx_queue
             .push_back(tx_packet_buf(vec![0; 20]));
-        let capacity_before = router.available_tx_packet_slots();
+        let capacity_before = tx.available();
 
-        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
+        let (work_done, _) = router.dispatch_budgeted(&mut tx, MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
-        assert_eq!(router.available_tx_packet_slots(), capacity_before);
+        assert_eq!(tx.available(), capacity_before);
     }
 
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
+        let mut tx = DataTxQueue::with_capacity(SOCKET_BUFFER_SIZE);
         let mut router = Router::new();
-        assert!(
-            router
-                .data_tx_queue
-                .try_push(tx_packet_buf(vec![0; 20]))
-                .is_ok()
-        );
-        let capacity_before = router.available_tx_packet_slots();
+        assert!(tx.try_push(tx_packet_buf(vec![0; 20])).is_ok());
+        let capacity_before = tx.available();
 
-        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
+        let (work_done, _) = router.dispatch_budgeted(&mut tx, MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
-        assert_eq!(router.available_tx_packet_slots(), capacity_before + 1);
+        assert_eq!(tx.available(), capacity_before + 1);
     }
 
     #[def_test]
