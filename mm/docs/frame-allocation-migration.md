@@ -116,3 +116,18 @@
 - VMM 子表构造失败回滚补齐：完整子表批次分配成功前保留 RAII owner，失败自动
   结束已取得前缀；成功后才把 raw 持有交给树。批次元数据在栈上，不递归申请堆表。
 - 本次不迁移大块堆分配或 slab pool；pool 所有权与整页回收继续作为独立设计。
+
+
+## 受管理线性映射与测试缓冲区
+
+- 新增可选的 owned linear backing：运行时持有 FrameRun，PTE 独立取得基础页持有。
+  现有外部持有的 kernel RAM/MMIO 线性映射仍沿用原协议，不强加共享引用。
+- map_owned_linear 消费 backing 并限定可见前缀，拒绝暴露 buddy rounding slack；
+  map 中途失败撤销新建前缀并完成 TLB 失效，保留原有冲突映射。
+- TestUserBuffer 不再保存 kernel_va/num_pages 后直接归还库存，改为持有 live mm
+  和映射范围。正常 unmap/清理结束该 VMA/PTE 持有，fork 子映射可继续保留物理页。
+  线性 VMA 继承与 futex 分类不变，不以匿名映射替代而改变现有测试的语义。
+- TLB shootdown 测试的 marker 页改为 FrameRef，保留 raw map 的外部 owner 协议：
+  远端读取完成并撤映射/失效后才 Drop，不要求瞬时的每个 CPU 读取都克隆引用。
+- legacy FXMAC 仍是依赖未接通的占位端口，暂未迁移。字节堆/slab backing 的独占
+  所有权、整页回收，以及 buddy PA/PFN 改造仍作为后续独立事项。

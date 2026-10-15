@@ -116,14 +116,16 @@ fn test_shootdown_clears_stale_tlb() {
         let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 
         // Allocate two physical pages with different magic values.
-        let v1 = kalloc::global_allocator()
-            .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
-            .expect("alloc page 1");
-        let v2 = kalloc::global_allocator()
-            .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
-            .expect("alloc page 2");
-        let p1 = khal::mem::v2p(VirtAddr::from(v1));
-        let p2 = khal::mem::v2p(VirtAddr::from(v2));
+        let page1 = kalloc::global_allocator()
+            .alloc_frame(kalloc::UsageKind::VirtMem)
+            .expect("alloc data page 1");
+        let page2 = kalloc::global_allocator()
+            .alloc_frame(kalloc::UsageKind::VirtMem)
+            .expect("alloc data page 2");
+        let v1 = page1.kernel_addr().as_usize();
+        let v2 = page2.kernel_addr().as_usize();
+        let p1 = page1.phys_addr();
+        let p2 = page2.phys_addr();
 
         const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
         const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
@@ -209,8 +211,9 @@ fn test_shootdown_clears_stale_tlb() {
                 .unmap(test_vaddr)
                 .expect("test mapping must remain installed until cleanup");
         }
-        kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
-        kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+        // The raw test mapping uses external owners deliberately. End these
+        // holds only after remote reads and the unmap guard's TLB finish.
+        drop((page1, page2));
     }
 }
 
@@ -245,14 +248,16 @@ fn test_kernel_pt_miss_remote_without_mask() {
         task.reset_on_cpu_mask(my_cpu);
 
         // Allocate two physical pages with different magic values.
-        let v1 = kalloc::global_allocator()
-            .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
-            .expect("alloc page 1");
-        let v2 = kalloc::global_allocator()
-            .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
-            .expect("alloc page 2");
-        let p1 = khal::mem::v2p(VirtAddr::from(v1));
-        let p2 = khal::mem::v2p(VirtAddr::from(v2));
+        let page1 = kalloc::global_allocator()
+            .alloc_frame(kalloc::UsageKind::VirtMem)
+            .expect("alloc data page 1");
+        let page2 = kalloc::global_allocator()
+            .alloc_frame(kalloc::UsageKind::VirtMem)
+            .expect("alloc data page 2");
+        let v1 = page1.kernel_addr().as_usize();
+        let v2 = page2.kernel_addr().as_usize();
+        let p1 = page1.phys_addr();
+        let p2 = page2.phys_addr();
 
         const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
         const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
@@ -363,7 +368,8 @@ fn test_kernel_pt_miss_remote_without_mask() {
                 .unmap(test_vaddr)
                 .expect("test mapping must remain installed until cleanup");
         }
-        kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
-        kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+        // The raw test mapping uses external owners deliberately. End these
+        // holds only after remote reads and the unmap guard's TLB finish.
+        drop((page1, page2));
     }
 }
