@@ -53,7 +53,14 @@ pub(crate) fn release_frame(allocator: &GlobalAllocator, paddr: PhysAddr, kind: 
         .expect("live frame must have a content mapping")
         .kernel_address(paddr)
         .expect("registered frame address must not overflow");
-    allocator.dealloc_pages_inner(va.as_usize(), 1, kind);
+    if matches!(kind, UsageKind::Dma) {
+        // DMA selection bypasses PCP. Return retired DMA pages to the same
+        // inventory so fully released runs can coalesce for another DMA user.
+        allocator.record_usage_dealloc(kind, PAGE_SIZE_4K);
+        allocator.palloc.lock().deallocate_pages(va.as_usize(), 1);
+    } else {
+        allocator.dealloc_pages_inner(va.as_usize(), 1, kind);
+    }
 }
 
 pub(crate) fn validate_raw_release(

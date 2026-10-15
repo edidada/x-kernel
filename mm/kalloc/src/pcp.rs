@@ -471,3 +471,8 @@ pub(crate) fn drain_cache(
 // ---------------------------------------------------------------------------
 
 unittest::path_mod_test!(tests, "../ut-tests/pcp.rs");
+
+unittest::path_mod_test!(
+    dma_retirement_unittest,
+    "../ut-tests/dma_retirement_unittest.rs"
+);

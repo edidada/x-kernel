@@ -451,7 +451,7 @@ slices. It guarantees lifetime, not content exclusivity, COW eligibility or mapp
 invalidation. Consumers must keep references until their I/O/device/translation use
 is finished. This change does not migrate user-PTE ownership or repair truncate.
 
-Raw page and DMA release validate the whole range before accounting or PCP/buddy
+Raw page release validates the whole range before accounting or PCP/buddy
 mutation. A Shared, Initializing, Retiring or Permanent slot is rejected. This is an
 admission guard, not proof of legacy raw provenance or complete double-free detection.
 The old VA entry is translated only in the adapter; the registry checks a PFN
@@ -513,3 +513,10 @@ Allocation identity and alignment use the allocator's registered mapping, not a
 caller-side VA-to-PA conversion. Attribute changes, device retirement and platform
 share/unshare remain `kdma` responsibilities. The allocator still selects first
 and checks afterward; this does not introduce a DMA zone or a low-RAM search.
+
+
+DMA-kind final holds return base pages directly to central buddy, bypassing PCP
+on retirement as well as selection. This keeps those pages available for DMA32
+allocation and lets a fully retired run coalesce immediately; independent retained
+siblings still block only their own pages. Other kinds retain the ordinary PCP
+policy. DMA retirement remains O(base pages), without a bulk free protocol.

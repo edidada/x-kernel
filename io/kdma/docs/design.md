@@ -14,7 +14,7 @@ point for address-space integration.
 ## Responsibilities
 
 - Coherent allocation: `allocate_dma_memory(layout)` carves page-granular
-  regions through `kalloc::alloc_dma_frame_run` (`UsageKind::Dma`), applies
+  regions through `kalloc::GlobalAllocator::alloc_dma_frame_run` (`UsageKind::Dma`), applies
   `READ | WRITE | UNCACHED | SHARED` mapping flags through
   `DmaPageTableIf::protect`, and registers the range with the platform
   (`kplat::dma::prepare`). The complete rounded backing stays held throughout

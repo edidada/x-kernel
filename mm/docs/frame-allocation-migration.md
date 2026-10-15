@@ -89,7 +89,8 @@
 
 - kalloc 的 alloc_dma_frame_run 为完整 power-of-two backing 建立基础页持有，
   DMA32 校验覆盖全部 backing；错误候选在计数与 usage 发布前归还。保留先选择
-  后检查的策略，不新增 DMA zone。旧 alloc_dma_pages/dealloc_dma_pages 已删除。
+  后检查的策略，不新增 DMA zone。DMA 最后持有结束后直接归还 buddy，和选页一样
+  绕过普通 PCP，避免后续 DMA 分配看不到这些页。旧裸 DMA 接口已删除。
 - kdma 在持有 FrameRun 期间设置属性和平台共享；成功后显式 into_raw 转交整段
   持有，原始 DmaInfo/layout 的唯一释放恢复该转移。复制 DmaInfo 不克隆引用。
 - 设备与软件使用者必须先结束使用。随后 release 平台共享、同步恢复 cached

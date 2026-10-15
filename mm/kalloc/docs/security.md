@@ -413,3 +413,9 @@ returns the entire unclaimed block. DMA selection bypasses PCP, preserving the
 old DMA path's inventory boundary. The resulting FrameRun controls storage only:
 its caller must finish device use, platform release and mapping restoration before
 ending the hold, or retain it if that retirement cannot complete.
+
+DMA retirement bypasses ordinary PCP as DMA allocation does. Otherwise newly
+retired pages could be hidden in a cache that the constrained allocator never
+consults, delaying whole-run coalescing and producing avoidable allocation
+failures. A final-reference test pins one CPU and verifies that ending a DMA run
+and its independent last holder does not alter that CPU's PCP contents.
