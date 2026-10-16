@@ -119,10 +119,10 @@ driver_virtio_net = ["dep:drv-virtio", "drv-virtio/net", "driver-init/virtio-net
 driver_virtio_gpu = ["dep:drv-virtio", "drv-virtio/gpu", "driver-init/virtio-gpu", "display"]
 driver_virtio_input = ["dep:drv-virtio", "drv-virtio/input", "driver-init/virtio-input", "input"]
 driver_virtio_socket = ["dep:drv-virtio", "drv-virtio/vsock", "driver-init/virtio-vsock", "vsock"]
-driver_virtio_9p = ["dep:drv-virtio", "drv-virtio/fs9p", "driver-init/virtio-9p", "fs_9p", "dep:device_class", "device_class/virtio-9p"]
+driver_virtio_9p = ["dep:drv-virtio", "drv-virtio/fs9p", "driver-init/virtio-9p", "fs_9p"]
 # Hardware driver and trusted-source connection are separate knobs (main's
 # !916 split): the driver can exist without feeding the entropy pool.
-driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-init/virtio-rng", "dep:device_class", "device_class/hwrng"]
+driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-init/virtio-rng"]
 entropy_virtio_rng = ["driver_virtio_rng", "dep:entropy", "entropy/entropy_virtio_rng"]
 driver_virtio_mmio = ["dep:drv-virtio", "drv-virtio/mmio", "driver-init/virtio-mmio"]
 entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
@@ -206,7 +206,6 @@ drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
-device_class = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 kdma.workspace = true
 pci = { workspace = true }

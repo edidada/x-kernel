@@ -12,21 +12,24 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-blk = ["dep:subsys_block", "device_class/block", "virtio_devices/block"]
-net = ["device_class/net", "virtio_devices/net"]
-rng = ["device_class/hwrng", "dep:kpoll", "dep:ktask", "virtio_devices/rng"]
-gpu = ["device_class/display", "virtio_devices/gpu"]
-input = ["device_class/input", "virtio_devices/input"]
-vsock = ["device_class/vsock", "virtio_devices/socket"]
-fs9p = ["device_class/virtio-9p", "virtio_devices/virtio-9p"]
+blk = ["dep:subsys_block", "virtio_devices/block"]
+net = ["virtio_devices/net"]
+rng = ["dep:kpoll", "dep:ktask", "virtio_devices/rng"]
+gpu = ["virtio_devices/gpu"]
+input = ["virtio_devices/input"]
+vsock = ["virtio_devices/socket"]
+fs9p = ["virtio_devices/virtio-9p"]
 mmio = []
 
 [dependencies]
+subsys_vsock = { workspace = true }
+subsys_input = { workspace = true }
+subsys_display = { workspace = true }
+subsys_net = { workspace = true }
 kerrno.workspace = true
 subsys_block = { workspace = true, optional = true }
 driver_base = { workspace = true }
 driver_host = { workspace = true, features = ["virtio-hal"] }
-device_class = { workspace = true }
 subsys_hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }

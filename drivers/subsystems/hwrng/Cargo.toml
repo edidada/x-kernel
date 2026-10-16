@@ -9,11 +9,10 @@ homepage.workspace = true
 repository.workspace = true
 categories.workspace = true
 
-[package.metadata.cargo-shear]
-# Used by crate-local UNITTEST=y tests included from ut-tests/.
-ignored = ["kspin"]
 
 [dependencies]
+log = { workspace = true }
+lazyinit = { workspace = true }
 driver_base = { workspace = true }
 kerrno.workspace = true
 kspin.workspace = true
@@ -21,3 +20,7 @@ unittest.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

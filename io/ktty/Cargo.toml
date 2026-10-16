@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+driver_base = { workspace = true }
 serial_core = { workspace = true }
 intrusive-collections.workspace = true
 kcred.workspace = true
@@ -17,7 +18,6 @@ kworkng.workspace = true
 kcpu_id_map.workspace = true
 console_driver.workspace = true
 subsys_char = { workspace = true }
-device_class = { workspace = true, features = ["char"] }
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true

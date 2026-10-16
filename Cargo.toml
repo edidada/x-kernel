@@ -208,7 +208,6 @@ serial_core = { path = "drivers/drv/serial/serial-core", package = "serial-core"
 drv-clk = { path = "drivers/drv/clk" }
 drv-block = { path = "drivers/drv/block" }
 devnode = { path = "drivers/common/devnode" }
-device_class = { path = "drivers/common/device-class", package = "device-class" }
 subsys_input = { path = "drivers/subsystems/input", package = "subsys-input" }
 subsys_net = { path = "drivers/subsystems/net", package = "subsys-net" }
 subsys_vsock = { path = "drivers/subsystems/vsock", package = "subsys-vsock" }

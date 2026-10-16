@@ -16,9 +16,9 @@ ns16550-mmio = ["serial_core/ns16550-mmio"]
 ns16550-ioport = ["serial_core/ns16550-ioport"]
 
 [dependencies]
+subsys_char = { workspace = true }
 kerrno.workspace = true
 driver_base = { workspace = true }
-device_class = { workspace = true, features = ["char"] }
 devnode = { workspace = true }
 khal = { workspace = true }
 kiface = { workspace = true }

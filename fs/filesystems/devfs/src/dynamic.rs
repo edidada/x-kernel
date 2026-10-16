@@ -6,16 +6,17 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-#[cfg(feature = "input")]
-use device_class::find_input_device;
-use device_class::{ClassDeviceId, find_display_device};
 use devnode::{DevNode, DevNodeEvent, subscribe};
+use driver_base::ClassDeviceId;
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
     Dentry, DeviceId, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsError, VfsResult, cdev_del,
 };
 use lazyinit::LazyInit;
+use subsys_display::find_display_device;
+#[cfg(feature = "input")]
+use subsys_input::find_input_device;
 
 #[cfg(feature = "input")]
 use crate::nodes::event::EventDev;

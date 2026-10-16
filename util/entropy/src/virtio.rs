@@ -6,12 +6,12 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_class::{ClassDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
+use driver_base::ClassDevice;
 use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use kworkng::{HandleCreateError, SubmitError, WorkHandle};
-use subsys_hwrng::HwrngDevice;
+use subsys_hwrng::{HwrngDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
 
 // Back off failed reads, not in-flight device completion waits.
 const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(100);
@@ -279,8 +279,8 @@ mod tests {
                 ready: WaitQueue::new(),
                 entered: WaitQueue::new(),
             });
-            let class = device_class::publish_hwrng(
-                device_class::ClassParent::detached(
+            let class = subsys_hwrng::publish_hwrng(
+                driver_base::ClassParent::detached(
                     index as u64,
                     "entropy-collector-test",
                     alloc::string::String::from("ram-disk"), // 板静态别名占位
@@ -332,7 +332,7 @@ mod tests {
             source.work.flush().unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), reads);
             source.work.shutdown().unwrap();
-            device_class::unpublish_hwrng(class.id());
+            subsys_hwrng::unpublish_hwrng(class.id());
         }
         unittest::TestResult::Ok
     }

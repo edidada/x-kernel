@@ -9,8 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 categories.workspace = true
 
-[package.metadata.cargo-shear]
-
 [features]
 # bcm2835-sdhci = ["dep:bcm2835-sdhci"]
 ramdisk = []
@@ -19,6 +17,9 @@ ramdisk-static = []
 # ahci = ["dep:simple-ahci"]
 
 [dependencies]
+log = { workspace = true }
+driver_base = { workspace = true }
+lazyinit = { workspace = true }
 memaddr.workspace = true
 bitflags = { workspace = true }
 kerrno = { workspace = true }
@@ -40,3 +41,7 @@ unittest = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

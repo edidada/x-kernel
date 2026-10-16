@@ -6,12 +6,12 @@ use alloc::sync::Arc;
 use core::task::Waker;
 
 use console_driver::runtime::stdout_console;
-use device_class::{CharDeviceImpl, ClassDevice};
+use driver_base::ClassDevice;
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
 use serial_core::SerialPort;
-use subsys_char::CharDevice;
+use subsys_char::{CharDevice, CharDeviceImpl};
 
 use super::{Tty, TtyKind};
 use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};

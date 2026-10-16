@@ -7,9 +7,13 @@
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
 
+extern crate alloc;
+
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod class;
+pub use class::*;
 pub mod forwarding;
 
 /// Vsock address.

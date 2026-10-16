@@ -11,6 +11,7 @@ keywords = ["driver", "x-kernel"]
 categories = ["os", "no-std"]
 
 [dependencies]
+devnode = { workspace = true }
 kerrno.workspace = true
 kspin.workspace = true
 kirq = { workspace = true }

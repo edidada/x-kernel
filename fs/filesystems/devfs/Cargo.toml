@@ -10,14 +10,18 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-input = ["device_class/input", "dep:inputdev"]
-serial = ["device_class/char", "dep:console_driver"]
+input = ["dep:inputdev"]
+serial = ["dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
 dice = ["dep:dice_driver", "dep:tee_crypto"]
 vmm = ["dep:kvmm-api"]
 
 [dependencies]
+driver_base = { workspace = true }
+subsys_display = { workspace = true }
+subsys_char = { workspace = true }
+subsys_input = { workspace = true }
 devnode = { workspace = true }
 subsys_block = { workspace = true }
 kalloc.workspace = true
@@ -55,7 +59,6 @@ klazy.workspace = true
 entropy.workspace = true
 kvmm-api = { workspace = true, optional = true }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
-device_class = { workspace = true, features = ["display"] }
 inputdev = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 

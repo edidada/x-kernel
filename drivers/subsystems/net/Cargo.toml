@@ -9,14 +9,15 @@ repository.workspace = true
 documentation.workspace = true
 description = "This crate provides core interfaces and types for network drivers."
 
-[package.metadata.cargo-shear]
-
 [features]
 default = []
 # ixgbe = ["dep:ixgbe-driver"]
 # fxmac = ["dep:fxmac_rs"]
 
 [dependencies]
+log = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
 driver_base = { workspace = true }
 kerrno.workspace = true
 # fxmac_rs = { git = "https://github.com/elliott10/fxmac_rs.git", rev = "0dbc3916", optional = true }
@@ -26,3 +27,7 @@ unittest = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

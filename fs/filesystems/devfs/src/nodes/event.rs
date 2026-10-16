@@ -5,10 +5,7 @@
 use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
-use device_class::{
-    ClassDevice,
-    prelude::{Event, EventType, InputDevice, InputDeviceImpl},
-};
+use driver_base::ClassDevice;
 use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -25,6 +22,7 @@ use linux_raw_sys::{
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION, EVIOCSCLOCKID},
 };
 use posix_types::{InputId, SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
+use subsys_input::{Event, EventType, InputDevice, InputDeviceImpl};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::dynamic::DynamicDeviceDir;

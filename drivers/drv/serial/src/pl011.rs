@@ -25,15 +25,15 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use console_driver::runtime::register_console_parented;
-use device_class::{ClassParent, publish_char};
 use driver_base::{
-    BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
+    BoundDevice, ClassParent, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap,
+    IrqAction, ProbeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
-use subsys_char::CharDevice;
+use subsys_char::{CharDevice, publish_char};
 
 /// `static const struct of_device_id pl011_of_match[]`.
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
@@ -47,7 +47,7 @@ pub struct Pl011Data {
     /// The Data-owned char publication (auxiliary ports): dropping
     /// unpublishes. FIRST field — before every guard below. The stdout
     /// port deliberately holds none (console continuity across rebind).
-    _publication: Option<device_class::ClassWithdraw>,
+    _publication: Option<driver_base::ClassWithdraw>,
     _irq: Option<DevIrq>,
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,
@@ -151,8 +151,8 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // model-agnostic since the class-layer decoupling.
         use driver_base::BusDeviceData as _;
         let location = dev.bus_data().path_component();
-        let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
-        let mut publication: Option<device_class::ClassWithdraw> = None;
+        let char_dev: subsys_char::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+        let mut publication: Option<driver_base::ClassWithdraw> = None;
         match port.role() {
             SerialRole::Stdout => {
                 register_console_parented(
@@ -169,7 +169,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                     "serial",
                 )
                 .map_err(crate::probe_error::map_driver_error)?;
-                publication = Some(device_class::char_withdraw(&handle));
+                publication = Some(subsys_char::char_withdraw(&handle));
             }
         }
 

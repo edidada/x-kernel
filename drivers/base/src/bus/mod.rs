@@ -116,3 +116,13 @@ pub trait Bus: Sized + Send + Sync + 'static {
     /// row. Drivers bind through the best-scoring row.
     fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore;
 }
+
+/// Format the canonical physical path for a device location (the
+/// `devices/...` prefix source for DEVPATH and sysfs).
+///
+/// THE single derivation: drivers and the class projections must all
+/// call this — independent copies drifted before (DEVPATH vs sysfs
+/// tree mismatch).
+pub fn physical_path(data: &dyn BusDeviceData) -> alloc::string::String {
+    data.path_component()
+}

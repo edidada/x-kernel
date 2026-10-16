@@ -24,8 +24,7 @@ use core::{
     task::Poll,
 };
 
-use device_class::prelude::KError;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kpoll::{PollRegisterError, PollRegistrations, PollSet};
 use ksync::Mutex;

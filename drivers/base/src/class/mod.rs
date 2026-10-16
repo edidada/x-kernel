@@ -11,9 +11,9 @@
 //! module stays family-agnostic: `ClassDevice<T>` is generic over the
 //! runtime capability type.
 //!
-//! Known debt (pass 2): `ClassDeviceMetadata` still carries the input
-//! identity bag here; it belongs with the input family once the node
-//! projection is subsystem-owned.
+//! The family hooks (publish/unpublish side effects, node projection)
+//! live in [`class_api`] + [`ClassRuntimeMetadata`]; the families
+//! instantiate them in their own subsystem crates.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -207,7 +207,6 @@ struct ClassDeviceInner<T> {
     parent: ClassParent,
     runtime: T,
     name: String,
-    metadata: ClassDeviceMetadata,
     /// Device-usage protocol (Linux `device usage`/`try_acquire`
     /// analogue): in-flight operations count here, and `class_remove`
     /// flips `draining` BEFORE the removal callbacks run — new acquires
@@ -218,32 +217,6 @@ struct ClassDeviceInner<T> {
     /// quiesce), not a class-core one.
     uses: core::sync::atomic::AtomicUsize,
     draining: core::sync::atomic::AtomicBool,
-}
-
-pub struct ClassDeviceMetadata {
-    input_identity: Option<InputIdentity>,
-}
-
-struct InputIdentity {
-    physical_location: String,
-    unique_id: String,
-}
-
-impl ClassDeviceMetadata {
-    pub const fn empty() -> Self {
-        Self {
-            input_identity: None,
-        }
-    }
-
-    pub fn input(physical_location: String, unique_id: String) -> Self {
-        Self {
-            input_identity: Some(InputIdentity {
-                physical_location,
-                unique_id,
-            }),
-        }
-    }
 }
 
 impl<T> Clone for ClassDevice<T> {
@@ -261,15 +234,12 @@ impl<T> ClassDevice<T> {
         inner: T,
         name: String,
     ) -> KResult<Self> {
-        Self::try_new_with_class_metadata(parent, inner, name, ClassDeviceMetadata::empty())
+        Self::try_new(parent, inner, name)
     }
 
-    pub fn try_new_with_class_metadata(
-        parent: impl Into<ClassParent>,
-        inner: T,
-        name: String,
-        metadata: ClassDeviceMetadata,
-    ) -> KResult<Self> {
+    /// Create a class device: the runtime, the name the driver built,
+    /// and the parent it publishes under.
+    pub fn try_new(parent: impl Into<ClassParent>, inner: T, name: String) -> KResult<Self> {
         let parent = parent.into();
         parent.driver_name().ok_or(KError::BadState)?;
         Ok(Self {
@@ -279,7 +249,6 @@ impl<T> ClassDevice<T> {
                 parent,
                 runtime: inner,
                 name,
-                metadata,
             }),
         })
     }
@@ -400,22 +369,6 @@ impl<T> ClassDevice<T> {
             .store(true, core::sync::atomic::Ordering::Release);
         self.in_flight()
     }
-
-    pub fn input_physical_location(&self) -> &str {
-        self.inner
-            .metadata
-            .input_identity
-            .as_ref()
-            .map_or("", |identity| identity.physical_location.as_str())
-    }
-
-    pub fn input_unique_id(&self) -> &str {
-        self.inner
-            .metadata
-            .input_identity
-            .as_ref()
-            .map_or("", |identity| identity.unique_id.as_str())
-    }
 }
 
 impl<T> core::fmt::Debug for ClassDevice<T> {
@@ -522,6 +475,7 @@ impl<T> Default for ClassRegistry<T> {
     }
 }
 
-#[cfg(unittest)]
+pub mod class_api;
+
 #[cfg(test)]
 mod tests;

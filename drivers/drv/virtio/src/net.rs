@@ -13,11 +13,12 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_class::{ClassParent, publish_net};
 use driver_base::{
-    BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+    BoundDevice, ClassParent, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError,
+    RuntimeError,
 };
 use pci::{PciBus, PciMatch};
+use subsys_net::publish_net;
 use virtio_devices::{VirtIoNetDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and
@@ -33,7 +34,7 @@ pub struct NetData {
     /// The Data-owned publication: dropping unpublishes. FIRST field —
     /// runs before the IRQ guard below releases (consumers detach while
     /// the device is still live).
-    _publication: device_class::ClassWithdraw,
+    _publication: driver_base::ClassWithdraw,
     _irq: Option<DevIrq>,
 }
 
@@ -69,11 +70,11 @@ pub fn activate<B: driver_base::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio_devices::Transport + 'static,
     msi_irq: Option<usize>,
-) -> Result<(device_class::ClassWithdraw, Option<DevIrq>), ProbeError> {
+) -> Result<(driver_base::ClassWithdraw, Option<DevIrq>), ProbeError> {
     // The publication rides the caller's Data (withdrawal guard): the
     // Data-owner contract — no composition-root class drain at remove.
     let (publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
-    let withdraw = device_class::net_withdraw(&publication);
+    let withdraw = subsys_net::net_withdraw(&publication);
     Ok((withdraw, irq))
 }
 
@@ -86,7 +87,7 @@ fn activate_with_irq<B: driver_base::Bus, T: virtio_devices::Transport + 'static
     mmio_regs: Option<driver_base::IoMap>,
 ) -> Result<
     (
-        device_class::ClassDevice<device_class::NetDeviceImpl>,
+        driver_base::ClassDevice<subsys_net::NetDeviceImpl>,
         Option<DevIrq>,
     ),
     ProbeError,
@@ -171,7 +172,7 @@ pub fn activate_mmio<B: driver_base::Bus, T: virtio_devices::Transport + 'static
     struct NetMmioActivation {
         // Field order = teardown order: unpublish (consumers detach while
         // the device is live), then the IRQ guard releases.
-        _withdraw: device_class::ClassWithdraw,
+        _withdraw: driver_base::ClassWithdraw,
         irq: Option<DevIrq>,
     }
     impl crate::mmio::MmioActivation for NetMmioActivation {
@@ -180,7 +181,7 @@ pub fn activate_mmio<B: driver_base::Bus, T: virtio_devices::Transport + 'static
         }
     }
     Ok(builder.build(NetMmioActivation {
-        _withdraw: device_class::net_withdraw(&publication),
+        _withdraw: subsys_net::net_withdraw(&publication),
         irq,
     }))
 }

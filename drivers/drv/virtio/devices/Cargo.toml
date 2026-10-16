@@ -22,6 +22,9 @@ socket = ["alloc", "dep:subsys_vsock"]
 virtio-9p = ["alloc"]
 
 [dependencies]
+
+lazyinit = { workspace = true }
+
 kerrno.workspace = true
 driver_base = { workspace = true }
 bitflags = { workspace = true }

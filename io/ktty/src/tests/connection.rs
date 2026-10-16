@@ -38,7 +38,7 @@ impl CharDevice for RuntimeIo {
 }
 
 fn connection(
-    _parent: &device_class::ClassParent,
+    _parent: &driver_base::ClassParent,
     fails: bool,
     boot_port: Option<Arc<SerialPort>>,
     offline: bool,
@@ -54,7 +54,7 @@ fn connection(
     // snapshot would alias its offline flag between test and live device.
     // `offline` expresses the removed-device state (the main-side test used
     // a bound-but-inactive device object for the same effect).
-    let parent = device_class::ClassParent::detached(
+    let parent = driver_base::ClassParent::detached(
         0x7e57,
         "tty-test",
         alloc::string::String::from("platform/static0x7e57"),
@@ -125,7 +125,7 @@ fn runtime_errors_return_both_directions_to_the_boot_port() {
 fn unavailable_runtime_clears_handle_and_uses_boot_port() {
     // A detached class parent never touches any registry: the test
     // connection exercises availability without global device lifecycle.
-    let parent = device_class::ClassParent::detached(
+    let parent = driver_base::ClassParent::detached(
         1,
         "tty-test",
         alloc::string::String::from("platform/static1"),

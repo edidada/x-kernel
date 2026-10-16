@@ -11,7 +11,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use device_class::{ClassDevice, prelude::*};
+use driver_base::ClassDevice;
 use hashbrown::HashMap;
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollSet;
@@ -19,6 +19,7 @@ use kspin::{SpinNoIrq, static_lock};
 use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(not(unittest))]
 use lazyinit::LazyInit;
+use subsys_net::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -337,7 +338,7 @@ impl EthernetDevice {
     }
 
     fn send_frame<F>(
-        inner: &dyn NetDevice,
+        inner: &dyn subsys_net::NetDevice,
         dst: MacAddress,
         size: usize,
         f: F,
@@ -635,7 +636,7 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn device_id(&self) -> Option<device_class::ClassDeviceId> {
+    fn device_id(&self) -> Option<driver_base::ClassDeviceId> {
         Some(self.inner.id())
     }
 

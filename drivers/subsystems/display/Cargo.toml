@@ -10,9 +10,17 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
+log = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+devnode = { workspace = true }
 driver_base = { workspace = true }
 kerrno.workspace = true
 unittest.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

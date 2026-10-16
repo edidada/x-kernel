@@ -36,8 +36,10 @@ pub mod uevent;
 /// keep a single import path. There is exactly ONE path derivation in the
 /// tree: the pre-refactor duplicate (kept so the projection stayed
 /// model-agnostic across two device models) died with the old model.
-pub use driver_base::BusDeviceData;
 pub use uevent::bitmap_value;
+
+mod node_class;
+pub use node_class::{InputNodeMetadata, NodeClass};
 
 /// Packed `dev_t`: the same layout the block core and devfs use
 /// (block and kvfs re-export this type as their DeviceId).
@@ -612,9 +614,6 @@ fn dispatch_added(
 /// THE single derivation: the block driver, the virtio drivers and the
 /// device_class projections must all call this — independent copies drifted
 /// before (DEVPATH vs sysfs tree mismatch).
-pub fn physical_path(data: &dyn BusDeviceData) -> String {
-    data.path_component()
-}
 
 pub fn physical_path_pci(segment: u16, bus: u8, device: u8, function: u8) -> String {
     format!("pci{segment:04x}:{bus:02x}/{segment:04x}:{bus:02x}:{device:02x}.{function}")

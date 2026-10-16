@@ -23,14 +23,14 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_class::{ClassParent, publish_block};
 use driver_base::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
 use subsys_block::{
     Gendisk,
     dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
+    publish_block,
 };
 use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal, VirtioDeviceKind};
 
@@ -110,7 +110,7 @@ struct BlkActivation<H: VirtIoHal, T: Transport> {
     /// The Data-owned publication: taken and dropped at the exact
     /// begin_close → unpublish → drain point in `Drop` (field order alone
     /// cannot express the interleaving).
-    publication: Option<device_class::ClassWithdraw>,
+    publication: Option<driver_base::ClassWithdraw>,
 }
 
 impl<H: VirtIoHal, T: Transport> Drop for BlkActivation<H, T> {
@@ -222,7 +222,7 @@ pub fn activate<B: driver_base::Bus, T: Transport + 'static>(
         disk.name(),
     )
     .map_err(crate::common::map_driver_error)?;
-    activation.publication = Some(device_class::block_withdraw(&publication));
+    activation.publication = Some(subsys_block::block_withdraw(&publication));
 
     Ok(Box::new(activation))
 }

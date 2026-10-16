@@ -14,7 +14,6 @@ categories = ["os", "no-std"]
 kspin.workspace = true
 ksync.workspace = true
 log.workspace = true
-driver_base = { workspace = true }
 unittest = { workspace = true }
 
 [lints]

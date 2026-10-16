@@ -33,13 +33,16 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use device_class::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
+use driver_base::ClassDevice;
 use kalloc::GlobalPage;
 use khal::mem::v2p;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
-use subsys_display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
+use subsys_display::{
+    DisplayDevice, DisplayDeviceImpl, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource,
+    display_devices as class_display_devices,
+};
 
 /// Bytes per pixel for the shadow scanout buffer. Matches the BGRA8888 format
 /// advertised to the display device.

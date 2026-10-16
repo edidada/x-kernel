@@ -12,14 +12,13 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_class::{ClassParent, publish_char};
 use driver_base::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
+    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
 use kerrno::KResult;
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
-use subsys_char::CharDevice;
+use subsys_char::{CharDevice, publish_char};
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]
@@ -46,7 +45,7 @@ pub struct SerialData {
     /// unpublishes. FIRST field — before the mapping guard below, so
     /// consumer detach sees a live device. The stdout port deliberately
     /// holds none (console continuity across rebind).
-    _publication: Option<device_class::ClassWithdraw>,
+    _publication: Option<driver_base::ClassWithdraw>,
     /// Kept alive for the binding: dropping it unmaps the cold-start UART
     /// window. Field placement (after the publication) encodes release order.
     // Ownership-only field: read access is intentionally impossible.
@@ -75,10 +74,10 @@ impl CharDevice for SerialCharDev {
 fn publish(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     port: Arc<SerialPort>,
-) -> Result<Option<device_class::ClassWithdraw>, ProbeError> {
+) -> Result<Option<driver_base::ClassWithdraw>, ProbeError> {
     use driver_base::BusDeviceData as _;
     let location = dev.bus_data().path_component();
-    let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+    let char_dev: subsys_char::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
@@ -92,7 +91,7 @@ fn publish(
             char_dev,
             "serial",
         )
-        .map(|handle| Some(device_class::char_withdraw(&handle)))
+        .map(|handle| Some(subsys_char::char_withdraw(&handle)))
         .map_err(crate::probe_error::map_driver_error),
     }
 }

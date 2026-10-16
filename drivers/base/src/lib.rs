@@ -94,10 +94,10 @@ mod resource;
 
 pub mod desc;
 
-pub use bus::{Bus, BusDeviceData, BusId, BusInstanceId, MatchScore};
+pub use bus::{Bus, BusDeviceData, BusId, BusInstanceId, MatchScore, physical_path};
 pub use class::{
-    ClassDevice, ClassDeviceId, ClassDeviceMetadata, ClassParent, ClassRegistry, ClassUse,
-    ClassWithdraw, DetachedParent,
+    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
+    ClassRemovalCallback, ClassUse, ClassWithdraw, DetachedParent,
 };
 pub use desc::DeviceDescriptor;
 pub use device::{BoundDevice, DeviceCtx, DeviceId};

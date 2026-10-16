@@ -28,11 +28,11 @@ impl InputDevice for ClassDevice<Box<dyn InputDevice + Send + Sync>> {
     }
 
     fn physical_location(&self) -> &str {
-        self.input_physical_location()
+        self.with(|device| device.physical_location())
     }
 
     fn unique_id(&self) -> &str {
-        self.input_unique_id()
+        self.with(|device| device.unique_id())
     }
 
     fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> KResult<bool> {

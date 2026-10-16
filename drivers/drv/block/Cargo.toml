@@ -18,9 +18,7 @@ ramdisk-static = ["subsys_block/ramdisk-static"]
 kerrno.workspace = true
 subsys_block = { workspace = true, features = ["ramdisk"] }
 kbuild_config = { workspace = true }
-devnode = { workspace = true }
 driver_base = { workspace = true }
-device_class = { workspace = true, features = ["block"] }
 
 
 [lints]

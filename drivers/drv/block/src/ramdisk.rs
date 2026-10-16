@@ -11,12 +11,11 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use device_class::{ClassParent, publish_block};
 use driver_base::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError,
+    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError,
     platform::{PlatformBus, PlatformId},
 };
-use subsys_block::Gendisk;
+use subsys_block::{Gendisk, publish_block};
 
 /// `struct platform_device_id ramdisk_ids[]`: one board alias row.
 static IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatch::new(
@@ -28,7 +27,7 @@ static IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatc
 pub struct RamdiskData {
     /// The Data-owned publication: dropping unpublishes (first field —
     /// registry removal → del_gendisk + devnode withdraw).
-    _publication: device_class::ClassWithdraw,
+    _publication: driver_base::ClassWithdraw,
 }
 
 /// The driver ops.
@@ -81,7 +80,7 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
         )
         .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData {
-            _publication: device_class::block_withdraw(&publication),
+            _publication: subsys_block::block_withdraw(&publication),
         })
     }
 

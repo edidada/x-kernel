@@ -9,9 +9,11 @@
 
 use alloc::boxed::Box;
 
-use device_class::{ClassParent, publish_display};
-use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
+use driver_base::{
+    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
+};
 use pci::{PciBus, PciMatch};
+use subsys_display::publish_display;
 use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_gpu_id_table[]`.
@@ -21,7 +23,7 @@ static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1050)];
 pub struct GpuData {
     /// The Data-owned publication: dropping unpublishes (first field —
     /// runs before any later guard releases).
-    _publication: device_class::ClassWithdraw,
+    _publication: driver_base::ClassWithdraw,
 }
 
 /// The driver ops.
@@ -54,7 +56,7 @@ pub fn activate<B: driver_base::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio_devices::Transport + 'static,
     mmio_regs: Option<driver_base::IoMap>,
-) -> Result<device_class::ClassWithdraw, ProbeError> {
+) -> Result<driver_base::ClassWithdraw, ProbeError> {
     let device = virtio_devices::VirtIoGpuDev::<driver_host::virtio_hal::Hal, _>::try_new(
         transport, mmio_regs,
     )
@@ -68,7 +70,7 @@ pub fn activate<B: driver_base::Bus>(
     .map_err(crate::common::map_driver_error)?;
     // The Data-owned publication: dropping the guard unpublishes (the
     // single-owner contract — no composition-root class drain at remove).
-    Ok(device_class::display_withdraw(&handle))
+    Ok(subsys_display::display_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -89,7 +91,7 @@ pub fn activate_mmio(
     let withdraw = activate(dev, transport, mmio_regs)?;
 
     struct GpuMmioActivation {
-        _withdraw: device_class::ClassWithdraw,
+        _withdraw: driver_base::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for GpuMmioActivation {

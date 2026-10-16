@@ -21,7 +21,6 @@ serial_core = { workspace = true }
 kerrno.workspace = true
 console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
 driver_base = { workspace = true }
-device_class = { workspace = true, features = ["char"] }
 memaddr = { workspace = true }
 subsys_char = { workspace = true }
 log.workspace = true

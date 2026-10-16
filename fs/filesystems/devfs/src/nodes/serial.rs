@@ -14,12 +14,13 @@
 use alloc::{format, sync::Arc};
 
 use console_driver::runtime::stdout_console_id;
-use device_class::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
+use driver_base::ClassDevice;
 use kerrno::KError;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
     VfsInode, VfsResult,
 };
+use subsys_char::{CharDevice, CharDeviceImpl, char_devices};
 
 use crate::{DeviceFile, add_device_entry};
 

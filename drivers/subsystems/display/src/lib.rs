@@ -5,10 +5,13 @@
 //! Common traits and types for graphics display device drivers.
 
 #![no_std]
+extern crate alloc;
 
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod class;
+pub use class::*;
 pub mod forwarding;
 
 /// The information of the graphics display device.

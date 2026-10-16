@@ -16,14 +16,15 @@ use alloc::{
 };
 
 use bitmaps::Bitmap;
-use device_class::{
-    ClassDevice, Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
-    input_devices as class_input_devices, subscribe_input_available, subscribe_input_removed,
-};
+use driver_base::ClassDevice;
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
+use subsys_input::{
+    Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
+    input_devices as class_input_devices, subscribe_input_available, subscribe_input_removed,
+};
 
 const KEY_COUNT: usize = EventType::Key.bits_count();
 const MAX_FRAME_EVENTS: usize = 256;
@@ -166,9 +167,7 @@ pub struct InputEndpoint {
 }
 
 impl InputEndpoint {
-    fn new(
-        device: ClassDevice<InputDeviceImpl>,
-    ) -> Result<Arc<Self>, device_class::prelude::KError> {
+    fn new(device: ClassDevice<InputDeviceImpl>) -> Result<Arc<Self>, kerrno::KError> {
         let endpoint = Arc::new(Self {
             device,
             poller: LazyInit::new(),
@@ -180,7 +179,7 @@ impl InputEndpoint {
                 endpoint.poll_background();
             }
         }) as Box<dyn Fn() + Send + Sync>)
-        .map_err(|_| device_class::prelude::KError::BadState)?;
+        .map_err(|_| kerrno::KError::BadState)?;
         endpoint.poller.init_once(poller);
         Ok(endpoint)
     }
@@ -194,7 +193,7 @@ impl InputEndpoint {
         }
     }
 
-    fn start(self: &Arc<Self>) -> Result<(), device_class::prelude::KError> {
+    fn start(self: &Arc<Self>) -> Result<(), kerrno::KError> {
         let notifier: Arc<dyn InputEventNotifier> = Arc::new(EndpointNotifier {
             endpoint: Arc::downgrade(self),
         });
@@ -206,7 +205,7 @@ impl InputEndpoint {
         if self.schedule_poll().is_err() {
             let _ = self.device.set_event_notifier(None);
             let _ = self.poller.shutdown();
-            return Err(device_class::prelude::KError::BadState);
+            return Err(kerrno::KError::BadState);
         }
         Ok(())
     }
@@ -240,7 +239,7 @@ impl InputEndpoint {
                         event,
                     });
                 }
-                Err(device_class::prelude::KError::WouldBlock) => {
+                Err(kerrno::KError::WouldBlock) => {
                     return false;
                 }
                 Err(error) => {
@@ -275,13 +274,10 @@ impl InputEndpoint {
     /// # Errors
     ///
     /// Returns `BadState` after the device has been detached.
-    pub fn subscribe(
-        &self,
-        listener: Arc<dyn InputEventListener>,
-    ) -> Result<(), device_class::prelude::KError> {
+    pub fn subscribe(&self, listener: Arc<dyn InputEventListener>) -> Result<(), kerrno::KError> {
         let mut state = self.state.lock();
         if state.is_detached || !self.device.is_available() {
-            return Err(device_class::prelude::KError::BadState);
+            return Err(kerrno::KError::BadState);
         }
         state.add_listener(&listener);
         Ok(())
@@ -382,7 +378,7 @@ fn remove_input_device(device: ClassDevice<InputDeviceImpl>) {
 /// propagates a driver notification-registration failure.
 pub fn input_endpoint(
     device: ClassDevice<InputDeviceImpl>,
-) -> Result<Arc<InputEndpoint>, device_class::prelude::KError> {
+) -> Result<Arc<InputEndpoint>, kerrno::KError> {
     let mut endpoints = INPUT_ENDPOINTS.lock();
     if let Some(endpoint) = endpoints
         .iter()
@@ -391,13 +387,13 @@ pub fn input_endpoint(
         return Ok(endpoint.clone());
     }
     if !device.is_available() {
-        return Err(device_class::prelude::KError::BadState);
+        return Err(kerrno::KError::BadState);
     }
     let endpoint = InputEndpoint::new(device.clone())?;
     endpoint.start()?;
     if !device.is_available() {
         endpoint.detach();
-        return Err(device_class::prelude::KError::BadState);
+        return Err(kerrno::KError::BadState);
     }
     endpoints.push(endpoint.clone());
     Ok(endpoint)

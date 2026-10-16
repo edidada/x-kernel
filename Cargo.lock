@@ -660,7 +660,6 @@ dependencies = [
 name = "console-driver"
 version = "0.3.0-dev"
 dependencies = [
- "device-class",
  "devnode",
  "driver-base",
  "kerrno",
@@ -673,6 +672,7 @@ dependencies = [
  "memspace",
  "of",
  "serial-core",
+ "subsys-char",
  "unittest",
 ]
 
@@ -1118,9 +1118,9 @@ dependencies = [
  "bitmaps",
  "chrono",
  "console-driver",
- "device-class",
  "devnode",
  "dice-driver",
+ "driver-base",
  "drmdevice",
  "entropy",
  "fbdevice",
@@ -1151,37 +1151,18 @@ dependencies = [
  "osvm",
  "posix-types",
  "subsys-block",
+ "subsys-char",
+ "subsys-display",
+ "subsys-input",
  "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
  "zerocopy",
 ]
 
 [[package]]
-name = "device-class"
-version = "0.3.0-dev"
-dependencies = [
- "devnode",
- "driver-base",
- "kerrno",
- "kspin",
- "lazyinit",
- "log",
- "subsys-block",
- "subsys-char",
- "subsys-display",
- "subsys-hwrng",
- "subsys-input",
- "subsys-net",
- "subsys-vsock",
- "unittest",
- "virtio-devices",
-]
-
-[[package]]
 name = "devnode"
 version = "0.3.0-dev"
 dependencies = [
- "driver-base",
  "kspin",
  "ksync",
  "log",
@@ -1225,6 +1206,7 @@ dependencies = [
 name = "driver-base"
 version = "0.3.0-dev"
 dependencies = [
+ "devnode",
  "kerrno",
  "kirq",
  "kspin",
@@ -1272,7 +1254,7 @@ name = "drmdevice"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
- "device-class",
+ "driver-base",
  "kalloc",
  "kcred",
  "khal",
@@ -1292,8 +1274,6 @@ dependencies = [
 name = "drv-block"
 version = "0.3.0-dev"
 dependencies = [
- "device-class",
- "devnode",
  "driver-base",
  "kbuild_config",
  "kerrno",
@@ -1315,7 +1295,6 @@ name = "drv-serial"
 version = "0.3.0-dev"
 dependencies = [
  "console-driver",
- "device-class",
  "driver-base",
  "kerrno",
  "log",
@@ -1328,7 +1307,6 @@ dependencies = [
 name = "drv-virtio"
 version = "0.3.0-dev"
 dependencies = [
- "device-class",
  "driver-base",
  "driver-host",
  "kerrno",
@@ -1337,7 +1315,11 @@ dependencies = [
  "log",
  "pci",
  "subsys-block",
+ "subsys-display",
  "subsys-hwrng",
+ "subsys-input",
+ "subsys-net",
+ "subsys-vsock",
  "virtio-devices",
 ]
 
@@ -1428,7 +1410,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entropy"
 version = "0.3.0-dev"
 dependencies = [
- "device-class",
  "devnode",
  "driver-base",
  "karch",
@@ -1568,7 +1549,7 @@ dependencies = [
 name = "fbdevice"
 version = "0.3.0-dev"
 dependencies = [
- "device-class",
+ "driver-base",
  "kalloc",
  "khal",
  "kspin",
@@ -1675,7 +1656,7 @@ dependencies = [
  "bpffs",
  "cgroup2fs",
  "devfs",
- "device-class",
+ "driver-base",
  "fs_context",
  "kbuild_config",
  "kcred",
@@ -1691,6 +1672,7 @@ dependencies = [
  "sysfs",
  "uevent-netlink",
  "v9fs",
+ "virtio-devices",
 ]
 
 [[package]]
@@ -2014,13 +1996,15 @@ name = "inputdev"
 version = "0.3.0-dev"
 dependencies = [
  "bitmaps",
- "device-class",
+ "driver-base",
+ "kerrno",
  "ksync",
  "ktime",
  "ktime_types",
  "kworkng",
  "lazyinit",
  "log",
+ "subsys-input",
  "unittest",
 ]
 
@@ -2411,7 +2395,6 @@ dependencies = [
  "backtrace",
  "console-driver",
  "devfs",
- "device-class",
  "driver-init",
  "drv-block",
  "drv-clk",
@@ -2610,7 +2593,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bitflags 2.13.2",
- "device-class",
+ "driver-base",
  "entropy",
  "enum_dispatch",
  "etherparse",
@@ -2636,6 +2619,8 @@ dependencies = [
  "log",
  "ringbuf",
  "smoltcp",
+ "subsys-net",
+ "subsys-vsock",
  "tipc",
  "unittest",
  "zerocopy",
@@ -2879,7 +2864,6 @@ dependencies = [
  "boot-info",
  "chrono",
  "clocksource-driver",
- "device-class",
  "driver-init",
  "entropy",
  "fbdevice",
@@ -3141,7 +3125,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "console-driver",
- "device-class",
+ "driver-base",
  "intrusive-collections",
  "kcpu_id_map",
  "kcred",
@@ -4970,6 +4954,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "devnode",
+ "driver-base",
  "kbuild_config",
  "kerrno",
  "khal",
@@ -4979,8 +4964,10 @@ dependencies = [
  "kspin",
  "ksync",
  "ktask",
+ "lazyinit",
  "linked_list_r4l",
  "linux-raw-sys",
+ "log",
  "memaddr",
  "unittest",
 ]
@@ -4991,14 +4978,21 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
+ "kspin",
+ "lazyinit",
+ "log",
 ]
 
 [[package]]
 name = "subsys-display"
 version = "0.3.0-dev"
 dependencies = [
+ "devnode",
  "driver-base",
  "kerrno",
+ "kspin",
+ "lazyinit",
+ "log",
  "unittest",
 ]
 
@@ -5009,6 +5003,8 @@ dependencies = [
  "driver-base",
  "kerrno",
  "kspin",
+ "lazyinit",
+ "log",
  "unittest",
 ]
 
@@ -5016,8 +5012,12 @@ dependencies = [
 name = "subsys-input"
 version = "0.3.0-dev"
 dependencies = [
+ "devnode",
  "driver-base",
  "kerrno",
+ "kspin",
+ "lazyinit",
+ "log",
  "strum",
 ]
 
@@ -5027,7 +5027,10 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
+ "kspin",
  "ksync",
+ "lazyinit",
+ "log",
  "unittest",
 ]
 
@@ -5037,6 +5040,9 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
+ "kspin",
+ "lazyinit",
+ "log",
 ]
 
 [[package]]
@@ -5653,6 +5659,7 @@ dependencies = [
  "kerrno",
  "kspin",
  "kvirtiodrivers",
+ "lazyinit",
  "linked_list_r4l",
  "log",
  "pci",

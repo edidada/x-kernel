@@ -8,7 +8,7 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use device_class::{ClassDevice, prelude::*};
+use driver_base::ClassDevice;
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
 use klazy::Lazy;
@@ -20,6 +20,10 @@ use ktask::{
 };
 use ktime_types::TimeSpan;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
+use subsys_vsock::{
+    VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl, VsockTransportEvent,
+    VsockTransportEventKind,
+};
 
 pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 128 * 1024; // 128KB receive buffer
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
@@ -856,7 +860,7 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     Ok(())
 }
 
-pub(crate) fn unregister_vsock_dev(id: device_class::ClassDeviceId) -> bool {
+pub(crate) fn unregister_vsock_dev(id: driver_base::ClassDeviceId) -> bool {
     let mut guard = VSOCK_DEV.lock();
     if guard.as_ref().is_none_or(|dev| dev.id() != id) {
         return false;

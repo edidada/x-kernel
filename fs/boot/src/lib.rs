@@ -21,9 +21,7 @@ use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
-use device_class::{
-    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::KError, virtio_9p_devices,
-};
+use driver_base::ClassDevice;
 #[cfg(feature = "fs9p")]
 use kerrno::KError;
 #[cfg(feature = "fs9p")]
@@ -32,6 +30,8 @@ use kvfs::{
     Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
     SuperBlock, SuperBlockFlags, path::PathBuf,
 };
+#[cfg(feature = "fs9p")]
+use virtio_devices::{Virtio9pDevice as _, Virtio9pDeviceImpl, virtio_9p_devices};
 
 const PSEUDO_FS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)

@@ -9,9 +9,11 @@
 
 use alloc::boxed::Box;
 
-use device_class::{ClassParent, publish_input};
-use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
+use driver_base::{
+    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
+};
 use pci::{PciBus, PciMatch};
+use subsys_input::publish_input;
 use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_input_id_table[]`.
@@ -20,7 +22,7 @@ static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];
 /// Driver-private data: the published device is owned by its class registry.
 pub struct InputData {
     /// The Data-owned publication: dropping unpublishes (first field).
-    _publication: device_class::ClassWithdraw,
+    _publication: driver_base::ClassWithdraw,
 }
 
 /// The driver ops.
@@ -52,7 +54,7 @@ pub fn activate<B: driver_base::Bus>(
     transport: impl virtio_devices::Transport + 'static,
     irq: usize,
     mmio_regs: Option<driver_base::IoMap>,
-) -> Result<device_class::ClassWithdraw, ProbeError> {
+) -> Result<driver_base::ClassWithdraw, ProbeError> {
     let device = virtio_devices::VirtIoInputDev::<driver_host::virtio_hal::Hal, _>::try_new(
         transport, irq, mmio_regs,
     )
@@ -65,7 +67,7 @@ pub fn activate<B: driver_base::Bus>(
         name,
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(device_class::input_withdraw(&handle))
+    Ok(subsys_input::input_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -91,7 +93,7 @@ pub fn activate_mmio(
     let publication = activate(dev, transport, irq, mmio_regs)?;
 
     struct InputMmioActivation {
-        _withdraw: device_class::ClassWithdraw,
+        _withdraw: driver_base::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for InputMmioActivation {

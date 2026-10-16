@@ -25,5 +25,5 @@ pub(crate) fn map_driver_error(err: KError) -> ProbeError {
 /// Physical sysfs path for a device location (parent path for the disk's
 /// devnode publication — mirrors the virtio-side helper).
 pub(crate) fn physical_path(location: DeviceLocation) -> alloc::string::String {
-    devnode::physical_path(&location)
+    driver_base::physical_path(&location)
 }

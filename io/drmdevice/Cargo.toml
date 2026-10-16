@@ -10,11 +10,11 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+driver_base = { workspace = true }
 kcred.workspace = true
 bytemuck.workspace = true
 subsys_display = { workspace = true }
 kalloc.workspace = true
-device_class = { workspace = true, features = ["display"] }
 khal.workspace = true
 ktime_types.workspace = true
 kpoll.workspace = true

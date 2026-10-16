@@ -45,8 +45,7 @@ pub use control::{
     set_interface_ipv4_netmask,
 };
 #[cfg(feature = "vsock")]
-use device_class::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
-use device_class::{NetDevice, net_devices};
+use driver_base::ClassDevice;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
@@ -60,6 +59,8 @@ pub use socket::{
 };
 pub(crate) use socket::{general, state};
 pub(crate) use stack::{router, socket_set};
+use subsys_net::{NetDevice, net_devices};
+use subsys_vsock::{VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
@@ -172,8 +173,8 @@ pub fn init_network() {
     SERVICE.start_timer();
 }
 
-fn subscribe_network_unregister(id: device_class::ClassDeviceId) {
-    device_class::subscribe_net_removed(Arc::new(move |removed| {
+fn subscribe_network_unregister(id: driver_base::ClassDeviceId) {
+    subsys_net::subscribe_net_removed(Arc::new(move |removed| {
         if removed.id() != id {
             return;
         }
@@ -187,7 +188,7 @@ fn subscribe_network_unregister(id: device_class::ClassDeviceId) {
 ///
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
-pub(crate) fn unregister_netdev(id: device_class::ClassDeviceId) -> bool {
+pub(crate) fn unregister_netdev(id: driver_base::ClassDeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
@@ -235,7 +236,7 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    device_class::subscribe_vsock_removed(Arc::new(move |removed| {
+    subsys_vsock::subscribe_vsock_removed(Arc::new(move |removed| {
         if removed.id() == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }

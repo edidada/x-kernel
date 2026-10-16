@@ -39,6 +39,9 @@ use devnode::DeviceNumber;
 // #[cfg(feature = "sdmmc")]
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
+
+pub mod class;
+pub use class::*;
 use klazy::Lazy;
 use ksync::Mutex;
 

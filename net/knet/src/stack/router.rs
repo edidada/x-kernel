@@ -250,7 +250,7 @@ impl Router {
 
     pub(crate) fn remove_device_by_model_id(
         &mut self,
-        id: device_class::ClassDeviceId,
+        id: driver_base::ClassDeviceId,
     ) -> Option<()> {
         let pos = self
             .devices

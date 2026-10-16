@@ -18,10 +18,13 @@
 //! remains separate.
 
 #![no_std]
+extern crate alloc;
 
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod class;
+pub use class::*;
 pub mod forwarding;
 
 /// Operations a character device driver must implement.

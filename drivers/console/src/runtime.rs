@@ -12,13 +12,14 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
-use device_class::{
-    CharDeviceImpl, ClassDevice, ClassDeviceId, char_devices, find_char_device, publish_char,
-    subscribe_char_available, subscribe_char_removed,
-};
+use driver_base::{ClassDevice, ClassDeviceId};
 use kerrno::KResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
+use subsys_char::{
+    CharDeviceImpl, char_devices, find_char_device, publish_char, subscribe_char_available,
+    subscribe_char_removed,
+};
 
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
@@ -156,7 +157,7 @@ fn ensure_console_bridge() {
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
 pub fn register_stdout_console(
-    parent: impl Into<device_class::ClassParent>,
+    parent: impl Into<driver_base::ClassParent>,
     runtime: CharDeviceImpl,
     name: impl Into<String>,
 ) -> KResult<()> {
@@ -171,7 +172,7 @@ pub fn register_stdout_console(
     {
         let mut subsystem = console_subsystem().lock();
         if let Some(previous) = subsystem.stdout.take() {
-            device_class::unpublish_char(previous);
+            subsys_char::unpublish_char(previous);
         }
     }
     let handle = publish_char(parent, runtime, name)?;
@@ -195,7 +196,7 @@ pub fn register_stdout_console(
 /// `Arc<DeviceObject>` parent became a `ClassParent`); auxiliary ports use
 /// plain `publish_char` and stay out of the console subsystem.
 pub fn register_console_parented(
-    parent: impl Into<device_class::ClassParent>,
+    parent: impl Into<driver_base::ClassParent>,
     runtime: CharDeviceImpl,
     name: impl Into<String>,
 ) -> KResult<()> {

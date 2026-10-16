@@ -18,7 +18,7 @@
 //! independently of runtime device publication.
 //!
 //! ```ignore
-//! use device_class::CharDevice;
+//! use subsys_char::CharDevice;
 //! use console_driver::runtime;
 //!
 //! if let Some(console) = runtime::stdout_console() {

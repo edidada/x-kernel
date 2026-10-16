@@ -13,6 +13,8 @@ use alloc::sync::Arc;
 #[doc(no_inline)]
 pub use kerrno::{KError, KResult};
 
+pub mod class;
+pub use class::*;
 pub mod forwarding;
 use strum::FromRepr;
 

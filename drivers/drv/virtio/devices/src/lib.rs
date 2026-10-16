@@ -76,6 +76,10 @@ mod virtio_9p;
 pub use self::virtio_9p::{VirtIo9pDev, Virtio9pDevice};
 
 #[cfg(feature = "virtio-9p")]
+pub mod class_9p;
+#[cfg(feature = "virtio-9p")]
+pub use class_9p::*;
+#[cfg(feature = "virtio-9p")]
 pub mod forwarding_9p;
 #[cfg(unittest)]
 pub mod mock_virtio;
