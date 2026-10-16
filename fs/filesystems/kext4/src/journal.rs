@@ -6,8 +6,8 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
 
-use block::BlockDeviceOperations;
 use ksync::Mutex;
+use subsys_block::BlockDeviceOperations;
 
 use crate::{
     disk::{Ext4DiskSuperblock, superblock},

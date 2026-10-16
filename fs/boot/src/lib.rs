@@ -463,7 +463,7 @@ impl BootVfs {
 fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
 
-    let mut block_devs = block::block_devices()
+    let mut block_devs = subsys_block::block_devices()
         .into_iter()
         .filter(|device| device.num_blocks() != 0)
         .collect();
@@ -535,7 +535,9 @@ fn mount_root_file_system(boot: &BootVfs) {
 }
 
 /// Chooses the block device used as the root filesystem.
-fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::BlockDevice> {
+fn select_root_block(
+    devs: &mut Vec<Arc<subsys_block::BlockDevice>>,
+) -> Arc<subsys_block::BlockDevice> {
     let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
     if !preferred.is_empty() {
         #[expect(

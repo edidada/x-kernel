@@ -12,11 +12,11 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-ramdisk-static = ["block/ramdisk-static"]
+ramdisk-static = ["subsys_block/ramdisk-static"]
 
 [dependencies]
 kerrno.workspace = true
-block = { workspace = true, features = ["ramdisk"] }
+subsys_block = { workspace = true, features = ["ramdisk"] }
 kbuild_config = { workspace = true }
 devnode = { workspace = true }
 driver_base = { workspace = true }

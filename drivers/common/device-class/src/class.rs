@@ -25,7 +25,7 @@ fn remove_all_detached_drains_every_enabled_class() {
     #[cfg(feature = "hwrng")]
     {
         struct SentinelHwrng;
-        impl hwrng::HwrngDevice for SentinelHwrng {
+        impl subsys_hwrng::HwrngDevice for SentinelHwrng {
             fn read(&self, _buf: &mut [u8]) -> KResult<usize> {
                 Ok(0)
             }
@@ -46,9 +46,9 @@ fn remove_all_detached_drains_every_enabled_class() {
     #[cfg(feature = "net")]
     {
         struct SentinelNet;
-        impl net::NetDevice for SentinelNet {
-            fn mac(&self) -> net::MacAddress {
-                net::MacAddress([0; 6])
+        impl subsys_net::NetDevice for SentinelNet {
+            fn mac(&self) -> subsys_net::MacAddress {
+                subsys_net::MacAddress([0; 6])
             }
 
             fn can_tx(&self) -> bool {
@@ -67,7 +67,7 @@ fn remove_all_detached_drains_every_enabled_class() {
                 0
             }
 
-            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
+            fn recycle_rx(&self, _rx_buf: subsys_net::NetBufHandle) -> KResult {
                 Ok(())
             }
 
@@ -75,15 +75,15 @@ fn remove_all_detached_drains_every_enabled_class() {
                 Ok(())
             }
 
-            fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+            fn send(&self, _tx_buf: subsys_net::NetBufHandle) -> KResult {
                 Err(KError::Unsupported)
             }
 
-            fn recv(&self) -> KResult<net::NetBufHandle> {
+            fn recv(&self) -> KResult<subsys_net::NetBufHandle> {
                 Err(KError::Unsupported)
             }
 
-            fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+            fn alloc_tx_buf(&self, _size: usize) -> KResult<subsys_net::NetBufHandle> {
                 Err(KError::Unsupported)
             }
         }
@@ -126,8 +126,8 @@ fn unpublish_keeps_consumer_clone_leases_alive() {
         _lease: LeaseOnDrop,
     }
     impl NetDevice for SentinelNet {
-        fn mac(&self) -> net::MacAddress {
-            net::MacAddress([0; 6])
+        fn mac(&self) -> subsys_net::MacAddress {
+            subsys_net::MacAddress([0; 6])
         }
 
         fn can_tx(&self) -> bool {
@@ -146,7 +146,7 @@ fn unpublish_keeps_consumer_clone_leases_alive() {
             0
         }
 
-        fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> KResult {
+        fn recycle_rx(&self, _rx_buf: subsys_net::NetBufHandle) -> KResult {
             Ok(())
         }
 
@@ -154,19 +154,22 @@ fn unpublish_keeps_consumer_clone_leases_alive() {
             Ok(())
         }
 
-        fn send(&self, _tx_buf: net::NetBufHandle) -> KResult {
+        fn send(&self, _tx_buf: subsys_net::NetBufHandle) -> KResult {
             Err(KError::Unsupported)
         }
 
-        fn recv(&self) -> KResult<net::NetBufHandle> {
+        fn recv(&self) -> KResult<subsys_net::NetBufHandle> {
             Err(KError::Unsupported)
         }
 
-        fn alloc_tx_buf(&self, _size: usize) -> KResult<net::NetBufHandle> {
+        fn alloc_tx_buf(&self, _size: usize) -> KResult<subsys_net::NetBufHandle> {
             Err(KError::Unsupported)
         }
 
-        fn set_rx_scheduler(&self, _scheduler: Option<Arc<dyn net::NetRxScheduler>>) -> KResult {
+        fn set_rx_scheduler(
+            &self,
+            _scheduler: Option<Arc<dyn subsys_net::NetRxScheduler>>,
+        ) -> KResult {
             Err(KError::Unsupported)
         }
     }

@@ -61,7 +61,7 @@ fn level2_subsystem_cores() {
     // The block reclaimer is the one subsystem core that needs explicit
     // bring-up before any block driver registers.
     #[cfg(any(feature = "virtio-blk", feature = "ramdisk"))]
-    block::dispatch::reclaimer::init();
+    subsys_block::dispatch::reclaimer::init();
 }
 
 fn level3_drivers() {

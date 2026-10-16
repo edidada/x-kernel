@@ -9,9 +9,11 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::pin, ptr::NonNull};
 
-use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter, PrepareBlockWait};
 use kerrno::{KError, KResult};
 use linked_list_r4l::{GetLinks, Links, RawList};
+use subsys_block::completion::{
+    BlockCompletionOperations, BlockSignals, BlockWaiter, PrepareBlockWait,
+};
 use virtio_drivers::{
     Error,
     device::blk::{BlkReq, BlkResp},

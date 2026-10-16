@@ -4,7 +4,7 @@
 
 use core::fmt;
 
-use block::KError;
+use subsys_block::KError;
 
 /// Result type used by KExt4 storage operations.
 pub type Ext4Result<T> = core::result::Result<T, Ext4Error>;

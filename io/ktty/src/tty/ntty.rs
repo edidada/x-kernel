@@ -5,15 +5,13 @@
 use alloc::sync::Arc;
 use core::task::Waker;
 
-use char_driver::CharDevice;
-use console_driver::{
-    runtime::stdout_console,
-    serial::{self, SerialPort},
-};
+use console_driver::runtime::stdout_console;
 use device_class::{CharDeviceImpl, ClassDevice};
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
+use serial_core::SerialPort;
+use subsys_char::CharDevice;
 
 use super::{Tty, TtyKind};
 use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
@@ -34,7 +32,7 @@ pub struct ConsoleConnection {
 impl ConsoleConnection {
     fn new() -> Self {
         Self {
-            boot_port: serial::stdout_port(),
+            boot_port: serial_core::stdout_port(),
             runtime: SpinNoPreempt::new(None),
         }
     }

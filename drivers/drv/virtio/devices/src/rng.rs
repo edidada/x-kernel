@@ -7,9 +7,9 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use hwrng::{HwrngDevice, completion::RngCompletion};
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
+use subsys_hwrng::{HwrngDevice, completion::RngCompletion};
 use virtio_drivers::{
     Hal,
     device::rng::VirtIORng,

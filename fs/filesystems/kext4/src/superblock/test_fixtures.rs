@@ -4,7 +4,7 @@
 
 //! In-memory filesystem fixtures shared by kernel component tests.
 
-use block::{KError, KResult};
+use subsys_block::{KError, KResult};
 
 use super::*;
 use crate::{

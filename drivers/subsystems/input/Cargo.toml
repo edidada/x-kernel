@@ -1,5 +1,5 @@
 [package]
-name = "input"
+name = "subsys-input"
 edition.workspace = true
 description = "Common traits and types for input device drivers"
 version.workspace = true

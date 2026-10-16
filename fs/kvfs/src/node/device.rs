@@ -7,12 +7,12 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use block::{BlockDevice, BlockOpenMode};
 use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
 use memaddr::PhysAddrRange;
 use osvm::VirtPtr;
+use subsys_block::{BlockDevice, BlockOpenMode};
 
 use crate::{
     DeviceId, FMode, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
@@ -278,7 +278,7 @@ impl FileOperations for DefaultChrdevFileOperations {
 
 impl FileOperations for DefaultBlkdevFileOperations {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let device = block::lookup_block_device(inode.rdev())
+        let device = subsys_block::lookup_block_device(inode.rdev())
             .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
         device.open(block_open_mode(file.mode()))
     }
@@ -309,7 +309,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
     }
 
     fn release(&self, inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
-        if let Some(device) = block::lookup_block_device(inode.rdev()) {
+        if let Some(device) = subsys_block::lookup_block_device(inode.rdev()) {
             device.release();
         }
         Ok(())
@@ -332,7 +332,8 @@ fn block_open_mode(mode: FMode) -> BlockOpenMode {
 }
 
 fn file_block_device(file: &VfsFile) -> VfsResult<Arc<BlockDevice>> {
-    block::lookup_block_device(file.inode().rdev()).ok_or_else(|| VfsError::from(LinuxError::ENXIO))
+    subsys_block::lookup_block_device(file.inode().rdev())
+        .ok_or_else(|| VfsError::from(LinuxError::ENXIO))
 }
 
 fn map_block_error(error: KError) -> VfsError {
@@ -1069,7 +1070,7 @@ mod tests {
         fail_after_write_bytes: core::sync::atomic::AtomicUsize,
     }
 
-    impl block::BlockDeviceOperations for MemoryBlockDevice {
+    impl subsys_block::BlockDeviceOperations for MemoryBlockDevice {
         fn num_blocks(&self) -> u64 {
             (self.storage.lock().len() / self.block_size) as u64
         }
@@ -1078,7 +1079,7 @@ mod tests {
             self.block_size
         }
 
-        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::KResult {
+        fn read_block(&self, block_id: u64, buf: &mut [u8]) -> subsys_block::KResult {
             self.reads
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if self.fail_io.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1090,7 +1091,7 @@ mod tests {
             Ok(())
         }
 
-        fn write_block(&self, block_id: u64, buf: &[u8]) -> block::KResult {
+        fn write_block(&self, block_id: u64, buf: &[u8]) -> subsys_block::KResult {
             self.writes
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if self.fail_io.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1110,7 +1111,7 @@ mod tests {
             Ok(())
         }
 
-        fn flush(&self) -> block::KResult {
+        fn flush(&self) -> subsys_block::KResult {
             self.flushes
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(())
@@ -1130,7 +1131,7 @@ mod tests {
         let writes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let fail_io = Arc::new(core::sync::atomic::AtomicBool::new(false));
         let disk = alloc::sync::Arc::new(
-            block::Gendisk::new(
+            subsys_block::Gendisk::new(
                 String::from("kvfs-block-test"),
                 243,
                 0,
@@ -1147,7 +1148,7 @@ mod tests {
             )
             .expect("valid KVFS test disk"),
         );
-        let device = block::add_disk(disk.clone()).expect("publish KVFS test disk");
+        let device = subsys_block::add_disk(disk.clone()).expect("publish KVFS test disk");
 
         let mut output = vec![0; 1024];
         assert_eq!(read_block_device(&device, &mut output, 256).unwrap(), 1024);
@@ -1224,7 +1225,7 @@ mod tests {
             VfsError::from(KError::OperationNotPermitted)
         );
 
-        block::del_gendisk(disk.device_number()).expect("remove KVFS test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove KVFS test disk");
     }
 
     struct BlockIoFixture {
@@ -1245,7 +1246,7 @@ mod tests {
                 fail_after_write_bytes: AtomicUsize::new(usize::MAX),
             });
             let disk = alloc::sync::Arc::new(
-                block::Gendisk::new(
+                subsys_block::Gendisk::new(
                     String::from("kvfs-extent-test"),
                     244,
                     0,
@@ -1254,14 +1255,14 @@ mod tests {
                 )
                 .expect("valid extent test disk"),
             );
-            let device = block::add_disk(disk).expect("publish extent test disk");
+            let device = subsys_block::add_disk(disk).expect("publish extent test disk");
             Self { device, backend }
         }
     }
 
     impl Drop for BlockIoFixture {
         fn drop(&mut self) {
-            block::del_gendisk(self.device.disk().device_number())
+            subsys_block::del_gendisk(self.device.disk().device_number())
                 .expect("remove extent test disk");
         }
     }

@@ -24,11 +24,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use char_driver::CharDevice;
-use console_driver::{
-    runtime::register_console_parented,
-    serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
-};
+use console_driver::runtime::register_console_parented;
 use device_class::{ClassParent, publish_char};
 use driver_base::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
@@ -36,6 +32,8 @@ use driver_base::{
 };
 use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
+use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
+use subsys_char::CharDevice;
 
 /// `static const struct of_device_id pl011_of_match[]`.
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];

@@ -14,10 +14,12 @@ impl BootHandler {
     fn firmware_init(_boot_info: &BootInfo) {}
 
     fn early_driver_init() {
-        timer_driver::riscv_sbi::init(timer_driver::riscv_sbi::TimerConfig::platform_static(
-            irqchip_driver::riscv::S_TIMER,
-            ktime_types::Frequency::from_hz(10_000_000),
-        ));
+        clocksource_driver::riscv_sbi::init(
+            clocksource_driver::riscv_sbi::TimerConfig::platform_static(
+                irqchip_driver::riscv::S_TIMER,
+                ktime_types::Frequency::from_hz(10_000_000),
+            ),
+        );
         irqchip_driver::riscv::init_primary();
         irqchip_driver::riscv::init_current_cpu_context();
         #[expect(
@@ -47,12 +49,12 @@ impl BootHandler {
 
     fn final_init(_boot_info: &BootInfo) {
         irqchip_driver::riscv::init_percpu();
-        timer_driver::riscv_sbi::init_percpu();
+        clocksource_driver::riscv_sbi::init_percpu();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
         irqchip_driver::riscv::init_percpu();
-        timer_driver::riscv_sbi::init_percpu();
+        clocksource_driver::riscv_sbi::init_percpu();
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "char_driver"
+name = "subsys-char"
 description = "Common traits and types for character device drivers (non-boot path)"
 edition.workspace = true
 version.workspace = true

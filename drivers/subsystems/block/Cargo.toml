@@ -1,5 +1,5 @@
 [package]
-name = "block"
+name = "subsys-block"
 description = "Common traits and types for block storage drivers"
 edition.workspace = true
 version.workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "timer-driver"
+name = "clocksource-driver"
 description = "platform clock source and clock event providers for X-Kernel"
 version.workspace = true
 edition.workspace = true

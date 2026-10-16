@@ -6,9 +6,9 @@
 
 use alloc::boxed::Box;
 
-use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
+use subsys_display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use virtio_drivers::{
     Hal, PAGE_SIZE,
     config::{ReadOnly, WriteOnly, read_config},
@@ -173,7 +173,7 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
         paddr: u64,
         length: u32,
     ) -> virtio_drivers::Result {
-        if resource.format != display::ScanoutFormat::Bgra8888 {
+        if resource.format != subsys_display::ScanoutFormat::Bgra8888 {
             return Err(virtio_drivers::Error::InvalidParam);
         }
         self.resource_create_2d(resource.id, resource.width, resource.height)?;

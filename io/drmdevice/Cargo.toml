@@ -12,7 +12,7 @@ documentation.workspace = true
 [dependencies]
 kcred.workspace = true
 bytemuck.workspace = true
-display.workspace = true
+subsys_display = { workspace = true }
 kalloc.workspace = true
 device_class = { workspace = true, features = ["display"] }
 khal.workspace = true

@@ -11,12 +11,12 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use block::Gendisk;
 use device_class::{ClassParent, publish_block};
 use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError,
     platform::{PlatformBus, PlatformId},
 };
+use subsys_block::Gendisk;
 
 /// `struct platform_device_id ramdisk_ids[]`: one board alias row.
 static IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatch::new(
@@ -45,22 +45,22 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
         // this must be cfg attributes rather than `if cfg!()`.
         #[cfg(feature = "ramdisk-static")]
         let (dev, name): (
-            Box<dyn block::BlockDeviceOperations + Send + Sync>,
+            Box<dyn subsys_block::BlockDeviceOperations + Send + Sync>,
             alloc::string::String,
         ) = {
-            let dev = block::ramdisk_image::ramdisk();
+            let dev = subsys_block::ramdisk_image::ramdisk();
             (Box::new(dev), alloc::string::String::from("ramdisk"))
         };
         #[cfg(not(feature = "ramdisk-static"))]
         let (dev, name): (
-            Box<dyn block::BlockDeviceOperations + Send + Sync>,
+            Box<dyn subsys_block::BlockDeviceOperations + Send + Sync>,
             alloc::string::String,
         ) = {
             // Capacity is a platform/build parameter (KFEAT_RAMDISK_SIZE,
             // Linux brd's rd_size): a synthetic device has no firmware
             // description to read it from.
             (
-                Box::new(block::ramdisk_heap::RamDisk::new(
+                Box::new(subsys_block::ramdisk_heap::RamDisk::new(
                     kbuild_config::KFEAT_RAMDISK_SIZE as usize,
                 )),
                 alloc::string::String::from("ramdisk"),

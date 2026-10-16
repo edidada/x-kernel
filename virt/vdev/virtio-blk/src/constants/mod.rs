@@ -11,5 +11,5 @@ pub mod block;
 
 // Re-export common VirtIO constants from axvirtio-common
 // Re-export block device specific constants
-pub use block::*;
+pub use subsys_block::*;
 pub use vdev_virtio::constants::*;

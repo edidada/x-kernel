@@ -5,8 +5,8 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use block::{BlockDeviceOperations, KError, KResult};
 use ktime_types::TimeSpan;
+use subsys_block::{BlockDeviceOperations, KError, KResult};
 use unittest::def_test;
 
 use super::*;

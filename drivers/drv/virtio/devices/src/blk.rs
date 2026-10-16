@@ -6,12 +6,12 @@
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use block::{
+use kerrno::{KError, KResult};
+use kspin::SpinNoIrq;
+use subsys_block::{
     BlockDeviceOperations,
     completion::{BlockSignals, PrepareBlockWait},
 };
-use kerrno::{KError, KResult};
-use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
     device::blk::{SECTOR_SIZE, VirtIOBlk as InnerDev},

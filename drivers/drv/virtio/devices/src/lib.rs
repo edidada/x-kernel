@@ -40,7 +40,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "net")]
-extern crate net as driver_net;
+extern crate subsys_net as driver_net;
 
 #[cfg(feature = "block")]
 mod blk;

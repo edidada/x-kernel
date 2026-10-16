@@ -7,11 +7,11 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use device_class::{ClassDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
-use hwrng::HwrngDevice;
 use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use kworkng::{HandleCreateError, SubmitError, WorkHandle};
+use subsys_hwrng::HwrngDevice;
 
 // Back off failed reads, not in-flight device completion waits.
 const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(100);
@@ -218,7 +218,7 @@ mod tests {
 
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use hwrng::{KError, KResult};
+    use subsys_hwrng::{KError, KResult};
 
     #[derive(Default)]
     struct HardwareState {

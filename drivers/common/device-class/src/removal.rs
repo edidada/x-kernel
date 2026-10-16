@@ -126,7 +126,7 @@ pub fn virtio_9p_withdraw(device: &ClassDevice<Virtio9pDeviceImpl>) -> ClassWith
 
 #[cfg(feature = "block")]
 pub fn unpublish_block(device_number: devnode::DeviceNumber) {
-    block::del_gendisk(device_number);
+    subsys_block::del_gendisk(device_number);
 }
 
 #[cfg(feature = "block")]

@@ -12,14 +12,14 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use char_driver::CharDevice;
-use console_driver::serial::{SerialIdent, SerialPort, SerialRole, take_early_port};
 use device_class::{ClassParent, publish_char};
 use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
 use kerrno::KResult;
+use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
+use subsys_char::CharDevice;
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]

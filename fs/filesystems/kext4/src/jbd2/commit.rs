@@ -974,7 +974,7 @@ mod tests {
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;
 
-    use block::KError;
+    use subsys_block::KError;
     use unittest::def_test;
 
     use super::*;

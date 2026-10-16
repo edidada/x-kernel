@@ -5,7 +5,7 @@
 //! Persistent versus buffered fault models shared by component recovery tests.
 use alloc::vec::Vec;
 
-use block::{BlockDeviceOperations, KError, KResult};
+use subsys_block::{BlockDeviceOperations, KError, KResult};
 
 use crate::sync::Mutex;
 const DEVICE_BLOCK_SIZE: usize = 512;

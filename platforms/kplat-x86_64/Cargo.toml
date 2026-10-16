@@ -38,7 +38,7 @@ ktime = { workspace = true }
 kirq = { workspace = true }
 x86_apic = { workspace = true }
 rtc_driver = { workspace = true }
-timer_driver = { workspace = true }
+clocksource_driver = { workspace = true }
 boot_info = { workspace = true }
 acpi = { workspace = true }
 klazy = { workspace = true }

@@ -16,11 +16,11 @@ use device_class::{ClassParent, publish_hwrng};
 use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
-use hwrng::completion::RngCompletion;
 use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
+use subsys_hwrng::completion::RngCompletion;
 use virtio_devices::{VirtIoRngDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
@@ -86,10 +86,10 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 /// # Registered exception E-04
 ///
 /// This is the one place under `drv/` that names `ktask` and `kpoll` directly.
-/// `subsystems/block::dispatch::wait` already wraps the identical primitive
+/// `subsystems/subsys_block::dispatch::wait` already wraps the identical primitive
 /// (`PreparedTaskWait` + a poll registration, same register-before-recheck
 /// ordering) as a subsystem *service* — that is where this belongs, and the
-/// hwrng side should get the same `subsystems/hwrng::dispatch` module. It has
+/// hwrng side should get the same `subsystems/subsys_hwrng::dispatch` module. It has
 /// not, because hwrng has exactly one consumer and the project's own rule is
 /// not to build machinery ahead of a second one
 /// (`docs/driver-framework-review.md` §8.3 class B). **Fold this into a service

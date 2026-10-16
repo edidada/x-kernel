@@ -34,7 +34,7 @@ khal.workspace = true
 pci.workspace = true
 of.workspace = true
 log.workspace = true
-block = { workspace = true }
+subsys_block = { workspace = true }
 drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }

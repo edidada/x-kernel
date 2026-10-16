@@ -24,7 +24,7 @@ smp = ["procfs/smp"]
 
 [dependencies]
 anon_inodefs.workspace = true
-block.workspace = true
+subsys_block = { workspace = true }
 bpffs = { workspace = true, optional = true }
 cgroup2fs = { workspace = true, optional = true }
 devfs.workspace = true

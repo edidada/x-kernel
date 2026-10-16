@@ -20,7 +20,6 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytemuck::bytes_of;
 use device_class::{ClassDevice, DisplayDeviceImpl};
-use display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
 use kalloc::GlobalPage;
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -30,6 +29,7 @@ use kvfs::{
 };
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
+use subsys_display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
 
 use super::{consts::*, drm::*};
 

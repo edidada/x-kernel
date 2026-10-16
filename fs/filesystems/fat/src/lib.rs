@@ -19,11 +19,11 @@ mod util;
 
 use core::{cell::UnsafeCell, ptr::NonNull};
 
-use block::BlockDevice;
 use fatfs::SeekFrom;
 pub use fs::FatFilesystem;
 use fs::FatFilesystemGuard;
 use fs_block::SeekableDisk;
+use subsys_block::BlockDevice;
 
 fn fat_get_tree(
     context: &mut kvfs::FsContext<'_>,

@@ -6,7 +6,7 @@
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
-use block::{BlockDeviceOperations, KError, KResult};
+use subsys_block::{BlockDeviceOperations, KError, KResult};
 use unittest::def_test;
 
 use crate::{

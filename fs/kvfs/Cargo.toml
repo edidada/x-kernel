@@ -9,7 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-block.workspace = true
+subsys_block = { workspace = true }
 kcred = { workspace = true }
 devnode = { workspace = true }
 kerrno = { workspace = true}

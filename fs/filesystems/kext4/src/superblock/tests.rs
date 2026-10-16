@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec};
 use core::num::NonZeroU32;
 
-use block::BlockDeviceOperations;
+use subsys_block::BlockDeviceOperations;
 use unittest::def_test;
 
 use super::*;

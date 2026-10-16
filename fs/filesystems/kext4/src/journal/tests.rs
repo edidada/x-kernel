@@ -4,7 +4,7 @@
 
 //! Journal lifecycle tests executed in the kernel with in-memory storage.
 
-use block::KError;
+use subsys_block::KError;
 use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;

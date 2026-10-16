@@ -15,7 +15,7 @@ times = []
 
 [dependencies]
 bitflags.workspace = true
-block = { workspace = true }
+subsys_block = { workspace = true }
 iov_iter.workspace = true
 kcred.workspace = true
 kerrno.workspace = true

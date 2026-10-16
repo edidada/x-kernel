@@ -12,17 +12,18 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-pl011 = ["console_driver/pl011"]
-ns16550-mmio = ["console_driver/ns16550-mmio"]
-ns16550-ioport = ["console_driver/ns16550-ioport"]
+pl011 = ["serial_core/pl011", "console_driver/pl011"]
+ns16550-mmio = ["serial_core/ns16550-mmio", "console_driver/ns16550-mmio"]
+ns16550-ioport = ["serial_core/ns16550-ioport", "console_driver/ns16550-ioport"]
 
 [dependencies]
+serial_core = { workspace = true }
 kerrno.workspace = true
 console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
 driver_base = { workspace = true }
 device_class = { workspace = true, features = ["char"] }
 memaddr = { workspace = true }
-char_driver = { workspace = true }
+subsys_char = { workspace = true }
 log.workspace = true
 
 [lints]

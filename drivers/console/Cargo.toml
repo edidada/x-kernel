@@ -1,0 +1,39 @@
+[package]
+name = "console-driver"
+description = "console and serial drivers for x-kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+pl011 = ["serial_core/pl011"]
+ns16550-mmio = ["serial_core/ns16550-mmio"]
+ns16550-ioport = ["serial_core/ns16550-ioport"]
+
+[dependencies]
+kerrno.workspace = true
+driver_base = { workspace = true }
+device_class = { workspace = true, features = ["char"] }
+devnode = { workspace = true }
+khal = { workspace = true }
+kiface = { workspace = true }
+kirq = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+log = { workspace = true }
+memspace = { workspace = true }
+of = { workspace = true }
+unittest.workspace = true
+serial_core = { workspace = true }
+
+[package.metadata.cargo-shear]
+# devnode is consumed only by cfg(unittest) tests under ut-tests.
+ignored = ["devnode"]
+
+[lints]
+workspace = true

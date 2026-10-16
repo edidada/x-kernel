@@ -5,9 +5,9 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
-use block::BlockDeviceOperations;
 use ksync::{Mutex, MutexGuard};
 use ktime_types::TimestampLimits;
+use subsys_block::BlockDeviceOperations;
 
 use crate::{
     bitmap_allocator::{BlockGroupRange, InodeGroupRange},

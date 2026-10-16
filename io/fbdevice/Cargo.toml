@@ -8,7 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-display.workspace = true
+subsys_display = { workspace = true }
 kalloc.workspace = true
 device_class = { workspace = true, features = ["display"] }
 khal.workspace = true

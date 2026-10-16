@@ -14,6 +14,9 @@ use alloc::vec::Vec;
 
 use kerrno::KResult;
 use kspin::SpinNoIrq;
+use subsys_vsock::{
+    VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTransportEventKind,
+};
 use virtio_drivers::{
     Hal,
     device::socket::{
@@ -21,7 +24,6 @@ use virtio_drivers::{
     },
     transport::Transport,
 };
-use vsock::{VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTransportEventKind};
 
 use crate::as_driver_error;
 
@@ -106,11 +108,11 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF
     }
 
     fn translate_event(event: &VsockEvent) -> VsockTransportEvent {
-        let source = vsock::VsockAddr {
+        let source = subsys_vsock::VsockAddr {
             cid: event.source.cid,
             port: event.source.port,
         };
-        let destination = vsock::VsockAddr {
+        let destination = subsys_vsock::VsockAddr {
             cid: event.destination.cid,
             port: event.destination.port,
         };

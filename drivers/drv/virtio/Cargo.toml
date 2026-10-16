@@ -12,7 +12,7 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-blk = ["dep:block", "device_class/block", "virtio_devices/block"]
+blk = ["dep:subsys_block", "device_class/block", "virtio_devices/block"]
 net = ["device_class/net", "virtio_devices/net"]
 rng = ["device_class/hwrng", "dep:kpoll", "dep:ktask", "virtio_devices/rng"]
 gpu = ["device_class/display", "virtio_devices/gpu"]
@@ -23,11 +23,11 @@ mmio = []
 
 [dependencies]
 kerrno.workspace = true
-block = { workspace = true, optional = true }
+subsys_block = { workspace = true, optional = true }
 driver_base = { workspace = true }
 driver_host = { workspace = true, features = ["virtio-hal"] }
 device_class = { workspace = true }
-hwrng = { workspace = true }
+subsys_hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 log.workspace = true

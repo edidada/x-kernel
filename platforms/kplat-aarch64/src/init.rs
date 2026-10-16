@@ -29,9 +29,9 @@ impl BootHandler {
                       node is missing or invalid; early_driver_init has no error return or \
                       recovery"
         )]
-        let timer_config = timer_driver::arm_generic::config_from_device_tree()
+        let timer_config = clocksource_driver::arm_generic::config_from_device_tree()
             .expect("ARM generic timer DT node is required on aarch64");
-        timer_driver::arm_generic::init(timer_config);
+        clocksource_driver::arm_generic::init(timer_config);
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
@@ -59,7 +59,7 @@ impl BootHandler {
 
     fn final_init(_boot_info: &BootInfo) {
         irqchip_driver::gic::init_current_cpu();
-        timer_driver::arm_generic::init_percpu();
+        clocksource_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
     }
@@ -67,7 +67,7 @@ impl BootHandler {
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
         irqchip_driver::gic::init_current_cpu();
-        timer_driver::arm_generic::init_percpu();
+        clocksource_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
     }

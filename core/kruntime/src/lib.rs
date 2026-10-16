@@ -697,7 +697,7 @@ fn init_interrupt() {
         khal::time::interrupt_id(),
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
-            timer_driver::arm_generic::dispatch_resume_fixup();
+            clocksource_driver::arm_generic::dispatch_resume_fixup();
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),
@@ -708,7 +708,7 @@ fn init_interrupt() {
         kbuild_config::IPI_IRQ,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
-            timer_driver::arm_generic::handle_ipi_fixup();
+            clocksource_driver::arm_generic::handle_ipi_fixup();
             #[cfg(feature = "ipi")]
             kipi::ipi_handler();
             kirq::IrqEvent::HANDLED

@@ -1204,7 +1204,7 @@ mod tests {
         let journal = JournalTransactions::new(TransactionId::new(1));
         let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
 
-        journal.abort(Ext4Error::Device(block::KError::Io));
+        journal.abort(Ext4Error::Device(subsys_block::KError::Io));
 
         assert!(journal.is_aborted());
         assert_eq!(
@@ -1301,7 +1301,7 @@ mod tests {
             lock(&done).is_none(),
             "checkpoint wait returned before completion"
         );
-        journal.abort(Ext4Error::Device(block::KError::Io));
+        journal.abort(Ext4Error::Device(subsys_block::KError::Io));
         waiter.join();
         assert_eq!(lock(&done).take().unwrap(), Err(Ext4Error::JournalAborted));
     }
@@ -1435,7 +1435,7 @@ mod tests {
         let handle = journal.begin(JournalCredits::new(2)).unwrap();
         let transaction = handle.id();
 
-        journal.abort(Ext4Error::Device(block::KError::Io));
+        journal.abort(Ext4Error::Device(subsys_block::KError::Io));
         assert!(matches!(
             journal.force_commit(transaction),
             Err(Ext4Error::JournalAborted)

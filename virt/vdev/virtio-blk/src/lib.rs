@@ -28,6 +28,6 @@ pub mod bus;
 pub mod selftest;
 
 pub use backend::BlockBackend;
-pub use block::config::VirtioBlockConfig;
 pub use mmio::{BlockDeviceEvent, VirtioMmioBlockDevice};
+pub use subsys_block::config::VirtioBlockConfig;
 pub use vdev_virtio::{VirtioConfig, VirtioError, VirtioQueue, VirtioResult};

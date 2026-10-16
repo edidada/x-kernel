@@ -5,8 +5,8 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use char_driver::{KError, KResult};
-use console_driver::serial::test_support::SerialPortFixture;
+use subsys_char::{KError, KResult};
+use serial_core::test_support::SerialPortFixture;
 use unittest::def_test;
 
 use super::*;
@@ -81,7 +81,7 @@ fn runtime_connection_is_shared_by_read_write_and_repeated_handoff() {
         return unittest::TestResult::Ignored;
     };
     let (mut connection, calls) =
-        connection(stdout.parent_ref(), false, serial::stdout_port(), false);
+        connection(stdout.parent_ref(), false, serial_core::stdout_port(), false);
     connection.try_handoff();
     let mut bytes = [0; 3];
     assert_eq!(TtyRead::read(&mut connection, &mut bytes), 3);

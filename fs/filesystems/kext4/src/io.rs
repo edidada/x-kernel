@@ -4,7 +4,7 @@
 
 use alloc::{sync::Arc, vec};
 
-use block::BlockDeviceOperations;
+use subsys_block::BlockDeviceOperations;
 
 use crate::{
     Ext4Error, Ext4Result, FilesystemBlock,
@@ -222,7 +222,7 @@ impl JournalReplayBlockWriter for FilesystemDevice {
 mod tests {
     use alloc::vec::Vec;
 
-    use block::{KError, KResult};
+    use subsys_block::{KError, KResult};
     use unittest::def_test;
 
     use super::*;

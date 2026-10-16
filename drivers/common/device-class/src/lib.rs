@@ -60,7 +60,7 @@ pub use removal::{unpublish_vsock, vsock_withdraw};
 pub type NetDeviceImpl = Box<dyn NetDevice + Send + Sync>;
 
 #[cfg(feature = "block")]
-pub type BlockDeviceImpl = Arc<block::Gendisk>;
+pub type BlockDeviceImpl = Arc<subsys_block::Gendisk>;
 
 #[cfg(feature = "char")]
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
@@ -88,24 +88,24 @@ pub type VsockDeviceImpl = Box<dyn VsockDevice + Send + Sync>;
 pub type Virtio9pDeviceImpl = Box<dyn Virtio9pDevice + Send + Sync>;
 
 #[cfg(feature = "block")]
-pub use block::Gendisk;
+pub use subsys_block::Gendisk;
 #[cfg(feature = "char")]
-pub use char_driver::CharDevice;
+pub use subsys_char::CharDevice;
 #[cfg(feature = "display")]
-pub use display::{DisplayDevice, DisplayInfo};
+pub use subsys_display::{DisplayDevice, DisplayInfo};
 #[cfg(feature = "hwrng")]
-pub use hwrng::HwrngDevice;
+pub use subsys_hwrng::HwrngDevice;
 #[cfg(feature = "input")]
-pub use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
+pub use subsys_input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
 #[cfg(feature = "net")]
-pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
-#[cfg(feature = "virtio-9p")]
-pub use virtio_devices::Virtio9pDevice;
+pub use subsys_net::{NetBufHandle, NetDevice, NetRxScheduler};
 #[cfg(feature = "vsock")]
-pub use vsock::{
+pub use subsys_vsock::{
     VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockTransportEvent,
     VsockTransportEventKind,
 };
+#[cfg(feature = "virtio-9p")]
+pub use virtio_devices::Virtio9pDevice;
 
 // ---------------------------------------------------------------------------
 // Per-class behavior (the `struct class` function-pointer slots)
@@ -150,11 +150,11 @@ pub struct InputNodeMetadata {
 #[cfg(feature = "block")]
 impl ClassRuntimeMetadata for BlockDeviceImpl {
     fn publish_class(&self) -> KResult<()> {
-        block::add_disk(self.clone()).map(drop)
+        subsys_block::add_disk(self.clone()).map(drop)
     }
 
     fn unpublish_class(&self) {
-        block::del_gendisk(self.device_number());
+        subsys_block::del_gendisk(self.device_number());
     }
 }
 
@@ -597,9 +597,9 @@ mod node_compat {
 }
 
 pub mod prelude {
-    #[cfg(feature = "block")]
-    pub use block::BlockDeviceOperations;
     pub use kerrno::{KError, KResult};
+    #[cfg(feature = "block")]
+    pub use subsys_block::BlockDeviceOperations;
 
     #[cfg(feature = "block")]
     pub use crate::BlockDeviceImpl;

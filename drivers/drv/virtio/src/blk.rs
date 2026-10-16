@@ -19,19 +19,19 @@
 //! * the IRQ handler is registered per device and captures the device
 //!   through a `Weak` (the `dev_id` pattern);
 //! * the completion path reuses the block-class dispatch services
-//!   (`block::dispatch`), which are model-agnostic.
+//!   (`subsys_block::dispatch`), which are model-agnostic.
 
 use alloc::{boxed::Box, sync::Arc};
 
-use block::{
-    Gendisk,
-    dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
-};
 use device_class::{ClassParent, publish_block};
 use driver_base::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
+use subsys_block::{
+    Gendisk,
+    dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
+};
 use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and
@@ -132,7 +132,7 @@ impl<H: VirtIoHal, T: Transport> Drop for BlkActivation<H, T> {
         if let Some(disk) = &self.disk
             && disk.part0().is_some()
         {
-            block::del_gendisk(disk.device_number());
+            subsys_block::del_gendisk(disk.device_number());
         }
         drain.wait_completion();
         self.device.disable_interrupts();
@@ -165,7 +165,7 @@ pub fn activate<B: driver_base::Bus, T: Transport + 'static>(
         .map_err(crate::common::map_driver_error)?,
     );
 
-    let completion: Arc<dyn block::completion::BlockCompletionOperations> = device.clone();
+    let completion: Arc<dyn subsys_block::completion::BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
     let mut activation = BlkActivation {
         publication: None,

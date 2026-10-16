@@ -29,7 +29,7 @@ fn has_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -
 }
 
 fn validate_block_device_flags(
-    block_device: &block::BlockDevice,
+    block_device: &subsys_block::BlockDevice,
     flags: SuperBlockFlags,
 ) -> VfsResult<()> {
     if block_device.is_read_only() && !flags.contains(SuperBlockFlags::RDONLY) {
@@ -86,7 +86,7 @@ where
     if device_number == crate::DeviceId::default() {
         return Err(VfsError::from(kerrno::LinuxError::ENXIO));
     }
-    let device = block::lookup_block_device(device_number)
+    let device = subsys_block::lookup_block_device(device_number)
         .ok_or_else(|| VfsError::from(kerrno::LinuxError::ENXIO))?;
     validate_block_device_flags(&device, context.sb_flags())?;
     super_block_registry().get_or_try_init_bdev(
@@ -122,7 +122,7 @@ impl SuperBlockSet {
     fn lookup_bdev(
         &mut self,
         file_system_type: &'static FileSystemType,
-        block_device: &Arc<block::BlockDevice>,
+        block_device: &Arc<subsys_block::BlockDevice>,
     ) -> Option<Arc<SuperBlock>> {
         let mut matching = None;
         self.super_blocks
@@ -185,7 +185,7 @@ impl SuperBlockRegistry {
     fn get_or_try_init_bdev<F>(
         &self,
         file_system_type: &'static FileSystemType,
-        block_device: Arc<block::BlockDevice>,
+        block_device: Arc<subsys_block::BlockDevice>,
         flags: SuperBlockFlags,
         fill_super: F,
     ) -> VfsResult<Arc<SuperBlock>>
@@ -311,7 +311,7 @@ pub fn default_evict_inode(inode: &VfsInode) -> VfsResult<()> {
 pub const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
 
 bitflags::bitflags! {
-    /// VFS superblock flags corresponding to Linux `super_block::s_flags`.
+    /// VFS superblock flags corresponding to Linux `super_subsys_block::s_flags`.
     ///
     /// Per-mount policy belongs to [`crate::MountFlags`] instead. In
     /// particular, `RELATIME` is a mount flag rather than a superblock flag.
@@ -479,8 +479,8 @@ pub struct SuperBlock {
     /// Canonical filesystem type corresponding to Linux `s_type`.
     file_system_type: &'static FileSystemType,
     /// Exclusive claim on the canonical device corresponding to Linux
-    /// `super_block::s_bdev` and its block-device holder.
-    block_device: Option<block::BlockDeviceClaim>,
+    /// `super_subsys_block::s_bdev` and its block-device holder.
+    block_device: Option<subsys_block::BlockDeviceClaim>,
     /// Shared filesystem operation table corresponding to Linux `s_op`.
     ops: Once<&'static dyn SuperBlockOperations>,
     /// Default dentry operation table corresponding to Linux `s_d_op`.
@@ -490,13 +490,13 @@ pub struct SuperBlock {
     /// Filesystem-private mount state corresponding to Linux `s_fs_info`.
     private: Once<Box<dyn Any + Send + Sync>>,
     root: Once<Dentry>,
-    /// VFS-wide state corresponding to Linux `super_block::s_flags`.
+    /// VFS-wide state corresponding to Linux `super_subsys_block::s_flags`.
     flags: AtomicSuperBlockFlags,
     /// Active mount references and shutdown state, corresponding to Linux
-    /// `super_block::s_active` together with `SB_DYING` and `SB_DEAD`.
+    /// `super_subsys_block::s_active` together with `SB_DYING` and `SB_DEAD`.
     lifecycle: Mutex<SuperBlockLifecycle>,
     /// Serializes reconfiguration and final shutdown, corresponding to Linux
-    /// `super_block::s_umount`.
+    /// `super_subsys_block::s_umount`.
     umount_lock: Mutex<()>,
     /// Wakes `sget_dev` callers after nascent initialization or final shutdown.
     lifecycle_waiters: WaitQueue,
@@ -520,10 +520,10 @@ impl SuperBlock {
     }
 
     /// Returns the canonical block device backing this superblock, if any.
-    pub fn block_device(&self) -> Option<&Arc<block::BlockDevice>> {
+    pub fn block_device(&self) -> Option<&Arc<subsys_block::BlockDevice>> {
         self.block_device
             .as_ref()
-            .map(block::BlockDeviceClaim::device)
+            .map(subsys_block::BlockDeviceClaim::device)
     }
 
     /// Returns the root dentry for this superblock.
@@ -787,7 +787,7 @@ impl SuperBlock {
 
     fn allocate(
         file_system_type: &'static FileSystemType,
-        block_device: Option<block::BlockDeviceClaim>,
+        block_device: Option<subsys_block::BlockDeviceClaim>,
         flags: SuperBlockFlags,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -1363,7 +1363,7 @@ mod tests {
 
     struct TestBlockDevice;
 
-    impl block::BlockDeviceOperations for TestBlockDevice {
+    impl subsys_block::BlockDeviceOperations for TestBlockDevice {
         fn num_blocks(&self) -> u64 {
             1
         }
@@ -1372,15 +1372,15 @@ mod tests {
             512
         }
 
-        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::KResult {
+        fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> subsys_block::KResult {
             Ok(())
         }
 
-        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> block::KResult {
+        fn write_block(&self, _block_id: u64, _buf: &[u8]) -> subsys_block::KResult {
             Ok(())
         }
 
-        fn flush(&self) -> block::KResult {
+        fn flush(&self) -> subsys_block::KResult {
             Ok(())
         }
     }
@@ -1429,7 +1429,9 @@ mod tests {
         TRANSITION_WAITER_DONE.store(0, Ordering::Release);
     }
 
-    fn spawn_successful_waiting_mount(block_device: Arc<block::BlockDevice>) -> ktask::KtaskRef {
+    fn spawn_successful_waiting_mount(
+        block_device: Arc<subsys_block::BlockDevice>,
+    ) -> ktask::KtaskRef {
         ktask::spawn(move || {
             TRANSITION_WAITER_STARTED.store(1, Ordering::Release);
             TRANSITION_WAITERS.notify_all(false);
@@ -1448,12 +1450,16 @@ mod tests {
         })
     }
 
-    fn add_test_disk(name: &str, major: u32) -> (Arc<block::Gendisk>, Arc<block::BlockDevice>) {
+    fn add_test_disk(
+        name: &str,
+        major: u32,
+    ) -> (Arc<subsys_block::Gendisk>, Arc<subsys_block::BlockDevice>) {
         let disk = Arc::new(
-            block::Gendisk::new(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
+            subsys_block::Gendisk::new(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
                 .expect("valid superblock test disk"),
         );
-        let block_device = block::add_disk(disk.clone()).expect("publish superblock test disk");
+        let block_device =
+            subsys_block::add_disk(disk.clone()).expect("publish superblock test disk");
         (disk, block_device)
     }
 
@@ -1496,7 +1502,7 @@ mod tests {
 
         first.deactivate_mount();
         drop(second);
-        block::del_gendisk(disk.device_number()).expect("remove sget test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove sget test disk");
     }
 
     #[def_test(serial)]
@@ -1529,7 +1535,7 @@ mod tests {
             device
                 .as_ref()
                 .ioctl(
-                    block::BlockOpenMode::READ,
+                    subsys_block::BlockOpenMode::READ,
                     linux_raw_sys::ioctl::BLKRASET,
                     sectors,
                     true,
@@ -1552,7 +1558,7 @@ mod tests {
         drop(second);
         drop(mount);
         drop(sb);
-        block::del_gendisk(disk.device_number()).unwrap();
+        subsys_block::del_gendisk(disk.device_number()).unwrap();
     }
 
     #[def_test(serial)]
@@ -1593,7 +1599,7 @@ mod tests {
         replacement.activate_mount();
         assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
         replacement.deactivate_mount();
-        block::del_gendisk(disk.device_number()).expect("remove holder test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove holder test disk");
     }
 
     #[def_test(serial)]
@@ -1610,7 +1616,7 @@ mod tests {
             )
             .expect("mount old device generation");
         old_super_block.activate_mount();
-        block::del_gendisk(old_disk.device_number()).expect("unpublish old disk");
+        subsys_block::del_gendisk(old_disk.device_number()).expect("unpublish old disk");
 
         let (new_disk, new_device) = add_test_disk("kvfs-new-device", 248);
         let new_super_block = registry
@@ -1628,7 +1634,7 @@ mod tests {
 
         old_super_block.deactivate_mount();
         new_super_block.deactivate_mount();
-        block::del_gendisk(new_disk.device_number()).expect("remove replacement disk");
+        subsys_block::del_gendisk(new_disk.device_number()).expect("remove replacement disk");
     }
 
     #[def_test(serial)]
@@ -1665,7 +1671,7 @@ mod tests {
         assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));
 
         super_block.deactivate_mount();
-        block::del_gendisk(disk.device_number()).expect("remove read-only remount disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove read-only remount disk");
     }
 
     #[def_test(serial)]
@@ -1698,7 +1704,7 @@ mod tests {
 
         assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 1);
         assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
-        block::del_gendisk(disk.device_number()).expect("remove failed-fill test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove failed-fill test disk");
     }
 
     #[def_test(serial)]
@@ -1731,6 +1737,6 @@ mod tests {
 
         assert_eq!(TRANSITION_WAITER_DONE.load(Ordering::Acquire), 1);
         assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 2);
-        block::del_gendisk(disk.device_number()).expect("remove dying-wait test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove dying-wait test disk");
     }
 }

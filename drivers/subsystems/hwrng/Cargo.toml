@@ -1,5 +1,5 @@
 [package]
-name = "hwrng"
+name = "subsys-hwrng"
 description = "Common traits and types for hwrng drivers"
 edition.workspace = true
 version.workspace = true

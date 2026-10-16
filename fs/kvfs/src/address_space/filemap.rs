@@ -178,7 +178,9 @@ impl AddressSpace {
         self.read_with_ra(
             iter,
             offset,
-            &Mutex::new(FileRaState::new(block::BackingDevInfo::DEFAULT_RA_PAGES)),
+            &Mutex::new(FileRaState::new(
+                subsys_block::BackingDevInfo::DEFAULT_RA_PAGES,
+            )),
         )
     }
 

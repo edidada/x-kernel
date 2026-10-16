@@ -339,7 +339,7 @@ impl SerialPort {
     /// Startup/task context only; allocation and discarded preparations stay
     /// outside the port lock. Repeated calls preserve existing input.
     /// The console continues using direct input until this is explicitly called.
-    pub(crate) fn prepare_irq_input(&self) -> Result<(), TryReserveError> {
+    pub fn prepare_irq_input(&self) -> Result<(), TryReserveError> {
         if self.io.lock().input.is_some() {
             return Ok(());
         }

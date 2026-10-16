@@ -30,9 +30,7 @@
 extern crate alloc;
 
 #[cfg(feature = "ns16550-mmio")]
-mod ns16550_mmio;
 pub mod runtime;
-pub mod serial;
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -41,9 +39,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use khal::mem::PhysAddr;
 use kirq::{IrqActionToken, IrqDesc};
 use kspin::{SpinNoIrq, static_lock};
-#[cfg(feature = "ns16550-mmio")]
-pub use ns16550_mmio::SerialRegWidth;
-pub use serial::{SerialIdent, SerialPort, SerialRole};
+use serial_core::{SerialPort, SerialRegWidth, SerialRole};
 
 #[cfg(not(any(
     feature = "pl011",
@@ -121,31 +117,31 @@ pub fn boot_console_io_port() -> u16 {
 #[kiface::provide]
 impl khal::console::ConsoleIf {
     fn write_data(buf: &[u8]) {
-        if let Some(port) = serial::stdout_port() {
+        if let Some(port) = serial_core::stdout_port() {
             port.write_data(buf);
         }
     }
 
     fn write_data_atomic(buf: &[u8]) {
-        if let Some(port) = serial::stdout_port() {
+        if let Some(port) = serial_core::stdout_port() {
             port.write_data_atomic(buf);
         }
     }
 
     fn read_data(buf: &mut [u8]) -> usize {
-        serial::stdout_port()
+        serial_core::stdout_port()
             .map(|port| port.read_data(buf))
             .unwrap_or(0)
     }
 
     fn interrupt_id() -> Option<usize> {
-        serial::stdout_irq().and_then(IrqDesc::logical_irq)
+        serial_core::stdout_irq().and_then(IrqDesc::logical_irq)
     }
 }
 
 /// Read one byte from the stdout console, if it has been brought up.
 pub fn getchar() -> Option<u8> {
-    serial::stdout_port().and_then(|port| port.getchar())
+    serial_core::stdout_port().and_then(|port| port.getchar())
 }
 
 /// Resolve the device-tree stdout node into a port description.
@@ -327,7 +323,7 @@ pub fn init_stdout_from_device_tree() -> Option<()> {
     let desc = stdout_desc_from_device_tree()?;
     let port = build_stdout_port(&desc);
     let irq = desc.irq.and_then(map_console_irq);
-    serial::register_early_stdout(Arc::new(port), irq);
+    serial_core::register_early_stdout(Arc::new(port), irq);
     Some(())
 }
 
@@ -337,7 +333,7 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
     let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };
     let irq = irq.and_then(map_console_irq);
-    serial::register_early_stdout(Arc::new(uart), irq);
+    serial_core::register_early_stdout(Arc::new(uart), irq);
 }
 
 /// Register the stdout console's input interrupt handler.
@@ -345,7 +341,7 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
 /// Must be called after the platform IRQ provider is up; platforms differ on
 /// whether that is `early_driver_init` or `final_init`.
 pub fn register_input_irq_handler() {
-    let Some(desc) = serial::stdout_irq() else {
+    let Some(desc) = serial_core::stdout_irq() else {
         return;
     };
     let Some(virq) = desc.logical_irq() else {
@@ -359,7 +355,7 @@ pub fn register_input_irq_handler() {
         reason = "CG-021-no-panic-on-reachable-failure: The resolved console IRQ belongs to the \
                   stdout port installed before IRQ input initialization"
     )]
-    let port = serial::stdout_port().expect("console IRQ requires a stdout port");
+    let port = serial_core::stdout_port().expect("console IRQ requires a stdout port");
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the console input buffer \

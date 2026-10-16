@@ -55,7 +55,7 @@ impl LoopDevice {
     }
 
     /// Returns the current loop configuration.
-    pub(crate) fn get_info(&self, block_device: &block::BlockDevice) -> KResult<loop_info> {
+    pub(crate) fn get_info(&self, block_device: &subsys_block::BlockDevice) -> KResult<loop_info> {
         if self.file.lock().is_none() {
             return Err(KError::from(LinuxError::ENXIO));
         }
@@ -95,7 +95,7 @@ impl LoopDevice {
     fn validate_backing_file(
         &self,
         file: &Arc<VfsFile>,
-        block_device: &block::BlockDevice,
+        block_device: &subsys_block::BlockDevice,
     ) -> VfsResult<()> {
         let mut current = file.clone();
         loop {
@@ -123,8 +123,8 @@ impl LoopDevice {
 
     fn ioctl_impl(
         &self,
-        block_device: &block::BlockDevice,
-        mode: block::BlockOpenMode,
+        block_device: &subsys_block::BlockDevice,
+        mode: subsys_block::BlockOpenMode,
         cmd: u32,
         arg: usize,
         has_sys_admin: bool,
@@ -140,7 +140,7 @@ impl LoopDevice {
                 self.validate_backing_file(&file, block_device)?;
                 let capacity = file.size() / 512;
                 let read_only = !file.mode().contains(FMode::WRITE)
-                    || !mode.contains(block::BlockOpenMode::WRITE);
+                    || !mode.contains(subsys_block::BlockOpenMode::WRITE);
                 let mut backing = self.file.lock();
                 if backing.is_some() {
                     return Err(KError::ResourceBusy);
@@ -172,7 +172,7 @@ impl LoopDevice {
                 (arg as *mut loop_info).write_vm(self.get_info(block_device)?)?;
             }
             LOOP_SET_STATUS => {
-                if !mode.contains(block::BlockOpenMode::WRITE) && !has_sys_admin {
+                if !mode.contains(subsys_block::BlockOpenMode::WRITE) && !has_sys_admin {
                     return Err(KError::from(LinuxError::EPERM));
                 }
                 let mut info = empty_loop_info();
@@ -193,7 +193,7 @@ impl LoopDevice {
     }
 }
 
-impl block::BlockDeviceOperations for LoopDevice {
+impl subsys_block::BlockDeviceOperations for LoopDevice {
     fn num_blocks(&self) -> u64 {
         self.file
             .lock()
@@ -205,47 +205,51 @@ impl block::BlockDeviceOperations for LoopDevice {
         512
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::KResult<()> {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> subsys_block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::KError::InvalidInput)?;
-        let file = self.clone_file().map_err(|_| block::KError::BadState)?;
+            .ok_or(subsys_block::KError::InvalidInput)?;
+        let file = self
+            .clone_file()
+            .map_err(|_| subsys_block::KError::BadState)?;
         let mut position = offset;
         let read = file
             .read_from(buf, &mut position)
-            .map_err(|_| block::KError::Io)?;
+            .map_err(|_| subsys_block::KError::Io)?;
         if read != buf.len() {
-            return Err(block::KError::Io);
+            return Err(subsys_block::KError::Io);
         }
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> block::KResult<()> {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> subsys_block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::KError::InvalidInput)?;
-        let file = self.clone_file().map_err(|_| block::KError::BadState)?;
+            .ok_or(subsys_block::KError::InvalidInput)?;
+        let file = self
+            .clone_file()
+            .map_err(|_| subsys_block::KError::BadState)?;
         let mut position = offset;
         let written = file
             .write_from(buf, &mut position)
-            .map_err(|_| block::KError::Io)?;
+            .map_err(|_| subsys_block::KError::Io)?;
         if written != buf.len() {
-            return Err(block::KError::Io);
+            return Err(subsys_block::KError::Io);
         }
         Ok(())
     }
 
-    fn flush(&self) -> block::KResult<()> {
+    fn flush(&self) -> subsys_block::KResult<()> {
         if let Some(file) = self.file.lock().as_ref() {
-            file.fsync(false).map_err(|_| block::KError::Io)?;
+            file.fsync(false).map_err(|_| subsys_block::KError::Io)?;
         }
         Ok(())
     }
 
     fn ioctl(
         &self,
-        device: &block::BlockDevice,
-        mode: block::BlockOpenMode,
+        device: &subsys_block::BlockDevice,
+        mode: subsys_block::BlockOpenMode,
         cmd: u32,
         arg: usize,
         has_sys_admin: bool,
@@ -266,7 +270,7 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
         .map(|number| {
             let device = Arc::new(LoopDevice::new(number));
             let disk = alloc::sync::Arc::new(
-                block::Gendisk::new(
+                subsys_block::Gendisk::new(
                     format!("loop{number}"),
                     7,
                     number,
@@ -275,7 +279,7 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
                 )
                 .expect("valid loop gendisk"),
             );
-            block::add_disk(disk).expect("loop device number must be unique");
+            subsys_block::add_disk(disk).expect("loop device number must be unique");
             device
         })
         .collect()
@@ -291,11 +295,11 @@ mod tests {
 
     #[unittest::def_test]
     fn ioctl_permissions_follow_command_and_open_mode() {
-        use block::BlockOpenMode as Mode;
         use linux_raw_sys::ioctl::{BLKFRASET, BLKRASET};
+        use subsys_block::BlockOpenMode as Mode;
 
         let disk = alloc::sync::Arc::new(
-            block::Gendisk::new(
+            subsys_block::Gendisk::new(
                 "test-loop-ioctl".into(),
                 240,
                 0,
@@ -304,7 +308,7 @@ mod tests {
             )
             .expect("valid loop disk"),
         );
-        let device = block::add_disk(disk.clone()).expect("publish loop ioctl test disk");
+        let device = subsys_block::add_disk(disk.clone()).expect("publish loop ioctl test disk");
         for (cmd, mode, has_sys_admin, error) in [
             (
                 LOOP_SET_STATUS,
@@ -336,6 +340,6 @@ mod tests {
                 Err(error)
             );
         }
-        block::del_gendisk(disk.device_number()).expect("remove loop ioctl test disk");
+        subsys_block::del_gendisk(disk.device_number()).expect("remove loop ioctl test disk");
     }
 }

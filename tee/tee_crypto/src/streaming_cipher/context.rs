@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::{
     algo::{Direction, PaddingMode, StreamingCipherAlgo},
-    mode::{aead, block, ctr},
+    mode::{aead, ctr, subsys_block},
     padding::{pkcs7_pad, pkcs7_unpad},
 };
 use crate::error::{CryptoError, Result};
@@ -150,7 +150,7 @@ impl StreamingCipherCtx {
             return Ok(Vec::new());
         }
         let chunk: Vec<u8> = self.buffer.drain(..complete).collect();
-        block::process(self, &chunk)
+        subsys_block::process(self, &chunk)
     }
 
     /// Finalize. Handles padding for the last block.
@@ -170,10 +170,10 @@ impl StreamingCipherCtx {
             if matches!(self.padding, PaddingMode::Pkcs7) {
                 pkcs7_pad(&mut data, bs)?;
             }
-            block::process(self, &data)
+            subsys_block::process(self, &data)
         } else {
             let data = core::mem::take(&mut self.buffer);
-            let output = block::process(self, &data)?;
+            let output = subsys_block::process(self, &data)?;
             if matches!(self.padding, PaddingMode::Pkcs7) {
                 pkcs7_unpad(&output, bs)
             } else {

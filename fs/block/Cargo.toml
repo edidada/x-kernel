@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-block.workspace = true
+subsys_block = { workspace = true }
 
 [lints]
 workspace = true

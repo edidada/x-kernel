@@ -341,27 +341,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block"
-version = "0.3.0-dev"
-dependencies = [
- "bitflags 2.13.2",
- "devnode",
- "kbuild_config",
- "kerrno",
- "khal",
- "kirq",
- "klazy",
- "kpoll",
- "kspin",
- "ksync",
- "ktask",
- "linked_list_r4l",
- "linux-raw-sys",
- "memaddr",
- "unittest",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,14 +499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "char_driver"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -625,6 +596,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "clocksource-driver"
+version = "0.3.0-dev"
+dependencies = [
+ "aarch64-cpu 10.0.0",
+ "int_ratio",
+ "kbuild_config",
+ "kcpu_id_map",
+ "kernel-boot",
+ "khal",
+ "kiface",
+ "kirq",
+ "klazy",
+ "kspin",
+ "ktime_types",
+ "log",
+ "of",
+ "raw-cpuid 11.6.0",
+ "riscv",
+ "sbi-rt",
+ "unittest",
+ "x2apic",
+ "x86-apic",
+ "x86_64",
+]
+
+[[package]]
 name = "cmac"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -663,7 +660,6 @@ dependencies = [
 name = "console-driver"
 version = "0.3.0-dev"
 dependencies = [
- "arm_pl011",
  "device-class",
  "devnode",
  "driver-base",
@@ -676,8 +672,7 @@ dependencies = [
  "log",
  "memspace",
  "of",
- "ringbuf",
- "uart_16550",
+ "serial-core",
  "unittest",
 ]
 
@@ -1121,7 +1116,6 @@ version = "0.3.0-dev"
 dependencies = [
  "backtrace",
  "bitmaps",
- "block",
  "chrono",
  "console-driver",
  "device-class",
@@ -1156,6 +1150,7 @@ dependencies = [
  "memaddr",
  "osvm",
  "posix-types",
+ "subsys-block",
  "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
  "zerocopy",
@@ -1165,21 +1160,21 @@ dependencies = [
 name = "device-class"
 version = "0.3.0-dev"
 dependencies = [
- "block",
- "char_driver",
  "devnode",
- "display",
  "driver-base",
- "hwrng",
- "input",
  "kerrno",
  "kspin",
  "lazyinit",
  "log",
- "net",
+ "subsys-block",
+ "subsys-char",
+ "subsys-display",
+ "subsys-hwrng",
+ "subsys-input",
+ "subsys-net",
+ "subsys-vsock",
  "unittest",
  "virtio-devices",
- "vsock",
 ]
 
 [[package]]
@@ -1227,15 +1222,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "display"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
- "unittest",
-]
-
-[[package]]
 name = "driver-base"
 version = "0.3.0-dev"
 dependencies = [
@@ -1268,7 +1254,6 @@ dependencies = [
 name = "driver-init"
 version = "0.3.0-dev"
 dependencies = [
- "block",
  "driver-base",
  "driver-host",
  "drv-block",
@@ -1279,6 +1264,7 @@ dependencies = [
  "log",
  "of",
  "pci",
+ "subsys-block",
 ]
 
 [[package]]
@@ -1287,7 +1273,6 @@ version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "device-class",
- "display",
  "kalloc",
  "kcred",
  "khal",
@@ -1300,18 +1285,19 @@ dependencies = [
  "macros",
  "memaddr",
  "posix-types",
+ "subsys-display",
 ]
 
 [[package]]
 name = "drv-block"
 version = "0.3.0-dev"
 dependencies = [
- "block",
  "device-class",
  "devnode",
  "driver-base",
  "kbuild_config",
  "kerrno",
+ "subsys-block",
 ]
 
 [[package]]
@@ -1328,29 +1314,30 @@ dependencies = [
 name = "drv-serial"
 version = "0.3.0-dev"
 dependencies = [
- "char_driver",
  "console-driver",
  "device-class",
  "driver-base",
  "kerrno",
  "log",
  "memaddr",
+ "serial-core",
+ "subsys-char",
 ]
 
 [[package]]
 name = "drv-virtio"
 version = "0.3.0-dev"
 dependencies = [
- "block",
  "device-class",
  "driver-base",
  "driver-host",
- "hwrng",
  "kerrno",
  "kpoll",
  "ktask",
  "log",
  "pci",
+ "subsys-block",
+ "subsys-hwrng",
  "virtio-devices",
 ]
 
@@ -1444,7 +1431,6 @@ dependencies = [
  "device-class",
  "devnode",
  "driver-base",
- "hwrng",
  "karch",
  "khal",
  "klazy",
@@ -1456,6 +1442,7 @@ dependencies = [
  "kworkng",
  "log",
  "rand_chacha 0.3.1",
+ "subsys-hwrng",
  "unittest",
 ]
 
@@ -1565,7 +1552,6 @@ name = "fat"
 version = "0.3.0-dev"
 dependencies = [
  "axfatfs",
- "block",
  "chrono",
  "fs_block",
  "kcred",
@@ -1574,6 +1560,7 @@ dependencies = [
  "kvfs",
  "macros",
  "slab",
+ "subsys-block",
  "unittest",
 ]
 
@@ -1582,13 +1569,13 @@ name = "fbdevice"
 version = "0.3.0-dev"
 dependencies = [
  "device-class",
- "display",
  "kalloc",
  "khal",
  "kspin",
  "lazyinit",
  "log",
  "memaddr",
+ "subsys-display",
 ]
 
 [[package]]
@@ -1677,7 +1664,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 name = "fs_block"
 version = "0.3.0-dev"
 dependencies = [
- "block",
+ "subsys-block",
 ]
 
 [[package]]
@@ -1685,7 +1672,6 @@ name = "fs_boot"
 version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
- "block",
  "bpffs",
  "cgroup2fs",
  "devfs",
@@ -1701,6 +1687,7 @@ dependencies = [
  "p9",
  "pipefs",
  "procfs",
+ "subsys-block",
  "sysfs",
  "uevent-netlink",
  "v9fs",
@@ -1942,16 +1929,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hwrng"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
- "kspin",
- "unittest",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2030,15 +2007,6 @@ checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
  "block-padding",
  "hybrid-array",
-]
-
-[[package]]
-name = "input"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
- "strum",
 ]
 
 [[package]]
@@ -2377,7 +2345,6 @@ name = "kext4"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "block",
  "iov_iter",
  "kcred",
  "kerrno",
@@ -2388,6 +2355,7 @@ dependencies = [
  "kvfs",
  "macros",
  "pagecache",
+ "subsys-block",
  "unittest",
 ]
 
@@ -2708,6 +2676,7 @@ name = "kplat-aarch64"
 version = "0.3.0-dev"
 dependencies = [
  "aarch64-pmuv3",
+ "clocksource-driver",
  "console-driver",
  "heapless",
  "irqchip-driver",
@@ -2730,7 +2699,6 @@ dependencies = [
  "memaddr",
  "of",
  "rtc-driver",
- "timer-driver",
  "unittest",
 ]
 
@@ -2775,6 +2743,7 @@ dependencies = [
 name = "kplat-riscv64"
 version = "0.3.0-dev"
 dependencies = [
+ "clocksource-driver",
  "console-driver",
  "irqchip-driver",
  "karch",
@@ -2791,7 +2760,6 @@ dependencies = [
  "of",
  "rtc-driver",
  "sbi-rt",
- "timer-driver",
 ]
 
 [[package]]
@@ -2800,6 +2768,7 @@ version = "0.3.0-dev"
 dependencies = [
  "acpi",
  "boot-info",
+ "clocksource-driver",
  "console-driver",
  "irqchip-driver",
  "karch",
@@ -2819,7 +2788,6 @@ dependencies = [
  "log",
  "multiboot2",
  "rtc-driver",
- "timer-driver",
  "x86-apic",
  "x86_64",
 ]
@@ -2908,9 +2876,9 @@ name = "kruntime"
 version = "0.3.0-dev"
 dependencies = [
  "backtrace",
- "block",
  "boot-info",
  "chrono",
+ "clocksource-driver",
  "device-class",
  "driver-init",
  "entropy",
@@ -2941,7 +2909,7 @@ dependencies = [
  "kworkng",
  "memaddr",
  "memspace",
- "timer-driver",
+ "subsys-block",
  "unittest",
  "watchdog",
 ]
@@ -3172,7 +3140,6 @@ name = "ktty"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
- "char_driver",
  "console-driver",
  "device-class",
  "intrusive-collections",
@@ -3193,6 +3160,8 @@ dependencies = [
  "linux-raw-sys",
  "osvm",
  "ringbuf",
+ "serial-core",
+ "subsys-char",
  "unittest",
 ]
 
@@ -3221,7 +3190,6 @@ name = "kvfs"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "block",
  "devnode",
  "hashbrown 0.15.5",
  "inherit-methods-macro",
@@ -3243,6 +3211,7 @@ dependencies = [
  "pagecache",
  "slab",
  "smallvec",
+ "subsys-block",
  "unittest",
  "vmobj",
 ]
@@ -3578,16 +3547,6 @@ checksum = "6892f2795001adb0f6e4c124de90b68f9edc4bf52b8d81b14dac45cb361f1cca"
 dependencies = [
  "ptr_meta",
  "thiserror",
-]
-
-[[package]]
-name = "net"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
- "ksync",
- "unittest",
 ]
 
 [[package]]
@@ -4774,6 +4733,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial-core"
+version = "0.3.0-dev"
+dependencies = [
+ "arm_pl011",
+ "kerrno",
+ "khal",
+ "kirq",
+ "kspin",
+ "lazyinit",
+ "ringbuf",
+ "uart_16550",
+ "unittest",
+]
+
+[[package]]
 name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4988,6 +4962,81 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "subsys-block"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "devnode",
+ "kbuild_config",
+ "kerrno",
+ "khal",
+ "kirq",
+ "klazy",
+ "kpoll",
+ "kspin",
+ "ksync",
+ "ktask",
+ "linked_list_r4l",
+ "linux-raw-sys",
+ "memaddr",
+ "unittest",
+]
+
+[[package]]
+name = "subsys-char"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+]
+
+[[package]]
+name = "subsys-display"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "unittest",
+]
+
+[[package]]
+name = "subsys-hwrng"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "subsys-input"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "strum",
+]
+
+[[package]]
+name = "subsys-net"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "ksync",
+ "unittest",
+]
+
+[[package]]
+name = "subsys-vsock"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
 ]
 
 [[package]]
@@ -5257,32 +5306,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "timer-driver"
-version = "0.3.0-dev"
-dependencies = [
- "aarch64-cpu 10.0.0",
- "int_ratio",
- "kbuild_config",
- "kcpu_id_map",
- "kernel-boot",
- "khal",
- "kiface",
- "kirq",
- "klazy",
- "kspin",
- "ktime_types",
- "log",
- "of",
- "raw-cpuid 11.6.0",
- "riscv",
- "sbi-rt",
- "unittest",
- "x2apic",
- "x86-apic",
- "x86_64",
 ]
 
 [[package]]
@@ -5626,21 +5649,21 @@ name = "virtio-devices"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "block",
- "display",
  "driver-base",
- "hwrng",
- "input",
  "kerrno",
  "kspin",
  "kvirtiodrivers",
  "linked_list_r4l",
  "log",
- "net",
  "pci",
  "safe-mmio",
+ "subsys-block",
+ "subsys-display",
+ "subsys-hwrng",
+ "subsys-input",
+ "subsys-net",
+ "subsys-vsock",
  "unittest",
- "vsock",
  "zerocopy",
 ]
 
@@ -5657,14 +5680,6 @@ name = "volatile"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
-
-[[package]]
-name = "vsock"
-version = "0.3.0-dev"
-dependencies = [
- "driver-base",
- "kerrno",
-]
 
 [[package]]
 name = "walkdir"

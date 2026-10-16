@@ -1,5 +1,5 @@
 [package]
-name = "display"
+name = "subsys-display"
 edition.workspace = true
 description = "Common traits and types for graphics device drivers"
 version.workspace = true

@@ -4,7 +4,7 @@
 
 //! Filesystem adapters for block devices.
 //!
-//! The block subsystem owns [`block::Gendisk`] and [`block::BlockDevice`],
+//! The block subsystem owns [`subsys_block::Gendisk`] and [`subsys_block::BlockDevice`],
 //! including their publication and `dev_t` lookup. This crate only contains
 //! filesystem-facing adapters that do not belong to the block core itself.
 
@@ -15,7 +15,7 @@ extern crate alloc;
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
-use block::{BlockDevice, KResult};
+use subsys_block::{BlockDevice, KResult};
 
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
