@@ -14,9 +14,9 @@ use kvfs::{
     Dentry, DeviceId, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsError, VfsResult, cdev_del,
 };
 use lazyinit::LazyInit;
-use subsys_display::find_display_device;
+use subsys_display::class::DISPLAY;
 #[cfg(feature = "input")]
-use subsys_input::find_input_device;
+use subsys_input::class::INPUT;
 
 #[cfg(feature = "input")]
 use crate::nodes::event::EventDev;
@@ -64,7 +64,7 @@ fn input_file(
     number: DeviceId,
     id: ClassDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
-    let device = find_input_device(id)?;
+    let device = INPUT.find(id)?;
     // The endpoint keeps the driver's event queue draining even with no
     // open fd (main !887); the EventDev pairs view + endpoint.
     let endpoint = match inputdev::input_endpoint(device.clone()) {
@@ -92,7 +92,7 @@ fn display_file(
     number: DeviceId,
     id: ClassDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
-    let device = find_display_device(id)?;
+    let device = DISPLAY.find(id)?;
     let card = drmdevice::DrmCard::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {

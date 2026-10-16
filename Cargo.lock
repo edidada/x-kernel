@@ -4964,7 +4964,6 @@ dependencies = [
  "kspin",
  "ksync",
  "ktask",
- "lazyinit",
  "linked_list_r4l",
  "linux-raw-sys",
  "log",
@@ -4978,8 +4977,6 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
- "kspin",
- "lazyinit",
  "log",
 ]
 
@@ -4990,8 +4987,6 @@ dependencies = [
  "devnode",
  "driver-base",
  "kerrno",
- "kspin",
- "lazyinit",
  "log",
  "unittest",
 ]
@@ -5003,7 +4998,6 @@ dependencies = [
  "driver-base",
  "kerrno",
  "kspin",
- "lazyinit",
  "log",
  "unittest",
 ]
@@ -5015,8 +5009,6 @@ dependencies = [
  "devnode",
  "driver-base",
  "kerrno",
- "kspin",
- "lazyinit",
  "log",
  "strum",
 ]
@@ -5027,9 +5019,7 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
- "kspin",
  "ksync",
- "lazyinit",
  "log",
  "unittest",
 ]
@@ -5040,8 +5030,6 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "kerrno",
- "kspin",
- "lazyinit",
  "log",
 ]
 
@@ -5659,7 +5647,6 @@ dependencies = [
  "kerrno",
  "kspin",
  "kvirtiodrivers",
- "lazyinit",
  "linked_list_r4l",
  "log",
  "pci",

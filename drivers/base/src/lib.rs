@@ -97,10 +97,10 @@ pub mod desc;
 pub use bus::{Bus, BusDeviceData, BusId, BusInstanceId, MatchScore, physical_path};
 pub use class::{
     ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassUse, ClassWithdraw, DetachedParent,
+    ClassRemovalCallback, ClassUse, ClassWithdraw,
 };
 pub use desc::DeviceDescriptor;
-pub use device::{BoundDevice, DeviceCtx, DeviceId};
+pub use device::{BoundDevice, DeviceCore, DeviceCtx, DeviceId};
 pub use devres::{
     ClkHandle, CoherentMem, DevIrq, DmaDirection, DmaOp, EnabledClock, IoMap, IrqAction,
     IrqHandlerFn, IrqOp, MmioOp, ReleaseHook, ResError,

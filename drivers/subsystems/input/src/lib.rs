@@ -15,7 +15,6 @@ pub use kerrno::{KError, KResult};
 
 pub mod class;
 pub use class::*;
-pub mod forwarding;
 use strum::FromRepr;
 
 /// Input event categories defined by the Linux input subsystem.

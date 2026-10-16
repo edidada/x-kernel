@@ -16,10 +16,7 @@ use driver_base::{ClassDevice, ClassDeviceId};
 use kerrno::KResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
-use subsys_char::{
-    CharDeviceImpl, char_devices, find_char_device, publish_char, subscribe_char_available,
-    subscribe_char_removed,
-};
+use subsys_char::{CharDeviceImpl, class::CHAR};
 
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
@@ -136,13 +133,13 @@ fn add_console_device(handle: ClassDevice<CharDeviceImpl>) {
 
 fn ensure_console_bridge() {
     CONSOLE_CLASS_BRIDGE.call_once(|| {
-        for handle in char_devices() {
+        for handle in CHAR.devices() {
             add_console_device(handle);
         }
-        subscribe_char_available(Arc::new(add_console_device));
+        CHAR.subscribe_available(Arc::new(add_console_device));
         // Class-layer removal subscription replaces the old device-model
         // removal event: the console keeps no stale handles.
-        subscribe_char_removed(Arc::new(|handle| {
+        CHAR.subscribe_removed(Arc::new(|handle| {
             let _ = unregister_console_device(handle.id());
         }));
     });
@@ -172,17 +169,17 @@ pub fn register_stdout_console(
     {
         let mut subsystem = console_subsystem().lock();
         if let Some(previous) = subsystem.stdout.take() {
-            subsys_char::unpublish_char(previous);
+            subsys_char::class::CHAR.unpublish(previous);
         }
     }
-    let handle = publish_char(parent, runtime, name)?;
+    let handle = CHAR.publish(parent, runtime, name)?;
     let id = handle.id();
     console_subsystem().lock().stdout = Some(id);
     // This runs inside the driver's `probe_device`, so the device is usually
-    // not active yet and `find_char_device()` (which filters on availability)
+    // not active yet and `CHAR.find()` (which filters on availability)
     // cannot see it. Adopt immediately when already active; otherwise remember
     // the id and adopt when the device activates.
-    if let Some(handle) = find_char_device(id) {
+    if let Some(handle) = CHAR.find(id) {
         console_subsystem().lock().add(handle);
         return Ok(());
     }

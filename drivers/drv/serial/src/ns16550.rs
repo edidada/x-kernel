@@ -13,12 +13,12 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
 use kerrno::KResult;
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
-use subsys_char::{CharDevice, publish_char};
+use subsys_char::{CharDevice, class::CHAR};
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]
@@ -80,19 +80,16 @@ fn publish(
     let char_dev: subsys_char::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(
-            ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
+            dev.class_parent(),
             char_dev,
             "serial",
         )
         .map(|_| None) // console continuity: no withdrawal guard
         .map_err(crate::probe_error::map_driver_error),
-        SerialRole::Auxiliary => publish_char(
-            ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
-            char_dev,
-            "serial",
-        )
-        .map(|handle| Some(subsys_char::char_withdraw(&handle)))
-        .map_err(crate::probe_error::map_driver_error),
+        SerialRole::Auxiliary => CHAR
+            .publish(dev.class_parent(), char_dev, "serial")
+            .map(|handle| Some(subsys_char::class::CHAR.withdraw(&handle)))
+            .map_err(crate::probe_error::map_driver_error),
     }
 }
 

@@ -18,7 +18,6 @@ pub use kerrno::{KError, KResult};
 
 pub mod class;
 pub use class::*;
-pub mod forwarding;
 
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};

@@ -14,11 +14,10 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{
-    BoundDevice, ClassParent, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError,
-    RuntimeError,
+    BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
-use subsys_net::publish_net;
+use subsys_net::class::NET;
 use virtio_devices::{VirtIoNetDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and
@@ -74,7 +73,7 @@ pub fn activate<B: driver_base::Bus>(
     // The publication rides the caller's Data (withdrawal guard): the
     // Data-owner contract — no composition-root class drain at remove.
     let (publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
-    let withdraw = subsys_net::net_withdraw(&publication);
+    let withdraw = subsys_net::class::NET.withdraw(&publication);
     Ok((withdraw, irq))
 }
 
@@ -145,13 +144,9 @@ fn activate_with_irq<B: driver_base::Bus, T: virtio_devices::Transport + 'static
     if irq.is_some() {
         device.mark_irq_backed();
     }
-    let location = crate::common::physical_path(dev);
-    let handle = publish_net(
-        ClassParent::detached(dev.id().raw(), "virtio-net", location),
-        Box::new(device),
-        "virtio-net",
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let handle = NET
+        .publish(dev.class_parent(), Box::new(device), "virtio-net")
+        .map_err(crate::common::map_driver_error)?;
     Ok((handle, irq))
 }
 
@@ -181,7 +176,7 @@ pub fn activate_mmio<B: driver_base::Bus, T: virtio_devices::Transport + 'static
         }
     }
     Ok(builder.build(NetMmioActivation {
-        _withdraw: subsys_net::net_withdraw(&publication),
+        _withdraw: subsys_net::class::NET.withdraw(&publication),
         irq,
     }))
 }

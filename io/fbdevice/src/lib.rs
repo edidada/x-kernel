@@ -41,7 +41,7 @@ use lazyinit::LazyInit;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use subsys_display::{
     DisplayDevice, DisplayDeviceImpl, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource,
-    display_devices as class_display_devices,
+    class::DISPLAY,
 };
 
 /// Bytes per pixel for the shadow scanout buffer. Matches the BGRA8888 format
@@ -89,7 +89,7 @@ fn try_setup() -> Result<(), ()> {
     // Pick the primary display device. Display device registration races with
     // fb_init in general, but the device_class registry is seeded before fb_init
     // runs in the boot sequence; a missing device here means no display at all.
-    let device = class_display_devices().into_iter().next().ok_or(())?;
+    let device = DISPLAY.devices().into_iter().next().ok_or(())?;
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");

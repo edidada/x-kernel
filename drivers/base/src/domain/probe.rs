@@ -35,13 +35,15 @@ impl DeviceDomain {
             }
             for (id, desc, driver) in batch {
                 let services = self.inner.lock().services.clone();
-                let generation = self
-                    .inner
-                    .lock()
-                    .devices
-                    .get(&id)
-                    .map_or(0, |e| e.lifecycle.generation);
-                match driver.probe(&desc, crate::device::DeviceId(id), services.as_ref()) {
+                let (generation, core) = {
+                    let inner = self.inner.lock();
+                    let entry = inner
+                        .devices
+                        .get(&id)
+                        .expect("batch devices are registered");
+                    (entry.lifecycle.generation, entry.core.clone())
+                };
+                match driver.probe(&desc, crate::device::DeviceId(id), &core, services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
                         match inner.devices.get_mut(&id) {

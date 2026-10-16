@@ -59,8 +59,8 @@ pub use socket::{
 };
 pub(crate) use socket::{general, state};
 pub(crate) use stack::{router, socket_set};
-use subsys_net::{NetDevice, net_devices};
-use subsys_vsock::{VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
+use subsys_net::{NetDevice, class::NET};
+use subsys_vsock::{VsockDeviceImpl, class::VSOCK};
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
@@ -94,7 +94,7 @@ pub fn init_network() {
     // Prepare stable Work storage before installing NIC notification sources.
     let _ = poller::network_poller();
 
-    let mut net_devs = net_devices();
+    let mut net_devs = NET.devices();
 
     let mut router = Router::new();
     let lo_dev = router
@@ -174,7 +174,7 @@ pub fn init_network() {
 }
 
 fn subscribe_network_unregister(id: driver_base::ClassDeviceId) {
-    subsys_net::subscribe_net_removed(Arc::new(move |removed| {
+    subsys_net::class::NET.subscribe_removed(Arc::new(move |removed| {
         if removed.id() != id {
             return;
         }
@@ -200,13 +200,13 @@ pub(crate) fn unregister_netdev(id: driver_base::ClassDeviceId) -> bool {
 #[cfg(feature = "vsock")]
 pub fn init_vsock() {
     info!("Initialize vsock subsystem...");
-    let mut vsock_devs = vsock_devices();
+    let mut vsock_devs = VSOCK.devices();
     if let Some(handle) = vsock_devs.pop() {
         register_vsock_handle(handle);
     } else {
         warn!("  No vsock device found!");
     }
-    subscribe_vsock_available(Arc::new(register_vsock_handle));
+    VSOCK.subscribe_available(Arc::new(register_vsock_handle));
 }
 
 /// Starts vsock runtime workers that require all scheduler run queues.
@@ -236,7 +236,7 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    subsys_vsock::subscribe_vsock_removed(Arc::new(move |removed| {
+    subsys_vsock::class::VSOCK.subscribe_removed(Arc::new(move |removed| {
         if removed.id() == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }

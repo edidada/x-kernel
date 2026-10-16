@@ -2,59 +2,37 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `block` class: its publication API (publish/devices/find/
-//! subscribe), removal entries, and the class hooks — instantiated on
-//! the shared machinery in `driver-base::class` (the Linux
-//! drivers/block shape: the subsystem owns its whole class story).
+//! The `block` class: one const-constructed static with the
+//! `add_disk`/`del_gendisk` hooks (the Linux `struct class block`
+//! analogue).
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
 use driver_base::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassWithdraw,
-    class::class_api::{ClassHooks, class_notify},
+    ClassDevice,
+    class::class_api::{Class, ClassHooks},
 };
 use kerrno::KResult;
-use kspin::SpinNoPreempt;
-use lazyinit::LazyInit;
 
 use super::Gendisk;
 
+/// The block class payload: one shared disk.
 pub type BlockDeviceImpl = Arc<Gendisk>;
 
-fn publish(disk: &BlockDeviceImpl) -> KResult<()> {
-    super::add_disk(disk.clone()).map(drop)
+/// A published disk handle.
+pub type BlockClassDevice = ClassDevice<BlockDeviceImpl>;
+
+pub struct BlockHooks;
+
+impl ClassHooks<BlockDeviceImpl> for BlockHooks {
+    fn publish(&self, disk: &BlockDeviceImpl) -> KResult<()> {
+        super::add_disk(disk.clone()).map(drop)
+    }
+
+    fn unpublish(&self, disk: &BlockDeviceImpl) {
+        super::del_gendisk(disk.device_number());
+    }
 }
 
-fn unpublish(disk: &BlockDeviceImpl) {
-    super::del_gendisk(disk.device_number());
-}
-
-static HOOKS: ClassHooks<BlockDeviceImpl> = ClassHooks {
-    publish,
-    unpublish,
-    node_class: |_| None,
-};
-
-driver_base::class_api!(
-    "block",
-    BlockDeviceImpl,
-    BLOCK_DEVICES,
-    block_class_registry,
-    publish_block,
-    block_devices,
-    find_block_device,
-    subscribe_block_available,
-    subscribe_block_removed,
-    HOOKS
-);
-
-/// Unpublish one `block` class device by publication id.
-pub fn unpublish_block(id: ClassDeviceId) {
-    driver_base::class::class_api::class_remove(block_class_registry, &HOOKS, id);
-}
-
-/// Guard form: withdraws this publication when the activation drops.
-pub fn block_withdraw(device: &ClassDevice<BlockDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_block, device.id())
-}
+/// The block device class.
+pub static BLOCK: Class<BlockDeviceImpl, BlockHooks> = Class::new(BlockHooks);

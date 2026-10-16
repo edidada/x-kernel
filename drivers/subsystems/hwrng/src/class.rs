@@ -2,47 +2,28 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `hwrng` class: its publication API (publish/devices/find/
-//! subscribe), removal entries, and the class hooks — instantiated on
-//! the shared machinery in `driver-base::class` (the Linux
-//! drivers/char/hw_random shape: the subsystem owns its whole class story).
+//! The `hwrng` class: one const-constructed static plus the admission-gated
+//! consumer data plane (the Linux `struct class hwrng` analogue).
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
-use driver_base::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassWithdraw,
-    class::class_api::{ClassHooks, class_notify},
-};
+use driver_base::{ClassDevice, class::class_api::Class};
 use kerrno::KResult;
-use kspin::SpinNoPreempt;
-use lazyinit::LazyInit;
 
 use super::HwrngDevice;
 
 pub type HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>;
 
-static HOOKS: ClassHooks<HwrngDeviceImpl> = ClassHooks::passthrough();
+pub static HWRNG: Class<HwrngDeviceImpl> = Class::new(());
 
-driver_base::class_api!(
-    "hwrng",
-    HwrngDeviceImpl,
-    HWRNG_DEVICES,
-    hwrng_class_registry,
-    publish_hwrng,
-    hwrng_devices,
-    find_hwrng_device,
-    subscribe_hwrng_available,
-    subscribe_hwrng_removed,
-    HOOKS
-);
+impl HwrngDevice for ClassDevice<Arc<dyn HwrngDevice + Send + Sync>> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
+        self.with_available(|device| device.read(buf))
+    }
 
-/// Unpublish one `hwrng` class device by publication id.
-pub fn unpublish_hwrng(id: ClassDeviceId) {
-    driver_base::class::class_api::class_remove(hwrng_class_registry, &HOOKS, id);
-}
-
-/// Guard form: withdraws this publication when the activation drops.
-pub fn hwrng_withdraw(device: &ClassDevice<HwrngDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_hwrng, device.id())
+    fn is_failed(&self) -> bool {
+        // Query on cached state; a post-removal clone answers its last
+        // known terminal state.
+        self.with(|device| device.is_failed())
+    }
 }

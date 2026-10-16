@@ -2,47 +2,30 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `char` class: its publication API (publish/devices/find/
-//! subscribe), removal entries, and the class hooks — instantiated on
-//! the shared machinery in `driver-base::class` (the Linux
-//! drivers/char shape: the subsystem owns its whole class story).
+//! The `char` class: one const-constructed static plus the admission-gated
+//! consumer data plane (the Linux `struct class char` analogue).
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::boxed::Box;
 
-use driver_base::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassWithdraw,
-    class::class_api::{ClassHooks, class_notify},
-};
+use driver_base::{ClassDevice, class::class_api::Class};
 use kerrno::KResult;
-use kspin::SpinNoPreempt;
-use lazyinit::LazyInit;
 
 use super::CharDevice;
 
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
 
-static HOOKS: ClassHooks<CharDeviceImpl> = ClassHooks::passthrough();
+pub static CHAR: Class<CharDeviceImpl> = Class::new(());
 
-driver_base::class_api!(
-    "char",
-    CharDeviceImpl,
-    CHAR_DEVICES,
-    char_class_registry,
-    publish_char,
-    char_devices,
-    find_char_device,
-    subscribe_char_available,
-    subscribe_char_removed,
-    HOOKS
-);
+impl CharDevice for ClassDevice<Box<dyn CharDevice + Send + Sync>> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
+        self.with_available(|device| device.read(buf))
+    }
 
-/// Unpublish one `char` class device by publication id.
-pub fn unpublish_char(id: ClassDeviceId) {
-    driver_base::class::class_api::class_remove(char_class_registry, &HOOKS, id);
-}
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
+        self.with_available(|device| device.write(buf))
+    }
 
-/// Guard form: withdraws this publication when the activation drops.
-pub fn char_withdraw(device: &ClassDevice<CharDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_char, device.id())
+    fn flush(&self) -> KResult {
+        self.with_available(|device| device.flush())
+    }
 }

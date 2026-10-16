@@ -20,7 +20,7 @@ use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
     VfsInode, VfsResult,
 };
-use subsys_char::{CharDevice, CharDeviceImpl, char_devices};
+use subsys_char::{CharDevice, CharDeviceImpl, class::CHAR};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -93,7 +93,7 @@ pub(crate) fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut serials = DirMapping::new();
     let stdout_id = stdout_console_id();
     let mut idx = 0u32;
-    for device in char_devices() {
+    for device in CHAR.devices() {
         // Only the unified serial driver's per-instance UARTs.
         if !device.driver_name().starts_with("serial-") {
             continue;

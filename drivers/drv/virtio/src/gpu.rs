@@ -9,11 +9,9 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-};
+use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
-use subsys_display::publish_display;
+use subsys_display::class::DISPLAY;
 use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_gpu_id_table[]`.
@@ -61,16 +59,12 @@ pub fn activate<B: driver_base::Bus>(
         transport, mmio_regs,
     )
     .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::physical_path(dev);
-    let handle = publish_display(
-        ClassParent::detached(dev.id().raw(), "virtio-gpu", location),
-        Box::new(device),
-        "virtio-gpu",
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let handle = DISPLAY
+        .publish(dev.class_parent(), Box::new(device), "virtio-gpu")
+        .map_err(crate::common::map_driver_error)?;
     // The Data-owned publication: dropping the guard unpublishes (the
     // single-owner contract — no composition-root class drain at remove).
-    Ok(subsys_display::display_withdraw(&handle))
+    Ok(subsys_display::class::DISPLAY.withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes

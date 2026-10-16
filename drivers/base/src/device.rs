@@ -42,6 +42,91 @@ impl core::fmt::Display for DeviceId {
 ///
 /// Every method either succeeds, fails fatally, or — for dependency-backed
 /// resources — returns [`ProbeError::Deferred`].
+
+/// The device's live identity card — the shared, domain-owned side of a
+/// registered device (Linux's refcounted `struct device` the class layer
+/// points at). Created by the domain at `add_device`; class publications
+/// and consumers hold `Arc`s and read facts LIVE instead of carrying
+/// value snapshots that drift.
+///
+/// The authoritative home of "which driver bound this device", "where it
+/// sits on the bus topology", and "is it still there". One fact, one
+/// home: a device with three class publications has ONE name, ONE path,
+/// ONE offline flag.
+pub struct DeviceCore {
+    id: DeviceId,
+    /// Set by the domain when a driver's probe starts (the claim is known
+    /// then, not at bind-commit).
+    driver_name: kspin::SpinNoPreempt<Option<&'static str>>,
+    /// The bus-vocabulary path component, derived once at `add_device`.
+    physical_path: alloc::string::String,
+    /// Flipped by the removal orchestration (after quiesce, before the
+    /// class publications withdraw). Every publication of this device —
+    /// and any consumer holding a clone — observes it.
+    offline: core::sync::atomic::AtomicBool,
+}
+
+impl DeviceCore {
+    /// The device id (the domain's, not a publication id).
+    pub fn id(&self) -> DeviceId {
+        self.id
+    }
+
+    /// The driver that claimed this device, once probing started.
+    pub fn driver_name(&self) -> Option<&'static str> {
+        *self.driver_name.lock()
+    }
+
+    /// Record the claiming driver. Domain-internal.
+    pub(crate) fn bind_driver(&self, name: &'static str) {
+        *self.driver_name.lock() = Some(name);
+    }
+
+    /// The physical path (DEVPATH source), as derived from the bus data.
+    pub fn physical_path(&self) -> &str {
+        self.physical_path.as_str()
+    }
+
+    /// Whether the device is still standing behind its publications.
+    pub fn is_online(&self) -> bool {
+        !self.offline.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark the device gone. Removal-orchestration internal.
+    pub(crate) fn mark_offline(&self) {
+        self.offline
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// A synthetic core for tests and model-external devices: same shape,
+    /// no domain behind it. Production paths always publish under a core
+    /// the domain created.
+    pub fn synthetic(
+        id: DeviceId,
+        driver_name: &'static str,
+        physical_path: alloc::string::String,
+    ) -> alloc::sync::Arc<Self> {
+        alloc::sync::Arc::new(Self {
+            id,
+            driver_name: kspin::SpinNoPreempt::new(Some(driver_name)),
+            physical_path,
+            offline: core::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn new(
+        id: DeviceId,
+        physical_path: alloc::string::String,
+    ) -> alloc::sync::Arc<Self> {
+        alloc::sync::Arc::new(Self {
+            id,
+            driver_name: kspin::SpinNoPreempt::new(None),
+            physical_path,
+            offline: core::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+
 pub struct DeviceCtx<'a, B: Bus> {
     /// The bus's own data vocabulary — typed: probe runs where the bus is
     /// statically known, so drivers read bus facts without any erasure.
@@ -51,6 +136,8 @@ pub struct DeviceCtx<'a, B: Bus> {
     dma: crate::resource::DmaInfo,
     modalias: Option<&'a str>,
     services: &'a dyn DeviceServices,
+    /// The live device identity: what class publications attach to.
+    core: alloc::sync::Arc<DeviceCore>,
     _bus: PhantomData<fn(&B)>,
 }
 
@@ -62,8 +149,9 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         resources: &'a ResourceMap,
         dma: crate::resource::DmaInfo,
         services: &'a dyn DeviceServices,
+        core: alloc::sync::Arc<DeviceCore>,
     ) -> Self {
-        Self::with_modalias(data, id, resources, dma, None, services)
+        Self::with_modalias(data, id, resources, dma, None, services, core)
     }
 
     /// Constructed by the domain with the device's `MODALIAS`.
@@ -74,6 +162,7 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         dma: crate::resource::DmaInfo,
         modalias: Option<&'a str>,
         services: &'a dyn DeviceServices,
+        core: alloc::sync::Arc<DeviceCore>,
     ) -> Self {
         Self {
             data,
@@ -82,8 +171,15 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
             dma,
             modalias,
             services,
+            core,
             _bus: PhantomData,
         }
+    }
+
+    /// The class parent for publications from THIS device: the live
+    /// identity card, not a value snapshot.
+    pub fn class_parent(&self) -> crate::ClassParent {
+        crate::ClassParent::for_device(self.core.clone())
     }
 
     /// The `MODALIAS` derived from the device's own bus data (published

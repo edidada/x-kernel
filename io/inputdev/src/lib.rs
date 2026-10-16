@@ -22,8 +22,7 @@ use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
 use subsys_input::{
-    Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
-    input_devices as class_input_devices, subscribe_input_available, subscribe_input_removed,
+    Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier, class::INPUT,
 };
 
 const KEY_COUNT: usize = EventType::Key.bits_count();
@@ -339,9 +338,9 @@ static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new
 pub fn init_input() {
     info!("Initialize input subsystem...");
     INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
-    subscribe_input_removed(Arc::new(remove_input_device));
-    subscribe_input_available(Arc::new(register_input_device));
-    for device in class_input_devices() {
+    INPUT.subscribe_removed(Arc::new(remove_input_device));
+    INPUT.subscribe_available(Arc::new(register_input_device));
+    for device in INPUT.devices() {
         register_input_device(device);
     }
 }

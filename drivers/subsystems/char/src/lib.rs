@@ -25,7 +25,6 @@ pub use kerrno::{KError, KResult};
 
 pub mod class;
 pub use class::*;
-pub mod forwarding;
 
 /// Operations a character device driver must implement.
 ///

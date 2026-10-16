@@ -13,7 +13,8 @@ use unittest::{TestResult, assert, assert_eq, def_test};
 use super::*;
 
 fn find_device() -> Option<ClassDevice<HwrngDeviceImpl>> {
-    hwrng_devices()
+    HWRNG
+        .devices()
         .into_iter()
         .find(|device| is_virtio_rng(device.name(), device.driver_name()))
 }

@@ -26,10 +26,14 @@ arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
 
 1. **devres 一根轴**:`base/src/devres/` = 前端守卫(iomap/irq/dma/clk)+ 后端能力
    (provider.rs)+ 缝合面(services.rs);`resource.rs` 固件侧数据。
-2. **类机械归一**:`base/src/class/` 拥有全部通用机械;`ClassHooks`(函数指针,
-   Linux struct class 字面形状)替代 trait 钩子;8 个家族的实例化各自住在
-   `subsystems/*/src/class.rs`(9p 在 virtio-devices)。device-class crate 死亡。
-   metadata 袋死亡(input 身份由运行时投影时查询)。
+2. **类机械归一**:`base/src/class/` 拥有全部通用机械;一个类 = 一个
+   `pub static X: Class<T, H>`(const 构造,链接期成形,零 LazyInit 首用分支——
+   机制移植自平行的 driver-mvp 线,该判优于宏方案);钩子 `H: ClassHooks<T>`
+   是类型参数(子系统本地 unit struct,孤儿规则结构性满足)。8 个家族的
+   静态声明 + 消费面(转发 impl)各自住在 `subsystems/*/src/class.rs`
+   (9p 的 `P9` 在 virtio-devices)。device-class crate 死亡;metadata 袋死亡
+   (input 身份由运行时投影时查询);消费 API 是方法(`NET.devices()`),
+   消费者导入一个静态而非一袋自由函数。
 3. **家族栈回家**:转发 impl(消费面)住在各子系统;发布/订阅/查找 API 住在各
    子系统;节点投影词汇在 devnode。孤儿规则与 initcall 等级(L1-L5)保证序。
 
@@ -38,11 +42,18 @@ arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
 aarch64 build/clippy 0 error、全部单测通过、QEMU 启动到 shell、
 riscv64/x86_64 交叉构建 0 error。
 
+## 下半场(已完成):ClassParent 值桥 → `DeviceCore` 活引用
+
+`DetachedParent`(owner/driver_name/physical_path/offline 四项值拷贝)消亡。
+域在 `add_device` 创建 `Arc<DeviceCore>`——设备的活身份卡:id、驱动名(probe
+开始时由域写入)、物理路径(总线词汇一次性派生)、offline 标志。每个
+`ClassParent::Device` 持有它;发布点从 `ClassParent::detached(dev.id().raw(),
+"硬编码名", location)` 变为 `dev.class_parent()`——12 个发布点的硬编码驱动名
+与手工 location 全部消亡。一设备多发布共享同一 offline:设备开始拆除的瞬间,
+它所有发布一起观察到不可用(比旧语义更正确)。
+
 ## 已知债务(后续刀)
 
-1. **ClassParent 仍是值桥**(owner/driver_name/physical_path 快照 + offline 标志):
-   Device↔ClassDevice 对象反转未做——需要 domain 核心改 Arc 共享设备条目。
-   这是"两个设备对象"病根的最后半场。
 2. `drv/serial/serial-core` 内嵌 `input.rs`(串口输入环)与 devnode 语义耦合。
 3. `virtio_hal`/`virtio_transport` 仍在 host 顶层文件(家族区未显性子目录化)。
 4. kfeat/kruntime 的 feature 网与新 initcall 等级并存(等级是序,feature 是集;

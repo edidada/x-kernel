@@ -11,7 +11,7 @@ use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use kworkng::{HandleCreateError, SubmitError, WorkHandle};
-use subsys_hwrng::{HwrngDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
+use subsys_hwrng::{HwrngDevice, HwrngDeviceImpl, class::HWRNG};
 
 // Back off failed reads, not in-flight device completion waits.
 const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(100);
@@ -179,8 +179,8 @@ pub(crate) fn register_sources() {
             *slot = Some(source);
         }
     }
-    subscribe_hwrng_available(Arc::new(note_device));
-    for device in hwrng_devices() {
+    HWRNG.subscribe_available(Arc::new(note_device));
+    for device in HWRNG.devices() {
         note_device(device);
     }
 }
@@ -279,16 +279,17 @@ mod tests {
                 ready: WaitQueue::new(),
                 entered: WaitQueue::new(),
             });
-            let class = subsys_hwrng::publish_hwrng(
-                driver_base::ClassParent::detached(
-                    index as u64,
-                    "entropy-collector-test",
-                    alloc::string::String::from("ram-disk"), // 板静态别名占位
-                ),
-                hardware.clone(),
-                "virtio-rng-test",
-            )
-            .unwrap();
+            let class = subsys_hwrng::class::HWRNG
+                .publish(
+                    driver_base::ClassParent::detached(
+                        index as u64,
+                        "entropy-collector-test",
+                        alloc::string::String::from("ram-disk"), // 板静态别名占位
+                    ),
+                    hardware.clone(),
+                    "virtio-rng-test",
+                )
+                .unwrap();
             let source = VirtioEntropySource::new(class.clone()).unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
             source.request();
@@ -332,7 +333,7 @@ mod tests {
             source.work.flush().unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), reads);
             source.work.shutdown().unwrap();
-            subsys_hwrng::unpublish_hwrng(class.id());
+            subsys_hwrng::class::HWRNG.unpublish(class.id());
         }
         unittest::TestResult::Ok
     }

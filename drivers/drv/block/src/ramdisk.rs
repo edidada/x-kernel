@@ -12,10 +12,10 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError,
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError,
     platform::{PlatformBus, PlatformId},
 };
-use subsys_block::{Gendisk, publish_block};
+use subsys_block::Gendisk;
 
 /// `struct platform_device_id ramdisk_ids[]`: one board alias row.
 static IDS: &[PlatformId] = &[PlatformId::Alias(driver_base::platform::AliasMatch::new(
@@ -73,14 +73,11 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
         let disk = Gendisk::new(name, 1, 0, 1, dev)
             .map_err(crate::common::map_driver_error)?
             .with_devnode_context(&parent_path, modalias);
-        let location = crate::common::physical_path(_dev);
-        let publication = publish_block(
-            ClassParent::detached(_dev.id().raw(), "ramdisk", location),
-            Arc::new(disk),
-        )
-        .map_err(crate::common::map_driver_error)?;
+        let publication = BLOCK
+            .publish(dev.class_parent(), Arc::new(disk))
+            .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData {
-            _publication: subsys_block::block_withdraw(&publication),
+            _publication: subsys_block::class::BLOCK.withdraw(&publication),
         })
     }
 

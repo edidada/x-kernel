@@ -13,13 +13,13 @@
 use alloc::sync::{Arc, Weak};
 
 use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
-use subsys_hwrng::{completion::RngCompletion, publish_hwrng};
+use subsys_hwrng::{class::HWRNG, completion::RngCompletion};
 use virtio_devices::{VirtIoRngDev, VirtioDeviceKind};
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
@@ -55,7 +55,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
         // contract — no composition-root class drain at remove.
         let (publication, irq) = activate(dev, transport, None)?;
         Ok(RngData {
-            _publication: subsys_hwrng::hwrng_withdraw(&publication),
+            _publication: subsys_hwrng::class::HWRNG.withdraw(&publication),
             _irq: irq,
         })
     }
@@ -177,13 +177,9 @@ pub fn activate<B: driver_base::Bus>(
     })?;
     device.enable_completion_irq();
 
-    let location = crate::common::physical_path(dev);
-    let publication = publish_hwrng(
-        ClassParent::detached(dev.id().raw(), "virtio-rng", location),
-        device,
-        "virtio-rng",
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let publication = HWRNG
+        .publish(dev.class_parent(), device, "virtio-rng")
+        .map_err(crate::common::map_driver_error)?;
     Ok((publication, irq))
 }
 
@@ -217,7 +213,7 @@ pub fn activate_mmio(
     }
 
     Ok(builder.build(RngActivation {
-        _withdraw: subsys_hwrng::hwrng_withdraw(&publication),
+        _withdraw: subsys_hwrng::class::HWRNG.withdraw(&publication),
         _irq: irq,
     }))
 }

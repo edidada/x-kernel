@@ -2,47 +2,61 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `vsock` class: its publication API (publish/devices/find/
-//! subscribe), removal entries, and the class hooks — instantiated on
-//! the shared machinery in `driver-base::class` (the Linux
-//! drivers/virtio shape: the subsystem owns its whole class story).
+//! The `vsock` class: one const-constructed static plus the admission-gated
+//! consumer data plane (the Linux `struct class vsock` analogue).
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::boxed::Box;
 
-use driver_base::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassWithdraw,
-    class::class_api::{ClassHooks, class_notify},
-};
+use driver_base::{ClassDevice, class::class_api::Class};
 use kerrno::KResult;
-use kspin::SpinNoPreempt;
-use lazyinit::LazyInit;
 
-use super::VsockDevice;
+use super::{VsockConnectionInfo, VsockDevice, VsockTransportEvent};
 
 pub type VsockDeviceImpl = Box<dyn VsockDevice + Send + Sync>;
 
-static HOOKS: ClassHooks<VsockDeviceImpl> = ClassHooks::passthrough();
+pub static VSOCK: Class<VsockDeviceImpl> = Class::new(());
 
-driver_base::class_api!(
-    "vsock",
-    VsockDeviceImpl,
-    VSOCK_DEVICES,
-    vsock_class_registry,
-    publish_vsock,
-    vsock_devices,
-    find_vsock_device,
-    subscribe_vsock_available,
-    subscribe_vsock_removed,
-    HOOKS
-);
+impl VsockDevice for ClassDevice<Box<dyn VsockDevice + Send + Sync>> {
+    fn guest_cid(&self) -> u64 {
+        self.with(|device| device.guest_cid())
+    }
 
-/// Unpublish one `vsock` class device by publication id.
-pub fn unpublish_vsock(id: ClassDeviceId) {
-    driver_base::class::class_api::class_remove(vsock_class_registry, &HOOKS, id);
-}
+    fn listen(&self, port: u32) {
+        self.with(|device| device.listen(port));
+    }
 
-/// Guard form: withdraws this publication when the activation drops.
-pub fn vsock_withdraw(device: &ClassDevice<VsockDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_vsock, device.id())
+    fn unlisten(&self, port: u32) {
+        self.with(|device| device.unlisten(port));
+    }
+
+    fn connect(&self, info: &VsockConnectionInfo) -> KResult<()> {
+        self.with_available(|device| device.connect(info))
+    }
+
+    fn accept(&self, info: &VsockConnectionInfo) -> KResult<()> {
+        self.with_available(|device| device.accept(info))
+    }
+
+    fn force_close(&self, info: &VsockConnectionInfo) -> KResult<()> {
+        self.with_available(|device| device.force_close(info))
+    }
+
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> KResult<usize> {
+        self.with_available(|device| device.send(info, buf))
+    }
+
+    fn shutdown(&self, info: &VsockConnectionInfo) -> KResult<()> {
+        self.with_available(|device| device.shutdown(info))
+    }
+
+    fn credit_update(&self, info: &VsockConnectionInfo) -> KResult<()> {
+        self.with_available(|device| device.credit_update(info))
+    }
+
+    fn poll_event(
+        &self,
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> KResult<()>,
+    ) -> KResult<bool> {
+        self.with_available(|device| device.poll_event(handler))
+    }
 }

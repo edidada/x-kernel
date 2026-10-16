@@ -65,22 +65,24 @@ impl<T> core::ops::Deref for ClassUse<T> {
 }
 
 pub struct ClassWithdraw {
-    unpublish: fn(ClassDeviceId),
-    id: ClassDeviceId,
+    unpublish: alloc::boxed::Box<dyn FnOnce() + Send + Sync>,
 }
 
 impl ClassWithdraw {
-    /// Build from the class-specific withdraw constructor generated per
-    /// class (e.g. [`crate::net_withdraw`]); `unpublish` is that class's
-    /// id-keyed removal entry.
-    pub fn new(unpublish: fn(ClassDeviceId), id: ClassDeviceId) -> Self {
-        Self { unpublish, id }
+    /// Built by [`Class::withdraw`](crate::class::class_api::Class::withdraw)
+    /// with the owning class's unpublish entry closed over.
+    pub fn new(unpublish: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            unpublish: alloc::boxed::Box::new(unpublish),
+        }
     }
 }
 
 impl Drop for ClassWithdraw {
     fn drop(&mut self) {
-        (self.unpublish)(self.id);
+        // FnOnce consumed via a swap: the guard drops at most once.
+        let unpublish = core::mem::replace(&mut self.unpublish, alloc::boxed::Box::new(|| {}));
+        unpublish();
     }
 }
 
@@ -116,84 +118,71 @@ impl ClassDeviceId {
 /// domain; availability is managed by the composition root's remove
 /// notifier.
 pub enum ClassParent {
-    Detached(DetachedParent),
+    Device(DeviceParent),
 }
 
-/// Value snapshot for driver-core publications.
-pub struct DetachedParent {
+/// One publication's link to its owning device plus its own publication
+/// id (a device may publish to several classes).
+pub struct DeviceParent {
     pub id: ClassDeviceId,
-    /// The owning driver-core device id. Explicit, never derived from the
-    /// publication id (Linux links class devices to their parent with a
-    /// real pointer; id arithmetic silently decouples the two counters).
-    pub owner: u64,
-    pub driver_name: &'static str,
-    /// The parent's physical path (bus-vtable derived at publication).
-    pub physical_path: String,
-    /// Flipped when the composition root removes the owning device (after
-    /// the quiesce callbacks returned). Shared by every [`ClassDevice`]
-    /// clone through the inner `Arc`, so a consumer holding a stale clone
-    /// can observe `is_available() == false` instead of silently poking a
-    /// device the framework no longer stands behind.
-    offline: core::sync::atomic::AtomicBool,
+    core: Arc<crate::DeviceCore>,
 }
 
 impl ClassParent {
-    /// Publish under a driver-core device snapshot.
-    ///
-    /// `owner` is the publishing device's driver-core id (`DeviceCtx::id()`);
-    /// the composition root's remove notifier uses it to find this
-    /// publication when that device goes away.
-    pub fn detached(owner: u64, driver_name: &'static str, physical_path: String) -> Self {
-        Self::Detached(DetachedParent {
+    /// Publish under a live device reference.
+    pub fn for_device(core: Arc<crate::DeviceCore>) -> Self {
+        Self::Device(DeviceParent {
             id: ClassDeviceId::new_detached(),
-            owner,
-            offline: core::sync::atomic::AtomicBool::new(false),
+            core,
+        })
+    }
+
+    /// Publish under a synthetic device (tests, model-external devices).
+    pub fn detached(owner: u64, driver_name: &'static str, physical_path: String) -> Self {
+        Self::for_device(crate::DeviceCore::synthetic(
+            crate::DeviceId(owner),
             driver_name,
             physical_path,
-        })
+        ))
     }
 
     pub fn id(&self) -> ClassDeviceId {
         match self {
-            Self::Detached(detached) => detached.id,
+            Self::Device(parent) => parent.id,
         }
     }
 
     pub fn driver_name(&self) -> Option<&'static str> {
         match self {
-            Self::Detached(detached) => Some(detached.driver_name),
+            Self::Device(parent) => parent.core.driver_name(),
         }
     }
 
     pub fn location(&self) -> &str {
         match self {
-            Self::Detached(detached) => detached.physical_path.as_str(),
+            Self::Device(parent) => parent.core.physical_path(),
         }
     }
 
     fn is_available(&self) -> bool {
         match self {
-            Self::Detached(detached) => {
-                !detached.offline.load(core::sync::atomic::Ordering::Acquire)
-            }
+            Self::Device(parent) => parent.core.is_online(),
         }
     }
 
-    /// Mark the parent device removed. Called by the removal orchestration
+    /// Mark the owning device removed. Called by the removal orchestration
     /// after the quiesce callbacks have returned, before the devnode and
     /// class publication are withdrawn.
     pub fn mark_offline(&self) {
         match self {
-            Self::Detached(detached) => detached
-                .offline
-                .store(true, core::sync::atomic::Ordering::Release),
+            Self::Device(parent) => parent.core.mark_offline(),
         }
     }
 
-    /// The owning device id, as passed to [`ClassParent::detached`].
+    /// The owning device id.
     pub fn detached_owner(&self) -> Option<u64> {
         match self {
-            Self::Detached(detached) => Some(detached.owner),
+            Self::Device(parent) => Some(parent.core.id().raw()),
         }
     }
 }

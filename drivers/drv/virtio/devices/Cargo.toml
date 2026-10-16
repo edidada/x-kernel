@@ -22,8 +22,8 @@ socket = ["alloc", "dep:subsys_vsock"]
 virtio-9p = ["alloc"]
 
 [dependencies]
+kspin = { workspace = true }
 
-lazyinit = { workspace = true }
 
 kerrno.workspace = true
 driver_base = { workspace = true }
@@ -35,7 +35,6 @@ subsys_input = { workspace = true, optional = true }
 subsys_net = { workspace = true, optional = true }
 subsys_vsock = { workspace = true, optional = true }
 log = { workspace = true }
-kspin = { workspace = true }
 linked_list_r4l = { workspace = true, optional = true }
 virtio-drivers = { workspace = true }
 unittest = { workspace = true }

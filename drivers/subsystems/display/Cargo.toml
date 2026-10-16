@@ -11,8 +11,6 @@ categories.workspace = true
 
 [dependencies]
 log = { workspace = true }
-kspin = { workspace = true }
-lazyinit = { workspace = true }
 devnode = { workspace = true }
 driver_base = { workspace = true }
 kerrno.workspace = true

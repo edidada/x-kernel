@@ -26,14 +26,13 @@ use alloc::{boxed::Box, sync::Arc};
 
 use console_driver::runtime::register_console_parented;
 use driver_base::{
-    BoundDevice, ClassParent, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap,
-    IrqAction, ProbeError,
+    BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kerrno::KResult;
 use memaddr::{PhysAddr, VirtAddr};
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
-use subsys_char::{CharDevice, publish_char};
+use subsys_char::{CharDevice, class::CHAR};
 
 /// `static const struct of_device_id pl011_of_match[]`.
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
@@ -149,27 +148,18 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // subsystem (/dev/console backing), auxiliary ports become char
         // devices. Both use a detached class parent — the class layer is
         // model-agnostic since the class-layer decoupling.
-        use driver_base::BusDeviceData as _;
-        let location = dev.bus_data().path_component();
         let char_dev: subsys_char::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
         let mut publication: Option<driver_base::ClassWithdraw> = None;
         match port.role() {
             SerialRole::Stdout => {
-                register_console_parented(
-                    ClassParent::detached(dev.id().raw(), "pl011-serial", location),
-                    char_dev,
-                    "serial",
-                )
-                .map_err(crate::probe_error::map_driver_error)?;
+                register_console_parented(dev.class_parent(), char_dev, "serial")
+                    .map_err(crate::probe_error::map_driver_error)?;
             }
             SerialRole::Auxiliary => {
-                let handle = publish_char(
-                    ClassParent::detached(dev.id().raw(), "pl011-serial", location),
-                    char_dev,
-                    "serial",
-                )
-                .map_err(crate::probe_error::map_driver_error)?;
-                publication = Some(subsys_char::char_withdraw(&handle));
+                let handle = CHAR
+                    .publish(dev.class_parent(), char_dev, "serial")
+                    .map_err(crate::probe_error::map_driver_error)?;
+                publication = Some(subsys_char::class::CHAR.withdraw(&handle));
             }
         }
 

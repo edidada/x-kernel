@@ -16,8 +16,6 @@ default = []
 
 [dependencies]
 log = { workspace = true }
-kspin = { workspace = true }
-lazyinit = { workspace = true }
 driver_base = { workspace = true }
 kerrno.workspace = true
 

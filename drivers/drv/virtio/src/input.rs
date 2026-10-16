@@ -9,11 +9,9 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-};
+use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
-use subsys_input::publish_input;
+use subsys_input::class::INPUT;
 use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_input_id_table[]`.
@@ -59,15 +57,11 @@ pub fn activate<B: driver_base::Bus>(
         transport, irq, mmio_regs,
     )
     .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::physical_path(dev);
     let name = alloc::string::String::from(device.name());
-    let handle = publish_input(
-        ClassParent::detached(dev.id().raw(), "virtio-input", location),
-        Box::new(device),
-        name,
-    )
-    .map_err(crate::common::map_driver_error)?;
-    Ok(subsys_input::input_withdraw(&handle))
+    let handle = INPUT
+        .publish(dev.class_parent(), Box::new(device), name)
+        .map_err(crate::common::map_driver_error)?;
+    Ok(subsys_input::class::INPUT.withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes

@@ -9,9 +9,7 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-};
+use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
 use virtio_devices::{VirtioDeviceKind, publish_virtio_9p};
 
@@ -62,16 +60,11 @@ pub fn activate<B: driver_base::Bus>(
         transport, mmio_regs,
     )
     .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::physical_path(dev);
-    let handle = publish_virtio_9p(
-        ClassParent::detached(dev.id().raw(), "virtio-9p", location),
-        Box::new(device),
-        "virtio-9p",
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let handle = publish_virtio_9p(dev.class_parent(), Box::new(device), "virtio-9p")
+        .map_err(crate::common::map_driver_error)?;
     // The Data-owned publication: dropping the guard unpublishes (the
     // single-owner contract — no composition-root class drain at remove).
-    Ok(virtio_devices::virtio_9p_withdraw(&handle))
+    Ok(virtio_devices::p9_class::P9.withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes

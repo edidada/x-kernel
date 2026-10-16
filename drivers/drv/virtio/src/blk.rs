@@ -24,13 +24,13 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use pci::{PciBus, PciMatch};
 use subsys_block::{
     Gendisk,
+    class::BLOCK,
     dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
-    publish_block,
 };
 use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal, VirtioDeviceKind};
 
@@ -215,14 +215,10 @@ pub fn activate<B: driver_base::Bus, T: Transport + 'static>(
 
     device.enable_interrupts();
 
-    let location = crate::common::physical_path(dev);
-    let publication = publish_block(
-        ClassParent::detached(dev.id().raw(), "virtio-blk", location),
-        disk.clone(),
-        disk.name(),
-    )
-    .map_err(crate::common::map_driver_error)?;
-    activation.publication = Some(subsys_block::block_withdraw(&publication));
+    let publication = BLOCK
+        .publish(dev.class_parent(), disk.clone(), disk.name())
+        .map_err(crate::common::map_driver_error)?;
+    activation.publication = Some(subsys_block::class::BLOCK.withdraw(&publication));
 
     Ok(Box::new(activation))
 }

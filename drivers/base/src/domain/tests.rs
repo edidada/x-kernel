@@ -989,6 +989,11 @@ fn probe_reads_firmware_property_snapshot() {
         &desc.resources,
         desc.dma,
         &*services,
+        crate::DeviceCore::synthetic(
+            crate::device::DeviceId(1),
+            "test-driver",
+            alloc::string::String::from("platform/test"),
+        ),
     );
     assert_eq!(ctx.fw_u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw_str("vendor,label"), Some("rev-b"));
@@ -1030,6 +1035,11 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         &desc.resources,
         desc.dma,
         &*services,
+        crate::DeviceCore::synthetic(
+            crate::device::DeviceId(1),
+            "test-driver",
+            alloc::string::String::from("platform/test"),
+        ),
     );
     let mem = ctx.alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
@@ -1052,6 +1062,11 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         &desc.resources,
         desc.dma,
         &*services,
+        crate::DeviceCore::synthetic(
+            crate::device::DeviceId(1),
+            "test-driver",
+            alloc::string::String::from("platform/test"),
+        ),
     );
     assert!(ctx.alloc_coherent(0x1000, 0x1000).is_err());
 }

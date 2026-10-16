@@ -12,7 +12,6 @@ pub use kerrno::{KError, KResult};
 
 pub mod class;
 pub use class::*;
-pub mod forwarding;
 
 /// The information of the graphics display device.
 #[derive(Debug, Clone, Copy)]

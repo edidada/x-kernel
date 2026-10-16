@@ -10,11 +10,12 @@ use crate::{DeviceFile, add_device_entry};
 
 /// Adds device nodes for the resident whole disks registered by the block layer.
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
-    for device in subsys_block::block_devices() {
+    for device in subsys_block::class::BLOCK.devices() {
+        let number = device.with(|disk| disk.device_number());
         add_device_entry(
             root,
             device.name(),
-            Ok(DeviceFile::new_block(fs.clone(), device.device_number())),
+            Ok(DeviceFile::new_block(fs.clone(), number)),
         );
     }
 }

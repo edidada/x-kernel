@@ -14,7 +14,6 @@ pub use kerrno::{KError, KResult};
 
 pub mod class;
 pub use class::*;
-pub mod forwarding;
 
 /// Vsock address.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]

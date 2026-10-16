@@ -181,6 +181,7 @@ trait AnyDriver: Send + Sync {
         &self,
         desc: &DeviceDescriptor,
         id: DeviceId,
+        core: &alloc::sync::Arc<crate::DeviceCore>,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError>;
     fn remove(
@@ -232,8 +233,12 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         &self,
         desc: &DeviceDescriptor,
         id: DeviceId,
+        core: &alloc::sync::Arc<crate::DeviceCore>,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError> {
+        // The claim is known when probing STARTS — record the driver on
+        // the live identity card before any publication can occur.
+        core.bind_driver(self.desc.name);
         // MODALIAS is DEVICE-derived (of_modalias semantics: the first
         // compatible string), not id-row-derived — module loading matches
         // the same string the bus published.
@@ -257,6 +262,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             desc.dma,
             modalias.as_deref(),
             services,
+            core.clone(),
         );
         let data = self.desc.ops.probe(&mut ctx)?;
         Ok(Box::new(data))
@@ -318,6 +324,10 @@ struct DeviceEntry {
     /// Identity: the immutable descriptor (bus type, instance, parent,
     /// resources, firmware identity).
     desc: DeviceDescriptor,
+    /// The live identity card, shared with this device's class
+    /// publications (driver name, physical path, offline flag — one
+    /// authoritative home).
+    core: alloc::sync::Arc<crate::DeviceCore>,
     /// Lifecycle: state machine + teardown bookkeeping.
     lifecycle: LifecycleState,
     /// Binding: what driver claimed this device and the Data it produced.

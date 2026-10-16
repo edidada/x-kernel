@@ -35,7 +35,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `IdMatchEntry` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch` |
 | `src/desc.rs` | 总线枚举的描述词汇：`DeviceDescriptor` / `DeviceIdentity` / `DeviceLocation` / `FirmwareProp` / `FirmwareNodeInfo` |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc` |
-| `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCtx`（probe 侧表面，驱动持有的唯一对象）、`BoundDevice` |
+| `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`DeviceCtx`（probe 侧表面，`class_parent()` 即从它取 core）、`BoundDevice` |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
 | `src/handle/` | 驱动侧运行时资源句柄，按资源家族一文件（guards-in-Data 契约在 mod.rs）：`iomap.rs`（`IoMap`）/ `irq.rs`（`DevIrq` + `IrqAction`/`IrqHandlerFn`）/ `dma.rs`（`CoherentMem`）/ `clk.rs`（`ClkHandle` / `EnabledClock`） |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |

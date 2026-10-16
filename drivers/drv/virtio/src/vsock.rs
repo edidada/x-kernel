@@ -9,11 +9,9 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{
-    BoundDevice, ClassParent, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-};
+use driver_base::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
-use subsys_vsock::publish_vsock;
+use subsys_vsock::class::VSOCK;
 use virtio_devices::VirtioDeviceKind;
 
 /// `struct pci_device_id virtio_vsock_id_table[]`.
@@ -62,14 +60,10 @@ pub fn activate<B: driver_base::Bus>(
         transport, mmio_regs,
     )
     .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::physical_path(dev);
-    let handle = publish_vsock(
-        ClassParent::detached(dev.id().raw(), "virtio-vsock", location),
-        Box::new(device),
-        "virtio-socket",
-    )
-    .map_err(crate::common::map_driver_error)?;
-    Ok(subsys_vsock::vsock_withdraw(&handle))
+    let handle = VSOCK
+        .publish(dev.class_parent(), Box::new(device), "virtio-socket")
+        .map_err(crate::common::map_driver_error)?;
+    Ok(subsys_vsock::class::VSOCK.withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes

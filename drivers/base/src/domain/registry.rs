@@ -242,10 +242,15 @@ impl DeviceDomain {
                     None => return Err(AddDeviceError::ParentMissing(parent.raw())),
                 }
             }
+            // The live identity card: physical path derives from the bus's
+            // own vocabulary ONCE, here — every later publication and
+            // consumer reads it through the shared core.
+            let core = crate::DeviceCore::new(id, desc.data.path_component());
             inner.devices.insert(
                 id.raw(),
                 DeviceEntry {
                     desc,
+                    core,
                     lifecycle: LifecycleState {
                         state: DeviceState::Pending,
                         generation: 0,

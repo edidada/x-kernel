@@ -2,56 +2,59 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `display` class: its publication API (publish/devices/find/
-//! subscribe), removal entries, and the class hooks — instantiated on
-//! the shared machinery in `driver-base::class` (the Linux
-//! drivers/gpu/drm shape: the subsystem owns its whole class story).
+//! The `display` class: one const-constructed static plus the admission-gated
+//! consumer data plane (the Linux `struct class display` analogue).
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::boxed::Box;
 
 use devnode::NodeClass;
 use driver_base::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassRegistry,
-    ClassRemovalCallback, ClassWithdraw,
-    class::class_api::{ClassHooks, class_notify},
+    ClassDevice,
+    class::class_api::{Class, ClassHooks},
 };
 use kerrno::KResult;
-use kspin::SpinNoPreempt;
-use lazyinit::LazyInit;
 
-use super::DisplayDevice;
+use super::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 
 pub type DisplayDeviceImpl = Box<dyn DisplayDevice + Send + Sync>;
 
-fn node_class(_runtime: &DisplayDeviceImpl) -> Option<NodeClass> {
-    Some(NodeClass::Drm)
+pub static DISPLAY: Class<DisplayDeviceImpl, DisplayHooks> = Class::new(DisplayHooks);
+
+pub struct DisplayHooks;
+
+impl ClassHooks<DisplayDeviceImpl> for DisplayHooks {
+    fn node_class(&self, _runtime: &DisplayDeviceImpl) -> Option<NodeClass> {
+        Some(NodeClass::Drm)
+    }
 }
 
-static HOOKS: ClassHooks<DisplayDeviceImpl> = ClassHooks {
-    publish: |_| Ok(()),
-    unpublish: |_| {},
-    node_class,
-};
+impl DisplayDevice for ClassDevice<Box<dyn DisplayDevice + Send + Sync>> {
+    fn info(&self) -> DisplayInfo {
+        self.with(|device| device.info())
+    }
 
-driver_base::class_api!(
-    "display",
-    DisplayDeviceImpl,
-    DISPLAY_DEVICES,
-    display_class_registry,
-    publish_display,
-    display_devices,
-    find_display_device,
-    subscribe_display_available,
-    subscribe_display_removed,
-    HOOKS
-);
+    fn need_flush(&self) -> bool {
+        self.with(|device| device.need_flush())
+    }
 
-/// Unpublish one `display` class device by publication id.
-pub fn unpublish_display(id: ClassDeviceId) {
-    driver_base::class::class_api::class_remove(display_class_registry, &HOOKS, id);
-}
+    fn flush(&self) -> KResult {
+        self.with_available(|device| device.flush())
+    }
 
-/// Guard form: withdraws this publication when the activation drops.
-pub fn display_withdraw(device: &ClassDevice<DisplayDeviceImpl>) -> ClassWithdraw {
-    ClassWithdraw::new(unpublish_display, device.id())
+    fn create_scanout_resource(
+        &self,
+        resource: ScanoutResource,
+        paddr: u64,
+        length: u32,
+    ) -> KResult {
+        self.with_available(|device| device.create_scanout_resource(resource, paddr, length))
+    }
+
+    fn destroy_scanout_resource(&self, resource_id: u32) -> KResult {
+        self.with_available(|device| device.destroy_scanout_resource(resource_id))
+    }
+
+    fn present_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> KResult {
+        self.with_available(|device| device.present_scanout_resource(resource_id, rect))
+    }
 }
