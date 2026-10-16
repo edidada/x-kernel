@@ -7,6 +7,7 @@
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
+use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
@@ -14,11 +15,8 @@ use smoltcp::wire::Ipv6Packet;
 use crate::network::router::ROUTE_PROTOCOL_KERNEL;
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{
-        DeviceRegistry, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
-        NetDevice, NetDeviceId,
-    },
+    consts::SOCKET_BUFFER_SIZE,
+    device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     network::{
         ipv4::{self, Ipv4Error, Ipv4Header},
@@ -32,6 +30,7 @@ use crate::{
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
+const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 
 /// Conditions under which a control-plane neighbor update may be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,12 +63,12 @@ pub(crate) struct Ipv4AddrSnapshot {
 pub(crate) struct Router {
     rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
+    data_tx_queue: DataTxQueue,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     next_ipv4_identification: u16,
     pub(crate) devices: DeviceRegistry,
     pub(crate) table: RouteTable,
-    effective_mtu: usize,
 }
 
 pub(crate) struct RxDrain {
@@ -84,18 +83,25 @@ impl Router {
         Self {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
+            data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
             next_ipv4_identification: 1,
             devices: DeviceRegistry::new(),
             table: RouteTable::new(),
-            effective_mtu: STANDARD_MTU,
         }
     }
 
-    /// Borrows admitted RX and shared data TX for one smoltcp operation.
-    pub(crate) fn stack_device<'a>(&'a mut self, tx: &'a mut DataTxQueue) -> StackDevice<'a> {
-        StackDevice::new(&mut self.rx_queue, tx, self.effective_mtu)
+    /// Borrows only the packet queues and capabilities required by smoltcp.
+    ///
+    /// The enclosing Router guard still serializes queue access. The adapter
+    /// cannot access routing, device state, or dispatch packets to a device.
+    pub(crate) fn stack_device(&mut self) -> StackDevice<'_> {
+        StackDevice::new(
+            &mut self.rx_queue,
+            &mut self.data_tx_queue,
+            self.devices.effective_mtu(),
+        )
     }
 
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
@@ -156,19 +162,38 @@ impl Router {
         }
     }
 
-    pub(crate) fn queue_ipv4_packet(
-        &mut self,
-        tx: &mut DataTxQueue,
-        packet: Vec<u8>,
-        oif: i32,
-    ) -> KResult {
+    pub(crate) fn can_enqueue_tx_packet(&self) -> bool {
+        !self.data_tx_queue.is_full()
+    }
+
+    pub(crate) fn available_tx_packet_slots(&self) -> usize {
+        self.data_tx_queue.available()
+    }
+
+    pub(crate) fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        self.data_tx_queue.register_capacity_waker(context)
+    }
+
+    pub(crate) fn tx_capacity_poll(&self) -> PollSet {
+        self.data_tx_queue.capacity_poll()
+    }
+
+    pub(crate) fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
+        self.data_tx_queue.can_push(packet_count)
+    }
+
+    pub(crate) fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
-        tx.try_extend(
-            packets
-                .into_iter()
-                .map(|packet| PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)),
-        )
-        .map_err(|_| KError::WouldBlock)
+        self.data_tx_queue
+            .try_extend(
+                packets.into_iter().map(|packet| {
+                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
+                }),
+            )
+            .map_err(|_| KError::WouldBlock)
     }
 
     /// Returns whether `dst` is routed through a loopback device.
@@ -214,7 +239,6 @@ impl Router {
     ) -> Result<NetDeviceId, LinuxError> {
         let id = self.devices.register(device)?;
         self.sync_device_ipv4_addrs();
-        self.recompute_effective_mtu();
         Ok(id)
     }
 
@@ -244,7 +268,6 @@ impl Router {
         self.rebuild_ipv4_address_routes();
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
-        self.recompute_effective_mtu();
         Some(())
     }
 
@@ -264,37 +287,6 @@ impl Router {
                 .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
-    /// Returns the MTU advertised through the smoltcp device capabilities.
-    pub(crate) fn effective_mtu(&self) -> usize {
-        self.effective_mtu
-    }
-
-    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
-        self.devices
-            .iter()
-            .enumerate()
-            .map(|(slot, device)| device.link_snapshot(self.devices.id_at(slot).ifindex()))
-            .collect()
-    }
-
-    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        let dev_index = self.device_slot(ifindex)?;
-        self.devices
-            .get_by_slot(dev_index)
-            .map(|device| device.link_snapshot(ifindex))
-    }
-
-    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
-        self.device_slot(ifindex).is_some()
-    }
-
-    pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
-        self.devices
-            .iter()
-            .position(|device| device.name() == name)
-            .map(|slot| self.devices.id_at(slot))
-    }
-
     /// Returns the primary IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
@@ -306,7 +298,10 @@ impl Router {
     /// Returns `ENODEV` for an unknown device and `EADDRNOTAVAIL` when the
     /// device has no IPv4 address.
     pub(crate) fn interface_ipv4_addr(&self, name: &str) -> Result<Ipv4Cidr, LinuxError> {
-        let dev = self.device_id_by_name(name).ok_or(LinuxError::ENODEV)?;
+        let dev = self
+            .devices
+            .device_id_by_name(name)
+            .ok_or(LinuxError::ENODEV)?;
         self.ipv4_addrs
             .iter()
             .find(|entry| entry.dev == dev)
@@ -320,13 +315,6 @@ impl Router {
             .iter()
             .find(|entry| entry.dev == dev)
             .map(|entry| entry.addr)
-    }
-
-    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        let dev_index = self.device_slot(ifindex)?;
-        self.devices
-            .get_by_slot(dev_index)
-            .map(|device| device.link_send_snapshot())
     }
 
     pub(crate) fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
@@ -609,59 +597,6 @@ impl Router {
         Ok(())
     }
 
-    /// Applies a validated link update.
-    ///
-    /// Returns `Ok(true)` when the effective device MTU changed and the
-    /// smoltcp interface must be rebuilt to refresh its cached capabilities.
-    pub(crate) fn update_device_link(
-        &mut self,
-        ifindex: i32,
-        update: LinkConfigUpdate,
-    ) -> Result<bool, LinuxError> {
-        let dev = self.device_slot(ifindex).ok_or(LinuxError::ENODEV)?;
-        let device = self.devices.get_by_slot(dev).ok_or(LinuxError::ENODEV)?;
-        if let Some(name) = update.name.as_deref() {
-            crate::device::validate_interface_name(name)?;
-            if self
-                .devices
-                .iter()
-                .enumerate()
-                .any(|(other_dev, device)| other_dev != dev && device.name() == name)
-            {
-                return Err(LinuxError::EEXIST);
-            }
-        }
-        if let Some(mtu) = update.mtu {
-            device.link_kind().validate_mtu(mtu)?;
-        }
-
-        let is_mtu_changed = update.mtu.is_some_and(|mtu| mtu != device.mtu());
-        let effective_mtu = self.effective_mtu;
-
-        let LinkConfigUpdate { name, mtu, is_up } = update;
-        let device = self
-            .devices
-            .get_mut_by_slot(dev)
-            .expect("validated device slot");
-        if let Some(mtu) = mtu {
-            device.set_mtu(mtu)?;
-        }
-        if let Some(name) = name {
-            device.set_name(name);
-        }
-        if let Some(is_up) = is_up {
-            device.set_link_up(is_up);
-        }
-        if is_mtu_changed {
-            self.recompute_effective_mtu();
-        }
-        Ok(self.effective_mtu != effective_mtu)
-    }
-
-    fn device_slot(&self, ifindex: i32) -> Option<usize> {
-        self.devices.slot(NetDeviceId::new(ifindex)?)
-    }
-
     pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,
@@ -766,15 +701,6 @@ impl Router {
         }
     }
 
-    fn recompute_effective_mtu(&mut self) {
-        self.effective_mtu = self
-            .devices
-            .iter()
-            .map(|device| device.mtu().min(u16::MAX as usize))
-            .min()
-            .unwrap_or(STANDARD_MTU);
-    }
-
     pub(crate) fn drain_rx_budgeted_into(
         &mut self,
         timestamp: MonotonicInstant,
@@ -865,18 +791,17 @@ impl Router {
 
     pub(crate) fn dispatch_budgeted(
         &mut self,
-        tx: &mut DataTxQueue,
         timestamp: MonotonicInstant,
         budget: usize,
     ) -> (usize, bool) {
         if budget == 0 {
-            return (0, self.has_queued_tx_packets(tx));
+            return (0, self.has_queued_tx_packets());
         }
 
         let mut work_done = 0;
         let mut poll_next = false;
         while work_done < budget {
-            let Some(mut packet) = self.pop_tx_packet(tx) else {
+            let Some(mut packet) = self.pop_tx_packet() else {
                 break;
             };
             work_done += 1;
@@ -932,7 +857,7 @@ impl Router {
                 _ => debug!("Dropping packet with invalid IP version"),
             }
         }
-        (work_done, poll_next || self.has_queued_tx_packets(tx))
+        (work_done, poll_next || self.has_queued_tx_packets())
     }
 
     /// Dispatches one IPv4 packet onto the selected device.
@@ -1043,12 +968,14 @@ impl Router {
         Ok(())
     }
 
-    fn pop_tx_packet(&mut self, tx: &mut DataTxQueue) -> Option<PacketBuf> {
-        self.control_tx_queue.pop_front().or_else(|| tx.pop_front())
+    fn pop_tx_packet(&mut self) -> Option<PacketBuf> {
+        self.control_tx_queue
+            .pop_front()
+            .or_else(|| self.data_tx_queue.pop_front())
     }
 
-    fn has_queued_tx_packets(&self, tx: &DataTxQueue) -> bool {
-        !self.control_tx_queue.is_empty() || !tx.is_empty()
+    fn has_queued_tx_packets(&self) -> bool {
+        !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
     }
 
     pub(crate) fn has_immediate_rx_work(&self) -> bool {
@@ -1079,12 +1006,11 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 
-    use kpoll::{PollContext, PollRegisterError};
     use ktime_types::MonotonicInstant;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::device::LoopbackDevice;
+    use crate::device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice};
 
     fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
         Ipv4Cidr::new(address, prefix_len).unwrap()
@@ -1220,30 +1146,33 @@ mod tests {
 
     #[def_test]
     fn control_dispatch_does_not_free_data_tx_capacity() {
-        let mut tx = DataTxQueue::with_capacity(SOCKET_BUFFER_SIZE);
         let mut router = Router::new();
         router
             .control_tx_queue
             .push_back(tx_packet_buf(vec![0; 20]));
-        let capacity_before = tx.available();
+        let capacity_before = router.available_tx_packet_slots();
 
-        let (work_done, _) = router.dispatch_budgeted(&mut tx, MonotonicInstant::ORIGIN, 1);
+        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
-        assert_eq!(tx.available(), capacity_before);
+        assert_eq!(router.available_tx_packet_slots(), capacity_before);
     }
 
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
-        let mut tx = DataTxQueue::with_capacity(SOCKET_BUFFER_SIZE);
         let mut router = Router::new();
-        assert!(tx.try_push(tx_packet_buf(vec![0; 20])).is_ok());
-        let capacity_before = tx.available();
+        assert!(
+            router
+                .data_tx_queue
+                .try_push(tx_packet_buf(vec![0; 20]))
+                .is_ok()
+        );
+        let capacity_before = router.available_tx_packet_slots();
 
-        let (work_done, _) = router.dispatch_budgeted(&mut tx, MonotonicInstant::ORIGIN, 1);
+        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
-        assert_eq!(tx.available(), capacity_before + 1);
+        assert_eq!(router.available_tx_packet_slots(), capacity_before + 1);
     }
 
     #[def_test]
