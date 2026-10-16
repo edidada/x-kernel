@@ -186,9 +186,9 @@ slab byte allocator 的前 64 个 region descriptor 位于 inline 表中；后�
 
 byte heap 已取得的 backing region 不主动归还 page allocator。单步上限只限制一次扩容
 额外保留的空间；使用峰值下降和 size-class 碎片仍可能留下超过一个步长的总空闲量。
-这一条是必需的：超过 1 MiB 的大对象绕开 byte heap 直接向 page allocator 取，
-若允许无上限翻倍，一次瞬时失败就能把数百 MiB 物理页永久钉进只有 byte heap 能用的空间，
-随后一个 1.3 MiB 的分配会在 byte heap 仍报告上百 MiB 空闲时 panic。
+超过 1 MiB 的大对象绕开 byte heap 直接向 page allocator 取；限制扩容步长可以减少
+一次成功扩容后仅 byte heap 可用的富余页。32 MiB 是增长策略参数，不代表物理内存预留、
+缓存回收或对碎片与泄漏的完整修复，也不保证之后的 page allocation 一定成功。
 
 deallocation 必须携带原 allocation 的 pointer 和 layout。超过 1 MiB 的大对象返回 page
 allocator；slab-cache-eligible 对象优先进入当前 CPU cache；其他对象返回中央 byte

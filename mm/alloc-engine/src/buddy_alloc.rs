@@ -392,13 +392,9 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         if metadata_pages >= registered_pages {
             return Err(AllocError::NoMemory);
         }
-        // The bitmap goes at the tail so `heap_start` stays equal to `base`.
-        // A head prefix would drop the heap's alignment to
-        // `tz(metadata_pages)` -- usually 0, since that page count is odd --
-        // and the maximal-order carving below would then have to climb from a
-        // single page. Every chunk it produces would sit at `base + 2^k`, whose
-        // XOR buddy is `base` itself, so no two of them could ever coalesce and
-        // the largest block would be capped near half the region.
+        // Tail metadata preserves the caller's base as the first usable page.
+        // Each free chunk is still carved using its own absolute alignment;
+        // usable endpoints and capacity determine the available block orders.
         let total_pages = registered_pages - metadata_pages;
         let bitmap_start = base + total_pages * PAGE_SIZE;
         if metadata_pages != 0 {

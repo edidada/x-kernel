@@ -37,17 +37,17 @@ storage stays mapped and exclusively owned until reset or Drop finishes.
 The slab heap can therefore keep growing in bounded 32 MiB steps even when all
 64 preceding regions contain live allocations.
 
-The reservation must not move `heap_start` off `base`. Maximal-order carving
-derives each chunk's order from that chunk's own address alignment, so a head
-prefix of `m` pages would leave the heap aligned only to `tz(m)` -- normally a
-single page, because `m` is odd for most region sizes. Carving would then place
-chunks at `base + 2^k` for ascending `k`, and each such chunk's XOR buddy is
-exactly `base`, which lies outside the heap: no two chunks could ever coalesce,
-and the largest block would stay capped near half the region for that region's
-whole lifetime. Keeping the reservation at the tail leaves `heap_start == base`,
-so the first chunk carries the caller's alignment. The largest block remains
-bounded by usable capacity and base alignment, without an extra loss from moving
-the heap start.
+Tail reservation keeps `heap_start == base`, so the first usable page retains
+the caller's base alignment. Carving derives each chunk's order from that
+chunk's absolute address and remaining capacity. Initial maximal chunks cannot
+merge beyond the usable endpoints; descendants split from one of those chunks
+can coalesce back after they are freed with either metadata placement.
+
+For example, a naturally aligned 32 MiB region with one metadata page has 8191
+usable pages and a largest initial block of 16 MiB with either a head or a tail
+reservation. The two layouts have the same initial order histogram, at different
+addresses. For irregular regions the available orders depend on both endpoints;
+tail placement does not universally increase the largest allocatable order.
 
 ## Operations and complexity
 

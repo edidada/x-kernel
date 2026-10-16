@@ -39,10 +39,8 @@ const LARGE_ALLOC_THRESHOLD_BYTES: usize = 1024 * 1024;
 ///
 /// The byte heap never returns pages to the page allocator, and allocations
 /// above [`LARGE_ALLOC_THRESHOLD_BYTES`] bypass it and go straight to the page
-/// allocator. Growing the whole heap geometrically on every failed allocation
-/// therefore parks memory that only the byte heap can ever use: a 1 GiB guest
-/// was observed panicking on a 1.3 MiB request while the byte heap reported
-/// `used=0xd0a3800 avail=0xaf2fe00`, i.e. 175 MiB of its 384 MiB idle.
+/// allocator. Unbounded geometric growth can therefore retain a large surplus
+/// that only the byte heap can use, reducing capacity for direct page requests.
 ///
 /// Growth stays geometric below this step and linear above it, which bounds the
 /// requested surplus to one step. The slab heap stores overflow region
@@ -472,7 +470,7 @@ impl GlobalAllocator {
         let heap_ready = self.heap_ready.load(Ordering::Acquire);
         let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
         // Geometric while the heap is small, bounded steps once it is not: see
-        // `HEAP_GROW_STEP_MAX_BYTES` for why an unbounded doubling is unsafe.
+        // `HEAP_GROW_STEP_MAX_BYTES` for why growth should limit retained surplus.
         let step = old_size.clamp(PAGE_SIZE_4K, HEAP_GROW_STEP_MAX_BYTES);
         let exp_size = step
             .max(layout.size())
