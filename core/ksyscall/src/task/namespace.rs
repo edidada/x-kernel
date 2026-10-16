@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
 use kns::{NamespaceFlags, NamespaceType, NsFd, UnshareContext, UnshareError};
-use kprocess::{PidFd, current_resources, current_user_process};
+use kprocess::{PidFd, current_files, current_user_process};
 use linux_raw_sys::general::{CLONE_FILES, CLONE_FS};
 
 /// All flags `unshare(2)` accepts: namespace creation bits plus the
@@ -51,7 +51,7 @@ fn map_unshare_error(err: UnshareError) -> KError {
 /// All validation happens in the prepare phase (privilege, `NEWNS` with a
 /// shared `fs_struct`, unsupported namespace kinds); the commit phase only
 /// installs the prepared bundle.
-pub fn sys_unshare(flags: usize) -> KResult<isize> {
+pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
     let (namespace_flags, detach_fs, detach_files) = unshare_flag_set(flags as u64)?;
 
     let process = current_user_process();
@@ -79,9 +79,9 @@ pub fn sys_unshare(flags: usize) -> KResult<isize> {
 /// namespace type (`EINVAL` otherwise). The `PidFd` channel implements the
 /// Linux 5.8 semantics: exactly one `CLONE_NEW*` bit must be given, and the
 /// caller joins that namespace of the pidfd's target process.
-pub fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
+pub(crate) fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
     let process = current_user_process();
-    let file = current_resources().get_file(fd as i32)?;
+    let file = current_files().get_file(fd as i32)?;
 
     if let Ok(nsfd) = NsFd::from_file(&file) {
         return sys_setns_nsfd(&process, nsfd, nstype as u64);

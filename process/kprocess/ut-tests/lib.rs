@@ -765,9 +765,7 @@ fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
     let parent =
         init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGCHLD));
     let fs_context = fs_context::copy_init_fs_struct();
-    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
-        ksignal::api::SignalActions::default(),
-    ));
+    let signal_actions = ksignal::api::SignalActions::default();
     let thread = build_process_thread(
         parent.clone(),
         parent_task_number.clone(),

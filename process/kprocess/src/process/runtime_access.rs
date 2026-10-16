@@ -313,7 +313,7 @@ impl Process {
     /// Unshare preparation has already performed authorization and combination
     /// checks; this only installs the precomputed namespace bundle, optionally
     /// replaces the filesystem context (`NEWNS`/`CLONE_FS`), and unshares the
-    /// file-descriptor table when `CLONE_FILES` was requested.
+    /// calling thread's file-descriptor table when `CLONE_FILES` was requested.
     ///
     /// # Errors
     ///
@@ -326,7 +326,7 @@ impl Process {
             runtime.set_fs_context(Arc::new(Mutex::new(new_fs.snapshot())));
         }
         if prepared.unshare_files() {
-            runtime.resources().unshare_fd_table()?;
+            crate::current_files().unshare_fd_table()?;
         }
         Ok(())
     }
