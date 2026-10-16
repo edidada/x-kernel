@@ -7,6 +7,7 @@
 use alloc::{string::String, vec, vec::Vec};
 use core::ffi::{c_char, c_void};
 
+use fs_context::FsStruct;
 use kerrno::{KError, KResult};
 use kprocess::{Process, current_user_process};
 use kvfs::{
@@ -194,8 +195,15 @@ fn path_mount(
 }
 
 fn lookup_mount_path(process: &Process, name: &str, cred: &kcred::Cred) -> KResult<Path> {
-    let fs_context = process.fs_context()?;
-    let fs = fs_context.lock();
+    let fs = process.fs_context()?.lock().snapshot();
+    lookup_mount_path_in(&fs, name, cred)
+}
+
+/// Resolves `name` against an already-snapshotted filesystem context.
+///
+/// `pivot_root` resolves both paths and records the old root from one snapshot,
+/// so a concurrent `chroot(2)` cannot make them disagree.
+fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResult<Path> {
     Filename::new(name).lookup_at(
         fs.root(),
         fs.pwd(),
@@ -378,11 +386,13 @@ pub fn sys_pivot_root(
     // mount-management privilege; path reachability alone is not authorization
     // (Linux `may_mount()`). Check before any tree surgery.
     require_mount_privilege(&cred)?;
-    let new_root = lookup_mount_path(&process, &new_root, &cred)?;
-    let put_old = lookup_mount_path(&process, &put_old, &cred)?;
-
-    let fs_context = process.fs_context()?;
-    let (old_root, _old_pwd) = fs_context.lock().root_and_pwd();
+    // Snapshot the caller's fs before resolving the paths: the lookup bases and
+    // the old root used by the `chroot_fs_refs` sweep must come from the same
+    // generation, or a concurrent `chroot(2)` would make them disagree.
+    let fs = process.fs_context()?.lock().snapshot();
+    let (old_root, _old_pwd) = fs.root_and_pwd();
+    let new_root = lookup_mount_path_in(&fs, &new_root, &cred)?;
+    let put_old = lookup_mount_path_in(&fs, &put_old, &cred)?;
 
     let namespace = process.mnt_ns()?;
     namespace.pivot_root(&new_root, &put_old, &old_root)?;

@@ -627,7 +627,8 @@ parent 返回已经离开的 namespace。
 `umount2(MNT_DETACH)` 摘除）。要求：`new_root` 是已注册 mount 根、`put_old` 是目录且
 位于 `new_root` 子树内——允许 `put_old == new_root`（runc 的 `pivot_root(".", ".")`
 路径），`put_old` 被其他挂载覆盖时保留被覆盖层。手术在 registry mutex + 受影响 inode 的 namespace 写锁
-（按 root 在前的固定顺序、按 Arc 去重）下执行：先把 `new_root` 从原位置摘除并恢复其覆盖
+（按 `Dentry::namespace_lock_key()` 的全序、按 Arc 去重）下执行，并在持锁后就绪地复查旧可见
+root 仍挂在其自身 parent mountpoint（读栈可能早于取锁），不满足则返回错误而不是断言：先把 `new_root` 从原位置摘除并恢复其覆盖
 层，使其压栈到 namespace 的 structural root 之上，再把原可见 root 从其被 `new_root` 覆盖的
 位置取出（其自身覆盖链仍随后续 root 保留，对应 Linux 的 stack-preserving move），最后把
 原 root 挂到 `put_old`。所有可失败校验在首次修改前完成，保证失败的 pivot 不留下半编辑的

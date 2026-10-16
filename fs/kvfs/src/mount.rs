@@ -540,6 +540,20 @@ impl MntNamespace {
             .map(|(inode, _)| inode.lock_namespace_exclusive())
             .collect();
 
+        // Re-validate under the locks: the mount stacks read while resolving the
+        // paths may have changed before these inode locks were acquired. The
+        // surgery below assumes the old visible root is attached exactly at its
+        // own parent mountpoint, so verify it and fail instead of asserting
+        // inside the critical section.
+        let (old_parent_mount, old_parent_dentry) =
+            (old_parent_path.mnt.clone(), old_parent_path.dentry.clone());
+        if !old_parent_mount
+            .child_mount_at(&old_parent_dentry)
+            .is_some_and(|mounted| Arc::ptr_eq(&mounted, &old_mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
         // 1. Detach `new_mnt` from its old parent, restoring whatever mount it
         //    covered at its original location.
         let (new_parent_mount, new_parent_dentry) =
@@ -548,23 +562,14 @@ impl MntNamespace {
 
         // 2. Stack `new_mnt` over the old visible root at the old root's own
         //    mountpoint (`attach_mnt(new_mnt, root_parent, root_mp)`),
-        //    temporarily holding the old root in its `covers` slot.
-        let (old_parent_mount, old_parent_dentry) =
-            (old_parent_path.mnt.clone(), old_parent_path.dentry.clone());
-        if let Some(covered) = old_parent_mount.install_child_mount(&old_parent_dentry, &new_mnt) {
-            *new_mnt.covers.lock() = Some(covered);
-        }
+        //    temporarily holding the old root in its `covers` slot. The
+        //    re-validation above guarantees this returns the old visible root.
+        *new_mnt.covers.lock() = old_parent_mount.install_child_mount(&old_parent_dentry, &new_mnt);
         *new_mnt.mnt_location.lock() = Some(old_parent_path);
 
         // 3. Take the old visible root out of the stack. The chain it covered
         //    at the root (usually empty) stays covered under `new_mnt`,
         //    matching Linux's stack-preserving move.
-        let covers_old = new_mnt
-            .covers
-            .lock()
-            .take()
-            .expect("pivot_root validation ensures the old visible root sits below new_mnt");
-        assert!(Arc::ptr_eq(&covers_old, &old_mnt));
         let chain_below = old_mnt.covers.lock().take();
         old_mnt.detach();
         if let Some(chain) = chain_below {

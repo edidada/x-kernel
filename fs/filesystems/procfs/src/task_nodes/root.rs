@@ -515,6 +515,11 @@ impl ProcExeLink {
     fn check_access(&self) -> VfsResult<()> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let target = task.as_thread();
+        // A zombie keeps its task object until reaped, but Linux reports
+        // `ENOENT` for its `/proc/<pid>/exe`: the image it ran is gone.
+        if target.is_exiting() || target.process().is_exited() {
+            return Err(VfsError::NotFound);
+        }
         if let Some(caller) = ktask::current().try_as_thread() {
             kprocess::ptrace::check_read_real_creds_access(caller, target)
                 .map_err(|_| VfsError::OperationNotPermitted)?;

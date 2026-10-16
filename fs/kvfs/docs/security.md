@@ -453,8 +453,9 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
   `fchown`/`fchmod` 的 owner/mode 更新在 KVFS 驻留 inode 上发布而不是被 `EOPNOTSUPP`
   拒绝。
 - pivot_root 是否在任何 mutation 前完成全部可失败校验（new_root 为注册 mount 根、
-  put_old 可从 new_root 到达且不在当前 root 文件系统内、`put_old` 为目录），并只
-  在全部 inode namespace 锁（按固定顺序、Arc 去重）就绪后改变拓扑。
+  put_old 可从 new_root 到达且不在当前 root 文件系统内、`put_old` 为目录），
+  在全部 inode namespace 锁（按 `namespace_lock_key` 全序、Arc 去重）就绪后
+  复查旧 root 仍挂在其自身 parent mountpoint，再改变拓扑。
 - pathname FIFO 时间更新是否只在一次成功的对外 I/O 后经 VFS policy 执行。
 - xattr raw flags 是否先转换为 `XattrSetFlags`，set/remove 是否检查只读 mount 并持有
   inode data lock，`trusted.*` 是否对非特权 list/get 隐藏名称和存在性，`security.*`

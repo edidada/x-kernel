@@ -353,10 +353,10 @@ pub fn exec_de_thread() -> bool {
     // Snapshot the fatal-signal counter: a genuine fatal signal delivered to an
     // already-marked sweep target must abort this exec instead of being absorbed
     // by the sweep exemption.
-    let fatal_epoch = process
+    let fatal_snapshot = process
         .signal_manager()
-        .map(|manager| manager.fatal_signal_epoch())
-        .unwrap_or_default();
+        .ok()
+        .map(|manager| manager.fatal_signal_snapshot());
 
     // A sibling can publish between the snapshot and the joins, so sweep until
     // only this thread remains. Linux `de_thread` likewise waits for every
@@ -395,9 +395,11 @@ pub fn exec_de_thread() -> bool {
     // fatal signal bumps the epoch. Sweep kills are excluded from it, so they
     // cannot abort the exec they belong to. Terminate with the racing signal so
     // the parent observes the real `WIFSIGNALED` status instead of a clean exit
-    // or the sweep's own SIGKILL.
+    // or the sweep's own SIGKILL. The epoch and signal number come from one
+    // packed snapshot, so they cannot be mismatched.
     let racing_signal = process.signal_manager().ok().and_then(|manager| {
-        (manager.fatal_signal_epoch() != fatal_epoch).then(|| manager.last_fatal_signo())
+        let (epoch, signo) = manager.fatal_signal_snapshot();
+        (fatal_snapshot.map(|snapshot| snapshot.0) != Some(epoch)).then_some(signo)
     });
     if let Some(signo) = racing_signal {
         do_exit_from_signal(signo as i32);

@@ -649,6 +649,10 @@ impl ProcessPublication {
         let tid = thread.tid();
         let slot = self.tables.read().task_table.get(&tid).cloned();
         let Some(slot) = slot else {
+            // The TID directory entry was already swept (e.g. by a concurrent
+            // `cleanup()`). Drop the stable identity entry too so no
+            // token -> dead Weak residue survives until the next sweep.
+            self.identities.write().remove(&thread.identity_token());
             return false;
         };
         if !slot.retire_if_publishes(task) {

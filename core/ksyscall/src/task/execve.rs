@@ -165,8 +165,11 @@ pub(crate) fn sys_execveat(
 
     debug!("sys_execveat <= dirfd {dirfd}, path: {path:?}, args: {args:?}");
     let process = kprocess::current_user_thread().process().clone();
-    let fs_context = process.fs_context()?;
-    let fs = fs_context.lock();
+    // Snapshot the fs context before any descriptor lookup, matching the
+    // `with_fs` pattern used by every other `*at` syscall: taking the fd-table
+    // lock under the fs lock would invert the established order, and a live
+    // fs would let a concurrent `chdir`/`chroot` move the lookup base.
+    let fs = process.fs_context()?.lock().snapshot();
     let location = if path.as_str().chars().next().is_some_and(|c| c == '/') || dirfd == AT_FDCWD {
         Filename::new(path.as_str()).lookup_at(
             fs.root(),
@@ -189,7 +192,6 @@ pub(crate) fn sys_execveat(
             &cred,
         )?
     };
-    drop(fs);
     exec_resolved(
         uctx,
         location,
@@ -200,6 +202,30 @@ pub(crate) fn sys_execveat(
         #[cfg(unittest)]
         None,
     )
+}
+
+/// Returns whether the process must terminate instead of entering a new image.
+///
+/// Called after the thread-group surgery and the address-space swap. A fatal
+/// signal delivered during that window, or a concurrent `exit_group(2)`, must be
+/// taken here so `execve` never returns a live entry point for a dying process.
+/// `fatal_snapshot` is the packed fatal-signal snapshot taken before the surgery.
+fn abort_if_terminating(
+    process: &Arc<kprocess::Process>,
+    fatal_snapshot: Option<(u32, u32)>,
+) -> bool {
+    if let Ok(manager) = process.signal_manager() {
+        let (epoch, signo) = manager.fatal_signal_snapshot();
+        if fatal_snapshot.map(|snapshot| snapshot.0) != Some(epoch) {
+            posix_process::do_exit(signo as i32, true);
+            return true;
+        }
+    }
+    if process.is_group_exited() {
+        posix_process::do_exit(process.exit_code(), true);
+        return true;
+    }
+    false
 }
 
 /// Loads `argv`/`envp` (NUL-terminated pointer arrays) into owned strings.
@@ -277,6 +303,13 @@ fn exec_request(
     // this is the sole surviving non-leader thread: the group pid must move onto
     // it before the image is installed, or number-indexed lookups (pidfd,
     // procfs, `tgkill`) would keep missing the survivor.
+    // Snapshot the fatal-signal counter before the thread-group surgery so a
+    // fatal signal (or group exit) arriving during it is detected before the
+    // new image is entered.
+    let fatal_snapshot = process
+        .signal_manager()
+        .ok()
+        .map(|manager| manager.fatal_signal_snapshot());
     let needs_takeover = kprocess::scheduler::process_task_count(process.as_ref()) > 1
         || thread.tid() != process.pid();
     if needs_takeover && exec_de_thread() {
@@ -372,6 +405,14 @@ fn exec_request(
     // This process no longer uses the old mappings, even if VM-sharing peers
     // retain them. Drop its stale attachment bookkeeping before new user entry.
     posix_ipc::SHM_MANAGER.lock().clear_proc_shm(process.pid());
+
+    // A fatal signal or group exit may have arrived after `exec_de_thread`'s own
+    // check. Take it here instead of entering a program that is already doomed;
+    // the trap-return drain would catch it, but this keeps the exec boundary
+    // explicit and never returns a live entry point for a dying process.
+    if abort_if_terminating(&process, fatal_snapshot) {
+        return Ok(0);
+    }
 
     // execve replaces the whole user register context.  Do not inherit any
     // general-purpose register of the old program: the x86_64 `execve`

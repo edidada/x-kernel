@@ -140,7 +140,7 @@ pub(crate) fn sys_prctl(
         PR_GET_PDEATHSIG => {
             // Linux kernel/sys.c: `put_user(me->pdeath_signal, (int __user *)arg2)`.
             let signal = kprocess::current_user_process().pdeath_signal();
-            write_vm_mem(arg2 as _, &signal.to_ne_bytes())?;
+            write_vm_mem(arg2 as _, &[signal])?;
         }
         PR_SET_PDEATHSIG => {
             // Linux `valid_signal(arg2)`: 0 clears, otherwise 1..=_NSIG (64,

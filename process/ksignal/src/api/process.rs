@@ -10,7 +10,7 @@ use alloc::{
 use core::{
     array,
     ops::{Index, IndexMut},
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use kerrno::{KError, KResult};
@@ -102,16 +102,15 @@ pub struct ProcessSignalManager {
     /// Fast path indicator for pending signals
     pub(crate) has_pending: AtomicBool,
 
-    /// Monotonic counter bumped whenever a fatal signal is accepted for delivery.
+    /// Packs the fatal-signal counter (high 32 bits) and the signal number of
+    /// the last accepted fatal signal (low 32 bits) into one word.
     ///
-    /// `exec_de_thread` snapshots it and aborts the exec if it changed during the
-    /// sibling sweep, so a genuine fatal signal delivered to an already-marked
-    /// sweep target still terminates the process instead of being absorbed.
-    fatal_signal_epoch: AtomicU32,
-
-    /// Signal number of the last accepted fatal signal, paired with
-    /// [`Self::fatal_signal_epoch`].
-    last_fatal_signo: AtomicU32,
+    /// `exec_de_thread` snapshots it and aborts the exec if the counter changed
+    /// during the sibling sweep, so a genuine fatal signal delivered to an
+    /// already-marked sweep target still terminates the process instead of being
+    /// absorbed. Packing both halves means a reader can never pair an old epoch
+    /// with a newer signal.
+    fatal_signal: AtomicU64,
 }
 
 /// Prepared Linux-style `SIGCHLD` child-exit notification.
@@ -160,8 +159,7 @@ impl ProcessSignalManager {
             default_restorer,
             children: SpinNoIrq::new(Vec::new()),
             has_pending: AtomicBool::new(false),
-            fatal_signal_epoch: AtomicU32::new(0),
-            last_fatal_signo: AtomicU32::new(0),
+            fatal_signal: AtomicU64::new(0),
         }
     }
 
@@ -637,24 +635,32 @@ pub(super) fn signal_is_fatal(actions: &SignalActions, signo: Signo) -> bool {
 impl ProcessSignalManager {
     /// Records that a fatal signal was accepted for delivery.
     ///
-    /// `signo` is stored before the counter is bumped, so `exec_de_thread`
-    /// observes the matching signal with the new epoch.
+    /// The counter is bumped and `signo` stored in one atomic update, so a
+    /// reader never observes the new epoch with an older signal number.
     pub fn note_fatal_signal(&self, signo: Signo) {
-        self.last_fatal_signo.store(signo as u32, Ordering::Release);
-        self.fatal_signal_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut current = self.fatal_signal.load(Ordering::Acquire);
+        loop {
+            let epoch = ((current >> 32) as u32).wrapping_add(1);
+            let next = (u64::from(epoch) << 32) | u64::from(signo as u32);
+            match self.fatal_signal.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
-    /// Returns the current fatal-signal counter.
+    /// Returns one snapshot of the fatal-signal counter and last signal number.
     ///
-    /// `exec_de_thread` snapshots it around the sibling sweep; a change means a
-    /// genuine fatal signal raced the sweep and must win over the exec.
-    pub fn fatal_signal_epoch(&self) -> u32 {
-        self.fatal_signal_epoch.load(Ordering::Acquire)
-    }
-
-    /// Returns the signal number paired with the latest epoch bump.
-    pub fn last_fatal_signo(&self) -> u32 {
-        self.last_fatal_signo.load(Ordering::Acquire)
+    /// `exec_de_thread` takes it around the sibling sweep; a counter change
+    /// means a genuine fatal signal raced the sweep and must win over the exec.
+    pub fn fatal_signal_snapshot(&self) -> (u32, u32) {
+        let raw = self.fatal_signal.load(Ordering::Acquire);
+        ((raw >> 32) as u32, raw as u32)
     }
 
     /// Finds a suitable thread and reports whether any live thread blocks it.
