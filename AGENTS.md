@@ -55,9 +55,12 @@ Major areas:
 - `core/`: core runtime, syscall, tracing, and services.
 - `mm/`: memory management and address-space abstractions.
 - `drivers/`: the driver framework and concrete drivers.
-  - `core/`: device model (`driver-core`), host service bridge
-    (`driver-host`), composition root (`driver-compose`).
-  - `common/`: cross-subsystem foundations (`device-class`, `devnode`).
+  - `base/`: device model (`driver-base`) incl. the class machinery;
+    `host/`: host service bridge (`driver-host`); `init/`: composition
+    root with initcall levels (`driver-init`).
+  - `common/`: cross-subsystem foundations (`devnode`); the class layer
+    lives in `driver-base::class` with family instantiation in
+    `subsystems/*`.
   - `subsystems/`: per-class APIs and services
     (block/char/display/hwrng/input/net/vsock).
   - `drv/`: concrete drivers, one subsystem crate per family, one module
@@ -67,7 +70,7 @@ Major areas:
   - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing.
   - `integration/`: framework -> kernel facilities (`uevent-netlink`); the
     kernel-capabilities -> framework direction is implemented by the
-    provider inside `core/driver-host`.
+    provider inside `drivers/host`.
 - `platforms/`: platform glue and defconfigs.
 - `process/`, `task/`, `fs/`, `io/`, `net/`, and `tee/`: subsystem crates.
 - `util/`: shared utility crates such as `klazy`.
@@ -105,8 +108,8 @@ ownership boundaries.
 - Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
   driver work. It states the rules (L0-a family-agnostic core, L0-b
   host-free contracts, L1 single resource acquisition path) and the exception
-  register (L2). `bus/`, `firmware/`, `platform/`, `core/driver-host`,
-  `core/driver-compose`, and `integration/` are host-side trees by role and
+  register (L2). `bus/`, `firmware/`, `drivers/host`,
+  `drivers/init`, and `integration/` are host-side trees by role and
   are out of scope for L0/L1. `kirq`'s type vocabulary (`IrqTrigger`,
   `IrqController`, `IrqDomainId`) is common and may be used anywhere; its
   registration API may not be called from `drv/**`.

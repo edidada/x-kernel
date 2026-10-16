@@ -14,27 +14,37 @@ The normative rules are in
 ## Layers
 
 ```text
-                core/  device model + host bridge + composition root
+                base/  the device model: device, driver, bus, class, domain, devres
                ┌──────────────────────────────────────┐
-               │ driver-core / driver-host            │
-               │ driver-compose                       │
+               │ driver-base / driver-host            │
+               │ driver-init (initcall levels)        │
                └──────────────────┬───────────────────┘
                                   │
       ┌───────────────┬───────────┴───────────┬─────────────────┐
       ▼               ▼                       ▼                 ▼
- common/         subsystems/              drv/             bus/ firmware/
- (cross-          (per-class contracts      (one module      (PCI access,
-  subsystem        + class services,        per driver,      DT/ACPI/FDT
-  foundations:     e.g. block dispatch)     family crates)   parsing)
-         │                    │
-  device-class,         └────► driver-host provider ◄────────┘
-  devnode)                     (capability backend bridge:
-                                memspace / kirq / kdma / khal)
-                                        │
-                                integration/
-                                (uevent-netlink)
+   common/        subsystems/              drv/             bus/ firmware/
+   (devnode:      (per-class stack:        (one module      (PCI access,
+    node + uevent  traits + class API       per driver,      DT/ACPI/FDT,
+    projection)    + dispatch, e.g. block)  family crates)   DICE handover)
+         │                │                    │
+         │                └────► driver-host provider ◄────────┘
+         │                       (capability backend bridge:
+         │                        memspace / kirq / kdma / khal)
+         │                                │
+         └────► driver-init (composition root, initcall levels)
 ```
 
+One device object, one class story per subsystem:
+`driver-base` owns the model and the class machinery (registry, drain,
+`class_api!`); each `subsystems/*` crate owns its whole class stack —
+trait, `publish_*`/`subscribe_*` API, hooks (`ClassHooks`), node
+projection. There is no separate class crate. Consumers import family
+items from their subsystem and model types from `driver-base`.
+
+Serial: `drv/serial/serial-core` is the UART family library (hardware,
+early-port handoff); `console/` is the printk-side consumer.
+`clocksource/`, `irqchip/`, `rtc/`, `perf/` are kernel-integrated
+drivers outside the model; `x86-apic` lives in `arch/`.
 Host-side trees — `core/driver-host`, `core/driver-compose`, `bus/`,
 `firmware/`, `platform/`, `integration/` — may use host-kernel crates freely;
 that is their role. The L0/L1 rules apply to `core/driver-core`, `common/`,
@@ -44,9 +54,9 @@ that is their role. The L0/L1 rules apply to `core/driver-core`, `common/`,
 
 | Crate | Package | Role |
 |------|------|------|
-| `core/driver-core` | `driver-core` | The device model: bus/device/driver contracts, const id tables, deferred probe, the device domain, extension services. Family-agnostic by construction (rule L0-a). |
-| `core/driver-host` | `driver-host` | Per-device services (`DeviceServices`), the resource provider binding them to `memspace`/`kirq`/`kdma`/`khal` (formerly the `device-res` stack), the virtio transport extension and HAL, and the clock registry. |
-| `core/driver-compose` | `driver-compose` | Composition root: host runtime install, driver registration, DT/PCI enumeration into the domain. Called once from `kruntime`. |
+| `base` | `driver-base` | The device model: bus/device/driver contracts, const id tables, deferred probe, the device domain, extension services, the devres front/back axis, and the class machinery (registry, drain, `class_api!`). Family-agnostic by construction (rule L0-a). |
+| `host` | `driver-host` | Per-device services (`DeviceServices`), the resource provider binding them to `memspace`/`kirq`/`kdma`/`khal` (formerly the `device-res` stack), the virtio transport extension and HAL, and the clock registry. |
+| `init` | `driver-init` | Composition root with explicit initcall levels: L1 host services → L2 subsystem cores → L3 drivers → L4 enumeration → L5 probe storm. Called once from `kruntime`. |
 
 ## Cross-Subsystem Foundations (`common/`)
 
@@ -58,7 +68,7 @@ host-kernel-free (rule L0-b), which is what lets the model be tested against
 | Crate | Package | Role |
 |------|------|------|
 | `common/devnode` | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, and the udev-visible uevent payload format. |
-| `common/device-class` | `device-class` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions, the `with_available` data-plane gate. |
+| `subsystems/*` | `subsys-*` | Per-class stack: trait + class API (publish/find/subscribe) + hooks + node projection; `drv/serial/serial-core` is the UART family library. |
 
 ## Per-Class Subsystems (`subsystems/`)
 

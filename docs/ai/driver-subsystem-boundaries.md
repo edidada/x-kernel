@@ -55,7 +55,7 @@ core/driver-host (the host bridge)
 | Tree | Host-side by definition? | Rules |
 |---|---|---|
 | `core/driver-core` | no — must stay host-agnostic AND family-agnostic | L0-a, L0-b |
-| `common/` (`device-class`, `devnode`) | no | L0-b, L1 |
+| `common/` (`devnode`) | no | L0-b, L1 |
 | `subsystems/` **contracts** (traits, published types) | no | L0-b |
 | `subsystems/` **services** (e.g. `block::dispatch`) | yes — see L0-b | L1 |
 | `drv/` (concrete drivers + family libraries) | no | L1, L2 |
@@ -80,7 +80,7 @@ with the model's whole test suite behind it. Every family-specific method added
 there is a change that risks every already-transcribed driver.
 
 Check: `grep -rniE 'virtio|nvme|ahci|sdhci|mmc|i2c|usb|pl011|ns16550'
-drivers/core/driver-core/src` must return comment lines only. `spi` is not in
+drivers/base/src` must return comment lines only. `spi` is not in
 the mechanical pattern because it collides with `spin`/`kspin`/`SpinNoPreempt`;
 an SPI bus added to the core is caught by the review checklist below instead.
 
@@ -97,7 +97,7 @@ The distinction that makes the model testable:
 | `driver-core::DeviceServices` and friends | ✅ (this is why `MockServices` exists) | — |
 | `subsystems/block` `BlockCompletionOperations`, `BlockWaiter`, `BlockSignals` | ✅ | — |
 | `subsystems/block::dispatch::{wait,reclaimer}` | — | ✅ |
-| `common/{device-class,devnode}` | ✅ | — |
+| `common/{devnode}` | ✅ | — |
 
 A **contract** is a trait a driver implements or a type it publishes. A
 **service** is an implementation the subsystem owns and runs. Contracts stay
@@ -192,8 +192,8 @@ See `drivers/README.md` for the current inventory.
 - **`core/`** — `driver-core` (model), `driver-host` (services + extensions +
   the resource provider), `driver-compose` (composition root, called once from
   `kruntime`).
-- **`common/`** — cross-subsystem foundations only: `device-class` (typed
-  class publication), `devnode` (userland node projection).
+- **`common/`** — cross-subsystem foundations only: `devnode`
+  (userland node projection + node classes).
 - **`subsystems/`** — per-class APIs and class services: `block`, `char`,
   `display`, `hwrng`, `input`, `net`, `vsock`.
 - **`drv/`** — concrete drivers, one subsystem crate per family, one module
