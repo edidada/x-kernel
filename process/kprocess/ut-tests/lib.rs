@@ -874,7 +874,9 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         &thread.process().mnt_ns().expect("mnt after")
     ));
 
-    // Commit respects the CLONE_FILES request.
+    // CLONE_FILES commits in two places: the prepared bundle installs on the
+    // process, then the descriptor-table detach runs on the calling thread
+    // (the syscall adapter's step). The fixture thread plays the caller here.
     let prepared_files = thread
         .process()
         .nsproxy()
@@ -890,10 +892,18 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
             &thread.process().fs_context().expect("fs context").lock(),
         )
         .expect("files-only unshare prepares");
+    assert!(
+        prepared_files.unshare_files(),
+        "prepare must record the CLONE_FILES request for the commit phase"
+    );
     thread
         .process()
         .apply_prepared_unshare(prepared_files)
-        .expect("files unshare commits");
+        .expect("files unshare bundle commits");
+    thread
+        .files()
+        .unshare_fd_table()
+        .expect("thread fd-table detach commits");
 
     parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
     parent.free();

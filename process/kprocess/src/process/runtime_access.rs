@@ -311,22 +311,20 @@ impl Process {
     /// Applies a validated [`kns::PreparedUnshare`] bundle to this process.
     ///
     /// Unshare preparation has already performed authorization and combination
-    /// checks; this only installs the precomputed namespace bundle, optionally
-    /// replaces the filesystem context (`NEWNS`/`CLONE_FS`), and unshares the
-    /// calling thread's file-descriptor table when `CLONE_FILES` was requested.
+    /// checks; this only installs the precomputed namespace bundle and
+    /// optionally replaces the filesystem context (`NEWNS`/`CLONE_FS`). The
+    /// `CLONE_FILES` descriptor-table detach is thread-owned state: the syscall
+    /// adapter commits it on the calling thread after this bundle install, so
+    /// sibling threads keep their own bindings.
     ///
     /// # Errors
     ///
-    /// Returns [`KError::NoSuchProcess`] when the runtime is gone, or the
-    /// descriptor-table unshare error when `CLONE_FILES` was requested.
+    /// Returns [`KError::NoSuchProcess`] when the runtime is gone.
     pub fn apply_prepared_unshare(&self, prepared: kns::PreparedUnshare) -> KResult<()> {
         let runtime = self.runtime()?;
         runtime.set_nsproxy(prepared.nsproxy().clone());
         if let Some(new_fs) = prepared.new_fs() {
             runtime.set_fs_context(Arc::new(Mutex::new(new_fs.snapshot())));
-        }
-        if prepared.unshare_files() {
-            crate::current_files().unshare_fd_table()?;
         }
         Ok(())
     }

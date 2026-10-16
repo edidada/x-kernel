@@ -49,8 +49,10 @@ fn map_unshare_error(err: UnshareError) -> KError {
 /// (`unshare(2)`).
 ///
 /// All validation happens in the prepare phase (privilege, `NEWNS` with a
-/// shared `fs_struct`, unsupported namespace kinds); the commit phase only
-/// installs the prepared bundle.
+/// shared `fs_struct`, unsupported namespace kinds). The commit phase installs
+/// the prepared bundle on the process, then unshares the calling thread's
+/// descriptor table when `CLONE_FILES` was requested — the fd table is
+/// thread-owned, so the detach must run on this thread's own binding.
 pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
     let (namespace_flags, detach_fs, detach_files) = unshare_flag_set(flags as u64)?;
 
@@ -69,7 +71,11 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
             &fs_context.lock(),
         )
         .map_err(map_unshare_error)?;
+    let unshare_files = prepared.unshare_files();
     process.apply_prepared_unshare(prepared)?;
+    if unshare_files {
+        current_files().unshare_fd_table()?;
+    }
     Ok(0)
 }
 
