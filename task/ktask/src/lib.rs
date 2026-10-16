@@ -45,6 +45,9 @@ mod tests_timer_routing;
 #[cfg(unittest)]
 mod tests_timer_irq;
 
+#[cfg(unittest)]
+mod tests_event_cs;
+
 #[macro_use]
 mod api;
 mod irq_wait;

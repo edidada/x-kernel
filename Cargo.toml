@@ -71,6 +71,7 @@ unwrap_used = "warn"
 expect_used = "warn"
 
 [workspace.dependencies]
+critical-section = { version = "1.2.0", features = ["restore-state-usize"] }
 # Internal: API and core services
 kfeat = { path = "api/kfeat" }
 ksignal = { path = "process/ksignal" }
@@ -114,7 +115,7 @@ kuaccess = { path = "core/kuaccess" }
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
 krcu = { path = "task/krcu" }
-kspin = { path = "task/kspin" }
+kspin = { path = "task/kspin", features = ["critical-section-provider"] }
 ksync = { path = "task/ksync" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
 kworkqueue_ng = { path = "task/kworkng/crates/kworkqueue_ng" }
@@ -278,7 +279,7 @@ chrono = { version = "0.4", default-features = false }
 crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
 etherparse = { version = "0.20.2", default-features = false }
-event-listener = { version = "=5.4.1", default-features = false }
+event-listener = { version = "=5.4.2", default-features = false, features = ["critical-section"] }
 extern-trait = "0.2"
 fatfs = { version = "0.1.0-pre.0", default-features = false, package = "axfatfs" }
 hashbrown = "0.16"
