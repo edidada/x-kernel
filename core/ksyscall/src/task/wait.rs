@@ -20,7 +20,8 @@ use kpoll::PollRegistrations;
 use kprocess::{Pid, Process, wait_reap, wait_reap::WaitedChild};
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
-    __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED, siginfo_t,
+    __WALL, __WCLONE, __WNOTHREAD, P_ALL, P_PGID, P_PID, P_PIDFD, WCONTINUED, WEXITED, WNOHANG,
+    WNOWAIT, WUNTRACED, siginfo_t,
 };
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_types::{UserConstPtr, UserPtr};
@@ -286,25 +287,25 @@ pub(crate) fn sys_waitid(
         return Err(KError::from(LinuxError::EINVAL));
     }
 
-    // Linux `idtype_t`: P_ALL=0, P_PID=1, P_PGID=2, P_PIDFD=3.
+    // Linux `idtype_t`, matching the `P_*` constants (`u32`).
     let selector = match idtype {
-        0 => WaitPid::Any,
-        1 => {
+        P_ALL => WaitPid::Any,
+        P_PID => {
             if id == 0 {
                 return Err(KError::from(LinuxError::EINVAL));
             }
-            WaitPid::Pid(id as _)
+            WaitPid::Pid(id)
         }
-        2 => {
+        P_PGID => {
             if id == 0 {
                 // Linux: `P_PGID` with id 0 waits on the caller's own group.
                 let current_thread = kprocess::current_user_thread();
-                WaitPid::Pgid(current_thread.process().group().pgid() as _)
+                WaitPid::Pgid(current_thread.process().group().pgid())
             } else {
-                WaitPid::Pgid(id as _)
+                WaitPid::Pgid(id)
             }
         }
-        3 => {
+        P_PIDFD => {
             // P_PIDFD: `id` is a pidfd file descriptor referring to a process.
             // Linux: a negative `id` is `EINVAL`, a closed or invalid descriptor
             // is `EBADF`, and a valid descriptor that is not a pidfd is `EINVAL`.
