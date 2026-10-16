@@ -329,3 +329,20 @@ pub unsafe fn force_unlock(&self)
 - [ ] `SpinRaw` 的新调用点已经有外部 IRQ/抢占不可重入保证。
 - [ ] 不在持有自旋锁期间执行可能睡眠、阻塞 I/O 或长时间循环的操作。
 - [ ] defconfig 的 `smp` / `preempt` feature 与实际平台模型一致。
+
+
+## Experimental event-listener 5.4.2 integration
+
+The opt-in `critical-section-provider` feature implements the process-wide
+critical-section ABI using one global SMP owner and a nesting depth. It saves
+local IRQ state and disables preemption before acquiring ownership, permits
+nesting on the same CPU, and releases ownership before restoring local state.
+The provider requires initialized logical CPU identity, excludes NMI callers,
+and must be the only critical-section provider linked into the kernel.
+
+This is an evaluation patch, not a completed production integration. All
+event-listener objects now share the global exclusion domain. Waker callbacks
+run within that domain; callers must not sleep or introduce an inverse lock
+order. Reentry into the same event's RefCell is not supported. Further review
+of callback lock order, SMP contention, IRQ latency, boot timing and all
+architectures is required before deployment.

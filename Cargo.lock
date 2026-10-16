@@ -1442,11 +1442,11 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
+ "critical-section",
  "pin-project-lite",
 ]
 
@@ -2957,6 +2957,7 @@ dependencies = [
 name = "kspin"
 version = "0.3.0-dev"
 dependencies = [
+ "critical-section",
  "karch",
  "kcpu_slot",
  "kiface",
@@ -3036,6 +3037,7 @@ name = "ktask"
 version = "0.3.0-dev"
 dependencies = [
  "backtrace",
+ "critical-section",
  "event-listener",
  "futures-util",
  "karch",

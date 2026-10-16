@@ -85,6 +85,9 @@
 
 extern crate alloc;
 
+#[cfg(all(target_os = "none", feature = "critical-section-provider"))]
+mod critical_section_provider;
+
 mod guard;
 #[cfg(unittest)]
 #[path = "../ut-tests/kspin_unittest.rs"]

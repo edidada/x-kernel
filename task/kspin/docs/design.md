@@ -314,3 +314,20 @@ guard 类型参数把临界区策略编码进类型：
 若 guard 被 `mem::forget`，
 锁保持 locked 状态，
 除非调用者使用 `unsafe force_unlock`。
+
+
+## Experimental event-listener 5.4.2 integration
+
+The opt-in `critical-section-provider` feature implements the process-wide
+critical-section ABI using one global SMP owner and a nesting depth. It saves
+local IRQ state and disables preemption before acquiring ownership, permits
+nesting on the same CPU, and releases ownership before restoring local state.
+The provider requires initialized logical CPU identity, excludes NMI callers,
+and must be the only critical-section provider linked into the kernel.
+
+This is an evaluation patch, not a completed production integration. All
+event-listener objects now share the global exclusion domain. Waker callbacks
+run within that domain; callers must not sleep or introduce an inverse lock
+order. Reentry into the same event's RefCell is not supported. Further review
+of callback lock order, SMP contention, IRQ latency, boot timing and all
+architectures is required before deployment.

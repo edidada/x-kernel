@@ -16,12 +16,14 @@ categories = ["os", "no-std"]
 ignored = ["linkme"]
 
 [features]
+critical-section-provider = ["dep:critical-section"]
 preempt = []
 smp = []
 stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
 default = []
 
 [dependencies]
+critical-section = { workspace = true, optional = true }
 kiface = { workspace = true }
 karch = { workspace = true }
 kcpu_slot = { workspace = true }
