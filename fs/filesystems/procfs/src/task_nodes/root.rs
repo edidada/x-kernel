@@ -740,6 +740,7 @@ fn make_thread_dir(
 enum ProcNsKind {
     Mnt,
     Pid,
+    PidForChildren,
     Net,
     Ipc,
     Uts,
@@ -748,9 +749,10 @@ enum ProcNsKind {
 }
 
 impl ProcNsKind {
-    const ALL: [ProcNsKind; 7] = [
+    const ALL: [ProcNsKind; 8] = [
         Self::Mnt,
         Self::Pid,
+        Self::PidForChildren,
         Self::Net,
         Self::Ipc,
         Self::Uts,
@@ -762,6 +764,7 @@ impl ProcNsKind {
         match self {
             Self::Mnt => "mnt",
             Self::Pid => "pid",
+            Self::PidForChildren => "pid_for_children",
             Self::Net => "net",
             Self::Ipc => "ipc",
             Self::Uts => "uts",
@@ -785,7 +788,11 @@ fn task_namespace_inode(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<u64> {
     let process = task.as_thread().process();
     Ok(match kind {
         ProcNsKind::Mnt => process.mnt_ns()?.id().as_u64(),
-        ProcNsKind::Pid => process.pid_ns_for_children()?.id(),
+        // `ns/pid` is the namespace the task itself lives in
+        // (task_active_pid_ns); the children slot is the separate
+        // `ns/pid_for_children` entry below.
+        ProcNsKind::Pid => process.active_pid_namespace().id(),
+        ProcNsKind::PidForChildren => process.pid_ns_for_children()?.id(),
         ProcNsKind::Net => process.net_ns()?.id().as_u64(),
         ProcNsKind::Ipc => process.ipc_ns()?.id().as_u64(),
         ProcNsKind::Uts => process.uts_ns()?.id().as_u64(),
@@ -802,7 +809,8 @@ fn task_namespace_fd(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<kns::NsFd> 
     let process = task.as_thread().process();
     Ok(match kind {
         ProcNsKind::Mnt => kns::NsFd::Mnt(process.mnt_ns()?),
-        ProcNsKind::Pid => kns::NsFd::Pid(process.pid_ns_for_children()?),
+        ProcNsKind::Pid => kns::NsFd::Pid(process.active_pid_namespace()),
+        ProcNsKind::PidForChildren => kns::NsFd::Pid(process.pid_ns_for_children()?),
         ProcNsKind::Net => kns::NsFd::Net(process.net_ns()?),
         ProcNsKind::Ipc => kns::NsFd::Ipc(process.ipc_ns()?),
         ProcNsKind::Uts => kns::NsFd::Uts(process.uts_ns()?),

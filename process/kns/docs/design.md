@@ -57,6 +57,12 @@ object. Key behavior:
   `anon_inode:[uts_ns]`, `[ipc_ns]`, `[mnt_ns]`, `[pid_ns_for_children]`,
   `[net_ns]`, `[user_ns]`, `[cgroup_ns]`.
 - Reads return EOF, writes are denied (the fd is a capability handle only).
+- `NsFd::Pid` carries whichever PID namespace the entry named: procfs
+  `ns/pid` snapshots the task's own namespace (task_active_pid_ns) while
+  `ns/pid_for_children` snapshots the children slot, and `setns` installs
+  either into the caller's `pid_ns_for_children` slot exactly as Linux does.
+  The two entries therefore share one NsFd variant distinguished only by the
+  namespace object it pins.
 
 ## Execution context
 

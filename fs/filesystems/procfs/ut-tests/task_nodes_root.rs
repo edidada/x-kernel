@@ -96,8 +96,17 @@ fn test_maps_rewind_observes_captured_image_heap_updates() {
 
 #[def_test]
 fn test_namespace_kind_names_cover_linux_set() {
-    assert_eq!(ProcNsKind::ALL.len(), 7);
-    for name in ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"] {
+    assert_eq!(ProcNsKind::ALL.len(), 8);
+    for name in [
+        "mnt",
+        "pid",
+        "pid_for_children",
+        "net",
+        "ipc",
+        "uts",
+        "user",
+        "cgroup",
+    ] {
         assert_eq!(
             ProcNsKind::from_name(name).map(ProcNsKind::name),
             Some(name),

@@ -899,7 +899,9 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
 
     // The exit-signal payload for the grandchild, as the waiting parent (the
     // nested process, whose active namespace is the child namespace)
-    // observes it.
+    // observes it. The exact child-namespace number is the contract; the
+    // root number is deliberately not compared, because the global root
+    // counter's value depends on unrelated test ordering.
     let siginfo = process_exit::child_exit_signal_info(&grand, &nested, ksignal::Signo::SIGCHLD);
     let payload = siginfo
         .as_signal_info()
@@ -909,11 +911,6 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
         payload.pid(),
         grand_child_ns_nr,
         "si_pid must carry the parent-namespace number, not the root number"
-    );
-    assert_ne!(
-        payload.pid(),
-        grand.pid(),
-        "inside a child namespace the projection differs from the root number"
     );
 
     grand.discard_unpublished();
