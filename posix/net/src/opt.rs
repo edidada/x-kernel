@@ -16,11 +16,12 @@ use alloc::{vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
+    SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
     sock_from_file,
 };
 use linux_raw_sys::net::{
-    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SOL_SOCKET, socklen_t,
+    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_TYPE, SOL_SOCKET, socklen_t,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
@@ -356,7 +357,13 @@ pub fn sys_getsockopt(
             put(optval, &mut optlen, &sys_val)?;
         };
     }
-    if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
+    if level == SOL_SOCKET && optname == SO_TYPE {
+        // `SO_TYPE` is a property of the socket itself, not a stored option.
+        // Runtime supervisors (containerd-shim, ttrpc) validate inherited
+        // descriptors with it right after spawn.
+        let sock_type = socket.socket_type();
+        put(optval, &mut optlen, &sock_type)?;
+    } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;
         socket.get_option(GetSocketOption::BindToDevice(&mut name))?;
         let buf = encode_bound_device_name(name.as_deref(), optlen as usize)?;

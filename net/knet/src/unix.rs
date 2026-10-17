@@ -308,6 +308,15 @@ impl Configurable for UnixDomainSocket {
     }
 }
 impl SocketOps for UnixDomainSocket {
+    /// Returns the `SO_TYPE` reported for this socket, matching the Unix
+    /// transport kind (stream for the ttrpc/docker sockets, datagram otherwise).
+    fn socket_type(&self) -> i32 {
+        match &self.transport {
+            UnixTransport::Stream(_) => linux_raw_sys::net::SOCK_STREAM as i32,
+            UnixTransport::Dgram(_) => linux_raw_sys::net::SOCK_DGRAM as i32,
+        }
+    }
+
     fn bind(&self, local_endpoint: SocketAddrEx) -> KResult {
         let cred = kprocess::current_cred();
         let mode = NodePermission::from_bits_truncate(0o777 & !(kprocess::current_umask() as u16));

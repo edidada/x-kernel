@@ -343,6 +343,11 @@ impl Configurable for PacketSocket {
 }
 
 impl SocketOps for PacketSocket {
+    /// Returns the `SO_TYPE` reported for this socket.
+    fn socket_type(&self) -> i32 {
+        linux_raw_sys::net::SOCK_RAW as i32
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut addr = local_addr.into_packet()?;
         validate_ifindex_or_any(addr.ifindex)?;

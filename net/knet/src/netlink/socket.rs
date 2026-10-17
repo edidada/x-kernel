@@ -221,6 +221,11 @@ impl Configurable for NetlinkSocket {
 }
 
 impl SocketOps for NetlinkSocket {
+    /// Returns the `SO_TYPE` reported for this socket.
+    fn socket_type(&self) -> i32 {
+        linux_raw_sys::net::SOCK_RAW as i32
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let addr = local_addr.into_netlink()?;
         if self.inner.protocol == NETLINK_ROUTE && addr.groups != 0 {
