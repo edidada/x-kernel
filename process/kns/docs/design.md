@@ -166,11 +166,13 @@ the tgoskits gaps):
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check covers published threads of the caller; cross-process `CLONE_FS`
   sharing is not counted (no `fs->users` counter yet).
-- **setns PID reachability**: only the reference swap is enforced; Linux's
-  requirements that the target PID namespace be the caller's active namespace
-  or one of its descendants, and the per-type `CAP_SYS_ADMIN` checks against
-  the target's owner namespace, are approximated by the single euid-0 gate at
-  the syscall boundary (there is no per-process active-ns field yet).
+- **setns PID reachability**: the syscall boundary enforces the euid-0
+  `CAP_SYS_ADMIN` gate and Linux's `pidns_install` ancestor rule — the target
+  PID namespace must be the caller's active namespace or one of its
+  descendants — which also keeps plain-fork allocation keyed on
+  `pid_ns_for_children` resolvable in the caller's namespace. What remains
+  approximate is the credential side: one euid-0 gate stands in for the
+  per-type `CAP_SYS_ADMIN` checks against each target's owner namespace.
 - **bind-mount lifecycle**: namespace files keep identity in their inode and
   can be bound, but re-opening a bound file after the owning process exits
   fails with `ESRCH`; a namespace registry (nsfs-style) is needed for the

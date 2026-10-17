@@ -17,7 +17,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
-use kns::{NamespaceFlags, NsFd, UnshareContext, UnshareError};
+use kns::{NamespaceFlags, NsFd, PidNamespace, UnshareContext, UnshareError};
 use kprocess::{PidFd, current_files, current_user_process};
 use linux_raw_sys::general::{
     CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VM,
@@ -71,6 +71,31 @@ fn map_unshare_error(err: UnshareError) -> KError {
         UnshareError::Unsupported => KError::OperationNotSupported,
         UnshareError::Mount(err) => err,
     }
+}
+
+/// Linux `pidns_install` only allows entering the caller's active PID
+/// namespace itself or one of its descendants: fork must return a usable
+/// number in the caller's namespace, and processes must not escape it. The
+/// same constraint keeps plain-fork allocation — keyed on
+/// `pid_ns_for_children` — resolvable in the caller's namespace after a
+/// `setns(CLONE_NEWPID)`.
+fn ensure_pid_ns_reachable(process: &kprocess::Process, target: &Arc<PidNamespace>) -> KResult<()> {
+    let active = process.active_pid_namespace();
+    if target.level() < active.level() {
+        return Err(KError::InvalidInput);
+    }
+    let mut ancestor = Some(target);
+    while let Some(ns) = ancestor {
+        if ns.level() == active.level() {
+            return if Arc::ptr_eq(ns, &active) {
+                Ok(())
+            } else {
+                Err(KError::InvalidInput)
+            };
+        }
+        ancestor = ns.parent();
+    }
+    Err(KError::InvalidInput)
 }
 
 /// Disconnect the calling process from parts of its namespace/share state
@@ -143,6 +168,10 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
 
     let target_mnt = match &*nsfd {
         NsFd::Mnt(ns) => Some(ns.clone()),
+        NsFd::Pid(ns) => {
+            ensure_pid_ns_reachable(process, ns)?;
+            None
+        }
         _ => None,
     };
     let new_proxy = process
@@ -197,7 +226,9 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
         } else if flag == NamespaceFlags::NEWIPC {
             swaps.push(NsFd::Ipc(target_bundle.ipc_ns().clone()));
         } else {
-            swaps.push(NsFd::Pid(target_bundle.pid_ns_for_children().clone()));
+            let ns = target_bundle.pid_ns_for_children();
+            ensure_pid_ns_reachable(process, ns)?;
+            swaps.push(NsFd::Pid(ns.clone()));
         }
     }
 
