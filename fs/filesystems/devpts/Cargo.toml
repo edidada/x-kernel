@@ -10,5 +10,9 @@ repository.workspace = true
 
 [dependencies]
 devfs.workspace = true
+log.workspace = true
 kvfs.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

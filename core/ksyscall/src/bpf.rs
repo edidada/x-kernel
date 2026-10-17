@@ -61,7 +61,7 @@ const MIN_ID_ATTR_SIZE: u32 = 4;
 
 /// Handles the subset of `bpf(2)` commands the stubbed device controller
 /// needs; see the [module documentation](self).
-pub fn sys_bpf_stub(cmd: u32, attr_addr: usize, attr_size: u32) -> KResult<isize> {
+pub(crate) fn sys_bpf_stub(cmd: u32, attr_addr: usize, attr_size: u32) -> KResult<isize> {
     warn!("bpf stub <= cmd: {cmd}, attr_size: {attr_size}");
     match cmd {
         BPF_MAP_CREATE | BPF_PROG_LOAD | BPF_LINK_CREATE => {
@@ -69,7 +69,7 @@ pub fn sys_bpf_stub(cmd: u32, attr_addr: usize, attr_size: u32) -> KResult<isize
                 return Err(KError::InvalidInput);
             }
             let file = BpfProgramPlaceholder::new_file(kprocess::current_cred())?;
-            kprocess::current_resources()
+            kprocess::current_files()
                 .add_file(file, true)
                 .map(|fd| fd as _)
         }
@@ -116,6 +116,6 @@ pub fn sys_bpf_stub(cmd: u32, attr_addr: usize, attr_size: u32) -> KResult<isize
 /// Returns `EBADF` when the caller has no fd at the given attribute offset.
 fn check_fd_at(attr_addr: usize) -> KResult<()> {
     let fd = UserConstPtr::<i32>::from(attr_addr).read_vm()?;
-    kprocess::current_resources().get_file(fd)?;
+    kprocess::current_files().get_file(fd)?;
     Ok(())
 }

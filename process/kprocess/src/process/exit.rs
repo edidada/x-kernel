@@ -368,16 +368,10 @@ impl Process {
         autoreap: bool,
         parent: Option<&Arc<Process>>,
     ) -> (bool, Option<Arc<Process>>) {
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
-                      before any process can enter exit and reparent children"
-        )]
         let reaper = self.find_child_reaper_locked();
 
         if Arc::ptr_eq(self, &reaper) {
             return (false, None);
-
         }
 
         let exit_state = if autoreap {
@@ -432,6 +426,11 @@ impl Process {
     /// themselves as subreapers so reparented container processes surface as
     /// their children instead of being adopted by init.
     fn find_child_reaper_locked(&self) -> Arc<Process> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
+                      before any process can enter exit and reparent children"
+        )]
         let init = INIT_PROC.get().unwrap();
         let mut ancestor = self.parent_relation.snapshot().0;
         while let Some(process) = ancestor {

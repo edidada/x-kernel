@@ -44,7 +44,7 @@ pub(crate) fn sys_prlimit64(
         // The credential model has no capability sets yet, so root
         // (euid 0) stands in for the capability check.
         if kprocess::current_cred().euid() != 0 {
-            let (_, old_max) = resources.rlimit_values(resource)?;
+            let old_max = resources.rlimit(resource)?.max;
             if new_limit.rlim_max > old_max || new_limit.rlim_cur > old_max {
                 return Err(KError::OperationNotPermitted);
             }

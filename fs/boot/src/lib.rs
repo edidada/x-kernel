@@ -178,6 +178,11 @@ pub fn prepare_namespace() {
     // Nothing else references the devpts crate at boot (containers mount it
     // by name at runtime), so it must be registered here both to run the
     // registration and to keep the crate's objects linked in.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&devpts::FILE_SYSTEM_TYPE)
         .expect("devpts filesystem type must register once");
 }

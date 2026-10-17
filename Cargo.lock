@@ -1204,10 +1204,11 @@ dependencies = [
 
 [[package]]
 name = "devpts"
-version = "0.2.0-rc3"
+version = "0.3.0-dev"
 dependencies = [
  "devfs",
  "kvfs",
+ "log",
  "unittest",
 ]
 

@@ -6,10 +6,10 @@
 
 use alloc::sync::Arc;
 
-use devfs::{DeviceFile, Ptmx};
+use devfs::DeviceFile;
 use kvfs::{
-    Dentry, DeviceId, DirMaker, DirMapping, NodeFlags, SimpleDir, SimpleDirLookup, SimpleFs,
-    VfsInode, VfsInodeInit,
+    CharacterDeviceRegistration, Dentry, DeviceId, DirMaker, DirMapping, NodeFlags, SimpleDir,
+    SimpleDirLookup, SimpleFs, VfsInode, VfsInodeInit, registered_character_devices,
 };
 
 /// `TTY_AUX_MAJOR`/`PTMX_MINOR`: the Unix98 ptmx device (Linux `devpts`).
@@ -18,14 +18,33 @@ const PTMX_DEVICE_ID: DeviceId = DeviceId::new(5, 2);
 /// Name of the master multiplexer node mandated by the Unix98 pty layout.
 const PTMX_NAME: &str = "ptmx";
 
-pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+pub(super) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();
-    add_device_entry(
-        &mut root,
-        PTMX_NAME,
-        DeviceFile::new_character(fs.clone(), PTMX_DEVICE_ID, Arc::new(Ptmx(fs.clone()))),
-    );
+    if let Some(device) = ptmx_device(fs.clone()) {
+        add_device_entry(&mut root, PTMX_NAME, device);
+    } else {
+        // devfs registers the shared ptmx multiplexer at boot; a devpts mount
+        // without it has no ptmx backend to project.
+        log::warn!("devpts: ptmx device {PTMX_DEVICE_ID:?} is not registered");
+    }
     SimpleDir::new_maker(fs, Arc::new(root))
+}
+
+/// Projects the devfs-registered `ptmx` multiplexer into this filesystem.
+///
+/// The registration (and therefore the PTY driver) is owned by devfs; the
+/// node only references it, so `open(2)` on either mount reaches the same
+/// multiplexer.
+fn ptmx_device(fs: Arc<SimpleFs>) -> Option<Arc<DeviceFile>> {
+    registered_character_devices()
+        .iter()
+        .find(|registration| registration.device_id() == PTMX_DEVICE_ID)
+        .map(|registration: &CharacterDeviceRegistration| {
+            DeviceFile::from_registration(fs, registration)
+        })
+        .transpose()
+        .ok()
+        .flatten()
 }
 
 /// Mirrors devfs's entry projection: a directory child that materializes the

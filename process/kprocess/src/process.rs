@@ -10,7 +10,10 @@ mod thread_membership;
 mod tree;
 
 use alloc::sync::{Arc, Weak};
-use core::{fmt, sync::atomic::{AtomicBool, AtomicU32, Ordering}};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
@@ -172,7 +175,6 @@ impl Process {
         group.exit_code = 0;
     }
 
->>>>>>> 3892e1d3a (kprocess: child subreaper + prlimit privilege check)
     /// Returns `true` if the [`Process`] is the init process.
     ///
     /// This is a convenience method for checking if the [`Process`]
