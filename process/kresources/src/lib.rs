@@ -80,14 +80,16 @@ impl ProcessResources {
     /// For an update, validation, the snapshot and replacement share one limits
     /// write lock; a failed update returns no snapshot and changes no state.
     ///
+    /// Privilege is not checked here: raising a hard limit requires
+    /// `CAP_SYS_RESOURCE`, which the syscall layer validates against the
+    /// calling task's credentials (Linux `do_prlimit()`).
+    ///
     /// Requires sleepable task context. This method does not access user memory;
     /// callers must copy inputs before calling and publish outputs after it returns.
     ///
     /// # Errors
     ///
     /// Returns `KError::InvalidInput` for an out-of-range resource or soft > hard.
-    /// Returns `KError::OperationNotPermitted` for any hard-limit increase;
-    /// capability-based increases are not supported.
     pub fn update_rlimit_and_get_old(
         &self,
         resource: u32,
@@ -96,6 +98,7 @@ impl ProcessResources {
         let Some(new_limit) = new_limit else {
             return self.rlimit(resource);
         };
+
         if resource >= RLIM_NLIMITS {
             return Err(KError::InvalidInput);
         }
@@ -105,11 +108,6 @@ impl ProcessResources {
         let old_limit = *limit;
         if new_limit.current > new_limit.max {
             return Err(KError::InvalidInput);
-        }
-        if new_limit.max > old_limit.max {
-            // Raising the hard limit requires CAP_SYS_RESOURCE.
-            // Return EPERM until proper credential checks are in place.
-            return Err(KError::OperationNotPermitted);
         }
         *limit = new_limit;
 

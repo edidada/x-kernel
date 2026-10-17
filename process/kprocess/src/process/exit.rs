@@ -368,16 +368,16 @@ impl Process {
         autoreap: bool,
         parent: Option<&Arc<Process>>,
     ) -> (bool, Option<Arc<Process>>) {
-        // TODO: child subreaper
         #[expect(
             clippy::unwrap_used,
             reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
                       before any process can enter exit and reparent children"
         )]
-        let reaper = INIT_PROC.get().unwrap();
+        let reaper = self.find_child_reaper_locked();
 
-        if Arc::ptr_eq(self, reaper) {
+        if Arc::ptr_eq(self, &reaper) {
             return (false, None);
+
         }
 
         let exit_state = if autoreap {
@@ -412,7 +412,7 @@ impl Process {
                 continue;
             };
             old_slot.clear();
-            child.attach_to_parent_slot_locked(domain, reaper, Some(Signo::SIGCHLD));
+            child.attach_to_parent_slot_locked(domain, &reaper, Some(Signo::SIGCHLD));
             if child.exit_state_locked(domain) == ProcessExitState::Dead {
                 continue;
             }
@@ -422,6 +422,28 @@ impl Process {
         }
 
         (true, reparented_zombie_parent)
+    }
+
+    /// Selects the reaper that adopts this process's orphaned children.
+    ///
+    /// Linux `find_new_reaper()`: walk the parent chain from the exiting
+    /// process upward and use the nearest child subreaper (`PR_SET_CHILD_
+    /// SUBREAPER`), falling back to the child reaper. Container runtimes set
+    /// themselves as subreapers so reparented container processes surface as
+    /// their children instead of being adopted by init.
+    fn find_child_reaper_locked(&self) -> Arc<Process> {
+        let init = INIT_PROC.get().unwrap();
+        let mut ancestor = self.parent_relation.snapshot().0;
+        while let Some(process) = ancestor {
+            if Arc::ptr_eq(&process, init) {
+                break;
+            }
+            if process.is_child_subreaper() {
+                return process;
+            }
+            ancestor = process.parent_relation.snapshot().0;
+        }
+        init.clone()
     }
 
     /// Frees a waitable zombie [`Process`]. Removes it from the parent.

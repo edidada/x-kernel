@@ -38,6 +38,18 @@ pub(crate) fn sys_prlimit64(
         })?;
     }
 
+    if let Some(new_limit) = new_limit {
+        // Linux `do_prlimit()`: raising the hard limit, or setting the soft
+        // limit beyond the current hard limit, requires `CAP_SYS_RESOURCE`.
+        // The credential model has no capability sets yet, so root
+        // (euid 0) stands in for the capability check.
+        if kprocess::current_cred().euid() != 0 {
+            let (_, old_max) = resources.rlimit_values(resource)?;
+            if new_limit.rlim_max > old_max || new_limit.rlim_cur > old_max {
+                return Err(KError::OperationNotPermitted);
+            }
+        }
+    }
     Ok(0)
 }
 
