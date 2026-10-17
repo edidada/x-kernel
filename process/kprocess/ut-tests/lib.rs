@@ -835,6 +835,94 @@ fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
 }
 
 #[def_test(serial)]
+fn test_child_exit_si_pid_projected_into_parent_namespace() {
+    // Two-level construction from the newnpid fixture: the root-namespace
+    // parent forks a CLONE_NEWPID child (visible as 1 inside the fresh
+    // namespace), and the child plain-forks a grandchild. Per the
+    // pid_ns_for_children allocation rule the grandchild's number in the
+    // child namespace differs from its root number, and si_pid must report
+    // that child-namespace view to the waiting parent.
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_800);
+    let parent =
+        init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGCHLD));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[nsi-pid-parent]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context::copy_init_fs_struct(),
+        ksignal::api::SignalActions::default(),
+        initial_cred(),
+    );
+    let task =
+        TaskInner::new_user(|| {}, String::from("nsi-pid-parent"), parent_task_number, thread);
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::NEWPID,
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_NEWPID fork should prepare");
+    let nested = prepared.process().clone();
+    let (nested_thread, nested_number) = prepared.into_parts();
+    let nested_pid_ns = nested
+        .pid_ns_for_children()
+        .expect("nested runtime exposes the pid namespace");
+    assert_eq!(nested_number.number_in(&nested_pid_ns), Some(1));
+
+    // The nested child forks a grandchild WITHOUT CLONE_NEWPID: the
+    // grandchild is allocated inside the inherited child namespace.
+    let grand_prepared = nested_thread
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("plain fork inside the child namespace should prepare");
+    let grand = grand_prepared.process().clone();
+    let (_, grand_number) = grand_prepared.into_parts();
+    let grand_child_ns_nr = grand_number
+        .number_in(&nested_pid_ns)
+        .expect("grandchild identity holds a projection in the child namespace");
+
+    // The exit-signal payload for the grandchild, as the waiting parent (the
+    // nested process, whose active namespace is the child namespace)
+    // observes it.
+    let siginfo = process_exit::child_exit_signal_info(&grand, &nested, ksignal::Signo::SIGCHLD);
+    let payload = siginfo
+        .as_signal_info()
+        .child_exit()
+        .expect("child-exit signal should carry sigchld payload");
+    assert_eq!(
+        payload.pid(),
+        grand_child_ns_nr,
+        "si_pid must carry the parent-namespace number, not the root number"
+    );
+    assert_ne!(
+        payload.pid(),
+        grand.pid(),
+        "inside a child namespace the projection differs from the root number"
+    );
+
+    grand.discard_unpublished();
+    nested.discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
 fn test_apply_prepared_unshare_installs_namespace_bundle() {
     let (parent, task) = build_prepared_test_user_task();
     let thread = task.as_thread();
@@ -1531,9 +1619,11 @@ fn test_child_exit_signal_info_carries_linux_child_payload() {
     let task = prepare_user_task(prepared).publish().unwrap().activate();
     process_exit::finish_thread_exit(&child, &task, 9 << 8);
 
-    // The parentless fixture falls back to itself as its own parent; the
-    // root-namespace projection then equals the root number.
-    let parent = child.parent().unwrap_or_else(|| child.clone());
+    // The fixture forks from init, so the parent is init in the root
+    // namespace; the projection there equals the root number. The
+    // namespace-relative path is covered by
+    // test_child_exit_si_pid_projected_into_parent_namespace.
+    let parent = child.parent().expect("fixture child keeps its init parent");
     let siginfo = process_exit::child_exit_signal_info(&child, &parent, ksignal::Signo::SIGCHLD);
     let payload = siginfo
         .as_signal_info()
