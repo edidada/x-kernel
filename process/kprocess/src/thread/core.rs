@@ -623,6 +623,13 @@ impl Thread {
         self.task_number.lock().clone()
     }
 
+    /// Returns the PID namespace this task lives in — the namespace whose
+    /// number `getpid(2)` reports (Linux `task_active_pid_ns`). Fixed at
+    /// creation; `setns(CLONE_NEWPID)` does not move it.
+    pub fn active_pid_ns(&self) -> Arc<kidentity::PidNamespace> {
+        self.task_number().active_ns().clone()
+    }
+
     /// Adopts `number` as this thread's current number binding.
     ///
     /// Used by the `exec` leader takeover after the global number directory has

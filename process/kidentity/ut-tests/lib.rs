@@ -26,6 +26,10 @@ fn child_pid_namespace_gets_pid_one() {
 
     assert_eq!(handle.nr_in(&child), Some(1));
     assert!(handle.root_nr() >= 2);
+    // The active-namespace view is what getpid(2) reports: the deepest
+    // projection, not the root number.
+    assert_eq!(handle.active_nr(), 1);
+    assert!(Arc::ptr_eq(handle.active_ns(), &child));
 }
 
 #[def_test]

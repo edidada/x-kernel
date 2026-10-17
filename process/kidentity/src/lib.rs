@@ -320,6 +320,47 @@ impl PidHandle {
             .or_else(|| ns.is_root().then(|| self.root_nr()))
     }
 
+    /// Returns the number in the namespace the task lives in: the deepest
+    /// (most nested) projection installed at creation time, i.e. the
+    /// `task_active_pid_ns(current)` view that `getpid(2)` reports.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle carries no projection; both public constructors
+    /// maintain that invariant.
+    pub fn active_nr(&self) -> u32 {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Both PID-handle constructors install \
+                      at least the active-namespace projection"
+        )]
+        self.numbers
+            .first()
+            .expect("pid handle must always carry its active-namespace number")
+            .nr
+    }
+
+    /// Returns the namespace the task lives in — the deepest projection's
+    /// owner, analogous to Linux `task_active_pid_ns`. `setns(CLONE_NEWPID)`
+    /// changes `pid_ns_for_children` instead, so this stays fixed for the
+    /// handle's lifetime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle carries no projection; both public constructors
+    /// maintain that invariant.
+    pub fn active_ns(&self) -> &Arc<PidNamespace> {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Both PID-handle constructors install \
+                      at least the active-namespace projection"
+        )]
+        self.numbers
+            .first()
+            .map(|upid| upid.ns())
+            .expect("pid handle must always carry its active-namespace number")
+    }
+
     /// Returns the number an observer in `observer` sees for this identity.
     ///
     /// The observer walk starts at `observer` and climbs to its root, returning
