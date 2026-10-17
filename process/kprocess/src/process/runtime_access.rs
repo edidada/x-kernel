@@ -340,23 +340,60 @@ impl Process {
     ///
     /// Returns [`KError::NoSuchProcess`] when the runtime is gone, or the
     /// filesystem-context retarget error when the mount namespace's visible
-    /// root is not a directory.
+    /// root is not a directory. Nothing is committed when an error is
+    /// returned: the retarget is drafted on a snapshot before the bundle
+    /// install.
+    ///
+    /// # Examples
+    ///
+    /// The `kns` prepare/validate phase runs first; this commit installs the
+    /// already-validated result. For `setns(2)` on a mount-namespace fd, the
+    /// commit also retargets root/pwd into the target namespace:
+    ///
+    /// ```no_run
+    /// # fn enter_mount_ns(
+    /// #     process: &kprocess::Process,
+    /// #     nsfd: alloc::sync::Arc<kns::NsFd>,
+    /// # ) -> kerrno::KResult<()> {
+    /// // The NsFd channel already checked `nstype` and the caller's privilege.
+    /// let target_mnt = match &*nsfd {
+    ///     kns::NsFd::Mnt(ns) => Some(ns.clone()),
+    ///     _ => None,
+    /// };
+    /// let new_proxy = process
+    ///     .nsproxy()?
+    ///     .with_namespace(&nsfd)
+    ///     .expect("kind was validated before the commit");
+    /// process.apply_setns(new_proxy, target_mnt)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn apply_setns(
         &self,
         new_proxy: Arc<kns::NsProxy>,
         target_mnt: Option<Arc<kns::MntNamespace>>,
     ) -> KResult<()> {
         let runtime = self.runtime()?;
+        // The filesystem retarget is the only fallible step, so it is drafted
+        // against a snapshot before anything is committed: a failed
+        // `CLONE_NEWNS` switch must leave the namespace bundle and the fs
+        // context exactly as they were.
+        let new_fs = match target_mnt {
+            Some(mnt_ns) => {
+                let current_fs = runtime.fs_context().ok_or(KError::NoSuchProcess)?;
+                let mut fs = current_fs.lock().snapshot();
+                // kvfs::Path carries dentry/mount identity rather than a comparable
+                // value, so the fs root and pwd are both retargeted to the target
+                // namespace's visible root. This mirrors the same-namespace reentry
+                // case that bind-mounted sandbox namespaces exercise.
+                let root = mnt_ns.visible_root_path();
+                fs.replace_root_and_pwd(root.clone(), root)?;
+                Some(fs)
+            }
+            None => None,
+        };
         runtime.set_nsproxy(new_proxy);
-        if let Some(mnt_ns) = target_mnt {
-            let current_fs = runtime.fs_context().ok_or(KError::NoSuchProcess)?;
-            let mut fs = current_fs.lock().snapshot();
-            // kvfs::Path carries dentry/mount identity rather than a comparable
-            // value, so the fs root and pwd are both retargeted to the target
-            // namespace's visible root. This mirrors the same-namespace reentry
-            // case that bind-mounted sandbox namespaces exercise.
-            let root = mnt_ns.visible_root_path();
-            fs.replace_root_and_pwd(root.clone(), root)?;
+        if let Some(fs) = new_fs {
             runtime.set_fs_context(Arc::new(Mutex::new(fs)));
         }
         Ok(())

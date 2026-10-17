@@ -6,32 +6,52 @@
 //!
 //! `unshare(2)` runs a two-phase [`NsProxy::prepare_unshare`] /
 //! `Process::apply_prepared_unshare` commit so that every Linux acl and
-//! combination check happens before any field of the running process changes.
-//! `setns(2)` resolves the fd through one of two channels: an [`NsFd`] that
-//! pins the namespace directly, or a pidfd whose target process's namespace is
-//! entered (Linux 5.8+ semantics).
+//! combination check happens before any field of the running process changes;
+//! the descriptor-table detach then commits on the calling thread. `setns(2)`
+//! resolves the fd through one of two channels: an [`NsFd`] that pins the
+//! namespace directly, or a pidfd whose target process's namespace is entered
+//! (Linux 5.8+ semantics). Both channels sit behind one authorization gate:
+//! joining a namespace requires the privileged-credential proxy of Linux's
+//! per-type `CAP_SYS_ADMIN` checks.
 
 use alloc::sync::Arc;
 
 use kerrno::{KError, KResult};
 use kns::{NamespaceFlags, NamespaceType, NsFd, UnshareContext, UnshareError};
 use kprocess::{PidFd, current_files, current_user_process};
-use linux_raw_sys::general::{CLONE_FILES, CLONE_FS};
+use linux_raw_sys::general::{CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 
-/// All flags `unshare(2)` accepts: namespace creation bits plus the
-/// `CLONE_FS` / `CLONE_FILES` sharing-detach bits.
+/// Parse `unshare(2)` flags the way Linux's flag gate does.
 ///
-/// `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` are rejected inside
-/// [`NsProxy::prepare_unshare`] with `EOPNOTSUPP` (no pseudo-isolation), while
-/// unknown bits are rejected here with `EINVAL`.
-fn unshare_flag_set(flags: u64) -> KResult<(NamespaceFlags, bool, bool)> {
+/// Unknown bits are rejected with `EINVAL`. The thread-shared-state bits
+/// `CLONE_THREAD` / `CLONE_SIGHAND` / `CLONE_VM` are legal for a
+/// single-threaded caller (they have nothing to detach from) and rejected only
+/// for a multithreaded one, mirroring `check_unshare_flags`. `CLONE_NEWNS`
+/// implies `CLONE_FS`, as in `ksys_unshare`: the mount-namespace switch needs
+/// a private fs struct and the kernel adds the bit itself instead of
+/// requiring callers to spell it out.
+///
+/// `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` pass this gate and are
+/// rejected inside [`NsProxy::prepare_unshare`] with `EOPNOTSUPP` (no
+/// pseudo-isolation).
+fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags, bool, bool)> {
     let namespace_bits = NamespaceFlags::all().bits();
-    let allowed = namespace_bits | CLONE_FS as u64 | CLONE_FILES as u64;
+    let allowed = namespace_bits
+        | CLONE_FS as u64
+        | CLONE_FILES as u64
+        | CLONE_VM as u64
+        | CLONE_SIGHAND as u64
+        | CLONE_THREAD as u64;
     if flags & !allowed != 0 {
         return Err(KError::InvalidInput);
     }
+    let shares_thread_state =
+        flags & (CLONE_VM as u64 | CLONE_SIGHAND as u64 | CLONE_THREAD as u64) != 0;
+    if shares_thread_state && multithreaded {
+        return Err(KError::InvalidInput);
+    }
     let namespaces = NamespaceFlags::from_bits_truncate(flags);
-    let detach_fs = flags & CLONE_FS as u64 != 0;
+    let detach_fs = flags & CLONE_FS as u64 != 0 || namespaces.contains(NamespaceFlags::NEWNS);
     let detach_files = flags & CLONE_FILES as u64 != 0;
     Ok((namespaces, detach_fs, detach_files))
 }
@@ -54,9 +74,10 @@ fn map_unshare_error(err: UnshareError) -> KError {
 /// descriptor table when `CLONE_FILES` was requested — the fd table is
 /// thread-owned, so the detach must run on this thread's own binding.
 pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
-    let (namespace_flags, detach_fs, detach_files) = unshare_flag_set(flags as u64)?;
-
     let process = current_user_process();
+    let multithreaded = process.threads().len() > 1;
+    let (namespace_flags, detach_fs, detach_files) = unshare_flag_set(flags as u64, multithreaded)?;
+
     let nsproxy = process.nsproxy()?;
     let fs_context = process.fs_context()?;
     let prepared = nsproxy
@@ -81,13 +102,21 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
 
 /// Join a namespace referenced by a namespace fd or a pidfd (`setns(2)`).
 ///
+/// The caller must hold the privileged-credential proxy of Linux's per-type
+/// `CAP_SYS_ADMIN` install checks; joining any namespace without it is
+/// `EPERM`. The bad-fd error keeps priority by resolving the fd first.
+///
 /// The `NsFd` channel requires `nstype` to be zero or to match the fd's
 /// namespace type (`EINVAL` otherwise). The `PidFd` channel implements the
-/// Linux 5.8 semantics: exactly one `CLONE_NEW*` bit must be given, and the
-/// caller joins that namespace of the pidfd's target process.
+/// Linux 5.8 semantics: `nstype` is an OR-combination mask, every requested
+/// slot is validated against the pidfd's target process, and the whole set is
+/// committed before the caller observes any change.
 pub(crate) fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
     let process = current_user_process();
     let file = current_files().get_file(fd as i32)?;
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::OperationNotPermitted);
+    }
 
     if let Ok(nsfd) = NsFd::from_file(&file) {
         return sys_setns_nsfd(&process, nsfd, nstype as u64);
@@ -122,41 +151,68 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
 }
 
 /// `setns` through the pidfd channel (Linux 5.8+).
+///
+/// `nstype` is a mask: each `CLONE_NEW*` bit selects one namespace of the
+/// target process to enter. Namespace kinds without isolated backing tables
+/// answer `EOPNOTSUPP` instead of silently half-switching.
 fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) -> KResult<isize> {
-    let namespace = NamespaceFlags::from_bits(nstype).ok_or(KError::InvalidInput)?;
-    if !namespace.bits().is_power_of_two() {
+    let requested = NamespaceFlags::from_bits(nstype).ok_or(KError::InvalidInput)?;
+    if requested.is_empty() {
         return Err(KError::InvalidInput);
     }
-    if namespace.contains(NamespaceFlags::NEWPID) && process.threads().len() > 1 {
+    let supported = NamespaceFlags::NEWNS
+        | NamespaceFlags::NEWUTS
+        | NamespaceFlags::NEWIPC
+        | NamespaceFlags::NEWPID;
+    if (requested & supported) != requested {
+        return Err(KError::OperationNotSupported);
+    }
+    if requested.contains(NamespaceFlags::NEWPID) && process.threads().len() > 1 {
         return Err(KError::InvalidInput);
     }
 
+    // Validate-and-commit per slot: every requested namespace is resolved
+    // against the target process and swapped into a successively derived
+    // proxy, so a rejected kind fails the whole call before any commit.
     let target = pidfd.live_process()?;
-    let (replacement, target_mnt): (NsFd, Option<Arc<kns::MntNamespace>>) = match namespace {
-        NamespaceFlags::NEWNS => {
-            let ns = target.mnt_ns()?;
-            (NsFd::Mnt(ns.clone()), Some(ns))
+    let mut proxy = process.nsproxy()?;
+    for flag in [
+        NamespaceFlags::NEWNS,
+        NamespaceFlags::NEWUTS,
+        NamespaceFlags::NEWIPC,
+        NamespaceFlags::NEWPID,
+    ] {
+        if !requested.contains(flag) {
+            continue;
         }
-        NamespaceFlags::NEWUTS => (NsFd::Uts(target.uts_ns()?), None),
-        NamespaceFlags::NEWIPC => (NsFd::Ipc(target.ipc_ns()?), None),
-        NamespaceFlags::NEWPID => (NsFd::Pid(target.pid_ns_for_children()?), None),
-        _ => return Err(KError::OperationNotSupported),
-    };
+        let resolved = if flag == NamespaceFlags::NEWNS {
+            target.mnt_ns().map(NsFd::Mnt)
+        } else if flag == NamespaceFlags::NEWUTS {
+            target.uts_ns().map(NsFd::Uts)
+        } else if flag == NamespaceFlags::NEWIPC {
+            target.ipc_ns().map(NsFd::Ipc)
+        } else {
+            target.pid_ns_for_children().map(NsFd::Pid)
+        }?;
+        proxy = proxy.with_namespace(&resolved).map_err(map_unshare_error)?;
+    }
 
-    let new_proxy = process
-        .nsproxy()?
-        .with_namespace(&replacement)
-        .map_err(map_unshare_error)?;
-    process.apply_setns(new_proxy, target_mnt)?;
+    let target_mnt = if requested.contains(NamespaceFlags::NEWNS) {
+        Some(target.mnt_ns()?)
+    } else {
+        None
+    };
+    process.apply_setns(proxy, target_mnt)?;
     Ok(0)
 }
 
 #[cfg(unittest)]
 mod tests_namespace {
     use linux_raw_sys::general::{
-        CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUTS,
+        CLONE_NEWCGROUP, CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWTIME,
+        CLONE_NEWUSER, CLONE_NEWUTS,
     };
-    use unittest::def_test;
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
@@ -165,7 +221,7 @@ mod tests_namespace {
         let raw = (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID) as u64
             | CLONE_FS as u64
             | CLONE_FILES as u64;
-        let (namespaces, detach_fs, detach_files) = unshare_flag_set(raw).unwrap();
+        let (namespaces, detach_fs, detach_files) = unshare_flag_set(raw, false).unwrap();
         assert!(namespaces.contains(NamespaceFlags::NEWNS));
         assert!(namespaces.contains(NamespaceFlags::NEWUTS));
         assert!(namespaces.contains(NamespaceFlags::NEWIPC));
@@ -175,17 +231,45 @@ mod tests_namespace {
 
     #[def_test]
     fn unshare_flag_set_rejects_unknown_bits() {
-        assert!(unshare_flag_set(1 << 0).is_err());
-        assert!(unshare_flag_set(u64::MAX).is_err());
+        assert!(unshare_flag_set(1 << 0, false).is_err());
+        assert!(unshare_flag_set(u64::MAX, false).is_err());
     }
 
     #[def_test]
     fn unshare_flag_set_keeps_explicitly_unsupported_namespace_flags() {
         // NEWNET/NEWUSER/NEWCGROUP/NEWTIME pass the flag-set gate and are
         // rejected with EOPNOTSUPP in the prepare phase instead.
-        for raw in [CLONE_NEWNET as u64, CLONE_NEWIPC as u64] {
-            let (namespaces, ..) = unshare_flag_set(raw).unwrap();
+        for raw in [
+            CLONE_NEWNET as u64,
+            CLONE_NEWUSER as u64,
+            CLONE_NEWCGROUP as u64,
+            CLONE_NEWTIME as u64,
+        ] {
+            let (namespaces, ..) = unshare_flag_set(raw, false).unwrap();
             assert_eq!(namespaces.bits(), raw);
         }
+    }
+
+    #[def_test]
+    fn unshare_flag_set_newns_implies_clone_fs() {
+        // Linux's ksys_unshare adds CLONE_FS itself when CLONE_NEWNS is given;
+        // callers never need to spell it out.
+        let (namespaces, detach_fs, detach_files) =
+            unshare_flag_set(CLONE_NEWNS as u64, true).unwrap();
+        assert!(namespaces.contains(NamespaceFlags::NEWNS));
+        assert!(detach_fs);
+        assert!(!detach_files);
+    }
+
+    #[def_test]
+    fn unshare_flag_set_accepts_thread_state_bits_only_for_single_thread() {
+        let thread_bits = (CLONE_VM | CLONE_SIGHAND | CLONE_THREAD) as u64;
+        // A single-threaded caller has nothing to detach: the bits are no-ops.
+        let (namespaces, detach_fs, detach_files) =
+            unshare_flag_set(thread_bits | CLONE_NEWNS as u64, false).unwrap();
+        assert!(namespaces.contains(NamespaceFlags::NEWNS));
+        assert!(detach_fs && !detach_files);
+        // A multithreaded caller is rejected with EINVAL, as in Linux.
+        assert!(unshare_flag_set(thread_bits, true).is_err());
     }
 }
