@@ -14,7 +14,7 @@
 //! joining a namespace requires the privileged-credential proxy of Linux's
 //! per-type `CAP_SYS_ADMIN` checks.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
 use kns::{NamespaceFlags, NamespaceType, NsFd, UnshareContext, UnshareError};
@@ -179,11 +179,14 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
         return Err(KError::InvalidInput);
     }
 
-    // Validate-and-commit per slot: every requested namespace is resolved
-    // against the target process and swapped into a successively derived
-    // proxy, so a rejected kind fails the whole call before any commit.
+    // Resolve every requested slot against one snapshot of the target
+    // process first, then commit the whole set: a rejected or half-switched
+    // target must not leave the caller with slots pinned from different
+    // generations of the target's bundle. The mount slot is resolved once and
+    // shared between the proxy swap and the fs root/pwd retarget.
     let target = pidfd.live_process()?;
-    let mut proxy = process.nsproxy()?;
+    let mut swaps: Vec<NsFd> = Vec::new();
+    let mut target_mnt: Option<Arc<kns::MntNamespace>> = None;
     for flag in [
         NamespaceFlags::NEWNS,
         NamespaceFlags::NEWUTS,
@@ -193,23 +196,23 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
         if !requested.contains(flag) {
             continue;
         }
-        let resolved = if flag == NamespaceFlags::NEWNS {
-            target.mnt_ns().map(NsFd::Mnt)
+        if flag == NamespaceFlags::NEWNS {
+            let ns = target.mnt_ns()?;
+            target_mnt = Some(ns.clone());
+            swaps.push(NsFd::Mnt(ns));
         } else if flag == NamespaceFlags::NEWUTS {
-            target.uts_ns().map(NsFd::Uts)
+            swaps.push(NsFd::Uts(target.uts_ns()?));
         } else if flag == NamespaceFlags::NEWIPC {
-            target.ipc_ns().map(NsFd::Ipc)
+            swaps.push(NsFd::Ipc(target.ipc_ns()?));
         } else {
-            target.pid_ns_for_children().map(NsFd::Pid)
-        }?;
-        proxy = proxy.with_namespace(&resolved).map_err(map_unshare_error)?;
+            swaps.push(NsFd::Pid(target.pid_ns_for_children()?));
+        }
     }
 
-    let target_mnt = if requested.contains(NamespaceFlags::NEWNS) {
-        Some(target.mnt_ns()?)
-    } else {
-        None
-    };
+    let mut proxy = process.nsproxy()?;
+    for nsfd in &swaps {
+        proxy = proxy.with_namespace(nsfd).map_err(map_unshare_error)?;
+    }
     process.apply_setns(proxy, target_mnt)?;
     Ok(0)
 }
