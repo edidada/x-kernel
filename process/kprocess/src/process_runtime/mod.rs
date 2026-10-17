@@ -509,19 +509,20 @@ pub(crate) fn fork_process_runtime(
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
-    // With CLONE_NEWPID the child leader is allocated inside the fresh child
-    // PID namespace (visible as 1 there, plus a new root projection), matching
-    // Linux `copy_pid_ns`. Otherwise the child takes its numbers in the
-    // parent's active PID namespace — the namespace the parent's own getpid
-    // reports — so plain forks inside a child namespace stay namespace-local;
-    // the root allocator only serves forks out of the root namespace.
-    let parent_active_ns = parent.process().active_pid_namespace();
+    // Children take their numbers in the parent's `pid_ns_for_children` —
+    // the namespace `setns(CLONE_NEWPID)` retargets and a plain fork
+    // inherits, matching the setns(2) contract that only future children
+    // move. With CLONE_NEWPID that slot IS the fresh child namespace
+    // clone_for_child just created, so the leader reads 1 there plus a full
+    // ancestor chain; the root allocator serves forks whose slot is still
+    // the root namespace.
+    let alloc_ns = fs_namespaces.nsproxy.pid_ns_for_children();
     let leader_task_number = if config.namespace_flags.contains(kns::NamespaceFlags::NEWPID) {
-        kidentity::PidHandle::allocate_in(fs_namespaces.nsproxy.pid_ns_for_children())?
-    } else if parent_active_ns.is_root() {
+        kidentity::PidHandle::allocate_in(alloc_ns)?
+    } else if alloc_ns.is_root() {
         kidentity::allocate_root_pid_handle()?
     } else {
-        kidentity::PidHandle::allocate_in(&parent_active_ns)?
+        kidentity::PidHandle::allocate_in(alloc_ns)?
     };
     let process = parent.process().fork_with_tree_parent(
         leader_task_number.clone(),

@@ -122,18 +122,20 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
 /// PID arguments are written in the caller's active PID namespace — the same
 /// view `getpid(2)`/`getppid(2)` and the `clone`/`fork` return value use — so
 /// a `CLONE_NEWPID` child passing its own `getpid()` (1) must resolve to
-/// itself, not to whatever holds the root number 1. The exact namespace
-/// projection is tried first; a number no published process carries there
-/// falls back to the root table, because root-keyed surfaces (/proc listings,
-/// wait metadata) still hand out root numbers until per-namespace procfs
-/// lands. Callers in the root namespace skip the work entirely.
+/// itself, not to whatever holds the root number 1. A number no published
+/// process carries in the caller's namespace is `ESRCH`, matching Linux
+/// where a namespace-invisible PID does not exist; callers in the root
+/// namespace skip the work entirely. Root numbers leak through root-keyed
+/// surfaces such as the /proc listing until per-namespace procfs lands; the
+/// boundary deliberately does NOT paper over that leak by falling back,
+/// because doing so would let a namespace-internal caller reach outside it.
 fn translate_caller_pid(pid: Pid) -> KResult<Pid> {
     let current = kprocess::current_user_thread();
     let observer = current.process().active_pid_namespace();
     if observer.is_root() {
         return Ok(pid);
     }
-    Ok(kprocess::Process::resolve_pid_in_namespace(pid, &observer).unwrap_or(pid))
+    kprocess::Process::resolve_pid_in_namespace(pid, &observer).ok_or(KError::NoSuchProcess)
 }
 
 /// Sends a signal to a process or process group.

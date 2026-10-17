@@ -269,13 +269,17 @@ impl CloneRequest {
         };
         let tid = prepared.tid();
         let child_process = prepared.process().clone();
-        // Linux reports the child's number in the forking process's active
-        // PID namespace (pid_nr_ns); a child allocated in an ancestor-only
-        // chain keeps the root number. The internal tables stay root-keyed.
-        let observer = current_user_thread().process().active_pid_namespace();
-        let tid = child_process.number_in_namespace(&observer).unwrap_or(tid);
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
+        // Linux reports the new task's number in the forking process's active
+        // PID namespace (pid_nr_ns): the leader number for a process fork,
+        // the thread's own TID for a thread clone. The projection uses the
+        // created task's OWN identity — the process's leader handle would
+        // report the thread-group number and break every pthread tid — and
+        // an identity without a projection in the observer's namespace keeps
+        // the root number, as does a root-namespace observer.
+        let observer = current_user_thread().process().active_pid_namespace();
+        let tid = task_number.number_in(&observer).unwrap_or(tid);
 
         if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(self.child_tid);
