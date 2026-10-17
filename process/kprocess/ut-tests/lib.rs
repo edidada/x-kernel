@@ -1531,7 +1531,10 @@ fn test_child_exit_signal_info_carries_linux_child_payload() {
     let task = prepare_user_task(prepared).publish().unwrap().activate();
     process_exit::finish_thread_exit(&child, &task, 9 << 8);
 
-    let siginfo = process_exit::child_exit_signal_info(&child, ksignal::Signo::SIGCHLD);
+    // The parentless fixture falls back to itself as its own parent; the
+    // root-namespace projection then equals the root number.
+    let parent = child.parent().unwrap_or_else(|| child.clone());
+    let siginfo = process_exit::child_exit_signal_info(&child, &parent, ksignal::Signo::SIGCHLD);
     let payload = siginfo
         .as_signal_info()
         .child_exit()

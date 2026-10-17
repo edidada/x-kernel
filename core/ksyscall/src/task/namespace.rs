@@ -73,29 +73,32 @@ fn map_unshare_error(err: UnshareError) -> KError {
     }
 }
 
-/// Linux `pidns_install` only allows entering the caller's active PID
-/// namespace itself or one of its descendants: fork must return a usable
-/// number in the caller's namespace, and processes must not escape it. The
-/// same constraint keeps plain-fork allocation — keyed on
+/// Returns `true` when `target` is `active` itself or one of its
+/// descendants — Linux `pidns_install`'s reachability rule. Fork must return
+/// a usable number in the caller's namespace and processes must not escape
+/// it; the same constraint keeps plain-fork allocation — keyed on
 /// `pid_ns_for_children` — resolvable in the caller's namespace after a
 /// `setns(CLONE_NEWPID)`.
-fn ensure_pid_ns_reachable(process: &kprocess::Process, target: &Arc<PidNamespace>) -> KResult<()> {
-    let active = process.active_pid_namespace();
+fn pid_ns_reachable(active: &Arc<PidNamespace>, target: &Arc<PidNamespace>) -> bool {
     if target.level() < active.level() {
-        return Err(KError::InvalidInput);
+        return false;
     }
     let mut ancestor = Some(target);
     while let Some(ns) = ancestor {
         if ns.level() == active.level() {
-            return if Arc::ptr_eq(ns, &active) {
-                Ok(())
-            } else {
-                Err(KError::InvalidInput)
-            };
+            return Arc::ptr_eq(ns, active);
         }
         ancestor = ns.parent();
     }
-    Err(KError::InvalidInput)
+    false
+}
+
+fn ensure_pid_ns_reachable(process: &kprocess::Process, target: &Arc<PidNamespace>) -> KResult<()> {
+    if pid_ns_reachable(&process.active_pid_namespace(), target) {
+        Ok(())
+    } else {
+        Err(KError::InvalidInput)
+    }
 }
 
 /// Disconnect the calling process from parts of its namespace/share state
@@ -293,6 +296,32 @@ mod tests_namespace {
         assert!(namespaces.contains(NamespaceFlags::NEWNS));
         assert!(detach_fs);
         assert!(!detach_files);
+    }
+
+    #[def_test]
+    fn pid_ns_reachable_accepts_self_and_descendants() {
+        let root = Arc::new(PidNamespace::new_root());
+        let child = PidNamespace::new_child(&root);
+        let grandchild = PidNamespace::new_child(&child);
+        assert!(pid_ns_reachable(&root, &root));
+        assert!(pid_ns_reachable(&root, &child));
+        assert!(pid_ns_reachable(&root, &grandchild));
+        assert!(pid_ns_reachable(&child, &grandchild));
+    }
+
+    #[def_test]
+    fn pid_ns_reachable_rejects_ancestors_and_unrelated_trees() {
+        let root = Arc::new(PidNamespace::new_root());
+        let child = PidNamespace::new_child(&root);
+        // Entering an ancestor escapes the caller's own namespace.
+        assert!(!pid_ns_reachable(&child, &root));
+        // Two independent roots are sibling trees: never reachable from one
+        // another, at any nesting depth.
+        let other = Arc::new(PidNamespace::new_root());
+        let other_child = PidNamespace::new_child(&other);
+        assert!(!pid_ns_reachable(&child, &other));
+        assert!(!pid_ns_reachable(&child, &other_child));
+        assert!(!pid_ns_reachable(&other_child, &child));
     }
 
     #[def_test]
