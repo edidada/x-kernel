@@ -147,10 +147,10 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   `EINVAL`, then runs `NsProxy::prepare_unshare` (privilege, shared-fs, and
   unsupported-kind checks) and commits via `Process::apply_prepared_unshare`.
   `setns` splits into the `NsFd` channel (nstype must be zero or match the
-  fd type) and the `PidFd` channel (exactly one `CLONE_NEW*` bit, Linux 5.8+
-  semantics), and commits via `Process::apply_setns`. Net/User/Cgroup swaps
-  are `EOPNOTSUPP` (no pseudo-isolation); `CLONE_NEWPID` requires a
-  single-threaded caller.
+  fd type) and the `PidFd` channel (nstype is an OR mask resolved against one
+  snapshot of the target bundle, Linux 5.8+ semantics), and commits via
+  `Process::apply_setns`. Net/User/Cgroup swaps are `EOPNOTSUPP`
+  (no pseudo-isolation); both channels sit behind the `has_sys_admin` gate.
 - `arch/`: architecture-specific system-info/control adapters (`arch/mod.rs`
   organizes per-architecture submodules via `cfg`, `lib.rs` declares the
   top-level `mod arch;`, and `sys.rs` only re-exports `crate::arch::*`),
@@ -274,8 +274,12 @@ channel treats `nstype` as Linux's OR-combination mask: every requested slot
 is validated against the target process and committed together, unsupported
 kinds answer `EOPNOTSUPP`. `getpid`/`getppid` project the identity into the
 PID namespace the task was created in (`task_active_pid_ns` semantics, so a
-`CLONE_NEWPID` child reads 1 and its parent reads 0); kernel-internal PID
-lookup stays root-keyed (see the known-limits note in `process/kns/docs/design.md`).
+`CLONE_NEWPID` child reads 1 and its parent reads 0), `clone`/`fork` return
+the child's number in the forking process's namespace, and signal PID
+arguments (`kill`/`tgkill`/`sigqueue`) are translated through the caller's
+namespace with a root-number fallback for root-keyed sources such as
+/proc. Kernel-internal lookup stays root-keyed (see the known-limits note
+in `process/kns/docs/design.md`).
 `PR_SET_NO_NEW_PRIVS`
 records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
 it back; the exec credential path consumes the flag via

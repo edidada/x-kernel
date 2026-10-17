@@ -100,6 +100,14 @@ impl Process {
         self.leader_task_number.active_ns().clone()
     }
 
+    /// Returns the leader's exact number in `observer_ns`, or `None` when the
+    /// identity carries no projection there — Linux `pid_nr_ns` semantics.
+    /// This is the inverse of the allocation view: the number a caller in
+    /// `observer_ns` would use to name this process.
+    pub fn number_in_namespace(&self, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        self.leader_task_number.number_in(observer_ns)
+    }
+
     /// Returns the parent's PID as seen in this process's active PID
     /// namespace, or `None` when the parent has no number there — Linux
     /// `pid_nr_ns` semantics: a `CLONE_NEWPID` child's parent holds no

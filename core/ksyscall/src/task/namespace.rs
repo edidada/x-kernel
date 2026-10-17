@@ -17,7 +17,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::{KError, KResult};
-use kns::{NamespaceFlags, NamespaceType, NsFd, UnshareContext, UnshareError};
+use kns::{NamespaceFlags, NsFd, UnshareContext, UnshareError};
 use kprocess::{PidFd, current_files, current_user_process};
 use linux_raw_sys::general::{
     CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VM,
@@ -137,12 +137,7 @@ pub(crate) fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
 
 /// `setns` through the namespace-fd channel.
 fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> KResult<isize> {
-    let fd_type = nsfd.ns_type();
     if nstype != 0 && nstype != nsfd.namespace_flag().bits() {
-        return Err(KError::InvalidInput);
-    }
-    // Linux rejects setns(CLONE_NEWPID) from a multithreaded process (EINVAL).
-    if fd_type == NamespaceType::Pid && process.threads().len() > 1 {
         return Err(KError::InvalidInput);
     }
 
@@ -175,16 +170,13 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
     if (requested & supported) != requested {
         return Err(KError::OperationNotSupported);
     }
-    if requested.contains(NamespaceFlags::NEWPID) && process.threads().len() > 1 {
-        return Err(KError::InvalidInput);
-    }
 
-    // Resolve every requested slot against one snapshot of the target
-    // process first, then commit the whole set: a rejected or half-switched
-    // target must not leave the caller with slots pinned from different
-    // generations of the target's bundle. The mount slot is resolved once and
-    // shared between the proxy swap and the fs root/pwd retarget.
-    let target = pidfd.live_process()?;
+    // Resolve every requested slot against ONE snapshot of the target's
+    // namespace bundle, then commit the whole set: slots must not be pinned
+    // from different generations of the target's bundle, and nothing is
+    // installed before every resolution succeeded. The mount slot is read
+    // once and shared between the proxy swap and the fs root/pwd retarget.
+    let target_bundle = pidfd.live_process()?.nsproxy()?;
     let mut swaps: Vec<NsFd> = Vec::new();
     let mut target_mnt: Option<Arc<kns::MntNamespace>> = None;
     for flag in [
@@ -197,15 +189,15 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
             continue;
         }
         if flag == NamespaceFlags::NEWNS {
-            let ns = target.mnt_ns()?;
+            let ns = target_bundle.mnt_ns().clone();
             target_mnt = Some(ns.clone());
             swaps.push(NsFd::Mnt(ns));
         } else if flag == NamespaceFlags::NEWUTS {
-            swaps.push(NsFd::Uts(target.uts_ns()?));
+            swaps.push(NsFd::Uts(target_bundle.uts_ns().clone()));
         } else if flag == NamespaceFlags::NEWIPC {
-            swaps.push(NsFd::Ipc(target.ipc_ns()?));
+            swaps.push(NsFd::Ipc(target_bundle.ipc_ns().clone()));
         } else {
-            swaps.push(NsFd::Pid(target.pid_ns_for_children()?));
+            swaps.push(NsFd::Pid(target_bundle.pid_ns_for_children().clone()));
         }
     }
 

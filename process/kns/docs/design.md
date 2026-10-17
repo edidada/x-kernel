@@ -120,8 +120,7 @@ used by `setns(2)`. Net/User/Cgroup slots are rejected as `Unsupported`
 resolves an fd through two channels:
 
 - `NsFd` channel: `nstype` must be zero or match the fd's namespace type
-  (`EINVAL` otherwise); `CLONE_NEWPID` requires the caller to be
-  single-threaded.
+  (`EINVAL` otherwise).
 - `PidFd` channel (Linux 5.8+): `nstype` is an OR-combination mask; every
   requested slot is validated against the pidfd's live process, and
   unsupported kinds answer `EOPNOTSUPP` before anything commits.
@@ -167,10 +166,11 @@ the tgoskits gaps):
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check covers published threads of the caller; cross-process `CLONE_FS`
   sharing is not counted (no `fs->users` counter yet).
-- **setns PID reachability**: only the single-threaded requirement and
-  reference swap are enforced; Linux's requirement that the target PID
-  namespace be an ancestor of the caller's active namespace is not modeled
-  (there is no per-process active-ns field).
+- **setns PID reachability**: only the reference swap is enforced; Linux's
+  requirements that the target PID namespace be the caller's active namespace
+  or one of its descendants, and the per-type `CAP_SYS_ADMIN` checks against
+  the target's owner namespace, are approximated by the single euid-0 gate at
+  the syscall boundary (there is no per-process active-ns field yet).
 - **bind-mount lifecycle**: namespace files keep identity in their inode and
   can be bound, but re-opening a bound file after the owning process exits
   fails with `ESRCH`; a namespace registry (nsfs-style) is needed for the

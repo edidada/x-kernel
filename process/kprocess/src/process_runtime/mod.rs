@@ -511,11 +511,17 @@ pub(crate) fn fork_process_runtime(
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
     // With CLONE_NEWPID the child leader is allocated inside the fresh child
     // PID namespace (visible as 1 there, plus a new root projection), matching
-    // Linux `copy_pid_ns`; otherwise the root allocator hands out the number.
+    // Linux `copy_pid_ns`. Otherwise the child takes its numbers in the
+    // parent's active PID namespace — the namespace the parent's own getpid
+    // reports — so plain forks inside a child namespace stay namespace-local;
+    // the root allocator only serves forks out of the root namespace.
+    let parent_active_ns = parent.process().active_pid_namespace();
     let leader_task_number = if config.namespace_flags.contains(kns::NamespaceFlags::NEWPID) {
         kidentity::PidHandle::allocate_in(fs_namespaces.nsproxy.pid_ns_for_children())?
-    } else {
+    } else if parent_active_ns.is_root() {
         kidentity::allocate_root_pid_handle()?
+    } else {
+        kidentity::PidHandle::allocate_in(&parent_active_ns)?
     };
     let process = parent.process().fork_with_tree_parent(
         leader_task_number.clone(),

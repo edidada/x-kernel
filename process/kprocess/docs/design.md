@@ -18,8 +18,9 @@ Syscall ABI decoding belongs to `ksyscall`; image loading belongs to `kexec`;
 trap-loop and cleanup orchestration belong to `posix-process`; MM/VMA state
 belongs to `memspace`; fd/resources, filesystem context and namespaces belong
 to `kfd`/`kresources`, `fs_context` and `kns`. `kidentity` owns `PidHandle`
-allocation and namespace number projection; public PID/TID values here currently
-use root/global numbers. Concrete controlling-terminal behavior belongs to TTY
+allocation and namespace number projection; kernel-internal PID/TID values here
+stay root/global, while the user-visible getpid/getppid/fork views project into
+the caller's active PID namespace. Concrete controlling-terminal behavior belongs to TTY
 implementations of `ControllingTerminal`.
 
 ## Source scope and architecture
@@ -378,8 +379,9 @@ root/pwd into a mount namespace for `CLONE_NEWNS`. Both paths only install
 state validated by `kns`, so the commit surface is small. `Process::nsproxy` and
 the per-namespace accessors expose the bundle to `setns` and `/proc/<pid>/ns`.
 Known limits include the fs-sharing check covering only the caller's published
-threads (cross-process `CLONE_FS` sharing is not counted), PID lookups still
-keyed by root numbers, no child-subreaper implementation, representative-thread
+threads (cross-process `CLONE_FS` sharing is not counted), signal PID arguments
+carrying only caller-namespace translation with a root fallback while lookup
+tables stay root-keyed, no child-subreaper implementation, representative-thread
 credential snapshots, simplified ptrace privilege checks (effective UID zero
 substitutes for CAP_SYS_PTRACE), and no full authorization policy in
 signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
