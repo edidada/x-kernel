@@ -116,6 +116,24 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
     )))
 }
 
+/// Translates a caller-supplied process PID into the root number the process
+/// table is keyed on.
+///
+/// PID arguments are written in the caller's active PID namespace — the same
+/// view `getpid(2)`/`getppid(2)` report — so a `CLONE_NEWPID` child passing
+/// its own `getpid()` (1) must resolve to itself, not to whatever holds the
+/// root number 1. Callers in the root namespace skip the scan entirely.
+/// A number no published process carries in that namespace is `ESRCH`,
+/// matching Linux where a namespace-invisible PID does not exist.
+fn translate_caller_pid(pid: Pid) -> KResult<Pid> {
+    let current = kprocess::current_user_thread();
+    let observer = current.process().active_pid_namespace();
+    if observer.is_root() {
+        return Ok(pid);
+    }
+    kprocess::Process::resolve_pid_in_namespace(pid, &observer).ok_or(KError::NoSuchProcess)
+}
+
 /// Sends a signal to a process or process group.
 ///
 /// See <https://man7.org/linux/man-pages/man2/kill.2.html>.
@@ -124,7 +142,10 @@ pub(crate) fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_USER as _)?;
 
     match pid {
-        1.. => kprocess::process_signals::send_to_process(pid as _, sig)?,
+        1.. => {
+            let pid = translate_caller_pid(pid as _)?;
+            kprocess::process_signals::send_to_process(pid, sig)?
+        }
         0 => {
             let pgid = kprocess::current_user_thread().process().group().pgid();
             kprocess::process_signals::send_to_process_group(pgid, sig)?;
@@ -174,6 +195,7 @@ pub(crate) fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tgkill.2.html>.
 pub(crate) fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
+    let tgid = translate_caller_pid(tgid)?;
     kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }

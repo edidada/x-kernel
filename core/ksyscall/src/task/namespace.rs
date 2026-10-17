@@ -19,21 +19,28 @@ use alloc::sync::Arc;
 use kerrno::{KError, KResult};
 use kns::{NamespaceFlags, NamespaceType, NsFd, UnshareContext, UnshareError};
 use kprocess::{PidFd, current_files, current_user_process};
-use linux_raw_sys::general::{CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+use linux_raw_sys::general::{
+    CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VM,
+};
 
 /// Parse `unshare(2)` flags the way Linux's flag gate does.
 ///
 /// Unknown bits are rejected with `EINVAL`. The thread-shared-state bits
 /// `CLONE_THREAD` / `CLONE_SIGHAND` / `CLONE_VM` are legal for a
 /// single-threaded caller (they have nothing to detach from) and rejected only
-/// for a multithreaded one, mirroring `check_unshare_flags`. `CLONE_NEWNS`
-/// implies `CLONE_FS`, as in `ksys_unshare`: the mount-namespace switch needs
-/// a private fs struct and the kernel adds the bit itself instead of
-/// requiring callers to spell it out.
+/// for a multithreaded one, mirroring `check_unshare_flags`; Linux's
+/// `CLONE_VM => CLONE_SIGHAND => CLONE_THREAD` implication chain therefore
+/// never changes the outcome, because all three bits share that same rule.
+/// `CLONE_NEWNS` implies `CLONE_FS`, as in `ksys_unshare`: the mount-namespace
+/// switch needs a private fs struct and the kernel adds the bit itself instead
+/// of requiring callers to spell it out. `CLONE_SYSVSEM` is accepted as a
+/// no-op — the kernel implements no SysV-semaphore undo lists to detach, and
+/// Linux's gate admits the bit unconditionally.
 ///
 /// `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` pass this gate and are
 /// rejected inside [`NsProxy::prepare_unshare`] with `EOPNOTSUPP` (no
-/// pseudo-isolation).
+/// pseudo-isolation); Linux's `CLONE_NEWUSER => CLONE_THREAD | CLONE_FS`
+/// implication is moot for the same reason.
 fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags, bool, bool)> {
     let namespace_bits = NamespaceFlags::all().bits();
     let allowed = namespace_bits
@@ -41,7 +48,8 @@ fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags,
         | CLONE_FILES as u64
         | CLONE_VM as u64
         | CLONE_SIGHAND as u64
-        | CLONE_THREAD as u64;
+        | CLONE_THREAD as u64
+        | CLONE_SYSVSEM as u64;
     if flags & !allowed != 0 {
         return Err(KError::InvalidInput);
     }
@@ -84,7 +92,7 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
         .prepare_unshare(
             namespace_flags,
             UnshareContext {
-                privileged: kprocess::current_cred().is_privileged(),
+                privileged: kprocess::current_cred().has_sys_admin(),
                 fs_shared_with_others: process.fs_is_shared(),
                 unshare_fs: detach_fs,
                 unshare_files: detach_files,
@@ -102,9 +110,9 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
 
 /// Join a namespace referenced by a namespace fd or a pidfd (`setns(2)`).
 ///
-/// The caller must hold the privileged-credential proxy of Linux's per-type
-/// `CAP_SYS_ADMIN` install checks; joining any namespace without it is
-/// `EPERM`. The bad-fd error keeps priority by resolving the fd first.
+/// The caller must hold `CAP_SYS_ADMIN` authority (the euid-0 proxy standing
+/// in for Linux's per-type install checks); joining any namespace without
+/// it is `EPERM`. The bad-fd error keeps priority by resolving the fd first.
 ///
 /// The `NsFd` channel requires `nstype` to be zero or to match the fd's
 /// namespace type (`EINVAL` otherwise). The `PidFd` channel implements the
@@ -114,7 +122,7 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
 pub(crate) fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
     let process = current_user_process();
     let file = current_files().get_file(fd as i32)?;
-    if !kprocess::current_cred().is_privileged() {
+    if !kprocess::current_cred().has_sys_admin() {
         return Err(KError::OperationNotPermitted);
     }
 

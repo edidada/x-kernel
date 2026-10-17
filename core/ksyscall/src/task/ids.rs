@@ -14,15 +14,12 @@ pub(crate) fn sys_getpid() -> KResult<isize> {
 }
 
 /// Returns the parent process ID of the current process, projected into the
-/// caller's active PID namespace (Linux `task_ppid_nr_ns`): a
+/// process's active PID namespace (Linux `task_ppid_nr_ns`): a
 /// `CLONE_NEWPID` child's parent holds no number in the child's namespace,
 /// so `getppid(2)` reads 0 there.
 pub(crate) fn sys_getppid() -> KResult<isize> {
     let current_thread = kprocess::current_user_thread();
-    let observer_ns = current_thread.active_pid_ns();
-    current_thread
-        .process()
-        .parent()
-        .ok_or(KError::NoSuchProcess)
-        .map(|parent| parent.visible_parent_pid(&observer_ns).unwrap_or(0) as _)
+    let process = current_thread.process();
+    process.parent().ok_or(KError::NoSuchProcess)?;
+    Ok(process.visible_parent_pid().unwrap_or(0) as _)
 }
