@@ -70,9 +70,10 @@ semantics without storing a raw PID integer in observers.
 Every [`PidHandle`] carries a [`PidLifecycleState`]:
 
 ```text
-Reserved --(publish)--> Published --(retire)--> Retiring --(reap)--> Reclaimed
-Reserved --(abort)----> Reclaimed
-Published --(reap, no waiters)--> Reclaimed
+Reserved --(publish: mark_published)--> Published --(retire: mark_retiring)--> Retiring
+Retiring --(reap: mark_reclaimed)--> Reclaimed
+Reserved --(abort: mark_reclaimed)--> Reclaimed
+Published --(reap with no waiters: mark_reclaimed)--> Reclaimed
 ```
 
 - `Reserved`: number allocated, task not yet published — not lookup-visible.

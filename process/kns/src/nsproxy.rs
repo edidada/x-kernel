@@ -209,9 +209,11 @@ impl NsProxy {
     /// # Errors
     ///
     /// Returns `CloneNsError::Unimplemented` for NEWNET, NEWUSER, NEWCGROUP,
-    /// NEWPID, or NEWTIME. Returns `CloneNsError::InvalidFlagCombination` for
-    /// NEWNS with a shared filesystem context. Mount cloning or root/pwd retarget
-    /// errors are wrapped in `CloneNsError::Mount`.
+    /// or NEWTIME — their backing tables are not isolated, so cloning the
+    /// reference would create pseudo-isolation. Returns
+    /// `CloneNsError::InvalidFlagCombination` for NEWNS with a shared
+    /// filesystem context. Mount cloning or root/pwd retarget errors are
+    /// wrapped in `CloneNsError::Mount`.
     ///
     /// # Panics
     ///
@@ -319,8 +321,39 @@ impl NsProxy {
     ///
     /// # Errors
     ///
-    /// See [`UnshareError`] for the error contract; mount-tree copy and path
-    /// retarget failures are wrapped in [`UnshareError::Mount`].
+    /// - [`UnshareError::Unsupported`] — any of `NEWNET`, `NEWUSER`,
+    ///   `NEWCGROUP`, or `NEWTIME` was requested.
+    /// - [`UnshareError::NotPermitted`] — a `NEW*` flag was requested while
+    ///   [`UnshareContext::privileged`] is false.
+    /// - [`UnshareError::InvalidArgument`] — `NEWNS` was requested while
+    ///   [`UnshareContext::fs_shared_with_others`] holds and `CLONE_FS`
+    ///   (`unshare_fs`) was not also requested.
+    /// - [`UnshareError::Mount`] — the mount-tree copy or the root/pwd
+    ///   retarget into the clone failed; the wrapped source is the underlying
+    ///   VFS error.
+    ///
+    /// # Examples
+    ///
+    /// Build the context from the caller's credential and fs-sharing state,
+    /// then prepare against the caller's current fs view; the returned
+    /// [`PreparedUnshare`] is installed later by the process-layer commit:
+    ///
+    /// ```no_run
+    /// use fs_context::FsStruct;
+    /// use kns::{NamespaceFlags, NsProxy, UnshareContext};
+    ///
+    /// let proxy = NsProxy::new_initial();
+    /// let fs = FsStruct::new(proxy.mnt_ns().visible_root_path());
+    /// let context = UnshareContext {
+    ///     privileged: true,
+    ///     fs_shared_with_others: false,
+    ///     unshare_fs: false,
+    ///     unshare_files: true,
+    /// };
+    /// let _prepared = proxy
+    ///     .prepare_unshare(NamespaceFlags::NEWUTS, context, &fs)
+    ///     .unwrap();
+    /// ```
     pub fn prepare_unshare(
         &self,
         flags: NamespaceFlags,

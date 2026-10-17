@@ -91,7 +91,7 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
 | T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
 | T-16 | Unprivileged caller creates namespaces | High | `unshare` with any `NEW*` bit | The ns owner checks `UnshareContext::privileged` (euid-0 `CAP_SYS_ADMIN` approximation) and returns `EPERM`; plain `CLONE_FS`/`CLONE_FILES` need no privilege |
-| T-17 | `setns` enters a mismatched or unsupported namespace | High | fd type / `nstype` mismatch or net/user/cgroup swap | NsFd channel rejects type mismatches with `EINVAL`; pidfd channel requires exactly one `CLONE_NEW*` bit; net/user/cgroup swaps are `EOPNOTSUPP`; `CLONE_NEWPID` requires a single-threaded caller |
+| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup swap | Both channels sit behind the same euid-0 `CAP_SYS_ADMIN` proxy gate (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL`; pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for net/user/cgroup swaps; `CLONE_NEWPID` requires a single-threaded caller |
 | T-18 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or an effective root credential, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
 | T-19 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
 | T-20 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |
@@ -135,10 +135,12 @@ registered wakeups rather than polling or a timer.
   setuid/setgid or file-capability support must consult the flag at the
   credential reset and refuse elevation instead of silently dropping the
   guarantee.
-- `unshare`'s privilege and `NEWNS`-shared-fs checks are the euid-0 /
-  published-thread approximations documented in `kns`; cross-process
-  `CLONE_FS` sharing is not counted, and PID-namespace setns does not model
-  the Linux ancestor-reachability rule.
+- `unshare`'s and `setns`'s privilege checks are the euid-0 /
+  published-thread approximations documented in `kns`: both syscalls refuse
+  namespace creation or entry without the credential proxy, standing in for
+  Linux's per-type `CAP_SYS_ADMIN` install checks. Cross-process `CLONE_FS`
+  sharing is not counted, and PID-namespace setns does not model the Linux
+  ancestor-reachability rule.
 
 - seccomp supports `STRICT` and `FILTER` (with `TSYNC`) plus action queries.
   A `TRAP` or unrecognised filter return fails closed (`do_exit(SIGSYS)`), and

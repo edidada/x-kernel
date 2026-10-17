@@ -103,7 +103,11 @@ shared. The function does not install the result into a running process.
    private copy; `CLONE_FILES` is recorded for the commit phase.
 
 The syscall layer supplies process facts through `UnshareContext`
-(privilege and fs-sharing) and commits via `Process::apply_prepared_unshare`.
+(privilege and fs-sharing) and commits via `Process::apply_prepared_unshare`;
+the descriptor-table detach then runs on the calling thread. Per Linux
+`ksys_unshare`, the syscall layer adds `CLONE_FS` itself whenever `CLONE_NEWNS`
+is requested, so callers never need the explicit bit; the `check_fs_flag`
+rejection above remains as defense for direct `prepare_unshare` callers.
 
 `NsProxy::with_namespace` builds a proxy with one namespace slot swapped,
 used by `setns(2)`. Net/User/Cgroup slots are rejected as `Unsupported`
@@ -111,17 +115,22 @@ used by `setns(2)`. Net/User/Cgroup slots are rejected as `Unsupported`
 
 ## setns semantics
 
-`setns(2)` in `core/ksyscall` resolves an fd through two channels:
+`setns(2)` in `core/ksyscall` requires the privileged credential (the euid-0
+`CAP_SYS_ADMIN` proxy standing in for Linux's per-type install checks) and
+resolves an fd through two channels:
 
 - `NsFd` channel: `nstype` must be zero or match the fd's namespace type
   (`EINVAL` otherwise); `CLONE_NEWPID` requires the caller to be
   single-threaded.
-- `PidFd` channel (Linux 5.8+): exactly one `CLONE_NEW*` bit must be given,
-  and the caller joins that namespace of the pidfd's live process.
+- `PidFd` channel (Linux 5.8+): `nstype` is an OR-combination mask; every
+  requested slot is validated against the pidfd's live process, and
+  unsupported kinds answer `EOPNOTSUPP` before anything commits.
 
-Both channels build the replacement proxy with `with_namespace` and commit
-through `Process::apply_setns`; `CLONE_NEWNS` additionally retargets the fs
-root/pwd into the target mount namespace's visible root.
+Both channels build the replacement proxy with `with_namespace` (the pidfd
+channel once per requested slot) and commit through `Process::apply_setns`;
+`CLONE_NEWNS` additionally retargets the fs root/pwd into the target mount
+namespace's visible root, drafted on a snapshot so a failed retarget commits
+nothing.
 
 ## UTS data flow and concurrency
 
@@ -168,6 +177,17 @@ the tgoskits gaps):
   libnetwork bind/setns/GC lifecycle. `/proc/<pid>/ns/<type>` files are
   regular files whose readlink fails with `EINVAL` (documented deviation from
   Linux's nsfs magic symlinks, mirroring the Docker-netns precedent).
+- **switch granularity is process-level**: `unshare(2)`/`setns(2)` commit the
+  namespace bundle (and fs context) on the shared `ProcessRuntime`, so in a
+  multithreaded process one thread's switch re-views the whole thread group.
+  Linux switches only the calling task (`switch_task_namespaces(current)`).
+  Moving nsproxy/fs to the task layer is a prerequisite for per-thread
+  namespaces; until then this deviation is the accepted contract. Only the
+  fd-table detach (`CLONE_FILES`) is thread-scoped.
+- **single-writer commit**: `apply_setns`/`apply_prepared_unshare` perform an
+  unsynchronized read-modify-write of the runtime bundle. Concurrent
+  `setns`/`unshare` from sibling threads of one process is not serialized and
+  not supported; the syscall surface assumes one committing caller at a time.
 
 No complete mount-propagation or IPC implementation is implied by the presence
 of a namespace reference.

@@ -876,7 +876,11 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
 
     // CLONE_FILES commits in two places: the prepared bundle installs on the
     // process, then the descriptor-table detach runs on the calling thread
-    // (the syscall adapter's step). The fixture thread plays the caller here.
+    // (the syscall adapter's step, `sys_unshare`). This fixture only owns one
+    // thread, so its fd table is already private and a detach here would be a
+    // no-op; the prepare phase is asserted to record the request, and the
+    // detach semantics themselves are covered by
+    // `task_files_unshare_preserves_siblings_and_clone_files_policy`.
     let prepared_files = thread
         .process()
         .nsproxy()
@@ -900,10 +904,6 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         .process()
         .apply_prepared_unshare(prepared_files)
         .expect("files unshare bundle commits");
-    thread
-        .files()
-        .unshare_fd_table()
-        .expect("thread fd-table detach commits");
 
     parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
     parent.free();

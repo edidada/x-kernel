@@ -261,8 +261,22 @@ validation and `kprocess` commit (see above). `clone`/`clone3` now accept
 `CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return `ENOSYS`
 from the namespace-flag validator instead of improvising namespace creation
 without isolation. Until unified user-namespace capability authorization
-exists, `unshare` uses the caller's privilege flag (effective UID zero as the
-`CAP_SYS_ADMIN` proxy) from `kns`. `PR_SET_NO_NEW_PRIVS`
+exists, both syscalls gate on the caller's privilege flag (effective UID zero
+as the `CAP_SYS_ADMIN` proxy): `unshare` through
+`UnshareContext::privileged`, and `setns` before either channel dispatches —
+joining any namespace without it is `EPERM`, standing in for Linux's per-type
+`ns_install` capability checks. The unshare flag gate follows
+`check_unshare_flags`: `CLONE_THREAD`/`CLONE_SIGHAND`/`CLONE_VM` are accepted
+as no-ops for a single-threaded caller and rejected with `EINVAL` only for a
+multithreaded one, and `CLONE_NEWNS` implies `CLONE_FS` as in
+`ksys_unshare`, so callers never need the explicit bit. The pidfd `setns`
+channel treats `nstype` as Linux's OR-combination mask: every requested slot
+is validated against the target process and committed together, unsupported
+kinds answer `EOPNOTSUPP`. `getpid`/`getppid` project the identity into the
+PID namespace the task was created in (`task_active_pid_ns` semantics, so a
+`CLONE_NEWPID` child reads 1 and its parent reads 0); kernel-internal PID
+lookup stays root-keyed (see the known-limits note in `process/kns/docs/design.md`).
+`PR_SET_NO_NEW_PRIVS`
 records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
 it back; the exec credential path consumes the flag via
 `Cred::apply_exec`, and because exec never elevates identity today the
