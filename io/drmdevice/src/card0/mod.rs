@@ -13,7 +13,6 @@ use alloc::{
     format,
     string::String,
     sync::{Arc, Weak},
-    vec,
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -234,7 +233,6 @@ pub struct DrmCard {
     /// Always taken before `state`, never while holding it, so the order is
     /// `commit_lock` -> `state` -> the inner maps `apply_prop` touches.
     commit_lock: Mutex<()>,
-    legacy_crtc: Mutex<LegacyCrtcState>,
     dumbs: Mutex<BTreeMap<DumbHandle, DumbBuffer>>,
     next_dumb_handle: AtomicU32,
     next_offset: AtomicU64,
@@ -261,7 +259,6 @@ impl DrmCard {
             sequence: AtomicU32::new(0),
             state: Mutex::new(ModesetState::default()),
             commit_lock: Mutex::new(()),
-            legacy_crtc: Mutex::new(LegacyCrtcState::default()),
             dumbs: Mutex::new(BTreeMap::new()),
             next_dumb_handle: AtomicU32::new(FIRST_DUMB_HANDLE),
             next_offset: AtomicU64::new(DUMB_BUFFER_OFFSET_STRIDE),

@@ -36,12 +36,14 @@ pub(crate) fn ioctl_drm_mode_rm_fb(
     fb_id: &mut DrmModeRmFb,
 ) -> VfsResult<usize> {
     dev.fbs.lock().remove(&FbId::from_wire(fb_id.0));
-    {
-        let mut legacy = dev.legacy_crtc.lock();
-        if legacy.fb_id == fb_id.0 {
-            *legacy = LegacyCrtcState::default();
+    // Destroying the displayed framebuffer blanks the scanout, matching what
+    // the legacy-only reader used to do to its mirror state.
+    dev.commit(|_, s, _| {
+        if s.plane_fb_id == fb_id.0 {
+            s.plane_fb_id = 0;
         }
-    }
+        Ok(())
+    })?;
     Ok(0)
 }
 

@@ -105,7 +105,7 @@ pub(crate) struct DrmModeCardRes {
 }
 
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+#[derive(Debug, Default, Clone, Copy, NoUninit, AnyBitPattern, UserRead, UserWrite)]
 pub(crate) struct DrmModeModeInfo {
     pub clock: u32,
     pub hdisplay: u16,

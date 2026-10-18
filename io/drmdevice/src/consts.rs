@@ -156,23 +156,6 @@ pub(crate) const PROP_CRTC_MODE_ID: u32 = 0x201;
 
 pub(crate) const PROP_CONN_CRTC_ID: u32 = 0x300;
 
-pub(crate) const PLANE_PROPS: &[u32] = &[
-    PROP_PLANE_TYPE,
-    PROP_PLANE_FB_ID,
-    PROP_PLANE_CRTC_ID,
-    PROP_PLANE_SRC_X,
-    PROP_PLANE_SRC_Y,
-    PROP_PLANE_SRC_W,
-    PROP_PLANE_SRC_H,
-    PROP_PLANE_CRTC_X,
-    PROP_PLANE_CRTC_Y,
-    PROP_PLANE_CRTC_W,
-    PROP_PLANE_CRTC_H,
-    PROP_PLANE_IN_FORMATS,
-];
-pub(crate) const CRTC_PROPS: &[u32] = &[PROP_CRTC_ACTIVE, PROP_CRTC_MODE_ID];
-pub(crate) const CONN_PROPS: &[u32] = &[PROP_CONN_CRTC_ID];
-
 // ======== buffer / blob limits ========
 
 pub(crate) const FIRST_DUMB_HANDLE: u32 = 1;
