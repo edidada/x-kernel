@@ -15,14 +15,14 @@ documentation.workspace = true
 ignored = ["kdevice"]
 
 [dependencies]
+driver_base = { workspace = true }
+serial_core = { workspace = true }
 intrusive-collections.workspace = true
 kcred.workspace = true
 kworkng.workspace = true
 kcpu_id_map.workspace = true
 console_driver.workspace = true
-char_driver.workspace = true
-kclass = { workspace = true, features = ["char"] }
-kdevice.workspace = true
+subsys_char = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true

@@ -22,11 +22,11 @@ use core::{
 
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
-#[cfg(feature = "vsock")]
-use kclass::prelude::VsockAddr;
 use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
+#[cfg(feature = "vsock")]
+use subsys_vsock::VsockAddr;
 
 #[cfg(feature = "vsock")]
 use crate::vsock::VsockSocket;

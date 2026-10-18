@@ -4,7 +4,7 @@
 
 //! In-memory filesystem fixtures shared by kernel component tests.
 
-use block::{Device, DeviceKind, DriverError, DriverResult};
+use subsys_block::{KError, KResult};
 
 use super::*;
 use crate::{
@@ -304,16 +304,6 @@ impl TestDevice {
     }
 }
 
-impl Device for TestDevice {
-    fn name(&self) -> &str {
-        "kext4-mount-allocator-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Block
-    }
-}
-
 impl BlockDeviceOperations for TestDevice {
     fn num_blocks(&self) -> u64 {
         (lock(&self.bytes).len() / TEST_BLOCK_SIZE) as u64
@@ -323,48 +313,46 @@ impl BlockDeviceOperations for TestDevice {
         TEST_BLOCK_SIZE
     }
 
-    fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+    fn read_block(&self, block_id: u64, output: &mut [u8]) -> KResult {
         let start = usize::try_from(block_id)
             .ok()
             .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         let end = start
             .checked_add(output.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         output.copy_from_slice(
             lock(&self.bytes)
                 .get(start..end)
-                .ok_or(DriverError::InvalidInput)?,
+                .ok_or(KError::InvalidInput)?,
         );
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+    fn write_block(&self, block_id: u64, input: &[u8]) -> KResult {
         let mut write_count = lock(&self.write_count);
         *write_count += 1;
         if *lock(&self.fail_write_at) == Some(*write_count) {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         drop(write_count);
         let start = usize::try_from(block_id)
             .ok()
             .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))
-            .ok_or(DriverError::InvalidInput)?;
-        let end = start
-            .checked_add(input.len())
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
+        let end = start.checked_add(input.len()).ok_or(KError::InvalidInput)?;
         lock(&self.bytes)
             .get_mut(start..end)
-            .ok_or(DriverError::InvalidInput)?
+            .ok_or(KError::InvalidInput)?
             .copy_from_slice(input);
         Ok(())
     }
 
-    fn flush(&self) -> DriverResult {
+    fn flush(&self) -> KResult {
         let mut flush_count = lock(&self.flush_count);
         *flush_count += 1;
         if *lock(&self.fail_flush_at) == Some(*flush_count) {
-            return Err(DriverError::Io);
+            return Err(KError::Io);
         }
         Ok(())
     }

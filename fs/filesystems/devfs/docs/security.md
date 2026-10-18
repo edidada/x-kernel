@@ -27,8 +27,8 @@ interfaces.
 
 ## Trust model and external boundaries
 
-Class handles come from `kclass`; node identities, device locations, names,
-and numbers come from trusted `kdevice::DeviceNode` events.
+Class handles come from `device-class`; node identities, device locations, names,
+and numbers come from trusted `devnode::DevNode` events.
 User space can open, read, poll, mmap, and issue ioctls through the generated
 character nodes. The projection never accepts user-selected device numbers or
 kernel object identities and does not allocate identifiers itself.
@@ -108,8 +108,8 @@ provider crates.
 - A driver-core `DeviceId` has at most one filesystem projection record.
 - Every `DeviceFile` uses the exact name and character-device number in its
   source `DeviceNode`.
-- Removal detaches old file objects before the `kdevice` callback returns and
-  before `kdevice` releases the class index for reuse.
+- Removal detaches old file objects before the `devnode` callback returns and
+  before `devnode` releases the class index for reuse.
 - A stale remove event cannot delete a replacement record because removal
   compares the complete `DeviceNode` snapshot.
 - Directory lookup returns only a file object still present in the projection
@@ -119,8 +119,8 @@ provider crates.
 
 ## Thread safety
 
-`DeviceProjection` is protected by one `ksync::Mutex`. Per-open evdev operations
-use an `EventClient` mutex; DRM uses its own locks. `kdevice` delivers owned node snapshots
+`DeviceProjection` is protected by one `ksync::Mutex`. Per-open operations use
+locks owned by `EventDev` or `DrmCard`. `devnode` delivers owned node snapshots>>>>>>> 9f18a37dd (docs: purge old-framework references from every module's docs)
 without holding its registry lock, so no borrowed registry data escapes into
 devfs. Removal extracts the record before running detach and `cdev_del`. The
 implementation requires normal task context and may allocate. Hard-IRQ code
@@ -133,7 +133,7 @@ and wakes client-owned poll registrations.
 |----|--------|--------|---------|------------------|
 | T-01 | Snapshot and callback create conflicting files | Medium — duplicate character-device registration could hide the valid node | An add callback waits while initialization applies the same snapshot | Projection insertion deduplicates under the mutex by driver-core id. |
 | T-02 | Device removal redirects an old fd to a newly reused index | High — an old descriptor could operate on a different physical device | Hot-unplug followed by another device registration | Each node owns a distinct file object; removal detaches the old object, unregisters its number, then permits index reuse. |
-| T-03 | Device event arrives before the class is active | Medium — node creation fails and userspace cannot access the device | Node publication is moved ahead of the `Activated` transition | `kclass` registers the node inside its activation callback; devfs then resolves an available class handle. |
+| T-03 | Device event arrives before the class is active | Medium — node creation fails and userspace cannot access the device | Node publication is moved ahead of the `Activated` transition | `device-class` registers the node inside its activation callback; devfs then resolves an available class handle. |
 | T-04 | A stale remove deletes a new projection | Medium — the replacement device disappears from `/dev` | A future device id or assignment is reused | Removal compares the complete recorded `DeviceNode` before deleting it. |
 | T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `ClassDevice::is_available`. |
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
@@ -152,9 +152,9 @@ limitation must not be presented as a complete suspend-aware clock.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Class index space is exhausted in kdevice | No add event reaches devfs | Existing devices remain usable | 3 | `kclass` logs the device-node assignment failure; allocation policy remains in kdevice. |
+| F-01 | Class index space is exhausted in devnode | No add event reaches devfs | Existing devices remain usable | 3 | `device-class` logs the device-node assignment failure; allocation policy remains in devnode. |
 | F-02 | Character-device unregister races with lookup | Lookup either clones the old object or reports not found | An already opened old object reports removal | 3 | Registry serialization plus detached file semantics. |
-| F-03 | Active class handle cannot be found for an add event | The `/dev` node is absent | sysfs may still expose the identity | 3 | Log the inconsistent activation ordering; `kclass` publishes nodes only from the active transition. |
+| F-03 | Active class handle cannot be found for an add event | The `/dev` node is absent | sysfs may still expose the identity | 3 | Log the inconsistent activation ordering; `device-class` publishes nodes only from the active transition. |
 | F-04 | Removal wins during initial snapshot insertion | The callback waits for initialization | No stale node survives | 4 | Initialization holds the projection mutex across subscription and snapshot insertion, then the queued remove callback deletes the record. |
 | F-05 | Client poll registration is rejected | The current poll operation fails | The task does not sleep without a wake source | 3 | Propagate `PollRegisterError`. |
 
@@ -168,7 +168,7 @@ limitation must not be presented as a complete suspend-aware clock.
 ## Audit checklist
 
 - Keep subscriptions installed before snapshots are read.
-- Keep `kdevice` callback delivery outside its registry lock.
+- Keep `devnode` callback delivery outside its registry lock.
 - Never allocate or reinterpret node names and numbers inside devfs.
 - Preserve detached-fd behavior before enabling index reuse.
 - Add a class adapter before accepting a new `DeviceNodeKind` in devfs.

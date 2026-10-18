@@ -5,11 +5,8 @@
 use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
+use driver_base::Publication;
 use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
-use kclass::{
-    ClassDevice,
-    prelude::{Event, EventType, InputDevice, InputDeviceImpl},
-};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
@@ -25,6 +22,7 @@ use linux_raw_sys::{
     ioctl::{EVIOCGID, EVIOCGRAB, EVIOCGVERSION, EVIOCSCLOCKID},
 };
 use posix_types::{InputId, SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
+use subsys_input::{Event, EventType, InputDevice, InputDeviceImpl};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::dynamic::DynamicDeviceDir;
@@ -220,13 +218,13 @@ impl Pollable for EventClient {
 }
 
 pub(crate) struct EventDev {
-    device: ClassDevice<InputDeviceImpl>,
+    device: Publication<InputDeviceImpl>,
     endpoint: Arc<InputEndpoint>,
     ev_bits: Bitmap<{ EventType::COUNT as usize }>,
 }
 
 impl EventDev {
-    pub(crate) fn new(device: ClassDevice<InputDeviceImpl>, endpoint: Arc<InputEndpoint>) -> Self {
+    pub(crate) fn new(device: Publication<InputDeviceImpl>, endpoint: Arc<InputEndpoint>) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {

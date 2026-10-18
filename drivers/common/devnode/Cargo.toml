@@ -1,0 +1,20 @@
+[package]
+name = "devnode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Model-agnostic userland device-node projection: data-driven devtmpfs/sysfs/uevent registry"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "devnode", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+kspin.workspace = true
+ksync.workspace = true
+log.workspace = true
+unittest = { workspace = true }
+
+[lints]
+workspace = true

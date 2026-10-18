@@ -16,10 +16,10 @@ workqueue-bench = ["kworkng/bench"]
 smp = ["khal/smp", "ktask/smp", "krcu/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi", "ktask/ipi", "krcu/ipi"]
 
-char = ["kdriver/char", "dep:ktty"]
-display = ["kdriver/display", "dep:fbdevice"]
-input = ["kdriver/input", "dep:inputdev"]
-fs = ["kdriver/block", "dep:fs_boot"]
+char = ["dep:ktty"]
+display = ["dep:fbdevice"]
+input = ["dep:inputdev"]
+fs = ["dep:fs_boot", "dep:subsys_block"]
 # 9P runtime glue only. The transport driver is selected at the top level via
 # `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).
 fs9p = [
@@ -28,19 +28,19 @@ fs9p = [
 ]
 fs_cgroup2 = ["fs", "fs_boot/cgroup2"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
-net = ["kdriver/net", "dep:knet"]
-vsock = ["net", "kdriver/vsock"]
+net = ["dep:knet"]
+vsock = ["net"]
 vsock_tipc_bridge = []
 
 rtc = []
-# driver-dyn = ["kdriver/dyn"]
-arm-timer-resume-fixup = ["ktask/arm-timer-resume-fixup", "timer_driver/arm-timer-resume-fixup"]
+arm-timer-resume-fixup = ["ktask/arm-timer-resume-fixup", "clocksource_driver/arm-timer-resume-fixup"]
 rootfs-secondary-block = ["fs", "fs_boot/rootfs-secondary-block"]
 watchdog = ["dep:watchdog"]
 watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
+subsys_block = { workspace = true, optional = true }
 kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }
@@ -50,7 +50,7 @@ kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 fs_boot = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
-kdriver.workspace = true
+driver-init.workspace = true
 kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true
@@ -66,7 +66,7 @@ knet = { workspace = true, optional = true }
 kworkng = { workspace = true, features = ["system"] }
 ktask = { workspace = true }
 krcu.workspace = true
-timer_driver = { workspace = true }
+clocksource_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 entropy.workspace = true
 chrono.workspace = true

@@ -29,9 +29,9 @@ impl BootHandler {
                       node is missing or invalid; early_driver_init has no error return or \
                       recovery"
         )]
-        let timer_config = timer_driver::arm_generic::config_from_device_tree()
+        let timer_config = clocksource_driver::arm_generic::config_from_device_tree()
             .expect("ARM generic timer DT node is required on aarch64");
-        timer_driver::arm_generic::init(timer_config);
+        clocksource_driver::arm_generic::init(timer_config);
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
@@ -51,23 +51,23 @@ impl BootHandler {
                 kernel_boot::bootln!("rtc init skipped (non-fatal): no pl031 RTC in device tree");
             }
         }
-        irq_driver::gic::init_from_device_tree();
+        irqchip_driver::gic::init_from_device_tree();
         console_driver::register_input_irq_handler();
         #[cfg(feature = "nmi")]
         khal::nmi::early_init();
     }
 
     fn final_init(_boot_info: &BootInfo) {
-        irq_driver::gic::init_current_cpu();
-        timer_driver::arm_generic::init_percpu();
+        irqchip_driver::gic::init_current_cpu();
+        clocksource_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
-        irq_driver::gic::init_current_cpu();
-        timer_driver::arm_generic::init_percpu();
+        irqchip_driver::gic::init_current_cpu();
+        clocksource_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
     }

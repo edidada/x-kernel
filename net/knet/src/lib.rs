@@ -45,9 +45,7 @@ pub use control::{
     set_interface_ipv4_netmask,
 };
 #[cfg(feature = "vsock")]
-use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
-use kclass::{NetDevice, net_devices};
-use kdevice::subscribe_device_removed;
+use driver_base::Publication;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
@@ -61,6 +59,8 @@ pub use socket::{
 };
 pub(crate) use socket::{general, state};
 pub(crate) use stack::{router, socket_set};
+use subsys_net::{NetDevice, class::NET};
+use subsys_vsock::{VsockDeviceImpl, class::VSOCK};
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
@@ -97,7 +97,7 @@ pub fn init_network() {
     // Prepare stable Work storage before installing NIC notification sources.
     let _ = poller::network_poller();
 
-    let mut net_devs = net_devices();
+    let mut net_devs = NET.devices();
 
     let mut router = Router::new();
     let lo_dev = router
@@ -176,9 +176,9 @@ pub fn init_network() {
     SERVICE.start_timer();
 }
 
-fn subscribe_network_unregister(id: kdevice::DeviceId) {
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id {
+fn subscribe_network_unregister(id: driver_base::PublicationId) {
+    subsys_net::class::NET.subscribe_removed(Arc::new(move |removed| {
+        if removed.id() != id {
             return;
         }
         if unregister_netdev(id) {
@@ -191,7 +191,7 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 ///
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
-pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+pub(crate) fn unregister_netdev(id: driver_base::PublicationId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
@@ -203,13 +203,13 @@ pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
 #[cfg(feature = "vsock")]
 pub fn init_vsock() {
     info!("Initialize vsock subsystem...");
-    let mut vsock_devs = vsock_devices();
+    let mut vsock_devs = VSOCK.devices();
     if let Some(handle) = vsock_devs.pop() {
         register_vsock_handle(handle);
     } else {
         warn!("  No vsock device found!");
     }
-    subscribe_vsock_available(Arc::new(register_vsock_handle));
+    VSOCK.subscribe_available(Arc::new(register_vsock_handle));
 }
 
 /// Starts vsock runtime workers that require all scheduler run queues.
@@ -219,14 +219,14 @@ pub fn start_vsock_bridge() {
 }
 
 #[cfg(feature = "vsock")]
-fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
+fn register_vsock_handle(handle: Publication<VsockDeviceImpl>) {
     use crate::vsock::connection_manager::{register_vsock_dev, unregister_vsock_dev};
 
     let id = handle.id();
     info!(
         "  use vsock 0: {:?} (driver={}, {:?})",
         handle.name(),
-        handle.driver_name(),
+        handle.driver_name().unwrap_or("<none>"),
         handle.location(),
     );
     if let Err(e) = register_vsock_dev(handle) {
@@ -239,8 +239,8 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id == id && unregister_vsock_dev(id) {
+    subsys_vsock::class::VSOCK.subscribe_removed(Arc::new(move |removed| {
+        if removed.id() == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }
     }));

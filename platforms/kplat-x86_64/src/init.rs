@@ -26,8 +26,8 @@ impl BootHandler {
     fn firmware_init(_boot_info: &BootInfo) {}
 
     fn early_driver_init() {
-        timer_driver::x86_lapic_tsc::early_init(
-            timer_driver::x86_lapic_tsc::TimerConfig::platform_static(
+        clocksource_driver::x86_lapic_tsc::early_init(
+            clocksource_driver::x86_lapic_tsc::TimerConfig::platform_static(
                 ktime_types::Frequency::from_hz(TIMER_FREQUENCY_HZ as u64),
             ),
         );
@@ -62,12 +62,12 @@ impl BootHandler {
     fn final_init(_boot_info: &BootInfo) {
         x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
         console_driver::register_input_irq_handler();
-        timer_driver::x86_lapic_tsc::init_primary();
+        clocksource_driver::x86_lapic_tsc::init_primary();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
         x86_apic::init_secondary();
-        timer_driver::x86_lapic_tsc::init_secondary();
+        clocksource_driver::x86_lapic_tsc::init_secondary();
     }
 }

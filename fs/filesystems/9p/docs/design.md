@@ -114,7 +114,7 @@ v9fs 自身不增加全局或 session 级锁。一个 mount 的 inode/file fids 
 
 - 只实现 9P2000.L cacheless filesystem 语义；
 - 尚无 KVFS dentry-private fid slot、atomic-open contract、page-cache、xattr 或远端锁支持；
-- transport discovery 和 VirtIO/kclass glue 保持在现有 boot/driver 层，本次不重构它们。
+- transport discovery 和 VirtIO/device-class glue 保持在现有 boot/driver 层，本次不重构它们。
 
 ## Drop / 资源释放
 

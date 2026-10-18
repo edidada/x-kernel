@@ -4,7 +4,7 @@
 
 use core::fmt;
 
-use block::DriverError;
+use subsys_block::KError;
 
 /// Result type used by KExt4 storage operations.
 pub type Ext4Result<T> = core::result::Result<T, Ext4Error>;
@@ -156,7 +156,7 @@ pub enum CorruptKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ext4Error {
     /// The block driver rejected an I/O operation.
-    Device(DriverError),
+    Device(KError),
     /// The journal has aborted and no further metadata mutation is allowed.
     JournalAborted,
     /// A transaction handle ran out of metadata credits.
@@ -215,8 +215,8 @@ pub enum Ext4Error {
     Corrupt(CorruptKind),
 }
 
-impl From<DriverError> for Ext4Error {
-    fn from(error: DriverError) -> Self {
+impl From<KError> for Ext4Error {
+    fn from(error: KError) -> Self {
         Self::Device(error)
     }
 }

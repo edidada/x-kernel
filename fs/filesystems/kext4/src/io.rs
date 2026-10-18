@@ -4,7 +4,7 @@
 
 use alloc::{sync::Arc, vec};
 
-use block::BlockDeviceOperations;
+use subsys_block::BlockDeviceOperations;
 
 use crate::{
     Ext4Error, Ext4Result, FilesystemBlock,
@@ -222,7 +222,7 @@ impl JournalReplayBlockWriter for FilesystemDevice {
 mod tests {
     use alloc::vec::Vec;
 
-    use block::{Device, DeviceKind, DriverError, DriverResult};
+    use subsys_block::{KError, KResult};
     use unittest::def_test;
 
     use super::*;
@@ -246,16 +246,6 @@ mod tests {
         }
     }
 
-    impl Device for MemoryBlockDevice {
-        fn name(&self) -> &str {
-            "kext4-memory-block-device"
-        }
-
-        fn device_kind(&self) -> DeviceKind {
-            DeviceKind::Block
-        }
-    }
-
     impl BlockDeviceOperations for MemoryBlockDevice {
         fn num_blocks(&self) -> u64 {
             (self.bytes.lock().len() / DEVICE_BLOCK_SIZE) as u64
@@ -265,41 +255,39 @@ mod tests {
             DEVICE_BLOCK_SIZE
         }
 
-        fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
+        fn read_block(&self, block_id: u64, output: &mut [u8]) -> KResult {
             let start = usize::try_from(block_id)
-                .map_err(|_| DriverError::InvalidInput)?
+                .map_err(|_| KError::InvalidInput)?
                 .checked_mul(DEVICE_BLOCK_SIZE)
-                .ok_or(DriverError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             let end = start
                 .checked_add(output.len())
-                .ok_or(DriverError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             output.copy_from_slice(
                 self.bytes
                     .lock()
                     .get(start..end)
-                    .ok_or(DriverError::InvalidInput)?,
+                    .ok_or(KError::InvalidInput)?,
             );
             Ok(())
         }
 
-        fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+        fn write_block(&self, block_id: u64, input: &[u8]) -> KResult {
             self.write_lengths.lock().push(input.len());
             let start = usize::try_from(block_id)
-                .map_err(|_| DriverError::InvalidInput)?
+                .map_err(|_| KError::InvalidInput)?
                 .checked_mul(DEVICE_BLOCK_SIZE)
-                .ok_or(DriverError::InvalidInput)?;
-            let end = start
-                .checked_add(input.len())
-                .ok_or(DriverError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
+            let end = start.checked_add(input.len()).ok_or(KError::InvalidInput)?;
             self.bytes
                 .lock()
                 .get_mut(start..end)
-                .ok_or(DriverError::InvalidInput)?
+                .ok_or(KError::InvalidInput)?
                 .copy_from_slice(input);
             Ok(())
         }
 
-        fn flush(&self) -> DriverResult {
+        fn flush(&self) -> KResult {
             *self.is_flushed.lock() = true;
             Ok(())
         }

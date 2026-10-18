@@ -13,27 +13,28 @@ dev-log = ["devfs/dev-log"]
 ebpf = ["dep:bpffs"]
 cgroup2 = ["dep:cgroup2fs"]
 fs9p = [
-    "dep:kclass",
+    "dep:virtio_devices",
     "dep:macros",
     "dep:p9",
     "dep:v9fs",
-    "kclass/virtio-9p",
+    "virtio_devices/virtio-9p",
 ]
 rootfs-secondary-block = []
 smp = ["procfs/smp"]
 
 [dependencies]
+driver_base = { workspace = true }
+virtio_devices = { workspace = true, optional = true }
 anon_inodefs.workspace = true
-block.workspace = true
+subsys_block = { workspace = true }
 bpffs = { workspace = true, optional = true }
 cgroup2fs = { workspace = true, optional = true }
 devfs.workspace = true
 fs_context.workspace = true
-kclass = { workspace = true, optional = true }
 kbuild_config.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
-kdevice_uevent.workspace = true
+uevent_netlink.workspace = true
 kvfs.workspace = true
 log.workspace = true
 macros = { workspace = true, optional = true }

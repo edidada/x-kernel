@@ -6,7 +6,7 @@
 
 use alloc::vec;
 
-use block::DriverError;
+use subsys_block::KError;
 use unittest::def_test;
 
 use crate::{
@@ -40,7 +40,7 @@ fn sync_filesystem_propagates_flush_error() {
 
     assert_eq!(
         filesystem.sync_filesystem(),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     );
     assert_eq!(device.flush_count(), 1);
 }
@@ -174,7 +174,7 @@ fn commit_failure_after_metadata_publication_aborts_mount_journal() {
             Ok(()),
             crate::journal::RecoveryFlagPolicy::PreserveDuringRecovery,
         ),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     );
     assert!(journal.is_aborted());
     assert!(matches!(
@@ -197,7 +197,7 @@ fn explicit_sync_commit_failure_aborts_mount_journal() {
 
     assert_eq!(
         filesystem.sync_filesystem(),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     );
     assert!(journal.is_aborted());
     assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
@@ -333,7 +333,7 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
             .unwrap();
         assert_eq!(
             filesystem.commit_metadata_transaction(TransactionId::new(721)),
-            Err(Ext4Error::Device(DriverError::Io))
+            Err(Ext4Error::Device(KError::Io))
         );
         assert!(journal.is_aborted());
         assert_eq!(

@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Clock policy and topology flags.
+//!
+//! These mirror the Linux `CLK_*` flags. Each variant documents whether it is
+//! honored by the framework core.
+
+use bitflags::bitflags;
+
+bitflags! {
+    /// Flags governing a clock node's behavior.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ClkFlags: u32 {
+        /// Propagate rate changes up to the parent clock.
+        ///
+        /// **Implemented:** honored by `ClkCore::round_rate` / `set_rate`.
+        const SET_RATE_PARENT = 1 << 0;
+        /// The clock's rate may only be changed while it is disabled
+        /// (Linux `CLK_SET_RATE_GATE`). An enabled clock's `set_rate` is
+        /// rejected with [`Busy`](crate::ClkError::Busy) — reprogramming
+        /// running hardware is glitch-prone, and the disable/change/re-enable
+        /// alternative strands the enable count on gated hardware if the
+        /// re-enable fails.
+        const SET_RATE_GATE = 1 << 1;
+        /// The clock's parent may only be changed while it is not prepared
+        /// (Linux `CLK_SET_PARENT_GATE`). A prepared clock's `set_parent` is
+        /// rejected with [`Busy`](crate::ClkError::Busy).
+        const SET_PARENT_GATE = 1 << 4;
+        /// Never gate this clock, even when it appears unused.
+        ///
+        /// **Implemented:** honored by [`crate::clk_disable_unused`], which
+        /// skips clocks carrying this flag.
+        const IGNORE_UNUSED = 1 << 2;
+        /// The clock is critical and must stay enabled at all times.
+        ///
+        /// **Implemented:** honored by [`crate::clk_disable_unused`], which
+        /// skips clocks carrying this flag.
+        const IS_CRITICAL = 1 << 3;
+        /// Re-read the hardware rate on every query instead of trusting the cache.
+        ///
+        /// **Implemented:** `get_rate` re-reads the hardware rate (and refreshes
+        /// the cache) instead of returning the cached value.
+        const GET_RATE_NOCACHE = 1 << 6;
+    }
+}

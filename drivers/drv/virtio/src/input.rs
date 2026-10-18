@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! virtio-input driver on the driver-core model (PCI transport).
+//!
+//! Template application of the PCI consumer pattern: const id table, one
+//! class publication, no interrupt ownership in this crate.
+
+use alloc::boxed::Box;
+
+use driver_base::{Device, DriverOps, ProbeError, RuntimeError};
+use pci::{PciBus, PciMatch};
+use subsys_input::class::INPUT;
+use virtio_devices::VirtioDeviceKind;
+
+/// `struct pci_device_id virtio_input_id_table[]`.
+static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];
+
+/// Driver-private data: the published device is owned by its class registry.
+pub struct InputData {
+    /// The Data-owned publication: dropping unpublishes (first field).
+    _publication: driver_base::Publication<subsys_input::class::InputDeviceImpl>,
+}
+
+/// The driver ops.
+pub struct InputDriver;
+
+impl DriverOps<PciBus> for InputDriver {
+    type Data = InputData;
+
+    fn probe(&self, dev: &mut Device<'_, PciBus>) -> Result<InputData, ProbeError> {
+        let (kind, transport, irq) = crate::common::pci_transport(dev)?;
+        if !matches!(kind, VirtioDeviceKind::Input) {
+            return Err(ProbeError::Fatal(RuntimeError::Unsupported));
+        }
+        let publication = activate(dev, transport, irq.unwrap_or(0), None)?;
+        Ok(InputData {
+            _publication: publication,
+        })
+    }
+
+    fn remove(&self, _dev: &mut Device<'_, PciBus>, _data: &mut InputData) {
+        // The Data-owned publication guard unpublishes at Data drop.
+    }
+}
+
+/// Construct and publish the device for a probed transport — shared by the
+/// PCI driver above and the virtio-mmio transport driver.
+pub fn activate<B: driver_base::Bus>(
+    dev: &mut Device<'_, B>,
+    transport: impl virtio_devices::Transport + 'static,
+    irq: usize,
+    mmio_regs: Option<driver_base::IoMap>,
+) -> Result<driver_base::Publication<subsys_input::class::InputDeviceImpl>, ProbeError> {
+    let device = virtio_devices::VirtIoInputDev::<driver_host::virtio_hal::Hal, _>::try_new(
+        transport, irq, mmio_regs,
+    )
+    .map_err(crate::common::map_driver_error)?;
+    let name = alloc::string::String::from(device.name());
+    let handle = dev
+        .publish(&INPUT, Box::new(device), name)
+        .map_err(crate::common::map_driver_error)?;
+    Ok(handle)
+}
+
+/// virtio-mmio activation: owns the class publication; close() unpublishes
+/// so nothing dereferences the transport after the mapping drops.
+#[cfg(feature = "mmio")]
+pub fn activate_mmio(
+    dev: &mut driver_base::Device<'_, driver_base::PlatformBus>,
+    transport: impl virtio_devices::Transport + 'static,
+    mut builder: crate::mmio::ActivationBuilder,
+) -> Result<crate::mmio::MmioData, ProbeError> {
+    // The MMIO register mapping follows the device object (Linux BAR
+    // model): released with the last Publication clone.
+    let mmio_regs = builder.take_regs();
+
+    // The vendored input device filters its shared-line handler by the
+    // LOGICAL virq (the number the host IRQ core dispatches). Resolve the
+    // descriptor's irq through the host service — a firmware route (the
+    // shape DT enumeration produces) maps through its controller's domain
+    // here; reading raw fields would confuse hwirq with virq on every
+    // non-identity domain, and rejecting routes broke the only real
+    // firmware-enumerated path.
+    let irq = dev.res().resolve_irq(0)?;
+    // The vendored input device wants a plain number; `Virq::raw` is the
+    // documented crossing into a consumer API that predates the newtype.
+    let publication = activate(dev, transport, irq.raw(), mmio_regs)?;
+
+    struct InputMmioActivation {
+        _withdraw: driver_base::Publication<subsys_input::class::InputDeviceImpl>,
+    }
+
+    impl crate::common::Activation for InputMmioActivation {
+        fn close(self: alloc::boxed::Box<Self>) {
+            // Field order sequences the unpublish before later guards.
+        }
+    }
+
+    Ok(builder.build(InputMmioActivation {
+        _withdraw: publication,
+    }))
+}
+
+driver_base::declare_driver!(PciBus, InputDriver, "virtio-input", IDS);

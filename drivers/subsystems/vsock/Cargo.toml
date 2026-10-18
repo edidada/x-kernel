@@ -1,0 +1,27 @@
+[package]
+name = "subsys-vsock"
+edition.workspace = true
+description = "Common traits and types for vsock drivers"
+keywords = ["x-kernel", "driver", "vsock"]
+documentation.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+log = { workspace = true }
+driver_base = { workspace = true }
+kerrno.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

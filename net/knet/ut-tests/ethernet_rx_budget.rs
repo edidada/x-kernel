@@ -4,8 +4,7 @@
 
 use alloc::boxed::Box;
 
-use driver_net::{NetBuf, NetBufPool};
-use kdevice::{DeviceId, DeviceObject};
+use subsys_net::{NetBuf, NetBufPool};
 use ksync::Mutex;
 use unittest::{assert, assert_eq, def_test};
 
@@ -26,19 +25,9 @@ struct TestNic {
     pool: Arc<NetBufPool>,
 }
 
-impl Device for TestNic {
-    fn name(&self) -> &str {
-        "rx-budget-test"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Net
-    }
-}
-
 impl NetDevice for TestNic {
-    fn mac(&self) -> driver_net::MacAddress {
-        driver_net::MacAddress(LOCAL_MAC)
+    fn mac(&self) -> subsys_net::MacAddress {
+        subsys_net::MacAddress(LOCAL_MAC)
     }
 
     fn can_tx(&self) -> bool {
@@ -57,13 +46,13 @@ impl NetDevice for TestNic {
         0
     }
 
-    fn recv(&self) -> DriverResult<NetBufHandle> {
+    fn recv(&self) -> KResult<NetBufHandle> {
         let frame = self
             .state
             .frames
             .lock()
             .pop_front()
-            .ok_or(DriverError::WouldBlock)?;
+            .ok_or(KError::WouldBlock)?;
         let mut buffer = self.pool.alloc_boxed().unwrap();
         buffer.set_payload_len(frame.len()).unwrap();
         buffer.payload_mut().copy_from_slice(&frame);
@@ -71,27 +60,27 @@ impl NetDevice for TestNic {
         Ok(buffer.into_handle())
     }
 
-    fn recycle_rx(&self, buffer: NetBufHandle) -> DriverResult {
+    fn recycle_rx(&self, buffer: NetBufHandle) -> KResult {
         // SAFETY: recv creates every RX handle with NetBuf::into_handle and
         // transfers it only to the Ethernet poll, which returns it exactly once.
         drop(unsafe { NetBuf::from_handle(buffer) });
         self.state.recycled.fetch_add(1, Ordering::Relaxed);
         if self.state.has_recycle_error.load(Ordering::Relaxed) {
-            Err(DriverError::Io)
+            Err(KError::Io)
         } else {
             Ok(())
         }
     }
 
-    fn recycle_tx(&self) -> DriverResult {
+    fn recycle_tx(&self) -> KResult {
         Ok(())
     }
 
-    fn alloc_tx_buf(&self, _size: usize) -> DriverResult<NetBufHandle> {
-        Err(DriverError::Unsupported)
+    fn alloc_tx_buf(&self, _size: usize) -> KResult<NetBufHandle> {
+        Err(KError::Unsupported)
     }
 
-    fn send(&self, _buffer: NetBufHandle) -> DriverResult {
+    fn send(&self, _buffer: NetBufHandle) -> KResult {
         panic!("the RX fixture does not allocate TX buffers")
     }
 }
@@ -105,22 +94,18 @@ fn device(frames: impl IntoIterator<Item = Vec<u8>>) -> (EthernetDevice, Arc<RxS
     });
     // Keep the synthetic device and RX source local: no registry, softirq
     // action, or scheduler is installed by this fixture.
-    let parent = Arc::new(DeviceObject::new_bound_for_test(
-        DeviceId::new(1),
-        DeviceKind::Net,
-    ));
     let runtime: NetDeviceImpl = Box::new(TestNic {
         state: state.clone(),
         pool: NetBufPool::new(1, 2048).unwrap(),
     });
-    let inner = ClassDevice::try_new_with_info(
-        parent,
+    let inner = driver_base::Publication::detached(
+        1,
+        "knet-test",
+        alloc::string::String::from("/virtual/rx-budget-test"),
         runtime,
-        "rx-budget-test".into(),
-        DeviceKind::Net,
-        None,
-    )
-    .unwrap();
+        "rx-budget-test",
+        false,
+    );
     (
         EthernetDevice {
             name: "rx-budget-test".into(),

@@ -19,9 +19,8 @@ use alloc::{
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytemuck::bytes_of;
-use display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
+use driver_base::Publication;
 use kalloc::GlobalPage;
-use kclass::{ClassDevice, DisplayDeviceImpl};
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
@@ -30,6 +29,9 @@ use kvfs::{
 };
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
+use subsys_display::{
+    DisplayDevice, DisplayDeviceImpl, ScanoutFormat, ScanoutRect, ScanoutResource,
+};
 
 use super::{consts::*, drm::*};
 
@@ -443,7 +445,7 @@ impl Drop for DrmFile {
 
 /// One DRM primary character device bound to one display backend.
 pub struct DrmCard {
-    display: ClassDevice<DisplayDeviceImpl>,
+    display: Publication<DisplayDeviceImpl>,
     masters: Arc<Mutex<MasterState>>,
     events: Mutex<VecDeque<DrmEventVblank>>,
     poll_rx: PollSet,
@@ -517,7 +519,7 @@ pub struct DrmCard {
 
 impl DrmCard {
     /// Create a new DRM device instance.
-    pub fn new(display: ClassDevice<DisplayDeviceImpl>) -> Arc<Self> {
+    pub fn new(display: Publication<DisplayDeviceImpl>) -> Arc<Self> {
         Arc::new(Self {
             display,
             masters: Arc::new(Mutex::new(MasterState::default())),
@@ -552,7 +554,7 @@ impl DrmCard {
         self.poll_rx.wake();
     }
 
-    fn display(&self) -> VfsResult<&ClassDevice<DisplayDeviceImpl>> {
+    fn display(&self) -> VfsResult<&Publication<DisplayDeviceImpl>> {
         self.display
             .is_available()
             .then_some(&self.display)
@@ -1246,7 +1248,7 @@ fn resource_on_scanout(dev: &DrmCard, resource_id: u32) -> bool {
 /// `fbs` lock -- the order `retire_unused_dumb()` takes them in.  Without that, a
 /// close of the last framebuffer could slip in between the test and the
 /// insertion, and the parked entry would never be retired.
-fn park_or_destroy(dev: &DrmCard, device: &ClassDevice<DisplayDeviceImpl>, dumb: DumbBuffer) {
+fn park_or_destroy(dev: &DrmCard, device: &Publication<DisplayDeviceImpl>, dumb: DumbBuffer) {
     {
         let fbs = dev.fbs.lock();
         let referenced = fbs.values().any(|fb| fb.resource_id == dumb.resource_id);
@@ -1260,7 +1262,7 @@ fn park_or_destroy(dev: &DrmCard, device: &ClassDevice<DisplayDeviceImpl>, dumb:
 }
 
 /// Detach the scanout resource behind `dumb` and release its backing pages.
-fn destroy_dumb(device: &ClassDevice<DisplayDeviceImpl>, dumb: DumbBuffer) {
+fn destroy_dumb(device: &Publication<DisplayDeviceImpl>, dumb: DumbBuffer) {
     if let Err(err) = device.destroy_scanout_resource(dumb.resource_id) {
         log::warn!(
             "drm: failed to destroy scanout resource {}: {:?}",

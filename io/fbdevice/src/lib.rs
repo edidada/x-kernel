@@ -34,13 +34,16 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
+use driver_base::Publication;
 use kalloc::GlobalPage;
-use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
 use khal::mem::v2p;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use subsys_display::{
+    DisplayDevice, DisplayDeviceImpl, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource,
+    class::DISPLAY,
+};
 
 /// Bytes per pixel for the shadow scanout buffer. Matches the BGRA8888 format
 /// advertised to the display device.
@@ -57,7 +60,7 @@ struct FbEmulation {
     /// one Arc clone instead of re-snapshotting (and allocating) the whole
     /// class registry on every [`fb_present`] call. The device outlives fbdev
     /// (no teardown), so the cached handle cannot dangle.
-    device: ClassDevice<DisplayDeviceImpl>,
+    device: Publication<DisplayDeviceImpl>,
     /// Guest-mapped shadow buffer; userspace reads/writes land here. Kept alive
     /// for the framebuffer lifetime, so the host scanout resource's backing
     /// memory stays valid.
@@ -85,9 +88,9 @@ pub fn fb_init() {
 
 fn try_setup() -> Result<(), ()> {
     // Pick the primary display device. Display device registration races with
-    // fb_init in general, but the kclass registry is seeded before fb_init
+    // fb_init in general, but the device_class registry is seeded before fb_init
     // runs in the boot sequence; a missing device here means no display at all.
-    let device = class_display_devices().into_iter().next().ok_or(())?;
+    let device = DISPLAY.devices().into_iter().next().ok_or(())?;
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");

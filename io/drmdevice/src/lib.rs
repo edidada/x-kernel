@@ -17,7 +17,7 @@
 //! use alloc::sync::Arc;
 //! use drmdevice::DrmCard;
 //!
-//! let display = kclass::display_devices()
+//! let display = subsys_display::class::DISPLAY.devices()
 //!     .into_iter()
 //!     .next()
 //!     .expect("display discovery must run before devfs registration");

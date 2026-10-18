@@ -10,16 +10,16 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-vsock = ["kclass/vsock"]
+vsock = []
 vsock_tipc_bridge = ["vsock", "dep:tipc"]
 
 [dependencies]
+subsys_net = { workspace = true }
+subsys_vsock = { workspace = true }
+driver_base = { workspace = true }
 entropy.workspace = true
 anon_inodefs.workspace = true
 unittest = { workspace = true }
-kclass = { workspace = true, features = ["net"] }
-net.workspace = true
-kdevice = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }

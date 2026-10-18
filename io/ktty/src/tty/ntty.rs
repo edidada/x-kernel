@@ -5,15 +5,13 @@
 use alloc::sync::Arc;
 use core::task::Waker;
 
-use char_driver::CharDevice;
-use console_driver::{
-    runtime::stdout_console,
-    serial::{self, SerialPort},
-};
-use kclass::{CharDeviceImpl, ClassDevice};
+use console_driver::runtime::stdout_console;
+use driver_base::Publication;
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
+use serial_core::SerialPort;
+use subsys_char::{CharDevice, CharDeviceImpl};
 
 use super::{Tty, TtyKind};
 use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
@@ -28,13 +26,13 @@ pub type NTtyDriver = Tty<Arc<ConsoleConnection>, Arc<ConsoleConnection>>;
 /// retaining its runtime wrapper does not provide general hot-unplug support.
 pub struct ConsoleConnection {
     boot_port: Option<Arc<SerialPort>>,
-    runtime: SpinNoPreempt<Option<ClassDevice<CharDeviceImpl>>>,
+    runtime: SpinNoPreempt<Option<Publication<CharDeviceImpl>>>,
 }
 
 impl ConsoleConnection {
     fn new() -> Self {
         Self {
-            boot_port: serial::stdout_port(),
+            boot_port: serial_core::stdout_port(),
             runtime: SpinNoPreempt::new(None),
         }
     }
@@ -71,7 +69,7 @@ impl ConsoleConnection {
         }
     }
 
-    fn runtime_handle(&self) -> Option<ClassDevice<CharDeviceImpl>> {
+    fn runtime_handle(&self) -> Option<Publication<CharDeviceImpl>> {
         let handle = self.runtime.lock().clone()?;
         if handle.is_available() {
             Some(handle)
@@ -81,7 +79,7 @@ impl ConsoleConnection {
         }
     }
 
-    fn fallback(&self, failed: &ClassDevice<CharDeviceImpl>) {
+    fn fallback(&self, failed: &Publication<CharDeviceImpl>) {
         let removed = {
             let mut runtime = self.runtime.lock();
             if runtime

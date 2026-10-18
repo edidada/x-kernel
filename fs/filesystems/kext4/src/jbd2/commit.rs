@@ -974,7 +974,7 @@ mod tests {
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;
 
-    use block::DriverError;
+    use subsys_block::KError;
     use unittest::def_test;
 
     use super::*;
@@ -1037,7 +1037,7 @@ mod tests {
                 });
             }
             if *self.fail_write_at.borrow() == Some(self.write_order.borrow().len()) {
-                return Err(Ext4Error::Device(DriverError::Io));
+                return Err(Ext4Error::Device(KError::Io));
             }
             self.write_order.borrow_mut().push(block);
             self.blocks.borrow_mut().insert(block.get(), input.to_vec());
@@ -1481,7 +1481,7 @@ mod tests {
         journal.fail_write_at(1);
         assert!(matches!(
             persist_journal_commit(&superblock, &journal, None, commit.as_ref(), &blocks),
-            Err(Ext4Error::Device(DriverError::Io))
+            Err(Ext4Error::Device(KError::Io))
         ));
 
         let mut bytes = vec![0; BLOCK_SIZE];

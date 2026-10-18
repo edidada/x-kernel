@@ -297,6 +297,7 @@ make install-tools
 make check_deps
 make check_header
 make check_lints
+make check_boundaries
 make doc
 make doc_check_missing
 make fmt
@@ -327,6 +328,19 @@ are not a complete Rust syntax analysis.
 including implicit path-dependency members, must declare
 `[lints] workspace = true`; there is no opt-out list. `make clippy`,
 `make dylint`, and `make dylint_test` run it before Cargo.
+
+`make check_boundaries` runs `scripts/ci/check_driver_boundaries.sh`, the
+mechanical half of `docs/ai/driver-subsystem-boundaries.md`: rule L0-a
+(`driver-core` names no device family), L0-b (contract crates carry no direct
+host-kernel dependency), L1 (no `drv/**`/`subsystems/**`/`common/**` crate
+fetches a provider singleton or imports `driver_core::provider`, and no `drv/**`
+crate calls a `kirq` registration API), and the integrity of the E-01..E-04
+exception register — an allow-list entry whose id is missing from that document,
+or whose code no longer needs the exception, fails the check. It is pure grep
+over the tree (no build), and `make clippy` and `make dylint` run it before
+Cargo, so it also gates the pre-commit hook. A new host dependency under
+`drv/**` must be added to that document's register *and* to the script's
+allow-list; the script fails until both exist.
 
 `make unittest` means a kernel unit-test build followed by QEMU execution. It
 is equivalent to the former `make run UNITTEST=y` workflow:

@@ -15,7 +15,7 @@ attributes are read-only; hardware DeviceNode uevent behavior is unchanged.
 ## Purpose
 
 `sysfs` provides a Linux-compatible, read-mostly device discovery filesystem.
-It projects `kdevice::DeviceNode` facts into `/sys/devices`, `/sys/class`,
+It projects `devnode::DevNode` facts into `/sys/devices`, `/sys/class`,
 `/sys/dev/char`, and `/sys/bus`, and exposes `uevent` attributes for standard
 device-management clients.
 
@@ -33,8 +33,8 @@ device-management clients.
 
 `sysfs` does not discover hardware, bind drivers, assign class indices,
 allocate device numbers, create `/dev` nodes, or publish automatic lifecycle
-events. `kdevice` owns node identity and lifecycle ordering,
-`kdevice-uevent` publishes automatic events, `kclass` publishes runtime
+events. `devnode` owns node identity and lifecycle ordering,
+`devnode-uevent` publishes automatic events, `device-class` publishes runtime
 capabilities, and devfs independently projects the same facts into `/dev`.
 KVFS owns generic pathname, inode, mount, and permission enforcement. This
 crate does not parse firmware, access hardware, or implement userspace udev
@@ -49,10 +49,10 @@ construction, input attributes, and user-triggered uevent files.
 ## Architecture
 
 ```text
-kclass input/display activation
+device-class input/display activation
               │
               ▼
-    kdevice DeviceNode registry
+    devnode registry
               │ Added / Removing / Removed + snapshot
               ▼
  DEVICE_PROJECTION: Mutex<nodes + cached tree>
@@ -65,10 +65,10 @@ kclass input/display activation
 /sys/bus/<bus>/drivers/<driver>   bus/driver projection
               │ write action to uevent
               ▼
-kdevice-uevent -> NETLINK_KOBJECT_UEVENT group 1
+devnode-uevent -> NETLINK_KOBJECT_UEVENT group 1
 ```
 
-The physical path is derived from `kdevice::DeviceLocation`. PCI devices use
+The physical path is derived from `devnode::DeviceLocation`. PCI devices use
 `pciSSSS:BB/SSSS:BB:DD.F`; MMIO and other platform devices use stable platform
 paths. The allocated class index, `DeviceNumber`, `devname`, driver identity,
 and input metadata all come from the same `DeviceNode` snapshot.
@@ -102,7 +102,7 @@ by boot filesystem setup.
 ## Initialization and state
 
 Boot initializes the projection before driver discovery, independently of the
-first sysfs mount. Initialization subscribes to `kdevice::DeviceNodeEvent` and
+first sysfs mount. Initialization subscribes to `devnode::DevNodeEvent` and
 receives the current node snapshot atomically. It never turns that snapshot
 into synthetic add events. Mount-time initialization is only an idempotent
 fallback for nonstandard callers.
@@ -112,7 +112,7 @@ publishes its add event. Removal first changes the shared node state to
 unavailable. The `Removing` callback takes the projected device's access gate
 exclusively, which waits for in-flight attribute reads or uevent writes. The
 coordinator then publishes remove while the path still exists, and `Removed`
-finally deletes the projection. A removing node remains reserved in `kdevice`,
+finally deletes the projection. A removing node remains reserved in `devnode`,
 so a replacement with the same core ID cannot interleave with this sequence.
 
 Each add or remove rebuilds the generated path tree once. A structural diff
@@ -154,7 +154,7 @@ tree update and its cache invalidation ordered against other device callbacks.
 
 ## Design decisions
 
-- sysfs consumes `kdevice` facts directly and is a peer of devfs. Boot installs
+- sysfs consumes `devnode` facts directly and is a peer of devfs. Boot installs
   the sysfs projection before discovery, so device events do not depend on
   filesystem mount order.
 - One device-core allocation authority keeps `/dev` and `/sys` indices,
@@ -162,7 +162,7 @@ tree update and its cache invalidation ordered against other device callbacks.
 - A generated tree keeps the implementation small while preserving dynamic
   semantics. It is rebuilt only for lifecycle changes, so repeated path lookup
   does not reformat every device attribute. Device counts are bounded by the
-  kdevice node-class pools.
+  devnode node-class pools.
 - Relative links are computed rather than encoded with fixed `../` counts.
 - Capability files use Linux's high-word-first hexadecimal format.
 - Uevent files use a command-file operation so one node supports readable

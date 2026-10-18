@@ -21,17 +21,15 @@ use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
-use kclass::{
-    ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
-};
-#[cfg(feature = "fs9p")]
-use kerrno::KError;
+use driver_base::Publication;
 #[cfg(feature = "fs9p")]
 use kvfs::{FileSystemType, FsContext, FsContextOperations};
 use kvfs::{
     Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
     SuperBlock, SuperBlockFlags, path::PathBuf,
 };
+#[cfg(feature = "fs9p")]
+use virtio_devices::{Virtio9pDevice as _, Virtio9pDeviceImpl, class_9p::P9};
 
 const PSEUDO_FS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)
@@ -53,33 +51,18 @@ const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
 /// independent of when userspace mounts sysfs.
 pub fn init_device_discovery() {
     sysfs::init_device_projection();
-    kdevice_uevent::init();
+    uevent_netlink::init();
 }
 
 #[cfg(feature = "fs9p")]
-struct Virtio9pTransport(ClassDevice<Virtio9pDeviceImpl>);
+struct Virtio9pTransport(Publication<Virtio9pDeviceImpl>);
 
 #[cfg(feature = "fs9p")]
 impl p9::P9Transport for Virtio9pTransport {
     fn request(&mut self, request: &[u8], response: &mut [u8]) -> kerrno::KResult<usize> {
-        self.0
-            .request(request, response)
-            .map_err(map_9p_driver_error)
-    }
-}
-
-#[cfg(feature = "fs9p")]
-fn map_9p_driver_error(error: DriverError) -> KError {
-    match error {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::BadState => KError::BadState,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
-        DriverError::NoMemory => KError::NoMemory,
-        DriverError::ReadOnly => KError::ReadOnlyFilesystem,
-        DriverError::ResourceBusy => KError::ResourceBusy,
-        DriverError::Unsupported => KError::OperationNotSupported,
+        // The publication's `Virtio9pDevice` forwarding gates on availability
+        // and returns the driver's own error vocabulary unchanged.
+        self.0.request(request, response)
     }
 }
 
@@ -89,7 +72,7 @@ fn host_9p_get_tree(
     _lookup_root: &Path,
     _lookup_pwd: &Path,
 ) -> kvfs::VfsResult<Arc<SuperBlock>> {
-    let mut devices = virtio_9p_devices();
+    let mut devices = P9.devices();
     let handle = match context.source().filter(|mount_tag| !mount_tag.is_empty()) {
         Some(mount_tag) => devices
             .into_iter()
@@ -463,9 +446,9 @@ impl BootVfs {
 fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
 
-    let mut block_devs = block::block_devices()
+    let mut block_devs = subsys_block::block_devices()
         .into_iter()
-        .filter(|device| device.num_sectors() != 0)
+        .filter(|device| device.num_blocks() != 0)
         .collect();
     let handle = select_root_block(&mut block_devs);
     let source = format!("/dev/{}", handle.name());
@@ -535,7 +518,9 @@ fn mount_root_file_system(boot: &BootVfs) {
 }
 
 /// Chooses the block device used as the root filesystem.
-fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::BlockDevice> {
+fn select_root_block(
+    devs: &mut Vec<Arc<subsys_block::BlockDevice>>,
+) -> Arc<subsys_block::BlockDevice> {
     let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
     if !preferred.is_empty() {
         #[expect(

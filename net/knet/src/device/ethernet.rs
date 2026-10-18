@@ -11,16 +11,15 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use driver_base::Publication;
 use hashbrown::HashMap;
-use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollSet;
 use kspin::{SpinNoIrq, static_lock};
 use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(not(unittest))]
 use lazyinit::LazyInit;
-#[cfg(unittest)]
-use net as driver_net;
+use subsys_net::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -280,7 +279,7 @@ pub(crate) struct EthernetDevice {
     flags: u32,
     mtu: usize,
     operstate: u8,
-    inner: ClassDevice<NetDeviceImpl>,
+    inner: Publication<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
     assigned_ipv4_addrs: Vec<Ipv4Cidr>,
     local_ipv4_addrs: Vec<Ipv4Cidr>,
@@ -293,14 +292,14 @@ impl EthernetDevice {
     const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
-    pub(crate) fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
+    pub(crate) fn new(name: String, inner: Publication<NetDeviceImpl>) -> Self {
         let rx_source = if let Some(rx_source) = register_net_rx_source() {
             let scheduler: Arc<dyn NetRxScheduler> = Arc::new(KnetRxScheduler {
                 source: Arc::downgrade(&rx_source),
             });
             match inner.set_rx_scheduler(Some(scheduler)) {
                 Ok(()) => Some(rx_source),
-                Err(DriverError::Unsupported) => {
+                Err(KError::Unsupported) => {
                     warn!("Ethernet driver does not support interrupt-driven RX scheduling");
                     unregister_net_rx_source(rx_source.id);
                     None
@@ -339,7 +338,7 @@ impl EthernetDevice {
     }
 
     fn send_frame<F>(
-        inner: &dyn NetDevice,
+        inner: &dyn subsys_net::NetDevice,
         dst: MacAddress,
         size: usize,
         f: F,
@@ -637,7 +636,7 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn device_id(&self) -> Option<kdevice::DeviceId> {
+    fn device_id(&self) -> Option<driver_base::PublicationId> {
         Some(self.inner.id())
     }
 
@@ -647,7 +646,7 @@ impl NetDeviceOps for EthernetDevice {
         }
         let rx_buf: NetBufHandle = match self.inner.recv() {
             Ok(buf) => buf,
-            Err(DriverError::WouldBlock) => return Ok(RxPoll::Empty),
+            Err(KError::WouldBlock) => return Ok(RxPoll::Empty),
             Err(err) => return Err(map_dev_err(err)),
         };
         trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
@@ -826,13 +825,13 @@ impl Drop for EthernetDevice {
     }
 }
 
-fn map_dev_err(err: DriverError) -> KError {
+fn map_dev_err(err: KError) -> KError {
     match err {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::NoMemory => LinuxError::ENOBUFS.into(),
-        DriverError::Io => KError::Io,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::NoMemory => LinuxError::ENOBUFS.into(),
+        KError::Io => KError::Io,
         _ => KError::BadState,
     }
 }

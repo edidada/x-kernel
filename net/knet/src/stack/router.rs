@@ -218,7 +218,10 @@ impl Router {
         Ok(id)
     }
 
-    pub(crate) fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> Option<()> {
+    pub(crate) fn remove_device_by_model_id(
+        &mut self,
+        id: driver_base::PublicationId,
+    ) -> Option<()> {
         let pos = self
             .devices
             .iter()

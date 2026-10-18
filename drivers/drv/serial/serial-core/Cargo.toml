@@ -1,0 +1,31 @@
+[package]
+name = "serial-core"
+description = "The serial family library: UART ports (PL011, NS16550 MMIO/IO-port), early-port handoff, emergency output — the hardware every serial driver and the console share"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+pl011 = ["dep:arm_pl011"]
+ns16550-mmio = []
+ns16550-ioport = ["dep:uart_16550"]
+
+[dependencies]
+kerrno.workspace = true
+khal = { workspace = true }
+kirq = { workspace = true }
+kspin = { workspace = true }
+lazyinit.workspace = true
+ringbuf = { workspace = true }
+arm_pl011 = { version = "0.1.1", optional = true }
+uart_16550 = { version = "0.4", optional = true }
+
+unittest.workspace = true
+
+[lints]
+workspace = true

@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use block::DriverError;
+use subsys_block::KError;
 use unittest::def_test;
 
 use super::{
@@ -153,7 +153,7 @@ fn clean_orphan_recovery_flush_failure_preserves_evidence_and_retries() {
     let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     );
 
     {
@@ -342,7 +342,7 @@ fn invalid_orphan_head_recovery_failure_preserves_evidence_and_retries() {
     let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     );
 
     {
@@ -513,7 +513,7 @@ fn partial_replay_write_failure_keeps_completed_block_and_recovery_evidence() {
     let device = Arc::new(WriteThroughFaultDevice::fail_write_at(bytes, 2));
     assert!(matches!(
         Ext4SbInfo::recover(device.clone()),
-        Err(Ext4Error::Device(DriverError::Io))
+        Err(Ext4Error::Device(KError::Io))
     ));
     let committed = device.committed_bytes();
     assert!(recovery_flag(&committed));
@@ -572,7 +572,7 @@ fn replay_barrier_failures_preserve_durable_blocks_and_recovery_evidence() {
         assert!(
             matches!(
                 Ext4SbInfo::recover(device.clone()),
-                Err(Ext4Error::Device(DriverError::Io))
+                Err(Ext4Error::Device(KError::Io))
             ),
             "{stage}"
         );

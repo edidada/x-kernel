@@ -16,15 +16,14 @@ use alloc::{
 };
 
 use bitmaps::Bitmap;
-use kclass::{
-    ClassDevice, Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
-    input_devices as class_input_devices, subscribe_input_available,
-};
-use kdevice::{DeviceId, subscribe_device_removed};
+use driver_base::Publication;
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
+use subsys_input::{
+    Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier, class::INPUT,
+};
 
 const KEY_COUNT: usize = EventType::Key.bits_count();
 const MAX_FRAME_EVENTS: usize = 256;
@@ -161,15 +160,13 @@ impl InputEventNotifier for EndpointNotifier {
 /// This endpoint drains the driver even when no user has opened its device
 /// file, allowing the hardware queue to keep making progress.
 pub struct InputEndpoint {
-    device: ClassDevice<InputDeviceImpl>,
+    device: Publication<InputDeviceImpl>,
     poller: LazyInit<InputPoller>,
     state: Mutex<EndpointState>,
 }
 
 impl InputEndpoint {
-    fn new(
-        device: ClassDevice<InputDeviceImpl>,
-    ) -> Result<Arc<Self>, kclass::prelude::DriverError> {
+    fn new(device: Publication<InputDeviceImpl>) -> Result<Arc<Self>, kerrno::KError> {
         let endpoint = Arc::new(Self {
             device,
             poller: LazyInit::new(),
@@ -181,7 +178,7 @@ impl InputEndpoint {
                 endpoint.poll_background();
             }
         }) as Box<dyn Fn() + Send + Sync>)
-        .map_err(|_| kclass::prelude::DriverError::BadState)?;
+        .map_err(|_| kerrno::KError::BadState)?;
         endpoint.poller.init_once(poller);
         Ok(endpoint)
     }
@@ -195,7 +192,7 @@ impl InputEndpoint {
         }
     }
 
-    fn start(self: &Arc<Self>) -> Result<(), kclass::prelude::DriverError> {
+    fn start(self: &Arc<Self>) -> Result<(), kerrno::KError> {
         let notifier: Arc<dyn InputEventNotifier> = Arc::new(EndpointNotifier {
             endpoint: Arc::downgrade(self),
         });
@@ -207,7 +204,7 @@ impl InputEndpoint {
         if self.schedule_poll().is_err() {
             let _ = self.device.set_event_notifier(None);
             let _ = self.poller.shutdown();
-            return Err(kclass::prelude::DriverError::BadState);
+            return Err(kerrno::KError::BadState);
         }
         Ok(())
     }
@@ -241,7 +238,7 @@ impl InputEndpoint {
                         event,
                     });
                 }
-                Err(kclass::prelude::DriverError::WouldBlock) => {
+                Err(kerrno::KError::WouldBlock) => {
                     return false;
                 }
                 Err(error) => {
@@ -276,13 +273,10 @@ impl InputEndpoint {
     /// # Errors
     ///
     /// Returns `BadState` after the device has been detached.
-    pub fn subscribe(
-        &self,
-        listener: Arc<dyn InputEventListener>,
-    ) -> Result<(), kclass::prelude::DriverError> {
+    pub fn subscribe(&self, listener: Arc<dyn InputEventListener>) -> Result<(), kerrno::KError> {
         let mut state = self.state.lock();
         if state.is_detached || !self.device.is_available() {
-            return Err(kclass::prelude::DriverError::BadState);
+            return Err(kerrno::KError::BadState);
         }
         state.add_listener(&listener);
         Ok(())
@@ -344,31 +338,32 @@ static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new
 pub fn init_input() {
     info!("Initialize input subsystem...");
     INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
-    subscribe_device_removed(Arc::new(remove_input_device));
-    subscribe_input_available(Arc::new(register_input_device));
-    for device in class_input_devices() {
+    INPUT.subscribe_removed(Arc::new(remove_input_device));
+    INPUT.subscribe_available(Arc::new(register_input_device));
+    for device in INPUT.devices() {
         register_input_device(device);
     }
 }
 
-fn register_input_device(device: ClassDevice<InputDeviceImpl>) {
+fn register_input_device(device: Publication<InputDeviceImpl>) {
     match input_endpoint(device.clone()) {
         Ok(_) => info!("  input device activated: {}", device.name()),
         Err(error) => warn!("input: failed to activate {}: {error:?}", device.name()),
     }
 }
 
-fn remove_input_device(id: DeviceId) {
+fn remove_input_device(device: Publication<InputDeviceImpl>) {
     let endpoint = {
         let mut endpoints = INPUT_ENDPOINTS.lock();
         endpoints
             .iter()
-            .position(|endpoint| endpoint.device.id() == id)
+            .position(|endpoint| endpoint.device.id() == device.id())
             .map(|index| endpoints.swap_remove(index))
     };
     if let Some(endpoint) = endpoint {
         endpoint.detach();
     }
+    let _ = device;
 }
 
 /// Return the unique event endpoint for an active input class device.
@@ -381,8 +376,8 @@ fn remove_input_device(id: DeviceId) {
 /// Returns `BadState` for removed devices or unavailable worker queues, or
 /// propagates a driver notification-registration failure.
 pub fn input_endpoint(
-    device: ClassDevice<InputDeviceImpl>,
-) -> Result<Arc<InputEndpoint>, kclass::prelude::DriverError> {
+    device: Publication<InputDeviceImpl>,
+) -> Result<Arc<InputEndpoint>, kerrno::KError> {
     let mut endpoints = INPUT_ENDPOINTS.lock();
     if let Some(endpoint) = endpoints
         .iter()
@@ -391,20 +386,20 @@ pub fn input_endpoint(
         return Ok(endpoint.clone());
     }
     if !device.is_available() {
-        return Err(kclass::prelude::DriverError::BadState);
+        return Err(kerrno::KError::BadState);
     }
     let endpoint = InputEndpoint::new(device.clone())?;
     endpoint.start()?;
     if !device.is_available() {
         endpoint.detach();
-        return Err(kclass::prelude::DriverError::BadState);
+        return Err(kerrno::KError::BadState);
     }
     endpoints.push(endpoint.clone());
     Ok(endpoint)
 }
 
 /// Return a snapshot of active input device handles.
-pub fn input_devices() -> Vec<ClassDevice<InputDeviceImpl>> {
+pub fn input_devices() -> Vec<Publication<InputDeviceImpl>> {
     INPUT_ENDPOINTS
         .lock()
         .iter()

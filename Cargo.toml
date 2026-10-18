@@ -10,6 +10,11 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "drivers/base",
+    "drivers/host",
+    "drivers/init",
+    "drivers/common/devnode",
+    "drivers/drv/*",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -191,37 +196,41 @@ ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
-block = { path = "drivers/contracts/block" }
-hwrng = { path = "drivers/contracts/hwrng" }
-char_driver = { path = "drivers/contracts/char" }
-display = { path = "drivers/contracts/display" }
-driver_base = { path = "drivers/contracts/driver_base" }
-device_res = { path = "drivers/contracts/device-res", package = "device-res" }
-kclass = { path = "drivers/contracts/kclass" }
-kdevice = { path = "drivers/contracts/kdevice" }
-input = { path = "drivers/contracts/input" }
-net = { path = "drivers/contracts/net" }
-vsock = { path = "drivers/contracts/vsock" }
+subsys_block = { path = "drivers/subsystems/block", package = "subsys-block" }
+subsys_char = { path = "drivers/subsystems/char", package = "subsys-char" }
+subsys_display = { path = "drivers/subsystems/display", package = "subsys-display" }
+subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }
+kclk = { path = "core/kclk" }
+driver_base = { path = "drivers/base", package = "driver-base" }
+driver_host = { path = "drivers/host", package = "driver-host" }
+driver-init = { path = "drivers/init", package = "driver-init" }
+drv-virtio = { path = "drivers/drv/virtio" }
+drv-serial = { path = "drivers/drv/serial" }
+serial_core = { path = "drivers/drv/serial/serial-core", package = "serial-core" }
+drv-clk = { path = "drivers/drv/clk" }
+drv-block = { path = "drivers/drv/block" }
+devnode = { path = "drivers/common/devnode" }
+subsys_input = { path = "drivers/subsystems/input", package = "subsys-input" }
+subsys_net = { path = "drivers/subsystems/net", package = "subsys-net" }
+subsys_vsock = { path = "drivers/subsystems/vsock", package = "subsys-vsock" }
 
 # Internal: portable concrete drivers
-virtio = { path = "drivers/devices/virtio" }
+virtio_devices = { path = "drivers/drv/virtio/devices", package = "virtio-devices" }
 
 # Internal: driver adapters and integration
-device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
-kdriver = { path = "drivers/integration/kdriver" }
-kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
+uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
 
 # Internal: platform, firmware, and host driver support
-aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
-console_driver = { path = "drivers/platform/console", package = "console-driver" }
-pci = { path = "drivers/platform/pci" }
-rs_fdtree = { path = "drivers/platform/rs-fdtree" }
-acpi = { path = "drivers/platform/acpi" }
-of = { path = "drivers/platform/of" }
-dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
-irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
-rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }
-timer_driver = { path = "drivers/platform/timer", package = "timer-driver" }
+aarch64-pmuv3 = { path = "drivers/perf" }
+console_driver = { path = "drivers/console", package = "console-driver" }
+pci = { path = "drivers/bus/pci" }
+rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
+acpi = { path = "drivers/firmware/acpi" }
+of = { path = "drivers/firmware/of" }
+dice_driver = { path = "drivers/firmware/dice", package = "dice-driver" }
+irqchip_driver = { path = "drivers/irqchip", package = "irqchip-driver" }
+rtc_driver = { path = "drivers/rtc", package = "rtc-driver" }
+clocksource_driver = { path = "drivers/clocksource", package = "clocksource-driver" }
 x86_apic = { path = "arch/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
@@ -279,7 +288,6 @@ zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = { version = "1.9", default-features = false }
 uuid = { version = "0.8", default-features = false }
 chrono = { version = "0.4", default-features = false }
-crate_interface = { version = "0.3", features = ["weak_default"] }
 enum_dispatch = "0.3"
 etherparse = { version = "0.20.2", default-features = false }
 event-listener = { version = "=5.4.1", default-features = false }

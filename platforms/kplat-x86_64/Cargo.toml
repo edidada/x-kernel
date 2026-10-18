@@ -31,14 +31,14 @@ kiface = { workspace = true }
 kplat = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-ioport"] }
 kbuild_config = { workspace = true }
-irq_driver = { workspace = true }
+irqchip_driver = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 ktime = { workspace = true }
 kirq = { workspace = true }
 x86_apic = { workspace = true }
 rtc_driver = { workspace = true }
-timer_driver = { workspace = true }
+clocksource_driver = { workspace = true }
 boot_info = { workspace = true }
 acpi = { workspace = true }
 klazy = { workspace = true }

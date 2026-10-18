@@ -6,9 +6,10 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+kerrno = { workspace = true }
+driver_base = { workspace = true }
+subsys_input = { workspace = true }
 bitmaps = { version = "3.2.1", default-features = false }
-kclass = { workspace = true, features = ["input"] }
-kdevice = { workspace = true }
 ksync.workspace = true
 ktime.workspace = true
 ktime_types.workspace = true

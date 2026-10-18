@@ -14,13 +14,13 @@
 use alloc::{format, sync::Arc};
 
 use console_driver::runtime::stdout_console_id;
-use driver_base::DriverError;
-use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
+use driver_base::Publication;
 use kerrno::KError;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
     VfsInode, VfsResult,
 };
+use subsys_char::{CharDevice, CharDeviceImpl, class::CHAR};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -33,14 +33,14 @@ fn serial_device_id(index: u32) -> DeviceId {
 }
 
 /// `/dev/serialN` backing for one per-instance UART. Wraps the driver-model
-/// `ClassDevice<CharDeviceImpl>` and adapts its offset-less `CharDevice` API
+/// `Publication<CharDeviceImpl>` and adapts its offset-less `CharDevice` API
 /// to the `DeviceFileOps` the VFS expects.
 pub(crate) struct SerialDev {
-    device: ClassDevice<CharDeviceImpl>,
+    device: Publication<CharDeviceImpl>,
 }
 
 impl SerialDev {
-    pub(crate) fn new(device: ClassDevice<CharDeviceImpl>) -> Self {
+    pub(crate) fn new(device: Publication<CharDeviceImpl>) -> Self {
         Self { device }
     }
 }
@@ -76,9 +76,9 @@ impl DeviceFileOps for SerialDev {
     }
 }
 
-fn map_err(err: DriverError) -> KError {
+fn map_err(err: KError) -> KError {
     match err {
-        DriverError::WouldBlock => KError::WouldBlock,
+        KError::WouldBlock => KError::WouldBlock,
         _ => KError::Io,
     }
 }
@@ -93,9 +93,12 @@ pub(crate) fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut serials = DirMapping::new();
     let stdout_id = stdout_console_id();
     let mut idx = 0u32;
-    for device in char_devices() {
+    for device in CHAR.devices() {
         // Only the unified serial driver's per-instance UARTs.
-        if !device.driver_name().starts_with("serial-") {
+        if !device
+            .driver_name()
+            .is_some_and(|name| name.starts_with("serial-"))
+        {
             continue;
         }
         // The stdout UART is already exposed via `/dev/console`; skip it so

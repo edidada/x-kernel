@@ -13,7 +13,8 @@ use vdev_virtio::{
 };
 
 use crate::{
-    backend::BlockBackend, block::config::VirtioBlockConfig, constants::*, mmio::VirtioBlockHeader,
+    backend::BlockBackend, constants::*, mmio::VirtioBlockHeader,
+    subsys_block::config::VirtioBlockConfig,
 };
 
 /// Action that the VMM must perform after an MMIO write.

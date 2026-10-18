@@ -17,7 +17,7 @@ vmm = []
 [dependencies]
 log = "0.4"
 
-irq_driver = { workspace = true }
+irqchip_driver = { workspace = true }
 khal = { workspace = true }
 ktime = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-mmio"] }
@@ -31,7 +31,7 @@ kplat = { workspace = true }
 ktime_types = { workspace = true }
 of = { workspace = true }
 rtc_driver = { workspace = true }
-timer_driver = { workspace = true }
+clocksource_driver = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 sbi-rt = { version = "0.0.3", features = ["legacy"] }

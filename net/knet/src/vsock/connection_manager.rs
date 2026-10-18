@@ -8,8 +8,7 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kclass::{ClassDevice, prelude::*};
-use kdevice::{Device, DeviceId, DeviceKind};
+use driver_base::Publication;
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
 use klazy::Lazy;
@@ -21,6 +20,10 @@ use ktask::{
 };
 use ktime_types::TimeSpan;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
+use subsys_vsock::{
+    VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl, VsockTransportEvent,
+    VsockTransportEventKind,
+};
 
 pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 128 * 1024; // 128KB receive buffer
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
@@ -541,7 +544,7 @@ impl VsockConnectionManager {
         reason = "CG-028-focused-functions: TODO(cg): legacy vsock event handler; split per event \
                   type"
     )]
-    fn handle_raw_event(&mut self, event: VsockTransportEvent, body: &[u8]) -> DriverResult<()> {
+    fn handle_raw_event(&mut self, event: VsockTransportEvent, body: &[u8]) -> KResult<()> {
         let conn_id = VsockConnId {
             peer_addr: event.source,
             local_port: event.destination.port,
@@ -807,13 +810,13 @@ static_lock! {
         Mutex::new(VsockConnectionManager::new());
 }
 
-/// Map a transport-level [`DriverError`] to a [`KError`] for socket callers.
-fn map_dev_err(e: DriverError) -> KError {
+/// Map a transport-level [`KError`] to a [`KError`] for socket callers.
+fn map_dev_err(e: KError) -> KError {
     match e {
-        DriverError::AlreadyExists => KError::AlreadyExists,
-        DriverError::WouldBlock => KError::WouldBlock,
-        DriverError::InvalidInput => KError::InvalidInput,
-        DriverError::Io => KError::Io,
+        KError::AlreadyExists => KError::AlreadyExists,
+        KError::WouldBlock => KError::WouldBlock,
+        KError::InvalidInput => KError::InvalidInput,
+        KError::Io => KError::Io,
         _ => KError::BadState,
     }
 }
@@ -823,7 +826,7 @@ fn map_dev_err(e: DriverError) -> KError {
 // ------------------------------------------------------------------
 
 static_lock! {
-    static VSOCK_DEV: Mutex<Option<ClassDevice<VsockDeviceImpl>>> = Mutex::new(None);
+    static VSOCK_DEV: Mutex<Option<Publication<VsockDeviceImpl>>> = Mutex::new(None);
 }
 
 /// Registers a vsock device. Only one vsock device can be registered.
@@ -832,7 +835,7 @@ static_lock! {
 /// We take it over, install it into the connection manager, and start the poll
 /// task. The rest of the system (AF_VSOCK socket and vsock-TIPC bridge) uses
 /// [`VSOCK_CONN_MANAGER`] rather than the raw device directly.
-pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<()> {
+pub(crate) fn register_vsock_dev(raw: Publication<VsockDeviceImpl>) -> KResult<()> {
     let mut guard = VSOCK_DEV.lock();
     if guard.is_some() {
         k_bail!(AlreadyExists, "vsock device already registered");
@@ -845,7 +848,7 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     log::info!(
         "vsock manager installed raw transport (guest_cid={}), driver={}",
         guest_cid,
-        raw.driver_name()
+        raw.driver_name().unwrap_or("<none>")
     );
 
     *guard = Some(raw);
@@ -857,7 +860,7 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     Ok(())
 }
 
-pub(crate) fn unregister_vsock_dev(id: DeviceId) -> bool {
+pub(crate) fn unregister_vsock_dev(id: driver_base::PublicationId) -> bool {
     let mut guard = VSOCK_DEV.lock();
     if guard.as_ref().is_none_or(|dev| dev.id() != id) {
         return false;
@@ -1052,7 +1055,7 @@ pub(crate) fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
             .unwrap_or_default();
         let transport = manager
             .clone_raw_transport()
-            .ok_or(DriverError::BadState)
+            .ok_or(KError::BadState)
             .map_err(map_dev_err)?;
         (transport, info)
     };
@@ -1066,7 +1069,7 @@ pub(crate) fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
 /// the peer has no credit.
 ///
 /// The raw transport is all-or-nothing: it either queues the whole packet or
-/// returns [`DriverError::WouldBlock`], so there is no point in retrying with
+/// returns [`KError::WouldBlock`], so there is no point in retrying with
 /// a smaller chunk. For blocking sockets the caller waits on the TX wait queue
 /// until the peer advertises enough credit or the connection is closed;
 /// for non-blocking sockets [`KError::WouldBlock`] is returned immediately.
@@ -1088,7 +1091,7 @@ pub(crate) fn vsock_send(
                 .unwrap_or_default();
             let transport = manager
                 .clone_raw_transport()
-                .ok_or(DriverError::BadState)
+                .ok_or(KError::BadState)
                 .map_err(map_dev_err)?;
             (transport, info)
         };
@@ -1096,10 +1099,10 @@ pub(crate) fn vsock_send(
             Ok(len) => {
                 return Ok(len);
             }
-            Err(DriverError::WouldBlock) if nonblocking => {
-                return Err(map_dev_err(DriverError::WouldBlock));
+            Err(KError::WouldBlock) if nonblocking => {
+                return Err(map_dev_err(KError::WouldBlock));
             }
-            Err(DriverError::WouldBlock) => {
+            Err(KError::WouldBlock) => {
                 // Use wait_until to close the lost-wakeup window.
                 // Connection absent ⇒ closed, return true so the waiter
                 // wakes up and falls into the ConnectionReset path below.
@@ -1139,7 +1142,7 @@ pub(crate) fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
             .unwrap_or_default();
         let transport = manager
             .clone_raw_transport()
-            .ok_or(DriverError::BadState)
+            .ok_or(KError::BadState)
             .map_err(map_dev_err)?;
         (transport, info)
     };
@@ -1190,7 +1193,7 @@ pub(crate) fn create_bridge_connection(
             .unwrap_or_default();
         let transport = manager
             .clone_raw_transport()
-            .ok_or(DriverError::BadState)
+            .ok_or(KError::BadState)
             .map_err(map_dev_err)?;
         (conn_id, info, transport)
     };
@@ -1212,10 +1215,10 @@ pub(crate) fn create_bridge_connection(
 ///
 /// The underlying transport is all-or-nothing (see [`VsockDevice::send`]), so
 /// a single call either queues the entire buffer or returns
-/// [`DriverError::WouldBlock`].  The loop only retries after a credit-update
+/// [`KError::WouldBlock`].  The loop only retries after a credit-update
 /// wake-up when the peer's buffer was full.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
+pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> KResult<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -1225,12 +1228,12 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
             let manager = VSOCK_CONN_MANAGER.lock();
             let conn = manager
                 .get_connection(conn_id)
-                .ok_or(DriverError::InvalidInput)?;
+                .ok_or(KError::InvalidInput)?;
             let (info, tx_wait_queue) = {
                 let c = conn.lock();
                 (c.info, c.tx_wait_queue())
             };
-            let transport = manager.clone_raw_transport().ok_or(DriverError::BadState)?;
+            let transport = manager.clone_raw_transport().ok_or(KError::BadState)?;
             (transport, info, tx_wait_queue)
         };
         match transport.send(&info, buf) {
@@ -1238,7 +1241,7 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
                 VSOCK_CONN_MANAGER.lock().add_tx_bytes(conn_id, sent);
                 return Ok(sent);
             }
-            Err(DriverError::WouldBlock) => {
+            Err(KError::WouldBlock) => {
                 // Use wait_until to close the lost-wakeup window.
                 // Connection absent ⇒ closed, return true so the waiter
                 // wakes up and falls into the error path below.
@@ -1261,7 +1264,7 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
                     c.state() == ConnectionState::Connected && !c.tx_closed()
                 });
                 if !alive {
-                    return Err(DriverError::Io);
+                    return Err(KError::Io);
                 }
             }
             Err(e) => return Err(e),
@@ -1271,11 +1274,11 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
 
 /// Receive up to `buf.len()` bytes from a bridge connection's receive buffer.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
+pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> KResult<usize> {
     let count = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let Some(conn) = manager.connections.get(&conn_id) else {
-            return Err(DriverError::InvalidInput);
+            return Err(KError::InvalidInput);
         };
         let mut c = conn.lock();
         if c.rx_buffer_used() == 0 {
@@ -1307,7 +1310,7 @@ pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<
 
 /// Disconnect a bridge connection and remove it from the manager.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn disconnect_bridge(conn_id: VsockConnId) -> DriverResult<()> {
+pub(crate) fn disconnect_bridge(conn_id: VsockConnId) -> KResult<()> {
     let (transport, info, tx_wq) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let already_closed = manager
@@ -1342,7 +1345,7 @@ pub(crate) fn disconnect_bridge(conn_id: VsockConnId) -> DriverResult<()> {
 
 /// Forcibly abort a bridge connection and remove it from the manager.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn abort_bridge(conn_id: VsockConnId) -> DriverResult<()> {
+pub(crate) fn abort_bridge(conn_id: VsockConnId) -> KResult<()> {
     let (transport, info, tx_wq) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let already_closed = manager
@@ -1382,12 +1385,12 @@ pub(crate) fn abort_bridge(conn_id: VsockConnId) -> DriverResult<()> {
 /// against the last `fwd_cnt` we reported, so only push an update once the
 /// free space visible to the peer drops below a low watermark. While the
 /// peer still has plenty of credit, an explicit update is pure overhead.
-pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverResult<()> {
+pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> KResult<()> {
     let (transport, info, conn) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let conn = manager
             .get_connection(conn_id)
-            .ok_or(DriverError::InvalidInput)?;
+            .ok_or(KError::InvalidInput)?;
         let mut c = conn.lock();
         c.info.fwd_cnt = c.info.fwd_cnt.wrapping_add(count as u32);
         let unreported = c.info.fwd_cnt.wrapping_sub(c.last_sent_fwd_cnt);
@@ -1397,7 +1400,7 @@ pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverRes
         }
         let info = c.info;
         drop(c);
-        let transport = manager.clone_raw_transport().ok_or(DriverError::BadState)?;
+        let transport = manager.clone_raw_transport().ok_or(KError::BadState)?;
         (transport, info, conn)
     };
     transport.credit_update(&info)?;
@@ -1405,34 +1408,20 @@ pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverRes
     Ok(())
 }
 
-/// Wrapper that turns a kclass `ClassDevice<VsockDeviceImpl>` into a
-/// [`VsockDevice`] by calling `ClassDevice::with()` on each method.
+/// Wrapper that turns a device_class `Publication<VsockDeviceImpl>` into a
+/// [`VsockDevice`] by calling `Publication::with()` on each method.
 ///
 /// The connection manager owns this wrapper and uses it to drive the raw
-/// virtqueue without knowing about kclass locking.
-struct RawTransportWrapper(ClassDevice<VsockDeviceImpl>);
+/// virtqueue without knowing about device_class locking.
+struct RawTransportWrapper(Publication<VsockDeviceImpl>);
 
 impl RawTransportWrapper {
-    fn new(device: ClassDevice<VsockDeviceImpl>) -> Self {
+    fn new(device: Publication<VsockDeviceImpl>) -> Self {
         Self(device)
     }
 
     fn with_device<R>(&self, f: impl FnOnce(&dyn VsockDevice) -> R) -> R {
         self.0.with(|device| f(&**device))
-    }
-}
-
-impl Device for RawTransportWrapper {
-    fn name(&self) -> &str {
-        "vsock-raw-transport-wrapper"
-    }
-
-    fn device_kind(&self) -> DeviceKind {
-        DeviceKind::Vsock
-    }
-
-    fn irq(&self) -> Option<usize> {
-        self.0.irq()
     }
 }
 
@@ -1449,34 +1438,34 @@ impl VsockDevice for RawTransportWrapper {
         self.with_device(|t| t.unlisten(port));
     }
 
-    fn connect(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn connect(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_device(|t| t.connect(info))
     }
 
-    fn accept(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn accept(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_device(|t| t.accept(info))
     }
 
-    fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn force_close(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_device(|t| t.force_close(info))
     }
 
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
+    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> KResult<usize> {
         self.with_device(|t| t.send(info, buf))
     }
 
-    fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn shutdown(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_device(|t| t.shutdown(info))
     }
 
-    fn credit_update(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+    fn credit_update(&self, info: &VsockConnectionInfo) -> KResult<()> {
         self.with_device(|t| t.credit_update(info))
     }
 
     fn poll_event(
         &self,
-        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> DriverResult<()>,
-    ) -> DriverResult<bool> {
+        handler: &mut dyn FnMut(VsockTransportEvent, &[u8]) -> KResult<()>,
+    ) -> KResult<bool> {
         self.with_device(|t| t.poll_event(handler))
     }
 }

@@ -55,7 +55,7 @@ impl LoopDevice {
     }
 
     /// Returns the current loop configuration.
-    pub(crate) fn get_info(&self, block_device: &block::BlockDevice) -> KResult<loop_info> {
+    pub(crate) fn get_info(&self, block_device: &subsys_block::BlockDevice) -> KResult<loop_info> {
         if self.file.lock().is_none() {
             return Err(KError::from(LinuxError::ENXIO));
         }
@@ -95,7 +95,7 @@ impl LoopDevice {
     fn validate_backing_file(
         &self,
         file: &Arc<VfsFile>,
-        block_device: &block::BlockDevice,
+        block_device: &subsys_block::BlockDevice,
     ) -> VfsResult<()> {
         let mut current = file.clone();
         loop {
@@ -123,8 +123,8 @@ impl LoopDevice {
 
     fn ioctl_impl(
         &self,
-        block_device: &block::BlockDevice,
-        mode: block::BlockOpenMode,
+        block_device: &subsys_block::BlockDevice,
+        mode: subsys_block::BlockOpenMode,
         cmd: u32,
         arg: usize,
         has_sys_admin: bool,
@@ -140,7 +140,7 @@ impl LoopDevice {
                 self.validate_backing_file(&file, block_device)?;
                 let capacity = file.size() / 512;
                 let read_only = !file.mode().contains(FMode::WRITE)
-                    || !mode.contains(block::BlockOpenMode::WRITE);
+                    || !mode.contains(subsys_block::BlockOpenMode::WRITE);
                 let mut backing = self.file.lock();
                 if backing.is_some() {
                     return Err(KError::ResourceBusy);
@@ -172,7 +172,7 @@ impl LoopDevice {
                 (arg as *mut loop_info).write_vm(self.get_info(block_device)?)?;
             }
             LOOP_SET_STATUS => {
-                if !mode.contains(block::BlockOpenMode::WRITE) && !has_sys_admin {
+                if !mode.contains(subsys_block::BlockOpenMode::WRITE) && !has_sys_admin {
                     return Err(KError::from(LinuxError::EPERM));
                 }
                 let mut info = empty_loop_info();
@@ -193,7 +193,7 @@ impl LoopDevice {
     }
 }
 
-impl block::BlockDeviceOperations for LoopDevice {
+impl subsys_block::BlockDeviceOperations for LoopDevice {
     fn num_blocks(&self) -> u64 {
         self.file
             .lock()
@@ -205,51 +205,51 @@ impl block::BlockDeviceOperations for LoopDevice {
         512
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::DriverResult<()> {
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> subsys_block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
+            .ok_or(subsys_block::KError::InvalidInput)?;
         let file = self
             .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
+            .map_err(|_| subsys_block::KError::BadState)?;
         let mut position = offset;
         let read = file
             .read_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
+            .map_err(|_| subsys_block::KError::Io)?;
         if read != buf.len() {
-            return Err(block::DriverError::Io);
+            return Err(subsys_block::KError::Io);
         }
         Ok(())
     }
 
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> block::DriverResult<()> {
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> subsys_block::KResult<()> {
         let offset = block_id
             .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
+            .ok_or(subsys_block::KError::InvalidInput)?;
         let file = self
             .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
+            .map_err(|_| subsys_block::KError::BadState)?;
         let mut position = offset;
         let written = file
             .write_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
+            .map_err(|_| subsys_block::KError::Io)?;
         if written != buf.len() {
-            return Err(block::DriverError::Io);
+            return Err(subsys_block::KError::Io);
         }
         Ok(())
     }
 
-    fn flush(&self) -> block::DriverResult<()> {
+    fn flush(&self) -> subsys_block::KResult<()> {
         if let Some(file) = self.file.lock().as_ref() {
-            file.fsync(false).map_err(|_| block::DriverError::Io)?;
+            file.fsync(false).map_err(|_| subsys_block::KError::Io)?;
         }
         Ok(())
     }
 
     fn ioctl(
         &self,
-        device: &block::BlockDevice,
-        mode: block::BlockOpenMode,
+        device: &subsys_block::BlockDevice,
+        mode: subsys_block::BlockOpenMode,
         cmd: u32,
         arg: usize,
         has_sys_admin: bool,
@@ -261,28 +261,25 @@ impl block::BlockDeviceOperations for LoopDevice {
 // Linux keeps loop instances independently of devtmpfs dentries. The block
 // objects are therefore created once and each devfs mount only projects them.
 static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: fixed loop parameters and a \
+                  once-initialized array uniquely owning major 7 minors 0 through 15"
+    )]
     (0..16)
         .map(|number| {
             let device = Arc::new(LoopDevice::new(number));
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: Loop devices use a fixed valid \
-                          block size and initially zero capacity"
-            )]
-            let disk = block::Gendisk::alloc(
-                format!("loop{number}"),
-                7,
-                number,
-                1,
-                Box::new(device.clone()),
-            )
-            .expect("valid loop gendisk");
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: The once-initialized loop array \
-                          uniquely owns major 7 minors 0 through 15"
-            )]
-            block::add_disk(disk).expect("loop device number must be unique");
+            let disk = alloc::sync::Arc::new(
+                subsys_block::Gendisk::new(
+                    format!("loop{number}"),
+                    7,
+                    number,
+                    1,
+                    Box::new(device.clone()),
+                )
+                .expect("valid loop gendisk"),
+            );
+            subsys_block::add_disk(disk).expect("loop device number must be unique");
             device
         })
         .collect()
@@ -292,4 +289,57 @@ pub(crate) fn init_devices() {
     Lazy::force(&LOOP_DEVICES);
 }
 
-unittest::path_mod_test!(tests, "../../ut-tests/loop.rs");
+#[unittest::mod_test]
+mod tests {
+    use super::*;
+
+    #[unittest::def_test]
+    fn ioctl_permissions_follow_command_and_open_mode() {
+        use linux_raw_sys::ioctl::{BLKFRASET, BLKRASET};
+        use subsys_block::BlockOpenMode as Mode;
+
+        let disk = alloc::sync::Arc::new(
+            subsys_block::Gendisk::new(
+                "test-loop-ioctl".into(),
+                240,
+                0,
+                1,
+                Box::new(Arc::new(LoopDevice::new(0))),
+            )
+            .expect("valid loop disk"),
+        );
+        let device = subsys_block::add_disk(disk.clone()).expect("publish loop ioctl test disk");
+        for (cmd, mode, has_sys_admin, error) in [
+            (
+                LOOP_SET_STATUS,
+                Mode::READ,
+                false,
+                KError::from(LinuxError::EPERM),
+            ),
+            (LOOP_SET_STATUS, Mode::WRITE, false, KError::BadAddress),
+            (LOOP_SET_STATUS, Mode::READ, true, KError::BadAddress),
+            (LOOP_SET_FD, Mode::READ, false, KError::BadFileDescriptor),
+            (
+                LOOP_CLR_FD,
+                Mode::READ,
+                false,
+                KError::from(LinuxError::ENXIO),
+            ),
+            (BLKRASET, Mode::WRITE, false, KError::PermissionDenied),
+            (BLKFRASET, Mode::WRITE, false, KError::PermissionDenied),
+        ] {
+            assert_eq!(
+                device.as_ref().ioctl(
+                    mode,
+                    cmd,
+                    usize::MAX,
+                    has_sys_admin,
+                    || panic!("these commands do not copy a generic int"),
+                    |_| panic!("these commands do not copy generic output"),
+                ),
+                Err(error)
+            );
+        }
+        subsys_block::del_gendisk(disk.device_number()).expect("remove loop ioctl test disk");
+    }
+}

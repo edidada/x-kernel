@@ -10,7 +10,7 @@
 
 #[macro_use]
 extern crate log;
-extern crate irq_driver as _;
+extern crate irqchip_driver as _;
 extern crate kernel_boot;
 mod init;
 #[cfg(feature = "smp")]

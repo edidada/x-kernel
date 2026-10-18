@@ -167,7 +167,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_boundaries check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -217,11 +217,11 @@ symbolize:
 	@$(XKMAKE) symbolize $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS) $(if $(strip $(LOG)),--log $(LOG))
 
 clippy:
-	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@$(MAKE) --no-print-directory check_deps check_header check_lints check_boundaries
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
-	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@$(MAKE) --no-print-directory check_deps check_header check_lints check_boundaries
 	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint_test:
@@ -263,6 +263,9 @@ savedefconfig:
 	@test -f .config || { echo "error: .config not found; run 'make defconfig' first"; exit 1; }
 	@$(XCONFIG) savedefconfig --config .config --output defconfig --kconfig Kconfig --srctree .
 	@echo "saved defconfig to ./defconfig"
+
+gen-cargo:
+	@$(XCONFIG) gen-cargo --config .config
 
 gen-const:
 	@platform="$$($(XKMAKE) config platform)"; \
@@ -354,6 +357,20 @@ ramdisk_img:
 install-tools:
 	@$(XKMAKE) hygiene install-tools
 
+# Type-check a single workspace crate with the full resolved Kconfig feature
+# set (kernel crates need kfeat features like kalloc/slab to compile outside
+# a full build): make check-crate CRATE=driver-core [FEATURES=...]
+check-crate:
+	@set -eu; \
+	feats=$$(python3 scripts/kfeat-features.py); \
+	extra=""; \
+	if [ -n "$$(strip $(FEATURES))" ]; then extra=",$(FEATURES)"; fi; \
+	cargo check --manifest-path entry/Cargo.toml \
+		--target aarch64-unknown-none-softfloat \
+		--target-dir $(TARGET_DIR) \
+		-p entry -p $(CRATE) \
+		--features "$$feats$$extra"
+
 check_deps:
 	@$(XKMAKE) hygiene deps
 
@@ -369,8 +386,13 @@ header:
 check_lints:
 	@$(XKMAKE) hygiene lints
 
-check_test_layout:
-	@$(XKMAKE) hygiene test-layout
+# Driver subsystem boundary rules (docs/ai/driver-subsystem-boundaries.md):
+# L0-a family-agnostic core, L0-b host-free contracts, L1 one resource
+# acquisition path, and the integrity of the E-01..E-04 exception register.
+# Pure grep over the tree — no build needed, which is why it sits in the
+# clippy/dylint chain and therefore in the pre-commit hook.
+check_boundaries:
+	@scripts/ci/check_driver_boundaries.sh
 
 check_host_tests:
 	@$(XKMAKE) hygiene host-tests

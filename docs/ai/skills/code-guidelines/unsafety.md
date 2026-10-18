@@ -277,7 +277,7 @@ Avoid:
 
 Repository examples:
 
-- [drivers/contracts/net/src/net_buf.rs](/home/laoyekang/code/x-kernel/drivers/contracts/net/src/net_buf.rs:16)
+- [drivers/subsystems/net/src/net_buf.rs](/home/laoyekang/code/x-kernel/drivers/subsystems/net/src/net_buf.rs:16)
 - [mm/kalloc/src/lib.rs](/home/laoyekang/code/x-kernel/mm/kalloc/src/lib.rs:256)
 
 Relevant standard references:

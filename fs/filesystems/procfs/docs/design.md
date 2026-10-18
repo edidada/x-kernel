@@ -32,7 +32,7 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
 | `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
-| `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
+| `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `driver-core` domain snapshots (`global_topology_summary`) |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
 | `src/sysrq_nodes/root.rs` | Optional task-backtrace trigger |
 | `src/irq_nodes/root.rs` | Empty registration stub; no interrupts file yet |

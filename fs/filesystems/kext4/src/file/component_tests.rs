@@ -6,7 +6,7 @@
 
 use alloc::vec;
 
-use block::DriverError;
+use subsys_block::KError;
 use unittest::def_test;
 
 use crate::{
@@ -827,7 +827,7 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
             0,
         )
         .expect_err("the second transaction data barrier must fail");
-    assert_eq!(failure.error(), Ext4Error::Device(DriverError::Io));
+    assert_eq!(failure.error(), Ext4Error::Device(KError::Io));
     assert_eq!(failure.completed_bytes(), TEST_BLOCK_SIZE * 5);
 
     // The first five-block transaction and its journal commit are durable.

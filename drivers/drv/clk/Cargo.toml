@@ -1,0 +1,25 @@
+[package]
+name = "drv-clk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core clock provider drivers"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "clk", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+fixed-clock = []
+
+[dependencies]
+driver_base = { workspace = true }
+driver_host = { workspace = true }
+kclk = { workspace = true }
+log.workspace = true
+
+
+[lints]
+workspace = true
