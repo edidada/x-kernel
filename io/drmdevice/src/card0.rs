@@ -33,7 +33,8 @@ use posix_types::{UserPtr, UserRead, UserWrite};
 
 use super::{consts::*, drm::*};
 
-/// DRM ioctl handler trait. `const CMD` is injected by the `#[drm_ioctl]` attribute macro.
+/// DRM ioctl handler trait. `const CMD` and the uniform dispatch function are
+/// generated from the `for_each_drm_ioctl!` table at the bottom of this file.
 trait DrmIoctl: Sized {
     const CMD: u32;
     fn handle(dev: &DrmCard, file: &Arc<DrmFile>, arg: &mut Self) -> VfsResult<usize>;
@@ -78,255 +79,251 @@ fn copy_version_field(user_ptr: UserPtr<u8>, capacity: usize, value: &str) -> Vf
     Ok(value.len())
 }
 
-impl DrmIoctl for DrmVersion {
-    const CMD: u32 = iowr::<DrmVersion>(DRM_TYPE, 0x00);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, version: &mut Self) -> VfsResult<usize> {
-        version.version_major = DRIVER_VERSION_MAJOR;
-        version.version_minor = DRIVER_VERSION_MINOR;
-        version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
-        version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
-        version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
-        version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
-        Ok(0)
-    }
+fn ioctl_drm_version(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    version: &mut DrmVersion,
+) -> VfsResult<usize> {
+    version.version_major = DRIVER_VERSION_MAJOR;
+    version.version_minor = DRIVER_VERSION_MINOR;
+    version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
+    version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
+    version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
+    version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
+    Ok(0)
 }
 
-impl DrmIoctl for DrmSetVersion {
-    const CMD: u32 = iowr::<DrmSetVersion>(DRM_TYPE, 0x07);
+fn ioctl_drm_set_version(
+    dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    set_version: &mut DrmSetVersion,
+) -> VfsResult<usize> {
+    let requested = *set_version;
+    // Like Linux drm_setversion's done path, return supported versions even
+    // for lower-version requests and validation errors, not the input pair.
+    set_version.drm_di_major = 1;
+    set_version.drm_di_minor = 4;
+    set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
+    set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
 
-    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, set_version: &mut Self) -> VfsResult<usize> {
-        let requested = *set_version;
-        // Like Linux drm_setversion's done path, return supported versions even
-        // for lower-version requests and validation errors, not the input pair.
-        set_version.drm_di_major = 1;
-        set_version.drm_di_minor = 4;
-        set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
-        set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
-
-        let masters = dev.masters.lock();
-        if !masters
-            .active
-            .as_ref()
-            .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
-        {
-            return Err(VfsError::PermissionDenied);
+    let masters = dev.masters.lock();
+    if !masters
+        .active
+        .as_ref()
+        .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
+    {
+        return Err(VfsError::PermissionDenied);
+    }
+    let binding = file.binding.lock();
+    // Linux treats interface major -1 as a query and ignores its minor.
+    // See drm_setversion in https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_ioctl.c.
+    if requested.drm_di_major != -1 {
+        if requested.drm_di_major != 1 || !(0..=4).contains(&requested.drm_di_minor) {
+            return Err(VfsError::InvalidInput);
         }
+        if requested.drm_di_minor >= 1 {
+            *binding.master.unique.lock() = Some(format!("{}:0", DRIVER_NAME));
+        }
+    }
+    // Linux establishes the bus identity before validating the driver
+    // version, and still copies supported versions out on an error.
+    if requested.drm_dd_major != -1
+        && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
+            || requested.drm_dd_minor < 0
+            || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
+    {
+        return Err(VfsError::InvalidInput);
+    }
+    Ok(0)
+}
+
+fn ioctl_drm_unique(
+    dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    unique: &mut DrmUnique,
+) -> VfsResult<usize> {
+    let identity = {
+        let _masters = dev.masters.lock();
         let binding = file.binding.lock();
-        // Linux treats interface major -1 as a query and ignores its minor.
-        // See drm_setversion in https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_ioctl.c.
-        if requested.drm_di_major != -1 {
-            if requested.drm_di_major != 1 || !(0..=4).contains(&requested.drm_di_minor) {
-                return Err(VfsError::InvalidInput);
-            }
-            if requested.drm_di_minor >= 1 {
-                *binding.master.unique.lock() = Some(format!("{}:0", DRIVER_NAME));
-            }
-        }
-        // Linux establishes the bus identity before validating the driver
-        // version, and still copies supported versions out on an error.
-        if requested.drm_dd_major != -1
-            && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
-                || requested.drm_dd_minor < 0
-                || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
-        {
-            return Err(VfsError::InvalidInput);
-        }
-        Ok(0)
+        binding.master.unique.lock().clone()
+    };
+    let unique_str = identity.as_deref().unwrap_or("");
+    // GET_UNIQUE copies only when the complete identity fits, unlike VERSION.
+    if !unique_str.is_empty() && unique.unique_len >= unique_str.len() {
+        unique
+            .unique
+            .write_vm_slice(unique_str.as_bytes())
+            .map_err(|_| VfsError::BadAddress)?;
     }
+    unique.unique_len = unique_str.len();
+    Ok(0)
 }
 
-impl DrmIoctl for DrmUnique {
-    const CMD: u32 = iowr::<DrmUnique>(DRM_TYPE, 0x01);
-
-    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, unique: &mut Self) -> VfsResult<usize> {
-        let identity = {
-            let _masters = dev.masters.lock();
-            let binding = file.binding.lock();
-            binding.master.unique.lock().clone()
-        };
-        let unique_str = identity.as_deref().unwrap_or("");
-        // GET_UNIQUE copies only when the complete identity fits, unlike VERSION.
-        if !unique_str.is_empty() && unique.unique_len >= unique_str.len() {
-            unique
-                .unique
-                .write_vm_slice(unique_str.as_bytes())
-                .map_err(|_| VfsError::BadAddress)?;
-        }
-        unique.unique_len = unique_str.len();
-        Ok(0)
-    }
+fn ioctl_drm_get_cap(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    cap: &mut DrmGetCap,
+) -> VfsResult<usize> {
+    cap.value = match cap.capability {
+        DRM_CAP_DUMB_BUFFER => 1,
+        // The driver exposes a single primary plane and no cursor
+        // commands (the virtio-gpu cursor path is disabled), so these
+        // are client-compatibility values: libdrm-based clients treat
+        // 0 as "cursor unsupported" and bail out during init. See
+        // DRM_CURSOR_COMPAT_SIZE in consts.rs.
+        DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => DRM_CURSOR_COMPAT_SIZE,
+        DRM_CAP_TIMESTAMP_MONOTONIC => 1,
+        DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
+        DRM_CAP_ADDFB2_MODIFIERS => 1,
+        _ => 0,
+    };
+    Ok(0)
 }
 
-impl DrmIoctl for DrmGetCap {
-    const CMD: u32 = iowr::<DrmGetCap>(DRM_TYPE, 0x0c);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, cap: &mut Self) -> VfsResult<usize> {
-        cap.value = match cap.capability {
-            DRM_CAP_DUMB_BUFFER => 1,
-            // The driver exposes a single primary plane and no cursor
-            // commands (the virtio-gpu cursor path is disabled), so these
-            // are client-compatibility values: libdrm-based clients treat
-            // 0 as "cursor unsupported" and bail out during init. See
-            // DRM_CURSOR_COMPAT_SIZE in consts.rs.
-            DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => DRM_CURSOR_COMPAT_SIZE,
-            DRM_CAP_TIMESTAMP_MONOTONIC => 1,
-            DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
-            DRM_CAP_ADDFB2_MODIFIERS => 1,
-            _ => 0,
-        };
-        Ok(0)
+fn ioctl_drm_set_client_cap(
+    _dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    cap: &mut DrmSetClientCap,
+) -> VfsResult<usize> {
+    // Mirror Linux `drm_setclientcap()`: reject an unknown capability with
+    // EOPNOTSUPP and an out-of-range boolean with EINVAL, then remember what
+    // was granted.
+    //
+    // Answering Ok(0) to everything - which is what this used to do - turns
+    // every "does the driver support X?" probe into a false positive. Clients
+    // legitimately branch on this: a libdrm client that is told `atomic` was
+    // accepted will go on to issue atomic commits.  The granted bits are read
+    // back by `DrmModeAtomic`; see `DrmFile::client_caps` for why the other
+    // two are recorded rather than enforced.
+    //
+    // `STEREO_3D` and `UNIVERSAL_PLANES` are accepted even though nothing here
+    // implements stereoscopy or gated plane enumeration.  Linux's
+    // `drm_setclientcap()` does not ask the driver either: both are per-file
+    // client flags that govern what the client itself may send, so a driver
+    // that answered EOPNOTSUPP would be the one out of spec -- and a client
+    // that probes them before doing anything else would give up.  Only
+    // `ATOMIC` changes what this kernel acts on.
+    match cap.capability {
+        DRM_CLIENT_CAP_STEREO_3D | DRM_CLIENT_CAP_UNIVERSAL_PLANES | DRM_CLIENT_CAP_ATOMIC => {}
+        _ => return Err(VfsError::OperationNotSupported),
     }
+    if cap.value > 1 {
+        return Err(VfsError::InvalidInput);
+    }
+    // Capability values are small and defined above, so the shift is in
+    // range by construction.
+    let bit = 1u64 << cap.capability;
+    if cap.value == 1 {
+        file.client_caps.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        file.client_caps.fetch_and(!bit, Ordering::Relaxed);
+    }
+    Ok(0)
 }
 
-impl DrmIoctl for DrmSetClientCap {
-    const CMD: u32 = iow::<DrmSetClientCap>(DRM_TYPE, 0x0d);
+fn ioctl_drm_auth(_dev: &DrmCard, _file: &Arc<DrmFile>, auth: &mut DrmAuth) -> VfsResult<usize> {
+    auth.magic = 1;
+    Ok(0)
+}
 
-    fn handle(_dev: &DrmCard, file: &Arc<DrmFile>, cap: &mut Self) -> VfsResult<usize> {
-        // Mirror Linux `drm_setclientcap()`: reject an unknown capability with
-        // EOPNOTSUPP and an out-of-range boolean with EINVAL, then remember what
-        // was granted.
-        //
-        // Answering Ok(0) to everything - which is what this used to do - turns
-        // every "does the driver support X?" probe into a false positive. Clients
-        // legitimately branch on this: a libdrm client that is told `atomic` was
-        // accepted will go on to issue atomic commits.  The granted bits are read
-        // back by `DrmModeAtomic`; see `DrmFile::client_caps` for why the other
-        // two are recorded rather than enforced.
-        //
-        // `STEREO_3D` and `UNIVERSAL_PLANES` are accepted even though nothing here
-        // implements stereoscopy or gated plane enumeration.  Linux's
-        // `drm_setclientcap()` does not ask the driver either: both are per-file
-        // client flags that govern what the client itself may send, so a driver
-        // that answered EOPNOTSUPP would be the one out of spec -- and a client
-        // that probes them before doing anything else would give up.  Only
-        // `ATOMIC` changes what this kernel acts on.
-        match cap.capability {
-            DRM_CLIENT_CAP_STEREO_3D | DRM_CLIENT_CAP_UNIVERSAL_PLANES | DRM_CLIENT_CAP_ATOMIC => {}
-            _ => return Err(VfsError::OperationNotSupported),
-        }
-        if cap.value > 1 {
-            return Err(VfsError::InvalidInput);
-        }
-        // Capability values are small and defined above, so the shift is in
-        // range by construction.
-        let bit = 1u64 << cap.capability;
-        if cap.value == 1 {
-            file.client_caps.fetch_or(bit, Ordering::Relaxed);
+fn ioctl_drm_auth_magic(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    _auth: &mut DrmAuthMagic,
+) -> VfsResult<usize> {
+    Ok(0)
+}
+
+fn ioctl_drm_mode_dirty_fb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    dirty: &mut DrmModeDirtyFb,
+) -> VfsResult<usize> {
+    // Linux's drm_mode_dirtyfb_ioctl() reports an unknown fb_id as -ENOENT
+    // (drm_framebuffer_lookup), and callers distinguish the two: Xorg keeps
+    // its damage tracking enabled only when the generic path answers with
+    // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
+    // identifier before calling it.
+    if !dev.fbs.lock().contains_key(&dirty.fb_id) {
+        return Err(VfsError::NotFound);
+    }
+    dev.present_fb(dirty.fb_id);
+    Ok(0)
+}
+
+fn ioctl_drm_prime_handle(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    prime: &mut DrmPrimeHandle,
+) -> VfsResult<usize> {
+    prime.fd = prime.handle as i32;
+    Ok(0)
+}
+
+fn ioctl_drm_prime_fd_to_handle(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    prime: &mut DrmPrimeFdToHandle,
+) -> VfsResult<usize> {
+    prime.0.handle = prime.0.fd as u32;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_card_res(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    r: &mut DrmModeCardRes,
+) -> VfsResult<usize> {
+    let (w, h) = display_resolution(dev);
+    r.min_width = w;
+    r.max_width = w;
+    r.min_height = h;
+    r.max_height = h;
+
+    r.count_fbs = 0;
+    r.count_crtcs = report_user_array(r.crtc_id_ptr, r.count_crtcs, &[CRTC_ID])?;
+    r.count_encoders = report_user_array(r.encoder_id_ptr, r.count_encoders, &[ENCODER_ID])?;
+    r.count_connectors =
+        report_user_array(r.connector_id_ptr, r.count_connectors, &[CONNECTOR_ID])?;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_crtc(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    crtc: &mut DrmModeCrtc,
+) -> VfsResult<usize> {
+    if crtc.crtc_id != CRTC_ID {
+        return Err(VfsError::InvalidInput);
+    }
+    let legacy = dev.legacy_crtc.lock().clone();
+    crtc.gamma_size = 0;
+    if legacy.fb_id != 0 {
+        crtc.x = legacy.x;
+        crtc.y = legacy.y;
+        crtc.fb_id = legacy.fb_id;
+        crtc.mode_valid = legacy.mode_valid;
+        crtc.mode = if legacy.mode_valid != 0 {
+            legacy.mode
         } else {
-            file.client_caps.fetch_and(!bit, Ordering::Relaxed);
-        }
-        Ok(0)
+            DrmModeModeInfo::default()
+        };
+        crtc.count_connectors = report_user_array(
+            crtc.set_connectors_ptr,
+            crtc.count_connectors,
+            &legacy.connectors,
+        )?;
+    } else {
+        crtc.x = 0;
+        crtc.y = 0;
+        crtc.fb_id = 0;
+        crtc.mode_valid = 1;
+        crtc.mode = current_mode(dev);
+        let empty: &[u32] = &[];
+        crtc.count_connectors =
+            report_user_array(crtc.set_connectors_ptr, crtc.count_connectors, empty)?;
     }
-}
-
-impl DrmIoctl for DrmAuth {
-    const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x02);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, auth: &mut Self) -> VfsResult<usize> {
-        auth.magic = 1;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmAuthMagic {
-    const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x03);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, _auth: &mut Self) -> VfsResult<usize> {
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeDirtyFb {
-    const CMD: u32 = iowr::<DrmModeDirtyFb>(DRM_TYPE, 0xB1);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, dirty: &mut Self) -> VfsResult<usize> {
-        // Linux's drm_mode_dirtyfb_ioctl() reports an unknown fb_id as -ENOENT
-        // (drm_framebuffer_lookup), and callers distinguish the two: Xorg keeps
-        // its damage tracking enabled only when the generic path answers with
-        // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
-        // identifier before calling it.
-        if !dev.fbs.lock().contains_key(&dirty.fb_id) {
-            return Err(VfsError::NotFound);
-        }
-        dev.present_fb(dirty.fb_id);
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmPrimeHandle {
-    const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2d);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
-        prime.fd = prime.handle as i32;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmPrimeFdToHandle {
-    const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2e);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
-        prime.0.handle = prime.0.fd as u32;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeCardRes {
-    const CMD: u32 = iowr::<DrmModeCardRes>(DRM_TYPE, 0xA0);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, r: &mut Self) -> VfsResult<usize> {
-        let (w, h) = display_resolution(dev);
-        r.min_width = w;
-        r.max_width = w;
-        r.min_height = h;
-        r.max_height = h;
-
-        r.count_fbs = 0;
-        r.count_crtcs = report_user_array(r.crtc_id_ptr, r.count_crtcs, &[CRTC_ID])?;
-        r.count_encoders = report_user_array(r.encoder_id_ptr, r.count_encoders, &[ENCODER_ID])?;
-        r.count_connectors =
-            report_user_array(r.connector_id_ptr, r.count_connectors, &[CONNECTOR_ID])?;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeCrtc {
-    const CMD: u32 = iowr::<DrmModeCrtc>(DRM_TYPE, 0xA1);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, crtc: &mut Self) -> VfsResult<usize> {
-        if crtc.crtc_id != CRTC_ID {
-            return Err(VfsError::InvalidInput);
-        }
-        let legacy = dev.legacy_crtc.lock().clone();
-        crtc.gamma_size = 0;
-        if legacy.fb_id != 0 {
-            crtc.x = legacy.x;
-            crtc.y = legacy.y;
-            crtc.fb_id = legacy.fb_id;
-            crtc.mode_valid = legacy.mode_valid;
-            crtc.mode = if legacy.mode_valid != 0 {
-                legacy.mode
-            } else {
-                DrmModeModeInfo::default()
-            };
-            crtc.count_connectors = report_user_array(
-                crtc.set_connectors_ptr,
-                crtc.count_connectors,
-                &legacy.connectors,
-            )?;
-        } else {
-            crtc.x = 0;
-            crtc.y = 0;
-            crtc.fb_id = 0;
-            crtc.mode_valid = 1;
-            crtc.mode = current_mode(dev);
-            let empty: &[u32] = &[];
-            crtc.count_connectors =
-                report_user_array(crtc.set_connectors_ptr, crtc.count_connectors, empty)?;
-        }
-        Ok(0)
-    }
+    Ok(0)
 }
 
 /// The fields of a legacy cursor request that this driver acts on.
@@ -659,11 +656,6 @@ impl DeviceFileOps for DrmCard {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "CG-028-focused-functions: linear DRM ioctl dispatch table: one short match arm \
-                  per command, arms share no state"
-    )]
     fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.display()?;
         let state = file
@@ -702,139 +694,7 @@ impl DeviceFileOps for DrmCard {
                 masters.active = None;
                 Ok(0)
             }
-            <DrmVersion as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmVersion>::from(arg);
-                <DrmVersion as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmUnique as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmUnique>::from(arg);
-                <DrmUnique as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmSetVersion as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmSetVersion>::from(arg);
-                <DrmSetVersion as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmGetCap as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmGetCap>::from(arg);
-                <DrmGetCap as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmSetClientCap as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmSetClientCap>::from(arg);
-                <DrmSetClientCap as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmAuth as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmAuth>::from(arg);
-                <DrmAuth as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmAuthMagic as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
-                <DrmAuthMagic as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeDirtyFb as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
-                <DrmModeDirtyFb as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmPrimeHandle as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);
-                <DrmPrimeHandle as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmPrimeFdToHandle as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmPrimeFdToHandle>::from(arg);
-                <DrmPrimeFdToHandle as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCardRes as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCardRes>::from(arg);
-                <DrmModeCardRes as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCrtc as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCrtc>::from(arg);
-                <DrmModeCrtc as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeSetCrtc as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeSetCrtc>::from(arg);
-                <DrmModeSetCrtc as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetEncoder as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetEncoder>::from(arg);
-                <DrmModeGetEncoder as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetConnector as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetConnector>::from(arg);
-                <DrmModeGetConnector as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeRmFb as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeRmFb>::from(arg);
-                <DrmModeRmFb as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCrtcPageFlip as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCrtcPageFlip>::from(arg);
-                <DrmModeCrtcPageFlip as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCreateDumb as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCreateDumb>::from(arg);
-                <DrmModeCreateDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeMapDumb as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeMapDumb>::from(arg);
-                <DrmModeMapDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeDestroyDumb as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeDestroyDumb>::from(arg);
-                <DrmModeDestroyDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetPlaneRes as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetPlaneRes>::from(arg);
-                <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetPlane as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetPlane>::from(arg);
-                <DrmModeGetPlane as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeObjGetProperties as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeObjGetProperties>::from(arg);
-                <DrmModeObjGetProperties as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetProperty as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetProperty>::from(arg);
-                <DrmModeGetProperty as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmWaitVblank as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmWaitVblank>::from(arg);
-                <DrmWaitVblank as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeAtomic as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeAtomic>::from(arg);
-                <DrmModeAtomic as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCreateBlob as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCreateBlob>::from(arg);
-                <DrmModeCreateBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeDestroyBlob as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeDestroyBlob>::from(arg);
-                <DrmModeDestroyBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeGetBlob as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeGetBlob>::from(arg);
-                <DrmModeGetBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCursor as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCursor>::from(arg);
-                <DrmModeCursor as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeCursor2 as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeCursor2>::from(arg);
-                <DrmModeCursor2 as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeFbCmd as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeFbCmd>::from(arg);
-                <DrmModeFbCmd as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            <DrmModeFbCmd2 as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeFbCmd2>::from(arg);
-                <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, &state, user_ptr)
-            }
-            _ => Err(kvfs::VfsError::OperationNotSupported),
+            cmd => drm_uniform_ioctl(self, &state, cmd, arg),
         }
     }
 
@@ -895,596 +755,596 @@ impl Pollable for DrmCard {
     }
 }
 
-impl DrmIoctl for DrmModeSetCrtc {
-    const CMD: u32 = iowr::<DrmModeCrtc>(DRM_TYPE, 0xA2);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, crtc: &mut Self) -> VfsResult<usize> {
-        let c = &crtc.0;
-        if c.crtc_id != CRTC_ID {
-            return Err(VfsError::InvalidInput);
-        }
-        if c.fb_id == 0 && c.count_connectors == 0 {
-            *dev.legacy_crtc.lock() = LegacyCrtcState::default();
-            return Ok(0);
-        }
-        if c.fb_id == 0 || !dev.fbs.lock().contains_key(&c.fb_id) {
-            return Err(VfsError::InvalidInput);
-        }
-        if c.count_connectors == 0 || c.set_connectors_ptr.is_null() {
-            return Err(VfsError::InvalidInput);
-        }
-        if c.count_connectors > 16 {
-            return Err(VfsError::InvalidInput);
-        }
-        let connectors: Vec<u32> = c
-            .set_connectors_ptr
-            .load_vm_vec(c.count_connectors as usize)?;
-        for &id in &connectors {
-            if id != CONNECTOR_ID {
-                return Err(VfsError::InvalidInput);
-            }
-        }
-        *dev.legacy_crtc.lock() = LegacyCrtcState {
-            fb_id: c.fb_id,
-            connectors,
-            mode: c.mode,
-            mode_valid: c.mode_valid,
-            x: c.x,
-            y: c.y,
-        };
-        dev.present_fb(c.fb_id);
-        Ok(0)
+fn ioctl_drm_mode_set_crtc(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    crtc: &mut DrmModeSetCrtc,
+) -> VfsResult<usize> {
+    let c = &crtc.0;
+    if c.crtc_id != CRTC_ID {
+        return Err(VfsError::InvalidInput);
     }
+    if c.fb_id == 0 && c.count_connectors == 0 {
+        *dev.legacy_crtc.lock() = LegacyCrtcState::default();
+        return Ok(0);
+    }
+    if c.fb_id == 0 || !dev.fbs.lock().contains_key(&c.fb_id) {
+        return Err(VfsError::InvalidInput);
+    }
+    if c.count_connectors == 0 || c.set_connectors_ptr.is_null() {
+        return Err(VfsError::InvalidInput);
+    }
+    if c.count_connectors > 16 {
+        return Err(VfsError::InvalidInput);
+    }
+    let connectors: Vec<u32> = c
+        .set_connectors_ptr
+        .load_vm_vec(c.count_connectors as usize)?;
+    for &id in &connectors {
+        if id != CONNECTOR_ID {
+            return Err(VfsError::InvalidInput);
+        }
+    }
+    *dev.legacy_crtc.lock() = LegacyCrtcState {
+        fb_id: c.fb_id,
+        connectors,
+        mode: c.mode,
+        mode_valid: c.mode_valid,
+        x: c.x,
+        y: c.y,
+    };
+    dev.present_fb(c.fb_id);
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeGetEncoder {
-    const CMD: u32 = iowr::<DrmModeGetEncoder>(DRM_TYPE, 0xA6);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, e: &mut Self) -> VfsResult<usize> {
-        if e.encoder_id != ENCODER_ID {
-            return Err(VfsError::InvalidInput);
-        }
-        e.encoder_type = DRM_MODE_ENCODER_VIRTUAL;
-        e.crtc_id = CRTC_ID;
-        e.possible_crtcs = 1;
-        e.possible_clones = 0;
-        Ok(0)
+fn ioctl_drm_mode_get_encoder(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    e: &mut DrmModeGetEncoder,
+) -> VfsResult<usize> {
+    if e.encoder_id != ENCODER_ID {
+        return Err(VfsError::InvalidInput);
     }
+    e.encoder_type = DRM_MODE_ENCODER_VIRTUAL;
+    e.crtc_id = CRTC_ID;
+    e.possible_crtcs = 1;
+    e.possible_clones = 0;
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeGetConnector {
-    const CMD: u32 = iowr::<DrmModeGetConnector>(DRM_TYPE, 0xA7);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
-        if c.connector_id != CONNECTOR_ID {
-            return Err(VfsError::InvalidInput);
-        }
-        c.encoder_id = ENCODER_ID;
-        c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
-        c.connector_type_id = 1;
-        c.connection = DRM_MODE_CONNECTED;
-        let (w, h) = display_resolution(dev);
-        c.mm_width = w;
-        c.mm_height = h;
-        c.subpixel = 0;
-        c.count_encoders = report_user_array(c.encoders_ptr, c.count_encoders, &[ENCODER_ID])?;
-        if !c.modes_ptr.is_null() && c.count_modes > 0 {
-            c.modes_ptr
-                .write_vm(current_mode(dev))
-                .map_err(|_| VfsError::BadAddress)?;
-        }
-        c.count_modes = 1;
-        c.count_props = 0;
-        Ok(0)
+fn ioctl_drm_mode_get_connector(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    c: &mut DrmModeGetConnector,
+) -> VfsResult<usize> {
+    if c.connector_id != CONNECTOR_ID {
+        return Err(VfsError::InvalidInput);
     }
+    c.encoder_id = ENCODER_ID;
+    c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
+    c.connector_type_id = 1;
+    c.connection = DRM_MODE_CONNECTED;
+    let (w, h) = display_resolution(dev);
+    c.mm_width = w;
+    c.mm_height = h;
+    c.subpixel = 0;
+    c.count_encoders = report_user_array(c.encoders_ptr, c.count_encoders, &[ENCODER_ID])?;
+    if !c.modes_ptr.is_null() && c.count_modes > 0 {
+        c.modes_ptr
+            .write_vm(current_mode(dev))
+            .map_err(|_| VfsError::BadAddress)?;
+    }
+    c.count_modes = 1;
+    c.count_props = 0;
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeRmFb {
-    const CMD: u32 = iowr::<u32>(DRM_TYPE, 0xAF);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, fb_id: &mut Self) -> VfsResult<usize> {
-        dev.fbs.lock().remove(&fb_id.0);
-        {
-            let mut legacy = dev.legacy_crtc.lock();
-            if legacy.fb_id == fb_id.0 {
-                *legacy = LegacyCrtcState::default();
-            }
+fn ioctl_drm_mode_rm_fb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    fb_id: &mut DrmModeRmFb,
+) -> VfsResult<usize> {
+    dev.fbs.lock().remove(&fb_id.0);
+    {
+        let mut legacy = dev.legacy_crtc.lock();
+        if legacy.fb_id == fb_id.0 {
+            *legacy = LegacyCrtcState::default();
         }
-        Ok(0)
     }
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeCrtcPageFlip {
-    const CMD: u32 = iowr::<DrmModeCrtcPageFlip>(DRM_TYPE, 0xB0);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
-        if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
-            return Err(VfsError::InvalidInput);
-        }
-        dev.present_fb(f.fb_id);
-        if f.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
-            dev.queue_flip_event(f.user_data);
-        }
-        Ok(0)
+fn ioctl_drm_mode_crtc_page_flip(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    f: &mut DrmModeCrtcPageFlip,
+) -> VfsResult<usize> {
+    if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
+        return Err(VfsError::InvalidInput);
     }
+    dev.present_fb(f.fb_id);
+    if f.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
+        dev.queue_flip_event(f.user_data);
+    }
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeCreateDumb {
-    const CMD: u32 = iowr::<DrmModeCreateDumb>(DRM_TYPE, 0xB2);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
-        // The backing store is always BGRA8888 (32bpp) and `bytes_per_pixel` is
-        // therefore constant, but 24bpp requests must still be accepted: Linux's
-        // generic dumb-buffer ioctl accepts them, and libdrm-based clients on
-        // the non-atomic path (Xorg's modesetting driver) ask for 24bpp and then
-        // hand that same value back to `ADDFB`. Rejecting it fails their
-        // initialisation before any framebuffer exists.
-        //
-        // `bpp == 0`, `bpp > 64` and the multiple-of-8 rule are still enforced,
-        // because the depth comes from user space and an unknown depth cannot be
-        // described to the scanout device.
-        if c.width == 0 || c.height == 0 || c.flags != 0 || !matches!(c.bpp, 24 | 32) {
-            return Err(VfsError::InvalidInput);
-        }
-        if c.width > 16384 || c.height > 16384 {
-            return Err(VfsError::InvalidInput);
-        }
-        let bytes_per_pixel = 4;
-        let pitch = c
-            .width
-            .checked_mul(bytes_per_pixel)
-            .ok_or(VfsError::InvalidInput)?;
-        let size = (pitch as u64)
-            .checked_mul(c.height as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        if size as usize > DUMB_BUFFER_MAX_SIZE {
-            return Err(VfsError::NoMemory);
-        }
-        c.pitch = pitch;
-        c.size = size;
-        let size_aligned = (size as usize).next_multiple_of(PAGE_SIZE_4K);
-        let pages = size_aligned / PAGE_SIZE_4K;
-        let mut backing =
-            GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| VfsError::NoMemory)?;
-        backing.zero();
-        let paddr = v2p(backing.start_va()).as_usize() as u64;
-        let resource_id = dev.next_resource_id.fetch_add(1, Ordering::Relaxed);
-        dev.display()?
-            .create_scanout_resource(
-                ScanoutResource {
-                    id: resource_id,
-                    width: c.width,
-                    height: c.height,
-                    pitch: c.pitch,
-                    format: ScanoutFormat::Bgra8888,
-                },
-                paddr,
-                size_aligned as u32,
-            )
-            .map_err(|_| VfsError::Io)?;
-        let pages_arc = Arc::new(backing);
-        let offset = dev
-            .next_offset
-            .fetch_add(DUMB_BUFFER_OFFSET_STRIDE, Ordering::Relaxed);
-        let handle = dev.next_dumb_handle.fetch_add(1, Ordering::Relaxed);
-
-        dev.dumbs.lock().insert(
-            handle,
-            DumbBuffer {
+fn ioctl_drm_mode_create_dumb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    c: &mut DrmModeCreateDumb,
+) -> VfsResult<usize> {
+    // The backing store is always BGRA8888 (32bpp) and `bytes_per_pixel` is
+    // therefore constant, but 24bpp requests must still be accepted: Linux's
+    // generic dumb-buffer ioctl accepts them, and libdrm-based clients on
+    // the non-atomic path (Xorg's modesetting driver) ask for 24bpp and then
+    // hand that same value back to `ADDFB`. Rejecting it fails their
+    // initialisation before any framebuffer exists.
+    //
+    // `bpp == 0`, `bpp > 64` and the multiple-of-8 rule are still enforced,
+    // because the depth comes from user space and an unknown depth cannot be
+    // described to the scanout device.
+    if c.width == 0 || c.height == 0 || c.flags != 0 || !matches!(c.bpp, 24 | 32) {
+        return Err(VfsError::InvalidInput);
+    }
+    if c.width > 16384 || c.height > 16384 {
+        return Err(VfsError::InvalidInput);
+    }
+    let bytes_per_pixel = 4;
+    let pitch = c
+        .width
+        .checked_mul(bytes_per_pixel)
+        .ok_or(VfsError::InvalidInput)?;
+    let size = (pitch as u64)
+        .checked_mul(c.height as u64)
+        .ok_or(VfsError::InvalidInput)?;
+    if size as usize > DUMB_BUFFER_MAX_SIZE {
+        return Err(VfsError::NoMemory);
+    }
+    c.pitch = pitch;
+    c.size = size;
+    let size_aligned = (size as usize).next_multiple_of(PAGE_SIZE_4K);
+    let pages = size_aligned / PAGE_SIZE_4K;
+    let mut backing =
+        GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| VfsError::NoMemory)?;
+    backing.zero();
+    let paddr = v2p(backing.start_va()).as_usize() as u64;
+    let resource_id = dev.next_resource_id.fetch_add(1, Ordering::Relaxed);
+    dev.display()?
+        .create_scanout_resource(
+            ScanoutResource {
+                id: resource_id,
                 width: c.width,
                 height: c.height,
                 pitch: c.pitch,
-                offset,
-                resource_id,
-                pages: pages_arc,
+                format: ScanoutFormat::Bgra8888,
             },
+            paddr,
+            size_aligned as u32,
+        )
+        .map_err(|_| VfsError::Io)?;
+    let pages_arc = Arc::new(backing);
+    let offset = dev
+        .next_offset
+        .fetch_add(DUMB_BUFFER_OFFSET_STRIDE, Ordering::Relaxed);
+    let handle = dev.next_dumb_handle.fetch_add(1, Ordering::Relaxed);
+
+    dev.dumbs.lock().insert(
+        handle,
+        DumbBuffer {
+            width: c.width,
+            height: c.height,
+            pitch: c.pitch,
+            offset,
+            resource_id,
+            pages: pages_arc,
+        },
+    );
+    c.handle = handle;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_map_dumb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    m: &mut DrmModeMapDumb,
+) -> VfsResult<usize> {
+    let offset = dev
+        .dumbs
+        .lock()
+        .get(&m.handle)
+        .map(|b| b.offset)
+        .ok_or(VfsError::InvalidInput)?;
+    m.offset = offset;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_destroy_dumb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    d: &mut DrmModeDestroyDumb,
+) -> VfsResult<usize> {
+    let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
+        return Ok(0);
+    };
+    // Resolve the display device *before* mutating guest state: if it is
+    // gone, fail the ioctl instead of dropping the backing while the host
+    // still holds a scanout resource for it (dangling backing + leak).
+    let device = dev.display()?;
+    dev.dumbs.lock().remove(&d.handle);
+    if let Err(err) = device.destroy_scanout_resource(resource_id) {
+        log::warn!(
+            "drm: failed to destroy scanout resource {}: {:?}",
+            resource_id,
+            err
         );
-        c.handle = handle;
-        Ok(0)
     }
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeMapDumb {
-    const CMD: u32 = iowr::<DrmModeMapDumb>(DRM_TYPE, 0xB3);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, m: &mut Self) -> VfsResult<usize> {
-        let offset = dev
-            .dumbs
-            .lock()
-            .get(&m.handle)
-            .map(|b| b.offset)
-            .ok_or(VfsError::InvalidInput)?;
-        m.offset = offset;
-        Ok(0)
-    }
+fn ioctl_drm_mode_get_plane_res(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    r: &mut DrmModeGetPlaneRes,
+) -> VfsResult<usize> {
+    let planes: &[u32] = &[PLANE_ID];
+    r.count_planes = report_user_array(r.plane_id_ptr, r.count_planes, planes)?;
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeDestroyDumb {
-    const CMD: u32 = iowr::<DrmModeDestroyDumb>(DRM_TYPE, 0xB4);
+fn ioctl_drm_mode_get_plane(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    p: &mut DrmModeGetPlane,
+) -> VfsResult<usize> {
+    if p.plane_id != PLANE_ID {
+        return Err(VfsError::InvalidInput);
+    }
+    p.crtc_id = CRTC_ID;
+    p.fb_id = 0;
+    p.possible_crtcs = 1;
+    p.gamma_size = 0;
+    p.count_format_types =
+        report_user_array(p.format_type_ptr, p.count_format_types, SUPPORTED_FORMATS)?;
+    Ok(0)
+}
 
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
-        let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
-            return Ok(0);
-        };
-        // Resolve the display device *before* mutating guest state: if it is
-        // gone, fail the ioctl instead of dropping the backing while the host
-        // still holds a scanout resource for it (dangling backing + leak).
-        let device = dev.display()?;
-        dev.dumbs.lock().remove(&d.handle);
-        if let Err(err) = device.destroy_scanout_resource(resource_id) {
-            log::warn!(
-                "drm: failed to destroy scanout resource {}: {:?}",
-                resource_id,
-                err
-            );
+fn ioctl_drm_mode_obj_get_properties(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    q: &mut DrmModeObjGetProperties,
+) -> VfsResult<usize> {
+    let state = *dev.state.lock();
+    let (prop_ids, prop_vals): (&[u32], Vec<u64>) = match (q.obj_type, q.obj_id) {
+        (DRM_MODE_OBJECT_PLANE, PLANE_ID) => {
+            let blob_id = dev.ensure_in_formats_blob() as u64;
+            (PLANE_PROPS, plane_prop_values(&state, blob_id))
         }
-        Ok(0)
-    }
+        (DRM_MODE_OBJECT_CRTC, CRTC_ID) => (CRTC_PROPS, crtc_prop_values(&state)),
+        (DRM_MODE_OBJECT_CONNECTOR, CONNECTOR_ID) => (CONN_PROPS, conn_prop_values(&state)),
+        _ => return Err(VfsError::NotFound),
+    };
+    report_user_array(q.props_ptr, q.count_props, prop_ids)?;
+    report_user_array(q.prop_values_ptr, q.count_props, &prop_vals)?;
+    q.count_props = prop_ids.len() as u32;
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeGetPlaneRes {
-    const CMD: u32 = iowr::<DrmModeGetPlaneRes>(DRM_TYPE, 0xB5);
+fn ioctl_drm_mode_get_property(
+    _dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    g: &mut DrmModeGetProperty,
+) -> VfsResult<usize> {
+    let meta = property_meta(g.prop_id).ok_or(VfsError::NotFound)?;
 
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, r: &mut Self) -> VfsResult<usize> {
-        let planes: &[u32] = &[PLANE_ID];
-        r.count_planes = report_user_array(r.plane_id_ptr, r.count_planes, planes)?;
-        Ok(0)
+    g.flags = meta.flags;
+    g.name = [0; DRM_PROP_NAME_LEN];
+    let nb = meta.name.as_bytes();
+    let n = nb.len().min(DRM_PROP_NAME_LEN - 1);
+    g.name[..n].copy_from_slice(&nb[..n]);
+
+    match meta.kind {
+        PropKind::Enum(enums) => {
+            g.count_values = enums.len() as u32;
+            g.count_enum_blobs = report_user_array(g.enum_blob_ptr, g.count_enum_blobs, enums)?;
+        }
+        PropKind::RangeU64 { min, max } => {
+            let limits = [min, max];
+            g.count_values = report_user_array(g.values_ptr, g.count_values, &limits)?;
+            g.count_enum_blobs = 0;
+        }
+        PropKind::Object | PropKind::Blob => {
+            g.count_values = 0;
+            g.count_enum_blobs = 0;
+        }
     }
+    Ok(0)
 }
 
-impl DrmIoctl for DrmModeGetPlane {
-    const CMD: u32 = iowr::<DrmModeGetPlane>(DRM_TYPE, 0xB6);
+fn ioctl_drm_wait_vblank(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    request: &mut DrmWaitVblank,
+) -> VfsResult<usize> {
+    let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
+    let current = dev.sequence.load(Ordering::Acquire);
+    let target = if is_relative {
+        current.wrapping_add(request.sequence)
+    } else {
+        request.sequence
+    };
+    let raw_wait = target.wrapping_sub(current);
+    let wait_count = if raw_wait == 0 || raw_wait >= i32::MAX as u32 {
+        1
+    } else {
+        raw_wait
+    };
 
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, p: &mut Self) -> VfsResult<usize> {
-        if p.plane_id != PLANE_ID {
+    const FRAME_PERIOD_NS: u64 = ktime_types::NANOS_PER_SEC / 60;
+    let delay =
+        ktime_types::TimeSpan::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
+    ktask::sleep(delay);
+    dev.sequence.fetch_add(wait_count, Ordering::AcqRel);
+
+    let now = khal::time::monotonic_time();
+    let now = now.span_since_origin();
+    *request = DrmWaitVblank {
+        rep_type: 0,
+        sequence: dev.sequence.load(Ordering::Acquire),
+        tv_sec: now.as_secs() as i64,
+        tv_usec: now.subsec_micros() as i64,
+    };
+    Ok(0)
+}
+
+fn ioctl_drm_mode_atomic(
+    dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    a: &mut DrmModeAtomic,
+) -> VfsResult<usize> {
+    // This is the consumer of the bitmap SET_CLIENT_CAP maintains: a client
+    // that never negotiated `DRM_CLIENT_CAP_ATOMIC` is told the atomic path
+    // is unavailable so it falls back to the legacy one, instead of being
+    // handed an interface it did not ask for.
+    if file.client_caps.load(Ordering::Relaxed) & (1u64 << DRM_CLIENT_CAP_ATOMIC) == 0 {
+        return Err(VfsError::OperationNotSupported);
+    }
+
+    let known = DRM_MODE_ATOMIC_TEST_ONLY
+        | DRM_MODE_ATOMIC_NONBLOCK
+        | DRM_MODE_ATOMIC_ALLOW_MODESET
+        | DRM_MODE_PAGE_FLIP_EVENT;
+    if a.flags & !known != 0 {
+        return Err(VfsError::InvalidInput);
+    }
+
+    let n = a.count_objs as usize;
+    let objs: Vec<u32> = a.objs_ptr.load_vm_vec(n)?;
+    let counts: Vec<u32> = a.count_props_ptr.load_vm_vec(n)?;
+    let total_props: usize = counts.iter().map(|c| *c as usize).sum();
+    let props: Vec<u32> = a.props_ptr.load_vm_vec(total_props)?;
+    let values: Vec<u64> = a.prop_values_ptr.load_vm_vec(total_props)?;
+
+    let mut state = dev.state.lock();
+    let mut proposed = *state;
+    let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
+    let mut idx = 0;
+    for (obj_i, &obj_id) in objs.iter().enumerate() {
+        let obj_type = object_type_of(obj_id).ok_or(VfsError::NotFound)?;
+        for _ in 0..counts[obj_i] {
+            let prop_id = props[idx];
+            let value = values[idx];
+            idx += 1;
+            if !dev.apply_prop(
+                obj_type,
+                obj_id,
+                prop_id,
+                value,
+                &mut proposed,
+                &mut new_mode_blob,
+            )? {
+                return Err(VfsError::InvalidInput);
+            }
+        }
+    }
+
+    if a.flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
+        return Ok(0);
+    }
+
+    let current_fb = proposed.plane_fb_id;
+    *state = proposed;
+    drop(state);
+    if let Some(new_ref) = new_mode_blob {
+        *dev.mode_id_blob_ref.lock() = new_ref;
+    }
+    if current_fb != 0 {
+        dev.present_fb(current_fb);
+    }
+    if a.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
+        dev.queue_flip_event(a.user_data);
+    }
+    Ok(0)
+}
+
+fn ioctl_drm_mode_create_blob(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    c: &mut DrmModeCreateBlob,
+) -> VfsResult<usize> {
+    if c.length == 0 || c.length as usize > MAX_BLOB_BYTES {
+        return Err(VfsError::InvalidInput);
+    }
+    let len = c.length as usize;
+    let bytes = c.data.load_vm_vec(len).map_err(|_| VfsError::BadAddress)?;
+    let id = dev.next_blob_id.fetch_add(1, Ordering::Relaxed);
+    dev.blobs.lock().insert(id, Arc::new(bytes));
+    c.blob_id = id;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_destroy_blob(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    d: &mut DrmModeDestroyBlob,
+) -> VfsResult<usize> {
+    if dev.system_blobs.lock().contains_key(&d.blob_id) {
+        return Err(VfsError::PermissionDenied);
+    }
+    dev.blobs
+        .lock()
+        .remove(&d.blob_id)
+        .ok_or(VfsError::NotFound)?;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_get_blob(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    g: &mut DrmModeGetBlob,
+) -> VfsResult<usize> {
+    let bytes = if let Some(b) = dev.blobs.lock().get(&g.blob_id).cloned() {
+        b
+    } else if g.blob_id == dev.state.lock().crtc_mode_id
+        && let Some(b) = dev.mode_id_blob_ref.lock().clone()
+    {
+        b
+    } else if let Some(b) = dev.system_blobs.lock().get(&g.blob_id).cloned() {
+        b
+    } else {
+        return Err(VfsError::NotFound);
+    };
+    if !g.data.is_null() && g.length > 0 {
+        let n = (g.length as usize).min(bytes.len());
+        g.data
+            .write_vm_slice(&bytes[..n])
+            .map_err(|_| VfsError::BadAddress)?;
+    }
+    g.length = bytes.len() as u32;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_cursor(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    cursor: &mut DrmModeCursor,
+) -> VfsResult<usize> {
+    dev.set_cursor(CursorRequest {
+        crtc_id: cursor.crtc_id,
+        flags: cursor.flags,
+        width: cursor.width,
+        height: cursor.height,
+        handle: cursor.handle,
+    })
+}
+
+fn ioctl_drm_mode_cursor2(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    cursor: &mut DrmModeCursor2,
+) -> VfsResult<usize> {
+    // The hotspot is only meaningful to a hardware cursor plane, which this
+    // driver does not expose; validating it would reject requests the device
+    // is happy to treat as a plain move.
+    dev.set_cursor(CursorRequest {
+        crtc_id: cursor.crtc_id,
+        flags: cursor.flags,
+        width: cursor.width,
+        height: cursor.height,
+        handle: cursor.handle,
+    })
+}
+
+fn ioctl_drm_mode_fb_cmd(
+    dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    f: &mut DrmModeFbCmd,
+) -> VfsResult<usize> {
+    // Legacy ADDFB. Translate the request into the modern form and reuse
+    // that implementation, so the two entry points cannot drift apart.
+    //
+    // bpp 24 is accepted on purpose: `DrmModeCreateDumb` backs every request
+    // with a 32bpp BGRA buffer and reports `pitch = width * 4`, and callers
+    // hand that same bpp straight back here.
+    //
+    // Unlike ADDFB2 there is no pixel_format field; the legacy ABI implies
+    // XRGB8888 for depth 24, which is what the driver implements.
+    // ADDFB always registers XRGB8888 below, so only accept the depths that
+    // format actually describes: 24 (RGB) and 32 (XRGB with a spare byte).
+    if f.handle == 0 || !matches!(f.bpp, 24 | 32) || !matches!(f.depth, 24 | 32) {
+        return Err(VfsError::InvalidInput);
+    }
+    let mut modern = DrmModeFbCmd2 {
+        fb_id: f.fb_id,
+        width: f.width,
+        height: f.height,
+        pixel_format: DRM_FORMAT_XRGB8888,
+        flags: 0,
+        handles: [f.handle, 0, 0, 0],
+        pitches: [f.pitch, 0, 0, 0],
+        offsets: [0; 4],
+        abi_pad: 0,
+        modifier: [0; 4],
+    };
+    <DrmModeFbCmd2 as DrmIoctl>::handle(dev, file, &mut modern)?;
+    f.fb_id = modern.fb_id;
+    Ok(0)
+}
+
+fn ioctl_drm_mode_fb_cmd2(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    f: &mut DrmModeFbCmd2,
+) -> VfsResult<usize> {
+    let handle = f.handles[0];
+    if handle == 0 || f.offsets[0] != 0 {
+        return Err(VfsError::InvalidInput);
+    }
+    for i in 1..4 {
+        if f.handles[i] != 0 || f.pitches[i] != 0 || f.offsets[i] != 0 {
             return Err(VfsError::InvalidInput);
         }
-        p.crtc_id = CRTC_ID;
-        p.fb_id = 0;
-        p.possible_crtcs = 1;
-        p.gamma_size = 0;
-        p.count_format_types =
-            report_user_array(p.format_type_ptr, p.count_format_types, SUPPORTED_FORMATS)?;
-        Ok(0)
     }
-}
-
-impl DrmIoctl for DrmModeObjGetProperties {
-    const CMD: u32 = iowr::<DrmModeObjGetProperties>(DRM_TYPE, 0xB9);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, q: &mut Self) -> VfsResult<usize> {
-        let state = *dev.state.lock();
-        let (prop_ids, prop_vals): (&[u32], Vec<u64>) = match (q.obj_type, q.obj_id) {
-            (DRM_MODE_OBJECT_PLANE, PLANE_ID) => {
-                let blob_id = dev.ensure_in_formats_blob() as u64;
-                (PLANE_PROPS, plane_prop_values(&state, blob_id))
-            }
-            (DRM_MODE_OBJECT_CRTC, CRTC_ID) => (CRTC_PROPS, crtc_prop_values(&state)),
-            (DRM_MODE_OBJECT_CONNECTOR, CONNECTOR_ID) => (CONN_PROPS, conn_prop_values(&state)),
-            _ => return Err(VfsError::NotFound),
-        };
-        report_user_array(q.props_ptr, q.count_props, prop_ids)?;
-        report_user_array(q.prop_values_ptr, q.count_props, &prop_vals)?;
-        q.count_props = prop_ids.len() as u32;
-        Ok(0)
+    if !matches!(f.pixel_format, DRM_FORMAT_XRGB8888 | DRM_FORMAT_ARGB8888) {
+        return Err(VfsError::InvalidInput);
     }
-}
-
-impl DrmIoctl for DrmModeGetProperty {
-    const CMD: u32 = iowr::<DrmModeGetProperty>(DRM_TYPE, 0xAA);
-
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, g: &mut Self) -> VfsResult<usize> {
-        let meta = property_meta(g.prop_id).ok_or(VfsError::NotFound)?;
-
-        g.flags = meta.flags;
-        g.name = [0; DRM_PROP_NAME_LEN];
-        let nb = meta.name.as_bytes();
-        let n = nb.len().min(DRM_PROP_NAME_LEN - 1);
-        g.name[..n].copy_from_slice(&nb[..n]);
-
-        match meta.kind {
-            PropKind::Enum(enums) => {
-                g.count_values = enums.len() as u32;
-                g.count_enum_blobs = report_user_array(g.enum_blob_ptr, g.count_enum_blobs, enums)?;
-            }
-            PropKind::RangeU64 { min, max } => {
-                let limits = [min, max];
-                g.count_values = report_user_array(g.values_ptr, g.count_values, &limits)?;
-                g.count_enum_blobs = 0;
-            }
-            PropKind::Object | PropKind::Blob => {
-                g.count_values = 0;
-                g.count_enum_blobs = 0;
-            }
-        }
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmWaitVblank {
-    const CMD: u32 = iowr::<DrmWaitVblank>(DRM_TYPE, 0x3A);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, request: &mut Self) -> VfsResult<usize> {
-        let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
-        let current = dev.sequence.load(Ordering::Acquire);
-        let target = if is_relative {
-            current.wrapping_add(request.sequence)
-        } else {
-            request.sequence
-        };
-        let raw_wait = target.wrapping_sub(current);
-        let wait_count = if raw_wait == 0 || raw_wait >= i32::MAX as u32 {
-            1
-        } else {
-            raw_wait
-        };
-
-        const FRAME_PERIOD_NS: u64 = ktime_types::NANOS_PER_SEC / 60;
-        let delay =
-            ktime_types::TimeSpan::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
-        ktask::sleep(delay);
-        dev.sequence.fetch_add(wait_count, Ordering::AcqRel);
-
-        let now = khal::time::monotonic_time();
-        let now = now.span_since_origin();
-        *request = DrmWaitVblank {
-            rep_type: 0,
-            sequence: dev.sequence.load(Ordering::Acquire),
-            tv_sec: now.as_secs() as i64,
-            tv_usec: now.subsec_micros() as i64,
-        };
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeAtomic {
-    const CMD: u32 = iowr::<DrmModeAtomic>(DRM_TYPE, 0xBC);
-
-    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, a: &mut Self) -> VfsResult<usize> {
-        // This is the consumer of the bitmap SET_CLIENT_CAP maintains: a client
-        // that never negotiated `DRM_CLIENT_CAP_ATOMIC` is told the atomic path
-        // is unavailable so it falls back to the legacy one, instead of being
-        // handed an interface it did not ask for.
-        if file.client_caps.load(Ordering::Relaxed) & (1u64 << DRM_CLIENT_CAP_ATOMIC) == 0 {
-            return Err(VfsError::OperationNotSupported);
-        }
-
-        let known = DRM_MODE_ATOMIC_TEST_ONLY
-            | DRM_MODE_ATOMIC_NONBLOCK
-            | DRM_MODE_ATOMIC_ALLOW_MODESET
-            | DRM_MODE_PAGE_FLIP_EVENT;
-        if a.flags & !known != 0 {
+    let (resource_id, width, height, pitch) = {
+        let dumbs = dev.dumbs.lock();
+        let Some(b) = dumbs.get(&handle) else {
             return Err(VfsError::InvalidInput);
-        }
-
-        let n = a.count_objs as usize;
-        let objs: Vec<u32> = a.objs_ptr.load_vm_vec(n)?;
-        let counts: Vec<u32> = a.count_props_ptr.load_vm_vec(n)?;
-        let total_props: usize = counts.iter().map(|c| *c as usize).sum();
-        let props: Vec<u32> = a.props_ptr.load_vm_vec(total_props)?;
-        let values: Vec<u64> = a.prop_values_ptr.load_vm_vec(total_props)?;
-
-        let mut state = dev.state.lock();
-        let mut proposed = *state;
-        let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
-        let mut idx = 0;
-        for (obj_i, &obj_id) in objs.iter().enumerate() {
-            let obj_type = object_type_of(obj_id).ok_or(VfsError::NotFound)?;
-            for _ in 0..counts[obj_i] {
-                let prop_id = props[idx];
-                let value = values[idx];
-                idx += 1;
-                if !dev.apply_prop(
-                    obj_type,
-                    obj_id,
-                    prop_id,
-                    value,
-                    &mut proposed,
-                    &mut new_mode_blob,
-                )? {
-                    return Err(VfsError::InvalidInput);
-                }
+        };
+        (b.resource_id, b.width, b.height, b.pitch)
+    };
+    // The scanout resource is created at exactly the dumb buffer's size
+    // and pitch (no ANY_LAYOUT negotiation), and TRANSFER_TO_HOST_2D reads
+    // the backing row-by-row with the resource pitch. A sub-size
+    // framebuffer would be misread (garbled scanout) or rejected by the
+    // device, so the framebuffer must match the resource layout exactly.
+    if f.width != width || f.height != height || f.pitches[0] != pitch {
+        return Err(VfsError::InvalidInput);
+    }
+    if f.flags & DRM_MODE_FB_MODIFIERS != 0 {
+        for i in 0..4 {
+            if f.handles[i] == 0 {
+                continue;
+            }
+            let m = f.modifier[i];
+            if m != DRM_FORMAT_MOD_LINEAR && m != DRM_FORMAT_MOD_INVALID {
+                return Err(VfsError::InvalidInput);
             }
         }
-
-        if a.flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
-            return Ok(0);
-        }
-
-        let current_fb = proposed.plane_fb_id;
-        *state = proposed;
-        drop(state);
-        if let Some(new_ref) = new_mode_blob {
-            *dev.mode_id_blob_ref.lock() = new_ref;
-        }
-        if current_fb != 0 {
-            dev.present_fb(current_fb);
-        }
-        if a.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
-            dev.queue_flip_event(a.user_data);
-        }
-        Ok(0)
     }
-}
-
-impl DrmIoctl for DrmModeCreateBlob {
-    const CMD: u32 = iowr::<DrmModeCreateBlob>(DRM_TYPE, 0xBD);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
-        if c.length == 0 || c.length as usize > MAX_BLOB_BYTES {
-            return Err(VfsError::InvalidInput);
-        }
-        let len = c.length as usize;
-        let bytes = c.data.load_vm_vec(len).map_err(|_| VfsError::BadAddress)?;
-        let id = dev.next_blob_id.fetch_add(1, Ordering::Relaxed);
-        dev.blobs.lock().insert(id, Arc::new(bytes));
-        c.blob_id = id;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeDestroyBlob {
-    const CMD: u32 = iowr::<DrmModeDestroyBlob>(DRM_TYPE, 0xBE);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
-        if dev.system_blobs.lock().contains_key(&d.blob_id) {
-            return Err(VfsError::PermissionDenied);
-        }
-        dev.blobs
-            .lock()
-            .remove(&d.blob_id)
-            .ok_or(VfsError::NotFound)?;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeGetBlob {
-    const CMD: u32 = iowr::<DrmModeGetBlob>(DRM_TYPE, 0xAC);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, g: &mut Self) -> VfsResult<usize> {
-        let bytes = if let Some(b) = dev.blobs.lock().get(&g.blob_id).cloned() {
-            b
-        } else if g.blob_id == dev.state.lock().crtc_mode_id
-            && let Some(b) = dev.mode_id_blob_ref.lock().clone()
-        {
-            b
-        } else if let Some(b) = dev.system_blobs.lock().get(&g.blob_id).cloned() {
-            b
-        } else {
-            return Err(VfsError::NotFound);
-        };
-        if !g.data.is_null() && g.length > 0 {
-            let n = (g.length as usize).min(bytes.len());
-            g.data
-                .write_vm_slice(&bytes[..n])
-                .map_err(|_| VfsError::BadAddress)?;
-        }
-        g.length = bytes.len() as u32;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeCursor {
-    const CMD: u32 = iowr::<DrmModeCursor>(DRM_TYPE, 0xA3);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, cursor: &mut Self) -> VfsResult<usize> {
-        dev.set_cursor(CursorRequest {
-            crtc_id: cursor.crtc_id,
-            flags: cursor.flags,
-            width: cursor.width,
-            height: cursor.height,
-            handle: cursor.handle,
-        })
-    }
-}
-
-impl DrmIoctl for DrmModeCursor2 {
-    const CMD: u32 = iowr::<DrmModeCursor2>(DRM_TYPE, 0xBB);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, cursor: &mut Self) -> VfsResult<usize> {
-        // The hotspot is only meaningful to a hardware cursor plane, which this
-        // driver does not expose; validating it would reject requests the device
-        // is happy to treat as a plain move.
-        dev.set_cursor(CursorRequest {
-            crtc_id: cursor.crtc_id,
-            flags: cursor.flags,
-            width: cursor.width,
-            height: cursor.height,
-            handle: cursor.handle,
-        })
-    }
-}
-
-impl DrmIoctl for DrmModeFbCmd {
-    const CMD: u32 = iowr::<DrmModeFbCmd>(DRM_TYPE, 0xAE);
-
-    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
-        // Legacy ADDFB. Translate the request into the modern form and reuse
-        // that implementation, so the two entry points cannot drift apart.
-        //
-        // bpp 24 is accepted on purpose: `DrmModeCreateDumb` backs every request
-        // with a 32bpp BGRA buffer and reports `pitch = width * 4`, and callers
-        // hand that same bpp straight back here.
-        //
-        // Unlike ADDFB2 there is no pixel_format field; the legacy ABI implies
-        // XRGB8888 for depth 24, which is what the driver implements.
-        // ADDFB always registers XRGB8888 below, so only accept the depths that
-        // format actually describes: 24 (RGB) and 32 (XRGB with a spare byte).
-        if f.handle == 0 || !matches!(f.bpp, 24 | 32) || !matches!(f.depth, 24 | 32) {
-            return Err(VfsError::InvalidInput);
-        }
-        let mut modern = DrmModeFbCmd2 {
-            fb_id: f.fb_id,
+    let fb_id = dev.next_fb_id.fetch_add(1, Ordering::Relaxed);
+    dev.fbs.lock().insert(
+        fb_id,
+        Framebuffer {
+            resource_id,
             width: f.width,
             height: f.height,
-            pixel_format: DRM_FORMAT_XRGB8888,
-            flags: 0,
-            handles: [f.handle, 0, 0, 0],
-            pitches: [f.pitch, 0, 0, 0],
-            offsets: [0; 4],
-            abi_pad: 0,
-            modifier: [0; 4],
-        };
-        <DrmModeFbCmd2 as DrmIoctl>::handle(dev, file, &mut modern)?;
-        f.fb_id = modern.fb_id;
-        Ok(0)
-    }
-}
-
-impl DrmIoctl for DrmModeFbCmd2 {
-    const CMD: u32 = iowr::<DrmModeFbCmd2>(DRM_TYPE, 0xB8);
-
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
-        let handle = f.handles[0];
-        if handle == 0 || f.offsets[0] != 0 {
-            return Err(VfsError::InvalidInput);
-        }
-        for i in 1..4 {
-            if f.handles[i] != 0 || f.pitches[i] != 0 || f.offsets[i] != 0 {
-                return Err(VfsError::InvalidInput);
-            }
-        }
-        if !matches!(f.pixel_format, DRM_FORMAT_XRGB8888 | DRM_FORMAT_ARGB8888) {
-            return Err(VfsError::InvalidInput);
-        }
-        let (resource_id, width, height, pitch) = {
-            let dumbs = dev.dumbs.lock();
-            let Some(b) = dumbs.get(&handle) else {
-                return Err(VfsError::InvalidInput);
-            };
-            (b.resource_id, b.width, b.height, b.pitch)
-        };
-        // The scanout resource is created at exactly the dumb buffer's size
-        // and pitch (no ANY_LAYOUT negotiation), and TRANSFER_TO_HOST_2D reads
-        // the backing row-by-row with the resource pitch. A sub-size
-        // framebuffer would be misread (garbled scanout) or rejected by the
-        // device, so the framebuffer must match the resource layout exactly.
-        if f.width != width || f.height != height || f.pitches[0] != pitch {
-            return Err(VfsError::InvalidInput);
-        }
-        if f.flags & DRM_MODE_FB_MODIFIERS != 0 {
-            for i in 0..4 {
-                if f.handles[i] == 0 {
-                    continue;
-                }
-                let m = f.modifier[i];
-                if m != DRM_FORMAT_MOD_LINEAR && m != DRM_FORMAT_MOD_INVALID {
-                    return Err(VfsError::InvalidInput);
-                }
-            }
-        }
-        let fb_id = dev.next_fb_id.fetch_add(1, Ordering::Relaxed);
-        dev.fbs.lock().insert(
-            fb_id,
-            Framebuffer {
-                resource_id,
-                width: f.width,
-                height: f.height,
-            },
-        );
-        f.fb_id = fb_id;
-        Ok(0)
-    }
+        },
+    );
+    f.fb_id = fb_id;
+    Ok(0)
 }
 
 impl DrmCard {
@@ -1856,3 +1716,82 @@ fn checked_i32(value: u64) -> VfsResult<i32> {
         Err(VfsError::InvalidInput)
     }
 }
+
+/// Single declaration point for every uniform DRM ioctl: the wire ioctl
+/// number, its transfer direction, the request type, and the handler. This
+/// one table drives both the `impl DrmIoctl` wiring and the generated
+/// dispatch function, so adding a command is a single line here and the
+/// number, the size-derived command word, the dispatch arm and the handler
+/// can no longer drift apart.
+macro_rules! for_each_drm_ioctl {
+    ($mac:ident) => {
+        $mac! {
+            (0x00, iowr, DrmVersion, ioctl_drm_version),
+            (0x07, iowr, DrmSetVersion, ioctl_drm_set_version),
+            (0x01, iowr, DrmUnique, ioctl_drm_unique),
+            (0x0c, iowr, DrmGetCap, ioctl_drm_get_cap),
+            (0x0d, iow, DrmSetClientCap, ioctl_drm_set_client_cap),
+            (0x02, iowr, DrmAuth, ioctl_drm_auth),
+            (0x03, iowr, DrmAuthMagic, ioctl_drm_auth_magic),
+            (0xB1, iowr, DrmModeDirtyFb, ioctl_drm_mode_dirty_fb),
+            (0x2d, iowr, DrmPrimeHandle, ioctl_drm_prime_handle),
+            (0x2e, iowr, DrmPrimeFdToHandle, ioctl_drm_prime_fd_to_handle),
+            (0xA0, iowr, DrmModeCardRes, ioctl_drm_mode_card_res),
+            (0xA1, iowr, DrmModeCrtc, ioctl_drm_mode_crtc),
+            (0xA2, iowr, DrmModeSetCrtc, ioctl_drm_mode_set_crtc),
+            (0xA6, iowr, DrmModeGetEncoder, ioctl_drm_mode_get_encoder),
+            (0xA7, iowr, DrmModeGetConnector, ioctl_drm_mode_get_connector),
+            (0xAF, iowr, DrmModeRmFb, ioctl_drm_mode_rm_fb),
+            (0xB0, iowr, DrmModeCrtcPageFlip, ioctl_drm_mode_crtc_page_flip),
+            (0xB2, iowr, DrmModeCreateDumb, ioctl_drm_mode_create_dumb),
+            (0xB3, iowr, DrmModeMapDumb, ioctl_drm_mode_map_dumb),
+            (0xB4, iowr, DrmModeDestroyDumb, ioctl_drm_mode_destroy_dumb),
+            (0xB5, iowr, DrmModeGetPlaneRes, ioctl_drm_mode_get_plane_res),
+            (0xB6, iowr, DrmModeGetPlane, ioctl_drm_mode_get_plane),
+            (0xB9, iowr, DrmModeObjGetProperties, ioctl_drm_mode_obj_get_properties),
+            (0xAA, iowr, DrmModeGetProperty, ioctl_drm_mode_get_property),
+            (0x3A, iowr, DrmWaitVblank, ioctl_drm_wait_vblank),
+            (0xBC, iowr, DrmModeAtomic, ioctl_drm_mode_atomic),
+            (0xBD, iowr, DrmModeCreateBlob, ioctl_drm_mode_create_blob),
+            (0xBE, iowr, DrmModeDestroyBlob, ioctl_drm_mode_destroy_blob),
+            (0xAC, iowr, DrmModeGetBlob, ioctl_drm_mode_get_blob),
+            (0xA3, iowr, DrmModeCursor, ioctl_drm_mode_cursor),
+            (0xBB, iowr, DrmModeCursor2, ioctl_drm_mode_cursor2),
+            (0xAE, iowr, DrmModeFbCmd, ioctl_drm_mode_fb_cmd),
+            (0xB8, iowr, DrmModeFbCmd2, ioctl_drm_mode_fb_cmd2),
+        }
+    };
+}
+
+macro_rules! drm_impl_and_dispatch {
+    ($(($nr:literal, $dir:ident, $ty:ty, $handle:path)),* $(,)?) => {
+        $(
+            impl DrmIoctl for $ty {
+                const CMD: u32 = $dir::<$ty>(DRM_TYPE, $nr);
+
+                fn handle(dev: &DrmCard, file: &Arc<DrmFile>, req: &mut Self) -> VfsResult<usize> {
+                    $handle(dev, file, req)
+                }
+            }
+        )*
+
+        fn drm_uniform_ioctl(
+            dev: &DrmCard,
+            state: &Arc<DrmFile>,
+            cmd: u32,
+            arg: usize,
+        ) -> VfsResult<usize> {
+            match cmd {
+                $(
+                    <$ty as DrmIoctl>::CMD => {
+                        let user_ptr = UserPtr::<$ty>::from(arg);
+                        <$ty as DrmIoctl>::handle_raw(dev, state, user_ptr)
+                    }
+                )*
+                _ => Err(kvfs::VfsError::OperationNotSupported),
+            }
+        }
+    };
+}
+
+for_each_drm_ioctl!(drm_impl_and_dispatch);
