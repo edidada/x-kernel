@@ -47,7 +47,7 @@ sealed to the crate, so every such object was created from `Arc<ClkCore>`.
 
 ## Invariants
 
-- Consumers only ever hold `ClkHandle` (kclk's own handle or driver-core's);
+- Consumers only ever hold `ClkHandle` (kclk's own handle or driver-base's);
   they cannot reach
   `ClkHwOps` or the raw register accessor.
 - `enable_count` / `prepare_count` never go below zero (decrement guards).

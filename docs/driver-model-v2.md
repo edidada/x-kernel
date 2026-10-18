@@ -8,7 +8,7 @@
 ```
 drivers/
   base/    driver-base —— 设备模型:device/driver/bus/class/domain + devres 前后端轴
-           + class 机械(ClassDevice/Registry/ClassHooks/class_api! 宏/notify+remove 引擎)
+           + class 机械(Publication/Registry/ClassHooks/class_api! 宏/notify+remove 引擎)
   host/    driver-host —— 资源后端(DeviceServices over kirq/kdma/memspace/kclk)
   init/    driver-init —— 组合根,显式 initcall 等级
   common/  devnode —— 节点模型 + NodeClass(input/drm 投影)+ uevent 格式
@@ -27,13 +27,11 @@ arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
 1. **devres 一根轴**:`base/src/devres/` = 前端守卫(iomap/irq/dma/clk)+ 后端能力
    (provider.rs)+ 缝合面(services.rs);`resource.rs` 固件侧数据。
 2. **类机械归一**:`base/src/class/` 拥有全部通用机械;一个类 = 一个
-   `pub static X: Class<T, H>`(const 构造,链接期成形,零 LazyInit 首用分支——
-   机制移植自平行的 driver-mvp 线,该判优于宏方案);钩子 `H: ClassHooks<T>`
-   是类型参数(子系统本地 unit struct,孤儿规则结构性满足)。8 个家族的
-   静态声明 + 消费面(转发 impl)各自住在 `subsystems/*/src/class.rs`
-   (9p 的 `P9` 在 virtio-devices)。device-class crate 死亡;metadata 袋死亡
-   (input 身份由运行时投影时查询);消费 API 是方法(`NET.devices()`),
-   消费者导入一个静态而非一袋自由函数。
+   `pub static X: Class<T, H>`,驱动用 `dev.publish(&X, runtime, name)` 发布,
+   返回的 `Publication<T>` 就是所有者(drop 即撤销,`InUse` 计数让 class 侧
+   teardown 等在途操作结束);钩子 `H: ClassHooks<T>` 是类型参数。设备身份是
+   域创建的 `DeviceCore`,不再有 `ClassParent` 包装;devnode 投影随
+   `Publication` 的发布/撤销走。
 3. **家族栈回家**:转发 impl(消费面)住在各子系统;发布/订阅/查找 API 住在各
    子系统;节点投影词汇在 devnode。孤儿规则与 initcall 等级(L1-L5)保证序。
 
@@ -42,13 +40,13 @@ arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
 aarch64 build/clippy 0 error、全部单测通过、QEMU 启动到 shell、
 riscv64/x86_64 交叉构建 0 error。
 
-## 下半场(已完成):ClassParent 值桥 → `DeviceCore` 活引用
+## 下半场(已完成):DeviceCore 值桥 → `DeviceCore` 活引用
 
 `DetachedParent`(owner/driver_name/physical_path/offline 四项值拷贝)消亡。
 域在 `add_device` 创建 `Arc<DeviceCore>`——设备的活身份卡:id、驱动名(probe
 开始时由域写入)、物理路径(总线词汇一次性派生)、offline 标志。每个
-`ClassParent::Device` 持有它;发布点从 `ClassParent::detached(dev.id().raw(),
-"硬编码名", location)` 变为 `dev.class_parent()`——12 个发布点的硬编码驱动名
+`DeviceCore::Device` 持有它;发布点从 `DeviceCore::detached(dev.id().raw(),
+"硬编码名", location)` 变为 `dev.publish(&CLASS, …)`——12 个发布点的硬编码驱动名
 与手工 location 全部消亡。一设备多发布共享同一 offline:设备开始拆除的瞬间,
 它所有发布一起观察到不可用(比旧语义更正确)。
 

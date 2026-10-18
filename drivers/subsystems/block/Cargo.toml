@@ -25,13 +25,7 @@ bitflags = { workspace = true }
 kerrno = { workspace = true }
 klazy = { workspace = true }
 ksync = { workspace = true }
-kbuild_config = { workspace = true }
 devnode = { workspace = true }
-khal = { workspace = true }
-kirq = { workspace = true }
-kpoll = { workspace = true }
-ktask = { workspace = true }
-linked_list_r4l = { workspace = true }
 # bcm2835-sdhci = { git = "https://github.com/lhw2002426/bcm2835-sdhci.git", rev = "e974f16", optional = true }
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
 # simple-sdmmc = { git = "https://github.com/Starry-OS/simple-sdmmc.git", rev = "9e6420c", optional = true }

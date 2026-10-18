@@ -517,7 +517,7 @@ fn request_fifo_exceeds_descriptors_and_cancels_head_and_middle() {
         let queue = queue.as_mut().unwrap();
         for request in &requests {
             // SAFETY: the device lock protects the state of these pinned nodes.
-            if unsafe { *request.state.get() } == RequestState::Pending {
+            if unsafe { *request.state.get() } == BlkRequestState::Pending {
                 queue.try_submit(device.as_mut().unwrap(), request);
             }
         }

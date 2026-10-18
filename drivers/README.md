@@ -45,9 +45,9 @@ Serial: `drv/serial/serial-core` is the UART family library (hardware,
 early-port handoff); `console/` is the printk-side consumer.
 `clocksource/`, `irqchip/`, `rtc/`, `perf/` are kernel-integrated
 drivers outside the model; `x86-apic` lives in `arch/`.
-Host-side trees — `core/driver-host`, `core/driver-compose`, `bus/`,
+Host-side trees — `core/driver-host`, `drivers/init`, `bus/`,
 `firmware/`, `platform/`, `integration/` — may use host-kernel crates freely;
-that is their role. The L0/L1 rules apply to `core/driver-core`, `common/`,
+that is their role. The L0/L1 rules apply to `drivers/base`, `common/`,
 `subsystems/` and `drv/`.
 
 ## Device Model and Host Bridge (`core/`)
@@ -96,7 +96,7 @@ the directory name.
 
 One subsystem crate per family, one module per driver, one feature per driver —
 mirroring Linux's file-per-driver model. Adding a driver touches: a module
-file, one feature line in its subsystem crate, one `driver-compose`
+file, one feature line in its subsystem crate, one `driver-init`
 registration, and a Kconfig block.
 
 | Crate | Package | Modules |
@@ -107,7 +107,9 @@ registration, and a Kconfig block.
 | `drv/clk` | `drv-clk` | `fixed_clock` (DT `fixed-clock` provider). |
 | `drv/block` | `drv-block` | `ramdisk`. |
 
-Drivers acquire resources through `DeviceCtx` only (rule L1). The registered
+Drivers acquire resources through `Device` only, and publish providers through
+`Device::provide::<C>` (rule L1: two doors, no third). A driver registers itself
+with one `driver_base::declare_driver!(...)` line. The registered
 host-dependency exceptions are E-01 … E-04 in
 `docs/ai/driver-subsystem-boundaries.md`; do not add a new one without an
 entry there.
@@ -116,7 +118,7 @@ entry there.
 
 | Crate | Package | Role |
 |------|------|------|
-| `bus/pci` | `pci` | CAM/BAR configuration and access, PCI discovery into the device domain. First-class `driver-core` bus (`PciBus`, `PciMatch`). |
+| `bus/pci` | `pci` | CAM/BAR configuration and access, PCI discovery into the device domain. First-class `driver-base` bus (`PciBus`, `PciMatch`). |
 | `firmware/of` | `of` | Device-tree node discovery: `reg`/`reg-names`, `interrupts`/`interrupt-names`, `clocks`/`clock-names`, provider attributes. |
 | `firmware/acpi` | `acpi` | ACPI table parsing (MCFG, MADT, DSDT `_CRS`). |
 | `firmware/rs-fdtree` | `rs_fdtree` | The vendored FDT reader underneath `of`. |

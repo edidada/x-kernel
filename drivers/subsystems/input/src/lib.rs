@@ -123,35 +123,6 @@ impl InputDeviceId {
     }
 }
 
-/// Axis information for absolute input devices.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct AbsInfo {
-    /// The minimum value for the axis.
-    pub min: u32,
-    /// The maximum value for the axis.
-    pub max: u32,
-    /// The fuzz value used to filter noise from the event stream.
-    pub fuzz: u32,
-    /// The size of the dead zone; values less than this will be reported as 0.
-    pub flat: u32,
-    /// The resolution for values reported for the axis.
-    pub res: u32,
-}
-
-impl AbsInfo {
-    /// Creates an absolute-axis descriptor.
-    pub const fn new(min: u32, max: u32, fuzz: u32, flat: u32, res: u32) -> Self {
-        Self {
-            min,
-            max,
-            fuzz,
-            flat,
-            res,
-        }
-    }
-}
-
 /// IRQ-safe notification that an input device may have completed events.
 ///
 /// Implementations must only schedule input processing. They must not sleep,

@@ -12,7 +12,7 @@
 //! calls [`init_secondary`] after its own APIC initialization. Runtime users
 //! access the providers through `khal::time`.
 //!
-//! [`TimerConfig`] supplies the nominal frequency used for the calibration
+//! [`LapicTimerConfig`] supplies the nominal frequency used for the calibration
 //! timeout and as the final fallback. TSC discovery does not calibrate the
 //! separate LAPIC event rate.
 
@@ -86,14 +86,14 @@ impl khal::time::ClockEventIf {
 
 /// Platform-provided fallback configuration for the x86 timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimerConfig {
+pub struct LapicTimerConfig {
     /// Nominal TSC frequency used for the calibration timeout and final fallback.
     pub nominal_frequency: Frequency,
     /// Configuration provenance; frequency discovery does not inspect this field.
     pub source: TimerSource,
 }
 
-impl TimerConfig {
+impl LapicTimerConfig {
     /// Creates a configuration backed by a platform-static fallback frequency.
     ///
     /// Frequency validation occurs in [`early_init`].
@@ -216,7 +216,7 @@ impl Drop for PitChannel2 {
 ///
 /// Panics if the platform fallback is below 1 MHz or the selected frequency
 /// cannot be represented by the timer conversion ratios.
-pub fn early_init(config: TimerConfig) {
+pub fn early_init(config: LapicTimerConfig) {
     assert!(
         config.nominal_frequency >= MIN_TSC_FREQUENCY,
         "x86 LAPIC/TSC timer frequency must be at least 1MHz"

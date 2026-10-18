@@ -129,6 +129,9 @@ entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
 entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
 entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
 driver_ramdisk = ["dep:drv-block", "driver-init/ramdisk", "char"]
+# Second provider driver (transcription exercise): consumer+provider in one
+# probe; board-static node, parent = QEMU apb-pclk.
+driver_fixed_factor = ["dep:drv-clk", "drv-clk/fixed-factor", "driver-init/fixed-factor"]
 driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-init/ramdisk-static"]
 driver_console_pl011 = ["dep:console_driver", "console_driver/pl011"]
 driver_console_ns16550_mmio = ["dep:console_driver", "console_driver/ns16550-mmio"]

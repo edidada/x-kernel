@@ -2,7 +2,7 @@
 
 ## 定位
 
-driver-core 模型下的块设备驱动聚合 crate。一个模块一个驱动，一个 feature 一个
+driver-base 模型下的块设备驱动聚合 crate。一个模块一个驱动，一个 feature 一个
 驱动（Linux 的 file-per-driver 模型）。
 
 当前只有一个驱动：`ramdisk`。它是**最简完整模板**——板级静态设备、无固件资源、
@@ -20,7 +20,7 @@ driver-core 模型下的块设备驱动聚合 crate。一个模块一个驱动�
 ## 架构
 
 ```text
-driver-compose::enumerate_static_devices()
+driver-init::enumerate_static_devices()
    └─ DeviceDescriptor { location: PlatformStatic{id:0},
                          identity: Platform{ alias: Some("ramdisk"),
                                              compatibles: [] } }
@@ -31,8 +31,8 @@ RamdiskDriver::probe(dev)
    │  否则                → block::ramdisk_heap::RamDisk::new(KFEAT_RAMDISK_SIZE)
    ├─ Gendisk::new(name, major=1, first_minor=0, minors=1, dev)
    │      .with_devnode_context(parent_path, modalias)
-   ├─ device_class::publish_block(ClassParent::detached(dev.id().raw(), "ramdisk", location), Arc::new(disk))
-   └─ Ok(RamdiskData { _publication: device_class::block_withdraw(&publication) })
+   ├─ subsys_block::class::BLOCK.publish(dev.publish(&CLASS, …), Arc::new(disk), "ramdisk")
+   └─ Ok(RamdiskData { _publication: BLOCK.withdraw(&publication) })
 ```
 
 板级静态设备**没有 compatible**（`compatibles: Vec::new()`），因此按
@@ -41,7 +41,7 @@ RamdiskDriver::probe(dev)
 ## 调用约束 / 执行上下文
 
 - `probe` / `remove` 由域在**锁外的任务上下文**调用，可睡眠。
-- `register()` 只在 `driver-compose::init()` 里调用一次；它必须在
+- `register()` 只在 `driver-init::init()` 里调用一次；它必须在
   `block::dispatch::reclaimer::init()` 之后（compose 把两行放在同一个
   `#[cfg(feature = "ramdisk")]` 块里）。
 - 本 crate 无锁、无原子、无中断处理。块 I/O 的完成与回收全在
@@ -69,7 +69,7 @@ RamdiskDriver::probe(dev)
 
 ## Drop / 资源释放
 
-`RamdiskData` 只有一个字段：`_publication: device_class::ClassWithdraw`。
+`RamdiskData` 只有一个字段：`_publication: Publication`。
 它是**第一个也是唯一一个**字段，drop 时触发
 registry removal → `del_gendisk` → devnode withdraw。
 

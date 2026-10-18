@@ -2,7 +2,7 @@
 
 ## 定位
 
-driver-core 模型下的 virtio **驱动模块** crate：一个模块一个设备家族，加一个
+driver-base 模型下的 virtio **驱动模块** crate：一个模块一个设备家族，加一个
 virtio-mmio transport 驱动。
 
 | 模块 | feature | 总线 | 说明 |
@@ -18,7 +18,7 @@ virtio-mmio transport 驱动。
 | `common` | 无门控 | — | `map_driver_error` / `physical_path` / `pci_transport`（扩展服务入口） |
 
 设备协议实现（`VirtIoBlkDev` 等）**不在这里**，在 `drv/virtio/devices`
-（包 `virtio-devices`），它有自己的 `docs/`。本 crate 只做 driver-core 侧的
+（包 `virtio-devices`），它有自己的 `docs/`。本 crate 只做 driver-base 侧的
 probe/remove/发布/资源所有权。
 
 ## 范围
@@ -28,30 +28,30 @@ probe/remove/发布/资源所有权。
 ## 架构
 
 ```text
-        driver-compose::pci_discover()          DT "virtio,mmio" 节点
+        driver-init::pci_discover()          DT "virtio,mmio" 节点
                 │                                       │
                 ▼                                       ▼
         DeviceDescriptor{Pci}                   DeviceDescriptor{Platform}
                 │                                       │
      ┌──────────┴───────────┐                           ▼
      ▼                      ▼                    MmioDriver::probe
- PciBus 驱动            (每个家族一个                │ dev.mmio(0) / dev.iomap(0)
+ PciBus 驱动            (每个家族一个                │ dev.res().mmio(0) / dev.res().iomap(0)
  VirtioBlkDriver         DriverDesc +               │ probe_mmio_device(regs) → kind
  VirtioNetDriver …       const IDS 表)              │ ActivationBuilder::new(regs)
      │                      │                       └─ dispatch(kind) ──┐
      ▼                      ▼                                           │
   probe(dev):                                                           │
    1. common::pci_transport(dev)                                        │
-        └─ dev.extension::<driver_host::virtio_transport               │
+        └─ dev.env().extension::<driver_host::virtio_transport               │
                              ::PciTransportService>()                   │
              └─ service.probe(descriptor)                               │
                   → (VirtioDeviceKind, virtio_devices::PciTransport, Option<virq>)
    2. 校验 kind 与本驱动一致（否则 Fatal(Unsupported)）                   │
-   3. IRQ spec：transport 绑定的向量优先，否则 dev.irq(0) 的固件路由       │
+   3. IRQ spec：transport 绑定的向量优先，否则 dev.res().irq(0) 的固件路由       │
    4. activate(dev, transport, spec, mmio_regs)  ◄───────────────────────┘
         ├─ VirtIoXxxDev::<driver_host::virtio_hal::Hal, T>::try_new(...)
-        ├─ dev.request_irq(spec, name, closure)      // 闭包捕获 Weak（dev_id 模式）
-        ├─ device_class::publish_xxx(ClassParent::detached(dev.id().raw(), name, loc), runtime)
+        ├─ dev.res().request_irq(spec, name, closure)      // 闭包捕获 Weak（dev_id 模式）
+        ├─ <CLASS>.publish(dev.publish(&CLASS, …), runtime, name)   // 子系统 class 静态
         └─ Ok(Box<dyn Activation>)   // publication + irq + transport + 家族状态
    5. Ok(XxxData { activation: Some(..) })
 ```
@@ -108,7 +108,7 @@ activate(dev, transport, irq, mmio_regs)?     // 映射进 VirtIoBlkDev
 builder.build(activation)                     // MmioData 只含 activation，不含映射
 ```
 
-因此映射的生命周期 = 设备对象的生命周期 = **最后一个 `ClassDevice` clone 的
+因此映射的生命周期 = 设备对象的生命周期 = **最后一个 `Publication` clone 的
 生命周期**，而不是驱动 `Data` 的生命周期。这正是 Linux 的 BAR 语义
 （`pci_release_regions` 在最后一次 `put_device` 之后跑，不是在 driver unbind 时）。
 
@@ -131,7 +131,7 @@ HAL 级长期映射；现在探测发生在 `MmioDriver::probe` 里，映射由 
   handler 报 `NotHandled`。这是 Linux 的 `dev_id` 模式。
 - `common::pci_transport` 触发 `driver-host` 的 transport probe，其中
   `begin_mmio_probe()` 是**单槽**的：它断言 PCI transport probe 串行。
-  这个前提由 `driver-core` 的 probe 泵串行化提供，不是本 crate 的责任，
+  这个前提由 `driver-base` 的 probe 泵串行化提供，不是本 crate 的责任，
   但本 crate 是它的受益者。
 - `mmio` 模块的 `dispatch` 在家族 feature 关闭时返回 `Fatal(Unsupported)`——
   transport 探测成功但没有对应驱动，这是"配置不完整"而不是"硬件不存在"，
@@ -172,7 +172,7 @@ static IDS: &[PciMatch] = &[
   `VirtIoHal: 'static` 作为**类型参数**，所以构造 `VirtIoBlkDev<H, T>` 必须
   命名一个具体 `H`。
 - `driver_host::virtio_transport::PciTransportService`：`ExtensionService`
-  用 `as_any` downcast，调用方必须命名具体类型——这正是 `driver-core` 不认识
+  用 a typed extension lookup，调用方必须命名具体类型——这正是 `driver-base` 不认识
   家族的代价。
 - `ktask` / `kpoll`：`rng` 的主机完成等待（`HostRngCompletion`）。
   `subsystems/block::dispatch::wait` 已经用同一原语实现了服务化版本；
@@ -181,8 +181,8 @@ static IDS: &[PciMatch] = &[
 三条都登记在 `docs/ai/driver-subsystem-boundaries.md` 的例外表里，带退出条件。
 
 **`kirq` 不在列表里，也不在 `Cargo.toml` 里**：本 crate 与 `virtio-devices`
-都不依赖它。中断注册全部走 `dev.request_irq(spec, name, closure)` +
-`driver_core::IrqAction`，家族库只提供一个固有方法 `ack_irq(irq) -> bool`
+都不依赖它。中断注册全部走 `dev.res().request_irq(spec, name, closure)` +
+`driver_base::IrqAction`，家族库只提供一个固有方法 `ack_irq(irq) -> bool`
 （net 是 `VirtIoNetIrqWorker::service() -> bool`）。旧模型里设备对象直接
 `impl device_res::IrqHandler` 并被注册进 provider，那个形状遗留下了三个
 **从未被注册**的 `impl kirq::IrqHandler`，已删除。
@@ -209,7 +209,7 @@ XxxData { activation: Option<Box<dyn Activation>> }
 Box<dyn Activation> → XxxActivation { device, irq, reclaimer, disk, publication }
    │  Drop 按上面"Activation 模式"里的显式顺序 close
    ▼
-guards: DevIrq（→ driver-host release_irq）、ClassWithdraw（→ class unpublish
+guards: DevIrq（→ driver-host release_irq）、Publication（→ class unpublish
         + devnode withdraw）、IoMap（mmio 变体：不在这里，在设备对象里）
 ```
 

@@ -19,15 +19,15 @@ const BLOCK_SIZE: usize = 512;
 /// `base_addr`/`len` describe the backing allocation without storing a global
 /// `&'static mut [u8]`; the lock serializes temporary mutable slice
 /// reconstruction for each I/O operation.
-pub struct RamDisk {
+pub struct ImageRamDisk {
     lock: SpinNoPreempt<()>,
     base_addr: usize,
     len: usize,
 }
 
-impl Default for RamDisk {
+impl Default for ImageRamDisk {
     fn default() -> Self {
-        RamDisk {
+        ImageRamDisk {
             lock: SpinNoPreempt::new(()),
             base_addr: [0u8; 0].as_mut_ptr().addr(),
             len: 0,
@@ -35,7 +35,7 @@ impl Default for RamDisk {
     }
 }
 
-impl RamDisk {
+impl ImageRamDisk {
     /// Constructs a new RAM disk from the provided static buffer.
     ///
     /// # Panics
@@ -53,7 +53,7 @@ impl RamDisk {
             "Buffer size is not a multiple of block size."
         );
         let len = buffer.len();
-        RamDisk {
+        ImageRamDisk {
             lock: SpinNoPreempt::new(()),
             base_addr: buffer.as_mut_ptr().addr(),
             len,
@@ -70,7 +70,7 @@ impl RamDisk {
         f(data)
     }
 }
-impl BlockDeviceOperations for RamDisk {
+impl BlockDeviceOperations for ImageRamDisk {
     /// Returns the number of blocks the RAM disk can hold.
     #[inline]
     fn num_blocks(&self) -> u64 {
@@ -156,7 +156,7 @@ pub mod tests_ramdisk_static {
     #[def_test]
     fn test_ramdisk_static_basic_operations() {
         let buffer = create_aligned_buffer(2048); // 4 blocks
-        let disk = RamDisk::new(buffer);
+        let disk = ImageRamDisk::new(buffer);
 
         // Test driver properties
         assert_eq!(disk.name(), "ramdisk");
@@ -199,7 +199,7 @@ pub mod tests_ramdisk_static {
     #[def_test]
     fn test_ramdisk_static_boundary_and_errors() {
         let buffer = create_aligned_buffer(1024); // 2 blocks
-        let disk = RamDisk::new(buffer);
+        let disk = ImageRamDisk::new(buffer);
 
         // Test reading/writing beyond boundaries
         let mut test_buf = vec![0; 512];

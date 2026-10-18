@@ -99,7 +99,7 @@
   （`PublishError::{ResourceBusy, AlreadyExists}`）与
   `install_lifecycle_publisher`（`bool`）。
 - `withdraw` 返回 `()`：对一个不存在的 id 撤销是幂等的无操作。这是刻意的——
-  移除路径可能被走两次（驱动的 `ClassWithdraw` guard + 安全网 drain），
+  移除路径可能被走两次（驱动的 `Publication` guard + 安全网 drain），
   第二次必须安静成功。
 - **本 crate 不 panic**（除 `IndexPools::alloc` 里那个带 `CG-021` 说明的
   `expect`，它论证为不可达）。
@@ -123,7 +123,7 @@ unique id）——这些是硬件描述，与 Linux 的暴露面等价，但**�
    与内核同生命周期。
 5. **`INDEX_POOLS` 的 `Vec<(&'static str, Vec<u32>)>` 是线性查找**，subsystem
    数量个位数时可接受。
-6. **`DeviceLocation` 来自 `driver-core`**，所以本 crate 不是完全模型无关的
+6. **`DeviceLocation` 来自 `driver-base`**，所以本 crate 不是完全模型无关的
    （见 `design.md` 的设计决策）。这是为了 sysfs 路径只有一个出处的刻意取舍。
 7. **`DevNodeType` 的两个 `fn` 指针返回 `String`**，每次投影都分配。
    devname/sysfs_path 在发布时算一次并存在 `DevNode` 上，所以不在热路径。

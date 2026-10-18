@@ -2,13 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`driver_base::devres::provider::MmioOp`] contract.
+//! X-Kernel implementation of the [`driver_base::devres::host_api::MmioOp`] contract.
 
 use core::ptr::NonNull;
 
 use driver_base::{
     MmioRegion,
-    devres::provider::{MmioMapping, MmioOp, ResError, ResResult},
+    devres::host_api::{MmioMapping, MmioOp, ResError, ResResult},
 };
 
 use super::XKernelResourceProvider;

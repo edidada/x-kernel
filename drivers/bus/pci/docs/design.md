@@ -45,7 +45,7 @@ and MSI-X capability setup (`msix` module).
 ## Non-Responsibilities
 
 - No bus walking or device driver binding: enumerating `DeviceFunction`s
-  and matching drivers belongs to the driver composition root (`driver-compose`).
+  and matching drivers belongs to the driver composition root (`driver-init`).
 - No interrupt controller programming: routes and MSI-X messages describe
   targets; actual controller setup belongs to `kirq` and the irqchip
   drivers.

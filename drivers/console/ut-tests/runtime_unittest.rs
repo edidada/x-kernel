@@ -4,7 +4,8 @@
 
 use alloc::boxed::Box;
 
-
+use driver_base::Publication;
+use subsys_char::KResult;
 use subsys_char::CharDevice;
 use unittest::def_test;
 
@@ -27,25 +28,26 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     // Detached class parent: never touches a registry — identity test only.
     // Offline mirrors the main-side bound-but-inactive device object: the
     // handle exists, availability is false.
-    let parent = driver_base::ClassParent::detached(
+    let runtime: CharDeviceImpl = Box::new(DummyConsole);
+    let stdout: Publication<CharDeviceImpl> = Publication::detached(
         1,
         "console-test",
         alloc::string::String::from("platform/static1"),
+        runtime,
+        "console-test",
+        true,
     );
-    parent.mark_offline();
-    let runtime: CharDeviceImpl = Box::new(DummyConsole);
-    let stdout = ClassDevice::try_new_with_info(parent, runtime, "console-test".into()).unwrap();
     assert!(!stdout.is_available());
     let id = stdout.id();
     let mut subsystem = ConsoleSubsystem::new();
-    subsystem.stdout = Some(id);
-    // The ID alone cannot resolve a handle absent from this local list.
-    // Adding it below does not activate the independent Bound device.
+    // The handle must be listed locally; remembering the id alone does not
+    // resolve one.
+    subsystem.stdout = Some(stdout.clone());
     assert!(subsystem.stdout_handle().is_none());
-    subsystem.add(stdout);
+    subsystem.add(stdout.clone());
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(!subsystem.stdout_handle().unwrap().is_available());
-    let other = driver_base::ClassDeviceId::new_detached();
+    let other = driver_base::PublicationId::next();
     assert!(subsystem.remove(other).is_none());
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(subsystem.remove(id).is_some());

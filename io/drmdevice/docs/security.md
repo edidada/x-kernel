@@ -62,7 +62,7 @@ handle's availability state and does not mutate another card's local tables.
 - KMS-only: no render node, command submission, or complete DMA-BUF sharing.
 - Each card currently exposes one CRTC, connector, and plane.
 - Connector hotplug within one display backend is not modeled separately from
-  driver-core device removal.
+  driver-base device removal.
 
 ## Audit checklist
 

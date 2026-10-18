@@ -2,7 +2,7 @@
 
 ## 定位
 
-driver-core 模型下的串口驱动聚合 crate，含两个 UART 家族、三个注册入口：
+driver-base 模型下的串口驱动聚合 crate，含两个 UART 家族、三个注册入口：
 
 | 模块 | feature | id 表 | 说明 |
 |---|---|---|---|
@@ -25,12 +25,12 @@ driver-core 模型下的串口驱动聚合 crate，含两个 UART 家族、三�
 ## 架构
 
 ```text
-                       DeviceCtx (driver-core)
+                       Device (driver-base)
                              │
         ┌────────────────────┼────────────────────┐
         │ 命名资源            │ 时钟                │ 中断
         ▼                    ▼                    ▼
-   dev.iomap(0)         dev.clk("baudclk")   dev.request_irq(spec,"pl011",closure)
+   dev.res().iomap(0)         dev.res().clk("baudclk")   dev.res().request_irq(spec,"pl011",closure)
         │                    │                    │  闭包捕获 Arc<SerialPort>
         │              ┌─────┴──────┐             │  （dev_id 模式）
         │              │ provider   │ provider    │
@@ -49,7 +49,7 @@ driver-core 模型下的串口驱动聚合 crate，含两个 UART 家族、三�
    （冷启动，需要自己的 IoMap）        **不持有 withdrawal guard**
                │                              │
                ▼                              ▼
-        publish_char(...)            adopt_stdout_guards(irq, regs)
+        publish(&CHAR, ...)            adopt_stdout_guards(irq, regs)
         + char_withdraw guard         （guard 所有权移交给 console 子系统）
                │
                ▼
@@ -64,7 +64,7 @@ stdout 端口走一条与辅助端口**系统性不同**的路径：
 
 | 资源 | 辅助端口（Auxiliary） | stdout 端口（Stdout） |
 |---|---|---|
-| `SerialPort` 实例 | 冷启动：自己 `dev.iomap(0)` + `SerialPort::new_*` | **收养**：`take_early_port(&ident)` 返回与 printk 共享的 `Arc<SerialPort>`，不建新映射（`regs = None`） |
+| `SerialPort` 实例 | 冷启动：自己 `dev.res().iomap(0)` + `SerialPort::new_*` | **收养**：`take_early_port(&ident)` 返回与 printk 共享的 `Arc<SerialPort>`，不建新映射（`regs = None`） |
 | class 发布 | `publish_char` + `char_withdraw` guard 存进 `Data`，drop 即撤销 | `register_console_parented`，**故意不持有 withdrawal guard** → 发布比 binding 活得久 |
 | IRQ guard | 存进 `Data._irq`，drop 即释放 | `adopt_stdout_guards(irq.take(), …)` **移交给 console 子系统** |
 | MMIO 映射（仅冷启动端口） | 存进 `Data._regs`，drop 即 unmap | `adopt_stdout_guards(…, regs.take())` **移交** |
@@ -87,7 +87,7 @@ stdout 端口走一条与辅助端口**系统性不同**的路径：
 - **IRQ handler 闭包在硬中断上下文运行**。它只做
   `handler_port.handle_input_irq()`——确认并收集输入、唤醒挂着的 tty waker，
   不做任何设备模型调用、不取域锁、不分配。
-- `dev.clk()` 可能返回 `Deferred`，因此 probe **必须**能安全地被重跑：所有已
+- `dev.res().clk()` 可能返回 `Deferred`，因此 probe **必须**能安全地被重跑：所有已
   获取的 guard 都是局部值，`?` 提前返回时按 Rust 逆序 drop。`enable_baud_clock`
   返回的 token 在后续每个可失败步骤里都保持存活，只有 probe 完全成功才决定
   token 的去向（`keep_running` 或存进 `Data`）。
@@ -99,13 +99,13 @@ stdout 端口走一条与辅助端口**系统性不同**的路径：
 
 ## 状态机
 
-本 crate 没有自己的状态机。设备状态由 `driver-core` 的 `DeviceState` 负责，
+本 crate 没有自己的状态机。设备状态由 `driver-base` 的 `DeviceState` 负责，
 端口角色（`SerialRole::{Stdout, Auxiliary}`）在 `SerialPort` 构造时确定且不可变。
 
 时钟有一个两段式的所有权状态，值得单独记：
 
 ```text
-dev.clk(name) ─► ClkHandle（获取，未使能）
+dev.res().clk(name) ─► ClkHandle（获取，未使能）
       │
       ▼
 prepare_enable() ─► EnabledClock（token：代表"已 prepare + 已 enable"这笔账）
@@ -124,7 +124,7 @@ Rust 按声明顺序 drop 字段。发布必须**先于**它投影的资源的�
 
 ```rust
 pub struct Pl011Data {
-    _publication: Option<ClassWithdraw>,  // 1. 先撤销可见性
+    _publication: Option<Publication>,  // 1. 先撤销可见性
     _irq: Option<DevIrq>,                 // 2. 停中断（它服务下面的映射）
     _port: Arc<SerialPort>,               // 3. 释放端口引用
     _regs: Option<IoMap>,                 // 4. 解映射

@@ -105,7 +105,7 @@ provider crates.
 
 ## Invariants
 
-- A driver-core `DeviceId` has at most one filesystem projection record.
+- A driver-base `DeviceId` has at most one filesystem projection record.
 - Every `DeviceFile` uses the exact name and character-device number in its
   source `DeviceNode`.
 - Removal detaches old file objects before the `devnode` callback returns and
@@ -131,11 +131,11 @@ and wakes client-owned poll registrations.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Snapshot and callback create conflicting files | Medium — duplicate character-device registration could hide the valid node | An add callback waits while initialization applies the same snapshot | Projection insertion deduplicates under the mutex by driver-core id. |
+| T-01 | Snapshot and callback create conflicting files | Medium — duplicate character-device registration could hide the valid node | An add callback waits while initialization applies the same snapshot | Projection insertion deduplicates under the mutex by driver-base id. |
 | T-02 | Device removal redirects an old fd to a newly reused index | High — an old descriptor could operate on a different physical device | Hot-unplug followed by another device registration | Each node owns a distinct file object; removal detaches the old object, unregisters its number, then permits index reuse. |
 | T-03 | Device event arrives before the class is active | Medium — node creation fails and userspace cannot access the device | Node publication is moved ahead of the `Activated` transition | `device-class` registers the node inside its activation callback; devfs then resolves an available class handle. |
 | T-04 | A stale remove deletes a new projection | Medium — the replacement device disappears from `/dev` | A future device id or assignment is reused | Removal compares the complete recorded `DeviceNode` before deleting it. |
-| T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `ClassDevice::is_available`. |
+| T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `Publication::is_available`. |
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
 | T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
 

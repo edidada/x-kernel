@@ -7,7 +7,7 @@
 //! # Host-side surface (registered exception E-01)
 //!
 //! This module is the one place under `drv/` that names
-//! [`driver_base::devres::provider::IrqOp`]. That is deliberate and registered:
+//! [`driver_base::devres::host_api::IrqOp`]. That is deliberate and registered:
 //!
 //! * the MSI-X **config vector belongs to the transport**, not to a device
 //!   driver's `Data` — Linux keeps it in `virtio_pci_modern.c` for the same
@@ -16,18 +16,18 @@
 //! * the vector is driven from inside the vendored [`Transport`] impl
 //!   (`max_queue_size` programs the queue vector, `set_status` programs the
 //!   config vector and activates), so it cannot be an acquisition a driver
-//!   performs through `DeviceCtx`;
+//!   performs through `Device`;
 //! * the provider is **injected** by `driver-host`
 //!   ([`probe_pci_transport_only`]'s `irq_provider` parameter). Nothing here
 //!   reaches for a global provider singleton.
 //!
-//! Everything a *device driver* needs still goes through `DeviceCtx`. The
+//! Everything a *device driver* needs still goes through `Device`. The
 //! legacy-INTx route resolution that used to live here moved to
 //! `driver-host`, which owns the provider vocabulary.
 
 use alloc::vec::Vec;
 
-use driver_base::devres::provider::IrqOp;
+use driver_base::devres::host_api::IrqOp;
 use pci::MmioCam;
 
 #[cfg(target_arch = "x86_64")]

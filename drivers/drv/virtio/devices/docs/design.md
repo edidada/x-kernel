@@ -7,7 +7,7 @@ VirtIO 设备封装为 [`kerrno`] 系列 trait 的实现。块设备、网络、
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
-IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver-core` 的 provider
+IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver-base` 的 provider
 contract（由 `driver-host` 绑定到主机）传入。
 
 ## 背景
@@ -119,7 +119,7 @@ Feature flags 控制编译哪些设备适配器：
   过滤（输入设备共享中断线），再获取设备的 `SpinNoIrq`，
   读取并清除 VirtIO ISR；ISR 为空时返回 `false`。
   该方法不会消费输入事件、分配内存或进入 VFS；队列消费仍在任务上下文完成。
-  注册本身由驱动层经 `DeviceCtx::request_irq` 完成——本 crate 不实现任何
+  注册本身由驱动层经 `Device::request_irq` 完成——本 crate 不实现任何
   host 注册 trait。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   blk 使用内部锁保护队列和请求状态；其他非 net 设备主要通过 `&mut self` 独占访问；
@@ -405,7 +405,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 1. 设备侧通过 `irq_worker()` 交出 `VirtIoNetIrqWorker`——只持有设备内部状态的
    一份共享句柄，不拥有设备本身
-2. 驱动层（`drv/virtio/src/net.rs`）通过 `DeviceCtx::request_irq()` 注册中断：
+2. 驱动层（`drv/virtio/src/net.rs`）通过 `Device::request_irq()` 注册中断：
    handler 闭包捕获 worker，调用 `worker.service()` 认领并处理设备事件；返回的
    `DevIrq` guard 由驱动 `Data`（或 mmio activation）持有
 3. 中断到来时 handler 只服务**本设备**：没有全局路由表、没有跨设备遍历；
@@ -420,8 +420,8 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 2. `VirtIoInputDev::ack_irq(virq)` 是家族侧的确认入口。**当前的 PCI 驱动
    （`drv/virtio/src/input.rs`）并不注册中断**——它只发布 class 设备，
    事件由消费者在任务上下文轮询 `read_event()`；mmio 变体会
-   `DeviceCtx::resolve_irq(0)` 解析出 virq 并存进设备对象供 `ack_irq` 过滤。
-   要接上中断，注册方式与 net 相同：驱动经 `DeviceCtx::request_irq` 注册，
+   `Device::resolve_irq(0)` 解析出 virq 并存进设备对象供 `ack_irq` 过滤。
+   要接上中断，注册方式与 net 相同：驱动经 `Device::request_irq` 注册，
    闭包捕获设备的 `Weak` 并调用 `ack_irq`。
 3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
    ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
@@ -501,7 +501,7 @@ host IRQ 核心或工作队列。
   任务不会持有该锁等待。
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。
-- **IRQ 注册**：设备不自行注册中断。驱动层通过 `DeviceCtx::request_irq()` 注册
+- **IRQ 注册**：设备不自行注册中断。驱动层通过 `Device::request_irq()` 注册
   per-device handler，返回的 `DevIrq` guard 存入驱动 `Data`——设备移除时 guard
   先于设备本体释放，没有全局注册表需要清理。
 
@@ -554,7 +554,7 @@ inert state; cached geometry/read-only queries never require a live transport.
 No concrete driver imports ktask/kirq, and the blk device layer imports
 neither: its completion wait is injected as `PrepareBlockWait` and its
 interrupt acknowledgement is the inherent `VirtIoBlkDev::ack_irq`, which the
-driver registers through `DeviceCtx::request_irq`.
+driver registers through `Device::request_irq`.
 
 Request tests live in blk/tests/requests.rs and remain a child of the requests
 module through #[path]. The blk directory holds runtime request code; requests

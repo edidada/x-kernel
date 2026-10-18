@@ -11,7 +11,7 @@ framework and devfs respectively.
 ## Responsibilities
 
 - Seed a process-wide snapshot from the input class registry.
-- Track later registration and removal callbacks by driver-core id.
+- Track later registration and removal callbacks by driver-base id.
 - Return cloned class handles so multiple kernel consumers can rescan without
   consuming shared discovery state.
 
@@ -29,7 +29,7 @@ behavior belong to devfs and its `EventDev` adapter.
 device-class input snapshot + availability callback
                     │
                     ▼
-INPUT_DEVICES: Mutex<Vec<ClassDevice<InputDeviceImpl>>>
+INPUT_DEVICES: Mutex<Vec<Publication<InputDeviceImpl>>>
                     │ clone
                     ▼
              input_devices()
@@ -37,7 +37,7 @@ INPUT_DEVICES: Mutex<Vec<ClassDevice<InputDeviceImpl>>>
 devnode removal callback ──> remove matching id>>>>>>> 9f18a37dd (docs: purge old-framework references from every module's docs)
 ```
 
-`INPUT_ENDPOINTS` holds at most one `InputEndpoint` per driver-core device id.
+`INPUT_ENDPOINTS` holds at most one `InputEndpoint` per driver-base device id.
 `init_input` subscribes to removal and availability, then visits the existing
 class snapshot. `input_endpoint` also creates an endpoint on demand because
 device-node publication can precede the class availability callback. The same
@@ -98,4 +98,4 @@ The current managed removal path runs the driver and bus removal hooks and
 `device.run_cleanups()` before emitting `DeviceEvent::Removed`. The inputdev
 removal subscriber stops the worker only after that notification, so detach
 does not establish a barrier before driver resources are released. Fixing that
-ordering requires a separate driver-core lifecycle change.
+ordering requires a separate driver-base lifecycle change.

@@ -10,7 +10,7 @@
 
 | 输入 | 来源 | 信任级别 |
 |---|---|---|
-| `DeviceDescriptor`（alias `"ramdisk"`、`PlatformStatic{id:0}`） | `driver-compose::enumerate_static_devices()` 的硬编码常量 | 可信 |
+| `DeviceDescriptor`（alias `"ramdisk"`、`PlatformStatic{id:0}`） | `driver-init::enumerate_static_devices()` 的硬编码常量 | 可信 |
 | `KFEAT_RAMDISK_SIZE` | Kconfig → `kbuild_config` | 可信（构建参数） |
 | 内嵌镜像（`ramdisk-static`） | 构建期 `include_bytes!` | 可信 |
 
@@ -48,7 +48,7 @@
 ## 线程安全
 
 本 crate 无状态：`RamdiskDriver` 是零大小类型，`RamdiskData` 只含一个
-`ClassWithdraw`（内部是 `Arc` + 原子标志）。`Send + Sync` 由字段类型继承。
+`Publication`（内部是 `Arc` + 原子标志）。`Send + Sync` 由字段类型继承。
 
 块 I/O 的并发在 `subsystems/block`（`SpinNoIrq` 保护的请求队列 + softirq
 reclaimer），不在这里。
@@ -103,6 +103,6 @@ reclaimer），不在这里。
       必须返回 `ProbeError::Deferred` 而不是 `Fatal`——用 `Fatal` 会让设备过早
       `Unclaimed`。
 - [ ] 是否调用了 `with_devnode_context`？漏掉它磁盘不会到达 `/dev`（F-03）。
-- [ ] `ClassParent::detached` 的 owner 是否用 `dev.id().raw()`？用别的 id 会让
+- [ ] `DeviceCore::detached` 的 owner 是否用 `dev.id().raw()`？用别的 id 会让
       移除时找不到这个发布（`device-class` 按 owner 匹配）。
 - [ ] 有没有在这里加块类的通用逻辑？那属于 `subsystems/block`，不属于驱动 crate。

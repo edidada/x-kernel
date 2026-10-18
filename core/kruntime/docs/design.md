@@ -54,7 +54,7 @@ its local services and publishing completion. The notification entry enables the
 line, publishes ENABLED, and drains early requests. `SCHED_READY_CPUS` still means
 run-queue registration, not IRQ readiness; static reason bits retain early requests.
 
-`kruntime` 是 x-kernel 的**运行时编排层**：在平台引导代码将控制权交给内核后，负责主核/从核的初始化顺序、子系统装配，以及跳转到系统初始化入口（`entry` crate 提供的 `SystemInitEntry`）。它不实现具体设备驱动或 syscall，而是把 `khal`、`memspace`、`ktask`、`driver-compose` 等按固定阶段串联起来。
+`kruntime` 是 x-kernel 的**运行时编排层**：在平台引导代码将控制权交给内核后，负责主核/从核的初始化顺序、子系统装配，以及跳转到系统初始化入口（`entry` crate 提供的 `SystemInitEntry`）。它不实现具体设备驱动或 syscall，而是把 `khal`、`memspace`、`ktask`、`driver-init` 等按固定阶段串联起来。
 
 目标读者：需要理解启动链、SMP 屏障、或在此 crate 增加初始化钩子的内核开发者。
 
@@ -311,7 +311,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 |---------|------|
 | `smp` | 从核启动、`rust_main_secondary`、`memspace`/`ktask`/`khal` SMP |
 | `ipi` | 依赖 `kipi`；IPI 中断处理 |
-| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `driver-compose`）；具体 filesystem feature 只负责链接其自注册实现 |
+| `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `driver-init`）；具体 filesystem feature 只负责链接其自注册实现 |
 | `rtc` | 启动时打印墙钟时间 |
 | `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`） |
 | `pmu` | PMU 溢出中断；`kruntime` 在 `pmu` feature 下独立注册溢出分发（`khal::pmu::register_overflow_dispatch`），perf 与 watchdog 解耦；配合 `watchdog_hardlockup` 时 PMU 线可被提升为周期 NMI 源 |

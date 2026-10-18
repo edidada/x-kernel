@@ -75,7 +75,7 @@ impl VirtIoNetIrqWorker {
 ///
 /// ```ignore
 /// // Transport probing goes through the virtio extension service
-/// // (`DeviceCtx::extension::<PciTransportService>()` in drv/virtio);
+/// // (`Device::extension::<PciTransportService>()` in drv/virtio);
 /// // the device takes only the transport and an optional MMIO register
 /// // lease (virtio-mmio path):
 /// let mut net = VirtIoNetDev::<HalImpl, _, 256>::try_new(transport, None)?;

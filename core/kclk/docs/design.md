@@ -58,23 +58,23 @@ sharing), so flags must be written by name, never by numeric value.
 ## Layering
 
 Clock support is split across three crates, mirroring how IRQ is wired through
-`driver-core` (provider contracts) → `driver-host` → `kirq`:
+`driver-base` (provider contracts) → `driver-host` → `kirq`:
 
 ```text
-driver-core (device model)
-  ClkSpec / DeviceCtx::clk() — the driver-facing surface
+driver-base (device model)
+  ClkSpec / Device::clk() — the driver-facing surface
         |  does NOT depend on kclk
         v
 driver-host (host bridge)
   ClkRegistry::get(spec) -> kclk::clk_get_by_index
-  KclkHandle              -> wraps kclk's ClkHandle as driver-core's ClkOps
+  KclkHandle              -> wraps kclk's ClkHandle as driver-base's ClkOps
         |
         v
 kclk (framework core)            <-- this crate
   ClkHwOps / ClkCore / ClkBuilder / ClkLookup / ClkTable / ClkHandle
 ```
 
-Keeping the driver-facing surface (`DeviceCtx::clk` / `ClkHandle`) free of
+Keeping the driver-facing surface (`Device::clk` / `ClkHandle`) free of
 any `kclk` dependency lets the device model stay kernel-neutral: porting
 the framework to another kernel only requires reimplementing the runtime's
 clock registry bridge, exactly as the IRQ path reimplements its provider.
@@ -246,13 +246,13 @@ makes `get_rate` re-read the hardware rate instead of the cache.
 
 ```text
 DT node (compatible = "fixed-clock" or SoC-specific controller)
-   \-- driver-compose enumerates -> DeviceDescriptor in the domain
+   \-- driver-init enumerates -> DeviceDescriptor in the domain
    \-- id-table match on compatible -> controller driver (DriverOps)
    \-- driver.probe():
          |-- builds ClkHwOps (basic type or custom PLL)
          |-- ClkBuilder::new(name, ops).parent(..).flags(..).build() -> Arc<ClkCore>
-         \-- driver_host::register_clk_provider(&lookup)
-               (publishes under the DT phandle; wakes deferred consumers)
+         \-- dev.env().provide::<driver_host::ClkProvider>(phandle, lookup)?
+               (one provider door for every family; wakes deferred consumers)
 ```
 
 ### Resolution (consumer side, driver probe)
@@ -261,15 +261,15 @@ A consumer never resolves a DT `clock-names` connection name through kclk —
 that name is consumer-local (many devices can have one named `"bus"`). The
 firmware layer resolves it at enumeration: it finds the matching `clocks`
 specifier on the consumer node, reads the two cells `<&phandle index>`, and
-records a named `ClkSpec` entry in the descriptor's ResourceMap. `dev.clk(
+records a named `ClkSpec` entry in the descriptor's ResourceMap. `dev.res().clk(
 "name")` looks that entry up; kclk resolves `(provider, index)`:
 
 ```text
-driver: dev.clk("baudclk")   (DeviceCtx resolves the clock-names entry)
+driver: dev.res().clk("baudclk")   (Device resolves the clock-names entry)
    -> DeviceServices::clk_get -> driver-host ClkRegistry::get
    -> kclk::clk_get_by_index(phandle, index)
    -> ClkLookup::get_by_index -> Arc<ClkCore>
-   -> wrapped as driver_core::ClkHandle (ClkOps)
+   -> wrapped as driver_base::ClkHandle (ClkOps)
 ```
 
 Positional access (`dev.resources().clk_at(0)`) mirrors the `clocks`
@@ -331,9 +331,9 @@ calling the hardware op once when the count reaches zero.
 - **Two provider/consumer traits.** Mirrors `struct clk_hw`/`struct clk`:
   providers implement `ClkHwOps`, consumers only ever hold `ClkHandle` and never
   touch hardware details.
-- **`ClkOps` as a trait object in `driver-core`.** Clock consumer operations
+- **`ClkOps` as a trait object in `driver-base`.** Clock consumer operations
   outnumber IRQ's, so dispatching through `Arc<dyn ClkOps>` is simpler than
-  IRQ's token table, while `driver-core` still imports no concrete framework type.
+  IRQ's token table, while `driver-base` still imports no concrete framework type.
 - **Register access behind `ClkRegAccess`.** Basic types that touch registers
   (gate/mux/divider) never depend on a host MMIO mechanism; `MmioClkReg` is one
   default impl, and tests inject an array-backed mock.
@@ -465,11 +465,11 @@ Consumer nodes' `clocks` properties are auto-converted to
 impl DriverOps<PlatformBus> for FixedClockDriver {
     type Data = FixedClockData;
 
-    fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<FixedClockData, ProbeError> {
+    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<FixedClockData, ProbeError> {
         // The firmware layer extracts phandle + clock-frequency at
         // enumeration (FirmwareNodeInfo); the driver registers under the
         // DT phandle so `clocks = <&phandle>` references resolve.
-        let firmware = dev.descriptor().firmware.as_ref()
+        let firmware = dev.fw().node().as_ref()
             .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
         let frequency = firmware.clock_frequency
             .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
@@ -481,7 +481,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
             .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
         let lookup: &'static FixedClockLookup = Box::leak(Box::new(
             FixedClockLookup { provider_id: phandle, core: core.clone() }));
-        driver_host::register_clk_provider(lookup);
+        dev.env().provide::<driver_host::ClkProvider>(phandle, lookup)?;
         Ok(FixedClockData { _core: core })
     }
 }
@@ -489,11 +489,11 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
 // An SoC controller driver (e.g. rk3588-cru) — same shape, plus MMIO:
 impl DriverOps<PlatformBus> for Rk3588CruDriver {
     type Data = CruData;
-    fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<CruData, ProbeError> {
-        let regs = dev.iomap(0)?;                 // guards-in-Data ownership
+    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<CruData, ProbeError> {
+        let regs = dev.res().iomap(0)?;                 // guards-in-Data ownership
         let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(regs.as_ptr()) });
         let ccu = build_ccu_tree(&reg)?;          // kclk branches
-        driver_host::register_clk_provider(&ccu.lookup);
+        dev.env().provide::<driver_host::ClkProvider>(ccu.phandle, &ccu.lookup)?;
         Ok(CruData { _regs: regs, _ccu: ccu })
     }
 }
@@ -501,16 +501,16 @@ impl DriverOps<PlatformBus> for Rk3588CruDriver {
 
 ### Step 5 — consume a clock from any driver
 
-Drivers never name `kclk` directly; they go through the `driver-core` resource
-model (`DeviceCtx`), exactly like MMIO and IRQ:
+Drivers never name `kclk` directly; they go through the `driver-base` resource
+model (`Device`), exactly like MMIO and IRQ:
 
 ```rust
-// From any driver probe on the driver-core model:
-fn probe(dev: &mut DeviceCtx<'_, Bus>, /* ... */) -> Result<Data, ProbeError> {
+// From any driver probe on the driver-base model:
+fn probe(dev: &mut Device<'_, Bus>, /* ... */) -> Result<Data, ProbeError> {
     // The framework resolved the `clock-names` connection to this ClkSpec
     // (a (phandle, specifier) pair) from the consumer's `clocks` property
-    // at enumeration; `dev.clk()` looks it up by connection name.
-    let clk = dev.clk("baudclk")?;   // -EPROBE_DEFER until the provider probes
+    // at enumeration; `dev.res().clk()` looks it up by connection name.
+    let clk = dev.res().clk("baudclk")?;   // -EPROBE_DEFER until the provider probes
     clk.prepare_enable()?;
     let rate = clk.get_rate();
     // ... program the UART divisor from `rate`; store the ClkHandle in Data ...

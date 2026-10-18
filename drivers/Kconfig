@@ -345,6 +345,16 @@ config KFEAT_DRIVER_VIRTIO_MMIO
       Claims DT "virtio,mmio" nodes and dispatches to the per-family
       driver-core virtio drivers by probing the transport header.
 
+config KFEAT_DRIVER_FIXED_FACTOR
+    bool "fixed-factor clock driver (transcription exercise)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Second clock-provider driver: consumes a parent clock by firmware
+      reference and publishes a derived fixed-factor output. Board-static
+      device (QEMU has no DT node for it); exercises the consumer+provider
+      probe shape and the provider door.
+
 config KFEAT_DRIVER_RAMDISK
     bool "ramdisk block device"
     depends on KFEAT_CHAR

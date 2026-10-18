@@ -2,24 +2,24 @@
 
 ## 定位
 
-`driver-core` 服务契约的 X-Kernel 实现，也是驱动框架里**唯一**允许直接触碰
+`driver-base` 服务契约的 X-Kernel 实现，也是驱动框架里**唯一**允许直接触碰
 `memspace` / `kirq` / `kdma` / `khal` / `kclk` 的地方（能力 → 框架方向）。
 
 它承担四件事：
 
-1. **资源 provider**（`provider/`）：把 `driver_core::provider` 的 `MmioOp` /
+1. **资源 provider**（`provider/`）：把 `driver_base::devres::host_api` 的 `MmioOp` /
    `IrqOp` / `DmaOp` 绑到主机子系统；
-2. **每设备服务面**（`XKernelRuntime`）：实现 `DeviceServices`，把 provider 的
+2. **每设备服务面**（`Host`）：实现 `DeviceServices`，把 provider 的
    裸操作包装成驱动实际拿到的 RAII guard（`IoMap` / `DevIrq` / `CoherentMem` /
    `ClkHandle`）；
 3. **时钟注册表**（`clk.rs`）：`kclk` 的 boot-static provider registry 在设备
    模型上的投影，负责 `NoProvider` → `ServiceError::Deferred` 的翻译与唤醒；
 4. **家族扩展服务**（`virtio_hal.rs` / `virtio_transport.rs`）：vendored
    `virtio-drivers` 需要的 `VirtIoHal` 实现，以及 `PciTransportService`
-   （`driver_core::ExtensionService`）。
+   （`driver_base::ExtensionService`）。
 
-依赖它的：`core/driver-compose`（安装）、`drv/virtio`、`drv/clk`（例外 E-02）。
-它依赖 `driver-core`，反向不成立。
+依赖它的：`drivers/init`（安装）、`drv/virtio`、`drv/clk`（例外 E-02）。
+它依赖 `driver-base`，反向不成立。
 
 ## 背景
 
@@ -27,33 +27,33 @@
 `IrqHandler`/`IrqEvent`/`IrqTrigger` 词汇，490 行），实现在
 `adapters/xkernel/device-res`（466 行纯翻译）。`refactor(device-res)` 六步系列
 把两者折叠进一个 crate，并让 IRQ 词汇只在 `kirq` 里定义一次
-（`driver-core/src/resource.rs` re-export）。
+（`driver-base/src/resource.rs` re-export）。
 
-折叠的理由：只有两个消费者（`XKernelRuntime` + vendored HAL 表面），多一个
+折叠的理由：只有两个消费者（`Host` + vendored HAL 表面），多一个
 crate 只多一条依赖边，不多任何隔离。
 
 ## 范围
 
 | 文件 | 职责 |
 |---|---|
-| `src/lib.rs` | `XKernelRuntime`（`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` 实现）、`GLOBAL_RUNTIME`、`RESOURCE_PROVIDER` 静态、`AdaptedIrqHandler`、`probe_pci_transport_with` |
+| `src/lib.rs` | `Host`（`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` 实现）、`Host`、`RESOURCE_PROVIDER` 静态、`AdaptedIrqHandler`、`probe_pci_transport_with` |
 | `src/provider/mod.rs` | `XKernelResourceProvider`（无状态单元结构体） |
 | `src/provider/mmio.rs` | `MmioOp` → `memspace::iomap_device` / `iounmap` |
 | `src/provider/irq.rs` | `IrqOp` → `kirq::{try_register_shared, try_free_irq, try_free_irq_action, enable, try_map, alloc_msix, free_msix}`；词汇翻译 `to_runtime_controller` / `to_runtime_route` / `resolve_irq_spec` |
 | `src/provider/dma.rs` | `DmaOp` → `kdma::{allocate_dma_memory, deallocate_dma_memory, map_dma_buffer, unmap_dma_buffer}` |
-| `src/clk.rs` | `ClkRegistry` + `KclkHandle`（orphan-rule 桥接 `kclk::ClkHandle` → `driver_core::ClkOps`） |
+| `src/clk.rs` | `ClkRegistry` + `KclkHandle`（orphan-rule 桥接 `kclk::ClkHandle` → `driver_base::ClkOps`） |
 | `src/virtio_hal.rs` | `unsafe impl VirtIoHal for Hal`：DMA alloc/dealloc、`mmio_phys_to_virt` + probe-scope lease 收集器、streaming share/unshare |
-| `src/virtio_transport.rs` | `PciTransportService`：`ExtensionService` 实现，从 services 实例 downcast 回 `XKernelRuntime` |
+| `src/virtio_transport.rs` | `PciTransportService`：`ExtensionService` 实现，从 services 实例 downcast 回 `Host` |
 
 ## 架构
 
 ```text
-        drv/**  ── DeviceCtx ──┐
+        drv/**  ── Device ──┐
                                ▼
-   driver-core:  DeviceResourceServices + ClockConsumerServices
+   driver-base:  DeviceResourceServices + ClockConsumerServices
                         ┌──────┴───────┐
                         ▼              ▼
-              XKernelRuntime      ClkRegistry ──► kclk (boot-static providers)
+              Host      ClkRegistry ──► kclk (boot-static providers)
                    │  │  │
         ┌──────────┘  │  └──────────┐
         ▼             ▼             ▼
@@ -62,15 +62,15 @@ crate 只多一条依赖边，不多任何隔离。
         ▼             ▼             ▼
     memspace        kirq          kdma
 
-   virtio_hal::Hal ── resource_provider() ──► 同一个 XKernelResourceProvider
+   virtio_hal::Hal ── Host::global().provider() ──► 同一个 XKernelResourceProvider
         ▲
         └── vendored virtio-drivers 通过类型参数 `H: VirtIoHal` 调用
 ```
 
 ### 为什么只有一个 provider 实例
 
-`XKernelRuntime.provider` 是 `&'static XKernelResourceProvider`，指向
-`lib.rs` 的 `RESOURCE_PROVIDER` 静态——**和 HAL 通过 `resource_provider()`
+`Host.provider` 是 `&'static XKernelResourceProvider`，指向
+`lib.rs` 的 `RESOURCE_PROVIDER` 静态——**和 HAL 通过 `Host::global().provider()`
 拿到的是同一个**。
 
 原因：vendored `VirtIoHal` trait 的方法是**关联函数**（没有 `&self` 接收者），
@@ -78,16 +78,17 @@ crate 只多一条依赖边，不多任何隔离。
 `Arc::new(provider)`，就会静默把 provider 世界分叉成两份——per-device 记账、
 未来的 IOMMU domain 都会分裂。因此两边共享这一个静态。
 
-`PciTransportService` 则相反：它从**自己所属的 services 实例** downcast 出
-`XKernelRuntime`，再取 `static_provider()`，不用全局回退。这样带自己 runtime
-的域会绑到自己的 provider（这是 review II-6 的修复）。
+`PciTransportService` 是**值**而不是工厂：`Host::new` 用 `provider()` 构造一次并
+注册进 `ExtensionRegistry`（按类型），驱动用 `dev.env().extension::<PciTransportService>()`
+取到它。这样带自己 runtime 的域会绑到自己的 provider（review II-6），且不再有
+`as_any` downcast。
 
 ## 调用约束 / 执行上下文
 
-- `XKernelRuntime::install_global()` 由 `driver-compose::init()` 调用**恰好一次**，
-  在任何驱动注册之前。`register_clk_provider()`（自由函数版本）从
-  `GLOBAL_RUNTIME` 取 runtime，若未安装则 **panic**——这是刻意的启动顺序断言，
-  带 `CG-021` 例外说明。
+- `Host::install_global()` 由 `driver-init::init()` 调用**恰好一次**，
+  在任何驱动注册之前。驱动侧的 provider 发布走 `dev.env().provide::<C>`（经本设备的
+  `DeviceServices`），不访问进程级全局；只有 HAL/组合根使用的
+  `Host::global()` 带启动顺序 `expect`。
 - **`provider/*` 的 Op 方法运行在任务上下文**（probe / remove 路径），不是中断
   上下文。`MmioOp::map_mmio` 会分配地址空间，`IrqOp::request_irq` 会取 kirq 的
   描述符锁。
@@ -97,7 +98,7 @@ crate 只多一条依赖边，不多任何隔离。
   `SpinNoPreempt`，不关中断，因此**不得在硬中断里首次映射**。
 - `begin_mmio_probe()` 是**单槽**的：第二个 scope 在第一个未关闭时打开会
   `assert!` panic。这不是防御性代码，是把"PCI transport probe 串行"这个契约
-  变成可执行的断言——`driver-core` 的 probe 泵串行化（`probing` 标志）是它
+  变成可执行的断言——`driver-base` 的 probe 泵串行化（`probing` 标志）是它
   成立的前提。scope guard 的 `Drop` 关闭槽位，所以 open 与 take 之间 panic
   不会把槽位卡住（旧的 begin/take 对没有错误路径恢复）。
 - `resolve_irq_spec` / `IrqOp::map_irq` 可在 probe 期间调用；它只查/建 kirq 的
@@ -142,21 +143,22 @@ provider 知识（规则 L1）。
 ### 时钟：deferred probe 的握手
 
 ```text
-消费者 probe:  dev.clk("baudclk")
+消费者 probe:  dev.res().clk("baudclk")
    └► ClkRegistry::get(ClkSpec{phandle, index})
         ├─ kclk 查到 → KclkHandle 包成 Arc<dyn ClkOps> → ClkHandle
         └─ NoProvider → ServiceError::Deferred(DepSource::clk(phandle))
                           └► 域 park 设备
 
-provider 驱动 probe 末尾:  driver_host::register_clk_provider(&lookup)
-   └► ClkRegistry::register_provider
-        ├─ kclk::register_provider(phandle, lookup)
-        └─ wake_hook(DepSource::clk(phandle))
-             └► global_domain().wake(dep) → 精确重探被 park 的设备
+provider 驱动 probe 末尾:  dev.env().provide::<driver_host::ClkProvider>(phandle, lookup)?
+   └► Host::register_provider（ProviderServices，key 与 lookup id 交叉校验）
+        └► ClkRegistry::register_provider（重复 phandle → AlreadyExists）
+             ├─ kclk::register_provider(phandle, lookup)
+             └─ wake_hook(DepSource::clk(phandle))
+                  └► global_domain().wake(dep) → 精确重探被 park 的设备
 ```
 
 没有轮询、没有重试表。`ClkRegistry::new(wake)` 的 wake 闭包由
-`XKernelRuntime::install_global()` 接成 `global_domain().wake`。
+`Host::install_global()` 接成 `global_domain().wake`。
 
 ### virtio HAL 的 MMIO lease 生命周期
 
@@ -186,7 +188,7 @@ probe_pci_transport_with:
 
 | 状态 | 保护 | 说明 |
 |---|---|---|
-| `GLOBAL_RUNTIME` | `SpinNoPreempt<Option<Arc<XKernelRuntime>>>` | 安装一次；`register_clk_provider` 自由函数 clone 出来后立即释放锁 |
+| `Host` | `SpinNoPreempt<Option<Arc<Host>>>` | 安装一次；`Host::global()` clone 出来后立即释放锁 |
 | `RESOURCE_PROVIDER` | 无（`XKernelResourceProvider` 是无状态单元结构体） | 所有 Op 方法都是 `&self`，状态在被调用的主机子系统里 |
 | `PROBE_MMIO_LEASES` | `SpinNoPreempt<Option<Vec<IoMap>>>` | 单槽，`begin_mmio_probe` 断言不嵌套 |
 | `FALLBACK_MMIO_LEASES` | `SpinNoPreempt<Vec<IoMap>>` | scope 外映射的永久归宿；只增不减 |
@@ -200,7 +202,7 @@ probe_pci_transport_with:
 ### provider 无状态，状态在主机子系统里
 
 `XKernelResourceProvider` 是单元结构体。这样 `&'static` 共享是安全的，也不需要
-per-domain 的 provider 实例（per-domain 的差异体现在 `XKernelRuntime` 上，
+per-domain 的 provider 实例（per-domain 的差异体现在 `Host` 上，
 而不是 provider 上）。
 
 ### `AdaptedIrqHandler`：把 `Fn() -> IrqAction` 适配成 `kirq::IrqHandler`
@@ -215,7 +217,7 @@ per-domain 的 provider 实例（per-domain 的差异体现在 `XKernelRuntime` 
 ### `resolve_irq_spec` 放在本 crate
 
 见"算法流程"。它原先在 `drv/virtio/devices/src/pci.rs`，导致家族库被迫依赖
-`kirq::IrqController` 与 `driver_core::provider::IrqRouteDesc`，并在本地重复了
+`kirq::IrqController` 与 `driver_base::devres::host_api::IrqRouteDesc`，并在本地重复了
 一份 controller 词汇映射（本 crate 已有 `to_runtime_controller`）。搬过来之后
 家族库少两个主机依赖，映射也只剩一份。
 

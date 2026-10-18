@@ -331,9 +331,9 @@ including implicit path-dependency members, must declare
 
 `make check_boundaries` runs `scripts/ci/check_driver_boundaries.sh`, the
 mechanical half of `docs/ai/driver-subsystem-boundaries.md`: rule L0-a
-(`driver-core` names no device family), L0-b (contract crates carry no direct
+(`driver-base` names no device family), L0-b (contract crates carry no direct
 host-kernel dependency), L1 (no `drv/**`/`subsystems/**`/`common/**` crate
-fetches a provider singleton or imports `driver_core::provider`, and no `drv/**`
+fetches a provider singleton or imports `driver_base::devres::host_api`, and no `drv/**`
 crate calls a `kirq` registration API), and the integrity of the E-01..E-04
 exception register — an allow-list entry whose id is missing from that document,
 or whose code no longer needs the exception, fails the check. It is pure grep

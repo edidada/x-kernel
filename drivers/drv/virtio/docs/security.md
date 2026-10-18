@@ -5,7 +5,7 @@
 `drivers/drv/virtio/src/*.rs`（1389 行，驱动模块层）。
 
 设备协议实现与请求队列校验在 `drv/virtio/devices`（包 `virtio-devices`），
-它有独立的 `docs/security.md`；本文档只覆盖 driver-core 侧的 probe/remove/
+它有独立的 `docs/security.md`；本文档只覆盖 driver-base 侧的 probe/remove/
 发布/资源所有权，以及本 crate 唯一的一处 `unsafe`。
 
 ## 信任模型
@@ -38,15 +38,15 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 
 | 位置 | 调用 | 依赖的不变量 | 由谁保证 |
 |---|---|---|---|
-| `mmio.rs:107` | `virtio_devices::probe_mmio_device(regs.as_ptr(), mmio.size)` | `regs.as_ptr()` 指向一个至少 `mmio.size` 字节的有效映射；探测只**读** header | 紧邻上一行 `let regs = dev.iomap(0)?` 建立了映射，且 `dev.mmio(0)?` 给出的 `mmio.size` 与映射大小一致（`DeviceCtx::iomap` 映射的正是 `mmio(0)` 的 region）。`regs` 在本函数内一直存活，之后经 `ActivationBuilder::new(regs)` 移交 |
+| `mmio.rs:107` | `virtio_devices::probe_mmio_device(regs.as_ptr(), mmio.size)` | `regs.as_ptr()` 指向一个至少 `mmio.size` 字节的有效映射；探测只**读** header | 紧邻上一行 `let regs = dev.res().iomap(0)?` 建立了映射，且 `dev.res().mmio(0)?` 给出的 `mmio.size` 与映射大小一致（`Device::iomap` 映射的正是 `mmio(0)` 的 region）。`regs` 在本函数内一直存活，之后经 `ActivationBuilder::new(regs)` 移交 |
 
 **为什么这里必须用裸指针而不是 `IoMap::read32`**：`probe_mmio_device` 在
 `virtio-devices` 里，它接受 vendored `virtio-drivers` 的 MMIO 访问形状
-（`NonNull<u8>` + size），不知道 `driver_core::IoMap` 的存在。让家族库依赖
-`IoMap` 会把 driver-core 的类型渗进 vendored 适配层。
+（`NonNull<u8>` + size），不知道 `driver_base::IoMap` 的存在。让家族库依赖
+`IoMap` 会把 driver-base 的类型渗进 vendored 适配层。
 
 **代价**：这一处访问**不经过 `IoMap` 的边界检查**。缓解在于 `mmio.size` 与
-映射大小同源（都来自 `dev.mmio(0)`），且 `probe_mmio_device` 只读 header 的
+映射大小同源（都来自 `dev.res().mmio(0)`），且 `probe_mmio_device` 只读 header 的
 固定几个偏移。若将来 `probe_mmio_device` 开始按设备返回的长度字段做访问，
 这个不变量就不够了——那时必须改成先校验长度。
 
@@ -64,7 +64,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
    `begin_close → del_gendisk → drain → disable_interrupts → drop(irq) →
    reclaimer.stop_and_wait → finish_close`。字段 drop 顺序无法表达
    "在两个字段之间等待在途 I/O"，因此 `publication` 字段被显式 `take`。
-5. **`remove()` 在 guards 仍存活时运行**（`driver-core` 的契约），因此
+5. **`remove()` 在 guards 仍存活时运行**（`driver-base` 的契约），因此
    quiesce 阶段可以安全地做 MMIO 与等待。guards 在 `remove()` 返回后才释放。
 6. **probe 失败时局部 `activation` 就地 drop**，已获取的 IRQ/发布按逆序释放；
    `XxxData` 从未构造，因此不存在二次释放。
@@ -93,7 +93,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 | T-04 | teardown 顺序错误：IRQ 在 transport 销毁之后才释放 → 中断打到已释放的队列 | 高 | 修改 `BlkActivation::drop` 的顺序 | **已实现**：不变量 4 的显式顺序 + `disable_interrupts()` 在 `drop(irq)` **之前**（先让设备停止产生，再释放主机侧处理）。**残余风险**：这个顺序没有测试钉住（remove 路径的测试覆盖是整个框架的已知弱点，见 `docs/driver-framework-review.md` §8.4 教训 2）。加固建议：加一个 mock transport 的 close 顺序断言测试 |
 | T-05 | handler 在设备消失后被调用，`Weak::upgrade` 成功但 transport 已销毁 | 高 | IRQ 释放与 transport 销毁的顺序颠倒 | **已实现**：不变量 2 + teardown 顺序（`drop(irq)` 在 `finish_close()` 之前）。`upgrade()` 返回 `None` 时报 `NotHandled`，这是安全默认值（共享线上让别人处理） |
 | T-06 | `del_gendisk` 之后仍有在途 I/O 完成，写回已注销的请求 | 高 | drain 缺失或顺序错误 | **已实现**：`begin_close(drain.signals())` 先登记在途请求，`del_gendisk` 撤销设备号，然后 `drain.wait_completion()` 等干净。这正是 `BlockActivation::drop` 里两个 `prepare_block_wait().expect(...)` 的用途（带 `CG-021` 说明：remove 在任务上下文，分配失败不可恢复） |
-| T-07 | 消费者持有 `ClassDevice` clone，在设备移除后继续提交 I/O | 高 | 热插拔 | **部分实现**：`device_class` 的数据面走 `with_available` → `acquire_use`，移除编排翻 `draining`/`offline` 后返回 `BadState`。**残余风险**：已过门禁的在途操作与裸 `with()` 调用不受保护，完整闭合需要 per-op 完成计数（`docs/driver-framework-review.md` §8.3 类别 A） |
+| T-07 | 消费者持有 `Publication` clone，在设备移除后继续提交 I/O | 高 | 热插拔 | **部分实现**：`device_class` 的数据面走 `with_available` → `acquire_use`，移除编排翻 `draining`/`offline` 后返回 `BadState`。**残余风险**：已过门禁的在途操作与裸 `with()` 调用不受保护，完整闭合需要 per-op 完成计数（`docs/driver-framework-review.md` §8.3 类别 A） |
 | T-08 | `mmio` 变体的寄存器映射在最后一个消费者 clone 释放前被 unmap | 高 | 映射所有权放错位置 | **已实现**：不变量 1。映射经 `take_regs()` 移进设备对象，`MmioData::drop` **不**释放它（代码注释明确写了这一点） |
 | T-09 | `rng` 的 `HostRngCompletion::wait_until` 在非任务上下文调用 | 中 | 未来某个调用者从中断里读熵 | **已实现**：`PreparedTaskWait::prepare()` 在错误上下文会失败并返回 `InvalidInput`（不是 hang），且 `HostRngCompletion` 的 rustdoc 写明了上下文前提、唯一调用链与"新增调用者先查上下文"的要求（例外 E-04）。**残余风险**：仍然只是文档约束，类型上没有 barrier。彻底修法是把等待收进 `subsystems/hwrng::dispatch` 服务（与 `block::dispatch::wait` 同构），等第二个 hwrng 消费者出现时做 |
 | T-10 | 熵源被 VMM 控制（virtio-rng 输出的随机数可预测） | 高 | 恶意 VMM | **不在本 crate**。`KFEAT_ENTROPY_VIRTIO_RNG` 决定是否把 virtio-rng 接入熵池；`util/entropy` 负责混合与可信度标记（启动日志 `hardware_ready=true`）。本 crate 只提供设备驱动 |
@@ -108,7 +108,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 | F-04 | `request_irq` 失败 | MSI-X 分配失败 / 线冲突 | probe `Fatal`，局部 activation drop | 设备 `Unclaimed`；已发布的 class 条目在 activation drop 时撤销 | 3 | `?` 传播；不变量 6 保证不留半状态 |
 | F-05 | `prepare_block_wait()` 在 close 里分配失败 | 内存紧张 | **panic**（`expect`，带 `CG-021`） | 停机 | 2 | 刻意选择：close 运行在任务上下文，无法把错误传回（`Drop` 不返回 `Result`），而"跳过 drain 继续拆设备"会让在途 DMA 写进已释放内存——那比停机更糟 |
 | F-06 | `publish_*` 失败（devnode index 耗尽 / 重复发布） | 同一 owner 二次发布，或 class 注册表冲突 | probe `Fatal`，activation drop | 设备 `Unclaimed` | 3 | `map_driver_error` 分类；`device-class` 的注册表查重 |
-| F-07 | reclaimer 未初始化就注册 blk 驱动 | `driver-compose` 里 `reclaimer::init()` 的顺序被改 | I/O 完成不被回收 | 块请求永久挂起 | 2 | compose 把两行放在同一个 `#[cfg(feature = "virtio-blk")]` / `ramdisk` 块里。**加固建议**：把 `reclaimer::init()` 收进 `block` 子系统的幂等初始化 |
+| F-07 | reclaimer 未初始化就注册 blk 驱动 | `driver-init` 里 `reclaimer::init()` 的顺序被改 | I/O 完成不被回收 | 块请求永久挂起 | 2 | compose 把两行放在同一个 `#[cfg(feature = "virtio-blk")]` / `ramdisk` 块里。**加固建议**：把 `reclaimer::init()` 收进 `block` 子系统的幂等初始化 |
 | F-08 | `rng` 的完成等待丢唤醒 | 设备在 check 与 park 之间 notify | 请求永久挂起 | 熵收集卡住 | 3 | `wait_until` 的循环是"先 register 再 recheck"，与 `block::dispatch::wait` 同构；spurious wake 后重试 |
 
 ## 故障管理
@@ -151,7 +151,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
    前提写在 `HostRngCompletion` 的 rustdoc 里，类型上没有 barrier。
 6. **`ktask`/`kpoll`/`driver_host` 依赖**（例外 E-02、E-04），因此本 crate
    不是主机无关的。`kirq` **不在其中**：中断注册全部经
-   `DeviceCtx::request_irq`，家族库只暴露固有方法 `ack_irq`。
+   `Device::request_irq`，家族库只暴露固有方法 `ack_irq`。
 7. **无热插拔模板**：框架支持 `add_device` 增量触发，但 T-07 的在途操作窗口
    未闭合，因此不推荐把 virtio 驱动当热插拔参考实现。
 8. **`vsock`/`virtio_9p`/`gpu`/`input` 的 `remove` 路径未经验证**（同 T-04）。

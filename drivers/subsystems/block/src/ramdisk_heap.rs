@@ -21,12 +21,12 @@ const BLOCK_SIZE: usize = 512;
 /// storage so the device can be shared behind a `&self` interface. Capacity is
 /// fixed at construction time and cached separately, so metadata queries do not
 /// need to take the data lock.
-pub struct RamDisk {
+pub struct HeapRamDisk {
     storage: SpinNoPreempt<Box<[u8]>>,
     len: usize,
 }
 
-impl Default for RamDisk {
+impl Default for HeapRamDisk {
     fn default() -> Self {
         Self {
             storage: SpinNoPreempt::new(Box::<[u8]>::default()),
@@ -35,7 +35,7 @@ impl Default for RamDisk {
     }
 }
 
-impl RamDisk {
+impl HeapRamDisk {
     /// Creates a new RAM disk with the specified size hint.
     ///
     /// The size is rounded up to be aligned to the block size (512 bytes).
@@ -48,9 +48,9 @@ impl RamDisk {
     }
 }
 
-impl From<&[u8]> for RamDisk {
+impl From<&[u8]> for HeapRamDisk {
     fn from(data: &[u8]) -> Self {
-        let ramdisk = RamDisk::new(data.len());
+        let ramdisk = HeapRamDisk::new(data.len());
         {
             let mut storage = ramdisk.storage.lock();
             storage[..data.len()].copy_from_slice(data);
@@ -58,7 +58,7 @@ impl From<&[u8]> for RamDisk {
         ramdisk
     }
 }
-impl BlockDeviceOperations for RamDisk {
+impl BlockDeviceOperations for HeapRamDisk {
     #[inline]
     fn num_blocks(&self) -> u64 {
         (self.len / BLOCK_SIZE) as u64
@@ -116,7 +116,7 @@ mod tests_ramdisk {
     #[def_test]
     fn test_ramdisk_basic_operations() {
         // Test creation with different sizes
-        let disk = RamDisk::new(1024);
+        let disk = HeapRamDisk::new(1024);
         assert_eq!(disk.name(), "ramdisk");
         assert_eq!(disk.block_size(), 512);
         assert_eq!(disk.num_blocks(), 2);
@@ -148,7 +148,7 @@ mod tests_ramdisk {
 
     #[def_test]
     fn test_ramdisk_num_blocks_matches_capacity() {
-        let disk = RamDisk::from(&[0x5Au8; 700][..]);
+        let disk = HeapRamDisk::from(&[0x5Au8; 700][..]);
         assert_eq!(disk.num_blocks(), 2);
         assert!(disk.write_block(1, &[0xA5; 512]).is_ok());
         assert_eq!(disk.num_blocks(), 2);
@@ -156,7 +156,7 @@ mod tests_ramdisk {
 
     #[def_test]
     fn test_ramdisk_boundary_conditions() {
-        let disk = RamDisk::new(1536); // 3 blocks
+        let disk = HeapRamDisk::new(1536); // 3 blocks
 
         // Test reading beyond disk boundary
         let mut buf = vec![0; 512];
@@ -206,11 +206,11 @@ mod tests_ramdisk {
 
         // Test creation from slice
         let source_data = vec![0x12; 2048];
-        let disk_from_slice = RamDisk::from(source_data.as_slice());
+        let disk_from_slice = HeapRamDisk::from(source_data.as_slice());
         assert_eq!(disk_from_slice.num_blocks(), 4);
 
         let mut verify_buf = vec![0; 512];
-        let disk_from_slice_mut = &mut RamDisk::from(source_data.as_slice());
+        let disk_from_slice_mut = &mut HeapRamDisk::from(source_data.as_slice());
         assert!(disk_from_slice_mut.read_block(0, &mut verify_buf).is_ok());
         assert_eq!(verify_buf, vec![0x12; 512]);
     }

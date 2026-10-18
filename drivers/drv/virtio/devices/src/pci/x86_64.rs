@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use driver_base::devres::provider::{IrqOp, MsiResource};
+use driver_base::devres::host_api::{IrqOp, MsiResource};
 use pci::msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT};
 use safe_mmio::{UniqueMmioPointer, field, field_shared, fields::ReadPureWrite};
 use virtio_drivers::{
@@ -386,7 +386,7 @@ pub(super) fn setup_msix<H: VirtIoHal>(
         return None;
     }
 
-    let irq = msi.irq.number();
+    let irq = msi.irq.virq().raw();
     // SAFETY: the state-owned root aliases the probe root's ECAM window.
     // This is sound here because the state's config-space accesses (MSI-X
     // enable/mask word and command register writes) are volatile MMIO

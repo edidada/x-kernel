@@ -25,7 +25,6 @@ pub mod ramdisk_heap;
 #[cfg(feature = "ramdisk-static")]
 pub mod ramdisk_static;
 
-pub mod dispatch;
 #[cfg(feature = "ramdisk-static")]
 pub mod ramdisk_image;
 
@@ -730,21 +729,9 @@ pub fn add_disk(disk: Arc<Gendisk>) -> KResult<Arc<BlockDevice>> {
     }
     devices.insert(device_number, part0.clone());
     drop(devices);
-
-    // Project the disk into devtmpfs/sysfs/uevent (block subsystem).
-    // Node id: the dev_t itself — unique per disk and stable.
-    if let Some(parent_path) = disk.devnode_parent_path() {
-        devnode::publish(
-            device_number.0,
-            "block",
-            String::from(disk.name()),
-            device_number,
-            parent_path,
-            disk.devnode_modalias().cloned(),
-            Vec::new(),
-            None,
-        );
-    }
+    // The /dev and uevent projection belongs to the class publication
+    // (`ClassHooks::publish`), not to the registry: `add_disk` only makes the
+    // disk usable by the block core.
     Ok(part0)
 }
 
@@ -754,7 +741,6 @@ pub fn del_gendisk(device_number: DeviceNumber) -> Option<Arc<Gendisk>> {
     let disk = devices.get(&device_number)?.disk().clone();
     devices.retain(|_, device| !Arc::ptr_eq(device.disk(), &disk));
     drop(devices);
-    devnode::withdraw(device_number.0);
     Some(disk)
 }
 

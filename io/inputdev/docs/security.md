@@ -17,7 +17,7 @@ no unsafe code.>>>>>>> 9f18a37dd (docs: purge old-framework references from ever
 
 ## Invariants and thread safety
 
-- One driver-core id has at most one endpoint and one active poller.
+- One driver-base id has at most one endpoint and one active poller.
 - The hard-IRQ notifier only schedules work; driver reads and listener calls
   happen in task context.
 - No endpoint lock is held while reading the driver or invoking a listener.

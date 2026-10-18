@@ -30,7 +30,7 @@ report() {
 # core/driver-host, core/driver-compose and integration/ are host-side by role
 # and are deliberately NOT listed: the old flat deny-list flagged them, which
 # trained reviewers to ignore the whole document.
-RULED_DIRS=(drivers/core/driver-core drivers/common drivers/subsystems drivers/drv)
+RULED_DIRS=(drivers/base drivers/common drivers/subsystems drivers/drv)
 
 # Host-kernel crates a ruled directory must not depend on directly.
 # kirq is NOT here: its type vocabulary (IrqTrigger/IrqController/IrqDomainId)
@@ -52,8 +52,11 @@ DRV_HOST_ALLOW=(
     "drivers/drv/clk driver_host"
     "drivers/drv/clk kclk"
     # E-03: early-console adoption and the stdout identity handoff are
-    # single-machine boot integration, not a device resource.
+    # single-machine boot integration, not a device resource. serial-core's
+    # `khal` use is unittest-only (the atomic console-write regression test);
+    # its non-test sources take PhysAddr/VirtAddr from `memaddr` directly.
     "drivers/drv/serial console_driver"
+    "drivers/drv/serial/serial-core khal"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a
     # service; hwrng has exactly one consumer today.
@@ -61,7 +64,7 @@ DRV_HOST_ALLOW=(
     "drivers/drv/virtio kpoll"
 )
 
-# Files allowed to import driver_core::provider under L1b.
+# Files allowed to import the host capability surface under L1b.
 PROVIDER_SURFACE_ALLOW=(
     # E-01: the MSI-X config vector belongs to the TRANSPORT (Linux keeps it
     # in virtio_pci_modern.c), is driven from inside the vendored Transport
@@ -82,7 +85,7 @@ PROVIDER_SURFACE_ALLOW=(
 # driver-core is caught by the review checklist in the boundaries doc instead.
 FAMILIES='virtio|nvme|ahci|sdhci|mmc|i2c|usb|pl011|ns16550'
 PROVIDER_SINGLETON='resource_provider|XKernelResourceProvider|XKernelRuntime|GLOBAL_RUNTIME'
-PROVIDER_SURFACE='driver_core::provider|use driver_core::\{[^}]*provider'
+PROVIDER_SURFACE='driver_base::devres::host_api|use driver_base::\{[^}]*host_api'
 # Longer alternative first: `try_free_irq\b` would not match
 # `try_free_irq_action` because `_` is a word character.
 KIRQ_REGISTRATION='kirq::(try_register_shared|try_free_irq_action|try_free_irq|try_map|alloc_msix|free_msix|enable)\b'
@@ -117,7 +120,7 @@ while IFS= read -r hit; do
         continue
     fi
     report "L0-a: driver-core names a device family at ${file}:${lineno}:${text}"
-done < <(grep -rniE "$FAMILIES" drivers/core/driver-core/src --include='*.rs' || true)
+done < <(grep -rniE "$FAMILIES" drivers/base/src --include='*.rs' || true)
 
 # ---------------------------------------------------------------------------
 # L0-b: contracts are host-free (direct Cargo dependencies).
@@ -135,11 +138,12 @@ for dir in "${RULED_DIRS[@]}"; do
         crate_dir="$(dirname "$manifest")"
         for host in "${HOST_CRATES[@]}"; do
             grep -qE "^${host}([[:space:]]*=|\.workspace)" "$manifest" || continue
-            # subsystems/** SERVICES may use the host — that is L0-b's second
-            # column, not an exception. block::dispatch uses kirq softirq,
-            # ktask and kpoll by design.
+            # subsystems/** CONTRACTS must stay host-free: that is what lets
+            # the class layer and mock domains compile without a host. The
+            # host-side SERVICES live in their own `*-host` crates
+            # (`subsys-block-host` today), which are allowed to use the host.
             case "$crate_dir" in
-                drivers/subsystems/*) continue ;;
+                drivers/subsystems/*-host) continue ;;
             esac
             if in_allow "${crate_dir} ${host}" "${DRV_HOST_ALLOW[@]}"; then
                 continue
@@ -181,7 +185,7 @@ for dir in "${RULED_DIRS[@]}"; do
         if in_allow "$file" "${PROVIDER_SURFACE_ALLOW[@]}"; then
             continue
         fi
-        report "L1b: ${file}:${lineno} reaches around DeviceCtx into the provider surface:${text}"
+        report "L1b: ${file}:${lineno} reaches around Device into the host capability surface:${text}"
     done < <(grep -rnE "$PROVIDER_SURFACE" "$dir" --include='*.rs' || true)
 done
 
@@ -191,7 +195,7 @@ while IFS= read -r hit; do
     rest="${hit#*:}"
     lineno="${rest%%:*}"
     text="${rest#*:}"
-    report "L1c: ${file}:${lineno} calls a kirq registration API; use DeviceCtx::request_irq / resolve_irq:${text}"
+    report "L1c: ${file}:${lineno} calls a kirq registration API; use Device::request_irq / resolve_irq:${text}"
 done < <(grep -rnE "$KIRQ_REGISTRATION" drivers/drv --include='*.rs' || true)
 
 # ---------------------------------------------------------------------------
@@ -229,11 +233,11 @@ done
 # pre-rename names must not come back. A rename that does not update the docs
 # is exactly the drift this script exists to prevent.
 # ---------------------------------------------------------------------------
-for crate in driver-core driver-host driver-compose device-traits device-class devnode; do
+for crate in driver-base driver-host driver-init devnode; do
     grep -rq "^name = \"${crate}\"" drivers --include=Cargo.toml ||
         report "doc-sync: no crate named \`${crate}\` exists, but the normative docs name it"
 done
-for stale in driver-runtime kclass driver_base; do
+for stale in driver-runtime kclass driver-core driver-compose device-class device-traits; do
     if grep -rqw "$stale" "$BOUNDARIES_DOC" drivers/README.md AGENTS.md 2>/dev/null; then
         report "doc-sync: \`${stale}\` is a pre-rename crate name still present in ${BOUNDARIES_DOC} / drivers/README.md / AGENTS.md"
     fi

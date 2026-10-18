@@ -1,9 +1,10 @@
-# driver-core — 安全与可靠性分析
+# driver-base — 安全与可靠性分析
 
 ## Scope
 
-`drivers/core/driver-core/src/`：`bus.rs`、`driver.rs`、`device.rs`、`error.rs`、
-`resource.rs`、`provider.rs`、`domain/{mod,registry,probe,dependency,lifecycle}.rs`。
+`drivers/base/src/`：`bus/`、`driver.rs`、`device.rs`、`error.rs`、`resource.rs`、
+`provider.rs`、`devres/`（含 `host_api.rs` 的 host 侧 Op 契约）、`class/`、
+`domain/{mod,registry,probe,dependency,lifecycle}.rs`。
 测试 `domain/tests.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
 一个具体实例。
 
@@ -11,10 +12,11 @@
 
 | 边界 | 谁在外面 | 本 crate 假设什么 |
 |---|---|---|
-| 固件 → 描述符 | DT / ACPI / PCI 配置空间（`driver-compose`、`bus/pci`、`firmware/of` 转换后交给 `add_device`） | **半可信**：地址、大小、中断号、compatible 字符串都可能与真实硬件不符或被篡改。本 crate 只做结构校验，不做"这段物理地址真的是 MMIO"的判断——那是 `driver-host` + `memspace` 的职责 |
+| 固件 → 描述符 | DT / ACPI / PCI 配置空间（`driver-init`、`bus/pci`、`firmware/of` 转换后交给 `add_device`） | **半可信**：地址、大小、中断号、compatible 字符串都可能与真实硬件不符或被篡改。本 crate 只做结构校验，不做"这段物理地址真的是 MMIO"的判断——那是 `driver-host` + `memspace` 的职责 |
 | `DriverOps` 实现 → 域 | `drv/**` 里的驱动 | **可信内核代码**。域不防御驱动的错误，但把驱动能造成的破坏限制在"这一个设备"内（generation 守卫、独占移除声明） |
-| `DeviceServices` 实现 → 域 | `driver-host::XKernelRuntime` 或测试 mock | **可信**。契约要求返回的 guard 携带正确的 `ReleaseHook` |
-| 域 → 观察者 | `DeviceLifecycleObserver` 实现 | 回调在锁外运行，**不得重入域**。这是文档约束，不是类型约束 |
+| `DeviceServices` 实现 → 域 | `driver-host::Host` 或测试 mock | **可信**。契约要求返回的 guard 携带正确的 `ReleaseHook` |
+| 驱动 → provider 注册表 | `dev.env().provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
+| 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Publication` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是不撤销的 clone |
 
 关键的分层判断：本 crate 是**模型**，它不做硬件访问，因此它的 soundness 责任
 集中在两处——`IoMap` 的 volatile 访问器，以及"guard 的释放钩子恰好被调用一次"。
@@ -25,9 +27,10 @@
 |---|---|---|
 | 设备树 / ACPI | `DeviceDomain::add_device(DeviceDescriptor)` | `MmioRegion{base,size}`、`IoPortRange{base,size}`、`IrqSpec::FirmwareRoute{hwirq,controller,domain,trigger}`、`ClkSpec{phandle,index}`、`compatibles: Vec<String>` 全部来自固件 |
 | PCI 配置空间 | 同上（`bus/pci::discover` 产出） | `PciIdentity{vendor_id,device_id,class,subclass}`、BAR 派生的 `MmioRegion`、MSI-X 派生的 irq |
-| 板级静态表 | 同上（`driver-compose::enumerate_static_devices`） | x86 COM 口 `IoPortRange{base, size: 8}`、ramdisk alias |
+| 板级静态表 | 同上（`driver-init::enumerate_static_devices`） | x86 COM 口 `IoPortRange{base, size: 8}`、ramdisk alias |
 | MMIO 寄存器 | `IoMap::read*/write*` | 本 crate 唯一的硬件触点，且是**写出去的**——读回来的值不进入模型状态 |
 | 用户内存 / 用户指针 | 无 | 本 crate 不接受任何用户态指针 |
+| 驱动宣告的 provider key | `Device::provide` | 与 lookup 自身 id 交叉校验；冲突即失败，不覆盖 |
 | DMA 缓冲 | 无（`CoherentMem` 只是所有者句柄） | 分配与映射在 `driver-host`/`kdma` |
 | 中断上下文 | **不接受** | 见"线程安全" |
 
@@ -108,14 +111,13 @@
 | T-08 | 依赖永不发布，设备静默停在 Deferred，故障不可见 | 中 | 固件引用了一个不存在的 clock phandle | **已实现**：`finish_probe_phase(false)` + `deferred_report()` 在探测阶段结束时把卡住的设备 `log::warn` 出来并降级为 `Unclaimed`。实测启动日志可见 `device 70 gave up waiting on dependency clk:66 (provider never registered)` |
 | T-09 | 后注册的驱动抢走一个已被别的驱动认领的设备 | 中 | 驱动注册顺序变化 | **已实现**：`select_batch` 跳过 `Active`/`Removing`/`Removed`；`attempted` 集合防止同一个失败驱动被反复选中。测试 `late_driver_registration_claims_unclaimed_device`、`late_driver_registration_skips_unmatched_unmatched` |
 | T-10 | 两个 `DeviceDomain` 同时存活时设备 id 撞号，以 owner id 为键的外部注册表（class 发布、devnode）被跨域误撤 | 中 | 单元测试并行、或未来多域 | **已实现**：id 从 crate 级 `DEVICE_ID_ALLOCATOR` 分配，跨域唯一。测试 `device_ids_are_unique_across_domains` |
-| T-11 | 观察者回调在锁外重入域（在 `device_removed` 里调 `remove_device`） | 中 | 观察者实现错误 | **部分实现**：契约在 `DeviceLifecycleObserver` 的文档里写明"不得重入"，但类型上没有阻止。**残余风险**：重入会在 `SpinNoPreempt` 上自死锁（禁抢占锁不可重入），表现为 softlockup 而非内存破坏。加固建议：加一个 `in_observer` 标志并在重入时 panic，把死锁变成可诊断的失败 |
-| T-12 | `DeviceDescriptor` 的 `compatibles: Vec<String>` 来自固件，超长或超多导致枚举期分配放大 | 低 | 恶意/畸形 DT | **部分实现**：`driver-compose` 侧的 `FirmwareNode{id}` 分配器有 u32 耗尽拒绝；本 crate 不限制字符串长度或 compatible 条数。**残余风险**：启动期内存放大，不影响运行期。加固建议：在 `firmware/of` 解析处限长 |
+| T-12 | `DeviceDescriptor` 的 `compatibles: Vec<String>` 来自固件，超长或超多导致枚举期分配放大 | 低 | 恶意/畸形 DT | **部分实现**：`driver-init` 侧的 `FirmwareNode{id}` 分配器有 u32 耗尽拒绝；本 crate 不限制字符串长度或 compatible 条数。**残余风险**：启动期内存放大，不影响运行期。加固建议：在 `firmware/of` 解析处限长 |
 
 ## 故障模式与影响分析（FMEA）
 
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |---|---|---|---|---|---|---|
-| F-01 | `add_device` 被拒 | 父设备不存在 / 正在拆 / bus instance 缺失或类型不符 | 该设备不进入模型 | 该设备无驱动；`driver-compose` `log::warn` 后继续枚举其余节点 | 3 | 返回结构化 `AddDeviceError`，四种原因可区分；compose 侧不 panic |
+| F-01 | `add_device` 被拒 | 父设备不存在 / 正在拆 / bus instance 缺失或类型不符 | 该设备不进入模型 | 该设备无驱动；`driver-init` `log::warn` 后继续枚举其余节点 | 3 | 返回结构化 `AddDeviceError`，四种原因可区分；compose 侧不 panic |
 | F-02 | 探测返回 `Fatal` | 驱动判定自己不该认领（如 virtio-blk 发现 `VirtioDeviceKind != Block`） | 驱动进 `attempted` | 同一轮换下一个候选；穷尽则 `Unclaimed` | 4 | 正常控制流，`log::debug` |
 | F-03 | 探测返回 `Deferred` | clock/irq-domain/gpio/regulator provider 未就绪 | 设备 parked | provider 发布时被精确唤醒；阶段结束仍未唤醒则报告 + 降级 `Unclaimed` | 3 | 见 T-07 / T-08 |
 | F-04 | 服务未安装就取资源 | `set_services` 之前调用，或某个域没有自己的 runtime | 所有资源获取返回 `RuntimeError::Unsupported` | 该域上所有驱动 probe 失败 → `Unclaimed` | 2 | 刻意的"响亮失败"：`NoServices` 是一个真实类型而不是 `Option::None` 静默路径；启动日志会显示 0 active |
@@ -137,7 +139,7 @@
   MMIO 越界/未对齐（F-05）、`Data` downcast（F-07）、以及 id 分配器溢出
   （u64，实际不可达）。三处都带 `CG-021-no-panic-on-reachable-failure`
   例外说明。
-- 没有锁中毒概念：`SpinNoPreempt` 不可重入，重入即死锁（见 T-11）。
+- 没有锁中毒概念：`SpinNoPreempt` 不可重入，重入即死锁（见 T-09 的相关分析）。
 - 移除路径**不可回滚**：一旦翻到 `Removing` 且级联成功，即使 `DriverOps::remove`
   内部出错也继续走到 `Removed`（Linux 的 "remove never fails" 约定）。
   驱动的错误只记日志。
@@ -151,10 +153,10 @@
 
 ## 已知限制
 
-1. **无 threaded IRQ**。`IrqAction` 只有 `Handled`/`NotHandled`；`provider::IrqOp`
-   有 `request_threaded_irq`，但 `DeviceServices` 与 `DeviceCtx` 两层都没有对应
+1. **无 threaded IRQ**。`IrqAction` 只有 `Handled`/`NotHandled`；`devres::host_api::IrqOp`
+   有 `request_threaded_irq`，但 `DeviceServices` 与 `Device` 两层都没有对应
    入口。Linux `devm_request_threaded_irq` **禁止机械映射**。
-2. **无 MSI-X per-vector 暴露**。`provider::MsiResource` 有分配接口，`DeviceCtx`
+2. **无 MSI-X per-vector 暴露**。`devres::host_api::MsiResource` 有分配接口，`Device`
    没有方法；当前只有 virtio-net 在 x86_64 通过 transport 内部的 config+queue
    双向量使用（例外 E-01）。三层 handler 签名并存（`Fn(usize)` /
    `Fn(usize)->IrqEvent` / `Fn()->IrqAction`）是这个缺口的症状。
@@ -165,10 +167,13 @@
 5. **`DeviceSnapshot::kind` 恒为 `None`**（`domain/mod.rs` 的 `snapshot_of`
    里注释"until a class view exists"）。后果是 `/proc/devices` 丢失了按设备类
    分组与状态列——相对旧模型是观测面回退。
-6. **观察者契约靠文档**（T-11），类型上不阻止重入。
-7. **`select_batch` 每轮深拷贝 `DeviceDescriptor`**，`modalias` 每次重算。
+6. **provider 家族仍是闭集**。`ProviderServices` 的 host 实现只认 `DepKind::Clk`
+   对应的 `ClkProvider`；新增 gpio/regulator 要在 `driver-host` 增加匹配分支与其
+   `ProviderClass` 描述符，但**不需要**新注册路径、新 wake 机制或驱动侧新 API。
+   未知家族返回 `RuntimeError::Unsupported`（响亮失败，不静默丢弃）。
+7. **`select_batch` 每轮深拷贝 `DeviceDescriptor`**（现在连 `fw` 快照一起），`modalias` 每次重算。
    probe 非热路径，已记录为可接受代价（`docs/driver-framework-review.md` §8.3 类别 B）。
-8. **`PlatformBus` 的参考实现住在本 crate**（`src/bus.rs` 的 `platform` 模块）。
+8. **`PlatformBus` 的参考实现住在本 crate**（`src/bus/platform_bus.rs`）。
    它应该在独立的 `bus-platform` crate 里；只要枚举只由组合根做，暂时留在这里。
 
 ## 审计清单
@@ -180,9 +185,10 @@
       从而重新需要锁序文档？
 - [ ] 新增的 check-then-act 序列是否整体在锁内？（父设备校验、批选择、独占
       移除声明都是这类）
-- [ ] 有没有在持锁期间调用驱动代码、做 MMIO、分配内存、或调用观察者？
+- [ ] 有没有在持锁期间调用驱动代码、做 MMIO 或分配内存？
 - [ ] 新的 teardown 步骤是否遵守 `quiesce → 撤发布 → 释 IRQ → drop transport
-      → unmap` 的顺序？
+      → unmap` 的顺序？类发布侧是否有在途 `Publication` 需要 `finish_or_defer`
+      延迟 `hooks.unpublish`？
 - [ ] 新增的 guard 是否 `take()` 掉 `ReleaseHook`（保证至多释放一次）？
 - [ ] 新的 `DeviceState` 迁移是否在所有并发入口（probe 提交、remove 三相、
       wake）下都被考虑？是否需要 bump `generation`？
@@ -193,3 +199,5 @@
 - [ ] `domain/tests.rs` 是否覆盖了新的状态迁移？特别注意：涉及关联/ID 的修复，
       回归测试必须覆盖那条关联链本身（`docs/driver-framework-review.md` §8.4 教训 2）。
 - [ ] 是否引入了对某个设备家族的命名？如果是，应该改成 `ExtensionService`。
+- [ ] 新增的公共名词能否归入 Device / Driver / Bus / Resource / Class /
+      Provider / Host？不能归入就是设计问题，不是命名问题。

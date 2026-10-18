@@ -23,17 +23,23 @@ only weakens "portability", it does not.
 
 ## Model
 
-One device model (`driver-core`) plus layered interfaces:
+One device model (`driver-base`) plus layered interfaces:
 
-- **Device model** — `core/driver-core`: bus/device/driver contracts, const
+- **Device model** — `drivers/base`: bus/device/driver contracts, const
   id tables, deferred probe, the device domain. Family-agnostic by
   construction: no device family is named in its API.
-- **Kernel capability contracts** — `driver-core::provider` (MMIO/IRQ/DMA
-  ops) and the per-device service traits (`DeviceResourceServices`,
-  `ClockConsumerServices`, `DeviceServices`). Drivers reach them only through
-  `DeviceCtx`; `core/driver-host` binds them to `memspace`/`kirq`/`kdma`/`khal`.
+- **Kernel capability contracts** — `driver-base::devres::host_api`
+  (MMIO/IRQ/DMA ops, `#[doc(hidden)]`) and the per-device service traits
+  (`DeviceResourceServices`, `ClockConsumerServices`, `ProviderServices`,
+  `DeviceServices`). Drivers reach them only through `Device`;
+  `drivers/host` binds them to `memspace`/`kirq`/`kdma`/`khal`.
+- **Provider registration** — `driver-base::provider`: one convention
+  (`ProviderClass` + `ProviderRegistration`) for every provider family
+  (clock today; GPIO/regulator next). A family adds a descriptor in its own
+  crate, never a new register path or a new wake mechanism.
 - **Device class subsystems** — `subsystems/`: per-class APIs and services.
-  Drivers publish into them through `device_class` detached parents.
+  Drivers publish into them through the class statics with a live
+  `DeviceCore` parent (`dev.publish(&CLASS, …)`).
 - **Extension services** — family-specific capabilities (the virtio transport
   probe) are extension traits recovered from the runtime. The core never names
   the family.
@@ -41,11 +47,12 @@ One device model (`driver-core`) plus layered interfaces:
 ```text
 drv/<family> (one module per driver)
         │
-        ├── dev.iomap()/request_irq()/clk() …     (DeviceCtx — generic resources)
+        ├── dev.res().iomap()/request_irq()/clk() …     (Device — generic resources)
+        ├── dev.env().provide::<ClkProvider>(key, l)?    (provider publication)
         ├── subsystems/<class> traits + publish    (class publication)
         └── extension::<FamilyService>()           (family-specific probing)
 
-core/driver-host (the host bridge)
+drivers/host (the host bridge)
         ├── implements DeviceServices over its resource provider
         └── provides family extension services (typed, compile-checked)
 ```
@@ -54,12 +61,12 @@ core/driver-host (the host bridge)
 
 | Tree | Host-side by definition? | Rules |
 |---|---|---|
-| `core/driver-core` | no — must stay host-agnostic AND family-agnostic | L0-a, L0-b |
+| `drivers/base` | no — must stay host-agnostic AND family-agnostic | L0-a, L0-b |
 | `common/` (`devnode`) | no | L0-b, L1 |
 | `subsystems/` **contracts** (traits, published types) | no | L0-b |
-| `subsystems/` **services** (e.g. `block::dispatch`) | yes — see L0-b | L1 |
+| `subsystems/*-host` **services** (`subsys-block-host`) | yes — see L0-b | L1 |
 | `drv/` (concrete drivers + family libraries) | no | L1, L2 |
-| `core/driver-host`, `core/driver-compose` | **yes** | none of L0/L1 |
+| `drivers/host`, `drivers/init` | **yes** | none of L0/L1 |
 | `bus/`, `firmware/`, `platform/`, `integration/` | **yes** | none of L0/L1 |
 
 `bus/pci` maps the ECAM window through `khal`/`memspace`; `platform/*` are
@@ -70,12 +77,12 @@ whole document.
 
 ## Hard Rules
 
-### L0-a — `driver-core` names no device family
+### L0-a — `driver-base` names no device family
 
-`driver-core` must not name a device family, depend on a device stack, or gain
+`driver-base` must not name a device family, depend on a device stack, or gain
 a family-specific method. Adding a driver never touches the core.
 
-This is a **fan-in** rule, not a portability rule: `driver-core` is ~4.5k lines
+This is a **fan-in** rule, not a portability rule: `driver-base` is ~4.5k lines
 with the model's whole test suite behind it. Every family-specific method added
 there is a change that risks every already-transcribed driver.
 
@@ -94,7 +101,7 @@ The distinction that makes the model testable:
 
 | | must be host-free | may use `kirq`/`ktask`/`kpoll`/… |
 |---|---|---|
-| `driver-core::DeviceServices` and friends | ✅ (this is why `MockServices` exists) | — |
+| `driver-base::DeviceServices` and friends | ✅ (this is why `MockServices` exists) | — |
 | `subsystems/block` `BlockCompletionOperations`, `BlockWaiter`, `BlockSignals` | ✅ | — |
 | `subsystems/block::dispatch::{wait,reclaimer}` | — | ✅ |
 | `common/{devnode}` | ✅ | — |
@@ -104,14 +111,17 @@ A **contract** is a trait a driver implements or a type it publishes. A
 host-free so the model and the class layer can be exercised on mocks;
 services are allowed to be host code because that is their job.
 
-`subsystems/block::dispatch` using `kirq::softirq` and
-`ktask::future::PreparedTaskWait` is therefore **not** an exception — it is an
-instance of this rule.
+`subsys-block-host` (wait / reclaimer) using `kirq::softirq`,
+`ktask::future::PreparedTaskWait` and `kpoll` is therefore **not** an
+exception — it is the service half of this rule. The contracts crate
+(`subsys-block`) has no host dependency left, and
+`scripts/ci/check_driver_boundaries.sh` enforces that for every
+`subsystems/*` crate except the `*-host` service crates.
 
-### L1 — resources have exactly one acquisition path: `DeviceCtx`
+### L1 — resources have exactly one acquisition path: `Device`
 
 Concrete driver code (`drv/**`) acquires MMIO, IRQ, DMA and clocks through
-`DeviceCtx` (or through a documented subsystem service), never by reaching
+`Device` (or through a documented subsystem service), never by reaching
 around to a provider.
 
 Why this is load-bearing rather than stylistic: the framework's rollback
@@ -121,11 +131,23 @@ there is one door. A second acquisition path creates a resource whose lifetime
 the `Data` drop order does not describe — i.e. a hole exactly where RAII was
 supposed to be the invariant.
 
+L1 covers two doors, and only two:
+
+1. **Resources** — `dev.res()` (`iomap`, `request_irq`, `alloc_coherent`, `clk`).
+2. **Providers** — `dev.env().provide::<C>(key, lookup)`. A provider family is a
+   `ProviderClass` descriptor, not a register function; publishing and waking
+   consumers are the framework's job.
+
+Class publication (`dev.publish`) is a third verb, not a third resource door:
+it takes the device's identity and returns the owner of one user-visible
+object.
+
 Mechanically checkable half of L1: **no `drv/**`, `subsystems/**` or
-`common/**` crate may name the host runtime or a provider singleton**
-(`driver_host::resource_provider`, `XKernelResourceProvider`, `XKernelRuntime`,
-`GLOBAL_RUNTIME`). A provider may be *injected* into a family library; it may
-never be *fetched*. See exception E-01 for the one injected-provider site.
+`common/**` crate may name the host runtime, a provider singleton, or the
+host capability surface** (`Host::global`, `XKernelResourceProvider`,
+`driver_base::devres::host_api`). A provider may be *injected* into a family
+library; it may never be *fetched*. See exception E-01 for the one
+injected-provider site.
 
 ### L2 — exceptions are registered, not prose
 
@@ -145,7 +167,7 @@ too.
 
 - Kernel subsystems (`kirq`, `memspace`, `kdma`, `ktask`) must not depend on
   driver-subsystem crates.
-- Host-specific code lives in `core/driver-host` (capabilities → framework:
+- Host-specific code lives in `drivers/host` (capabilities → framework:
   the only place the model touches `memspace`/`kirq`/`kdma`) and
   `integration/` (framework → kernel facilities). The direction is fixed.
 - New driver needs become capability contracts or subsystem services first.
@@ -154,21 +176,21 @@ too.
 ### `kirq` is common vocabulary, not a host implementation
 
 `AGENTS.md` treats `kirq` as X-Kernel's common interrupt core, and
-`driver-core` deliberately re-exports its IRQ vocabulary
-(`driver-core/src/resource.rs`: `pub use kirq::{IrqController, IrqDomainId,
+`driver-base` deliberately re-exports its IRQ vocabulary
+(`driver-base/src/resource.rs`: `pub use kirq::{IrqController, IrqDomainId,
 IrqTrigger}`) so the trigger/controller/domain shapes exist exactly once in
 the tree. Therefore:
 
 - **Allowed anywhere**: `kirq`'s *type vocabulary* — `IrqTrigger`,
-  `IrqController`, `IrqDomainId`, and `driver_core::IrqAction`.
+  `IrqController`, `IrqDomainId`, and `driver_base::IrqAction`.
 - **Not allowed in `drv/**`**: `kirq`'s *registration API* —
   `try_register_shared`, `try_free_irq`, `enable`, `try_map`, `alloc_msix`.
-  Registration goes through `DeviceCtx::request_irq` /
-  `DeviceCtx::resolve_irq`, which return an owned `DevIrq` guard that
+  Registration goes through `Device::request_irq` /
+  `Device::resolve_irq`, which return an owned `DevIrq` guard that
   participates in the `Data` drop order.
 
 The previous version of this document listed `kirq` flatly in the forbidden
-set while `driver-core` depended on it. That contradiction is the reason the
+set while `driver-base` depended on it. That contradiction is the reason the
 rule drifted; it is resolved here in favour of the dedup, not in favour of
 duplicating the vocabulary.
 
@@ -176,22 +198,25 @@ duplicating the vocabulary.
 
 | ID | Site | Host surface used | Why the contract is not enough | Exit condition |
 |---|---|---|---|---|
-| E-01 | `drv/virtio/devices/src/pci{,/x86_64}.rs` | `driver_core::provider::{IrqOp, MsiResource}` (injected by `driver-host`) | The MSI-X **config vector belongs to the transport**, not to a device driver's `Data` — Linux keeps it in `virtio_pci_modern.c` for the same reason. It is driven from inside the vendored `Transport` impl (`max_queue_size` programs the queue vector, `set_status` programs the config vector and activates), so no driver-side `DeviceCtx` call can own it. Lifetime is transport-scoped: allocated in `setup_msix`, released on transport drop. | Move together with per-vector MSI-X exposure (tracked in `docs/driver-framework-review.md` §8.3 class A). Not before: there is no multi-queue consumer yet. |
-| E-02 | `drv/virtio/**`, `drv/clk` | `driver_host::{virtio_hal::Hal, virtio_transport::PciTransportService, register_clk_provider}` | Two independent causes. (a) `ExtensionService::from_services` is an `as_any` downcast, so the caller **must** name the concrete host type — that is what keeps `driver-core` family-agnostic (L0-a). (b) The vendored `virtio-drivers` requires `VirtIoHal: 'static` as a *type parameter*, so a driver constructing `VirtIoBlkDev<H, T>` must name a concrete `H`. (c) A clock provider driver's job *is* registering into the host clock subsystem (`of_clk_add_hw_provider` does the same in Linux). | (a) would need a TypeId-keyed extension registry with the contract trait living host-free — a `driver-core` public-API redesign whose only remaining payoff was portability. **Deliberately not pursued.** (b) needs an upstream change to the vendored crate. (c) none. |
-| E-03 | `drv/serial/{pl011,ns16550}.rs` | `console_driver::{runtime, serial}` | Early-console adoption and the stdout identity handoff are single-machine boot integration, not a device resource. There is no second host for a shim to be portable to. | None planned. The real risk here is ownership, not layering — see the stdout handoff protocol in `drivers/drv/serial/docs/design.md`. |
+| E-01 | `drv/virtio/devices/src/pci{,/x86_64}.rs` | `driver_base::devres::host_api::{IrqOp, MsiResource}` (injected by `drivers/host`) | The MSI-X **config vector belongs to the transport**, not to a device driver's `Data` — Linux keeps it in `virtio_pci_modern.c` for the same reason. It is driven from inside the vendored `Transport` impl (`max_queue_size` programs the queue vector, `set_status` programs the config vector and activates), so no driver-side `Device` call can own it. Lifetime is transport-scoped: allocated in `setup_msix`, released on transport drop. | Move together with per-vector MSI-X exposure (tracked in `docs/driver-framework-review.md` §8.3 class A). Not before: there is no multi-queue consumer yet. |
+| E-02 | `drv/virtio/**`, `drv/clk` | `driver_host::{virtio_hal::Hal, virtio_transport::PciTransportService, ClkProvider}` | Three independent causes. (a) `ExtensionRegistry::register` is an a typed extension lookup, so the caller **must** name the concrete host type — that is what keeps `driver-base` family-agnostic (L0-a). (b) The vendored `virtio-drivers` requires `VirtIoHal: 'static` as a *type parameter*, so a driver constructing `VirtIoBlkDev<H, T>` must name a concrete `H`. (c) A clock provider driver's job *is* registering into the host clock subsystem (`of_clk_add_hw_provider` does the same in Linux); the registration itself goes through `dev.env().provide::<ClkProvider>`, so the only host name left is the class descriptor. | (a) would need a TypeId-keyed extension registry with the contract trait living host-free — a `driver-base` public-API redesign whose only remaining payoff was portability. **Deliberately not pursued.** (b) needs an upstream change to the vendored crate. (c) needs a `ProviderClass` descriptor for a host-side lookup trait; that is the intended shape, not debt. |
+| E-03 | `drv/serial/{pl011,ns16550}.rs`, `drv/serial/serial-core/ut-tests/*` | `console_driver::{runtime, serial}`, `khal::console` (unittest only) | Early-console adoption and the stdout identity handoff are single-machine boot integration, not a device resource. There is no second host for a shim to be portable to. The `serial-core` entry is the atomic console-write regression test: it must exercise the real `khal` console lock, and the crate's non-test sources take `PhysAddr`/`VirtAddr` from `memaddr`, not `khal`. | None planned. The real risk here is ownership, not layering — see the stdout handoff protocol in `drivers/drv/serial/docs/design.md`. |
 | E-04 | `drv/virtio/src/rng.rs` | `ktask::future::PreparedTaskWait`, `kpoll::PollSet` | The hwrng completion wait needs a task-context park/wake. `subsystems/block::dispatch::wait` already wraps the identical primitive as a service, but hwrng has exactly **one** consumer today. | Fold into a `subsystems/hwrng` dispatch service when a second hwrng driver appears. Until then the execution-context invariant is documented at `HostRngCompletion`. |
 
 Not exceptions (they follow from scope or L0-b): `subsystems/block::dispatch`
 (service, host by design); `bus/pci`, `firmware/*`, `platform/*`,
-`core/driver-host`, `core/driver-compose`, `integration/*` (host-side trees).
+`drivers/host`, `drivers/init`, `integration/*` (host-side trees).
 
 ## Crate Layers
 
 See `drivers/README.md` for the current inventory.
 
-- **`core/`** — `driver-core` (model), `driver-host` (services + extensions +
-  the resource provider), `driver-compose` (composition root, called once from
-  `kruntime`).
+- **`drivers/base`** — `driver-base`: the model, the provider convention,
+  devres and the class machinery.
+- **`drivers/host`** — `driver-host`: `Host` (services + extensions + the
+  resource provider + provider registries) — the one process-global root.
+- **`drivers/init`** — `driver-init`: composition root, called once from
+  `kruntime`.
 - **`common/`** — cross-subsystem foundations only: `devnode`
   (userland node projection + node classes).
 - **`subsystems/`** — per-class APIs and class services: `block`, `char`,
@@ -204,19 +229,23 @@ See `drivers/README.md` for the current inventory.
 
 ## Review Checklist
 
-- Does `driver-core` gain any family knowledge? (L0-a grep must stay
+- Does `driver-base` gain any family knowledge? (L0-a grep must stay
   comment-only.)
 - Does a `common/` crate, or a subsystem **contract**, gain a host-kernel
   dependency? (L0-b.)
-- Does a new device family require editing `driver-core` instead of adding an
+- Does a new device family require editing `driver-base` instead of adding an
   extension trait? (L0-a.)
-- Does driver code acquire a resource anywhere other than `DeviceCtx` or a
+- Does driver code acquire a resource anywhere other than `Device` or a
   documented subsystem service? (L1.)
 - Does a `drv/**`, `subsystems/**` or `common/**` crate name the host runtime
   or a provider singleton — i.e. *fetch* rather than *receive* a provider?
   (L1.) If yes, is it registered? (L2.)
 - Does a `drv/**` crate call a `kirq` **registration** API rather than
-  `DeviceCtx::request_irq` / `resolve_irq`?
+  `Device::request_irq` / `resolve_irq`?
+- Does a provider driver publish through `dev.env().provide::<C>` (not a bespoke
+  register function), as the last fallible step of its probe?
+- Does a transcribed driver carry ONE `dev` handle (probe) and the same handle
+  plus `&mut Data` (remove), with no second device type?
 - Is a new host dependency in `drv/**` added to the exception register with a
   reason and an exit condition?
 - Is the teardown order preserved: quiesce → withdraw publication → release

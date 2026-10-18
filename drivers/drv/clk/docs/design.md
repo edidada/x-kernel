@@ -2,7 +2,7 @@
 
 ## 定位
 
-driver-core 模型下的**时钟 provider 驱动**聚合 crate。当前只有一个驱动：
+driver-base 模型下的**时钟 provider 驱动**聚合 crate。当前只有一个驱动：
 `fixed_clock`，认领 DT 的 `compatible = "fixed-clock"` 节点，把一个固定频率
 输出发布到 `kclk` 的 provider registry。
 
@@ -21,7 +21,7 @@ provider 驱动的形状与消费者不同：它不获取资源，它**发布**�
 ## 架构
 
 ```text
-DT 节点                              driver-compose::build_descriptor
+DT 节点                              driver-init::build_descriptor
   clk24m: clock-24m {                    └─ FirmwareNodeInfo {
     compatible = "fixed-clock";                phandle: Some(0x…)
     #clock-cells = <0>;                        clock_frequency: Some(24000000)
@@ -34,17 +34,19 @@ FixedClockDriver::probe(dev)
    ├─ 读 dev.descriptor().firmware 的 phandle / clock_frequency / clock_output_name
    ├─ ClkBuilder::new(name, FixedRate::new(freq).into_ops()).build()  → Arc<ClkCore>
    ├─ Box::leak(Box::new(FixedClockLookup { provider_id: phandle, core }))
-   └─ driver_host::register_clk_provider(lookup)          // ← 唤醒钩子在这里触发
+   └─ dev.env().provide::<driver_host::ClkProvider>(phandle, lookup)?   // ← 通用 provider 门
         │
         ▼
-   driver_host::ClkRegistry::register_provider
-        ├─ kclk::register_provider(phandle, lookup)
-        └─ wake_hook(DepSource::clk(phandle))
-             └─ driver_core::global_domain().wake(dep)
+   driver_host::Host::register_provider（ProviderServices）
+        ├─ 校验 key 与 lookup.provider_id() 一致（不一致 → Fatal(Invalid)）
+        ├─ driver_host::ClkRegistry::register_provider（重复 phandle → Fatal(AlreadyExists)）
+        │     ├─ kclk::register_provider(phandle, lookup)
+        │     └─ wake_hook(DepSource::clk(phandle))
+        │          └─ driver_base::global_domain().wake(dep)
                   └─ 所有 parked 在这个 phandle 上的消费者被精确重探
 ```
 
-消费者侧（例如 pl011）只写 `dev.clk("baudclk")`：provider 未注册时
+消费者侧（例如 pl011）只写 `dev.res().clk("baudclk")`：provider 未注册时
 `ClkRegistry::get` 把 `kclk::ClkError::NoProvider` 翻译成
 `ServiceError::Deferred(DepSource::clk(phandle))`，域 park 设备。**没有轮询、
 没有重试表、没有顺序表。**
@@ -52,9 +54,9 @@ FixedClockDriver::probe(dev)
 ## 调用约束 / 执行上下文
 
 - `probe` 由域在锁外的任务上下文调用，可睡眠（`ClkBuilder::build` 分配）。
-- `driver_host::register_clk_provider` 要求 `GLOBAL_RUNTIME` 已安装，否则
-  **panic**（启动顺序断言）。因为 `driver-compose::init()` 第一行就是
-  `install_global()`，而 `fixed_clock::register()` 在其后，这个前提成立。
+- `dev.env().provide::<ClkProvider>` 走的是本设备的 `DeviceServices`（`Host` 实例），
+  不访问进程级全局，因此没有"未安装 runtime 就 panic"的路径；注册失败以
+  `ProbeError::Fatal` 返回（key 不一致 / 重复 phandle / host 不支持该家族）。
 - `register()` 必须在**消费者驱动之前**调用吗？**不必须**。deferred probe 的
   全部意义就是顺序无关：先 probe 的消费者会 defer，provider 发布时被唤醒。
   compose 里 `fixed_clock` 排在第一位只是为了减少一轮 defer。
@@ -66,10 +68,10 @@ FixedClockDriver::probe(dev)
 
 ```rust
 let lookup: &'static FixedClockLookup = Box::leak(Box::new(FixedClockLookup { … }));
-driver_host::register_clk_provider(lookup);
+dev.env().provide::<driver_host::ClkProvider>(phandle, lookup)?;
 ```
 
-`register_clk_provider` 的签名要求 `&'static dyn kclk::ClkLookup`，因为
+`ProviderClass::Lookup = dyn kclk::ClkLookup`，所以这条调用要求
 `kclk` 的 provider registry 是 **boot-static** 的（时钟控制器与内核同生命周期，
 对应 Linux `of_clk_add_hw_provider` 同样不注销）。`FixedClockData` 另外持有
 `Arc<ClkCore>`，所以时钟树本身由 `Data` 拥有；泄漏的只是那个 8 字节的 lookup
@@ -84,7 +86,7 @@ outlives the device"。**这是一个刻意的语义选择**：移除一个 fixe
 
 `#clock-cells = <0>` 的节点没有 SoC 输出名，只有 index 0。所以
 `get_by_index(0)` 返回时钟，`get_by_name(_)` 一律 `None`。消费者用
-`dev.clk("baudclk")` 时走的是 DT `clock-names` → `ClkSpec::by_phandle_index`
+`dev.res().clk("baudclk")` 时走的是 DT `clock-names` → `ClkSpec::by_phandle_index`
 的 index 路径，不是 name 路径。
 
 ### 名字来自 `clock-output-names`，回退到 `"fixed-clock"`
@@ -94,11 +96,34 @@ outlives the device"。**这是一个刻意的语义选择**：移除一个 fixe
 
 ### 依赖 `driver_host` 与 `kclk`（登记的例外 E-02c）
 
-provider 驱动的职责**就是**往主机时钟子系统注册。Linux 的
-`of_clk_add_hw_provider` 同样是直接调主机 API。为它加一层
-`DeviceServices::publish_clk` 能力契约是纯间接——而且 `FixedClockLookup` 要
-构造 `kclk::ClkCore`，时钟树的类型本来就属于 `kclk`。
+provider 驱动的职责**就是**往主机时钟子系统注册，而注册的**形状**由通用的
+`ProviderClass` 约定给出：本驱动只命名家族描述符
+（`driver_host::ClkProvider`），不调用任何注册函数、不自己唤醒消费者。
+`FixedClockLookup` 要构造 `kclk::ClkCore`，时钟树的类型本来就属于 `kclk`，
+所以 `driver_host`/`kclk` 依赖仍然登记在 E-02c。
 见 `docs/ai/driver-subsystem-boundaries.md` 例外 E-02。
+
+## 第二个驱动：`fixed_factor`（转写验证用）
+
+`src/fixed_factor.rs` 是 Linux `drivers/clk/clk-fixed-factor.c` 的转写，形态是
+**一个 probe 里同时是消费者和 provider**：
+
+```text
+dev.res().clk("parent")             // 固件引用 clocks = <&apb_pclk 0>
+  → rate = parent_rate * mult / div
+dev.env().provide::<ClkProvider>(PROVIDER_ID, lookup)?   // 最后一步
+```
+
+QEMU `virt` 只有一个时钟节点（`apb-pclk`, phandle `0x8000`，已被 `fixed_clock`
+认领），没有派生时钟的 DT 节点，所以这个设备由组合根作为**板级静态设备**
+（alias `clk48m`）枚举，倍数/分频与 Linux 从 `clock-mult`/`clock-div` 读的值
+等价地来自驱动内的板级表。父时钟边是真实的固件引用（描述符里的 `clocks`），
+经 `dev.res().clk("parent")` 解析到真实 provider。
+
+实测启动：`fixed-factor: published clk48m @ 48000000 Hz (parent 24000000 Hz, 2/1)`。
+
+**已知限制**：`kclk` 的 `FixedRate` 不跟踪父时钟变化，派生频率在 probe 时采样
+一次；Linux `clk-fixed-factor` 会在父时钟变化时重算。
 
 ## Drop / 资源释放
 
@@ -106,7 +131,7 @@ provider 驱动的职责**就是**往主机时钟子系统注册。Linux 的
 
 - probe 失败（`ClkBuilder::build` 出错、缺 `phandle`/`clock-frequency`）→
   `Data` 从未构造，局部 `Arc` 就地 drop，时钟树释放。
-  **注意顺序**：`Box::leak` + `register_clk_provider` 在 `Ok(...)` 之前，
+  **注意顺序**：`Box::leak` + `dev.provide` 在 `Ok(...)` 之前，
   所以一旦注册成功就不会再失败——注册是 probe 的最后一步，这是刻意的，
   避免出现"已注册但 probe 失败"的半状态。
 - 设备移除 → `remove()` 空操作 → drop `Data` → `Arc<ClkCore>` 减一。

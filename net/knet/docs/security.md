@@ -666,7 +666,7 @@ Impact levels:
 
 | ID | Failure Mode | Cause | Local Effect | System Effect | Severity | Mitigation |
 |----|--------------|-------|--------------|---------------|----------|------------|
-| F-01 | No network device | `device_class::net_devices()` returns no devices | Only loopback is available | External TCP, UDP, and raw IP operations report no route or connection failure | 3 | `init_network` logs a warning; `Service::get_source_address` returns `ENETUNREACH` |
+| F-01 | No network device | `net_devices()` returns no devices | Only loopback is available | External TCP, UDP, and raw IP operations report no route or connection failure | 3 | `init_network` logs a warning; `Service::get_source_address` returns `ENETUNREACH` |
 | F-02 | No route to the destination | `RouteTable::lookup` finds no match | The current send fails | Application connection failure | 3 | connect or send returns `ENETUNREACH`; the dispatch path logs a warning and drops the packet |
 | F-03 | Ethernet pending queue is full | ARP is unresolved and `pending_tx` reaches its limit | Subsequent IP packets are dropped | Packet loss when communicating with one or more destinations | 3 | Log a warning; future work should split queues by next hop to reduce head-of-line blocking |
 | F-04 | Driver transmit-buffer allocation fails | The NIC driver returns an `alloc_tx_buf` error | The current frame is not sent | Reduced network throughput or connection timeout | 3 | Log a warning and return; the upper-layer poller can continue retrying |

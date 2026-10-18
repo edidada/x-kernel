@@ -9,8 +9,7 @@ use alloc::{boxed::Box, sync::Arc};
 use kerrno::{KError, KResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use ktask::future::PreparedTaskWait;
-
-use crate::completion::{BlockSignals, BlockWaiter};
+use subsys_block::completion::{BlockSignals, BlockWaiter};
 
 pub fn prepare_block_wait() -> KResult<Box<dyn BlockWaiter>> {
     Ok(Box::new(HostBlockWaiter::prepare()?))

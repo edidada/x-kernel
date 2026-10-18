@@ -10,17 +10,18 @@
 //! console view and the adopted stdout identity, without a public console
 //! selection mechanism.
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
-use driver_base::{ClassDevice, ClassDeviceId};
-use kerrno::KResult;
+use driver_base::{Publication, PublicationId};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 use subsys_char::{CharDeviceImpl, class::CHAR};
 
 struct ConsoleSubsystem {
-    devices: Vec<ClassDevice<CharDeviceImpl>>,
-    stdout: Option<ClassDeviceId>,
+    devices: Vec<Publication<CharDeviceImpl>>,
+    /// The adopted stdout publication. Console OWNS it: a rebind drops it,
+    /// which withdraws the previous identity (projection included).
+    stdout: Option<Publication<CharDeviceImpl>>,
     /// The adopted stdout's transferred guards (see [`StdoutBinding`]).
     stdout_binding: Option<StdoutBinding>,
 }
@@ -34,7 +35,7 @@ impl ConsoleSubsystem {
         }
     }
 
-    fn add(&mut self, handle: ClassDevice<CharDeviceImpl>) {
+    fn add(&mut self, handle: Publication<CharDeviceImpl>) {
         let id = handle.id();
         if self.devices.iter().any(|current| current.id() == id) {
             return;
@@ -42,26 +43,32 @@ impl ConsoleSubsystem {
         log::debug!(
             "console subsystem: added {:?} (driver={})",
             id,
-            handle.driver_name()
+            handle.driver_name().unwrap_or("<none>")
         );
         self.devices.push(handle);
     }
 
-    fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
-        if self.stdout == Some(id) {
-            self.stdout = None;
-        }
-        self.devices
+    fn remove(&mut self, id: PublicationId) -> Option<Publication<CharDeviceImpl>> {
+        // Take the owning stdout publication out (never drop it under the
+        // console lock: its withdrawal runs callbacks that re-enter here).
+        let owned = if self.stdout.as_ref().is_some_and(|p| p.id() == id) {
+            self.stdout.take()
+        } else {
+            None
+        };
+        let listed = self
+            .devices
             .iter()
             .position(|device| device.id() == id)
-            .map(|pos| self.devices.swap_remove(pos))
+            .map(|pos| self.devices.swap_remove(pos));
+        owned.or(listed)
     }
 
-    fn stdout_handle(&self) -> Option<ClassDevice<CharDeviceImpl>> {
-        let id = self.stdout?;
+    fn stdout_handle(&self) -> Option<Publication<CharDeviceImpl>> {
+        let stdout = self.stdout.as_ref()?;
         self.devices
             .iter()
-            .find(|device| device.id() == id)
+            .find(|device| device.id() == stdout.id())
             .cloned()
     }
 }
@@ -116,16 +123,20 @@ fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
         .expect("console subsystem call_once succeeded")
 }
 
-fn is_runtime_console(handle: &ClassDevice<CharDeviceImpl>) -> bool {
+fn is_runtime_console(handle: &Publication<CharDeviceImpl>) -> bool {
     // Serial stdout is matched separately by its registered device ID, never
     // by driver name: auxiliary UARTs use the same serial driver.
-    handle.driver_name() == "console"
+    handle.driver_name() == Some("console")
 }
 
-fn add_console_device(handle: ClassDevice<CharDeviceImpl>) {
+fn add_console_device(handle: Publication<CharDeviceImpl>) {
     let is_console = is_runtime_console(&handle);
     let mut subsystem = console_subsystem().lock();
-    if !is_console && subsystem.stdout != Some(handle.id()) {
+    let is_adopted_stdout = subsystem
+        .stdout
+        .as_ref()
+        .is_some_and(|stdout| stdout.id() == handle.id());
+    if !is_console && !is_adopted_stdout {
         return;
     }
     subsystem.add(handle);
@@ -153,54 +164,25 @@ fn ensure_console_bridge() {
 /// cannot replace the stdout association.
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
-pub fn register_stdout_console(
-    parent: impl Into<driver_base::ClassParent>,
-    runtime: CharDeviceImpl,
-    name: impl Into<String>,
-) -> KResult<()> {
+pub fn register_stdout_console(publication: Publication<CharDeviceImpl>) {
     ensure_console_bridge();
-    // Rebind: withdraw the PREVIOUS stdout publication before publishing
-    // the replacement — one stdout identity carries exactly one class
-    // publication. Without this, a same-port rebind left the old
-    // publication live in the char registry while the console pointed at
-    // the new one (and STDOUT_GUARDS had already released the old
-    // binding's irq/mapping): a stale handle any consumer could still
-    // find, referencing dead hardware.
-    {
+    let id = publication.id();
+    // Rebind: dropping the previous stdout publication withdraws the old
+    // identity (projection, callbacks, class teardown) before the new one
+    // becomes THE console — one stdout identity, one publication.
+    let previous = {
         let mut subsystem = console_subsystem().lock();
-        if let Some(previous) = subsystem.stdout.take() {
-            subsys_char::class::CHAR.unpublish(previous);
-        }
-    }
-    let handle = CHAR.publish(parent, runtime, name)?;
-    let id = handle.id();
-    console_subsystem().lock().stdout = Some(id);
-    // This runs inside the driver's `probe_device`, so the device is usually
-    // not active yet and `CHAR.find()` (which filters on availability)
-    // cannot see it. Adopt immediately when already active; otherwise remember
-    // the id and adopt when the device activates.
+        let previous = subsystem.stdout.replace(publication);
+        subsystem.devices.retain(|device| device.id() != id);
+        previous
+    };
+    drop(previous);
+    // This runs inside the driver's probe, so the device is usually not
+    // active yet and `CHAR.find()` (which filters on availability) cannot
+    // see it. Adopt immediately when already available.
     if let Some(handle) = CHAR.find(id) {
         console_subsystem().lock().add(handle);
-        return Ok(());
     }
-    Ok(())
-}
-
-/// Publish the boot stdout port's runtime wrapper under the caller's class
-/// parent and register it as THE console.
-///
-/// New-model serial drivers call this for their stdout role (the old
-/// `Arc<DeviceObject>` parent became a `ClassParent`); auxiliary ports use
-/// plain `publish_char` and stay out of the console subsystem.
-pub fn register_console_parented(
-    parent: impl Into<driver_base::ClassParent>,
-    runtime: CharDeviceImpl,
-    name: impl Into<String>,
-) -> KResult<()> {
-    // Thin alias of [`register_stdout_console`] kept as the serial drivers'
-    // naming (parent-shaped entry); the semantics are identical — see
-    // register_stdout_console for the full contract.
-    register_stdout_console(parent, runtime, name)
 }
 
 /// Snapshot the available runtime device associated with boot stdout.
@@ -208,7 +190,7 @@ pub fn register_console_parented(
 /// Task context. Returns none until the device is published and active. The
 /// handle retains ownership, not availability: callers must check availability
 /// before later I/O. This does not provide synchronization for hot-unplug.
-pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
+pub fn stdout_console() -> Option<Publication<CharDeviceImpl>> {
     let handle = console_subsystem().lock().stdout_handle()?;
     handle.is_available().then_some(handle)
 }
@@ -217,12 +199,16 @@ pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
 ///
 /// Task context. Available after publication, including before activation;
 /// cleared on removal. This identifies the port, not its I/O availability.
-pub fn stdout_console_id() -> Option<ClassDeviceId> {
-    console_subsystem().lock().stdout
+pub fn stdout_console_id() -> Option<PublicationId> {
+    console_subsystem()
+        .lock()
+        .stdout
+        .as_ref()
+        .map(Publication::id)
 }
 
 /// Remove a runtime console from the console subsystem.
-pub fn unregister_console_device(id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
+pub fn unregister_console_device(id: PublicationId) -> Option<Publication<CharDeviceImpl>> {
     console_subsystem().lock().remove(id)
 }
 

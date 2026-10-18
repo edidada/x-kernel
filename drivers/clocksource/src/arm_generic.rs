@@ -107,14 +107,14 @@ impl TimerMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimerConfig {
+pub struct ArmTimerConfig {
     pub irq: usize,
     pub frequency: Option<Frequency>,
     pub source: TimerSource,
     pub mode: TimerMode,
 }
 
-impl TimerConfig {
+impl ArmTimerConfig {
     /// Builds the platform-static timer descriptor for one non-zero IRQ
     /// line.
     pub const fn platform_static(irq: usize) -> Self {
@@ -180,7 +180,7 @@ impl khal::time::ClockEventIf {
 ///
 /// Panics for a zero IRQ, a zero frequency, or a frequency that does
 /// not fit in `u32` — all platform configuration errors.
-pub fn init(config: TimerConfig) {
+pub fn init(config: ArmTimerConfig) {
     assert!(config.irq != 0, "ARM generic timer IRQ must be non-zero");
     TIMER_IRQ.store(config.irq, Ordering::Relaxed);
     TIMER_MODE.store(config.mode.as_usize(), Ordering::Relaxed);
@@ -448,11 +448,11 @@ fn write_physical_timer_tval(value: u64) {
 
 /// Discovers the ARM generic timer from the device tree (the `timer`
 /// node's frequency and interrupt); returns `None` when absent.
-pub fn config_from_device_tree() -> Option<TimerConfig> {
+pub fn config_from_device_tree() -> Option<ArmTimerConfig> {
     let timer_mode = TimerMode::from_kconfig();
     let node = of::find_compatible("arm,armv8-timer")
         .or_else(|| of::find_compatible("arm,armv7-timer"))?;
-    Some(TimerConfig {
+    Some(ArmTimerConfig {
         irq: timer_irq_from_device_tree(node, timer_mode)?,
         frequency: timer_frequency_from_device_tree(node),
         source: TimerSource::DeviceTree,

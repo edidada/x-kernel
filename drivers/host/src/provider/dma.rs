@@ -2,11 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`driver_base::devres::provider::DmaOp`] contract.
+//! X-Kernel implementation of the [`driver_base::devres::host_api::DmaOp`] contract.
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use driver_base::devres::provider::{
+use driver_base::devres::host_api::{
     DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult,
 };
 

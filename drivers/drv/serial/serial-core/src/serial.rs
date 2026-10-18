@@ -27,12 +27,12 @@ use arm_pl011::Pl011Uart;
 use emergency::EmergencyTx;
 use input::SerialInput;
 use kerrno::KError;
-use khal::mem::PhysAddr;
-#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
-use khal::mem::VirtAddr;
 use kirq::{IrqDesc, IrqEvent};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
+use memaddr::PhysAddr;
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+use memaddr::VirtAddr;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 use uart_16550::SerialPort as SerialPort16550;
 

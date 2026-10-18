@@ -16,7 +16,7 @@ It separates normal and NMI emergency output and owns optional bounded input sto
 ## Architecture and Algorithms
 
 `runtime::stdout_console` snapshots the adopted stdout handle
-(`ClassDevice<CharDeviceImpl>`) under the subsystem lock. Native TTY retains
+(`Publication<CharDeviceImpl>`) under the subsystem lock. Native TTY retains
 that handle and performs I/O without holding the registry lock. The owning
 serial driver's character-device implementation forwards to the same early
 `SerialPort`. The established TTY remains connected to that port.

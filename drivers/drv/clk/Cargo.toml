@@ -13,6 +13,7 @@ categories = ["os", "no-std"]
 [features]
 default = []
 fixed-clock = []
+fixed-factor = []
 
 [dependencies]
 driver_base = { workspace = true }

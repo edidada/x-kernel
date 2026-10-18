@@ -79,7 +79,7 @@
   `publish()` 是 `()`（失败静默）。
 - 唯一的 panic 是 `init()` 里的 `assert!`，它断言的是启动顺序契约。
 - **没有失败可见性**（F-02）：既没有日志，也没有计数器。相比之下
-  `devnode`/`driver-core` 至少在关键路径上 `log::warn`。这是本 crate 应该改进
+  `devnode`/`driver-base` 至少在关键路径上 `log::warn`。这是本 crate 应该改进
   的第一项。
 
 ## 隐私分析

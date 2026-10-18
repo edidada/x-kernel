@@ -197,6 +197,7 @@ watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
 subsys_block = { path = "drivers/subsystems/block", package = "subsys-block" }
+subsys_block_host = { path = "drivers/subsystems/block-host", package = "subsys-block-host" }
 subsys_char = { path = "drivers/subsystems/char", package = "subsys-char" }
 subsys_display = { path = "drivers/subsystems/display", package = "subsys-display" }
 subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }

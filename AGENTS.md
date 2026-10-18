@@ -48,6 +48,10 @@ Before starting the analysis, the review agent must read the rule file correspon
 
 X-Kernel is a multi-architecture Rust OS/kernel project.
 
+The device lifecycle narrative (enumerate → probe → publish → quiesce →
+release) lives in `docs/device-life.md`; read it before changing any of the
+four stages.
+
 Major areas:
 
 - `arch/`: architecture HAL and CPU support.
@@ -99,12 +103,15 @@ ownership boundaries.
   behavior such as configure, mask/unmask, claim, complete, priority, and IPI
   delivery through `kirq::IntrManagerIf`.
 - The driver framework is single-host: cross-host portability is not a goal.
-  What is still required is that `driver-core` names no device family, that
+  What is still required is that `driver-base` names no device family, that
   class/subsystem *contracts* stay host-free so the model runs on mocks, and
-  that drivers acquire resources only through `DeviceCtx`. The framework
-  exposes kernel IRQ capability to drivers by adapting provider IRQ resources
-  to `kirq` in `driver-host` (the `DeviceServices` bridge over
-  `kirq`/`kdma`/`memspace`); `kirq` must not depend on driver-subsystem crates.
+  that drivers acquire resources only through `Device` and publish providers
+  only through `Device::provide::<C>`. The framework exposes kernel IRQ
+  capability to drivers by adapting provider IRQ resources to `kirq` in
+  `driver-host` (the `DeviceServices` bridge over `kirq`/`kdma`/`memspace`);
+  `kirq` must not depend on driver-subsystem crates. Process-global wiring
+  (installed services, resource provider, provider registries) has exactly one
+  home: `driver_host::Host`.
 - Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
   driver work. It states the rules (L0-a family-agnostic core, L0-b
   host-free contracts, L1 single resource acquisition path) and the exception

@@ -1,11 +1,11 @@
-# driver-core — 设计文档
+# driver-base — 设计文档
 
 ## 定位
 
 X-Kernel 唯一的设备模型核心。它拥有 bus/device/driver 三类契约、const id 表、
 deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceServices`）。
 
-依赖它的层：`core/driver-host`（实现服务契约）、`core/driver-compose`（组合根）、
+依赖它的层：`core/driver-host`（实现服务契约）、`drivers/init`（组合根）、
 `common/devnode`（复用 `DeviceLocation`）、`bus/pci`（实现 `Bus`）、
 `drv/**`（实现 `DriverOps`）。
 
@@ -32,21 +32,25 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | 文件 | 职责 |
 |---|---|
 | `src/lib.rs` | crate 门面 + Linux↔x-kernel 映射表 + 所有权模型说明 |
-| `src/bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `IdMatchEntry` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch` |
-| `src/desc.rs` | 总线枚举的描述词汇：`DeviceDescriptor` / `DeviceIdentity` / `DeviceLocation` / `FirmwareProp` / `FirmwareNodeInfo` |
-| `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc` |
-| `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`DeviceCtx`（probe 侧表面，`class_parent()` 即从它取 core）、`BoundDevice` |
-| `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
-| `src/handle/` | 驱动侧运行时资源句柄，按资源家族一文件（guards-in-Data 契约在 mod.rs）：`iomap.rs`（`IoMap`）/ `irq.rs`（`DevIrq` + `IrqAction`/`IrqHandlerFn`）/ `dma.rs`（`CoherentMem`）/ `clk.rs`（`ClkHandle` / `EnabledClock`） |
+| `src/bus/mod.rs`, `src/bus/platform_bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch`（`driver_base` 根上各导出一次，不再有用 `platform::` 二次路径） |
+| `src/desc.rs` | 描述符：`DeviceDescriptor`（`ident` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
+| `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
+| `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
+| `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`Device`（**唯一**设备句柄：probe 收 `&mut Device<'_, B>`，remove 收同一句柄 + `&mut Data`；`publish(&CLASS, …)` 即从它取 core） |
+| `src/devres/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
+| `src/devres/` | 一根 devres 轴：驱动侧句柄 `iomap.rs`（`IoMap`）/ `irq.rs`（`DevIrq` + `IrqAction`/`IrqHandlerFn`）/ `dma.rs`（`CoherentMem`）/ `clk.rs`（`ClkHandle` / `EnabledClock`），`host_api.rs` 为 host 侧 Op 契约（`#[doc(hidden)]`），`services.rs` 是两者的缝合面 |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
-| `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec` |
-| `src/provider.rs` | 主机实现的 Op 契约（每资源家族一个 vtable）：`MmioOp`/`IrqOp`/`DmaOp`/`ClkOps` + `IrqRouteDesc`/`MsiResource` |
-| `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`DeviceLifecycleObserver`、`global_domain()` |
+| `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec`、`Virq`（OS 可见中断号，与固件 hwirq 结构性区分） |
+| `src/provider.rs` | provider 注册惯例（**唯一一条**）：`ProviderClass`（一个 provider 家族 = key/lookup/`DepKind` 描述符）、`ProviderRegistration`（类型擦除的一次发布）、`ProviderServices`（host 侧落点） |
+| `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
+| `src/class/` | `Class<T,H>`（registry + hooks）+ `Publication<T>`（所有者/数据面/teardown）+ `InUse<T>`（在途计数 guard）+ `PublicationId`；devnode 投影与撤销在 `Publication` 的发布/撤销路径里 |
+| `src/devres/host_api.rs` | 主机实现的 Op 契约（每资源家族一个 vtable）：`MmioOp`/`IrqOp`/`DmaOp`/`ClkOps` + `IrqRouteDesc`/`MsiResource`；host 面，`drv/**` 不得命名 |
+| `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（唯一的进程级域名入口，组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
-| `src/domain/lifecycle.rs` | 移除编排：独占声明、children-first 级联、观察者派发、teardown 分相 |
-| `src/domain/tests.rs` | 19 个模型单测（`MockServices` 上运行） |
+| `src/domain/lifecycle.rs` | 移除编排：独占声明、children-first 级联、teardown 分相（`remove()` → drop `Data`；没有观察者/通知旁路） |
+| `src/domain/tests.rs` | 模型单测（`MockServices` 上运行），含 `dev.provide` provider 门与 defer/wake 链路 |
 
 ## 架构
 
@@ -64,7 +68,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
     四个状态域）   守卫式提交）     / late provider）  级联 → teardown）
 
     DomainInner { bus_instances, drivers, devices, sched, services,
-                  observers, next_device_id, services_installed }
+                  next_device_id, services_installed }
 
     DeviceEntry { desc          ← 身份（不可变）
                   lifecycle     ← 状态机 + generation + remove_retryable
@@ -87,17 +91,29 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时 id 仍全�
   调用**——持锁期间来中断会在同一把锁上自死锁。
 - **驱动代码在域锁外运行**（`probe.rs` 的 `select_batch` 之后释放锁），所以
   `DriverOps::probe` / `remove` 可以睡眠、可以回调域、可以做慢速 MMIO。
-- `remove_device` 的 teardown 相（`DriverOps::remove` → 观察者 → drop `Data`）
+- `remove_device` 的 teardown 相（`DriverOps::remove` → drop `Data`）
   同样在锁外，且按构造运行在任务上下文——这是各驱动 `Drop` 里
   `block_wait::prepare_block_wait()` 之类可睡眠调用的前提。
-- `DeviceLifecycleObserver` 回调在锁外、`remove()` 返回之后、`Data` drop 之前
-  调用；观察者**不得重入域**（不能在里面 probe/remove/快照）。
+- 没有 lifecycle observer / remove notifier：域状态机是移除的唯一权威，
+  发布回收由 `Data` 持有的 `Publication` 完成。类发布的 `ClassHooks::unpublish`
+  （`del_gendisk`、transport close）在仍有在途 `Publication` 时推迟到最后一个 drop
+  ——见 `src/class/mod.rs` 的 `finish_or_defer`。
 - `global_domain()` 可在早期启动调用（`LazyInit::call_once`）；但
   `set_services` 之前所有资源获取都落到 `NoServices`，返回
   `RuntimeError::Unsupported`。这是刻意的"响亮失败"，不是静默降级。
 - `IoMap` 的访问器带边界与对齐检查，越界/未对齐**总是 panic**（不是
   `debug_assert`）——release 下同样是 panic，因为 MMIO 上的未对齐 volatile
   访问是 UB。
+
+整条跨 crate 链路（枚举 → probe → 发布 → quiesce → 释放）只在
+`docs/device-life.md` 描述一次；本文件只讲这一站。
+
+## 公开名词预算
+
+驱动面只允许出现这些名词，其余都是实现细节：`Device`、`Driver`/`DriverDesc`、
+`Bus`、`Resource`（devm guard 族）、`Class`（发布）、`Provider`（家族描述符）、
+`Host`（进程级根，driver-host 侧）。新增一个公共名词要说明它归并/删除了哪个既有
+名词；只有单个使用者的抽象不进公共面。
 
 ## 状态机
 
@@ -246,25 +262,24 @@ pub trait Bus: Sized + Send + Sync + 'static {
 }
 ```
 
-新总线在自己的 crate 里实现，`driver-core` 不枚举任何东西。旧模型的
+新总线在自己的 crate 里实现，`driver-base` 不枚举任何东西。旧模型的
 `BusTypeId` 虽然是 `&'static str` newtype，但 `BusTypeObject::new_builtin` 对
 非 PCI/PLATFORM 直接 panic，匹配策略硬编码在模型 crate 里。
 
-### `ExtensionService` 用 `as_any` downcast
+### 扩展按类型注册/查找，而不是按 host 类型 downcast
 
 ```rust
-pub trait ExtensionService: Sized {
-    fn from_services(services: &dyn DeviceServices) -> Option<Self>;
-}
+// host 安装时注册一次（boot-static）：
+extensions.register(Box::leak(Box::new(PciTransportService::new(&provider))));
+// 驱动按类型取：
+let Some(service) = dev.env().extension::<PciTransportService>() else { … };
 ```
 
-这是**唯一一处刻意的 downcast 表面**，目的正是守住 L0-a：家族 transport 需要
-超出能力契约的主机机制时，由**扩展自己**命名它支持的主机类型，core 永远不
-命名家族。
-
-代价是明确的：调用方（`drv/virtio`）必须命名 `driver_host` 里的具体扩展类型。
-把它换成"契约 trait 住 host-free crate + TypeId 注册表"可以消除这个代价，但那
-次重设计唯一的剩余收益是跨主机可移植性——**已被明确放弃**，因此保留 downcast。
+家族 transport 需要超出能力契约的主机机制时，扩展自己是**一个值**，按类型
+住在 host 的 `ExtensionRegistry` 里；core 不认识家族，host 不再需要
+`as_any`，驱动写错的类型就是"没注册"。调用方仍然命名
+`driver_host::virtio_transport::PciTransportService`（E-02a），那是"驱动的
+家族知识"本身，不是框架的泄漏。
 登记为例外 E-02。
 
 ### `IrqAction` 没有 `WakeThread` 变体
@@ -280,7 +295,7 @@ drop 字段）。因此中断 guard 要声明在它服务的 MMIO 映射**之前
 
 ```rust
 pub struct Pl011Data {
-    _publication: Option<device_class::ClassWithdraw>,  // 先撤可见性
+    _publication: Option<Publication>,  // 先撤可见性
     _irq: Option<DevIrq>,                               // 再停中断
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,                               // 再解映射
@@ -302,4 +317,4 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 `ReleaseHook = Arc<dyn Fn() + Send + Sync>` 是每个 guard 携带的延迟释放钩子，
 由 `driver-host` 在构造 guard 时注入（例如 `move || provider.unmap_mmio(mapping)`）。
-`driver-core` 自己从不实现释放动作。
+`driver-base` 自己从不实现释放动作。

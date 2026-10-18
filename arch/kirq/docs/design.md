@@ -145,7 +145,7 @@ and x86 APIC trap adapters remain in `khal::irq`; x86 APIC MSI vector
 allocation is an irqchip/backend detail reached through `kirq::MsiBackendIf`,
 not through `khal`. `IPI_IRQ` stays at Kconfig call sites such as `kipi`, not
 in `kirq`. Driver devres integration is owned by `driver-host`, which
-translates `driver-core::provider` IRQ resources into `kirq` descriptors and
+translates `driver-base::provider` IRQ resources into `kirq` descriptors and
 handlers.
 
 ## 架构
@@ -411,7 +411,7 @@ future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch
 merge/mapping 分支。
 
 devres IRQ request 通过 `kirq::try_register_shared()` 安装 shared action，并把返回的
-`IrqActionToken` 包装成 `driver-core::provider::IrqHandlerToken`。release 时，`driver-host` 使用
+`IrqActionToken` 包装成 `driver-base::provider::IrqHandlerToken`。release 时，`driver-host` 使用
 `kirq::free_irq_action()` 删除单个 action；只有最后一个 action 离开时，
 `kirq` 才 mask line、等待 `in_flight` 归零并清理 descriptor。这样 shared IRQ 的
 fanout、teardown 和后续 threaded/oneshot 扩展点都集中在 IRQ core，而不是隐藏在
@@ -471,7 +471,7 @@ submits prepared kworkng work after releasing the port lock. TTY parses input,
 echoes, delivers signals, and wakes readable waiters in normal-worker context.
 Networking similarly owns its receive processing and socket readiness.
 
-driver-core/driver-host IRQ guards (`DevIrq`) manage IRQ resource lifetime,
+driver-base/driver-host IRQ guards (`DevIrq`) manage IRQ resource lifetime,
 not upper-layer
 waiter registration. Descriptor-local in-flight completion remains part of
 `synchronize_irq()` and `free_irq()`; it is not an event subscription. Hardirq
@@ -888,7 +888,7 @@ softirq、workerqueue 和 threaded IRQ 扩展持续依赖 HAL trap-entry 细节�
 
 ### 为什么 devres 只适配到 `kirq`
 
-`driver-core::provider` 是驱动框架的 OS-neutral resource contract。它描述驱动需要
+`driver-base::provider` 是驱动框架的 OS-neutral resource contract。它描述驱动需要
 的 IRQ 资源，但不拥有内核中断处理语义。x-kernel 的 devres provider 位于
 `driver-host`，负责把 provider contract 的 trigger/controller/domain/event/
 handler 转换为 `kirq` 类型。这样驱动框架获得内核 IRQ 能力，同时 `kirq`

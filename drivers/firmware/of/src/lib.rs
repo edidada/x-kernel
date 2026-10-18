@@ -30,6 +30,10 @@ pub use rs_fdtree::{
 /// * `coherent`: `Some(true)`/`Some(false)` only when firmware STATED
 ///   coherency via `dma-coherent`; `None` = not stated (caller applies
 ///   its architecture default).
+///
+/// This is the DECODE product; the device model's snapshot is
+/// `driver_base::DmaInfo`, produced from these facts once, at descriptor
+/// construction (`driver-init`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaFacts {
     pub offset: i64,
@@ -48,88 +52,15 @@ impl DmaFacts {
     };
 }
 
-/// One firmware node property, eagerly typed when the byte encoding is
-/// unambiguous (`of_property_read_u32`-style views come from these).
+/// Every property of a node, in firmware order, as `(name, raw payload)`.
 ///
-/// Multi-cell payloads stay [`PropValue::Bytes`] — length alone cannot
-/// prove list intent; consumers reinterpret with the same rules the
-/// device-tree specification states for the specific property they know.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PropValue {
-    /// Zero-length property — presence is the information.
-    Empty,
-    /// One NUL-terminated string.
-    Str(&'static str),
-    /// NUL-separated string list.
-    StrList(Vec<&'static str>),
-    /// One big-endian u32 cell.
-    U32(u32),
-    /// One big-endian u64 value.
-    U64(u64),
-    /// Everything else (raw cells, mixed payloads).
-    Bytes(&'static [u8]),
-}
-
-/// Decode one property payload. Typing follows the device-tree
-/// specification's disambiguation rule (the same one
-/// `of_property_read_string` applies): a payload whose LAST byte is NUL is
-/// a string/stringlist; otherwise it is cells (4 → u32, 8 → u64, else raw
-/// bytes). Ambiguities remain only where firmware itself encoded
-/// string-looking cell values — `of_property_read_u32` callers get those
-/// through [`PropValue::Bytes`] reinterpretation by property NAME, which
-/// is how Linux resolves typing too.
-fn decode_prop_value(value: &'static [u8]) -> PropValue {
-    if value.is_empty() {
-        return PropValue::Empty;
-    }
-    // The strings encoding is ENTIRE NUL-separated UTF-8 segments ending
-    // in a NUL — anything else is cells.
-    if value[value.len() - 1] == 0
-        && let Some(list) = decode_string_list(value)
-    {
-        return if list.len() == 1 {
-            PropValue::Str(list[0])
-        } else {
-            PropValue::StrList(list)
-        };
-    }
-    if value.len() == 4 {
-        return PropValue::U32(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
-    }
-    if value.len() == 8 {
-        let cells = [
-            u32::from_be_bytes([value[0], value[1], value[2], value[3]]),
-            u32::from_be_bytes([value[4], value[5], value[6], value[7]]),
-        ];
-        return PropValue::U64((cells[0] as u64) << 32 | cells[1] as u64);
-    }
-    PropValue::Bytes(value)
-}
-
-fn decode_string_list(value: &'static [u8]) -> Option<Vec<&'static str>> {
-    let mut out = Vec::new();
-    let mut rest = value;
-    loop {
-        let Some(pos) = rest.iter().position(|&byte| byte == 0) else {
-            // Non-NUL-terminated tail: not a stringlist.
-            if rest.is_empty() {
-                break;
-            }
-            return None;
-        };
-        out.push(core::str::from_utf8(&rest[..pos]).ok()?);
-        rest = &rest[pos + 1..];
-    }
-    Some(out)
-}
-
-/// Every property of a node, in firmware order, typed per
-/// [`decode_prop_value`] — the snapshot a bus backend hands to the device
-/// model so probe code can read quirk properties (`of_find_property` /
-/// `of_property_read_*` surface, minus a live tree).
-pub fn node_properties(node: FdtNode<'static, 'static>) -> Vec<(&'static str, PropValue)> {
+/// Typing is the DEVICE MODEL's job (`driver_base::FirmwareProp`): a parser
+/// that also decides "what does this property mean" would duplicate the
+/// model's property vocabulary, and the device tree's disambiguation rule
+/// (last byte NUL ⇒ string; 4/8 bytes ⇒ cells) is one rule with one home.
+pub fn node_properties(node: FdtNode<'static, 'static>) -> Vec<(&'static str, &'static [u8])> {
     node.properties()
-        .map(|prop| (prop.name, decode_prop_value(prop.value)))
+        .map(|prop| (prop.name, prop.value))
         .collect()
 }
 

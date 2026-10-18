@@ -52,13 +52,13 @@ impl khal::time::ClockEventIf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimerConfig {
+pub struct SbiTimerConfig {
     pub irq: usize,
     pub frequency: Frequency,
     pub source: TimerSource,
 }
 
-impl TimerConfig {
+impl SbiTimerConfig {
     /// Builds the platform-static timer descriptor for one IRQ line and
     /// a known counter frequency.
     pub const fn platform_static(irq: usize, frequency: Frequency) -> Self {
@@ -76,7 +76,7 @@ impl TimerConfig {
 /// # Panics
 ///
 /// Panics for a zero IRQ or a zero frequency.
-pub fn init(config: TimerConfig) {
+pub fn init(config: SbiTimerConfig) {
     assert!(config.irq != 0, "RISC-V SBI timer IRQ must be non-zero");
     assert!(
         !config.frequency.is_zero(),

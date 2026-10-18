@@ -1,4 +1,4 @@
-# driver-compose — 设计文档
+# driver-init — 设计文档
 
 ## 定位
 
@@ -9,7 +9,7 @@
 2. 注册所有编译进来的驱动（`module_init` 等价物，一行一个，按 cargo feature 门控）；
 3. 把固件设备树、板级静态设备、PCI 层级枚举成 `DeviceDescriptor` 灌进域。
 
-之后一切由 `driver-core` 的域自行推进：探测、defer、唤醒、级联移除。
+之后一切由 `driver-base` 的域自行推进：探测、defer、唤醒、级联移除。
 
 它是 host-side 树（见 `docs/ai/driver-subsystem-boundaries.md` 的 Scope 表），
 因此可以直接依赖 `khal` / `driver-host` / `of` / `pci`。
@@ -37,7 +37,7 @@
 | `next_firmware_node_id()` | 单调 `AtomicU32` 分配 `DeviceLocation::FirmwareNode{id}`，带耗尽拒绝 |
 | `enumerate_static_devices()` | ramdisk（alias 认领）+ x86 四个 ISA COM 口（带 `IoPortRange`） |
 | `pci_discover()` | 任一 virtio-* 开启时调 `pci::discover::discover(global_domain())` |
-| `map_trigger()` | `firmware::InterruptTrigger` → `driver_core::IrqTrigger` |
+| `map_trigger()` | `firmware::InterruptTrigger` → `driver_base::IrqTrigger` |
 
 ## 架构
 
@@ -48,7 +48,7 @@ core/kruntime 主核初始化
         ▼
   driver_compose::init()
         │
-        ├─1─ driver_host::XKernelRuntime::install_global()
+        ├─1─ driver_host::Host::install_global()
         │       └─ 域装上 DeviceServices；wake 钩子 = global_domain().wake
         │
         ├─2─ 驱动注册（feature 门控，一行一个）
@@ -78,8 +78,9 @@ core/kruntime 主核初始化
 - 必须在 workqueue 就绪之后（`virtio-blk`/`ramdisk` 注册前先
   `block::dispatch::reclaimer::init()`，它建 softirq/worker）、在 console
   handoff 之前（stdout 端口的收养发生在 pl011/ns16550 的 probe 里）。
-- `XKernelRuntime::install_global()` 必须先于任何驱动注册：`register_clk_provider`
-  自由函数在未安装时会 panic。
+- `Host::install_global()` 必须先于任何驱动注册：驱动侧 `dev.provide` 走设备
+  自己的 `DeviceServices`（未安装时是 `NoServices`，返回 `Unsupported` 而不是
+  静默丢弃），HAL/组合根侧的 `Host::global()` 带启动顺序断言。
 - 不得在中断上下文调用；不得重入。
 - 平台早期部分**不在这里**：两边都是 `khal::early_driver_init()` 在更早处拉起
   timer/IRQ/boot console。
@@ -142,7 +143,7 @@ if !stuck.is_empty() {
   同一个 `DeviceLocation`，从而 devnode 路径、uevent `DEVPATH`、class parentage
   全部撞车。
 - 除此之外本 crate 无锁、无共享可变状态。枚举是单线程的（主核初始化）。
-- 域自身的并发由 `driver-core` 负责。
+- 域自身的并发由 `driver-base` 负责。
 
 ## 设计决策
 
@@ -159,7 +160,7 @@ if !stuck.is_empty() {
 
 ### 枚举代码住在组合根，而不是 `bus-platform` crate
 
-`PlatformBus` 的参考实现在 `driver-core::platform`，枚举逻辑在这里。两处都
+`PlatformBus` 的参考实现在 `driver-base::platform`，枚举逻辑在这里。两处都
 标注了"应该在独立的 bus-platform crate 里"。只要枚举只有组合根一个调用者，
 拆出去只增加一条依赖边。
 
@@ -167,7 +168,7 @@ if !stuck.is_empty() {
 
 `pci::discover::discover(global_domain())` 自己建 bus instance、自己把 BAR 与
 legacy INTx 作为命名资源写进描述符。组合根只决定**要不要**发现（任一 virtio-*
-feature 开启时），不决定怎么发现。这是 PCI 成为 driver-core 一等成员的一部分。
+feature 开启时），不决定怎么发现。这是 PCI 成为 driver-base 一等成员的一部分。
 
 ## Drop / 资源释放
 

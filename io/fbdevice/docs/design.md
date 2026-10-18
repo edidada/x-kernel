@@ -52,7 +52,7 @@ io/fbdevice/
 ## Architecture
 
 ```text
-device-class display registry -> primary ClassDevice<DisplayDeviceImpl>
+device-class display registry -> primary Publication<DisplayDeviceImpl>
         | info()
         v
 GlobalPage shadow (BGRA8888, packed) --v2p--> create_scanout_resource

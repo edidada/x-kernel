@@ -3,7 +3,7 @@
 ## Purpose
 
 `drmdevice` implements a minimal Linux DRM/KMS primary device over one
-`ClassDevice<DisplayDeviceImpl>`. Each `DrmCard` owns its KMS state and remains
+`Publication<DisplayDeviceImpl>`. Each `DrmCard` owns its KMS state and remains
 bound to the display handle supplied at construction.
 
 ## Responsibilities
@@ -36,7 +36,7 @@ Device-node discovery, card index allocation, and hotplug projection belong to
         │ ioctl/read/mmap/poll
         ▼
 DrmCard
-├── bound display ClassDevice
+├── bound display Publication
 ├── KMS + legacy CRTC state
 ├── dumb buffers and framebuffer objects
 ├── property blobs
@@ -51,9 +51,9 @@ compositors. It is KMS-only: there is no render node or command submission.
 
 The `display` contract crate provides the `DisplayDevice` interface, concrete
 display drivers publish implementations through `device-class`, and `device-class`
-forwards the contract through `ClassDevice<DisplayDeviceImpl>`. `DrmCard` is
+forwards the contract through `Publication<DisplayDeviceImpl>`. `DrmCard` is
 the consumer. The scanout call direction is therefore `DrmCard` -> bound
-`ClassDevice<DisplayDeviceImpl>` -> `DisplayDevice` for display information,
+`Publication<DisplayDeviceImpl>` -> `DisplayDevice` for display information,
 resource creation and destruction, and presentation. devfs only selects the
 exact published class handle and passes it to `DrmCard::new`.
 
@@ -81,7 +81,7 @@ valid in interrupt context. No task or workqueue is created by this crate.
 
 `DrmCard::new` receives the exact display class handle represented by its
 `cardN` node. Every operation that needs scanout calls `display()`, which checks
-`ClassDevice::is_available` and returns `ENODEV` after driver-core removal. A
+`Publication::is_available` and returns `ENODEV` after driver-base removal. A
 card never falls back to another registered display, so an open fd cannot be
 silently redirected when card indices are reused.
 

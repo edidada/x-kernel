@@ -29,7 +29,10 @@
 
 extern crate alloc;
 
-#[cfg(feature = "ns16550-mmio")]
+// The runtime console view is model-side state (publication bookkeeping,
+// stdout identity, adopted guards), not a serial backend: it must exist
+// whenever the console subsystem does — including builds with no UART
+// backend at all (`ktty` links against it unconditionally).
 pub mod runtime;
 
 use alloc::sync::Arc;

@@ -711,7 +711,7 @@ fn read_memory_regions_from_ptr_reports_memory_node_ranges() {
 }
 
 #[def_test]
-fn node_properties_types_each_encoding() {
+fn node_properties_preserve_raw_payloads() {
     let fdt = test_fdt();
     let nic = fdt.find_node("/dma-bus@40000000/nic@40001000").unwrap();
     let props = node_properties(nic);
@@ -719,19 +719,20 @@ fn node_properties_types_each_encoding() {
         props
             .iter()
             .find(|(key, _)| *key == name)
-            .map(|(_, value)| value)
+            .map(|(_, value)| *value)
     };
-    // Single string, single u32, stringlist, multi-cell payload, and
-    // firmware ORDER preserved (compatible first, as written).
-    assert_eq!(get("vendor,board-rev"), Some(&PropValue::Str("b3")));
-    assert_eq!(get("vendor,tx-queues"), Some(&PropValue::U32(4)));
+    // The parser emits the raw payload; typing is the model's job
+    // (`driver_base::FirmwareProp`). Firmware ORDER is preserved
+    // (compatible first, as written).
+    assert_eq!(get("vendor,board-rev"), Some(&b"b3\0"[..]));
+    assert_eq!(get("vendor,tx-queues"), Some(&[0, 0, 0, 4][..]));
     assert_eq!(
         get("vendor,alias-list"),
-        Some(&PropValue::StrList(vec!["a", "b"]))
+        Some(&b"a\0b\0"[..])
     );
     assert_eq!(
         get("vendor,cfg-cells"),
-        Some(&PropValue::Bytes(&[0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3][..]))
+        Some(&[0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3][..])
     );
     assert_eq!(props.first().map(|(name, _)| *name), Some("compatible"));
 }

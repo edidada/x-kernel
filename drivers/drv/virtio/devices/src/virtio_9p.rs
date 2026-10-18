@@ -15,7 +15,7 @@ use crate::as_driver_error;
 ///
 /// Defines the abstract interface used by the 9P filesystem layer so that the
 /// concrete `VirtIo9pDev<H, T>` does not have to leak through subsystem APIs.
-pub trait Virtio9pDevice: Device {
+pub trait Virtio9pDevice: Send + Sync {
     /// Returns the mount tag reported by the device.
     fn mount_tag(&self) -> String;
 

@@ -12,7 +12,7 @@ uevent（netlink）三个投影层都从这里取事实。
 （Gendisk 的 devname/设备号）、`fs/filesystems/devfs`、`fs/filesystems/sysfs`、
 `integration/uevent-netlink`。
 
-它依赖 `driver-core`，但只用一个类型：`DeviceLocation`（见"设计决策"）。
+它依赖 `driver-base`，但只用一个类型：`DeviceLocation`（见"设计决策"）。
 
 ## 背景
 
@@ -22,7 +22,7 @@ uevent（netlink）三个投影层都从这里取事实。
 
 本 crate 把它换成**数据驱动**：`DevNodeType` 是一个值（subsystem 名、major、
 minor base、index 数、devname 格式函数、sysfs 路径格式函数），由 class crate
-注册。新增子系统不触碰 devnode，也不触碰 `driver-core`。
+注册。新增子系统不触碰 devnode，也不触碰 `driver-base`。
 
 同时它把 uevent 的**格式**与**传输**分开：格式（udev 可见的兼容面）在这里的
 `uevent.rs`，传输（唯一消费 `knet` 的地方）在 `integration/uevent-netlink`。
@@ -185,7 +185,7 @@ pub struct DevNodeType {
 ```
 
 两个 `fn` 指针是 Linux `struct class` 的 `devnode` 回调的等价物。加一个子系统
-= 加一个 `static DevNodeType`，不改 devnode，不改 `driver-core`。
+= 加一个 `static DevNodeType`，不改 devnode，不改 `driver-base`。
 
 ### `DeviceNumber` 自己打包 `dev_t`
 
@@ -205,20 +205,20 @@ pub struct DevNodeType {
 bitmap 字序是 load-bearing 的）可以独立测试，而 `knet` 依赖被限制在一个 71 行
 的 crate 里。
 
-### 依赖 `driver-core` 只为 `DeviceLocation`
+### 依赖 `driver-base` 只为 `DeviceLocation`
 
 ```rust
-pub use driver_core::DeviceLocation;
+pub use driver_base::DeviceLocation;
 ```
 
 本 crate 曾经真的是"双模型无关"的（旧框架时期需要同时服务新旧两个设备模型，
 因此自己复制了一份 `DeviceLocation`）。旧模型删除后这份复制也随之删除，
-`DeviceLocation` 现在只有 `driver-core` 一个定义点，本 crate re-export 它，
+`DeviceLocation` 现在只有 `driver-base` 一个定义点，本 crate re-export 它，
 让消费者保持单一 import 路径。
 
 **因此"model-agnostic"这个说法现在只对了一半**：投影机制（`DevNodeType` /
 `DevNode` / 注册表 / index 池 / uevent 格式）确实与模型无关，但**位置身份的
-类型**来自 `driver-core`。这是刻意的取舍——重复一份 `DeviceLocation` 会让
+类型**来自 `driver-base`。这是刻意的取舍——重复一份 `DeviceLocation` 会让
 sysfs 路径推导有两个出处，那正是本 crate 要消灭的问题。
 
 ## Drop / 资源释放

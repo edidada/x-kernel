@@ -22,8 +22,7 @@ use kirq::softirq::{self, SoftirqVec};
 use kspin::{NoPreempt, SpinNoIrq, static_lock};
 use ksync::Mutex;
 use linked_list_r4l::{GetLinks, Links, List};
-
-use crate::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter};
+use subsys_block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessingPhase {

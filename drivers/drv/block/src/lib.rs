@@ -8,6 +8,4 @@
 
 extern crate alloc;
 
-mod common;
-
 pub mod ramdisk;

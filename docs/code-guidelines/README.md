@@ -116,6 +116,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-034-used-binding-names](CG-034-used-binding-names.md) | SHOULD | clippy | `clippy::used_underscore_binding` |
 | [CG-035-declared-cfgs](CG-035-declared-cfgs.md) | SHOULD | rustc | `unexpected_cfgs` |
 | [CG-036-ordinary-error-propagation](CG-036-ordinary-error-propagation.md) | SHOULD | clippy | `clippy::question_mark` |
+| [CG-037-error-vocabulary-names](CG-037-error-vocabulary-names.md) | SHOULD | ai | — |
 
 ## Adding a rule
 

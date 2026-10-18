@@ -17,7 +17,6 @@ ns16550-ioport = ["serial_core/ns16550-ioport"]
 
 [dependencies]
 subsys_char = { workspace = true }
-kerrno.workspace = true
 driver_base = { workspace = true }
 devnode = { workspace = true }
 khal = { workspace = true }

@@ -12,11 +12,11 @@
 
 | 边界 | 谁在外面 | 本 crate 假设什么 |
 |---|---|---|
-| `driver-core` → 本 crate | `XKernelRuntime` 被当作 `dyn DeviceServices` 调用 | 契约可信：传入的 `MmioRegion` / `IrqSpec` / `DmaSpec` 已经是模型校验过的形状，但**物理地址本身的合法性由 `memspace` 判断** |
+| `driver-base` → 本 crate | `Host` 被当作 `dyn DeviceServices` 调用 | 契约可信：传入的 `MmioRegion` / `IrqSpec` / `DmaSpec` 已经是模型校验过的形状，但**物理地址本身的合法性由 `memspace` 判断** |
 | 固件 → 物理地址 | DT/ACPI/PCI 描述符里的 `MmioRegion.base` | **半可信**。本 crate 不做二次判断，直接交给 `memspace::iomap_device` |
 | vendored `virtio-drivers` → `Hal` | 传输层通过 `unsafe trait VirtIoHal` 的关联函数调用 | **契约式可信**：本 crate 必须满足 trait 文档的生命周期约定；trait 的签名是**不可失败**的，所以主机侧的错误只能变成哨兵值（见 F-04/F-05） |
 | 设备 → DMA 缓冲 | 设备可以对已 `share` 的缓冲做任何事 | **不可信**。这是 DMA 的固有性质，见 T-06 |
-| `kclk` provider → 本 crate | `register_clk_provider(&'static dyn ClkLookup)` | provider 必须活到内核生命周期结束（boot-static 模型） |
+| provider 发布 → 本 crate | `ProviderRegistration`（`dev.provide` 经 `ProviderServices`） | provider 必须活到内核生命周期结束（boot-static 模型）；`key` 与 lookup 自称 id 不一致、或重复 key，一律拒绝 |
 
 ## 外部边界 / 攻击面
 
@@ -38,7 +38,7 @@
 | 位置 | 不变量 | 由谁保证 |
 |---|---|---|
 | `dma.rs:22` `kdma::allocate_dma_memory(layout)` | `layout` 是合法非零 layout | 上一行 `Layout::from_size_align(...).map_err(...)` 已把非法 layout 变成 `ResError::InvalidResource` |
-| `dma.rs:49` `kdma::deallocate_dma_memory(info, layout)` | `info`/`layout` 描述的是 `alloc_coherent` 为同一 spec 返回的缓冲，且**恰好释放一次** | `DmaAllocation.spec` 原样携带 alloc 时的 `len`/`align`；释放由 `driver_core::CoherentMem` 的 `Drop` 触发一次。这是 §8.3 类别 B 记录的"对称性靠约定"项 |
+| `dma.rs:49` `kdma::deallocate_dma_memory(info, layout)` | `info`/`layout` 描述的是 `alloc_coherent` 为同一 spec 返回的缓冲，且**恰好释放一次** | `DmaAllocation.spec` 原样携带 alloc 时的 `len`/`align`；释放由 `driver_base::CoherentMem` 的 `Drop` 触发一次。这是 §8.3 类别 B 记录的"对称性靠约定"项 |
 | `dma.rs:60` `buffer.as_ref()` | `buffer` 在映射期间是有效活切片 | 调用者（`Hal::share` ← vendored transport）契约 |
 | `dma.rs:64` `kdma::map_dma_buffer(buffer, dir)` | 同上 | 同上 |
 | `dma.rs:88` `kdma::unmap_dma_buffer(...)` | `mapping` 描述的是 `map_streaming` 建立的映射；`cpu_addr + len` 重建原缓冲 | `DmaMapping` 的四个字段由 `map_streaming` 一次性填齐，之后不可变 |
@@ -82,27 +82,27 @@
    `FALLBACK_MMIO_LEASES` 的存在就是为了在没有 scope 时也能守住它（宁可泄漏
    也不悬垂）。
 4. **probe scope 单槽**。`begin_mmio_probe` 的 `assert!` 保证不会有两个 probe
-   的 lease 混在一个 scope 里。前提由 `driver-core` 的 probe 泵串行化提供。
+   的 lease 混在一个 scope 里。前提由 `driver-base` 的 probe 泵串行化提供。
 5. **固件路由在注册前解析**。`request_irq` 先把 `FirmwareRoute` 映射成 virq，
    再注册；因此 `DevIrq::number()` 与主机实际分发的号一致。破坏这条会让驱动
    持有一个"号是错的"的 guard，共享线上会误判归属。
-6. **`GLOBAL_RUNTIME` 安装先于任何驱动**。自由函数 `register_clk_provider` 在
+6. **`Host` 安装先于任何驱动**。`Host::global()` 在
    未安装时 panic（启动顺序断言），而不是静默丢弃 provider 注册。
 
 ## 线程安全
 
-- `XKernelRuntime: Send + Sync`（字段是 `&'static` provider + `ClkRegistry`），
+- `Host: Send + Sync`（字段是 `&'static` provider + `ClkRegistry`），
   因此可以作为 `Arc<dyn DeviceServices>` 装进域。
 - `Hal` 是零大小类型，`VirtIoHal` 的方法全是关联函数 → 天然 `Send + Sync`，
   但也因此**无法携带 per-runtime 状态**，这是"只有一个 provider 实例"的根因。
-- `PROBE_MMIO_LEASES` / `FALLBACK_MMIO_LEASES` / `GLOBAL_RUNTIME` 都是
+- `PROBE_MMIO_LEASES` / `FALLBACK_MMIO_LEASES` / `Host` 都是
   `SpinNoPreempt`：**禁抢占、不关中断**。`Hal::mmio_phys_to_virt` 会取这两把锁
   并可能分配地址空间，因此**不得在硬中断上下文首次映射**。
 - `IrqOp::request_irq` 里构造的 `AdaptedIrqHandler` 闭包会在**硬中断上下文**
   执行；它只调用驱动给的 `IrqHandlerFn`（`Fn() -> IrqAction`），不取本 crate
   的任何锁。
 - `ClkRegistry` 的 wake 钩子在自己的锁释放之后调用，钩子里会取
-  `driver-core` 的域锁 → 锁序是 `ClkRegistry → 域锁`，单向，不成环。
+  `driver-base` 的域锁 → 锁序是 `ClkRegistry → 域锁`，单向，不成环。
 
 ## 威胁分析
 
@@ -115,7 +115,7 @@
 | T-05 | `DevIrq` 的号与主机实际分发的 virq 不一致，共享中断线上驱动误判归属（吞掉别人的中断，或反复报 `NotHandled` 导致 irq storm 禁用） | 中 | 固件路由未解析就注册 | **已实现**：不变量 5，`request_irq` 先 `map_irq` 再注册，`DomainMapped{number:0}` 这类占位不可能出现 |
 | T-06 | 设备对已 `share` 的 DMA 缓冲写入非预期内容 | 高 | DMA 的固有性质 | **部分实现**：本 crate 只负责映射的正确性（方向、长度、cache 维护由 `kdma` 负责）。**内容校验是消费者责任**：virtio-blk 的请求完成校验在 `drv/virtio/devices/src/blk/requests.rs`。**残余风险**：任何新增的 DMA 消费者必须自己校验设备写回的数据，本层不会提醒 |
 | T-07 | `dma_dealloc` 用错误的 layout 释放（alloc/dealloc 不对称） | 高 | 修改 `alloc_coherent` 的对齐策略而未同步 dealloc | **部分实现**：`DmaAllocation.spec` 原样携带 alloc 参数，dealloc 从 spec 重建 layout，正常路径下对称是结构保证的。**残余风险**：`Hal::dma_alloc` 硬编码 `PAGE_SIZE_4K` 对齐而 `DmaSpec::new(size, PAGE_SIZE_4K)` 也硬编码同一值——两处常量必须一起改。加固建议：把对齐提取成一个共享常量 |
-| T-08 | 未安装 runtime 就注册 clock provider，注册被静默丢弃 → 消费者永久 deferred | 中 | 启动顺序错误 | **已实现**：`register_clk_provider` 自由函数在未安装时 `expect` panic（带 `CG-021` 说明），把顺序错误变成启动期可见失败 |
+| T-08 | 未安装 runtime 就发布 provider，注册被静默丢弃 → 消费者永久 deferred | 中 | 启动顺序错误 | **已实现**：驱动侧 `dev.provide` 经设备自己的 `DeviceServices`（`NoServices` 返回 `Unsupported`），发布失败即 probe 失败，不会静默丢弃；HAL 侧 `Host::global()` 带 `CG-021` 启动顺序断言 |
 | T-09 | `unmap_mmio` / `release_irq` 失败但无法上报（契约返回 `()`），资源实际未释放 | 中 | kirq 返回 `InvalidContext`、memspace 映射已不存在 | **部分实现**：`unmap_mmio` 丢弃错误（"已不存在的映射不需要动作"，语义正确）；`release_irq` 对 `try_free_irq` 的"未注册"只 `log::warn`，但对 `InvalidContext` 这类错误 **panic**。**残余风险**：panic 发生在 teardown 路径，会把"一个设备移除失败"升级成停机。已记录 `TODO(cg)`：把 `release_irq` 改成可失败并沿 teardown 传播 |
 
 ## 故障模式与影响分析（FMEA）
@@ -127,25 +127,25 @@
 | F-03 | `map_irq` 失败（只要号不注册） | controller 没有注册 domain / hwirq 冲突 | `resolve_irq_spec` 返回 `None` | 调用方（virtio transport probe）回退到描述符的 legacy 路由；都没有则 probe `Fatal` | 3 | `log::warn` 带完整 route 描述 |
 | F-04 | **`Hal::dma_alloc` 失败但 trait 签名不可失败** | provider 返回 `NoMemory` 等 | 返回 `(0, NonNull::dangling())` | vendored transport 会把 bus_addr 0 写进描述符 → 设备 DMA 到物理地址 0 | **2** | **已实现**：`log::error` 带 pages 与错误码。**残余风险**：这是 vendored trait 的不可失败签名强加的哨兵值，本 crate 无法拒绝。缓解依赖 vendored transport 对 0 地址的检查——**不保证存在**。加固建议：向 vendored crate 提交可失败的 `dma_alloc`，或在此处 panic（当前选择"记录 + 返回哨兵"是为了不在启动期把一个设备的内存不足升级成停机） |
 | F-05 | **`Hal::share` 失败但 trait 签名不可失败** | `map_streaming` 失败 | 返回 bus_addr `0` | 同 F-04 | **2** | 已实现：`log::error`；`unshare` 用 `paddr == 0` 短路，因此不会对未映射缓冲做 unmap（这一点是安全的）。残余风险同 F-04 |
-| F-06 | `Hal::mmio_phys_to_virt` 映射失败 | provider 返回错误 | **panic** | 停机 | 1 | 刻意选择：vendored trait 的关联函数无法返回错误，映射失败在这个边界不可恢复。**对比**：驱动路径经 `DeviceCtx::iomap` 会正确报 `ProbeError`，所以这个 panic 只在 vendored 构造器内部触发 |
+| F-06 | `Hal::mmio_phys_to_virt` 映射失败 | provider 返回错误 | **panic** | 停机 | 1 | 刻意选择：vendored trait 的关联函数无法返回错误，映射失败在这个边界不可恢复。**对比**：驱动路径经 `Device::iomap` 会正确报 `ProbeError`，所以这个 panic 只在 vendored 构造器内部触发 |
 | F-07 | scope 外调用 `mmio_phys_to_virt` | 非 probe 路径的映射（例如运行期 transport 重新映射） | lease 进 `FALLBACK_MMIO_LEASES`，永不释放 | 内核地址空间引用泄漏（可见、可计数） | 4 | 刻意选择：宁可泄漏也不悬垂。旧行为是直接 drop 令牌（静默泄漏且不可见） |
 | F-08 | `free_coherent` 收到 null cpu_addr | 上游构造了非法 `DmaAllocation` | **panic**（`expect`，带 `CG-021`） | 停机 | 2 | 不变量：`DmaAllocation` 只能由本 crate 的 `alloc_coherent` 构造，其 `cpu_addr` 来自 `info.cpu_addr.as_ptr()`，非空 |
 | F-09 | `unmap_streaming` 收到 `bus_addr == 0` | 对应的 `share` 失败过（F-05） | 直接返回，不做 unmap | 无 | 4 | 显式短路，与 F-05 的哨兵值配对 |
-| F-10 | clock provider 永不注册 | 固件引用了不存在的 phandle，或 provider 驱动未编译进来 | 消费者 probe 返回 `ServiceError::Deferred` | 设备 parked；`driver-core::finish_probe_phase` 在启动结束时报告并降级为 `Unclaimed` | 3 | 本 crate 只负责把 `kclk::ClkError::NoProvider` 翻译成 `Deferred`；可见性由 `driver-core` 保证 |
+| F-10 | clock provider 永不注册 | 固件引用了不存在的 phandle，或 provider 驱动未编译进来 | 消费者 probe 返回 `ServiceError::Deferred` | 设备 parked；`driver-base::finish_probe_phase` 在启动结束时报告并降级为 `Unclaimed` | 3 | 本 crate 只负责把 `kclk::ClkError::NoProvider` 翻译成 `Deferred`；可见性由 `driver-base` 保证 |
 | F-11 | `kclk` 的 prepare/enable 失败 | 时钟树状态错误 | `map_clk_error` → `RuntimeError` → probe `Fatal` 或 `Deferred` | 该设备不被认领 | 3 | `ClkOps` 的每个方法都翻译错误；`unprepare`/`disable` 无返回值，失败只丢弃 |
 
 ## 故障管理
 
 - 三层错误词汇，逐层收窄：`memspace::IoMapError` / `kirq::IrqDescError` /
-  `kclk::ClkError` → `driver_core::provider::ResError`（5 变体）→
-  `driver_core::RuntimeError`（9 变体）→ `ProbeError`（2 变体）。
+  `kclk::ClkError` → `driver_base::devres::host_api::ResError`（5 变体）→
+  `driver_base::RuntimeError`（9 变体）→ `ProbeError`（2 变体）。
   每层都是显式 match，不用 `map_err(|_| ...)` 吞掉分类。
 - **唯一的例外是 `ServiceError`**：时钟获取可以返回
   `ServiceError::Deferred(DepSource)`，这是 `RuntimeError` 表达不了的控制流，
   因此时钟契约（`ClockConsumerServices`）单独一个错误类型。这不是重复，是
   "只有能 defer 的能力才需要 defer 词汇"。
 - panic 点共 4 处，全部带 `CG-021-no-panic-on-reachable-failure` 例外说明：
-  `register_clk_provider` 的启动顺序断言、`mmio_phys_to_virt` 映射失败、
+  `Host::global()` 的启动顺序断言、`mmio_phys_to_virt` 映射失败、
   `release_irq` 的 `InvalidContext`、`free_coherent`/`unmap_streaming` 的 null 地址。
 - `begin_mmio_probe` 的嵌套 `assert!` **不带**例外说明，因为它断言的是设计契约
   而不是不可达路径。
@@ -165,13 +165,13 @@ BDF——都是硬件描述，与 Linux `dmesg` 的暴露面等价。
 4. **`release_irq` 返回 `()`**，无法把 teardown 期的 kirq 错误传回驱动
    （T-09），`InvalidContext` 只能 panic。已记录 `TODO(cg)`。
 5. **threaded IRQ 只到 provider 层**：`IrqOp::request_threaded_irq` 存在，但
-   `DeviceServices` 与 `DeviceCtx` 两层都没有对应入口，驱动无法使用。
-6. **MSI-X 只到 provider 层**：`alloc_msix`/`free_msix` 存在，`DeviceCtx` 未
+   `DeviceServices` 与 `Device` 两层都没有对应入口，驱动无法使用。
+6. **MSI-X 只到 provider 层**：`alloc_msix`/`free_msix` 存在，`Device` 未
    暴露；当前唯一消费者是 virtio PCI transport（例外 E-01），且只在 x86_64、
    只对 net 设备启用。
 7. **streaming DMA 只覆盖单缓冲区**，无 scatter-gather。
 8. **`FALLBACK_MMIO_LEASES` 只增不减**，且没有上限（F-07）。
-9. **provider 是进程级单例**，per-domain 的差异只体现在 `XKernelRuntime` 上。
+9. **provider 是进程级单例**，per-domain 的差异只体现在 `Host` 上。
    若将来需要 per-domain 的 IOMMU domain，`VirtIoHal` 的关联函数签名是障碍。
 
 ## 审计清单
@@ -189,5 +189,5 @@ BDF——都是硬件描述，与 Linux `dmesg` 的暴露面等价。
 - [ ] 有没有把设备可控的数据（配置空间、DMA 写回内容）当成可信输入？
       本 crate 不校验内容，校验责任在消费者——新增消费者时要显式确认。
 - [ ] 改动 `provider/irq.rs` 的词汇翻译（`to_runtime_controller` /
-      `to_runtime_route`）时，是否同步检查 `driver-core::IrqController` 的变体
+      `to_runtime_route`）时，是否同步检查 `driver-base::IrqController` 的变体
       集合有没有增加？漏一个变体会静默落到 `Unknown`。

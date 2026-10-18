@@ -61,3 +61,6 @@ target/kbuild/
 CLAUDE.md
 
 /uapps/memfd-test/out/
+
+# Unit-test runner output (scripts/ci/run_unit_tests.sh)
+/unittest-output.log

@@ -29,7 +29,7 @@ enum Operation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RequestState {
+enum BlkRequestState {
     Prepared,
     Pending,
     Submitted(u16),
@@ -41,7 +41,7 @@ struct Request {
     header: UnsafeCell<BlkReq>,
     response: UnsafeCell<BlkResp>,
     operation: UnsafeCell<Option<Operation>>,
-    state: UnsafeCell<RequestState>,
+    state: UnsafeCell<BlkRequestState>,
     signals: Arc<dyn BlockSignals>,
     _pin: PhantomPinned,
 }
@@ -53,7 +53,7 @@ impl Request {
             header: UnsafeCell::new(BlkReq::default()),
             response: UnsafeCell::new(BlkResp::default()),
             operation: UnsafeCell::new(Some(operation)),
-            state: UnsafeCell::new(RequestState::Prepared),
+            state: UnsafeCell::new(BlkRequestState::Prepared),
             signals,
             _pin: PhantomPinned,
         }
@@ -74,7 +74,7 @@ impl Drop for Request {
         // panic aborts: unwinding a node through live DMA is not supported.
         assert!(matches!(
             self.state.get_mut(),
-            RequestState::Prepared | RequestState::Done(_)
+            BlkRequestState::Prepared | BlkRequestState::Done(_)
         ));
     }
 }
@@ -115,12 +115,12 @@ impl BlockRequests {
     unsafe fn enqueue(&mut self, request: &Request) {
         // SAFETY: the caller keeps the node pinned, live and exclusively on this
         // FIFO; the device lock excludes other list/state access.
-        assert_eq!(unsafe { *request.state.get() }, RequestState::Prepared);
+        assert_eq!(unsafe { *request.state.get() }, BlkRequestState::Prepared);
         // SAFETY: The caller pins and retains this node through removal;
         // the held device lock serializes its link and pending-list accesses.
         assert!(unsafe { self.pending.push_back(NonNull::from(request)) });
         // SAFETY: The device lock still excludes other state readers/writers.
-        unsafe { *request.state.get() = RequestState::Pending };
+        unsafe { *request.state.get() = BlkRequestState::Pending };
     }
 
     fn finish(request: &Request, result: KResult) {
@@ -129,13 +129,13 @@ impl BlockRequests {
         unsafe { *request.operation.get() = None };
         // SAFETY: The same device lock protects state publication after all
         // list/token references have been reclaimed or before submission.
-        unsafe { *request.state.get() = RequestState::Done(result) };
+        unsafe { *request.state.get() = BlkRequestState::Done(result) };
     }
 
     fn cancel_pending(&mut self, request: &Request, error: KError) {
         // SAFETY: only the submitting caller can cancel; it has not submitted
         // this Pending node, and holds its device lock and pinned lifetime.
-        assert_eq!(unsafe { *request.state.get() }, RequestState::Pending);
+        assert_eq!(unsafe { *request.state.get() }, BlkRequestState::Pending);
         // SAFETY: This unsubmitted node belongs to pending and remains pinned;
         // the submitting caller holds the device lock throughout removal.
         assert!(unsafe { self.pending.remove(request) });
@@ -157,7 +157,7 @@ impl BlockRequests {
         }
         // SAFETY: run_request pins and retains request, and the device lock
         // serializes all state reads and transitions.
-        assert_eq!(unsafe { *request.state.get() }, RequestState::Pending);
+        assert_eq!(unsafe { *request.state.get() }, BlkRequestState::Pending);
         // SAFETY: The same lock protects the initialized operation metadata.
         let operation = unsafe { *request.operation.get() }.expect("pending operation");
         // SAFETY: No device owns this pending request's header yet. Only this
@@ -204,7 +204,7 @@ impl BlockRequests {
                 // SAFETY: the device lock protects this transition; token and
                 // state are installed before completion can acquire the lock.
                 unsafe {
-                    *request.state.get() = RequestState::Submitted(token);
+                    *request.state.get() = BlkRequestState::Submitted(token);
                 }
             }
             Ok(None) => Self::finish(request, Ok(())),
@@ -231,7 +231,7 @@ impl BlockRequests {
             let request = unsafe { pointer.as_ref() };
             // SAFETY: The device lock serializes reads of this retained request.
             let state = unsafe { *request.state.get() };
-            assert_eq!(state, RequestState::Submitted(token));
+            assert_eq!(state, BlkRequestState::Submitted(token));
             // SAFETY: The submitted operation is initialized and immutable until
             // reclamation under the same device lock completes.
             let operation = unsafe { *request.operation.get() }.expect("submitted operation");
@@ -393,8 +393,8 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
                 // SAFETY: the device lock protects terminal publication and
                 // includes retirement of all list/token/buffer references.
                 match unsafe { *request.state.get() } {
-                    RequestState::Done(result) => Some(result),
-                    RequestState::Submitted(_) => None,
+                    BlkRequestState::Done(result) => Some(result),
+                    BlkRequestState::Submitted(_) => None,
                     _ => unreachable!("request left admission without a result or token"),
                 }
             };
@@ -409,7 +409,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Acknowledge one interrupt and report whether it was ours.
     ///
-    /// The family-side half of `DeviceCtx::request_irq`: the driver's handler
+    /// The family-side half of `Device::request_irq`: the driver's handler
     /// closure calls this and maps the result to `driver_base::IrqAction`
     /// (the same shape `VirtIoNetIrqWorker::service` has). This is
     /// deliberately NOT a host registration trait — nothing in this crate is

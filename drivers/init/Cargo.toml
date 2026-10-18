@@ -26,6 +26,7 @@ virtio-mmio = ["dep:drv-virtio", "drv-virtio/blk", "drv-virtio/net", "drv-virtio
 ramdisk = ["dep:drv-block"]
 ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
 fixed-clock = ["dep:drv-clk"]
+fixed-factor = ["dep:drv-clk", "drv-clk/fixed-factor"]
 
 [dependencies]
 driver_base = { workspace = true }
@@ -34,7 +35,7 @@ khal.workspace = true
 pci.workspace = true
 of.workspace = true
 log.workspace = true
-subsys_block = { workspace = true }
+subsys_block_host = { workspace = true }
 drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
