@@ -13,7 +13,7 @@ documentation.workspace = true
 default = []
 
 [dependencies]
-subsys_block = { workspace = true }
+subsys_block.workspace = true
 chrono = { workspace = true }
 fatfs = { workspace = true, features = ["alloc", "lfn"] }
 fs_block.workspace = true
