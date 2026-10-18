@@ -6,7 +6,7 @@
 
 use alloc::vec;
 
-use subsys_block::KError;
+use kerrno::KError;
 use unittest::def_test;
 
 use crate::{

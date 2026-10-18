@@ -1,5 +1,8 @@
 # procfs - Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 `/proc/devices` combines hardware topology records with snapshots of named
 KVFS cdev registrations. Virtual tty name/major values come from successful
 registrations, not hardcoded entries. Failed or removed cdevs are absent from
@@ -29,7 +32,7 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
 | `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
-| `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `driver-base` domain snapshots (`global_topology_summary`) |
+| `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
 | `src/sysrq_nodes/root.rs` | Optional task-backtrace trigger |
 | `src/irq_nodes/root.rs` | Empty registration stub; no interrupts file yet |
@@ -182,6 +185,14 @@ are rendered as `00:00`. Several status/memory fields and non-cgroup namespace
 identities are placeholders. Mount reporting uses synthetic device identities
 and is not a globally frozen namespace snapshot. `printk` uses X-Kernel log-level
 values, not Linux console-loglevel semantics.
+
+`/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
+(the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the
+`kidentity` PID-namespace counter for pid, and the fixed initial user
+namespace for user). These counters are independent, so a collision across
+subsystems is possible; Linux avoids it with one global nsfs inode space.
+A shared namespace-inode registry is a prerequisite for nsfs-style magic
+symlinks and bind-mount identity.
 
 ## Drop and Resource Release
 
