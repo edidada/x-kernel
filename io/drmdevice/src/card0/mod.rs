@@ -36,6 +36,7 @@ pub(crate) mod auth;
 pub(crate) mod blob;
 pub(crate) mod fb;
 pub(crate) mod gem;
+pub(crate) mod ids;
 pub(crate) mod ioctl;
 pub(crate) mod kms;
 pub(crate) mod present;
@@ -44,6 +45,7 @@ pub(crate) use auth::*;
 pub(crate) use blob::*;
 pub(crate) use fb::*;
 pub(crate) use gem::*;
+pub(crate) use ids::*;
 pub(crate) use ioctl::*;
 pub(crate) use kms::*;
 pub(crate) use present::*;
@@ -233,16 +235,16 @@ pub struct DrmCard {
     /// `commit_lock` -> `state` -> the inner maps `apply_prop` touches.
     commit_lock: Mutex<()>,
     legacy_crtc: Mutex<LegacyCrtcState>,
-    dumbs: Mutex<BTreeMap<u32, DumbBuffer>>,
+    dumbs: Mutex<BTreeMap<DumbHandle, DumbBuffer>>,
     next_dumb_handle: AtomicU32,
     next_offset: AtomicU64,
-    fbs: Mutex<BTreeMap<u32, Framebuffer>>,
+    fbs: Mutex<BTreeMap<FbId, Framebuffer>>,
     next_fb_id: AtomicU32,
     next_resource_id: AtomicU32,
-    blobs: Mutex<BTreeMap<u32, Arc<Vec<u8>>>>,
+    blobs: Mutex<BTreeMap<BlobId, Arc<Vec<u8>>>>,
     mode_id_blob_ref: Mutex<Option<Arc<Vec<u8>>>>,
     next_blob_id: AtomicU32,
-    system_blobs: Mutex<BTreeMap<u32, Arc<Vec<u8>>>>,
+    system_blobs: Mutex<BTreeMap<BlobId, Arc<Vec<u8>>>>,
     in_formats_blob: AtomicU32,
     system_blobs_init: Mutex<()>,
     retained_pages: Mutex<BTreeMap<u64, Arc<GlobalPage>>>,
@@ -299,10 +301,10 @@ impl DrmCard {
             return cur;
         }
         let bytes = build_in_formats_blob();
-        let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
+        let id = BlobId::from_wire(self.next_blob_id.fetch_add(1, Ordering::Relaxed));
         self.system_blobs.lock().insert(id, Arc::new(bytes));
-        self.in_formats_blob.store(id, Ordering::Release);
-        id
+        self.in_formats_blob.store(id.wire(), Ordering::Release);
+        id.wire()
     }
 }
 

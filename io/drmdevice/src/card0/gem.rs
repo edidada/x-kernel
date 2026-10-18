@@ -94,7 +94,7 @@ pub(crate) fn ioctl_drm_mode_create_dumb(
     let handle = dev.next_dumb_handle.fetch_add(1, Ordering::Relaxed);
 
     dev.dumbs.lock().insert(
-        handle,
+        DumbHandle::from_wire(handle),
         DumbBuffer {
             width: c.width,
             height: c.height,
@@ -116,7 +116,7 @@ pub(crate) fn ioctl_drm_mode_map_dumb(
     let offset = dev
         .dumbs
         .lock()
-        .get(&m.handle)
+        .get(&DumbHandle::from_wire(m.handle))
         .map(|b| b.offset)
         .ok_or(VfsError::InvalidInput)?;
     m.offset = offset;
@@ -128,14 +128,19 @@ pub(crate) fn ioctl_drm_mode_destroy_dumb(
     _file: &Arc<DrmFile>,
     d: &mut DrmModeDestroyDumb,
 ) -> VfsResult<usize> {
-    let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
+    let Some(resource_id) = dev
+        .dumbs
+        .lock()
+        .get(&DumbHandle::from_wire(d.handle))
+        .map(|b| b.resource_id)
+    else {
         return Ok(0);
     };
     // Resolve the display device *before* mutating guest state: if it is
     // gone, fail the ioctl instead of dropping the backing while the host
     // still holds a scanout resource for it (dangling backing + leak).
     let device = dev.display()?;
-    dev.dumbs.lock().remove(&d.handle);
+    dev.dumbs.lock().remove(&DumbHandle::from_wire(d.handle));
     if let Err(err) = device.destroy_scanout_resource(resource_id) {
         log::warn!(
             "drm: failed to destroy scanout resource {}: {:?}",

@@ -118,7 +118,7 @@ pub(crate) fn ioctl_drm_mode_set_crtc(
         *dev.legacy_crtc.lock() = LegacyCrtcState::default();
         return Ok(0);
     }
-    if c.fb_id == 0 || !dev.fbs.lock().contains_key(&c.fb_id) {
+    if c.fb_id == 0 || !dev.fbs.lock().contains_key(&FbId::from_wire(c.fb_id)) {
         return Err(VfsError::InvalidInput);
     }
     if c.count_connectors == 0 || c.set_connectors_ptr.is_null() {
@@ -143,7 +143,7 @@ pub(crate) fn ioctl_drm_mode_set_crtc(
         x: c.x,
         y: c.y,
     };
-    dev.present_fb(c.fb_id);
+    dev.present_fb(FbId::from_wire(c.fb_id));
     Ok(0)
 }
 
@@ -194,10 +194,10 @@ pub(crate) fn ioctl_drm_mode_crtc_page_flip(
     _file: &Arc<DrmFile>,
     f: &mut DrmModeCrtcPageFlip,
 ) -> VfsResult<usize> {
-    if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
+    if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&FbId::from_wire(f.fb_id)) {
         return Err(VfsError::InvalidInput);
     }
-    dev.present_fb(f.fb_id);
+    dev.present_fb(FbId::from_wire(f.fb_id));
     if f.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
         dev.queue_flip_event(f.user_data);
     }
@@ -248,7 +248,7 @@ pub(crate) fn ioctl_drm_mode_connector_set_property(
     }
     set_one_property(
         dev,
-        DRM_MODE_OBJECT_CONNECTOR,
+        DrmObjectType::Connector,
         req.connector_id,
         req.prop_id,
         req.value,
@@ -256,7 +256,7 @@ pub(crate) fn ioctl_drm_mode_connector_set_property(
 }
 
 /// DRM_IOCTL_MODE_OBJ_SETPROPERTY = DRM_IOWR(0xBA, struct
-///  // drm_mode_obj_set_property): 24 bytes after alignment, not 20.
+/// drm_mode_obj_set_property): 24 bytes after alignment, not 20.
 pub(crate) fn ioctl_drm_mode_obj_set_property(
     dev: &DrmCard,
     _file: &Arc<DrmFile>,
@@ -265,10 +265,13 @@ pub(crate) fn ioctl_drm_mode_obj_set_property(
     // The object type travels in the request, so it has to agree with the id.
     // This is the check MODE_ATOMIC applies to every entry of its object list,
     // and it is what stops a client from writing a plane property onto the CRTC.
-    if object_type_of(req.obj_id) != Some(req.obj_type) {
+    let Some(obj_type) = DrmObjectType::from_wire(req.obj_type) else {
+        return Err(VfsError::NotFound);
+    };
+    if DrmObjectType::of_resource_id(req.obj_id) != Some(obj_type) {
         return Err(VfsError::NotFound);
     }
-    set_one_property(dev, req.obj_type, req.obj_id, req.prop_id, req.value)
+    set_one_property(dev, obj_type, req.obj_id, req.prop_id, req.value)
 }
 
 /// Write one property from a non-atomic entry point.
@@ -292,7 +295,7 @@ pub(crate) fn ioctl_drm_mode_obj_set_property(
 /// `MODE_ATOMIC` all answer alike and a client cannot tell which one it used.
 pub(crate) fn set_one_property(
     dev: &DrmCard,
-    obj_type: u32,
+    obj_type: DrmObjectType,
     obj_id: u32,
     prop_id: u32,
     value: u64,
@@ -328,7 +331,7 @@ pub(crate) fn set_one_property(
     }
     drop(state);
     if current_fb != 0 {
-        dev.present_fb(current_fb);
+        dev.present_fb(FbId::from_wire(current_fb));
     }
     Ok(0)
 }
@@ -421,7 +424,7 @@ pub(crate) fn ioctl_drm_mode_atomic(
     let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
     let mut idx = 0;
     for (obj_i, &obj_id) in objs.iter().enumerate() {
-        let obj_type = object_type_of(obj_id).ok_or(VfsError::NotFound)?;
+        let obj_type = DrmObjectType::of_resource_id(obj_id).ok_or(VfsError::NotFound)?;
         for _ in 0..counts[obj_i] {
             let prop_id = props[idx];
             let value = values[idx];
@@ -450,7 +453,7 @@ pub(crate) fn ioctl_drm_mode_atomic(
         *dev.mode_id_blob_ref.lock() = new_ref;
     }
     if current_fb != 0 {
-        dev.present_fb(current_fb);
+        dev.present_fb(FbId::from_wire(current_fb));
     }
     if a.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
         dev.queue_flip_event(a.user_data);
@@ -521,7 +524,10 @@ impl DrmCard {
         if request.flags & DRM_MODE_CURSOR_BO != 0 && request.handle != 0 {
             if request.width == 0
                 || request.height == 0
-                || !self.dumbs.lock().contains_key(&request.handle)
+                || !self
+                    .dumbs
+                    .lock()
+                    .contains_key(&DumbHandle::from_wire(request.handle))
             {
                 return Err(VfsError::InvalidInput);
             }
@@ -537,7 +543,7 @@ impl DrmCard {
 
     pub(crate) fn apply_prop(
         &self,
-        obj_type: u32,
+        obj_type: DrmObjectType,
         _obj_id: u32,
         prop_id: u32,
         value: u64,
@@ -545,61 +551,66 @@ impl DrmCard {
         new_mode_blob: &mut Option<Option<Arc<Vec<u8>>>>,
     ) -> VfsResult<bool> {
         match (obj_type, prop_id) {
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_TYPE) => {
+            (DrmObjectType::Plane, PROP_PLANE_TYPE) => {
                 if value != DRM_PLANE_TYPE_PRIMARY {
                     return Err(VfsError::InvalidInput);
                 }
             }
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_FB_ID) => {
+            (DrmObjectType::Plane, PROP_PLANE_FB_ID) => {
                 let fb = value as u32;
-                if fb != 0 && !self.fbs.lock().contains_key(&fb) {
+                if fb != 0 && !self.fbs.lock().contains_key(&FbId::from_wire(fb)) {
                     return Err(VfsError::InvalidInput);
                 }
                 s.plane_fb_id = fb;
             }
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_CRTC_ID) => {
+            (DrmObjectType::Plane, PROP_PLANE_CRTC_ID) => {
                 let c = value as u32;
                 if c != 0 && c != CRTC_ID {
                     return Err(VfsError::InvalidInput);
                 }
                 s.plane_crtc_id = c;
             }
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_SRC_X) => s.plane_src_x = value,
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_SRC_Y) => s.plane_src_y = value,
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_SRC_W) => s.plane_src_w = value,
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_SRC_H) => s.plane_src_h = value,
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_CRTC_X) => {
+            (DrmObjectType::Plane, PROP_PLANE_SRC_X) => s.plane_src_x = value,
+            (DrmObjectType::Plane, PROP_PLANE_SRC_Y) => s.plane_src_y = value,
+            (DrmObjectType::Plane, PROP_PLANE_SRC_W) => s.plane_src_w = value,
+            (DrmObjectType::Plane, PROP_PLANE_SRC_H) => s.plane_src_h = value,
+            (DrmObjectType::Plane, PROP_PLANE_CRTC_X) => {
                 s.plane_crtc_x = checked_i32(value)? as i64;
             }
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_CRTC_Y) => {
+            (DrmObjectType::Plane, PROP_PLANE_CRTC_Y) => {
                 s.plane_crtc_y = checked_i32(value)? as i64;
             }
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_CRTC_W) => s.plane_crtc_w = value,
-            (DRM_MODE_OBJECT_PLANE, PROP_PLANE_CRTC_H) => s.plane_crtc_h = value,
-            (DRM_MODE_OBJECT_CRTC, PROP_CRTC_ACTIVE) => {
+            (DrmObjectType::Plane, PROP_PLANE_CRTC_W) => s.plane_crtc_w = value,
+            (DrmObjectType::Plane, PROP_PLANE_CRTC_H) => s.plane_crtc_h = value,
+            (DrmObjectType::Crtc, PROP_CRTC_ACTIVE) => {
                 if value > 1 {
                     return Err(VfsError::InvalidInput);
                 }
                 s.crtc_active = value;
             }
-            (DRM_MODE_OBJECT_CRTC, PROP_CRTC_MODE_ID) => {
+            (DrmObjectType::Crtc, PROP_CRTC_MODE_ID) => {
                 let blob = value as u32;
                 let arc = if blob == 0 {
                     None
                 } else {
-                    let arc = self.blobs.lock().get(&blob).cloned().or_else(|| {
-                        if s.crtc_mode_id == blob {
-                            self.mode_id_blob_ref.lock().clone()
-                        } else {
-                            None
-                        }
-                    });
+                    let arc = self
+                        .blobs
+                        .lock()
+                        .get(&BlobId::from_wire(blob))
+                        .cloned()
+                        .or_else(|| {
+                            if s.crtc_mode_id == blob {
+                                self.mode_id_blob_ref.lock().clone()
+                            } else {
+                                None
+                            }
+                        });
                     Some(arc.ok_or(VfsError::InvalidInput)?)
                 };
                 s.crtc_mode_id = blob;
                 *new_mode_blob = Some(arc);
             }
-            (DRM_MODE_OBJECT_CONNECTOR, PROP_CONN_CRTC_ID) => {
+            (DrmObjectType::Connector, PROP_CONN_CRTC_ID) => {
                 let c = value as u32;
                 if c != 0 && c != CRTC_ID {
                     return Err(VfsError::InvalidInput);
@@ -715,15 +726,6 @@ pub(crate) fn range_u32(name: &'static str, atomic: u32) -> PropMeta {
             min: 0,
             max: u32::MAX as u64,
         },
-    }
-}
-
-pub(crate) fn object_type_of(id: u32) -> Option<u32> {
-    match id {
-        CRTC_ID => Some(DRM_MODE_OBJECT_CRTC),
-        CONNECTOR_ID => Some(DRM_MODE_OBJECT_CONNECTOR),
-        PLANE_ID => Some(DRM_MODE_OBJECT_PLANE),
-        _ => None,
     }
 }
 

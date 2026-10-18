@@ -17,7 +17,9 @@ pub(crate) fn ioctl_drm_mode_create_blob(
     let len = c.length as usize;
     let bytes = c.data.load_vm_vec(len).map_err(|_| VfsError::BadAddress)?;
     let id = dev.next_blob_id.fetch_add(1, Ordering::Relaxed);
-    dev.blobs.lock().insert(id, Arc::new(bytes));
+    dev.blobs
+        .lock()
+        .insert(BlobId::from_wire(id), Arc::new(bytes));
     c.blob_id = id;
     Ok(0)
 }
@@ -27,12 +29,16 @@ pub(crate) fn ioctl_drm_mode_destroy_blob(
     _file: &Arc<DrmFile>,
     d: &mut DrmModeDestroyBlob,
 ) -> VfsResult<usize> {
-    if dev.system_blobs.lock().contains_key(&d.blob_id) {
+    if dev
+        .system_blobs
+        .lock()
+        .contains_key(&BlobId::from_wire(d.blob_id))
+    {
         return Err(VfsError::PermissionDenied);
     }
     dev.blobs
         .lock()
-        .remove(&d.blob_id)
+        .remove(&BlobId::from_wire(d.blob_id))
         .ok_or(VfsError::NotFound)?;
     Ok(0)
 }
@@ -42,13 +48,18 @@ pub(crate) fn ioctl_drm_mode_get_blob(
     _file: &Arc<DrmFile>,
     g: &mut DrmModeGetBlob,
 ) -> VfsResult<usize> {
-    let bytes = if let Some(b) = dev.blobs.lock().get(&g.blob_id).cloned() {
+    let bytes = if let Some(b) = dev.blobs.lock().get(&BlobId::from_wire(g.blob_id)).cloned() {
         b
     } else if g.blob_id == dev.state.lock().crtc_mode_id
         && let Some(b) = dev.mode_id_blob_ref.lock().clone()
     {
         b
-    } else if let Some(b) = dev.system_blobs.lock().get(&g.blob_id).cloned() {
+    } else if let Some(b) = dev
+        .system_blobs
+        .lock()
+        .get(&BlobId::from_wire(g.blob_id))
+        .cloned()
+    {
         b
     } else {
         return Err(VfsError::NotFound);

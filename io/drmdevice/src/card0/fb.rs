@@ -16,10 +16,11 @@ pub(crate) fn ioctl_drm_mode_dirty_fb(
     // its damage tracking enabled only when the generic path answers with
     // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
     // identifier before calling it.
-    if !dev.fbs.lock().contains_key(&dirty.fb_id) {
+    let fb_id = FbId::from_wire(dirty.fb_id);
+    if !dev.fbs.lock().contains_key(&fb_id) {
         return Err(VfsError::NotFound);
     }
-    dev.present_fb(dirty.fb_id);
+    dev.present_fb(fb_id);
     Ok(0)
 }
 
@@ -34,7 +35,7 @@ pub(crate) fn ioctl_drm_mode_rm_fb(
     _file: &Arc<DrmFile>,
     fb_id: &mut DrmModeRmFb,
 ) -> VfsResult<usize> {
-    dev.fbs.lock().remove(&fb_id.0);
+    dev.fbs.lock().remove(&FbId::from_wire(fb_id.0));
     {
         let mut legacy = dev.legacy_crtc.lock();
         if legacy.fb_id == fb_id.0 {
@@ -99,7 +100,7 @@ pub(crate) fn ioctl_drm_mode_fb_cmd2(
     }
     let (resource_id, width, height, pitch) = {
         let dumbs = dev.dumbs.lock();
-        let Some(b) = dumbs.get(&handle) else {
+        let Some(b) = dumbs.get(&DumbHandle::from_wire(handle)) else {
             return Err(VfsError::InvalidInput);
         };
         (b.resource_id, b.width, b.height, b.pitch)
@@ -123,7 +124,7 @@ pub(crate) fn ioctl_drm_mode_fb_cmd2(
             }
         }
     }
-    let fb_id = dev.next_fb_id.fetch_add(1, Ordering::Relaxed);
+    let fb_id = FbId::from_wire(dev.next_fb_id.fetch_add(1, Ordering::Relaxed));
     dev.fbs.lock().insert(
         fb_id,
         Framebuffer {
@@ -132,6 +133,6 @@ pub(crate) fn ioctl_drm_mode_fb_cmd2(
             height: f.height,
         },
     );
-    f.fb_id = fb_id;
+    f.fb_id = fb_id.wire();
     Ok(0)
 }

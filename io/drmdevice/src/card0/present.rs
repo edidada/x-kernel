@@ -90,7 +90,7 @@ pub(crate) fn ioctl_drm_wait_vblank(
 }
 
 impl DrmCard {
-    pub(crate) fn present_fb(&self, fb_id: u32) {
+    pub(crate) fn present_fb(&self, fb_id: FbId) {
         let (resource_id, width, height) = match self.fbs.lock().get(&fb_id) {
             Some(fb) => (fb.resource_id, fb.width, fb.height),
             None => return,
