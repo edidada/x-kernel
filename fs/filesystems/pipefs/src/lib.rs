@@ -15,9 +15,8 @@ use klazy::Once;
 use kvfs::{
     Dentry, DentryOperations, FMode, FileOperations, FileSystemType, Mount, NodeFlags,
     NodePermission, NodeType, OpenFlags, Umode, VfsFile, VfsInode, VfsInodeInit, VfsResult,
-    get_next_ino,
+    empty_inode_operations, get_next_ino,
     libfs::new_pseudo_super_block,
-    metadata_only_inode_operations,
     pipe::{PipeObject, pipe_file_operations},
 };
 use memaddr::PAGE_SIZE_4K;
@@ -107,7 +106,7 @@ fn new_pipe_inode(
     .with_stat_data(PAGE_SIZE_4K as u64, 0, timestamp, timestamp, timestamp);
     VfsInode::new_file_with_operations(
         pipe,
-        metadata_only_inode_operations(),
+        empty_inode_operations(),
         file_operations,
         NodeFlags::PRIVATE,
         init,

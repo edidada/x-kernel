@@ -10,16 +10,16 @@ components by the cdev registration API; virtual uevent attributes are read-only
 
 ## Analysis scope
 
-This analysis covers `src/lib.rs` and the kernel tests in `ut-tests/lib.rs`;
-no source module or test-only path is excluded. `kdevice` owns
+This analysis covers the entire crate, which currently consists of
+`src/lib.rs`; no source module or test-only path is excluded. `devnode` owns
 device-node identity, numbering, state, and ordered lifecycle callbacks;
-`kdevice-uevent` owns formatting and netlink delivery; KVFS owns filesystem
+`devnode-uevent` owns formatting and netlink delivery; KVFS owns filesystem
 dispatch, user-copy, mount, and permission contracts at the external
 boundaries used here.
 
 ## Trust model
 
-Device descriptions are trusted kernel data copied from `kdevice`. Paths,
+Device descriptions are trusted kernel data copied from `devnode`. Paths,
 attributes, and uevents are visible to unprivileged user space. User space can
 supply only the action string written to a `uevent` file; it cannot select the
 message path, subsystem, device number, or properties.
@@ -58,7 +58,7 @@ projection escapes its mutex. VFS command callbacks capture owned values.
 ## Thread safety
 
 The device map and generated tree are protected by one projection mutex.
-`kdevice` invokes node callbacks outside its registry lock. Initialization
+`devnode` invokes node callbacks outside its registry lock. Initialization
 holds the sysfs projection lock while installing the callback and inserting the
 atomic snapshot; concurrent callbacks wait, so a remove event cannot be
 overtaken by stale snapshot insertion. A separate event mutex serializes each
@@ -66,7 +66,7 @@ tree update with its targeted VFS cache invalidation, preventing concurrent
 device callbacks from invalidating a newer projection state. Removal uses a
 per-projected-device reader-writer gate outside the projection mutex: ordinary
 attribute operations hold a read guard, while `Removing` takes the write guard
-after `kdevice` marks the node unavailable. This waits for old operations and
+after `devnode` marks the node unavailable. This waits for old operations and
 prevents new ones from passing their state check without creating a
 registry/projection lock cycle.
 

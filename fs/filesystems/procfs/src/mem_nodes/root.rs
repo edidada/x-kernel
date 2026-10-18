@@ -110,4 +110,14 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
 }
 
-unittest::path_mod_test!(tests, "../../ut-tests/mem_nodes_root.rs");
+#[unittest::mod_test]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::bytes_to_kib;
+
+    #[def_test]
+    fn test_bytes_to_kib_rounds_down() {
+        assert_eq!(bytes_to_kib(4097), 4);
+    }
+}
