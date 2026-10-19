@@ -27,19 +27,29 @@ ramdisk = ["dep:drv-block"]
 ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
 fixed-clock = ["dep:drv-clk"]
 fixed-factor = ["dep:drv-clk", "drv-clk/fixed-factor"]
+# RTC class + one backend per feature: the class carries the boot wall-clock
+# service, each feature compiles exactly one concrete clock in.
+rtc = ["dep:subsys_rtc"]
+rtc-pl031 = ["rtc", "dep:drv-rtc", "drv-rtc/pl031"]
+rtc-goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish"]
+rtc-cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos"]
+rtc-ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a"]
 
 [dependencies]
 driver_base = { workspace = true }
 driver_host.workspace = true
+kbuild_config = { workspace = true }
 khal.workspace = true
 pci.workspace = true
 of.workspace = true
 log.workspace = true
 subsys_block_host = { workspace = true }
+subsys_rtc = { workspace = true, optional = true }
 drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
+drv-rtc = { workspace = true, optional = true }
 
 [lints]
 workspace = true

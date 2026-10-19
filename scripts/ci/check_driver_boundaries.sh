@@ -26,10 +26,10 @@ report() {
 }
 
 # --- scope -----------------------------------------------------------------
-# Directories the L0/L1 rules apply to. bus/, firmware/, platform/,
-# core/driver-host, core/driver-compose and integration/ are host-side by role
-# and are deliberately NOT listed: the old flat deny-list flagged them, which
-# trained reviewers to ignore the whole document.
+# Directories the L0/L1 rules apply to. bus/, firmware/, console/,
+# clocksource/, irqchip/, perf/, drivers/host and drivers/init are host-side
+# (or boot-order-pinned) by role and are deliberately NOT listed: the old flat
+# deny-list flagged them, which trained reviewers to ignore the whole document.
 RULED_DIRS=(drivers/base drivers/common drivers/subsystems drivers/drv)
 
 # Host-kernel crates a ruled directory must not depend on directly.

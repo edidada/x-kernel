@@ -5,7 +5,8 @@
 > `drv/serial` 的 `pl011`（platform/DT 消费者）、`drv/clk` 的 `fixed_clock`（provider）、
 > `drv/virtio` 的 `blk`（PCI 消费者 + 类发布 + devnode）、
 > `net`（中断所有权）、`rng`（最小消费者）、
-> `drv/block` 的 `ramdisk`（板级静态设备）。
+> `drv/block` 的 `ramdisk`（板级静态设备）、
+> `drv/rtc` 的 `pl031`/`ls7a`（platform/DT + 板级静态两种发现方式，发布到模型内类）。
 
 ## 0. 转写流程（一个驱动的完整步骤）
 

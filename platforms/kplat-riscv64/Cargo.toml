@@ -10,7 +10,6 @@ repository.workspace = true
 
 [features]
 fp-simd = ["kcpu/fp-simd"]
-rtc = ["rtc_driver/goldfish"]
 smp = ["kplat/smp"]
 vmm = []
 
@@ -19,7 +18,6 @@ log = "0.4"
 
 irqchip_driver = { workspace = true }
 khal = { workspace = true }
-ktime = { workspace = true }
 console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kernel_boot = { workspace = true }
 kcpu = { workspace = true }
@@ -30,7 +28,6 @@ kiface = { workspace = true }
 kplat = { workspace = true }
 ktime_types = { workspace = true }
 of = { workspace = true }
-rtc_driver = { workspace = true }
 clocksource_driver = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]

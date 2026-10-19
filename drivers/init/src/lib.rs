@@ -49,6 +49,21 @@ pub fn init() {
     level3_drivers();
     level4_enumeration();
     level5_probe_storm();
+
+    // Seed the wall clock after the probe storm: RTCs are ordinary platform
+    // devices now, so this is the model's `late_initcall(rtc_hctosys)`.
+    // `ktime::initialize_realtime` is idempotent, so a platform that
+    // supplied an earlier sample keeps it.
+    #[cfg(feature = "rtc")]
+    rtc_hctosys();
+}
+
+/// Seed the kernel wall clock from the RTC class (Linux `rtc_hctosys`).
+#[cfg(feature = "rtc")]
+fn rtc_hctosys() {
+    if subsys_rtc::hctosys().is_none() {
+        log::warn!("driver-core: no RTC device supplied the boot wall clock");
+    }
 }
 
 fn level1_host_services() {
@@ -87,6 +102,14 @@ fn level3_drivers() {
     drv_serial::ns16550::register_mmio();
     #[cfg(feature = "serial-ns16550-ioport")]
     drv_serial::ns16550::register_ioport();
+    #[cfg(feature = "rtc-pl031")]
+    drv_rtc::pl031::register();
+    #[cfg(feature = "rtc-goldfish")]
+    drv_rtc::goldfish::register();
+    #[cfg(feature = "rtc-cmos")]
+    drv_rtc::cmos::register();
+    #[cfg(feature = "rtc-ls7a")]
+    drv_rtc::ls7a::register();
     #[cfg(feature = "virtio-mmio")]
     drv_virtio::mmio::register();
     #[cfg(feature = "ramdisk")]
@@ -307,9 +330,18 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
 #[cfg(feature = "serial-ns16550-ioport")]
 static COM_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 
+/// x86 CMOS clock command port; the data port follows it.
+#[cfg(feature = "rtc-cmos")]
+const RTC_CMOS_PORT: u16 = 0x70;
+
+/// LS7A RTC aperture size (the `RTC_PADDR` window).
+#[cfg(feature = "rtc-ls7a")]
+const RTC_LS7A_SIZE: usize = 0x1000;
+
 /// Board-static devices (no firmware description): the compose layer is
-/// the only registrar since the legacy backend went away — the ramdisk and
-/// the x86 COM ports both live here.
+/// the only registrar since the legacy backend went away — the ramdisk,
+/// the derived clock, the x86 COM ports and the board-static RTCs all live
+/// here.
 fn enumerate_static_devices() {
     #[cfg(feature = "ramdisk")]
     {
@@ -343,6 +375,52 @@ fn enumerate_static_devices() {
         match global_domain().add_device(descriptor) {
             Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
             Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+        }
+    }
+
+    // The x86 CMOS clock has no firmware description: the board-static
+    // descriptor states the architecture-defined command/data port pair,
+    // and the driver refuses to run if the hardware model disagrees with
+    // the board description.
+    #[cfg(feature = "rtc-cmos")]
+    {
+        let mut resources = ResourceMap::new();
+        resources.push_kind(ResourceKind::IoPort(driver_base::IoPortRange {
+            base: RTC_CMOS_PORT,
+            size: 2,
+        }));
+        let descriptor = DeviceDescriptor::new(
+            <PlatformBus as Bus>::ID,
+            alloc::boxed::Box::new(PlatformBusData::static_config(0x10, "rtc-cmos")),
+        )
+        .with_resources(resources);
+        match global_domain().add_device(descriptor) {
+            Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+            Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+        }
+    }
+
+    // Boards that describe the LS7A RTC only by the board-static aperture
+    // (the `RTC_PADDR` build parameter) instead of a device-tree node.
+    #[cfg(feature = "rtc-ls7a")]
+    {
+        if kbuild_config::RTC_PADDR == 0 {
+            log::warn!("driver-core: rtc-ls7a enabled but RTC_PADDR is unset; skipping");
+        } else {
+            let mut resources = ResourceMap::new();
+            resources.push_kind(ResourceKind::Mmio(driver_base::MmioRegion::new(
+                kbuild_config::RTC_PADDR as usize,
+                RTC_LS7A_SIZE,
+            )));
+            let descriptor = DeviceDescriptor::new(
+                <PlatformBus as Bus>::ID,
+                alloc::boxed::Box::new(PlatformBusData::static_config(0x11, "rtc-ls7a")),
+            )
+            .with_resources(resources);
+            match global_domain().add_device(descriptor) {
+                Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+                Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+            }
         }
     }
 

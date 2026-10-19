@@ -39,18 +39,6 @@ impl BootHandler {
         )]
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
-        #[cfg(feature = "rtc")]
-        {
-            // RTC init is best-effort: RK3588's RTC is a PMIC (rk806/hym8563
-            // over i2c), not the pl031 MMIO RTC this driver probes, so it
-            // typically finds nothing. Don't panic the whole boot over a
-            // missing RTC; just record it for bring-up diagnostics.
-            if let Some(sample) = rtc_driver::read_from_device_tree() {
-                ktime::initialize_realtime(sample);
-            } else {
-                kernel_boot::bootln!("rtc init skipped (non-fatal): no pl031 RTC in device tree");
-            }
-        }
         irqchip_driver::gic::init_from_device_tree();
         console_driver::register_input_irq_handler();
         #[cfg(feature = "nmi")]

@@ -42,15 +42,19 @@ projection. There is no separate class crate. Consumers import family
 items from their subsystem and model types from `driver-base`.
 
 Serial: `drv/serial/serial-core` is the UART family library (hardware,
-early-port handoff); `console/` is the printk-side consumer.
-`clocksource/`, `irqchip/`, `rtc/`, `perf/` are kernel-integrated
-drivers outside the model; `x86-apic` lives in `arch/`.
-Host-side trees — `core/driver-host`, `drivers/init`, `bus/`,
-`firmware/`, `platform/`, `integration/` — may use host-kernel crates freely;
-that is their role. The L0/L1 rules apply to `drivers/base`, `common/`,
-`subsystems/` and `drv/`.
+early-port handoff); `console/` is the printk-side consumer that must come
+up before the model and later publishes into the char class. `rtc/` was the
+first kernel-integrated driver migrated into the model: the class lives in
+`subsystems/rtc`, the backends in `drv/rtc`. `clocksource/`, `irqchip/` and
+`perf/` remain outside the model by boot order — see
+[Kernel-Integrated Drivers](#kernel-integrated-drivers-outside-the-model).
+`x86-apic` lives in `arch/`.
+Host-side trees — `drivers/host`, `drivers/init`, `bus/`, `firmware/`,
+`integration/`, `console/`, `clocksource/`, `irqchip/`, `perf/` — may use
+host-kernel crates freely; that is their role. The L0/L1 rules apply to
+`drivers/base`, `common/`, `subsystems/` and `drv/`.
 
-## Device Model and Host Bridge (`core/`)
+## Device Model and Host Bridge (`base/`, `host/`, `init/`)
 
 | Crate | Package | Role |
 |------|------|------|
@@ -61,36 +65,36 @@ that is their role. The L0/L1 rules apply to `drivers/base`, `common/`,
 ## Cross-Subsystem Foundations (`common/`)
 
 Only crates that several subsystems depend on by design — not a dumping
-ground. Anything class-specific belongs in `subsystems/`. All three are
+ground. Anything class-specific belongs in `subsystems/`. `devnode` is
 host-kernel-free (rule L0-b), which is what lets the model be tested against
 `MockServices`.
 
 | Crate | Package | Role |
 |------|------|------|
 | `common/devnode` | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, and the udev-visible uevent payload format. |
-| `subsystems/*` | `subsys-*` | Per-class stack: trait + class API (publish/find/subscribe) + hooks + node projection; `drv/serial/serial-core` is the UART family library. |
 
 ## Per-Class Subsystems (`subsystems/`)
 
 Contracts (APIs and published types) and services for one device class.
 
-`subsystems/block` owns the Gendisk model plus the completion waiting, the
-softirq reclaimer and the IRQ wiring under `dispatch/`. That split is the
-L0-b rule in practice: `BlockCompletionOperations` / `BlockWaiter` /
-`BlockSignals` are host-free contracts, while `dispatch::{wait,reclaimer}` are
-host services and legitimately use `kirq`/`ktask`/`kpoll`. The
-`contracts`-era pretense that the whole crate was a pure interface is gone with
-the directory name.
+`subsystems/block` owns the Gendisk model and the host-free contracts;
+`subsystems/block-host` owns the completion waiting, the softirq reclaimer
+and the IRQ wiring. That split is the L0-b rule in practice:
+`BlockCompletionOperations` / `BlockWaiter` /
+`BlockSignals` are host-free contracts, while `block-host`'s `wait` /
+`reclaimer` are host services and legitimately use `kirq`/`ktask`/`kpoll`.
 
 | Crate | Package |
 |------|------|
-| `subsystems/block` | `block` |
-| `subsystems/char` | `char_driver` |
-| `subsystems/display` | `display` |
-| `subsystems/hwrng` | `hwrng` |
-| `subsystems/input` | `input` |
-| `subsystems/net` | `net` |
-| `subsystems/vsock` | `vsock` |
+| `subsystems/block` | `subsys-block` (Gendisk model + host-free contracts) |
+| `subsystems/block-host` | `subsys-block-host` (wait / reclaimer services) |
+| `subsystems/char` | `subsys-char` |
+| `subsystems/display` | `subsys-display` |
+| `subsystems/hwrng` | `subsys-hwrng` |
+| `subsystems/input` | `subsys-input` |
+| `subsystems/net` | `subsys-net` |
+| `subsystems/rtc` | `subsys-rtc` |
+| `subsystems/vsock` | `subsys-vsock` |
 
 ## Concrete Drivers (`drv/`)
 
@@ -104,8 +108,9 @@ registration, and a Kconfig block.
 | `drv/virtio` | `drv-virtio` | `blk`, `net`, `rng`, `gpu`, `input`, `vsock`, `virtio_9p`, plus the `mmio` transport driver. |
 | `drv/virtio/devices` | `virtio-devices` | Shared virtio device-family constructors (`VirtIoBlkDev`, …) over the vendored `virtio-drivers` transport, implementing the class traits. A separate package because the HAL and class layers share it. |
 | `drv/serial` | `drv-serial` | `pl011`, `ns16550` (MMIO + I/O-port). |
-| `drv/clk` | `drv-clk` | `fixed_clock` (DT `fixed-clock` provider). |
+| `drv/clk` | `drv-clk` | `fixed_clock`, `fixed_factor` (DT clock providers). |
 | `drv/block` | `drv-block` | `ramdisk`. |
+| `drv/rtc` | `drv-rtc` | `pl031`, `goldfish`, `cmos`, `ls7a`; publishes into `subsys-rtc`'s class. |
 
 Drivers acquire resources through `Device` only, and publish providers through
 `Device::provide::<C>` (rule L1: two doors, no third). A driver registers itself
@@ -122,27 +127,29 @@ entry there.
 | `firmware/of` | `of` | Device-tree node discovery: `reg`/`reg-names`, `interrupts`/`interrupt-names`, `clocks`/`clock-names`, provider attributes. |
 | `firmware/acpi` | `acpi` | ACPI table parsing (MCFG, MADT, DSDT `_CRS`). |
 | `firmware/rs-fdtree` | `rs_fdtree` | The vendored FDT reader underneath `of`. |
+| `firmware/dice` | `dice-driver` | DICE handover-data reader shared by the TEE and devfs layers (crate name kept for compatibility; it parses firmware-provided data, it does not drive a device). |
 
-## Platform Drivers and Boot Integration (`platform/`)
+## Kernel-Integrated Drivers (outside the model)
 
-Hardware controller drivers and boot integration. Their long-term home is
-`drv/<family>` (console likewise landing beside the char subsystem), migrated
-one-by-one when touched.
+This group is deliberately outside the L0/L1 rules: none of these crates
+publishes through the device model, and each is boot-ordering-pinned or
+arch/BSP glue. A move into `drv/<family>` + `subsystems/<class>` is possible
+only when that pin is resolved — the RTC migration (see above) is the
+template for a driver that could move.
 
-| Crate | Package |
-|------|------|
-| `platform/console` | `console-driver` |
-| `platform/irqchip` | `irqchip-driver` |
-| `platform/timer` | `timer-driver` |
-| `platform/rtc` | `rtc-driver` |
-| `platform/x86-apic` | `x86-apic` |
-| `platform/aarch64-pmuv3` | `aarch64-pmuv3` |
-| `platform/dice` | `dice-driver` |
+| Directory | Package | Role | Why not in the model |
+|------|------|------|------|
+| `console/` | `console-driver` | Early-boot stdout adoption and the printk-side console path. | Runs in `early_driver_init` before the domain exists; later publishes into the char class. |
+| `clocksource/` | `clocksource-driver` | Architected timers (ARM generic, SBI, LAPIC/TSC). | The scheduler and workqueues need timekeeping before `driver-init` runs. |
+| `irqchip/` | `irqchip-driver` | Interrupt controllers (GIC v2/v3, RISC-V PLIC, x86 IO-APIC). | Registers into `kirq`, which `driver-base` sits **above**; IRQs are needed before the model's L1 host services. |
+| `perf/` | `aarch64-pmuv3` | AArch64 PMUv3 counter driver. | Arch PMU consumed by `platforms/kplat-aarch64` peripherals; no perf class exists yet. |
 
-`platform/irqchip` sits **below** `kirq`: irqchip drivers implement concrete
+`irqchip/` sits **below** `kirq`: irqchip drivers implement concrete
 controller behavior (configure, mask/unmask, claim, complete, priority, IPI
 delivery) through `kirq::IntrManagerIf`. Generic descriptor, mapping,
 registration, dispatch, softirq and threaded-IRQ semantics belong in `kirq`.
+`arch/x86-apic` (CPU interrupt infrastructure) is the one hardware driver
+that lives in `arch/` rather than `drivers/`.
 
 ## Integration (`integration/`)
 

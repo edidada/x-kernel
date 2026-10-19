@@ -66,12 +66,19 @@ Major areas:
     lives in `driver-base::class` with family instantiation in
     `subsystems/*`.
   - `subsystems/`: per-class APIs and services
-    (block/char/display/hwrng/input/net/vsock).
+    (block/char/display/hwrng/input/net/rtc/vsock).
   - `drv/`: concrete drivers, one subsystem crate per family, one module
-    per driver (`drv/virtio`, `drv/serial`, `drv/clk`, `drv/block`). The
+    per driver (`drv/virtio`, `drv/serial`, `drv/clk`, `drv/block`,
+    `drv/rtc`). The
     shared virtio family library is `drv/virtio/devices` (package
     `virtio-devices`).
-  - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing.
+  - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing and the DICE
+    handover reader (`firmware/dice`, package `dice-driver`).
+  - `console/`, `clocksource/`, `irqchip/`, `perf/`: kernel-integrated
+    drivers outside the model, pinned there by boot order or `kirq`
+    layering (`console` also publishes into the char class). `arch/x86-apic`
+    holds the CPU interrupt backend. `rtc` is the template for migrating
+    one into `subsystems/<class>` + `drv/<family>`.
   - `integration/`: framework -> kernel facilities (`uevent-netlink`); the
     kernel-capabilities -> framework direction is implemented by the
     provider inside `drivers/host`.

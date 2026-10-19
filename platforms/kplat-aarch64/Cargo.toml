@@ -16,7 +16,6 @@ ignored = ["kcpu"]
 [features]
 default = []
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
-rtc = ["rtc_driver/pl031"]
 smp = ["kplat/smp"]
 nmi = ["kplat/nmi"]
 nmi-pseudo = ["nmi", "irqchip_driver/nmi-pseudo"]
@@ -36,7 +35,6 @@ irqchip_driver = { workspace = true }
 kirq = { workspace = true, optional = true }
 of = { workspace = true }
 khal = { workspace = true }
-ktime = { workspace = true }
 kcpu = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
@@ -45,7 +43,6 @@ kplat = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
 klazy = { workspace = true }
-rtc_driver = { workspace = true }
 clocksource_driver = { workspace = true }
 memaddr = { workspace = true }
 unittest = { workspace = true }

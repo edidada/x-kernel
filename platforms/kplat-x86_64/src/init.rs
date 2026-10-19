@@ -42,21 +42,6 @@ impl BootHandler {
             ),
         );
         kernel_boot::bootln!("console driver init");
-        #[cfg(feature = "rtc")]
-        {
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
-                          cannot initialize; early_driver_init has no error return or recovery"
-            )]
-            let sample = rtc_driver::read(rtc_driver::RtcConfig::platform(
-                rtc_driver::RtcKind::Cmos,
-                rtc_driver::RtcSource::PlatformStatic,
-            ))
-            .expect("failed to read platform rtc");
-            ktime::initialize_realtime(sample);
-        }
-        kernel_boot::bootln!("rtc init");
     }
 
     fn final_init(_boot_info: &BootInfo) {

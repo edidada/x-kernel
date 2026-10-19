@@ -32,10 +32,12 @@ no user-space input.
   must carry a `regmap` phandle, `offset`, and `value`
   (`of::syscon_poweroff` returns `None` otherwise). Failure result: the
   terminal logs and halts instead of writing any register.
-- **RTC MMIO aperture**: mapped from the build-time `RTC_PADDR` for
-  `LS7A_RTC_SIZE` bytes; failure panics with the mapping error. The
-  sampled value is validated by the `rtc_driver` LS7A backend (year
-  consistency) before it reaches `ktime`.
+- **RTC MMIO aperture**: the composition root enumerates the LS7A RTC as a
+  board-static `rtc-ls7a` device whose MMIO resource comes from the
+  build-time `RTC_PADDR`; the `drv-rtc` LS7A driver maps it through the
+  framework resource door. A failed mapping is a probe failure (logged,
+  no panic); the sampled value is validated for year consistency before
+  `subsys-rtc` seeds `ktime`.
 - **Console device tree node**: parsed by `console_driver`; a parse
   failure panics in `early_driver_init` (a machine without a declared
   console cannot boot usefully).
@@ -71,7 +73,7 @@ no user-space input.
 |----|--------|--------|---------|------------------|
 | T-01 | Malformed `syscon-poweroff` node | Medium — power-off writes a wrong register | Corrupt or hostile DTB | `of::syscon_poweroff` requires a resolvable regmap phandle and offset/value properties; absence degrades to halt. Residual risk: a valid-but-lying declaration is indistinguishable from firmware truth. |
 | T-02 | Out-of-range external hwirq | Medium — writes into an unrelated controller vector | Bad IRQ number from above | Range gate in `IntrManagerIf::enable` against `PCH_PIC_IRQ_COUNT` plus backend-level re-checks (`eiointc`/`pch_pic` reject before access). |
-| T-03 | Invalid RTC sample (torn year) | Low — wall clock not initialized | LS7A TOY counters straddling new-year | `rtc_driver` LS7A backend re-samples until the year halves agree and rejects persistent instability; `early_driver_init` propagates the failure as a panic. |
+| T-03 | Invalid RTC sample (torn year) | Low — wall clock not initialized | LS7A TOY counters straddling new-year | The `drv-rtc` LS7A backend re-samples until the year halves agree and rejects persistent instability; `subsys-rtc::hctosys` logs the failure and boot continues without seeding the clock. |
 | T-04 | Spurious external IRQ line | Low — wasted IRQ cycle | Noise on a PCH PIC input | EIOINTC claim returns `None`; the dispatcher logs `"Spurious external IRQ"` and returns without dispatching. |
 | T-05 | `boot_ap` for an unmapped logical CPU | Medium — AP boots with a wrong context | CPU-id table missing an entry | Named panic in the `SysCtrl::boot_ap` provider before any mailbox write. |
 
@@ -79,7 +81,7 @@ no user-space input.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | RTC aperture mapping fails | Panic in `early_driver_init` | Boot fails | 2 | A machine whose RTC cannot be mapped cannot establish wall time. |
+| F-01 | RTC aperture mapping fails | Logged `drv-rtc` probe failure | Wall clock stays at the epoch base | 3 | Board configuration error; boot continues, `subsys-rtc::hctosys` logs the missing clock. |
 | F-02 | No `syscon-poweroff` declaration, or its register cannot be mapped | Warn + halt on power-off | Power stays on; system halted | 3 | Documented degradation path. |
 | F-03 | Console node parse failure | Panic in `early_driver_init` | Boot fails | 2 | A machine without a usable console aborts rather than running headless silently. |
 | F-04 | `notify_cpu` / `set_prio` called | `todo!()` panic | Offending caller aborts | 2 | Unimplemented capability (see Known Limitations); surfaced loudly instead of misrouting. |
@@ -100,9 +102,9 @@ no user-space input.
   otherwise pending device interrupts cannot complete blocked I/O. Device
   registration still controls the downstream per-device masks.
 - Backend hwirq range gates remain ahead of any IOCSR/MMIO access.
-- The RTC mapping size and address still come from `RTC_PADDR` /
-  `LS7A_RTC_SIZE`, and the sample still flows through
-  `rtc_driver::read` before `ktime`.
+- The RTC mapping address still comes from `RTC_PADDR` (the aperture size
+  is the composition root's `RTC_LS7A_SIZE`), and the sample still flows
+  through `subsys_rtc::hctosys` before `ktime`.
 - Power-off still reads its register and byte from the firmware
   declaration rather than machine constants.
 - Any new `kiface` provider method either has a real implementation or

@@ -139,10 +139,13 @@ config KFEAT_VIRTIO_BUS_MMIO
 endchoice
 
 config KFEAT_RTC
-    bool "RTC (Real Time Clock) Support"
+    bool "RTC (Real Time Clock) class support"
     default y
     help
-      Enable Real Time Clock driver subsystem.
+      Build the real-time clock class (subsys-rtc) and its boot wall-clock
+      seeding service. The class is a consumer contract; an actual clock
+      comes from one of the KFEAT_DRIVER_RTC_* backends. Without a backend
+      the class stays empty and the wall clock keeps its epoch base.
 
 config KFEAT_DISPLAY
     bool "Display Driver Support"
@@ -388,6 +391,43 @@ config KFEAT_DRIVER_SERIAL_NS16550_IOPORT
     help
       NS16550 x86 ISA COM port driver on the driver-core model.
 
+comment "Real-time clock drivers"
+
+config KFEAT_DRIVER_RTC_PL031
+    bool "PL031 RTC driver"
+    depends on KFEAT_RTC && ARCH_AARCH64
+    default y
+    help
+      ARM PrimeCell PL031 driver on the driver-core model: of-device-id
+      table (with the generic PrimeCell periphid fallback), MMIO mapping
+      through the Device resource door, RTC class publication.
+
+config KFEAT_DRIVER_RTC_GOLDFISH
+    bool "Goldfish RTC driver"
+    depends on KFEAT_RTC && ARCH_RISCV64
+    default y if MACHINE_RISCV64_QEMU
+    help
+      Goldfish virtual RTC driver (`google,goldfish-rtc`) on the
+      driver-core model.
+
+config KFEAT_DRIVER_RTC_CMOS
+    bool "CMOS RTC driver"
+    depends on KFEAT_RTC && ARCH_X86_64
+    default y if MACHINE_X86_64_QEMU
+    help
+      PC-compatible CMOS clock driver on the driver-core model. X86 has no
+      firmware description, so the composition root enumerates a
+      board-static `rtc-cmos` device carrying the fixed 0x70/0x71 port
+      pair.
+
+config KFEAT_DRIVER_RTC_LS7A
+    bool "LS7A RTC driver"
+    depends on KFEAT_RTC && ARCH_LOONGARCH64
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      Loongson LS7A TOY-counter RTC driver on the driver-core model.
+      Claims the device-tree node when present; otherwise the composition
+      root enumerates a board-static `rtc-ls7a` device from RTC_PADDR.
 
 comment "Filesystem transport drivers"
 

@@ -11,9 +11,10 @@ LoongArch machines (QEMU virt-class platforms).
 ## Responsibilities
 
 - Boot handoff: the `BootHandler` provider runs
-  `early_driver_init` (clock, interrupts, console from the device tree,
-  RTC sample seeding `ktime::initialize_realtime`) and per-CPU
-  `final_init` (timer enablement).
+  `early_driver_init` (clock, interrupts, console from the device tree)
+  and per-CPU
+  `final_init` (timer enablement). The RTC sample is no longer taken here;
+  the model seeds `ktime::initialize_realtime` after its probe storm.
 - Clock: the architectural stable counter (`Time::read`, `TCFG`
   registers) exposed as the `ClockSourceIf` / `ClockEventIf` providers,
   with a once-computed `NANOS_PER_TICK` conversion.
@@ -33,12 +34,15 @@ LoongArch machines (QEMU virt-class platforms).
 ## Non-Responsibilities
 
 - No device-tree parsing policy: firmware descriptions are consumed
-  through `of` / `rtc_driver` / `console_driver`; this crate owns no
-  parser.
+  through `of` / `console_driver`; this crate owns no
+  parser. The LS7A RTC aperture is described by the driver composition
+  root as a board-static `rtc-ls7a` device (see `RTC_PADDR`), not by this
+  crate.
 - No interrupt policy: which IRQ a device uses and how it is shared is
   `kirq`'s decision; this crate only gates and dispatches lines.
-- No wall-clock ownership: the RTC sample is taken here, but realtime
-  correlation belongs to `ktime`.
+- No wall-clock ownership: the RTC sample is taken by the `drv-rtc`
+  LS7A driver and seeded by `subsys-rtc` after the driver probe storm;
+  realtime correlation belongs to `ktime`.
 - No console implementation: UART drivers live in `console-driver`;
   this crate only calls its initialization entry points.
 - No wakeup/suspend support: S3 has no path and is reported as
@@ -85,8 +89,12 @@ or user-mode flags.
 ```text
 BootHandler (kiface)
   early_driver_init ─> time::early_init, irq::init (EIOINTC+PCH PIC),
-                       console from DT, RTC sample -> ktime
+                       console from DT
   final_init(_ap)   ─> per-CPU timer enablement (TCFG + IRQ 11)
+
+RTC (model path, after platform boot)
+  driver-init L4 ─> board-static rtc-ls7a from RTC_PADDR → drv-rtc probe
+  driver-init L5+ ─> subsys-rtc hctosys → ktime::initialize_realtime
 
 kirq::IntrManagerIf (kiface)
   enable:   Timer -> ECFG.LIE | Ex -> range gate -> EIOINTC + PCH PIC
@@ -105,8 +113,8 @@ other enabled CPU lines. Individual device lines remain gated by EIOINTC and
 PCH PIC; enabling a device alone cannot open the CPU parent gate.
 
 - `early_driver_init` runs on the boot hart before the driver model;
-  the RTC path maps its MMIO aperture through `memspace` and must run
-  after `memspace` is available.
+  the RTC aperture is mapped later by `drv-rtc`, through the model's
+  resource door.
 - `final_init_ap` runs per application CPU; `time::init_percpu` touches
   only CPU-local registers and enables the local timer IRQ.
 - `dispatch_irq` runs in interrupt context: it must not sleep or
@@ -128,9 +136,9 @@ PCH PIC; enabling a device alone cannot open the CPU parent gate.
 
 ## Error And Panic Model
 
-- Bring-up panics name the failure: a failed RTC aperture mapping
-  (`"failed to iomap ls7a rtc"`), a console parse failure, and a boot AP
-  without a raw CPU id mapping all abort loudly.
+- Bring-up panics name the failure: a console parse failure and a boot AP
+  without a raw CPU id mapping abort loudly. A failed RTC aperture mapping
+  is a logged probe failure instead (the clock stays at its epoch base).
 - Absence degrades: a firmware without `syscon-poweroff`, or a declared
   sleep-control register that cannot be mapped, falls back to halting
   with power kept; a spurious external IRQ logs and returns `None` to

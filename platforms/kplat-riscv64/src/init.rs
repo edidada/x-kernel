@@ -33,18 +33,6 @@ impl BootHandler {
             kcpu::init_hwprobe_from_fdt(fdt);
         }
         console_driver::register_input_irq_handler();
-        #[cfg(feature = "rtc")]
-        {
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the device-tree RTC \
-                          cannot supply the startup wall clock; early_driver_init has no error \
-                          return or recovery"
-            )]
-            let sample =
-                rtc_driver::read_from_device_tree().expect("failed to read rtc from device tree");
-            ktime::initialize_realtime(sample);
-        }
     }
 
     fn final_init(_boot_info: &BootInfo) {

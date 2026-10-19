@@ -1238,13 +1238,16 @@ dependencies = [
  "driver-host",
  "drv-block",
  "drv-clk",
+ "drv-rtc",
  "drv-serial",
  "drv-virtio",
+ "kbuild_config",
  "khal",
  "log",
  "of",
  "pci",
  "subsys-block-host",
+ "subsys-rtc",
 ]
 
 [[package]]
@@ -1286,6 +1289,22 @@ dependencies = [
  "driver-host",
  "kclk",
  "log",
+]
+
+[[package]]
+name = "drv-rtc"
+version = "0.3.0-dev"
+dependencies = [
+ "arm_pl031",
+ "chrono",
+ "driver-base",
+ "kerrno",
+ "ktime_types",
+ "log",
+ "riscv_goldfish",
+ "subsys-rtc",
+ "unittest",
+ "x86_rtc",
 ]
 
 [[package]]
@@ -2397,6 +2416,7 @@ dependencies = [
  "driver-init",
  "drv-block",
  "drv-clk",
+ "drv-rtc",
  "drv-serial",
  "drv-virtio",
  "entropy",
@@ -2680,12 +2700,10 @@ dependencies = [
  "klazy",
  "kplat",
  "kspin",
- "ktime",
  "lazyinit",
  "log",
  "memaddr",
  "of",
- "rtc-driver",
  "unittest",
 ]
 
@@ -2696,7 +2714,6 @@ dependencies = [
  "console-driver",
  "kaddr_layout",
  "karch",
- "kbuild_config",
  "kcpu",
  "kcpu_id_map",
  "kernel-boot",
@@ -2706,14 +2723,12 @@ dependencies = [
  "kirq",
  "kplat",
  "kspin",
- "ktime",
  "ktime_types",
  "lazyinit",
  "log",
  "loongArch64",
  "memspace",
  "of",
- "rtc-driver",
  "unittest",
 ]
 
@@ -2741,11 +2756,9 @@ dependencies = [
  "khal",
  "kiface",
  "kplat",
- "ktime",
  "ktime_types",
  "log",
  "of",
- "rtc-driver",
  "sbi-rt",
 ]
 
@@ -2770,11 +2783,9 @@ dependencies = [
  "klazy",
  "kplat",
  "kspin",
- "ktime",
  "ktime_types",
  "log",
  "multiboot2",
- "rtc-driver",
  "x86-apic",
  "x86_64",
 ]
@@ -4552,22 +4563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-driver"
-version = "0.3.0-dev"
-dependencies = [
- "arm_pl031",
- "chrono",
- "khal",
- "ktime_types",
- "log",
- "memspace",
- "of",
- "riscv_goldfish",
- "unittest",
- "x86_rtc",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5076,6 +5071,17 @@ dependencies = [
  "ksync",
  "log",
  "unittest",
+]
+
+[[package]]
+name = "subsys-rtc"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "ktime",
+ "ktime_types",
+ "log",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 ## 定位
 
 驱动框架的**组合根**（composition root）。全树只有 `core/kruntime` 的主核初始化
-调用它一次（`driver_compose::init()`），它负责三件事：
+调用它一次（`driver_init::init()`），它负责：
 
 1. 安装主机运行时并把 deferred-probe 唤醒钩子接到全局域；
 2. 注册所有编译进来的驱动（`module_init` 等价物，一行一个，按 cargo feature 门控）；
@@ -23,7 +23,7 @@
 - 总线后端 → `bus/pci`（PCI 发现）+ 本 crate 的固件枚举；
 - 每个驱动的 glue → `drv/<family>/<module>.rs` 的 `register()`；
 - block 完成/回收/IRQ 走线 → `subsystems/block::dispatch`；
-- provider 持有 → `core/driver-host`。
+- provider 持有 → `drivers/host`。
 
 ## 范围
 
@@ -35,7 +35,8 @@
 | `enumerate_firmware_nodes_direct()` | 遍历 `of::fdt()` 的**全部**节点，逐节点构造 `khal::firmware::devices::FirmwareDevice` |
 | `build_descriptor()` | `FirmwareDevice` → `DeviceDescriptor`（命名资源表 + 完整 compatible 列表 + provider 属性） |
 | `next_firmware_node_id()` | 单调 `AtomicU32` 分配 `DeviceLocation::FirmwareNode{id}`，带耗尽拒绝 |
-| `enumerate_static_devices()` | ramdisk（alias 认领）+ x86 四个 ISA COM 口（带 `IoPortRange`） |
+| `enumerate_static_devices()` | ramdisk、派生时钟、x86 四个 ISA COM 口（带 `IoPortRange`）、板级静态 RTC（`rtc-cmos` / `rtc-ls7a`） |
+| `rtc_hctosys()` | probe storm 之后从 `subsys_rtc::RTC` 取采样播种墙钟（Linux `late_initcall(rtc_hctosys)`） |
 | `pci_discover()` | 任一 virtio-* 开启时调 `pci::discover::discover(global_domain())` |
 | `map_trigger()` | `firmware::InterruptTrigger` → `driver_base::IrqTrigger` |
 
@@ -46,7 +47,7 @@ core/kruntime 主核初始化
   workqueue 就绪 → fs_boot::init_device_discovery()
         │
         ▼
-  driver_compose::init()
+  driver_init::init()
         │
         ├─1─ driver_host::Host::install_global()
         │       └─ 域装上 DeviceServices；wake 钩子 = global_domain().wake
@@ -54,22 +55,25 @@ core/kruntime 主核初始化
         ├─2─ 驱动注册（feature 门控，一行一个）
         │       fixed_clock → pl011 → virtio_blk(先 reclaimer::init)
         │       → virtio_{net,rng,gpu,input,vsock,9p}
-        │       → ns16550_{mmio,ioport} → virtio_mmio → ramdisk
+        │       → ns16550_{mmio,ioport} → rtc_{pl031,goldfish,cmos,ls7a}
+        │       → virtio_mmio → ramdisk
         │
         ├─3─ enumerate_firmware_devices()   // DT 全节点
-        │    enumerate_static_devices()     // ramdisk + COM 口
+        │    enumerate_static_devices()     // ramdisk + COM 口 + 板级静态 RTC
         │    pci_discover()                 // PCI 层级
         │       └─ 每次 add_device 都触发一轮 probe_pending
         │
-        └─4─ log 汇总 + deferred_report() + finish_probe_phase(false)
+        ├─4─ log 汇总 + deferred_report() + finish_probe_phase(false)
+        │
+        └─5─ rtc_hctosys()                  // 墙钟播种（RTC 类非空时）
         │
         ▼
   ktty::tty::try_handoff_console() → entropy → init_cb → fb/input → fs → net
 ```
 
 前一个邻居（`fs_boot::init_device_discovery()`）与后一个邻居
-（`try_handoff_console()`）在旧框架下完全相同；重构建时唯一改动的那一行是
-`kdriver::init_drivers()` → `driver_compose::init()`。
+（`try_handoff_console()`）在旧框架下完全相同；重构建后入口是
+`driver_init::init()`。
 
 ## 调用约束 / 执行上下文
 

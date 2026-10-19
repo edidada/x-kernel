@@ -105,7 +105,7 @@ input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 char = ["kruntime/char", "devfs/serial"]
 
 # Real Time Clock (RTC) Driver.
-rtc = ["kruntime/rtc"]
+rtc = ["kruntime/rtc", "driver-init/rtc"]
 
 # Device drivers
 #
@@ -139,6 +139,11 @@ driver_console_ns16550_ioport = ["dep:console_driver", "console_driver/ns16550-i
 driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-init/serial-pl011", "driver-init/fixed-clock", "char", "dep:console_driver", "console_driver/pl011"]
 driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-init/serial-ns16550-mmio", "char", "dep:console_driver", "console_driver/ns16550-mmio"]
 driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-init/serial-ns16550-ioport", "char", "dep:console_driver", "console_driver/ns16550-ioport"]
+# RTC class plus one backend per driver feature (KFEAT_DRIVER_RTC_*).
+driver_rtc_pl031 = ["rtc", "dep:drv-rtc", "drv-rtc/pl031", "driver-init/rtc-pl031"]
+driver_rtc_goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish", "driver-init/rtc-goldfish"]
+driver_rtc_cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos", "driver-init/rtc-cmos"]
+driver_rtc_ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a", "driver-init/rtc-ls7a"]
 
 # Backtrace
 # In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
@@ -209,27 +214,16 @@ drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
+drv-rtc = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 kdma.workspace = true
 pci = { workspace = true }
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
-kplat-aarch64 = { workspace = true, optional = true, features = [
-    "fp-simd",
-    "rtc",
-] }
-kplat-x86_64 = { workspace = true, optional = true, features = [
-    "fp-simd",
-    "rtc",
-] }
-kplat-riscv64 = { workspace = true, optional = true, features = [
-    "fp-simd",
-    "rtc",
-] }
-kplat-loongarch64 = { workspace = true, optional = true, features = [
-    "fp-simd",
-    "rtc",
-] }
+kplat-aarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-x86_64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-riscv64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-loongarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
 kexec = { workspace = true }
 devfs = { workspace = true }
 entropy = { workspace = true, optional = true }

@@ -287,6 +287,17 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
     driver_init::init();
+    // The RTC drivers are ordinary model devices now, so the wall clock is
+    // seeded by `driver_init::init()` (its `rtc_hctosys` step) before this
+    // banner runs. Printing it after the probe storm matches Linux's late
+    // `rtc_hctosys` ordering.
+    #[cfg(feature = "rtc")]
+    kprintln!(
+        "Boot at {}\n",
+        chrono::DateTime::from_timestamp_nanos(
+            i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX)
+        ),
+    );
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
 
@@ -437,13 +448,6 @@ pub fn rust_main(arg: usize) -> ! {
     khal::early_driver_init();
 
     kprintln!("{}", LOGO);
-    #[cfg(feature = "rtc")]
-    kprintln!(
-        "Boot at {}\n",
-        chrono::DateTime::from_timestamp_nanos(
-            i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX)
-        ),
-    );
 
     klogger::init_klogger();
     klogger::set_log_level(resolve_boot_log_level());
