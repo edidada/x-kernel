@@ -146,15 +146,28 @@ pub struct DeviceSnapshot {
     pub identity: Option<alloc::string::String>,
 }
 
+/// Domain-unique driver registration key: monotonic, never reused.
+///
+/// The identity behind `BindingState::attempted`. Keys are handed out at
+/// registration and stay valid as NAMES even if a registration is someday
+/// withdrawn: identity is a token, not the object's address — an address
+/// is only a lifetime-scoped borrow of it, and reused addresses (ABA)
+/// would silently alias a failed registration onto its successor. The
+/// fatal verdict belongs to the DEFINITION, and identity does not depend
+/// on drivers being immortal. Domain-local: attempted sets and the
+/// registry are domain-internal bookkeeping (unlike `DeviceId`, which
+/// must be globally unique because owner-keyed global registries exist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DriverKey(u64);
+
 trait AnyDriver: Send + Sync {
     fn name(&self) -> &'static str;
-    /// The bus this driver is registered for — the cheap rejection before
-    /// any vocabulary work.
-    #[expect(
-        dead_code,
-        reason = "reserved: pre-filter before the vtable call once hot"
-    )]
+    /// The bus this driver is registered for — the cheap rejection
+    /// before any vocabulary work, and half the duplicate-registration
+    /// check (bus type + name).
     fn bus_id(&self) -> BusId;
+    /// The registration key the domain handed out for this driver.
+    fn key(&self) -> DriverKey;
     fn matches(&self, data: &dyn BusDeviceData) -> MatchScore;
     fn probe(
         &self,
@@ -175,6 +188,7 @@ trait AnyDriver: Send + Sync {
 
 struct RegisteredDriver<B: Bus, P: crate::driver::DriverOps<B>> {
     desc: crate::driver::DriverDesc<B, P>,
+    key: DriverKey,
 }
 
 impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P> {
@@ -184,6 +198,10 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
 
     fn bus_id(&self) -> BusId {
         B::ID
+    }
+
+    fn key(&self) -> DriverKey {
+        self.key
     }
 
     fn matches(&self, data: &dyn BusDeviceData) -> MatchScore {
@@ -270,10 +288,6 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
     }
 }
 
-fn driver_key(driver: &Arc<dyn AnyDriver>) -> usize {
-    Arc::as_ptr(driver) as *const u8 as usize
-}
-
 /// One concrete bus instance (see [`BusInstanceId`](crate::BusInstanceId)): created by a bus
 /// controller/bridge driver (or the composition root for a root bus),
 /// anchoring the devices discovered on it. Removing the BRIDGE device
@@ -330,8 +344,12 @@ struct LifecycleState {
 struct BindingState {
     driver: Option<Arc<dyn AnyDriver>>,
     data: Option<Box<DataBox>>,
-    /// Drivers that failed this device permanently (ptr keys).
-    attempted: Vec<usize>,
+    /// Driver registrations that failed this device permanently.
+    ///
+    /// Keys are never reused ([`DriverKey`] is monotonic), so entries
+    /// stay harmless even if a registration is someday withdrawn —
+    /// identity does not depend on drivers being immortal.
+    attempted: Vec<DriverKey>,
 }
 
 /// Topology state domain of [`DeviceEntry`].
@@ -429,6 +447,9 @@ struct DomainInner {
     next_device_id: u64,
     services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
+    /// Allocation cursor for [`DriverKey`]s (domain-local: keys are
+    /// only ever compared against this domain's own registries).
+    next_driver_key: u64,
     devices: BTreeMap<u64, DeviceEntry>,
     /// The probe-scheduling protocol's state (the DependencyWaiter data
     /// domain): one coherent unit — the queues and their generation

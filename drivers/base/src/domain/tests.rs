@@ -462,6 +462,38 @@ fn same_score_later_registration_wins() {
     assert_eq!(domain.snapshot(id).unwrap().driver, Some("tie-b"));
 }
 
+/// One driver definition, one registration (Linux `driver_register`
+/// returns -EBUSY for the same case): a second key over the same probe
+/// body would hand every device a second attempt after one Fatal
+/// failure, because the twin key is not in the device's `attempted` set.
+#[def_test(serial)]
+fn duplicate_registration_is_rejected() {
+    PROBES.store(0, Ordering::Relaxed);
+    let (domain, services) = fresh_domain();
+    services.publish_clk(0x42);
+    assert!(domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer)));
+    assert!(!domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer)));
+
+    let id = domain.add_device(test_descriptor()).expect("add device");
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+    // Exactly one probe body ran for the device.
+    assert_eq!(PROBES.load(Ordering::Relaxed), 1);
+}
+
+/// The Fatal verdict belongs to the driver DEFINITION. Re-registering
+/// the same definition must not resurrect the device's matching
+/// candidates under a second key.
+#[def_test(serial)]
+fn duplicate_registration_cannot_retry_a_fatal_device() {
+    let (domain, _services) = fresh_domain();
+    assert!(domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver)));
+    let id = domain.add_device(test_descriptor()).expect("add device");
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+
+    assert!(!domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver)));
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+}
+
 /// Topology: with_parent links entries, removal cascades
 /// children-first (the child's teardown completes before the parent's
 /// begins), and the parent's children list stays accurate after.

@@ -35,8 +35,9 @@ pub struct DeviceDescriptor {
     /// when the bus has instances. Validated at `add_device`: the
     /// instance must exist and its type must equal `bus`.
     pub bus_instance: Option<BusInstanceId>,
-    /// Bus-specific device data (identity, firmware facts, discovery
-    /// source) — the bus's vocabulary, opaque to the core.
+    /// Bus-specific device data (identity, discovery source) — the
+    /// bus's vocabulary, opaque to the core. The firmware property
+    /// snapshot is the descriptor's own `fw` field, not bus vocabulary.
     pub data: Box<dyn BusDeviceData>,
     /// The parent device (the topology link). The domain validates the
     /// parent exists at `add_device` time and cascades removals through

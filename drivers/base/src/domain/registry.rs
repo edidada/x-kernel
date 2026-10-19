@@ -26,6 +26,7 @@ impl DeviceDomain {
             probing: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
+                next_driver_key: 0,
                 bus_instances: BTreeMap::new(),
                 sched: SchedulingState {
                     pending: Vec::new(),
@@ -49,14 +50,35 @@ impl DeviceDomain {
     }
 
     /// Register a driver and immediately probe anything waiting for it.
+    ///
+    /// Returns whether the registration was accepted. Duplicates (same
+    /// bus type AND name — Linux `driver_register`'s `-EBUSY` case) are
+    /// rejected: a second key over the same probe body would give every
+    /// device a second attempt after one Fatal failure (the twin key is
+    /// not in the device's `attempted` set), and would make the
+    /// `DeviceCore` driver-name identity card ambiguous.
     pub fn register_driver<B: Bus, P: crate::driver::DriverOps<B>>(
         &self,
         desc: crate::driver::DriverDesc<B, P>,
-    ) {
+    ) -> bool {
         {
             let mut inner = self.inner.lock();
+            if inner
+                .drivers
+                .iter()
+                .any(|d| d.bus_id() == B::ID && d.name() == desc.name)
+            {
+                log::error!(
+                    "driver-core: duplicate registration of `{}` on bus `{}` ignored",
+                    desc.name,
+                    B::ID.name()
+                );
+                return false;
+            }
+            let key = DriverKey(inner.next_driver_key);
+            inner.next_driver_key += 1;
             let name = desc.name;
-            inner.drivers.push(Arc::new(RegisteredDriver { desc }));
+            inner.drivers.push(Arc::new(RegisteredDriver { desc, key }));
             // Resweep: an Unclaimed device is a per-registration-generation
             // verdict, not a terminal one. A driver registered later (module
             // load, rebind) must be able to claim it; otherwise runtime
@@ -68,7 +90,7 @@ impl DeviceDomain {
                 .filter(|(_, entry)| entry.lifecycle.state == DeviceState::Unclaimed)
                 .filter(|(_, entry)| {
                     inner.drivers.iter().any(|candidate| {
-                        !entry.binding.attempted.contains(&driver_key(candidate))
+                        !entry.binding.attempted.contains(&candidate.key())
                             && candidate.matches(entry.desc.data.as_ref()) != MatchScore::NoMatch
                     })
                 })
@@ -86,6 +108,7 @@ impl DeviceDomain {
             );
         }
         self.probe_pending();
+        true
     }
 
     /// Insert an enumeration product and probe it eagerly.

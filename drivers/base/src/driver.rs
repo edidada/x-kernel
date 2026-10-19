@@ -75,10 +75,12 @@ macro_rules! declare_driver {
     };
     ($bus:ty, $driver:ident, $name:literal, $ids:expr => $register:ident) => {
         /// Registration entry point called by the composition root.
-        pub fn $register() {
+        /// Returns whether the registration was accepted (`false`: a
+        /// driver of the same name is already registered on this bus).
+        pub fn $register() -> bool {
             let desc: $crate::DriverDesc<$bus, $driver> =
                 $crate::DriverDesc::new($name, $ids, $driver);
-            $crate::global_domain().register_driver(desc);
+            $crate::global_domain().register_driver(desc)
         }
     };
 }

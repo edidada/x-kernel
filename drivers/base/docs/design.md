@@ -288,6 +288,22 @@ let Some(service) = dev.env().extension::<PciTransportService>() else { … };
 线程"的半支持变体会在主机适配层静默降级成 `Handled`，让驱动以为自己跑在任务
 上下文、实际跑在中断上下文。要加就和一个真的 threaded-IRQ 通道一起加。
 
+### 驱动身份是注册键，不是对象地址
+
+`DriverKey` 是域内单调分配、永不复用的注册序号，`BindingState::attempted`（设备
+的永久失败历史）以它为键。身份安全性因此不依赖"驱动永生"假设：地址只能作
+生命周期限定的对象借用，一旦允许注销，地址复用（ABA）会把一次失败注册静默
+别名到它的继任者身上；键不复用使历史里的死键无害。键是域内的——`attempted`
+和注册表都是域内部簿记，不像 `DeviceId` 因 owner-keyed 全局注册表而必须全局
+唯一。
+
+驱动注册按（总线类型， 名字）去重并拒绝（Linux `driver_register` 对同一情形
+返回 `-EBUSY`）：同一 probe 体出现两个键，一次 Fatal 失败会留下仍匹配的孪生
+键，让每个设备把同一个 probe 跑两遍；per 总线名字唯一同时保证 `DeviceCore`
+驱动名身份卡无歧义。同分 tie-break：`select_batch` 用 `max_by_key` 在注册序
+Vec 上取最高分，平分时后注册者胜——这是显式决定，由
+`same_score_later_registration_wins` 钉住。
+
 ## Drop / 资源释放
 
 **约定：所有 guard 存进 `Data`，字段声明顺序就是释放顺序**（Rust 按声明顺序

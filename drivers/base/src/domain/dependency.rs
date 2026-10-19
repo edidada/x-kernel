@@ -121,7 +121,7 @@ impl DeviceDomain {
     /// the device requeues if another driver might still claim it, else
     /// turns Unclaimed.
     pub(super) fn record_failure(inner: &mut DomainInner, id: u64, driver: &Arc<dyn AnyDriver>) {
-        let attempted_key = driver_key(driver);
+        let attempted_key = driver.key();
         let Some(entry) = inner.devices.get_mut(&id) else {
             return;
         };
@@ -129,7 +129,7 @@ impl DeviceDomain {
         let retryable = inner
             .drivers
             .iter()
-            .filter(|candidate| !entry.binding.attempted.contains(&driver_key(candidate)))
+            .filter(|candidate| !entry.binding.attempted.contains(&candidate.key()))
             .any(|candidate| candidate.matches(entry.desc.data.as_ref()) != MatchScore::NoMatch);
         if retryable {
             entry.lifecycle.state = DeviceState::Pending;

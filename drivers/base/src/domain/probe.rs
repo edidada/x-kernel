@@ -123,7 +123,7 @@ impl DeviceDomain {
             let best = inner
                 .drivers
                 .iter()
-                .filter(|driver| !attempted.contains(&driver_key(driver)))
+                .filter(|driver| !attempted.contains(&driver.key()))
                 .map(|driver| (driver.clone(), driver.matches(desc.data.as_ref())))
                 .filter(|(_, score)| *score != MatchScore::NoMatch)
                 .max_by_key(|(_, score)| *score)
