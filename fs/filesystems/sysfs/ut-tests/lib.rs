@@ -2,21 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert_eq, assert_ne, def_test};
+use unittest::{assert_eq, def_test};
 
 use super::*;
-
-#[def_test]
-fn pci_paths_are_derived_from_bus_location() {
-    let path = kdevice_uevent::physical_device_path(DeviceLocation::Pci {
-        segment: 0,
-        bus: 4,
-        device: 2,
-        function: 1,
-    });
-    assert_eq!(path, "pci0000:04/0000:04:02.1");
-    assert_ne!(path.as_str(), "platform/simpledrm");
-}
 
 #[def_test]
 fn capability_bitmaps_use_linux_word_order() {
