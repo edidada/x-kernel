@@ -21,7 +21,7 @@ use crate::{
     network::{
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot, Ipv4AddressSet, PrimaryAddrChange},
         ipv4::{self, Ipv4Error, Ipv4Header},
-        router::{RouteTable, Rule},
+        router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
     },
     runtime::tx_queue::DataTxQueue,
     stack::device::StackDevice,
@@ -334,7 +334,12 @@ impl Router {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        match self.ipv4_addrs.set_primary(dev, addr)? {
+        match self.ipv4_addrs.set_primary(Ipv4AddrEntry {
+            dev,
+            addr,
+            scope: ROUTE_SCOPE_UNIVERSE,
+            broadcast: None,
+        })? {
             PrimaryAddrChange::Unchanged => return Ok(()),
             PrimaryAddrChange::Added => {}
             PrimaryAddrChange::Replaced(old) => self.remove_ipv4_source_state_if_unowned(old),

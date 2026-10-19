@@ -10,7 +10,7 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
-    network::router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE},
+    network::router::ROUTE_SCOPE_HOST,
 };
 
 fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {

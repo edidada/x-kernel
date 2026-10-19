@@ -15,7 +15,6 @@ use kerrno::LinuxError;
 use crate::{
     device::NetDeviceId,
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
-    network::router::ROUTE_SCOPE_UNIVERSE,
 };
 
 /// An IPv4 address configured on a network interface.
@@ -110,35 +109,32 @@ impl Ipv4AddressSet {
         Ok(true)
     }
 
-    /// Replaces the primary address, resetting its scope and broadcast override.
+    /// Replaces the primary address with the caller-supplied entry.
     /// Setting the same local address preserves all existing attributes.
     pub(crate) fn set_primary(
         &mut self,
-        dev: NetDeviceId,
-        addr: Ipv4Cidr,
+        entry: Ipv4AddrEntry,
     ) -> Result<PrimaryAddrChange, LinuxError> {
-        if !addr.address().is_unicast() {
+        if !entry.addr.address().is_unicast() {
             return Err(LinuxError::EINVAL);
         }
-        let entry = Ipv4AddrEntry {
-            dev,
-            addr,
-            scope: ROUTE_SCOPE_UNIVERSE,
-            broadcast: None,
-        };
-        let Some(index) = self.entries.iter().position(|entry| entry.dev == dev) else {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|existing| existing.dev == entry.dev)
+        else {
             self.insert(entry)?;
             return Ok(PrimaryAddrChange::Added);
         };
         let old = self.entries[index];
-        if old.addr.address() == addr.address() {
+        if old.addr.address() == entry.addr.address() {
             return Ok(PrimaryAddrChange::Unchanged);
         }
         if self
             .entries
             .iter()
             .skip(index + 1)
-            .any(|entry| entry.dev == dev && entry.addr == addr)
+            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
         {
             return Err(LinuxError::EEXIST);
         }
