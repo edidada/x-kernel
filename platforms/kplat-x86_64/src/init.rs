@@ -27,7 +27,7 @@ impl BootHandler {
 
     fn early_driver_init() {
         clocksource_driver::x86_lapic_tsc::early_init(
-            clocksource_driver::x86_lapic_tsc::TimerConfig::platform_static(
+            clocksource_driver::x86_lapic_tsc::LapicTimerConfig::platform_static(
                 ktime_types::Frequency::from_hz(TIMER_FREQUENCY_HZ as u64),
             ),
         );

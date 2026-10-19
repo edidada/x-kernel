@@ -15,7 +15,7 @@ impl BootHandler {
 
     fn early_driver_init() {
         clocksource_driver::riscv_sbi::init(
-            clocksource_driver::riscv_sbi::TimerConfig::platform_static(
+            clocksource_driver::riscv_sbi::SbiTimerConfig::platform_static(
                 irqchip_driver::riscv::S_TIMER,
                 ktime_types::Frequency::from_hz(10_000_000),
             ),
