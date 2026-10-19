@@ -369,8 +369,8 @@ Avoid:
 
 Repository examples:
 
-- [drivers/arm-gic/src/gicv3.rs](/home/laoyekang/code/x-kernel/drivers/arm-gic/src/gicv3.rs:121)
-- [drivers/platform/console/src/ns16550_mmio.rs](/home/laoyekang/code/x-kernel/drivers/platform/console/src/ns16550_mmio.rs:1)
+- [drivers/irqchip/src/gicv3.rs](/home/laoyekang/code/x-kernel/drivers/irqchip/src/gicv3.rs:121)
+- [drivers/drv/serial/serial-core/src/ns16550_mmio.rs](/home/laoyekang/code/x-kernel/drivers/drv/serial/serial-core/src/ns16550_mmio.rs:1)
 
 Relevant standard references:
 

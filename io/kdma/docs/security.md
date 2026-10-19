@@ -48,7 +48,7 @@ device callbacks, user pointers, or network/file inputs in this crate):
 
 A production call site exercising `allocate_dma_memory` /
 `deallocate_dma_memory` is the driver-host provider
-`drivers/core/driver-host/src/provider/dma.rs`
+`drivers/host/src/provider/dma.rs`
 (`alloc_coherent` / `free_coherent`), which drivers reach through
 `Device::alloc_coherent` (the `CoherentMem` guard).
 

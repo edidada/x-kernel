@@ -11,7 +11,7 @@
 //! secondary serial / UART expansion cards, and runtime handoff wrappers for
 //! boot-time devices.
 //!
-//! The early-boot console (`drivers/platform/console`) still comes up on its dedicated
+//! The early-boot console (`drivers/console`) still comes up on its dedicated
 //! boot path before the bus manager and driver registry exist. Runtime code
 //! may later *reuse* that already-initialized console by exposing a thin
 //! `CharDevice` wrapper through the generic pipeline; the boot sequence itself

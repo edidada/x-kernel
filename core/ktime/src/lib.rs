@@ -7,8 +7,9 @@
 //! `ktime` is the system timekeeping owner: it derives realtime from the
 //! monotonic hardware clock exposed by [`khal::time`] plus a clock
 //! correlation, and owns cumulative sleep time, initialization, updates, and reads.
-//! `khal` stays a pure hardware time source; the `drivers/platform/rtc` crate only
-//! provides persistent-clock samples that boot code passes to
+//! `khal` stays a pure hardware time source; the `subsys-rtc` class and its
+//! `drv-rtc` drivers only
+//! provide persistent-clock samples that boot code passes to
 //! [`initialize_realtime`].
 //!
 //! Semantics:

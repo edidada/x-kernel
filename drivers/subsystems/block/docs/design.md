@@ -138,7 +138,7 @@ A waiter is not shared across tasks. Signals can be called from IRQ context and
 retain no request, data, or device pointers. Waiting-resource preparation and
 admission registration may return errors, but the terminal wait after submission
 does not register again or return wait errors. The VirtIO implementation lives in
-`virtio::blk`; `kdriver` supplies waiting and IRQ/softirq integration. Other drivers
+`virtio::blk`; `subsys-block-host` supplies waiting and IRQ/softirq integration. Other drivers
 can adopt these contracts without filesystem changes.
 
 `QueueLimits` is the block core's sole source of device geometry. Backends
@@ -204,7 +204,7 @@ no geometry or capacity state.
   to the concrete backend behind `BlockDeviceOperations` (for example
   `virtio::blk`); the core only validates and routes.
 - No IRQ wiring or completion threading: waiting, admission, and
-  IRQ/softirq delivery are owned by `kdriver`'s block host providers;
+  IRQ/softirq delivery are owned by `subsys-block-host`;
   this crate defines the contracts only.
 - No page-cache algorithm or cache ownership: the disk owns the shared
   readahead budget; file windows, cached pages, byte-level adaptation, durability
@@ -314,7 +314,7 @@ the duration of outstanding I/O instead of waiting for a completion event.
 - Behavior: reusable concrete driver crates remain independent from X-Kernel
   host-kernel implementation crates for host-specific capabilities.
 - Acceptance: dependency metadata and imports show no new direct dependency from
-  `drivers/devices/virtio` to host crates such as `kirq`, `ktask`, `kwork`,
+  `drivers/drv/virtio` to host crates such as `kirq`, `ktask`, `kwork`,
   `khal`, `memspace`, `kdma`, or `kruntime`.
 
 ### REQ-BLKIRQ-10: Demonstrate reduced CPU waste under delayed I/O.
@@ -345,8 +345,8 @@ waiting and deferred execution. `block` defines the shared contracts without
 owning hardware tokens or scheduler objects. Filesystem callers use
 `BlockDevice`/`Gendisk`, never a VirtIO-specific wait or interrupt API.
 
-- [VirtIO transactions and resource lifetime](../../../devices/virtio/docs/design.md)
-- [Host waiting, IRQ dispatch and removal](../../../integration/kdriver/docs/design.md)
+- [VirtIO transactions and resource lifetime](../../../drv/virtio/devices/docs/design.md)
+- [Host waiting, IRQ dispatch and removal](../../block-host/src/lib.rs)
 
 ## Staged Migration And Test Boundaries
 

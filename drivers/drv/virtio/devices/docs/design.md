@@ -278,7 +278,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
    - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
    - 通过 provider 的 `IrqOp::map_irq()` 将硬件 IRQ 映射为虚拟 IRQ
-     （实现位于 `core/driver-host/src/provider/irq.rs::resolve_irq_spec`，
+     （实现位于 `drivers/host/src/provider/irq.rs::resolve_irq_spec`，
      由 `probe_pci_transport_with` 注入 provider；本 crate 只声明契约）
 4. 其他架构：通过设备树或固定映射获取 IRQ
    - aarch64：`pci::legacy_interrupt_route()` 获取设备树路由，按触发类型创建 GIC 描述符

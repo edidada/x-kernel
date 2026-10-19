@@ -38,7 +38,7 @@ configuration so that `kirq` stays architecture-neutral.
 ## Scope
 
 ```text
-drivers/platform/irq/
+drivers/irqchip/
 ├── src/
 │   ├── lib.rs      # architecture dispatch (cfg per target)
 │   ├── gic.rs      # AArch64: discovery, mapping, IntrManagerIf, NMI

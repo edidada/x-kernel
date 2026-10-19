@@ -2,7 +2,7 @@
 
 ## Scope
 
-`drivers/core/driver-host/src/`：`lib.rs`、`provider/{mod,mmio,irq,dma}.rs`、
+`drivers/host/src/`：`lib.rs`、`provider/{mod,mmio,irq,dma}.rs`、
 `clk.rs`、`virtio_hal.rs`、`virtio_transport.rs`。
 
 这是驱动框架里**唯一**直接调用 `memspace` / `kirq` / `kdma` / `khal` / `kclk`

@@ -5,7 +5,7 @@
 X-Kernel 唯一的设备模型核心。它拥有 bus/device/driver 三类契约、const id 表、
 deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceServices`）。
 
-依赖它的层：`core/driver-host`（实现服务契约）、`drivers/init`（组合根）、
+依赖它的层：`drivers/host`（实现服务契约）、`drivers/init`（组合根）、
 `common/devnode`（复用 `DeviceLocation`）、`bus/pci`（实现 `Bus`）、
 `drv/**`（实现 `DriverOps`）。
 
