@@ -9,7 +9,7 @@
 //! atomic-KMS path (`MODE_ATOMIC` + blob properties) used by modern compositors.
 
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::String,
     sync::{Arc, Weak},
@@ -233,6 +233,39 @@ pub struct DrmCard {
     /// Always taken before `state`, never while holding it, so the order is
     /// `commit_lock` -> `state` -> the inner maps `apply_prop` touches.
     commit_lock: Mutex<()>,
+    /// The framebuffer `present_fb` last put on screen.
+    ///
+    /// `state.plane_fb_id` records what a client asked for, but `MODE_DIRTYFB`
+    /// presents without touching it, so the binding alone cannot answer "is
+    /// this framebuffer still on screen?".
+    presented_fb: AtomicU32,
+    /// The scanout resource `present_fb` last handed to the host, or 0.
+    ///
+    /// Retirement has to keep this resource alive: this driver has no "stop
+    /// scanning" call, so the host keeps scanning the last resource it was
+    /// given until another one is presented.  "No framebuffer references it"
+    /// is therefore not enough on its own.
+    presented_resource: AtomicU32,
+    /// Resources whose scanout state is unknown.
+    ///
+    /// `present_fb` issues `TRANSFER_TO_HOST_2D`, `SET_SCANOUT` and
+    /// `RESOURCE_FLUSH`; when one of them fails there is no way to tell how far
+    /// the host got, so the new resource joins this set and the previous scanout
+    /// target is still in `presented_resource`; both are held back from
+    /// retirement.  A set rather than a slot, because several failed presents can
+    /// pile up before one succeeds.  The next successful present settles all of
+    /// them at once: this driver has a single scanout slot (`SET_SCANOUT` replaces
+    /// the target), so nothing in the set can still be on screen afterwards.
+    unsettled: Mutex<BTreeSet<u32>>,
+    /// Dumb buffers whose handle was closed while a registered framebuffer
+    /// still named their scanout resource.
+    ///
+    /// A framebuffer only copies the resource id out of the dumb buffer, so the
+    /// resource and its backing have to outlive the handle.  Parked here and
+    /// destroyed by the last framebuffer that references them (`RMFB` /
+    /// `MODE_CLOSEFB`), which is the ordering the GEM object refcount gives
+    /// Linux for free.
+    retired_dumbs: Mutex<BTreeMap<u32, DumbBuffer>>,
     dumbs: Mutex<BTreeMap<DumbHandle, DumbBuffer>>,
     next_dumb_handle: AtomicU32,
     next_offset: AtomicU64,
@@ -259,6 +292,10 @@ impl DrmCard {
             sequence: AtomicU32::new(0),
             state: Mutex::new(ModesetState::default()),
             commit_lock: Mutex::new(()),
+            presented_fb: AtomicU32::new(0),
+            presented_resource: AtomicU32::new(0),
+            unsettled: Mutex::new(BTreeSet::new()),
+            retired_dumbs: Mutex::new(BTreeMap::new()),
             dumbs: Mutex::new(BTreeMap::new()),
             next_dumb_handle: AtomicU32::new(FIRST_DUMB_HANDLE),
             next_offset: AtomicU64::new(DUMB_BUFFER_OFFSET_STRIDE),

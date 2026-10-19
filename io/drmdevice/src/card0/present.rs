@@ -110,7 +110,29 @@ impl DrmCard {
                 resource_id,
                 err
             );
+            // The host may already have switched (a later command in the same
+            // call can be the one that failed), so the new resource is held back
+            // as well: retirement skips both markers until a present succeeds.
+            self.unsettled.lock().insert(resource_id);
+            return;
         }
+        // Remember what is actually being scanned out: `MODE_CLOSEFB` has to
+        // refuse to close a framebuffer that a page flip or a dirtyfb put up
+        // there, and neither of those records itself anywhere else.  The
+        // resource is recorded too, because retirement has to keep scanning
+        // targets alive after their framebuffer is gone.
+        self.presented_fb.store(fb_id.wire(), Ordering::Relaxed);
+        self.presented_resource
+            .store(resource_id, Ordering::Relaxed);
+        // A successful `SET_SCANOUT` replaces the one and only scanout target, so
+        // every earlier "unknown" resource is now provably off screen: the set can
+        // be dropped wholesale, otherwise an entry whose framebuffer is closed
+        // later would never be retired.  The resource just presented is tracked by
+        // `presented_resource` from here on.
+        self.unsettled.lock().clear();
+        // A new scanout target is up, so parked buffers that nothing else
+        // names may now be retired.
+        self.sweep_retired_dumbs();
     }
 
     pub(crate) fn queue_flip_event(&self, user_data: u64) {

@@ -580,6 +580,7 @@ impl DrmCard {
     {
         let _commit = self.commit_lock.lock();
         let mut state = self.state.lock();
+        let previous_fb = state.plane_fb_id;
         let mut proposed = *state;
         let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
         mutate(self, &mut proposed, &mut new_mode_blob)?;
@@ -591,6 +592,13 @@ impl DrmCard {
         drop(state);
         if current_fb != 0 {
             self.present_fb(FbId::from_wire(current_fb));
+        } else if previous_fb != 0 {
+            // Unbinding the plane tears the scanout down, so `MODE_CLOSEFB`
+            // must no longer refuse the framebuffer that was up there.  The
+            // resource marker stays: this driver has no call that stops the
+            // host from scanning it, so it is retired by the next present of
+            // another resource (`sweep_retired_dumbs`).
+            self.presented_fb.store(0, Ordering::Relaxed);
         }
         Ok(())
     }

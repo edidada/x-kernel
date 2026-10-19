@@ -37,6 +37,7 @@ macro_rules! for_each_drm_ioctl {
             (0x01, iowr, DrmUnique, ioctl_drm_unique),
             (0x0c, iowr, DrmGetCap, ioctl_drm_get_cap),
             (0x0d, iow, DrmSetClientCap, ioctl_drm_set_client_cap),
+            (0x09, iow, DrmGemClose, ioctl_drm_gem_close),
             (0x02, iowr, DrmAuth, ioctl_drm_auth),
             (0x03, iowr, DrmAuthMagic, ioctl_drm_auth_magic),
             (0xB1, iowr, DrmModeDirtyFb, ioctl_drm_mode_dirty_fb),
@@ -67,6 +68,7 @@ macro_rules! for_each_drm_ioctl {
             (0xBB, iowr, DrmModeCursor2, ioctl_drm_mode_cursor2),
             (0xAE, iowr, DrmModeFbCmd, ioctl_drm_mode_fb_cmd),
             (0xB8, iowr, DrmModeFbCmd2, ioctl_drm_mode_fb_cmd2),
+            (0xD0, iowr, DrmModeCloseFb, ioctl_drm_mode_close_fb),
         }
     };
 }

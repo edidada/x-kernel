@@ -16,6 +16,10 @@ pub(crate) fn ioctl_drm_mode_dirty_fb(
     // its damage tracking enabled only when the generic path answers with
     // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
     // identifier before calling it.
+    //
+    // Serialize with `MODE_CLOSEFB`: it decides "still on screen" partly from
+    // the `presented_fb` marker, which the present below updates.
+    let _commit = dev.commit_lock.lock();
     let fb_id = FbId::from_wire(dirty.fb_id);
     if !dev.fbs.lock().contains_key(&fb_id) {
         return Err(VfsError::NotFound);
@@ -35,15 +39,61 @@ pub(crate) fn ioctl_drm_mode_rm_fb(
     _file: &Arc<DrmFile>,
     fb_id: &mut DrmModeRmFb,
 ) -> VfsResult<usize> {
-    dev.fbs.lock().remove(&FbId::from_wire(fb_id.0));
-    // Destroying the displayed framebuffer blanks the scanout, matching what
-    // the legacy-only reader used to do to its mirror state.
-    dev.commit(|_, s, _| {
-        if s.plane_fb_id == fb_id.0 {
-            s.plane_fb_id = 0;
-        }
-        Ok(())
-    })?;
+    let fb_id = FbId::from_wire(fb_id.0);
+    // Same lock as `MODE_CLOSEFB`: the retirement below reads the scanout
+    // markers, which a concurrent present updates under this lock.
+    let _commit = dev.commit_lock.lock();
+    let removed = dev.fbs.lock().remove(&fb_id);
+    // Detach the committed plane binding without presenting: the framebuffer
+    // is already gone, so there is nothing left to put on screen, and `RMFB`
+    // does not refresh a different framebuffer that may still be bound.
+    let mut state = dev.state.lock();
+    if state.plane_fb_id == fb_id.wire() {
+        state.plane_fb_id = 0;
+    }
+    drop(state);
+    // This may have been the last framebuffer naming a dumb buffer whose
+    // handle was closed earlier; that is when its resource is destroyed.
+    if let Some(fb) = removed {
+        retire_unused_dumb(dev, fb.resource_id);
+    }
+    Ok(0)
+}
+
+pub(crate) fn ioctl_drm_mode_close_fb(
+    dev: &DrmCard,
+    _file: &Arc<DrmFile>,
+    args: &mut DrmModeCloseFb,
+) -> VfsResult<usize> {
+    // `drm_mode_closefb_ioctl()`: a non-zero `pad` is EINVAL, an unknown
+    // framebuffer is ENOENT, and a framebuffer that is still on screen is
+    // EBUSY.  That in-use check is the whole difference from RMFB (0xAF),
+    // which this driver implements as an unconditional removal: CLOSEFB
+    // tells a client its framebuffer is still on screen instead of pulling
+    // the scanout out from under it.
+    //
+    // "On screen" has two sources: the plane binding committed through
+    // `MODE_SETCRTC` / `MODE_PAGE_FLIP` / `MODE_ATOMIC`, and whatever
+    // `present_fb` last put up -- `MODE_DIRTYFB` presents without committing
+    // a binding.
+    if args.pad != 0 {
+        return Err(VfsError::InvalidInput);
+    }
+    // `MODE_SETCRTC` and the commit path take this lock too, so the binding
+    // cannot change between the checks below and the removal.
+    let _commit = dev.commit_lock.lock();
+    let fb_id = FbId::from_wire(args.fb_id);
+    let Some(resource_id) = dev.fbs.lock().get(&fb_id).map(|fb| fb.resource_id) else {
+        return Err(VfsError::NotFound);
+    };
+    let bound = dev.state.lock().plane_fb_id == args.fb_id;
+    let presented = dev.presented_fb.load(Ordering::Relaxed) == args.fb_id;
+    if bound || presented {
+        return Err(VfsError::ResourceBusy);
+    }
+    dev.fbs.lock().remove(&fb_id);
+    // May have been the last framebuffer naming a parked dumb buffer.
+    retire_unused_dumb(dev, resource_id);
     Ok(0)
 }
 
@@ -89,6 +139,10 @@ pub(crate) fn ioctl_drm_mode_fb_cmd2(
     f: &mut DrmModeFbCmd2,
 ) -> VfsResult<usize> {
     let handle = f.handles[0];
+    // The dumb handle is read here and the framebuffer is registered further
+    // down; `GEM_CLOSE` / `DESTROY_DUMB` take the same lock, so the handle
+    // cannot be closed (and its resource destroyed) in between.
+    let _commit = dev.commit_lock.lock();
     if handle == 0 || f.offsets[0] != 0 {
         return Err(VfsError::InvalidInput);
     }
