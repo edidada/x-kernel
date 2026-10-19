@@ -19,7 +19,8 @@ pub fn begin_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32
 
 /// Completes cleanup and atomically releases nonleader membership and CPU totals.
 /// Returns true for the last completed member, which must publish process exit.
-/// A leader remains an accounting member until wait/autoreap releases its identity.
+/// A leader remains an accounting member until wait/autoreap or exec takeover
+/// releases its identity.
 pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
     process.exit_thread(task, exit_code)
 }

@@ -2586,6 +2586,14 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
     assert_eq!(process.threads(), vec![pid]);
     let expected = (TimeSpan::from_nanos(20), TimeSpan::from_nanos(28));
     assert_eq!(process.process_cpu_times(), expected);
+    assert_eq!(process.unreleased_thread_count(), 1);
+    // Retaining an external reference must not keep the old leader in the
+    // accounting membership after its identity has been handed over.
+    leader.as_thread().set_cpu_time_for_test(100, 200);
+    assert_eq!(process.process_cpu_times(), expected);
+    assert!(process.assume_leader_identity(&survivor));
+    assert_eq!(process.process_cpu_times(), expected);
+    assert_eq!(process.unreleased_thread_count(), 1);
     assert!(process.exit_thread(&survivor, 0));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();

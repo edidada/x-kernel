@@ -212,8 +212,8 @@ Wait scans/matches/consumes under the domain write lock and returns a stable
 transaction. The wrapper removes the retired directory entry afterwards.
 ThreadMembership owns members, released user/system/runtime totals and child
 totals under one lock. Sampling and nonleader removal/transfer share that lock;
-leader accounting remains attached until wait/autoreap. Scheduler refresh occurs
-before acquiring the group lock. Retired task references drop outside both the
+leader accounting remains attached until wait/autoreap or exec identity takeover.
+Scheduler refresh occurs before acquiring the group lock. Retired task references drop outside both the
 group and process-domain locks.
 
 Exec initializes the new image's heap marker when constructing its MM binding.
@@ -404,22 +404,16 @@ exit unpublishes a TID immediately, so external targeting cannot reach teardown.
 The member-slot state is Vacant, Published(Weak task), or ExitedLeader.
 A published numeric group leader exits into ExitedLeader; nonleaders release
 their slot at exit. Last-task detection, task enumeration and lookup ignore
-ExitedLeader. The retained state
-owns no task, runtime or mm and cannot be scheduled. Wait consumption/autoreap
-clears it when the process identity is retired, even if other Arc<Process>
-observers remain. Failed publication uses Vacant and contributes no membership.
+ExitedLeader. The retained state owns the task reference needed for accounting,
+but grants no scheduling or external targeting capability. Wait consumption or
+autoreap releases it when the process identity is retired. Failed publication
+uses Vacant and contributes no membership.
 
-This change does not implement exec thread-group identity takeover. In particular,
-a sole nonleader may currently exec after the original leader exits while retaining
-its original TID; kprocess has no unified de_thread transition that changes that
-identity and its global publication. The original ExitedLeader therefore remains
-until reap, and the task-directory count can include that retained member after
-nonleader exec. Linux-exact post-exec counts are not claimed for this path. A
-count-only leader alias would conceal the identity mismatch, so exec neither
-promotes a member for accounting nor removes the original leader slot here.
-A follow-up must coordinate canonical task identity, global/member publication,
-signal/cgroup bindings, old-leader release and the successful/fatal exec boundary
-before procfs can derive the corresponding Linux count from final membership.
+During nonleader exec, the survivor adopts the group number and signal binding.
+The former leader's counters then move into group totals under the membership
+lock, and its retained reference is dropped outside that lock. Repeating takeover
+on the current leader does not transfer counters again. The surviving task keeps
+its stable membership identity throughout the transition.
 
 This retention scheme relies on the current runtime identity allocator, not on
 the probability of TID reuse. `Thread::prepare_thread_clone` calls

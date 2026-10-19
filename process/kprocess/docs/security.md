@@ -251,15 +251,15 @@ atomic group snapshot or synchronization against clone/exit.
 ## Unreleased thread membership
 
 The procfs lifetime count uses member-slot state, not the schedulable-task count.
-ExitedLeader retains the task's accounting owner until wait/autoreap, and grants
-no TID lookup or signal delivery capability. Exact Weak task identity gates the exit transition
+ExitedLeader retains the task's accounting owner until wait/autoreap or exec
+identity takeover, and grants no TID lookup or signal delivery capability. Exact Weak task identity gates the exit transition
 so an old task cannot retire a replacement binding. Reserved/rolled-back slots
 remain Vacant; completed nonleader cleanup transfers counters and removes the
 member under the group lock. Wait/autoreap retires identity in the process domain,
-then releases retained leader accounting and drops its reference outside locks. Exec does not change
-member accounting, canonical TID, or publication in this patch. The existing
-nonleader-exec identity gap and its post-exec count consequence are documented
-in design.md; metadata must not be presented as proof of Linux-exact takeover.
+then releases retained leader accounting and drops its reference outside locks.
+After exec identity takeover, the old leader's counters are transferred and its
+membership removed under the group lock; its task reference is dropped outside
+the lock. Repeating takeover does not accumulate the old leader again.
 Current runtime TIDs are checked monotonic allocations and are not recycled on
 drop; exhaustion fails rather than wrapping. Fixed-number test identities do not
 provide a production reuse path. Any future recycling policy must preserve leader

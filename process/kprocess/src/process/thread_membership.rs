@@ -246,7 +246,8 @@ impl Process {
     ///
     /// `task` must be the process's sole surviving published thread. The number
     /// directory entry moves once and the thread adopts the group number;
-    /// membership and cgroup key on the stable identity and need no change.
+    /// membership and cgroup key on the stable identity and need no re-keying.
+    /// The former leader is released and its counters join the group totals.
     /// Signal routing still keys threads by number, so its registry entry is
     /// re-keyed here. Call in sleepable context, before the new image is
     /// installed; returns `false` when the precondition or directory move fails.
@@ -268,6 +269,9 @@ impl Process {
         }
         thread.adopt_task_number(self.leader_task_number.clone());
         thread.signal_manager().rebind_after_exec(pid);
+        // Identity takeover ends the old leader's accounting membership;
+        // retaining it until wait would keep obsolete leaders across exec.
+        self.release_exited_thread_members();
         true
     }
 
@@ -378,7 +382,7 @@ impl Process {
             if retired.is_none() {
                 break;
             }
-            // Exec may have retired more than one holder of the group number.
+            // Drop the retained task only after releasing the membership lock.
             drop(retired);
         }
     }
