@@ -13,9 +13,12 @@
 # Notes:
 #   * Only plain single-branch pushes are intercepted: tags, branch
 #     deletions, multi-refspec and detached-HEAD pushes pass untouched.
-#   * Pushing the base branch itself (e.g. main) is never rewritten.
+#   * Pushing the base branch itself (e.g. main) is never rewritten, and a
+#     re-push is refused when the remote branch tip carries commits the
+#     local side has never seen (a blind --force-with-lease would drop them).
 #   * Network failures degrade to a warning and never block the push.
 #   * `git push --dry-run` may still perform the rebase and the re-push.
+#   * All hook output goes to stderr, matching .githooks/pre-commit.
 
 # Never let a misconfigured environment block a push.
 if [ "${SKIP_ALL:-0}" = "1" ] || [ "${SKIP_REBASE:-0}" = "1" ]; then
@@ -78,36 +81,65 @@ if [ "$BEHIND" -eq 0 ]; then
 	exit 0
 fi
 
+# The rebase only replays $BASE..HEAD, so a remote branch tip holding commits
+# the local side has never seen would be silently dropped by the re-push
+# below -- exactly what a plain push would have refused as non-fast-forward.
+# The ancestor check also fails when the remote tip is unknown locally,
+# which is the same "commits not present locally" situation.
+if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" HEAD 2>/dev/null; then
+	echo "❌ pre-push: $REMOTE/$BRANCH has commits not present locally; not rebasing." >&2
+	git rev-list --oneline "HEAD..$REMOTE_SHA" 2>/dev/null | sed 's/^/     /' >&2
+	echo "   reconcile first, then push:" >&2
+	echo "     git fetch $REMOTE && git rebase $REMOTE/$BRANCH" >&2
+	exit 1
+fi
+
 cd "$REPO_ROOT" || exit 0
 
 # A dirty worktree cannot be rebased; warn and let the push through.
+# Untracked files are excluded on purpose: they almost never block a rebase,
+# and when one does, the rebase below fails before it starts and the push
+# still goes through untouched with the real error shown.
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 	echo "⚠️  pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, but the worktree is dirty." >&2
 	echo "    commit or stash first, then push again to rebase automatically." >&2
 	exit 0
 fi
 
-# ---- rebase: clean success re-pushes, conflict aborts and instructs ----
+# ---- rebase: conflicts roll back and instruct, other failures surface ----
 AHEAD="$(git rev-list --count "$BASE..HEAD")"
-echo "🔄 pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, rebasing $AHEAD commit(s)..."
+echo "🔄 pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, rebasing $AHEAD commit(s)..." >&2
 REBASE_LOG="$(git rebase "$BASE" 2>&1)" || {
-	CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
-	git rebase --abort
-	echo "❌ pre-push: automatic rebase hit conflicts and was rolled back." >&2
-	echo "   conflicted files: $CONFLICTS" >&2
-	echo "   resolve them manually, then push again:" >&2
-	echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
-	echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
+	if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ]; then
+		CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+		git rebase --abort
+		echo "❌ pre-push: automatic rebase hit conflicts and was rolled back." >&2
+		echo "   conflicted files: $CONFLICTS" >&2
+		echo "   resolve them manually, then push again:" >&2
+		echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
+		echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
+	else
+		# The rebase never started (e.g. an untracked file would have been
+		# overwritten by the checkout); show why and let the push through.
+		echo "⚠️  pre-push: automatic rebase did not start; pushing as-is:" >&2
+		echo "$REBASE_LOG" >&2
+		exit 0
+	fi
 	exit 1
 }
 
-echo "✅ pre-push: rebased $BRANCH onto $BASE ($AHEAD commit(s) carried)."
-echo "   pushing the rebased branch (--force-with-lease); the trailing"
-echo "   'failed to push' error from the original command is expected."
+echo "✅ pre-push: rebased $BRANCH onto $BASE ($AHEAD commit(s) carried)." >&2
+echo "   re-pushing with --force-with-lease; the original push is aborted either way." >&2
 
 LEASE_ARGS=()
 if [ "$REMOTE_SHA" != "$ZERO_SHA" ]; then
 	LEASE_ARGS=(--force-with-lease="$REMOTE_REF:$REMOTE_SHA")
 fi
-git push --no-verify "${LEASE_ARGS[@]}" "$REMOTE" "$LOCAL_REF:$REMOTE_REF"
+if git push --no-verify "${LEASE_ARGS[@]}" "$REMOTE" "$LOCAL_REF:$REMOTE_REF"; then
+	echo "✅ pre-push: rebased branch pushed to $REMOTE/$BRANCH." >&2
+else
+	echo "❌ pre-push: the re-push failed; remote $REMOTE_REF was NOT updated." >&2
+	echo "   the local branch stays rebased -- check the git error above," >&2
+	echo "   then fetch and push again." >&2
+fi
 exit 1 # the original push must not proceed with the pre-rebase commit
