@@ -94,6 +94,7 @@ pub fn interface_ipv4_addr(name: &str) -> Result<Ipv4Addr, LinuxError> {
 /// Updates the primary IPv4 address on `name`.
 ///
 /// Other IPv4 addresses assigned to the interface remain unchanged.
+/// Setting the same local address preserves its prefix, scope, and broadcast.
 pub fn set_interface_ipv4_addr(
     name: &str,
     addr: Ipv4Addr,

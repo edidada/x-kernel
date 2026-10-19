@@ -19,7 +19,7 @@ use crate::{
     device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId, RxPoll},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
-        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot, Ipv4AddressSet, PrimaryAddrChange},
+        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot, Ipv4AddressSet},
         ipv4::{self, Ipv4Error, Ipv4Header},
         router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
     },
@@ -334,15 +334,21 @@ impl Router {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        match self.ipv4_addrs.set_primary(Ipv4AddrEntry {
+        let primary = self.ipv4_addrs.primary_entry(dev);
+        if primary.is_some_and(|entry| entry.addr.address() == addr.address()) {
+            return Ok(());
+        }
+        let entry = Ipv4AddrEntry {
             dev,
             addr,
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: None,
-        })? {
-            PrimaryAddrChange::Unchanged => return Ok(()),
-            PrimaryAddrChange::Added => {}
-            PrimaryAddrChange::Replaced(old) => self.remove_ipv4_source_state_if_unowned(old),
+        };
+        if primary.is_some() {
+            let old = self.ipv4_addrs.replace_primary(entry)?;
+            self.remove_ipv4_source_state_if_unowned(old.addr.address());
+        } else {
+            self.ipv4_addrs.insert(entry)?;
         }
         self.table
             .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
@@ -407,7 +413,13 @@ impl Router {
         dev: NetDeviceId,
         broadcast: Ipv4Address,
     ) -> Result<(), LinuxError> {
-        self.ipv4_addrs.set_broadcast(dev, broadcast)
+        let mut entry = self
+            .ipv4_addrs
+            .primary_entry(dev)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        entry.broadcast = Some(broadcast);
+        self.ipv4_addrs.replace_primary(entry)?;
+        Ok(())
     }
 
     /// Updates the prefix length of the primary IPv4 address on `dev`.
@@ -419,16 +431,31 @@ impl Router {
         dev: NetDeviceId,
         prefix_len: u8,
     ) -> Result<(), LinuxError> {
+        if prefix_len > 32 {
+            return Err(LinuxError::EINVAL);
+        }
+        let mut entry = self
+            .ipv4_addrs
+            .primary_entry(dev)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        if entry.addr.prefix_len() == prefix_len {
+            return Ok(());
+        }
         let has_broadcast_flag = self
             .devices
             .get_by_id(dev)
             .is_some_and(|device| device.link_kind() == LinkKind::Ethernet);
-        if !self
-            .ipv4_addrs
-            .set_netmask(dev, prefix_len, has_broadcast_flag)?
-        {
-            return Ok(());
+        let old_derived_broadcast = entry.addr.broadcast();
+        let should_recalculate_broadcast = has_broadcast_flag
+            && prefix_len < 31
+            && entry.effective_broadcast() == old_derived_broadcast;
+        entry.addr = Ipv4Cidr::new(entry.addr.address(), prefix_len).ok_or(LinuxError::EINVAL)?;
+        if should_recalculate_broadcast {
+            entry.broadcast = None;
+        } else if entry.broadcast.is_none() {
+            entry.broadcast = old_derived_broadcast;
         }
+        self.ipv4_addrs.replace_primary(entry)?;
 
         self.table
             .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());

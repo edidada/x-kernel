@@ -6,7 +6,7 @@
 //!
 //! Each record combines address values from `crate::ip` with an owning
 //! interface, scope, and optional broadcast override. `Ipv4AddressSet` owns
-//! their ordering, insertion checks, capacity, and primary-address update rules.
+//! their ordering, identity checks, capacity, and source-address selection.
 
 use alloc::{string::String, vec::Vec};
 
@@ -38,14 +38,6 @@ impl Ipv4AddrEntry {
 pub(crate) struct Ipv4AddrSnapshot {
     pub entry: Ipv4AddrEntry,
     pub label: String,
-}
-
-/// The result of updating an interface's primary IPv4 address.
-pub(crate) enum PrimaryAddrChange {
-    Unchanged,
-    Added,
-    /// The old local address whose dependent state may need cleanup.
-    Replaced(Ipv4Address),
 }
 
 /// Ordered interface addresses with a caller-supplied capacity limit.
@@ -93,10 +85,12 @@ impl Ipv4AddressSet {
     }
 
     pub(crate) fn primary(&self, dev: NetDeviceId) -> Option<Ipv4Cidr> {
-        self.entries
-            .iter()
-            .find(|entry| entry.dev == dev)
-            .map(|entry| entry.addr)
+        self.primary_entry(dev).map(|entry| entry.addr)
+    }
+
+    /// Returns a copy of the first address entry for the device.
+    pub(crate) fn primary_entry(&self, dev: NetDeviceId) -> Option<Ipv4AddrEntry> {
+        self.entries.iter().find(|entry| entry.dev == dev).copied()
     }
 
     /// Adds an address, returning whether a new device/CIDR pair was inserted.
@@ -114,29 +108,21 @@ impl Ipv4AddressSet {
         Ok(true)
     }
 
-    /// Replaces the primary address with the caller-supplied entry.
-    /// Setting the same local address preserves all existing attributes.
-    pub(crate) fn set_primary(
+    /// Replaces all attributes of the device's primary entry and returns the old entry.
+    ///
+    /// Preserves the device and entry order. Returns `EADDRNOTAVAIL` when the
+    /// device has no address, `EINVAL` for a non-unicast local address, or
+    /// `EEXIST` for a conflicting device/CIDR pair. Errors leave entries intact.
+    pub(crate) fn replace_primary(
         &mut self,
         entry: Ipv4AddrEntry,
-    ) -> Result<PrimaryAddrChange, LinuxError> {
-        if !entry.addr.address().is_unicast() {
-            return Err(LinuxError::EINVAL);
-        }
-        let Some(index) = self
+    ) -> Result<Ipv4AddrEntry, LinuxError> {
+        let index = self
             .entries
             .iter()
             .position(|existing| existing.dev == entry.dev)
-        else {
-            self.insert(entry)?;
-            return Ok(PrimaryAddrChange::Added);
-        };
-        let old = self.entries[index];
-        if old.addr.address() == entry.addr.address() {
-            return Ok(PrimaryAddrChange::Unchanged);
-        }
-        self.replace_at(index, entry.addr, entry.scope, entry.broadcast)?;
-        Ok(PrimaryAddrChange::Replaced(old.addr.address()))
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        self.replace_at(index, entry.addr, entry.scope, entry.broadcast)
     }
 
     /// Validates a replacement before committing it without changing its device.
@@ -189,56 +175,6 @@ impl Ipv4AddressSet {
         removed
     }
 
-    pub(crate) fn set_broadcast(
-        &mut self,
-        dev: NetDeviceId,
-        broadcast: Ipv4Address,
-    ) -> Result<(), LinuxError> {
-        let entry = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.dev == dev)
-            .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        entry.broadcast = Some(broadcast);
-        Ok(())
-    }
-
-    /// Preserves scope and custom broadcasts when changing the primary prefix.
-    /// Returns whether the prefix changed.
-    /// A conflicting device/CIDR pair returns `EEXIST` without changing entries.
-    pub(crate) fn set_netmask(
-        &mut self,
-        dev: NetDeviceId,
-        prefix_len: u8,
-        has_broadcast_flag: bool,
-    ) -> Result<bool, LinuxError> {
-        if prefix_len > 32 {
-            return Err(LinuxError::EINVAL);
-        }
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.dev == dev)
-            .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        let mut entry = self.entries[index];
-        if entry.addr.prefix_len() == prefix_len {
-            return Ok(false);
-        }
-        let old_derived_broadcast = entry.addr.broadcast();
-        let should_recalculate_broadcast = has_broadcast_flag
-            && prefix_len < 31
-            && entry.effective_broadcast() == old_derived_broadcast;
-        entry.addr =
-            Ipv4Cidr::new(entry.addr.address(), prefix_len).expect("prefix length was validated");
-        if should_recalculate_broadcast {
-            entry.broadcast = None;
-        } else if entry.broadcast.is_none() {
-            entry.broadcast = old_derived_broadcast;
-        }
-        self.replace_at(index, entry.addr, entry.scope, entry.broadcast)?;
-        Ok(true)
-    }
-
     /// Prefers an address covering the next hop among entries eligible by scope,
     /// falling back to the first eligible address on the selected device.
     pub(crate) fn select_source(
@@ -260,5 +196,76 @@ impl Ipv4AddressSet {
                 .unwrap_or(first)
         };
         Some(selected.addr.address())
+    }
+}
+
+#[unittest::mod_test]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn replacing_primary_entry_updates_all_attributes_and_preserves_other_entries() {
+        let mut addresses = Ipv4AddressSet::new(3);
+        let primary = Ipv4AddrEntry {
+            dev: NetDeviceId::new(2).unwrap(),
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
+            scope: 254,
+            broadcast: None,
+        };
+        let other_device = Ipv4AddrEntry {
+            dev: NetDeviceId::new(3).unwrap(),
+            addr: Ipv4Cidr::new(primary.addr.address(), 16).unwrap(),
+            ..primary
+        };
+        let secondary = Ipv4AddrEntry {
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24).unwrap(),
+            ..primary
+        };
+        for entry in [primary, other_device, secondary] {
+            addresses.insert(entry).unwrap();
+        }
+
+        let replacement = Ipv4AddrEntry {
+            scope: 0,
+            broadcast: Some(Ipv4Address::new(192, 0, 2, 111)),
+            ..primary
+        };
+        assert_eq!(addresses.replace_primary(replacement), Ok(primary));
+        let updated_prefix = Ipv4AddrEntry {
+            addr: other_device.addr,
+            ..replacement
+        };
+        assert_eq!(addresses.replace_primary(updated_prefix), Ok(replacement));
+        assert_eq!(addresses.primary_entry(primary.dev), Some(updated_prefix));
+        assert_eq!(
+            addresses.as_slice(),
+            &[updated_prefix, other_device, secondary]
+        );
+
+        for (entry, error) in [
+            (secondary, LinuxError::EEXIST),
+            (
+                Ipv4AddrEntry {
+                    addr: Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 32).unwrap(),
+                    ..updated_prefix
+                },
+                LinuxError::EINVAL,
+            ),
+            (
+                Ipv4AddrEntry {
+                    dev: NetDeviceId::new(4).unwrap(),
+                    ..updated_prefix
+                },
+                LinuxError::EADDRNOTAVAIL,
+            ),
+        ] {
+            assert_eq!(addresses.replace_primary(entry), Err(error));
+            assert_eq!(
+                addresses.as_slice(),
+                &[updated_prefix, other_device, secondary]
+            );
+        }
     }
 }
