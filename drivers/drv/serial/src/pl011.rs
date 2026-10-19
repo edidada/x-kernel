@@ -24,7 +24,6 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use console_driver::runtime::register_stdout_console;
 use driver_base::{
     ClkHandle, DevIrq, Device, DriverOps, IoMap, IrqAction, OfMatch, PlatformBus, PlatformId,
     ProbeError,
@@ -32,6 +31,7 @@ use driver_base::{
 use memaddr::{PhysAddr, VirtAddr};
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
 use subsys_char::class::CHAR;
+use subsys_char_console::{adopt_stdout_guards, register_stdout_console};
 
 use crate::serial_char_dev::SerialCharDev;
 
@@ -207,7 +207,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         let is_stdout = matches!(port.role(), SerialRole::Stdout);
         let (mut irq, mut regs) = (irq, regs);
         if is_stdout {
-            console_driver::runtime::adopt_stdout_guards(irq.take(), regs.take());
+            adopt_stdout_guards(irq.take(), regs.take());
         }
         Ok(Pl011Data {
             _publication: publication,

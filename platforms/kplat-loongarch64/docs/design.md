@@ -34,7 +34,7 @@ LoongArch machines (QEMU virt-class platforms).
 ## Non-Responsibilities
 
 - No device-tree parsing policy: firmware descriptions are consumed
-  through `of` / `console_driver`; this crate owns no
+  through `of` / `boot-console`; this crate owns no
   parser. The LS7A RTC aperture is described by the driver composition
   root as a board-static `rtc-ls7a` device (see `RTC_PADDR`), not by this
   crate.
@@ -43,7 +43,7 @@ LoongArch machines (QEMU virt-class platforms).
 - No wall-clock ownership: the RTC sample is taken by the `drv-rtc`
   LS7A driver and seeded by `subsys-rtc` after the driver probe storm;
   realtime correlation belongs to `ktime`.
-- No console implementation: UART drivers live in `console-driver`;
+- No console implementation: UART drivers live in `serial-core` / `boot-console`;
   this crate only calls its initialization entry points.
 - No wakeup/suspend support: S3 has no path and is reported as
   unsupported.

@@ -18,7 +18,7 @@ log = "0.4"
 
 irqchip_driver = { workspace = true }
 khal = { workspace = true }
-console_driver = { workspace = true, features = ["ns16550-mmio"] }
+boot_console = { workspace = true, features = ["ns16550-mmio"] }
 kernel_boot = { workspace = true }
 kcpu = { workspace = true }
 kcpu_id_map = { workspace = true }

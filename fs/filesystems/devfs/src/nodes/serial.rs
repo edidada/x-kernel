@@ -13,7 +13,6 @@
 
 use alloc::{format, sync::Arc};
 
-use console_driver::runtime::stdout_console_id;
 use driver_base::Publication;
 use kerrno::KError;
 use kvfs::{
@@ -21,6 +20,7 @@ use kvfs::{
     VfsInode, VfsResult,
 };
 use subsys_char::{CharDevice, CharDeviceImpl, class::CHAR};
+use subsys_char_console::stdout_console_id;
 
 use crate::{DeviceFile, add_device_entry};
 

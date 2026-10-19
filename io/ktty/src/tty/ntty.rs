@@ -5,13 +5,13 @@
 use alloc::sync::Arc;
 use core::task::Waker;
 
-use console_driver::runtime::stdout_console;
 use driver_base::Publication;
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
 use serial_core::SerialPort;
 use subsys_char::{CharDevice, CharDeviceImpl};
+use subsys_char_console::stdout_console;
 
 use super::{Tty, TtyKind};
 use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};

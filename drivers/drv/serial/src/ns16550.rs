@@ -7,14 +7,17 @@
 //! Two variants, one crate:
 //! * `mmio` — device-tree UART nodes (`ns16550a`, `snps,dw-apb-uart`, ...),
 //!   matching the serial-pl011 template with the NS16550 register layout
-//!   decoded from the early-console layout table;
+//!   decoded from the device's own firmware snapshot;
 //! * `ioport` — x86 ISA COM ports (platform-static alias, no firmware).
 
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{Device, DriverOps, PlatformBus, PlatformId, ProbeError, RuntimeError};
+#[cfg(feature = "ns16550-mmio")]
+use serial_core::SerialMmioLayout;
 use serial_core::{SerialIdent, SerialPort, SerialRole, take_early_port};
 use subsys_char::class::CHAR;
+use subsys_char_console::{adopt_stdout_guards, register_stdout_console};
 
 use crate::serial_char_dev::SerialCharDev;
 
@@ -66,7 +69,7 @@ fn publish(
         // The console subsystem owns the stdout publication (withdrawn on the
         // next rebind); auxiliary ports carry their own guard in `Data`.
         SerialRole::Stdout => {
-            console_driver::runtime::register_stdout_console(published);
+            register_stdout_console(published);
             None
         }
         SerialRole::Auxiliary => Some(published),
@@ -99,8 +102,14 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
                 Some(port) => (port, None),
                 None => {
                     let regs = dev.res().iomap(0)?;
-                    let layout = console_driver::ns16550_mmio_layout_for_paddr(mmio.base)
-                        .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
+                    // Layout from the device's own firmware snapshot (the
+                    // model already parsed the node); Linux 8250 defaults
+                    // apply when the properties are absent.
+                    let layout = SerialMmioLayout::from_props(
+                        dev.fw().u32("reg-shift"),
+                        dev.fw().u32("reg-io-width"),
+                    )
+                    .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
                     // SAFETY: `regs` covers the firmware-declared window and
                     // stays alive in `Data` for the binding's lifetime.
                     let port = unsafe {
@@ -124,7 +133,7 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
         // no mapping (regs already None).
         let mut regs = regs;
         if matches!(port.role(), SerialRole::Stdout) {
-            console_driver::runtime::adopt_stdout_guards(None, regs.take());
+            adopt_stdout_guards(None, regs.take());
         }
         Ok(SerialData {
             _publication: publication,
@@ -178,7 +187,7 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
         // to whatever guards this binding DOES own (none today — ioport
         // stdout is the adopted early port with no binding-owned guards).
         if matches!(port.role(), SerialRole::Stdout) {
-            console_driver::runtime::adopt_stdout_guards(None, None);
+            adopt_stdout_guards(None, None);
         }
         Ok(SerialData {
             _publication: publication,
@@ -189,7 +198,7 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
     fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut SerialData) {}
 }
 
-/// `module_platform_driver()` equivalents: one hardware family, two buses.
+// `module_platform_driver()` equivalents: one hardware family, two buses.
 #[cfg(feature = "ns16550-mmio")]
 driver_base::declare_driver!(
     PlatformBus,

@@ -42,16 +42,18 @@ projection. There is no separate class crate. Consumers import family
 items from their subsystem and model types from `driver-base`.
 
 Serial: `drv/serial/serial-core` is the UART family library (hardware,
-early-port handoff); `console/` is the printk-side consumer that must come
-up before the model and later publishes into the char class. `rtc/` was the
+early-port handoff, and the firmware→port decode behind its `earlycon`
+feature); `boot-console/` is the boot-stage printk sink and stdout
+bring-up; `subsystems/char-console` owns the runtime console identity over
+the char class once the model has published the port. `rtc/` was the
 first kernel-integrated driver migrated into the model: the class lives in
 `subsystems/rtc`, the backends in `drv/rtc`. `clocksource/`, `irqchip/` and
 `perf/` remain outside the model by boot order — see
 [Kernel-Integrated Drivers](#kernel-integrated-drivers-outside-the-model).
 `x86-apic` lives in `arch/`.
 Host-side trees — `drivers/host`, `drivers/init`, `bus/`, `firmware/`,
-`integration/`, `console/`, `clocksource/`, `irqchip/`, `perf/` — may use
-host-kernel crates freely; that is their role. The L0/L1 rules apply to
+`integration/`, `boot-console/`, `clocksource/`, `irqchip/`, `perf/` — may
+use host-kernel crates freely; that is their role. The L0/L1 rules apply to
 `drivers/base`, `common/`, `subsystems/` and `drv/`.
 
 ## Device Model and Host Bridge (`base/`, `host/`, `init/`)
@@ -89,6 +91,7 @@ and the IRQ wiring. That split is the L0-b rule in practice:
 | `subsystems/block` | `subsys-block` (Gendisk model + host-free contracts) |
 | `subsystems/block-host` | `subsys-block-host` (wait / reclaimer services) |
 | `subsystems/char` | `subsys-char` |
+| `subsystems/char-console` | `subsys-char-console` (console service over the char class) |
 | `subsystems/display` | `subsys-display` |
 | `subsystems/hwrng` | `subsys-hwrng` |
 | `subsystems/input` | `subsys-input` |
@@ -139,7 +142,7 @@ template for a driver that could move.
 
 | Directory | Package | Role | Why not in the model |
 |------|------|------|------|
-| `console/` | `console-driver` | Early-boot stdout adoption and the printk-side console path. | Runs in `early_driver_init` before the domain exists; later publishes into the char class. |
+| `boot-console/` | `boot-console` | The printk sink, firmware stdout bring-up and early console input. | Runs in `early_driver_init` before the domain exists; its model-side half (stdout publication identity) is `subsystems/char-console`. |
 | `clocksource/` | `clocksource-driver` | Architected timers (ARM generic, SBI, LAPIC/TSC). | The scheduler and workqueues need timekeeping before `driver-init` runs. |
 | `irqchip/` | `irqchip-driver` | Interrupt controllers (GIC v2/v3, RISC-V PLIC, x86 IO-APIC). | Registers into `kirq`, which `driver-base` sits **above**; IRQs are needed before the model's L1 host services. |
 | `perf/` | `aarch64-pmuv3` | AArch64 PMUv3 counter driver. | Arch PMU consumed by `platforms/kplat-aarch64` peripherals; no perf class exists yet. |

@@ -133,12 +133,12 @@ driver_ramdisk = ["dep:drv-block", "driver-init/ramdisk", "char"]
 # probe; board-static node, parent = QEMU apb-pclk.
 driver_fixed_factor = ["dep:drv-clk", "drv-clk/fixed-factor", "driver-init/fixed-factor"]
 driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-init/ramdisk-static"]
-driver_console_pl011 = ["dep:console_driver", "console_driver/pl011"]
-driver_console_ns16550_mmio = ["dep:console_driver", "console_driver/ns16550-mmio"]
-driver_console_ns16550_ioport = ["dep:console_driver", "console_driver/ns16550-ioport"]
-driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-init/serial-pl011", "driver-init/fixed-clock", "char", "dep:console_driver", "console_driver/pl011"]
-driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-init/serial-ns16550-mmio", "char", "dep:console_driver", "console_driver/ns16550-mmio"]
-driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-init/serial-ns16550-ioport", "char", "dep:console_driver", "console_driver/ns16550-ioport"]
+driver_console_pl011 = ["dep:boot_console", "boot_console/pl011"]
+driver_console_ns16550_mmio = ["dep:boot_console", "boot_console/ns16550-mmio"]
+driver_console_ns16550_ioport = ["dep:boot_console", "boot_console/ns16550-ioport"]
+driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-init/serial-pl011", "driver-init/fixed-clock", "char", "dep:boot_console", "boot_console/pl011"]
+driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-init/serial-ns16550-mmio", "char", "dep:boot_console", "boot_console/ns16550-mmio"]
+driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-init/serial-ns16550-ioport", "char", "dep:boot_console", "boot_console/ns16550-ioport"]
 # RTC class plus one backend per driver feature (KFEAT_DRIVER_RTC_*).
 driver_rtc_pl031 = ["rtc", "dep:drv-rtc", "drv-rtc/pl031", "driver-init/rtc-pl031"]
 driver_rtc_goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish", "driver-init/rtc-goldfish"]
@@ -215,7 +215,7 @@ drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
 drv-rtc = { workspace = true, optional = true }
-console_driver = { workspace = true, optional = true }
+boot_console = { workspace = true, optional = true }
 kdma.workspace = true
 pci = { workspace = true }
 kirq = { workspace = true, optional = true }

@@ -27,12 +27,12 @@ impl BootHandler {
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
                       cannot be parsed; early_driver_init has no error return or recovery"
         )]
-        console_driver::init_stdout_from_device_tree()
+        boot_console::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
         if let Some(fdt) = of::fdt() {
             kcpu::init_hwprobe_from_fdt(fdt);
         }
-        console_driver::register_input_irq_handler();
+        boot_console::register_input_irq_handler();
     }
 
     fn final_init(_boot_info: &BootInfo) {

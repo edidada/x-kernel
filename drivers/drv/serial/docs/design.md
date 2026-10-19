@@ -153,12 +153,16 @@ class 层的 `Device::irq()` 是历史遗留的 introspection 字段。串口的
 `Data._irq` 拥有，不通过 class 暴露——因此这里返回 `None` 是准确的，
 不是没实现。
 
-### 依赖 `console_driver`（登记的例外 E-03）
+### 依赖子系统与 family 库（不再是 E-03 例外）
 
-早期 console 收养与 stdout 身份交接是**单机启动集成**，不是设备资源。
-把它拆成"可移植的寄存器访问 + 主机侧收养 shim"需要多一个 crate 边界，
-而收益只有跨主机可移植性——**已被明确放弃**。
-因此保留依赖，但把协议完整写在本文档里（这才是 review 真正需要的东西：
+早期 console 收养与 stdout 身份交接曾被登记为 `console_driver` 的依赖例外。
+现在它们都是正常的向下调用：`serial_core::take_early_port`（family 库）与
+`subsys-char-console`（char 类旁的子系统服务）。本 crate 的 host 依赖只剩
+serial-core 测试用的 `khal`（E-03），生产代码不碰 host 运行时。
+`ns16550` 的寄存器布局不再跨 crate 重扫 FDT，而是读本设备自己的
+`dev.fw()` 快照。
+
+stdout 所有权交接协议完整写在本文档里（这才是 review 真正需要的东西：
 `df5f15ead`、`6f7d44aea`、`0cfb1ad88` 三次修复都发生在这条协议上）。
 
 ## Drop / 资源释放

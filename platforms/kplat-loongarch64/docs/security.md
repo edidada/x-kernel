@@ -38,9 +38,9 @@ no user-space input.
   framework resource door. A failed mapping is a probe failure (logged,
   no panic); the sampled value is validated for year consistency before
   `subsys-rtc` seeds `ktime`.
-- **Console device tree node**: parsed by `console_driver`; a parse
-  failure panics in `early_driver_init` (a machine without a declared
-  console cannot boot usefully).
+- **Console device tree node**: parsed by `serial_core::earlycon` and brought
+  up by `boot-console`; a parse failure panics in `early_driver_init`
+  (a machine without a declared console cannot boot usefully).
 
 ## Unsafe Code
 

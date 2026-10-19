@@ -32,8 +32,8 @@ impl BootHandler {
             ),
         );
         kernel_boot::bootln!("timer init");
-        console_driver::init_stdout_ioport(
-            console_driver::boot_console_io_port(),
+        boot_console::init_stdout_ioport(
+            boot_console::boot_console_io_port(),
             Some(
                 kirq::IrqDesc::new(4, kirq::IrqTrigger::EdgeRising)
                     .with_source(kirq::IrqSource::PlatformStatic)
@@ -46,7 +46,7 @@ impl BootHandler {
 
     fn final_init(_boot_info: &BootInfo) {
         x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
-        console_driver::register_input_irq_handler();
+        boot_console::register_input_irq_handler();
         clocksource_driver::x86_lapic_tsc::init_primary();
     }
 

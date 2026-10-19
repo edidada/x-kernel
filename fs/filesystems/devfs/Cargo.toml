@@ -16,7 +16,7 @@ ignored = ["ktime_types"]
 
 [features]
 input = ["dep:inputdev"]
-serial = ["dep:console_driver"]
+serial = ["dep:subsys_char_console"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
 dev-log = []
 dice = ["dep:dice_driver", "dep:tee_crypto"]
@@ -65,7 +65,7 @@ entropy.workspace = true
 kvmm-api = { workspace = true, optional = true }
 tee_crypto = { workspace = true, features = ["alloc"], optional = true }
 inputdev = { workspace = true, optional = true }
-console_driver = { workspace = true, optional = true }
+subsys_char_console = { workspace = true, optional = true }
 
 unittest.workspace = true
 

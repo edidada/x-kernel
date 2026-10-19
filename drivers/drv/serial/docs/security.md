@@ -16,7 +16,7 @@
 | 设备树 → 本 crate | `reg`（base/size）、`interrupts`、`clocks`/`clock-names` | **半可信**。地址合法性由 `memspace` 判断；本 crate 额外依赖一个**编译期表**把 base 映射到寄存器布局（见 T-02） |
 | 板级静态表 → ioport 变体 | `COM_PORTS: [u16; 4]`（在 `driver-init`）经 `ResourceKind::IoPort` | 可信（编译期常量） |
 | **UART 硬件 → 本 crate** | RX FIFO 里的字节、LSR/RIS 状态位 | **不可信**。对端（宿主机串口、物理串口上的设备）可以发任意字节，也可以让状态位呈现任意组合 |
-| `console_driver` → 本 crate | `take_early_port` 返回的 `Arc<SerialPort>`、`ns16550_mmio_layout_for_paddr` | 可信（同一内核的启动集成层） |
+| 设备固件快照 / `serial_core` → 本 crate | `take_early_port` 返回的 `Arc<SerialPort>`、`SerialMmioLayout::from_props`（`reg-shift`/`reg-io-width`） | 可信（同一内核的启动集成层与 family 库） |
 | 本 crate → tty / class 消费者 | `SerialCharDev::{read, write, flush}` | 消费者可信；但 `read` 返回的字节来自不可信的 UART |
 
 ## 外部边界 / 攻击面
@@ -24,20 +24,20 @@
 | 输入源 | 入口 | 说明 |
 |---|---|---|
 | **设备树** | `dev.res().mmio(0)` / `dev.res().irq(0)` / `dev.res().clk(name)` / `dev.descriptor().location` | `MmioRegion{base,size}` 直接决定 `SerialPort` 的窗口；`interrupts` 决定 IRQ 路由；`clocks` 决定波特率基准 |
-| **UART 寄存器（MMIO / PIO）** | `SerialPort::{handle_input_irq, read_data, write_data}`（在 `console_driver`） | 本 crate 只在 probe 里构造 `SerialPort` 并注册 handler，寄存器访问本身在 `console_driver`。但**中断 handler 的行为由本 crate 决定**（返回 `Handled`/`NotHandled`） |
+| **UART 寄存器（MMIO / PIO）** | `SerialPort::{handle_input_irq, read_data, write_data}`（在 `serial-core`） | 本 crate 只在 probe 里构造 `SerialPort` 并注册 handler，寄存器访问本身在 `serial-core`。但**中断 handler 的行为由本 crate 决定**（返回 `Handled`/`NotHandled`） |
 | **UART RX 数据** | `SerialCharDev::read` → tty → 用户态 / 内核命令行 | 不可信字节流。本 crate 只做透传（`self.0.read_data(buf)`），不解析 |
 | 用户内存 | `read(&self, buf: &mut [u8])` 的 `buf` | 是内核缓冲（tty 层提供），不是裸用户指针；用户拷贝在 tty/POSIX 层 |
 | DMA | 无 | 串口是 PIO |
 
 ## unsafe 代码清单
 
-生产代码 **3 处** `unsafe`，全部是"把 `IoMap`/端口号交给 `console_driver` 的
+生产代码 **3 处** `unsafe`，全部是"把 `IoMap`/端口号交给 `serial-core` 的
 `SerialPort` 构造器"：
 
 | 位置 | 调用 | 依赖的不变量 | 由谁保证 |
 |---|---|---|---|
 | `pl011.rs:115` | `SerialPort::new_mmio_pl011(VirtAddr::from_usize(regs.as_ptr()), paddr, mmio.size, Auxiliary)` | `regs` 恰好覆盖固件声明的 `mmio` 窗口；PL011 寄存器按 spec 是 32 位对齐；`regs` 在端口整个生命周期内存活 | 紧邻上一行的 `dev.res().iomap(0)?` 建立了映射；`regs` 被 move 进 `Pl011Data._regs`，字段顺序保证它在 `_port` **之后**释放 |
-| `ns16550.rs:141` | `SerialPort::new_mmio_ns16550(vaddr, paddr, mmio.size, Auxiliary, layout.reg_shift, layout.reg_width)` | 同上，外加 `reg_shift`/`reg_width` 与真实硬件一致 | 同上；布局来自 `ns16550_mmio_layout_for_paddr(mmio.base)` 的编译期表，查不到就 `Fatal(Invalid)`（见 T-02） |
+| `ns16550.rs:141` | `SerialPort::new_mmio_ns16550(vaddr, paddr, mmio.size, Auxiliary, layout.reg_shift, layout.reg_width)` | 同上，外加 `reg_shift`/`reg_width` 与真实硬件一致 | 同上；布局来自本设备自己的固件快照（`dev.fw()` 的 `reg-shift`/`reg-io-width`，经 `SerialMmioLayout::from_props` 解码，缺失时按 Linux 8250 默认 stride=1/width=8）；非法宽度就 `Fatal(Invalid)`（见 T-02） |
 | `ns16550.rs:204` | `SerialPort::new_ioport_ns16550(port_base, Auxiliary)` | 端口范围来自板级静态描述符，且被本设备独占 | `driver-init::enumerate_static_devices` 硬编码 `COM_PORTS` 与 `size: 8`；无固件参与 |
 
 **收养路径没有 unsafe**：`take_early_port(&ident)` 返回已经构造好的
@@ -78,7 +78,7 @@
   正是想要的顺序。
 - handler 在**硬中断上下文**运行，只调 `handle_input_irq()`；不取域锁、
   不分配、不调设备模型。`SerialPort` 内部用 `SpinNoIrq` 保护（在
-  `console_driver`）。
+  `serial-core`）。
 - `take_early_port` 是"取走"语义（`Option::take` 风格），因此并发 probe 两个
   声称是同一 stdout 的节点时只有一个能收养成功。**当前不构成风险**：DT 里
   stdout-path 只指向一个节点。
@@ -90,11 +90,11 @@
 | T-01 | 共享中断线上，pl011 handler 恒返回 `Handled` 并 ack，吞掉同线其他设备的中断 | 中 | 平台把 PL011 与别的设备共享一条 SPI | **未修复（已知正确性债务）**。当前所有支持的 DT 上 PL011 是独占 SPI，因此不触发。修法明确：先查 RIS → 只有本设备的位被置位才 ack → 才返回 `Handled`。**残余风险**：移植到共享线平台时会出现"另一个设备的中断丢失"，表现为该设备卡死而非串口异常，诊断方向容易错。见 `docs/driver-framework-review.md` §8.3.1 |
 | T-02 | 固件给出一个 `reg.base`，它在 `ns16550_mmio_layout_for_paddr` 的表里对应**错误的** `reg_shift`/`reg_width`，驱动按错误步长访问寄存器 | 高 | DT base 与真实硬件不符，或表里的平台条目写错 | **部分实现**：表查不到时 probe 返回 `Fatal(Invalid)`，**不会**用默认布局硬上（这是关键的失败方向）。**残余风险**：表里有错误条目时无法检测——按错误 `reg_shift` 访问会读到相邻寄存器，可能改写 UART 的 FCR/MCR 而不是 LCR。加固建议：把布局从"按物理地址查表"改成从 DT 的 `reg-shift`/`reg-io-width` 属性读取（Linux 的 `ns16550a` 绑定就是这么做的），让固件描述成为唯一来源 |
 | T-03 | 固件给出的 `mmio.size` 小于真实寄存器窗口，`SerialPort` 访问超出映射 | 高 | 畸形 DT | **已实现**：`dev.res().iomap(0)` 映射的正是 `mmio.size`，`SerialPort` 收到的 size 与映射大小一致；`driver-base::IoMap` 的每次寄存器访问都做 `offset + width <= region.size` 的**硬检查**（越界 panic，不是 UB）。因此后果是响亮 panic 而不是越界访问 |
-| T-04 | UART 对端发送海量字节，RX 处理压垮中断或 tty 缓冲 | 中 | 物理串口上的恶意设备、或宿主机串口灌数据 | **不在本 crate 防御**。handler 只确认并收集，唤醒 tty waker；缓冲与背压在 `console_driver` 的 ring buffer 与 tty 层。**残余风险**：本 crate 无速率限制 |
+| T-04 | UART 对端发送海量字节，RX 处理压垮中断或 tty 缓冲 | 中 | 物理串口上的恶意设备、或宿主机串口灌数据 | **不在本 crate 防御**。handler 只确认并收集，唤醒 tty waker；缓冲与背压在 `serial-core` 的 ring buffer 与 tty 层。**残余风险**：本 crate 无速率限制 |
 | T-05 | UART RX 字节被当作可信输入解析 | 高 | 串口 console 登录 / 内核命令行 | **不在本 crate**：`SerialCharDev::read` 只做 `self.0.read_data(buf)` 透传，不解析。解析责任在 tty 行规程与命令行解析器，它们必须把串口输入当不可信 |
 | T-06 | stdout binding 被移除，但发布与 guard 的移交不完整 → console 发布指向已释放的 IRQ/映射 | 高 | 移除 stdout 设备；或新增一个串口驱动时漏了移交 | **已实现**：不变量 2 + 3。`adopt_stdout_guards` 显式接收 `irq` 与 `regs`，用 `take()` 移交。**残余风险**：这是**手工协议**，编译器不检查完整性。`df5f15ead`/`6f7d44aea`/`0cfb1ad88` 三次修复都在这条协议上，说明它容易做错。加固建议：让 `register_console_parented` 直接接收 guards 作为参数（把"发布"与"移交"合成一个不可拆分的调用），而不是分两步 |
 | T-07 | stdout probe 失败后重试，`take_early_port` 已被取走 → 第二次走冷启动路径，对同一 UART 建第二份映射与第二个 `SerialPort` | 中 | stdout 节点的 probe 失败（缺时钟 provider、映射失败） | **未防御**。后果是两个 `SerialPort` 实例操作同一个 UART，printk 与驱动各持一份状态。**残余风险**：当前 stdout probe 只需要 `reg` 与时钟，失败概率低；但 `dev.res().clk()` 的 `Deferred` 路径**会**导致 probe 提前返回，此时 `take_early_port` 已经执行过了。加固建议：把 `take_early_port` 移到所有可失败步骤**之后**，或在失败路径上把端口还回去 |
-| T-08 | 时钟频率错误导致波特率偏移 | 低 | DT `clock-frequency` 错误（`drv/clk` 的 T-01） | **不在本 crate 防御**。`enable_baud_clock` 只负责 prepare/enable，分频计算在 `console_driver`/`SerialPort` |
+| T-08 | 时钟频率错误导致波特率偏移 | 低 | DT `clock-frequency` 错误（`drv/clk` 的 T-01） | **不在本 crate 防御**。`enable_baud_clock` 只负责 prepare/enable，分频计算在 `serial-core`/`SerialPort` |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -146,7 +146,9 @@
 6. **stdout 发布不可撤销**（F-08），这是 console 连续性的代价。
 7. **无 DMA、无 flow control、无 termios 完整支持**（`SerialCharDev` 只实现
    `read`/`write`/`flush`）。
-8. **依赖 `console_driver`**（例外 E-03），因此本 crate 不是主机无关的。
+8. **依赖 `subsys-char-console` 与 `serial-core`**：前者是 char 类旁的
+   子系统服务，后者是 family 库；`drv/**` 的 host 依赖只剩 serial-core
+   测试用的 `khal`（例外 E-03），生产代码不碰 host 运行时。
 
 ## 审计清单
 

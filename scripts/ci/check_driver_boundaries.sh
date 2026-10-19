@@ -36,7 +36,7 @@ RULED_DIRS=(drivers/base drivers/common drivers/subsystems drivers/drv)
 # kirq is NOT here: its type vocabulary (IrqTrigger/IrqController/IrqDomainId)
 # is common and driver-core re-exports it. What is forbidden in drv/** is
 # kirq's REGISTRATION API — checked separately as L1c.
-HOST_CRATES=(khal memspace kdma ktask kwork kpoll kclk knet driver_host console_driver)
+HOST_CRATES=(khal memspace kdma ktask kwork kpoll kclk knet driver_host boot_console)
 
 # --- L2: the exception register (data, cross-checked against the doc) ------
 # (crate dir, host crate) pairs allowed under L0-b. Format: "<dir> <crate>".
@@ -51,11 +51,10 @@ DRV_HOST_ALLOW=(
     # subsystem (of_clk_add_hw_provider does the same in Linux).
     "drivers/drv/clk driver_host"
     "drivers/drv/clk kclk"
-    # E-03: early-console adoption and the stdout identity handoff are
-    # single-machine boot integration, not a device resource. serial-core's
-    # `khal` use is unittest-only (the atomic console-write regression test);
-    # its non-test sources take PhysAddr/VirtAddr from `memaddr` directly.
-    "drivers/drv/serial console_driver"
+    # E-03: the atomic console-write regression test must exercise the real
+    # khal console lock. serial-core's non-test sources take PhysAddr/VirtAddr
+    # from `memaddr`; the `of` dependency is the `earlycon` feature (boot
+    # console bring-up), never the model driver path.
     "drivers/drv/serial/serial-core khal"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a

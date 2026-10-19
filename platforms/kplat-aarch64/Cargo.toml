@@ -22,15 +22,13 @@ nmi-pseudo = ["nmi", "irqchip_driver/nmi-pseudo"]
 nmi-hardware = ["nmi", "irqchip_driver/nmi-hardware"]
 nmi-pmu = ["nmi", "pmu"]
 pmu = ["kplat/pmu", "dep:aarch64-pmuv3", "dep:kirq"]
-console-pl011 = ["console_driver/pl011"]
-console-ns16550-mmio = ["console_driver/ns16550-mmio"]
 kvm-guest-mem-share = []
 kvm-mmio-guard = []
 vmm = ["clocksource_driver/vmm"]
 
 [dependencies]
 log = "0.4"
-console_driver = { workspace = true }
+boot_console = { workspace = true }
 irqchip_driver = { workspace = true }
 kirq = { workspace = true, optional = true }
 of = { workspace = true }

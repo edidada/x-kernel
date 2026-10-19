@@ -368,6 +368,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "boot-console"
+version = "0.3.0-dev"
+dependencies = [
+ "khal",
+ "kiface",
+ "kirq",
+ "kspin",
+ "log",
+ "memspace",
+ "of",
+ "serial-core",
+ "unittest",
+]
+
+[[package]]
 name = "boot-info"
 version = "0.3.0-dev"
 dependencies = [
@@ -654,25 +669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "console-driver"
-version = "0.3.0-dev"
-dependencies = [
- "devnode",
- "driver-base",
- "khal",
- "kiface",
- "kirq",
- "kspin",
- "lazyinit",
- "log",
- "memspace",
- "of",
- "serial-core",
- "subsys-char",
- "unittest",
 ]
 
 [[package]]
@@ -1116,7 +1112,6 @@ dependencies = [
  "backtrace",
  "bitmaps",
  "chrono",
- "console-driver",
  "devnode",
  "dice-driver",
  "driver-base",
@@ -1151,6 +1146,7 @@ dependencies = [
  "posix-types",
  "subsys-block",
  "subsys-char",
+ "subsys-char-console",
  "subsys-display",
  "subsys-input",
  "tee_crypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1311,13 +1307,13 @@ dependencies = [
 name = "drv-serial"
 version = "0.3.0-dev"
 dependencies = [
- "console-driver",
  "driver-base",
  "kerrno",
  "log",
  "memaddr",
  "serial-core",
  "subsys-char",
+ "subsys-char-console",
 ]
 
 [[package]]
@@ -2411,7 +2407,7 @@ version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
  "backtrace",
- "console-driver",
+ "boot-console",
  "devfs",
  "driver-init",
  "drv-block",
@@ -2683,8 +2679,8 @@ name = "kplat-aarch64"
 version = "0.3.0-dev"
 dependencies = [
  "aarch64-pmuv3",
+ "boot-console",
  "clocksource-driver",
- "console-driver",
  "heapless",
  "irqchip-driver",
  "karch",
@@ -2711,7 +2707,7 @@ dependencies = [
 name = "kplat-loongarch64"
 version = "0.3.0-dev"
 dependencies = [
- "console-driver",
+ "boot-console",
  "kaddr_layout",
  "karch",
  "kcpu",
@@ -2745,8 +2741,8 @@ dependencies = [
 name = "kplat-riscv64"
 version = "0.3.0-dev"
 dependencies = [
+ "boot-console",
  "clocksource-driver",
- "console-driver",
  "irqchip-driver",
  "karch",
  "kcpu",
@@ -2767,9 +2763,9 @@ name = "kplat-x86_64"
 version = "0.3.0-dev"
 dependencies = [
  "acpi",
+ "boot-console",
  "boot-info",
  "clocksource-driver",
- "console-driver",
  "irqchip-driver",
  "karch",
  "kbuild_config",
@@ -3173,7 +3169,6 @@ name = "ktty"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
- "console-driver",
  "driver-base",
  "intrusive-collections",
  "kcpu_id_map",
@@ -3195,6 +3190,7 @@ dependencies = [
  "ringbuf",
  "serial-core",
  "subsys-char",
+ "subsys-char-console",
  "unittest",
 ]
 
@@ -4765,6 +4761,7 @@ dependencies = [
  "kspin",
  "lazyinit",
  "memaddr",
+ "of",
  "ringbuf",
  "uart_16550",
  "unittest",
@@ -5027,6 +5024,18 @@ dependencies = [
  "driver-base",
  "kerrno",
  "log",
+]
+
+[[package]]
+name = "subsys-char-console"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kspin",
+ "lazyinit",
+ "log",
+ "subsys-char",
+ "unittest",
 ]
 
 [[package]]

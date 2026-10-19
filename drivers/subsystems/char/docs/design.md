@@ -26,7 +26,7 @@ hand a boot-initialized device to the generic pipeline.
 - No device nodes, no `/dev` filesystem, no cdev registry: naming and
   exposure to user space belong to the fs/device layers.
 - No early-boot console: the boot console
-  (`drivers/console`) initializes on its dedicated path before
+  (`drivers/boot-console`) initializes on its dedicated path before
   the bus manager and driver registry exist. This crate only enables
   *reusing* an already-initialized console through a thin `CharDevice`
   wrapper later at runtime.

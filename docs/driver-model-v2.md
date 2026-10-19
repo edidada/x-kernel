@@ -17,7 +17,7 @@ drivers/
   drv/     家族驱动 + 家族库(virtio/devices、serial/serial-core=UART 硬件、rtc=PL031/Goldfish/CMOS/LS7A)
   bus/     pci
   firmware/ of、acpi、dice(握手)、rs-fdtree(外部解析库)
-  console/ printk 侧消费者(早启 + stdout 采用)
+  boot-console/ printk sink + 固件 stdout 早启(earlycon) + 早期输入
   clocksource/ irqchip/ perf/ —— 模型外内核集成驱动(启动序/架构钉死,见 drivers/README.md)
   integration/ uevent-netlink
 arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
@@ -57,10 +57,11 @@ riscv64/x86_64 交叉构建 0 error。
 
 ## 已知债务(后续刀)
 
-1. `drivers/{console,clocksource,irqchip,perf}` 仍不在模型内:clocksource/
-   irqchip 被启动序钉在 `driver-init` 之前(irqchip 在 `kirq` 之下),perf 是
-   架构 PMU、尚无 perf 类。console 已完成到"char 类消费者"的一半,可参照
-   RTC 的拆法继续收敛。
+1. `drivers/{boot-console,clocksource,irqchip,perf}` 仍不在模型内:
+   clocksource/irqchip 被启动序钉在 `driver-init` 之前(irqchip 在 `kirq`
+   之下),perf 是架构 PMU、尚无 perf 类;boot-console 的模型侧半边已按类
+   服务拆到 `subsystems/char-console`,串口 family 的 earlycon 解码进了
+   `serial-core`。
 2. `drv/serial/serial-core` 内嵌 `input.rs`(串口输入环)与 devnode 语义耦合。
 3. `virtio_hal`/`virtio_transport` 仍在 host 顶层文件(家族区未显性子目录化)。
 4. kfeat/kruntime 的 feature 网与新 initcall 等级并存(等级是序,feature 是集;

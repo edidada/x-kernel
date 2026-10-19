@@ -31,6 +31,7 @@ impl SerialRegWidth {
         }
     }
 
+    #[cfg(feature = "ns16550-mmio")]
     fn bytes(self) -> usize {
         match self {
             Self::U8 => 1,
@@ -40,12 +41,53 @@ impl SerialRegWidth {
     }
 }
 
+/// NS16550 register layout: distance between adjacent registers and the
+/// access width, both decoded from the register stride and width the
+/// firmware declares (Linux 8250 defaults: stride 1, width 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialMmioLayout {
+    /// Device-tree `reg-shift`: adjacent register offset is `1 << reg_shift`.
+    pub reg_shift: u32,
+    /// Typed MMIO access width decoded from `reg-io-width`.
+    pub reg_width: SerialRegWidth,
+}
+
+impl SerialMmioLayout {
+    /// Build a layout from an explicit stride shift and access width.
+    pub const fn new(reg_shift: u32, reg_width: SerialRegWidth) -> Self {
+        Self {
+            reg_shift,
+            reg_width,
+        }
+    }
+
+    /// The Linux 8250 defaults: stride 1, 8-bit access.
+    pub const fn hw_default() -> Self {
+        Self::new(0, SerialRegWidth::U8)
+    }
+
+    /// Decode the raw firmware property values, applying the Linux defaults
+    /// for absent properties.
+    ///
+    /// Returns `None` when a present `reg-io-width` names an unsupported
+    /// width (the caller treats that as a firmware error rather than
+    /// guessing).
+    pub fn from_props(reg_shift: Option<u32>, reg_io_width: Option<u32>) -> Option<Self> {
+        Some(Self::new(
+            reg_shift.unwrap_or(0),
+            SerialRegWidth::from_bytes(reg_io_width.unwrap_or(1))?,
+        ))
+    }
+}
+
+#[cfg(feature = "ns16550-mmio")]
 pub(crate) struct Port {
     base: usize,
     stride: usize,
     reg_width: SerialRegWidth,
 }
 
+#[cfg(feature = "ns16550-mmio")]
 impl Port {
     const DATA: usize = 0;
     const FCR: usize = 2;

@@ -1,0 +1,21 @@
+[package]
+name = "subsys-char-console"
+description = "Console service over the char class: adopted stdout publication, transferred guards, console view"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+driver_base = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+log = { workspace = true }
+subsys_char = { workspace = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

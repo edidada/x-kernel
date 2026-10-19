@@ -21,7 +21,10 @@ extern crate alloc;
 mod ns16550_mmio;
 mod serial;
 
-pub use ns16550_mmio::SerialRegWidth;
+#[cfg(feature = "earlycon")]
+pub mod earlycon;
+
+pub use ns16550_mmio::{SerialMmioLayout, SerialRegWidth};
 // Cross-crate test fixtures (ktty's connection tests) — compiled only in
 // the unittest build, the same cfg the path_mod_test! macro gates on.
 #[cfg(unittest)]

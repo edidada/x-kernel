@@ -14,6 +14,9 @@ default = []
 pl011 = ["dep:arm_pl011"]
 ns16550-mmio = []
 ns16550-ioport = ["dep:uart_16550"]
+# Firmware-described early console ports (`earlycon`): the boot console crate
+# is the only consumer, so model-only serial builds stay `of`-free.
+earlycon = ["dep:of"]
 
 [dependencies]
 kerrno.workspace = true
@@ -23,6 +26,7 @@ kirq = { workspace = true }
 kspin = { workspace = true }
 lazyinit.workspace = true
 ringbuf = { workspace = true }
+of = { workspace = true, optional = true }
 arm_pl011 = { version = "0.1.1", optional = true }
 uart_16550 = { version = "0.4", optional = true }
 unittest.workspace = true
