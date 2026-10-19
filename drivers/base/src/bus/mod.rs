@@ -44,6 +44,8 @@ impl BusInstanceId {
 
 /// How well an id-table row matches a device: the score picks the driver
 /// AND the modalias row (Linux `bus_type.match` returning a probe score).
+/// Equal scores between drivers tie-break by registration order — the
+/// later registration wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchScore {
     /// The row does not bind this device.

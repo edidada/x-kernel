@@ -94,6 +94,11 @@ impl DeviceDomain {
         }
     }
 
+    /// Select the next probe batch: per pending device, the single
+    /// highest-scoring unattempted driver. Equal scores resolve to the
+    /// LATER registration (`max_by_key` over the registration-ordered
+    /// registry returns the last maximum) — pinned by
+    /// `same_score_later_registration_wins`.
     fn select_batch(&self) -> Vec<(u64, DeviceDescriptor, Arc<dyn AnyDriver>)> {
         let mut inner = self.inner.lock();
         let mut batch = Vec::new();

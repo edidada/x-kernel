@@ -425,6 +425,43 @@ fn late_driver_registration_skips_unmatched_unclaimed() {
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 }
 
+/// Tie-break fixture: both drivers match `test,serial` with the SAME
+/// score (Exact), so selection is decided by registration order alone.
+struct TieA;
+struct TieB;
+
+static TIE_IDS: &[crate::PlatformId] = &[crate::PlatformId::Of(OfMatch::compatible("test,serial"))];
+
+impl DriverOps<PlatformBus> for TieA {
+    type Data = ();
+
+    fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        Ok(())
+    }
+}
+
+impl DriverOps<PlatformBus> for TieB {
+    type Data = ();
+
+    fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        Ok(())
+    }
+}
+
+/// Equal MatchScore on every row: `max_by_key` returns the LAST maximum
+/// over the registration-ordered registry, so the LATER registration
+/// binds. This pins an explicit decision — switching to earliest-wins
+/// must edit this test first.
+#[def_test(serial)]
+fn same_score_later_registration_wins() {
+    let (domain, _services) = fresh_domain();
+    domain.register_driver(DriverDesc::new("tie-a", TIE_IDS, TieA));
+    domain.register_driver(DriverDesc::new("tie-b", TIE_IDS, TieB));
+
+    let id = domain.add_device(test_descriptor()).expect("add device");
+    assert_eq!(domain.snapshot(id).unwrap().driver, Some("tie-b"));
+}
+
 /// Topology: with_parent links entries, removal cascades
 /// children-first (the child's teardown completes before the parent's
 /// begins), and the parent's children list stays accurate after.
