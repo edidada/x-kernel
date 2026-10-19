@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# x-kernel shared pre-push hook: automatic rebase onto the base branch.
+#
+# Gerrit-style "rebase if necessary": before a branch push, fetch the base
+# branch and rebase the local branch onto it when it drifted behind. A clean
+# rebase is pushed again transparently (--force-with-lease); a conflicting
+# rebase is aborted and the push is stopped with manual instructions.
+#
+# Escape hatches (set for a single push):
+#   SKIP_REBASE=1  git push ...   # skip the automatic rebase entirely
+#   SKIP_ALL=1     git push ...   # same, kept in sync with pre-commit
+#
+# Notes:
+#   * Only plain single-branch pushes are intercepted: tags, branch
+#     deletions, multi-refspec and detached-HEAD pushes pass untouched.
+#   * Pushing the base branch itself (e.g. main) is never rewritten.
+#   * Network failures degrade to a warning and never block the push.
+#   * `git push --dry-run` may still perform the rebase and the re-push.
+
+# Never let a misconfigured environment block a push.
+if [ "${SKIP_ALL:-0}" = "1" ] || [ "${SKIP_REBASE:-0}" = "1" ]; then
+	echo "⏭️  pre-push: skip requested, pushing as-is." >&2
+	exit 0
+fi
+
+REMOTE="${1:-}"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+GIT_DIR="$(git rev-parse --git-dir)" || exit 0
+
+# Only plain single-branch pushes are eligible.
+mapfile -t LINES
+if [ -z "$REMOTE" ] || [ "${#LINES[@]}" -ne 1 ]; then
+	exit 0
+fi
+read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA <<<"${LINES[0]}"
+ZERO_SHA="0000000000000000000000000000000000000000"
+case "$LOCAL_REF:$REMOTE_REF:$LOCAL_SHA" in
+refs/heads/*:refs/heads/*:0000*) exit 0 ;; # branch deletion
+refs/heads/*:refs/heads/*:*) ;;
+*) exit 0 ;;
+esac
+
+# Only the currently checked-out branch, never a detached HEAD or a rebase
+# that is already in progress.
+BRANCH="$(git symbolic-ref --quiet --short HEAD)" || exit 0
+[ "refs/heads/$BRANCH" = "$LOCAL_REF" ] || exit 0
+if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -e "$GIT_DIR/MERGE_HEAD" ]; then
+	exit 0
+fi
+
+# The base branch: XK_REBASE_BASE (remote/branch) > origin/main > $REMOTE/main.
+BASE="${XK_REBASE_BASE:-}"
+if [ -z "$BASE" ]; then
+	if git show-ref --verify --quiet refs/remotes/origin/main; then
+		BASE="origin/main"
+	elif git show-ref --verify --quiet "refs/remotes/$REMOTE/main"; then
+		BASE="$REMOTE/main"
+	else
+		exit 0
+	fi
+fi
+BASE_REMOTE="${BASE%%/*}"
+BASE_BRANCH="${BASE#*/}"
+
+# Never rewrite the base branch itself (e.g. pushing main directly).
+if [ "$BASE_REMOTE" = "$REMOTE" ] && [ "refs/heads/$BASE_BRANCH" = "$REMOTE_REF" ]; then
+	exit 0
+fi
+
+# Refresh the base ref; being offline must not block the push.
+if ! git fetch --quiet --no-tags "$BASE_REMOTE" "$BASE_BRANCH" 2>/dev/null; then
+	echo "⚠️  pre-push: cannot fetch $BASE, skipping the rebase check." >&2
+	exit 0
+fi
+
+BEHIND="$(git rev-list --count "HEAD..$BASE")"
+if [ "$BEHIND" -eq 0 ]; then
+	exit 0
+fi
+
+cd "$REPO_ROOT" || exit 0
+
+# A dirty worktree cannot be rebased; warn and let the push through.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+	echo "⚠️  pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, but the worktree is dirty." >&2
+	echo "    commit or stash first, then push again to rebase automatically." >&2
+	exit 0
+fi
+
+# ---- rebase: clean success re-pushes, conflict aborts and instructs ----
+AHEAD="$(git rev-list --count "$BASE..HEAD")"
+echo "🔄 pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, rebasing $AHEAD commit(s)..."
+REBASE_LOG="$(git rebase "$BASE" 2>&1)" || {
+	CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+	git rebase --abort
+	echo "❌ pre-push: automatic rebase hit conflicts and was rolled back." >&2
+	echo "   conflicted files: $CONFLICTS" >&2
+	echo "   resolve them manually, then push again:" >&2
+	echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
+	echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
+	exit 1
+}
+
+echo "✅ pre-push: rebased $BRANCH onto $BASE ($AHEAD commit(s) carried)."
+echo "   pushing the rebased branch (--force-with-lease); the trailing"
+echo "   'failed to push' error from the original command is expected."
+
+LEASE_ARGS=()
+if [ "$REMOTE_SHA" != "$ZERO_SHA" ]; then
+	LEASE_ARGS=(--force-with-lease="$REMOTE_REF:$REMOTE_SHA")
+fi
+git push --no-verify "${LEASE_ARGS[@]}" "$REMOTE" "$LOCAL_REF:$REMOTE_REF"
+exit 1 # the original push must not proceed with the pre-rebase commit
