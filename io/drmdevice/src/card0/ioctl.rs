@@ -6,8 +6,11 @@
 
 use super::*;
 
-/// DRM ioctl handler trait. `const CMD` and the uniform dispatch function are
-/// generated from the `for_each_drm_ioctl!` table at the bottom of this file.
+/// DRM ioctl handler trait: binds a wire command word to its request type
+/// and its handler.  Every request type declares `impl DrmIoctl for <Type>`
+/// next to the code that implements it, so the command number, the struct
+/// it is decoded into, and the handler stay one greppable unit;
+/// `drm_uniform_ioctl` below is the single dispatch point over the `CMD`s.
 pub(crate) trait DrmIoctl: Sized {
     const CMD: u32;
     fn handle(dev: &DrmCard, file: &Arc<DrmFile>, arg: &mut Self) -> VfsResult<usize>;
@@ -23,85 +26,168 @@ pub(crate) trait DrmIoctl: Sized {
     }
 }
 
-/// Single declaration point for every uniform DRM ioctl: the wire ioctl
-/// number, its transfer direction, the request type, and the handler. This
-/// one table drives both the `impl DrmIoctl` wiring and the generated
-/// dispatch function, so adding a command is a single line here and the
-/// number, the size-derived command word, the dispatch arm and the handler
-/// can no longer drift apart.
-macro_rules! for_each_drm_ioctl {
-    ($mac:ident) => {
-        $mac! {
-            (0x00, iowr, DrmVersion, ioctl_drm_version),
-            (0x07, iowr, DrmSetVersion, ioctl_drm_set_version),
-            (0x01, iowr, DrmUnique, ioctl_drm_unique),
-            (0x0c, iowr, DrmGetCap, ioctl_drm_get_cap),
-            (0x0d, iow, DrmSetClientCap, ioctl_drm_set_client_cap),
-            (0x09, iow, DrmGemClose, ioctl_drm_gem_close),
-            (0x02, iowr, DrmAuth, ioctl_drm_auth),
-            (0x03, iowr, DrmAuthMagic, ioctl_drm_auth_magic),
-            (0xB1, iowr, DrmModeDirtyFb, ioctl_drm_mode_dirty_fb),
-            (0x2d, iowr, DrmPrimeHandle, ioctl_drm_prime_handle),
-            (0x2e, iowr, DrmPrimeFdToHandle, ioctl_drm_prime_fd_to_handle),
-            (0xA0, iowr, DrmModeCardRes, ioctl_drm_mode_card_res),
-            (0xA1, iowr, DrmModeCrtc, ioctl_drm_mode_crtc),
-            (0xA2, iowr, DrmModeSetCrtc, ioctl_drm_mode_set_crtc),
-            (0xA6, iowr, DrmModeGetEncoder, ioctl_drm_mode_get_encoder),
-            (0xA7, iowr, DrmModeGetConnector, ioctl_drm_mode_get_connector),
-            (0xAF, iowr, DrmModeRmFb, ioctl_drm_mode_rm_fb),
-            (0xB0, iowr, DrmModeCrtcPageFlip, ioctl_drm_mode_crtc_page_flip),
-            (0xB2, iowr, DrmModeCreateDumb, ioctl_drm_mode_create_dumb),
-            (0xB3, iowr, DrmModeMapDumb, ioctl_drm_mode_map_dumb),
-            (0xB4, iowr, DrmModeDestroyDumb, ioctl_drm_mode_destroy_dumb),
-            (0xB5, iowr, DrmModeGetPlaneRes, ioctl_drm_mode_get_plane_res),
-            (0xB6, iowr, DrmModeGetPlane, ioctl_drm_mode_get_plane),
-            (0xAB, iowr, DrmModeConnectorSetProperty, ioctl_drm_mode_connector_set_property),
-            (0xBA, iowr, DrmModeObjSetProperty, ioctl_drm_mode_obj_set_property),
-            (0xB9, iowr, DrmModeObjGetProperties, ioctl_drm_mode_obj_get_properties),
-            (0xAA, iowr, DrmModeGetProperty, ioctl_drm_mode_get_property),
-            (0x3A, iowr, DrmWaitVblank, ioctl_drm_wait_vblank),
-            (0xBC, iowr, DrmModeAtomic, ioctl_drm_mode_atomic),
-            (0xBD, iowr, DrmModeCreateBlob, ioctl_drm_mode_create_blob),
-            (0xBE, iowr, DrmModeDestroyBlob, ioctl_drm_mode_destroy_blob),
-            (0xAC, iowr, DrmModeGetBlob, ioctl_drm_mode_get_blob),
-            (0xA3, iowr, DrmModeCursor, ioctl_drm_mode_cursor),
-            (0xBB, iowr, DrmModeCursor2, ioctl_drm_mode_cursor2),
-            (0xAE, iowr, DrmModeFbCmd, ioctl_drm_mode_fb_cmd),
-            (0xB8, iowr, DrmModeFbCmd2, ioctl_drm_mode_fb_cmd2),
-            (0xD0, iowr, DrmModeCloseFb, ioctl_drm_mode_close_fb),
+/// Decode and run the ioctl named by `cmd`; unknown commands answer
+/// `ENOSYS`, like `drm_ioctl()` falling off its table.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear DRM ioctl dispatch table: one short match arm per command, arms share no \
+              state"
+)]
+pub(crate) fn drm_uniform_ioctl(
+    dev: &DrmCard,
+    file: &Arc<DrmFile>,
+    cmd: u32,
+    arg: usize,
+) -> VfsResult<usize> {
+    match cmd {
+        <DrmVersion as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmVersion>::from(arg);
+            <DrmVersion as DrmIoctl>::handle_raw(dev, file, user_ptr)
         }
-    };
-}
-
-macro_rules! drm_impl_and_dispatch {
-    ($(($nr:literal, $dir:ident, $ty:ty, $handle:path)),* $(,)?) => {
-        $(
-            impl DrmIoctl for $ty {
-                const CMD: u32 = $dir::<$ty>(DRM_TYPE, $nr);
-
-                fn handle(dev: &DrmCard, file: &Arc<DrmFile>, req: &mut Self) -> VfsResult<usize> {
-                    $handle(dev, file, req)
-                }
-            }
-        )*
-
-        pub(crate) fn drm_uniform_ioctl(
-            dev: &DrmCard,
-            state: &Arc<DrmFile>,
-            cmd: u32,
-            arg: usize,
-        ) -> VfsResult<usize> {
-            match cmd {
-                $(
-                    <$ty as DrmIoctl>::CMD => {
-                        let user_ptr = UserPtr::<$ty>::from(arg);
-                        <$ty as DrmIoctl>::handle_raw(dev, state, user_ptr)
-                    }
-                )*
-                _ => Err(kvfs::VfsError::OperationNotSupported),
-            }
+        <DrmSetVersion as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmSetVersion>::from(arg);
+            <DrmSetVersion as DrmIoctl>::handle_raw(dev, file, user_ptr)
         }
-    };
+        <DrmUnique as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmUnique>::from(arg);
+            <DrmUnique as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmGetCap as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmGetCap>::from(arg);
+            <DrmGetCap as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmSetClientCap as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmSetClientCap>::from(arg);
+            <DrmSetClientCap as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmGemClose as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmGemClose>::from(arg);
+            <DrmGemClose as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmAuth as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmAuth>::from(arg);
+            <DrmAuth as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmAuthMagic as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
+            <DrmAuthMagic as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeDirtyFb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
+            <DrmModeDirtyFb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmPrimeHandle as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);
+            <DrmPrimeHandle as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmPrimeFdToHandle as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmPrimeFdToHandle>::from(arg);
+            <DrmPrimeFdToHandle as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCardRes as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCardRes>::from(arg);
+            <DrmModeCardRes as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCrtc as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCrtc>::from(arg);
+            <DrmModeCrtc as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeSetCrtc as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeSetCrtc>::from(arg);
+            <DrmModeSetCrtc as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetEncoder as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetEncoder>::from(arg);
+            <DrmModeGetEncoder as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetConnector as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetConnector>::from(arg);
+            <DrmModeGetConnector as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeRmFb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeRmFb>::from(arg);
+            <DrmModeRmFb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCrtcPageFlip as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCrtcPageFlip>::from(arg);
+            <DrmModeCrtcPageFlip as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCreateDumb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCreateDumb>::from(arg);
+            <DrmModeCreateDumb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeMapDumb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeMapDumb>::from(arg);
+            <DrmModeMapDumb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeDestroyDumb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeDestroyDumb>::from(arg);
+            <DrmModeDestroyDumb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetPlaneRes as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetPlaneRes>::from(arg);
+            <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetPlane as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetPlane>::from(arg);
+            <DrmModeGetPlane as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeConnectorSetProperty as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeConnectorSetProperty>::from(arg);
+            <DrmModeConnectorSetProperty as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeObjSetProperty as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeObjSetProperty>::from(arg);
+            <DrmModeObjSetProperty as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeObjGetProperties as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeObjGetProperties>::from(arg);
+            <DrmModeObjGetProperties as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetProperty as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetProperty>::from(arg);
+            <DrmModeGetProperty as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmWaitVblank as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmWaitVblank>::from(arg);
+            <DrmWaitVblank as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeAtomic as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeAtomic>::from(arg);
+            <DrmModeAtomic as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCreateBlob as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCreateBlob>::from(arg);
+            <DrmModeCreateBlob as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeDestroyBlob as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeDestroyBlob>::from(arg);
+            <DrmModeDestroyBlob as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeGetBlob as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeGetBlob>::from(arg);
+            <DrmModeGetBlob as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCursor as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCursor>::from(arg);
+            <DrmModeCursor as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCursor2 as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCursor2>::from(arg);
+            <DrmModeCursor2 as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeFbCmd as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeFbCmd>::from(arg);
+            <DrmModeFbCmd as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeFbCmd2 as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeFbCmd2>::from(arg);
+            <DrmModeFbCmd2 as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        <DrmModeCloseFb as DrmIoctl>::CMD => {
+            let user_ptr = UserPtr::<DrmModeCloseFb>::from(arg);
+            <DrmModeCloseFb as DrmIoctl>::handle_raw(dev, file, user_ptr)
+        }
+        _ => Err(kvfs::VfsError::OperationNotSupported),
+    }
 }
-
-for_each_drm_ioctl!(drm_impl_and_dispatch);

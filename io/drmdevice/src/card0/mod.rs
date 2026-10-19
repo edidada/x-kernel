@@ -78,105 +78,105 @@ fn copy_version_field(user_ptr: UserPtr<u8>, capacity: usize, value: &str) -> Vf
     Ok(value.len())
 }
 
-fn ioctl_drm_version(
-    _dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    version: &mut DrmVersion,
-) -> VfsResult<usize> {
-    version.version_major = DRIVER_VERSION_MAJOR;
-    version.version_minor = DRIVER_VERSION_MINOR;
-    version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
-    version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
-    version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
-    version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
-    Ok(0)
+impl DrmIoctl for DrmVersion {
+    const CMD: u32 = iowr::<DrmVersion>(DRM_TYPE, 0x00);
+
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, version: &mut Self) -> VfsResult<usize> {
+        version.version_major = DRIVER_VERSION_MAJOR;
+        version.version_minor = DRIVER_VERSION_MINOR;
+        version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
+        version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
+        version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
+        version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
+        Ok(0)
+    }
 }
 
-fn ioctl_drm_set_version(
-    dev: &DrmCard,
-    file: &Arc<DrmFile>,
-    set_version: &mut DrmSetVersion,
-) -> VfsResult<usize> {
-    let requested = *set_version;
-    // Like Linux drm_setversion's done path, return supported versions even
-    // for lower-version requests and validation errors, not the input pair.
-    set_version.drm_di_major = 1;
-    set_version.drm_di_minor = 4;
-    set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
-    set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
+impl DrmIoctl for DrmSetVersion {
+    const CMD: u32 = iowr::<DrmSetVersion>(DRM_TYPE, 0x07);
 
-    let masters = dev.masters.lock();
-    if !masters
-        .active
-        .as_ref()
-        .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
-    {
-        return Err(VfsError::PermissionDenied);
-    }
-    let binding = file.binding.lock();
-    // Linux treats interface major -1 as a query and ignores its minor.
-    // See drm_setversion in https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_ioctl.c.
-    if requested.drm_di_major != -1 {
-        if requested.drm_di_major != 1 || !(0..=4).contains(&requested.drm_di_minor) {
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, set_version: &mut Self) -> VfsResult<usize> {
+        let requested = *set_version;
+        // Like Linux drm_setversion's done path, return supported versions even
+        // for lower-version requests and validation errors, not the input pair.
+        set_version.drm_di_major = 1;
+        set_version.drm_di_minor = 4;
+        set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
+        set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
+
+        let masters = dev.masters.lock();
+        if !masters
+            .active
+            .as_ref()
+            .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        let binding = file.binding.lock();
+        // Linux treats interface major -1 as a query and ignores its minor.
+        // See drm_setversion in https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_ioctl.c.
+        if requested.drm_di_major != -1 {
+            if requested.drm_di_major != 1 || !(0..=4).contains(&requested.drm_di_minor) {
+                return Err(VfsError::InvalidInput);
+            }
+            if requested.drm_di_minor >= 1 {
+                *binding.master.unique.lock() = Some(format!("{}:0", DRIVER_NAME));
+            }
+        }
+        // Linux establishes the bus identity before validating the driver
+        // version, and still copies supported versions out on an error.
+        if requested.drm_dd_major != -1
+            && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
+                || requested.drm_dd_minor < 0
+                || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
+        {
             return Err(VfsError::InvalidInput);
         }
-        if requested.drm_di_minor >= 1 {
-            *binding.master.unique.lock() = Some(format!("{}:0", DRIVER_NAME));
+        Ok(0)
+    }
+}
+
+impl DrmIoctl for DrmUnique {
+    const CMD: u32 = iowr::<DrmUnique>(DRM_TYPE, 0x01);
+
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, unique: &mut Self) -> VfsResult<usize> {
+        let identity = {
+            let _masters = dev.masters.lock();
+            let binding = file.binding.lock();
+            binding.master.unique.lock().clone()
+        };
+        let unique_str = identity.as_deref().unwrap_or("");
+        // GET_UNIQUE copies only when the complete identity fits, unlike VERSION.
+        if !unique_str.is_empty() && unique.unique_len >= unique_str.len() {
+            unique
+                .unique
+                .write_vm_slice(unique_str.as_bytes())
+                .map_err(|_| VfsError::BadAddress)?;
         }
+        unique.unique_len = unique_str.len();
+        Ok(0)
     }
-    // Linux establishes the bus identity before validating the driver
-    // version, and still copies supported versions out on an error.
-    if requested.drm_dd_major != -1
-        && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
-            || requested.drm_dd_minor < 0
-            || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
-    {
-        return Err(VfsError::InvalidInput);
-    }
-    Ok(0)
 }
 
-fn ioctl_drm_unique(
-    dev: &DrmCard,
-    file: &Arc<DrmFile>,
-    unique: &mut DrmUnique,
-) -> VfsResult<usize> {
-    let identity = {
-        let _masters = dev.masters.lock();
-        let binding = file.binding.lock();
-        binding.master.unique.lock().clone()
-    };
-    let unique_str = identity.as_deref().unwrap_or("");
-    // GET_UNIQUE copies only when the complete identity fits, unlike VERSION.
-    if !unique_str.is_empty() && unique.unique_len >= unique_str.len() {
-        unique
-            .unique
-            .write_vm_slice(unique_str.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
-    }
-    unique.unique_len = unique_str.len();
-    Ok(0)
-}
+impl DrmIoctl for DrmGetCap {
+    const CMD: u32 = iowr::<DrmGetCap>(DRM_TYPE, 0x0c);
 
-fn ioctl_drm_get_cap(
-    _dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    cap: &mut DrmGetCap,
-) -> VfsResult<usize> {
-    cap.value = match cap.capability {
-        DRM_CAP_DUMB_BUFFER => 1,
-        // The driver exposes a single primary plane and no cursor
-        // commands (the virtio-gpu cursor path is disabled), so these
-        // are client-compatibility values: libdrm-based clients treat
-        // 0 as "cursor unsupported" and bail out during init. See
-        // DRM_CURSOR_COMPAT_SIZE in consts.rs.
-        DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => DRM_CURSOR_COMPAT_SIZE,
-        DRM_CAP_TIMESTAMP_MONOTONIC => 1,
-        DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
-        DRM_CAP_ADDFB2_MODIFIERS => 1,
-        _ => 0,
-    };
-    Ok(0)
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, cap: &mut Self) -> VfsResult<usize> {
+        cap.value = match cap.capability {
+            DRM_CAP_DUMB_BUFFER => 1,
+            // The driver exposes a single primary plane and no cursor
+            // commands (the virtio-gpu cursor path is disabled), so these
+            // are client-compatibility values: libdrm-based clients treat
+            // 0 as "cursor unsupported" and bail out during init. See
+            // DRM_CURSOR_COMPAT_SIZE in consts.rs.
+            DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => DRM_CURSOR_COMPAT_SIZE,
+            DRM_CAP_TIMESTAMP_MONOTONIC => 1,
+            DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
+            DRM_CAP_ADDFB2_MODIFIERS => 1,
+            _ => 0,
+        };
+        Ok(0)
+    }
 }
 
 pub(crate) struct DrmFile {

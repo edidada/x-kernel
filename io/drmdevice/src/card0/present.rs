@@ -53,40 +53,40 @@ pub(crate) fn current_mode(dev: &DrmCard) -> DrmModeModeInfo {
     }
 }
 
-pub(crate) fn ioctl_drm_wait_vblank(
-    dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    request: &mut DrmWaitVblank,
-) -> VfsResult<usize> {
-    let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
-    let current = dev.sequence.load(Ordering::Acquire);
-    let target = if is_relative {
-        current.wrapping_add(request.sequence)
-    } else {
-        request.sequence
-    };
-    let raw_wait = target.wrapping_sub(current);
-    let wait_count = if raw_wait == 0 || raw_wait >= i32::MAX as u32 {
-        1
-    } else {
-        raw_wait
-    };
+impl DrmIoctl for DrmWaitVblank {
+    const CMD: u32 = iowr::<DrmWaitVblank>(DRM_TYPE, 0x3A);
 
-    const FRAME_PERIOD_NS: u64 = ktime_types::NANOS_PER_SEC / 60;
-    let delay =
-        ktime_types::TimeSpan::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
-    ktask::sleep(delay);
-    dev.sequence.fetch_add(wait_count, Ordering::AcqRel);
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, request: &mut Self) -> VfsResult<usize> {
+        let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
+        let current = dev.sequence.load(Ordering::Acquire);
+        let target = if is_relative {
+            current.wrapping_add(request.sequence)
+        } else {
+            request.sequence
+        };
+        let raw_wait = target.wrapping_sub(current);
+        let wait_count = if raw_wait == 0 || raw_wait >= i32::MAX as u32 {
+            1
+        } else {
+            raw_wait
+        };
 
-    let now = khal::time::monotonic_time();
-    let now = now.span_since_origin();
-    *request = DrmWaitVblank {
-        rep_type: 0,
-        sequence: dev.sequence.load(Ordering::Acquire),
-        tv_sec: now.as_secs() as i64,
-        tv_usec: now.subsec_micros() as i64,
-    };
-    Ok(0)
+        const FRAME_PERIOD_NS: u64 = ktime_types::NANOS_PER_SEC / 60;
+        let delay =
+            ktime_types::TimeSpan::from_nanos(FRAME_PERIOD_NS.saturating_mul(wait_count as u64));
+        ktask::sleep(delay);
+        dev.sequence.fetch_add(wait_count, Ordering::AcqRel);
+
+        let now = khal::time::monotonic_time();
+        let now = now.span_since_origin();
+        *request = DrmWaitVblank {
+            rep_type: 0,
+            sequence: dev.sequence.load(Ordering::Acquire),
+            tv_sec: now.as_secs() as i64,
+            tv_usec: now.subsec_micros() as i64,
+        };
+        Ok(0)
+    }
 }
 
 impl DrmCard {

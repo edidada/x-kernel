@@ -6,22 +6,22 @@
 
 use super::*;
 
-pub(crate) fn ioctl_drm_prime_handle(
-    _dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    prime: &mut DrmPrimeHandle,
-) -> VfsResult<usize> {
-    prime.fd = prime.handle as i32;
-    Ok(0)
+impl DrmIoctl for DrmPrimeHandle {
+    const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2d);
+
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
+        prime.fd = prime.handle as i32;
+        Ok(0)
+    }
 }
 
-pub(crate) fn ioctl_drm_prime_fd_to_handle(
-    _dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    prime: &mut DrmPrimeFdToHandle,
-) -> VfsResult<usize> {
-    prime.0.handle = prime.0.fd as u32;
-    Ok(0)
+impl DrmIoctl for DrmPrimeFdToHandle {
+    const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2e);
+
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
+        prime.0.handle = prime.0.fd as u32;
+        Ok(0)
+    }
 }
 
 pub(crate) struct DumbBuffer {
@@ -33,94 +33,94 @@ pub(crate) struct DumbBuffer {
     pub(crate) pages: Arc<GlobalPage>,
 }
 
-pub(crate) fn ioctl_drm_mode_create_dumb(
-    dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    c: &mut DrmModeCreateDumb,
-) -> VfsResult<usize> {
-    // The backing store is always BGRA8888 (32bpp) and `bytes_per_pixel` is
-    // therefore constant, but 24bpp requests must still be accepted: Linux's
-    // generic dumb-buffer ioctl accepts them, and libdrm-based clients on
-    // the non-atomic path (Xorg's modesetting driver) ask for 24bpp and then
-    // hand that same value back to `ADDFB`. Rejecting it fails their
-    // initialisation before any framebuffer exists.
-    //
-    // `bpp == 0`, `bpp > 64` and the multiple-of-8 rule are still enforced,
-    // because the depth comes from user space and an unknown depth cannot be
-    // described to the scanout device.
-    if c.width == 0 || c.height == 0 || c.flags != 0 || !matches!(c.bpp, 24 | 32) {
-        return Err(VfsError::InvalidInput);
-    }
-    if c.width > 16384 || c.height > 16384 {
-        return Err(VfsError::InvalidInput);
-    }
-    let bytes_per_pixel = 4;
-    let pitch = c
-        .width
-        .checked_mul(bytes_per_pixel)
-        .ok_or(VfsError::InvalidInput)?;
-    let size = (pitch as u64)
-        .checked_mul(c.height as u64)
-        .ok_or(VfsError::InvalidInput)?;
-    if size as usize > DUMB_BUFFER_MAX_SIZE {
-        return Err(VfsError::NoMemory);
-    }
-    c.pitch = pitch;
-    c.size = size;
-    let size_aligned = (size as usize).next_multiple_of(PAGE_SIZE_4K);
-    let pages = size_aligned / PAGE_SIZE_4K;
-    let mut backing =
-        GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| VfsError::NoMemory)?;
-    backing.zero();
-    let paddr = v2p(backing.start_va()).as_usize() as u64;
-    let resource_id = dev.next_resource_id.fetch_add(1, Ordering::Relaxed);
-    dev.display()?
-        .create_scanout_resource(
-            ScanoutResource {
-                id: resource_id,
+impl DrmIoctl for DrmModeCreateDumb {
+    const CMD: u32 = iowr::<DrmModeCreateDumb>(DRM_TYPE, 0xB2);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
+        // The backing store is always BGRA8888 (32bpp) and `bytes_per_pixel` is
+        // therefore constant, but 24bpp requests must still be accepted: Linux's
+        // generic dumb-buffer ioctl accepts them, and libdrm-based clients on
+        // the non-atomic path (Xorg's modesetting driver) ask for 24bpp and then
+        // hand that same value back to `ADDFB`. Rejecting it fails their
+        // initialisation before any framebuffer exists.
+        //
+        // `bpp == 0`, `bpp > 64` and the multiple-of-8 rule are still enforced,
+        // because the depth comes from user space and an unknown depth cannot be
+        // described to the scanout device.
+        if c.width == 0 || c.height == 0 || c.flags != 0 || !matches!(c.bpp, 24 | 32) {
+            return Err(VfsError::InvalidInput);
+        }
+        if c.width > 16384 || c.height > 16384 {
+            return Err(VfsError::InvalidInput);
+        }
+        let bytes_per_pixel = 4;
+        let pitch = c
+            .width
+            .checked_mul(bytes_per_pixel)
+            .ok_or(VfsError::InvalidInput)?;
+        let size = (pitch as u64)
+            .checked_mul(c.height as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        if size as usize > DUMB_BUFFER_MAX_SIZE {
+            return Err(VfsError::NoMemory);
+        }
+        c.pitch = pitch;
+        c.size = size;
+        let size_aligned = (size as usize).next_multiple_of(PAGE_SIZE_4K);
+        let pages = size_aligned / PAGE_SIZE_4K;
+        let mut backing =
+            GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| VfsError::NoMemory)?;
+        backing.zero();
+        let paddr = v2p(backing.start_va()).as_usize() as u64;
+        let resource_id = dev.next_resource_id.fetch_add(1, Ordering::Relaxed);
+        dev.display()?
+            .create_scanout_resource(
+                ScanoutResource {
+                    id: resource_id,
+                    width: c.width,
+                    height: c.height,
+                    pitch: c.pitch,
+                    format: ScanoutFormat::Bgra8888,
+                },
+                paddr,
+                size_aligned as u32,
+            )
+            .map_err(|_| VfsError::Io)?;
+        let pages_arc = Arc::new(backing);
+        let offset = dev
+            .next_offset
+            .fetch_add(DUMB_BUFFER_OFFSET_STRIDE, Ordering::Relaxed);
+        let handle = dev.next_dumb_handle.fetch_add(1, Ordering::Relaxed);
+
+        dev.dumbs.lock().insert(
+            DumbHandle::from_wire(handle),
+            DumbBuffer {
                 width: c.width,
                 height: c.height,
                 pitch: c.pitch,
-                format: ScanoutFormat::Bgra8888,
+                offset,
+                resource_id,
+                pages: pages_arc,
             },
-            paddr,
-            size_aligned as u32,
-        )
-        .map_err(|_| VfsError::Io)?;
-    let pages_arc = Arc::new(backing);
-    let offset = dev
-        .next_offset
-        .fetch_add(DUMB_BUFFER_OFFSET_STRIDE, Ordering::Relaxed);
-    let handle = dev.next_dumb_handle.fetch_add(1, Ordering::Relaxed);
-
-    dev.dumbs.lock().insert(
-        DumbHandle::from_wire(handle),
-        DumbBuffer {
-            width: c.width,
-            height: c.height,
-            pitch: c.pitch,
-            offset,
-            resource_id,
-            pages: pages_arc,
-        },
-    );
-    c.handle = handle;
-    Ok(0)
+        );
+        c.handle = handle;
+        Ok(0)
+    }
 }
 
-pub(crate) fn ioctl_drm_mode_map_dumb(
-    dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    m: &mut DrmModeMapDumb,
-) -> VfsResult<usize> {
-    let offset = dev
-        .dumbs
-        .lock()
-        .get(&DumbHandle::from_wire(m.handle))
-        .map(|b| b.offset)
-        .ok_or(VfsError::InvalidInput)?;
-    m.offset = offset;
-    Ok(0)
+impl DrmIoctl for DrmModeMapDumb {
+    const CMD: u32 = iowr::<DrmModeMapDumb>(DRM_TYPE, 0xB3);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, m: &mut Self) -> VfsResult<usize> {
+        let offset = dev
+            .dumbs
+            .lock()
+            .get(&DumbHandle::from_wire(m.handle))
+            .map(|b| b.offset)
+            .ok_or(VfsError::InvalidInput)?;
+        m.offset = offset;
+        Ok(0)
+    }
 }
 
 /// Drop a dumb buffer's handle and release the host scanout resource behind it.
@@ -286,37 +286,38 @@ impl DrmCard {
     }
 }
 
-pub(crate) fn ioctl_drm_mode_destroy_dumb(
-    dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    d: &mut DrmModeDestroyDumb,
-) -> VfsResult<usize> {
-    // Legacy entry point: an unknown handle stays a silent success, because
-    // callers free a dumb buffer without ever reading the result.  GEM_CLOSE
-    // below is the entry point that is allowed to report the miss.
-    //
-    // `ADDFB2` holds this lock from reading a handle to registering the
-    // framebuffer, which is what keeps a close from destroying a resource
-    // the new framebuffer is about to name.
-    let _commit = dev.commit_lock.lock();
-    take_dumb(dev, DumbHandle::from_wire(d.handle))?;
-    Ok(0)
+impl DrmIoctl for DrmModeDestroyDumb {
+    const CMD: u32 = iowr::<DrmModeDestroyDumb>(DRM_TYPE, 0xB4);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
+        // Legacy entry point: an unknown handle stays a silent success, because
+        // callers free a dumb buffer without ever reading the result.  GEM_CLOSE
+        // below is the entry point that is allowed to report the miss.
+        //
+        // `ADDFB2` holds this lock from reading a handle to registering the
+        // framebuffer, which is what keeps a close from destroying a resource
+        // the new framebuffer is about to name.
+        let _commit = dev.commit_lock.lock();
+        take_dumb(dev, DumbHandle::from_wire(d.handle))?;
+        Ok(0)
+    }
 }
 
-pub(crate) fn ioctl_drm_gem_close(
-    dev: &DrmCard,
-    _file: &Arc<DrmFile>,
-    args: &mut DrmGemClose,
-) -> VfsResult<usize> {
-    // `drm_gem_close_ioctl()` rejects a non-zero `pad` and reports an unknown
-    // handle as EINVAL (through `drm_gem_handle_delete()`), not ENOENT.
-    if args.pad != 0 {
-        return Err(VfsError::InvalidInput);
+impl DrmIoctl for DrmGemClose {
+    // DRM_IOCTL_GEM_CLOSE = DRM_IOW(0x09, struct drm_gem_close): 8 bytes.
+    const CMD: u32 = iow::<DrmGemClose>(DRM_TYPE, 0x09);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, args: &mut Self) -> VfsResult<usize> {
+        // `drm_gem_close_ioctl()` rejects a non-zero `pad` and reports an unknown
+        // handle as EINVAL (through `drm_gem_handle_delete()`), not ENOENT.
+        if args.pad != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        // See `MODE_DESTROY_DUMB`: this lock orders the close against `ADDFB2`.
+        let _commit = dev.commit_lock.lock();
+        if !take_dumb(dev, DumbHandle::from_wire(args.handle))? {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(0)
     }
-    // See `MODE_DESTROY_DUMB`: this lock orders the close against `ADDFB2`.
-    let _commit = dev.commit_lock.lock();
-    if !take_dumb(dev, DumbHandle::from_wire(args.handle))? {
-        return Err(VfsError::InvalidInput);
-    }
-    Ok(0)
 }
