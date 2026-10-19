@@ -400,3 +400,7 @@ impl<T> ClassRegistry<T> {
         self.removal_subscribers.clone()
     }
 }
+
+#[cfg(unittest)]
+#[path = "tests.rs"]
+mod tests;

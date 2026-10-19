@@ -14,8 +14,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kerrno::KResult;
 use unittest::{assert_eq, def_test};
 
-use super::{class_api::{Class, ClassHooks}, *};
-use crate::{DeviceCore, DeviceId};
+use super::class_api::{Class, ClassHooks, PublicationNode};
+use crate::device::{DeviceCore, DeviceId};
 
 fn loc(id: u32) -> String {
     format!("platform/firmware{id}")
@@ -34,7 +34,7 @@ fn publication_owner_withdraws_and_clones_do_not() {
 
     struct NoHooks;
     impl ClassHooks<u32> for NoHooks {
-        fn unpublish(&self, _runtime: &u32) {
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -43,7 +43,7 @@ fn publication_owner_withdraws_and_clones_do_not() {
     let published = CLASS.publish(owner(1), 7u32, "dev").expect("publish");
     let id = published.id();
     let borrow = published.clone();
-    assert_eq!(CLASS.find(id).map(|p| *p.with(|v| *v)), Some(7));
+    assert_eq!(CLASS.find(id).map(|p| p.with(|v| *v)), Some(7));
 
     // Consumer borrows never withdraw.
     drop(borrow);
@@ -66,7 +66,7 @@ fn class_teardown_waits_for_last_in_flight_use() {
 
     struct DrainHooks;
     impl ClassHooks<u32> for DrainHooks {
-        fn unpublish(&self, _runtime: &u32) {
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -121,7 +121,8 @@ fn with_available_refuses_after_withdrawal() {
 
     let publication = CLASS.publish(owner(4), 9u32, "gate2").expect("publish");
     let borrowed = publication.clone();
-    let before = borrowed.with_available(|runtime| Ok::<u32, kerrno::KError>(*runtime) as KResult<u32>);
+    let before =
+        borrowed.with_available(|runtime| Ok::<u32, kerrno::KError>(*runtime) as KResult<u32>);
     assert_eq!(before.ok(), Some(9));
 
     drop(publication);
@@ -148,4 +149,49 @@ fn publications_share_the_owner_identity_but_not_the_handle() {
     first.mark_offline();
     assert!(!first.is_available());
     assert!(!second.is_available());
+}
+
+/// One class serves many devices (class 1:N), and one device identity can be
+/// the owner of publications in several classes (device/class N:M).
+///
+/// Liveness is shared: publication availability reads the device's online
+/// flag, so withdrawing ONE publication marks the whole device offline — the
+/// other classes' entries stay registered but stop being available, and their
+/// own drop completes the withdrawal. That is the model's unit of life: one
+/// device, not one publication.
+#[def_test(serial)]
+fn one_class_serves_many_devices_and_publications_share_device_liveness() {
+    static CHAR_LIKE: Class<u32, NoHooks> = Class::new(NoHooks);
+    static BLOCK_LIKE: Class<u64, NoHooks> = Class::new(NoHooks);
+
+    struct NoHooks;
+    impl ClassHooks<u32> for NoHooks {}
+    impl ClassHooks<u64> for NoHooks {}
+
+    let first = CHAR_LIKE.publish(owner(10), 1, "a").expect("publish a");
+    let second = CHAR_LIKE.publish(owner(11), 2, "b").expect("publish b");
+    assert_eq!(CHAR_LIKE.devices().len(), 2);
+
+    // One device, two classes: the owner identity is shared, the handles are
+    // distinct.
+    let device = owner(12);
+    let char_side = CHAR_LIKE
+        .publish(device.clone(), 3, "c")
+        .expect("publish c");
+    let block_side = BLOCK_LIKE.publish(device, 4, "d").expect("publish d");
+    assert_ne!(char_side.id(), block_side.id());
+    assert_eq!(char_side.location(), block_side.location());
+
+    // Withdrawing one publication flips the shared device identity: the
+    // sibling is no longer handed out ...
+    drop(char_side);
+    assert!(BLOCK_LIKE.find(block_side.id()).is_none());
+    // ... but its runtime stays reachable for its own teardown, and its drop
+    // removes the registry entry.
+    assert_eq!(block_side.with(|value| *value), 4);
+    drop(block_side);
+    assert_eq!(BLOCK_LIKE.devices().len(), 0);
+
+    drop(first);
+    drop(second);
 }

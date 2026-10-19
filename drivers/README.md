@@ -160,6 +160,49 @@ that lives in `arch/` rather than `drivers/`.
 |------|------|------|
 | `integration/uevent-netlink` | `uevent-netlink` | Netlink transport for kobject uevents — the one drivers-tree consumer of `knet`. The payload format (a udev-visible compatibility surface) lives in `devnode::uevent`, shared with sysfs attributes. |
 
+## Relationship Multiplicity
+
+The model's unit of life is the **device**: drivers, classes and providers
+multiply around it. This is the audit of which shapes are supported, where
+the extension seam is, and which are deliberately closed. The named tests
+are kernel unit tests in `driver-base` that pin the behavior.
+
+| Relationship | Supported | Mechanism | Extension seam / limit |
+|---|---|---|---|
+| driver 1 : N devices | yes | one `DriverDesc`, `probe` once per device, per-binding `Data` (`one_driver_binds_many_devices`) | per-device state must live in `Data`, never in the driver object |
+| driver N : 1 device | sequential attempts | `attempted` set + `MatchScore`: `Fatal` hands the device to the next candidate, first success binds (`fatal_failure_falls_through_to_next_candidate`) | no simultaneous two-driver binding (Linux parity). A driver that must split a device enumerates **child devices** (`DeviceDescriptor::with_parent`); there is no aux-bus helper |
+| device : bus | 1 bus (+ optional `BusInstanceId`) | `DeviceDescriptor.bus` / `bus_instance` | a device cannot sit on two buses (Linux parity) |
+| device 1 : N classes | yes | one `Device::publish` per class, publications share `Arc<DeviceCore>` | **liveness is per device, not per publication**: the first withdrawal flips the shared online flag, so sibling publications stop being available and only their own drop removes the registry entry (`one_class_serves_many_devices_and_publications_share_device_liveness`) |
+| class 1 : N devices | yes | `ClassRegistry` vector + `devices()`/`find()` + availability/removal subscriptions | scans are O(N); callbacks are class-wide (consumers filter); no per-device subscription |
+| driver 1 : N classes | yes | `Data` holds N `Publication`s; field order is release order | a driver must keep every publication in one `Data` so rollback stays field-order RAII |
+| publication : devnode | 1 : 1 | devnode registry keyed by publication id; `publish_auto_indexed` allocates per-class indices | one publication cannot project two nodes; two userland projections mean two class publications |
+| class : hook type | 1 : 1 (`H`) | `Class<T, H: ClassHooks<T>>` | per-family behavior must dispatch inside `H`/`T`; the class cannot vary hooks per device |
+| provider key : outputs | 1 : N | `ProviderClass::Key` → lookup with `get_by_index` | the lookup object owns the output fan-out |
+| provider key : consumers | 1 : N | deferred wake keyed by `DepSource` (`provider_publication_wakes_every_consumer_on_the_key`) | one re-probe per parked consumer per publication |
+| device : provider keys | 1 : N | each `dev.env().provide::<C>(key, lookup)` publishes one key | duplicate keys are rejected (`AlreadyExists`); provider lifetime is boot-static — a device removal does not withdraw its providers |
+| extension type : instance | 1 : 1 | `ExtensionRegistry` keyed by `TypeId` | one value per contract type; a service holds its own per-device maps internally |
+| class : subscribers | 1 : N | `subscribe_available` / `subscribe_removed` | no unsubscribe; boot-static consumers assumed |
+| removal | N : M cascade | `remove_device`: retryable exclusive claim, children-first (device children ∪ bus-instance members), quiesce → `Data` drop (publications withdraw) → `Removed` | `Removed` entries remain as tombstones; re-adding the same hardware gets a new identity (no stable hardware key) |
+
+### Known closed shapes
+
+These are decisions, not missing work; each has an exit condition:
+
+1. **One device, two simultaneously bound drivers** — closed (Linux parity).
+   The supported expansion is child devices owned by a parent driver.
+2. **Per-publication liveness** — closed: the device is the liveness unit, so
+   `Publication::is_available()` reads the shared `DeviceCore`.[^1]
+3. **Provider withdrawal on device removal** — closed: clock providers are
+   boot-static (`of_clk_add_hw_provider` semantics; see E-02c). Exit condition:
+   a removable provider class ties its registration to a `Data` guard and adds
+   the unregister path to `ProviderServices`.
+4. **Multi-instance extensions** — closed: the extension *type* is the key.
+   A family that needs N instances puts the map inside its one service value.
+
+[^1]: The class tests in `drivers/base/src/class/tests.rs` were previously
+orphaned (not linked into the unittest build); they are linked now, and the
+multiplicity tests above live beside them.
+
 ## Porting Workflow
 
 See [`docs/linux-porting-map.md`](../docs/linux-porting-map.md) — the normative

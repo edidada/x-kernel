@@ -320,10 +320,16 @@ fn test_resources() -> crate::resource::ResourceMap {
 }
 
 fn test_descriptor() -> DeviceDescriptor {
+    test_descriptor_for_node(1)
+}
+
+/// A consumer descriptor on a distinct firmware node: identity is per node,
+/// so several test devices never share a path or dedupe accidentally.
+fn test_descriptor_for_node(node_id: u32) -> DeviceDescriptor {
     let resources = test_resources();
     DeviceDescriptor::new(
         PlatformBus::ID,
-        alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["test,serial"])),
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(node_id, &["test,serial"])),
     )
     .with_resources(resources)
 }
@@ -1177,4 +1183,78 @@ fn provider_registration_wakes_exactly_its_consumer() {
 
     let rate = domain.with_data::<SerData, u64>(consumer, |data| data.clk.get_rate());
     assert_eq!(rate, Some(24_000_000));
+}
+
+/// One driver instance serves many device instances (driver 1:N): the
+/// registration is one descriptor, `probe` runs once per device, and each
+/// binding owns its own `Data` — the driver object itself is shared and
+/// carries no per-device state.
+#[def_test(serial)]
+fn one_driver_binds_many_devices() {
+    let (domain, services) = fresh_domain();
+    services.publish_clk(0x42);
+    domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+    let probes_before = PROBES.load(Ordering::Relaxed);
+
+    let first = domain
+        .add_device(test_descriptor_for_node(1))
+        .expect("add first");
+    let second = domain
+        .add_device(test_descriptor_for_node(3))
+        .expect("add second");
+
+    for id in [first, second] {
+        let snapshot = domain.snapshot(id).unwrap();
+        assert_eq!(snapshot.state, DeviceState::Active);
+        assert_eq!(snapshot.driver, Some("test-serial"));
+        assert_eq!(
+            domain.with_data::<SerData, u64>(id, |data| data.clk.get_rate()),
+            Some(24_000_000)
+        );
+    }
+    assert_eq!(PROBES.load(Ordering::Relaxed) - probes_before, 2);
+
+    // Tearing one device down leaves the other binding intact.
+    domain.remove_device(first).expect("remove first");
+    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Removed);
+    assert_eq!(domain.snapshot(second).unwrap().state, DeviceState::Active);
+}
+
+/// One provider key wakes every consumer parked on it (provider 1:N
+/// consumers): the wake is keyed by `DepSource`, not by device id, so two
+/// devices deferring on the same phandle both resume on one publication.
+#[def_test(serial)]
+fn provider_publication_wakes_every_consumer_on_the_key() {
+    PROBES.store(0, Ordering::Relaxed);
+    let domain: &'static DeviceDomain = Box::leak(Box::new(DeviceDomain::new()));
+    let services = MockServices::new();
+    services.set_wake(Arc::new(move |dep| {
+        domain.wake(dep);
+    }));
+    domain.set_services(services.clone());
+    domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+    domain.register_driver(DriverDesc::new("test-ccu", CCU_IDS, TestCcu));
+
+    let first = domain
+        .add_device(test_descriptor_for_node(1))
+        .expect("add first");
+    let second = domain
+        .add_device(test_descriptor_for_node(3))
+        .expect("add second");
+    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Deferred);
+    assert_eq!(
+        domain.snapshot(second).unwrap().state,
+        DeviceState::Deferred
+    );
+    assert_eq!(services.provider_keys(), alloc::vec![]);
+
+    let provider = domain.add_device(ccu_descriptor()).expect("add provider");
+    assert_eq!(
+        domain.snapshot(provider).unwrap().state,
+        DeviceState::Active
+    );
+    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(second).unwrap().state, DeviceState::Active);
+    // Two deferred first attempts plus one re-probe per woken consumer.
+    assert_eq!(PROBES.load(Ordering::Relaxed), 4);
 }
