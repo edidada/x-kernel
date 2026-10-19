@@ -26,7 +26,7 @@
 //! [`Class::find`]: crate::class::class_api::Class::find
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
@@ -44,15 +44,16 @@ pub mod class_api;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicationId(u64);
 
-/// High bit tags driver-base (new model) owned publications.
-const DRIVER_BASE_ID_TAG: u64 = 1 << 63;
-
-static NEXT_PUBLICATION_ID: AtomicUsize = AtomicUsize::new((DRIVER_BASE_ID_TAG + 1) as usize);
+/// THE publication-id source: one process-wide counter, no tag range. The
+/// legacy-model high-bit fence is gone — nothing else allocates a
+/// `PublicationId`, and `from_raw` only round-trips values that already
+/// came from here (devfs projection keys, tests).
+static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
 
 impl PublicationId {
     /// Allocate a fresh publication id.
     pub fn next() -> Self {
-        Self(NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed) as u64)
+        Self(NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Wrap an existing raw id without re-deriving it.
