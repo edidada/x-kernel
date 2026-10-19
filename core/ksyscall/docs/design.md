@@ -122,6 +122,24 @@ avoiding two periodic polls missing the blocked interval. The partial-install
 observer captures request-local handshake state without coupling the loader to
 the scheduler. Migration and memory checks still run after acknowledgement.
 Synthetic ELF fixtures verify installation, not execution of user instructions.
+Exit-tail command and finish waits use separate predicate queues with five-second
+hang bounds. Publishers store with release ordering before notifying; finish
+broadcasts to both held tails. Observers still require the real scheduler
+`Blocked` state: acknowledgements alone do not prove a task has parked. The
+remote IRQ-enabled `NoPreempt` window remains a bounded spin, not a queue wait.
+The parent renews its five-second observation deadline only when a finite leader
+stage strictly advances (prepared, first boundary checked, second boundary
+checked, exit published). Repeated observations or unrelated wakeups do not
+renew it. Thus both execs no longer share one parent five-second budget, while
+each stalled stage and each individual command/finish wait remains bounded.
+Timeouts report stage, command, acknowledgement and release state, with observed
+task state/CPU where applicable. A protocol regression checks early publication,
+one registered command listener, and broadcast delivery to two blocked finish
+listeners using notification counts, not wall-clock latency assertions. All MM,
+two-exec, migration and reap/GC assertions remain. A pure budget regression uses
+synthetic instants to check that repeated or older stages cannot renew the
+deadline, while strictly advancing stages can. This addresses plausible test
+handshake sensitivity; it does not establish the root cause of CI #2467.
 The external harness `exec-mm-semantics` suite covers runnable-image behavior:
 successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 

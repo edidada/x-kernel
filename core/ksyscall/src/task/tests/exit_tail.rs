@@ -7,14 +7,14 @@
 // Noexec controls also retain M through the runtime. Exec cases replace that
 // binding twice while the unpublished sibling must keep using its captured M.
 
-use alloc::{format, sync::Arc, vec};
+use alloc::{format, string::String, sync::Arc, vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kprocess::{
     ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, ProcessForkConfig,
 };
 use ktask::{TaskInner, TaskState, WaitQueue};
-use ktime_types::TimeSpan;
+use ktime_types::{MonotonicInstant, TimeSpan};
 use unittest::{TestResult, def_test};
 use unittest_support::TestUserValue;
 
@@ -23,6 +23,9 @@ use crate::task::execve::{exec_owned, lifecycle_tests::executable_root};
 struct Stages {
     command: AtomicUsize,
     acknowledgement: AtomicUsize,
+    command_queue: WaitQueue,
+    finish_queue: WaitQueue,
+    leader_stage: AtomicUsize,
     // The leader publishes exit; only the parent releases both held tails.
     has_leader_exited: AtomicBool,
     can_finish: AtomicBool,
@@ -35,11 +38,74 @@ const FIRST_PARKED: usize = 1;
 const WINDOW_HELD: usize = 2;
 const SECOND_PARKED: usize = 3;
 
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum LeaderStage {
+    Prepared             = 1,
+    FirstBoundaryChecked = 2,
+    SecondBoundaryChecked = 3,
+    ExitPublished        = 4,
+}
+
+fn leader_stage_label(stage: usize) -> &'static str {
+    match stage {
+        0 => "starting",
+        1 => "prepared",
+        2 => "first-boundary-checked",
+        3 => "second-boundary-checked",
+        4 => "exit-published",
+        _ => "invalid",
+    }
+}
+
+fn renew_stage_deadline(
+    stage: &mut usize,
+    next: usize,
+    deadline: &mut MonotonicInstant,
+    now: MonotonicInstant,
+) {
+    if next > *stage {
+        *stage = next;
+        *deadline = now + TimeSpan::from_secs(5);
+    }
+}
+
 impl Stages {
-    fn command(&self, value: usize) {
+    fn new() -> Self {
+        Self {
+            command: AtomicUsize::new(0),
+            acknowledgement: AtomicUsize::new(0),
+            command_queue: WaitQueue::new(),
+            finish_queue: WaitQueue::new(),
+            leader_stage: AtomicUsize::new(0),
+            has_leader_exited: AtomicBool::new(false),
+            can_finish: AtomicBool::new(false),
+        }
+    }
+
+    fn advance(&self, stage: LeaderStage) {
+        let stage = stage as usize;
+        // A single leader publishes a finite sequence, never a heartbeat.
+        assert!(stage > self.leader_stage.load(Ordering::Acquire));
+        self.leader_stage.store(stage, Ordering::Release);
+    }
+
+    fn diagnostics(&self) -> String {
+        format!(
+            "stage={} command={} ack={} leader_exited={} can_finish={}",
+            leader_stage_label(self.leader_stage.load(Ordering::Acquire)),
+            self.command.load(Ordering::Acquire),
+            self.acknowledgement.load(Ordering::Acquire),
+            self.has_leader_exited.load(Ordering::Acquire),
+            self.can_finish.load(Ordering::Acquire),
+        )
+    }
+
+    fn command(&self, value: usize) -> bool {
         // Only the leader writes commands; only the sibling acknowledges them.
         // Release/acquire publishes completed observations before advancing.
         self.command.store(value, Ordering::Release);
+        self.command_queue.notify_one(false)
     }
 
     fn acknowledge(&self, value: usize) {
@@ -47,22 +113,89 @@ impl Stages {
     }
 
     fn wait_command(&self, value: usize) {
-        bounded_wait_labeled("sibling wait command", || {
-            self.command.load(Ordering::Acquire) >= value
-        });
+        let has_timed_out = self
+            .command_queue
+            .wait_timeout_until(TimeSpan::from_secs(5), || {
+                self.command.load(Ordering::Acquire) >= value
+            });
+        assert!(
+            !has_timed_out,
+            "exit-tail timeout: wait command {value}; {}; state={:?}",
+            self.diagnostics(),
+            ktask::current().state(),
+        );
     }
 
     fn wait_parked(&self, value: usize, task: &ktask::KtaskRef) {
-        bounded_wait_labeled("leader wait sibling parked", || {
+        self.wait_observed("leader wait sibling parked", task, || {
             self.acknowledgement.load(Ordering::Acquire) == value
                 && task.state() == TaskState::Blocked
         });
     }
 
     fn wait_finish(&self) {
-        bounded_wait_labeled("child wait finish release", || {
-            self.can_finish.load(Ordering::Acquire)
-        });
+        let has_timed_out = self
+            .finish_queue
+            .wait_timeout_until(TimeSpan::from_secs(5), || {
+                self.can_finish.load(Ordering::Acquire)
+            });
+        assert!(
+            !has_timed_out,
+            "exit-tail timeout: wait finish; {}; state={:?}",
+            self.diagnostics(),
+            ktask::current().state(),
+        );
+    }
+
+    fn finish(&self) -> usize {
+        self.can_finish.store(true, Ordering::Release);
+        // Both held tails must resume. Count delivery for the protocol regression.
+        self.finish_queue.notify_many(usize::MAX, false)
+    }
+
+    fn wait_observed(
+        &self,
+        label: &str,
+        task: &ktask::KtaskRef,
+        mut condition: impl FnMut() -> bool,
+    ) {
+        let deadline = khal::time::monotonic_time() + TimeSpan::from_secs(5);
+        let queue = WaitQueue::new();
+        while !condition() {
+            assert!(
+                khal::time::monotonic_time() < deadline,
+                "exit-tail timeout: {label}; {}; state={:?} cpu={:?}",
+                self.diagnostics(),
+                task.state(),
+                task.cpu_id(),
+            );
+            // ACK publication precedes actual blocking; no notification marks
+            // that scheduler transition. Poll only the observer, not the tail.
+            queue.wait_timeout(TimeSpan::from_millis(1));
+        }
+    }
+
+    fn wait_leader_parked(&self, task: &ktask::KtaskRef) {
+        let mut stage = 0;
+        let mut deadline = khal::time::monotonic_time() + TimeSpan::from_secs(5);
+        let queue = WaitQueue::new();
+        loop {
+            let next = self.leader_stage.load(Ordering::Acquire);
+            let now = khal::time::monotonic_time();
+            renew_stage_deadline(&mut stage, next, &mut deadline, now);
+            if self.has_leader_exited.load(Ordering::Acquire) && task.state() == TaskState::Blocked
+            {
+                return;
+            }
+            assert!(
+                now < deadline,
+                "exit-tail timeout: parent wait leader exited and blocked; {}; state={:?} cpu={:?}",
+                self.diagnostics(),
+                task.state(),
+                task.cpu_id(),
+            );
+            queue.wait_timeout(TimeSpan::from_millis(1));
+        }
     }
 }
 
@@ -128,7 +261,8 @@ pub(in crate::task) fn check_current_root(empty_sentinel: Option<usize>) -> usiz
 
 #[expect(
     clippy::too_many_lines,
-    reason = "CG-028-focused-functions: unittest scenario: one linear exit-tail test script in a file test module"
+    reason = "CG-028-focused-functions: unittest scenario: one linear exit-tail test script in a \
+              file test module"
 )]
 fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     let cpu = khal::percpu::this_cpu_id().as_usize();
@@ -179,12 +313,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
         let check_root = capture_root(&guard);
         (Arc::downgrade(&mm), residency, check_root)
     };
-    let stages = Arc::new(Stages {
-        command: AtomicUsize::new(0),
-        acknowledgement: AtomicUsize::new(0),
-        has_leader_exited: AtomicBool::new(false),
-        can_finish: AtomicBool::new(false),
-    });
+    let stages = Arc::new(Stages::new());
     let child_stages = stages.clone();
     let child_mm = observed.clone();
     let (thread, number) = prepared.into_parts();
@@ -263,7 +392,8 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                         while sibling_stages.command.load(Ordering::Acquire) < END_WINDOW {
                             assert!(
                                 khal::time::monotonic_time() < deadline,
-                                "remote tail timeout: wait end window"
+                                "remote tail timeout: wait end window; {}",
+                                sibling_stages.diagnostics(),
                             );
                             core::hint::spin_loop();
                         }
@@ -307,36 +437,41 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                 assert_eq!(process.mm_id().unwrap(), original_id);
                 assert_eq!(check_current_root(None), original_root);
             }
+            child_stages.advance(LeaderStage::Prepared);
             child_stages.command(START);
             child_stages.wait_parked(FIRST_PARKED, &sibling);
             assert_eq!(sibling.cpu_id().as_usize(), cpu);
             assert!(kprocess::scheduler::task_by_tid(tid).is_err());
             // Boundary one: B is unpublished and has actually blocked.
             observe_boundary();
+            child_stages.advance(LeaderStage::FirstBoundaryChecked);
             child_stages.command(RESUME_FIRST);
             if is_remote {
-                bounded_wait_labeled("leader wait remote window held", || {
+                child_stages.wait_observed("leader wait remote window held", &sibling, || {
                     child_stages.acknowledgement.load(Ordering::Acquire) == WINDOW_HELD
                 });
                 assert_eq!(sibling.state(), TaskState::Running);
                 assert_eq!(sibling.cpu_id().as_usize(), sibling_cpu);
                 // Boundary two: B stays on the other CPU with IRQs enabled.
                 observe_boundary();
+                child_stages.advance(LeaderStage::SecondBoundaryChecked);
                 child_stages.command(END_WINDOW);
             }
             child_stages.wait_parked(SECOND_PARKED, &sibling);
             if !is_remote {
                 // Same-CPU boundary two uses another real blocked interval.
                 observe_boundary();
+                child_stages.advance(LeaderStage::SecondBoundaryChecked);
             }
             posix_process::do_exit(0, false);
             child_stages
                 .has_leader_exited
                 .store(true, Ordering::Release);
+            child_stages.advance(LeaderStage::ExitPublished);
             child_stages.wait_finish();
             assert_eq!(check_current_root(Some(sentinel_addr)), current_root);
             assert_eq!(khal::percpu::this_cpu_id().as_usize(), cpu);
-            bounded_wait_labeled("leader wait sibling exited", || {
+            child_stages.wait_observed("leader wait sibling exited", &sibling, || {
                 sibling.state() == TaskState::Exited
             });
             assert_eq!(sibling.join(), 0);
@@ -349,9 +484,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     task.ctx_mut().set_page_table_root(root);
     task.set_cpumask(ktask::KCpuMask::one_shot(cpu));
     let child = kprocess::start_user_task(task);
-    bounded_wait_labeled("parent wait leader exited and blocked", || {
-        stages.has_leader_exited.load(Ordering::Acquire) && child.state() == TaskState::Blocked
-    });
+    stages.wait_leader_parked(&child);
     assert_eq!(child.cpu_id().as_usize(), cpu);
     assert_eq!(
         crate::task::wait::sys_waitpid(pid as i32, status.as_user_ptr(), 0),
@@ -363,15 +496,119 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
         let mm = observed.upgrade().expect("held exit tails lost their MM");
         assert_eq!(mm.lock().vmas().count(), 0);
     }
-    stages.can_finish.store(true, Ordering::Release);
-    bounded_wait_labeled("parent wait leader exited", || {
+    stages.finish();
+    stages.wait_observed("parent wait leader exited", &child, || {
         child.state() == TaskState::Exited
     });
     assert_eq!(child.join(), 0);
     drop(child);
-    bounded_wait_labeled("parent wait old mm dropped", || observed.upgrade().is_none());
+    bounded_wait_labeled("parent wait old mm dropped", || {
+        observed.upgrade().is_none()
+    });
     assert_eq!(sentinel.read(), 0x1234);
     TestResult::Ok
+}
+
+#[def_test(serial)]
+fn exit_tail_protocol_preserves_early_notifications_and_broadcasts_finish() {
+    let early = Stages::new();
+    assert!(!early.command(START));
+    early.wait_command(START);
+    assert_eq!(early.finish(), 0);
+    early.wait_finish();
+
+    let stages = Arc::new(Stages::new());
+    let child_stages = stages.clone();
+    let command_waiter = ktask::spawn(move || child_stages.wait_command(START));
+    stages.wait_observed("protocol command listener", &command_waiter, || {
+        command_waiter.state() == TaskState::Blocked
+    });
+    // Delivery, not elapsed time, proves the waiter had registered a listener.
+    let was_command_delivered = stages.command(START);
+    stages.wait_observed("protocol command waiter exited", &command_waiter, || {
+        command_waiter.state() == TaskState::Exited
+    });
+    assert_eq!(command_waiter.join(), 0);
+    assert!(was_command_delivered);
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let waiters = core::array::from_fn::<_, 2, _>(|_| {
+        let stages = stages.clone();
+        let entered = entered.clone();
+        let finished = finished.clone();
+        ktask::spawn(move || {
+            entered.fetch_add(1, Ordering::Release);
+            stages.wait_finish();
+            finished.fetch_add(1, Ordering::Release);
+        })
+    });
+    stages.wait_observed("protocol two finish listeners", &waiters[0], || {
+        entered.load(Ordering::Acquire) == 2
+            && waiters
+                .iter()
+                .all(|task| task.state() == TaskState::Blocked)
+    });
+    assert_eq!(finished.load(Ordering::Acquire), 0);
+    let finish_deliveries = stages.finish();
+    for task in &waiters {
+        stages.wait_observed("protocol finish waiter exited", task, || {
+            task.state() == TaskState::Exited
+        });
+        assert_eq!(task.join(), 0);
+    }
+    assert_eq!(finished.load(Ordering::Acquire), 2);
+    assert_eq!(finish_deliveries, 2);
+}
+
+#[def_test]
+fn exit_tail_parent_budget_renews_only_on_stage_progress() {
+    let origin = MonotonicInstant::ORIGIN;
+    let mut stage = 0;
+    let mut deadline = origin + TimeSpan::from_secs(5);
+    let first = LeaderStage::Prepared as usize;
+    let second = LeaderStage::FirstBoundaryChecked as usize;
+
+    renew_stage_deadline(
+        &mut stage,
+        0,
+        &mut deadline,
+        origin + TimeSpan::from_secs(4),
+    );
+    assert_eq!(deadline, origin + TimeSpan::from_secs(5));
+    renew_stage_deadline(
+        &mut stage,
+        first,
+        &mut deadline,
+        origin + TimeSpan::from_secs(4),
+    );
+    assert_eq!(stage, first);
+    assert_eq!(deadline, origin + TimeSpan::from_secs(9));
+    for now in [5, 8, 9, 10] {
+        renew_stage_deadline(
+            &mut stage,
+            first,
+            &mut deadline,
+            origin + TimeSpan::from_secs(now),
+        );
+        assert_eq!(deadline, origin + TimeSpan::from_secs(9));
+    }
+    renew_stage_deadline(
+        &mut stage,
+        0,
+        &mut deadline,
+        origin + TimeSpan::from_secs(10),
+    );
+    assert_eq!(stage, first);
+    assert_eq!(deadline, origin + TimeSpan::from_secs(9));
+    renew_stage_deadline(
+        &mut stage,
+        second,
+        &mut deadline,
+        origin + TimeSpan::from_secs(10),
+    );
+    assert_eq!(stage, second);
+    assert_eq!(deadline, origin + TimeSpan::from_secs(15));
 }
 
 #[def_test(user, serial)]

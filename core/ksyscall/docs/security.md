@@ -208,6 +208,18 @@ The exec and exit-tail regressions in `src/task/tests/` cover the exec
 boundaries above. Synthetic-image and injected-error cases do not establish
 real user-program execution or allocator-exhaustion behavior.
 
+Exit-tail synchronization is test-local: command and finish use distinct
+predicate queues, release/acquire publication, and explicit notification.
+Finish wakes both held tails; neither queue is used for progress notifications
+that could disturb the observed blocked interval. The parent hang bound renews
+only on strictly advancing, finite leader stages, never on random wakeups.
+Each command/finish wait still has its own five-second bound. Diagnostics retain
+only protocol metadata and task observations, not extra MM ownership or locks.
+The remote IRQ-enabled spin and all root/residency, real-blocking and two-exec
+checks remain intact. Notification-count regressions validate listener delivery
+without making a timing-performance claim. CI #2467's root cause is unconfirmed;
+these changes do not claim to repair a production MM or scheduler defect.
+
 Scheduler ownership does not equate shared PID/thread-group membership with
 matching credentials. Raw credential changes affect only the calling thread;
 libc-wide synchronization is a separate userspace responsibility. A caller
