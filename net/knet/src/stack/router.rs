@@ -19,9 +19,9 @@ use crate::{
     device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId, RxPoll},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
-        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
+        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot, Ipv4AddressSet, PrimaryAddrChange},
         ipv4::{self, Ipv4Error, Ipv4Header},
-        router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
+        router::{RouteTable, Rule},
     },
     runtime::tx_queue::DataTxQueue,
     stack::device::StackDevice,
@@ -42,7 +42,7 @@ pub(crate) struct Router {
     control_tx_queue: VecDeque<PacketBuf>,
     data_tx_queue: DataTxQueue,
     next_rx_device: usize,
-    ipv4_addrs: Vec<Ipv4AddrEntry>,
+    ipv4_addrs: Ipv4AddressSet,
     next_ipv4_identification: u16,
     pub(crate) devices: DeviceRegistry,
     pub(crate) table: RouteTable,
@@ -65,7 +65,7 @@ impl Router {
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
             data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
-            ipv4_addrs: Vec::new(),
+            ipv4_addrs: Ipv4AddressSet::new(smoltcp::config::IFACE_MAX_ADDR_COUNT),
             next_ipv4_identification: 1,
             devices: DeviceRegistry::new(),
             table: RouteTable::new(),
@@ -136,7 +136,8 @@ impl Router {
         match rule.preferred_source() {
             Some(source) => Ok(source),
             None => self
-                .select_ipv4_source(rule.dev, &rule.via.unwrap_or(*dst), rule.scope)
+                .ipv4_addrs
+                .select_source(rule.dev, &rule.via.unwrap_or(*dst), rule.scope)
                 .map(IpAddress::Ipv4)
                 .ok_or(KError::from(LinuxError::ENETUNREACH)),
         }
@@ -224,14 +225,9 @@ impl Router {
             .iter()
             .position(|device| device.device_id() == Some(id))?;
         let dev = self.devices.id_at(pos);
-        let removed_sources: Vec<_> = self
-            .ipv4_addrs
-            .iter()
-            .filter_map(|entry| (entry.dev == dev).then_some(entry.addr.address()))
-            .collect();
         self.devices.remove_slot(pos);
         self.table.remove_device(dev);
-        self.ipv4_addrs.retain(|entry| entry.dev != dev);
+        let removed_sources = self.ipv4_addrs.remove_device(dev);
         for source in removed_sources {
             if !self.has_ipv4_address(source) {
                 self.table
@@ -242,7 +238,7 @@ impl Router {
             }
         }
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
         Some(())
@@ -280,22 +276,22 @@ impl Router {
             .device_id_by_name(name)
             .ok_or(LinuxError::ENODEV)?;
         self.ipv4_addrs
-            .iter()
-            .find(|entry| entry.dev == dev)
-            .map(|entry| entry.addr)
+            .primary(dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)
     }
 
     fn first_ipv4_addr_for_device(&self, ifindex: i32) -> Option<Ipv4Cidr> {
         let dev = NetDeviceId::new(ifindex)?;
-        self.ipv4_addrs
-            .iter()
-            .find(|entry| entry.dev == dev)
-            .map(|entry| entry.addr)
+        self.ipv4_addrs.primary(dev)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
-        &self.ipv4_addrs
+        self.ipv4_addrs.as_slice()
+    }
+
+    pub(crate) fn has_ipv4_addr_entry(&self, entry: Ipv4AddrEntry) -> bool {
+        self.ipv4_addrs.contains_entry(entry)
     }
 
     pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
@@ -316,23 +312,11 @@ impl Router {
         if self.devices.slot(entry.dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        if !entry.addr.address().is_unicast() {
-            return Err(LinuxError::EINVAL);
-        }
-        if self
-            .ipv4_addrs
-            .iter()
-            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
-        {
+        if !self.ipv4_addrs.insert(entry)? {
             return Ok(());
         }
-        if self.ipv4_addrs.len() >= smoltcp::config::IFACE_MAX_ADDR_COUNT {
-            return Err(LinuxError::ENOBUFS);
-        }
-
-        self.ipv4_addrs.push(entry);
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -350,40 +334,13 @@ impl Router {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        if !addr.address().is_unicast() {
-            return Err(LinuxError::EINVAL);
+        match self.ipv4_addrs.set_primary(dev, addr)? {
+            PrimaryAddrChange::Unchanged => return Ok(()),
+            PrimaryAddrChange::Added => {}
+            PrimaryAddrChange::Replaced(old) => self.remove_ipv4_source_state_if_unowned(old),
         }
-
-        let Some(primary_index) = self.ipv4_addrs.iter().position(|entry| entry.dev == dev) else {
-            return self.add_ipv4_addr(Ipv4AddrEntry {
-                dev,
-                addr,
-                scope: ROUTE_SCOPE_UNIVERSE,
-                broadcast: None,
-            });
-        };
-        let old = self.ipv4_addrs[primary_index];
-        if old.addr.address() == addr.address() {
-            return Ok(());
-        }
-
-        if self
-            .ipv4_addrs
-            .iter()
-            .skip(primary_index + 1)
-            .any(|entry| entry.dev == dev && entry.addr == addr)
-        {
-            return Err(LinuxError::EEXIST);
-        }
-        self.ipv4_addrs[primary_index] = Ipv4AddrEntry {
-            dev,
-            addr,
-            scope: ROUTE_SCOPE_UNIVERSE,
-            broadcast: None,
-        };
-        self.remove_ipv4_source_state_if_unowned(old.addr.address());
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -396,41 +353,35 @@ impl Router {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        let Some(primary_index) = self.ipv4_addrs.iter().position(|entry| entry.dev == dev) else {
+        let Some(old) = self.ipv4_addrs.remove_primary(dev) else {
             return Ok(());
         };
-        let old = self.ipv4_addrs.remove(primary_index);
         self.remove_ipv4_source_state_if_unowned(old.addr.address());
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         Ok(())
     }
 
     pub(crate) fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
-        let old_len = self.ipv4_addrs.len();
-        self.ipv4_addrs
-            .retain(|existing| existing.dev != entry.dev || existing.addr != entry.addr);
-        if self.ipv4_addrs.len() == old_len {
+        if !self.ipv4_addrs.remove(entry) {
             return false;
         }
 
         self.remove_ipv4_source_state_if_unowned(entry.addr.address());
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         true
     }
 
     pub(crate) fn has_ipv4_address(&self, address: Ipv4Address) -> bool {
-        self.ipv4_addrs
-            .iter()
-            .any(|entry| entry.addr.address() == address)
+        self.ipv4_addrs.contains(address)
     }
 
     pub(crate) fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
         self.table
-            .add_configured_rule(rule, &self.devices, &self.ipv4_addrs)
+            .add_configured_rule(rule, &self.devices, self.ipv4_addrs.as_slice())
     }
 
     pub(crate) fn replace_route_rule(
@@ -438,8 +389,12 @@ impl Router {
         existing: Rule,
         replacement: Rule,
     ) -> Result<(), LinuxError> {
-        self.table
-            .replace_configured_rule(existing, replacement, &self.devices, &self.ipv4_addrs)
+        self.table.replace_configured_rule(
+            existing,
+            replacement,
+            &self.devices,
+            self.ipv4_addrs.as_slice(),
+        )
     }
 
     pub(crate) fn set_ipv4_broadcast(
@@ -447,13 +402,7 @@ impl Router {
         dev: NetDeviceId,
         broadcast: Ipv4Address,
     ) -> Result<(), LinuxError> {
-        let entry = self
-            .ipv4_addrs
-            .iter_mut()
-            .find(|entry| entry.dev == dev)
-            .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        entry.broadcast = Some(broadcast);
-        Ok(())
+        self.ipv4_addrs.set_broadcast(dev, broadcast)
     }
 
     /// Updates the prefix length of the primary IPv4 address on `dev`.
@@ -465,55 +414,19 @@ impl Router {
         dev: NetDeviceId,
         prefix_len: u8,
     ) -> Result<(), LinuxError> {
-        if prefix_len > 32 {
-            return Err(LinuxError::EINVAL);
-        }
-        let old = self
-            .ipv4_addrs
-            .iter()
-            .find(|entry| entry.dev == dev)
-            .copied()
-            .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        if old.addr.prefix_len() == prefix_len {
-            return Ok(());
-        }
-
-        let addr =
-            Ipv4Cidr::new(old.addr.address(), prefix_len).expect("prefix length was validated");
-        if self
-            .ipv4_addrs
-            .iter()
-            .any(|entry| entry.dev == dev && entry.addr == addr)
-        {
-            // Linux drops the old entry when netmask reinsertion collides,
-            // and SIOCSIFNETMASK still reports success.
-            self.remove_ipv4_addr(old);
-            return Ok(());
-        }
-
-        let old_derived_broadcast = old.addr.broadcast();
         let has_broadcast_flag = self
             .devices
             .get_by_id(dev)
             .is_some_and(|device| device.link_kind() == LinkKind::Ethernet);
-        let should_recalculate_broadcast = has_broadcast_flag
-            && prefix_len < 31
-            && old.effective_broadcast() == old_derived_broadcast;
-
-        let entry = self
+        if !self
             .ipv4_addrs
-            .iter_mut()
-            .find(|entry| entry.dev == dev)
-            .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        entry.addr = addr;
-        if should_recalculate_broadcast {
-            entry.broadcast = None;
-        } else if entry.broadcast.is_none() {
-            entry.broadcast = old_derived_broadcast;
+            .set_netmask(dev, prefix_len, has_broadcast_flag)?
+        {
+            return Ok(());
         }
 
         self.table
-            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, self.ipv4_addrs.as_slice());
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -553,27 +466,6 @@ impl Router {
         self.devices
             .get_by_id(dev)
             .is_some_and(|device| device.has_neighbor(dst))
-    }
-
-    fn select_ipv4_source(
-        &self,
-        dev: NetDeviceId,
-        next_hop: &IpAddress,
-        route_scope: u8,
-    ) -> Option<Ipv4Address> {
-        let mut eligible = self
-            .ipv4_addrs
-            .iter()
-            .filter(|entry| entry.dev == dev && entry.scope <= route_scope);
-        let first = eligible.next()?;
-        let selected = if first.addr.contains_addr(next_hop) {
-            first
-        } else {
-            eligible
-                .find(|entry| entry.addr.contains_addr(next_hop))
-                .unwrap_or(first)
-        };
-        Some(selected.addr.address())
     }
 
     fn sync_device_ipv4_addrs(&mut self) {
@@ -844,9 +736,7 @@ impl Router {
     }
 
     fn is_local_ipv4_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
-        self.ipv4_addrs
-            .iter()
-            .any(|entry| entry.addr.address() == src_addr)
+        self.ipv4_addrs.contains(src_addr)
     }
 
     fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {

@@ -10,7 +10,7 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
-    network::router::ROUTE_SCOPE_HOST,
+    network::router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE},
 };
 
 fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
@@ -450,6 +450,16 @@ fn setting_primary_ipv4_address_keeps_secondary_addresses() {
     router.add_ipv4_addr(primary).unwrap();
     router.add_ipv4_addr(secondary).unwrap();
 
+    router
+        .set_primary_ipv4_addr(dev, valid_ipv4_cidr(primary.addr.address(), 16))
+        .unwrap();
+    assert_eq!(router.ipv4_addr_entries()[0], primary);
+    assert_eq!(
+        router.set_primary_ipv4_addr(dev, secondary.addr),
+        Err(LinuxError::EEXIST)
+    );
+    assert_eq!(router.ipv4_addr_entries(), &[primary, secondary]);
+
     let replacement = valid_ipv4_cidr(Ipv4Address::new(203, 0, 113, 7), 24);
     router.set_primary_ipv4_addr(dev, replacement).unwrap();
 
@@ -482,6 +492,7 @@ fn removing_primary_ipv4_address_keeps_secondary_addresses() {
     router.remove_primary_ipv4_addr(dev).unwrap();
 
     assert_eq!(router.ipv4_addr_entries(), &[secondary]);
+    assert_eq!(router.interface_ipv4_addr("lo"), Ok(secondary.addr));
 }
 
 #[def_test]

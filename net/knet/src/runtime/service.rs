@@ -810,10 +810,7 @@ impl Service {
         existing_action: ExistingIpv4AddrAction,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
-        let is_existing = router
-            .ipv4_addr_entries()
-            .iter()
-            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr);
+        let is_existing = router.has_ipv4_addr_entry(entry);
         if is_existing {
             return match existing_action {
                 ExistingIpv4AddrAction::Keep => Ok(()),
