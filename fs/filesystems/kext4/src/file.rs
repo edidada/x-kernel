@@ -1319,3 +1319,7 @@ mod unittests {
 
 #[cfg(unittest)]
 mod component_tests;
+
+#[cfg(unittest)]
+#[path = "file/read_tests.rs"]
+pub(crate) mod read_tests;

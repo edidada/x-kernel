@@ -2,9 +2,30 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert_eq, def_test};
+use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;
+
+
+#[def_test]
+fn pci_paths_are_derived_from_bus_location() {
+    // The old `kdevice_uevent::physical_device_path` helper lived outside the
+    // model; the derivation is now the bus's own `BusDeviceData::path_component`,
+    // which devnode and sysfs both consume.
+    let data = pci::PciBusData {
+        segment: 0,
+        bus: 4,
+        device: 2,
+        function: 1,
+        vendor_id: 0x1af4,
+        device_id: 0x1001,
+        class: 0x01,
+        subclass: 0x00,
+    };
+    let path = driver_base::BusDeviceData::path_component(&data);
+    assert_eq!(path, "pci0000:04/0000:04:02.1");
+    assert_ne!(path.as_str(), "platform/simpledrm");
+}
 
 #[def_test]
 fn capability_bitmaps_use_linux_word_order() {

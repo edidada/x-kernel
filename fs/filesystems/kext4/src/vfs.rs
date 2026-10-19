@@ -2076,3 +2076,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(unittest)]
+#[path = "vfs/read_tests.rs"]
+mod read_tests;
