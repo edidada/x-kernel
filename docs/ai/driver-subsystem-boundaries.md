@@ -238,7 +238,11 @@ See `drivers/README.md` for the current inventory.
   `drivers/base/devtmpfs.c` + `dev_uevent()`) plus the udev-visible payload
   format (Linux: `lib/kobject_uevent.c`), and it is deliberately outside
   `drivers/base` because the model core must stay family- *and* bus-agnostic
-  (L0-a) and must not depend on node policy. `uevent-netlink` is its client:
+  (L0-a) and must not depend on node policy. The one model dependency
+  `devnode` takes is `driver-base`'s opaque `PublicationId` — the registry
+  key, re-exported so node consumers name a single type — and it brings no
+  bus, host or kernel facility with it; the reverse edge (model core → node
+  policy) stays forbidden. `uevent-netlink` is its client:
   the 71-line sink that pays for `knet` so the registry does not have to.
   Keeping it a crate is what lets `fs/devfs`, `fs/sysfs`, `fs/kvfs`,
   `subsystems/{block,display,input}` and `util/entropy` use `devnode` without

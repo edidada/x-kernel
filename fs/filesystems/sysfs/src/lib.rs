@@ -37,7 +37,7 @@ use alloc::{
     vec::Vec,
 };
 
-use devnode::{DevNode, DevNodeEvent, subscribe, uevent};
+use devnode::{DevNode, DevNodeEvent, PublicationId, subscribe, uevent};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
 use kvfs::{
@@ -121,7 +121,7 @@ impl TreeEntry {
 }
 
 struct DeviceProjection {
-    nodes: BTreeMap<u64, Arc<ProjectedDevice>>,
+    nodes: BTreeMap<PublicationId, Arc<ProjectedDevice>>,
     characters: Vec<kvfs::CharacterDeviceRegistration>,
     tree: BTreeMap<String, TreeEntry>,
 }
@@ -615,7 +615,7 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
 }
 
 fn build_tree(
-    nodes: &BTreeMap<u64, Arc<ProjectedDevice>>,
+    nodes: &BTreeMap<PublicationId, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
 ) -> BTreeMap<String, TreeEntry> {
     let mut tree = BTreeMap::new();

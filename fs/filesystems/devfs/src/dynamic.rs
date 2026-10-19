@@ -6,8 +6,7 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-use devnode::{DevNode, DevNodeEvent, subscribe};
-use driver_base::PublicationId;
+use devnode::{DevNode, DevNodeEvent, PublicationId, subscribe};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
@@ -104,12 +103,12 @@ fn display_file(
 }
 
 fn node_key(node: &DevNode) -> PublicationId {
-    // Node ids ARE the publishing class device's raw id (device_class passes
-    // `parent_ref().id().raw()`), so the record key must preserve it:
+    // The node key IS the publishing class's publication handle (the class
+    // hook passes `PublicationNode.id`), so the record key must preserve it:
     // `find_input_device`/`find_display_device` look the CLASS registry up
     // by this id, and a hashed derivation would never match — the /dev
     // input/drm projections silently never materialized.
-    PublicationId::from_raw(node.id())
+    node.id()
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DevNode) {

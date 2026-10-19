@@ -12,7 +12,7 @@
 
 | 边界 | 谁在外面 | 本 crate 假设什么 |
 |---|---|---|
-| class crate → devnode | `device-class` / `subsystems/block` 调 `publish*` | **可信内核代码**。`DevNodeType` 是编译期常量，`physical_path` 由发布者填 |
+| class crate → devnode | `drivers/base` 的 class 层 / `subsystems/block` 调 `publish*` | **可信内核代码**。`DevNodeType` 是编译期常量，`physical_path` 由发布者填；注册表 key 是类型化的 `PublicationId`（发布者传入自己拿到的 class 句柄），裸整数进不了发布路径 |
 | 驱动 → class crate → devnode | 驱动提供 devname 的来源字符串、modalias、properties | **半可信**：modalias 来自 const id 表（可信），devname 今天来自 index 派生（`vd{a,b,…}`、`event{N}`），但**类型上没有约束**（见 T-02） |
 | devnode → 订阅者 | devfs / sysfs / uevent-netlink | 订阅者**不得重入** register/withdraw |
 | devnode → 用户态 | netlink payload、`/dev` 节点、sysfs 属性 | 用户态是 payload 的**消费者**，不是输入源。唯一例外是 sysfs `uevent` 文件的写入路径，它经 `lifecycle_publisher` 复用同一条格式化代码 |
@@ -55,6 +55,11 @@
 7. **`bitmap_value` 的字序是兼容面**：小端字节按 native 64-bit word 分组，
    最高非零 word 在前，空格分隔，全零渲染成 `0`。input 的 capability bitmap
    依赖这个顺序被 libevdev 正确解析。
+8. **注册表 key 是类型化的 `PublicationId`**：`publish` / `publish_auto_indexed`
+   / `withdraw` / `DevNode::id()` 只接受发布者持有的 class 句柄，发布路径没有
+   裸 `u64` 入口，任意整数无法伪装成某个节点的 key。`PublicationId::from_raw`
+   只服务于回放已存在的句柄（测试 fixture），不是发布者 API；驱动的句柄来自
+   class hook 收到的 `PublicationNode.id`。
 
 ## 线程安全
 
@@ -89,7 +94,7 @@
 | F-02 | index 池耗尽（`ResourceBusy`） | `index_count` 用尽 | 该设备无 `/dev` 节点 | class 发布失败 → probe 失败 → 设备 `Unclaimed`；已有设备不受影响 | 3 | min-free 复用最低空洞，所以只有真的占满才会耗尽 |
 | F-03 | `IndexPools::alloc` 里 `last_mut().unwrap()` | push 之后立即取 | 不可能失败 | — | 4 | 带 `CG-021` 例外说明的 `expect`；push 保证池存在 |
 | F-04 | 订阅者抛错/失败 | devfs 创建节点失败、sysfs 重建树失败、netlink 发送失败 | 该投影层缺这个节点 | **本 crate 不感知**：`DevNodeCallback` 返回 `()`，没有错误通道。三个投影可能不一致（例如 `/dev/vda` 存在但 uevent 没发出去） | **2** | **未实现**。这是真实的可观测缺口：投影失败静默。加固建议：把 `DevNodeCallback` 改成返回 `Result`，或让投影层自己记日志并在 sysfs 暴露一致性计数 |
-| F-05 | `withdraw` 一个不存在的 id | 双重 withdraw、或发布者 id 计算错误 | 无操作 | 无 | 4 | 锁下查找失败即返回，不 panic |
+| F-05 | `withdraw` 一个不存在的 id | 同一 handle 被撤销两次（驱动 guard + 安全网 drain） | 无操作 | 无 | 4 | 锁下查找失败即返回，不 panic |
 | F-06 | `DISPATCH_ORDER` 死锁 | 订阅者重入（T-05） | 该 CPU 卡死 | softlockup | 2 | 契约 + review；建议加 panic 断言 |
 | F-07 | `lifecycle_publisher` 未安装就发布节点 | `uevent-netlink::init()` 未被调用 | 节点在 devfs/sysfs 正常，但**没有 uevent** | udev 不会为该设备跑规则（不会创建符号链接、不会加载模块） | 2 | `install_lifecycle_publisher` 返回 bool 且迟到安装失败，`init()` 里 `assert!`——把"没装"变成启动期 panic 而不是静默降级 |
 

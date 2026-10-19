@@ -128,10 +128,12 @@ done < <(grep -rniE "$FAMILIES" drivers/base/src --include='*.rs' || true)
 # This is what makes MockServices possible — the model and the class layer run
 # on mocks, which is why driver-core has state-machine tests at all.
 #
-# Note: devnode (`drivers/devnode`) takes only the log/spin/sync utility crates
-# — no device-model, bus or kernel-facility dependency. Its netlink half lives
-# in `drivers/uevent-netlink`, which is why the model itself never reaches
-# `knet`. Only DIRECT deps are checked here.
+# Note: devnode (`drivers/devnode`) takes the log/spin/sync utility crates plus
+# `driver-base`, and the latter only for the opaque `PublicationId` value type
+# that keys its registry — no bus, host or kernel-facility dependency. The
+# reverse direction stays forbidden: the model core must not depend on node
+# policy. Its netlink half lives in `drivers/uevent-netlink`, which is why the
+# model itself never reaches `knet`. Only DIRECT deps are checked here.
 # ---------------------------------------------------------------------------
 for dir in "${RULED_DIRS[@]}"; do
     while IFS= read -r manifest; do

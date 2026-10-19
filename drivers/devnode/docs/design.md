@@ -12,8 +12,11 @@ uevent（netlink）三个投影层都从这里取事实。
 class 层把发布投影成节点）、`fs/filesystems/devfs`、`fs/filesystems/sysfs`、
 `fs/kvfs`、`util/entropy`（可选）、`uevent-netlink`。
 
-它的依赖只有 `kspin` / `ksync` / `log`——不依赖 `driver-base`，也不依赖任何
-内核设施（见“设计决策 · 为什么住在 drivers/ 而不是 core/”）。
+它的依赖是 `kspin` / `ksync` / `log`，外加 `driver-base` 的 `PublicationId`——
+注册表的 key。该值是发布的 class 句柄，这里 re-export 一次，让节点消费者只
+认一个类型、不需要直接依赖设备模型；`driver-base` 本身 host-free，不带入任何
+总线/宿主设施。反方向仍然禁止：模型核心不依赖节点政策（见“设计决策 · 为什么
+住在 drivers/ 而不是 core/”）。
 
 ## 背景
 
@@ -32,7 +35,7 @@ minor base、index 数、devname 格式函数、sysfs 路径格式函数），�
 
 | 文件 | 内容 |
 |---|---|
-| `src/lib.rs` | `DeviceNumber`（打包 `dev_t`）、`DevNodeType`、`DevNode`、`DevNodeEvent`、注册表（`REGISTRY` / `INDEX_POOLS` / `DISPATCH_ORDER`）、`publish` / `publish_auto_indexed` / `withdraw` / `nodes` / `subscribe` / `install_lifecycle_publisher`、`physical_path_pci` |
+| `src/lib.rs` | `DeviceNumber`（打包 `dev_t`）、`DevNodeType`、`DevNode`、`DevNodeEvent`、注册表（`REGISTRY` / `INDEX_POOLS` / `DISPATCH_ORDER`）、`PublicationId`（re-export，注册表 key）、`publish` / `publish_auto_indexed` / `withdraw` / `nodes` / `subscribe` / `install_lifecycle_publisher`、`physical_path_pci` |
 | `src/uevent.rs` | `UeventAction`、`uevent_devpath`、`uevent_env`、`uevent_payload`、`uevent_file_contents`、`bitmap_value` |
 
 ## 架构

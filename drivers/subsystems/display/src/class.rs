@@ -38,7 +38,7 @@ impl ClassHooks<DisplayDeviceImpl> for DisplayHooks {
         // device ownership); losing it changes /dev/dri/cardN handling.
         let properties = vec![(String::from("DEVTYPE"), String::from("drm_minor"))];
         match publish_auto_indexed(
-            node.id.raw(),
+            node.id,
             &DRM_NODE,
             node.parent_path.as_str(),
             None,
@@ -63,7 +63,7 @@ impl ClassHooks<DisplayDeviceImpl> for DisplayHooks {
     }
 
     fn unpublish(&self, _runtime: &DisplayDeviceImpl, node: &PublicationNode) {
-        withdraw(node.id.raw());
+        withdraw(node.id);
     }
 }
 

@@ -1158,6 +1158,7 @@ dependencies = [
 name = "devnode"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-base",
  "kspin",
  "ksync",
  "log",

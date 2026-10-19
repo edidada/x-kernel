@@ -96,7 +96,7 @@ impl ClassHooks<InputDeviceImpl> for InputHooks {
         }
 
         match publish_auto_indexed(
-            node.id.raw(),
+            node.id,
             &INPUT_NODE,
             &format!("{}/input", node.parent_path),
             None,
@@ -129,7 +129,7 @@ impl ClassHooks<InputDeviceImpl> for InputHooks {
     }
 
     fn unpublish(&self, _runtime: &InputDeviceImpl, node: &PublicationNode) {
-        withdraw(node.id.raw());
+        withdraw(node.id);
     }
 }
 

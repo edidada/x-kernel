@@ -25,7 +25,7 @@ impl ClassHooks<BlockDeviceImpl> for BlockHooks {
         // publication id (one key space for every class); the kernel's
         // `dev_t` is the node's device number, not its registry key.
         devnode::publish(
-            node.id.raw(),
+            node.id,
             "block",
             String::from(disk.name()),
             disk.device_number(),
@@ -38,7 +38,7 @@ impl ClassHooks<BlockDeviceImpl> for BlockHooks {
     }
 
     fn unpublish(&self, disk: &BlockDeviceImpl, node: &PublicationNode) {
-        devnode::withdraw(node.id.raw());
+        devnode::withdraw(node.id);
         super::del_gendisk(disk.device_number());
     }
 }

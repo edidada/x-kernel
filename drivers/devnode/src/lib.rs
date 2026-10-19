@@ -14,15 +14,18 @@
 //!   touches neither this crate nor `driver-base`;
 //! * a [`DevNode`] is one published node: devname, `dev_t`, physical path,
 //!   optional `MODALIAS`, and class-specific uevent properties;
-//! * publications are keyed by an opaque `u64` handle (the class
-//!   publication id), so the device model's id space does not leak in.
+//! * publications are keyed by [`PublicationId`] — the class publication
+//!   handle, re-exported from `driver-base` so the id space has exactly one
+//!   type. [`DevNode::id`] returns the value unchanged (never a derived
+//!   key): the class registry looks the publication up by it.
 //!
-//! This crate performs no I/O and names no kernel facility: it depends on
-//! `kspin`/`ksync`/`log` only. The netlink sink for these payloads is the
-//! separate `uevent-netlink` crate, which is why the model itself never
-//! reaches `knet`. That split is load-bearing, not cosmetic — `docs/design.md`
-//! records why the node policy lives here, beside the model, rather than in
-//! `driver-base` or `core/`.
+//! This crate performs no I/O and names no host kernel facility: it depends
+//! on `kspin`/`ksync`/`log` plus `driver-base` for the opaque
+//! [`PublicationId`] value type (itself host-free). The netlink sink for
+//! these payloads is the separate `uevent-netlink` crate, which is why the
+//! model itself never reaches `knet`. That split is load-bearing, not
+//! cosmetic — `docs/design.md` records why the node policy lives here,
+//! beside the model, rather than in `driver-base` or `core/`.
 //!
 //! The uevent payload format produced from these nodes is a compatibility
 //! surface (udev-visible); its property order and bitmap word order are
@@ -38,6 +41,11 @@ use kspin::SpinNoPreempt;
 
 pub mod uevent;
 
+/// The registry key: the publishing class's [`PublicationId`], re-exported
+/// so node consumers (devfs/sysfs, class hooks) name one type without a
+/// direct dependency on the device model. The value is preserved exactly —
+/// the class registry looks publications up by it.
+pub use driver_base::PublicationId;
 /// The capability-bitmap word-order helper, re-exported so uevent consumers
 /// (sysfs attributes, the input class) keep a single import path into the
 /// format layer.
@@ -132,7 +140,7 @@ impl DevNodeType {
 /// One published userland device node.
 #[derive(Clone)]
 pub struct DevNode {
-    id: u64,
+    id: PublicationId,
     subsystem: &'static str,
     /// The allocated per-class index when this node came from
     /// [`publish_auto_indexed`] (released back to the pool on withdraw).
@@ -153,8 +161,8 @@ pub struct DevNode {
 }
 
 impl DevNode {
-    /// Opaque publication handle (class publication id).
-    pub const fn id(&self) -> u64 {
+    /// The publishing class's [`PublicationId`] (the registry key).
+    pub const fn id(&self) -> PublicationId {
         self.id
     }
 
@@ -331,7 +339,7 @@ impl IndexPools {
 /// free index of `node_type`, released when the node is withdrawn.
 /// Distinct devices never share a devname or dev_t.
 pub fn publish_auto_indexed(
-    id: u64,
+    id: PublicationId,
     node_type: &DevNodeType,
     physical_path: &str,
     modalias: Option<String>,
@@ -390,7 +398,7 @@ pub fn publish_auto_indexed(
               instead of a builder for a boot-time path"
 )]
 pub fn publish(
-    id: u64,
+    id: PublicationId,
     subsystem: &'static str,
     devname: String,
     device_number: DeviceNumber,
@@ -420,7 +428,7 @@ pub fn publish(
         RegisterOutcome::DuplicateId(existing) => {
             log::warn!(
                 "devnode: publish id {} ({}) duplicated an existing node; keeping the original",
-                id,
+                id.raw(),
                 subsystem
             );
             existing
@@ -490,7 +498,7 @@ fn register_and_dispatch(node: DevNode) -> RegisterOutcome {
 }
 
 /// Remove the publication for `id` (idempotent).
-pub fn withdraw(id: u64) {
+pub fn withdraw(id: PublicationId) {
     let node = {
         let mut registry = REGISTRY.lock();
         let Some(entry) = registry.nodes.iter_mut().find(|e| e.node.id == id) else {
@@ -641,7 +649,7 @@ mod dispatch_order_tests {
     use ksync::Mutex;
     use unittest::{assert_eq, def_test};
 
-    use super::{DevNodeEvent, DeviceNumber, publish, withdraw};
+    use super::{DevNodeEvent, DeviceNumber, PublicationId, publish, withdraw};
 
     #[def_test]
     fn added_dispatch_runs_outside_the_registry_lock() {
@@ -664,7 +672,7 @@ mod dispatch_order_tests {
         }));
 
         let node = publish(
-            0x1d01,
+            PublicationId::from_raw(0x1d01),
             "dispatch_test",
             String::from("reentry0"),
             DeviceNumber(0x1d0),
@@ -685,7 +693,7 @@ mod dispatch_order_tests {
         // same order by construction — it serializes on DISPATCH_ORDER.
         // The registry is process-global and earlier tests may still hold
         // subscriptions: record only THIS node's events.
-        let watched = 0x1d02u64;
+        let watched = PublicationId::from_raw(0x1d02);
         let seq = Arc::new(Mutex::new(Vec::new()));
         let seq2 = seq.clone();
         let _sub = crate::subscribe(Arc::new(move |event| {
@@ -700,7 +708,7 @@ mod dispatch_order_tests {
         }));
 
         let node = publish(
-            0x1d02,
+            PublicationId::from_raw(0x1d02),
             "dispatch_test",
             String::from("order0"),
             DeviceNumber(0x1d1),
