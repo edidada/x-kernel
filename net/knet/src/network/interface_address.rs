@@ -42,8 +42,10 @@ pub(crate) struct Ipv4AddrSnapshot {
 
 /// Ordered interface addresses with a caller-supplied capacity limit.
 ///
-/// The first entry for each device is its primary address. Mutations preserve
-/// other entries' order, so removing the primary promotes the next entry.
+/// The first entry for each device is its default address, called `primary`
+/// by this API. This ordering does not model Linux `IFA_F_SECONDARY` semantics.
+/// Mutations preserve other entries' order, so removing the default address
+/// makes the next entry the default.
 /// Device/CIDR pairs are unique, and rejected mutations leave all entries intact.
 /// Callers validate device existence and synchronize derived network state.
 pub(crate) struct Ipv4AddressSet {
@@ -158,10 +160,11 @@ impl Ipv4AddressSet {
     }
 
     pub(crate) fn remove(&mut self, entry: Ipv4AddrEntry) -> bool {
-        let old_len = self.entries.len();
-        self.entries
-            .retain(|existing| existing.dev != entry.dev || existing.addr != entry.addr);
-        self.entries.len() != old_len
+        let Some(index) = self.entry_index(entry.dev, entry.addr) else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
     }
 
     /// Removes a device's addresses and returns the source values to reconcile.
