@@ -13,8 +13,8 @@
 //! formats through this one module.
 //!
 //! Transport is NOT here: the netlink broadcast lives in
-//! `drivers/integration/uevent-netlink`, which subscribes to node lifecycle
-//! events and serializes nodes through these functions.
+//! `drivers/uevent-netlink`, which subscribes to node lifecycle events and
+//! serializes nodes through these functions.
 
 use alloc::{
     format,

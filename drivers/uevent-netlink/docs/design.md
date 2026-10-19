@@ -5,9 +5,19 @@
 kobject uevent 的 **netlink 传输层**：订阅 `devnode` 的生命周期事件，把
 `devnode::uevent` 序列化好的 payload 广播到 `KOBJECT_UEVENT` netlink 组。
 
-它是 Linux `lib/kobject_uevent.c::kobject_uevent()` 的 netlink 那一半。
-也是 **drivers 树里唯一消费 `knet` 的 crate**——`integration/` 这个目录存在的
-理由就是"框架 → 内核设施"这个方向，本 crate 是它当前的唯一成员。
+它是 Linux `lib/kobject_uevent.c::kobject_uevent()` 的 netlink 那一半，也是
+**drivers 树里唯一消费 `knet` 的 crate**。
+
+它与 `devnode` 平级而不是住在它里面，理由是依赖姿态不同：`devnode` 是有状态的
+纯数据模型（不做 I/O，7 个 crate 靠它而不想要 `knet`），本 crate 是无状态的
+输出适配器。合并会把 `knet` 拖给全部 `devnode` 消费者，除非引入 cargo feature
+扇出。
+
+**方向是规则，不是门牌。** "框架 → 内核设施"这个约束由
+`docs/ai/driver-subsystem-boundaries.md` 的方向规则和 review checklist 执行
+（本 crate 不依赖 `knet` 以外的任何内核设施，命名空间是常量 1、发送是单向的）；
+它不靠某个叫 `integration/` 的目录表达。将来出现第二个框架 → 内核适配器时，
+它同样按自己的内容命名建 crate，不预先占一个空门牌。
 
 ## 范围
 
@@ -81,7 +91,7 @@ Linux 的 kobject uevent 只有 `add`/`remove`/`change`/`move`/`online`/`offline
    `uevent_env`，因此两者的键值集合永远不会分叉。
 
 代价是本 crate 只剩 71 行——但它换来了"`knet` 依赖被限制在一个 71 行的 crate 里"，
-这是 `integration/` 分层的意义。
+这也是它必须与 `devnode` 分成两个 crate 的全部理由。
 
 ### 组号是常量 1
 

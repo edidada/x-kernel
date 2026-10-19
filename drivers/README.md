@@ -22,10 +22,10 @@ The normative rules are in
                                   │
       ┌───────────────┬───────────┴───────────┬─────────────────┐
       ▼               ▼                       ▼                 ▼
-   common/        subsystems/              drv/             bus/ firmware/
-   (devnode:      (per-class stack:        (one module      (PCI access,
-    node + uevent  traits + class API       per driver,      DT/ACPI/FDT,
-    projection)    + dispatch, e.g. block)  family crates)   DICE handover)
+   devnode/       subsystems/              drv/             bus/ firmware/
+   (node model    (per-class stack:        (one module      (PCI access,
+    + netlink     traits + class API       per driver,      DT/ACPI/FDT,
+    sink)         + dispatch, e.g. block)  family crates)   DICE handover)
          │                │                    │
          │                └────► driver-host provider ◄────────┘
          │                       (capability backend bridge:
@@ -52,9 +52,9 @@ first kernel-integrated driver migrated into the model: the class lives in
 [Kernel-Integrated Drivers](#kernel-integrated-drivers-outside-the-model).
 `x86-apic` lives in `arch/`.
 Host-side trees — `drivers/host`, `drivers/init`, `bus/`, `firmware/`,
-`integration/`, `boot-console/`, `clocksource/`, `irqchip/`, `perf/` — may
+`uevent-netlink/`, `boot-console/`, `clocksource/`, `irqchip/`, `perf/` — may
 use host-kernel crates freely; that is their role. The L0/L1 rules apply to
-`drivers/base`, `common/`, `subsystems/` and `drv/`.
+`drivers/base`, `devnode/`, `subsystems/` and `drv/`.
 
 ## Device Model and Host Bridge (`base/`, `host/`, `init/`)
 
@@ -64,16 +64,26 @@ use host-kernel crates freely; that is their role. The L0/L1 rules apply to
 | `host` | `driver-host` | Per-device services (`DeviceServices`), the resource provider binding them to `memspace`/`kirq`/`kdma`/`khal` (formerly the `device-res` stack), the virtio transport extension and HAL, and the clock registry. |
 | `init` | `driver-init` | Composition root with explicit initcall levels: L1 host services → L2 subsystem cores → L3 drivers → L4 enumeration → L5 probe storm. Called once from `kruntime`. |
 
-## Cross-Subsystem Foundations (`common/`)
+## Device-Node Projection (`devnode/`, `uevent-netlink/`)
 
-Only crates that several subsystems depend on by design — not a dumping
-ground. Anything class-specific belongs in `subsystems/`. `devnode` is
-host-kernel-free (rule L0-b), which is what lets the model be tested against
-`MockServices`.
+The node half of the model, split in two because one half must stay free of
+kernel facilities: `devnode` owns the registry, the node identity and the
+udev-visible payload format; `uevent-netlink` is the only crate that carries
+those payloads out to `knet`. Linux keeps the same split (`drivers/base`
+node policy vs `lib/kobject_uevent.c`); the reasoning behind the placement of
+these two crates is in
+[the boundary document](../docs/ai/driver-subsystem-boundaries.md#crate-layers).
+
+`devnode` names no device family and no bus: a class registers its node type
+as **data** (`DevNodeType`), so adding a subsystem never edits this crate.
+It is host-kernel-free (rule L0-b), which is what keeps `MockServices` able
+to drive the projection, and that is the whole reason `uevent-netlink` is a
+separate crate: `knet` is paid by the 71-line sink, not by the model.
 
 | Crate | Package | Role |
 |------|------|------|
-| `common/devnode` | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, and the udev-visible uevent payload format. |
+| `devnode` | `devnode` | The userland node registry (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, event dispatch order, and the udev-visible uevent payload format shared with sysfs attributes. |
+| `uevent-netlink` | `uevent-netlink` | Netlink sink for kobject uevents: installs itself as the `devnode` lifecycle publisher at boot and broadcasts to `NETLINK_KOBJECT_UEVENT` group 1. The one drivers-tree consumer of `knet`. |
 
 ## Per-Class Subsystems (`subsystems/`)
 
@@ -153,12 +163,6 @@ delivery) through `kirq::IntrManagerIf`. Generic descriptor, mapping,
 registration, dispatch, softirq and threaded-IRQ semantics belong in `kirq`.
 `arch/x86-apic` (CPU interrupt infrastructure) is the one hardware driver
 that lives in `arch/` rather than `drivers/`.
-
-## Integration (`integration/`)
-
-| Crate | Package | Role |
-|------|------|------|
-| `integration/uevent-netlink` | `uevent-netlink` | Netlink transport for kobject uevents — the one drivers-tree consumer of `knet`. The payload format (a udev-visible compatibility surface) lives in `devnode::uevent`, shared with sysfs attributes. |
 
 ## Relationship Multiplicity
 

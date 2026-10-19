@@ -6,8 +6,8 @@ X-Kernel 唯一的设备模型核心。它拥有 bus/device/driver 三类契约�
 deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceServices`）。
 
 依赖它的层：`drivers/host`（实现服务契约）、`drivers/init`（组合根）、
-`common/devnode`（复用 `DeviceLocation`）、`bus/pci`（实现 `Bus`）、
-`drv/**`（实现 `DriverOps`）。
+`bus/pci`（实现 `Bus`）、`drv/**`（实现 `DriverOps`）。`devnode` **不**在这一层：
+它不依赖 `driver-base`，也不认识 `Device`/`DeviceDomain`（见 `drivers/devnode/docs/design.md`）。
 
 它**不**依赖任何设备家族，也**不**依赖 `memspace`/`kdma`/`khal`。唯一的主机侧
 依赖是 `kirq` 的**类型词汇**（`IrqTrigger`/`IrqController`/`IrqDomainId`，
@@ -220,7 +220,7 @@ pending/deferred 工作表摘掉、直接释放 entry。
   `select_batch` 对每个待探测设备深拷贝 `DeviceDescriptor`（含
   `Vec<String>` compatibles），`modalias` 每次重算。probe 是每设备一次性路径，
   不是热路径；优化需要改 `matches()` 的返回形状，等有真实吞吐需求再做。
-- class 注册表（`common/device-class`）仍是 `Vec` + 线性扫描，与本 crate 无关
+- class 注册表（`driver-base::class` 的 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
   但同样是已知的、被接受的小集合线性扫描。
 
 ## 设计决策

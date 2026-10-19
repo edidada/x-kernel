@@ -8,8 +8,10 @@
 //! crate subscribes to devnode lifecycle events and broadcasts the payloads
 //! (serialized by `devnode::uevent`, the format layer in the node model)
 //! on the KOBJECT_UEVENT netlink group. It is the one drivers-tree
-//! consumer of `knet` — the framework-to-kernel-facility direction this
-//! directory is for.
+//! consumer of `knet`: the node model itself stays host-free, and this sink
+//! is where that dependency is paid. Keeping the two in separate crates is
+//! what lets `devnode`'s seven consumers (devfs, sysfs, kvfs, block,
+//! display, input, entropy) build without `knet` or a cargo feature.
 //!
 //! The uevent payload format is a udev-visible compatibility surface; the
 //! format rules live in `devnode::uevent`, shared with sysfs attributes.

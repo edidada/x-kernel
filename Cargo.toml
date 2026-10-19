@@ -13,7 +13,7 @@ members = [
     "drivers/base",
     "drivers/host",
     "drivers/init",
-    "drivers/common/devnode",
+    "drivers/devnode",
     "drivers/drv/*",
     "tee/tee_crypto",
     "tee/xdice",
@@ -213,16 +213,15 @@ serial_core = { path = "drivers/drv/serial/serial-core", package = "serial-core"
 drv-clk = { path = "drivers/drv/clk" }
 drv-block = { path = "drivers/drv/block" }
 drv-rtc = { path = "drivers/drv/rtc" }
-devnode = { path = "drivers/common/devnode" }
+devnode = { path = "drivers/devnode" }
+# Internal: the device model's netlink uevent sink
+uevent_netlink = { path = "drivers/uevent-netlink", package = "uevent-netlink" }
 subsys_input = { path = "drivers/subsystems/input", package = "subsys-input" }
 subsys_net = { path = "drivers/subsystems/net", package = "subsys-net" }
 subsys_vsock = { path = "drivers/subsystems/vsock", package = "subsys-vsock" }
 
 # Internal: portable concrete drivers
 virtio_devices = { path = "drivers/drv/virtio/devices", package = "virtio-devices" }
-
-# Internal: driver adapters and integration
-uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/perf" }

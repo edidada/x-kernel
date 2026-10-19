@@ -5,17 +5,24 @@
 //! The userland device-node projection: one registry behind devtmpfs,
 //! sysfs, and uevent.
 //!
-//! Architecturally this is the *model-agnostic* identity that both device
-//! models publish into:
+//! The device model's userland-node projection: the single registry behind
+//! devtmpfs (`/dev`), sysfs (`/sys`) and uevent (netlink).
 //!
 //! * a [`DevNodeType`] is **data** — subsystem name, major, index count,
 //!   devname format — registered by class crates instead of a closed enum
 //!   in the device model. Adding a subsystem (block, tty, netdev, ...)
-//!   touches no framework code;
+//!   touches neither this crate nor `driver-base`;
 //! * a [`DevNode`] is one published node: devname, `dev_t`, physical path,
 //!   optional `MODALIAS`, and class-specific uevent properties;
 //! * publications are keyed by an opaque `u64` handle (the class
-//!   publication id), so neither device model's id space leaks in.
+//!   publication id), so the device model's id space does not leak in.
+//!
+//! This crate performs no I/O and names no kernel facility: it depends on
+//! `kspin`/`ksync`/`log` only. The netlink sink for these payloads is the
+//! separate `uevent-netlink` crate, which is why the model itself never
+//! reaches `knet`. That split is load-bearing, not cosmetic — `docs/design.md`
+//! records why the node policy lives here, beside the model, rather than in
+//! `driver-base` or `core/`.
 //!
 //! The uevent payload format produced from these nodes is a compatibility
 //! surface (udev-visible); its property order and bitmap word order are
@@ -31,11 +38,9 @@ use kspin::SpinNoPreempt;
 
 pub mod uevent;
 
-/// Device topology location — owned by the device model
-/// (`driver_base::BusDeviceData`), re-exported here so devnode consumers
-/// keep a single import path. There is exactly ONE path derivation in the
-/// tree: the pre-refactor duplicate (kept so the projection stayed
-/// model-agnostic across two device models) died with the old model.
+/// The capability-bitmap word-order helper, re-exported so uevent consumers
+/// (sysfs attributes, the input class) keep a single import path into the
+/// format layer.
 pub use uevent::bitmap_value;
 
 /// Packed `dev_t`: the same layout the block core and devfs use

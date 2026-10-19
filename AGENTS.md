@@ -62,9 +62,15 @@ Major areas:
   - `base/`: device model (`driver-base`) incl. the class machinery;
     `host/`: host service bridge (`driver-host`); `init/`: composition
     root with initcall levels (`driver-init`).
-  - `common/`: cross-subsystem foundations (`devnode`); the class layer
-    lives in `driver-base::class` with family instantiation in
-    `subsystems/*`.
+  - `devnode/`, `uevent-netlink/`: the device model's userland-node
+    projection (`devnode` holds the registry, node identity and the
+    udev-visible uevent payload format) and its netlink sink
+    (`uevent-netlink` installs itself as the lifecycle publisher and pays
+    for `knet`, so the node model stays host-free). The class layer lives in
+    `driver-base::class` with family instantiation in `subsystems/*`. The two
+    adapter directions — kernel capabilities -> framework (`drivers/host`) and
+    framework -> kernel facilities (`uevent-netlink`) — are fixed by role, not
+    by directory name.
   - `subsystems/`: per-class APIs and services
     (block/char/char-console/display/hwrng/input/net/rtc/vsock).
   - `drv/`: concrete drivers, one subsystem crate per family, one module
@@ -80,9 +86,6 @@ Major areas:
     identity lives in `subsystems/char-console`). `arch/x86-apic`
     holds the CPU interrupt backend. `rtc` is the template for migrating
     one into `subsystems/<class>` + `drv/<family>`.
-  - `integration/`: framework -> kernel facilities (`uevent-netlink`); the
-    kernel-capabilities -> framework direction is implemented by the
-    provider inside `drivers/host`.
 - `platforms/`: platform glue and defconfigs.
 - `process/`, `task/`, `fs/`, `io/`, `net/`, and `tee/`: subsystem crates.
 - `util/`: shared utility crates such as `klazy`.
@@ -124,8 +127,8 @@ ownership boundaries.
   driver work. It states the rules (L0-a family-agnostic core, L0-b
   host-free contracts, L1 single resource acquisition path) and the exception
   register (L2). `bus/`, `firmware/`, `drivers/host`,
-  `drivers/init`, and `integration/` are host-side trees by role and
-  are out of scope for L0/L1. `kirq`'s type vocabulary (`IrqTrigger`,
+  `drivers/init`, and `drivers/uevent-netlink` are host-side trees by role
+  and are out of scope for L0/L1. `kirq`'s type vocabulary (`IrqTrigger`,
   `IrqController`, `IrqDomainId`) is common and may be used anywhere; its
   registration API may not be called from `drv/**`.
 - Keep refactoring commits separate from feature or behavior commits.

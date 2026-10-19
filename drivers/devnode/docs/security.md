@@ -2,7 +2,7 @@
 
 ## Scope
 
-`drivers/common/devnode/src/lib.rs` 与 `src/uevent.rs`。
+`drivers/devnode/src/lib.rs` 与 `src/uevent.rs`。
 
 本 crate 的输出**直接构成用户态可见的兼容面**：`/dev` 下的节点名与 `st_rdev`、
 `/sys` 下的路径、以及 udev 消费的 netlink uevent payload。因此它的正确性问题
@@ -123,8 +123,10 @@ unique id）——这些是硬件描述，与 Linux 的暴露面等价，但**�
    与内核同生命周期。
 5. **`INDEX_POOLS` 的 `Vec<(&'static str, Vec<u32>)>` 是线性查找**，subsystem
    数量个位数时可接受。
-6. **`DeviceLocation` 来自 `driver-base`**，所以本 crate 不是完全模型无关的
-   （见 `design.md` 的设计决策）。这是为了 sysfs 路径只有一个出处的刻意取舍。
+6. **`physical_path_pci` 是总线词汇**（PCI `segment:bus:device.function` 命名），
+   住在节点模型里而不是 bus 层。保留理由是 `DEVPATH` 与 sysfs 目录必须同源，
+   否则会漂移；代价是本 crate 并非完全总线无关。这是记录在案的单点例外，
+   不是新增总线命名的先例（见 `design.md` 的 `physical_path` 一节）。
 7. **`DevNodeType` 的两个 `fn` 指针返回 `String`**，每次投影都分配。
    devname/sysfs_path 在发布时算一次并存在 `DevNode` 上，所以不在热路径。
 

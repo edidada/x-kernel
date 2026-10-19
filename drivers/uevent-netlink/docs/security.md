@@ -2,7 +2,7 @@
 
 ## Scope
 
-`drivers/integration/uevent-netlink/src/lib.rs`（71 行）。
+`drivers/uevent-netlink/src/lib.rs`（71 行）。
 
 这个 crate 小，但它坐在一条**内核 → 用户态的广播通道**上，且有一个用户态可写
 的入口（sysfs `uevent` 文件）。因此它的攻击面比行数暗示的要大。

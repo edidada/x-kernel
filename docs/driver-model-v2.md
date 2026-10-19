@@ -11,7 +11,8 @@ drivers/
            + class 机械(Publication/Registry/ClassHooks/class_api! 宏/notify+remove 引擎)
   host/    driver-host —— 资源后端(DeviceServices over kirq/kdma/memspace/kclk)
   init/    driver-init —— 组合根,显式 initcall 等级
-  common/  devnode —— 节点模型 + NodeClass(input/drm 投影)+ uevent 格式
+  devnode/ devnode —— 节点注册表(DevNodeType 数据驱动)+ uevent payload 格式
+  uevent-netlink/ uevent-netlink —— 该模型的 netlink 出口(唯一消费 knet 的 crate)
   subsystems/ subsys-* —— 每类完整栈:trait + class.rs(别名/钩子/发布 API/removal)+ dispatch
            (rtc = 第一个从"模型外"迁入的类:契约 + hctosys 服务)
   drv/     家族驱动 + 家族库(virtio/devices、serial/serial-core=UART 硬件、rtc=PL031/Goldfish/CMOS/LS7A)
@@ -19,7 +20,6 @@ drivers/
   firmware/ of、acpi、dice(握手)、rs-fdtree(外部解析库)
   boot-console/ printk sink + 固件 stdout 早启(earlycon) + 早期输入
   clocksource/ irqchip/ perf/ —— 模型外内核集成驱动(启动序/架构钉死,见 drivers/README.md)
-  integration/ uevent-netlink
 arch/x86-apic —— CPU 中断基础设施(离开 drivers/)
 ```
 

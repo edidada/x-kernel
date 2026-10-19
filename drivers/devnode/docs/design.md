@@ -8,11 +8,12 @@ uevent（netlink）三个投影层都从这里取事实。
 它是 Linux `drivers/base/devtmpfs.c` + `kobject_uevent` 的身份层合并：
 一个节点一次注册，三个投影各自订阅。
 
-依赖它的：`common/device-class`（class 发布时投影节点）、`subsystems/block`
-（Gendisk 的 devname/设备号）、`fs/filesystems/devfs`、`fs/filesystems/sysfs`、
-`integration/uevent-netlink`。
+依赖它的：`subsystems/block`、`subsystems/display`、`subsystems/input`（各自的
+class 层把发布投影成节点）、`fs/filesystems/devfs`、`fs/filesystems/sysfs`、
+`fs/kvfs`、`util/entropy`（可选）、`uevent-netlink`。
 
-它依赖 `driver-base`，但只用一个类型：`DeviceLocation`（见"设计决策"）。
+它的依赖只有 `kspin` / `ksync` / `log`——不依赖 `driver-base`，也不依赖任何
+内核设施（见“设计决策 · 为什么住在 drivers/ 而不是 core/”）。
 
 ## 背景
 
@@ -25,13 +26,13 @@ minor base、index 数、devname 格式函数、sysfs 路径格式函数），�
 注册。新增子系统不触碰 devnode，也不触碰 `driver-base`。
 
 同时它把 uevent 的**格式**与**传输**分开：格式（udev 可见的兼容面）在这里的
-`uevent.rs`，传输（唯一消费 `knet` 的地方）在 `integration/uevent-netlink`。
+`uevent.rs`，传输（唯一消费 `knet` 的地方）在 `drivers/uevent-netlink`。
 
 ## 范围
 
 | 文件 | 内容 |
 |---|---|
-| `src/lib.rs` | `DeviceNumber`（打包 `dev_t`）、`DevNodeType`、`DevNode`、`DevNodeEvent`、注册表（`REGISTRY` / `INDEX_POOLS` / `DISPATCH_ORDER`）、`publish` / `publish_auto_indexed` / `withdraw` / `nodes` / `subscribe` / `install_lifecycle_publisher`、`physical_path` |
+| `src/lib.rs` | `DeviceNumber`（打包 `dev_t`）、`DevNodeType`、`DevNode`、`DevNodeEvent`、注册表（`REGISTRY` / `INDEX_POOLS` / `DISPATCH_ORDER`）、`publish` / `publish_auto_indexed` / `withdraw` / `nodes` / `subscribe` / `install_lifecycle_publisher`、`physical_path_pci` |
 | `src/uevent.rs` | `UeventAction`、`uevent_devpath`、`uevent_env`、`uevent_payload`、`uevent_file_contents`、`bitmap_value` |
 
 ## 架构
@@ -150,9 +151,15 @@ index——否则订阅者会看到"同一个 devname 先 remove 后 add"颠倒�
 
 ### `physical_path`
 
-`DeviceLocation` → 规范 sysfs 物理路径（`/devices/platform/soc/9000000.pl011`、
+设备位置 → 规范 sysfs 物理路径（`/devices/platform/soc/9000000.pl011`、
 `/devices/pci0000:00/0000:00:01.0`）。这是 `DEVPATH` 与目录树的**唯一出处**：
 旧模型有两套推导（节点上一套、uevent 一套），会分叉。
+
+`physical_path_pci` 是这条规则的**已知例外**：PCI `segment:bus:device.function`
+命名是**总线词汇**（Linux 把它放在 `drivers/pci/probe.c`），而这里它住在节点模型里。
+保留的理由只有一条：`DEVPATH` 与 sysfs 目录必须用同一份推导，分居两处就会漂移；
+搬走它的前提是让 bus 层成为唯一出处，那是独立的一刀。**不要把这里当成"本 crate
+可以认识总线"的先例**——新增任何总线命名必须先有对应 bus 层实现。
 
 ## 并发模型
 
@@ -205,21 +212,28 @@ pub struct DevNodeType {
 bitmap 字序是 load-bearing 的）可以独立测试，而 `knet` 依赖被限制在一个 71 行
 的 crate 里。
 
-### 依赖 `driver-base` 只为 `DeviceLocation`
+### 为什么住在 `drivers/` 而不是 `core/`
 
-```rust
-pub use driver_base::DeviceLocation;
-```
+按 Linux 的分工，本 crate 的内容是两半之和：
 
-本 crate 曾经真的是"双模型无关"的（旧框架时期需要同时服务新旧两个设备模型，
-因此自己复制了一份 `DeviceLocation`）。旧模型删除后这份复制也随之删除，
-`DeviceLocation` 现在只有 `driver-base` 一个定义点，本 crate re-export 它，
-让消费者保持单一 import 路径。
+| 本 crate 的内容 | Linux 对应 | Linux 树 |
+|---|---|---|
+| `DevNodeType`（subsystem/major/minor/devname/sysfs 路径格式）、`DevNode` 的字段 | `drivers/base/devtmpfs.c` + `dev_uevent()` | drivers/base |
+| 注册表与 `Added → Removing → Removed` 派发序 | `device_add()` / `device_del()` 的生命周期 | drivers/base |
+| `uevent.rs`（payload 格式、bitmap 字序） | `lib/kobject_uevent.c` | lib（core） |
 
-**因此"model-agnostic"这个说法现在只对了一半**：投影机制（`DevNodeType` /
-`DevNode` / 注册表 / index 池 / uevent 格式）确实与模型无关，但**位置身份的
-类型**来自 `driver-base`。这是刻意的取舍——重复一份 `DeviceLocation` 会让
-sysfs 路径推导有两个出处，那正是本 crate 要消灭的问题。
+主体（节点命名政策、节点身份、生命周期序）是**设备模型政策**，约八成行数；只有
+payload 格式属于 `lib/` 材料，而它与 sysfs 共享、不能复制出去。
+
+它仍然**不**住在 `drivers/base` 里：模型核心必须对设备家族与总线保持无知
+（规则 L0-a），而节点政策是每类设备各不相同的东西。也不进 `fs/`：驱动侧是写入方，`fs`
+只读取投影。同理不进 `core/`：`core/` 现有 crate 全都不含设备/
+总线政策，而 `physical_path_pci` 就是总线词汇。
+
+这个结论有代价，必须写清楚：它在概念上靠近 kobject 层，但 X-Kernel 没有独立的
+kobject（DevNode 同时承担了 Linux 的 `kobject` 机制与 `devtmpfs` 策略）。如果将来
+把总线词汇搬回 bus 层、并把 `DevNodeType` 的类政策与通用机制分开，那时再讨论进
+`core/` 才有依据；在此之前，"它看起来像 lib/ 的代码"不是论据。
 
 ## Drop / 资源释放
 

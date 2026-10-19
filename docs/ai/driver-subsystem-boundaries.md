@@ -62,18 +62,19 @@ drivers/host (the host bridge)
 | Tree | Host-side by definition? | Rules |
 |---|---|---|
 | `drivers/base` | no — must stay host-agnostic AND family-agnostic | L0-a, L0-b |
-| `common/` (`devnode`) | no | L0-b, L1 |
+| `drivers/devnode` | no | L0-b, L1 |
 | `subsystems/` **contracts** (traits, published types) | no | L0-b |
 | `subsystems/*-host` **services** (`subsys-block-host`) | yes — see L0-b | L1 |
 | `subsystems/char-console` (console service over `CHAR`) | yes — see L0-b | L1 |
 | `drv/` (concrete drivers + family libraries) | no | L1, L2 |
 | `drivers/host`, `drivers/init` | **yes** | none of L0/L1 |
-| `bus/`, `firmware/`, `integration/` | **yes** | none of L0/L1 |
+| `bus/`, `firmware/`, `uevent-netlink/` | **yes** | none of L0/L1 |
 | `boot-console/`, `clocksource/`, `irqchip/`, `perf/` | **yes** — boot-order-pinned | none of L0/L1 |
 
 `bus/pci` maps the ECAM window through `khal`/`memspace`; `firmware/*`
-parse firmware descriptions; `integration/uevent-netlink` is the one
-consumer of `knet`. `boot-console/`, `clocksource/`, `irqchip/` and `perf/`
+parse firmware descriptions; `uevent-netlink` is the one consumer of
+`knet` (`devnode` itself stays host-free: the netlink half lives beside it,
+not inside it). `boot-console/`, `clocksource/`, `irqchip/` and `perf/`
 are hardware/boot-integration drivers that cannot be model clients: they run
 before `driver-init`'s L1 host services or register into `kirq`, which the
 model sits above (the console's model-facing half lives in
@@ -114,7 +115,7 @@ The distinction that makes the model testable:
 | `subsystems/block` `BlockCompletionOperations`, `BlockWaiter`, `BlockSignals` | ✅ | — |
 | `subsystems/block-host` (`wait`, `reclaimer`) | — | ✅ |
 | `subsystems/char-console` (console service over `CHAR`) | — | ✅ |
-| `common/{devnode}` | ✅ | — |
+| `drivers/devnode` | ✅ | — |
 
 A **contract** is a trait a driver implements or a type it publishes. A
 **service** is an implementation the subsystem owns and runs. Contracts stay
@@ -153,7 +154,7 @@ it takes the device's identity and returns the owner of one user-visible
 object.
 
 Mechanically checkable half of L1: **no `drv/**`, `subsystems/**` or
-`common/**` crate may name the host runtime, a provider singleton, or the
+`devnode/**` crate may name the host runtime, a provider singleton, or the
 host capability surface** (`Host::global`, `XKernelResourceProvider`,
 `driver_base::devres::host_api`). A provider may be *injected* into a family
 library; it may never be *fetched*. See exception E-01 for the one
@@ -179,7 +180,10 @@ too.
   driver-subsystem crates.
 - Host-specific code lives in `drivers/host` (capabilities → framework:
   the only place the model touches `memspace`/`kirq`/`kdma`) and
-  `integration/` (framework → kernel facilities). The direction is fixed.
+  `drivers/uevent-netlink` (framework → kernel facilities: the only place
+  `devnode` payloads reach `knet`). Both directions are fixed by role, not by
+  the directory name — a second adapter in either direction gets its own
+  content-named crate, not a shared `integration/`-style wrapper.
 - New driver needs become capability contracts or subsystem services first.
   Never make a concrete driver call a host API as a shortcut.
 
@@ -217,7 +221,7 @@ Not exceptions (they follow from scope or L0-b): `subsystems/block-host`
 (service, host by design); `subsystems/char-console` (service over the
 char class); `bus/pci`, `firmware/*`, `boot-console/*`,
 `clocksource/*`, `irqchip/*`, `perf/*`, `drivers/host`, `drivers/init`,
-`integration/*` (host-side or boot-order-pinned trees).
+`drivers/uevent-netlink` (host-side or boot-order-pinned trees).
 
 ## Crate Layers
 
@@ -229,8 +233,16 @@ See `drivers/README.md` for the current inventory.
   resource provider + provider registries) — the one process-global root.
 - **`drivers/init`** — `driver-init`: composition root, called once from
   `kruntime`.
-- **`common/`** — cross-subsystem foundations only: `devnode`
-  (userland node projection + node classes).
+- **`devnode/`, `uevent-netlink/`** — the node projection and its netlink
+  sink. `devnode` is the device model's userland-node policy (Linux:
+  `drivers/base/devtmpfs.c` + `dev_uevent()`) plus the udev-visible payload
+  format (Linux: `lib/kobject_uevent.c`), and it is deliberately outside
+  `drivers/base` because the model core must stay family- *and* bus-agnostic
+  (L0-a) and must not depend on node policy. `uevent-netlink` is its client:
+  the 71-line sink that pays for `knet` so the registry does not have to.
+  Keeping it a crate is what lets `fs/devfs`, `fs/sysfs`, `fs/kvfs`,
+  `subsystems/{block,display,input}` and `util/entropy` use `devnode` without
+  a `knet` dependency or a cargo feature.
 - **`subsystems/`** — per-class APIs and class services: `block`, `char`,
   `char-console`, `display`, `hwrng`, `input`, `net`, `rtc`, `vsock`.
 - **`drv/`** — concrete drivers, one subsystem crate per family, one module
@@ -240,22 +252,21 @@ See `drivers/README.md` for the current inventory.
 - **`bus/`, `firmware/`** — PCI access and DT/ACPI parsing; `firmware/dice`
   reads the DICE handover blob.
 - **`console/`, `clocksource/`, `irqchip/`, `perf/`** — boot-order-pinned
-  and arch/BSP drivers outside the model (see the scope table). `console/`
+  and arch/BSP drivers outside the model (see the scope table). The console
   split into `boot-console/` (printk sink + earlycon) and
   `subsystems/char-console` (runtime identity).
-- **`integration/`** — framework → kernel facilities (`uevent-netlink`).
 
 ## Review Checklist
 
 - Does `driver-base` gain any family knowledge? (L0-a grep must stay
   comment-only.)
-- Does a `common/` crate, or a subsystem **contract**, gain a host-kernel
+- Does a `devnode/` crate, or a subsystem **contract**, gain a host-kernel
   dependency? (L0-b.)
 - Does a new device family require editing `driver-base` instead of adding an
   extension trait? (L0-a.)
 - Does driver code acquire a resource anywhere other than `Device` or a
   documented subsystem service? (L1.)
-- Does a `drv/**`, `subsystems/**` or `common/**` crate name the host runtime
+- Does a `drv/**`, `subsystems/**` or `devnode/**` crate name the host runtime
   or a provider singleton — i.e. *fetch* rather than *receive* a provider?
   (L1.) If yes, is it registered? (L2.)
 - Does a `drv/**` crate call a `kirq` **registration** API rather than

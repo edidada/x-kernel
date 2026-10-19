@@ -26,11 +26,12 @@ report() {
 }
 
 # --- scope -----------------------------------------------------------------
-# Directories the L0/L1 rules apply to. bus/, firmware/, console/,
-# clocksource/, irqchip/, perf/, drivers/host and drivers/init are host-side
-# (or boot-order-pinned) by role and are deliberately NOT listed: the old flat
-# deny-list flagged them, which trained reviewers to ignore the whole document.
-RULED_DIRS=(drivers/base drivers/common drivers/subsystems drivers/drv)
+# Directories the L0/L1 rules apply to. bus/, firmware/, uevent-netlink/,
+# boot-console/, clocksource/, irqchip/, perf/, drivers/host and drivers/init
+# are host-side (or boot-order-pinned) by role and are deliberately NOT listed:
+# the old flat deny-list flagged them, which trained reviewers to ignore the
+# whole document.
+RULED_DIRS=(drivers/base drivers/devnode drivers/subsystems drivers/drv)
 
 # Host-kernel crates a ruled directory must not depend on directly.
 # kirq is NOT here: its type vocabulary (IrqTrigger/IrqController/IrqDomainId)
@@ -127,9 +128,10 @@ done < <(grep -rniE "$FAMILIES" drivers/base/src --include='*.rs' || true)
 # This is what makes MockServices possible — the model and the class layer run
 # on mocks, which is why driver-core has state-machine tests at all.
 #
-# Note: devnode depends on driver-core for DeviceLocation (a deliberate
-# single-source-of-truth tradeoff, documented in its design.md), so kirq
-# reaches it transitively. Only DIRECT deps are checked here.
+# Note: devnode (`drivers/devnode`) takes only the log/spin/sync utility crates
+# — no device-model, bus or kernel-facility dependency. Its netlink half lives
+# in `drivers/uevent-netlink`, which is why the model itself never reaches
+# `knet`. Only DIRECT deps are checked here.
 # ---------------------------------------------------------------------------
 for dir in "${RULED_DIRS[@]}"; do
     while IFS= read -r manifest; do
@@ -239,6 +241,14 @@ done
 for stale in driver-runtime kclass driver-core driver-compose device-class device-traits; do
     if grep -rqw "$stale" "$BOUNDARIES_DOC" drivers/README.md AGENTS.md 2>/dev/null; then
         report "doc-sync: \`${stale}\` is a pre-rename crate name still present in ${BOUNDARIES_DOC} / drivers/README.md / AGENTS.md"
+    fi
+done
+# Directory-level counterpart: the two relation-named groupings that held devnode
+# and uevent-netlink are gone. Re-creating one puts a layer of naming back
+# between a crate and its own name.
+for stale_dir in drivers/common drivers/integration; do
+    if [ -d "$stale_dir" ]; then
+        report "doc-sync: \`${stale_dir}\` was re-created; \`devnode\` and \`uevent-netlink\` are top-level crates under drivers/"
     fi
 done
 
