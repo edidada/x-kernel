@@ -529,7 +529,7 @@ fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
 }
 
 #[def_test]
-fn setting_ipv4_netmask_collision_keeps_existing_target() {
+fn setting_ipv4_netmask_rejects_duplicate_without_changing_state() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let primary = Ipv4AddrEntry {
@@ -545,17 +545,30 @@ fn setting_ipv4_netmask_collision_keeps_existing_target() {
     };
     router.add_ipv4_addr(primary).unwrap();
     router.add_ipv4_addr(secondary).unwrap();
-    assert_eq!(router.set_ipv4_netmask(dev, 24), Ok(()));
+    let routes_before: Vec<_> = router
+        .table
+        .rules()
+        .iter()
+        .map(|rule| (rule.filter, rule.dev, rule.preferred_source()))
+        .collect();
+
+    assert_eq!(router.set_ipv4_netmask(dev, 16), Err(LinuxError::EEXIST));
     assert_eq!(router.ipv4_addr_entries(), &[primary, secondary]);
-    assert_eq!(router.set_ipv4_netmask(dev, 16), Ok(()));
-    assert_eq!(router.ipv4_addr_entries(), &[secondary]);
-    assert_eq!(router.local_ipv4_addrs(), vec![secondary.addr]);
-    let destination = Ipv4Address::new(192, 0, 2, 8).into();
+    assert_eq!(router.interface_ipv4_addr("lo"), Ok(primary.addr));
     assert_eq!(
-        router.table.lookup(&destination).unwrap().filter,
-        secondary.addr.network().into()
+        router.local_ipv4_addrs(),
+        vec![primary.addr, secondary.addr]
     );
-    assert_eq!(router.output_route_source(&destination, 0), Ok(primary.addr.address().into()));
+    let routes_after: Vec<_> = router
+        .table
+        .rules()
+        .iter()
+        .map(|rule| (rule.filter, rule.dev, rule.preferred_source()))
+        .collect();
+    assert_eq!(routes_after, routes_before);
+
+    assert!(router.remove_ipv4_addr(secondary));
+    assert_eq!(router.ipv4_addr_entries(), &[primary]);
 }
 
 #[def_test]

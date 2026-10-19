@@ -119,7 +119,8 @@ pub fn set_interface_ipv4_addr(
 /// # Errors
 ///
 /// Returns `ENODEV` when `name` is unknown, `EADDRNOTAVAIL` when the
-/// interface has no IPv4 address, or `EINVAL` when `prefix_len` is invalid.
+/// interface has no IPv4 address, `EINVAL` when `prefix_len` is invalid,
+/// or `EEXIST` when the new CIDR duplicates another address on the device.
 pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_id_by_name(name)?;

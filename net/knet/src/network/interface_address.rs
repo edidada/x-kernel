@@ -52,6 +52,7 @@ pub(crate) enum PrimaryAddrChange {
 ///
 /// The first entry for each device is its primary address. Mutations preserve
 /// other entries' order, so removing the primary promotes the next entry.
+/// Device/CIDR pairs are unique, and rejected mutations leave all entries intact.
 /// Callers validate device existence and synchronize derived network state.
 pub(crate) struct Ipv4AddressSet {
     entries: Vec<Ipv4AddrEntry>,
@@ -82,9 +83,13 @@ impl Ipv4AddressSet {
 
     /// Tests address identity by device and CIDR, excluding mutable attributes.
     pub(crate) fn contains_entry(&self, entry: Ipv4AddrEntry) -> bool {
+        self.entry_index(entry.dev, entry.addr).is_some()
+    }
+
+    fn entry_index(&self, dev: NetDeviceId, addr: Ipv4Cidr) -> Option<usize> {
         self.entries
             .iter()
-            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
+            .position(|entry| entry.dev == dev && entry.addr == addr)
     }
 
     pub(crate) fn primary(&self, dev: NetDeviceId) -> Option<Ipv4Cidr> {
@@ -130,16 +135,35 @@ impl Ipv4AddressSet {
         if old.addr.address() == entry.addr.address() {
             return Ok(PrimaryAddrChange::Unchanged);
         }
+        self.replace_at(index, entry.addr, entry.scope, entry.broadcast)?;
+        Ok(PrimaryAddrChange::Replaced(old.addr.address()))
+    }
+
+    /// Validates a replacement before committing it without changing its device.
+    fn replace_at(
+        &mut self,
+        index: usize,
+        addr: Ipv4Cidr,
+        scope: u8,
+        broadcast: Option<Ipv4Address>,
+    ) -> Result<Ipv4AddrEntry, LinuxError> {
+        if !addr.address().is_unicast() {
+            return Err(LinuxError::EINVAL);
+        }
+        let old = self.entries[index];
         if self
-            .entries
-            .iter()
-            .skip(index + 1)
-            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
+            .entry_index(old.dev, addr)
+            .is_some_and(|existing_index| existing_index != index)
         {
             return Err(LinuxError::EEXIST);
         }
-        self.entries[index] = entry;
-        Ok(PrimaryAddrChange::Replaced(old.addr.address()))
+        self.entries[index] = Ipv4AddrEntry {
+            dev: old.dev,
+            addr,
+            scope,
+            broadcast,
+        };
+        Ok(old)
     }
 
     pub(crate) fn remove_primary(&mut self, dev: NetDeviceId) -> Option<Ipv4AddrEntry> {
@@ -181,6 +205,7 @@ impl Ipv4AddressSet {
 
     /// Preserves scope and custom broadcasts when changing the primary prefix.
     /// Returns whether the prefix changed.
+    /// A conflicting device/CIDR pair returns `EEXIST` without changing entries.
     pub(crate) fn set_netmask(
         &mut self,
         dev: NetDeviceId,
@@ -190,11 +215,12 @@ impl Ipv4AddressSet {
         if prefix_len > 32 {
             return Err(LinuxError::EINVAL);
         }
-        let entry = self
+        let index = self
             .entries
-            .iter_mut()
-            .find(|entry| entry.dev == dev)
+            .iter()
+            .position(|entry| entry.dev == dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        let mut entry = self.entries[index];
         if entry.addr.prefix_len() == prefix_len {
             return Ok(false);
         }
@@ -209,6 +235,7 @@ impl Ipv4AddressSet {
         } else if entry.broadcast.is_none() {
             entry.broadcast = old_derived_broadcast;
         }
+        self.replace_at(index, entry.addr, entry.scope, entry.broadcast)?;
         Ok(true)
     }
 
