@@ -35,8 +35,10 @@ impl ClkHandle {
         self.ops.prepare()?;
         if let Err(err) = self.ops.enable() {
             // Roll back the prepare: a failed enable must not leave the
-            // clock half-prepared.
-            let () = self.ops.disable();
+            // clock half-prepared. No `disable()` here — the enable never
+            // succeeded, and `EnabledClock`'s contract pairs one disable
+            // with one *successful* enable; a provider whose enable fails
+            // partway rolls its own partial state back.
             self.ops.unprepare();
             return Err(err);
         }

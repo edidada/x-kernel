@@ -382,22 +382,6 @@ fn deferred_probe_wakes_exactly_on_dependency() {
 }
 
 #[def_test(serial)]
-fn removing_probing_device_rejects_with_busy() {
-    // In the single-threaded unittest environment, a spin-gated probe
-    // cannot be interleaved with remove_device. We verify the state
-    // contract structurally: the Probing arm in remove_device() sits
-    // before the unbound light path and returns Busy — confirmed by
-    // the exhaustive match in the source. The SMP interleaving test
-    // requires multi-core support and is deferred.
-    //
-    // The key invariant: Probing is NOT in the light-path arm.
-    assert!(!matches!(
-        DeviceState::Probing,
-        DeviceState::Pending | DeviceState::Deferred | DeviceState::Unclaimed
-    ));
-}
-
-#[def_test(serial)]
 fn late_driver_registration_claims_unclaimed_device() {
     let (domain, services) = fresh_domain();
     services.publish_clk(0x42);
@@ -499,7 +483,16 @@ fn duplicate_registration_cannot_retry_a_fatal_device() {
 /// begins), and the parent's children list stays accurate after.
 #[def_test(serial)]
 fn remove_cascades_children_first() {
-    static ORDER: SpinNoPreempt<Vec<&'static str>> = SpinNoPreempt::new(Vec::new());
+    #[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unregistered_static_spinlock,
+    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+)]
+static ORDER: SpinNoPreempt<Vec<&'static str>> = SpinNoPreempt::new(Vec::new());
     struct ChildDriver;
     struct ParentDriver;
     impl DriverOps<PlatformBus> for ChildDriver {
@@ -573,7 +566,16 @@ fn remove_cascades_children_first() {
 /// new children, and complete on retry.
 #[def_test(serial)]
 fn parent_teardown_waits_for_probing_child() {
-    static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
+    #[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unregistered_static_spinlock,
+    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+)]
+static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
     struct ChildDriver {
         domain: &'static DeviceDomain,
         parent: u64,
@@ -797,7 +799,16 @@ fn resolve_irq_maps_firmware_routes_through_services() {
     // value — capture the answer through the registry instead: the
     // probe wrote into ITS copy; read it back via with_data is
     // impossible (unit Data). Use a static slot instead.
-    static RESOLVED: SpinNoPreempt<Option<crate::Virq>> = SpinNoPreempt::new(None);
+    #[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unregistered_static_spinlock,
+    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+)]
+static RESOLVED: SpinNoPreempt<Option<crate::Virq>> = SpinNoPreempt::new(None);
     struct SlotDriver;
     impl DriverOps<PlatformBus> for SlotDriver {
         type Data = ();
@@ -848,6 +859,15 @@ fn wake_during_probe_window_does_not_lose_the_device() {
     // The mock services' clk_get invokes this hook on the Deferred
     // path (before returning) — simulating the provider registering
     // mid-check. Arc<dyn Fn> over a global slot: tests are serial.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unregistered_static_spinlock,
+        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+    )]
     static MID_CHECK_HOOK: SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>> =
         SpinNoPreempt::new(None);
 

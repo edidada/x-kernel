@@ -202,8 +202,8 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时 id 仍全�
 2. 锁外：children-first 级联。任一子设备失败即中止——父设备停在 `Removing`、
    `remove_retryable = true`、binding 完整，错误返回给调用者重试。
 3. 重新持锁（只有这个流程会把该 id 从 `Removing` 往前推）：取出 driver/Data，
-   然后锁外跑 teardown：`DriverOps::remove()`（quiesce）→ 观察者
-   `device_removed` → drop `Data`（guards 按字段序释放）。
+   然后锁外跑 teardown：`DriverOps::remove()`（quiesce）→ drop
+   `Data`（类发布在其中撤销，guards 按字段序释放；没有观察者/通知旁路）。
 
 未绑定过的设备（Pending/Deferred/Probing 之外/Unclaimed）走轻路径：从
 pending/deferred 工作表摘掉、直接释放 entry。

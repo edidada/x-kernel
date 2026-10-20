@@ -33,8 +33,8 @@ impl DeviceDomain {
                 entry.lifecycle.state = DeviceState::Unclaimed;
             }
             log::warn!(
-                "driver-core: device {id} gave up waiting on dependency {dep}                  \
-                 (provider never registered)"
+                "driver-core: device {id} gave up waiting on dependency {dep} (provider never \
+                 registered)"
             );
         }
     }
@@ -167,6 +167,15 @@ impl DeviceDomain {
                     continue;
                 }
                 if let Some(entry) = inner.devices.get_mut(&id) {
+                    // Only a parked (Deferred) device may be woken: a device
+                    // flipped to `Removing` by a concurrent remove_device —
+                    // still sitting in the deferred list until its light
+                    // path re-takes the lock — must NOT be resurrected into
+                    // the probe queue (same guard as `finish_probe_phase`).
+                    if entry.lifecycle.state != DeviceState::Deferred {
+                        inner.sched.deferred.push((id, waiting));
+                        continue;
+                    }
                     entry.lifecycle.state = DeviceState::Pending;
                     Self::record_dep_generation(entry, dep, generation);
                 }

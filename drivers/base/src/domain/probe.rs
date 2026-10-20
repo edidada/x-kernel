@@ -39,7 +39,9 @@ impl DeviceDomain {
                     let inner = self.inner.lock();
                     #[expect(
                         clippy::expect_used,
-                        reason = "CG-021: select_batch produced this id under the same lock; a                                   missing entry here is a domain-internal invariant violation,                                   not a driver error"
+                        reason = "CG-021: select_batch produced this id under the same lock; a \
+                                  missing entry here is a domain-internal invariant violation, \
+                                  not a driver error"
                     )]
                     let entry = inner
                         .devices

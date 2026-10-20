@@ -10,10 +10,11 @@
 use super::*;
 
 impl DeviceDomain {
-    /// Tear a device down in the Linux order: `remove()` (quiesce), then the
-    /// remove notifier (class publications withdrawn and their consumers
-    /// detached — while the hardware is still mapped), then drop `Data`
-    /// (IRQ release, transport teardown, MMIO unmap last), then mark removed.
+    /// Tear a device down in the Linux order: `remove()` (quiesce), then
+    /// drop `Data` (class publications withdraw inside it — while the
+    /// hardware is still mapped — followed by IRQ release, transport
+    /// teardown, MMIO unmap last), then mark removed. There is no remove
+    /// notifier in this model.
     ///
     /// A device that never reached `Active` (Pending/Deferred/Probing/
     /// Unclaimed — e.g. hotplug of an unmatched card) takes the light path:
@@ -125,10 +126,10 @@ impl DeviceDomain {
             driver.remove(&desc, id, &core, data.as_mut(), services.as_ref());
         }
 
-        // `device_removed` fires AFTER the final state flip — the name
-        // now means what it says (registry no longer lists the device).
         // The publications are Data-owned: they withdraw inside
-        // `drop(data)` below, sequenced by each Data's field order.
+        // `drop(data)` below, sequenced by each Data's field order — this
+        // model has no remove notifier; the state flip to `Removed`
+        // happens right after the drop.
         drop(data);
         {
             let mut inner = self.inner.lock();
