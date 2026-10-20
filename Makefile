@@ -10,10 +10,23 @@
 #     - TARGET_DIR          Artifact / cargo output directory
 #     - UNITTEST            Build the unittest entry and run it under QEMU (y/n)
 #     - UNITTEST_CRATE      Limit unittest to crate(s), comma-separated
+#     - UNITTEST_BASE       Include committed changes up to HEAD relative to
+#                           this ref in `make unittest-changed`
+#     - UNITTEST_LIST       `make unittest-changed` only prints the crates (y/n)
 #     - DYLINT_DRIVER_PATH  Directory for the Dylint driver cache
+#
+# Automation targets:
+#     make bootcheck        Bounded boot verification: exits when the boot
+#                           completes, fails fast on panics; `make run` stays
+#                           interactive for manual sessions.
+#     make unittest-changed Run only the unit tests of crates touched by local
+#                           changes; full runs are the CI job.
 #
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
+#     - BOOTCHECK_MARKER    boot-check success marker (default: the guest
+#                           interactive shell prompt root@kylin-x:~#)
+#     - BOOTCHECK_TIMEOUT   boot-check backstop seconds (default: 180)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
 #     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration for
 #                           non-VMM kernels (y/n; default: n on macOS, y
@@ -105,6 +118,10 @@ ROOTFS_VARIANT ?= debian-openrc
 
 UNITTEST ?= n
 UNITTEST_CRATE ?=
+UNITTEST_BASE ?=
+UNITTEST_LIST ?= n
+BOOTCHECK_MARKER ?=
+BOOTCHECK_TIMEOUT ?=
 NET ?= y
 BLK ?= y
 VSOCK ?= y
@@ -163,8 +180,8 @@ _HOOKS_BOOTSTRAP := $(shell \
 		fi; \
 	fi)
 
-.PHONY: all build run justrun debug disasm clippy dylint dylint_test doc doc_check_missing
-.PHONY: unittest unittest_no_fail_fast
+.PHONY: all build run bootcheck justrun debug disasm clippy dylint dylint_test doc doc_check_missing
+.PHONY: unittest unittest_no_fail_fast unittest-changed
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
@@ -189,6 +206,19 @@ RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(QEMU_ARG
 run:
 	@echo "Running x-kernel..."
 	@$(XKMAKE) run $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
+
+# Automation-friendly bounded boot: builds, boots under QEMU, and exits as
+# soon as the boot-complete marker appears (panics fail fast; the timeout is
+# only a backstop). `make run` stays fully interactive for manual sessions.
+bootcheck:
+	@echo "Boot-checking x-kernel (auto-exit when boot completes)..."
+	@$(XKMAKE) boot-check \
+		$(XKMAKE_BUILD_ARGS) \
+		$(XKMAKE_RUN_ARGS) \
+		$(if $(strip $(BOOTCHECK_MARKER)),--exit-marker "$(BOOTCHECK_MARKER)") \
+		$(if $(strip $(BOOTCHECK_TIMEOUT)),--timeout "$(BOOTCHECK_TIMEOUT)") \
+		$(XKMAKE_ARGS) \
+		$(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
 
 justrun:
 	@$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
@@ -239,6 +269,13 @@ unittest:
 	@$(MAKE) --no-print-directory run UNITTEST=y
 
 unittest_no_fail_fast: unittest
+
+# Run only the unit tests of the crates touched by local changes. Full
+# unfiltered `make unittest` runs are the CI job's responsibility.
+unittest-changed:
+	@scripts/dev/unittest-changed.sh \
+		$(if $(strip $(UNITTEST_BASE)),--base "$(UNITTEST_BASE)") \
+		$(if $(filter y,$(UNITTEST_LIST)),--list)
 
 defconfig:
 	@test -f .config || { echo "error: copy a platform defconfig to .config first"; exit 1; }

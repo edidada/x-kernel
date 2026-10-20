@@ -109,9 +109,11 @@ Common commands:
 make build
 make clippy
 make run
+make bootcheck
 make UNITTEST=y run
 make unittest
-cargo +nightly-2026-03-08 fmt --all
+make unittest-changed
+make UNITTEST_CRATE=kvfs,kprocess unittest
 ```
 
 Do not use bare `cargo check -p <crate>` as the main validation path.
@@ -119,6 +121,46 @@ The project relies on Kconfig-generated features and `.cargo/.xconfig.toml`,
 so prefer the Makefile/Kconfig flow.
 
 The current checked-in toolchain is described by `rust-toolchain.toml`.
+
+## Local Run And Unit-Test Policy
+
+`make run` stays fully interactive and is intended for manual debugging
+sessions; it never auto-terminates.
+
+AI agents must not wrap `make run` in ad-hoc `timeout` loops to guess whether
+a kernel boots. Use the automation-facing target instead:
+
+```bash
+make bootcheck                          # build + bounded boot, auto-exit
+make bootcheck BOOTCHECK_TIMEOUT=60     # tighten the backstop
+make bootcheck BOOTCHECK_MARKER="..."   # custom boot-complete marker
+```
+
+`make bootcheck` builds the kernel, boots it under QEMU, and exits
+deterministically: when the boot-complete marker appears (default: the guest
+interactive shell prompt `root@kylin-x:~#`, i.e. the console is ready for
+input) it terminates QEMU and exits 0; a kernel panic fails the
+run immediately; `BOOTCHECK_TIMEOUT` (default 180 s) is only a backstop for
+hangs. The full console log is kept in the bundle's `qemu.log` with automatic
+backtrace symbolication.
+
+For unit tests, run only the crates that own the changed code. Prefer the
+automated mapping:
+
+```bash
+make unittest-changed                           # uncommitted changes
+make unittest-changed UNITTEST_BASE=origin/master
+make unittest-changed UNITTEST_LIST=y           # print crates only
+```
+
+or pass the crate filter explicitly with
+`make unittest UNITTEST_CRATE=<crates>`. Never run the full unfiltered
+`make unittest` locally for routine changes; full unit-test runs are the
+Jenkins CI job's responsibility. Changes to crates without kernel unit tests
+are skipped automatically instead of starting a pointless QEMU run.
+
+Formatting still uses the repository-pinned formatter:
+`cargo +nightly-2026-03-08 fmt --all`.
 
 ## Coding Guidelines
 

@@ -38,10 +38,12 @@ make defconfig
 Useful commands and flows already supported by the repository:
 
 ```bash
+make bootcheck                      # bounded boot check (auto-exit on marker)
 make run
 make run QEMU_LOG=y
 make UNITTEST=y run
 make unittest
+make unittest-changed
 make debug
 make disasm
 make justrun QEMU_ARGS="-s -S"
@@ -49,6 +51,11 @@ make justrun QEMU_ARGS="-s -S"
 
 Notes:
 
+- `make bootcheck` is the automation-facing boot verification: it exits when
+  the boot-complete marker appears, fails fast on panics, and keeps the full
+  console log in the bundle's `qemu.log` with automatic symbolication;
+- `make unittest-changed` runs only the unit tests of crates touched by
+  local changes instead of the full suite;
 - `QEMU_LOG=y` writes QEMU-side diagnostics to `qemu.log`;
 - harness logs are described by the `test-harness` skill;
 - `make debug` and `QEMU_ARGS="-s -S"` are for debugger-oriented sessions,

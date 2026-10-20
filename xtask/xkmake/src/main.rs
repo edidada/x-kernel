@@ -94,6 +94,22 @@ fn run() -> Result<()> {
             qemu_result?;
             coverage::generate(&bundle, &args)
         }
+        Command::BootCheck(args) => {
+            let bundle = if args.run.no_build {
+                build::existing_bundle(&args.run.build)?
+            } else {
+                build::build(&args.run.build)?
+            };
+            let result = qemu::boot_check(&bundle, &args);
+            if !args.run.no_symbolize {
+                // Symbolicate any panic backtrace from the QEMU log; failures
+                // degrade to warnings and never mask the boot-check result.
+                if let Err(error) = symbolize::auto(&bundle, &qemu::log_path(&bundle)) {
+                    eprintln!("[xkmake] auto symbolication failed: {error}");
+                }
+            }
+            result
+        }
         Command::Config(args) => context::print_config(&args),
         Command::Symbolize(args) => symbolize::run(&args),
         Command::Hygiene(args) => match args.command {

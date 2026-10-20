@@ -213,6 +213,42 @@ make run QEMU_ARGS='-no-reboot'
 (they are appended after `--`), covering ad-hoc devices or debug flags that
 don't have a dedicated Make variable.
 
+### Bounded boot check (automation)
+
+`make run` stays attached forever by design: the guest init script ends in an
+interactive shell. Automation and AI agents must not wrap it in `timeout` and
+guess. Use the dedicated boot-check target instead:
+
+```bash
+make bootcheck                                  # build + bounded boot
+make bootcheck BLK=n VSOCK=n                    # trim devices for a fast check
+make bootcheck BOOTCHECK_TIMEOUT=60             # tighten the backstop
+make bootcheck BOOTCHECK_MARKER="..."           # custom success marker
+```
+
+It delegates to `xkmake boot-check`, which runs the same QEMU invocation as
+`run` but terminates QEMU deterministically:
+
+- success: the boot-complete marker appears (default `root@kylin-x:~#`, the
+  guest
+  interactive shell prompt — the last output of a completed boot, so
+  reaching it means the console is ready for input);
+- fail fast: a `panicked at` / `Kernel panic` marker ends the run immediately
+  with a non-zero exit code;
+- backstop: `--timeout` (default 180 s) bounds runs whose output never
+  matches (hangs);
+- the full console log is kept at the bundle's `qemu.log`, and panic
+  backtraces are symbolicated automatically.
+
+Markers are matched against the raw console bytes, so pick a kernel line
+early in the boot for rootfs-free checks. The default marker assumes the
+standard Kylin development image (interactive shell on the console); rootfs
+variants without a console shell — for example openrc-based images handing
+off to getty — must set `BOOTCHECK_MARKER` explicitly.
+
+Interactive `make run` and `make debug` are untouched by this flow and remain
+the tools for manual sessions.
+
 ## Symbolize
 
 Raw backtrace addresses in a panic/exception log are resolved against the
@@ -336,6 +372,26 @@ make unittest
 make unittest UNITTEST_CRATE=kvfs,kprocess
 ```
 
+### Change-scoped unit tests
+
+Local iteration must run only the unit tests that own the changed code; the
+full unfiltered run is the Jenkins CI job. The automated mapping from local
+changes to affected crates lives in `make unittest-changed`:
+
+```bash
+make unittest-changed                           # uncommitted changes
+make unittest-changed UNITTEST_BASE=origin/master
+make unittest-changed UNITTEST_LIST=y           # print crates only
+```
+
+The helper maps each changed file to its owning crate (walking up to the
+nearest `[package]` manifest), keeps only crates that actually register
+kernel unit tests (`ut-tests/` or unittest macros), and runs
+`make unittest UNITTEST_CRATE=<crates>` for them. Changes to crates without
+kernel unit tests — or to host tool workspaces such as `xtask/` — are
+skipped without starting QEMU. When the mapping is not what you want, pass
+`UNITTEST_CRATE` explicitly instead of falling back to the full run.
+
 After a successful unit-test QEMU run, XKMake extracts
 `/.llvm-cov/default.profraw` from the configured disk image and writes these
 artifacts under `target/<rust-target>/<profile>/`:
@@ -374,11 +430,12 @@ For build-system changes, run:
 cargo test --manifest-path xtask/Cargo.toml -p xconfig -p xkmake
 cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps -- -D warnings
 make build
-make run
+make bootcheck
 ```
 
-Use a bounded QEMU run in automation and verify kernel boot output before
-terminating it.
+Use `make bootcheck` (not a raw `timeout make run`) for bounded QEMU runs in
+automation; it exits on observable boot output instead of a guessed deadline
+and verifies kernel boot output before terminating it.
 
 ## Formatting
 

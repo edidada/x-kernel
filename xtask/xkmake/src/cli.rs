@@ -26,6 +26,9 @@ pub(crate) enum Command {
     Doc(DocArgs),
     /// Build the configured kernel and run its bundle with QEMU.
     Run(RunArgs),
+    /// Build the configured kernel and run it until boot completes,
+    /// then exit QEMU automatically (automation-friendly bounded run).
+    BootCheck(BootCheckArgs),
     /// Print one resolved configuration or artifact value.
     Config(ConfigArgs),
     /// Symbolicate raw backtrace addresses in a log against the debug ELF.
@@ -142,6 +145,23 @@ pub(crate) struct BuildArgs {
     /// Restrict kernel unit tests to a crate or comma-separated crate list.
     #[arg(long, requires = "unittest")]
     pub(crate) unittest_crate: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BootCheckArgs {
+    #[command(flatten)]
+    pub(crate) run: RunArgs,
+
+    /// Output marker that marks the boot as complete. Defaults to the
+    /// interactive shell prompt of the standard Kylin development image;
+    /// override it for rootfs variants that never show a console shell
+    /// (for example openrc handing off to getty).
+    #[arg(long)]
+    pub(crate) exit_marker: Option<String>,
+
+    /// Backstop timeout in seconds when the marker never appears.
+    #[arg(long, default_value_t = 180)]
+    pub(crate) timeout: u64,
 }
 
 #[derive(Debug, Args)]

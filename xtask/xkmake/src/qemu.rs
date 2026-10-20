@@ -8,18 +8,22 @@ use std::{
     os::{fd::AsRawFd, unix::fs::FileTypeExt},
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 use xconfig::build_config::{KernelArch, VirtioBus};
 
 use crate::{
     build::{BootArtifacts, Bundle},
-    cli::{RunArgs, X86BootMode},
+    cli::{BootCheckArgs, RunArgs, X86BootMode},
     error::{Error, IoResultExt, Result},
-    process::Process,
+    process::{ExitWatch, Process, TeeOutcome},
 };
 
-pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
+/// Assembles the QEMU command shared by the interactive [`run`] and the
+/// automation-facing [`boot_check`], so both always launch the same guest
+/// configuration and cannot drift apart.
+fn build_qemu_command(bundle: &Bundle, args: &RunArgs) -> Result<Process> {
     let context = &bundle.context;
     if context.config.arch() != KernelArch::X86_64
         && (args.boot.is_some() || args.ovmf_code.is_some() || args.ovmf_vars_template.is_some())
@@ -52,6 +56,12 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
         command.arg("-nographic");
     }
     command.args(args.qemu_args.iter());
+    Ok(command)
+}
+
+pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
+    let context = &bundle.context;
+    let mut command = build_qemu_command(bundle, args)?;
 
     println!(
         "Running {} ({})",
@@ -70,12 +80,106 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
     }
     // Mirror QEMU output to the terminal and keep a copy so a panic
     // backtrace can be symbolicated after the run (`symbolize::auto`).
-    command.run_tee(log_path(bundle))
+    let TeeOutcome::Exit(status) = command.run_tee(log_path(bundle), None)? else {
+        unreachable!("a run without a watch is only ever ended by the child itself");
+    };
+    if !status.success() {
+        return Err(Error::CommandFailed {
+            program: qemu_program(context.config.arch()).to_string(),
+            status,
+        });
+    }
+    Ok(())
 }
 
 /// Where the QEMU output log is mirrored for post-run symbolication.
 pub(crate) fn log_path(bundle: &Bundle) -> PathBuf {
     bundle.directory.join("qemu.log")
+}
+
+/// Marker that the guest interactive shell prints once userspace is fully
+/// up; the default success checkpoint for boot-check runs. It is the last
+/// output of a completed boot, so reaching it means the console is ready for
+/// input. Rootfs variants without a console shell (for example openrc-based
+/// images handing off to getty) should override the marker.
+const DEFAULT_BOOT_MARKER: &str = "root@kylin-x:~#";
+
+/// Output markers that end a boot-check run immediately as a failure.
+const BOOT_FAILURE_MARKERS: [&str; 2] = ["panicked at", "Kernel panic"];
+
+/// Runs the same QEMU invocation as [`run`], but terminates QEMU as soon as
+/// the boot-success marker appears (failure markers end the run early; the
+/// timeout is only a backstop). This is the automation-facing counterpart of
+/// the interactive [`run`], which is left untouched.
+pub(crate) fn boot_check(bundle: &Bundle, args: &BootCheckArgs) -> Result<()> {
+    let run_args = &args.run;
+    let context = &bundle.context;
+    let mut command = build_qemu_command(bundle, run_args)?;
+
+    println!(
+        "Boot check {} ({}): exit on {:?}, backstop {}s",
+        context.config.platform(),
+        context.config.target(),
+        args.exit_marker.as_deref().unwrap_or(DEFAULT_BOOT_MARKER),
+        args.timeout,
+    );
+    // In verbose/dry-run mode the runner prints the command itself, so
+    // suppress it here to avoid a duplicate.
+    if context.verbosity == 0 && !context.dry_run {
+        println!("{}", command.command_lines());
+    }
+    if context.dry_run {
+        return command.run();
+    }
+
+    let watch = ExitWatch::new(
+        args.exit_marker.as_deref().unwrap_or(DEFAULT_BOOT_MARKER),
+        BOOT_FAILURE_MARKERS
+            .iter()
+            .map(|marker| (*marker).to_string())
+            .collect(),
+        Duration::from_secs(args.timeout),
+    );
+    let started = Instant::now();
+    match command.run_tee(log_path(bundle), Some(&watch))? {
+        TeeOutcome::MarkerReached => {
+            println!(
+                "Boot check PASSED: {:?} after {:.1}s; log at {}",
+                watch.success_marker(),
+                started.elapsed().as_secs_f32(),
+                log_path(bundle).display()
+            );
+            Ok(())
+        }
+        TeeOutcome::MarkerFailed(marker) => Err(Error::Message(format!(
+            "boot check FAILED: failure marker {:?} in output; log at {}",
+            marker,
+            log_path(bundle).display()
+        ))),
+        TeeOutcome::TimedOut => Err(Error::Message(format!(
+            "boot check FAILED: no {:?} within {}s; log at {}",
+            watch.success_marker(),
+            args.timeout,
+            log_path(bundle).display()
+        ))),
+        TeeOutcome::Exit(status) => {
+            if !status.success() {
+                return Err(Error::CommandFailed {
+                    program: qemu_program(context.config.arch()).to_string(),
+                    status,
+                });
+            }
+            // A zero exit without the success marker is inconclusive, not a
+            // pass: a unittest image powers off cleanly even when tests fail
+            // and never prints a shell prompt. Same stance as the coverage
+            // flow: QEMU can exit successfully after a guest error.
+            Err(Error::Message(format!(
+                "boot check FAILED: guest exited without the boot-complete marker {:?}; log at {}",
+                watch.success_marker(),
+                log_path(bundle).display()
+            )))
+        }
+    }
 }
 
 fn qemu_program(arch: KernelArch) -> &'static str {
