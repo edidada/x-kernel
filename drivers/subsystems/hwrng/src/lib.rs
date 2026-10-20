@@ -52,5 +52,4 @@ pub trait HwrngDevice: Send + Sync {
     fn is_failed(&self) -> bool;
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

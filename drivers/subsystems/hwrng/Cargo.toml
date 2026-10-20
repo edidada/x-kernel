@@ -21,5 +21,7 @@ unittest.workspace = true
 workspace = true
 
 [package.metadata.cargo-shear]
-# log is used through the class_api! macro expansion (invisible to shear).
-ignored = ["log"]
+# log is used through the class_api! macro expansion (invisible to shear);
+# kspin is used by the ut-tests fixture (ut-tests/lib.rs) only — workspace
+# cargo-shear excludes ut-tests from its scan.
+ignored = ["log", "kspin"]

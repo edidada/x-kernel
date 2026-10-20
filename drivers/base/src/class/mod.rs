@@ -402,6 +402,4 @@ impl<T> ClassRegistry<T> {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/class.rs");
