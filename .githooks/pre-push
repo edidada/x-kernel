@@ -82,23 +82,19 @@ if [ "$BEHIND" -eq 0 ]; then
 	exit 0
 fi
 
-# The re-push below rewrites the remote branch. That is only safe when the
-# remote tip is an ancestor of HEAD, or provably an older tip of THIS branch
-# (present in the branch reflog -- a rewrite the local side made itself).
-# A fetched foreign commit is reachable in the object store too but never
-# in the reflog: refusing it keeps the non-fast-forward protection a plain
-# push would have applied.
+# The re-push below rewrites the remote branch. A plain push guards a
+# remote tip that local history does not contain with its own non-
+# fast-forward check; with --force this hook is the last guard, so any
+# remote tip that is not an ancestor of HEAD is refused: those commits
+# would silently disappear from the branch. Rewriting one's own branch
+# stays possible via the explicit bypass below.
 if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" HEAD 2>/dev/null; then
-	if git reflog show "refs/heads/$BRANCH" --format='%H' 2>/dev/null | grep -qx "$REMOTE_SHA"; then
-		echo "ℹ️  pre-push: remote tip is an older version of this rewritten branch; the re-push will overwrite it." >&2
-	else
-		echo "❌ pre-push: remote $REMOTE/$BRANCH has commits this branch would drop; not rebasing." >&2
-		git rev-list --oneline "HEAD..$REMOTE_SHA" 2>/dev/null | sed 's/^/     /' >&2
-		echo "   inspect them first:" >&2
-		echo "     git fetch $REMOTE $BRANCH && git log --oneline HEAD..$REMOTE/$BRANCH" >&2
-		echo "   bypass with: SKIP_REBASE=1 git push --force ..." >&2
-		exit 1
-	fi
+	echo "❌ pre-push: remote $REMOTE/$BRANCH has commits this branch would drop; not rebasing." >&2
+	git rev-list --oneline "HEAD..$REMOTE_SHA" 2>/dev/null | head -8 | sed '/^$/d;s/^/     /' >&2
+	echo "   inspect them first:" >&2
+	echo "     git fetch $REMOTE $BRANCH && git log --oneline HEAD..$REMOTE/$BRANCH" >&2
+	echo "   bypass with: SKIP_REBASE=1 git push --force-with-lease ..." >&2
+	exit 1
 fi
 
 cd "$REPO_ROOT" || exit 0
@@ -127,7 +123,7 @@ REBASE_LOG="$(git rebase "$BASE" 2>&1)" || {
 		echo "   conflicted files: $CONFLICTS" >&2
 		echo "   resolve them manually, then push again:" >&2
 		echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
-		echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
+		echo "   bypass with: SKIP_REBASE=1 git push --force-with-lease ..." >&2
 	else
 		# Defensive teardown: should a failed rebase leave a state directory
 		# behind with no unmerged paths, drop it so later pushes are not
