@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# x-kernel shared pre-push hook: automatic rebase onto the base branch.
+# x-kernel shared pre-push hook: guard pushes against a stale base branch.
 #
-# Gerrit-style "rebase if necessary": before a branch push, fetch the base
-# branch and rebase the local branch onto it when it drifted behind. A clean
-# rebase is pushed again transparently (--force-with-lease); a conflicting
-# rebase is aborted and the push is stopped with manual instructions.
+# Pushing a branch that lags behind main makes the openKylin CI reject it
+# as DIVERGED before a single test runs. This hook catches that locally:
+# when the pushed branch is behind origin/main, the push is stopped with
+# the exact commands to catch up first. The hook is strictly read-only --
+# it never rewrites history and never performs a second network write.
 #
 # Escape hatches (set for a single push):
-#   SKIP_REBASE=1  git push ...   # skip the automatic rebase entirely
+#   SKIP_REBASE=1  git push ...   # push as-is even when behind
 #   SKIP_ALL=1     git push ...   # same, kept in sync with pre-commit
 #
 # Notes:
-#   * Only plain single-branch pushes are intercepted: tags, branch
-#     deletions, multi-refspec and detached-HEAD pushes pass untouched.
-#   * Pushing the base branch itself (e.g. main) is never rewritten, and a
-#     re-push is refused when the remote branch tip carries commits the
-#     local side has never seen (a blind --force-with-lease would drop them).
+#   * Only plain single-branch pushes are checked: tags, branch deletions,
+#     multi-refspec and detached-HEAD pushes pass untouched.
+#   * Pushing the base branch itself (e.g. main) is never interfered with.
 #   * Network failures degrade to a warning and never block the push.
-#   * `git push --dry-run` may still perform the rebase and the re-push.
-#   * All hook output goes to stderr, matching .githooks/pre-commit.
+#   * All output goes to stderr, matching .githooks/pre-commit.
 
 # Never let a misconfigured environment block a push.
 if [ "${SKIP_ALL:-0}" = "1" ] || [ "${SKIP_REBASE:-0}" = "1" ]; then
@@ -27,8 +25,7 @@ if [ "${SKIP_ALL:-0}" = "1" ] || [ "${SKIP_REBASE:-0}" = "1" ]; then
 fi
 
 REMOTE="${1:-}"
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-GIT_DIR="$(git rev-parse --git-dir)" || exit 0
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
 
 # Only plain single-branch pushes are eligible.
 mapfile -t LINES
@@ -65,15 +62,14 @@ fi
 BASE_REMOTE="${BASE%%/*}"
 BASE_BRANCH="${BASE#*/}"
 
-# Never rewrite a push whose target branch carries the base branch's name
-# (main itself, or a mirror of it on another remote under XK_REBASE_BASE).
+# Never interfere with a push of the base branch itself.
 if [ "refs/heads/$BASE_BRANCH" = "$REMOTE_REF" ]; then
 	exit 0
 fi
 
 # Refresh the base ref; being offline must not block the push.
 if ! git fetch --quiet --no-tags "$BASE_REMOTE" "$BASE_BRANCH" 2>/dev/null; then
-	echo "⚠️  pre-push: cannot fetch $BASE, skipping the rebase check." >&2
+	echo "⚠️  pre-push: cannot fetch $BASE, skipping the staleness check." >&2
 	exit 0
 fi
 
@@ -82,83 +78,19 @@ if [ "$BEHIND" -eq 0 ]; then
 	exit 0
 fi
 
-# The re-push below rewrites the remote branch. A plain push guards a
-# remote tip that local history does not contain with its own non-
-# fast-forward check; with --force this hook is the last guard, so any
-# remote tip that is not an ancestor of HEAD is refused: those commits
-# would silently disappear from the branch. Rewriting one's own branch
-# stays possible via the explicit bypass below.
-if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" HEAD 2>/dev/null; then
-	echo "❌ pre-push: remote $REMOTE/$BRANCH has commits this branch would drop; not rebasing." >&2
-	git rev-list --oneline "HEAD..$REMOTE_SHA" 2>/dev/null | head -8 | sed '/^$/d;s/^/     /' >&2
-	echo "   inspect them first:" >&2
-	echo "     git fetch $REMOTE $BRANCH && git log --oneline HEAD..$REMOTE/$BRANCH" >&2
-	echo "   bypass with: SKIP_REBASE=1 git push --force-with-lease ..." >&2
-	exit 1
-fi
-
-cd "$REPO_ROOT" || exit 0
-
-# A dirty worktree cannot be rebased; warn and let the push through.
-# Untracked files are excluded on purpose: they almost never block a rebase,
-# and when one does, the rebase below fails before it starts and the push
-# still goes through untouched with the real error shown.
+HINT="make rebase"
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-	echo "⚠️  pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, but the worktree is dirty." >&2
-	echo "    commit or stash first, then push again to rebase automatically." >&2
-	exit 0
+	HINT="make rebase   # autostash stashes and restores the dirty worktree"
 fi
-
-# ---- rebase: conflicts roll back and instruct, other failures surface ----
-AHEAD="$(git rev-list --count "$BASE..HEAD")"
-echo "🔄 pre-push: $BRANCH is $BEHIND commit(s) behind $BASE, rebasing $AHEAD commit(s)..." >&2
-REBASE_LOG="$(git rebase "$BASE" 2>&1)" || {
-	# Unmerged paths can only exist while a rebase is actually mid-flight, so
-	# they are the definitive conflict signal; anything else means the rebase
-	# never got going (e.g. an untracked file blocking the checkout).
-	CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
-	if [ -n "$CONFLICTS" ]; then
-		git rebase --abort
-		echo "❌ pre-push: automatic rebase hit conflicts and was rolled back." >&2
-		echo "   conflicted files: $CONFLICTS" >&2
-		echo "   resolve them manually, then push again:" >&2
-		echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
-		echo "   bypass with: SKIP_REBASE=1 git push --force-with-lease ..." >&2
-	else
-		# Defensive teardown: should a failed rebase leave a state directory
-		# behind with no unmerged paths, drop it so later pushes are not
-		# silently skipped by the in-progress guard above. No-op otherwise.
-		git rebase --abort 2>/dev/null || true
-		echo "⚠️  pre-push: automatic rebase did not start; pushing as-is:" >&2
-		echo "$REBASE_LOG" >&2
-		exit 0
-	fi
-	exit 1
-}
-
-echo "✅ pre-push: rebased $BRANCH onto $BASE ($AHEAD commit(s) carried)." >&2
-echo "   re-pushing with --force-with-lease; the original push is aborted either way." >&2
-
-LEASE_ARGS=()
-if [ "$REMOTE_SHA" != "$ZERO_SHA" ]; then
-	LEASE_ARGS=(--force-with-lease="$REMOTE_REF:$REMOTE_SHA")
-fi
-# The re-push is a fresh git invocation: outer flags like --dry-run or
-# --atomic do not carry over. Push options do reach this hook as
-# GIT_PUSH_OPTION_*, so forward them explicitly.
-PUSH_OPTS=()
-i=0
-while [ "$i" -lt "${GIT_PUSH_OPTION_COUNT:-0}" ]; do
-	opt_var="GIT_PUSH_OPTION_$i"
-	PUSH_OPTS+=(--push-option="${!opt_var}")
-	i=$((i + 1))
-done
-echo "   (the re-push is a plain real push; outer flags like --dry-run do not carry over)" >&2
-if git push --no-verify "${PUSH_OPTS[@]}" "${LEASE_ARGS[@]}" "$REMOTE" "$LOCAL_REF:$REMOTE_REF"; then
-	echo "✅ pre-push: rebased branch pushed to $REMOTE/$BRANCH." >&2
+echo "❌ pre-push: $BRANCH is $BEHIND commit(s) behind $BASE; the CI would reject it as DIVERGED." >&2
+echo "   catch up first, then push again:  $HINT" >&2
+# A branch that was already pushed diverges from its remote counterpart
+# once rebased, unless its pushed tip is already contained in the base's
+# history; in that case the follow-up push needs a lease, not plain push.
+if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" "$BASE" 2>/dev/null; then
+	echo "   (already pushed before: the re-push needs --force-with-lease)" >&2
+	echo "   push anyway now: SKIP_REBASE=1 git push --force-with-lease ..." >&2
 else
-	echo "❌ pre-push: the re-push failed; remote $REMOTE_REF was NOT updated." >&2
-	echo "   the local branch stays rebased -- check the git error above," >&2
-	echo "   then fetch and push again." >&2
+	echo "   push anyway now: SKIP_REBASE=1 git push ..." >&2
 fi
-exit 1 # the original push must not proceed with the pre-rebase commit
+exit 1
