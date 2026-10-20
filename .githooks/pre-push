@@ -48,7 +48,8 @@ if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -e "$GI
 	exit 0
 fi
 
-# The base branch: XK_REBASE_BASE (remote/branch) > origin/main > $REMOTE/main.
+# The base branch: XK_REBASE_BASE (remote/branch, same variable and format
+# as `make rebase`) > origin/main > $REMOTE/main.
 BASE="${XK_REBASE_BASE:-}"
 if [ -z "$BASE" ]; then
 	if git show-ref --verify --quiet refs/remotes/origin/main; then
@@ -73,7 +74,10 @@ if ! git fetch --quiet --no-tags "$BASE_REMOTE" "$BASE_BRANCH" 2>/dev/null; then
 	exit 0
 fi
 
-BEHIND="$(git rev-list --count "HEAD..$BASE")"
+BEHIND="$(git rev-list --count "HEAD..$BASE" 2>/dev/null)" || {
+	echo "⚠️  pre-push: cannot compare against $BASE, skipping the staleness check." >&2
+	exit 0
+}
 if [ "$BEHIND" -eq 0 ]; then
 	exit 0
 fi

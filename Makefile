@@ -386,10 +386,12 @@ hooks:
 	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
 	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
 
-# Catch the current branch up to the base branch (default origin/main).
+# Catch the current branch up to the base branch. The base is remote/branch
+# (default origin/main, same variable and format as .githooks/pre-push);
 # --autostash lets a dirty worktree survive the rebase untouched.
+XK_REBASE_BASE ?= origin/main
 rebase:
-	@git pull --rebase --autostash $(if $(XK_REBASE_BASE),$(XK_REBASE_BASE),origin main)
+	@git pull --rebase --autostash $(subst /, ,$(XK_REBASE_BASE))
 
 ci-test: build
 	@set -eu; \
