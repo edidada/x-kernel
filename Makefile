@@ -392,7 +392,7 @@ hooks:
 # release/2606 work. --autostash lets a dirty worktree survive the rebase.
 XK_REBASE_BASE ?= origin/main
 rebase:
-	@git pull --rebase --autostash "$${XK_REBASE_BASE%%/*}" "$${XK_REBASE_BASE#*/}"
+	@b="$(XK_REBASE_BASE)"; git pull --rebase --autostash "$${b%%/*}" "$${b#*/}"
 
 ci-test: build
 	@set -eu; \
