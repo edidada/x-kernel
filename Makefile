@@ -388,10 +388,11 @@ hooks:
 
 # Catch the current branch up to the base branch. The base is remote/branch
 # (default origin/main, same variable and format as .githooks/pre-push);
-# --autostash lets a dirty worktree survive the rebase untouched.
+# the split keeps everything after the first slash so branch names like
+# release/2606 work. --autostash lets a dirty worktree survive the rebase.
 XK_REBASE_BASE ?= origin/main
 rebase:
-	@git pull --rebase --autostash $(subst /, ,$(XK_REBASE_BASE))
+	@git pull --rebase --autostash "$${XK_REBASE_BASE%%/*}" "$${XK_REBASE_BASE#*/}"
 
 ci-test: build
 	@set -eu; \

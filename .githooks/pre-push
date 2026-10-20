@@ -34,11 +34,13 @@ if [ -z "$REMOTE" ] || [ "${#LINES[@]}" -ne 1 ]; then
 fi
 read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA <<<"${LINES[0]}"
 ZERO_SHA="0000000000000000000000000000000000000000"
-case "$LOCAL_REF:$REMOTE_REF:$LOCAL_SHA" in
-refs/heads/*:refs/heads/*:0000*) exit 0 ;; # branch deletion
-refs/heads/*:refs/heads/*:*) ;;
+case "$LOCAL_REF:$REMOTE_REF" in
+refs/heads/*:refs/heads/*) ;;
 *) exit 0 ;;
 esac
+if [ "$LOCAL_SHA" = "$ZERO_SHA" ]; then
+	exit 0 # branch deletion
+fi
 
 # Only the currently checked-out branch, never a detached HEAD or a rebase
 # that is already in progress.
@@ -88,6 +90,7 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 echo "❌ pre-push: $BRANCH is $BEHIND commit(s) behind $BASE; the CI would reject it as DIVERGED." >&2
 echo "   catch up first, then push again:  $HINT" >&2
+echo "   (the check assumes the PR targets main; for another base push with XK_REBASE_BASE=<remote>/<branch> ...)" >&2
 # A branch that was already pushed diverges from its remote counterpart
 # once rebased, unless its pushed tip is already contained in the base's
 # history; in that case the follow-up push needs a lease, not plain push.
