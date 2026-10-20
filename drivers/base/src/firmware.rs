@@ -29,9 +29,9 @@ pub enum FirmwareProp {
     StrList(Vec<&'static str>),
     /// One big-endian u32 cell.
     U32(u32),
-    /// One big-endian u64 value.
-    U64(u64),
-    /// Everything else (raw cells, mixed payloads).
+    /// Everything else (raw cells, mixed payloads; 4-byte payloads decode
+    /// as `U32`, everything cell-shaped reads back through
+    /// [`Self::u32_list`]).
     Bytes(&'static [u8]),
 }
 

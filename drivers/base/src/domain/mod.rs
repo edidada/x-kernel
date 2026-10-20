@@ -503,6 +503,12 @@ pub struct DeviceDomain {
     /// assumed. A second probe_pending while one runs returns immediately:
     /// the running pump owns the pending queue's progress.
     probing: SpinNoPreempt<bool>,
+    /// Set by a caller that found the pump already running: its device is
+    /// enqueued but the running pump may have already selected an empty
+    /// batch and be about to release the flag. Before exiting, the pump
+    /// drains this request and runs one more pass, so no enqueued device
+    /// is ever left Pending until an unrelated trigger.
+    pump_requested: SpinNoPreempt<bool>,
 }
 
 /// Build a consistent snapshot: one filling for `snapshot()` and

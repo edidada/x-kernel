@@ -213,6 +213,9 @@ impl DeviceDomain {
             let already_probing = {
                 let mut probing = self.probing.lock();
                 if *probing {
+                    // The running pump may already hold an empty final
+                    // batch; ask for one more pass over `sched.pending`.
+                    *self.pump_requested.lock() = true;
                     true
                 } else {
                     *probing = true;

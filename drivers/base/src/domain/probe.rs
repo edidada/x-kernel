@@ -14,10 +14,14 @@ impl DeviceDomain {
         {
             let mut probing = self.probing.lock();
             if *probing {
-                // Another pump owns the queue; its pass covers devices
-                // added before its current batch selection. Returning here
-                // also guards the single-slot host resources (the MMIO
-                // probe collector asserts serialization).
+                // Another pump owns the queue; our device is already in
+                // `sched.pending`, but the running pump may have selected
+                // its final (empty) batch — ask it for one more pass
+                // before it releases the flag, or this device would sit
+                // Pending with no trigger left. Returning here also guards
+                // the single-slot host resources (the MMIO probe collector
+                // asserts serialization).
+                *self.pump_requested.lock() = true;
                 return ProbeStats::default();
             }
             *probing = true;
@@ -31,7 +35,14 @@ impl DeviceDomain {
         loop {
             let batch = self.select_batch();
             if batch.is_empty() {
-                break stats;
+                // Drain late-arrival requests: a producer that hit the
+                // `probing` flag after our last non-empty selection left a
+                // marker behind. Re-run one pass; the take keeps this
+                // bounded even if more producers race in.
+                let requested = core::mem::take(&mut *self.pump_requested.lock());
+                if !requested {
+                    break stats;
+                }
             }
             for (id, desc, driver) in batch {
                 let services = self.inner.lock().services.clone();
