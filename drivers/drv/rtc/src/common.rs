@@ -23,6 +23,9 @@ pub(crate) fn system_time_from_unsigned_seconds(seconds: u64) -> KResult<SystemT
         .map_err(|_| KError::InvalidInput)
 }
 
+#[cfg(any(feature = "pl031", feature = "goldfish", feature = "cmos"))]
+unittest::path_mod_test!(tests, "../ut-tests/common.rs");
+
 /// Map a class-publication error into a probe result. The class layer's
 /// vocabulary is the former `DriverError` set; any other kerrno code is
 /// foreign here and treated as an I/O failure.

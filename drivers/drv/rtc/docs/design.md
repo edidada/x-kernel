@@ -49,6 +49,12 @@ the driver is selected *or* the unittest cfg is active, so the tearing
 regression tests run on every architecture, not only on LoongArch. `ls7a.rs`
 owns the MMIO accessor, discovery and publication.
 
+`ut-tests/common.rs` checks timestamp range validation;
+`ut-tests/ls7a_toy.rs` checks scripted LS7A samples. Each is mounted as
+`tests` from its source module with `unittest::path_mod_test!` under
+`cfg(unittest)`. The LS7A cases also require the existing `ls7a` feature.
+These are guest tests run through the configured kernel unittest runner.
+
 ## Failures
 
 Probe failures (`missing resource`, `iomap error`, `class publish error`) are

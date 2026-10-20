@@ -7,7 +7,10 @@ clock is, not to provide a valid time: every register value is treated as
 untrusted hardware input. The drivers validate samples before publishing
 them, and the class service only consumes `Ok` values. The board-static
 descriptors (`rtc-cmos`, `rtc-ls7a`) come from the composition root, not
-from firmware.
+from firmware. The guest fixtures in `ut-tests/common.rs` and
+`ut-tests/ls7a_toy.rs` check timestamp bounds and scripted LS7A samples
+without accessing real MMIO; the LS7A cases retain the backend's `ls7a`
+feature gate.
 
 ## Unsafe inventory and memory safety
 
