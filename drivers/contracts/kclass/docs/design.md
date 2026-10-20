@@ -5,7 +5,7 @@
 `kclass` is x-kernel's typed runtime device class layer. Built on top of
 the `kdevice` device core, it provides type-safe publication, enumeration,
 lookup, and availability-subscription interfaces for each device category
-(net / block / char / hwrng / display / input / vsock / 9p).
+(net / block / char / display / input / vsock / 9p).
 
 After a successful probe, a driver publishes its runtime capability into
 the matching class registry through `publish_<class>()`; subsystems (such
@@ -41,7 +41,7 @@ devices organized by functional category, orthogonal to bus topology
 
 - **kdevice** owns bus attachment, lifecycle state, and driver binding;
 - **kclass** adds the typed per-category view
-  (net/block/char/hwrng/display/input/vsock/9p) on top;
+  (net/block/char/display/input/vsock/9p) on top;
 - **kdriver** calls `publish_*()` after a successful probe to inject the
   runtime capability into the kclass registries.
 
@@ -278,14 +278,6 @@ physical scanout and cause flicker, so only `/dev/fb0` writes and the
 scanout" model applies uniformly to any `DisplayDevice`, so drivers never
 need to expose a directly-mapped framebuffer, and kclass needs no
 framebuffer special-casing or unsafe boundary.
-
-## Hardware entropy class
-
-The `hwrng` feature adds `HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>`
-and the standard class publication and discovery APIs.
-`ClassDevice<HwrngDeviceImpl>` forwards `read` and the terminal `is_failed`
-query without holding the registry lock. Only the read operation may sleep. The host must prepare completion delivery
-before publication; kclass does not implement waiting or entropy trust policy.
 
 ## Concurrency Model
 

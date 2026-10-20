@@ -90,7 +90,7 @@ cfg_if! {
             pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
                 irq: Option<usize>,
-            ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
+            ) -> DriverResult<subsys_hwrng::HwrngDeviceImpl> {
                 let irq = irq.ok_or(driver_base::DriverError::InvalidInput)?;
                 let device = virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new_irq(
                     transport,

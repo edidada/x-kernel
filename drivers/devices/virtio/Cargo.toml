@@ -17,7 +17,7 @@ block = ["dep:block", "alloc", "dep:linked_list_r4l"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
-rng = ["alloc", "dep:hwrng"]
+rng = ["alloc", "dep:subsys_hwrng"]
 socket = ["alloc", "dep:vsock"]
 virtio-9p = ["alloc"]
 
@@ -26,7 +26,8 @@ bitflags = { workspace = true }
 driver_base = { workspace = true }
 device_res = { workspace = true }
 block = { workspace = true, optional = true }
-hwrng = { workspace = true, optional = true }
+kerrno = { workspace = true }
+subsys_hwrng = { workspace = true, optional = true }
 display = { workspace = true, optional = true }
 input = { workspace = true, optional = true }
 net = { workspace = true, optional = true }

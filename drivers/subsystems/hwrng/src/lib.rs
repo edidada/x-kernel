@@ -15,7 +15,10 @@ extern crate alloc;
 
 pub mod completion;
 
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use kerrno::{KError, KResult};
+
+pub mod class;
+pub use class::*;
 
 /// A raw entropy source, implemented by a concrete device driver.
 ///
@@ -24,19 +27,19 @@ pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 /// is in `1..=buf.len()` and may be short. Errors
 /// deliver no bytes. Returning from a read must not leave the caller's buffer
 /// accessible to DMA. Keep in-flight storage driver-owned.
-pub trait HwrngDevice: Device {
+pub trait HwrngDevice: Send + Sync {
     /// Read in sleepable task context, sleeping until the device reports completion.
     ///
     /// No fixed completion timeout. No device, IRQ or preemption-disabling
     /// lock may be held across the wait. A short success need not fill `buf`.
     ///
     /// # Errors
-    /// Returns [`DriverError::InvalidInput`] if sleeping is forbidden.
+    /// Returns [`KError::InvalidInput`] if sleeping is forbidden.
     /// Other errors may come from wait preparation or the device.
     /// A read error alone does not establish device failure; consult [`Self::is_failed`].
     /// An error does not cancel a request submitted by an earlier readiness
     /// check. Task interruption does not end the read.
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize>;
+    fn read(&self, buf: &mut [u8]) -> KResult<usize>;
 
     /// Whether this instance has entered a terminal device failure state.
     ///
@@ -50,5 +53,4 @@ pub trait HwrngDevice: Device {
 }
 
 #[cfg(unittest)]
-#[path = "../ut-tests/hwrng_unittest.rs"]
-mod hwrng_unittest_tests;
+mod tests;

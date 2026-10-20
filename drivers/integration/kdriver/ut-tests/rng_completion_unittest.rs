@@ -172,7 +172,7 @@ fn atomic_context_is_rejected_before_the_driver_predicate() {
             true
         })
     };
-    assert_eq!(result, Err(DriverError::InvalidInput));
+    assert_eq!(result, Err(KError::InvalidInput));
     assert_eq!(checks, 0);
     assert_eq!(provider.waiters.notify_all(), 0);
 }

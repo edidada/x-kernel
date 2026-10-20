@@ -9,8 +9,9 @@ use core::{mem::ManuallyDrop, ops::Range};
 
 use device_res::{Irq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use hwrng::{HwrngDevice, completion::RngCompletion};
+use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
+use subsys_hwrng::{HwrngDevice, completion::RngCompletion};
 use virtio_drivers::{
     Hal,
     device::rng::VirtIORng,
@@ -20,6 +21,21 @@ use virtio_drivers::{
 use crate::as_driver_error;
 
 const MAX_REQUEST_BYTES: usize = 256;
+
+/// Map the driver-internal error vocabulary onto the kernel error set the
+/// hwrng class consumes (`subsys-hwrng` speaks `KError`; the device keeps its
+/// `DriverError` fault state for `is_failed`).
+fn map_driver_error(error: DriverError) -> KError {
+    match error {
+        DriverError::InvalidInput => KError::InvalidInput,
+        DriverError::NoMemory => KError::NoMemory,
+        DriverError::Io => KError::Io,
+        DriverError::ResourceBusy => KError::ResourceBusy,
+        DriverError::BadState => KError::BadState,
+        DriverError::Unsupported => KError::Unsupported,
+        _ => KError::Io,
+    }
+}
 
 fn map_irq_error(error: ResError) -> DriverError {
     match error {
@@ -240,7 +256,7 @@ impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
         self.request.lock().fault.is_some()
     }
 
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -261,7 +277,7 @@ impl<H: Hal + Send, T: Transport + Send> HwrngDevice for VirtIoRngDev<H, T> {
             }
             false
         })?;
-        result
+        result.map_err(map_driver_error)
     }
 }
 

@@ -240,10 +240,14 @@ watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
 block = { path = "drivers/contracts/block" }
-hwrng = { path = "drivers/contracts/hwrng" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
+# Transitional key: the v2 device-model spine (package `driver-base`). The
+# legacy contracts crate keeps the `driver_base` key until the old core is
+# deleted; the two names collapse then.
+driver_base_ng = { path = "drivers/base", package = "driver-base" }
+subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }
 device_res = { path = "drivers/contracts/device-res", package = "device-res" }
 kclass = { path = "drivers/contracts/kclass" }
 kdevice = { path = "drivers/contracts/kdevice" }

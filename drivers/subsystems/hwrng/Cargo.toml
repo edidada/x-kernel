@@ -1,5 +1,5 @@
 [package]
-name = "hwrng"
+name = "subsys-hwrng"
 description = "Common traits and types for hwrng drivers"
 edition.workspace = true
 version.workspace = true
@@ -9,14 +9,17 @@ homepage.workspace = true
 repository.workspace = true
 categories.workspace = true
 
-[package.metadata.cargo-shear]
-# Used by crate-local UNITTEST=y tests included from ut-tests/.
-ignored = ["kspin"]
 
 [dependencies]
-driver_base.workspace = true
+log = { workspace = true }
+driver_base_ng = { workspace = true }
+kerrno.workspace = true
 kspin.workspace = true
 unittest.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

@@ -25,7 +25,7 @@ a wait. There is no polling timeout.
 
 ## Failures and resource lifecycle
 
-Reads and host waits return the shared `DriverError`. `InvalidInput` identifies
+Reads and host waits return the shared `KError`. `InvalidInput` identifies
 a context that cannot sleep. Fallible wait preparation must finish before
 invoking the readiness predicate; subsequent registration must be infallible
 and allocation-free. These errors alone do not establish device failure, and the error type

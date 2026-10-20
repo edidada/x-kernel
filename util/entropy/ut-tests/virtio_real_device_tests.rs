@@ -12,10 +12,11 @@ use unittest::{TestResult, assert, assert_eq, def_test};
 
 use super::*;
 
-fn find_device() -> Option<ClassDevice<HwrngDeviceImpl>> {
-    hwrng_devices()
+fn find_device() -> Option<Publication<HwrngDeviceImpl>> {
+    HWRNG
+        .devices()
         .into_iter()
-        .find(|device| is_virtio_rng(device.name(), device.driver_name()))
+        .find(|device| is_virtio_rng(device.name(), device.driver_name().unwrap_or("")))
 }
 
 #[def_test(serial)]

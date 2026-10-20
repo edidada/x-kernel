@@ -4,7 +4,7 @@
 
 //! Host-provided waiting and notification for RNG read completion.
 
-use driver_base::DriverResult;
+use kerrno::KResult;
 
 /// Host capability for waiting on driver-owned read completion state.
 ///
@@ -27,12 +27,12 @@ pub trait RngCompletion: Send + Sync {
     /// wakes; never poll, yield-loop or use a device-completion timer.
     ///
     /// # Errors
-    /// Returns [`driver_base::DriverError::InvalidInput`] for a non-sleepable
+    /// Returns [`kerrno::KError::InvalidInput`] for a non-sleepable
     /// context, or a shared driver error for wait preparation failure. Neither
     /// error proves that the device failed. The registration is removed on
     /// return; an already detached late wake is allowed. A wait error does
     /// not cancel DMA started by an earlier check.
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult;
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult;
 
     /// Wake registered readers after the driver publishes a state change.
     ///

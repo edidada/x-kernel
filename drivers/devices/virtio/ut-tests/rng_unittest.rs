@@ -152,9 +152,9 @@ struct Completion {
     notifications: AtomicUsize,
 }
 impl RngCompletion for Completion {
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult {
         if let Some(error) = self.before {
-            return Err(error);
+            return Err(map_driver_error(error));
         }
         if ready() {
             return Ok(());
@@ -162,7 +162,7 @@ impl RngCompletion for Completion {
         if let Some(error) = self.after
             && !self.has_returned_error.swap(true, Ordering::Relaxed)
         {
-            return Err(error);
+            return Err(map_driver_error(error));
         }
         let action = self
             .action
@@ -263,14 +263,14 @@ fn hwrng_wait_failure_preserves_dma_and_validates_before_consuming() {
         });
         let (device, queue, irq) = device(completion);
         let mappings = MAPPINGS.load(Ordering::Relaxed);
-        assert_eq!(device.read(&mut [0; 8]), Err(error));
+        assert_eq!(device.read(&mut [0; 8]), Err(map_driver_error(error)));
         assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
         device.request.lock().submit().unwrap();
         // SAFETY: the controlled test published one device-owned buffer.
         unsafe { finish(&queue.lock(), 8, false) };
         irq.store(1, Ordering::Relaxed);
         device.handle(0);
-        assert_eq!(device.read(&mut [0; 8]), Err(error));
+        assert_eq!(device.read(&mut [0; 8]), Err(map_driver_error(error)));
         assert_eq!(device.request.lock().read(&mut [0; 8]), 8);
     }
     let completion = Arc::new(Completion {
@@ -280,7 +280,7 @@ fn hwrng_wait_failure_preserves_dma_and_validates_before_consuming() {
     let (device, queue, irq) = device(completion);
     let mut output = [0xaa; 8];
     let mappings = MAPPINGS.load(Ordering::Relaxed);
-    assert_eq!(device.read(&mut output), Err(DriverError::NoMemory));
+    assert_eq!(device.read(&mut output), Err(KError::NoMemory));
     assert_eq!(output, [0xaa; 8]);
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings + 1);
     // SAFETY: the wait error kept the device-owned submission alive.
@@ -303,7 +303,7 @@ fn hwrng_wait_retry_joins_pending_request() {
     let (device, queue, irq) = device(completion.clone());
     let mappings = MAPPINGS.load(Ordering::Relaxed);
     let mut output = [0xaa; 8];
-    assert_eq!(device.read(&mut output), Err(DriverError::NoMemory));
+    assert_eq!(device.read(&mut output), Err(KError::NoMemory));
     assert!(!device.is_failed());
     let token = match device.request.lock().state {
         RequestState::Pending(token) => token,
@@ -338,9 +338,9 @@ fn hwrng_wrong_token_reports_terminal_failure() {
         device.handle(0);
     }));
     let mut output = [0xaa; 8];
-    assert_eq!(device.read(&mut output), Err(DriverError::BadState));
+    assert_eq!(device.read(&mut output), Err(KError::BadState));
     assert!(device.is_failed());
-    assert_eq!(device.read(&mut output), Err(DriverError::BadState));
+    assert_eq!(device.read(&mut output), Err(KError::BadState));
     assert_eq!(output, [0xaa; 8]);
 }
 

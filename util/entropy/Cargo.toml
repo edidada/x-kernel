@@ -10,25 +10,20 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
-# kdevice is used by the cfg(unittest) collector fixture in ut-tests/virtio.rs
-# for device registration and cleanup; workspace cargo-shear excludes ut-tests.
-ignored = ["kdevice"]
-
 [features]
 default = []
 entropy_arch_cpu = ["dep:karch"]
 entropy_smccc_trng = ["dep:kplat-aarch64"]
 entropy_jitter = []
-entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kdevice", "dep:kclass", "dep:kworkng", "dep:kalloc-types", "dep:kerrno"]
+entropy_virtio_rng = ["dep:subsys_hwrng", "dep:kspin", "dep:kworkng", "dep:driver_base_ng", "dep:kalloc-types", "dep:kerrno"]
 
 [dependencies]
 kalloc-types = { workspace = true, optional = true }
 kerrno = { workspace = true, optional = true }
 kworkng = { workspace = true, optional = true }
-hwrng = { workspace = true, optional = true }
-kdevice = { workspace = true, optional = true }
+subsys_hwrng = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }
-kclass = { workspace = true, features = ["hwrng"], optional = true }
+driver_base_ng = { workspace = true, optional = true }
 khal.workspace = true
 karch = { workspace = true, optional = true }
 klazy.workspace = true

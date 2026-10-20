@@ -6,10 +6,10 @@
 
 use alloc::sync::Arc;
 
-use driver_base::{DriverError, DriverResult};
-use hwrng::completion::RngCompletion;
 use kcompletion::WaitQueue;
+use kerrno::{KError, KResult};
 use ktask::completion::CompletionWait;
+use subsys_hwrng::completion::RngCompletion;
 
 /// Creates a shared completion capability for injection into one RNG driver.
 ///
@@ -27,8 +27,8 @@ struct HostRngCompletion {
 }
 
 impl RngCompletion for HostRngCompletion {
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
-        let task_wait = CompletionWait::prepare().map_err(|_| DriverError::InvalidInput)?;
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> KResult {
+        let task_wait = CompletionWait::prepare().map_err(|_| KError::InvalidInput)?;
         task_wait.wait_until(&self.waiters, ready);
         Ok(())
     }

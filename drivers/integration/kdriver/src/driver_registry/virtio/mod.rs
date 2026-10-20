@@ -268,7 +268,32 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
         #[cfg(feature = "virtio-rng")]
         DeviceKind::Hwrng => {
             use glue::VirtIoRng;
-            kclass::publish_hwrng(parent, VirtIoRng::try_new(transport, irq)?).map(drop)
+            // Transitional publish door: the RNG device lands in the v2
+            // `subsys-hwrng` class while the rest of virtio still probes on
+            // the legacy model. The synthetic identity goes away together
+            // with this bridge when the virtio family migrates.
+            let device = VirtIoRng::try_new(transport, irq)?;
+            let publication = subsys_hwrng::HWRNG
+                .attach_legacy(
+                    "virtio-rng",
+                    alloc::string::String::from("/legacy/virtio-rng"),
+                    device,
+                    "virtio-rng",
+                )
+                .map_err(|error| match error {
+                    // Duplicate publication is the only reachable refusal:
+                    // the class already holds this virtio-rng instance.
+                    kerrno::KError::AlreadyExists => DriverError::AlreadyExists,
+                    _ => DriverError::Io,
+                })?;
+            // The publication is the class-side owner; dropping it would
+            // withdraw the device again. The legacy tree has no removal
+            // path for this device, so hold it for the kernel lifetime —
+            // the same strong-reference semantics the old kclass registry
+            // provided. Forgotten once the virtio family migrates and the
+            // bridge dies.
+            core::mem::forget(publication);
+            Ok(())
         }
         _ => Err(DriverError::Unsupported),
     }

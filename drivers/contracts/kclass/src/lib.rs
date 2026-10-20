@@ -250,8 +250,6 @@ pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;
 ///
 /// Publish only after the driver can receive completion IRQs and accept reads.
 /// Registry removal does not stop the source or prove that DMA has stopped.
-#[cfg(feature = "hwrng")]
-pub type HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>;
 /// Concrete runtime type for display devices.
 #[cfg(feature = "display")]
 pub type DisplayDeviceImpl = Box<dyn DisplayDevice + Send + Sync>;
@@ -274,9 +272,6 @@ pub use char_driver::CharDevice;
 /// Re-export display device trait and framebuffer metadata.
 #[cfg(feature = "display")]
 pub use display::{DisplayDevice, DisplayInfo};
-/// Re-export the hardware entropy source contract.
-#[cfg(feature = "hwrng")]
-pub use hwrng::HwrngDevice;
 /// Re-export input device trait, event types, identity types, and axis info.
 #[cfg(feature = "input")]
 pub use input::{
@@ -325,9 +320,6 @@ impl ClassRuntimeMetadata for BlockDeviceImpl {
 
 #[cfg(feature = "char")]
 impl ClassRuntimeMetadata for CharDeviceImpl {}
-
-#[cfg(feature = "hwrng")]
-impl ClassRuntimeMetadata for HwrngDeviceImpl {}
 
 #[cfg(feature = "display")]
 impl ClassRuntimeMetadata for DisplayDeviceImpl {
@@ -393,17 +385,6 @@ impl CharDevice for ClassDevice<CharDeviceImpl> {
 
     fn flush(&self) -> DriverResult {
         self.with(|device| device.flush())
-    }
-}
-
-#[cfg(feature = "hwrng")]
-impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
-    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
-        self.with(|device| device.read(buf))
-    }
-
-    fn is_failed(&self) -> bool {
-        self.with(|device| device.is_failed())
     }
 }
 
@@ -631,17 +612,6 @@ class_registries! {
     subscribe_char_available,
     notify_char_available,
     remove_char_device;
-    "hwrng",
-    HwrngDeviceImpl,
-    DeviceKind::Hwrng,
-    HWRNG_DEVICES,
-    hwrng_class_registry,
-    publish_hwrng,
-    hwrng_devices,
-    find_hwrng_device,
-    subscribe_hwrng_available,
-    notify_hwrng_available,
-    remove_hwrng_device;
     "display",
     DisplayDeviceImpl,
     DeviceKind::Display,
@@ -702,8 +672,6 @@ pub mod prelude {
     pub use crate::{DisplayDevice, DisplayDeviceImpl, DisplayInfo};
     #[cfg(feature = "input")]
     pub use crate::{Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
-    #[cfg(feature = "hwrng")]
-    pub use crate::{HwrngDevice, HwrngDeviceImpl};
     #[cfg(feature = "net")]
     pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
     #[cfg(feature = "virtio-9p")]
