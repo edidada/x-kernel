@@ -11,7 +11,7 @@
 use alloc::{format, string::String, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
 use super::class_api::{Class, ClassHooks, PublicationNode};
@@ -194,4 +194,31 @@ fn one_class_serves_many_devices_and_publications_share_device_liveness() {
 
     drop(first);
     drop(second);
+}
+
+/// Publishing the same runtime name twice off the same owning device is a
+/// driver bug and must be refused with `AlreadyExists` — the registry's
+/// duplicate-identity contract (same name under a different owner is fine).
+#[def_test(serial)]
+fn duplicate_publish_of_same_owner_and_name_is_refused() {
+    static CLASS: Class<u32, NoHooks2> = Class::new(NoHooks2);
+    struct NoHooks2;
+    impl ClassHooks<u32> for NoHooks2 {
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {}
+    }
+
+    let host = owner(9);
+    // Hold the owning publication: dropping it would withdraw the entry
+    // and the duplicate test below would see an empty registry.
+    let first = CLASS
+        .publish(host.clone(), 1u32, "dev")
+        .expect("first publish must succeed");
+    let second = CLASS.publish(host, 2u32, "dev");
+    assert!(matches!(second, Err(KError::AlreadyExists)));
+
+    // A different owner may reuse the name (Linux: same name under a
+    // different parent is a different device).
+    let other = CLASS.publish(owner(10), 3u32, "dev");
+    assert!(other.is_ok(), "same name under a different owner is allowed");
+    drop(first);
 }

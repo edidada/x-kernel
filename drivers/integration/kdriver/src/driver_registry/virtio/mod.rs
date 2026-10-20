@@ -281,8 +281,9 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
                     "virtio-rng",
                 )
                 .map_err(|error| match error {
-                    // Refusals are identity/hook failures on the class side;
-                    // map them losslessly onto the legacy error vocabulary.
+                    // Class-side refusal: a duplicate (device, name)
+                    // publication. Every other refusal reason folds to Io
+                    // on the legacy error vocabulary.
                     kerrno::KError::AlreadyExists => DriverError::AlreadyExists,
                     _ => DriverError::Io,
                 })?;

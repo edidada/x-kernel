@@ -24,6 +24,7 @@ impl DeviceDomain {
     pub fn new() -> Self {
         Self {
             probing: SpinNoPreempt::new(false),
+            pump_requested: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
                 next_driver_key: 0,
@@ -124,10 +125,25 @@ impl DeviceDomain {
         label: &str,
     ) -> Result<BusInstanceId, AddDeviceError> {
         let mut inner = self.inner.lock();
-        if let Some(bridge) = bridge
-            && !inner.devices.contains_key(&bridge.raw())
-        {
-            return Err(AddDeviceError::ParentMissing(bridge.raw()));
+        if let Some(bridge) = bridge {
+            // Same parent contract as `add_device`: a bridge that is being
+            // or has been torn down must not anchor new instances — its
+            // members would fall outside the teardown snapshot the first
+            // remove phase froze, and would never be cascaded.
+            match inner
+                .devices
+                .get(&bridge.raw())
+                .map(|entry| entry.lifecycle.state)
+            {
+                Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
+                    return Err(AddDeviceError::ParentUnavailable {
+                        parent: bridge.raw(),
+                        state: state.as_str(),
+                    });
+                }
+                None => return Err(AddDeviceError::ParentMissing(bridge.raw())),
+                _ => {}
+            }
         }
         let id = BusInstanceId::from_raw(
             DEVICE_ID_ALLOCATOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed),

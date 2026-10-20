@@ -155,6 +155,12 @@ impl<T> Publication<T> {
         self.inner.id
     }
 
+    /// Whether both handles publish the same runtime name off the same
+    /// owning device — the registry's duplicate-identity test.
+    pub(crate) fn shares_identity_with(&self, other: &Self) -> bool {
+        self.inner.name == other.inner.name && Arc::ptr_eq(&self.inner.owner, &other.inner.owner)
+    }
+
     /// The runtime device name the driver published under.
     pub fn name(&self) -> &str {
         &self.inner.name
@@ -365,9 +371,15 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
+    /// Publication ids are minted fresh per publish, so the duplicate test is
+    /// (owning device identity, runtime name) — the same device publishing
+    /// the same name twice is a driver bug and is refused.
     pub(crate) fn publish(&mut self, device: Publication<T>) -> KResult<()> {
-        let id = device.id();
-        if self.devices.iter().any(|current| current.id() == id) {
+        let duplicate = self
+            .devices
+            .iter()
+            .any(|current| current.shares_identity_with(&device));
+        if duplicate {
             return Err(KError::AlreadyExists);
         }
         self.devices.push(device);
