@@ -5427,7 +5427,6 @@ dependencies = [
  "driver-base",
  "kerrno",
  "kspin",
- "log",
  "unittest",
 ]
 

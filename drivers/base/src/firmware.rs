@@ -125,11 +125,10 @@ fn decode_prop(value: &'static [u8]) -> FirmwareProp {
     }
     match value.len() {
         4 => FirmwareProp::U32(u32::from_be_bytes([value[0], value[1], value[2], value[3]])),
-        8 => {
-            let high = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
-            let low = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
-            FirmwareProp::U64((high as u64) << 32 | low as u64)
-        }
+        // 8-byte payloads stay `Bytes`: `<reg>`-style entries are two u32
+        // cells read through `u32_list`, and the U64 variant has no
+        // accessor — typing it U64 made address/length properties
+        // unreadable through every door.
         _ => FirmwareProp::Bytes(value),
     }
 }
@@ -144,8 +143,17 @@ fn decode_string_list(value: &'static [u8]) -> Option<alloc::vec::Vec<&'static s
             }
             return None;
         };
+        // An empty component (leading or doubled NUL) is not a string
+        // table: cell payloads such as <0x1000 0x1000> or <5 0> end in
+        // 0x00 and must fall through to the cells branch so `u32` /
+        // `u32_list` stay reachable for the driver.
+        if pos == 0 {
+            return None;
+        }
         out.push(core::str::from_utf8(&rest[..pos]).ok()?);
         rest = &rest[pos + 1..];
     }
     Some(out)
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/firmware.rs");

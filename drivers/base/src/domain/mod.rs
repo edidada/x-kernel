@@ -246,7 +246,8 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         // is a domain-internal invariant violation, not a driver error.
         #[expect(
             clippy::expect_used,
-            reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is                       a domain-internal invariant violation, not a driver error"
+            reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is \
+                      a domain-internal invariant violation, not a driver error"
         )]
         let typed = desc
             .data

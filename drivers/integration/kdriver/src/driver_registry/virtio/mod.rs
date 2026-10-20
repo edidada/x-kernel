@@ -281,8 +281,8 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
                     "virtio-rng",
                 )
                 .map_err(|error| match error {
-                    // Duplicate publication is the only reachable refusal:
-                    // the class already holds this virtio-rng instance.
+                    // Refusals are identity/hook failures on the class side;
+                    // map them losslessly onto the legacy error vocabulary.
                     kerrno::KError::AlreadyExists => DriverError::AlreadyExists,
                     _ => DriverError::Io,
                 })?;

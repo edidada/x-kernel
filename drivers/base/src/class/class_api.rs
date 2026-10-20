@@ -125,7 +125,12 @@ where
         }
         publication.install_withdraw(move || self.withdraw(id));
         let is_active = publication.is_available();
-        if let Err(error) = self.registry.lock().publish(publication.clone()) {
+        // Bind the registry result first: the 2024-edition `if let` keeps
+        // scrutinee temporaries alive through the whole expression, and the
+        // guard must NOT be held while `unpublish` (del_gendisk, devnode
+        // withdraw — heavyweight, re-entrant) runs.
+        let registered = self.registry.lock().publish(publication.clone());
+        if let Err(error) = registered {
             publication.with(|runtime| self.hooks.unpublish(runtime, &node));
             return Err(error);
         }
@@ -146,7 +151,10 @@ where
     /// for the DEVPATH identity the legacy tree cannot supply.
     ///
     /// This exists only while the legacy virtio publisher migrates onto the
-    /// framework; do not build new drivers on it.
+    /// framework; do not build new drivers on it. Hidden from the documented
+    /// API surface on purpose — a migration shim must not become part of the
+    /// long-term model (api-design.md).
+    #[doc(hidden)]
     pub fn attach_legacy(
         &'static self,
         driver_name: &'static str,

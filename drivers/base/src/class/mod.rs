@@ -210,7 +210,18 @@ impl<T> Publication<T> {
         // passed. If the gate closed, undo and fail.
         self.inner.uses.fetch_add(1, Ordering::SeqCst);
         if self.inner.draining.load(Ordering::SeqCst) || !self.is_available() {
-            self.inner.uses.fetch_sub(1, Ordering::SeqCst);
+            // Undo our count. If we were the last in-flight operation, the
+            // finalizer parked in the slot by `finish_or_defer` is now
+            // unclaimed — nobody else can reach zero after us. Run it here,
+            // exactly as the last `InUse::drop` would, or the class-side
+            // teardown (devnode/gendisk/transport) never executes.
+            let previous = self.inner.uses.fetch_sub(1, Ordering::AcqRel);
+            if previous == 1 {
+                let finalize = self.inner.finalize.lock().take();
+                if let Some(finalize) = finalize {
+                    finalize(&self.inner.runtime);
+                }
+            }
             return Err(KError::BadState);
         }
         Ok(InUse {
