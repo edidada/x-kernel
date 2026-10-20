@@ -82,22 +82,23 @@ if [ "$BEHIND" -eq 0 ]; then
 	exit 0
 fi
 
-# The re-push below rewrites the remote branch, which is safe when the
-# remote tip is an ancestor of HEAD or a locally known older version of it
-# (the usual rewrite-your-own-branch case). It is not safe when the remote
-# tip is unknown to this clone: those commits were never seen here and
-# would be dropped without the non-fast-forward check a plain push applies.
+# The re-push below rewrites the remote branch. That is only safe when the
+# remote tip is an ancestor of HEAD, or provably an older tip of THIS branch
+# (present in the branch reflog -- a rewrite the local side made itself).
+# A fetched foreign commit is reachable in the object store too but never
+# in the reflog: refusing it keeps the non-fast-forward protection a plain
+# push would have applied.
 if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" HEAD 2>/dev/null; then
-	if ! git cat-file -e "$REMOTE_SHA" 2>/dev/null; then
-		echo "❌ pre-push: remote $REMOTE/$BRANCH has commits this clone has never seen; not rebasing." >&2
-		echo "   fetch and inspect them first, then push:" >&2
-		echo "     git fetch $REMOTE && git log --oneline HEAD..$REMOTE/$BRANCH" >&2
-		echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
+	if git reflog show "refs/heads/$BRANCH" --format='%H' 2>/dev/null | grep -qx "$REMOTE_SHA"; then
+		echo "ℹ️  pre-push: remote tip is an older version of this rewritten branch; the re-push will overwrite it." >&2
+	else
+		echo "❌ pre-push: remote $REMOTE/$BRANCH has commits this branch would drop; not rebasing." >&2
+		git rev-list --oneline "HEAD..$REMOTE_SHA" 2>/dev/null | sed 's/^/     /' >&2
+		echo "   inspect them first:" >&2
+		echo "     git fetch $REMOTE $BRANCH && git log --oneline HEAD..$REMOTE/$BRANCH" >&2
+		echo "   bypass with: SKIP_REBASE=1 git push --force ..." >&2
 		exit 1
 	fi
-	# Known locally but not an ancestor: this clone rewrote its own history.
-	# The lease below still pins the negotiated remote tip.
-	echo "ℹ️  pre-push: remote tip is an older version of this rewritten branch; the re-push will overwrite it." >&2
 fi
 
 cd "$REPO_ROOT" || exit 0
@@ -128,6 +129,10 @@ REBASE_LOG="$(git rebase "$BASE" 2>&1)" || {
 		echo "     git rebase $BASE   # or: git rebase -i $BASE" >&2
 		echo "   bypass with: SKIP_REBASE=1 git push ..." >&2
 	else
+		# Defensive teardown: should a failed rebase leave a state directory
+		# behind with no unmerged paths, drop it so later pushes are not
+		# silently skipped by the in-progress guard above. No-op otherwise.
+		git rebase --abort 2>/dev/null || true
 		echo "⚠️  pre-push: automatic rebase did not start; pushing as-is:" >&2
 		echo "$REBASE_LOG" >&2
 		exit 0
