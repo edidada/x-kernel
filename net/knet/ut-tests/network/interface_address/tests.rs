@@ -29,6 +29,8 @@ fn replacing_by_cidr_preserves_other_entries_and_rejects_invalid_updates() {
     for (addr, replacement, error) in [
         (second.addr, entry([0, 0, 0, 0], 32), LinuxError::EINVAL),
         (missing.addr, missing, LinuxError::EADDRNOTAVAIL),
+        (first.addr, second, LinuxError::EEXIST),
+        (second.addr, first, LinuxError::EEXIST),
     ] {
         assert_eq!(addresses.replace(addr, replacement), Err(error));
         assert_eq!(addresses.as_slice(), &[first, second]);

@@ -38,7 +38,7 @@ pub(crate) struct Ipv4AddrSnapshot {
 
 /// IPv4 addresses owned by one registered device.
 ///
-/// Mutations identify entries by CIDR and preserve their device-local order.
+/// Mutations identify entries by CIDR and preserve uniqueness and device-local order.
 /// Callers select which address to update and apply operation-specific collision
 /// policy. Rejected mutations leave the set intact.
 /// Router enforces the shared stack's capacity and synchronizes derived state
@@ -77,7 +77,8 @@ impl Ipv4AddressSet {
     /// Replaces the entry identified by `addr` without changing address order.
     ///
     /// Returns `EADDRNOTAVAIL` when `addr` is absent, `EINVAL` for a non-unicast
-    /// replacement. Errors leave the set intact.
+    /// replacement, or `EEXIST` when another entry has the replacement CIDR.
+    /// Errors leave the set intact.
     pub(crate) fn replace(
         &mut self,
         addr: Ipv4Cidr,
@@ -86,6 +87,9 @@ impl Ipv4AddressSet {
         let index = self.entry_index(addr).ok_or(LinuxError::EADDRNOTAVAIL)?;
         if !entry.addr.address().is_unicast() {
             return Err(LinuxError::EINVAL);
+        }
+        if entry.addr != addr && self.contains_entry(entry.addr) {
+            return Err(LinuxError::EEXIST);
         }
         Ok(core::mem::replace(&mut self.addresses[index], entry))
     }
