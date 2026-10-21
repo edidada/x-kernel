@@ -1389,22 +1389,12 @@ fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
     let eth0 = router.add_device(Box::new(ethernet("eth0", 2))).unwrap();
     let eth1 = router.add_device(Box::new(ethernet("eth1", 3))).unwrap();
     let address = crate::ip::Ipv4Address::new(10, 0, 0, 2);
-    router
-        .add_ipv4_addr(
-            eth1,
-            Ipv4AddrEntry {
-                addr: valid_ipv4_cidr(address, 24),
-                scope: wire_route::SCOPE_UNIVERSE,
-                broadcast: None,
-            },
-        )
-        .unwrap();
-
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(address, 24),
         scope: wire_route::SCOPE_UNIVERSE,
         broadcast: None,
     };
+    router.add_ipv4_addr(eth1, entry).unwrap();
     // Fill the shared capacity using another device's independent address set.
     for index in 1..smoltcp::config::IFACE_MAX_ADDR_COUNT {
         router
