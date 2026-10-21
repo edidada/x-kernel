@@ -48,11 +48,15 @@ const SMT_STATUS_FREE: u32 = 1;
 const fn scmi_header(msg_id: u32, protocol: u32) -> u32 {
     (msg_id & 0xFF) | ((protocol & 0x3FF) << 10)
 }
-/// SCMI clock-protocol message ids (firmware table).
+/// SCMI clock-protocol message ids (Linux `drivers/firmware/arm_scmi/clock.c`,
+/// SCMI spec v3 table — note there are no ENABLE/DISABLE messages: state
+/// changes ride CLOCK_CONFIG_SET with a state in the attributes field).
 const CLOCK_ATTRIBUTES: u32 = 0x3;
-const CLOCK_RATE_GET: u32 = 0x4;
-const CLOCK_ENABLE: u32 = 0x6;
-const CLOCK_DISABLE: u32 = 0x7;
+const CLOCK_RATE_GET: u32 = 0x6;
+const CLOCK_CONFIG_SET: u32 = 0x7;
+/// `attributes` field values for CLOCK_CONFIG_SET (Linux `enum clk_state`).
+const CLK_STATE_DISABLE: u32 = 0;
+const CLK_STATE_ENABLE: u32 = 1;
 /// The SMT channel is one page.
 const SMT_CHANNEL_BYTES: usize = 0x100;
 /// SMT payload begins after the 28-byte channel header.
@@ -120,6 +124,23 @@ impl ScmiChannel {
         self.wait_free()?;
         let status = self.shmem.read32(SMT_PAYLOAD) as i32;
         if status != SCMI_SUCCESS {
+            // Dump the channel header + first payload words: distinguishes
+            // "agent never wrote a response" (payload still holds our
+            // request words, e.g. the echoed clock_id) from a real SCMI
+            // error status.
+            let dump: [u32; 7] = [
+                self.shmem.read32(SMT_CHANNEL_STATUS),
+                self.shmem.read32(SMT_MSG_LENGTH),
+                self.shmem.read32(SMT_MSG_HEADER),
+                self.shmem.read32(SMT_PAYLOAD),
+                self.shmem.read32(SMT_PAYLOAD + 4),
+                self.shmem.read32(SMT_PAYLOAD + 8),
+                self.shmem.read32(SMT_PAYLOAD + 12),
+            ];
+            log::warn!(
+                "scmi-clk: msg {msg_id:#x} failed: status {status}; smt [status/len/hdr/p0..p3] \
+                 {dump:02x?}"
+            );
             return Err(ScmiError::Firmware(status));
         }
         let mut out = Vec::new();
@@ -150,13 +171,13 @@ impl ScmiChannel {
     }
 
     fn enable(&self, clock_id: u32) -> ClkResult<()> {
-        self.transact(CLOCK_ENABLE, &[clock_id], 0)
-            .map_err(|e| e.into_clk_error("enable"))?;
+        self.transact(CLOCK_CONFIG_SET, &[clock_id, CLK_STATE_ENABLE], 0)
+            .map_err(|e| e.into_clk_error("config_set(enable)"))?;
         Ok(())
     }
 
     fn disable(&self, clock_id: u32) {
-        let _ = self.transact(CLOCK_DISABLE, &[clock_id], 0);
+        let _ = self.transact(CLOCK_CONFIG_SET, &[clock_id, CLK_STATE_DISABLE], 0);
     }
 
     /// CLOCK_ATTRIBUTES: proves the agent serves the clock domain.
