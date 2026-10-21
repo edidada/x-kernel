@@ -370,6 +370,9 @@ impl Router {
             broadcast: None,
         };
         if let Some(current) = current {
+            if self.has_ipv4_addr_entry(dev, addr) {
+                return Err(LinuxError::EEXIST);
+            }
             let old = self
                 .devices
                 .ipv4_mut(dev)
@@ -468,6 +471,13 @@ impl Router {
             return Ok(());
         }
         let old_addr = entry.addr;
+        let addr = Ipv4Cidr::new(entry.addr.address(), prefix_len).ok_or(LinuxError::EINVAL)?;
+        if self.has_ipv4_addr_entry(dev, addr) {
+            // Linux drops the old entry when netmask reinsertion collides,
+            // and SIOCSIFNETMASK still reports success.
+            self.remove_ipv4_addr(dev, old_addr);
+            return Ok(());
+        }
         let has_broadcast_flag = self
             .devices
             .get_by_id(dev)
@@ -476,7 +486,7 @@ impl Router {
         let should_recalculate_broadcast = has_broadcast_flag
             && prefix_len < 31
             && entry.effective_broadcast() == old_derived_broadcast;
-        entry.addr = Ipv4Cidr::new(entry.addr.address(), prefix_len).ok_or(LinuxError::EINVAL)?;
+        entry.addr = addr;
         if should_recalculate_broadcast {
             entry.broadcast = None;
         } else if entry.broadcast.is_none() {

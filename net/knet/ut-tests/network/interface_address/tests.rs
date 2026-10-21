@@ -19,7 +19,7 @@ fn entry(address: [u8; 4], prefix: u8) -> Ipv4AddrEntry {
 }
 
 #[def_test]
-fn replacing_by_cidr_preserves_other_entries_and_rejects_conflicts_atomically() {
+fn replacing_by_cidr_preserves_other_entries_and_rejects_invalid_updates() {
     let first = entry([192, 0, 2, 7], 24);
     let second = entry([192, 0, 2, 7], 16);
     let missing = entry([203, 0, 113, 7], 24);
@@ -27,7 +27,6 @@ fn replacing_by_cidr_preserves_other_entries_and_rejects_conflicts_atomically() 
     addresses.insert(first).unwrap();
     addresses.insert(second).unwrap();
     for (addr, replacement, error) in [
-        (second.addr, first, LinuxError::EEXIST),
         (second.addr, entry([0, 0, 0, 0], 32), LinuxError::EINVAL),
         (missing.addr, missing, LinuxError::EADDRNOTAVAIL),
     ] {
