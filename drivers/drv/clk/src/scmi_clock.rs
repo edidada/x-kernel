@@ -39,10 +39,17 @@ static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("clock-provider
 
 /// SCMI base protocol success code.
 const SCMI_SUCCESS: i32 = 0;
+/// SCMI base protocol id (VERSION probe target).
+const SCMI_PROTOCOL_BASE: u32 = 0x10;
+/// Base-protocol VERSION message id (no args, out = one version word).
+const BASE_VERSION: u32 = 0x0;
 /// SCMI clock protocol id (`protocol@14`).
 const SCMI_PROTOCOL_CLOCK: u32 = 0x14;
 /// SMT channel-status free bit (channel may accept a message).
 const SMT_STATUS_FREE: u32 = 1;
+/// SMT channel-status error bit (agent-reported; sticky — the consumer
+/// clears it by writing the bit back to zero).
+const SMT_STATUS_ERROR: u32 = 2;
 /// SCMI message header fields: message id [7:0], type [10:8], protocol
 /// [17:10]; type 0 = command.
 const fn scmi_header(msg_id: u32, protocol: u32) -> u32 {
@@ -63,29 +70,40 @@ const SMT_CHANNEL_BYTES: usize = 0x100;
 const SMT_MSG_HEADER: usize = 0x18;
 const SMT_MSG_LENGTH: usize = 0x14;
 const SMT_CHANNEL_STATUS: usize = 0x04;
+const SMT_CHANNEL_FLAGS: usize = 0x10;
 const SMT_PAYLOAD: usize = 0x1C;
 /// The known RK3588 SCMI clock ids (`dt-bindings/clock/rockchip,rk3588-cru.h`).
 const SCMI_CCLK_SD: u32 = 9;
 const SCMI_HCLK_SD: u32 = 23;
-/// The SMT channel page/offset split (Linux `SHMEM_PAGE`/`SHMEM_OFFSET`):
-/// TF-A resolves the channel from `X1 = addr >> 12`, `X2 = addr & 0xFFF`.
-const SHMEM_SHIFT: u32 = 12;
-const fn shmem_page(addr: u64) -> u32 {
-    (addr >> SHMEM_SHIFT) as u32
-}
-const fn shmem_offset(addr: u64) -> u32 {
-    (addr & 0xFFF) as u32
-}
-
 /// One SMC-dispatched SMT channel (Linux `struct scmi_smc`).
 ///
 /// The SMC argument contract is Linux `arm_scmi/transports/smc.c`:
 /// `X1 = shmem page number (addr >> 12)`, `X2 = offset within the page`,
 /// `X3 = 0` — TF-A's handler resolves the channel from the page/offset
 /// pair, NOT from a raw address.
+/// The doorbell a channel rings: the SMC transport (`smc_call`) in
+/// production, a memory-backed stub in the transport regressions.
+type Doorbell = fn(smc_id: u32) -> [u64; 4];
+
+/// The production doorbell: an SMCCC fast call with **all-zero
+/// arguments** — the board-verified Rockchip bl31 convention (U-Boot
+/// `smccc_agent.c`: `arm_smccc_smc(func_id, 0, 0, 0, ...)`; the same
+/// firmware serves the board's own U-Boot, which reads the SD card
+/// through this path). The SMT channel address is statically bound
+/// inside the agent; the DT `shmem` node tells *us* where it is, not
+/// the agent. Mainline Linux's page/offset form targets Qualcomm-style
+/// agents and is rejected by this firmware (observed: ERROR flag set,
+/// no response written).
+fn smc_doorbell(smc_id: u32) -> [u64; 4] {
+    smc_call(u64::from(smc_id), 0, 0, 0)
+}
+
+/// One SMC-dispatched SMT channel (the Rockchip-bl31 flavor of Linux
+/// `struct scmi_smc`).
 struct ScmiChannel {
     shmem: IoMap,
     smc_id: u32,
+    doorbell: Doorbell,
 }
 
 impl ScmiChannel {
@@ -96,10 +114,23 @@ impl ScmiChannel {
     /// an empty return carry zero). The SMC is a synchronous fast call —
     /// the channel is free again by the time it returns; the polls are
     /// belt-and-braces bounded loops.
-    fn transact(&self, msg_id: u32, args: &[u32], out_words: usize) -> Result<Vec<u32>, ScmiError> {
+    fn transact(
+        &self,
+        msg_id: u32,
+        protocol: u32,
+        args: &[u32],
+        out_words: usize,
+    ) -> Result<Vec<u32>, ScmiError> {
         self.wait_free()?;
+        // Claim the channel (clear FREE, keep the agent's ERROR flag for
+        // the rx side to see and clear — the board-verified U-Boot smt.c
+        // shape), and zero the flags word.
+        let status_word = self.shmem.read32(SMT_CHANNEL_STATUS);
         self.shmem
-            .write32(SMT_MSG_HEADER, scmi_header(msg_id, SCMI_PROTOCOL_CLOCK));
+            .write32(SMT_CHANNEL_STATUS, status_word & !SMT_STATUS_FREE);
+        self.shmem.write32(SMT_CHANNEL_FLAGS, 0);
+        self.shmem
+            .write32(SMT_MSG_HEADER, scmi_header(msg_id, protocol));
         self.shmem.write32(SMT_MSG_LENGTH, (args.len() * 4) as u32);
         for (i, word) in args.iter().enumerate() {
             self.shmem.write32(SMT_PAYLOAD + i * 4, *word);
@@ -108,13 +139,7 @@ impl ScmiChannel {
         // The SMT channel is device-shared memory: make the message
         // stores visible to EL3 before ringing the doorbell.
         karch::dsb_ishst();
-        let base = self.shmem.region().base as u64;
-        let ret = smc_call(
-            u64::from(self.smc_id),
-            u64::from(shmem_page(base)),
-            u64::from(shmem_offset(base)),
-            0,
-        );
+        let ret = (self.doorbell)(self.smc_id);
         if ret[0] != 0 {
             // Only SMCCC_SUCCESS is a valid doorbell return (Linux maps
             // anything else to -EOPNOTSUPP).
@@ -122,6 +147,14 @@ impl ScmiChannel {
         }
 
         self.wait_free()?;
+        let status_word = self.shmem.read32(SMT_CHANNEL_STATUS);
+        if status_word & SMT_STATUS_ERROR != 0 {
+            // Clear the sticky ERROR flag so the next transfer starts
+            // clean (U-Boot smt.c read side).
+            self.shmem
+                .write32(SMT_CHANNEL_STATUS, status_word & !SMT_STATUS_ERROR);
+            return Err(ScmiError::ChannelError);
+        }
         let status = self.shmem.read32(SMT_PAYLOAD) as i32;
         if status != SCMI_SUCCESS {
             // Dump the channel header + first payload words: distinguishes
@@ -150,6 +183,21 @@ impl ScmiChannel {
         Ok(out)
     }
 
+    /// Base-protocol VERSION (protocol 0x10, message 0x0): the first
+    /// message any SCMI consumer sends — no parameters, one version word
+    /// out. The perfect probe: it works on every conforming agent and
+    /// exercises the whole transport without touching clock state.
+    fn protocol_version(&self) -> Result<u32, ScmiError> {
+        let out = self.transact(BASE_VERSION, SCMI_PROTOCOL_BASE, &[], 1)?;
+        let version = out.first().copied().unwrap_or(0);
+        log::info!(
+            "scmi-clk: agent SCMI spec v{}.{}",
+            version >> 16,
+            version & 0xFFFF
+        );
+        Ok(version)
+    }
+
     fn wait_free(&self) -> Result<(), ScmiError> {
         for _ in 0..(1 << 16) {
             if self.shmem.read32(SMT_CHANNEL_STATUS) & SMT_STATUS_FREE != 0 {
@@ -163,7 +211,7 @@ impl ScmiChannel {
     /// CLOCK_RATE_GET → 64-bit rate.
     fn rate_get(&self, clock_id: u32) -> ClkResult<Rate> {
         let out = self
-            .transact(CLOCK_RATE_GET, &[clock_id], 2)
+            .transact(CLOCK_RATE_GET, SCMI_PROTOCOL_CLOCK, &[clock_id], 2)
             .map_err(|e| e.into_clk_error("rate_get"))?;
         let lo = out.first().copied().ok_or(ClkError::Io)?;
         let hi = out.get(1).copied().unwrap_or(0);
@@ -171,18 +219,28 @@ impl ScmiChannel {
     }
 
     fn enable(&self, clock_id: u32) -> ClkResult<()> {
-        self.transact(CLOCK_CONFIG_SET, &[clock_id, CLK_STATE_ENABLE], 0)
-            .map_err(|e| e.into_clk_error("config_set(enable)"))?;
+        self.transact(
+            CLOCK_CONFIG_SET,
+            SCMI_PROTOCOL_CLOCK,
+            &[clock_id, CLK_STATE_ENABLE],
+            0,
+        )
+        .map_err(|e| e.into_clk_error("config_set(enable)"))?;
         Ok(())
     }
 
     fn disable(&self, clock_id: u32) {
-        let _ = self.transact(CLOCK_CONFIG_SET, &[clock_id, CLK_STATE_DISABLE], 0);
+        let _ = self.transact(
+            CLOCK_CONFIG_SET,
+            SCMI_PROTOCOL_CLOCK,
+            &[clock_id, CLK_STATE_DISABLE],
+            0,
+        );
     }
 
     /// CLOCK_ATTRIBUTES: proves the agent serves the clock domain.
     fn attributes(&self, clock_id: u32) -> Result<(), ScmiError> {
-        self.transact(CLOCK_ATTRIBUTES, &[clock_id], 0)?;
+        self.transact(CLOCK_ATTRIBUTES, SCMI_PROTOCOL_CLOCK, &[clock_id], 0)?;
         Ok(())
     }
 }
@@ -191,6 +249,9 @@ impl ScmiChannel {
 #[derive(Debug)]
 enum ScmiError {
     ChannelBusy,
+    /// The agent flagged the channel ERROR (its response failed); the
+    /// sticky flag has been cleared by the consumer.
+    ChannelError,
     /// The agent returned a non-SUCCESS SCMI status code.
     Firmware(i32),
     /// The SMCCC doorbell itself returned a non-zero code.
@@ -204,6 +265,10 @@ impl ScmiError {
             ScmiError::ChannelBusy => {
                 log::warn!("scmi-clk: {what}: channel stuck busy");
                 ClkError::Busy
+            }
+            ScmiError::ChannelError => {
+                log::warn!("scmi-clk: {what}: agent flagged channel error");
+                ClkError::Io
             }
             ScmiError::Firmware(code) => {
                 log::warn!("scmi-clk: {what}: firmware status {code}");
@@ -315,15 +380,22 @@ impl DriverOps<PlatformBus> for ScmiClockDriver {
             // The generated constant is `usize`; SMCCC ids are 32-bit.
             smc_id: u32::try_from(kbuild_config::SCMI_SMC_ID)
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?,
+            doorbell: smc_doorbell,
         });
 
-        // The agent must answer before anything parks on this provider.
-        channel.attributes(SCMI_CCLK_SD).map_err(|err| {
+        // The agent must answer before anything parks on this provider:
+        // base-protocol VERSION first (works on every conforming agent
+        // and exercises the whole transport), then the clock domain.
+        channel.protocol_version().map_err(|err| {
             log::warn!(
-                "scmi-clk: CLOCK_ATTRIBUTES probe failed: {err:?} (smc {:#x}, shmem {:#x})",
+                "scmi-clk: VERSION probe failed: {err:?} (smc {:#x}, shmem {:#x})",
                 kbuild_config::SCMI_SMC_ID,
                 kbuild_config::SCMI_SHMEM_PADDR
             );
+            ProbeError::Fatal(RuntimeError::Unsupported)
+        })?;
+        channel.attributes(SCMI_CCLK_SD).map_err(|err| {
+            log::warn!("scmi-clk: CLOCK_ATTRIBUTES probe failed: {err:?}");
             ProbeError::Fatal(RuntimeError::Unsupported)
         })?;
 
