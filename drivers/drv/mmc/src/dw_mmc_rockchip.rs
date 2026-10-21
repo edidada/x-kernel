@@ -19,8 +19,8 @@
 use alloc::sync::Arc;
 
 use driver_base::{
-    Bus, Device, DeviceDescriptor, DriverOps, IoMap, IrqAction, OfMatch, PlatformBus, PlatformId,
-    ProbeError, RuntimeError,
+    Bus, Device, DeviceDescriptor, DriverOps, IoMap, IrqAction, MmioRegion, OfMatch, PlatformBus,
+    PlatformId, ProbeError, RuntimeError,
 };
 use subsys_mmc::{
     DetectContext, MmcError,
@@ -71,17 +71,23 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
         // source and HCLK_SD gate sit behind the Rockchip bl31 blob, whose
         // SMC entry does not serve the mainline SCMI clock protocol
         // (probing it costs three round trips and a HARDWARE_ERROR; see
-        // drv/clk/scmi_clock for the full investigation). Both firmware
-        // stages leave the SD clock domain configured — U-Boot's own dwmmc
-        // read our boot medium through it — so the driver does NOT touch
-        // the clock source, and takes the CIU input rate as a board fact
-        // (Kconfig MMC_CIU_HZ, the RTC_PADDR precedent). The DWMMC
-        // internal divider covers 400 kHz init up to the 50 MHz high
-        // speed ceiling from that input.
-        let ciu_hz = u32::try_from(kbuild_config::MMC_CIU_HZ)
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
+        // drv/clk/scmi_clock for the full investigation). The boot stages
+        // leave the SD clock domain configured, so the driver does NOT
+        // reprogram the source — instead it READS the live rate back from
+        // the Secure CRU CLKSEL_CON registers (same math as U-Boot SPL's
+        // rk3588_scru_clk_get_rate), falling back to the board fact
+        // MMC_CIU_HZ when the SCRU reads as inaccessible/zero.
+        let ciu_hz = probe_scru_cclk_hz().unwrap_or_else(|| {
+            let fallback = kbuild_config::MMC_CIU_HZ as u32;
+            log::warn!(
+                "dwmmc-rocks: SCRU rate probe unavailable; using MMC_CIU_HZ={fallback:#x} Hz"
+            );
+            fallback
+        });
         if ciu_hz == 0 {
-            log::warn!("dwmmc-rocks: MMC_CIU_HZ is unset; slot {slot} cannot program its divider");
+            log::warn!(
+                "dwmmc-rocks: ciu rate resolved to 0; slot {slot} cannot program its divider"
+            );
             return Err(ProbeError::Fatal(RuntimeError::Invalid));
         }
         log::info!(
@@ -177,6 +183,51 @@ fn add_card_to_domain(
             Err(ProbeError::Fatal(RuntimeError::Invalid))
         }
     }
+}
+
+/// SCRU (Secure CRU) base — the SD clock domain's mux/div live here.
+const SCRU_PADDR: usize = 0xfd7d_0000;
+/// `CLKSEL_CON(n)` stride inside the SCRU (U-Boot `RK3588_CLKSEL_CON`).
+const fn scru_clksel_con(n: usize) -> usize {
+    0x300 + n * 4
+}
+const OSC_HZ: u64 = 24_000_000;
+const GPLL_HZ: u64 = 1_188_000_000;
+const SPLL_HZ: u64 = 702_000_000;
+
+/// Read the live CCLK_SD rate from the SCRU (U-Boot SPL
+/// `rk3588_scru_clk_get_rate` math): CLKSEL_CON(3) holds the parent
+/// select [13:12] (GPLL/SPLL/24M) and the divider [11:6]
+/// (rate = parent / (div + 1)). Returns `None` when the registers read
+/// as inaccessible (secure-only fault behavior reads-as-zero) — the
+/// caller falls back to the Kconfig board fact.
+fn probe_scru_cclk_hz() -> Option<u32> {
+    // SAFETY: the SCRU aperture is a 4 KiB device window at a fixed SoC
+    // address; reads are the same volatile MMIO the clock hardware
+    // defines. On systems where the window is secure-only the read
+    // returns garbage/zero, which the `?`-guards below reject.
+    let scru = unsafe { IoMap::new(SCRU_PADDR, MmioRegion::new(SCRU_PADDR, 0x1000), None) };
+    let con = scru.read32(scru_clksel_con(3));
+    let sel = (con >> 12) & 0x3;
+    let div = (con >> 6) & 0x3F;
+    if div == 0 {
+        return None;
+    }
+    let parent = match sel {
+        0 => GPLL_HZ,
+        1 => SPLL_HZ,
+        2 => OSC_HZ,
+        _ => return None,
+    };
+    if parent == 0 {
+        return None;
+    }
+    // Sanity: the divider must be consistent with a real clock tree —
+    // reads-as-zero windows yield div == 0 and are rejected above; a
+    // nonsense rate (> parent) is impossible by construction.
+    let rate = parent / (u64::from(div) + 1);
+    log::info!("dwmmc-rocks: SCRU CCLK_SD sel {sel} div {div} -> {rate} Hz");
+    u32::try_from(rate).ok()
 }
 
 /// Map host-construction failures onto the probe control flow.

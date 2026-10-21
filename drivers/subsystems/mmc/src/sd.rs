@@ -25,6 +25,16 @@ use crate::{
     bus::{CardKind, MmcCardData},
 };
 
+/// Log-and-return helper: card detection is a fixed script, so a failure
+/// names the exact step (opcode + arg) — the difference between "card
+/// absent", "signal integrity" and "protocol mismatch" at a glance.
+fn step<T>(what: &str, opcode: u8, arg: u32, result: Result<T, MmcError>) -> Result<T, MmcError> {
+    result.map_err(|err| {
+        log::warn!("sd: {what} (cmd {opcode}, arg {arg:#x}) -> {err:?}");
+        err
+    })
+}
+
 /// Command indexes used below (Linux `include/linux/mmc/sd.h` subset).
 const CMD_GO_IDLE: u8 = 0;
 const CMD_ALL_SEND_CID: u8 = 2;
@@ -96,15 +106,20 @@ pub fn detect_card(
     })?;
     let mut idle = MmcCommand::none(CMD_GO_IDLE);
     idle.init_clocks = true;
-    host_ref.send_cmd(&idle)?;
+    step("go idle", CMD_GO_IDLE, 0, host_ref.send_cmd(&idle))?;
 
     // 2. v2 voltage handshake: a card that does not echo 0x1AA in the
     //    low bits is a v1-era card this core does not drive.
-    let if_cond = host_ref.send_cmd(&MmcCommand::with(
+    let if_cond = step(
+        "voltage handshake",
         CMD_SEND_IF_COND,
         IF_COND_ARG,
-        RespKind::R1,
-    ))?;
+        host_ref.send_cmd(&MmcCommand::with(
+            CMD_SEND_IF_COND,
+            IF_COND_ARG,
+            RespKind::R1,
+        )),
+    )?;
     if if_cond.word() & 0x0FFF != IF_COND_ARG & 0x0FFF {
         return Err(MmcError::Unsupported);
     }
@@ -113,7 +128,14 @@ pub fn detect_card(
     let mut ocr = 0;
     let mut powered = false;
     for _ in 0..OP_COND_ATTEMPTS {
-        let resp = app_cmd(host_ref, 0, ACMD_SEND_OP_COND, OP_COND_ARG, RespKind::R3)?;
+        let resp = match app_cmd(host_ref, 0, ACMD_SEND_OP_COND, OP_COND_ARG, RespKind::R3) {
+            Ok(resp) => resp,
+            Err(err @ (MmcError::Timeout | MmcError::Crc)) => {
+                log::warn!("sd: ACMD41 polling -> {err:?} (card absent or slow to power up?)");
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
         ocr = resp.word();
         if ocr & OCR_BUSY != 0 {
             powered = true;
@@ -121,27 +143,51 @@ pub fn detect_card(
         }
     }
     if !powered {
+        log::warn!(
+            "sd: ACMD41 never completed power-up ({} polls)",
+            OP_COND_ATTEMPTS
+        );
         return Err(MmcError::Timeout);
     }
     let block_addressed = ocr & OCR_CCS != 0;
 
     // 4. Identification: CID → RCA → CSD → select.
-    let cid = host_ref.send_cmd(&MmcCommand::with(CMD_ALL_SEND_CID, 0, RespKind::R2))?;
+    let cid = step(
+        "read CID",
+        CMD_ALL_SEND_CID,
+        0,
+        host_ref.send_cmd(&MmcCommand::with(CMD_ALL_SEND_CID, 0, RespKind::R2)),
+    )?;
     let rca = {
-        let resp = host_ref.send_cmd(&MmcCommand::with(CMD_SET_RELATIVE_ADDR, 0, RespKind::R1))?;
+        let resp = step(
+            "assign RCA",
+            CMD_SET_RELATIVE_ADDR,
+            0,
+            host_ref.send_cmd(&MmcCommand::with(CMD_SET_RELATIVE_ADDR, 0, RespKind::R1)),
+        )?;
         (resp.word() >> RCA_SHIFT) as u16
     };
-    let csd = host_ref.send_cmd(&MmcCommand::with(
+    let csd = step(
+        "read CSD",
         CMD_SEND_CSD,
         u32::from(rca) << RCA_SHIFT,
-        RespKind::R2,
-    ))?;
+        host_ref.send_cmd(&MmcCommand::with(
+            CMD_SEND_CSD,
+            u32::from(rca) << RCA_SHIFT,
+            RespKind::R2,
+        )),
+    )?;
     let sectors = csd_capacity(&csd)?;
-    host_ref.send_cmd(&MmcCommand::with(
+    step(
+        "select card",
         CMD_SELECT,
         u32::from(rca) << RCA_SHIFT,
-        RespKind::R1b,
-    ))?;
+        host_ref.send_cmd(&MmcCommand::with(
+            CMD_SELECT,
+            u32::from(rca) << RCA_SHIFT,
+            RespKind::R1b,
+        )),
+    )?;
 
     // 5. SCR: spec version + advertised bus widths.
     let scr = read_scr(host_ref, rca)?;

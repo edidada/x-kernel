@@ -284,12 +284,22 @@ impl DwMmcHost {
         host.writel(SDMMC_DBADDR, host.ring_base());
         // Route data completion through the device interrupt; pure
         // commands are polled via RINTSTS and stay unmasked.
-        host.writel(SDMMC_INTMASK, INT_DATA_OVER | INT_ACD | INT_ERRORS);
+        // Data-completion interrupts stay MASKED until the first parked
+        // transfer (`arm_irq_masks`): card detection runs fully polled,
+        // and an unmasked line would let the IRQ handler clear RINTSTS
+        // bits out from under the polling loops.
+        host.writel(SDMMC_INTMASK, 0);
         host.writel(
             SDMMC_CTRL,
             CTRL_INT_ENABLE | CTRL_DMA_ENABLE | CTRL_USE_IDMAC,
         );
         Ok(host)
+    }
+
+    /// Unmask the data-completion interrupts (called once, before the
+    /// first parked transfer — block I/O).
+    pub fn arm_irq_masks(&self) {
+        self.writel(SDMMC_INTMASK, INT_DATA_OVER | INT_ACD | INT_ERRORS);
     }
 
     /// The host slot index (disk naming + bus-instance label).
@@ -572,6 +582,7 @@ impl DwMmcHost {
         dir: DataDir,
         bytes: usize,
     ) -> Result<(), MmcError> {
+        self.arm_irq_masks();
         self.reset_ring();
         self.arm_descriptors(bytes);
         let blksz: u32 = if bytes.is_multiple_of(512) {
