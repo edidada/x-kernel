@@ -122,12 +122,12 @@ impl ScmiChannel {
         out_words: usize,
     ) -> Result<Vec<u32>, ScmiError> {
         self.wait_free()?;
-        // Claim the channel (clear FREE, keep the agent's ERROR flag for
-        // the rx side to see and clear — the board-verified U-Boot smt.c
-        // shape), and zero the flags word.
-        let status_word = self.shmem.read32(SMT_CHANNEL_STATUS);
-        self.shmem
-            .write32(SMT_CHANNEL_STATUS, status_word & !SMT_STATUS_FREE);
+        // Claim the channel the way Linux `__shmem_tx_prepare` does:
+        // writing 0 clears FREE AND a sticky ERROR flag left by any
+        // earlier failed transfer (SMT state lives in SRAM across
+        // reboots). With the flag washed here, an ERROR seen on the rx
+        // side unambiguously belongs to THIS transfer.
+        self.shmem.write32(SMT_CHANNEL_STATUS, 0);
         self.shmem.write32(SMT_CHANNEL_FLAGS, 0);
         self.shmem
             .write32(SMT_MSG_HEADER, scmi_header(msg_id, protocol));
@@ -148,14 +148,27 @@ impl ScmiChannel {
 
         self.wait_free()?;
         let status_word = self.shmem.read32(SMT_CHANNEL_STATUS);
+        let status = self.shmem.read32(SMT_PAYLOAD) as i32;
         if status_word & SMT_STATUS_ERROR != 0 {
-            // Clear the sticky ERROR flag so the next transfer starts
-            // clean (U-Boot smt.c read side).
+            // Clear the sticky flag so the next transfer starts clean.
+            // The dump distinguishes "agent wrote a response" from
+            // "agent flagged ERROR without responding".
             self.shmem
                 .write32(SMT_CHANNEL_STATUS, status_word & !SMT_STATUS_ERROR);
+            let dump: [u32; 7] = [
+                status_word,
+                self.shmem.read32(SMT_MSG_LENGTH),
+                self.shmem.read32(SMT_MSG_HEADER),
+                self.shmem.read32(SMT_PAYLOAD),
+                self.shmem.read32(SMT_PAYLOAD + 4),
+                self.shmem.read32(SMT_PAYLOAD + 8),
+                self.shmem.read32(SMT_PAYLOAD + 12),
+            ];
+            log::warn!(
+                "scmi-clk: msg {msg_id:#x} channel-error dump [status/len/hdr/p0..p3] {dump:02x?}"
+            );
             return Err(ScmiError::ChannelError);
         }
-        let status = self.shmem.read32(SMT_PAYLOAD) as i32;
         if status != SCMI_SUCCESS {
             // Dump the channel header + first payload words: distinguishes
             // "agent never wrote a response" (payload still holds our
