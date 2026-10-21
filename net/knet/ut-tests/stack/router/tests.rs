@@ -328,7 +328,7 @@ fn connected_source_change_preserves_route_precedence() {
     for (dev, entry) in [(first, primary), (second, competing), (first, secondary)] {
         router.add_ipv4_addr(dev, entry).unwrap();
     }
-    router.remove_primary_ipv4_addr(first).unwrap();
+    router.remove_first_ipv4_addr(first).unwrap();
     let destination = Ipv4Address::new(192, 0, 2, 99).into();
     let selected = router.table.lookup(&destination).unwrap();
     assert_eq!(selected.dev, first);
@@ -426,7 +426,7 @@ fn interleaved_interface_addresses_preserve_equal_prefix_route_precedence() {
 
     // Replacing an earlier address must not move the other device's route.
     router
-        .set_primary_ipv4_addr(first, valid_ipv4_cidr(Ipv4Address::new(10, 1, 0, 1), 24))
+        .set_first_ipv4_addr(first, valid_ipv4_cidr(Ipv4Address::new(10, 1, 0, 1), 24))
         .unwrap();
     assert_eq!(router.table.lookup(&destination).unwrap().dev, second);
     assert!(router.remove_ipv4_addr(second, second_primary.addr));
@@ -489,7 +489,7 @@ fn ipv4_address_capacity_matches_smoltcp_interface_limit() {
 }
 
 #[def_test]
-fn setting_primary_ipv4_address_keeps_secondary_addresses() {
+fn setting_first_ipv4_address_keeps_other_addresses() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let primary = Ipv4AddrEntry {
@@ -506,17 +506,17 @@ fn setting_primary_ipv4_address_keeps_secondary_addresses() {
     router.add_ipv4_addr(dev, secondary).unwrap();
 
     router
-        .set_primary_ipv4_addr(dev, valid_ipv4_cidr(primary.addr.address(), 16))
+        .set_first_ipv4_addr(dev, valid_ipv4_cidr(primary.addr.address(), 16))
         .unwrap();
     assert_eq!(router.ipv4_addr_entries(dev)[0], primary);
     assert_eq!(
-        router.set_primary_ipv4_addr(dev, secondary.addr),
+        router.set_first_ipv4_addr(dev, secondary.addr),
         Err(LinuxError::EEXIST)
     );
     assert_eq!(router.ipv4_addr_entries(dev), &[primary, secondary]);
 
     let replacement = valid_ipv4_cidr(Ipv4Address::new(203, 0, 113, 7), 24);
-    router.set_primary_ipv4_addr(dev, replacement).unwrap();
+    router.set_first_ipv4_addr(dev, replacement).unwrap();
 
     assert_eq!(router.ipv4_addr_entries(dev).len(), 2);
     assert_eq!(router.ipv4_addr_entries(dev)[0].addr, replacement);
@@ -526,7 +526,7 @@ fn setting_primary_ipv4_address_keeps_secondary_addresses() {
 }
 
 #[def_test]
-fn removing_primary_ipv4_address_keeps_secondary_addresses() {
+fn removing_first_ipv4_address_keeps_other_addresses() {
     let mut router = Router::new();
     let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     let primary = Ipv4AddrEntry {
@@ -542,7 +542,7 @@ fn removing_primary_ipv4_address_keeps_secondary_addresses() {
     router.add_ipv4_addr(dev, primary).unwrap();
     router.add_ipv4_addr(dev, secondary).unwrap();
 
-    router.remove_primary_ipv4_addr(dev).unwrap();
+    router.remove_first_ipv4_addr(dev).unwrap();
 
     assert_eq!(router.ipv4_addr_entries(dev), &[secondary]);
     assert_eq!(router.interface_ipv4_addr("lo"), Ok(secondary.addr));

@@ -19,7 +19,7 @@ use crate::{
     device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId, RxPoll},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
-        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot, Ipv4AddressSet},
+        interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
         ipv4::{self, Ipv4Error, Ipv4Header},
         router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
     },
@@ -92,7 +92,7 @@ impl Router {
     /// Returns the source address for an output route with an active device.
     ///
     /// `oif` is a stable interface index; `0` means the socket is unbound.
-    /// Limited broadcasts with a bound device use that device's primary
+    /// Limited broadcasts with a bound device use that device's first
     /// address (or `0.0.0.0`) without requiring a unicast route.
     ///
     /// # Errors
@@ -267,7 +267,7 @@ impl Router {
                 .any(|(_, entry)| entry.addr.is_directed_broadcast(address))
     }
 
-    /// Returns the primary IPv4 address of the device named `name`.
+    /// Returns the first IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
     /// a concurrent device removal cannot invalidate the resolved ID between
@@ -282,24 +282,24 @@ impl Router {
             .devices
             .device_id_by_name(name)
             .ok_or(LinuxError::ENODEV)?;
-        self.devices
-            .ipv4(dev)
-            .and_then(Ipv4AddressSet::primary_entry)
+        self.first_ipv4_entry(dev)
             .map(|entry| entry.addr)
             .ok_or(LinuxError::EADDRNOTAVAIL)
     }
 
     fn first_ipv4_addr_for_device(&self, ifindex: i32) -> Option<Ipv4Cidr> {
         let dev = NetDeviceId::new(ifindex)?;
-        self.devices
-            .ipv4(dev)?
-            .primary_entry()
-            .map(|entry| entry.addr)
+        self.first_ipv4_entry(dev).map(|entry| entry.addr)
+    }
+
+    /// Selects the address used by legacy interface queries and updates.
+    fn first_ipv4_entry(&self, dev: NetDeviceId) -> Option<Ipv4AddrEntry> {
+        self.devices.ipv4(dev)?.as_slice().first().copied()
     }
 
     #[cfg(unittest)]
     pub(crate) fn ipv4_addr_entries(&self, dev: NetDeviceId) -> &[Ipv4AddrEntry] {
-        self.devices.ipv4(dev).map_or(&[], Ipv4AddressSet::as_slice)
+        self.devices.ipv4(dev).map_or(&[], |addrs| addrs.as_slice())
     }
 
     pub(crate) fn has_ipv4_addr_entry(&self, dev: NetDeviceId, addr: Ipv4Cidr) -> bool {
@@ -347,12 +347,12 @@ impl Router {
         Ok(())
     }
 
-    /// Updates the primary IPv4 address on `dev` in its owning address table.
+    /// Updates the first IPv4 address on `dev` in its owning address table.
     ///
     /// Other addresses on the device remain unchanged. Updating an existing
     /// address resets its scope and broadcast fields like Linux
     /// `SIOCSIFADDR`; setting the same local address is a no-op.
-    pub(crate) fn set_primary_ipv4_addr(
+    pub(crate) fn set_first_ipv4_addr(
         &mut self,
         dev: NetDeviceId,
         addr: Ipv4Cidr,
@@ -360,11 +360,8 @@ impl Router {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        let primary = self
-            .devices
-            .ipv4(dev)
-            .and_then(Ipv4AddressSet::primary_entry);
-        if primary.is_some_and(|entry| entry.addr.address() == addr.address()) {
+        let current = self.first_ipv4_entry(dev);
+        if current.is_some_and(|entry| entry.addr.address() == addr.address()) {
             return Ok(());
         }
         let entry = Ipv4AddrEntry {
@@ -372,12 +369,12 @@ impl Router {
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: None,
         };
-        if primary.is_some() {
+        if let Some(current) = current {
             let old = self
                 .devices
                 .ipv4_mut(dev)
                 .ok_or(LinuxError::EADDRNOTAVAIL)?
-                .replace_primary(entry)?;
+                .replace(current.addr, entry)?;
             self.remove_ipv4_source_state_if_unowned(old.addr.address());
         } else {
             return self.add_ipv4_addr(dev, entry);
@@ -387,25 +384,17 @@ impl Router {
         Ok(())
     }
 
-    /// Removes the primary IPv4 address from `dev`.
+    /// Removes the first IPv4 address from `dev`.
     ///
     /// Other addresses on the device remain unchanged. An interface without
     /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
-    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: NetDeviceId) -> Result<(), LinuxError> {
+    pub(crate) fn remove_first_ipv4_addr(&mut self, dev: NetDeviceId) -> Result<(), LinuxError> {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
-        let Some(old) = self
-            .devices
-            .ipv4_mut(dev)
-            .ok_or(LinuxError::ENODEV)?
-            .remove_primary()
-        else {
-            return Ok(());
-        };
-        self.remove_ipv4_source_state_if_unowned(old.addr.address());
-        self.table.sync_ipv4_address_routes(&self.devices);
-        self.devices.sync_ipv4_addrs();
+        if let Some(entry) = self.first_ipv4_entry(dev) {
+            self.remove_ipv4_addr(dev, entry.addr);
+        }
         Ok(())
     }
 
@@ -450,19 +439,17 @@ impl Router {
         broadcast: Ipv4Address,
     ) -> Result<(), LinuxError> {
         let mut entry = self
-            .devices
-            .ipv4(dev)
-            .and_then(Ipv4AddressSet::primary_entry)
+            .first_ipv4_entry(dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?;
         entry.broadcast = Some(broadcast);
         self.devices
             .ipv4_mut(dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?
-            .replace_primary(entry)?;
+            .replace(entry.addr, entry)?;
         Ok(())
     }
 
-    /// Updates the prefix length of the primary IPv4 address on `dev`.
+    /// Updates the prefix length of the first IPv4 address on `dev`.
     ///
     /// Linux `SIOCSIFNETMASK` keeps `ifa_scope` and only recalculates
     /// `ifa_broadcast` when it still matches the old derived mask.
@@ -475,13 +462,12 @@ impl Router {
             return Err(LinuxError::EINVAL);
         }
         let mut entry = self
-            .devices
-            .ipv4(dev)
-            .and_then(Ipv4AddressSet::primary_entry)
+            .first_ipv4_entry(dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?;
         if entry.addr.prefix_len() == prefix_len {
             return Ok(());
         }
+        let old_addr = entry.addr;
         let has_broadcast_flag = self
             .devices
             .get_by_id(dev)
@@ -499,7 +485,7 @@ impl Router {
         self.devices
             .ipv4_mut(dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?
-            .replace_primary(entry)?;
+            .replace(old_addr, entry)?;
 
         self.table.sync_ipv4_address_routes(&self.devices);
         self.devices.sync_ipv4_addrs();

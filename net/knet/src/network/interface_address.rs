@@ -38,9 +38,9 @@ pub(crate) struct Ipv4AddrSnapshot {
 
 /// IPv4 addresses owned by one registered device.
 ///
-/// CIDRs are unique within the device. The first address is its default,
-/// called `primary` here; removing it promotes the next address. Replacement
-/// preserves this device-local order, and rejected mutations leave it intact.
+/// CIDRs are unique within the device. Mutations identify entries by CIDR;
+/// replacement preserves their device-local order. Callers select which
+/// address to update, and rejected mutations leave the set intact.
 /// Router enforces the shared stack's capacity and synchronizes derived state
 /// under its mutex. Route precedence belongs to the route table.
 #[derive(Default)]
@@ -62,10 +62,6 @@ impl Ipv4AddressSet {
         self.entry_index(addr).is_some()
     }
 
-    pub(crate) fn primary_entry(&self) -> Option<Ipv4AddrEntry> {
-        self.addresses.first().copied()
-    }
-
     /// Inserts a unicast CIDR, accepting an existing identity without changes.
     pub(crate) fn insert(&mut self, entry: Ipv4AddrEntry) -> Result<bool, LinuxError> {
         if !entry.addr.address().is_unicast() {
@@ -78,28 +74,26 @@ impl Ipv4AddressSet {
         Ok(true)
     }
 
-    /// Replaces all primary attributes without changing address order.
+    /// Replaces the entry identified by `addr` without changing address order.
     ///
-    /// Returns `EADDRNOTAVAIL` for an empty set, `EINVAL` for a non-unicast
-    /// address, or `EEXIST` for a duplicate CIDR. Errors leave the set intact.
-    pub(crate) fn replace_primary(
+    /// Returns `EADDRNOTAVAIL` when `addr` is absent, `EINVAL` for a non-unicast
+    /// replacement, or `EEXIST` for another entry's CIDR. Errors leave the set intact.
+    pub(crate) fn replace(
         &mut self,
+        addr: Ipv4Cidr,
         entry: Ipv4AddrEntry,
     ) -> Result<Ipv4AddrEntry, LinuxError> {
-        if self.addresses.is_empty() {
-            return Err(LinuxError::EADDRNOTAVAIL);
-        }
+        let index = self.entry_index(addr).ok_or(LinuxError::EADDRNOTAVAIL)?;
         if !entry.addr.address().is_unicast() {
             return Err(LinuxError::EINVAL);
         }
-        if self.entry_index(entry.addr).is_some_and(|index| index != 0) {
+        if self
+            .entry_index(entry.addr)
+            .is_some_and(|existing_index| existing_index != index)
+        {
             return Err(LinuxError::EEXIST);
         }
-        Ok(core::mem::replace(&mut self.addresses[0], entry))
-    }
-
-    pub(crate) fn remove_primary(&mut self) -> Option<Ipv4AddrEntry> {
-        self.remove(self.primary_entry()?.addr)
+        Ok(core::mem::replace(&mut self.addresses[index], entry))
     }
 
     pub(crate) fn remove(&mut self, addr: Ipv4Cidr) -> Option<Ipv4AddrEntry> {
