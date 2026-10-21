@@ -372,6 +372,7 @@ check_lints: check_hooks
 .PHONY: check_hooks
 check_hooks:
 	@bash .githooks/tests/pre-commit.sh
+	@bash .githooks/tests/pre-push.sh
 
 check_test_layout:
 	@$(XKMAKE) hygiene test-layout
