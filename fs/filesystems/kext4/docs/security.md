@@ -394,3 +394,11 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   snapshot、mount-wide inode-number map 或通用状态容器？
 - 文档是否区分了 core support、live KVFS syscall exposure 和路线图能力？
 - statfs 模式是否只改变 `blocks`，并保持 free/available/reserved/delalloc accounting 共享？
+
+## 可见长度的标量发布
+
+`Ext4Inode::size()` 只读取 acquire/release 发布的可见长度镜像，不借用 inode state，
+不保护 folio 生命周期或数据。`update_state` 是镜像更新的唯一入口，在 state write guard
+内完成修改与发布；不得绕过该入口直接修改 `visible_size`。需要一致属性组合的调用者
+仍取得 state read guard。truncate 仍按 VFS data/invalidation 和 folio 锁协议执行，
+不能用标量长度发布替代这些锁或在发布前暴露未初始化数据。

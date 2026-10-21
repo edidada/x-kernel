@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use ktime_types::TimestampLimits;
 
@@ -740,6 +743,9 @@ pub struct Ext4InodeStat {
 pub struct Ext4Inode {
     number: InodeNumber,
     state: RwLock<Ext4InodeState>,
+    // Scalar EOF readers need no metadata snapshot. Writers publish changes
+    // here under `state`; paired metadata readers still use that lock.
+    published_size: AtomicU64,
     writeback_lock: Mutex<()>,
     /// Speculative prealloc spaces owned by this inode (Linux:
     /// `i_prealloc_node`). They die with this inode object; see the
@@ -761,6 +767,7 @@ impl Ext4Inode {
                 is_extra_isize_expansion_disabled: false,
                 orphan: None,
             }),
+            published_size: AtomicU64::new(visible_size),
             writeback_lock: Mutex::new(()),
             prealloc_map: InodePreallocMap::new(),
         }
@@ -780,7 +787,7 @@ impl Ext4Inode {
     /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
     /// call any method on the same [`Ext4Inode`] that acquires the inode-state
     /// lock (e.g. [`with_state`](Self::with_state),
-    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`update_state`](Self::update_state),
     /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
     /// otherwise the current thread will self-deadlock.
     ///
@@ -814,7 +821,7 @@ impl Ext4Inode {
     /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
     /// call any method on the same [`Ext4Inode`] that acquires the inode-state
     /// lock (e.g. [`with_state`](Self::with_state),
-    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`update_state`](Self::update_state),
     /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
     /// otherwise the current thread will self-deadlock.
     ///
@@ -826,7 +833,17 @@ impl Ext4Inode {
     /// used on a path that assumes Linux-grade writer fairness.
     fn update_state<R>(&self, f: impl FnOnce(&mut Ext4InodeState) -> R) -> R {
         let mut state = sync::write_lock(&self.state);
-        f(&mut state)
+        let previous_size = state.visible_size;
+        let result = f(&mut state);
+        if state.visible_size != previous_size {
+            // Publish after the mutation and before releasing the writer lock,
+            // so another writer cannot publish a newer size ahead of this one.
+            // Acquire EOF loads observe the writes preceding size publication;
+            // folio/invalidation locks still protect page data and truncation.
+            self.published_size
+                .store(state.visible_size, Ordering::Release);
+        }
+        result
     }
 
     /// This inode's speculative prealloc map. The lock inside is a leaf owned
@@ -937,9 +954,12 @@ impl Ext4Inode {
         self.with_state(|state| state.disk_size())
     }
 
-    /// Returns the VFS-visible inode size in bytes.
+    /// Returns the published VFS-visible inode size in bytes without a state lock.
+    ///
+    /// This scalar sample is not a snapshot of other metadata. Use [`Self::sizes`]
+    /// or [`Self::stat`] when a consistent set of attributes is required.
     pub fn size(&self) -> u64 {
-        self.with_state(|state| state.size())
+        self.published_size.load(Ordering::Acquire)
     }
 
     /// Returns the `(visible_size, disk_size)` pair under one state lock.

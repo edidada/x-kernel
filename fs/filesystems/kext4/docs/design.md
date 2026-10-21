@@ -144,8 +144,13 @@ superblock borrow 的引用。只读调用可共享进入，仍会联合修改 s
 mount write guard。该挂载级锁不保护 KVFS inode cache、AddressSpace 或 open-file 生命周期。
 VFS inode 组合持有的 ext4 private state 以 per-inode
 `RwLock<Ext4InodeState>` 保护磁盘 metadata working state 和 delayed-allocation extents：
-只读路径（`size`/`stat`/`metadata_snapshot`/delalloc 查询）通过 `with_state` 以 read guard
+组合读取路径（`stat`/`sizes`/`metadata_snapshot`/delalloc 查询）通过 `with_state` 以 read guard
 共享进入，mutation 通过 `update_state` 以 write guard 独占；resident lifecycle 完全归 KVFS。
+单独的 `size()` 从同一 `Ext4Inode` 内的 `published_size` 做 acquire load，避免热读逐页更新
+共享读锁计数。它是 `state.visible_size` 的发布镜像：构造时初始化，所有 state mutation
+通过 `update_state` 串行化，并在可见长度变化时、释放 write guard 之前做 release store。
+这保证写者发布顺序与 state 修改顺序一致；单独的 size sample 不承诺与其他属性组成快照。
+PageCache 的 folio/invalidation 锁及 VFS 的 inode data 写锁继续承担原有职责。
 调用者不能假设 allocator 或 journal
 已有 per-group 级别的并行修改。可写文件打开计数由
 KVFS `VfsInode` 拥有，kext4 只在 release callback 中读取它。

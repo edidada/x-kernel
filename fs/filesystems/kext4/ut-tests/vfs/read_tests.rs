@@ -389,3 +389,79 @@ fn metadata_cache_retains_reused_hot_blocks_during_cold_stream() {
         assert!(mounted.resident_blocks <= 1024);
     }
 }
+
+struct TruncatingReadSink {
+    start_truncate: Arc<ksync::Semaphore>,
+    truncate_done: Arc<ksync::Semaphore>,
+    output: Vec<u8>,
+}
+
+impl iov_iter::IovSink for TruncatingReadSink {
+    fn count(&self) -> usize {
+        PAGE_SIZE_4K * 3 - self.output.len()
+    }
+
+    fn copy_to_iter(&mut self, src: &[u8]) -> kerrno::KResult<usize> {
+        self.output.extend_from_slice(src);
+        if self.output.len() == PAGE_SIZE_4K {
+            // The other task truncates only future folios, so it never waits
+            // for this locked first folio. No timing assumptions or reentry.
+            self.start_truncate.release();
+            self.truncate_done.acquire();
+        }
+        Ok(src.len())
+    }
+
+    fn revert(&mut self, _count: usize) -> kerrno::KResult<()> {
+        Err(kerrno::KError::InvalidInput)
+    }
+}
+
+#[def_test]
+fn ext4_buffered_read_observes_mid_batch_shrink_and_zeroes_regrowth() {
+    let (mut filesystem, _storage) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, 8083);
+    let (_super_block, file) = cached_file(
+        filesystem,
+        private,
+        SuperBlockFlags::empty(),
+        OpenFlags::READ_WRITE,
+    );
+    let input = vec![0x63; PAGE_SIZE_4K * 3];
+    assert_eq!(file.write_from(&input, &mut 0), Ok(input.len()));
+    let start_truncate = Arc::new(ksync::Semaphore::new(0));
+    let truncate_done = Arc::new(ksync::Semaphore::new(0));
+    let truncate_result = Arc::new(ksync::Mutex::new(None));
+    let writer_file = Arc::clone(&file);
+    let writer_start = Arc::clone(&start_truncate);
+    let writer_done = Arc::clone(&truncate_done);
+    let writer_result = Arc::clone(&truncate_result);
+    let writer = ktask::spawn(move || {
+        writer_start.acquire();
+        *writer_result.lock() = Some(writer_file.truncate(PAGE_SIZE_4K as u64));
+        writer_done.release();
+    });
+    let mut sink = TruncatingReadSink {
+        start_truncate: Arc::clone(&start_truncate),
+        truncate_done,
+        output: Vec::new(),
+    };
+    let mut position = 0;
+    let result = file.read_iter_from(&mut iov_iter::iov_iter_dest(&mut sink), &mut position);
+    // Also release the worker if a read error bypassed the first copy callback.
+    start_truncate.release();
+    writer.join();
+    assert_eq!(truncate_result.lock().take(), Some(Ok(())));
+    assert_eq!(result, Ok(PAGE_SIZE_4K));
+    assert_eq!(position, PAGE_SIZE_4K as u64);
+    assert_eq!(sink.output, vec![0x63; PAGE_SIZE_4K]);
+    assert_eq!(file.inode().size(), PAGE_SIZE_4K as u64);
+    assert_eq!(file.mapping().nrpages(), 1);
+    file.truncate(input.len() as u64).unwrap();
+    let mut output = vec![0xa5; input.len()];
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(output.len()));
+    assert_eq!(&output[..PAGE_SIZE_4K], &input[..PAGE_SIZE_4K]);
+    assert!(output[PAGE_SIZE_4K..].iter().all(|byte| *byte == 0));
+}

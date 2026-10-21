@@ -223,8 +223,7 @@ fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-            .unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
     assert_eq!(metadata.atime, timestamp);
     assert_eq!(metadata.ctime, timestamp);
     assert_eq!(metadata.mtime, timestamp);
@@ -246,8 +245,7 @@ fn initialized_legacy_inode_clamps_post_2038_timestamp() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-            .unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
     let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
     assert_eq!(metadata.atime, maximum);
     assert_eq!(metadata.ctime, maximum);
@@ -312,11 +310,30 @@ fn update_state_publishes_mutation_to_later_readers() {
     let (size, disk_size, uid) =
         inode.with_state(|state| (state.size(), state.disk_size(), state.uid()));
     assert_eq!(size, 1234);
+    assert_eq!(inode.size(), 1234);
     assert_eq!(disk_size, 5678);
     assert_eq!(uid, 42);
 }
 
-/// The three tests below exercise real `RwLock` behavior and therefore
+#[def_test]
+fn scalar_size_tracks_initial_growth_shrink_and_metadata_publication() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 4096;
+    let inode = test_inode(metadata);
+    assert_eq!(inode.size(), 4096);
+    for size in [8193, 17, 0, 4096] {
+        inode.set_size(size);
+        assert_eq!(inode.size(), size);
+        assert_eq!(inode.sizes().0, size);
+        assert_eq!(inode.stat().size, size);
+        // Publishing on-disk metadata must not replace VFS EOF with i_disksize.
+        let metadata = inode.metadata_snapshot();
+        inode.publish_metadata(metadata).unwrap();
+        assert_eq!(inode.size(), size);
+    }
+}
+
+/// The concurrent tests below exercise real synchronization behavior and therefore
 /// need the kernel scheduler (`ktask`) and kernel sync primitives
 /// (`ksync`), which only exist when building for the kernel
 /// (`target_os = "none"`). `make UNITTEST=y` builds exactly that target.
@@ -434,6 +451,34 @@ mod concurrent {
             WRITER_COUNT as u64,
             "serialized writers must not lose updates"
         );
+    }
+
+    #[def_test]
+    fn scalar_size_observes_completed_growth_and_shrink_across_tasks() {
+        let inode = Arc::new(test_inode(regular_inode_metadata()));
+        let published = Arc::new(Semaphore::new(0));
+        let consumed = Arc::new(Semaphore::new(0));
+        let writer_inode = Arc::clone(&inode);
+        let writer_published = Arc::clone(&published);
+        let writer_consumed = Arc::clone(&consumed);
+        let sizes = [4097, 3, 0, 8192];
+        let writer = spawn(move || {
+            for size in sizes {
+                writer_inode.set_size(size);
+                writer_published.release();
+                writer_consumed.acquire();
+            }
+        });
+        let mut observed = Vec::new();
+        for _ in sizes {
+            published.acquire();
+            observed.push((inode.size(), inode.sizes().0));
+            consumed.release();
+        }
+        writer.join();
+        for (actual, expected) in observed.into_iter().zip(sizes) {
+            assert_eq!(actual, (expected, expected));
+        }
     }
 
     #[def_test]
