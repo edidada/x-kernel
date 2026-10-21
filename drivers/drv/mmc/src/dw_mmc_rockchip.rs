@@ -54,6 +54,10 @@ pub struct DwMmcRockchipData {
     _irq: driver_base::DevIrq,
 }
 
+/// Host slot index allocator (`mmc_host->index`): probe order defines
+/// the slot number used for disk naming and DEVPATH components.
+static NEXT_SLOT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// The platform driver.
 pub struct DwMmcRockchipDriver;
 
@@ -63,7 +67,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
     fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<DwMmcRockchipData, ProbeError> {
         let regs: IoMap = dev.res().iomap(0)?;
         let info = dev.info();
-        let slot = u8::try_from(info.id().raw()).unwrap_or(0);
+        let slot = NEXT_SLOT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let fifo_depth = dev.fw().u32("fifo-depth").unwrap_or(0x100);
         let max_frequency = dev.fw().u32("max-frequency").unwrap_or(50_000_000);
 

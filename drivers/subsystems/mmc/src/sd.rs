@@ -140,14 +140,21 @@ pub fn detect_card(
     // 3. Voltage negotiation.
     let mut ocr = 0;
     let mut powered = false;
-    for _ in 0..OP_COND_ATTEMPTS {
+    // ACMD41 is a broadcast-style exchange: while the card is busy with
+    // its internal power-up it MAY return corrupted or missing responses
+    // (Linux's __mmc_send_op_cond retries through exactly this). Per-
+    // iteration errors are tolerated; only exhausting the budget (the
+    // spec's 1 s) fails the card.
+    for attempt in 0..OP_COND_ATTEMPTS {
         let resp = match app_cmd(host_ref, 0, ACMD_SEND_OP_COND, OP_COND_ARG, RespKind::R3) {
             Ok(resp) => resp,
-            Err(err @ (MmcError::Timeout | MmcError::Crc)) => {
-                log::warn!("sd: ACMD41 polling -> {err:?} (card absent or slow to power up?)");
+            // Cards mid-initialization commonly show Timeout (no
+            // response yet) or Crc (partial response); keep polling.
+            Err(MmcError::Timeout | MmcError::Crc) => continue,
+            Err(err) => {
+                log::warn!("sd: ACMD41 attempt {attempt} -> {err:?}");
                 return Err(err);
             }
-            Err(err) => return Err(err),
         };
         ocr = resp.word();
         if ocr & OCR_BUSY != 0 {
