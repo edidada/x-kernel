@@ -820,8 +820,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// changed. A changed PTE is reported without overwriting the current
     /// mapping, so callers can drop prepared resources and retry.
     ///
-    /// The replacement preserves the page size from `expected`. Empty flags
-    /// clear the entry and retire its data hold after TLB invalidation.
+    /// The replacement preserves the page size from `expected`. Physical
+    /// addresses are normalized to that leaf size for both capability validation
+    /// and PTE publication, including when `vaddr` is inside a huge leaf. Empty
+    /// flags clear the entry and retire its data hold after TLB invalidation.
     ///
     /// # Returns
     ///
@@ -846,7 +848,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             return Err(PteReplaceError::PageTable(PtError::InvalidAddress));
         }
 
-        self.check_mapping_reference(vaddr.into(), paddr)
+        self.check_mapping_reference(vaddr.into(), paddr.align_down(expected.page_size()))
             .map_err(PteReplaceError::PageTable)?;
         let (entry, size) = match self.get_entry_mut(vaddr) {
             Ok(value) => value,

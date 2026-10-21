@@ -437,7 +437,9 @@ invalidation. Sparse teardown handles partial-error
 prefixes through the same guard finalization.
 
 Raw remap/conditional replacement cannot redirect a managed leaf to a different
-page without a replacement capability. Move clones the destination hold before
+page without a replacement capability. The conditional check uses the expected
+leaf size, matching the normalized PTE write; normalizing a 2 MiB or 1 GiB
+interior PA must neither reject its own backing nor accept a different leaf. Move clones the destination hold before
 source withdrawal and keeps source holds through invalidation. Failed mapping
 or cloning leaves the source valid. `copy_from` checks that destination owned
 mappings have been explicitly withdrawn before its raw subtree replacement.

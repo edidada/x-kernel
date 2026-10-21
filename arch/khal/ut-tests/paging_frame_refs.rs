@@ -223,3 +223,53 @@ fn empty_owned_replacement_retires_both_old_and_unused_new_holds() {
     assert_eq!(new_meta.state(), FrameState::Referenced { references: 1 });
     drop((old_observer, new_observer));
 }
+
+#[def_test]
+fn huge_conditional_replacement_normalizes_physical_offsets() {
+    let allocator = global_allocator();
+    let size = super::PageSize::Size2M;
+    let owner = allocator
+        .alloc_frame_run(
+            size as usize / PAGE_SIZE_4K,
+            size as usize,
+            kalloc::UsageKind::VirtMem,
+        )
+        .unwrap();
+    let observer = owner.try_clone_run().unwrap();
+    let first = owner.phys_addr().as_usize() / PAGE_SIZE_4K;
+    let address = memaddr::VirtAddr::from_usize(0x2000000);
+    let interior = address + 77 * PAGE_SIZE_4K;
+    let mut table = super::PageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    edit.map_owned_sized(address, owner, size, super::MappingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let snapshot = edit.query_entry(interior).unwrap();
+    let physical = edit.query(interior).unwrap().0;
+    let writable = super::MappingFlags::READ | super::MappingFlags::WRITE;
+    edit.replace_if_same(interior, snapshot, physical, writable)
+        .unwrap();
+    assert_eq!(edit.query(interior).unwrap(), (physical, writable, size));
+    let current = edit.query_entry(interior).unwrap();
+    assert!(matches!(
+        edit.replace_if_same(interior, current, physical + size as usize, writable),
+        Err(page_table::PteReplaceError::PageTable(
+            super::PagingError::InvalidAddress
+        ))
+    ));
+    assert_eq!(edit.query_entry(interior).unwrap(), current);
+    edit.unmap(address).unwrap();
+    for index in 0..observer.frame_count() {
+        assert_eq!(
+            allocator.frame_meta(first + index).unwrap().state(),
+            FrameState::Referenced { references: 2 }
+        );
+    }
+    edit.finish();
+    for index in 0..observer.frame_count() {
+        assert_eq!(
+            allocator.frame_meta(first + index).unwrap().state(),
+            FrameState::Referenced { references: 1 }
+        );
+    }
+}

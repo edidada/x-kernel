@@ -501,7 +501,10 @@ mutation remains exclusive; the retirement path does not allocate a new queue.
 `move_mapping` clones a destination hold before installing its PTE, then retires
 the old source hold. Failed destination installation preserves the source.
 `MmSpace::move_pages` uses this operation for mremap. Raw physical replacement
-of an owned leaf is rejected; permission-only remap remains supported. `replace_owned_if_same` installs the new capability before the conditional PTE
+of an owned leaf is rejected; permission-only remap remains supported. Conditional
+replacement normalizes the supplied PA to the expected leaf size in both its
+capability check and its PTE write; an interior huge-page query remains a valid
+input for permission-only replacement, while another physical leaf is rejected. `replace_owned_if_same` installs the new capability before the conditional PTE
 replacement, restores the old capability on compare failure, and retires the
 old one after success. Anonymous and private-file COW use this transaction.
 
