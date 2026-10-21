@@ -412,6 +412,13 @@ of kalloc and does not acquire generic user-PTE references as part of this chang
 
 ## Managed Data Lifetime
 
+Empty-permission owned mapping requests never enter the hold index or install a
+leaf. An occupied present address still fails without changing its hold. Remap
+and conditional replacement to empty permissions clear and retire the managed
+leaf; they cannot leave a positive mapping hold behind a non-present PTE. The
+caller owns backing independently when it needs future fault rematerialization.
+
+
 `PagingHandler::MappingReference` must keep its advertised aligned physical
 range alive until destruction, with a stable, truthful byte count. Cloning must acquire another hold on the same
 allocation and preserve the original on failure. `map_owned` records that

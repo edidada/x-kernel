@@ -372,3 +372,9 @@ external runtimes cannot merge. External runtimes require the same offset. Merel
 matching Linear kind and page-offset continuity is insufficient after a leading
 range was unmapped and a different allocation filled that hole. Keeping owners
 distinct preserves the correct source when PTEs are invalidated and faulted again.
+
+
+An initially PROT_NONE shared-anonymous VMA retains its SharedPages backing
+without installing a PTE or taking a mapping hold. Restoring permissions can
+then fault the same backing into the page table. Unmapping that VMA ends the
+backing owner even when its address space remains alive.

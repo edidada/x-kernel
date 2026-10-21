@@ -100,3 +100,126 @@ fn interior_huge_unmap_retires_every_backing_page_after_finish() {
     }
     drop(observer);
 }
+
+#[def_test]
+fn empty_permissions_do_not_publish_mapping_holds() {
+    let allocator = global_allocator();
+    let address = memaddr::VirtAddr::from_usize(0x1800000);
+    for size in [super::PageSize::Size4K, super::PageSize::Size2M] {
+        let owner = allocator
+            .alloc_frame_run(
+                size as usize / PAGE_SIZE_4K,
+                size as usize,
+                kalloc::UsageKind::VirtMem,
+            )
+            .unwrap();
+        let observer = owner.try_clone_run().unwrap();
+        let first = owner.phys_addr().as_usize() / PAGE_SIZE_4K;
+        let mut table = super::PageTable::try_new().unwrap();
+        let mut edit = table.modify();
+        edit.map_owned_sized(address, owner, size, super::MappingFlags::empty())
+            .unwrap();
+        edit.finish();
+        assert_eq!(edit.query(address), Err(super::PagingError::NotMapped));
+        for index in 0..observer.frame_count() {
+            assert_eq!(
+                allocator.frame_meta(first + index).unwrap().state(),
+                FrameState::Referenced { references: 1 }
+            );
+        }
+        edit.map_owned_sized(
+            address,
+            observer.try_clone_run().unwrap(),
+            size,
+            super::MappingFlags::READ,
+        )
+        .unwrap();
+        assert_eq!(
+            edit.map_owned_sized(
+                address,
+                observer.try_clone_run().unwrap(),
+                size,
+                super::MappingFlags::empty()
+            ),
+            Err(super::PagingError::AlreadyMapped)
+        );
+        assert_eq!(edit.query(address).unwrap().0, observer.phys_addr());
+        edit.unmap(address).unwrap();
+        edit.finish();
+        assert_eq!(
+            allocator.frame_meta(first).unwrap().state(),
+            FrameState::Referenced { references: 1 }
+        );
+    }
+}
+
+#[def_test]
+fn empty_remap_and_replacement_retire_mapping_holds() {
+    let allocator = global_allocator();
+    let address = memaddr::VirtAddr::from_usize(0x1c00000);
+    for conditional in [false, true] {
+        let owner = allocator.alloc_frame(kalloc::UsageKind::VirtMem).unwrap();
+        let observer = owner.try_clone_ref().unwrap();
+        let meta = allocator.frame_meta(owner.pfn()).unwrap();
+        let mut table = super::PageTable::try_new().unwrap();
+        let mut edit = table.modify();
+        edit.map_owned(address, owner, super::MappingFlags::READ)
+            .unwrap();
+        edit.finish();
+        if conditional {
+            let snapshot = edit.query_entry(address).unwrap();
+            edit.replace_if_same(
+                address,
+                snapshot,
+                observer.phys_addr(),
+                super::MappingFlags::empty(),
+            )
+            .unwrap();
+        } else {
+            edit.remap(address, observer.phys_addr(), super::MappingFlags::empty())
+                .unwrap();
+        }
+        assert_eq!(edit.query(address), Err(super::PagingError::NotMapped));
+        assert_eq!(meta.state(), FrameState::Referenced { references: 2 });
+        edit.finish();
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
+        edit.map_owned(
+            address,
+            observer.try_clone_ref().unwrap(),
+            super::MappingFlags::READ,
+        )
+        .unwrap();
+        edit.unmap(address).unwrap();
+        edit.finish();
+        assert_eq!(meta.state(), FrameState::Referenced { references: 1 });
+    }
+}
+
+#[def_test]
+fn empty_owned_replacement_retires_both_old_and_unused_new_holds() {
+    let allocator = global_allocator();
+    let old = allocator.alloc_frame(kalloc::UsageKind::VirtMem).unwrap();
+    let old_observer = old.try_clone_ref().unwrap();
+    let old_meta = allocator.frame_meta(old.pfn()).unwrap();
+    let new = allocator
+        .alloc_frame_run(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
+        .unwrap();
+    let new_observer = new.try_clone_frame(0).unwrap();
+    let new_meta = allocator.frame_meta(new_observer.pfn()).unwrap();
+    let address = memaddr::VirtAddr::from_usize(0x1e00000);
+    let mut table = super::PageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    edit.map_owned(address, old, super::MappingFlags::READ)
+        .unwrap();
+    edit.finish();
+    let snapshot = edit.query_entry(address).unwrap();
+    edit.replace_owned_if_same(address, snapshot, new, super::MappingFlags::empty())
+        .unwrap();
+    assert_eq!(edit.query(address), Err(super::PagingError::NotMapped));
+    assert_eq!(old_meta.state(), FrameState::Referenced { references: 2 });
+    assert_eq!(new_meta.state(), FrameState::Referenced { references: 2 });
+    edit.finish();
+    assert_eq!(old_meta.state(), FrameState::Referenced { references: 1 });
+    assert_eq!(new_meta.state(), FrameState::Referenced { references: 1 });
+    drop((old_observer, new_observer));
+}

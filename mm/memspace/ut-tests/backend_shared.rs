@@ -64,3 +64,81 @@ fn shared_backing_survives_backend_drop_and_tlb_retirement() {
     edit.finish();
     assert_eq!(meta.state(), kalloc::FrameState::Unreferenced);
 }
+
+#[def_test]
+fn initially_inaccessible_shared_mappings_release_backing_on_unmap() {
+    let page = memaddr::PAGE_SIZE_4K;
+    let start = va!(0x2400000);
+    let mut space = crate::MmSpace::new_empty_user(start, 16 * page).unwrap();
+    for index in 0..4 {
+        let address = start + index * page;
+        let runtime =
+            crate::VmRuntimeRef::new_anon_shared(address, page, PageSize::Size4K).unwrap();
+        let crate::VmRuntimeRef::AnonShared(backend) = &runtime else {
+            panic!("expected a shared anonymous runtime");
+        };
+        let observer = backend.pages.frames[0].try_clone_frame(0).unwrap();
+        let meta = kalloc::global_allocator()
+            .frame_meta(observer.pfn())
+            .unwrap();
+        space
+            .map(
+                address,
+                page,
+                khal::paging::MappingFlags::empty(),
+                false,
+                runtime,
+            )
+            .unwrap();
+        assert_eq!(
+            space.page_table().query(address),
+            Err(khal::paging::PagingError::NotMapped)
+        );
+        space.unmap(address, page).unwrap();
+        assert_eq!(
+            meta.state(),
+            kalloc::FrameState::Referenced { references: 1 },
+            "an unmapped PROT_NONE VMA must leave no page-table hold"
+        );
+    }
+}
+
+#[def_test]
+fn initially_inaccessible_shared_mapping_refaults_after_read_permission_is_restored() {
+    let page = memaddr::PAGE_SIZE_4K;
+    let start = va!(0x2500000);
+    let mut space = crate::MmSpace::new_empty_user(start, 4 * page).unwrap();
+    let runtime = crate::VmRuntimeRef::new_anon_shared(start, page, PageSize::Size4K).unwrap();
+    let crate::VmRuntimeRef::AnonShared(backend) = &runtime else {
+        panic!("expected a shared anonymous runtime");
+    };
+    let observer = backend.pages.frames[0].try_clone_frame(0).unwrap();
+    let meta = kalloc::global_allocator()
+        .frame_meta(observer.pfn())
+        .unwrap();
+    space
+        .map_with_max_flags(
+            start,
+            page,
+            khal::paging::MappingFlags::empty(),
+            khal::paging::MappingFlags::READ,
+            false,
+            runtime,
+        )
+        .unwrap();
+    space
+        .protect(start, page, khal::paging::MappingFlags::READ)
+        .unwrap();
+    space
+        .populate_area(start, page, khal::paging::MappingFlags::READ)
+        .unwrap();
+    assert_eq!(
+        space.page_table().query(start).unwrap().0,
+        observer.phys_addr()
+    );
+    space.unmap(start, page).unwrap();
+    assert_eq!(
+        meta.state(),
+        kalloc::FrameState::Referenced { references: 1 }
+    );
+}

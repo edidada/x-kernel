@@ -223,3 +223,9 @@ reconstructing its PTEs through the wrong source. The merge predicate checks the
 physical translation offset and managed-owner identity. A regression trims the
 front of one allocation, maps different backing into the hole, requests semantic
 merge, then invalidates/refaults both ranges and verifies their separate contents.
+
+
+Shared anonymous mapping with empty permissions preserves only the runtime's
+backing owner. No non-present owned PTE is published, so unmap cannot strand a
+page-table hold until address-space destruction. Restored read permissions use
+the ordinary fault path to acquire a mapping hold.

@@ -631,7 +631,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     ///
     /// The reference covers every backing base page of a 4 KiB or larger leaf.
     /// It is retired after invalidation, without splitting a huge leaf or using
-    /// reference counts as a compound-page protocol.
+    /// reference counts as a compound-page protocol. Empty flags install no
+    /// leaf and drop the supplied hold after validation; an existing present
+    /// mapping still returns AlreadyMapped. A caller that later restores
+    /// access must retain its backing independently for fault rematerialization.
     ///
     /// # Errors
     /// Returns NotAligned for mismatched reference size or alignment, and the
@@ -656,6 +659,16 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
         if self.mapping_reference_key(address).is_some() {
             return Err(PtError::AlreadyMapped);
+        }
+        if flags.is_empty() {
+            // There is no hardware user to retain this hold. The backing
+            // runtime keeps its own owner for a later permission fault.
+            // Preserve the occupied-address error without allocating tables.
+            return match self.query(vaddr) {
+                Ok(_) => Err(PtError::AlreadyMapped),
+                Err(PtError::NotMapped) => Ok(()),
+                Err(error) => Err(error),
+            };
         }
         self.inner.mapping_refs.insert(address, reference);
         if let Err(error) = self.map(vaddr, paddr, size, flags) {
@@ -755,7 +768,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// Remaps an existing mapping to a new physical address with new flags.
     ///
     /// The virtual address must already be mapped. The page size is preserved
-    /// from the existing mapping.
+    /// from the existing mapping. Empty flags clear the entry and retain any
+    /// data hold in the retirement batch until `finish` completes invalidation.
     ///
     /// # Returns
     ///
@@ -784,9 +798,16 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         if !entry.is_present() {
             return Err(PtError::NotMapped);
         }
-        entry.set_paddr(paddr);
-        entry.set_flags(flags, size.is_huge());
+        if flags.is_empty() {
+            entry.clear();
+        } else {
+            entry.set_paddr(paddr);
+            entry.set_flags(flags, size.is_huge());
+        }
         self.flush(vaddr);
+        if flags.is_empty() {
+            self.retire_mapping_reference(vaddr.into());
+        }
         Ok(size)
     }
 
@@ -799,7 +820,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// changed. A changed PTE is reported without overwriting the current
     /// mapping, so callers can drop prepared resources and retry.
     ///
-    /// The replacement preserves the page size from `expected`.
+    /// The replacement preserves the page size from `expected`. Empty flags
+    /// clear the entry and retire its data hold after TLB invalidation.
     ///
     /// # Returns
     ///
@@ -842,9 +864,16 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             });
         }
 
-        entry.set_paddr(paddr.align_down(expected.page_size()));
-        entry.set_flags(flags, expected.page_size().is_huge());
+        if flags.is_empty() {
+            entry.clear();
+        } else {
+            entry.set_paddr(paddr.align_down(expected.page_size()));
+            entry.set_flags(flags, expected.page_size().is_huge());
+        }
         self.flush(vaddr);
+        if flags.is_empty() {
+            self.retire_mapping_reference(vaddr.into());
+        }
         Ok(current)
     }
 

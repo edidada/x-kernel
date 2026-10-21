@@ -472,6 +472,14 @@ capability below.
 
 ## Owned Data Mappings
 
+Empty permissions do not publish an owned leaf or register a mapping hold.
+The supplied hold is dropped after address/size validation and the occupied
+present-address check; no page-table allocation is needed. Runtime backing
+owners retain storage for later permission faults. Remap and conditional
+replacement with empty permissions clear the old leaf and retire holds through
+the normal TLB batch, so non-present entries never strand those holds.
+
+
 `PagingHandler::MappingReference` is a provider-defined lifetime capability.
 The HAL supplies `FrameRun<'static>`; generic test handlers can use an uninhabited
 reference type. `map_owned` accepts a base-page hold (including `FrameRef` via

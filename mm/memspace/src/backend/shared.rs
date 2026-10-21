@@ -199,9 +199,13 @@ impl BackendOps for SharedBackend {
 
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
         debug!("Shared::map: {:?} {:?}", range, flags);
-        for (vaddr, frame) in
-            pages_in(range, self.pages.size)?.zip(self.pages_starting_from(range.start))
-        {
+        let addresses = pages_in(range, self.pages.size)?;
+        if flags.is_empty() {
+            // SharedPages keeps the allocation for a later access fault.
+            // PROT_NONE has no present PTE and must not add a mapping hold.
+            return Ok(());
+        }
+        for (vaddr, frame) in addresses.zip(self.pages_starting_from(range.start)) {
             pgtbl
                 .map_owned_sized(
                     vaddr,
