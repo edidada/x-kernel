@@ -165,6 +165,9 @@ impl GeneralOptions {
     }
 
     /// Poll for send readiness and run the provided operation.
+    // Only the vsock stream path uses the blocking default; the rest of the
+    // stack passes an explicit nonblocking override.
+    #[cfg(feature = "vsock")]
     pub(crate) fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,

@@ -60,6 +60,7 @@ pub use socket::{
 pub(crate) use socket::{general, state};
 pub(crate) use stack::{router, socket_set};
 use subsys_net::{NetDevice, class::NET};
+#[cfg(feature = "vsock")]
 use subsys_vsock::{VsockDeviceImpl, class::VSOCK};
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};

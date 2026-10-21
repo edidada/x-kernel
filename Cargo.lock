@@ -1290,6 +1290,9 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kclk",
+ "khal",
+ "kspin",
+ "ktime_types",
  "log",
 ]
 
