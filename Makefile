@@ -386,13 +386,11 @@ hooks:
 	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
 	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
 
-# Catch the current branch up to the base branch. The base is remote/branch
-# (default origin/main, same variable and format as .githooks/pre-push);
-# the split keeps everything after the first slash so branch names like
-# release/2606 work. --autostash lets a dirty worktree survive the rebase.
-XK_REBASE_BASE ?= origin/main
+# Catch the current branch up to origin/main before pushing: the CI would
+# reject a stale branch as DIVERGED (the pre-push hook checks the same).
+# --autostash lets a dirty worktree survive the rebase untouched.
 rebase:
-	@b="$(XK_REBASE_BASE)"; git pull --rebase --autostash "$${b%%/*}" "$${b#*/}"
+	@git pull --rebase --autostash origin main
 
 ci-test: build
 	@set -eu; \

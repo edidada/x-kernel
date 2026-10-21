@@ -1,103 +1,28 @@
 #!/usr/bin/env bash
-# x-kernel shared pre-push hook: guard pushes against a stale base branch.
+# x-kernel shared pre-push hook: block pushes of branches that are behind
+# main -- the openKylin CI would reject them as DIVERGED before running a
+# single test. Strictly read-only: it never rewrites history.
 #
-# Pushing a branch that lags behind main makes the openKylin CI reject it
-# as DIVERGED before a single test runs. This hook catches that locally:
-# when the pushed branch is behind origin/main, the push is stopped with
-# the exact commands to catch up first. The hook is strictly read-only --
-# it never rewrites history and never performs a second network write.
-#
-# Escape hatches (set for a single push):
-#   SKIP_REBASE=1  git push ...   # push as-is even when behind
-#   SKIP_ALL=1     git push ...   # same, kept in sync with pre-commit
-#
-# Notes:
-#   * Only plain single-branch pushes are checked: tags, branch deletions,
-#     multi-refspec and detached-HEAD pushes pass untouched.
-#   * Pushing the base branch itself (e.g. main) is never interfered with.
-#   * Network failures degrade to a warning and never block the push.
-#   * All output goes to stderr, matching .githooks/pre-commit.
+# Skip for one push: SKIP_REBASE=1 git push ...   (or SKIP_ALL=1, kept in
+# sync with pre-commit). Output goes to stderr, matching pre-commit.
 
-# Never let a misconfigured environment block a push.
-if [ "${SKIP_ALL:-0}" = "1" ] || [ "${SKIP_REBASE:-0}" = "1" ]; then
-	echo "⏭️  pre-push: skip requested, pushing as-is." >&2
-	exit 0
-fi
+[ "${SKIP_REBASE:-0}" = "1" ] || [ "${SKIP_ALL:-0}" = "1" ] && exit 0
 
-REMOTE="${1:-}"
-GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
-
-# Only plain single-branch pushes are eligible.
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 mapfile -t LINES
-if [ -z "$REMOTE" ] || [ "${#LINES[@]}" -ne 1 ]; then
-	exit 0
-fi
-read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA <<<"${LINES[0]}"
-ZERO_SHA="0000000000000000000000000000000000000000"
-case "$LOCAL_REF:$REMOTE_REF" in
-refs/heads/*:refs/heads/*) ;;
-*) exit 0 ;;
-esac
-if [ "$LOCAL_SHA" = "$ZERO_SHA" ]; then
-	exit 0 # branch deletion
-fi
+[ "${#LINES[@]}" -eq 1 ] || exit 0                        # plain single-branch pushes only
+read -r LOCAL_REF LOCAL_SHA _ REMOTE_SHA <<<"${LINES[0]}"
+case "$LOCAL_REF" in refs/heads/*) ;; *) exit 0 ;; esac   # tags are none of its business
+[ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && exit 0  # branch deletion
+BRANCH="$(git symbolic-ref --quiet --short HEAD)" || exit 0              # detached / mid-rebase
+[ "refs/heads/$BRANCH" = "$LOCAL_REF" ] || exit 0                        # only the checked-out branch
 
-# Only the currently checked-out branch, never a detached HEAD or a rebase
-# that is already in progress.
-BRANCH="$(git symbolic-ref --quiet --short HEAD)" || exit 0
-[ "refs/heads/$BRANCH" = "$LOCAL_REF" ] || exit 0
-if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -e "$GIT_DIR/MERGE_HEAD" ]; then
-	exit 0
-fi
+git fetch --quiet origin main 2>/dev/null || exit 0        # offline must not block
+behind="$(git rev-list --count "HEAD..origin/main" 2>/dev/null)" || exit 0
+[ "$behind" -gt 0 ] || exit 0
 
-# The base branch: XK_REBASE_BASE (remote/branch, same variable and format
-# as `make rebase`) > origin/main > $REMOTE/main.
-BASE="${XK_REBASE_BASE:-}"
-if [ -z "$BASE" ]; then
-	if git show-ref --verify --quiet refs/remotes/origin/main; then
-		BASE="origin/main"
-	elif git show-ref --verify --quiet "refs/remotes/$REMOTE/main"; then
-		BASE="$REMOTE/main"
-	else
-		exit 0
-	fi
-fi
-BASE_REMOTE="${BASE%%/*}"
-BASE_BRANCH="${BASE#*/}"
-
-# Never interfere with a push of the base branch itself.
-if [ "refs/heads/$BASE_BRANCH" = "$REMOTE_REF" ]; then
-	exit 0
-fi
-
-# Refresh the base ref; being offline must not block the push.
-if ! git fetch --quiet --no-tags "$BASE_REMOTE" "$BASE_BRANCH" 2>/dev/null; then
-	echo "⚠️  pre-push: cannot fetch $BASE, skipping the staleness check." >&2
-	exit 0
-fi
-
-BEHIND="$(git rev-list --count "HEAD..$BASE" 2>/dev/null)" || {
-	echo "⚠️  pre-push: cannot compare against $BASE, skipping the staleness check." >&2
-	exit 0
-}
-if [ "$BEHIND" -eq 0 ]; then
-	exit 0
-fi
-
-HINT="make rebase"
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-	HINT="make rebase   # autostash stashes and restores the dirty worktree"
-fi
-echo "❌ pre-push: $BRANCH is $BEHIND commit(s) behind $BASE; the CI would reject it as DIVERGED." >&2
-echo "   catch up first, then push again:  $HINT" >&2
-echo "   (the check assumes the PR targets main; for another base push with XK_REBASE_BASE=<remote>/<branch> ...)" >&2
-# A branch that was already pushed diverges from its remote counterpart
-# once rebased, unless its pushed tip is already contained in the base's
-# history; in that case the follow-up push needs a lease, not plain push.
-if [ "$REMOTE_SHA" != "$ZERO_SHA" ] && ! git merge-base --is-ancestor "$REMOTE_SHA" "$BASE" 2>/dev/null; then
-	echo "   (already pushed before: the re-push needs --force-with-lease)" >&2
-	echo "   push anyway now: SKIP_REBASE=1 git push --force-with-lease ..." >&2
-else
-	echo "   push anyway now: SKIP_REBASE=1 git push ..." >&2
-fi
+echo "❌ pre-push: $BRANCH is $behind commit(s) behind origin/main; the CI would reject it as DIVERGED." >&2
+echo "   catch up first:  make rebase" >&2
+echo "   then push again:  git push --force-with-lease   # not pushed before: plain git push" >&2
+echo "   push anyway now:  SKIP_REBASE=1 git push ..." >&2
 exit 1
