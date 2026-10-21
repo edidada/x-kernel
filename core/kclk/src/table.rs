@@ -41,7 +41,7 @@ use alloc::{
 
 use crate::{
     ClkBuilder, ClkCore, ClkError, ClkFlags, ClkHwOps, ClkIndex, ClkRegAccess, ClkResult, ClkTable,
-    Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+    Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, MuxFlags,
     core::with_clk_lock,
 };
 
@@ -82,6 +82,10 @@ impl ParentRef {
 ///
 /// `parents` are referenced by name and resolved by [`register_table`] after
 /// every node exists, so the table may list children before their parents.
+///
+/// `Clone` lets a controller combine a `const` static table with runtime-built
+/// entries (custom PLL/frac ops) into one `register_table` batch.
+#[derive(Clone)]
 pub struct ClkBranch {
     /// Provider-relative DT index to publish this clock at.
     pub(crate) index: ClkIndex,
@@ -211,6 +215,10 @@ impl ClkBranch {
     }
 
     /// Mux clock (parent-selector field).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: the constructor carries the clock table plus its                   parent context, matching the firmware description"
+    )]
     pub const fn mux(
         index: ClkIndex,
         name: &'static str,
@@ -218,6 +226,7 @@ impl ClkBranch {
         shift: u8,
         mask: u32,
         table: Option<&'static [u8]>,
+        flags: MuxFlags,
         parents: &'static [&'static str],
     ) -> Self {
         Self::new(
@@ -230,6 +239,7 @@ impl ClkBranch {
                 shift,
                 mask,
                 table,
+                flags,
             },
         )
     }
@@ -299,6 +309,7 @@ impl ClkBranch {
 ///
 /// Every variant except [`Custom`](Self::Custom) is `const`-constructible; a
 /// table using only those variants can be a `static`.
+#[derive(Clone)]
 pub enum ClkNodeDesc {
     /// Fixed-rate clock (a crystal), no parent.
     FixedRate {
@@ -331,6 +342,8 @@ pub enum ClkNodeDesc {
         mask: u32,
         /// Optional parent-index translation table.
         table: Option<&'static [u8]>,
+        /// Mux policy flags.
+        flags: MuxFlags,
     },
     /// A programmable divider field.
     Divider {
@@ -362,6 +375,7 @@ pub enum ClkNodeDesc {
 }
 
 /// Mux sub-node description for [`ClkNodeDesc::Composite`].
+#[derive(Clone, Copy)]
 pub struct MuxDesc {
     /// Byte offset of the register word.
     pub offset: usize,
@@ -371,9 +385,12 @@ pub struct MuxDesc {
     pub mask: u32,
     /// Optional parent-index translation table.
     pub table: Option<&'static [u8]>,
+    /// Mux policy flags.
+    pub flags: MuxFlags,
 }
 
 /// Divider sub-node description for [`ClkNodeDesc::Composite`].
+#[derive(Clone, Copy)]
 pub struct DividerDesc {
     /// Byte offset of the register word.
     pub offset: usize,
@@ -388,6 +405,7 @@ pub struct DividerDesc {
 }
 
 /// Gate sub-node description for [`ClkNodeDesc::Composite`].
+#[derive(Clone, Copy)]
 pub struct GateDesc {
     /// Byte offset of the register word.
     pub offset: usize,
@@ -496,9 +514,16 @@ pub fn register_table(
             let node = &nodes[b.name];
             for (i, pref) in b.parent_refs().iter().enumerate() {
                 let parent = match pref {
-                    ParentRef::Local(pname) => {
-                        nodes.get(pname).ok_or(ClkError::InvalidParent)?.clone()
-                    }
+                    ParentRef::Local(pname) => match nodes.get(pname) {
+                        Some(n) => n.clone(),
+                        // Not in this batch: fall back to the global provider
+                        // registry (Linux resolves branch parent names through
+                        // the global clock lookup at registration time). This
+                        // is what lets a second controller (e.g. the RK3588
+                        // PMU CRU) hang its outputs off main-CRU parents.
+                        None => crate::provider::clk_get_core_by_name(pname)
+                            .map_err(|_| ClkError::InvalidParent)?,
+                    },
                     ParentRef::External(pid, idx) => crate::provider::clk_get_by_index(*pid, *idx)
                         .map_err(|_| ClkError::InvalidParent)?
                         .into_core(),
@@ -548,7 +573,8 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
             shift,
             mask,
             table,
-        } => Mux::into_ops(reg.clone(), *offset, *shift, *mask, *table),
+            flags,
+        } => Mux::into_ops(reg.clone(), *offset, *shift, *mask, *table, *flags),
         ClkNodeDesc::Divider {
             offset,
             shift,
@@ -559,7 +585,7 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
         ClkNodeDesc::Composite { mux, div, gate } => {
             let m = mux
                 .as_ref()
-                .map(|d| Mux::into_ops(reg.clone(), d.offset, d.shift, d.mask, d.table));
+                .map(|d| Mux::into_ops(reg.clone(), d.offset, d.shift, d.mask, d.table, d.flags));
             let dv = div.as_ref().map(|d| {
                 Divider::into_ops(reg.clone(), d.offset, d.shift, d.width, d.table, d.flags)
             });

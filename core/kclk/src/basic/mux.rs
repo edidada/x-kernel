@@ -6,7 +6,24 @@
 
 use alloc::sync::Arc;
 
+use bitflags::bitflags;
+
 use crate::{ClkError, ClkHwOps, ClkRateRequest, ClkRegAccess, ClkResult, Rate, RoundResult};
+
+bitflags! {
+    /// Policy bits for a [`Mux`]. Semantics match Linux's `CLK_MUX_*` flags
+    /// (`include/linux/clk-provider.h`).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct MuxFlags: u32 {
+        /// Write the parent-select field atomically via the hiword-mask
+        /// convention (Linux `CLK_MUX_HIWORD_MASK`): the upper 16 bits of the
+        /// written word are the write-enable mask, the lower 16 the value.
+        /// A single `reg_write`, not a read-modify-write, so a parent switch
+        /// cannot lose a race against a gate's fast-path enable on a shared
+        /// register word (Rockchip CRU style). Requires `shift + width <= 16`.
+        const HIWORD_MASK = 1 << 0;
+    }
+}
 
 /// A clock that picks one of `N` parents using a bit field in a register.
 ///
@@ -21,6 +38,7 @@ pub struct Mux {
     shift: u8,
     mask: u32,
     table: Option<&'static [u8]>,
+    flags: MuxFlags,
 }
 
 impl Mux {
@@ -34,6 +52,7 @@ impl Mux {
         shift: u8,
         mask: u32,
         table: Option<&'static [u8]>,
+        flags: MuxFlags,
     ) -> Self {
         Self {
             reg,
@@ -41,6 +60,7 @@ impl Mux {
             shift,
             mask,
             table,
+            flags,
         }
     }
 
@@ -51,8 +71,9 @@ impl Mux {
         shift: u8,
         mask: u32,
         table: Option<&'static [u8]>,
+        flags: MuxFlags,
     ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self::new(reg, offset, shift, mask, table))
+        Arc::new(Self::new(reg, offset, shift, mask, table, flags))
     }
 
     /// Read the raw register field value.
@@ -114,8 +135,16 @@ impl ClkHwOps for Mux {
     fn set_parent(&self, index: u8) -> ClkResult {
         let raw = self.index_to_raw(index)?;
         let field = (raw & self.mask) << self.shift;
-        self.reg
-            .reg_modify(self.offset, self.mask << self.shift, field);
+        if self.flags.contains(MuxFlags::HIWORD_MASK) && self.shift as u32 + self.mask.ilog2() < 16
+        {
+            // Atomic hiword write: the upper half carries the write-enable
+            // mask, so other fields in this word are untouched in one store.
+            let mask = self.mask << (self.shift + 16);
+            self.reg.reg_write(self.offset, mask | field);
+        } else {
+            self.reg
+                .reg_modify(self.offset, self.mask << self.shift, field);
+        }
         Ok(())
     }
 
