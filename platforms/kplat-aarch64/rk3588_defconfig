@@ -36,6 +36,14 @@ KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_FS_FAT is not set
 # KFEAT_DWARF is not set
 KFEAT_FS_TIMES=y
+# MMC/SD: subsystem + card-bus block consumer + DW host backend; the SD
+# controller's ciu/biu clocks live behind the EL3 SCMI agent.
+KFEAT_MMC=y
+KFEAT_DRIVER_MMC_BLOCK=y
+KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
+KFEAT_DRIVER_CLK_SCMI=y
+SCMI_SMC_ID=0x82000010
+SCMI_SHMEM_PADDR=0x10f000
 # KFEAT_NET is not set
 # KFEAT_TA_VERIFY_WITH_ROOT is not set
 # KFEAT_TEE is not set

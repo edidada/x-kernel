@@ -14,13 +14,15 @@ categories = ["os", "no-std"]
 default = []
 fixed-clock = []
 fixed-factor = []
+scmi-clock = []
 
 [dependencies]
 driver_base = { workspace = true }
 driver_host = { workspace = true }
+karch = { workspace = true }
+kbuild_config = { workspace = true }
 kclk = { workspace = true }
 log.workspace = true
-
 
 [lints]
 workspace = true

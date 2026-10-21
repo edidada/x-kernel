@@ -82,6 +82,12 @@ fn level3_drivers() {
     drv_clk::fixed_clock::register();
     #[cfg(feature = "fixed-factor")]
     drv_clk::fixed_factor::register();
+    #[cfg(feature = "clk-scmi")]
+    drv_clk::scmi_clock::register();
+    #[cfg(feature = "mmc-block")]
+    subsys_mmc::blk::register();
+    #[cfg(feature = "mmc-dwmmc-rockchip")]
+    drv_mmc::dw_mmc_rockchip::register();
     #[cfg(feature = "serial-pl011")]
     drv_serial::pl011::register();
     #[cfg(feature = "virtio-blk")]
@@ -192,12 +198,24 @@ fn enumerate_firmware_nodes_direct() {
         return;
     };
     for node in fdt.all_nodes() {
-        let Some(firmware_id) = node.compatibles().next() else {
+        // Naked clock-provider nodes (the SCMI `protocol@14` shape: no
+        // compatible, but a `#clock-cells` and a phandle consumers bind
+        // to) are enumeration products all the same — synthesize the
+        // generic "clock-provider" identity so a provider driver can
+        // claim them. Everything else without a compatible is skipped.
+        let mut all_compatibles: alloc::vec::Vec<&'static str> = node.compatibles().collect();
+        if all_compatibles.is_empty() {
+            if node.property_u32("#clock-cells").is_none() {
+                continue;
+            }
+            all_compatibles.push("clock-provider");
+        }
+        let Some(firmware_id) = all_compatibles.first().copied() else {
             continue;
         };
         let dev = firmware::FirmwareDevice {
             firmware_id,
-            all_compatibles: node.compatibles().collect(),
+            all_compatibles,
             source: firmware::FirmwareSource::DeviceTree,
             mmios: {
                 let reg_names = of::string_list(node, "reg-names");

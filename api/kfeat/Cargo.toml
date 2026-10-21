@@ -145,6 +145,14 @@ driver_rtc_goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish", "driver-init/rt
 driver_rtc_cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos", "driver-init/rtc-cmos"]
 driver_rtc_ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a", "driver-init/rtc-ls7a"]
 
+# MMC/SD (KFEAT_MMC / KFEAT_DRIVER_MMC_*): subsystem, card-bus block
+# consumer, DW host backend, and the SCMI clock provider the RK3588 SD
+# clocks live behind.
+mmc = ["driver-init/mmc"]
+driver_mmc_block = ["mmc", "driver-init/mmc-block"]
+driver_mmc_dwmmc_rockchip = ["mmc", "dep:drv-mmc", "driver-init/mmc-dwmmc-rockchip"]
+driver_clk_scmi = ["dep:drv-clk", "drv-clk/scmi-clock", "driver-init/clk-scmi"]
+
 # Backtrace
 # In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
 dwarf = ["backtrace/dwarf"]
@@ -215,6 +223,7 @@ drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
 drv-rtc = { workspace = true, optional = true }
+drv-mmc = { workspace = true, optional = true }
 boot_console = { workspace = true, optional = true }
 kdma.workspace = true
 pci = { workspace = true }

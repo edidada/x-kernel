@@ -429,6 +429,53 @@ config KFEAT_DRIVER_RTC_LS7A
       Claims the device-tree node when present; otherwise the composition
       root enumerates a board-static `rtc-ls7a` device from RTC_PADDR.
 
+config KFEAT_MMC
+    bool "MMC/SD subsystem (mmc core + card bus)"
+    help
+      Build the MMC/SD subsystem (subsys-mmc): the host contract, the mmc
+      card bus and the SD protocol core. A storage stack needs one of the
+      KFEAT_DRIVER_MMC_* host backends plus KFEAT_DRIVER_MMC_BLOCK.
+
+config KFEAT_DRIVER_MMC_BLOCK
+    bool "MMC block device (mmc_blk)"
+    depends on KFEAT_MMC
+    help
+      The card-bus consumer publishing discovered SD cards as block
+      devices (Gendisk major 179) into the block class.
+
+config KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    bool "DesignWare MMC host driver (Rockchip)"
+    depends on KFEAT_MMC && ARCH_AARCH64
+    help
+      DW MSHC host driver (dw_mmc-rockchip shape) for RK3588-class SD
+      controllers: MMIO + IDMAC data path, DTO interrupt, SCMI-backed
+      ciu/biu clocks, card detection onto the mmc card bus.
+
+config KFEAT_DRIVER_CLK_SCMI
+    bool "SCMI clock provider driver"
+    depends on ARCH_AARCH64
+    help
+      SCMI clock-domain provider over an SMC-dispatched SMT channel
+      (clk-scmi shape). RK3588 keeps the SD controller clocks behind the
+      EL3 SCMI agent; without this provider their consumers defer.
+
+config SCMI_SMC_ID
+    hex "SCMI SMC function id"
+    depends on KFEAT_DRIVER_CLK_SCMI
+    default 0x82000010
+    help
+      SMCCC function identifier for the SCMI SMC transport (DT
+      `arm,smc-id` on the `scmi` node; the protocol child cannot carry
+      it, so the board fact lands here).
+
+config SCMI_SHMEM_PADDR
+    hex "SCMI SMT shared memory base address"
+    depends on KFEAT_DRIVER_CLK_SCMI
+    default 0x10f000
+    help
+      Physical base of the SMT shared-memory channel (DT `scmi_shmem`
+      node; 0x100 bytes). Mapped through the device resource door.
+
 comment "Filesystem transport drivers"
 
 

@@ -1,0 +1,21 @@
+[package]
+name = "subsys-mmc"
+description = "MMC/SD subsystem: mmc host contract, card bus, SD protocol core, mmc_blk"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["mmc", "sd", "storage", "driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+driver_base = { workspace = true }
+subsys_block = { workspace = true }
+kerrno = { workspace = true }
+log = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

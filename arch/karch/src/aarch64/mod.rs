@@ -12,6 +12,7 @@ mod fp;
 mod irq;
 mod mmu;
 mod rng;
+mod smc;
 mod tlb;
 mod trap;
 
@@ -36,5 +37,6 @@ pub use mmu::{
     write_user_page_table,
 };
 pub use rng::{cpu_rng_available, init_cpu_rng, read_cpu_random};
+pub use smc::smc_call;
 pub use tlb::{flush_tlb, flush_tlb_asid, flush_tlb_va_asid};
 pub use trap::write_trap_vector_base;

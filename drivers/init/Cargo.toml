@@ -34,6 +34,13 @@ rtc-pl031 = ["rtc", "dep:drv-rtc", "drv-rtc/pl031"]
 rtc-goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish"]
 rtc-cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos"]
 rtc-ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a"]
+# MMC/SD: the subsystem (host contract + card bus + protocol core), the
+# card-bus block consumer, the DW host backend, and the SCMI clock
+# provider the RK3588 SD clocks live behind.
+mmc = ["dep:subsys_mmc"]
+mmc-block = ["mmc"]
+mmc-dwmmc-rockchip = ["mmc", "dep:drv-mmc", "drv-mmc/dwmmc-rockchip"]
+clk-scmi = ["dep:drv-clk", "drv-clk/scmi-clock"]
 
 [dependencies]
 driver_base = { workspace = true }
@@ -45,6 +52,9 @@ of.workspace = true
 log.workspace = true
 subsys_block_host = { workspace = true }
 subsys_rtc = { workspace = true, optional = true }
+subsys_mmc = { workspace = true, optional = true }
+subsys_mmc_host = { workspace = true, optional = true }
+drv-mmc = { workspace = true, optional = true }
 drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }

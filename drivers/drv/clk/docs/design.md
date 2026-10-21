@@ -138,3 +138,35 @@ QEMU `virt` 只有一个时钟节点（`apb-pclk`, phandle `0x8000`，已被 `fi
   **但 lookup 仍然指向它**（`FixedClockLookup.core` 是另一个强引用，且被 leak），
   所以时钟树实际不会释放。这与"boot-static"的选择一致，但意味着
   **移除 fixed-clock 设备后 provider 仍然可用**。已记录在"已知限制"。
+
+## scmi_clock（RK3588 SD 时钟的第二 provider）
+
+`src/scmi_clock.rs`（feature `scmi-clock`）是同一家族里的第二个 provider
+驱动，形状与 `fixed_clock` 相同（发布 `ClkProvider`、`Box::leak` lookup、
+boot-static），但能力来自固件而不是 DT 常量：
+
+```text
+DT 节点                                  probe
+  scmi { compatible="arm,scmi-smc";       └─ ScmiClockDriver::probe
+         shmem=<&scmi_shmem>;                 ├─ fw().u32("reg") == 0x14？（clock protocol 才认领）
+         arm,smc-id=… }                       ├─ iomap_region(SCMI_SHMEM_PADDR, 0x100)
+    protocol@14 { reg=<0x14>;                 ├─ CLOCK_ATTRIBUTES(9)：agent 不答 → Unsupported
+      #clock-cells = <1>; }                   ├─ ClkBuilder("scmi_cclk_sd"/"scmi_hclk_sd", ScmiClkOps)
+  }                                           └─ provide::<ClkProvider>(phandle, lookup)
+```
+
+- **枚举侧配合**（drivers/init）：无 compatible 但带 `#clock-cells` 的裸
+  provider 节点被合成 `compatible = "clock-provider"` 身份枚举，驱动据此
+  认领 `protocol@14`；phandle 即 provider key，与消费者
+  `clocks = <&scmi_clk SCMI_CCLK_SD>` 的 phandle 天然对齐，`ClkIndex`
+  就是 SCMI 时钟 id（CCLK_SD=9，HCLK_SD=23）。
+- **传输**：SMT 共享内存 + SMCCC fast call（`karch::smc_call`）。
+  SMC id 与 shmem 基址是板级事实（`SCMI_SMC_ID` / `SCMI_SHMEM_PADDR`
+  构建参数，`RTC_PADDR` 同款先例）——protocol 子节点自身无法携带父节点的
+  `arm,smc-id`。
+- **能力边界**：只做 `rate_get` / `enable` / `disable`。`set_rate`
+  明确 `NotSupported`（本 slice 的消费者不改上游频率，DW 控制器内部分频）；
+  未知 id 返回 `None`，其消费者维持原状（相当于没有 provider）。
+- 执行上下文：probe 可睡眠（SMC fast call 同步返回，无阻塞等待）；
+  `recalc_rate`/`enable` 会在 kclk 持锁上下文里发 SMC —— 与 Linux
+  `clk-scmi` 的 `.is_atomic = false` 语义一致。

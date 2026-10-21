@@ -1235,6 +1235,7 @@ dependencies = [
  "driver-host",
  "drv-block",
  "drv-clk",
+ "drv-mmc",
  "drv-rtc",
  "drv-serial",
  "drv-virtio",
@@ -1244,6 +1245,8 @@ dependencies = [
  "of",
  "pci",
  "subsys-block-host",
+ "subsys-mmc",
+ "subsys-mmc-host",
  "subsys-rtc",
 ]
 
@@ -1284,8 +1287,21 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "driver-host",
+ "karch",
+ "kbuild_config",
  "kclk",
  "log",
+]
+
+[[package]]
+name = "drv-mmc"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "log",
+ "subsys-mmc",
+ "subsys-mmc-host",
+ "unittest",
 ]
 
 [[package]]
@@ -2413,6 +2429,7 @@ dependencies = [
  "driver-init",
  "drv-block",
  "drv-clk",
+ "drv-mmc",
  "drv-rtc",
  "drv-serial",
  "drv-virtio",
@@ -5069,6 +5086,27 @@ dependencies = [
  "kerrno",
  "log",
  "strum",
+]
+
+[[package]]
+name = "subsys-mmc"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "log",
+ "subsys-block",
+ "unittest",
+]
+
+[[package]]
+name = "subsys-mmc-host"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "kpoll",
+ "ktask",
+ "subsys-mmc",
 ]
 
 [[package]]

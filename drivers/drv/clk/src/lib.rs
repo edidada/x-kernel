@@ -13,3 +13,6 @@ pub mod fixed_clock;
 
 #[cfg(feature = "fixed-factor")]
 pub mod fixed_factor;
+
+#[cfg(feature = "scmi-clock")]
+pub mod scmi_clock;

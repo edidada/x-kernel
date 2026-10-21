@@ -1,0 +1,25 @@
+[package]
+name = "drv-mmc"
+description = "MMC host controller drivers: DesignWare Mobile Storage Host (dw_mmc-rockchip)"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["mmc", "sd", "dw-mshc", "driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+dwmmc-rockchip = []
+
+[dependencies]
+subsys_mmc = { workspace = true }
+subsys_mmc_host = { workspace = true }
+driver_base = { workspace = true }
+log = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

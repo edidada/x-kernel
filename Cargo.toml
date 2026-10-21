@@ -202,6 +202,8 @@ subsys_char = { path = "drivers/subsystems/char", package = "subsys-char" }
 subsys_char_console = { path = "drivers/subsystems/char-console", package = "subsys-char-console" }
 subsys_display = { path = "drivers/subsystems/display", package = "subsys-display" }
 subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }
+subsys_mmc = { path = "drivers/subsystems/mmc", package = "subsys-mmc" }
+subsys_mmc_host = { path = "drivers/subsystems/mmc-host", package = "subsys-mmc-host" }
 subsys_rtc = { path = "drivers/subsystems/rtc", package = "subsys-rtc" }
 kclk = { path = "core/kclk" }
 driver_base = { path = "drivers/base", package = "driver-base" }
@@ -212,6 +214,7 @@ drv-serial = { path = "drivers/drv/serial" }
 serial_core = { path = "drivers/drv/serial/serial-core", package = "serial-core" }
 drv-clk = { path = "drivers/drv/clk" }
 drv-block = { path = "drivers/drv/block" }
+drv-mmc = { path = "drivers/drv/mmc" }
 drv-rtc = { path = "drivers/drv/rtc" }
 devnode = { path = "drivers/devnode" }
 # Internal: the device model's netlink uevent sink
