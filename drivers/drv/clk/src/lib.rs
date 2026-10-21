@@ -16,3 +16,6 @@ pub mod fixed_factor;
 
 #[cfg(feature = "scmi-clock")]
 pub mod scmi_clock;
+
+#[cfg(feature = "rk3588-cru")]
+pub mod rk3588_cru;

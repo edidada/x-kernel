@@ -1,0 +1,16 @@
+{
+  "requirements": [
+    {
+      "id": "req-clk-framework",
+      "gap_id": "clk-framework",
+      "title": "实现 clk framework(rockchip_clk_register_branches)",
+      "infra_type": "multi-provider",
+      "status": "landed",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/clk/rockchip/clk-rk3588.c",
+      "symbol": "rockchip_clk_register_branches",
+      "created_ts": 1792590378,
+      "confirmed_ts": null,
+      "file": "req-clk-framework.md"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"ts":1792590509,"kind":"gap","linux":"rst-rk3588/rockchip_register_restart_notifier","note":"CRU 软复位域+重启通知无 reset framework/重启钩子承接;USB/PCI probe 需要 reset,随下一切片立项"}

@@ -132,6 +132,9 @@ driver_ramdisk = ["dep:drv-block", "driver-init/ramdisk", "char"]
 # Second provider driver (transcription exercise): consumer+provider in one
 # probe; board-static node, parent = QEMU apb-pclk.
 driver_fixed_factor = ["dep:drv-clk", "drv-clk/fixed-factor", "driver-init/fixed-factor"]
+# RK3588 CRU: the SoC clock tree provider (PLLs/muxes/dividers/gates), the
+# prerequisite for every `clocks = <&cru N>` consumer on the board.
+driver_clk_rk3588_cru = ["dep:drv-clk", "drv-clk/rk3588-cru", "driver-init/rk3588-cru"]
 driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-init/ramdisk-static"]
 driver_console_pl011 = ["dep:boot_console", "boot_console/pl011"]
 driver_console_ns16550_mmio = ["dep:boot_console", "boot_console/ns16550-mmio"]

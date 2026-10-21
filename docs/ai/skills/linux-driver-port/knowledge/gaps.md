@@ -22,7 +22,7 @@ x-kernel 目前只实现了驱动模型的「主干」:MMIO / IRQ / coherent DMA
 
 - **状态**:`partial`
 - **现状**:v2:core/kclk 提供 prepare/enable/set_rate/notifier 全套语义;消费者 API 是 driver_base 的 Device::res().clk(name) -> ClkHandle(经 driver-host 桥接),缺 provider 时返回 ProbeError::Deferred。已有 provider:drv/clk 的 fixed-clock/fixed-factor。RK3588 CRU(PLL/门控/软复位)provider 未移植 —— USB/PCI 移植的前置。
-- **Linux 符号**:`clk_get`, `clk_prepare_enable`, `clk_disable_unprepare`, `clk_set_rate`, `clk_get_rate`
+- **Linux 符号**:`clk_get`, `clk_prepare_enable`, `clk_disable_unprepare`, `clk_set_rate`, `clk_get_rate`, `of_clk_add_hw_provider`, `of_clk_add_provider`, `clk_hw_register`, `clk_register_composite`, `clk_register_divider`, `clk_register_mux`, `clk_register_gate`, `clk_register_frac_branch`, `rockchip_clk_register_branches`, `rockchip_clk_register_plll`
 - **按维度定级**:
   - `clk-enable` (conditional): provider 就绪前 dev.res().clk 返回 Deferred(probe 泵重试);CRU provider 落地后直接 ClkHandle::prepare_enable  · 口径:clk-enable — works-around. Removed clk_prepare_enable×N (firmware provides clock).
   - `clk-rate` (conditional): RK3588 CRU provider 未移植前走 fallback(U-Boot 实测值作常量 + probe 日志标注来源)。Rockchip DT 通常只有 max-frequency 不是 clock-frequency,不能当分频分母。  · 口径:clk-rate — CRU provider 缺:dev.res().clk(name) Deferred,需 ldp requirements 决策 CRU 优先级。

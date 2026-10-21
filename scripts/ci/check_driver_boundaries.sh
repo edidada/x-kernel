@@ -57,6 +57,10 @@ DRV_HOST_ALLOW=(
     # from `memaddr`; the `of` dependency is the `earlycon` feature (boot
     # console bring-up), never the model driver path.
     "drivers/drv/serial/serial-core khal"
+    # E-05: the RK3588 PLL lock wait is a µs-scale hardware timed poll
+    # (Linux clk-pll.c uses udelay); probe/initcall context cannot sleep.
+    # khal::time::busy_wait is the kernel's udelay equivalent.
+    "drivers/drv/clk khal"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a
     # service; hwrng has exactly one consumer today.
@@ -262,4 +266,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 echo "driver boundaries: L0-a (family-agnostic core), L0-b (host-free contracts),"
-echo "  L1 (one resource acquisition path) and the E-01..E-04 register all hold."
+echo "  L1 (one resource acquisition path) and the E-01..E-05 register all hold."

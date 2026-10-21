@@ -84,6 +84,8 @@ fn level3_drivers() {
     drv_clk::fixed_factor::register();
     #[cfg(feature = "clk-scmi")]
     drv_clk::scmi_clock::register();
+    #[cfg(feature = "rk3588-cru")]
+    drv_clk::rk3588_cru::register();
     #[cfg(feature = "mmc-block")]
     subsys_mmc::blk::register();
     #[cfg(feature = "mmc-dwmmc-rockchip")]

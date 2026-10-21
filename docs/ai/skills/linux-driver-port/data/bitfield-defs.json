@@ -53,6 +53,111 @@
         "-10": "PROTOCOL_ERROR"
       },
       "diagnostic_note": "错误响应 length=8 = header(4)+status(4),证明 length 约定'含 header',可反推请求 length 字段约定。字段 name 用驱动 pack_header 的参数名(message/protocol/token)以便 check-layout 比对驱动实现。"
+    },
+    {
+      "id": "rk3588-pll-con0",
+      "name": "RK3588 PLL CON0",
+      "scope": "port",
+      "port": "rk3588-cru",
+      "ref": {
+        "tree": "linux",
+        "file": "drivers/clk/rockchip/clk-pll.c"
+      },
+      "spec_ref": "RK3588 TRM PLL_CON0; Linux clk-pll.c:856-866",
+      "width": 32,
+      "fields": [
+        {
+          "name": "m",
+          "ref_symbol": "RK3588_PLLCON0_M_MASK",
+          "claim": {
+            "lsb": 0,
+            "msb": 9
+          }
+        }
+      ]
+    },
+    {
+      "id": "rk3588-pll-con1",
+      "name": "RK3588 PLL CON1",
+      "scope": "port",
+      "port": "rk3588-cru",
+      "ref": {
+        "tree": "linux",
+        "file": "drivers/clk/rockchip/clk-pll.c"
+      },
+      "spec_ref": "RK3588 TRM PLL_CON1; Linux clk-pll.c:856-866",
+      "width": 32,
+      "fields": [
+        {
+          "name": "p",
+          "ref_symbol": "RK3588_PLLCON1_P_MASK",
+          "claim": {
+            "lsb": 0,
+            "msb": 5
+          }
+        },
+        {
+          "name": "s",
+          "ref_symbol": "RK3588_PLLCON1_S_MASK",
+          "ref_shift_symbol": "RK3588_PLLCON1_S_SHIFT",
+          "claim": {
+            "lsb": 6,
+            "msb": 8
+          }
+        },
+        {
+          "name": "pwrdown",
+          "ref_symbol": "RK3588_PLLCON1_PWRDOWN",
+          "claim": {
+            "lsb": 13,
+            "msb": 13
+          }
+        }
+      ]
+    },
+    {
+      "id": "rk3588-pll-con2",
+      "name": "RK3588 PLL CON2",
+      "scope": "port",
+      "port": "rk3588-cru",
+      "ref": {
+        "tree": "linux",
+        "file": "drivers/clk/rockchip/clk-pll.c"
+      },
+      "spec_ref": "RK3588 TRM PLL_CON2; Linux clk-pll.c:856-866",
+      "width": 32,
+      "fields": [
+        {
+          "name": "k",
+          "ref_symbol": "RK3588_PLLCON2_K_MASK",
+          "claim": {
+            "lsb": 0,
+            "msb": 15
+          }
+        }
+      ]
+    },
+    {
+      "id": "rk3588-pll-con6",
+      "name": "RK3588 PLL CON6",
+      "scope": "port",
+      "port": "rk3588-cru",
+      "ref": {
+        "tree": "linux",
+        "file": "drivers/clk/rockchip/clk-pll.c"
+      },
+      "spec_ref": "RK3588 TRM PLL_CON6; Linux clk-pll.c:856-866",
+      "width": 32,
+      "fields": [
+        {
+          "name": "lock_status",
+          "ref_symbol": "RK3588_PLLCON6_LOCK_STATUS",
+          "claim": {
+            "lsb": 15,
+            "msb": 15
+          }
+        }
+      ]
     }
   ]
 }

@@ -20,7 +20,17 @@
         "clk_prepare_enable",
         "clk_disable_unprepare",
         "clk_set_rate",
-        "clk_get_rate"
+        "clk_get_rate",
+        "of_clk_add_hw_provider",
+        "of_clk_add_provider",
+        "clk_hw_register",
+        "clk_register_composite",
+        "clk_register_divider",
+        "clk_register_mux",
+        "clk_register_gate",
+        "clk_register_frac_branch",
+        "rockchip_clk_register_branches",
+        "rockchip_clk_register_plll"
       ],
       "status": "partial",
       "effective": {

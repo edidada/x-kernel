@@ -27,6 +27,7 @@ ramdisk = ["dep:drv-block"]
 ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
 fixed-clock = ["dep:drv-clk"]
 fixed-factor = ["dep:drv-clk", "drv-clk/fixed-factor"]
+rk3588-cru = ["dep:drv-clk"]
 # RTC class + one backend per feature: the class carries the boot wall-clock
 # service, each feature compiles exactly one concrete clock in.
 rtc = ["dep:subsys_rtc"]

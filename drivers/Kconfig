@@ -348,6 +348,17 @@ config KFEAT_DRIVER_VIRTIO_MMIO
       Claims DT "virtio,mmio" nodes and dispatches to the per-family
       driver-core virtio drivers by probing the transport header.
 
+config KFEAT_DRIVER_CLK_RK3588_CRU
+    bool "RK3588 CRU clock controller"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Registers the RK3588 CRU clock tree (PLLs, muxes, dividers, gates,
+      armclks) into kclk under the DT node's phandle, so consumers resolve
+      `clocks = <&cru N>` to real rates. Translation of the pinned Linux
+      reference via the linux-driver-port harness; DT binding indices follow
+      the Orange Pi 5 Plus BSP header.
+
 config KFEAT_DRIVER_FIXED_FACTOR
     bool "fixed-factor clock driver (transcription exercise)"
     depends on KFEAT_CHAR
