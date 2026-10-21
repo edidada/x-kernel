@@ -313,7 +313,13 @@ fn inherits_workspace_lints(manifest: &str) -> std::result::Result<bool, toml::d
 fn tracked_rust_files_under(root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
     let output = Command::new("git")
         .current_dir(root)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "--"])
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ])
         .arg(directory)
         .output()
         .map_err(|source| Error::Spawn {
@@ -348,7 +354,8 @@ fn has_cargo_integration_tests(crate_root: &Path, rust_files: &[PathBuf]) -> boo
 }
 
 fn is_cargo_integration_test_root(path: &Path) -> bool {
-    path.parent().is_some_and(|parent| parent == Path::new("tests"))
+    path.parent()
+        .is_some_and(|parent| parent == Path::new("tests"))
         && path.extension().is_some_and(|extension| extension == "rs")
 }
 
@@ -403,8 +410,8 @@ fn collect_test_layout_violations(
         && has_handwritten_panic_expect_attr(content)
     {
         violations.push(format!(
-            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic \
-             #[expect]; rely on the test harness lint policy"
+            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic #[expect]; \
+             rely on the test harness lint policy"
         ));
     }
 }
@@ -497,9 +504,8 @@ fn collect_cargo_shear_ignore_violations(
             manifest_path.display()
         ))
     })?;
-    let has_ignored =
-        has_cargo_shear_ignored(&manifest, &["package", "metadata", "cargo-shear"])
-            || has_cargo_shear_ignored(&manifest, &["workspace", "metadata", "cargo-shear"]);
+    let has_ignored = has_cargo_shear_ignored(&manifest, &["package", "metadata", "cargo-shear"])
+        || has_cargo_shear_ignored(&manifest, &["workspace", "metadata", "cargo-shear"]);
     if has_ignored && !ignored_entry_has_reason(content) {
         violations.push(format!(
             "{}: cargo-shear ignored entries must explain why the dependency is hidden",
@@ -575,14 +581,13 @@ fn ignored_entry_has_reason(manifest: &str) -> bool {
 
 fn split_toml_line_comment(line: &str) -> (&str, Option<&str>) {
     line.split_once('#')
-        .map_or((line, None), |(before, comment)| (before.trim_end(), Some(comment)))
+        .map_or((line, None), |(before, comment)| {
+            (before.trim_end(), Some(comment))
+        })
 }
 
 fn toml_section_name(header: &str) -> Option<&str> {
-    header
-        .strip_prefix('[')?
-        .strip_suffix(']')
-        .map(str::trim)
+    header.strip_prefix('[')?.strip_suffix(']').map(str::trim)
 }
 
 fn is_cargo_shear_section(section: &str) -> bool {
@@ -833,11 +838,11 @@ mod tests {
     use std::io;
 
     use super::{
-        cargo_install_list_has_version, collect_cargo_shear_ignore_violations,
-        collect_test_layout_violations, has_cargo_integration_tests, has_inline_test_module,
-        has_handwritten_panic_expect_attr, ignored_entry_has_reason,
-        inherits_workspace_lints, is_src_test_file, reported_version, required_feature_test_targets,
-        tool_spawn_error, unexpected_tool_version, RequiredFeatureTestTarget,
+        RequiredFeatureTestTarget, cargo_install_list_has_version,
+        collect_cargo_shear_ignore_violations, collect_test_layout_violations,
+        has_cargo_integration_tests, has_handwritten_panic_expect_attr, has_inline_test_module,
+        ignored_entry_has_reason, inherits_workspace_lints, is_src_test_file, reported_version,
+        required_feature_test_targets, tool_spawn_error, unexpected_tool_version,
     };
 
     #[test]
@@ -902,7 +907,13 @@ mod tests {
             "#[mod_test]",
             "#[unittest::mod_test]",
         ] {
-            for visibility in ["", "pub ", "pub(crate) ", "pub(super) ", "pub(in crate::task) "] {
+            for visibility in [
+                "",
+                "pub ",
+                "pub(crate) ",
+                "pub(super) ",
+                "pub(in crate::task) ",
+            ] {
                 for include in [
                     r#"include!("../ut-tests/cases.rs");"#,
                     r#"include!(env!("TEST_CASES"));"#,
@@ -979,7 +990,8 @@ mod tests {
             "// #[expect(clippy::expect_used, reason = \"old text\")]\nfn helper() {}"
         ));
         assert!(!has_handwritten_panic_expect_attr(
-            "#[expect(\n    clippy::expect_used,\n    reason = \"test scenario: setup\"\n)]\nfn helper() {}"
+            "#[expect(\n    clippy::expect_used,\n    reason = \"test scenario: setup\"\n)]\nfn \
+             helper() {}"
         ));
 
         let mut violations = Vec::new();
@@ -1064,55 +1076,70 @@ mod tests {
             "[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n"
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored \
+             = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "# kirq is used only by cfg(unittest) tests.\n[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
+            "# kirq is used only by cfg(unittest) tests.\n[package.metadata.cargo-shear]\nignored \
+             = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata.cargo-shear] # kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n"
+            "[package.metadata.cargo-shear] # kirq is used only by cfg(unittest) tests.\nignored \
+             = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\nignored = [\"kirq\"] # used only by cfg(unittest) tests\n"
+            "[package.metadata.cargo-shear]\nignored = [\"kirq\"] # used only by cfg(unittest) \
+             tests\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[workspace.metadata.cargo-shear]\n# unittest is used only by cfg(unittest) tests.\nignored = [\"unittest\"]\n"
+            "[workspace.metadata.cargo-shear]\n# unittest is used only by cfg(unittest) \
+             tests.\nignored = [\"unittest\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
-            "[dependencies] # normal dependency section.\n[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
+            "[dependencies] # normal dependency section.\n[package.metadata.cargo-shear]\nignored \
+             = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\nignored-paths = [\"**/ut-tests/*.rs\"]\n# hidden because cfg(unittest) tests use it.\nignored = [\"unittest\"]\n"
+            "[package.metadata.cargo-shear]\nignored-paths = [\"**/ut-tests/*.rs\"]\n# hidden \
+             because cfg(unittest) tests use it.\nignored = [\"unittest\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\n# paths are ignored by layout convention.\nignored-paths = [\"**/ut-tests/*.rs\"]\nignored = [\"unittest\"]\n"
+            "[package.metadata.cargo-shear]\n# paths are ignored by layout \
+             convention.\nignored-paths = [\"**/ut-tests/*.rs\"]\nignored = [\"unittest\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\nignored-paths = [\n# paths are ignored by layout convention.\n[\"**/ut-tests/*.rs\"],\n]\nignored = [\"unittest\"]\n"
+            "[package.metadata.cargo-shear]\nignored-paths = [\n# paths are ignored by layout \
+             convention.\n[\"**/ut-tests/*.rs\"],\n]\nignored = [\"unittest\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
             "package.metadata.cargo-shear.ignored = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "# kirq is used only by cfg(unittest) tests.\npackage.metadata.cargo-shear.ignored = [\"kirq\"]\n"
+            "# kirq is used only by cfg(unittest) tests.\npackage.metadata.cargo-shear.ignored = \
+             [\"kirq\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
             "package.metadata.cargo-shear = { ignored = [\"kirq\"] }\n"
         ));
         assert!(ignored_entry_has_reason(
-            "package.metadata.cargo-shear = { ignored = [\"kirq\"] } # cfg(unittest) tests use kirq\n"
+            "package.metadata.cargo-shear = { ignored = [\"kirq\"] } # cfg(unittest) tests use \
+             kirq\n"
         ));
         assert!(!ignored_entry_has_reason(
             "[package.metadata]\ncargo-shear.ignored = [\"kirq\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata]\n# kirq is used only by cfg(unittest) tests.\ncargo-shear.ignored = [\"kirq\"]\n"
+            "[package.metadata]\n# kirq is used only by cfg(unittest) tests.\ncargo-shear.ignored \
+             = [\"kirq\"]\n"
         ));
         assert!(!ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\nignored = [\"unittest\"]\n"
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored \
+             = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\nignored = [\"unittest\"]\n"
         ));
         assert!(ignored_entry_has_reason(
-            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\n# unittest is used only by cfg(unittest) tests.\nignored = [\"unittest\"]\n"
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored \
+             = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\n# unittest is used only by \
+             cfg(unittest) tests.\nignored = [\"unittest\"]\n"
         ));
 
         let mut violations = Vec::new();

@@ -5,8 +5,7 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use xconfig::KconfigError;
-use xconfig::kconfig::Parser;
+use xconfig::{KconfigError, kconfig::Parser};
 
 #[test]
 fn test_parse_basic_config() {

@@ -193,12 +193,13 @@ impl DependencyResolver {
             // so we only need to check it once
             if let Some(first_dep) = deps.first()
                 && let Some(condition) = &first_dep.condition
-                    && !self.expr_evaluator.evaluate(condition, symbol_table) {
-                        return Err(DependencyError::ConditionNotMet {
-                            symbol: symbol.to_string(),
-                            condition: self.format_expr(condition),
-                        });
-                    }
+                && !self.expr_evaluator.evaluate(condition, symbol_table)
+            {
+                return Err(DependencyError::ConditionNotMet {
+                    symbol: symbol.to_string(),
+                    condition: self.format_expr(condition),
+                });
+            }
         }
 
         Ok(())
@@ -227,7 +228,11 @@ impl DependencyResolver {
     pub fn is_selected_by_enabled_symbol(&self, symbol: &str, symbol_table: &SymbolTable) -> bool {
         self.reverse_select_map
             .get(symbol)
-            .map(|selectors| selectors.iter().any(|selector| symbol_table.is_enabled(selector)))
+            .map(|selectors| {
+                selectors
+                    .iter()
+                    .any(|selector| symbol_table.is_enabled(selector))
+            })
             .unwrap_or(false)
     }
 

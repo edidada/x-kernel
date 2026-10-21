@@ -86,7 +86,9 @@ fn test_complete_workflow() {
         }
     }
     for attribute in allowances {
-        assert!(attribute.contains("reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits all resolved symbols;"));
+        assert!(attribute.contains(
+            "reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits all resolved symbols;"
+        ));
     }
 }
 

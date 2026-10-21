@@ -434,8 +434,8 @@ fn resolve_vsock_cid(args: &RunArgs) -> Result<u32> {
         Ok(fd) => fd,
         Err(error) => {
             log::warn!(
-                "cannot open /dev/vhost-vsock to probe CID availability ({error}); \
-                 using the preferred CID {preferred}"
+                "cannot open /dev/vhost-vsock to probe CID availability ({error}); using the \
+                 preferred CID {preferred}"
             );
             return Ok(preferred);
         }
@@ -460,15 +460,16 @@ fn resolve_vsock_cid(args: &RunArgs) -> Result<u32> {
             }
             _ => {
                 log::warn!(
-                    "cannot probe vsock CID availability ({error}); using the preferred CID {preferred}"
+                    "cannot probe vsock CID availability ({error}); using the preferred CID \
+                     {preferred}"
                 );
                 return Ok(preferred);
             }
         }
     }
     Err(Error::Message(format!(
-        "no free vsock guest CID in {preferred}..={last}; \
-         release one of them or pick another with --vsock-cid"
+        "no free vsock guest CID in {preferred}..={last}; release one of them or pick another \
+         with --vsock-cid"
     )))
 }
 
@@ -480,15 +481,15 @@ fn add_devices(
 ) -> Result<()> {
     let config = &bundle.context.config;
     let needs_block = (config.is_enabled("KFEAT_DRIVER_VIRTIO_BLK")
-            || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_BLK"))
-            && !args.no_block;
+        || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_BLK"))
+        && !args.no_block;
     let needs_net = (config.is_enabled("KFEAT_DRIVER_VIRTIO_NET")
-            || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_NET"))
-            && !args.no_net;
+        || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_NET"))
+        && !args.no_net;
     let needs_graphic = config.is_enabled("KFEAT_DRIVER_VIRTIO_GPU") && args.graphic;
     let wants_vsock = config.is_enabled("KFEAT_DRIVER_VIRTIO_SOCKET") && !args.no_vsock;
     let needs_rng = config.is_enabled("KFEAT_DRIVER_VIRTIO_RNG")
-            || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_RNG");
+        || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_RNG");
 
     let suffix = if needs_block || needs_net || needs_graphic || wants_vsock || needs_rng {
         virtio_device_suffix(config.virtio_bus())?
@@ -562,9 +563,9 @@ fn add_devices(
                     vsock_cid
                 );
             }
-            command.arg("-device").arg(format!(
-                "{device},id=virtiosocket0,guest-cid={vsock_cid}"
-            ));
+            command
+                .arg("-device")
+                .arg(format!("{device},id=virtiosocket0,guest-cid={vsock_cid}"));
         }
     }
 
@@ -585,9 +586,7 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     {
         Ok(output) => output,
         Err(error) => {
-            log::warn!(
-                "cannot probe {qemu_program} for {device} support: {error}; skipping vsock"
-            );
+            log::warn!("cannot probe {qemu_program} for {device} support: {error}; skipping vsock");
             return false;
         }
     };
@@ -602,9 +601,7 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     let is_supported = output_contains_device(&output.stdout, device)
         || output_contains_device(&output.stderr, device);
     if !is_supported {
-        log::warn!(
-            "{qemu_program} does not support {device}; continuing without a vsock device"
-        );
+        log::warn!("{qemu_program} does not support {device}; continuing without a vsock device");
     }
     is_supported
 }

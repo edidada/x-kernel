@@ -285,8 +285,7 @@ PLATFORM_KPLAT_X86_64=y
     assert_eq!(
         symbol_table.get_value("PLATFORM"),
         Some("kplat-x86_64".to_string()),
-        "Broken defconfig: PLATFORM should be auto-corrected to 'kplat-x86_64' (derived \
-         symbol)"
+        "Broken defconfig: PLATFORM should be auto-corrected to 'kplat-x86_64' (derived symbol)"
     );
 }
 

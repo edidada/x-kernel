@@ -92,6 +92,15 @@ UAPP_TOOL := env \
 		--target-dir $(UAPP_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p uapp --
+# linux-driver-port skill harness (docs/ai/skills/linux-driver-port). Host-side
+# tool only: it reads data/*.json and the vendored reference trees, never the
+# kernel workspace.
+LDP_TARGET_DIR ?= $(XTASK_TARGET_DIR)
+LDP := env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
+	cargo run --quiet \
+		--target-dir $(LDP_TARGET_DIR) \
+		--manifest-path xtask/Cargo.toml \
+		-p ldp --
 
 # QEMU virtio-blk backing file. Distinct from RAMDISK_IMG (embedded into the
 # kernel at build time when KFEAT_DRIVER_RAMDISK_STATIC=y).
@@ -168,6 +177,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_boundaries check_host_tests fmt hooks clean distclean symbolize
+.PHONY: ldp ldp-check ldp-check-data ldp-gen-doc ldp-golden ldp-evolve ldp-requirements ldp-test
 .PHONY: ci-test
 
 all: build
@@ -356,6 +366,42 @@ ramdisk_img:
 
 install-tools:
 	@$(XKMAKE) hygiene install-tools
+
+# ---- linux-driver-port harness (docs/ai/skills/linux-driver-port) ----------
+
+## ldp CLI 总览。
+ldp:
+	@$(LDP) help
+
+## 完整验证门:参考树就位 + 数据完整 + 布局声明 vs 参考真值。
+ldp-check:
+	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout
+
+## 不依赖参考树的轻量验证门(改完 JSON 后快速自检 + 重生成文档):
+ldp-check-data:
+	@$(LDP) check-data && $(LDP) golden && $(LDP) gen-doc
+
+ldp-gen-doc:
+	@$(LDP) gen-doc
+
+ldp-golden:
+	@$(LDP) golden
+
+## 聚合轨迹并展示可发布候选(Ch8 离线进化)。
+ldp-evolve:
+	@$(LDP) staging aggregate && $(LDP) staging review
+
+## 列需求 issue(看哪些待人工确认)。
+ldp-requirements:
+	@$(LDP) requirements list
+
+## ldp 自身单测(xtask workspace)。
+ldp-test:
+	@env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
+		cargo test --quiet --target-dir $(LDP_TARGET_DIR) \
+		--manifest-path xtask/Cargo.toml -p ldp
+
+# ---- end ldp ---------------------------------------------------------------
 
 # Type-check a single workspace crate with the full resolved Kconfig feature
 # set (kernel crates need kfeat features like kalloc/slab to compile outside

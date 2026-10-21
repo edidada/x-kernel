@@ -116,12 +116,14 @@ impl ConfigGenerator {
             let value = &config[key];
 
             content.push_str(
-                "#[expect(clippy::allow_attributes, reason = \"CG-024-lint-exceptions: Generated constants are consumed by \
-                 different platform and feature subsets, so dead_code expectations are unreliable\")]\n",
+                "#[expect(clippy::allow_attributes, reason = \"CG-024-lint-exceptions: Generated \
+                 constants are consumed by different platform and feature subsets, so dead_code \
+                 expectations are unreliable\")]\n",
             );
             content.push_str(
-                "#[allow(dead_code, reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits all resolved symbols; each consumer \
-                 uses only its platform and feature subset\")]\n",
+                "#[allow(dead_code, reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits \
+                 all resolved symbols; each consumer uses only its platform and feature \
+                 subset\")]\n",
             );
 
             // Strip CONFIG_ prefix to look up in type_map
@@ -183,7 +185,10 @@ impl ConfigGenerator {
                 // never passed through the normalizing SymbolTable.
                 let canonical_hex =
                     crate::kconfig::canonical_symbol_value(symbol_type, value.to_string());
-                content.push_str(&format!("pub const {}: usize = {};\n\n", key, canonical_hex));
+                content.push_str(&format!(
+                    "pub const {}: usize = {};\n\n",
+                    key, canonical_hex
+                ));
                 Ok(true)
             }
 

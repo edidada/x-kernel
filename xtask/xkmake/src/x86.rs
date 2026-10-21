@@ -215,7 +215,12 @@ fn uefi_image_size(file_sizes: &[u64]) -> Result<u64> {
 }
 
 fn build_boot_stub(context: &BuildContext) -> Result<()> {
-    cargo_build(context, "boot/x86_64-boot-stub/Cargo.toml", "x86_64-unknown-none")?.run()
+    cargo_build(
+        context,
+        "boot/x86_64-boot-stub/Cargo.toml",
+        "x86_64-unknown-none",
+    )?
+    .run()
 }
 
 fn build_uefi_loader(context: &BuildContext) -> Result<()> {

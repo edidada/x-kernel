@@ -289,12 +289,18 @@ mod tests {
         assert!(validate_guest_completion(passed).is_err());
         assert!(validate_guest_completion(persisted).is_err());
         assert!(validate_guest_completion(&format!("{passed}\r\n{persisted}\r\n")).is_ok());
-        assert!(validate_guest_completion(&format!(
-            "{passed}\n=== UNITTEST_STATUS: TESTS_FAILED ===\n{persisted}\n"
-        )).is_err());
-        assert!(validate_guest_completion(&format!(
-            "{passed}\nFailed to write coverage data: Io\nFailed to flush filesystem: Io\n"
-        )).is_err());
+        assert!(
+            validate_guest_completion(&format!(
+                "{passed}\n=== UNITTEST_STATUS: TESTS_FAILED ===\n{persisted}\n"
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_guest_completion(&format!(
+                "{passed}\nFailed to write coverage data: Io\nFailed to flush filesystem: Io\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

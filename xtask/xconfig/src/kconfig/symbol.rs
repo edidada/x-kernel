@@ -114,9 +114,10 @@ impl SymbolTable {
 
             // Track if value actually changed
             if old_value != Some(canonical_value)
-                && !self.changed_symbols.contains(&name.to_string()) {
-                    self.changed_symbols.push(name.to_string());
-                }
+                && !self.changed_symbols.contains(&name.to_string())
+            {
+                self.changed_symbols.push(name.to_string());
+            }
         }
     }
 

@@ -31,6 +31,10 @@ Current skills:
 - `code-guidelines/`:
   executable coding and code-review conventions for Rust kernel code,
   backed by `docs/coding-guidelines/`.
+- `linux-driver-port/`:
+  harness-backed workflow for porting Linux C drivers (platform/PCI) to
+  x-kernel Rust, with the `ldp` CLI validation gates and vendored
+  reference trees under `data/references/`.
 - `test-harness/`:
   shared Starry Test Harness workflow for regression cases,
   suite registration, execution, and result inspection.

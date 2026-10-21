@@ -1,0 +1,25 @@
+{
+  "$comment": "Golden 回归基线。把 ls7a-rtc walkthrough 声明的映射/缺口变成机器可查的断言。改了数据,ldp golden ls7a-rtc 立刻告诉你有没有把 walkthrough 带歪(文档/数据漂移检测)。",
+  "id": "ls7a-rtc",
+  "title": "Linux rtc-loongson → x-kernel LS7A RTC 完整走查(v2 设备模型)",
+  "source_doc": "examples/ls7a-rtc-walkthrough.md",
+  "real_impl": {
+    "hardware_layer": "drivers/drv/rtc/src/ls7a.rs",
+    "protocol_layer": "drivers/drv/rtc/src/ls7a_toy.rs"
+  },
+  "expected_api_mappings": [
+    {"linux": "of_match_table", "xkernel_contains": "PlatformId", "source_substring": "drivers/base/src/bus/platform_bus.rs"},
+    {"linux": "devm_platform_ioremap_resource", "xkernel_contains": "iomap", "source_substring": "drivers/base/src/device.rs"},
+    {"linux": "readl", "xkernel_contains": "read32", "source_substring": "drivers/base/src/devres/iomap.rs"},
+    {"linux": "devm_rtc_device_register", "xkernel_contains": "class::RTC", "source_substring": "drivers/subsystems/rtc/src/class.rs"},
+    {"linux": "platform_set_drvdata", "xkernel_contains": "Data", "source_substring": "drivers/base/src/driver.rs"},
+    {"linux": "module_platform_driver", "xkernel_contains": "declare_driver", "source_substring": "drivers/base/src/driver.rs"}
+  ],
+  "expected_gaps": [],
+  "expected_verdict": "可完整工作(读时钟;alarm/set_time 属能力裁剪,与 Linux 同名变体对齐)",
+  "assertions": [
+    "expected_api_mappings 里每条都能在 api-mapping.json 找到对应条目(否则 walkthrough 引用了编造的 API)",
+    "expected_gaps 为空:该驱动不依赖任何缺失子系统,一个缺口都不该被编造出来",
+    "映射的 source_substring 都指向 v2 的 drivers/base|drivers/subsystems 路径(防旧框架词汇回流)"
+  ]
+}

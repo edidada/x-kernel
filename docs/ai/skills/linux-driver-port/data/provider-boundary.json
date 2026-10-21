@@ -1,0 +1,257 @@
+{
+  "$comment": "Provider 边界政策(判据 + A/B/concrete 三分 + per-gap 评估记录)。与 gaps.json 分离:gaps.json 存粗分类(infra_type),本文件存「为什么是 provider」的细判据 + 边界表。判据来自对 provider 滑坡的反模式分析。per-gap 评估留空(渐进填充,b 选项):现有分类是凭直觉的,未逐条论证——WARN nudge 提醒补,不阻塞。",
+  "criteria": [
+    {
+      "id": "physical-infra",
+      "name": "物理基础设施",
+      "question": "是 SoC 物理性服务设施(供时钟/供电/引脚/映射),物理存在?",
+      "pass_means": "倾向 provider(A 类能力)",
+      "fail_means": "具体设备 → 不是 provider"
+    },
+    {
+      "id": "multi-producer",
+      "name": "多生产者",
+      "question": "该能力有 ≥2 个独立来源,各管自己的命名空间?",
+      "pass_means": "多 provider 注册表",
+      "fail_means": "单一来源 → 直接写具体类型,不抽 provider"
+    },
+    {
+      "id": "consumer-generic",
+      "name": "消费者泛化",
+      "question": "消费者写「我要这个能力」,不关心是谁提供的(按名字/id 取)?",
+      "pass_means": "consumer API 走 Device::res()(driver-base)",
+      "fail_means": "消费者绑定具体实例 → device class(B 类),不是 provider"
+    },
+    {
+      "id": "contract-cross-kernel",
+      "name": "契约跨内核稳定",
+      "question": "能力语义在 Linux/RTOS/x-kernel 高度一致?",
+      "pass_means": "OS-agnostic 的领地",
+      "fail_means": "数据面语义分歧 → 不抽 provider,每内核重写"
+    },
+    {
+      "id": "cost-benefit",
+      "name": "收益 > 成本",
+      "question": "至少 N 个实现 × M 个消费者(provider trait 有足够复用面)?",
+      "pass_means": "值得抽",
+      "fail_means": "1×1 纯样板成本 → 不抽"
+    }
+  ],
+  "classification": {
+    "A_provider_capability": {
+      "desc": "横向「我能提供什么能力」,多个 provider 各提供一部分,驱动按名字/id 消费。OS-agnostic 的目标:换内核,能力获取方式不变。",
+      "examples": [
+        "clk",
+        "regulator",
+        "gpio",
+        "pinctrl",
+        "phy",
+        "regmap",
+        "DMA",
+        "MMIO",
+        "IRQ"
+      ],
+      "infra_types": [
+        "multi-provider",
+        "single-provider"
+      ]
+    },
+    "B_device_class_contract": {
+      "desc": "纵向「我是什么设备」,一个驱动实现它,上层子系统消费它。消费者绑定具体实例。数据面契约(buffer/所有权/零拷贝)跨内核根本不同,强行抽 provider 反而失去复用——每内核还是要重写数据面。",
+      "examples": [
+        "BlockDevice",
+        "NetDevice",
+        "CharDevice",
+        "DisplayDevice"
+      ],
+      "infra_types": [
+        "subsystem-class"
+      ]
+    },
+    "concrete_driver": {
+      "desc": "具体设备驱动。不是 provider,是寄存器层复用 + 数据面重写的实现。",
+      "examples": [
+        "e1000",
+        "ahci",
+        "pl011",
+        "dwcmshc"
+      ],
+      "infra_types": [
+        "driver-missing"
+      ]
+    }
+  },
+  "boundary_table": [
+    {
+      "thing": "MMIO / IRQ / DMA",
+      "kind": "A 类基础能力",
+      "is_provider": true,
+      "cross_kernel": true,
+      "note": "单全局 provider(Device::res() 形式,driver-host 承载后端)"
+    },
+    {
+      "thing": "clk / regulator / gpio / pinctrl / phy / regmap",
+      "kind": "A 类基础设施",
+      "is_provider": true,
+      "cross_kernel": true,
+      "note": "phandle 键多 provider 注册表"
+    },
+    {
+      "thing": "iommu",
+      "kind": "A 类服务",
+      "is_provider": true,
+      "cross_kernel": "partial",
+      "note": "domain/映射生命周期语义跨内核差异大,provider 化覆盖子集"
+    },
+    {
+      "thing": "block / net / char / display 数据面",
+      "kind": "B 类设备契约",
+      "is_provider": false,
+      "cross_kernel": false,
+      "note": "每内核重写数据面;sk_buff/mbuf/MDL 模型根本不同"
+    },
+    {
+      "thing": "e1000 / ahci / pl011 等具体驱动",
+      "kind": "具体设备实现",
+      "is_provider": false,
+      "cross_kernel": "partial",
+      "note": "仅寄存器层可复用"
+    },
+    {
+      "thing": "VFS / sched / mm 等内核服务",
+      "kind": "内核服务",
+      "is_provider": false,
+      "cross_kernel": false,
+      "note": "每内核独有"
+    }
+  ],
+  "grey_areas": [
+    {
+      "thing": "iommu attach",
+      "verdict": "值得抽 provider",
+      "caveat": "语义不完整(domain/映射生命周期跨内核差异大),需标注「provider 化覆盖子集」"
+    },
+    {
+      "thing": "gpio",
+      "verdict": "倾向抽 provider",
+      "caveat": "和 pinctrl 边界模糊;既是基础设施(pinctrl 近亲)又常被当简单设备(LED/按键)"
+    },
+    {
+      "thing": "firmware request (request_firmware)",
+      "verdict": "倾向不抽",
+      "caveat": "加载途径(sysfs/initramfs/EFI/网络)差异极大,Linux 自己都没抽象干净;每内核各写"
+    }
+  ],
+  "principle": "宁可先不抽,等出现 ≥2 个实现 × ≥2 个消费者的真实需求时再抽。早抽代价(trait 形状锁死、被迫破坏性变更)远大于晚抽代价(临时直接调用)。",
+  "impl_pitfalls": {
+    "$comment": "Stage 2 实现质量坑(provider 已确认该抽后,怎么避免「半成品 OS-agnostic」)。从 clk 实证归纳:clk 曾同时犯这三条,已修(见 core/kclk 现状)。与 criteria(Stage 1 该不该抽)分开——这些是「抽了之后怎么抽干净」。",
+    "note": "从 clk 一个实例归纳,泛化到所有 provider。它是归纳不是公理,撞到反例应改。",
+    "pits": [
+      {
+        "id": "firmware-specific-key",
+        "name": "注册键用了固件描述特定物",
+        "wrong": "provider key = DT phandle(phandle 是 DT 特有,ACPI/PCI 平台没有)",
+        "right": "provider key = OS 中性 name(DT 路径=节点名去 @unit;ACPI/PCI 各自翻译)",
+        "why": "phandle 绑死会让 crate 名义 OS-agnostic 实际只能跑 DT 平台",
+        "check": "机械查:中性 crate 不得依赖 of/DT crate"
+      },
+      {
+        "id": "incomplete-trait",
+        "name": "trait 只定当前 Tier 的方法,未来 Tier 注释占位",
+        "wrong": "只定 get_rate,enable/disable/set_rate 写成注释",
+        "right": "一次性定义完整方法集,当前 Tier 给默认实现(enable 默认 Ok、set_rate 默认 Unsupported)",
+        "why": "跨内核复用的接口稳定性取决于 trait 形状;加方法时所有 provider adapter 都得改",
+        "check": "人工:Tier N 实现不完整时,trait 仍应含所有 Tier 的方法签名 + 默认实现"
+      },
+      {
+        "id": "global-static-registry",
+        "name": "注册表全局静态 + 不可注入",
+        "wrong": "static REGISTRY 线性扫描,测试靠 reset_registry 绕",
+        "right": "注册表做成可注入 struct(ClkRegistry::new()),进程全局只是默认;用 core-only 自旋锁去 kspin 依赖",
+        "why": "全局静态无法多实例(hypervisor 管 guest)、无法测试隔离、引入宿主 lock 依赖",
+        "check": "机械查:中性 crate 不得依赖 k* crate(kspin 等);人工:registry 有 ::new() 可自建"
+      }
+    ],
+    "redline": {
+      "rule": "声称 OS-agnostic 的 provider crate,其 Cargo.toml 不得依赖任何 k* crate 或 of(DT) crate",
+      "machine_checkable": true,
+      "cmd": "ldp check-provider-crate <Cargo.toml>"
+    }
+  },
+  "per_gap_assessment": {
+    "$comment": "per-gap 五判据评估(Stage 1:该不该抽),渐进填充(b 选项)。留空 = 现有分类凭直觉,未逐条论证。check-data 对 provider 类 gap 无记录的 WARN nudge。格式:{ gap_id: { criterion_id: 'pass'|'fail'|'unknown', note?: '' } }。注意:这里是 Stage 1 分类判据,与 impl_pitfalls(Stage 2 实现质量)分开——实现不干净不等于分类错。",
+    "clk-framework": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pass",
+      "impl_fixed": "2025-08",
+      "note": "clk-subsystem.md 已论证 Stage 1(晶振物理存在、CRU/SCMI/fixed-clock 多 provider、dev.res().clk 按名取、get_rate/enable 语义通用、数十 provider×数十驱动)。Stage 2 三坑也已于 2025-08 修复:name 键(去 phandle)、trait 定全(含 enable/disable/set_rate 默认)、ClkRegistry 可注入(去 kspin);Cargo.toml 已去 of/kspin 依赖(见 redline)。现为本目录唯一 Stage1+Stage2 双全的 gap。"
+    },
+    "gpio": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "物理存在(RK3588 pinctrl/gpio 控制器在 DT)。Stage 1 判据全过,但无消费者驱动——首块需 gpio 的设备(reset-gpios/CD 引脚)出现时再立项;reset-gpios 短期可由 firmware 侧预置。"
+    },
+    "pinctrl": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "rejected-for-now",
+      "note": "物理存在但 x-kernel 单平台单固件,pinmux 由 bootloader/固件配置完成;受益驱动少。维持 works-around(pinmux assumed configured by firmware)。"
+    },
+    "reset": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "RK3588 CRU 软复位域(USB/PCI probe 前置)。建议随 CRU provider 一并立项(reset 域与 CRU 同一寄存器块);五判据全过,优先级随 USB/PCI 移植。"
+    },
+    "regulator": {
+      "physical-infra": "pending",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "rejected-for-now",
+      "note": "RK3588 板级供电多由固定 on 的 LDO;可开关 supply 出现(vmmc 类)再立项。单 provider 语义存疑(多 PMIC),Stage 1 待评估。"
+    },
+    "iommu": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pending",
+      "cost-benefit": "rejected-for-now",
+      "note": "RK3588 有 IOMMU(rk3588-iommu),但当前驱动面 DMA 不走 IOMMU(coherent 直通);真要接 USB3/PCIe 大流量 DMA 时重评。"
+    },
+    "phy": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "RK3588 USB2/PCIe/USBDP PHY 物理存在且 USB/PCI 移植必需。建议立项:multi-provider(phy_create/phy_get 按名),消费端并入 Device::res()。随 usb/pci 切片决策。"
+    },
+    "msi": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "GIC ITS(msi-map)物理存在。建议立项:ITS 域进 kirq(vocabulary 已有 IrqDomainId);PCIe/USB3 中断吞吐需要。首版可 INTx。"
+    },
+    "dma-streaming": {
+      "physical-infra": "pending",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "单全局 provider(DMA 后端在 driver-host)。USB HCD ring 可先用 coherent 绕过;出现 scatter-gather 性能需求(网卡/大流量存储)再立项。"
+    }
+  }
+}

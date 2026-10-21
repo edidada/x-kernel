@@ -1,0 +1,3 @@
+linux-7.1.8 (local snapshot, sparse subset)
+vendored: 2026-07, source tree /workspace/linux-7.1.8
+subtrees: drivers/{firmware/arm_scmi/common.h,clk/rockchip,usb/host,usb/dwc3,pci/controller/dwc,phy/rockchip}, include/dt-bindings/{clock,reset}/rockchip,rk3588-cru.h

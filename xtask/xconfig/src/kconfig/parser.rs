@@ -881,15 +881,13 @@ impl Parser {
         self.expect(Token::LBracket)?;
 
         match self.current_context().current_token.clone() {
-            Token::RBracket => {
-                Err(KconfigError::Syntax {
-                    file: self.current_file.clone(),
-                    line: self.current_context().lexer.current_line(),
-                    message: "Empty array type annotation: must specify element type, e.g. [(u64, \
-                              u64)]"
-                        .to_string(),
-                })
-            }
+            Token::RBracket => Err(KconfigError::Syntax {
+                file: self.current_file.clone(),
+                line: self.current_context().lexer.current_line(),
+                message: "Empty array type annotation: must specify element type, e.g. [(u64, \
+                          u64)]"
+                    .to_string(),
+            }),
             Token::LParen => {
                 // Tuple type: [(type1, type2, ...)]
                 self.advance()?;

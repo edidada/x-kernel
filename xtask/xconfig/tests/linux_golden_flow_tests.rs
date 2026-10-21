@@ -5,7 +5,9 @@
 use std::{fs, path::PathBuf};
 
 use tempfile::TempDir;
-use xconfig::cli::{defconfig_to_output, olddefconfig_command, saveconfig_command, savedefconfig_command};
+use xconfig::cli::{
+    defconfig_to_output, olddefconfig_command, saveconfig_command, savedefconfig_command,
+};
 
 fn config_body(content: &str) -> String {
     content

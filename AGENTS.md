@@ -15,6 +15,11 @@ Current shared skills:
   `security.md`, and required rustdoc coverage.
 - `docs/ai/skills/code-guidelines/SKILL.md`:
   coding and code-review conventions for Rust kernel code.
+- `docs/ai/skills/linux-driver-port/SKILL.md`:
+  harness-backed workflow for porting a Linux C driver (platform/PCI) to
+  x-kernel Rust: `ldp` CLI gates (lookup/gaps/scan/check-layout/golden/
+  requirements), API mapping data, and gap reporting. Reference trees are
+  vendored under `docs/ai/skills/linux-driver-port/data/references/`.
 - `docs/ai/skills/test-harness/SKILL.md`:
   external Starry Test Harness workflow for guest regression cases,
   suite registration, execution, and syscall-focused test design constraints.

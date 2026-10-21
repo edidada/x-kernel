@@ -26,8 +26,7 @@ pub enum SymbolType {
 }
 
 /// Represents the element type of a rangetype config.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum RangeType {
     /// Array of string slices: `["&str"]` or `["String"]`
     StringArray,
@@ -39,7 +38,6 @@ pub enum RangeType {
     #[default]
     Unknown,
 }
-
 
 /// Represents a Rust primitive or string type used inside rangetype annotations.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,8 +103,7 @@ pub struct DefaultValue {
     pub condition: Option<Expr>,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Property {
     pub prompt: Option<String>,
     pub defaults: Vec<DefaultValue>,
@@ -116,7 +113,6 @@ pub struct Property {
     pub range: Option<(Expr, Expr, Option<Expr>)>,
     pub help: Option<String>,
 }
-
 
 impl Property {
     /// Evaluate conditional defaults in order and return the first matching value
@@ -145,9 +141,10 @@ impl Property {
                 }
                 Expr::ShellExpr(shell) => {
                     if let Ok(value) = evaluate_shell_expr(shell, symbol_table)
-                        && !value.is_empty() {
-                            return Some(value);
-                        }
+                        && !value.is_empty()
+                    {
+                        return Some(value);
+                    }
                 }
                 _ => {}
             }
