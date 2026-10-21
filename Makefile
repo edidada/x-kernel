@@ -375,7 +375,7 @@ ldp:
 
 ## 完整验证门:参考树就位 + 数据完整 + 布局声明 vs 参考真值。
 ldp-check:
-	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout
+	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout && $(LDP) check-layout --port rk3588-cru
 
 ## 不依赖参考树的轻量验证门(改完 JSON 后快速自检 + 重生成文档):
 ldp-check-data:
