@@ -255,6 +255,23 @@ impl ScmiChannel {
         self.transact(CLOCK_ATTRIBUTES, SCMI_PROTOCOL_CLOCK, &[clock_id], 0)?;
         Ok(())
     }
+
+    /// Clock-protocol VERSION (protocol 0x14, message 0x0) — the standard
+    /// per-protocol handshake every SCMI consumer performs before using a
+    /// protocol's messages (Linux `scmi_clock_protocol_init` and U-Boot's
+    /// `scmi_protocol_probe` both start here). Vendor agents commonly rely
+    /// on it to set up the protocol context; skipping it has been observed
+    /// to make CLOCK_ATTRIBUTES fail with HARDWARE_ERROR on this board.
+    fn clock_protocol_version(&self) -> Result<u32, ScmiError> {
+        let out = self.transact(BASE_VERSION, SCMI_PROTOCOL_CLOCK, &[], 1)?;
+        let version = out.first().copied().unwrap_or(0);
+        log::info!(
+            "scmi-clk: clock protocol spec v{}.{}",
+            version >> 16,
+            version & 0xFFFF
+        );
+        Ok(version)
+    }
 }
 
 /// Transport-level failures (Linux `-ETIMEDOUT`/`-EPROTO` mapping).
@@ -404,6 +421,10 @@ impl DriverOps<PlatformBus> for ScmiClockDriver {
                 kbuild_config::SCMI_SMC_ID,
                 kbuild_config::SCMI_SHMEM_PADDR
             );
+            ProbeError::Fatal(RuntimeError::Unsupported)
+        })?;
+        channel.clock_protocol_version().map_err(|err| {
+            log::warn!("scmi-clk: clock VERSION probe failed: {err:?}");
             ProbeError::Fatal(RuntimeError::Unsupported)
         })?;
         channel.attributes(SCMI_CCLK_SD).map_err(|err| {
