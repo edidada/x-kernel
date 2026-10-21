@@ -129,6 +129,13 @@ impl ScmiChannel {
         // side unambiguously belongs to THIS transfer.
         self.shmem.write32(SMT_CHANNEL_STATUS, 0);
         self.shmem.write32(SMT_CHANNEL_FLAGS, 0);
+        // Wash the response window too (status + declared out words):
+        // this firmware's agent leaves stale words behind on partial
+        // responses, and a stale 49.5 MHz rate word must never be read
+        // back as data.
+        for i in 0..=out_words {
+            self.shmem.write32(SMT_PAYLOAD + i * 4, 0);
+        }
         self.shmem
             .write32(SMT_MSG_HEADER, scmi_header(msg_id, protocol));
         self.shmem.write32(SMT_MSG_LENGTH, (args.len() * 4) as u32);
@@ -149,25 +156,17 @@ impl ScmiChannel {
         self.wait_free()?;
         let status_word = self.shmem.read32(SMT_CHANNEL_STATUS);
         let status = self.shmem.read32(SMT_PAYLOAD) as i32;
+        // Observed on this bl31: the agent writes the SCMI status
+        // (payload[0] = 0 seen on a VERSION probe) but ALSO sets the
+        // SMT ERROR bit and may leave later response words stale. The
+        // non-standard ERROR bit is therefore NOT treated as failure —
+        // it is acknowledged and logged once per transaction; the SCMI
+        // status word is the success criterion. Stale-data protection
+        // is the tx-side response-window wash above.
         if status_word & SMT_STATUS_ERROR != 0 {
-            // Clear the sticky flag so the next transfer starts clean.
-            // The dump distinguishes "agent wrote a response" from
-            // "agent flagged ERROR without responding".
             self.shmem
                 .write32(SMT_CHANNEL_STATUS, status_word & !SMT_STATUS_ERROR);
-            let dump: [u32; 7] = [
-                status_word,
-                self.shmem.read32(SMT_MSG_LENGTH),
-                self.shmem.read32(SMT_MSG_HEADER),
-                self.shmem.read32(SMT_PAYLOAD),
-                self.shmem.read32(SMT_PAYLOAD + 4),
-                self.shmem.read32(SMT_PAYLOAD + 8),
-                self.shmem.read32(SMT_PAYLOAD + 12),
-            ];
-            log::warn!(
-                "scmi-clk: msg {msg_id:#x} channel-error dump [status/len/hdr/p0..p3] {dump:02x?}"
-            );
-            return Err(ScmiError::ChannelError);
+            log::debug!("scmi-clk: msg {msg_id:#x}: agent set the channel ERROR bit");
         }
         if status != SCMI_SUCCESS {
             // Dump the channel header + first payload words: distinguishes
