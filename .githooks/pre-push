@@ -11,9 +11,8 @@
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 mapfile -t LINES
 [ "${#LINES[@]}" -eq 1 ] || exit 0                        # plain single-branch pushes only
-read -r LOCAL_REF LOCAL_SHA _ <<<"${LINES[0]}"
-case "$LOCAL_REF" in refs/heads/*) ;; *) exit 0 ;; esac   # tags are none of its business
-[ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && exit 0  # branch deletion
+read -r LOCAL_REF _ _ <<<"${LINES[0]}"
+case "$LOCAL_REF" in refs/heads/*) ;; *) exit 0 ;; esac   # tags and "(delete)" are none of its business
 BRANCH="$(git symbolic-ref --quiet --short HEAD)" || exit 0              # detached / mid-rebase
 [ "refs/heads/$BRANCH" = "$LOCAL_REF" ] || exit 0                        # only the checked-out branch
 
