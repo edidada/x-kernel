@@ -252,6 +252,14 @@
       "contract-cross-kernel": "pass",
       "cost-benefit": "pending",
       "note": "单全局 provider(DMA 后端在 driver-host)。USB HCD ring 可先用 coherent 绕过;出现 scatter-gather 性能需求(网卡/大流量存储)再立项。"
+    },
+    "power-domain": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pending",
+      "note": "RK3588 PD(usb/pcie 挂 PD31 等)物理存在;首版假定固件已使能(works-around)。出现需要运行期开关 PD 的设备(低功耗场景)再立项;届时按 clk 模式落 multi-provider。"
     }
   }
 }

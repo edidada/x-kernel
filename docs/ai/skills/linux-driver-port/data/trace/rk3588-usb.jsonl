@@ -1,0 +1,3 @@
+{"ts":1792620631,"kind":"gap","linux":"power-domains (PD 31)","note":"RK3588 USB/PCI 节点带 power-domains;无 PD 框架,首版假定固件已使能并日志标注(gaps power-domain open)"}
+{"ts":1792620641,"kind":"gap","linux":"power-domains (PD 31)","note":"RK3588 USB/PCI 节点带 power-domains;无 PD 框架,首版假定固件已使能并日志标注(gaps power-domain open)"}
+{"ts":1792620642,"kind":"gap","linux":"dma_map_single","note":"USB 首版全 coherent(qh/qtd/ed/td),streaming 映射推迟(req-dma-streaming rejected)"}

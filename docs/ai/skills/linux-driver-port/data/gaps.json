@@ -563,6 +563,24 @@
         "sync_single"
       ],
       "infra_type": "single-provider"
+    },
+    {
+      "id": "power-domain",
+      "name": "power-domain(PD 开关)",
+      "status": "missing",
+      "severity": "conditional",
+      "symbols": [
+        "pm_runtime_get_sync",
+        "dev_pm_domain_attach",
+        "of_genpd_add_device"
+      ],
+      "xkernel_status": "无 PD 框架。RK3588 USB/PCI 节点带 power-domains=<&power 31>;首版假定固件已使能并日志标注,真实开关需求出现再立项。",
+      "context": [
+        "power-domain",
+        "pm_runtime",
+        "genpd"
+      ],
+      "infra_type": "multi-provider"
     }
   ],
   "cascade_gaps": [

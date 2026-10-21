@@ -172,6 +172,13 @@ x-kernel 目前只实现了驱动模型的「主干」:MMIO / IRQ / coherent DMA
 - **Linux 符号**:`dma_map_single`, `dma_unmap_single`, `dma_sync_single_for_cpu`, `dma_sync_single_for_device`, `dma_map_page`
 - **阻塞程度**:`conditional`
 
+### power-domain(PD 开关) (`power-domain`)
+
+- **状态**:`missing`
+- **现状**:无 PD 框架。RK3588 USB/PCI 节点带 power-domains=<&power 31>;首版假定固件已使能并日志标注,真实开关需求出现再立项。
+- **Linux 符号**:`pm_runtime_get_sync`, `dev_pm_domain_attach`, `of_genpd_add_device`
+- **阻塞程度**:`conditional`
+
 ## 级联缺口(常见组合)
 
 | 区域 | 缺口链 |
