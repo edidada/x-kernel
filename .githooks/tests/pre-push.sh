@@ -76,7 +76,7 @@ assert_no_fetch() {
 
 BEHIND_COUNT=3 run_case blocked_when_behind 1 'make rebase' rev-list
 BEHIND_COUNT=3 run_case blocked_output_names_the_base 1 'behind origin/main'
-run_case pass_when_current 0 '' '' BEHIND_COUNT=0
+BEHIND_COUNT=0 run_case pass_when_current 0 '' ''
 SKIP_REBASE=1 BEHIND_COUNT=3 run_case skip_rebase_pushes_anyway 0 '' ''
 SKIP_ALL=1 BEHIND_COUNT=3 run_case skip_all_pushes_anyway 0 '' ''
 FETCH_STATUS=1 BEHIND_COUNT=3 run_case offline_passes_with_warning 0 'cannot refresh'
