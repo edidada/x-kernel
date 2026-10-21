@@ -68,10 +68,18 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
         let max_frequency = dev.fw().u32("max-frequency").unwrap_or(50_000_000);
 
         // Clocks through the framework: biu gates the bus interface, ciu
-        // is the card-clock input whose rate programs the divider.
+        // is the card-clock input whose rate programs the divider. Enable
+        // failures are tolerated with a warning — the firmware (U-Boot)
+        // leaves these gates on, and some SCMI agents serve rate queries
+        // without enable support; only a bogus rate is fatal.
         let _biu = dev.res().clk("biu")?;
         let ciu = dev.res().clk("ciu")?;
-        ciu.prepare_enable().map_err(clock_error)?;
+        if let Err(err) = ciu.prepare_enable() {
+            log::warn!(
+                "dwmmc-rocks: slot {slot}: ciu prepare_enable: {err:?} (continuing; \
+                 firmware-configured clocks)"
+            );
+        }
         let ciu_hz = u32::try_from(ciu.get_rate()).map_err(|_| clock_error(()))?;
         if ciu_hz == 0 {
             return Err(ProbeError::Fatal(RuntimeError::Invalid));

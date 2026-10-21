@@ -63,8 +63,22 @@ const SMT_PAYLOAD: usize = 0x1C;
 /// The known RK3588 SCMI clock ids (`dt-bindings/clock/rockchip,rk3588-cru.h`).
 const SCMI_CCLK_SD: u32 = 9;
 const SCMI_HCLK_SD: u32 = 23;
+/// The SMT channel page/offset split (Linux `SHMEM_PAGE`/`SHMEM_OFFSET`):
+/// TF-A resolves the channel from `X1 = addr >> 12`, `X2 = addr & 0xFFF`.
+const SHMEM_SHIFT: u32 = 12;
+const fn shmem_page(addr: u64) -> u32 {
+    (addr >> SHMEM_SHIFT) as u32
+}
+const fn shmem_offset(addr: u64) -> u32 {
+    (addr & 0xFFF) as u32
+}
 
 /// One SMC-dispatched SMT channel (Linux `struct scmi_smc`).
+///
+/// The SMC argument contract is Linux `arm_scmi/transports/smc.c`:
+/// `X1 = shmem page number (addr >> 12)`, `X2 = offset within the page`,
+/// `X3 = 0` — TF-A's handler resolves the channel from the page/offset
+/// pair, NOT from a raw address.
 struct ScmiChannel {
     shmem: IoMap,
     smc_id: u32,
@@ -73,9 +87,12 @@ struct ScmiChannel {
 impl ScmiChannel {
     /// A transaction: wait FREE → pack → SMC → wait FREE → unpack.
     ///
-    /// The SMC is a synchronous fast call — the channel is free again by
-    /// the time it returns; the polls are belt-and-braces bounded loops.
-    fn transact(&self, msg_id: u32, args: &[u32]) -> Result<Vec<u32>, ScmiError> {
+    /// `out_words` is the protocol-declared response payload length after
+    /// the status word (RATE_GET carries two — 64-bit rate; commands with
+    /// an empty return carry zero). The SMC is a synchronous fast call —
+    /// the channel is free again by the time it returns; the polls are
+    /// belt-and-braces bounded loops.
+    fn transact(&self, msg_id: u32, args: &[u32], out_words: usize) -> Result<Vec<u32>, ScmiError> {
         self.wait_free()?;
         self.shmem
             .write32(SMT_MSG_HEADER, scmi_header(msg_id, SCMI_PROTOCOL_CLOCK));
@@ -84,13 +101,21 @@ impl ScmiChannel {
             self.shmem.write32(SMT_PAYLOAD + i * 4, *word);
         }
 
-        let shmem_addr = self.shmem.region().base as u64;
-        let _ = smc_call(
+        // The SMT channel is device-shared memory: make the message
+        // stores visible to EL3 before ringing the doorbell.
+        karch::barrier::dsb_ishst();
+        let base = self.shmem.region().base as u64;
+        let ret = smc_call(
             u64::from(self.smc_id),
-            shmem_addr & 0xFFFF_FFFF,
-            shmem_addr >> 32,
+            u64::from(SHMEM_PAGE(base)),
+            u64::from(SHMEM_OFFSET(base)),
             0,
         );
+        if ret[0] != 0 {
+            // Only SMCCC_SUCCESS is a valid doorbell return (Linux maps
+            // anything else to -EOPNOTSUPP).
+            return Err(ScmiError::Smccc(ret[0]));
+        }
 
         self.wait_free()?;
         let status = self.shmem.read32(SMT_PAYLOAD) as i32;
@@ -98,7 +123,7 @@ impl ScmiChannel {
             return Err(ScmiError::Firmware(status));
         }
         let mut out = Vec::new();
-        for i in 1..=(args.len()).max(1) {
+        for i in 1..=out_words {
             out.push(self.shmem.read32(SMT_PAYLOAD + i * 4));
         }
         Ok(out)
@@ -117,7 +142,7 @@ impl ScmiChannel {
     /// CLOCK_RATE_GET → 64-bit rate.
     fn rate_get(&self, clock_id: u32) -> ClkResult<Rate> {
         let out = self
-            .transact(CLOCK_RATE_GET, &[clock_id])
+            .transact(CLOCK_RATE_GET, &[clock_id], 2)
             .map_err(|e| e.into_clk_error("rate_get"))?;
         let lo = out.first().copied().ok_or(ClkError::Io)?;
         let hi = out.get(1).copied().unwrap_or(0);
@@ -125,18 +150,18 @@ impl ScmiChannel {
     }
 
     fn enable(&self, clock_id: u32) -> ClkResult<()> {
-        self.transact(CLOCK_ENABLE, &[clock_id])
+        self.transact(CLOCK_ENABLE, &[clock_id], 0)
             .map_err(|e| e.into_clk_error("enable"))?;
         Ok(())
     }
 
     fn disable(&self, clock_id: u32) {
-        let _ = self.transact(CLOCK_DISABLE, &[clock_id]);
+        let _ = self.transact(CLOCK_DISABLE, &[clock_id], 0);
     }
 
     /// CLOCK_ATTRIBUTES: proves the agent serves the clock domain.
     fn attributes(&self, clock_id: u32) -> Result<(), ScmiError> {
-        self.transact(CLOCK_ATTRIBUTES, &[clock_id])?;
+        self.transact(CLOCK_ATTRIBUTES, &[clock_id], 0)?;
         Ok(())
     }
 }
@@ -146,6 +171,8 @@ enum ScmiError {
     ChannelBusy,
     /// The agent returned a non-SUCCESS SCMI status code.
     Firmware(i32),
+    /// The SMCCC doorbell itself returned a non-zero code.
+    Smccc(u64),
 }
 
 impl ScmiError {
@@ -158,6 +185,10 @@ impl ScmiError {
             }
             ScmiError::Firmware(code) => {
                 log::warn!("scmi-clk: {what}: firmware status {code}");
+                ClkError::Io
+            }
+            ScmiError::Smccc(code) => {
+                log::warn!("scmi-clk: {what}: smccc returned {code:#x}");
                 ClkError::Io
             }
         }
@@ -250,7 +281,13 @@ impl DriverOps<PlatformBus> for ScmiClockDriver {
                 MmioRegion::new(kbuild_config::SCMI_SHMEM_PADDR, SMT_CHANNEL_BYTES),
                 "scmi-shmem",
             )
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
+            .map_err(|_| {
+                log::warn!(
+                    "scmi-clk: shmem mapping failed at {:#x}",
+                    kbuild_config::SCMI_SHMEM_PADDR
+                );
+                ProbeError::Fatal(RuntimeError::Invalid)
+            })?;
         let channel = Arc::new(ScmiChannel {
             shmem,
             // The generated constant is `usize`; SMCCC ids are 32-bit.
@@ -259,9 +296,14 @@ impl DriverOps<PlatformBus> for ScmiClockDriver {
         });
 
         // The agent must answer before anything parks on this provider.
-        channel
-            .attributes(SCMI_CCLK_SD)
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Unsupported))?;
+        channel.attributes(SCMI_CCLK_SD).map_err(|err| {
+            log::warn!(
+                "scmi-clk: CLOCK_ATTRIBUTES probe failed: {err:?} (smc {:#x}, shmem {:#x})",
+                kbuild_config::SCMI_SMC_ID,
+                kbuild_config::SCMI_SHMEM_PADDR
+            );
+            ProbeError::Fatal(RuntimeError::Unsupported)
+        })?;
 
         let known: [(&'static str, u32); 2] = [
             ("scmi_cclk_sd", SCMI_CCLK_SD),
