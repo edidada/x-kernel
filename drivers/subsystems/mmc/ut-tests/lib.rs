@@ -5,7 +5,6 @@
 //! Mock-host regressions for the SD protocol core and the block consumer
 //! — the L0-b payoff: everything below runs without a controller.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -68,6 +67,7 @@ struct MockHost {
 // SAFETY: the mock is exercised single-threaded by the unittest runner;
 // `RefCell` borrows never cross threads.
 unsafe impl Sync for MockHost {}
+// SAFETY: no thread-local state; see the `Sync` note.
 unsafe impl Send for MockHost {}
 
 impl MockHost {
@@ -202,7 +202,7 @@ fn empty_slot_reports_no_card() {
         }
     }
     let ctx = DetectContext { host: &Empty, slot: 0 };
-    assert_eq!(sd::detect_card(&ctx, Arc::new(Empty)), Err(MmcError::NoCard));
+    assert_eq!(sd::detect_card(&ctx, Arc::new(Empty)).map(|_| ()), Err(MmcError::NoCard));
 }
 
 #[def_test]
@@ -231,7 +231,7 @@ fn v1_card_is_reported_unsupported() {
         }
     }
     let ctx = DetectContext { host: &V1Card, slot: 0 };
-    assert_eq!(sd::detect_card(&ctx, Arc::new(V1Card)), Err(MmcError::Unsupported));
+    assert_eq!(sd::detect_card(&ctx, Arc::new(V1Card)).map(|_| ()), Err(MmcError::Unsupported));
 }
 
 // ---------------------------------------------------------------------------

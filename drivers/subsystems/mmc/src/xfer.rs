@@ -24,6 +24,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// (timeout/CRC/DMA bits straight from the controller's status registers).
 pub const XFER_DONE: u32 = 1;
 
+/// Whether a published status word reports success.
+pub fn status_is_ok(status: u32) -> bool {
+    status == XFER_DONE
+}
+
 /// Completion signal for data transfers (Linux `struct completion` role).
 pub trait XferSignal: Send + Sync {
     /// Block the calling task until `ready` holds.

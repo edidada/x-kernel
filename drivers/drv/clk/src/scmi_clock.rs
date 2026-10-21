@@ -103,12 +103,12 @@ impl ScmiChannel {
 
         // The SMT channel is device-shared memory: make the message
         // stores visible to EL3 before ringing the doorbell.
-        karch::barrier::dsb_ishst();
+        karch::dsb_ishst();
         let base = self.shmem.region().base as u64;
         let ret = smc_call(
             u64::from(self.smc_id),
-            u64::from(SHMEM_PAGE(base)),
-            u64::from(SHMEM_OFFSET(base)),
+            u64::from(shmem_page(base)),
+            u64::from(shmem_offset(base)),
             0,
         );
         if ret[0] != 0 {
@@ -167,6 +167,7 @@ impl ScmiChannel {
 }
 
 /// Transport-level failures (Linux `-ETIMEDOUT`/`-EPROTO` mapping).
+#[derive(Debug)]
 enum ScmiError {
     ChannelBusy,
     /// The agent returned a non-SUCCESS SCMI status code.
