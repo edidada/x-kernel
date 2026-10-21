@@ -114,11 +114,15 @@ installing a live hardware table.
 
 ## Mapped Data Holds
 
-The data capability supplied by `PagingHandlerImpl` is an existing live
-FrameRef. Address lookup and cloning use that hold, never a bare descriptor
-snapshot. Final destruction returns to its recorded allocator instance.
-PageTableMut retains the capability through required TLB completion. Page
-contents and file invalidation semantics require their separate caller protocols.
+The data capability supplied by `PagingHandlerImpl` is a live
+`FrameRun<'static>`. It retains every base page in the leaf's complete backing;
+physical start, byte count and checked cloning all refer to that run. A single
+`FrameRef` enters `map_owned` by conversion to a one-page run, while huge leaves
+must supply their full-sized, aligned run. Address lookup and cloning use the
+existing capability, never a bare descriptor snapshot. Final destruction
+returns each page to its recorded allocator instance. PageTableMut retains the
+capability through required TLB completion. Page contents and file invalidation
+semantics require their separate caller protocols.
 
 Page-table frame lifetime tests are mounted from `ut-tests/paging_frame_refs.rs`
 at their existing private `paging::tests_frame_refs` module. The `cfg(unittest)`

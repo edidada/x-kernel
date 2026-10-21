@@ -143,12 +143,14 @@ installing a live hardware table.
 
 ## Mapped Data References
 
-`PagingHandlerImpl::MappingReference` is `FrameRef<'static>`, separate from the
-raw table-storage transfer. The handler advertises the held physical address
-and provides checked cloning for relocation. Generic `page_table::map_owned`
-retains the supplied instance-bound hold through PTE/TLB retirement. It does
-not reconstruct a data hold from an unprotected PFN.
+`PagingHandlerImpl::MappingReference` is `FrameRun<'static>`, separate from the
+raw table-storage transfer. The handler advertises the run's physical start and
+complete byte count, and checked cloning retains every backing base page.
+`page_table::map_owned` accepts a single `FrameRef` by converting it to a one-page
+run. `map_owned_sized` retains a run covering the full 4 KiB, 2 MiB or 1 GiB leaf
+through PTE/TLB retirement; it rejects mismatched size or alignment. Neither
+entry point reconstructs data holds from an unprotected PFN.
 
-The three page-table frame lifetime cases are mounted from
+Page-table frame lifetime cases are mounted from
 `ut-tests/paging_frame_refs.rs` at `paging::tests_frame_refs`, under the existing
 `cfg(unittest)` gate. They retain their original private access and test paths.
