@@ -448,8 +448,21 @@ config KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
     depends on KFEAT_MMC && ARCH_AARCH64
     help
       DW MSHC host driver (dw_mmc-rockchip shape) for RK3588-class SD
-      controllers: MMIO + IDMAC data path, DTO interrupt, SCMI-backed
-      ciu/biu clocks, card detection onto the mmc card bus.
+      controllers: MMIO + IDMAC data path, DTO interrupt, card detection
+      onto the mmc card bus. The CIU input rate is a board fact
+      (MMC_CIU_HZ) — the SD clock domain sits behind the firmware and is
+      left configured by the boot stages.
+
+config MMC_CIU_HZ
+    hex "MMC CIU input clock rate (Hz)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default 0x2FAF080
+    help
+      The CIU input clock feeding the DWMMC internal divider (the rate
+      the firmware/boot stages configured for the SD clock domain). The
+      driver divides this down for 400 kHz init, 25 MHz default speed
+      and 50 MHz high speed; it never reprograms the source.
+
 
 config KFEAT_DRIVER_CLK_SCMI
     bool "SCMI clock provider driver"

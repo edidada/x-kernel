@@ -67,21 +67,21 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
         let fifo_depth = dev.fw().u32("fifo-depth").unwrap_or(0x100);
         let max_frequency = dev.fw().u32("max-frequency").unwrap_or(50_000_000);
 
-        // Clocks through the framework: biu gates the bus interface, ciu
-        // is the card-clock input whose rate programs the divider. Enable
-        // failures are tolerated with a warning — the firmware (U-Boot)
-        // leaves these gates on, and some SCMI agents serve rate queries
-        // without enable support; only a bogus rate is fatal.
-        let _biu = dev.res().clk("biu")?;
-        let ciu = dev.res().clk("ciu")?;
-        if let Err(err) = ciu.prepare_enable() {
-            log::warn!(
-                "dwmmc-rocks: slot {slot}: ciu prepare_enable: {err:?} (continuing; \
-                 firmware-configured clocks)"
-            );
-        }
-        let ciu_hz = u32::try_from(ciu.get_rate()).map_err(|_| clock_error(()))?;
+        // Clocking, the board-verified tgoskits/U-Boot shape: the CCLK_SD
+        // source and HCLK_SD gate sit behind the Rockchip bl31 blob, whose
+        // SMC entry does not serve the mainline SCMI clock protocol
+        // (probing it costs three round trips and a HARDWARE_ERROR; see
+        // drv/clk/scmi_clock for the full investigation). Both firmware
+        // stages leave the SD clock domain configured — U-Boot's own dwmmc
+        // read our boot medium through it — so the driver does NOT touch
+        // the clock source, and takes the CIU input rate as a board fact
+        // (Kconfig MMC_CIU_HZ, the RTC_PADDR precedent). The DWMMC
+        // internal divider covers 400 kHz init up to the 50 MHz high
+        // speed ceiling from that input.
+        let ciu_hz = u32::try_from(kbuild_config::MMC_CIU_HZ)
+            .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
         if ciu_hz == 0 {
+            log::warn!("dwmmc-rocks: MMC_CIU_HZ is unset; slot {slot} cannot program its divider");
             return Err(ProbeError::Fatal(RuntimeError::Invalid));
         }
         log::info!(
@@ -177,11 +177,6 @@ fn add_card_to_domain(
             Err(ProbeError::Fatal(RuntimeError::Invalid))
         }
     }
-}
-
-/// Map kclk failures onto the probe control flow.
-fn clock_error(_: impl core::fmt::Debug) -> ProbeError {
-    ProbeError::Fatal(RuntimeError::Io)
 }
 
 /// Map host-construction failures onto the probe control flow.
