@@ -74,7 +74,7 @@ pub fn find_interface(name: &str) -> Option<NetInterfaceInfo> {
     })
 }
 
-/// Returns the first IPv4 address of the specified interface.
+/// Returns the primary IPv4 address of the specified interface.
 ///
 /// Device resolution and address lookup run under a single Router lock.
 ///
@@ -91,10 +91,9 @@ pub fn interface_ipv4_addr(name: &str) -> Result<Ipv4Addr, LinuxError> {
         .map(|cidr| Ipv4Addr::from(cidr.address().octets()))
 }
 
-/// Updates the first IPv4 address on `name`.
+/// Updates the primary IPv4 address on `name`.
 ///
 /// Other IPv4 addresses assigned to the interface remain unchanged.
-/// Setting the same local address preserves its prefix, scope, and broadcast.
 pub fn set_interface_ipv4_addr(
     name: &str,
     addr: Ipv4Addr,
@@ -103,11 +102,11 @@ pub fn set_interface_ipv4_addr(
     let _network_config_guard = network_config_lock();
     let dev = device_id_by_name(name)?;
     if addr.is_unspecified() {
-        return SERVICE.remove_first_ipv4_addr(dev);
+        return SERVICE.remove_primary_ipv4_addr(dev);
     }
     let cidr = Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len)
         .ok_or(LinuxError::EINVAL)?;
-    SERVICE.set_first_ipv4_addr(dev, cidr)
+    SERVICE.set_primary_ipv4_addr(dev, cidr)
 }
 
 /// Updates the prefix length of the first IPv4 address assigned to `name`.

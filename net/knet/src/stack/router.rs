@@ -92,7 +92,7 @@ impl Router {
     /// Returns the source address for an output route with an active device.
     ///
     /// `oif` is a stable interface index; `0` means the socket is unbound.
-    /// Limited broadcasts with a bound device use that device's first
+    /// Limited broadcasts with a bound device use that device's primary
     /// address (or `0.0.0.0`) without requiring a unicast route.
     ///
     /// # Errors
@@ -267,7 +267,7 @@ impl Router {
                 .any(|(_, entry)| entry.addr.is_directed_broadcast(address))
     }
 
-    /// Returns the first IPv4 address of the device named `name`.
+    /// Returns the primary IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
     /// a concurrent device removal cannot invalidate the resolved ID between
@@ -347,12 +347,12 @@ impl Router {
         Ok(())
     }
 
-    /// Updates the first IPv4 address on `dev` in its owning address table.
+    /// Updates the primary IPv4 address on `dev` in its owning address table.
     ///
     /// Other addresses on the device remain unchanged. Updating an existing
     /// address resets its scope and broadcast fields like Linux
     /// `SIOCSIFADDR`; setting the same local address is a no-op.
-    pub(crate) fn set_first_ipv4_addr(
+    pub(crate) fn set_primary_ipv4_addr(
         &mut self,
         dev: NetDeviceId,
         addr: Ipv4Cidr,
@@ -387,11 +387,11 @@ impl Router {
         Ok(())
     }
 
-    /// Removes the first IPv4 address from `dev`.
+    /// Removes the primary IPv4 address from `dev`.
     ///
     /// Other addresses on the device remain unchanged. An interface without
     /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
-    pub(crate) fn remove_first_ipv4_addr(&mut self, dev: NetDeviceId) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: NetDeviceId) -> Result<(), LinuxError> {
         if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
@@ -452,7 +452,7 @@ impl Router {
         Ok(())
     }
 
-    /// Updates the prefix length of the first IPv4 address on `dev`.
+    /// Updates the prefix length of the primary IPv4 address on `dev`.
     ///
     /// Linux `SIOCSIFNETMASK` keeps `ifa_scope` and only recalculates
     /// `ifa_broadcast` when it still matches the old derived mask.
@@ -471,7 +471,8 @@ impl Router {
             return Ok(());
         }
         let old_addr = entry.addr;
-        let addr = Ipv4Cidr::new(entry.addr.address(), prefix_len).ok_or(LinuxError::EINVAL)?;
+        let addr =
+            Ipv4Cidr::new(entry.addr.address(), prefix_len).expect("prefix length was validated");
         if self.has_ipv4_addr_entry(dev, addr) {
             // Linux drops the old entry when netmask reinsertion collides,
             // and SIOCSIFNETMASK still reports success.

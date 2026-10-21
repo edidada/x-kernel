@@ -847,21 +847,21 @@ impl Service {
         Ok(is_last_owner)
     }
 
-    pub(crate) fn set_first_ipv4_addr(
+    pub(crate) fn set_primary_ipv4_addr(
         &self,
         dev: NetDeviceId,
         addr: crate::ip::Ipv4Cidr,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
-        router.set_first_ipv4_addr(dev, addr)?;
+        router.set_primary_ipv4_addr(dev, addr)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
     }
 
-    pub(crate) fn remove_first_ipv4_addr(&self, dev: NetDeviceId) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(&self, dev: NetDeviceId) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
-        router.remove_first_ipv4_addr(dev)?;
+        router.remove_primary_ipv4_addr(dev)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
