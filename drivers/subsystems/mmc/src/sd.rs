@@ -25,6 +25,16 @@ use crate::{
     bus::{CardKind, MmcCardData},
 };
 
+/// Coarse busy-wait for the card reset timing requirement (Linux
+/// `mmc_delay(1)` after GO_IDLE). Boot-context friendly: no timer
+/// dependency, iteration count rounded far above 1 ms on any aarch64
+/// core this kernel targets. Init path only.
+fn card_reset_delay() {
+    for _ in 0..4_000_000 {
+        core::hint::spin_loop();
+    }
+}
+
 /// Log-and-return helper: card detection is a fixed script, so a failure
 /// names the exact step (opcode + arg) — the difference between "card
 /// absent", "signal integrity" and "protocol mismatch" at a glance.
@@ -107,6 +117,9 @@ pub fn detect_card(
     let mut idle = MmcCommand::none(CMD_GO_IDLE);
     idle.init_clocks = true;
     step("go idle", CMD_GO_IDLE, 0, host_ref.send_cmd(&idle))?;
+    // The card is busy resetting after GO_IDLE; hammering CMD8 at it
+    // inside that window returns corrupted responses (Crc).
+    card_reset_delay();
 
     // 2. v2 voltage handshake: a card that does not echo 0x1AA in the
     //    low bits is a v1-era card this core does not drive.
