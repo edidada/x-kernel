@@ -119,3 +119,7 @@ FrameRef. Address lookup and cloning use that hold, never a bare descriptor
 snapshot. Final destruction returns to its recorded allocator instance.
 PageTableMut retains the capability through required TLB completion. Page
 contents and file invalidation semantics require their separate caller protocols.
+
+Page-table frame lifetime tests are mounted from `ut-tests/paging_frame_refs.rs`
+at their existing private `paging::tests_frame_refs` module. The `cfg(unittest)`
+gate, reference-transfer assertions and fixture safety contracts are unchanged.

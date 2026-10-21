@@ -148,3 +148,7 @@ raw table-storage transfer. The handler advertises the held physical address
 and provides checked cloning for relocation. Generic `page_table::map_owned`
 retains the supplied instance-bound hold through PTE/TLB retirement. It does
 not reconstruct a data hold from an unprotected PFN.
+
+The three page-table frame lifetime cases are mounted from
+`ut-tests/paging_frame_refs.rs` at `paging::tests_frame_refs`, under the existing
+`cfg(unittest)` gate. They retain their original private access and test paths.

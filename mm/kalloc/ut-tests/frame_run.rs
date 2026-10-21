@@ -22,7 +22,7 @@ impl Fixture {
     fn new() -> Self {
         let storage = GlobalPage::alloc_contiguous(64, PAGE).unwrap();
         let region = FrameRegion::new(
-            PhysAddr::from_usize(kaddr_layout::v2p(storage.start_va().as_usize())),
+            storage.start_pa(),
             storage.start_va(),
             storage.size(),
         );

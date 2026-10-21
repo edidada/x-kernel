@@ -555,3 +555,15 @@ exclusive owner. They do not need an extra clone merely because metadata exists.
 Folio/data-object and independent PTE holders keep sharing their existing holds;
 TLB, COW, file validity and device retirement remain separate protocols. Slab
 backing/reclaim design is outside this adjustment.
+
+## Guest test layout
+
+Frame lifetime tests live under crate-root `ut-tests/`. `frame/reference.rs` and
+`frame/registry.rs` mount `frame_reference.rs` and `frame_registry.rs` through
+`unittest::path_mod_test!`; `frame_bootstrap.rs` mounts `frame_bootstrap.rs` and
+`frame_bootstrap_integration.rs`. The existing `tests` / `integration_tests` module
+paths, `def_test` attributes and private-parent access remain unchanged. These
+modules are compiled only under `cfg(unittest)` and add no production behavior.
+
+Frame fixtures obtain PA from their `GlobalPage` owner directly, so tests do not
+need an architecture layout conversion or a `kaddr_layout` dependency.

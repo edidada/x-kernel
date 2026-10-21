@@ -16,7 +16,6 @@ tracking = ["dep:backtrace"]
 alloc-engine = { workspace = true, features = ["buddy-page"] }
 backtrace = { workspace = true, optional = true }
 cfg-if.workspace = true
-kaddr_layout.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 kspin.workspace = true

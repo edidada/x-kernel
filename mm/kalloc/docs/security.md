@@ -433,3 +433,10 @@ must not be used to infer a page's current free/allocated, slab occupancy, COW,
 DMA-completion or mapping-validity state. These contracts allow the same resident
 descriptor foundation to support exclusive and shared ownership without conflating
 storage lifetime with subsystem-specific safe-reuse conditions.
+
+## Frame test source boundary
+
+Frame reference, registry and bootstrap tests reside in crate-root `ut-tests/`
+and are mounted at their original private parent modules under `cfg(unittest)`.
+Moving the files does not widen production visibility or change unsafe fixture
+contracts. File-module mounts retain the existing test identities and gates.
