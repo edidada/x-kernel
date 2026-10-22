@@ -19,17 +19,22 @@ The existing page-table, executing-code and stack-mapping preconditions of
 
 ## User cache-access policy
 
-The SCTLR read-modify-write that enables translation and caching also sets
-`UCT::DontTrap` and `UCI::DontTrap`.
-In the ordinary EL1/EL0 regime, these permit an EL0 `CTR_EL0` read and remove
-the SCTLR trap on cache-maintenance instructions such as `DC CVAU` and `IC IVAU`.
+The read-modify-write that enables translation and caching stays unconditional;
+a following modify guarded by `#[cfg(not(feature = "vmm"))]` sets
+`UCT::DontTrap`, `UCI::DontTrap` and `DZE::DontTrap`.
+In the ordinary EL1/EL0 regime, these permit an EL0 `CTR_EL0` read, remove the
+SCTLR trap on cache-maintenance instructions such as `DC CVAU` and `IC IVAU`,
+and allow `DC ZVA` cache-line zeroing probed by vectorized memset and memcpy.
 These operations are used by user runtimes to publish generated code.
 Relying on firmware/reset values can instead turn valid operations into SIGILL.
 
 The common per-CPU location gives primary and secondary CPUs the same policy.
+The VMM build keeps its existing policy: under VHE
+(`HCR_EL2.{E2H,TGE}={1,1}`) the same-named controls alias into `SCTLR_EL2`,
+and that regime is outside this audit.
 Unrelated SCTLR fields and the existing post-write ISB remain unchanged.
 Linux's [initial SCTLR configuration](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/sysreg.h#L824)
-also includes UCT/UCI; LLVM's [AArch64 clear-cache implementation](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.0/compiler-rt/lib/builtins/clear_cache.c)
+also includes DZE/UCT/UCI; LLVM's [AArch64 clear-cache implementation](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.0/compiler-rt/lib/builtins/clear_cache.c)
 uses the corresponding instructions.
 
 ## Limits and validation

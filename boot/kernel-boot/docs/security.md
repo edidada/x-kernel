@@ -6,18 +6,19 @@
 boot page tables that preserve its executing code, stack and required data.
 The primary and secondary assembly callers establish the exception-level and
 boot-stack prerequisites before invoking it.
-The UCT/UCI policy uses the existing typed register read-modify-write API and
-adds no raw pointer access, assembly block or unsafe operation.
+The UCT/UCI/DZE policy uses the existing typed register read-modify-write API
+and adds no raw pointer access, assembly block or unsafe operation.
 Register state is CPU-local; the existing ISB synchronizes the control change.
 
 ## Access granted
 
 EL0 can read the implemented cache description and execute the cache operations
-governed by these controls.
+governed by these controls, including `DC ZVA` zeroing of one cache line.
+`DC ZVA` remains an ordinary data access: it cannot bypass translation or
+page-permission checks, and `DCZID_EL0` still reports the capability truthfully.
 Page-table permissions, exception classification and other architectural trap
 controls remain separate and unchanged.
-This does not enable all privileged instructions, create executable mappings,
-or enable the separately controlled `DC ZVA` instruction.
+This does not enable all privileged instructions or create executable mappings.
 User code must still follow the required translation, cache and barrier rules.
 
 Cache parameters become visible to userspace, and cache maintenance can affect

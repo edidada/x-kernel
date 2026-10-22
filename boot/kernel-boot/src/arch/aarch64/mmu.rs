@@ -374,10 +374,12 @@ pub(super) unsafe fn init_mmu() {
     karch::flush_tlb(None);
 
     SCTLR_EL1.modify(SCTLR_EL1::M::Enable + SCTLR_EL1::C::Cacheable + SCTLR_EL1::I::Cacheable);
-    // libc/JIT cache flushes read CTR_EL0 and maintain user-address caches.
+    // libc/JIT cache flushes read CTR_EL0 and maintain user-address caches;
+    // vectorized memset/memcpy additionally probe DC ZVA for line zeroing.
     // Establish that ABI on each EL1 CPU instead of inheriting reset values.
     #[cfg(not(feature = "vmm"))]
-    SCTLR_EL1.modify(SCTLR_EL1::UCT::DontTrap + SCTLR_EL1::UCI::DontTrap);
+    SCTLR_EL1
+        .modify(SCTLR_EL1::UCT::DontTrap + SCTLR_EL1::UCI::DontTrap + SCTLR_EL1::DZE::DontTrap);
     SCTLR_EL1.set(SCTLR_EL1.get() | (1 << 23));
     barrier::isb(barrier::SY);
     super::serial::activate_boot_map();
