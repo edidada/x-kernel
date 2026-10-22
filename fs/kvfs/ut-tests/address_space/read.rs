@@ -81,6 +81,12 @@ fn pinned_file_pages_reject_eof_before_materialization_or_quota_admission() {
     assert_eq!(mapping.nrpages(), 1);
     assert_eq!(quota.0.load(Ordering::Acquire), 1);
     drop(mapping);
+    for _ in 0..5000 {
+        if quota.0.load(Ordering::Acquire) == 0 {
+            break;
+        }
+        ktask::sleep(ktime_types::TimeSpan::from_millis(1));
+    }
     assert_eq!(quota.0.load(Ordering::Acquire), 0);
 }
 

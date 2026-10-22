@@ -23,6 +23,18 @@ mod truncate;
 #[path = "writeback_unittest.rs"]
 mod writeback;
 
+/// Waits for this test's observable worker-side release, outside all locks.
+pub(crate) fn wait_for_release(mut released: impl FnMut() -> bool) {
+    let start_ns = khal::time::monotonic_time_nanos();
+    while !released() {
+        assert!(
+            khal::time::monotonic_time_nanos() - start_ns < 5_000_000_000,
+            "deferred page release did not complete"
+        );
+        ktask::yield_now();
+    }
+}
+
 fn new_cache() -> MappingPages {
     MappingPages::new()
 }

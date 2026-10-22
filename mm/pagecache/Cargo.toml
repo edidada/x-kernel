@@ -10,7 +10,9 @@ repository.workspace = true
 [dependencies]
 kalloc = { workspace = true }
 kerrno = { workspace = true }
+kfinalize = { workspace = true }
 khal = { workspace = true }
+krcu = { workspace = true }
 ksync = { workspace = true }
 ktask = { workspace = true }
 log = { workspace = true }

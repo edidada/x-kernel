@@ -47,6 +47,8 @@ impl MappingPages {
     ///
     /// The owner must exclude new cache population and writes. Task context only:
     /// waits for outstanding writeback before discarding even dirty folios.
+    /// RCU leaf cleanup and retained references can delay physical page and
+    /// capacity-charge release beyond this call.
     pub fn truncate_final(&self) -> KResult<()> {
         self.remove_ready_folios_from(0);
         self.remove_folios_from(0);

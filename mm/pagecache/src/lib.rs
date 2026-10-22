@@ -16,6 +16,7 @@ mod folio;
 mod folio_batch;
 mod mapping_pages;
 mod readahead;
+mod resident_index;
 mod truncate;
 mod writeback;
 

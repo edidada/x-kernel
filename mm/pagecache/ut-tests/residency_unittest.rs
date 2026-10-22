@@ -5,11 +5,12 @@
 //! Physical page-quota accounting across reservation and retained lifecycles.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::KError;
 use unittest::{assert_eq, def_test};
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use super::wait_for_release;
 use crate::{CacheResidency, Folio, MappingPages};
 
 struct TestResidency {
@@ -19,7 +20,10 @@ struct TestResidency {
 
 impl TestResidency {
     fn new(limit: usize) -> Self {
-        Self { limit, used: AtomicUsize::new(0) }
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+        }
     }
 
     fn used_pages(&self) -> usize {
@@ -29,12 +33,16 @@ impl TestResidency {
 
 impl CacheResidency for TestResidency {
     fn try_add_folio(&self) -> kerrno::KResult<()> {
-        self.used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            (used < self.limit).then_some(used + 1)
-        }).map(|_| ()).map_err(|_| KError::StorageFull)
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < self.limit).then_some(used + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| KError::StorageFull)
     }
 
     fn remove_folio(&self) {
+        assert!(ktask::is_sleepable_context());
         assert!(self.used.fetch_sub(1, Ordering::AcqRel) >= 1);
     }
 }
@@ -64,11 +72,13 @@ fn detached_pin_clones_keep_the_single_page_charge_until_final_release() {
         Err(KError::StorageFull)
     ));
     drop(clone);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     let replacement = cache.pin_folio_or_create(1, |_| Ok(())).unwrap();
     assert_eq!(quota.used_pages(), 1);
     drop(replacement);
     drop(cache);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
 }
 
@@ -89,6 +99,7 @@ fn page_quota_limits_resident_entries_and_unpublished_pages_are_unaccounted() {
     );
     assert_eq!(cache.nrpages(), 1);
     drop(cache);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
 }
 
@@ -107,6 +118,7 @@ fn detached_external_reference_holds_quota_until_its_allocation_is_freed() {
         Err(KError::StorageFull)
     );
     drop(external);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     cache
         .with_folio_or_create(0, |_| Ok(()), |_| Ok(()))
@@ -129,7 +141,10 @@ fn truncate_invalidates_batches_without_returning_their_physical_page_quota() {
         )
         .unwrap();
     let batch = cache.get_folios_contig(0, 1);
-    assert_eq!(batch.with_read_folio(0, |folio| folio.data()[0]), Some(0x55));
+    assert_eq!(
+        batch.with_read_folio(0, |folio| folio.data()[0]),
+        Some(0x55)
+    );
     cache.truncate_final().unwrap();
     assert_eq!(quota.used_pages(), 1);
     assert_eq!(batch.with_read_folio(0, |folio| folio.data()[0]), None);
@@ -138,6 +153,7 @@ fn truncate_invalidates_batches_without_returning_their_physical_page_quota() {
         Err(KError::StorageFull)
     );
     drop(batch);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     cache
         .with_folio_or_create(0, |_| Ok(()), |_| Ok(()))
@@ -153,11 +169,7 @@ fn resident_lookup_does_not_charge_again_when_quota_is_full() {
         .with_folio_or_create(0, |_| Ok(()), |_| Ok(()))
         .unwrap();
     cache
-        .with_folio_or_create(
-            0,
-            |_| panic!("resident is initialized"),
-            |_| Ok(()),
-        )
+        .with_folio_or_create(0, |_| panic!("resident is initialized"), |_| Ok(()))
         .unwrap();
     assert_eq!(
         cache.with_folio_or_create(1, |_| Ok(()), |_| Ok(())),
@@ -178,9 +190,11 @@ fn readahead_reservations_charge_and_release_unconsumed_pages() {
             .unwrap(),
         2
     );
+    wait_for_release(|| quota.used_pages() == 1);
     assert_eq!(quota.used_pages(), 1);
     assert_eq!(cache.nrpages(), 1);
     cache.truncate_final().unwrap();
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
 }
 
@@ -265,6 +279,7 @@ fn mapping_drop_keeps_quota_until_its_retained_batch_is_dropped() {
         Err(KError::StorageFull)
     );
     drop(batch);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     replacement
         .with_folio_or_create(0, |_| Ok(()), |_| Ok(()))
@@ -285,8 +300,13 @@ fn retained_mapping_tokens_keep_the_charge_after_pin_and_mapping_drop() {
     let vaddr = VirtAddr::from(0x1000usize);
     // SAFETY: the isolated table is never activated; tokens outlive its PTE.
     let mapping = unsafe {
-        pin.map_readonly(&mut page_table, vaddr, MappingFlags::USER | MappingFlags::READ)
-    }.unwrap();
+        pin.map_readonly(
+            &mut page_table,
+            vaddr,
+            MappingFlags::USER | MappingFlags::READ,
+        )
+    }
+    .unwrap();
     let clone = mapping.clone();
     drop(cache);
     assert_eq!(quota.used_pages(), 1);
@@ -299,6 +319,7 @@ fn retained_mapping_tokens_keep_the_charge_after_pin_and_mapping_drop() {
     drop(mapping);
     assert_eq!(quota.used_pages(), 1);
     drop(clone);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     replacement.pin_folio_or_create(0, |_| Ok(())).unwrap();
     assert_eq!(quota.used_pages(), 1);
@@ -316,6 +337,7 @@ fn failed_initialization_retains_only_the_existing_reservation_charge() {
         assert_eq!(quota.used_pages(), 1);
     }
     cache.truncate_final().unwrap();
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     cache.pin_folio_or_create(1, |_| Ok(())).unwrap();
     assert_eq!(quota.used_pages(), 1);
@@ -326,13 +348,18 @@ fn rejected_publications_neither_charge_nor_release_the_winner() {
     let quota = Arc::new(TestResidency::new(1));
     let cache = MappingPages::with_residency(Some(quota.clone()));
     cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
-    let duplicate = cache.filemap_add_folio(Folio::new_zeroed(0).unwrap()).unwrap_err();
-    let denied = cache.filemap_add_folio(Folio::new_zeroed(1).unwrap()).unwrap_err();
+    let duplicate = cache
+        .filemap_add_folio(Folio::new_zeroed(0).unwrap())
+        .unwrap_err();
+    let denied = cache
+        .filemap_add_folio(Folio::new_zeroed(1).unwrap())
+        .unwrap_err();
     assert_eq!(quota.used_pages(), 1);
     drop(duplicate);
     drop(denied);
     assert_eq!(quota.used_pages(), 1);
     cache.truncate_final().unwrap();
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
     cache.pin_folio_or_create(1, |_| Ok(())).unwrap();
     assert_eq!(quota.used_pages(), 1);
@@ -347,16 +374,19 @@ fn detached_and_replacement_allocations_hold_independent_single_charges() {
     let replacement = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
     assert_eq!(quota.used_pages(), 2);
     drop(original);
+    wait_for_release(|| quota.used_pages() == 1);
     assert_eq!(quota.used_pages(), 1);
     drop(cache);
     assert_eq!(quota.used_pages(), 1);
     drop(replacement);
+    wait_for_release(|| quota.used_pages() == 0);
     assert_eq!(quota.used_pages(), 0);
 }
 
 #[def_test]
 fn final_quota_release_holds_no_mapping_or_folio_mutex() {
     use alloc::sync::Weak;
+
     use ksync::Mutex;
 
     struct LockCheckingResidency {
@@ -370,6 +400,7 @@ fn final_quota_release_holds_no_mapping_or_folio_mutex() {
         }
 
         fn remove_folio(&self) {
+            assert!(ktask::is_sleepable_context());
             let mapping = self.mapping.lock().upgrade().unwrap();
             // A final pin drop must not invoke the provider under the index
             // mutex. The folio's own state guard was also released by Drop.
@@ -388,5 +419,6 @@ fn final_quota_release_holds_no_mapping_or_folio_mutex() {
     cache.truncate_final().unwrap();
     assert_eq!(quota.released.load(Ordering::Acquire), 0);
     drop(pin);
+    wait_for_release(|| quota.released.load(Ordering::Acquire) == 1);
     assert_eq!(quota.released.load(Ordering::Acquire), 1);
 }

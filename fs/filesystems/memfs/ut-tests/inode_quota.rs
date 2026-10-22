@@ -132,6 +132,7 @@ fn unlinked_open_inode_is_charged_until_the_last_file_reference_drops() {
     drop(file);
     assert_eq!(fs.stat().unwrap().free_file_count, 0);
     drop(second_reference);
+    crate::tests::wait_for_page_release(|| fs.stat().unwrap().blocks_free == 1);
     assert_eq!(capacities(&fs).unwrap(), (1, 1, 2, 1));
     open_file(&root, "next").unwrap();
 }

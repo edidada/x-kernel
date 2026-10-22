@@ -7,6 +7,17 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
+/// Page-cache withdrawal precedes GP and worker-side physical reclamation.
+pub(crate) fn wait_for_page_release(mut released: impl FnMut() -> bool) {
+    for _ in 0..5000 {
+        if released() {
+            return;
+        }
+        ktask::sleep(ktime_types::TimeSpan::from_millis(1));
+    }
+    core::assert!(released(), "deferred page release did not complete");
+}
+
 #[def_test]
 fn memory_filesystems_report_page_sized_blocks() {
     let fs = MemoryFs::new();
@@ -73,6 +84,7 @@ fn tmpfs_page_quota_returns_enospc_and_truncate_releases() {
     );
 
     file.truncate(0).unwrap();
+    wait_for_page_release(|| fs.stat().unwrap().blocks_free == 1);
     assert_eq!(file.write_from(b"second", &mut pos), Ok(6));
 }
 

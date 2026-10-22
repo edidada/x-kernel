@@ -124,7 +124,7 @@ impl MappingPages {
     /// Collects up to `count` contiguous resident folios starting at `start`.
     ///
     /// Stops at the first hole or [`FolioBatch::CAPACITY`] without loading pages.
-    /// References keep allocations alive; batch access runs outside the mapping lock.
+    /// References keep allocations alive; lookup uses RCU without the mapping lock.
     pub fn get_folios_contig(&self, start: PageIndex, count: usize) -> FolioBatch {
         self.get_folios_contig_with_run_len(start, count.min(FolioBatch::CAPACITY))
             .0
@@ -133,8 +133,9 @@ impl MappingPages {
     /// Collects references and counts the contiguous resident prefix in one traversal.
     ///
     /// Returns at most [`FolioBatch::CAPACITY`] references and a count up to `count`,
-    /// checking entries beyond capacity without retaining them. This mapping-lock
-    /// snapshot does not guarantee residency during later access.
+    /// checking entries beyond capacity without retaining them. Entries are
+    /// sampled individually under RCU, not as an atomic mapping snapshot;
+    /// references do not guarantee residency during later access.
     pub fn get_folios_contig_with_run_len(
         &self,
         start: PageIndex,
@@ -145,16 +146,20 @@ impl MappingPages {
             return (batch, 0);
         }
         let mut run_len = 0;
-        let state = self.state.lock();
-        for (&index, folio) in state.entries.range(start..).take(count) {
-            if start.checked_add(run_len as u64) != Some(index) {
-                break;
+        krcu::with_read(|scope| {
+            for offset in 0..count {
+                let Some(index) = start.checked_add(offset as u64) else {
+                    break;
+                };
+                let Some(folio) = self.read_index.get(index, scope) else {
+                    break;
+                };
+                if !batch.is_full() {
+                    batch.push(folio);
+                }
+                run_len += 1;
             }
-            if !batch.is_full() {
-                batch.push(folio.clone());
-            }
-            run_len += 1;
-        }
+        });
         (batch, run_len)
     }
 
@@ -170,19 +175,21 @@ impl MappingPages {
         f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> R,
     ) -> R {
         loop {
-            let state = self.state.lock();
-            let Some(folio) = state.entries.get(&index).cloned() else {
-                drop(state);
+            let Some(folio) = krcu::with_read(|scope| self.read_index.get(index, scope)) else {
                 return f(None);
             };
             let Some(mut locked) = folio.try_lock() else {
-                drop(state);
                 #[cfg(unittest)]
                 crate::pagecache_unittest::observe_read_wait(&folio);
                 drop(folio.lock());
                 continue;
             };
-            drop(state);
+            // Removal marks the old identity while holding this same folio
+            // lock. An Arc acquired before withdrawal can therefore be alive
+            // but unusable; resolve its index again after releasing the guard.
+            if locked.is_invalidated() {
+                continue;
+            }
             let was_dirty = locked.is_dirty();
             let result = f(locked.is_uptodate().then_some(&mut locked));
             let needs_dirty_reconciliation = was_dirty != locked.is_dirty();
@@ -193,19 +200,19 @@ impl MappingPages {
         }
     }
 
-    /// Visits a bounded snapshot of resident folios and holes in page order.
+    /// Visits a bounded sample of resident folios and holes in page order.
     ///
     /// Visits at most [`FolioBatch::CAPACITY`] pages, returning the number
-    /// visited, including the page on which `visit` breaks. One index lookup
-    /// collects all resident references; initialized hits subsequently take
+    /// visited, including the page on which `visit` breaks. One RCU scope
+    /// collects the resident references; initialized hits subsequently take
     /// only their folio lock. Holes are passed as `None` without allocation.
-    /// A non-uptodate or invalidated snapshot entry is resolved again, and
+    /// A non-uptodate or invalidated sampled entry is resolved again, and
     /// initialization failures propagate without visiting that page.
     ///
     /// The owner must exclude invalidation and sample EOF inside `visit`.
     /// Callbacks must not reenter this mapping or wait for another folio;
     /// `visit` must not modify data, dirty state, or residency. Task context
-    /// only. A hole describes the initial snapshot, even if a concurrent writer
+    /// only. A hole describes its initial lookup, even if a concurrent writer
     /// subsequently creates that identity.
     ///
     /// # Errors
@@ -228,13 +235,14 @@ impl MappingPages {
             .ok_or(KError::InvalidInput)?;
         let mut batch = FolioBatch::new();
         let mut indices = [0; FolioBatch::CAPACITY];
-        {
-            let state = self.state.lock();
-            for (&index, folio) in state.entries.range(start..end) {
-                indices[batch.len()] = index;
-                batch.push(folio.clone());
+        krcu::with_read(|scope| {
+            for index in start..end {
+                if let Some(folio) = self.read_index.get(index, scope) {
+                    indices[batch.len()] = index;
+                    batch.push(folio);
+                }
             }
-        }
+        });
         let mut slot = 0;
         for (offset, index) in (start..end).enumerate() {
             let result = if slot < batch.len() && indices[slot] == index {

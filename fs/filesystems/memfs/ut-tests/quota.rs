@@ -25,6 +25,7 @@ fn retained_detached_pages_remain_charged_in_statfs_and_remount() {
         Err(KError::StorageFull)
     ));
     drop(original);
+    crate::tests::wait_for_page_release(|| quota.used_pages() == 1);
     quota.statfs(&mut stat);
     assert_eq!(stat.blocks_free, 1);
     assert_eq!(quota.reconfigure(Some(1), None), Ok(()));
@@ -32,6 +33,7 @@ fn retained_detached_pages_remain_charged_in_statfs_and_remount() {
     quota.statfs(&mut stat);
     assert_eq!(stat.blocks_free, 0);
     drop(replacement);
+    crate::tests::wait_for_page_release(|| quota.used_pages() == 0);
     quota.statfs(&mut stat);
     assert_eq!(stat.blocks_free, 1);
 }

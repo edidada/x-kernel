@@ -12,7 +12,10 @@ use alloc::{
 use kerrno::KResult;
 use ksync::Mutex;
 
-use crate::{Folio, FolioGuard, PageIndex};
+use crate::{
+    Folio, FolioGuard, PageIndex,
+    resident_index::{ResidentEntries, ResidentIndex},
+};
 
 /// Filesystem-owned capacity accounting for cache-owned physical pages.
 ///
@@ -22,6 +25,7 @@ use crate::{Folio, FolioGuard, PageIndex};
 /// They must not reenter a mapping, lock folios, perform I/O, or acquire locks
 /// whose holders wait for this mapping. Each folio contains one page. A charge
 /// belongs to the stable folio and survives cache detachment and all clones.
+/// RCU and deferred leaf cleanup can delay release after cache removal returns.
 pub trait CacheResidency: Send + Sync {
     /// Admits one new page before publication, or fails without changing accounting.
     fn try_add_folio(&self) -> KResult<()>;
@@ -31,7 +35,7 @@ pub trait CacheResidency: Send + Sync {
 }
 
 pub(super) struct MappingPagesState {
-    pub(super) entries: BTreeMap<PageIndex, Arc<Folio>>,
+    pub(super) entries: ResidentEntries,
     residency: Option<Arc<dyn CacheResidency>>,
     // Rust's `BTreeMap` has no per-entry marks, so this derived index carries
     // the enumeration role of Linux `PAGECACHE_TAG_DIRTY`. `Folio::dirty`
@@ -68,7 +72,7 @@ impl MappingPagesState {
     }
 
     pub(super) fn take_folios(&mut self) -> BTreeMap<PageIndex, Arc<Folio>> {
-        core::mem::take(&mut self.entries)
+        self.entries.take()
     }
 
     pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Folio>) -> bool {
@@ -83,9 +87,12 @@ impl MappingPagesState {
 /// This is the mapping's page index, corresponding to Linux `i_pages`.
 /// The owning address space supplies filesystem operations, size and
 /// invalidation serialization; this container does not own that state.
-/// Operations and final destruction require sleepable task context.
+/// Operations and final destruction require watched, sleepable kernel task
+/// context after the permanent RCU and normal finalization services have started.
+/// Hot reads use short RCU scopes; folio locking and callbacks run outside them.
 pub struct MappingPages {
     pub(super) state: Mutex<MappingPagesState>,
+    pub(super) read_index: Arc<ResidentIndex>,
     #[cfg(unittest)]
     pub(super) allocation_gate: Mutex<Option<Arc<crate::pagecache_unittest::AllocationGate>>>,
 }
@@ -99,15 +106,17 @@ impl MappingPages {
     /// Creates an empty mapping with its filesystem's residency lifecycle.
     /// The provider is fixed before any entry can become visible.
     pub fn with_residency(residency: Option<Arc<dyn CacheResidency>>) -> Self {
+        let (entries, read_index) = ResidentEntries::new();
         Self {
             #[cfg(unittest)]
             allocation_gate: Mutex::new(None),
             state: Mutex::new(MappingPagesState {
-                entries: BTreeMap::new(),
+                entries,
                 residency,
                 dirty_marks: BTreeSet::new(),
                 writeback_marks: BTreeSet::new(),
             }),
+            read_index,
         }
     }
 

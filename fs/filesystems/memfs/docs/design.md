@@ -250,7 +250,9 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 - inode 释放时，`AddressSpace` 在最后一个引用释放时销毁，其直接持有的 `MappingPages` 随字段释放。
 - Physical folio destruction returns its page-quota charge. `truncate(0)` and
   final inode eviction detach entries; retained pins, tokens and batches keep
-  capacity charged until they release the physical pages.
+  capacity charged until they release the physical pages. RCU index references
+  also retain pages until their grace period and worker cleanup finish, so
+  detachment does not guarantee immediately reusable page quota.
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。
 - `InodeRef` 持有 backing inode；`Inode::drop` 在最后一个引用释放时归还编号与
   分配额度，临时引用与 VFS 操作对象遵循同一生命周期。

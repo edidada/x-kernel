@@ -14,13 +14,25 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 
 ## unsafe 代码清单
 
-所有页内存 unsafe 操作集中在私有 `src/folio.rs`，字段不向其他模块开放。
+页内存 unsafe 操作集中在私有 `src/folio.rs`，字段不向其他模块开放。
+索引的 raw ownership、原子指针解引用和 GP 回收集中在私有 `src/resident_index.rs`。
 
 1. `Folio::new_zeroed(index)`：对页分配器返回的独占可写页清零。
 2. `Folio::data()`：仅允许未发布页的独占 owner 借用；已发布页只由
    `FolioGuard::data()` 在稳定页对象自身的 mutex 下访问。
 3. `PinnedFolio::copy_to_uninit()`：锁住 pin 持有的同一稳定页对象后复制完整初始化页。
    缓存摘除或替换不改变其分配或锁，允许继续复制原页；目标范围由独占切片限定。
+4. RCU reader 只在有效 `ReadScope` 内解引用 acquire-loaded 节点，复制出的 Arc 可离开 scope。
+5. writer 只通过 `ResidentEntries` 的独占访问更新索引；每个发布节点恰有一条入边，
+   根扩展把旧根变为新根的子节点，不回收旧根。所有被摘除节点均延迟至 GP 后销毁。
+6. `CallbackNode` 是 repr(C) 节点的零偏移字段。回调恢复唯一 Box owner；空分支的子槽位
+   已清空，叶持有提前准备的 `DeferredArc<Arc<Folio>>`，因此回调不遍历整树、不获取
+   sleepable lock、不访问 mapping。叶的普通 Arc 转交任务上下文释放；最终 Folio 析构
+   和配额归还允许获取睡眠锁，绝不能直接放在 GP softirq 回调中执行。
+7. 回调提交要求永久 RCU service 已启动。若违反 admission 不变量则保留 raw owner 并断言失败，
+   不把 rejected submission 当成 GP 完成。叶发布还要求普通任务延迟析构服务已启动。
+8. `ResidentIndex::drop` 的独占所有权排除所有查询，递归释放仍发布的树，最多 11 级分支和一层叶；
+   已摘除的节点自包含并归回调所有，无须回调借用已销毁 mapping。
 
 ## 内存安全不变量
 
@@ -56,6 +68,9 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 folio tree/dirty index 与 folio data 分层加锁。需要同时核对两层状态时，锁顺序固定为
 folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败必须释放
 索引锁再等待。folio access closure 持页锁完成 dirty index reconciliation。writeback 和缓冲缺页读取的文件系统 I/O 在 tree lock 外执行。
+热读通过 RCU 查询 radix 索引，scope 内不获取 folio Mutex、不分配、不进行 I/O。
+取得 Arc 后复核槽位身份，再离开 scope。Arc 只保证对象存活；摘除前必须在 folio 锁内标记
+invalidated，热读取得页锁后重查该标记，不能把仍存活的旧身份当成当前缓存页。
 缓冲读 owner 用 invalidate shared lock 协调 EOF、页保留和初始化，避免迟到读入恢复
 被截断的数据。读入前 folio 已进入 resident tree，I/O 期间持页锁而不持 tree lock；
 只有完整初始化的页可标记 uptodate，失败页不暴露部分数据。等待页锁后重新查找 resident，
@@ -92,8 +107,9 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 
 ## 已知限制
 
-- resident folio tree 和 dirty index 分别使用 `BTreeMap`/`BTreeSet`；已消除 writeback
-  对全部 resident folio 的扫描，但尚未实现 Linux XArray tag/reclaim；
+- resident 有序视图和 dirty index 分别使用 `BTreeMap`/`BTreeSet`，并维护额外的 RCU radix
+  查询索引；尚未实现统一的 Linux XArray tag/reclaim，索引内存、GP 和延迟析构积压需要单独评估；
+- 摘除不保证立即归还物理页配额；GP 和普通工作线程完成前，已摘除页仍可能占用容量；
 - truncate 等待写回时释放 mapping/folio 锁，重新加锁后复核 identity 与 writeback；
   owner 仍须串行化尺寸变化并禁止在截断范围内重新填页；
 - `writeback_until` 持 folio lock 调用 backend，callback 重入同一个 `MappingPages` 会造成
@@ -147,7 +163,7 @@ The filesystem owns capacity policy and supplies one `CacheResidency` provider
 when constructing an inode mapping. Only a winning publication calls
 `try_add_folio()` under folio and index mutexes; its charge is attached to the
 stable folio. Detachment, truncate and mapping destruction cannot release quota
-while pins, tokens or batches retain that physical page. The last reference
+while pins, tokens, batches or deferred radix leaves retain that physical page. The last reference
 frees the allocation before returning its single charge, with neither mutex
 held. Failed admissions and losing allocations own no charge; failed reads keep
 the resident reservation charged. A charge retains its provider past mapping
@@ -158,8 +174,8 @@ folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
 
 
-Resident batch traversal reports absent identities only from its bounded index
-snapshot. An existing non-uptodate or invalidated candidate is resolved again
+Resident batch traversal reports absent identities from individual lookups in one
+bounded RCU scope, not an atomic snapshot. An existing non-uptodate or invalidated candidate is resolved again
 before exposing data; initialization errors are preserved. The owner holds
 invalidation shared through the batch, including EOF checks and user copies.
 Only one folio is locked at a time; callbacks cannot reenter this mapping or

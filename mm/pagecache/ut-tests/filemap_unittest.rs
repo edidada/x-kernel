@@ -10,6 +10,26 @@ use unittest::def_test;
 use super::*;
 
 #[def_test]
+fn hot_read_lookup_does_not_acquire_the_mapping_state_mutex() {
+    let cache = MappingPages::new();
+    let mut folio = Folio::new_zeroed(0).unwrap();
+    folio.data()[0] = 0x51;
+    assert!(cache.filemap_add_folio(folio).is_ok());
+    // The same task holds the non-reentrant mutex. A lookup that still used
+    // it would violate the hot-read contract rather than merely run slower.
+    let state = cache.state.lock();
+    assert_eq!(cache.with_folio(0, |folio| folio.unwrap().data()[0]), 0x51);
+    assert!(cache.with_folio(1, |folio| folio.is_none()));
+    let batch = cache.get_folios_contig(0, 2);
+    assert_eq!(batch.len(), 1);
+    assert_eq!(
+        batch.with_read_folio(0, |folio| folio.data()[0]),
+        Some(0x51)
+    );
+    drop(state);
+}
+
+#[def_test]
 fn collected_folios_reject_removed_and_uninitialized_pages() {
     let cache = MappingPages::new();
     let count = FolioBatch::CAPACITY + 2;
@@ -133,6 +153,7 @@ fn pinned_page_retains_its_object_without_retaining_the_replacement() {
     let copied = unsafe { core::slice::from_raw_parts(destination.as_ptr().cast::<u8>(), PAGE_SIZE_4K) };
     assert!(copied.iter().all(|byte| *byte == 0x5a));
     cache.truncate_final().unwrap();
+    crate::pagecache_unittest::wait_for_release(|| replacement.strong_count() == 0);
     assert!(replacement.upgrade().is_none());
     drop(pin);
 }

@@ -33,6 +33,7 @@ runtime 不能直接引用它。
 - `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
 - `readahead.rs`：有界缺页段查询、页保留和同步读入协调；
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
+- `resident_index.rs`：RCU radix 查询、写端有序视图和节点延迟回收；
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
 - `tests/`：resident storage、truncate 和 writeback 测试。
 
@@ -43,10 +44,11 @@ VfsInode
   -> kvfs::AddressSpace { host, a_ops, object_id, mapped_views }
        -> i_pages: pagecache::MappingPages (直接持有)
             -> Mutex<MappingPagesState>
-                 -> BTreeMap<PageIndex, Arc<Folio>> entries
+                 -> ResidentEntries (BTreeMap ordered view + shared radix index)
                  -> optional Arc<dyn CacheResidency> (one per mapping)
                  -> BTreeSet<PageIndex> dirty_marks (派生索引)
                  -> BTreeSet<PageIndex> writeback_marks (派生索引)
+            -> ResidentIndex (RCU radix lookup, shared with ResidentEntries)
 ```
 
 `kvfs::AddressSpace` 在 materialize 时提供闭包，由自己的
@@ -63,9 +65,33 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 - 运行于普通 task context，可能分配内存并获取 sleepable mutex；
 - 不可在中断上下文调用；
 - 不依赖 current process；
+- RCU 查询和节点摘除要求 boot-owned RCU service 已启动、当前 task 处于 watched kernel context；
+- 叶节点发布要求普通任务延迟析构服务已启动；最终页释放可能延后至 GP 和工作线程执行后；
 - owner 必须在调用 resize/writeback 算法时提供已串行化的 inode 状态。
 
 ## 算法流程
+
+### 热命中查询
+
+`with_folio`、`get_folios_contig_with_run_len` 和 `visit_resident_folios` 使用
+`krcu::with_read` 查询 radix 索引。每级消耗 6 个页号位，根按实际页号范围增长，
+最多 11 级；普通连续文件不需要走满 64 位的高度。节点内容初始化后不再改变，
+只有子指针通过 release/acquire 原子操作发布。读者克隆叶节点持有的 folio `Arc`，
+复核原槽位仍指向同一叶节点，否则重新查找。RCU scope 内没有页锁、分配或文件系统 I/O。
+离开 scope 后才获取 folio 锁，并拒绝已 invalidated 的旧实例。
+
+`ResidentEntries` 保留 BTreeMap 用于截断、dirty/writeback 和预读策略的有序枚举，
+不暴露 DerefMut。所有结构更新在原 mapping mutex 内同步修改有序视图和 radix 索引；
+读者只采样 radix 发布的身份，不读取正在修改的 BTreeMap。插入不复制整树、不等待 GP。
+删除同时剪除空分支，每个叶节点或空分支独立提交 `PreparedCallback`，宽限期后回收。
+回调不访问 mapping 或 residency provider，不锁 folio；每次至多释放一个空分支或提交一个叶引用的延迟析构。
+叶中的 `Arc<Folio>` 用 `kfinalize::DeferredArc` 包装，在任务上下文提前准备；GP 回调只转交
+析构责任，由普通工作线程释放该引用，必要时完成物理页释放和配额归还。热读仍克隆普通
+`Arc<Folio>`，不改变 folio/pin/token 的身份。该包装增加每个叶节点的分配和回收调度成本。
+这增加了一个查询索引和每 resident folio 一个索引拥有引用，尚未合并为完整 Linux XArray。
+
+批量查询只提供逐项观察的有界引用集合，不提供多个索引位置的一致快照。run length 和
+hole 都是观察时的结果；后续页访问仍按 folio invalidation、uptodate 和 owner EOF 协议校验。
 
 ### Materialize
 
@@ -133,7 +159,7 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 - Folio 与 pin/token 共享同一稳定 `Arc<Folio>`，页的所有权、identity 和数据锁不分离；
 - 回调只得到 `FolioGuard`，不能替换或移出已发布 owner；缓存替换更新索引引用；
 - `copy_to_uninit` 在原页自己的锁内完整复制初始化页；摘除不禁止复制，EOF 由调用方校验；
-- 一个 mutex 保护 resident folio tree 和 dirty index；
+- 一个 mutex 串行化 resident 索引更新、有序枚举和 dirty/writeback index；热读查询使用 RCU；
 - 每个 folio 的 mutex 保护数据和 dirty/writeback 状态；
 - 同时核对 resident tree、dirty index 与 folio 状态时，锁顺序固定为
   folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败后释放索引锁再等待。
@@ -141,7 +167,7 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 - 本 crate 不拥有 inode data lock、mapped-view lock 或 MM lock；
 - 文件系统 I/O 在 folio-tree mutex 外执行；读入前将非 uptodate folio 纳入 resident tree，
   页锁串行化初始化，等待者释放索引锁睡眠并在醒来后重新查找身份；
-- `visit_resident_folios` 一次索引快照收集至多 31 页的驻留引用与位置；随后
+- `visit_resident_folios` 一次 RCU scope 逐项收集至多 31 页的驻留引用与位置；随后
   逐页访问时，已初始化命中只取 folio 锁。非 uptodate/失效候选重新查找，
   初始化错误不转为空洞；owner 持 invalidate shared 覆盖整个批次；
 - `with_folio` 仅暴露 uptodate 数据；初始化失败保留非 uptodate 页供重试，
@@ -173,7 +199,8 @@ mutex 下才能保持索引一致性。Folio 的数据与 flags 仍封装在 `fo
 2. 不保存 length。唯一 EOF 是 `VfsInode::size()`。
 3. 不保存 object-id 或 views。它们属于 `kvfs::AddressSpace`，对应 Linux
    `address_space::i_mmap`。
-4. resident folio 使用 `BTreeMap`，dirty/writeback tag 使用独立 `BTreeSet`。该集合只是补足
+4. resident folio 的写端有序视图使用 `BTreeMap`，热读使用 RCU radix 索引，
+   dirty/writeback tag 使用独立 `BTreeSet`。该集合只是补足
    `BTreeMap` 缺少 per-entry mark 的能力，枚举成本因此与 tagged folio 数量相关；
    未来可用 Linux XArray dirty tag 风格实现替换具体索引，不改变 `AddressSpace` 契约。
 
@@ -241,7 +268,8 @@ when constructing an inode mapping. Only a winning new identity calls
 `try_add_folio()` under its folio and index mutexes. That successful admission
 attaches one provider-owned capacity charge to the stable folio. Detaching the
 cache identity does not return it: pins, mapping tokens and read batches keep
-the physical allocation and its charge alive together. Cloning never charges
+the physical allocation and its charge alive together. The retired radix leaf
+also retains its reference through the grace period and subsequent worker cleanup. Cloning never charges
 again. After the last reference drops, Folio frees the physical allocation and
 returns its charge with neither the folio nor mapping index mutex held. The
 charge retains the provider even when the inode mapping has already gone away.
@@ -253,11 +281,11 @@ Speculative physical storage remains outside the admission policy until insertio
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
 Unconsumed readahead reservations detach while locked and release their charges
-when the batch drops its final references after unlocking. Failed reads retain
+after both the unlocked batch and the deferred radix owner release their references. Failed reads retain
 their non-uptodate reservation and charge until retry or removal.
 
-`visit_resident_folios` snapshots only one bounded page range. Missing identities
-are reported as None from that snapshot and never reserved or initialized. This
+`visit_resident_folios` samples only one bounded page range under RCU. Missing identities
+are reported as None from each lookup and never reserved or initialized. This
 allows a filesystem to own its sparse algorithm without a cache policy flag.
 Callbacks may stop before the next page; errors retain earlier callback progress.
 The fixed FolioBatch and index array allocate no additional heap storage.

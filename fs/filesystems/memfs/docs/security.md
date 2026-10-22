@@ -85,6 +85,9 @@
 - Every winning identity is charged once. The stable folio retains its charge
   and provider reference until physical deallocation; clones neither charge
   again nor allow cache removal to return capacity early.
+- RCU index references remain charged through their grace period and normal-worker
+  release. Truncate and inode eviction can return before physical reclamation;
+  statfs and admission must count those pages until actual deallocation.
 - Sparse-hole handling belongs to memfs's read operation. Cache access retries
   retained initialization errors and excludes truncate through EOF/data copying.
 

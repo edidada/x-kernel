@@ -447,6 +447,7 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
     }
     let last_index = ((count - 1) * 2) as u64;
     let last = cache.state.lock().entries[&last_index].clone();
+    let retained_ref_count = Arc::strong_count(&last);
     let mut distant_ref_count = 0;
     let mut writes = Vec::new();
     let initial_budget = usize::MAX;
@@ -460,7 +461,8 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
             &mut pages_skipped,
             &mut |index, _, _| {
                 if index == 0 {
-                    // Only the mapping and this test retain the distant page.
+                    // Scanning the first window must add no transient pin on
+                    // a distant page, regardless of the index's owning refs.
                     distant_ref_count = Arc::strong_count(&last);
                 }
                 writes.push(index);
@@ -468,7 +470,7 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
             },
         )
         .unwrap();
-    assert_eq!(distant_ref_count, 2);
+    assert_eq!(distant_ref_count, retained_ref_count);
     assert_eq!(initial_budget - nr_to_write, count);
     assert_eq!(
         writes,
