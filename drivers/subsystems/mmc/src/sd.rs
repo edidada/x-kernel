@@ -106,16 +106,22 @@ pub fn detect_card(
 ) -> Result<MmcCardData, MmcError> {
     let host_ref = host.as_ref();
     if !host_ref.card_present() {
+        log::warn!("sd: CDETECT says no card");
         return Err(MmcError::NoCard);
     }
 
     // 1. Init frame: 400 kHz, 1-bit, power on. GO_IDLE carries the
     //    80-clock initialization pattern.
-    host_ref.set_ios(&MmcIos {
-        clock_hz: 400_000,
-        bus_width: BusWidth::Bit1,
-        power_on: true,
-    })?;
+    step(
+        "initial ios (400 kHz / 1-bit / power)",
+        0,
+        0,
+        host_ref.set_ios(&MmcIos {
+            clock_hz: 400_000,
+            bus_width: BusWidth::Bit1,
+            power_on: true,
+        }),
+    )?;
     let mut idle = MmcCommand::none(CMD_GO_IDLE);
     idle.init_clocks = true;
     idle.stop = true;
@@ -315,7 +321,12 @@ fn read_scr(host: &dyn MmcHost, rca: u16) -> Result<Scr, MmcError> {
     ))?;
     let mut buf = [0u8; SCR_BYTES];
     let scr_cmd = MmcCommand::with(ACMD_SEND_SCR, u32::from(rca) << RCA_SHIFT, RespKind::R1);
-    host.read_data_cmd(&scr_cmd, SCR_BYTES, &mut buf)?;
+    step(
+        "read SCR (first data phase)",
+        ACMD_SEND_SCR,
+        u32::from(rca) << RCA_SHIFT,
+        host.read_data_cmd(&scr_cmd, SCR_BYTES, &mut buf),
+    )?;
 
     // SCR arrives MSB-first; fold into the {63:32}/{31:0} words that
     // [`MmcResponse::bits`] reads as raw[2]/raw[3].
@@ -361,7 +372,12 @@ fn switch_high_speed(
 
     let mut status = [0u8; SWITCH_STATUS_BYTES];
     let switch_cmd = MmcCommand::with(CMD_SWITCH_FUNC, HS_FUN_SEL_ARG, RespKind::R1);
-    host.read_data_cmd(&switch_cmd, SWITCH_STATUS_BYTES, &mut status)?;
+    step(
+        "HS switch (CMD6 data phase)",
+        CMD_SWITCH_FUNC,
+        HS_FUN_SEL_ARG,
+        host.read_data_cmd(&switch_cmd, SWITCH_STATUS_BYTES, &mut status),
+    )?;
 
     if status[16] & 0xF == 0x1 {
         // The controller's divider math happens inside set_ios; the bus

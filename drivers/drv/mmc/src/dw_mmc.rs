@@ -559,6 +559,15 @@ impl DwMmcHost {
         self.start_data_phase(cmd, DataDir::Read, bytes)?;
         let outcome = self.wait_transfer();
         self.idmac_stop();
+        if let Err(err) = &outcome {
+            log::warn!(
+                "dwmmc: data-read cmd {} bytes {} failed: {err:?} (rintsts {:#x} idsts {:#x})",
+                cmd.opcode,
+                bytes,
+                self.readl(SDMMC_RINTSTS),
+                self.readl(SDMMC_IDSTS),
+            );
+        }
         outcome?;
         // SAFETY: the window holds `bytes` staged bytes from the DMA just
         // completed; bounded by the guard above, and no other borrow of
@@ -583,6 +592,15 @@ impl DwMmcHost {
         self.start_data_phase(cmd, DataDir::Write, bytes)?;
         let outcome = self.wait_transfer();
         self.idmac_stop();
+        if let Err(err) = &outcome {
+            log::warn!(
+                "dwmmc: data-write cmd {} bytes {} failed: {err:?} (rintsts {:#x} idsts {:#x})",
+                cmd.opcode,
+                bytes,
+                self.readl(SDMMC_RINTSTS),
+                self.readl(SDMMC_IDSTS),
+            );
+        }
         outcome
     }
 
