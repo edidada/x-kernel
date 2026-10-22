@@ -16,9 +16,9 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-#[cfg(feature = "fs9p")]
-use alloc::boxed::Box;
-use alloc::{format, sync::Arc, vec::Vec};
+pub mod partition;
+
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
 use driver_base::Publication;
@@ -451,7 +451,17 @@ fn mount_root_file_system(boot: &BootVfs) {
         .filter(|device| device.num_blocks() != 0)
         .collect();
     let handle = select_root_block(&mut block_devs);
-    let source = format!("/dev/{}", handle.name());
+    let device_number = handle.device_number();
+
+    // Partition scan (verified reference `fs/block/partition.rs`): a
+    // partitioned card mounts its first partition; a raw filesystem at
+    // LBA 0 mounts the disk directly.
+    let root_block = subsys_block::lookup_block_device(device_number)
+        .expect("root block device vanished between selection and partition scan");
+    let source = partition::resolve_root_source(&root_block, device_number).unwrap_or_else(|err| {
+        warn!("partition scan failed: {err:?}; probing the raw device");
+        format!("/dev/{}", handle.name())
+    });
 
     info!(
         "  use block device 0: {:?} ({:?})",

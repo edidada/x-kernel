@@ -27,6 +27,7 @@ driver_base = { workspace = true }
 virtio_devices = { workspace = true, optional = true }
 anon_inodefs.workspace = true
 subsys_block = { workspace = true }
+devnode = { workspace = true }
 bpffs = { workspace = true, optional = true }
 cgroup2fs = { workspace = true, optional = true }
 devfs.workspace = true
