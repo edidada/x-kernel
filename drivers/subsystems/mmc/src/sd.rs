@@ -61,8 +61,10 @@ const ACMD_SEND_SCR: u8 = 51;
 
 /// Check pattern + 2.7–3.6 V support for CMD8 (Linux `0x1AA`).
 const IF_COND_ARG: u32 = 0x1AA;
-/// HCS bit (host supports SDHC) + 2.7–3.6 V OCR window.
-const OP_COND_ARG: u32 = 0x4000_0000 | 0x00FF_8000;
+/// HCS bit (host supports SDHC) + the 3.2–3.4 V window (bits 20/21) —
+/// the verified driver's exact argument (`MMC_VDD_32_33 | MMC_VDD_33_34 |
+/// MMC_SDHC_CAPACITY_HCS`).
+const OP_COND_ARG: u32 = 0x4000_0000 | 0x0030_0000;
 /// OCR busy bit (card powered up, Linux `MMC_OCR_BUSY`).
 const OCR_BUSY: u32 = 1 << 31;
 /// OCR high-capacity bit (Linux `MMC_OCR_CCS`).
@@ -116,6 +118,7 @@ pub fn detect_card(
     })?;
     let mut idle = MmcCommand::none(CMD_GO_IDLE);
     idle.init_clocks = true;
+    idle.stop = true;
     step("go idle", CMD_GO_IDLE, 0, host_ref.send_cmd(&idle))?;
     // The card is busy resetting after GO_IDLE; hammering CMD8 at it
     // inside that window returns corrupted responses (Crc).
@@ -123,6 +126,8 @@ pub fn detect_card(
 
     // 2. v2 voltage handshake: a card that does not echo 0x1AA in the
     //    low bits is a v1-era card this core does not drive.
+    // R7's CRC bits are undefined on several DW_mshc boards — the
+    // verified driver checks response presence only (ShortNoCrc).
     let if_cond = step(
         "voltage handshake",
         CMD_SEND_IF_COND,
@@ -130,7 +135,7 @@ pub fn detect_card(
         host_ref.send_cmd(&MmcCommand::with(
             CMD_SEND_IF_COND,
             IF_COND_ARG,
-            RespKind::R1,
+            RespKind::ShortNoCrc,
         )),
     )?;
     if if_cond.word() & 0x0FFF != IF_COND_ARG & 0x0FFF {
@@ -150,7 +155,12 @@ pub fn detect_card(
             Ok(resp) => resp,
             // Cards mid-initialization commonly show Timeout (no
             // response yet) or Crc (partial response); keep polling.
-            Err(MmcError::Timeout | MmcError::Crc) => continue,
+            Err(MmcError::Timeout | MmcError::Crc) => {
+                if attempt % 64 == 63 {
+                    log::warn!("sd: ACMD41 attempt {attempt}: still no usable response");
+                }
+                continue;
+            }
             Err(err) => {
                 log::warn!("sd: ACMD41 attempt {attempt} -> {err:?}");
                 return Err(err);
@@ -160,6 +170,9 @@ pub fn detect_card(
         if ocr & OCR_BUSY != 0 {
             powered = true;
             break;
+        }
+        if attempt % 64 == 63 {
+            log::warn!("sd: ACMD41 attempt {attempt}: ocr={ocr:#010x} (not busy yet)");
         }
     }
     if !powered {

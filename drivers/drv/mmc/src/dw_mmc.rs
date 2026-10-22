@@ -101,6 +101,7 @@ const CMD_USE_HOLD_REG: u32 = 1 << 29;
 const CMD_UPD_CLK: u32 = 1 << 21;
 const CMD_INIT: u32 = 1 << 15;
 const CMD_SEND_AUTO_STOP: u32 = 1 << 12;
+const CMD_STOP: u32 = 1 << 14;
 const CMD_PRV_DAT_WAIT: u32 = 1 << 13;
 const CMD_DAT_WR: u32 = 1 << 10;
 const CMD_DAT_EXP: u32 = 1 << 9;
@@ -456,8 +457,15 @@ impl DwMmcHost {
         match cmd.resp {
             RespKind::None => {}
             RespKind::R2 => cmdr |= CMD_RESP_EXP | CMD_RESP_LONG | CMD_RESP_CRC,
-            RespKind::R3 => cmdr |= CMD_RESP_EXP,
+            // OCR-shaped and ShortNoCrc responses carry undefined CRC bits
+            // — enabling the CRC check flags every transfer.
+            RespKind::R3 | RespKind::ShortNoCrc => cmdr |= CMD_RESP_EXP,
             RespKind::R1 | RespKind::R1b => cmdr |= CMD_RESP_EXP | CMD_RESP_CRC,
+        }
+        if cmd.stop {
+            // GO_IDLE / abort class (Linux marks GO_IDLE this way, and the
+            // verified driver sends CMD0 with STOP | INIT).
+            cmdr |= CMD_STOP;
         }
         if let Some(dir) = dir {
             cmdr |= CMD_DAT_EXP;
@@ -471,11 +479,9 @@ impl DwMmcHost {
         if cmd.init_clocks {
             cmdr |= CMD_INIT;
         }
-        if self.current_clock.load(Ordering::Acquire) <= 400_000 {
-            // Low-speed commands need the hold register (Linux default
-            // unless the card negotiates otherwise).
-            cmdr |= CMD_USE_HOLD_REG;
-        }
+        // The hold register is set on EVERY command (the verified driver
+        // defaults it on; RK3588 integrations do not declare NO_USE_HOLD).
+        cmdr |= CMD_USE_HOLD_REG;
         cmdr
     }
 
@@ -493,7 +499,7 @@ impl DwMmcHost {
                     self.readl(SDMMC_RESP0 + 0xC),
                 ],
             },
-            RespKind::R1 | RespKind::R1b | RespKind::R3 => MmcResponse {
+            RespKind::R1 | RespKind::R1b | RespKind::R3 | RespKind::ShortNoCrc => MmcResponse {
                 raw: [self.readl(SDMMC_RESP0), 0, 0, 0],
             },
         }

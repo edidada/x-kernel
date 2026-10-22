@@ -71,6 +71,11 @@ pub enum RespKind {
     R2,
     /// OCR register response (R3/ACMD41), CRC bits undefined.
     R3,
+    /// Short response whose CRC bits are undefined on this exchange —
+    /// CMD8's R7 on several DW_mshc boards (the verified driver checks
+    /// response presence only; enabling the CRC check there produces
+    /// spurious Crc failures).
+    ShortNoCrc,
 }
 
 /// One data direction (Linux `MMC_DATA_READ`/`MMC_DATA_WRITE`).
@@ -97,6 +102,10 @@ pub struct MmcCommand {
     /// Append an automatic stop transmission after the data phase
     /// (`SDMMC_CMD_SEND_AUTO_STOP`; CMD18 multi-block reads).
     pub auto_stop: bool,
+    /// Issue as STOP/ABORT (`SDMMC_CMD_STOP`, bit 14) — Linux marks
+    /// GO_IDLE / GO_INACTIVE / SDIO-abort this way, and the verified
+    /// driver sends CMD0 with it too.
+    pub stop: bool,
 }
 
 impl MmcCommand {
@@ -108,6 +117,7 @@ impl MmcCommand {
             resp: RespKind::None,
             init_clocks: false,
             auto_stop: false,
+            stop: false,
         }
     }
 
@@ -119,6 +129,7 @@ impl MmcCommand {
             resp,
             init_clocks: false,
             auto_stop: false,
+            stop: false,
         }
     }
 }
