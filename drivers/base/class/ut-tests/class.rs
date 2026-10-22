@@ -15,7 +15,7 @@ use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    Class, ClassHooks, Publication, PublicationId, PublicationNode, PublicationOwner,
+    Class, ClassHooks, Publication, PublicationId, PublicationNode, PublicationSource,
     owner::LegacyOwner,
 };
 

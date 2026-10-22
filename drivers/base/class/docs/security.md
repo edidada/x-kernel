@@ -3,7 +3,7 @@
 ## 范围与信任边界
 
 分析 `src/publication.rs`、`src/class.rs` 和 `src/owner.rs`；`src/lib.rs` 仅组织模块与导出。本 crate 不包含 unsafe。
-模型提供受信任的 `PublicationOwner`，具体子系统提供 hooks 和 runtime payload。
+模型提供受信任的 `PublicationSource`，具体子系统提供 hooks 和 runtime payload。
 不直接解析固件或用户输入，也不实现 MMIO、DMA 或 IRQ 操作。
 
 模型必须为同一设备复用相同的 `Arc` 身份 allocation，返回稳定路径、实时在线状态，

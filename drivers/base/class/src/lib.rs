@@ -5,7 +5,7 @@
 //! Generic device-capability publication, admission and withdrawal.
 //!
 //! [`Class`] owns a publication registry, subscriptions and projection hooks.
-//! Its registry is private to the class module. [`PublicationOwner`] supplies
+//! Its registry is private to the class module. [`PublicationSource`] supplies
 //! the live device identity without exposing the device model's private state.
 //!
 //! [`Publication`] owns the withdrawal of one published capability. Its clones
@@ -26,7 +26,7 @@ mod publication;
 pub use class::{
     Class, ClassAvailabilityCallback, ClassHooks, ClassRemovalCallback, PublicationNode,
 };
-pub use owner::PublicationOwner;
+pub use owner::PublicationSource;
 pub use publication::{InUse, Publication, PublicationId};
 
 unittest::path_mod_test!(tests, "../ut-tests/class.rs");

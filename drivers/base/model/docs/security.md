@@ -9,7 +9,7 @@
 一个具体实例。
 
 通用 class 已移到独立 `driver-class`，见 [class 安全分析](../../class/docs/security.md)。
-模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationOwner` 提供
+模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationSource` 提供
 只读身份查询与幂等退休回调。跨 crate 传递同一个 `Arc` allocation，保证重复
 发布检测和共享在线状态不因拆分改变。class 不依赖模型或访问其私有字段。
 

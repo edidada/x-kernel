@@ -23,7 +23,7 @@
 //! | `-EPROBE_DEFER` | [`ProbeError::Deferred`] |
 //!
 //! Class publication is provided by `driver_class`; this crate owns the device
-//! identity and implements its `PublicationOwner` contract without exposing
+//! identity and implements its `PublicationSource` contract without exposing
 //! internal device state.
 //!
 //! # Ownership model

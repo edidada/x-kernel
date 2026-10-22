@@ -60,7 +60,7 @@ pub(crate) struct DeviceCore {
     offline: core::sync::atomic::AtomicBool,
 }
 
-impl driver_class::PublicationOwner for DeviceCore {
+impl driver_class::PublicationSource for DeviceCore {
     fn driver_name(&self) -> Option<&'static str> {
         self.driver_name()
     }

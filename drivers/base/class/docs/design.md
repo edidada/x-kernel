@@ -4,7 +4,7 @@
 
 通用 class 发布机制，独立于设备绑定模型、具体设备家族和 host 实现。
 hwrng 定义具体设备能力，entropy 消费 `Publication`；二者无需依赖 probe 引擎。
-设备模型通过 `PublicationOwner` 接入，不向 class 暴露内部 `DeviceCore`。
+设备模型通过 `PublicationSource` 接入，不向 class 暴露内部 `DeviceCore`。
 
 ## 职责与拆分边界
 
@@ -62,7 +62,7 @@ borrow handle，不能通过 Drop 撤销发布。撤销从注册表移除对象�
 
 ## 设计决策与资源释放
 
-使用四方法的 `PublicationOwner` 契约替代对模型私有结构的依赖，不复制设备状态，
+使用四方法的 `PublicationSource` 契约替代对模型私有结构的依赖，不复制设备状态，
 也不拆出兜底 types crate。身份的实际修改仍由模型实现；class 仅持有受限的退休回调。
 最后一个 `InUse` 释放后执行 deferred teardown，payload 由剩余 `Arc` 保活。
 `with` 不检查可用性，仅供 teardown 和明确允许离线读取的操作；数据面使用

@@ -15,7 +15,7 @@ deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceSer
 迁移需要处理的遗留依赖，不是可移植边界的永久例外。
 
 依赖方向为 `driver-model → driver-class`。私有 `DeviceCore` 实现
-`PublicationOwner`，`Device::publish` 将同一个 `Arc` 身份交给 class。
+`PublicationSource`，`Device::publish` 将同一个 `Arc` 身份交给 class。
 class 通过模型实现的退休回调更新共享 offline 状态，不能修改绑定信息。
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
 发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
@@ -29,7 +29,7 @@ model 管设备实例与驱动实现的绑定关系：设备进入模型、选�
 
 一台设备可以发布多项能力；能力消费者经 class 使用这些能力，无需了解
 model 的驱动匹配和 probe 引擎。两套状态机通过同一个活身份协作。
-`PublicationOwner::mark_offline` 是模型实现、class 触发的退休入口；当前保留
+`PublicationSource::mark_offline` 是模型实现、class 触发的退休入口；当前保留
 单项发布撤销影响共享设备身份的行为，是否支持独立能力撤销需要另行审查。
 
 本轮不继续拆分 `domain` 的四个引擎，它们共同维护 `DomainInner` 和同步协议。

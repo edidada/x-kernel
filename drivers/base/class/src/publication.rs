@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
-use crate::PublicationOwner;
+use crate::PublicationSource;
 
 /// Opaque handle of one class publication.
 ///
@@ -56,7 +56,7 @@ struct Inner<T> {
     id: PublicationId,
     /// The device this publication belongs to — THE shared identity: name,
     /// path and liveness all come from here, never from a snapshot.
-    owner: Arc<dyn PublicationOwner>,
+    owner: Arc<dyn PublicationSource>,
     runtime: T,
     name: String,
     /// In-flight operation count. `class_remove` flips `draining` BEFORE the
@@ -108,7 +108,7 @@ impl<T> Publication<T> {
     /// Build a publication. The withdrawal action is installed separately by
     /// `Class::publish` once the owning class is known.
     pub(crate) fn new(
-        owner: Arc<dyn PublicationOwner>,
+        owner: Arc<dyn PublicationSource>,
         runtime: T,
         name: String,
         id: PublicationId,

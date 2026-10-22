@@ -9,7 +9,7 @@ device lengths before copying into caller-owned buffers.
 
 The hwrng publication adapter delegates availability and in-flight admission
 to `driver_class`, which owns the generic withdrawal protocol. Device-model
-identity remains behind its `PublicationOwner` contract; hwrng neither reads
+identity remains behind its `PublicationSource` contract; hwrng neither reads
 model internals nor maintains a second device-online flag.
 
 ## Memory and thread safety

@@ -31,7 +31,7 @@ use kspin::SpinNoPreempt;
 
 use crate::{
     Publication, PublicationId,
-    owner::{LegacyOwner, PublicationOwner},
+    owner::{LegacyOwner, PublicationSource},
 };
 
 /// The identity a class hook needs to publish its user-visible projection
@@ -102,7 +102,7 @@ where
     /// class-side state leaks.
     pub fn publish(
         &'static self,
-        owner: Arc<dyn PublicationOwner>,
+        owner: Arc<dyn PublicationSource>,
         runtime: T,
         name: impl Into<String>,
     ) -> KResult<Publication<T>> {

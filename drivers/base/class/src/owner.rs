@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// allocation identity, not paths or numeric identifiers, for duplicate detection.
 /// Methods run outside the class registry lock in task context; they must not
 /// reenter publication withdrawal. The path must remain stable for this identity.
-pub trait PublicationOwner: Send + Sync + 'static {
+pub trait PublicationSource: Send + Sync + 'static {
     /// Driver currently claiming the device; `None` prevents publication.
     fn driver_name(&self) -> Option<&'static str>;
 
@@ -48,7 +48,7 @@ impl LegacyOwner {
     }
 }
 
-impl PublicationOwner for LegacyOwner {
+impl PublicationSource for LegacyOwner {
     fn driver_name(&self) -> Option<&'static str> {
         Some(self.driver_name)
     }

@@ -56,7 +56,7 @@
 - `Publication<T>`、发布身份：区分发布所有者与消费者持有的借用句柄。
 - `InUse<T>`、使用许可、在途计数：协调数据面操作与撤销。
 - 通用 hooks、撤销和延迟 teardown：完成发布生命周期。
-- `PublicationOwner`：访问提供者的活身份，并请求模型执行共享身份的退出操作。
+- `PublicationSource`：访问提供者的活身份，并请求模型执行共享身份的退出操作。
 
 class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口和读取语义
 属于 hwrng 子系统；同理，block 和 net 的能力接口属于各自子系统。
@@ -73,7 +73,7 @@ class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口�
 
 ### 两者如何交接
 
-`Device::publish` 将同一个 `Arc<DeviceCore>` 作为 `PublicationOwner` 交给 class。
+`Device::publish` 将同一个 `Arc<DeviceCore>` 作为 `PublicationSource` 交给 class。
 模型仍拥有唯一的设备在线状态；class 的 drain gate 表示某项发布是否接受新
 操作，在途计数表示该发布尚有多少操作未退出，都不是设备在线状态的副本。
 
@@ -151,7 +151,7 @@ class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口�
 和设计、安全文档，不新建嵌套 workspace。具体数量、名字和目录布局由职责与
 依赖设计决定，本文不预先固定。
 
-class 定义 `PublicationOwner` 契约，model 的私有 `DeviceCore` 实现它；
+class 定义 `PublicationSource` 契约，model 的私有 `DeviceCore` 实现它；
 `Device::publish` 向 class 传递同一个身份的 `Arc`。模型仍持有唯一在线状态，
 class 通过模型实现的 `mark_offline` 回调完成原有共享退出协议。
 没有复制状态、公开 `DeviceCore` 或增加反向依赖。
@@ -191,7 +191,7 @@ trait crate。
 
 review 优先确认以下事项，再决定下一项结构工作：
 
-1. `PublicationOwner` 的查询与退休权限是否足够小，设备身份是否始终只有一个权威来源。
+1. `PublicationSource` 的查询与退休权限是否足够小，设备身份是否始终只有一个权威来源。
 2. 设备移除与单项 publication 撤销是否应具有相同效果，特别是多能力设备。
 3. 发布拥有者、消费者借用、在途操作与驱动私有数据的生命周期是否一致。
 4. 遗留桥接和新模型入口是否清楚区分，错误回退与跨 crate 测试是否覆盖交接处。
