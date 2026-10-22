@@ -6,9 +6,24 @@
 hwrng 定义具体设备能力，entropy 消费 `Publication`；二者无需依赖 probe 引擎。
 设备模型通过 `PublicationOwner` 接入，不向 class 暴露内部 `DeviceCore`。
 
+## 职责与拆分边界
+
+class 管能力提供者与消费者之间的发布关系，不管理设备与驱动的绑定关系。
+它拥有注册表、发布所有权、使用许可、在途计数和 finalizer；驱动匹配、probe
+调度及设备拓扑由 model 管理，hwrng 等具体能力接口由对应子系统定义。
+
+一个 class 可以接收不同设备的能力，同一设备也可以产生多个 publication。
+因此发布状态与设备绑定状态分别建模。class 不复制设备在线状态，自己的
+drain gate 只表示一项发布是否继续接受操作。
+
+本轮保持注册表、使用计数与 finalizer 为同一 crate 的内部实现，不继续拆 crate。
+当前共享 offline 协议不保证多项能力能独立撤销；是否改变该协议是后续 review
+的行为议题。整体停止点见 [base README](../../README.md#当前停止点与后续工作)。
+
 ## 范围与架构
 
-- `src/lib.rs`：publication 所有权、使用许可、在途计数和私有注册表。
+- `src/lib.rs`：模块组织、公开类型重导出和私有注册表。
+- `src/publication.rs`：`PublicationId`、`Publication`、`InUse` 及私有共享状态，负责发布所有权、使用许可、在途计数和延迟 teardown。
 - `src/class_api.rs`：`Class`、投影 hooks 与发布/撤销编排；实现模块私有，类型在根导出。
 - `src/lib.rs` 内的私有 `owner` 模块：活身份契约与遗留发布者的私有合成身份。
 - `ut-tests/class.rs`：发布、重复身份、撤销和 drain 测试及 detached 测试辅助实现。

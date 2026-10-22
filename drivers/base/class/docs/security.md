@@ -2,7 +2,7 @@
 
 ## 范围与信任边界
 
-分析 `src/lib.rs`、`src/class_api.rs`、`src/lib.rs` 内的私有 `owner` 模块。本 crate 不包含 unsafe。
+分析 `src/lib.rs`、`src/publication.rs`、`src/class_api.rs` 及 `src/lib.rs` 内的私有 `owner` 模块。本 crate 不包含 unsafe。
 模型提供受信任的 `PublicationOwner`，具体子系统提供 hooks 和 runtime payload。
 不直接解析固件或用户输入，也不实现 MMIO、DMA 或 IRQ 操作。
 

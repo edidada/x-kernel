@@ -20,6 +20,22 @@ class 通过模型实现的退休回调更新共享 offline 状态，不能修�
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
 发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
 
+## 职责与拆分边界
+
+model 管设备实例与驱动实现的绑定关系：设备进入模型、选择驱动、probe、
+依赖等待与重试、保存驱动私有数据，以及移除时的生命周期编排。
+它拥有设备身份、拓扑和绑定状态，不拥有 class 注册表、publication 在途计数
+或具体设备家族的数据面接口。
+
+一台设备可以发布多项能力；能力消费者经 class 使用这些能力，无需了解
+model 的驱动匹配和 probe 引擎。两套状态机通过同一个活身份协作。
+`PublicationOwner::mark_offline` 是模型实现、class 触发的退休入口；当前保留
+单项发布撤销影响共享设备身份的行为，是否支持独立能力撤销需要另行审查。
+
+本轮不继续拆分 `domain` 的四个引擎，它们共同维护 `DomainInner` 和同步协议。
+资源契约与 `PlatformBus` 暂留本 crate 不代表最终归属；后续迁移顺序和判断依据
+见 [base 的职责与停止点](../../README.md#当前停止点与后续工作)。
+
 ## 背景
 
 本 crate 是对旧 `kdevice` 的重写，动机是旧模型缺一个 drvdata 槽位：
@@ -105,7 +121,7 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时 id 仍全�
 - 没有 lifecycle observer / remove notifier：域状态机是移除的唯一权威，
   发布回收由 `Data` 持有的 `Publication` 完成。类发布的 `ClassHooks::unpublish`
   （`del_gendisk`、transport close）在仍有在途 `Publication` 时推迟到最后一个 drop
-  ——见 `../class/src/lib.rs` 的 `finish_or_defer`。
+  ——见 `../class/src/publication.rs` 的 `finish_or_defer`。
 - `global_domain()` 可在早期启动调用（`LazyInit::call_once`）；但
   `set_services` 之前所有资源获取都落到 `NoServices`，返回
   `RuntimeError::Unsupported`。这是刻意的"响亮失败"，不是静默降级。
