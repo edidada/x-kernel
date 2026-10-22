@@ -49,6 +49,10 @@
 - 共享文件缺页在 folio 借用内取得另一份持有，交给 map_owned。
 - 页表按 VA 保存 provider-defined MappingReference；unmap、稀疏失效与 PROT_NONE
   清除 PTE 后把持有交给有界批次，finish 完成 TLB 失效后结束持有。
+  失效范围摘要与持有暂存分离：16 个内联持有，可失败扩展到最多 256 个；
+  满批或扩展失败时同步结算。失败路径的当前局部持有在同一失效完成后释放，
+  不带入下一批；连续 4 KiB 撤映射不会因引用/地址队列错位退化成逐页失效。
+  详细资源边界、整域失效代价和确定性调用计数见 page_table 的 design/security。
 - move_mapping 先取得目标持有，再撤销源 PTE，确保 mremap 搬移时不丢失生命周期。
 - 旧 raw map 仍保持外部 backing 契约。DMA 和字节堆 backing 的收口尚未完成；这些路径按整段持有与
   映射协议继续迁移。GlobalPage 与连续多页支持见下。

@@ -273,3 +273,44 @@ fn huge_conditional_replacement_normalizes_physical_offsets() {
         );
     }
 }
+
+#[def_test]
+fn owned_unmap_batches_preserve_real_frame_holds_until_completion() {
+    let _guard = NoPreemptIrqSave::new();
+    let allocator = global_allocator();
+    for count in [1, 16, 17, 32, 33, 257] {
+        let mut table = super::PageTable::try_new().unwrap();
+        let mut frames = alloc::vec::Vec::new();
+        let mut edit = table.modify();
+        for index in 0..count {
+            let owner = allocator.alloc_frame(kalloc::UsageKind::VirtMem).unwrap();
+            // An independent observer prevents another CPU from reusing
+            // released storage before its mapping-reference assertion.
+            frames.push(owner.try_clone_ref().unwrap());
+            edit.map_owned(
+                memaddr::VirtAddr::from_usize(0x800000 + index * PAGE_SIZE_4K),
+                owner,
+                super::MappingFlags::READ,
+            )
+            .unwrap();
+        }
+        edit.finish();
+        for index in 0..count {
+            edit.unmap(memaddr::VirtAddr::from_usize(
+                0x800000 + index * PAGE_SIZE_4K,
+            ))
+            .unwrap();
+        }
+        // Small batches, and the last hold after a pressure-driven drain,
+        // must still prevent allocator reuse before the final completion.
+        let last = allocator.frame_meta(frames[count - 1].pfn()).unwrap();
+        assert_eq!(last.state(), FrameState::Referenced { references: 2 });
+        edit.finish();
+        for observer in &frames {
+            assert_eq!(
+                allocator.frame_meta(observer.pfn()).unwrap().state(),
+                FrameState::Referenced { references: 1 },
+            );
+        }
+    }
+}

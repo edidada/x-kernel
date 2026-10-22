@@ -1112,3 +1112,5 @@ fn fresh_map_invalidates_when_architecture_requires_it() {
     let receipt = guard.finish();
     assert!(receipt.had_pending());
 }
+
+unittest::path_mod_test!(tlb_gather, "tlb_gather.rs");

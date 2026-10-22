@@ -440,3 +440,14 @@ Frame reference, registry and bootstrap tests reside in crate-root `ut-tests/`
 and are mounted at their original private parent modules under `cfg(unittest)`.
 Moving the files does not widen production visibility or change unsafe fixture
 contracts. File-module mounts retain the existing test identities and gates.
+
+
+## Mapping gather release boundary
+
+Ending a gathered mapping's FrameRun holds is valid only after the page-table
+provider's synchronous TLB completion. Gather spill OOM cannot justify early
+release: the current local capability stays live through completion and is
+released with the drained batch. The gather bounds the number of capabilities,
+not the number of base pages retained by huge runs. Last-reference inventory
+publication and allocator provenance are unchanged; no RCU or concurrent VMA
+reclamation guarantee is added.

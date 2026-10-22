@@ -14,9 +14,10 @@
 //! `PageTableMut` batches TLB flushes for performance. Each mutating operation
 //! (`map`, `unmap`, `remap`, `protect`) records the affected virtual address.
 //! When the batch is finalized (via [`PageTableMut::finish`] or `Drop`), the
-//! addresses are flushed either individually (≤ 16 entries) or with a full TLB
-//! shootdown (> 16 entries).
-use alloc::collections::BTreeMap;
+//! summary selects individual invalidation for spans of at most 16 base pages,
+//! otherwise a full shootdown. Data lifetime holds are gathered separately in
+//! bounded storage; pressure may finalize a batch before the guard is dropped.
+use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(any(
     target_arch = "aarch64",
     all(feature = "smp", not(target_arch = "aarch64"))
@@ -278,7 +279,8 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     ///
     /// The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive
     /// access. All mutating operations on the page table must go through this
-    /// type. TLB flushes are deferred until [`PageTableMut::finish`] or `Drop`.
+    /// type. TLB flushes are deferred until [`PageTableMut::finish`], `Drop`,
+    /// or an intermediate finalization required by bounded retirement storage.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
     }
@@ -393,17 +395,102 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
     }
 }
 
-const FLUSH_THRESHOLD: usize = 16;
+// Invalidation policy and reference storage have independent bounds.
+const MAX_FLUSH_PAGES: usize = 16;
+const LOCAL_RETIRED_REFERENCES: usize = 16;
+const MAX_RETIRED_REFERENCES: usize = 256;
 
-enum ToFlush<M: PagingMetaData> {
+#[derive(Clone, Copy)]
+enum ToFlush {
     None,
-    Addresses(ArrayVec<M::VirtAddr, FLUSH_THRESHOLD>),
+    // Inclusive, base-page-aligned bounds avoid an exclusive-end overflow at
+    // the top of the address space. Small holes may be invalidated harmlessly.
+    Range { start: usize, last: usize },
     Full,
 }
 
-impl<M: PagingMetaData> ToFlush<M> {
+impl ToFlush {
     const fn has_pending(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    fn record(&mut self, address: usize) {
+        let address = address & !(PAGE_SIZE_4K - 1);
+        *self = match *self {
+            Self::None => Self::Range {
+                start: address,
+                last: address,
+            },
+            Self::Range { start, last } => {
+                let start = start.min(address);
+                let last = last.max(address);
+                if (last - start) / PAGE_SIZE_4K >= MAX_FLUSH_PAGES {
+                    Self::Full
+                } else {
+                    Self::Range { start, last }
+                }
+            }
+            Self::Full => Self::Full,
+        };
+    }
+}
+
+// Like mmu_gather's local bundle and bounded extra batches, keep small
+// operations allocation-free and make allocation failure a drain boundary.
+struct RetiredReferences<T> {
+    local: ArrayVec<T, LOCAL_RETIRED_REFERENCES>,
+    overflow: Vec<T>,
+    #[cfg(unittest)]
+    should_fail_reservation: bool,
+}
+
+impl<T> RetiredReferences<T> {
+    const fn new() -> Self {
+        Self {
+            local: ArrayVec::new_const(),
+            overflow: Vec::new(),
+            #[cfg(unittest)]
+            should_fail_reservation: false,
+        }
+    }
+
+    #[cfg(feature = "copy-from")]
+    fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.overflow.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.local.len() + self.overflow.len() == MAX_RETIRED_REFERENCES
+    }
+
+    fn try_push(&mut self, reference: T) -> Result<(), T> {
+        if !self.local.is_full() {
+            self.local.push(reference);
+            return Ok(());
+        }
+        if self.is_full() {
+            return Err(reference);
+        }
+        if self.overflow.capacity() == 0 {
+            #[cfg(unittest)]
+            if self.should_fail_reservation {
+                return Err(reference);
+            }
+            if self
+                .overflow
+                .try_reserve_exact(MAX_RETIRED_REFERENCES - LOCAL_RETIRED_REFERENCES)
+                .is_err()
+            {
+                return Err(reference);
+            }
+        }
+        self.overflow.push(reference);
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.local.clear();
+        self.overflow.clear();
     }
 }
 
@@ -411,14 +498,15 @@ impl<M: PagingMetaData> ToFlush<M> {
 ///
 /// `PageTableMut` borrows `&mut PageTable64` and provides map/unmap/remap/protect
 /// operations. Each mutating operation records the affected virtual address for
-/// deferred TLB flushing. The flushes are executed when [`finish`](Self::finish)
-/// is called or when `PageTableMut` is dropped.
+/// deferred TLB flushing. Flushes complete at [`finish`](Self::finish), on Drop,
+/// or during a mutation when bounded retirement storage requires a drain.
 ///
 /// # TLB flush batching
 ///
-/// Up to 16 addresses are flushed individually; beyond
-/// that, a full TLB shootdown is performed. This avoids the overhead of
-/// per-operation TLB invalidation during batch mappings.
+/// Changed addresses are summarized as a range. Spans of up to 16 base pages
+/// are invalidated individually; larger spans use a full shootdown. Managed
+/// data holds are retained separately until invalidation completes. Bounded
+/// storage pressure may finalize an intermediate batch during a mutation.
 ///
 /// # Example
 ///
@@ -432,12 +520,12 @@ impl<M: PagingMetaData> ToFlush<M> {
 /// ```
 pub struct PageTableMut<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> {
     inner: &'a mut PageTable64<M, PTE, H>,
-    flush: ToFlush<M>,
+    flush: ToFlush,
     /// Whether an entry was installed into a previously unused slot on an
     /// architecture that needs no invalidation for that transition.
     fresh_map: bool,
-    // Fixed-capacity retirement avoids heap allocation while tearing down PTEs.
-    retired_mapping_refs: ArrayVec<H::MappingReference, FLUSH_THRESHOLD>,
+    // Lifetime holds outlive the invalidation summary, including on spill OOM.
+    retired_mapping_refs: RetiredReferences<H::MappingReference>,
     #[cfg(unittest)]
     sparse_entries_visited: usize,
 }
@@ -458,7 +546,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             inner,
             flush: ToFlush::None,
             fresh_map: false,
-            retired_mapping_refs: ArrayVec::new(),
+            retired_mapping_refs: RetiredReferences::new(),
             #[cfg(unittest)]
             sparse_entries_visited: 0,
         }
@@ -470,12 +558,26 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 
     fn queue_retired_reference(&mut self, reference: H::MappingReference) {
-        if self.retired_mapping_refs.is_full() {
-            // The current hold remains live in this local while finishing all
-            // pending invalidations and retiring the previous batch.
-            self.finish();
+        if !self.flush.has_pending() {
+            // A multi-hold replacement may have drained while retiring its
+            // first hold. This still-local hold shared that completed change.
+            drop(reference);
+            return;
         }
-        self.retired_mapping_refs.push(reference);
+        match self.retired_mapping_refs.try_push(reference) {
+            Ok(()) => {
+                if self.retired_mapping_refs.is_full() {
+                    self.finish();
+                }
+            }
+            Err(reference) => {
+                // The PTE change is already in the summary. Keep this hold
+                // live through completion, then release it with this batch;
+                // carrying it into the next batch would skew the boundaries.
+                self.finish();
+                drop(reference);
+            }
+        }
     }
 
     fn retire_mapping_reference(&mut self, vaddr: usize) {
@@ -497,19 +599,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     }
 
     fn flush(&mut self, vaddr: M::VirtAddr) {
-        match self.flush {
-            ToFlush::None => {
-                let mut addresses = ArrayVec::new();
-                addresses.push(vaddr);
-                self.flush = ToFlush::Addresses(addresses);
-            }
-            ToFlush::Addresses(ref mut addrs) => {
-                if addrs.try_push(vaddr).is_err() {
-                    self.flush = ToFlush::Full;
-                }
-            }
-            ToFlush::Full => {}
-        }
+        self.flush.record(vaddr.into());
     }
 
     fn table_of_mut(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
@@ -1217,10 +1307,13 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
 
     /// Flushes all pending TLB entries and resets the flush state.
     ///
-    /// - If ≤ 16 addresses were recorded, each is flushed individually.
-    /// - If more than 16 addresses were recorded, a full TLB shootdown is performed.
+    /// Spans of up to 16 base pages are invalidated one base page at a time;
+    /// larger spans use a full shootdown for the existing kernel/user scope.
+    /// Only after synchronous completion are the gathered data holds released.
     ///
-    /// This method is also called automatically on `Drop`.
+    /// This method is also called on `Drop` and when bounded retirement storage
+    /// fills or cannot grow. The receipt describes work pending at this call,
+    /// excluding invalidations already completed by intermediate finalization.
     pub fn finish(&mut self) -> TlbFlushReceipt {
         let had_pending = self.flush.has_pending();
         #[cfg(not(docsrs))]
@@ -1230,9 +1323,9 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             // TLB entries.
             match &self.flush {
                 ToFlush::None => {}
-                ToFlush::Addresses(addrs) => {
-                    for vaddr in addrs.iter() {
-                        M::flush_tlb_all_cpus(Some(*vaddr));
+                ToFlush::Range { start, last } => {
+                    for address in (*start..=*last).step_by(PAGE_SIZE_4K) {
+                        M::flush_tlb_all_cpus(Some(address.into()));
                     }
                 }
                 ToFlush::Full => {
@@ -1248,14 +1341,15 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             let target_mask = self.current_user_cpu_mask();
             match &self.flush {
                 ToFlush::None => {}
-                ToFlush::Addresses(addrs) => {
-                    for vaddr in addrs.iter() {
+                ToFlush::Range { start, last } => {
+                    for address in (*start..=*last).step_by(PAGE_SIZE_4K) {
+                        let vaddr = address.into();
                         #[cfg(target_arch = "aarch64")]
-                        M::flush_tlb_process_asid(Some(*vaddr), asid);
+                        M::flush_tlb_process_asid(Some(vaddr), asid);
                         #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-                        M::flush_tlb_process_mask(Some(*vaddr), target_mask);
+                        M::flush_tlb_process_mask(Some(vaddr), target_mask);
                         #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
-                        M::flush_tlb_process(Some(*vaddr));
+                        M::flush_tlb_process(Some(vaddr));
                     }
                 }
                 ToFlush::Full => {
@@ -1275,9 +1369,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
         self.fresh_map = false;
         self.flush = ToFlush::None;
-        // A full batch may already have invalidated a newly queued hold while
-        // making retirement space. Otherwise the invalidation above is its
-        // release boundary. No hold is dropped on merely clearing a PTE.
+        // Synchronous invalidation is the release boundary for every queued
+        // hold. A failed spill's local hold stays live until this returns.
         self.retired_mapping_refs.clear();
         TlbFlushReceipt::new(had_pending)
     }

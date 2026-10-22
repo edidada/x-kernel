@@ -567,3 +567,15 @@ modules are compiled only under `cfg(unittest)` and add no production behavior.
 
 Frame fixtures obtain PA from their `GlobalPage` owner directly, so tests do not
 need an architecture layout conversion or a `kaddr_layout` dependency.
+
+
+## Managed mapping gather integration
+
+`page_table` gathers mapping-owned FrameRun capabilities independently of its
+TLB range summary. It retains up to 256 holds (16 inline, a fallible bounded
+spill) and synchronously invalidates before ending them. Reservation failure
+still retires the current local hold after the same completed invalidation.
+`kalloc` continues to return each backing page only after its last reference;
+it neither supplies TLB completion nor batches run inventory returns. HAL tests
+exercise 1/16/17/32/33/257 mapped pages against real FrameMeta states, while
+page_table's provider tests check invalidation ordering and call aggregation.

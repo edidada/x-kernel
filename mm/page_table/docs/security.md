@@ -426,15 +426,20 @@ capability before publishing a leaf. It does not authorize concurrent payload
 access or file validity; those protocols remain with the content owner.
 
 `PageTableMut::retire_mapping_reference` transfers a removed mapping's hold to
-a fixed array. Clearing PTEs is not its release boundary. `finish` releases only
-after architecture/provider TLB invalidation returns; a local current reference
-protects the page when a full array triggers an intermediate finish. Containing-leaf lookup covers interior huge-page addresses as well as
-unaligned base-page addresses, preventing a raw mutation from bypassing the hold
+bounded storage (16 inline holds and at most 240 spill holds). Clearing PTEs
+is not its release boundary. `finish` releases only after architecture/provider
+TLB invalidation returns. A full gather drains synchronously; if the fallible
+spill reservation fails, the current local hold stays live through that same
+invalidation and is then released, without being carried into a new batch.
+Containing-leaf lookup covers interior huge-page addresses as well as unaligned
+base-page addresses, preventing a raw mutation from bypassing the hold
 check. `map_owned_sized` rejects size/alignment mismatches before publishing a
 PTE. `replace_owned_if_same` restores the previous capability on failed compare;
-success puts the previous capability in the same retirement batch as its TLB
-invalidation. Sparse teardown handles partial-error
-prefixes through the same guard finalization.
+success retires the previous capability through the same TLB completion
+boundary. If a drain already completed that invalidation while retiring the
+first of two holds, the still-local second hold can be released immediately.
+Sparse teardown handles partial-error prefixes through the same guard
+finalization.
 
 Raw remap/conditional replacement cannot redirect a managed leaf to a different
 page without a replacement capability. The conditional check uses the expected
@@ -450,3 +455,30 @@ stop-hardware-use contract required for table storage destruction. Registered
 AArch64 ASIDs are invalidated before destruction. Forgetting a mutation guard
 can leak references; callers must finalize pending TLB work before hardware
 reuse of an address space.
+
+
+### Gather resource and completion invariants
+
+Range tracking is independent of reference capacity. Inclusive aligned bounds
+cover every recorded mutation address; spans larger than 16 base pages use the
+existing full-scope invalidation. Small holes and a huge leaf's recorded
+interior address may be invalidated conservatively. Bounds never require adding
+a page to the highest representable page address. Large or widely separated
+addresses immediately promote to full invalidation, bounding individual calls.
+
+The optional spill stores no more than 240 references, reserved once with
+`try_reserve_exact`, and is reused after drains. With the HAL's 24-byte FrameRun,
+the requested spill is 5760 bytes, excluding allocator rounding. No unbounded
+allocation/retry loop is introduced. Reservation failure completes pending TLB
+work before dropping either queued holds or the local current hold; the PTE
+operation can therefore progress under memory pressure. Up to 256 capabilities
+may be queued; a huge capability can retain many physical base pages, so this
+is a bound on bookkeeping, not bytes of backing or destructor work.
+
+Partial errors leave the successful prefix's invalidations and holds in the
+guard; explicit finish or Drop completes that prefix. Raw mapping backing still
+belongs to the caller and must survive through the final completion. Fresh-map
+publication, huge-leaf lookup, synchronous completion, ASID and residency
+providers retain their existing obligations. The serial gather tests install a
+scoped observation hook and remove it after destroying their inactive tables;
+no hook remains installed for another test.

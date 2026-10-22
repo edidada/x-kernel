@@ -37,15 +37,19 @@ page_table/
 │       └── loongarch64.rs
 ├── ut-tests/
 │   ├── defs.rs
-│   └── table64.rs
+│   ├── table64.rs
+│   └── tlb_gather.rs
 └── Cargo.toml
 ```
 
 Guest tests are mounted from their original source modules with
 `unittest::path_mod_test!` under `cfg(unittest)`: `ut-tests/defs.rs` retains
 `defs::tests_page_table_defs`, and `ut-tests/table64.rs` retains `table64::tests`,
-including its nested `aarch64_drop` module. Architecture and `smp` gates and
-serial execution flags remain attached to the same tests and helpers.
+including its nested `aarch64_drop` and `tlb_gather` modules.
+`tlb_gather` exercises managed PTE mutations with test-owned lifetime
+capabilities whose destructors verify completed invalidation; `khal` also tests
+these batches against real allocator reference states. Architecture and `smp`
+gates and serial execution flags remain attached to the same tests and helpers.
 
 ## Boundaries and Delegated Responsibilities
 
@@ -108,7 +112,7 @@ The following responsibilities belong to other layers:
 ### PageTableMut TLB Flush State
 
 ```text
-  None ──flush(vaddr)──> Addresses ──flush(beyond threshold)──> Full
+  None ──flush(vaddr)──> Range ──flush(span > 16 pages)──> Full
     │                       │                                  │
     │                       └────finish()──> None <──finish()───┘
     └────────────────────────────finish()──> None
@@ -129,11 +133,11 @@ under [AArch64 Fresh-Map Recovery Evidence](#aarch64-fresh-map-recovery-evidence
 
 | From | To | Trigger |
 |------|----|---------|
-| `None` | `Addresses` | First call to `flush(vaddr)`. |
-| `Addresses` | `Addresses` | Another address is recorded within `FLUSH_THRESHOLD` (16). |
-| `Addresses` | `Full` | Another address would exceed the threshold. |
-| `Addresses` | `None` | `finish()` or `Drop`. |
-| `Full` | `None` | `finish()` or `Drop`. |
+| `None` | `Range` | First changed address, aligned to its base page. |
+| `Range` | `Range` | Widen inclusive bounds within a span of 16 base pages. |
+| `Range` | `Full` | The inclusive span exceeds 16 base pages. |
+| `Range` | `None` | `finish()`, `Drop`, or storage-pressure finalization. |
+| `Full` | `None` | `finish()`, `Drop`, or storage-pressure finalization. |
 
 ### PTE Lifecycle
 
@@ -226,15 +230,52 @@ verify subtree skipping without timing thresholds.
    `INVALID_TO_VALID_NEEDS_TLBI`; it always installs into a slot it verified
    unused, and an architecture that cannot cache a translation for an invalid
    entry has nothing to invalidate there.
-3. Up to 16 addresses are retained for individual invalidation.
-   Exceeding this threshold changes the state to `Full`.
-4. `finish()` invalidates each recorded address for `Addresses`, or performs
+3. `ToFlush::Range` retains inclusive base-page-aligned minimum/maximum
+   addresses. Repeated addresses are deduplicated; small holes may be
+   invalidated too. A span exceeding 16 base pages changes the state to `Full`.
+   Inclusive bounds avoid exclusive-end overflow at the top of virtual memory.
+4. `finish()` invalidates every base page within `Range`, or performs
    a full invalidation for the target scope for `Full`. When nothing was
    pending and at least one fresh mapping was installed, it emits
    `M::fence_fresh_map()` instead, so the entry writes reach other translation
    table walkers without the cost of an invalidation broadcast. It then
    returns a `TlbFlushReceipt`.
 5. `Drop` calls `finish()` automatically to finalize pending invalidations.
+   Retirement storage pressure may also call it within a mutation. A later
+   receipt reports only the work still pending at that particular call.
+
+The range summary and lifetime storage have independent policies. The gather
+keeps 16 holds inline and lazily reserves one bounded spill buffer for another
+240 holds. It drains on reaching 256 holds, reusing the reservation until the
+guard is dropped. Failure to reserve does not fail an already committed PTE
+change: the current hold remains local while `finish()` invalidates the entire
+pending summary and drops the queued holds, then that local hold is dropped.
+A later batch may retry reservation. The current hold never enters a new,
+already-invalidated batch. An empty-permission owned
+replacement retires two holds; if its first hold triggered completion, its
+still-local second hold is released immediately after that completion too.
+This ordering is valid for any relation between storage capacity and
+invalidation threshold.
+
+For consecutive 4 KiB managed unmaps, 1/16 pages use 1/16 individual
+invalidations; 17/32/33 pages use one full invalidation. Each complete 256-hold
+batch uses one full invalidation, so 262144 pages require 1024 full calls.
+If the spill reservation always fails, complete batches contain 17 holds
+(including the local hold), with one full call each; only the final tail of
+at most 16 pages uses individual calls. These are deterministic call counts,
+not throughput measurements. Repeated replacement of one VA still needs just
+one single-address call per drain, even when retiring 256 holds.
+
+This borrows Linux's separation of range tracking, a local gather bundle,
+bounded extra storage and flush-before-free (`include/asm-generic/tlb.h` and
+`mm/mmu_gather.c`, local Linux 7.3.0-rc2). It does not import Linux table RCU,
+delayed rmap, page-size batching or VMA concurrency. Existing synchronous
+single-VA/full metadata hooks and ASID/residency selection are unchanged.
+Small ranges still cost one completion/broadcast per base page. A true range
+shootdown would require extending architecture and IPI requests/acknowledgements;
+that is outside this change. Full invalidation trades collateral TLB refills
+for fewer completions; the 256-hold bound is a resource policy, not a measured
+optimum.
 
 AArch64 invalidation helpers in `karch` issue `dsb ishst` **before** TLBI to
 publish the PTE changes, followed by a completion DSB and local ISB. A DSB after
@@ -491,12 +532,12 @@ PTE bits. Mapping bookkeeping is installed before the leaf; failure drops only
 the supplied hold. Raw `map` retains its external-backing contract.
 
 Unmap, sparse invalidation and protection that clears an entry remove the hold
-from the VA index and transfer it into a fixed-capacity retirement array. The
+from the VA index and transfer it into the bounded retirement gather. The
 index finds the containing leaf's start and physical coverage, including
 interior huge-page addresses accepted by the old mutation APIs. `finish()` completes all required
-TLB invalidations before dropping the batch. If the retirement array fills, its
-current hold stays live while an intermediate finish makes space. Table
-mutation remains exclusive; the retirement path does not allocate a new queue.
+TLB invalidations before dropping the batch. Capacity drains and failed spill
+reservations use the same completion boundary described above. Table mutation
+remains exclusive; teardown does not require a successful allocation to progress.
 
 `move_mapping` clones a destination hold before installing its PTE, then retires
 the old source hold. Failed destination installation preserves the source.
