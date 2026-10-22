@@ -98,7 +98,7 @@ pub(crate) fn run_user_thread_loop(
                     .process()
                     .address_space()
                     .expect("current user thread must still expose process address space");
-                let outcome = address_space.lock().handle_page_fault(addr, flags);
+                let outcome = address_space.resolve_fault(memspace::FaultInput::new(addr, flags));
                 if outcome.is_retryable() {
                     ktask::check_preempt_pending();
                     continue;

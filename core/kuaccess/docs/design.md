@@ -50,7 +50,7 @@ syscall / runtime
 2. `Vm` 先做用户地址范围检查。
 3. `copy_user_pages()` 按用户地址的 4 KiB 页边界拆分复制，每段先调用 `user_copy`。
 4. 普通复制不打开 trap 内回填窗口。缺页时通过 exception-table fixup 返回，
-   随后在调用任务中调用当前进程的 `MmSpace::handle_page_fault()`。这样不会在
+   随后在调用任务中调用当前进程的 `MmSpace::resolve_fault()`。这样不会在
    IRQ 被屏蔽的异常上下文里等待 IRQ 驱动的磁盘完成。
 5. 使用单一进度循环，每轮先尝试复制当前页片段：成功则推进 offset 并重置
    当前页的缺页次数；失败则最多处理一次缺页，再进入下一轮复制。
@@ -103,3 +103,11 @@ syscall / runtime
 只读保护和撤销映射。分阶段写缺页测试跨越多个页面并超过单页恢复预算，验证同一页连续缺页后
 复制结果完整；无进展测试覆盖反复报告成功、反复报告 COW retry 的有界退出，
 以及显式 `NoProgress` 的立即失败。测试不依赖真实磁盘或 IRQ 的时序。
+
+### 匿名首次缺页的锁范围
+
+普通 `copy_user_pages` 在 exception-table fixup 返回任务上下文后使用
+`MmSpace::resolve_fault`。私有匿名 first-touch 的分配与清零在 MM mutex 外完成，
+提交由 MM 持锁重验；这里继续按原预算处理 `Retry`，不保存 VMA/PTE 裸指针。
+用户原子访问的异常 handler 仍使用原有锁内缺页入口，不把新的可阻塞准备窗口扩展到
+该异常路径。无论走哪一个入口，typed fault outcome 与 `NoAccess` 转换保持一致。

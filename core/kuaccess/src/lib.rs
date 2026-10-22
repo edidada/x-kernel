@@ -111,9 +111,10 @@ fn copy_user_pages(
             .process()
             .address_space()
             .map_err(|_| MemError::NoAccess)?;
-        let outcome = address_space
-            .lock()
-            .handle_page_fault(VirtAddr::from_usize(address), access_flags);
+        let outcome = address_space.resolve_fault(memspace::FaultInput::new(
+            VirtAddr::from_usize(address),
+            access_flags,
+        ));
         // Retry the copy after each recoverable fault. Shared file writes may
         // first install a read-only PTE, then fault again to enable writing.
         match outcome {

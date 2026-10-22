@@ -456,3 +456,13 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/stat.rs`: mounted by `src/stat.rs` as `tests_stat`.
 - `ut-tests/thread_cpu_time.rs`: mounted by `src/thread/cpu_time.rs` as `tests`.
 - `ut-tests/process_runtime_runtime_state.rs`: mounted by `src/process_runtime/runtime_state.rs` as `tests`.
+
+## Live MM fault resolution
+
+`LiveAddressSpace::resolve_fault(FaultInput)` retains the captured image's active
+MM user while delegating split preparation to `MmSpace::resolve_fault`. It does
+not expose the internal MM owner or require callers to retain a mutex guard.
+Private anonymous first-touch allocation can occur without that guard; MM
+revalidates the VMA and serializes publication. Callers must invoke it outside
+the MM mutex and handle retry outcomes. Later exec/rebinding does not retarget
+the captured capability.

@@ -173,3 +173,29 @@
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
   `MmUserHandle` 延长用户映射生命周期。
+
+## 锁外匿名首次缺页准备
+
+`src/aspace/first_touch.rs` 不引入新的 unsafe。`resolve_fault` 只在短暂解锁窗口内
+分配、清零并持有未发布 frame，不读取或修改共享 PTE、VMA 或匿名对象内容。
+所有查询与最终 PTE/对象提交仍由同一个 `MmSpace` mutex 序列化。
+
+安全条件：
+
+- 调用方持有 active MM user；普通 Arc/MM pin 不能替代该权限，也不能持 MM 锁递归调用。
+- 保存 backend/view owner 防止准备期间对象消失，但必须在锁内重验映射身份和权限。
+  VMA split/trim、解除后同地址重建、runtime/view 更换均使旧准备重试。
+- PTE 和对象槽位检查与发布之间不释放 MM 锁，阻止解除映射完成后旧准备重新安装 PTE。
+- `PreparedPrivatePage` 在对象提交成功前负责归还 frame。PTE 已安装而对象提交失败时，
+  必须先撤销 PTE 并完成退休，随后才让 owner 归还；失败和 stale/OOM 路径均不转移所有权。
+- 准备只处理新的零页，不保留待复制数据的裸 PA，因此期间发生 discard 可在最终提交点
+  重新物化零页；不将该证明推广到 COW、文件 I/O 或无锁对象页访问。
+- 重复准备以锁内 PTE/object 状态为准；失败者丢弃自己的零页并重试，不覆盖胜者。
+- 不引入 RCU reader 或空中间页表的并发回收；现有硬件退休和地址空间最终析构要求不变。
+
+`ut-tests/fault_first_touch.rs` 验证解锁窗口、重映射 ABA、权限变更、拆分、重复提交、
+分配失败及丢弃后的零填充。性能需要相同 guest 配置的多线程 first-touch 实测。
+
+优化入口同时核对 backing 语义和实际 runtime variant。`FileShared` / `FilePrivate`
+adapter 可以代理匿名 backing；这类适配器仍经原 `VmArea::handle_fault` 处理，不能仅凭
+backing kind 绕过其故障计数、等待或 retry 策略。kuaccess 的可睡眠适配器回归覆盖该边界。

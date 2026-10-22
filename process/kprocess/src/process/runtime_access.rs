@@ -57,6 +57,15 @@ impl LiveAddressSpace {
         self.mm_user.address_space().lock()
     }
 
+    /// Resolves a task-context fault while retaining this image's active MM user.
+    ///
+    /// Anonymous first-touch allocation may run outside the MM mutex. Mapping
+    /// validation and publication remain serialized by memspace; a changed
+    /// mapping returns a retry outcome. The caller must not hold the MM mutex.
+    pub fn resolve_fault(&self, input: memspace::FaultInput) -> memspace::PageFaultOutcome {
+        MmSpace::resolve_fault(self.mm_user.address_space(), input)
+    }
+
     /// Runs a mapping operation while holding the live mm user capability.
     ///
     /// # Examples

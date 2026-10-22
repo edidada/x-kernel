@@ -317,13 +317,18 @@ sys_mmap
 ### Page fault
 
 ```text
-trap
-  -> MmSpace::handle_page_fault
-  -> VmAreaSet lookup
-  -> permission/backing checks
-  -> VmRuntimeOps::handle_fault
-  -> page_table PTE install or fault error
+task-context fault
+  -> LiveAddressSpace::resolve_fault
+  -> MmSpace::resolve_fault
+  -> locked VmAreaSet lookup and permission/backing checks
+       -> empty private-anon page: allocate/zero outside MM mutex
+            -> locked mapping/PTE/object revalidation and commit
+       -> other faults: existing locked runtime dispatch
+  -> page_table PTE install or retry/fault error
 ```
+
+私有匿名 first-touch 的 PTE/对象提交仍串行。锁外保留的 backend owner 不授权旧映射
+重新发布；必须在提交临界区重验。异常中的用户原子访问与已有锁内 MM 调用保留原入口。
 
 ### File truncate / resize invalidation
 

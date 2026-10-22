@@ -265,3 +265,11 @@ provide a production reuse path. Any future recycling policy must preserve leade
 retention separately from replacement publication before changing that invariant.
 The count is a slot scan, not a global counter or atomic snapshot. No new unsafe code or sleepable lock
 is introduced, and directory metadata locks are not held across the query.
+
+## Live capability during split fault preparation
+
+`LiveAddressSpace::resolve_fault` keeps its `MmUserHandle` alive across unlocked
+anonymous page preparation. A plain observer cannot use this method to revive
+an MM whose users have ended. The method must not be called with the captured
+MM mutex held; validation and publication are performed together by memspace.
+Concurrent VMA changes return retry rather than authorizing an old mapping.

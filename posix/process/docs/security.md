@@ -119,3 +119,11 @@ are simplified, and PI robust-futex cleanup is skipped.
 
 - `exec_de_thread` joins siblings before the address-space swap and undoes group-exit
   bookkeeping; changing the exec path must keep the group-kill flush ordering.
+
+## Split anonymous fault preparation
+
+`run_user_thread_loop` retains the current process's active MM user while
+`MmSpace::resolve_fault` temporarily releases the MM mutex for anonymous page
+allocation. Runtime code does not cache a VMA, PTE or raw frame across that
+window. MM revalidates the mapping before publication; retry outcomes re-enter
+the normal fault loop, and unresolved outcomes keep the existing signal mapping.

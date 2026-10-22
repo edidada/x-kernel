@@ -68,3 +68,10 @@
 
 - 当前 helper 只覆盖字符串装载与 `u32` 原子 load/cmpxchg；复杂结构体解析仍由各调用方自行组织。
 - 原子原语目前仅提供 32-bit load/cmpxchg；更大宽度或其它 RMW 操作按需再加。
+
+## 分阶段匿名缺页
+
+普通复制恢复将 `FaultInput` 交给 `MmSpace::resolve_fault`，不在 kuaccess 中保留
+VMA 或物理页指针。MM 锁外分配可能遇到映射变化；其 `Retry` 继续受每页 16 次预算约束。
+当前进程的 active user 保证调用期间地址空间的使用权限；MM 在提交前负责重验映射。
+faultable 用户原子访问仍由原异常 handler 处理，不改变异常执行上下文或锁契约。

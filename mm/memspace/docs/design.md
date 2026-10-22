@@ -36,6 +36,7 @@ Linux 对应关系：
 ## 范围
 
 - `src/aspace.rs`
+- `src/aspace/first_touch.rs`
 - `src/vma.rs`
 - `src/fault.rs`
 - `src/backend/*`
@@ -51,6 +52,7 @@ Linux 对应关系：
 | --- | --- | --- |
 | `ut-tests/lib.rs` | `tests_memspace` | 3 |
 | `ut-tests/aspace.rs` | `aspace::tests` | 16 |
+| `ut-tests/fault_first_touch.rs` | `aspace::first_touch::tests` | 13 |
 | `ut-tests/vma.rs` | `vma::tests` | 17 |
 | `ut-tests/fault.rs` | `fault::tests` | 2 |
 | `ut-tests/cpu_residency.rs` | `cpu_residency::tests_cpu_residency` | 3 |
@@ -58,8 +60,8 @@ Linux 对应关系：
 | `ut-tests/backend_shared.rs` | `backend::shared::tests` | 1 |
 | `ut-tests/aarch64_asid.rs` | `aarch64_asid::tests` | 6 |
 
-共 8 个测试模块、54 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
-其他架构选择其余 48 个用例。测试没有额外的 feature 门控或 serial/user 标记。
+共 9 个测试模块、67 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
+其他架构选择其余 61 个用例。测试没有额外的 feature 门控或 serial/user 标记。
 使用已配置内核的 guest unittest 流程验证，不通过 host Cargo 测试替代。
 
 ## 架构
@@ -314,3 +316,37 @@ dirty tracking.
 File-backed page faults classify backend capacity exhaustion (`StorageFull`)
 as `BusError`, alongside backend data and I/O failures. User runtime therefore
 delivers `SIGBUS`; this conversion does not change write syscall errno mapping.
+
+## 私有匿名首次缺页的准备与提交
+
+`MmSpace::resolve_fault(&Mutex<MmSpace>, FaultInput)` 是用户 runtime 和普通
+kuaccess 复制恢复的任务上下文入口。调用方必须保留 active MM user，且不能已经
+持有该 mutex。它不要求 RCU 读区间，也不放宽页表的独占修改契约。
+
+对于 PTE 不存在、匿名对象槽位也为空的私有匿名 VMA：
+
+1. 持锁消费 pending invalidation，验证范围、权限、runtime/backing 一致性，
+   保存必要的 VMA 标量字段和一份 backend owner；保留对象及 view registration 的存活。
+2. 解锁后分配并清零完整 backing，由 `PreparedPrivatePage` 持有未发布 frame。
+3. 重新持锁消费 invalidation，核对 VMA 范围、current/max 权限、backing、offset、
+   backend 对象、runtime 起点、页大小和 view registration，检查 PTE 和对象槽位仍空。
+4. 在同一临界区内安装 PTE，再将 frame 转入匿名对象。对象提交失败时清 PTE 并
+   完成 TLB 失效后结束未发布持有；成功后由对象的现有生命周期负责最终回收。
+5. 验证失败返回 `Retry`，未发布 frame 自动归还。调用者重新进入当前 VMA 的缺页
+   分派，不能使用旧快照恢复映射。即使锁外分配失败，也先验证是否已有竞争者解决
+   缺页，避免以过期的分配错误覆盖当前映射状态。
+
+一个仍被持有的 VMA/backend 只证明存储有效；提交权限来自持锁重验。准备内容仅为
+从未发布的零页，因此 `MADV_DONTNEED` 在期间清空槽位后，可以在提交点将零页作为
+新的 first-touch 发布；从旧数据页复制的 COW 或文件页不具备这一简化条件。
+
+present PTE、已有匿名对象页、COW、文件、共享和线性 fault 使用原有锁内路径。
+异常中的用户原子访问也保留原入口。PTE/对象发布、中间页表分配和 VMA 结构修改仍
+串行，本阶段只移出数据页分配及清零，不宣称已经实现无锁查找或并行页表提交。
+
+回归通过准备回调确定性地插入 unmap/remap、权限撤销、VMA split、重复 fault、
+OOM 和 discard，检查不会重新发布失效映射、覆盖竞争者数据或泄漏未提交页。
+
+非 first-touch 的私有匿名 fault 复用首次分派取得的 PTE 观测，直接交给同一锁内的
+`PrivateBackend::handle_fault_observed`。该观测不跨越 MM 解锁窗口，避免 COW 回退
+重新查找 VMA 和遍历页表。其他 backing 仍由 VMA 正常分派。

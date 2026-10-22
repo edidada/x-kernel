@@ -3,6 +3,8 @@
 // See LICENSES for license details.
 
 //! Address space implementation backed by VMA metadata and page tables.
+mod first_touch;
+
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},

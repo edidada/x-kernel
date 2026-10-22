@@ -29,7 +29,7 @@ the bootstrap task's active MM. Init never discards an existing user image.
 Clone adapters use `new_user_task` with matching `PidHandle` and `Thread` values.
 The returned task is still unpublished: the caller completes process publication
 before activation. Its closure enters `run_user_thread_loop`, which calls the
-provided dispatcher for syscalls and `MmSpace::handle_page_fault` for faults.
+provided dispatcher for syscalls and `MmSpace::resolve_fault` for faults.
 `BusError` maps to SIGBUS; other unresolved faults map to SIGSEGV. Retryable faults
 retry user execution after checking preemption. Signal delivery is delegated to
 `Thread::signal_manager`; fatal and stop actions call `do_exit`, while continue
@@ -147,3 +147,13 @@ Stop currently terminates the group with exit code 1; CoreDump terminates with
 128 plus the signal number and does not write a core image. PI-tagged robust
 entries are skipped. Cleanup errors are generally logged or ignored so teardown
 can continue; these are current limitations, not complete Linux compatibility.
+
+## Anonymous first-touch preparation
+
+The task-context fault dispatch passes the process-owned MM mutex and a
+`FaultInput` to `MmSpace::resolve_fault`, rather than holding that mutex across
+all preparation. MM can allocate and zero an unpublished anonymous page outside
+the mutex, then revalidate and commit under it. The current thread retains its
+active address-space user throughout. A stale preparation returns `Retry`; the
+existing runtime loop retries the fault before returning to user space. Other
+fault classes retain MM's existing serialization and outcome classification.
