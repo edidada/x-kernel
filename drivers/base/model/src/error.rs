@@ -137,3 +137,31 @@ impl fmt::Display for RuntimeError {
         f.write_str(self.as_str())
     }
 }
+
+/// Convert OS capability failures into device-service errors.
+///
+/// `ResError` is the host capability vocabulary and `RuntimeError` is what a
+/// driver sees; without a single `From` every host bridge re-derives the
+/// mapping (and the classifications drift). Hosts call
+/// `RuntimeError::from(err)` / `.map_err(RuntimeError::from)`.
+impl From<driver_os_api::ResError> for crate::error::RuntimeError {
+    fn from(err: driver_os_api::ResError) -> Self {
+        use driver_os_api::ResError;
+        match err {
+            ResError::InvalidResource => Self::Invalid,
+            ResError::MappingFailed | ResError::Io => Self::Io,
+            ResError::NoMemory => Self::NoMemory,
+            ResError::Busy => Self::Busy,
+            ResError::Unsupported => Self::Unsupported,
+            ResError::BadState => Self::BadState,
+            ResError::AlreadyExists => Self::AlreadyExists,
+            ResError::NotFound => Self::NotFound,
+        }
+    }
+}
+
+impl From<driver_os_api::ResError> for ProbeError {
+    fn from(error: driver_os_api::ResError) -> Self {
+        Self::Fatal(RuntimeError::from(error))
+    }
+}

@@ -16,8 +16,8 @@ use crate::{
     bus::{Bus, BusId, BusInstanceId, MatchScore},
     desc::DeviceDescriptor,
     device::DeviceId,
-    devres::services::DeviceServices,
     error::DepSource,
+    services::DeviceServices,
 };
 
 impl DeviceDomain {

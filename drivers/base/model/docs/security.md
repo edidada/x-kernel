@@ -3,7 +3,7 @@
 ## Scope
 
 `drivers/base/model/src/`：`bus/`、`driver.rs`、`device.rs`、`error.rs`、`resource.rs`、
-`provider.rs`、`devres/`（含 `host_api.rs` 的 host 侧 Op 契约）、
+`provider.rs`、`services.rs`（带设备上下文的服务契约）、
 `domain/{mod,registry,probe,dependency,lifecycle}.rs`。
 测试 `ut-tests/domain.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
 一个具体实例。
@@ -23,8 +23,8 @@
 | 驱动 → provider 注册表 | `dev.env().provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
 | 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Registration` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是无撤销权限的 Publication |
 
-关键的分层判断：本 crate 是**模型**，它不做硬件访问，因此它的 soundness 责任
-集中在两处——`IoMap` 的 volatile 访问器，以及"guard 的释放钩子恰好被调用一次"。
+本 crate 负责设备绑定、probe 状态、发布来源与退出协调。MMIO 访问器与资源句柄
+已移到 [driver-os-api](../../os-api/docs/security.md)，本模型必须安排正确的使用与释放顺序。
 
 ## 外部边界 / 攻击面
 
@@ -33,7 +33,7 @@
 | 设备树 / ACPI | `DeviceDomain::add_device(DeviceDescriptor)` | `MmioRegion{base,size}`、`IoPortRange{base,size}`、`IrqSpec::FirmwareRoute{hwirq,controller,domain,trigger}`、`ClkSpec{phandle,index}`、`compatibles: Vec<String>` 全部来自固件 |
 | PCI 配置空间 | 同上（`bus/pci::discover` 产出） | `PciIdentity{vendor_id,device_id,class,subclass}`、BAR 派生的 `MmioRegion`、MSI-X 派生的 irq |
 | 板级静态表 | 同上（`driver-init::enumerate_static_devices`） | x86 COM 口 `IoPortRange{base, size: 8}`、ramdisk alias |
-| MMIO 寄存器 | `IoMap::read*/write*` | 本 crate 唯一的硬件触点，且是**写出去的**——读回来的值不进入模型状态 |
+| MMIO 寄存器 | driver-os-api 的 `IoMap::read*/write*` | 访问器不在 model 内；设备服务返回句柄，不直接操作寄存器 |
 | 用户内存 / 用户指针 | 无 | 本 crate 不接受任何用户态指针 |
 | 驱动宣告的 provider key | `Device::provide` | 与 lookup 自身 id 交叉校验；冲突即失败，不覆盖 |
 | DMA 缓冲 | 无（`CoherentMem` 只是所有者句柄） | 分配与映射在 `driver-host`/`kdma` |
@@ -53,28 +53,17 @@
 
 ## unsafe 代码清单
 
-生产代码里 **11 处** `unsafe`，全部集中在 `device.rs` 的 MMIO 访问路径：
-
-| 位置 | 依赖的不变量 | 为什么安全 | 由谁保证 |
-|---|---|---|---|
-| `device.rs:205` `IoMap::new`（**唯一的 `pub unsafe fn`**） | `vaddr` 指向一个至少 `region.size` 字节、在本句柄生命周期内有效的映射，且调用方拥有该映射（配对最终的 release） | 这是把裸地址变成受检句柄的唯一入口；标记 `unsafe` 正是为了让"任意 `usize` 到达 volatile 访问器"在类型上不可能 | 全树两个调用点：`driver-host/src/lib.rs:182`（provider 刚 `map_mmio` 成功）、`ut-tests/domain.rs`（mock，`release = None`） |
-| `device.rs:252` `access_ptr` 末尾的 `as_ptr().add(offset)` | `offset + size <= region.size` 且 `vaddr + offset` 按 `size` 对齐 | 两个条件在同一函数内**先检查后计算**：对齐不满足 panic，越界 `assert!` | `access_ptr` 是私有函数，8 个访问器全部经过它 |
-| `device.rs:259/268/277/286` `read_volatile` | 指针有效且对齐 | `access_ptr` 已保证；`read8` 无对齐要求 | 同上 |
-| `device.rs:295/302/309/316` `write_volatile` | 同上 | 同上 | 同上 |
-
-**对齐检查是硬 panic，不是 `debug_assert`。** 旧模型的 `device_res::Io` 用
-`debug_assert!`，release 构建下未对齐的 `read_volatile::<u32>` 直接是 UB；
-本 crate 改成总是检查（`access_ptr` 里带 `CG-021` 例外说明的 `panic!`）。
-
-`ut-tests/domain.rs` 另有 2 处 `unsafe`（mock 的 `IoMap::new`、把
-`Arc<MockServices>` 泄漏成 `&'static`），仅 `cfg(unittest)`。
+model 生产源码当前没有 unsafe。原 IoMap 构造、指针计算与 volatile 访问器
+已迁到 driver-os-api，其前置条件和检查没有改变，见该 crate 的安全清单。
+model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主已完成适配。
 
 ## 内存安全不变量
 
-1. **`IoMap` 的 `region` 不可变且与 `vaddr` 同时确立**。构造后没有任何 API 能改
+1. **driver-os-api 的 `IoMap` 的 `region` 不可变且与 `vaddr` 同时确立**。构造后没有任何 API 能改
    `region.size`，因此 `access_ptr` 的边界检查不可能被后续操作绕过。
-2. **每个 guard 的 `ReleaseHook` 至多跑一次**。`IoMap::drop` 用
-   `self.release.take()`；`DevIrq`/`CoherentMem`/`ClkHandle`/`EnabledClock` 同构。
+2. **driver-os-api 的每个 guard 的 `ReleaseHook` 至多跑一次**。`IoMap::drop` 用
+   `self.release.take()`；`DevIrq`/`CoherentMem`/`ClkHandle` 同构。
+   `EnabledClock` 不持有 ReleaseHook，而是独立平衡一次 prepare/enable。
 3. **`Data` 的装箱与拆箱由同一个驱动类型完成**。`AnyDriver::remove` 里
    `data.downcast_mut::<P::Data>()` 失败会 panic（带 `CG-021` 例外说明），
    而它不可能失败：域只把 binding 的 `Data` 交回**创建它的那个** `RegisteredDriver`
@@ -106,7 +95,7 @@
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |---|---|---|---|---|
-| T-01 | 固件给出一个 `MmioRegion`，其 `base+size` 覆盖内核自身映射；驱动 `iomap` 后写寄存器 → 破坏内核内存 | 高 | 被篡改的 DT / ACPI，或固件描述与真实硬件不符 | **已实现**：本 crate 只按 `region.size` 做访问边界检查，不判断物理地址合法性；映射由 `driver-host` 经 `memspace` 建立，`memspace` 拥有物理地址空间的分配与重叠检测。**残余风险**：若 `memspace` 允许映射一段与内核镜像重叠的物理地址，本层无法发现。加固建议在 `driver-host`/`memspace` 侧拒绝已知保留区 |
+| T-01 | 固件给出一个 `MmioRegion`，其 `base+size` 覆盖内核自身映射；驱动 `iomap` 后写寄存器 → 破坏内核内存 | 高 | 被篡改的 DT / ACPI，或固件描述与真实硬件不符 | **已实现**：driver-os-api 只按 `region.size` 做访问边界检查，不判断物理地址合法性；映射由 `driver-host` 经 `memspace` 建立，`memspace` 拥有物理地址空间的分配与重叠检测。**残余风险**：若 `memspace` 允许映射一段与内核镜像重叠的物理地址，本层无法发现。加固建议在 `driver-host`/`memspace` 侧拒绝已知保留区 |
 | T-02 | 驱动用超出实际寄存器窗口的 `offset` 访问 `IoMap` | 高 | 驱动 bug 或转写错误 | **已实现**：`access_ptr` 用 `checked_add` 防溢出 + `assert!(end <= region.size)`，越界立即 panic 而不是静默访问相邻寄存器 |
 | T-03 | 驱动以未对齐 offset 做 `read32`/`write64` | 高 | 转写 Linux 驱动时把寄存器偏移算错 | **已实现**：`access_ptr` 总是检查 `is_multiple_of(size)`，不满足即 panic。旧模型此处是 `debug_assert`（release = UB），本 crate 已修正 |
 | T-04 | 设备被移除后，上一轮 probe 的结果被提交，导致两份 `Data` 同时对同一硬件负责（双重释放 IRQ / 双重 unmap） | 高 | 移除与 probe 并发 | **已实现**：`lifecycle.generation` 在每次 teardown 自增；提交时不匹配就 drop 陈旧 `Data` 并 `log::warn`。回归测试 `wake_during_probe_window_does_not_lose_the_device`；probe 期间
@@ -159,13 +148,13 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 
 ## 已知限制
 
-1. **无 threaded IRQ**。`IrqAction` 只有 `Handled`/`NotHandled`；`devres::host_api::IrqOp`
-   有 `request_threaded_irq`，但 `DeviceServices` 与 `Device` 两层都没有对应
-   入口。Linux `devm_request_threaded_irq` **禁止机械映射**。
-2. **无 MSI-X per-vector 暴露**。`devres::host_api::MsiResource` 有分配接口，`Device`
-   没有方法；当前只有 virtio-net 在 x86_64 通过 transport 内部的 config+queue
-   双向量使用（例外 E-01）。三层 handler 签名并存（`Fn(usize)` /
-   `Fn(usize)->IrqEvent` / `Fn()->IrqAction`）是这个缺口的症状。
+1. **新模型无 threaded IRQ 入口**。`IrqAction` 只有 `Handled`/`NotHandled`；
+   `driver_os_api::IrqOp`、`DeviceServices` 与 `Device` 均没有线程化注册入口。
+   普通设备 IRQ handler 不得阻塞或作为 pseudo-NMI handler 使用。
+   Linux `devm_request_threaded_irq` **禁止机械映射**。
+2. **无 MSI-X per-vector 暴露**。`driver_os_api::MsiResource` 有分配接口，`Device`
+   没有方法。旧 virtio transport 使用的是旧资源模型，不代表新模型已接入。
+   driver-os-api 的 provider 与 model 的设备服务均使用 `Fn()->IrqAction`；宿主负责内核回调转换。
 3. **无 runtime PM / suspend-resume**。`DriverOps` 只有 `probe`/`remove`，
    **没有** `suspend`/`resume` 预留位。
 4. **无热插拔再枚举入口**。`add_device` 是增量的，但没有旧模型
@@ -214,3 +203,10 @@ PublicationSource 不再提供 mark_offline。model 在 remove 回调前关闭�
 class 的独立撤销仅关闭该发布。InUse 只直接延迟 class unpublish hook，不延迟
 Data 的独立字段释放；驱动必须先停止并 join 操作，或由共享 runtime 保有资源。
 类型拆分不等同于跨所有 class 的自动资源 drain，当前模型不提供此保证。
+
+## IRQ 基础词汇边界
+
+model 经 driver-os-api 与 kirq 共享 irq-types 的三个值类型，不共享注册表、handler 或资源状态机。
+IrqDomainId 只是宿主域命名空间中的编号，构造不代表注册成功或有效性校验；
+宿主映射实现必须验证来源和域。model 不依赖 kirq 或旧 device_res。
+边界目前由代码审查保证，不存在专门的自动边界检查脚本。

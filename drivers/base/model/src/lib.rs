@@ -74,14 +74,14 @@
 //! [`ClockConsumerServices`] and [`DeviceServices`] must not name a
 //! host-kernel type in their signatures, because that is what lets the model
 //! be exercised against a mock (`ut-tests/domain.rs` runs 19 state-machine tests
-//! on `MockServices`). The one deliberate exception is the IRQ *vocabulary*
-//! re-exported by [`crate::resource`] (`IrqTrigger`, `IrqController`,
-//! `IrqDomainId`): those shapes are defined exactly once in the tree, in
-//! `kirq`, and are data rather than host behaviour.
+//! on `MockServices`). The IRQ trigger, controller and domain identifier
+//! types come through driver-os-api from irq-types without depending on the
+//! IRQ runtime. OS capability states, handlers and guards belong to driver-os-api;
+//! device-specific services and error conversion remain in this crate.
 //!
-//! Providers — the [`provider`] Op traits — are the host-facing surface and
-//! are *not* covered by L0-b; `driver-host` implements them. Drivers do not
-//! touch them (rule L1: one acquisition path, [`Device`]).
+//! Host-facing provider Op contracts obey the same dependency restriction.
+//! Only their implementations may call kernel APIs. Drivers acquire resources
+//! through Device rather than invoking providers directly.
 
 #![no_std]
 
@@ -89,7 +89,6 @@ extern crate alloc;
 
 pub mod bus;
 mod device;
-pub mod devres;
 mod domain;
 mod driver;
 mod error;
@@ -97,6 +96,7 @@ pub mod extension;
 pub mod firmware;
 pub mod provider;
 mod resource;
+mod services;
 
 pub mod desc;
 
@@ -111,15 +111,14 @@ pub use bus::{
 };
 pub use desc::DeviceDescriptor;
 pub use device::{Device, DeviceId};
-pub use devres::{
-    ClkHandle, CoherentMem, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn, ReleaseHook,
-    services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
-};
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
 };
 pub use driver::{DriverDesc, DriverOps};
+pub use driver_os_api::{
+    ClkHandle, CoherentMem, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn, ReleaseHook,
+};
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use extension::{ExtensionRegistry, ExtensionService, ExtensionServices};
 pub use firmware::{FirmwareNodeInfo, FirmwareProp};
@@ -128,3 +127,4 @@ pub use resource::{
     ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
     ResourceEntry, ResourceKind, ResourceMap, Virq,
 };
+pub use services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError};

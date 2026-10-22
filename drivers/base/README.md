@@ -13,17 +13,18 @@
 具体设备怎样收发数据、访问硬件，以及宿主内核怎样提供运行能力，由各自的层负责。
 
 本文定义后续演进的职责边界，不表示当前代码已经完成分层。
-当前目录是根 workspace 下两个 crate 的容器：
+当前目录是根 workspace 下三个 crate 的容器：
 
 | 目录 / package | Rust crate 名 | 职责 |
 |---|---|---|
 | `model/` / `driver-model` | `driver_model` | 设备模型、绑定与退出编排 |
 | `class/` / `driver-class` | `driver_class` | 通用发布、使用许可和撤销协调 |
+| `os-api/` / `driver-os-api` | `driver_os_api` | OS 能力契约、描述、句柄及释放协议 |
 
-依赖方向为 `model → class`、`hwrng → class`、`entropy → hwrng`；能力消费者不依赖模型。
+依赖方向为 `model → class`、`model → os-api`、`hwrng → class`、`entropy → hwrng`；能力消费者不依赖模型。
 它们与 `drivers/contracts/driver_base` 中的旧 `driver_base` crate 分别演进。
 内核 `entry` 仅在 `unittest` feature 下链接 model，保证模型 UT 在迁移期间仍被执行。
-资源契约与 platform 总线暂留 model，后续按本文边界迁移。
+OS 能力契约已抽到 os-api；设备服务协调和 platform 总线暂留 model。
 
 ## model 与 class 分别是什么
 
@@ -126,8 +127,10 @@ model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalize
 由 base 定义。RAII 释放也不能替代 remove 阶段显式停止硬件和协调在途操作。
 
 仓库已有 `device-res` 能力契约。调整此处资源抽象前，必须明确与它的复用、演进
-或替代关系，避免维护两套平行契约。当前对 `kirq` 的直接依赖也不能因为已有代码
-或移动目录而视为永久例外，应按驱动子系统边界规则明确契约与宿主适配的归属。
+或替代关系，避免维护两套永久平行契约。当前新旧 devres 暂时并存，本轮不迁移旧模型。
+model 经 os-api 与 kirq 共同使用 `arch/irq-types` 的触发方式、控制器类别和不透明域编号；
+新模型的资源状态、Op、handler 和句柄由 os-api 拥有，内核转换属于宿主适配层。
+model 不再直接依赖 kirq，也不通过旧 device_res 重新导出资源契约。
 
 ## crate 与 mod 的划分
 
@@ -140,10 +143,10 @@ model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalize
   领域对象与稳定能力。
 - 不建立仅用于收纳零散类型、错误或工具的 `common`、`types` 等兜底 crate。
 
-按这个标准，设备模型与通用 class 已拆成两个 crate；
+按这个标准，model、class 与 os-api 已分成三个 crate；
 `domain` 的 `registry`、`probe`、`dependency`、`lifecycle` 共同维护
 `DomainInner`、锁及 generation 协议，应继续作为模型内部的 mod。
-资源契约需要先完成职责梳理，具体总线实现应与模型核心分开。
+OS 能力契约已独立归位；宿主接入与旧模型迁移另行推进，具体总线实现仍应与模型核心分开。
 
 `base/` 可以演进为包含多个职责完整 crate 的目录容器，不必保留一个重新导出
 所有内容的总入口 crate。子 crate 仍加入根 workspace，各自维护 `ut-tests/`
@@ -175,16 +178,16 @@ trait crate。
 
 ## 当前停止点与后续工作
 
-本轮在 model/class 分离后停止结构拆分，先 review 接口、所有权和退出协议。
+当前已完成 model/class/os-api 的职责拆分，继续 review 接口、所有权和退出协议。
 这足以形成一个可独立审查的重构步骤，不表示 model 内的所有内容都已归位，
 也不表示资源层已经满足最终可移植边界。
 
 | 内容 | 当前决定 | 后续条件或动作 |
 |---|---|---|
-| model / class | 保持两个 crate | review 各自状态归属、单向依赖及跨 crate 生命周期协议 |
+| model / class / os-api | 保持三个 crate | review 各自状态归属、单向依赖及跨 crate 生命周期协议 |
 | domain 的四个引擎 | 保持内部 mod | 共同维护锁和 generation 协议，不按文件机械拆分 |
 | class 注册表、使用计数、finalizer | 保持 class 内部实现 | 它们共同实现一个发布生命周期，不分别建立 crate |
-| `resource` / `devres` / host 契约 | 记录为未完成的边界整理 | 先明确与 `device-res` 的复用、演进或替代，再迁移契约与宿主适配；新资源能力接入前应明确归属 |
+| OS 能力契约与句柄 | 由 os-api 拥有 | 与旧 device-res 暂时并存；旧调用方迁移和新宿主适配另行审查 |
 | `PlatformBus` 具体实现 | 暂留 model，目标移出核心 | 在总线迁移步骤中确定落点并调整枚举/驱动依赖，不连带拆走通用 `Bus` 契约 |
 | firmware 快照、provider、extension、错误类型 | 暂留所属职责内的 mod | 出现独立共享的所有权职责时再评估；不要预先建立兜底类型 crate |
 
@@ -206,3 +209,5 @@ review 优先确认以下事项，再决定下一项结构工作：
 - [通用 class 设计](class/docs/design.md)
 - [设备模型安全分析](model/docs/security.md)
 - [通用 class 安全分析](class/docs/security.md)
+
+OS 能力边界与生命周期详见 [os-api 设计](os-api/docs/design.md) 和 [安全分析](os-api/docs/security.md)。

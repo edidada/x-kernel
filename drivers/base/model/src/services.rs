@@ -8,7 +8,7 @@
 //! in tests keep the model host-free (L0-b).
 
 use crate::{
-    devres::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqHandlerFn},
+    ClkHandle, CoherentMem, DevIrq, IoMap, IrqHandlerFn,
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, DmaInfo, IrqSpec, MmioRegion, Virq},
 };
@@ -121,5 +121,11 @@ impl From<ServiceError> for ProbeError {
             ServiceError::Deferred(dep) => ProbeError::Deferred(dep),
             ServiceError::Fatal(err) => ProbeError::Fatal(err),
         }
+    }
+}
+
+impl From<driver_os_api::ResError> for ServiceError {
+    fn from(error: driver_os_api::ResError) -> Self {
+        Self::Fatal(RuntimeError::from(error))
     }
 }

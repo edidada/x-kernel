@@ -10,7 +10,7 @@ use core::{
 };
 
 use super::ReleaseHook;
-use crate::resource::MmioRegion;
+use crate::ResResult;
 
 /// A mapped MMIO region with checked volatile accessors.
 ///
@@ -161,4 +161,50 @@ impl Drop for IoMap {
             release();
         }
     }
+}
+
+/// A physical MMIO region described by firmware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmioRegion {
+    pub base: usize,
+    pub size: usize,
+}
+
+impl MmioRegion {
+    pub const fn new(base: usize, size: usize) -> Self {
+        Self { base, size }
+    }
+}
+
+/// An x86 I/O port range described by firmware or PCI BARs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoPortRange {
+    pub base: u16,
+    pub size: u16,
+}
+
+/// A mapping token returned by [`MmioOp::map_mmio`].
+///
+/// The provider is responsible for interpreting the token in
+/// [`MmioOp::unmap_mmio`]. Drivers never construct this directly; they hold an
+/// [`IoMap`] handle instead.
+#[derive(Debug, Clone, Copy)]
+pub struct MmioMapping {
+    /// Virtual address the CPU uses to access the region.
+    pub vaddr: usize,
+    /// The physical region this mapping covers.
+    pub region: MmioRegion,
+}
+
+/// MMIO mapping capability: map a physical device region into CPU-visible
+/// virtual memory and release it.
+///
+/// A host kernel implements this and passes it to its driver framework. Runs
+/// in normal (non-interrupt) context during device probe and removal.
+pub trait MmioOp: Sync {
+    /// Map an MMIO region and return a token for later teardown.
+    fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping>;
+
+    /// Release a mapping previously returned by [`Self::map_mmio`].
+    fn unmap_mmio(&self, mapping: MmioMapping);
 }

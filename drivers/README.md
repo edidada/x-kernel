@@ -5,7 +5,8 @@ contract it is implementing or consuming.
 
 The new device model is being migrated under [`base/`](base/README.md):
 `driver-model` owns binding and device lifecycle, while `driver-class` owns
-generic publication and withdrawal. The legacy crates listed below remain
+generic publication and withdrawal. `driver-os-api` owns the new OS capability
+contracts and guards; it remains separate from legacy `device-res`. The legacy crates listed below remain
 in use during migration; hwrng already consumes the independent class crate.
 
 ## Layers

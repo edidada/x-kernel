@@ -1271,11 +1271,19 @@ name = "driver-model"
 version = "0.3.0-dev"
 dependencies = [
  "driver-class",
+ "driver-os-api",
  "kerrno",
- "kirq",
  "kspin",
  "lazyinit",
  "log",
+ "unittest",
+]
+
+[[package]]
+name = "driver-os-api"
+version = "0.3.0-dev"
+dependencies = [
+ "irq-types",
  "unittest",
 ]
 
@@ -2070,6 +2078,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "irq-types"
+version = "0.3.0-dev"
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2755,6 +2767,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "intrusive-collections",
+ "irq-types",
  "kalloc-types",
  "karch",
  "kbuild_config",

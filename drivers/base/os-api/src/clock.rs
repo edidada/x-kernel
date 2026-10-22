@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use core::fmt;
 
 use super::ReleaseHook;
-use crate::{devres::host_api::ClkOps, error::RuntimeError};
+use crate::ResError;
 
 /// An acquired clock input (`struct clk *`); drops the reference on drop.
 ///
@@ -20,7 +20,7 @@ pub struct ClkHandle {
 }
 
 impl ClkHandle {
-    /// Constructed by [`DeviceServices`] implementations.
+    /// Construct a clock reference with its matching release hook.
     pub fn new(ops: Arc<dyn ClkOps>, release: Option<ReleaseHook>) -> Self {
         Self { ops, release }
     }
@@ -31,7 +31,7 @@ impl ClkHandle {
     /// paths (request_irq/class publication errors AFTER a successful
     /// enable) with no rollback; remove-time cleanup relied on reading the
     /// provider's current state instead of local ownership.
-    pub fn prepare_enable(&self) -> Result<EnabledClock, RuntimeError> {
+    pub fn prepare_enable(&self) -> Result<EnabledClock, ResError> {
         self.ops.prepare()?;
         if let Err(err) = self.ops.enable() {
             // Roll back the prepare: a failed enable must not leave the
@@ -108,3 +108,45 @@ impl fmt::Debug for ClkHandle {
             .finish_non_exhaustive()
     }
 }
+
+/// A clock input described by firmware (`clocks = <&phandle idx>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkSpec {
+    /// Provider identifier (DT phandle of the clock controller).
+    pub provider: u64,
+    /// Output index within the provider (`clock-specifier` cell).
+    pub index: u32,
+}
+
+impl ClkSpec {
+    pub const fn by_phandle_index(provider: u64, index: u32) -> Self {
+        Self { provider, index }
+    }
+}
+
+/// Provider-side clock operations behind a [`ClkHandle`].
+///
+/// The host implements clock operations; tests may use fixed-rate providers.
+pub trait ClkOps: Send + Sync {
+    fn name(&self) -> &str;
+
+    fn get_rate(&self) -> u64;
+
+    fn round_rate(&self, rate: u64) -> Result<u64, ResError>;
+
+    fn set_rate(&self, rate: u64) -> Result<u64, ResError>;
+
+    fn prepare(&self) -> Result<(), ResError>;
+
+    fn unprepare(&self);
+
+    fn enable(&self) -> Result<(), ResError>;
+
+    fn disable(&self);
+
+    fn is_prepared(&self) -> bool;
+
+    fn is_enabled(&self) -> bool;
+}
+
+unittest::path_mod_test!(tests, "../ut-tests/clock.rs");

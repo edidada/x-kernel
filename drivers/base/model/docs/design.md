@@ -9,11 +9,15 @@ deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceSer
 驱动后续通过对应契约接入，旧设备模型仍在迁移中。
 `entry` 的 `unittest` feature 显式链接本 crate，保证模型测试没有随着生产依赖拆分而丢失。
 
-它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`。当前资源描述引用
-`kirq` 类型，`devres/host_api.rs` 还引用 `kirq::IrqHandler`；这是后续资源契约
-迁移需要处理的遗留依赖，不是可移植边界的永久例外。
+它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`/`kirq`。
+OS 能力契约、句柄和纯资源描述现位于 `drivers/base/os-api`。
+model 通过 driver-os-api 使用 irq-types 的基础 IRQ 词汇，不依赖 kirq 或旧 device_res。
+新旧资源模型暂时并存，本轮不迁移旧调用方。生产宿主服务仍待通过契约接入。
+model 拥有带 DeviceId 的设备服务、deferred probe、ResourceMap 以及错误转换。
+宿主适配方实现 OS Op；普通 IRQ 回调通过 IrqHandlerFn / IrqAction 交接，不暴露内核 handler。
+边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
-依赖方向为 `driver-model → driver-class`。私有 `DeviceCore` 实现
+依赖方向为 `driver-model → driver-class` 和 `driver-model → driver-os-api`。私有 `DeviceCore` 实现
 `PublicationSource`，`Device::publish` 将同一个 `Arc` 身份交给 class。
 class 只读身份与在线状态；model 在 remove 回调前标记来源 offline。
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
@@ -58,14 +62,14 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
 | `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`Device`（**唯一**设备句柄：probe 收 `&mut Device<'_, B>`，remove 收同一句柄 + `&mut Data`；`publish(&CLASS, …)` 即从它取 core） |
-| `src/devres/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
-| `src/devres/` | 一根 devres 轴：驱动侧句柄 `iomap.rs`（`IoMap`）/ `irq.rs`（`DevIrq` + `IrqAction`/`IrqHandlerFn`）/ `dma.rs`（`CoherentMem`）/ `clk.rs`（`ClkHandle` / `EnabledClock`），`host_api.rs` 为 host 侧 Op 契约（`#[doc(hidden)]`），`services.rs` 是两者的缝合面 |
+| `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
+| `../os-api/src/{mmio,irq,dma,clock}.rs` | 已抽出的 OS 能力描述、Op 与句柄，按能力与生命周期聚合；不属于 model 实现 |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
-| `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec`、`Virq`（OS 可见中断号，与固件 hwirq 结构性区分） |
+| `src/resource.rs` | 设备枚举集合 ResourceMap / ResourceEntry / ResourceKind；纯描述类型从 driver-os-api 引用 |
 | `src/provider.rs` | provider 注册惯例（**唯一一条**）：`ProviderClass`（一个 provider 家族 = key/lookup/`DepKind` 描述符）、`ProviderRegistration`（类型擦除的一次发布）、`ProviderServices`（host 侧落点） |
 | `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
 | `driver_class`（独立 crate） | `Class<T,H>`（registry + hooks）+ `Registration<T>`（注册权）+ `Publication<T>`（消费者引用）+ `InUse<T>`（在途计数 guard）；投影与撤销由 class hooks 管理。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
-| `src/devres/host_api.rs` | 主机实现的 Op 契约（每资源家族一个 vtable）：`MmioOp`/`IrqOp`/`DmaOp`/`ClkOps` + `IrqRouteDesc`/`MsiResource`；host 面，`drv/**` 不得命名 |
+| `src/error.rs` | OS 能力错误到 RuntimeError / ProbeError 的转换，ServiceError 转换位于 services.rs |
 | `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（唯一的进程级域名入口，组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
@@ -266,8 +270,8 @@ pub unsafe fn new(vaddr: usize, region: MmioRegion, release: Option<ReleaseHook>
 ```
 
 一个 safe 构造器会让任意 `usize` 到达 volatile 访问器——那是 soundness 洞，
-不是使用不便。全树只有两个调用点：`driver-host`（provider 刚映射完）和
-`ut-tests/domain.rs` 的 `MockServices`。
+不是使用不便。实现已迁到 driver-os-api，安全契约见其安全文档。
+model 的 MockServices 仍按这个契约构造测试映射，生产适配必须同样满足它。
 
 ### 一把锁，而不是分层锁
 
@@ -307,9 +311,9 @@ let Some(service) = dev.env().extension::<PciTransportService>() else { … };
 
 ### `IrqAction` 没有 `WakeThread` 变体
 
-`services.rs` 里有整段注释说明：`kirq` 目前没有线程化 handler 词汇，一个"唤醒
-线程"的半支持变体会在主机适配层静默降级成 `Handled`，让驱动以为自己跑在任务
-上下文、实际跑在中断上下文。要加就和一个真的 threaded-IRQ 通道一起加。
+本模型的 `IrqAction` 只表示同步处理结果，Op、设备服务和 Device 均没有
+threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是对底层能力的判断。
+未来需要连同线程注册、退出同步和驱动侧入口一起设计，不得静默降级唤醒请求。
 
 ### 驱动身份是注册键，不是对象地址
 

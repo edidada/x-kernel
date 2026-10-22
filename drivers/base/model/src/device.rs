@@ -9,8 +9,8 @@ use alloc::sync::Arc;
 use core::marker::PhantomData;
 
 use crate::{
+    ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction,
     bus::Bus,
-    devres::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction, services::DeviceServices},
     error::{DepSource, ProbeError, RuntimeError},
     extension::ExtensionService,
     firmware::{FirmwareNodeInfo, FirmwareProp},

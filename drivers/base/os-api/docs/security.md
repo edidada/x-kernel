@@ -1,0 +1,40 @@
+# driver-os-api — 安全与可靠性
+
+## 范围与信任
+
+覆盖 mmio、irq、dma、clock、error 和 ReleaseHook。宿主 provider 是可信实现，
+描述符和驱动请求不证明硬件有效。此 crate 无用户内存入口，不注册 IRQ 或分配
+真实资源；对应的验证、访问授权、内核转换由宿主承担。
+
+## Unsafe 边界
+
+unsafe 集中在 mmio.rs，沿用提取前的实现：
+- IoMap::new 要求调用方提供至少 region.size 字节、在句柄生命周期内有效的映射，
+  并拥有与释放 hook 配对的权限。
+- access_ptr 在访问前检查 offset 范围与实际地址对齐，再计算指针。
+- read8/16/32/64 与 write8/16/32/64 使用 volatile 操作，并保留 acquire/release fence。
+- fence 不替代设备特定屏障、DMA 一致性或并发寄存器访问协议。
+
+错位、越界访问属于驱动错误，会 panic；真实物理地址合法性和映射重叠不由
+IoMap 判断。提取不扩展 unsafe 范围或放宽构造条件。
+
+## 所有权与清理
+
+每个 guard 的 hook 至多调用一次，但同一 Arc hook 被多个 guard 复用仍可能重复
+释放同一底层资源；宿主必须保证一个实际获取对应一个释放责任。
+驱动必须在 Drop 前停止设备、等待在途使用并按依赖顺序销毁 guard。
+DevIrq 的 hook 必须完成宿主要求的 handler 撤销与同步，单独丢弃描述值不完成清理。
+
+CoherentMem 的裸指针不提供安全解引用或 DMA 同步保证；分配、地址视图、
+缓存维护与设备停止由宿主/驱动协作完成。
+EnabledClock Drop 平衡一次成功 enable；enable 失败由 provider 自行清理其部分
+副作用，再由句柄回滚 prepare。keep_running 会有意保持 enabled 状态，不自动释放。
+
+## IRQ 与错误边界
+
+irq-types 的 IrqDomainId 不证明域存在，宿主必须验证并执行正确映射。
+IRQ handler 只用于普通设备 IRQ，不能睡眠或被当作 pseudo-NMI 回调。
+默认恒等 map_irq 不适用于非恒等中断域。新模型没有 threaded IRQ 入口。
+
+ResError 不携带 DeviceId、依赖等待或 probe 策略；model 显式转换错误分类。
+不允许为了错误转换而让本 crate 反向依赖 model、旧 device_res 或内核实现。

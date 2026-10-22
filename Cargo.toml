@@ -13,7 +13,9 @@ members = [
     "util/kiface/crates/cpu-api",
     "util/kiface/crates/task-wait-api",
     "core/kpm",
+    "arch/irq-types",
     "drivers/base/model",
+    "drivers/base/os-api",
     # kernel entry
     "entry",
     # boot and loader
@@ -111,6 +113,7 @@ kcpu = { path = "arch/kcpu" }
 kcpu_id_map = { path = "arch/kcpu_id_map" }
 kcpu_slot = { path = "arch/kcpu_slot" }
 khal = { path = "arch/khal" }
+irq_types = { path = "arch/irq-types", package = "irq-types" }
 kirq = { path = "arch/kirq" }
 kipi = { path = "arch/kipi" }
 kplat = { path = "platforms/kplat" }
@@ -244,6 +247,7 @@ block = { path = "drivers/contracts/block" }
 char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
+driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
 driver_model = { path = "drivers/base/model", package = "driver-model" }
 driver_class = { path = "drivers/base/class", package = "driver-class" }
 subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }

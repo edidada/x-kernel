@@ -52,6 +52,12 @@ The provider must not restore delivery on failure, and a caller must treat
 the error as requiring recovery even when logical enable state is unchanged.
 This is not hardware-active drain or a guarantee that every legacy provider
 performs readback; those guarantees remain controller-specific.
+## 共享值类型
+
+irq-types 仅提供触发方式、控制器类别和不透明域编号，没有执行能力或全局状态。
+构造 IrqDomainId 不会注册域，kirq 仍负责映射校验与命名空间管理。
+共享基础词汇不允许 driver-model 绕过宿主适配访问 IRQ 核心，且不共享内核
+handler 的普通 IRQ / pseudo-NMI 调用约定。现有分发与释放安全边界不变。
 
 ## irq_work Ownership And NMI Boundary
 

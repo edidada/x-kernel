@@ -23,6 +23,7 @@ intrusive-collections.workspace = true
 kiface-task-api.workspace = true
 kiface-task-wait-api.workspace = true
 kmutex.workspace = true
+irq_types.workspace = true
 bitflags = { workspace = true }
 karch = { workspace = true }
 kbuild_config = { workspace = true }

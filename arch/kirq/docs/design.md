@@ -92,6 +92,14 @@ late deactivation is invented for this hierarchy. Local per-CPU sources remain
 separate from this level flow; ordinary local sources use `PerCpu`. Tests in
 `ut-tests/level_dispatch.rs` cover overlapping and disabled claims, one completion
 per claim, no recursive action execution and no tail unmask after handler disable.
+## 共享 IRQ 词汇
+
+IrqTrigger、IrqController 与 IrqDomainId 的定义位于 `arch/irq-types`，
+kirq 保留原公共路径的重新导出，已有调用方不需要修改导入。
+此依赖不指向驱动资源层；driver-os-api 也直接依赖这份无运行时的基础词汇，
+driver-model 经 os-api 使用这些值。
+根域常量、域编号分配、映射、描述符合并、handler/event 和 NMI 语义仍属于 kirq。
+本轮不改变 IRQ 核心的状态机、注册、分发和退出行为。
 
 ## One-shot Local irq_work
 

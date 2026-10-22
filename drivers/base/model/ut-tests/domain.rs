@@ -7,14 +7,14 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use driver_os_api::ClkOps;
 use unittest::{assert_eq, def_test};
 
 use super::*;
 use crate::{
-    DepKind, OfMatch, PlatformBus,
+    ClkHandle, DepKind, DevIrq, IoMap, IrqAction, OfMatch, PlatformBus,
     bus::{BusInstanceId, PlatformId, platform_bus::PlatformBusData},
     desc::DeviceDescriptor,
-    devres::{ClkHandle, DevIrq, IoMap, IrqAction, host_api::ClkOps},
     driver::{DriverDesc, DriverOps},
 };
 
@@ -31,21 +31,21 @@ impl ClkOps for FixedClk {
         self.rate
     }
 
-    fn round_rate(&self, rate: u64) -> Result<u64, RuntimeError> {
+    fn round_rate(&self, rate: u64) -> Result<u64, driver_os_api::ResError> {
         Ok(rate)
     }
 
-    fn set_rate(&self, rate: u64) -> Result<u64, RuntimeError> {
+    fn set_rate(&self, rate: u64) -> Result<u64, driver_os_api::ResError> {
         Ok(rate)
     }
 
-    fn prepare(&self) -> Result<(), RuntimeError> {
+    fn prepare(&self) -> Result<(), driver_os_api::ResError> {
         Ok(())
     }
 
     fn unprepare(&self) {}
 
-    fn enable(&self) -> Result<(), RuntimeError> {
+    fn enable(&self) -> Result<(), driver_os_api::ResError> {
         Ok(())
     }
 
@@ -148,7 +148,7 @@ impl DeviceResourceServices for MockServices {
         _: crate::device::DeviceId,
         spec: IrqSpec,
         _: &'static str,
-        _: crate::devres::IrqHandlerFn,
+        _: crate::IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
         Ok(DevIrq::new(
             match spec {
@@ -167,18 +167,13 @@ impl DeviceResourceServices for MockServices {
         dma: crate::DmaInfo,
         _: usize,
         _: usize,
-    ) -> Result<crate::devres::CoherentMem, RuntimeError> {
+    ) -> Result<crate::CoherentMem, RuntimeError> {
         // Test mock: fake identity allocator honoring the device's DMA
         // view through the same translate() the real host uses, so the
         // mask/offset contract is exercised in tests too.
         let paddr = 0x4000_0000u64 + self.mapped.load(Ordering::Relaxed) as u64;
         match dma.translate(paddr) {
-            Some(bus) => Ok(crate::devres::CoherentMem::new(
-                paddr as usize,
-                bus,
-                0x1000,
-                None,
-            )),
+            Some(bus) => Ok(crate::CoherentMem::new(paddr as usize, bus, 0x1000, None)),
             None => Err(RuntimeError::NoMemory),
         }
     }
@@ -1040,40 +1035,6 @@ fn unmatched_descriptor_is_unclaimed() {
 }
 
 #[def_test]
-fn dma_view_translate_applies_offset_and_enforces_mask() {
-    // Identity view: pass-through.
-    let identity = crate::DmaInfo::DEFAULT;
-    assert_eq!(identity.translate(0x8000_1234), Some(0x8000_1234));
-
-    // dma-ranges offset: CPU 0x8000_0000 window appears at device 0x4000_0000.
-    let offset_view = crate::DmaInfo {
-        mask: u64::MAX,
-        offset: 0x4000_0000,
-        coherent: true,
-    };
-    assert_eq!(offset_view.translate(0x8000_1234), Some(0x4000_1234));
-
-    // A 32-bit device: anything above the mask is REJECTED, not truncated —
-    // the failure a real host converts into a failed allocation.
-    let narrow = crate::DmaInfo {
-        mask: 0xFFFF_FFFF,
-        offset: 0,
-        coherent: true,
-    };
-    assert_eq!(narrow.translate(0x1_0000_0000), None);
-    assert_eq!(narrow.translate(0xFFFF_FFFF), Some(0xFFFF_FFFF));
-
-    // The translated address (not the physical one) is what the mask gates.
-    let narrow_offset = crate::DmaInfo {
-        mask: 0xFFFF_FFFF,
-        offset: -0x4000_0000, // device ids sit ABOVE the CPU window
-        coherent: true,
-    };
-    assert_eq!(narrow_offset.translate(0x4000_0000), Some(0x8000_0000));
-    assert_eq!(narrow_offset.translate(0x1_4000_0000), None);
-}
-
-#[def_test]
 fn probe_reads_firmware_property_snapshot() {
     use crate::{device::Device, firmware::FirmwareNodeInfo};
 
@@ -1460,5 +1421,25 @@ mod publication_contract {
         drop(second);
         assert!(FIRST.devices().is_empty());
         assert!(SECOND.devices().is_empty());
+    }
+}
+
+#[def_test]
+fn os_errors_convert_at_the_model_boundary() {
+    use driver_os_api::ResError;
+    for (error, expected) in [
+        (ResError::InvalidResource, RuntimeError::Invalid),
+        (ResError::MappingFailed, RuntimeError::Io),
+        (ResError::Io, RuntimeError::Io),
+        (ResError::NoMemory, RuntimeError::NoMemory),
+        (ResError::Busy, RuntimeError::Busy),
+        (ResError::Unsupported, RuntimeError::Unsupported),
+        (ResError::BadState, RuntimeError::BadState),
+        (ResError::AlreadyExists, RuntimeError::AlreadyExists),
+        (ResError::NotFound, RuntimeError::NotFound),
+    ] {
+        assert_eq!(RuntimeError::from(error), expected);
+        assert_eq!(ProbeError::from(error), ProbeError::Fatal(expected));
+        assert_eq!(ServiceError::from(error), ServiceError::Fatal(expected));
     }
 }

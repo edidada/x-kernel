@@ -60,11 +60,9 @@ use crate::{
     bus::{Bus, BusDeviceData, BusId, MatchScore},
     desc::DeviceDescriptor,
     device::{Device, DeviceId},
-    devres::services::{
-        ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError,
-    },
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
+    services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
 };
 
 /// Erased driver-private data (DriverOps::Data boxed by the framework).
@@ -377,7 +375,7 @@ impl DeviceResourceServices for NoServices {
         _: crate::device::DeviceId,
         _: MmioRegion,
         _: &'static str,
-    ) -> Result<crate::devres::IoMap, RuntimeError> {
+    ) -> Result<crate::IoMap, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -386,8 +384,8 @@ impl DeviceResourceServices for NoServices {
         _: crate::device::DeviceId,
         _: IrqSpec,
         _: &'static str,
-        _: crate::devres::IrqHandlerFn,
-    ) -> Result<crate::devres::DevIrq, RuntimeError> {
+        _: crate::IrqHandlerFn,
+    ) -> Result<crate::DevIrq, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -397,7 +395,7 @@ impl DeviceResourceServices for NoServices {
         _: crate::DmaInfo,
         _: usize,
         _: usize,
-    ) -> Result<crate::devres::CoherentMem, RuntimeError> {
+    ) -> Result<crate::CoherentMem, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
 
@@ -415,7 +413,7 @@ impl ClockConsumerServices for NoServices {
         &self,
         _: crate::device::DeviceId,
         _: ClkSpec,
-    ) -> Result<crate::devres::ClkHandle, ServiceError> {
+    ) -> Result<crate::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }
