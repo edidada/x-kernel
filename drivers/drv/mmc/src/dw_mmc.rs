@@ -107,7 +107,13 @@ const CMD_DAT_EXP: u32 = 1 << 9;
 const CMD_RESP_CRC: u32 = 1 << 8;
 const CMD_RESP_LONG: u32 = 1 << 7;
 const CMD_RESP_EXP: u32 = 1 << 6;
-const CMD_INDX_MASK: u32 = 0x1F;
+/// The CMD register index field is bits [5:0] — six bits, not five.
+/// Masking with 0x1F (a macro in Linux dw_mmc.h that the mainline driver
+/// itself never applies: dw_mci_prepare_command uses `cmdr = cmd->opcode`
+/// verbatim) silently rewrites every opcode >= 32: ACMD41 becomes CMD9,
+/// ACMD55 becomes CMD23 — cards then never report busy and detection
+/// times out in the ACMD41 poll.
+const CMD_INDX_MASK: u32 = 0x3F;
 
 // CLKENA bits.
 const CLKEN_ENABLE: u32 = 1 << 0;
