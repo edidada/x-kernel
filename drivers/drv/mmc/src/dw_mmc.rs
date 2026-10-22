@@ -284,7 +284,14 @@ impl DwMmcHost {
         host.writel(SDMMC_FIFOTH, fifoth(0x2, half - 1, half));
 
         // IDMAC: software reset, ring link, interrupt enable, base address.
+        // SWRESET is self-clearing; the databook requires it to complete
+        // before any further IDMAC register access.
         host.writel(SDMMC_BMOD, IDMAC_SWRESET);
+        for _ in spin_budget(10_000) {
+            if host.readl(SDMMC_BMOD) & IDMAC_SWRESET == 0 {
+                break;
+            }
+        }
         host.reset_ring();
         host.writel(SDMMC_IDSTS, IDINT_CLR_ALL);
         host.writel(SDMMC_IDINTEN, IDINT_NI | IDINT_RI | IDINT_TI | IDINT_ERRORS);
@@ -517,14 +524,15 @@ impl DwMmcHost {
         }
     }
 
-    /// The completion predicate + fallible state read.
-    fn xfer_result(&self) -> Option<Result<(), MmcError>> {
+    /// The completion predicate + fallible state read, carrying the
+    /// published status word for failure diagnostics.
+    fn xfer_result(&self) -> Option<Result<u32, MmcError>> {
         let status = self.xfer.load();
         if status == 0 {
             return None;
         }
         Some(if status == XFER_DONE {
-            Ok(())
+            Ok(status)
         } else {
             Err(Self::status_error(status))
         })
@@ -532,7 +540,9 @@ impl DwMmcHost {
 
     /// Wait for a started data transfer: park via the signal when this is
     /// a task, fall back to a bounded poll otherwise (probe context).
-    fn wait_transfer(&self) -> Result<(), MmcError> {
+    /// Returns the published status word on completion (XFER_DONE or the
+    /// raw error bitset) and Timeout when nothing fired within budget.
+    fn wait_transfer(&self) -> Result<u32, MmcError> {
         let signal = self.xfer.signal().clone();
         let parked = signal.wait_until(&mut || self.xfer_result().is_some());
         if parked.is_err() {
@@ -543,7 +553,11 @@ impl DwMmcHost {
                 }
             }
         }
-        self.xfer_result().unwrap_or(Err(MmcError::Timeout))
+        match self.xfer_result() {
+            Some(Ok(status)) => Ok(status),
+            Some(Err(err)) => Err(err),
+            None => Err(MmcError::Timeout),
+        }
     }
 
     /// Read data phase: stage through the coherent window into `buf`.
@@ -561,14 +575,16 @@ impl DwMmcHost {
         self.idmac_stop();
         if let Err(err) = &outcome {
             log::warn!(
-                "dwmmc: data-read cmd {} bytes {} failed: {err:?} (rintsts {:#x} idsts {:#x})",
+                "dwmmc: data-read cmd {} bytes {} failed: {err:?} status={:#x} (rintsts {:#x} \
+                 idsts {:#x})",
                 cmd.opcode,
                 bytes,
+                self.xfer.load(),
                 self.readl(SDMMC_RINTSTS),
                 self.readl(SDMMC_IDSTS),
             );
         }
-        outcome?;
+        outcome.map(|_| ())?;
         // SAFETY: the window holds `bytes` staged bytes from the DMA just
         // completed; bounded by the guard above, and no other borrow of
         // the window is live inside `&self` methods.
@@ -594,14 +610,16 @@ impl DwMmcHost {
         self.idmac_stop();
         if let Err(err) = &outcome {
             log::warn!(
-                "dwmmc: data-write cmd {} bytes {} failed: {err:?} (rintsts {:#x} idsts {:#x})",
+                "dwmmc: data-write cmd {} bytes {} failed: {err:?} status={:#x} (rintsts {:#x} \
+                 idsts {:#x})",
                 cmd.opcode,
                 bytes,
+                self.xfer.load(),
                 self.readl(SDMMC_RINTSTS),
                 self.readl(SDMMC_IDSTS),
             );
         }
-        outcome
+        outcome.map(|_| ())
     }
 
     /// Shared pre-command sequencing: descriptors, geometry, status
@@ -615,6 +633,10 @@ impl DwMmcHost {
         self.arm_irq_masks();
         self.reset_ring();
         self.arm_descriptors(bytes);
+        // The DMA engine fetches the descriptor chain over the bus: the
+        // chain (and the staged data in the window) must be visible to it
+        // before ENABLE.
+        karch::dsb_ishst();
         let blksz: u32 = if bytes.is_multiple_of(512) {
             512
         } else {
@@ -624,7 +646,7 @@ impl DwMmcHost {
         self.writel(SDMMC_BYTCNT, bytes as u32);
         self.xfer.reset();
 
-        let bmod = self.readl(SDMMC_BMOD);
+        let bmod = self.readl(SDMMC_BMOD) & !IDMAC_SWRESET;
         self.writel(SDMMC_BMOD, bmod | IDMAC_ENABLE | IDMAC_FB);
         let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
         self.ciu_cmd(cmdr, cmd.arg)
