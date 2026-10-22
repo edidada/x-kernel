@@ -252,16 +252,22 @@ pub fn detect_card(
             power_on: true,
         })?;
     }
-    step(
-        "set block length",
-        CMD_SET_BLOCKLEN,
-        BLOCK_SIZE as u32,
-        host_ref.send_cmd(&MmcCommand::with(
+    // CMD16 (SET_BLOCKLEN) only matters for byte-addressed cards: SDHC/
+    // SDXC fix the block length at 512 by definition (Linux skips it for
+    // block-addressed cards as well), and several cards answer it with a
+    // corrupted response right after the bus-width change.
+    if !block_addressed {
+        step(
+            "set block length",
             CMD_SET_BLOCKLEN,
             BLOCK_SIZE as u32,
-            RespKind::R1,
-        )),
-    )?;
+            host_ref.send_cmd(&MmcCommand::with(
+                CMD_SET_BLOCKLEN,
+                BLOCK_SIZE as u32,
+                RespKind::R1,
+            )),
+        )?;
+    }
     let high_speed = switch_high_speed(host_ref, &csd, &scr, bus_width_4bit)?;
 
     Ok(MmcCardData {
