@@ -22,6 +22,11 @@
 
 外部 `mmap-semantics` 回归通过，日志为 harness 的
 `logs/ci-test-iter/20261022-114601/`，覆盖部分解除、权限变更、私有文件写及重叠拒绝。
+外部 `mmap-tlb-flush-semantics` 也通过，日志为 `logs/ci/20261022-114739/`，覆盖
+跨进程 truncate 的 SIGBUS 和同 mm 跨 CPU 的 PROT_NONE、只读、munmap 可见性。
+
+发布前将分支变基到 `97bac30f6`（相对测量基线仅一处 TEE 参数修复），MM 改动内容
+未变；性能表仍严格对应下面列出的测量快照。
 
 ## vm-scalability 方法
 
