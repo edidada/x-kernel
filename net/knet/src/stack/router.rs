@@ -25,6 +25,7 @@ use crate::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
         ipv4::{self, Ipv4Header},
+        output::{self, OutputRoute},
         router::{
             ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TYPE_BROADCAST,
             ROUTE_TYPE_LOCAL, ROUTE_TYPE_MULTICAST, ROUTE_TYPE_UNICAST, RouteTable, Rule,
@@ -159,55 +160,11 @@ impl Router {
         // Unbound limited broadcast still needs a route so the later
         // dispatch flood has a source address.
 
-        // A local address route is stored with loopback as its output device
-        // but is owned by the address's interface.  Constrain and validate
-        // the lookup through `lookup_device`, as Linux does for `RTA_OIF`,
-        // rather than comparing the internal output rewrite.
-        let oif = NetDeviceId::new(oif).filter(|id| id.ifindex() > 0);
-        let rule = self
-            .table
-            .lookup_for_output(dst, oif)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-        // An explicit `RTA_OIF` is validated against the FIB device before the
-        // lookup, matching `ip_route_output_key_hash_rcu`.  A local /32 has
-        // its FIB device on the address owner but is transmitted through
-        // loopback; when no OIF was requested Linux still delivers to the
-        // local address while the owner is down, so only the output device's
-        // link state gates that path.
-        if oif.is_some() {
-            let fib_device = self
-                .devices
-                .get_by_id(rule.lookup_device())
-                .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-            if !fib_device.is_link_up() {
-                return Err(LinuxError::ENETUNREACH.into());
-            }
-        }
-        let device = self
-            .devices
-            .get_by_id(rule.dev)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-        if !device.is_link_up() {
-            return Err(LinuxError::ENETUNREACH.into());
-        }
-        match rule.preferred_source() {
-            Some(source) => Ok(source),
-            None => self
-                .devices
-                .ipv4(rule.dev)
-                .and_then(|addrs| {
-                    addrs.select_source(
-                        &IpAddress::Ipv4(
-                            rule.via
-                                .and_then(ipv4_address)
-                                .unwrap_or(Ipv4Address::UNSPECIFIED),
-                        ),
-                        rule.scope,
-                    )
-                })
-                .map(IpAddress::Ipv4)
-                .ok_or(KError::from(LinuxError::ENETUNREACH)),
-        }
+        Ok(self.resolve_output_route(dst, oif)?.source)
+    }
+
+    pub(crate) fn resolve_output_route(&self, dst: &IpAddress, oif: i32) -> KResult<OutputRoute> {
+        output::resolve_output_route(&self.table, &self.devices, dst, oif)
     }
 
     /// Resolves the effective IPv4 destination, source, and output route.
@@ -488,8 +445,14 @@ impl Router {
         self.data_tx_queue.can_push(packet_count)
     }
 
-    pub(crate) fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
-        let packets = self.fragment_ipv4_packet_for_output(packet)?;
+    pub(crate) fn queue_ipv4_packet(
+        &mut self,
+        packet: Vec<u8>,
+        oif: i32,
+        mtu: Option<usize>,
+    ) -> KResult {
+        let packets =
+            output::fragment_ipv4_packet(packet, mtu, &mut self.next_ipv4_identification)?;
         self.data_tx_queue
             .try_extend(
                 packets.into_iter().map(|packet| {
@@ -511,6 +474,9 @@ impl Router {
     /// Transmits an IPv4 packet through the current route without waiting for
     /// the poller TX queue.
     ///
+    /// A supplied route must describe this packet and have been resolved under
+    /// the current Router guard. `None` retains limited-broadcast dispatch.
+    ///
     /// Loopback xmit raises `NetRx` and drains it on `local_bh_enable`, matching
     /// Linux `dev_queue_xmit` → `loopback_xmit` → `__netif_rx`.
     /// A full shared `NetRx` queue drops the packet and still returns `Ok`,
@@ -519,15 +485,18 @@ impl Router {
     pub(crate) fn transmit_ipv4_now(
         &mut self,
         packet: Vec<u8>,
+        mtu: Option<usize>,
+        route: Option<&OutputRoute>,
         timestamp: MonotonicInstant,
     ) -> KResult {
-        let packets = self.fragment_ipv4_packet_for_output(packet)?;
+        let packets =
+            output::fragment_ipv4_packet(packet, mtu, &mut self.next_ipv4_identification)?;
         for packet in packets {
             let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
             // RX-ready hint for the poller, not send success. This path is
             // not the poller; a dropped loopback packet is still a successful
             // xmit, as documented above.
-            let _poll_next = self.dispatch_ipv4_packet(buf, timestamp);
+            let _poll_next = self.dispatch_ipv4_packet(buf, timestamp, route);
         }
         Ok(())
     }
@@ -1166,7 +1135,7 @@ impl Router {
             };
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
-                    poll_next |= self.dispatch_ipv4_packet(packet, timestamp);
+                    poll_next |= self.dispatch_ipv4_packet(packet, timestamp, None);
                 }
                 Some(6) => {
                     let (src_addr, dst_addr, is_multicast) = {
@@ -1221,7 +1190,12 @@ impl Router {
     /// Returns whether the send made RX ready, which [`Self::dispatch_budgeted`]
     /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
     /// `false`.
-    fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
+    fn dispatch_ipv4_packet(
+        &mut self,
+        mut packet: PacketBuf,
+        timestamp: MonotonicInstant,
+        route: Option<&OutputRoute>,
+    ) -> bool {
         if crate::ipv4::prepare_output_packet(&mut packet).is_err() {
             return false;
         }
@@ -1261,55 +1235,35 @@ impl Router {
             return poll_next;
         }
 
-        let Some(rule) = self.table.lookup(&dst_addr) else {
-            warn!("No route found for destination: {}", dst_addr);
-            return false;
+        // Queued output resolves again; synchronous output can reuse a decision
+        // made under the same Router guard.
+        let (dev_id, next_hop) = if let Some(route) = route {
+            (route.dev, route.next_hop)
+        } else {
+            let Some(rule) = self.table.lookup(&dst_addr) else {
+                warn!("No route found for destination: {}", dst_addr);
+                return false;
+            };
+            (rule.dev, rule.via.unwrap_or(dst_addr))
         };
         let bound_if = packet.ifindex();
-        if bound_if != 0 && bound_if != rule.dev.ifindex() {
+        if bound_if != 0 && bound_if != dev_id.ifindex() {
             warn!(
                 "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
-                rule.dev.ifindex()
+                dev_id.ifindex()
             );
             return false;
         }
         if !self.is_local_ipv4_source(ipv4_src_addr) {
-            warn!(
-                "Dropping IPv4 packet with non-local source {} routed via {}",
-                src_addr, rule.src
-            );
+            warn!("Dropping IPv4 packet with non-local source {}", src_addr);
             return false;
         }
 
-        let next_hop = rule.via.unwrap_or(dst_addr);
         let dev = self
             .devices
-            .get_mut_by_id(rule.dev)
+            .get_mut_by_id(dev_id)
             .expect("route device must be registered");
-        dev.send_ip_packet(rule.dev.ifindex(), next_hop, src_addr, packet, timestamp)
-    }
-
-    fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
-        if packet.len() > usize::from(u16::MAX) {
-            return Err(KError::InvalidInput);
-        }
-        let header = Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
-        let dst_addr = IpAddress::Ipv4(header.dst_addr());
-        let Some(mtu) = self.route_mtu(&dst_addr) else {
-            return Ok(vec![packet]);
-        };
-        if packet.len() <= mtu {
-            return Ok(vec![packet]);
-        }
-
-        let identification = self.next_ipv4_identification;
-        self.next_ipv4_identification = self.next_ipv4_identification.wrapping_add(1).max(1);
-        ipv4::fragment_output_packet(&packet, mtu, identification).map_err(|err| match err {
-            ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
-            ipv4::Ipv4FragmentError::DontFragment | ipv4::Ipv4FragmentError::MtuTooSmall => {
-                LinuxError::EMSGSIZE.into()
-            }
-        })
+        dev.send_ip_packet(dev_id.ifindex(), next_hop, src_addr, packet, timestamp)
     }
 
     fn is_local_ipv4_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {

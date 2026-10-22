@@ -735,7 +735,7 @@ When the queue is full, the PCB queue lock must be released before the current d
 
 ### 18. IPv4 Output Boundary
 
-The output MTU for in-stack UDP comes from the device selected by the matching route.
+For routed in-stack UDP, one output decision supplies the source, device, next hop, MTU, and link kind under the Router mutex. Capacity preflight, construction, and fragmentation share this MTU. The decision is consumed before unlocking; queued packets resolve again and validate their source and socket interface constraint at dispatch. Limited broadcast retains its separate output path and optional route MTU.
 UDP and raw IPv4 return `ENETUNREACH` when no route exists or the output device is administratively down, and return `EMSGSIZE` when a DF packet exceeds the MTU. Payloads of packets that permit fragmentation are split only at 8-byte-aligned boundaries.
 
 ### 19. Poller Completion Conditions

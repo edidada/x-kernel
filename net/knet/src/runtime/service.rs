@@ -27,7 +27,7 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{
-        LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
+        LINK_FLAG_UP, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
         NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
     },
     ip::{self, IpAddress, Ipv4Address},
@@ -662,6 +662,10 @@ impl Service {
         self.router.lock().can_enqueue_tx_packet()
     }
 
+    /// Prepares and submits one datagram under the Router guard.
+    ///
+    /// `prepare` must construct a packet for `dst_addr` without changing its length.
+    /// Queue-capacity rejection leaves the buffer available for a later retry.
     pub(crate) fn prepare_and_send_ipv4_packet(
         &self,
         bound_src: Option<IpAddress>,
@@ -691,20 +695,35 @@ impl Service {
         }
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
         let source_addr = IpAddress::Ipv4(route.source.ok_or(LinuxError::ENETUNREACH)?);
-        let is_loopback = router.is_loopback_destination(dst_addr);
+        // Limited broadcast can fan out or bypass routing with a bound device.
+        let route = if dst_addr.is_broadcast() {
+            None
+        } else {
+            Some(router.resolve_output_route(dst_addr, oif)?)
+        };
+        let (route_mtu, is_loopback) = if let Some(route) = &route {
+            (
+                Some(route.mtu),
+                route.link_kind == LinkKind::Loopback,
+            )
+        } else {
+            (
+                router.route_mtu(dst_addr),
+                router.is_loopback_destination(dst_addr),
+            )
+        };
 
         if !is_loopback {
             if !router.can_enqueue_tx_packet() {
                 return Err(KError::WouldBlock);
             }
 
-            let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
+            let packet_count = output_ipv4_packet_count(packet_len, route_mtu)?;
             if !router.can_enqueue_tx_packets(packet_count) {
                 return Err(KError::WouldBlock);
             }
         }
 
-        let route_mtu = router.route_mtu(dst_addr);
         prepare(
             packet.as_deref_mut().ok_or(KError::InvalidInput)?,
             source_addr,
@@ -713,9 +732,9 @@ impl Service {
         )?;
         let packet = packet.take().ok_or(KError::InvalidInput)?;
         if is_loopback {
-            router.transmit_ipv4_now(packet, monotonic_time())
+            router.transmit_ipv4_now(packet, route_mtu, route.as_ref(), monotonic_time())
         } else {
-            router.queue_ipv4_packet(packet, oif)
+            router.queue_ipv4_packet(packet, oif, route_mtu)
         }
     }
 
@@ -1440,16 +1459,12 @@ fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
     }
 }
 
-fn output_ipv4_packet_count(
-    router: &Router,
-    dst_addr: &IpAddress,
-    packet_len: usize,
-) -> KResult<usize> {
+fn output_ipv4_packet_count(packet_len: usize, mtu: Option<usize>) -> KResult<usize> {
     if packet_len > u16::MAX as usize {
         return Err(LinuxError::EMSGSIZE.into());
     }
 
-    let Some(mtu) = router.route_mtu(dst_addr) else {
+    let Some(mtu) = mtu else {
         return Ok(1);
     };
     if packet_len <= mtu {
