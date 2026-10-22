@@ -372,6 +372,7 @@ check_lints: check_hooks
 .PHONY: check_hooks
 check_hooks:
 	@bash .githooks/tests/pre-commit.sh
+	@bash .githooks/tests/pre-push.sh
 
 check_test_layout:
 	@$(XKMAKE) hygiene test-layout
@@ -385,6 +386,7 @@ fmt:
 hooks:
 	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
 	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
+
 
 ci-test: build
 	@set -eu; \

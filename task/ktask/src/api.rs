@@ -326,14 +326,12 @@ pub(crate) fn rearm_local_timer() {
 
 /// Begins deferring hardware timer writes on this CPU (timer-IRQ wake batch).
 pub(crate) fn begin_defer_local_timer_rearm() {
-    let pin = NoPreemptIrqSave::new();
-    DEFER_LOCAL_TIMER_REARM.write(&pin, true);
+    DEFER_LOCAL_TIMER_REARM.store_current(true);
 }
 
 /// Ends deferred rearm mode. Caller must perform the final [`rearm_local_timer`].
 pub(crate) fn end_defer_local_timer_rearm() {
-    let pin = NoPreemptIrqSave::new();
-    DEFER_LOCAL_TIMER_REARM.write(&pin, false);
+    DEFER_LOCAL_TIMER_REARM.store_current(false);
 }
 
 /// Programs the next schedule-evaluation deadline from a relative `next_preemption_ns`.
@@ -374,10 +372,7 @@ pub(crate) fn program_sched_deadline_for(
 /// # IRQ safety
 /// Caller must have IRQs (and preemption) disabled on this CPU.
 pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
-    // The nested pin upgrades whatever masking the caller had; the store
-    // lands on this CPU's own cell.
-    let pin = NoPreemptIrqSave::new();
-    NEXT_SCHED_DEADLINE_NS.write(&pin, deadline_ns.unwrap_or(0));
+    NEXT_SCHED_DEADLINE_NS.store_current(deadline_ns.unwrap_or(0));
 }
 
 /// Hardware-timer IRQ entry for scheduling and owned timers:
@@ -407,10 +402,7 @@ pub fn on_timer_fire() {
     crate::timers::run_timer_irq_note();
 
     let sched_due = {
-        // The tick runs with IRQs masked; the nested pin adds the CPU-local
-        // exclusion proof instead of relying on that fact.
-        let pin = NoPreemptIrqSave::new();
-        let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&pin);
+        let sched_ns = NEXT_SCHED_DEADLINE_NS.load_current();
         sched_ns != 0 && now_ns >= sched_ns
     };
     // Account the interrupted task before waking anyone else.
@@ -639,7 +631,14 @@ pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
 ///
 /// Wakes issued while `f` runs may sync-preempt an eligible next-buddy on the
 /// wakee's run queue when the waker is expected to sleep soon (e.g. futex
-/// wake followed by wait). Nested calls are refcounted.
+/// wake followed by wait). Use it when the wakee consumes what the waker just
+/// produced (futex wake, pipe data, a signal); open/close-style state changes
+/// use ordinary wakes. On SMP, if this CPU's `nr_running`
+/// is 1, the wakee stays on this CPU instead of an idle sibling unless a
+/// placement veto applies (affinity today). A wake from hardirq or an active
+/// softirq drops the hint for both placement and the enqueue mark: `current`
+/// is the interrupted task. The IRQ-exit tail can still leak it onto the
+/// pinned ksoftirqd wake. Nested calls are refcounted.
 pub fn with_wake_sync<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,

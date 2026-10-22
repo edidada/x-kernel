@@ -15,6 +15,8 @@
 //! - realtime advances 1:1 with monotonic time between explicit updates;
 //! - boottime is monotonic plus cumulative injected sleep time;
 //! - [`inject_sleeptime`] advances realtime and boottime without changing monotonic;
+//! - [`begin_suspend_accounting`] and [`resume_suspend_accounting`] provide a
+//!   single-use accounting transaction, without suspending clocks or hardware;
 //! - before any persistent clock is sampled, realtime falls back to the Unix
 //!   epoch plus elapsed monotonic time and injected sleep intervals;
 //! - [`set_realtime_checked`] re-bases the correlation so a caller-supplied
@@ -26,11 +28,26 @@
 #![no_std]
 #![deny(unsafe_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
+extern crate alloc;
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use khal::time::monotonic_time;
 use kspin::SpinRwNoIrq;
+
+mod change;
+mod observer;
+mod suspend;
+pub use change::{ClockChangeListener, ClockDomain, clock_change_listener};
 use ktime_types::{BoottimeInstant, MonotonicInstant, NANOS_PER_SEC, SystemTime, TimeSpan};
+pub use observer::{
+    ClockChangeId, ClockObserver, ClockObserverRegistration, ClockReading, ClockUpdate,
+    register_clock_observer,
+};
+pub use suspend::{
+    SuspendAccountingError, SuspendToken, begin_suspend_accounting, cancel_suspend_accounting,
+    resume_suspend_accounting,
+};
 
 /// Largest settable wall-clock second value, mirroring Linux `KTIME_SEC_MAX`
 /// (`include/linux/time64.h`): the upper bound `timespec64_valid()` accepts.
@@ -75,12 +92,14 @@ impl ClockCorrelation {
 struct Timekeeper {
     correlation: ClockCorrelation,
     sleep_time: TimeSpan,
+    suspend: suspend::SuspendState,
 }
 
 impl Timekeeper {
     const INITIAL: Self = Self {
         correlation: ClockCorrelation::FALLBACK,
         sleep_time: TimeSpan::ZERO,
+        suspend: suspend::SuspendState::INITIAL,
     };
 
     fn snapshot(self, monotonic: MonotonicInstant) -> ClockSnapshot {
@@ -118,6 +137,21 @@ impl Timekeeper {
         if delta.is_zero() {
             return Ok(());
         }
+        if self.suspend.is_active() {
+            return Err(SleepTimeError::AccountingInProgress);
+        }
+        self.apply_sleeptime(delta, monotonic)
+    }
+
+    // Arithmetic shared by untracked injection and validated transaction commit.
+    fn apply_sleeptime(
+        &mut self,
+        delta: TimeSpan,
+        monotonic: MonotonicInstant,
+    ) -> Result<(), SleepTimeError> {
+        if delta.is_zero() {
+            return Ok(());
+        }
         let sleep_time = self
             .sleep_time
             .checked_add(delta)
@@ -147,6 +181,7 @@ impl Timekeeper {
 }
 
 static TIMEKEEPER: SpinRwNoIrq<Timekeeper> = SpinRwNoIrq::new(Timekeeper::INITIAL);
+static CHANGE_ID: AtomicU64 = AtomicU64::new(0);
 static REALTIME_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +207,11 @@ pub fn initialize_realtime(sample: SystemTime) {
         let monotonic_base = monotonic_time();
         timekeeper.correlation = ClockCorrelation::new(monotonic_base, sample);
         REALTIME_INITIALIZED.store(true, Ordering::Release);
+        let update = prepare_clock_update(&timekeeper, false);
+        let wake = change::publish(false);
+        drop(timekeeper);
+        observer::notify(update);
+        change::wake(wake);
     }
 }
 
@@ -210,6 +250,11 @@ pub fn set_realtime_checked(sample: SystemTime) -> Result<(), RealtimeOutOfRange
 
     timekeeper.set_realtime_checked(sample, monotonic_base)?;
     REALTIME_INITIALIZED.store(true, Ordering::Release);
+    let update = prepare_clock_update(&timekeeper, false);
+    let wake = change::publish(false);
+    drop(timekeeper);
+    observer::notify(update);
+    change::wake(wake);
     Ok(())
 }
 
@@ -256,6 +301,8 @@ pub fn boottime() -> BoottimeInstant {
 /// The reason a confirmed sleep interval could not be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SleepTimeError {
+    /// A nonzero untracked injection would bypass an active suspend transaction.
+    AccountingInProgress,
     /// Cumulative sleep time or a clock value would exceed its supported range.
     OutOfRange,
     /// The monotonic sample precedes the recorded realtime correlation base.
@@ -269,14 +316,14 @@ pub enum SleepTimeError {
 ///
 /// Monotonic time is unchanged. `TimeSpan` excludes negative intervals, and a
 /// zero interval is a successful no-op. This does not sleep and is valid in
-/// interrupt context; it performs no device reads or timer callbacks.
+/// interrupt context; it performs no device reads. Registered wakers must be
+/// IRQ-safe. Clock-change notifications run after releasing the timekeeper lock.
 ///
 /// The caller must establish a suspend/resume boundary, exclude `delta` from
 /// the underlying monotonic clock, and ensure each interval is injected once.
 /// This function neither detects sleep nor repairs hardware counters. The
-/// caller must also arrange timer notification/rearming after the update and
-/// before allowing dependent timers to run. No production resume path is wired
-/// to this interface yet.
+/// registered consumers recheck their original deadlines after notification.
+/// No production resume path is wired to this interface yet.
 ///
 /// # Errors
 ///
@@ -284,13 +331,21 @@ pub enum SleepTimeError {
 /// time cannot represent the update, or realtime would reach the upper bound
 /// enforced by [`set_realtime_checked`]. Returns
 /// [`SleepTimeError::InvalidMonotonicBaseline`] if the monotonic sample precedes
-/// the recorded correlation base. Either error leaves state unchanged.
+/// the recorded correlation base. Returns [`SleepTimeError::AccountingInProgress`]
+/// for a nonzero injection while a suspend accounting transaction is active.
+/// Every error leaves state unchanged.
 pub fn inject_sleeptime(delta: TimeSpan) -> Result<(), SleepTimeError> {
     if delta.is_zero() {
         return Ok(());
     }
     let mut timekeeper = TIMEKEEPER.write();
-    timekeeper.inject_sleeptime(delta, monotonic_time())
+    timekeeper.inject_sleeptime(delta, monotonic_time())?;
+    let update = prepare_clock_update(&timekeeper, true);
+    let wake = change::publish(true);
+    drop(timekeeper);
+    observer::notify(update);
+    change::wake(wake);
+    Ok(())
 }
 
 /// Converts a realtime deadline into the monotonic timer domain.
@@ -308,4 +363,37 @@ pub fn realtime_deadline_to_monotonic(deadline: SystemTime) -> MonotonicInstant 
         .unwrap_or(MonotonicInstant::from_span_since_origin(TimeSpan::MAX))
 }
 
+/// Converts a boot-time deadline to a snapshot of the monotonic timer domain.
+///
+/// Recompute after a clock-change notification; this conversion does not retain
+/// a subscription. Past deadlines map to the current monotonic instant.
+pub fn boottime_deadline_to_monotonic(deadline: BoottimeInstant) -> MonotonicInstant {
+    let now = snapshot();
+    let delay = deadline.saturating_duration_since(now.boottime);
+    now.monotonic
+        .checked_add(delay)
+        .unwrap_or(MonotonicInstant::from_span_since_origin(TimeSpan::MAX))
+}
+
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");
+
+fn prepare_clock_update(timekeeper: &Timekeeper, includes_boottime: bool) -> ClockUpdate {
+    // Serialized by TIMEKEEPER; readers sample this identity under its read lock.
+    let id = CHANGE_ID.load(Ordering::Relaxed).wrapping_add(1);
+    CHANGE_ID.store(id, Ordering::Relaxed);
+    let sample = timekeeper.snapshot(monotonic_time());
+    ClockUpdate {
+        reading: ClockReading::new(sample, id),
+        includes_boottime,
+    }
+}
+
+/// Reads all three clock domains and the last committed change identity together.
+/// Usable in IRQ context; does not allocate or initialize notification sources.
+pub fn clock_reading() -> ClockReading {
+    let timekeeper = TIMEKEEPER.read();
+    ClockReading::new(
+        timekeeper.snapshot(monotonic_time()),
+        CHANGE_ID.load(Ordering::Relaxed),
+    )
+}

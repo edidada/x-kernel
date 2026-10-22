@@ -111,8 +111,10 @@ pub fn set_interface_ipv4_addr(
 
 /// Updates the prefix length of the first IPv4 address assigned to `name`.
 ///
-/// Other IPv4 addresses, the address scope, and a custom broadcast address
-/// remain unchanged.
+/// Preserves other IPv4 addresses. If the resulting CIDR already exists on the
+/// interface, removes the updated entry and preserves the existing target's
+/// attributes, returning success. Otherwise, retains the updated entry's scope
+/// and custom broadcast address.
 ///
 /// # Errors
 ///
@@ -274,7 +276,7 @@ fn ipv4_entries_for_device(dev: NetDeviceId) -> Vec<Ipv4AddrEntry> {
     SERVICE
         .ipv4_addr_snapshots()
         .into_iter()
-        .filter(|snapshot| snapshot.entry.dev == dev)
+        .filter(|snapshot| snapshot.dev == dev)
         .map(|snapshot| snapshot.entry)
         .collect()
 }
