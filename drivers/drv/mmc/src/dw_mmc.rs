@@ -578,6 +578,28 @@ impl DwMmcHost {
         self.writel(SDMMC_INTMASK, INT_DATA_OVER | INT_ACD | INT_ERRORS);
     }
 
+    /// Boot-time data-integrity probe: read block 0 with the interrupt
+    /// line temporarily masked so the polling loop exclusively owns
+    /// RINTSTS (an armed line lets the handler clear bits out from under
+    /// the poll — the exact failure this closes). Safe in any context.
+    pub fn polled_lba0_head(&self) -> Option<[u8; 32]> {
+        self.writel(SDMMC_INTMASK, 0);
+        let result = (|| {
+            let mut block = [0u8; 512];
+            let cmd = MmcCommand::with(17, 0, RespKind::R1);
+            let () = self.data_cmd_read(&cmd, 512, &mut block).ok()?;
+            let mut head = [0u8; 32];
+            head.copy_from_slice(&block[..32]);
+            Some(head)
+        })();
+        self.arm_irq_masks();
+        let head = result?;
+        let hex: alloc::vec::Vec<alloc::string::String> =
+            head.iter().map(|b| alloc::format!("{b:02x}")).collect();
+        log::info!("dwmmc: LBA0 head: {}", hex.join(" "));
+        Some(head)
+    }
+
     /// Read data phase: IDMAC into the bounce window, then collect into
     /// `buf`.
     fn data_cmd_read(
