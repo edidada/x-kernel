@@ -23,9 +23,7 @@ mod class;
 mod owner;
 mod publication;
 
-pub use class::{
-    Class, ClassAvailabilityCallback, ClassHooks, ClassRemovalCallback, PublicationNode,
-};
+pub use class::{Class, ClassAvailabilityCallback, ClassHooks, ClassRemovalCallback};
 pub use owner::PublicationSource;
 pub use publication::{InUse, Publication, Registration};
 

@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
-use crate::{Class, ClassHooks, PublicationNode, PublicationSource, owner::LegacyOwner};
+use crate::{Class, ClassHooks, PublicationSource, owner::LegacyOwner};
 
 fn owner(id: u32) -> Arc<LegacyOwner> {
     LegacyOwner::new("test-driver", format!("platform/firmware{id}"))
@@ -42,7 +42,7 @@ fn class_teardown_waits_for_last_in_flight_use_not_last_reference() {
     static CLASS: Class<u32, Hooks> = Class::new(Hooks);
     struct Hooks;
     impl ClassHooks<u32> for Hooks {
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+        fn unpublish(&self, _runtime: &u32, _source: &dyn PublicationSource) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -116,7 +116,7 @@ fn duplicate_publish_preserves_original_registration() {
     static CLASS: Class<u32, Hooks> = Class::new(Hooks);
     struct Hooks;
     impl ClassHooks<u32> for Hooks {
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+        fn unpublish(&self, _runtime: &u32, _source: &dyn PublicationSource) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -161,11 +161,11 @@ fn failed_hook_rolls_back_without_publishing_or_retiring_source() {
     static CLASS: Class<u32, Hooks> = Class::new(Hooks);
     struct Hooks;
     impl ClassHooks<u32> for Hooks {
-        fn publish(&self, _runtime: &u32, _node: &PublicationNode) -> KResult<()> {
+        fn publish(&self, _runtime: &u32, _source: &dyn PublicationSource) -> KResult<()> {
             Err(KError::Io)
         }
 
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+        fn unpublish(&self, _runtime: &u32, _source: &dyn PublicationSource) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -187,7 +187,7 @@ fn removal_callback_observes_closed_gate_and_may_release_last_use() {
     static CLASS: Class<u32, Hooks> = Class::new(Hooks);
     struct Hooks;
     impl ClassHooks<u32> for Hooks {
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+        fn unpublish(&self, _runtime: &u32, _source: &dyn PublicationSource) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -229,4 +229,71 @@ fn payload_memory_outlives_registration_until_last_consumer_leaves() {
     assert!(consumer.acquire_use().is_err());
     drop(consumer);
     assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+}
+
+#[def_test(serial)]
+fn deferred_hook_queries_live_source_without_retaining_a_cycle() {
+    use core::sync::atomic::AtomicBool;
+
+    static PUBLISHED: AtomicBool = AtomicBool::new(false);
+    static UNPUBLISHED: AtomicBool = AtomicBool::new(false);
+    static CLASS: Class<u32, Hooks> = Class::new(Hooks);
+    struct Source {
+        is_updated: AtomicBool,
+    }
+    impl PublicationSource for Source {
+        fn driver_name(&self) -> Option<&'static str> {
+            Some(if self.is_updated.load(Ordering::SeqCst) {
+                "updated-driver"
+            } else {
+                "initial-driver"
+            })
+        }
+
+        fn physical_path(&self) -> &str {
+            "platform/live-source"
+        }
+
+        fn is_online(&self) -> bool {
+            true
+        }
+    }
+    struct Hooks;
+    impl ClassHooks<u32> for Hooks {
+        fn publish(&self, runtime: &u32, source: &dyn PublicationSource) -> KResult<()> {
+            PUBLISHED.store(
+                *runtime == 17
+                    && source.driver_name() == Some("initial-driver")
+                    && source.physical_path() == "platform/live-source",
+                Ordering::SeqCst,
+            );
+            Ok(())
+        }
+
+        fn unpublish(&self, runtime: &u32, source: &dyn PublicationSource) {
+            UNPUBLISHED.store(
+                *runtime == 17
+                    && source.driver_name() == Some("updated-driver")
+                    && source.physical_path() == "platform/live-source",
+                Ordering::SeqCst,
+            );
+        }
+    }
+    PUBLISHED.store(false, Ordering::SeqCst);
+    UNPUBLISHED.store(false, Ordering::SeqCst);
+    let source = Arc::new(Source {
+        is_updated: AtomicBool::new(false),
+    });
+    let weak = Arc::downgrade(&source);
+    let registration = CLASS.publish(source.clone(), 17, "live").unwrap();
+    assert!(PUBLISHED.load(Ordering::SeqCst));
+    let permit = registration.publication().acquire_use().unwrap();
+    drop(registration);
+    assert!(!UNPUBLISHED.load(Ordering::SeqCst));
+    source.is_updated.store(true, Ordering::SeqCst);
+    drop(source);
+    assert!(weak.upgrade().is_some());
+    drop(permit);
+    assert!(UNPUBLISHED.load(Ordering::SeqCst));
+    assert!(weak.upgrade().is_none());
 }

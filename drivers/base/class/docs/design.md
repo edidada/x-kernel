@@ -32,7 +32,7 @@ class 管能力发布关系，不管理设备/驱动绑定、总线、硬件操�
 同一来源必须复用同一个 Arc 身份，重复检测使用来源 allocation 与发布名称。
 
 - src/lib.rs：模块声明与公开重导出。
-- src/class.rs：Class、ClassHooks、PublicationNode、订阅接口及私有 ClassRegistry。
+- src/class.rs：Class、ClassHooks、订阅接口及私有 ClassRegistry。
 - src/publication.rs：Registration、Publication、InUse、共享 Inner 和 finalizer。
 - src/owner.rs：只读 PublicationSource 契约及遗留合成身份。
 - ut-tests/class.rs：注册权、消费者引用、许可、独立撤销及失败回退测试。
@@ -68,7 +68,7 @@ FnOnce，因此许可在安装前或安装后释放都不会漏掉或重复执�
 每个 Class 实例的私有注册表在自身锁内分配单调序号，用于撤销和通知前检查。
 序号不复用，溢出返回 BadState；hook 失败消耗的序号无需回收。
 不同 Class 可以具有相同序号，不提供公开 find(id)、PublicationId 或裸数字构造。
-PublicationNode 仅携带来源元数据；其他投影层负责自己的身份管理。
+hook 直接借用 PublicationSource 查询来源信息，不创建元数据副本；其他投影层负责自己的身份管理。
 消费者用 same_publication 比较同一次发布的 allocation，旧句柄与同名新发布不同。
 
 ## 资源释放与限制
@@ -77,3 +77,11 @@ Class 不直接管理硬件；finalizer 是受信任子系统提供的清理行�
 InUse 保护该清理行为，Publication 的 Arc 保护共享对象内存，两者不能互换。
 现有 Vec 注册表的成员检查和移除仍为线性扫描，本轮不改变索引结构。
 attach_legacy 仅为旧设备模型提供合成来源，具体驱动热拔插不在本轮实现。
+
+## Hook 的来源信息
+
+publish、失败回退和 unpublish 均接收 &dyn PublicationSource，查询同一来源对象。
+不再构造驱动名、物理路径的 String 副本。延迟 finalizer 从仍存活的 Inner 借用
+runtime 和来源，不捕获 Publication，避免形成自引用环。
+来源信息是执行 hook 时的实时视图，不保证与发布时相同；投影如需固定清理键，
+应在自己的状态中记录发布时结果，不能用撤销时重新查询的名称推导旧键。

@@ -34,18 +34,6 @@ use crate::{
     owner::{LegacyOwner, PublicationSource},
 };
 
-/// The source metadata a class hook needs to publish its user-visible projection
-/// (`devnode::publish`, `add_disk`, ...).
-///
-/// Owned, because the teardown hook runs from the publication's deferred
-/// finalizer and outlives the borrow of the device.
-pub struct PublicationNode {
-    /// The claiming driver's name (DEVPATH/uevent metadata).
-    pub driver_name: String,
-    /// The device's physical path (DEVPATH/sysfs parent).
-    pub parent_path: String,
-}
-
 /// Per-class behavior — the `struct class` function slots.
 ///
 /// `()` covers the common hook-free class. A class with behavior — block's
@@ -53,19 +41,21 @@ pub struct PublicationNode {
 /// cardN/eventN projection — provides a small unit struct implementing this
 /// trait and passes it to [`Class::new`]. The impl is on the subsystem's OWN
 /// hook type, so the orphan rule is satisfied structurally. Hooks take the
-/// payload by reference (`&T`) plus the source metadata.
+/// payload and read-only source by reference. Source queries are live, not a
+/// publish-time snapshot. A projection requiring stable teardown keys must
+/// retain those keys in its own state. Hooks run outside the registry lock.
 pub trait ClassHooks<T>: Send + Sync + 'static {
     /// Class-side publish hook (`add_disk`, devnode projection, ...), run
     /// before registry insert; on registry failure [`unpublish`](Self::unpublish)
     /// unwinds it.
-    fn publish(&self, _runtime: &T, _node: &PublicationNode) -> KResult<()> {
+    fn publish(&self, _runtime: &T, _source: &dyn PublicationSource) -> KResult<()> {
         Ok(())
     }
 
     /// Class-side unpublish hook (`del_gendisk`, `devnode::withdraw`, ...),
     /// run on removal — after the last in-flight use when operations were
     /// still running.
-    fn unpublish(&self, _runtime: &T, _node: &PublicationNode) {}
+    fn unpublish(&self, _runtime: &T, _source: &dyn PublicationSource) {}
 }
 
 impl<T> ClassHooks<T> for () {}
@@ -112,14 +102,12 @@ where
         let name = name.into();
         let id = self.registry.lock().allocate_id()?;
         let publication = Publication::new(owner, runtime, name, id);
-        let node = PublicationNode {
-            driver_name: String::from(publication.driver_name().unwrap_or("")),
-            parent_path: String::from(publication.location()),
-        };
-        if let Err(error) = publication.with(|runtime| self.hooks.publish(runtime, &node)) {
+        if let Err(error) =
+            publication.with(|runtime| self.hooks.publish(runtime, publication.source()))
+        {
             // Unwind the class-side publish hook; the publication itself was
             // never installed (no withdrawal to run).
-            publication.with(|runtime| self.hooks.unpublish(runtime, &node));
+            publication.with(|runtime| self.hooks.unpublish(runtime, publication.source()));
             return Err(error);
         }
         let is_active = publication.is_available();
@@ -129,7 +117,7 @@ where
         // withdraw — heavyweight, re-entrant) runs.
         let registered = self.registry.lock().publish(publication.clone());
         if let Err(error) = registered {
-            publication.with(|runtime| self.hooks.unpublish(runtime, &node));
+            publication.with(|runtime| self.hooks.unpublish(runtime, publication.source()));
             return Err(error);
         }
         log::debug!(
@@ -209,12 +197,8 @@ where
                 device.id()
             );
         }
-        let node = PublicationNode {
-            driver_name: String::from(device.driver_name().unwrap_or("")),
-            parent_path: String::from(device.location()),
-        };
-        device.finish_or_defer(alloc::boxed::Box::new(move |runtime| {
-            self.hooks.unpublish(runtime, &node)
+        device.finish_or_defer(alloc::boxed::Box::new(move |runtime, source| {
+            self.hooks.unpublish(runtime, source)
         }));
     }
 

@@ -14,7 +14,7 @@ use crate::PublicationSource;
 
 /// Class-side teardown run once, after the last in-flight use (or
 /// immediately when there was none).
-type Finalize<T> = Box<dyn FnOnce(&T) + Send + Sync>;
+type Finalize<T> = Box<dyn FnOnce(&T, &dyn PublicationSource) + Send + Sync>;
 
 struct Inner<T> {
     id: u64,
@@ -117,6 +117,11 @@ impl<T> Publication<T> {
         }
     }
 
+    /// Borrow the authoritative source retained by this publication.
+    pub(crate) fn source(&self) -> &dyn PublicationSource {
+        self.inner.owner.as_ref()
+    }
+
     /// Registry-local sequence, never exposed to consumers.
     pub(crate) fn id(&self) -> u64 {
         self.inner.id
@@ -204,7 +209,7 @@ impl<T> Publication<T> {
             if previous == 1 {
                 let finalize = self.inner.finalize.lock().take();
                 if let Some(finalize) = finalize {
-                    finalize(&self.inner.runtime);
+                    finalize(&self.inner.runtime, self.inner.owner.as_ref());
                 }
             }
             return Err(KError::BadState);
@@ -245,7 +250,7 @@ impl<T> Publication<T> {
             }
         };
         if let Some(finalize) = ready {
-            finalize(&self.inner.runtime);
+            finalize(&self.inner.runtime, self.inner.owner.as_ref());
         }
     }
 }
@@ -288,7 +293,7 @@ impl<T> Drop for InUse<T> {
         if previous == 1 {
             let finalize = self.publication.inner.finalize.lock().take();
             if let Some(finalize) = finalize {
-                finalize(&self.publication.inner.runtime);
+                finalize(&self.publication.inner.runtime, self.publication.source());
             }
         }
     }
