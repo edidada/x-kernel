@@ -218,13 +218,12 @@ impl<'a, B: Bus> Device<'a, B> {
         &self,
         class: &'static driver_class::Class<T, H>,
         runtime: T,
-        name: impl Into<alloc::string::String>,
     ) -> kerrno::KResult<driver_class::Registration<T>>
     where
         T: Send + Sync + 'static,
         H: driver_class::ClassHooks<T>,
     {
-        class.publish(self.core.clone(), runtime, name)
+        class.publish(self.core.clone(), runtime)
     }
 }
 

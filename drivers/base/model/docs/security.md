@@ -10,8 +10,8 @@
 
 通用 class 已移到独立 `driver-class`，见 [class 安全分析](../../class/docs/security.md)。
 模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationSource` 提供
-只读身份查询。跨 crate 传递同一个 `Arc` allocation，保证重复
-发布检测使用共享身份；单项撤销不修改来源在线状态。class 不依赖模型或访问其私有字段。
+只读身份查询。跨 crate 传递同一个 `Arc` allocation，共享实时来源状态；
+同源多项发布独立注册，单项撤销不修改来源在线状态。class 不依赖模型或访问其私有字段。
 
 ## 信任模型
 

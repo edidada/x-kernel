@@ -278,15 +278,8 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
                     "virtio-rng",
                     alloc::string::String::from("/legacy/virtio-rng"),
                     device,
-                    "virtio-rng",
                 )
-                .map_err(|error| match error {
-                    // Class-side refusal: a duplicate (device, name)
-                    // publication. Every other refusal reason folds to Io
-                    // on the legacy error vocabulary.
-                    kerrno::KError::AlreadyExists => DriverError::AlreadyExists,
-                    _ => DriverError::Io,
-                })?;
+                .map_err(|_| DriverError::Io)?;
             // The registration is the class-side owner; dropping it would
             // withdraw the device again. The legacy tree has no removal
             // path for this device, so hold it for the kernel lifetime —

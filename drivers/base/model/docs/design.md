@@ -366,3 +366,6 @@ Device::publish 返回不可克隆的 Registration；publication() 返回不撤�
 Registration Drop 只延迟 class hook，不阻塞 Data 的后续字段析构。
 当前 model 不持有所有 class 注册的 drain/join 集合，不能声称字段顺序自动保证
 MMIO、IRQ、DMA 生命周期安全。具体资源析构不得先于依赖它们的操作退出。
+
+Device::publish 仅接收 Class 与 runtime，不接收发布名。通用 class 允许同源多项
+独立注册；这不改变 model 自己的驱动注册去重或 provider 的业务键检查。

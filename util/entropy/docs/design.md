@@ -125,3 +125,8 @@ to preserve their existing behavior. Isolated deployments that do not trust
 the host must disable the source; the driver may remain enabled.
 When migrating a configuration that formerly enabled the source but disabled
 host trust, disable `KFEAT_ENTROPY_VIRTIO_RNG` to preserve that policy.
+
+VirtIO source selection uses only the source driver_name containing virtio-rng;
+there is no publication-name fallback. The existing production bridge already
+provides that driver identity. Other RNG drivers are not automatically trusted
+by this change, and source selection still compares publication instances.

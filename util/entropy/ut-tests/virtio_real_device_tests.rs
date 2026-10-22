@@ -16,7 +16,7 @@ fn find_device() -> Option<HwrngPublication> {
     HWRNG
         .devices()
         .into_iter()
-        .find(|device| is_virtio_rng(device.name(), device.driver_name().unwrap_or("")))
+        .find(|device| is_virtio_rng(device.driver_name().unwrap_or("")))
 }
 
 #[def_test(serial)]

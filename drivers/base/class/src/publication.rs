@@ -4,7 +4,7 @@
 
 //! Registration ownership, consumer identity, and in-flight teardown.
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
@@ -16,13 +16,13 @@ use crate::PublicationSource;
 /// immediately when there was none).
 type Finalize<T> = Box<dyn FnOnce(&T, &dyn PublicationSource) + Send + Sync>;
 
+type Withdraw<T> = Box<dyn FnOnce(&Publication<T>) + Send + Sync>;
+
 struct Inner<T> {
-    id: u64,
     /// The device this publication belongs to — THE shared identity: name,
     /// path and liveness all come from here, never from a snapshot.
     owner: Arc<dyn PublicationSource>,
     runtime: T,
-    name: String,
     /// In-flight operation count. `class_remove` flips `draining` BEFORE the
     /// removal callbacks run — new acquires fail from that point. Operations
     /// already past the gate complete against the still-live runtime, and the
@@ -43,13 +43,13 @@ struct Inner<T> {
 #[must_use = "dropping the registration immediately withdraws the capability"]
 pub struct Registration<T> {
     publication: Publication<T>,
-    withdraw: Option<Box<dyn FnOnce() + Send + Sync>>,
+    withdraw: Option<Withdraw<T>>,
 }
 
 impl<T> Registration<T> {
     pub(crate) fn new(
         publication: Publication<T>,
-        withdraw: impl FnOnce() + Send + Sync + 'static,
+        withdraw: impl FnOnce(&Publication<T>) + Send + Sync + 'static,
     ) -> Self {
         Self {
             publication,
@@ -66,7 +66,7 @@ impl<T> Registration<T> {
 impl<T> Drop for Registration<T> {
     fn drop(&mut self) {
         if let Some(withdraw) = self.withdraw.take() {
-            withdraw();
+            withdraw(&self.publication);
         }
     }
 }
@@ -98,18 +98,11 @@ impl<T> Clone for Publication<T> {
 
 impl<T> Publication<T> {
     /// Build the shared state before installing it in a class.
-    pub(crate) fn new(
-        owner: Arc<dyn PublicationSource>,
-        runtime: T,
-        name: String,
-        id: u64,
-    ) -> Self {
+    pub(crate) fn new(owner: Arc<dyn PublicationSource>, runtime: T) -> Self {
         Self {
             inner: Arc::new(Inner {
-                id,
                 owner,
                 runtime,
-                name,
                 uses: AtomicUsize::new(0),
                 draining: AtomicBool::new(false),
                 finalize: SpinNoPreempt::new(None),
@@ -122,28 +115,12 @@ impl<T> Publication<T> {
         self.inner.owner.as_ref()
     }
 
-    /// Registry-local sequence, never exposed to consumers.
-    pub(crate) fn id(&self) -> u64 {
-        self.inner.id
-    }
-
     /// Whether both handles refer to the same publication instance.
     ///
     /// Clones compare equal even after withdrawal. A new publication is
-    /// distinct even when its source and name match.
+    /// distinct even when its source and runtime match.
     pub fn same_publication(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
-    }
-
-    /// Whether both handles publish the same runtime name off the same
-    /// owning device — the registry's duplicate-identity test.
-    pub(crate) fn shares_identity_with(&self, other: &Self) -> bool {
-        self.inner.name == other.inner.name && Arc::ptr_eq(&self.inner.owner, &other.inner.owner)
-    }
-
-    /// The runtime device name the driver published under.
-    pub fn name(&self) -> &str {
-        &self.inner.name
     }
 
     /// The driver that published this device.
@@ -258,8 +235,6 @@ impl<T> Publication<T> {
 impl<T> core::fmt::Debug for Publication<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Publication")
-            .field("id", &self.id())
-            .field("name", &self.name())
             .field("location", &self.location())
             .field("driver_name", &self.driver_name())
             .finish()

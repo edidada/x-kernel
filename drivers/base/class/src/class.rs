@@ -18,15 +18,15 @@
 //! the hooks `H`. Drivers publish with ONE call, from the device handle:
 //!
 //! ```ignore
-//! let publication = dev.publish(&CHAR, runtime, "serial")?;
+//! let publication = dev.publish(&CHAR, runtime)?;
 //! ```
 //!
 //! The returned [`Registration`] owns registration; consumer [`Publication`]
 //! handles do not withdraw. Final teardown waits for existing uses.
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use kspin::SpinNoPreempt;
 
 use crate::{
@@ -46,8 +46,8 @@ use crate::{
 /// retain those keys in its own state. Hooks run outside the registry lock.
 pub trait ClassHooks<T>: Send + Sync + 'static {
     /// Class-side publish hook (`add_disk`, devnode projection, ...), run
-    /// before registry insert; on registry failure [`unpublish`](Self::unpublish)
-    /// unwinds it.
+    /// before registry insert. If this hook fails, [`unpublish`](Self::unpublish)
+    /// unwinds its partial effects before the error is returned.
     fn publish(&self, _runtime: &T, _source: &dyn PublicationSource) -> KResult<()> {
         Ok(())
     }
@@ -65,7 +65,7 @@ impl<T> ClassHooks<T> for () {}
 /// `static` requires `Class<T, H>: Sync`, which holds because the registry is
 /// behind `SpinNoPreempt` and the payloads are `Send + Sync`.
 pub struct Class<T, H: ClassHooks<T> = ()> {
-    registry: SpinNoPreempt<ClassRegistry<T>>,
+    state: SpinNoPreempt<ClassState<T>>,
     hooks: H,
 }
 
@@ -76,7 +76,7 @@ where
     /// Const-construct the class registry (link-time, no lazy init).
     pub const fn new(hooks: H) -> Self {
         Self {
-            registry: SpinNoPreempt::new(ClassRegistry::new()),
+            state: SpinNoPreempt::new(ClassState::new()),
             hooks,
         }
     }
@@ -84,24 +84,21 @@ where
     /// Publish a runtime capability into this class.
     ///
     /// Called by `Device::publish` — the driver-side
-    /// door — with the device's live identity. The name arrives explicitly:
-    /// the driver built it, it owns it. The class's publish hook runs before
-    /// the registry insert; on registry failure the hook is unwound so no
-    /// class-side state leaks.
+    /// door — with the device's live identity. Each successful call creates
+    /// an independent registration, even for the same source and runtime.
+    /// Subsystems own business uniqueness rules; a failing publish hook is
+    /// unwound before returning its error.
     pub fn publish(
         &'static self,
         owner: Arc<dyn PublicationSource>,
         runtime: T,
-        name: impl Into<String>,
     ) -> KResult<Registration<T>> {
         // A publication without a claiming driver has no DEVPATH/uevent
         // identity to project; reject it at the boundary.
         if owner.driver_name().is_none() || !owner.is_online() {
             return Err(kerrno::KError::BadState);
         }
-        let name = name.into();
-        let id = self.registry.lock().allocate_id()?;
-        let publication = Publication::new(owner, runtime, name, id);
+        let publication = Publication::new(owner, runtime);
         if let Err(error) =
             publication.with(|runtime| self.hooks.publish(runtime, publication.source()))
         {
@@ -111,21 +108,15 @@ where
             return Err(error);
         }
         let is_active = publication.is_available();
-        // Bind the registry result first: the 2024-edition `if let` keeps
-        // scrutinee temporaries alive through the whole expression, and the
-        // guard must NOT be held while `unpublish` (del_gendisk, devnode
-        // withdraw — heavyweight, re-entrant) runs.
-        let registered = self.registry.lock().publish(publication.clone());
-        if let Err(error) = registered {
-            publication.with(|runtime| self.hooks.unpublish(runtime, publication.source()));
-            return Err(error);
-        }
+        self.state.lock().devices.push(publication.clone());
         log::debug!(
             "device class: published {:?} (driver={})",
-            id,
+            publication.location(),
             publication.driver_name().unwrap_or("<none>")
         );
-        let registration = Registration::new(publication.clone(), move || self.withdraw(id));
+        let registration = Registration::new(publication.clone(), move |publication| {
+            self.withdraw(publication)
+        });
         if is_active {
             self.notify_available(publication.clone());
         }
@@ -147,34 +138,39 @@ where
         driver_name: &'static str,
         path: alloc::string::String,
         runtime: T,
-        name: impl Into<String>,
     ) -> KResult<Registration<T>> {
         let owner = LegacyOwner::new(driver_name, path);
-        self.publish(owner, runtime, name)
+        self.publish(owner, runtime)
     }
 
     /// Return every currently available device in this class.
     pub fn devices(&self) -> Vec<Publication<T>> {
-        self.registry.lock().devices()
+        self.state
+            .lock()
+            .devices
+            .iter()
+            .filter(|device| device.is_available())
+            .cloned()
+            .collect()
     }
 
     /// Subscribe to future availability notifications for this class.
     pub fn subscribe_available(&self, callback: ClassAvailabilityCallback<T>) {
-        self.registry.lock().subscribe_available(callback);
+        self.state.lock().availability_subscribers.push(callback);
     }
 
     /// Subscribe to removal notifications for this class.
     pub fn subscribe_removed(&self, callback: ClassRemovalCallback<T>) {
-        self.registry.lock().subscribe_removed(callback);
+        self.state.lock().removal_subscribers.push(callback);
     }
 
     /// Withdraw one registration, close its gate and notify consumers.
     /// Source identity is unchanged. The unpublish hook waits for existing uses.
-    fn withdraw(&'static self, id: u64) {
+    fn withdraw(&'static self, publication: &Publication<T>) {
         let (removed, callbacks) = {
-            let mut registry = self.registry.lock();
-            let removed = registry.remove(id);
-            let callbacks = registry.removal_callbacks();
+            let mut state = self.state.lock();
+            let removed = state.remove(publication);
+            let callbacks = state.removal_subscribers.clone();
             (removed, callbacks)
         };
         let Some(device) = removed else {
@@ -194,7 +190,7 @@ where
             log::debug!(
                 "device class: {:?} withdrawn with {in_flight} operation(s) in flight; class \
                  teardown deferred to the last one",
-                device.id()
+                device.location()
             );
         }
         device.finish_or_defer(alloc::boxed::Box::new(move |runtime, source| {
@@ -206,11 +202,11 @@ where
     /// lock. Projection is a hook concern, not a class-core one.
     fn notify_available(&self, device: Publication<T>) {
         let callbacks = {
-            let registry = self.registry.lock();
-            if registry.find(device.id()).is_none() {
+            let state = self.state.lock();
+            if !state.contains_available(&device) {
                 return;
             }
-            registry.availability_callbacks()
+            state.availability_subscribers.clone()
         };
 
         for callback in callbacks {
@@ -226,87 +222,36 @@ pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(Publication<T>) + Send + Sync
 /// Notification callback invoked when a class device is removed.
 pub type ClassRemovalCallback<T> = Arc<dyn Fn(Publication<T>) + Send + Sync>;
 
-/// Typed registry for one runtime device class.
+/// Shared state protected by one class lock.
 ///
 /// Holds consumer references, not registration credentials. Entries exist
 /// between successful publish and the Registration's drop.
-struct ClassRegistry<T> {
-    next_id: u64,
+struct ClassState<T> {
     devices: Vec<Publication<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
     removal_subscribers: Vec<ClassRemovalCallback<T>>,
 }
 
-impl<T> ClassRegistry<T> {
+impl<T> ClassState<T> {
     const fn new() -> Self {
         Self {
-            next_id: 1,
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
             removal_subscribers: Vec::new(),
         }
     }
 
-    fn allocate_id(&mut self) -> KResult<u64> {
-        let id = self.next_id;
-        self.next_id = id.checked_add(1).ok_or(KError::BadState)?;
-        Ok(id)
+    fn contains_available(&self, publication: &Publication<T>) -> bool {
+        self.devices
+            .iter()
+            .any(|device| device.same_publication(publication) && device.is_available())
     }
 
-    /// Publish one runtime class device.
-    ///
-    /// Linux device registration rejects duplicate identities; replacement is
-    /// a remove-then-add lifecycle rather than an implicit registry update.
-    /// Publication ids are minted fresh per publish, so the duplicate test is
-    /// (owning device identity, runtime name) — the same device publishing
-    /// the same name twice is a driver bug and is refused.
-    fn publish(&mut self, device: Publication<T>) -> KResult<()> {
-        let duplicate = self
+    fn remove(&mut self, publication: &Publication<T>) -> Option<Publication<T>> {
+        let position = self
             .devices
             .iter()
-            .any(|current| current.shares_identity_with(&device));
-        if duplicate {
-            return Err(KError::AlreadyExists);
-        }
-        self.devices.push(device);
-        Ok(())
-    }
-
-    /// Every available device in this class.
-    fn devices(&self) -> Vec<Publication<T>> {
-        self.devices
-            .iter()
-            .filter(|device| device.is_available())
-            .cloned()
-            .collect()
-    }
-
-    /// Find one device by its publication handle.
-    fn find(&self, id: u64) -> Option<Publication<T>> {
-        self.devices
-            .iter()
-            .find(|device| device.id() == id && device.is_available())
-            .cloned()
-    }
-
-    fn remove(&mut self, id: u64) -> Option<Publication<T>> {
-        let position = self.devices.iter().position(|device| device.id() == id)?;
+            .position(|device| device.same_publication(publication))?;
         Some(self.devices.swap_remove(position))
-    }
-
-    fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
-        self.availability_subscribers.push(callback);
-    }
-
-    fn subscribe_removed(&mut self, callback: ClassRemovalCallback<T>) {
-        self.removal_subscribers.push(callback);
-    }
-
-    fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
-        self.availability_subscribers.clone()
-    }
-
-    fn removal_callbacks(&self) -> Vec<ClassRemovalCallback<T>> {
-        self.removal_subscribers.clone()
     }
 }

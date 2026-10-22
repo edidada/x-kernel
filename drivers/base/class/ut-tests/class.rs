@@ -19,7 +19,7 @@ fn owner(id: u32) -> Arc<LegacyOwner> {
 #[def_test(serial)]
 fn registration_withdraws_but_consumer_clones_do_not() {
     static CLASS: Class<u32> = Class::new(());
-    let registration = CLASS.publish(owner(1), 7, "dev").expect("publish");
+    let registration = CLASS.publish(owner(1), 7).expect("publish");
     let consumer = registration.publication();
     let clone = consumer.clone();
     drop(consumer);
@@ -33,7 +33,7 @@ fn registration_withdraws_but_consumer_clones_do_not() {
         Err(KError::BadState)
     );
     assert!(clone.acquire_use().is_err());
-    assert_eq!(clone.name(), "dev");
+    assert_eq!(clone.driver_name(), Some("test-driver"));
 }
 
 #[def_test(serial)]
@@ -47,7 +47,7 @@ fn class_teardown_waits_for_last_in_flight_use_not_last_reference() {
         }
     }
     UNPUBLISHED.store(0, Ordering::SeqCst);
-    let registration = CLASS.publish(owner(2), 7, "drain").expect("publish");
+    let registration = CLASS.publish(owner(2), 7).expect("publish");
     let consumer = registration.publication();
     let first_use = consumer.acquire_use().expect("first permit");
     let second_use = consumer.acquire_use().expect("second permit");
@@ -68,7 +68,7 @@ fn class_teardown_waits_for_last_in_flight_use_not_last_reference() {
 #[def_test(serial)]
 fn acquire_after_gate_close_is_refused_and_leaves_no_count() {
     static CLASS: Class<u32> = Class::new(());
-    let registration = CLASS.publish(owner(3), 1, "gate").expect("publish");
+    let registration = CLASS.publish(owner(3), 1).expect("publish");
     let consumer = registration.publication();
     drop(registration);
     for _ in 0..3 {
@@ -82,9 +82,9 @@ fn publication_withdrawal_does_not_retire_source_or_siblings() {
     static FIRST: Class<u32> = Class::new(());
     static SECOND: Class<u32> = Class::new(());
     let source = owner(4);
-    let first = FIRST.publish(source.clone(), 1, "same").expect("first");
-    let sibling = FIRST.publish(source.clone(), 2, "other").expect("sibling");
-    let second = SECOND.publish(source.clone(), 3, "same").expect("second");
+    let first = FIRST.publish(source.clone(), 1).expect("first");
+    let sibling = FIRST.publish(source.clone(), 2).expect("sibling");
+    let second = SECOND.publish(source.clone(), 3).expect("second");
     let old = first.publication();
     drop(first);
     assert!(source.is_online());
@@ -97,21 +97,18 @@ fn publication_withdrawal_does_not_retire_source_or_siblings() {
         second.publication().with_available(|value| Ok(*value)),
         Ok(3)
     );
-    let replacement = FIRST.publish(source.clone(), 4, "same").expect("republish");
+    let replacement = FIRST.publish(source.clone(), 4).expect("republish");
     assert!(!old.same_publication(&replacement.publication()));
     source.mark_offline();
     assert!(sibling.publication().acquire_use().is_err());
     assert!(second.publication().acquire_use().is_err());
     assert!(replacement.publication().acquire_use().is_err());
     assert!(FIRST.devices().is_empty());
-    assert_eq!(
-        FIRST.publish(source, 5, "offline").unwrap_err(),
-        KError::BadState
-    );
+    assert_eq!(FIRST.publish(source, 5).unwrap_err(), KError::BadState);
 }
 
 #[def_test(serial)]
-fn duplicate_publish_preserves_original_registration() {
+fn same_source_publications_have_independent_registrations() {
     static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
     static CLASS: Class<u32, Hooks> = Class::new(Hooks);
     struct Hooks;
@@ -122,33 +119,39 @@ fn duplicate_publish_preserves_original_registration() {
     }
     UNPUBLISHED.store(0, Ordering::SeqCst);
     let source = owner(5);
-    let first = CLASS.publish(source.clone(), 1, "dev").expect("first");
-    assert_eq!(
-        CLASS.publish(source.clone(), 2, "dev").unwrap_err(),
-        KError::AlreadyExists
-    );
-    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+    let first = CLASS.publish(source.clone(), 1).expect("first");
+    let second = CLASS.publish(source.clone(), 1).expect("second");
+    assert!(!first.publication().same_publication(&second.publication()));
+    assert_eq!(CLASS.devices().len(), 2);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 0);
     assert!(source.is_online());
     assert_eq!(
         first.publication().with_available(|value| Ok(*value)),
         Ok(1)
     );
     drop(first);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        second.publication().with_available(|value| Ok(*value)),
+        Ok(1)
+    );
+    drop(second);
     assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 2);
+    assert!(CLASS.devices().is_empty());
 }
 
 #[def_test(serial)]
 fn publication_identity_is_instance_scoped() {
     static FIRST: Class<u32> = Class::new(());
     static SECOND: Class<u32> = Class::new(());
-    let first = FIRST.publish(owner(6), 1, "same").expect("first");
+    let first = FIRST.publish(owner(6), 1).expect("first");
     let borrowed = first.publication();
-    let second = SECOND.publish(owner(7), 1, "same").expect("second");
+    let second = SECOND.publish(owner(7), 1).expect("second");
     assert!(first.publication().same_publication(&borrowed));
     assert!(!borrowed.same_publication(&second.publication()));
     drop(first);
     assert_eq!(SECOND.devices().len(), 1);
-    let replacement = FIRST.publish(owner(6), 1, "same").expect("replacement");
+    let replacement = FIRST.publish(owner(6), 1).expect("replacement");
     assert!(!borrowed.same_publication(&replacement.publication()));
     assert!(borrowed.same_publication(&borrowed.clone()));
     drop(borrowed);
@@ -171,10 +174,7 @@ fn failed_hook_rolls_back_without_publishing_or_retiring_source() {
     }
     UNPUBLISHED.store(0, Ordering::SeqCst);
     let source = owner(8);
-    assert_eq!(
-        CLASS.publish(source.clone(), 1, "failure").unwrap_err(),
-        KError::Io
-    );
+    assert_eq!(CLASS.publish(source.clone(), 1).unwrap_err(), KError::Io);
     assert!(source.is_online());
     assert!(CLASS.devices().is_empty());
     assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
@@ -193,7 +193,7 @@ fn removal_callback_observes_closed_gate_and_may_release_last_use() {
     }
     CALLBACKS.store(0, Ordering::SeqCst);
     UNPUBLISHED.store(0, Ordering::SeqCst);
-    let registration = CLASS.publish(owner(9), 9, "callback").expect("publish");
+    let registration = CLASS.publish(owner(9), 9).expect("publish");
     let permit = Arc::new(kspin::SpinNoPreempt::new(Some(
         registration.publication().acquire_use().expect("permit"),
     )));
@@ -222,7 +222,7 @@ fn payload_memory_outlives_registration_until_last_consumer_leaves() {
         }
     }
     DROPS.store(0, Ordering::SeqCst);
-    let registration = CLASS.publish(owner(10), Payload, "payload").unwrap();
+    let registration = CLASS.publish(owner(10), Payload).unwrap();
     let consumer = registration.publication();
     drop(registration);
     assert_eq!(DROPS.load(Ordering::SeqCst), 0);
@@ -285,7 +285,7 @@ fn deferred_hook_queries_live_source_without_retaining_a_cycle() {
         is_updated: AtomicBool::new(false),
     });
     let weak = Arc::downgrade(&source);
-    let registration = CLASS.publish(source.clone(), 17, "live").unwrap();
+    let registration = CLASS.publish(source.clone(), 17).unwrap();
     assert!(PUBLISHED.load(Ordering::SeqCst));
     let permit = registration.publication().acquire_use().unwrap();
     drop(registration);
@@ -296,4 +296,23 @@ fn deferred_hook_queries_live_source_without_retaining_a_cycle() {
     drop(permit);
     assert!(UNPUBLISHED.load(Ordering::SeqCst));
     assert!(weak.upgrade().is_none());
+}
+
+#[def_test(serial)]
+fn withdrawal_matches_publication_instance_not_position() {
+    static CLASS: Class<u32> = Class::new(());
+    let first = CLASS.publish(owner(20), 1).unwrap();
+    let middle = CLASS.publish(owner(21), 2).unwrap();
+    let last = CLASS.publish(owner(22), 3).unwrap();
+    let last_consumer = last.publication();
+    drop(middle);
+    assert_eq!(CLASS.devices().len(), 2);
+    drop(first);
+    let remaining = CLASS.devices();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].same_publication(&last_consumer));
+    assert_eq!(last_consumer.with_available(|value| Ok(*value)), Ok(3));
+    drop(last);
+    assert!(CLASS.devices().is_empty());
+    assert!(!last_consumer.is_available());
 }

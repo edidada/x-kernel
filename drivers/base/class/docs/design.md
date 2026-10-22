@@ -29,10 +29,14 @@ Publication，向普通消费者仅暴露设备操作。hwrng 使用不暴露 pa
 
 class 管能力发布关系，不管理设备/驱动绑定、总线、硬件操作或宿主资源实现。
 依赖方向是 model → class；hwrng 封装 class，entropy 仅依赖 hwrng 消费接口。
-同一来源必须复用同一个 Arc 身份，重复检测使用来源 allocation 与发布名称。
+同一来源复用同一个 Arc 身份以共享实时状态。通用 class 不保存发布名，也不按
+来源、runtime 或物理路径判断业务重复；每次成功 publish 都建立独立注册。
 
 - src/lib.rs：模块声明与公开重导出。
-- src/class.rs：Class、ClassHooks、订阅接口及私有 ClassRegistry。
+- src/class.rs：Class、ClassHooks、订阅接口及私有 ClassState。
+  ClassState 聚合发布列表与两组订阅者，由同一个 SpinNoPreempt 保护，
+  不提供第二套发布或订阅接口。Class 在持锁区间更新状态、获取回调快照，
+  在锁外执行 hook 与回调；实例查找和移除保留为状态的私有辅助方法。
 - src/publication.rs：Registration、Publication、InUse、共享 Inner 和 finalizer。
 - src/owner.rs：只读 PublicationSource 契约及遗留合成身份。
 - ut-tests/class.rs：注册权、消费者引用、许可、独立撤销及失败回退测试。
@@ -41,8 +45,9 @@ class 管能力发布关系，不管理设备/驱动绑定、总线、硬件操�
 
 ## 状态与算法
 
-发布先验证来源已绑定且在线，分配私有序号，再运行投影 hook、插入注册表。
-失败时撤销该次投影，不改变来源状态；重复身份返回 AlreadyExists。
+发布先验证来源已绑定且在线，再运行投影 hook、插入注册表。
+hook 失败时撤销该次投影，不改变来源状态。注册表插入不实施业务去重；
+具体子系统或投影层如需唯一性，必须在其拥有的命名空间内检查。
 成功后创建唯一 Registration，再通知订阅者。注册表和订阅者仅持有 Publication。
 
 发布 gate 单向变化：开放 → 关闭。is_available 同时查询 gate 和来源在线状态，
@@ -65,11 +70,12 @@ FnOnce，因此许可在安装前或安装后释放都不会漏掉或重复执�
 
 ## 发布身份的作用域
 
-每个 Class 实例的私有注册表在自身锁内分配单调序号，用于撤销和通知前检查。
-序号不复用，溢出返回 BadState；hook 失败消耗的序号无需回收。
-不同 Class 可以具有相同序号，不提供公开 find(id)、PublicationId 或裸数字构造。
+不分配数字 ID，也不保存序号或指针整数。注册表使用 same_publication（Arc::ptr_eq）
+比较发布对象身份，完成成员检查和撤销。Registration Drop 把自己持有的发布对象
+借给撤销回调；回调只捕获所属 Class，不额外捕获 Publication 或形成引用环。
+旧引用存活时，其 allocation 不会被复用，因此同源重新发布不会与旧发布混淆。
 hook 直接借用 PublicationSource 查询来源信息，不创建元数据副本；其他投影层负责自己的身份管理。
-消费者用 same_publication 比较同一次发布的 allocation，旧句柄与同名新发布不同。
+消费者用 same_publication 比较同一次发布的 allocation，旧句柄与同源新发布不同。
 
 ## 资源释放与限制
 

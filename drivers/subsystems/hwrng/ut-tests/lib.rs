@@ -121,7 +121,6 @@ fn withdrawn_consumer_cannot_access_driver_payload() {
             "test-rng",
             alloc::string::String::from("test"),
             Arc::new(Probe),
-            "rng",
         )
         .unwrap();
     let consumer = registration.publication();

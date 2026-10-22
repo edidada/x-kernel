@@ -13,8 +13,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// that controls publication. Only the model may change device liveness.
 ///
 /// The model retains ownership of the state and must reuse the same `Arc`
-/// allocation for all publications of one device. Class registries compare
-/// allocation identity, not paths or numeric identifiers, for duplicate detection.
+/// allocation for all publications of one device so they observe the same live
+/// state. Class registries do not infer business uniqueness from source identity.
 /// Methods run in task context. Online queries may run under the class registry
 /// lock: they must be non-blocking and must not reenter the class. The path must
 /// remain stable for this identity.

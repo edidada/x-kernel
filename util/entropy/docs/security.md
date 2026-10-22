@@ -61,3 +61,7 @@ Warnings contain errors or lengths, never random bytes. Review trust gating,
 readiness publication, buffer-length validation, work reuse, failure logging,
 and absence of blocking calls under the source spinlock. These tests establish
 functional behavior, not randomness quality or a hard IRQ latency bound.
+
+VirtIO discovery retains its driver-name filter and removes the independent
+publication-name fallback. This does not broaden acceptance to all RNG devices.
+The driver name is trusted integration metadata, not cryptographic authentication.

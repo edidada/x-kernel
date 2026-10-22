@@ -1372,7 +1372,7 @@ mod publication_contract {
                 &self,
                 dev: &mut crate::Device<'_, crate::PlatformBus>,
             ) -> Result<Self::Data, crate::ProbeError> {
-                dev.publish(&CLASS, 42, "model-runtime")
+                dev.publish(&CLASS, 42)
                     .map_err(|_| crate::ProbeError::Fatal(crate::RuntimeError::BadState))
             }
 
@@ -1414,26 +1414,25 @@ mod publication_contract {
     }
 
     #[def_test(serial)]
-    fn class_uses_live_model_identity_and_rejects_duplicate_publication() {
+    fn class_uses_live_model_identity_for_independent_publications() {
         static CLASS: Class<u32> = Class::new(());
 
         let owner = DeviceCore::new(DeviceId(1), String::from("platform/model-test"));
         assert_eq!(
-            CLASS.publish(owner.clone(), 1, "device").unwrap_err(),
+            CLASS.publish(owner.clone(), 1).unwrap_err(),
             kerrno::KError::BadState
         );
         owner.bind_driver("model-test-driver");
-        let publication = CLASS.publish(owner.clone(), 1, "device").unwrap();
+        let publication = CLASS.publish(owner.clone(), 1).unwrap();
         assert_eq!(
             publication.publication().driver_name(),
             Some("model-test-driver")
         );
         let consumer = publication.publication();
         assert_eq!(consumer.location(), "platform/model-test");
-        assert_eq!(
-            CLASS.publish(owner.clone(), 2, "device").unwrap_err(),
-            kerrno::KError::AlreadyExists
-        );
+        let second = CLASS.publish(owner.clone(), 2).unwrap();
+        assert!(!consumer.same_publication(&second.publication()));
+        assert_eq!(CLASS.devices().len(), 2);
         assert!(owner.is_online());
         let borrow = publication.publication();
         owner.mark_offline();
@@ -1449,8 +1448,8 @@ mod publication_contract {
 
         let owner =
             DeviceCore::synthetic(DeviceId(2), "model-test", String::from("platform/shared"));
-        let first = FIRST.publish(owner.clone(), 11, "first").unwrap();
-        let second = SECOND.publish(owner.clone(), 22, "second").unwrap();
+        let first = FIRST.publish(owner.clone(), 11).unwrap();
+        let second = SECOND.publish(owner.clone(), 22).unwrap();
         let in_flight = first.publication().acquire_use().unwrap();
         drop(first);
         assert!(owner.is_online());

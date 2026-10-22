@@ -9,11 +9,12 @@ use super::*;
 
 #[def_test]
 fn test_is_virtio_rng_name_matching() {
-    assert!(is_virtio_rng("virtio-rng", "unknown"));
-    assert!(is_virtio_rng("hwrng0", "virtio-rng"));
-    assert!(is_virtio_rng("rng", "platform-virtio-rng-pci"));
-    assert!(!is_virtio_rng("ttyS0", "uart"));
-    assert!(!is_virtio_rng("virtio-blk", "virtio-blk"));
+    assert!(is_virtio_rng("virtio-rng"));
+    assert!(is_virtio_rng("platform-virtio-rng-mmio"));
+    assert!(is_virtio_rng("platform-virtio-rng-pci"));
+    assert!(!is_virtio_rng("unknown"));
+    assert!(!is_virtio_rng("uart"));
+    assert!(!is_virtio_rng("virtio-blk"));
 }
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -84,7 +85,6 @@ fn withdrawn_source_stops_collector_without_calling_hardware() {
             "entropy-collector-test",
             alloc::string::String::from("withdrawn"),
             hardware.clone(),
-            "virtio-rng-test",
         )
         .unwrap();
     let source = VirtioEntropySource::new(registration.publication()).unwrap();
@@ -110,7 +110,6 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure() -> un
                 "entropy-collector-test",
                 alloc::string::String::from("ram-disk"),
                 hardware.clone(),
-                "virtio-rng-test",
             )
             .unwrap();
         let class = registration.publication();

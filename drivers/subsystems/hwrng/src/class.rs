@@ -34,10 +34,9 @@ impl HwrngClass {
         driver_name: &'static str,
         path: String,
         runtime: HwrngDeviceImpl,
-        name: impl Into<String>,
     ) -> KResult<HwrngRegistration> {
         self.class
-            .attach_legacy(driver_name, path, runtime, name)
+            .attach_legacy(driver_name, path, runtime)
             .map(|registration| HwrngRegistration { registration })
     }
 
@@ -97,11 +96,6 @@ pub struct HwrngPublication {
 }
 
 impl HwrngPublication {
-    /// Published runtime name.
-    pub fn name(&self) -> &str {
-        self.publication.name()
-    }
-
     /// Name of the driver supplying this capability.
     pub fn driver_name(&self) -> Option<&'static str> {
         self.publication.driver_name()

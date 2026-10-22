@@ -57,3 +57,7 @@ Existing reads retain their permits until completion. Withdrawal cannot cancel a
 hung device request; DMA stop/reset and joining hardware operations remain the
 concrete driver's responsibility. The legacy boot bridge retains its registration
 for kernel lifetime and does not implement hot removal.
+
+Publication handles have no independent name. Publishers supply source identity
+and runtime only. Generic class registration does not impose source/path uniqueness;
+any future RNG-specific uniqueness rule belongs to this subsystem.

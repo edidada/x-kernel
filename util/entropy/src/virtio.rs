@@ -160,7 +160,7 @@ pub(crate) fn is_disabled() -> bool {
 // Subscribe before enumerating to avoid missing newly published devices.
 pub(crate) fn register_sources() {
     fn note_device(device: HwrngPublication) {
-        if !is_virtio_rng(device.name(), device.driver_name().unwrap_or("")) {
+        if !is_virtio_rng(device.driver_name().unwrap_or("")) {
             return;
         }
         {
@@ -207,8 +207,8 @@ pub(crate) fn request_entropy() {
     }
 }
 
-fn is_virtio_rng(name: &str, driver_name: &str) -> bool {
-    driver_name.contains("virtio-rng") || name == "virtio-rng"
+fn is_virtio_rng(driver_name: &str) -> bool {
+    driver_name.contains("virtio-rng")
 }
 
 unittest::path_mod_test!(real_device_tests, "../ut-tests/virtio_real_device_tests.rs");
