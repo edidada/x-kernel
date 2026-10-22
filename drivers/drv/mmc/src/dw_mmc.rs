@@ -629,10 +629,10 @@ impl DwMmcHost {
         let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
         self.ciu_cmd(cmdr, cmd.arg)
     }
-}
 
-impl MmcHost for DwMmcHost {
-    fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
+    /// The polling command path (no data phase): issue, wait CMD_DONE
+    /// via RINTSTS, decode the response. INTMASK-independent by design.
+    fn send_cmd_inner(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
         let cmdr = self.cmdr_of(cmd, None, 0);
         self.ciu_cmd(cmdr, cmd.arg)?;
         // Responses complete with CMD_DONE (polled via RINTSTS — the
@@ -668,6 +668,26 @@ impl MmcHost for DwMmcHost {
             }
         }
         Ok(response)
+    }
+}
+
+impl MmcHost for DwMmcHost {
+    fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
+        // Fallback diagnostics: EVERY command failure names itself here,
+        // so a silent protocol-layer failure can never hide behind a
+        // missing step() wrapper.
+        match self.send_cmd_inner(cmd) {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                log::warn!(
+                    "dwmmc: cmd {} arg {:#x} resp {:?} -> {err:?}",
+                    cmd.opcode,
+                    cmd.arg,
+                    cmd.resp
+                );
+                Err(err)
+            }
+        }
     }
 
     fn read_data_cmd(

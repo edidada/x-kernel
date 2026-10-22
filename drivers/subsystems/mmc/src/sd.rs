@@ -234,12 +234,17 @@ pub fn detect_card(
 
     // 6. Bus width, block length, then speed.
     if bus_width_4bit {
-        app_cmd(
-            host_ref,
-            rca,
+        step(
+            "set 4-bit bus",
             ACMD_SET_BUS_WIDTH,
             (u32::from(rca) << RCA_SHIFT) | 0x2,
-            RespKind::R1,
+            app_cmd(
+                host_ref,
+                rca,
+                ACMD_SET_BUS_WIDTH,
+                (u32::from(rca) << RCA_SHIFT) | 0x2,
+                RespKind::R1,
+            ),
         )?;
         host_ref.set_ios(&MmcIos {
             clock_hz: 400_000,
@@ -247,11 +252,16 @@ pub fn detect_card(
             power_on: true,
         })?;
     }
-    host_ref.send_cmd(&MmcCommand::with(
+    step(
+        "set block length",
         CMD_SET_BLOCKLEN,
         BLOCK_SIZE as u32,
-        RespKind::R1,
-    ))?;
+        host_ref.send_cmd(&MmcCommand::with(
+            CMD_SET_BLOCKLEN,
+            BLOCK_SIZE as u32,
+            RespKind::R1,
+        )),
+    )?;
     let high_speed = switch_high_speed(host_ref, &csd, &scr, bus_width_4bit)?;
 
     Ok(MmcCardData {
