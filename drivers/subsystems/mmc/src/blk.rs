@@ -146,10 +146,27 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
                 ", byte-addressed"
             }
         );
+        lba0_integrity_probe(bus_data.host.as_ref());
+
         Ok(MmcBlkData {
             _publication: publication,
             _disk: disk,
         })
+    }
+}
+
+/// Boot-time data-integrity probe: read block 0 and print its head so a
+/// PC-side `dd if=<sd> count=1 | xxd` can be diffed against it — the
+/// fastest way to tell a data-path corruption from a simply unformatted
+/// card.
+fn lba0_integrity_probe(host: &dyn crate::MmcHost) {
+    let mut head = [0u8; 32];
+    if read_blocks(host, 0, 1, &mut head).is_ok() {
+        let hex: alloc::vec::Vec<alloc::string::String> =
+            head.iter().map(|b| alloc::format!("{b:02x}")).collect();
+        log::info!("mmcblk: LBA0 head: {}", hex.join(" "));
+    } else {
+        log::warn!("mmcblk: LBA0 integrity probe read failed");
     }
 }
 
