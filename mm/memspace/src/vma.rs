@@ -818,12 +818,7 @@ impl VmArea {
     /// level fault policy before the backing-specific implementation
     /// materializes pages.
     pub fn handle_fault(&self, aspace: &mut MmSpace, ctx: FaultContext) -> PageFaultOutcome {
-        let page_base = ctx.address().align_down(self.backing.page_size());
-        let ctx = ctx.with_backing(
-            Some(self.page_index_for(ctx.address())),
-            self.file_offset_for(ctx.address()),
-            Some(self.start().as_usize().saturating_sub(page_base.as_usize())),
-        );
+        let ctx = self.fault_context(ctx);
         match self.backing.kind() {
             VmBackingKind::Linear => aspace.handle_linear_fault(self.clone(), ctx),
             VmBackingKind::AnonymousShared { .. } => {
@@ -837,6 +832,15 @@ impl VmArea {
                 aspace.handle_file_private_fault(self.clone(), ctx)
             }
         }
+    }
+
+    pub(crate) fn fault_context(&self, ctx: FaultContext) -> FaultContext {
+        let page_base = ctx.address().align_down(self.backing.page_size());
+        ctx.with_backing(
+            Some(self.page_index_for(ctx.address())),
+            self.file_offset_for(ctx.address()),
+            Some(self.start().as_usize().saturating_sub(page_base.as_usize())),
+        )
     }
 
     pub(crate) fn set_end(&mut self, new_end: VirtAddr) {

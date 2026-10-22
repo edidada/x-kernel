@@ -8,14 +8,15 @@ use alloc::{sync::Arc, vec::Vec};
 
 use anon::{
     AnonPrivateObject, AnonPrivatePageCommitError, AnonPrivateReleasedPage, AnonPrivateViewGuard,
+    PreparedAnonPrivatePage,
 };
 use kerrno::{KError, KResult};
 use khal::{
     mem::p2v,
-    paging::{MappingFlags, PageSize, PageTableMut, PagingError},
+    paging::{MappingFlags, PageSize, PageTableMut, PagingError, PagingResult},
 };
 use ksync::Mutex;
-use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 use page_table::PteReplaceError;
 use vmobj::{
     MappingViewId, MappingViewKind, MappingViewNotifier, MappingViewSpec, ObjectInvalidateWork,
@@ -28,6 +29,31 @@ use crate::{
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
     vma::VmRuntimeOps,
 };
+
+/// Owns a zeroed frame until its anonymous object accepts ownership.
+pub(crate) struct PreparedPrivatePage {
+    frame: PhysAddr,
+    size: PageSize,
+    is_published: bool,
+}
+
+impl PreparedPrivatePage {
+    pub(crate) fn new(size: PageSize) -> KResult<Self> {
+        Ok(Self {
+            frame: alloc_frame(true, size)?,
+            size,
+            is_published: false,
+        })
+    }
+}
+
+impl Drop for PreparedPrivatePage {
+    fn drop(&mut self) {
+        if !self.is_published {
+            dealloc_frame(self.frame, self.size);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct PrivateBackend {
@@ -93,23 +119,126 @@ impl PrivateBackend {
     fn alloc_new_at(&self, va: VirtAddr, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
         let object_start = self.object_offset_for(va)?;
         let prepared = self.object.prepare_first_touch_page(object_start)?;
-        let frame = alloc_frame(true, self.size)?;
-        if let Err(err) = pgtbl.map(va, frame, self.size, flags) {
-            dealloc_frame(frame, self.size);
-            return Err(map_paging_err(err));
-        }
-        if let Err(err) = prepared.commit(frame, self.size) {
-            if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(va) {
-                assert_eq!(page_size, self.size);
-                pgtbl.finish();
-            }
-            dealloc_frame(frame, self.size);
+        let page = PreparedPrivatePage::new(self.size)?;
+        self.install_first_touch(va, flags, pgtbl, prepared, page)
+    }
+
+    pub(crate) fn has_empty_slot(&self, va: VirtAddr) -> bool {
+        self.object_offset_for(va)
+            .is_ok_and(|offset| self.object.page_at(offset).is_none())
+    }
+
+    pub(crate) fn is_same_mapping(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.object, &other.object)
+            && self.start == other.start
+            && self.size == other.size
+            && self.registration_id() == other.registration_id()
+    }
+
+    pub(crate) fn commit_first_touch(
+        &self,
+        va: VirtAddr,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+        page: PreparedPrivatePage,
+    ) -> KResult {
+        let object_start = self.object_offset_for(va)?;
+        let prepared = self.object.prepare_first_touch_page(object_start)?;
+        self.install_first_touch(va, flags, pgtbl, prepared, page)
+    }
+
+    fn install_first_touch(
+        &self,
+        va: VirtAddr,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+        prepared: PreparedAnonPrivatePage,
+        mut page: PreparedPrivatePage,
+    ) -> KResult {
+        assert_eq!(self.size, page.size);
+        pgtbl
+            .map(va, page.frame, self.size, flags)
+            .map_err(map_paging_err)?;
+        if let Err(err) = prepared.commit(page.frame, self.size) {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: This leaf was just installed \
+                          under exclusive page-table access and no intervening operation changes \
+                          it"
+            )]
+            let (_frame, _flags, page_size) = pgtbl
+                .unmap(va)
+                .expect("unpublished first-touch mapping remains present");
+            assert_eq!(page_size, self.size);
+            pgtbl.finish();
             return Err(err);
         }
+        page.is_published = true;
         if flags.contains(MappingFlags::EXECUTE) {
-            karch::flush_icache_range(p2v(frame), self.size.into());
+            karch::flush_icache_range(p2v(page.frame), self.size.into());
         }
         Ok(())
+    }
+
+    /// Continues a locked fault using the PTE observation made by its dispatcher.
+    /// The caller retains exclusive page-table access between the observation
+    /// and this call; the result is not a lock-free snapshot.
+    pub(crate) fn handle_fault_observed(
+        &self,
+        ctx: FaultContext,
+        flags: MappingFlags,
+        pgtbl: &mut PageTableMut,
+        observed: PagingResult<(PhysAddr, MappingFlags, PageSize)>,
+    ) -> FaultCompletionResult {
+        let _ = self.registration_id();
+        let addr = ctx.address().align_down(self.page_size());
+        let object_start = self.object_offset_for(addr)?;
+        let populated = match observed {
+            Ok((_paddr, page_flags, page_size)) => {
+                assert_eq!(self.size, page_size);
+                if ctx.access_flags().contains(MappingFlags::WRITE)
+                    && !page_flags.contains(MappingFlags::WRITE)
+                {
+                    if cow_private_object_page(
+                        &self.object,
+                        object_start,
+                        addr,
+                        flags,
+                        self.size,
+                        pgtbl,
+                    )?
+                    .is_retry()
+                    {
+                        return Ok(FaultCompletion::cow_conflict_retry());
+                    }
+                    1
+                } else if page_flags.contains(ctx.access_flags()) {
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(PagingError::NotMapped) => {
+                let existing = map_existing_private_object_page(
+                    &self.object,
+                    object_start,
+                    addr,
+                    ctx.access_flags(),
+                    flags,
+                    self.size,
+                    pgtbl,
+                )?;
+                if existing.is_retry() {
+                    return Ok(FaultCompletion::cow_conflict_retry());
+                }
+                if !existing.is_resolved() {
+                    self.alloc_new_at(addr, flags, pgtbl)?;
+                }
+                1
+            }
+            Err(_) => return Err(KError::BadAddress),
+        };
+        Ok(FaultCompletion::from_populate((populated, None)))
     }
 
     pub fn clone_for_fork_runtime(
@@ -212,55 +341,8 @@ impl BackendOps for PrivateBackend {
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
     ) -> FaultCompletionResult {
-        let _ = self.registration_id();
-        let addr = ctx.address().align_down(self.page_size());
-        let object_start = self.object_offset_for(addr)?;
-        let populated = match pgtbl.query(addr) {
-            Ok((_paddr, page_flags, page_size)) => {
-                assert_eq!(self.size, page_size);
-                if ctx.access_flags().contains(MappingFlags::WRITE)
-                    && !page_flags.contains(MappingFlags::WRITE)
-                {
-                    if cow_private_object_page(
-                        &self.object,
-                        object_start,
-                        addr,
-                        flags,
-                        self.size,
-                        pgtbl,
-                    )?
-                    .is_retry()
-                    {
-                        return Ok(FaultCompletion::cow_conflict_retry());
-                    }
-                    1
-                } else if page_flags.contains(ctx.access_flags()) {
-                    1
-                } else {
-                    0
-                }
-            }
-            Err(PagingError::NotMapped) => {
-                let existing = map_existing_private_object_page(
-                    &self.object,
-                    object_start,
-                    addr,
-                    ctx.access_flags(),
-                    flags,
-                    self.size,
-                    pgtbl,
-                )?;
-                if existing.is_retry() {
-                    return Ok(FaultCompletion::cow_conflict_retry());
-                }
-                if !existing.is_resolved() {
-                    self.alloc_new_at(addr, flags, pgtbl)?;
-                }
-                1
-            }
-            Err(_) => return Err(KError::BadAddress),
-        };
-        Ok(FaultCompletion::from_populate((populated, None)))
+        let observed = pgtbl.query(ctx.address().align_down(self.page_size()));
+        self.handle_fault_observed(ctx, flags, pgtbl, observed)
     }
 }
 
