@@ -98,6 +98,7 @@ const CMD_START: u32 = 1 << 31;
 const CMD_USE_HOLD_REG: u32 = 1 << 29;
 const CMD_UPD_CLK: u32 = 1 << 21;
 const CMD_INIT: u32 = 1 << 15;
+const CMD_STOP: u32 = 1 << 14;
 const CMD_SEND_AUTO_STOP: u32 = 1 << 12;
 const CMD_PRV_DAT_WAIT: u32 = 1 << 13;
 const CMD_DAT_WR: u32 = 1 << 10;
@@ -431,6 +432,28 @@ impl DwMmcHost {
         }
     }
 
+    /// Human-readable names for a raw RINTSTS status word (diagnostics).
+    fn status_names(status: u32) -> alloc::string::String {
+        const NAMES: [(u32, &str); 10] = [
+            (INT_RESP_ERR, "RESP_ERR"),
+            (INT_CMD_DONE, "CMD_DONE"),
+            (INT_DATA_OVER, "DATA_OVER"),
+            (INT_RCRC, "RCRC"),
+            (INT_DCRC, "DCRC"),
+            (INT_RTO, "RTO"),
+            (INT_DRTO, "DRTO"),
+            (INT_HTO, "HTO"),
+            (INT_SBE, "SBE"),
+            (INT_EBE, "EBE"),
+        ];
+        let names: alloc::vec::Vec<&str> = NAMES
+            .iter()
+            .filter(|(bit, _)| status & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        alloc::format!("{status:#x} [{}]", names.join("|"))
+    }
+
     /// Map a published status word (already known not to be DONE) onto
     /// the error vocabulary.
     fn status_error(status: u32) -> MmcError {
@@ -611,23 +634,34 @@ impl DwMmcHost {
         if bytes > DMA_WINDOW_BYTES || buf.len() < bytes {
             return Err(MmcError::Io);
         }
-        self.start_data_phase(cmd, DataDir::Read, bytes)?;
-        let outcome = self.wait_transfer();
-        self.idmac_stop();
-        if let Err(err) = &outcome {
-            log::warn!(
-                "dwmmc: data-read cmd {} bytes {} failed: {err:?} status={:#x} (rintsts {:#x} \
-                 idsts {:#x})",
-                cmd.opcode,
-                bytes,
-                self.xfer.load(),
-                self.readl(SDMMC_RINTSTS),
-                self.readl(SDMMC_IDSTS),
-            );
+        // One retry after the card-recovery sequence: first data-phase
+        // failures are frequently transient state left by the previous
+        // transfer or the boot stages.
+        for attempt in 0..2 {
+            self.start_data_phase(cmd, DataDir::Read, bytes)?;
+            let outcome = self.wait_transfer();
+            self.idmac_stop();
+            match outcome {
+                Ok(status) => {
+                    if attempt > 0 {
+                        log::warn!("dwmmc: data-read cmd {} succeeded on retry", cmd.opcode);
+                    }
+                    self.stage_in(bytes, buf);
+                    return Ok(());
+                }
+                Err(err) => {
+                    log::warn!(
+                        "dwmmc: data-read cmd {} bytes {} attempt {}: {err:?} ({})",
+                        cmd.opcode,
+                        bytes,
+                        attempt,
+                        Self::status_names(self.xfer.load()),
+                    );
+                    self.recover_after_data_error(cmd);
+                }
+            }
         }
-        outcome?;
-        self.stage_in(bytes, buf);
-        Ok(())
+        Err(MmcError::Io)
     }
 
     /// Write data phase: stage `buf` through the bounce window out to the
@@ -652,6 +686,31 @@ impl DwMmcHost {
             );
         }
         outcome.map(|_| ())
+    }
+
+    /// Recovery after a failed data transfer (Linux `dw_mci` error path):
+    /// reset the FIFO, force-stop the card with CMD12, clear the raw
+    /// status — without this, a card parked mid-data-state poisons every
+    /// later command (SBE/RTO cascades).
+    fn recover_after_data_error(&self, failed_cmd: &MmcCommand) {
+        // FIFO reset (self-clearing).
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // Force-stop: CMD12 with STOP_ABORT_CMD (bypasses the normal
+        // response-decode path; errors here are best-effort cleared).
+        let cmdr = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
+        let _ = self.ciu_cmd(cmdr, 0);
+        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
+        log::warn!(
+            "dwmmc: recovered after data error on cmd {} ({})",
+            failed_cmd.opcode,
+            Self::status_names(self.xfer.load())
+        );
     }
 
     /// Stop and reset the DMA engine after a transfer (verified driver
