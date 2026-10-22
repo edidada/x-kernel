@@ -26,11 +26,13 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
-use super::{ClassRegistry, Publication, PublicationId};
-use crate::owner::{LegacyOwner, PublicationOwner};
+use crate::{
+    Publication, PublicationId,
+    owner::{LegacyOwner, PublicationOwner},
+};
 
 /// The identity a class hook needs to publish its user-visible projection
 /// (`devnode::publish`, `add_disk`, ...).
@@ -177,12 +179,12 @@ where
     }
 
     /// Subscribe to future availability notifications for this class.
-    pub fn subscribe_available(&self, callback: super::ClassAvailabilityCallback<T>) {
+    pub fn subscribe_available(&self, callback: ClassAvailabilityCallback<T>) {
         self.registry.lock().subscribe_available(callback);
     }
 
     /// Subscribe to removal notifications for this class.
-    pub fn subscribe_removed(&self, callback: super::ClassRemovalCallback<T>) {
+    pub fn subscribe_removed(&self, callback: ClassRemovalCallback<T>) {
         self.registry.lock().subscribe_removed(callback);
     }
 
@@ -244,5 +246,89 @@ where
         for callback in callbacks {
             callback(device.clone());
         }
+    }
+}
+
+/// Notification callback invoked after a class device is published while its
+/// owning device is available.
+pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(Publication<T>) + Send + Sync>;
+
+/// Notification callback invoked when a class device is removed.
+pub type ClassRemovalCallback<T> = Arc<dyn Fn(Publication<T>) + Send + Sync>;
+
+/// Typed registry for one runtime device class.
+///
+/// Holds borrows, not owners: the withdrawal belongs to the driver's
+/// `Publication`. Entries exist exactly between `publish` and that drop.
+struct ClassRegistry<T> {
+    devices: Vec<Publication<T>>,
+    availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
+    removal_subscribers: Vec<ClassRemovalCallback<T>>,
+}
+
+impl<T> ClassRegistry<T> {
+    const fn new() -> Self {
+        Self {
+            devices: Vec::new(),
+            availability_subscribers: Vec::new(),
+            removal_subscribers: Vec::new(),
+        }
+    }
+
+    /// Publish one runtime class device.
+    ///
+    /// Linux device registration rejects duplicate identities; replacement is
+    /// a remove-then-add lifecycle rather than an implicit registry update.
+    /// Publication ids are minted fresh per publish, so the duplicate test is
+    /// (owning device identity, runtime name) — the same device publishing
+    /// the same name twice is a driver bug and is refused.
+    fn publish(&mut self, device: Publication<T>) -> KResult<()> {
+        let duplicate = self
+            .devices
+            .iter()
+            .any(|current| current.shares_identity_with(&device));
+        if duplicate {
+            return Err(KError::AlreadyExists);
+        }
+        self.devices.push(device);
+        Ok(())
+    }
+
+    /// Every available device in this class.
+    fn devices(&self) -> Vec<Publication<T>> {
+        self.devices
+            .iter()
+            .filter(|device| device.is_available())
+            .cloned()
+            .collect()
+    }
+
+    /// Find one device by its publication handle.
+    fn find(&self, id: PublicationId) -> Option<Publication<T>> {
+        self.devices
+            .iter()
+            .find(|device| device.id() == id && device.is_available())
+            .cloned()
+    }
+
+    fn remove(&mut self, id: PublicationId) -> Option<Publication<T>> {
+        let position = self.devices.iter().position(|device| device.id() == id)?;
+        Some(self.devices.swap_remove(position))
+    }
+
+    fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
+        self.availability_subscribers.push(callback);
+    }
+
+    fn subscribe_removed(&mut self, callback: ClassRemovalCallback<T>) {
+        self.removal_subscribers.push(callback);
+    }
+
+    fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+        self.availability_subscribers.clone()
+    }
+
+    fn removal_callbacks(&self) -> Vec<ClassRemovalCallback<T>> {
+        self.removal_subscribers.clone()
     }
 }

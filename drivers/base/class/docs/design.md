@@ -22,11 +22,17 @@ drain gate 只表示一项发布是否继续接受操作。
 
 ## 范围与架构
 
-- `src/lib.rs`：模块组织、公开类型重导出和私有注册表。
+- `src/lib.rs`：crate 说明、模块声明和公开类型重导出，不承载运行时实现。
 - `src/publication.rs`：`PublicationId`、`Publication`、`InUse` 及私有共享状态，负责发布所有权、使用许可、在途计数和延迟 teardown。
-- `src/class_api.rs`：`Class`、投影 hooks 与发布/撤销编排；实现模块私有，类型在根导出。
-- `src/lib.rs` 内的私有 `owner` 模块：活身份契约与遗留发布者的私有合成身份。
+- `src/class.rs`：`Class`、投影 hooks、订阅接口和发布/撤销编排；`ClassRegistry` 及其操作完全私有，和拥有它的 `Class` 聚合在同一模块内。
+- `src/owner.rs`：活身份契约与遗留发布者的内部合成身份，不暴露身份存储字段。
 - `ut-tests/class.rs`：发布、重复身份、撤销和 drain 测试及 detached 测试辅助实现。
+
+模块按完整功能及生命周期聚合：publication 拥有单项发布的共享状态和在途
+清理协议；class 拥有发布集合及注册/撤销编排；owner 表达可被多个发布共享的
+提供者身份。内部结构不因单独命名而拆成模块，公开类型也不要求各占一个文件。
+例如 `Inner` 和 finalizer 留在 publication，`InUse` 虽对外可见，也因其生命周期
+直接依附 publication 而与其放在一起。所有公开导出仍保留原有 crate 根路径。
 
 依赖方向为 `driver-model → driver-class`。class 不依赖模型、总线或具体设备家族。
 `Class::publish` 是模型集成入口；普通驱动仍经 `Device::publish` 获取拥有发布权的句柄。

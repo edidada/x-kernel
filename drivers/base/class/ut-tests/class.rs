@@ -14,11 +14,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
-use super::{
-    Publication, PublicationId,
-    class_api::{Class, ClassHooks, PublicationNode},
+use crate::{
+    Class, ClassHooks, Publication, PublicationId, PublicationNode, PublicationOwner,
+    owner::LegacyOwner,
 };
-use crate::{PublicationOwner, owner::LegacyOwner};
 
 impl<T> Publication<T> {
     /// Detached publication for tests: its own device identity, no registry,

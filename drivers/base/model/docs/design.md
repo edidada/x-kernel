@@ -244,7 +244,7 @@ pending/deferred 工作表摘掉、直接释放 entry。
   `select_batch` 对每个待探测设备深拷贝 `DeviceDescriptor`（含
   `Vec<String>` compatibles），`modalias` 每次重算。probe 是每设备一次性路径，
   不是热路径；优化需要改 `matches()` 的返回形状，等有真实吞吐需求再做。
-- class 注册表（`driver-model::class` 的 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
+- class 注册表（`driver-class` 的私有 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
   但同样是已知的、被接受的小集合线性扫描。
 
 ## 设计决策
