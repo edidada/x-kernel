@@ -2,7 +2,9 @@
 
 This standalone C probe checks Linux-visible user instruction behavior. It does
 not inspect kernel logs or require a desktop, network, or application package.
-It is not registered in the external Starry Test Harness.
+It is not registered in the external Starry Test Harness: registration into the
+`ci-test-iter` workspace is staged as a follow-up of the PR that carries this
+probe, and until then this regression runs manually only.
 
 ## Build and run
 
@@ -24,8 +26,8 @@ Run it **inside that environment**, not directly on an x86 host:
 ./cache-permission-probe all --all-cpus
 ```
 
-`--all` is an alias for `all`. Individual modes are `ctr`, `dc`, `ic`, `jit`,
-and `udf`. No root privileges are required by the probe itself. The runtime
+`--all` is an alias for `all`. Individual modes are `ctr`, `dc`, `ic`, `zva`,
+`jit`, and `udf`. No root privileges are required by the probe itself. The runtime
 must allow anonymous mappings, `mprotect`, `fork`, and observing child status.
 The mapping length comes from `sysconf(_SC_PAGESIZE)`.
 
@@ -36,8 +38,9 @@ The mapping length comes from `sysconf(_SC_PAGESIZE)`.
 | `ctr` | Read `CTR_EL0` from EL0 | Child exits normally with status 0; no particular CTR value is required. |
 | `dc` | `DC CVAU` on the child's live private mapping, followed by barriers | Child exits normally with status 0. |
 | `ic` | `IC IVAU` on the child's live private mapping, followed by barriers | Child exits normally with status 0. |
+| `zva` | Read `DCZID_EL0`; when `DZP` is set exit with the skip code (77). Otherwise fill the mapping with a nonzero byte, run `DC ZVA`, and verify the covered line reads back zero | Child exits normally with status 0, or is reported as a skip when DC ZVA is unsupported. |
 | `jit` | Write two instructions, invoke the toolchain's `__builtin___clear_cache`, change RW to RX, and call the generated code; repeat on the same page | Calls return 42 and then 73, and the child exits with status 0. |
-| `udf` | Execute the truly undefined instruction word `0x00000000` | `waitpid` reports termination by SIGILL. Returning normally or merely exiting with code 4 fails. |
+| `udf` | Execute the truly undefined instruction word `0x00000000` | `waitpid` reports termination by SIGILL. Returning normally or merely exiting with code 90 (`CHILD_ERROR`) fails. |
 
 Each mode forks its own child and resets/unblocks SIGILL, SIGSEGV, and SIGBUS.
 UDF is a negative control: permitting cache instructions must not suppress
@@ -48,13 +51,15 @@ implements an instruction directly or emulates a trap.
 Output is newline-delimited JSON. The parent emits one `result` per mode and
 a final `summary` with separate `passed`, `failed`, and `skipped` counts.
 Child setup failures, wrong return values, unexpected signals, and timeouts
-are failures. A default `all` run expects five passing results and zero skips.
+are failures. A default `all` run expects six passing results and zero skips;
+when the target reports `DCZID_EL0.DZP=1` the `zva` mode counts as a skip.
 The process exits 0 for complete success, 1 for a test/infrastructure failure,
-2 for invalid invocation or parent setup failure, or 77 when optional CPU
-coverage was skipped without another failure. Preserve stdout, stderr, and the
-actual command status; a subsequent shell command's status is not the result.
+2 for invalid invocation or parent setup failure, or 77 when optional coverage
+(CPU affinity or DC ZVA support) was skipped without another failure. Preserve
+stdout, stderr, and the actual command status; a subsequent shell command's
+status is not the result.
 
-`--all-cpus` first performs the ordinary unbound five modes, then repeats them
+`--all-cpus` first performs the ordinary unbound six modes, then repeats them
 on each CPU in the calling task's allowed affinity mask. Each child requests
 a singleton affinity mask and checks `sched_getcpu()` before its operation.
 This covers available CPUs, not CPUs excluded by a container, cpuset, or
@@ -72,7 +77,7 @@ does not itself fail a test. Cleanup failures are reported, not hidden.
 These are liveness bounds, not performance requirements: a hung kernel cannot
 run a guest timer, so the host harness must also impose an overall timeout.
 For `--all-cpus`, budget up to 12 seconds per mode per allowed CPU, plus the
-five unbound modes and boot overhead.
+six unbound modes and boot overhead.
 
 ## Scope and references
 
@@ -96,12 +101,18 @@ runs on CPUs 0 through 3. Each bound child confirmed its requested CPU using
 `sched_getcpu()`. This is a standalone guest regression, not a Starry suite
 result.
 
+**Status of the `zva` mode:** the recorded run above predates it — it covered
+the five UCT/UCI modes only. The `zva` mode was added in review follow-up to
+give the separately introduced `DZE` grant positive and negative observable
+coverage; its before/after run on this tree is pending and will be recorded
+here when executed. Until then, `DZE` has no recorded guest validation.
+
 ### Coverage limits
 
 The regression targets instruction permissions in the ordinary AArch64
-EL1/EL0 regime. Setting SCTLR_EL1.UCT/UCI removes those controls' traps; other
-architectural and higher-level trap controls can still apply. The generated
-instruction stores currently target little-endian AArch64.
+EL1/EL0 regime. Setting SCTLR_EL1.DZE/UCT/UCI removes those controls' traps;
+other architectural and higher-level trap controls can still apply. The
+generated instruction stores currently target little-endian AArch64.
 
 Success under QEMU TCG does not establish real hardware instruction/data cache
 coherence, cross-CPU generated-code publication, heterogeneous cache geometry,
@@ -113,7 +124,7 @@ as an instruction-permission pass.
 
 Primary contract references:
 
-- [Linux v6.12 initial SCTLR configuration](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/sysreg.h#L824) includes UCT/UCI for the normal EL1/EL0 setup.
+- [Linux v6.12 initial SCTLR configuration](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/sysreg.h#L824) includes DZE/UCT/UCI for the normal EL1/EL0 setup.
 - [LLVM 20.1 clear-cache implementation](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.0/compiler-rt/lib/builtins/clear_cache.c#L115) reads CTR and uses user cache maintenance and barriers.
 - [Linux waitpid(2)](https://man7.org/linux/man-pages/man2/waitpid.2.html) defines signal termination and child reaping.
 - [Linux sched_setaffinity(2)](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html) defines CPU-mask restrictions.

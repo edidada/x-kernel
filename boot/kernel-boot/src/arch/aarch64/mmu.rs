@@ -377,6 +377,11 @@ pub(super) unsafe fn init_mmu() {
     // libc/JIT cache flushes read CTR_EL0 and maintain user-address caches;
     // vectorized memset/memcpy additionally probe DC ZVA for line zeroing.
     // Establish that ABI on each EL1 CPU instead of inheriting reset values.
+    // The cfg is a build-time premise: vmm builds stay at EL2/VHE via
+    // el::init_el2_vhe, where the same-named controls alias into SCTLR_EL2.
+    // If a vmm build ever falls back to EL1 (CurrentEL < 2), this grant is
+    // compiled out and EL0 keeps the reset policy — a pre-existing gap left
+    // to a future runtime regime check.
     #[cfg(not(feature = "vmm"))]
     SCTLR_EL1
         .modify(SCTLR_EL1::UCT::DontTrap + SCTLR_EL1::UCI::DontTrap + SCTLR_EL1::DZE::DontTrap);

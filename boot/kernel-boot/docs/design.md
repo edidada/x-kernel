@@ -32,6 +32,10 @@ The common per-CPU location gives primary and secondary CPUs the same policy.
 The VMM build keeps its existing policy: under VHE
 (`HCR_EL2.{E2H,TGE}={1,1}`) the same-named controls alias into `SCTLR_EL2`,
 and that regime is outside this audit.
+The `vmm` cfg is a build-time premise: those builds boot at EL2/VHE via
+`el::init_el2_vhe`; when such a build falls back to EL1 (`CurrentEL < 2`),
+the grant is compiled out and the reset policy remains — a pre-existing gap
+left to a future runtime regime check, not addressed here.
 Unrelated SCTLR fields and the existing post-write ISB remain unchanged.
 Linux's [initial SCTLR configuration](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/asm/sysreg.h#L824)
 also includes DZE/UCT/UCI; LLVM's [AArch64 clear-cache implementation](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.0/compiler-rt/lib/builtins/clear_cache.c)

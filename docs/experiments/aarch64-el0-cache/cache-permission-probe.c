@@ -1,4 +1,6 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
 /* Standalone Linux AArch64 EL0 instruction-permission regression. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -27,23 +29,32 @@ enum { CHILD_SKIP = 77, CHILD_ERROR = 90 };
 enum wait_result { WAIT_ERROR = -1, WAIT_TIMEOUT = 0, WAIT_REAPED = 1 };
 
 extern uint64_t el0_probe_ctr(void);
+extern uint64_t el0_probe_dczid(void);
 extern void el0_probe_dc(void *address);
 extern void el0_probe_ic(void *address);
+extern void el0_probe_zva(void *address);
 extern void el0_probe_udf(void);
 
 /* The operand of each maintenance instruction is a live private mapping.
- * UDF is a real instruction fault, not a software-generated SIGILL.
+ * DCZID_EL0 is unconditionally readable at EL0. UDF is a real instruction
+ * fault, not a software-generated SIGILL.
  */
 __asm__(".text\n.balign 4\n"
         ".global el0_probe_ctr\n.type el0_probe_ctr, %function\n"
         "el0_probe_ctr:\nmrs x0, ctr_el0\nret\n"
         ".size el0_probe_ctr, .-el0_probe_ctr\n"
+        ".global el0_probe_dczid\n.type el0_probe_dczid, %function\n"
+        "el0_probe_dczid:\nmrs x0, dczid_el0\nret\n"
+        ".size el0_probe_dczid, .-el0_probe_dczid\n"
         ".global el0_probe_dc\n.type el0_probe_dc, %function\n"
         "el0_probe_dc:\ndc cvau, x0\nret\n"
         ".size el0_probe_dc, .-el0_probe_dc\n"
         ".global el0_probe_ic\n.type el0_probe_ic, %function\n"
         "el0_probe_ic:\nic ivau, x0\nret\n"
         ".size el0_probe_ic, .-el0_probe_ic\n"
+        ".global el0_probe_zva\n.type el0_probe_zva, %function\n"
+        "el0_probe_zva:\ndc zva, x0\ndsb ish\nret\n"
+        ".size el0_probe_zva, .-el0_probe_zva\n"
         ".global el0_probe_udf\n.type el0_probe_udf, %function\n"
         "el0_probe_udf:\n.inst 0x00000000\nret\n"
         ".size el0_probe_udf, .-el0_probe_udf\n");
@@ -180,6 +191,23 @@ static int child_run(const char *mode, int cpu, size_t page_size)
         el0_probe_dc(page);
     } else if (!strcmp(mode, "ic")) {
         el0_probe_ic(page);
+    } else if (!strcmp(mode, "zva")) {
+        uint64_t dczid = el0_probe_dczid();
+        /* DZP (bit 4) set: DC ZVA is not supported, report an explicit skip. */
+        if ((dczid & UINT64_C(0x10)) != 0) {
+            printf("{\"event\":\"zva_unsupported\","
+                   "\"dczid\":\"0x%016" PRIx64 "\"}\n", dczid);
+            return CHILD_SKIP;
+        }
+        const size_t line = (size_t)4 << (dczid & UINT64_C(0xF));
+        volatile unsigned char *bytes = page;
+        for (size_t i = 0; i < line && i < page_size; ++i)
+            bytes[i] = UINT8_C(0x5a);
+        el0_probe_zva(page);
+        for (size_t i = 0; i < line && i < page_size; ++i)
+            if (bytes[i] != UINT8_C(0))
+                return child_error("zva_not_zeroed");
+        printf("{\"event\":\"zva_zeroed\",\"line_bytes\":%zu}\n", line);
     } else {
         result = run_jit(page, page_size);
     }
@@ -242,7 +270,8 @@ static int run_one(const char *mode, int cpu, size_t page_size)
     }
     int signo = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    int skipped = cpu >= 0 && code == CHILD_SKIP;
+    /* Skips are mode-driven (zva on unsupported hardware) or affinity-driven. */
+    int skipped = code == CHILD_SKIP;
     int passed = !strcmp(mode, "udf") ? signo == SIGILL : code == 0;
     printf("{\"event\":\"result\",\"mode\":\"%s\",\"cpu\":%d,"
            "\"child_pid\":%ld,\"signal\":%d,\"exit_code\":%d,"
@@ -253,7 +282,7 @@ static int run_one(const char *mode, int cpu, size_t page_size)
 
 int main(int argc, char **argv)
 {
-    const char *modes[] = {"ctr", "dc", "ic", "jit", "udf"};
+    const char *modes[] = {"ctr", "dc", "ic", "zva", "jit", "udf"};
     int all = argc >= 2 && (!strcmp(argv[1], "all") || !strcmp(argv[1], "--all"));
     int per_cpu = argc == 3 && !strcmp(argv[2], "--all-cpus");
     int selected = -1;
@@ -263,7 +292,7 @@ int main(int argc, char **argv)
                 selected = (int)i;
     if (argc < 2 || argc > 3 || (!all && selected < 0) ||
         (argc == 3 && (!all || !per_cpu))) {
-        fprintf(stderr, "usage: %s all [--all-cpus] | ctr | dc | ic | jit | udf\n", argv[0]);
+        fprintf(stderr, "usage: %s all [--all-cpus] | ctr | dc | ic | zva | jit | udf\n", argv[0]);
         return 2;
     }
     setbuf(stdout, NULL);

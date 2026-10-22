@@ -26,6 +26,9 @@ timing and contention; the change makes no side-channel isolation guarantee.
 Heterogeneous systems need a separate policy for a safe common cache description.
 The VHE path aliases control-register accesses and is outside the demonstrated
 non-VMM regression scope; it must not be described as unaffected or validated.
+The `vmm` build gate is a compile-time premise: a vmm build that boots below
+EL2 keeps the reset policy for these controls — the pre-change state, not a
+newly audited configuration.
 
 ## Failure analysis and review
 
