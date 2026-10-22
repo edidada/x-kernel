@@ -2,247 +2,231 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Generic class-machinery tests (no device family involved).
-//!
-//! These run in the kernel unit-test harness (`#[cfg(unittest)]`), not in a
-//! host `cargo test`: the machinery they cover is the one the kernel
-//! actually boots with.
+//! Registration ownership, consumer references and operation-permit tests.
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{format, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
-use crate::{
-    Class, ClassHooks, Publication, PublicationId, PublicationNode, PublicationSource,
-    owner::LegacyOwner,
-};
-
-impl<T> Publication<T> {
-    /// Detached publication for tests: its own device identity, no registry,
-    /// no withdrawal. `offline` mirrors an already-removed device.
-    pub fn detached(
-        _device_id: u64,
-        driver_name: &'static str,
-        path: String,
-        runtime: T,
-        name: &str,
-        offline: bool,
-    ) -> Self {
-        let owner = LegacyOwner::new(driver_name, path);
-        if offline {
-            owner.mark_offline();
-        }
-        Self::new(owner, runtime, String::from(name), PublicationId::next())
-    }
-}
-
-fn loc(id: u32) -> String {
-    format!("platform/firmware{id}")
-}
+use crate::{Class, ClassHooks, PublicationNode, PublicationSource, owner::LegacyOwner};
 
 fn owner(id: u32) -> Arc<LegacyOwner> {
-    LegacyOwner::new("test-driver", loc(id))
+    LegacyOwner::new("test-driver", format!("platform/firmware{id}"))
 }
 
-/// One publication: the value `publish` returns is the owner; clones handed
-/// to consumers are borrows and never withdraw.
 #[def_test(serial)]
-fn publication_owner_withdraws_and_clones_do_not() {
-    static CLASS: Class<u32, NoHooks> = Class::new(NoHooks);
-    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
+fn registration_withdraws_but_consumer_clones_do_not() {
+    static CLASS: Class<u32> = Class::new(());
+    let registration = CLASS.publish(owner(1), 7, "dev").expect("publish");
+    let consumer = registration.publication();
+    let clone = consumer.clone();
+    drop(consumer);
+    assert_eq!(CLASS.devices().len(), 1);
+    assert_eq!(clone.with_available(|value| Ok(*value)), Ok(7));
+    drop(registration);
+    assert!(CLASS.devices().is_empty());
+    assert!(!clone.is_available());
+    assert_eq!(
+        clone.with_available(|value| Ok(*value)),
+        Err(KError::BadState)
+    );
+    assert!(clone.acquire_use().is_err());
+    assert_eq!(clone.name(), "dev");
+}
 
-    struct NoHooks;
-    impl ClassHooks<u32> for NoHooks {
+#[def_test(serial)]
+fn class_teardown_waits_for_last_in_flight_use_not_last_reference() {
+    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    static CLASS: Class<u32, Hooks> = Class::new(Hooks);
+    struct Hooks;
+    impl ClassHooks<u32> for Hooks {
         fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
             UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
         }
     }
-
     UNPUBLISHED.store(0, Ordering::SeqCst);
-    let published = CLASS.publish(owner(1), 7u32, "dev").expect("publish");
-    let id = published.id();
-    let borrow = published.clone();
-    assert_eq!(CLASS.find(id).map(|p| p.with(|v| *v)), Some(7));
-
-    // Consumer borrows never withdraw.
-    drop(borrow);
-    assert!(CLASS.find(id).is_some());
+    let registration = CLASS.publish(owner(2), 7, "drain").expect("publish");
+    let consumer = registration.publication();
+    let first_use = consumer.acquire_use().expect("first permit");
+    let second_use = consumer.acquire_use().expect("second permit");
+    drop(registration);
+    assert!(!consumer.is_available());
+    assert!(CLASS.devices().is_empty());
     assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 0);
-
-    // The owning handle does.
-    drop(published);
-    assert!(CLASS.find(id).is_none());
+    assert_eq!(first_use.with(|value| *value), 7);
+    drop(first_use);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 0);
+    drop(second_use);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+    assert!(consumer.acquire_use().is_err());
+    drop(consumer);
     assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
 }
 
-/// The class-side teardown slot (`del_gendisk`, transport close) must not run
-/// while an operation that already passed the availability gate is still in
-/// flight: the last `InUse` drop runs it instead, exactly once.
-#[def_test(serial)]
-fn class_teardown_waits_for_last_in_flight_use() {
-    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
-    static CLASS: Class<u32, DrainHooks> = Class::new(DrainHooks);
-
-    struct DrainHooks;
-    impl ClassHooks<u32> for DrainHooks {
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
-            UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    UNPUBLISHED.store(0, Ordering::SeqCst);
-    let publication = CLASS.publish(owner(2), 7u32, "drain").expect("publish");
-    let id = publication.id();
-
-    let in_flight = publication.acquire_use().expect("acquire");
-    assert_eq!(publication.in_flight(), 1);
-
-    // Dropping the owning handle withdraws the publication immediately ...
-    drop(publication);
-    assert!(CLASS.find(id).is_none());
-    assert!(!in_flight.is_available());
-    assert!(in_flight.acquire_use().is_err());
-    // ... but the class-side teardown waits for the live operation.
-    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 0);
-
-    drop(in_flight);
-    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
-}
-
-/// The gate is re-checked after the in-flight count is bumped: an acquire
-/// that overlaps a withdrawal either wins the count (and defers teardown) or
-/// loses the gate and undoes its count.
 #[def_test(serial)]
 fn acquire_after_gate_close_is_refused_and_leaves_no_count() {
-    static CLASS: Class<u32, NoHooks> = Class::new(NoHooks);
-
-    struct NoHooks;
-    impl ClassHooks<u32> for NoHooks {}
-
-    let publication = CLASS.publish(owner(3), 1u32, "gate").expect("publish");
-    let borrowed = publication.clone();
-    drop(publication);
-
+    static CLASS: Class<u32> = Class::new(());
+    let registration = CLASS.publish(owner(3), 1, "gate").expect("publish");
+    let consumer = registration.publication();
+    drop(registration);
     for _ in 0..3 {
-        assert!(borrowed.acquire_use().is_err());
+        assert!(consumer.acquire_use().is_err());
     }
-    assert_eq!(borrowed.in_flight(), 0);
+    assert_eq!(consumer.in_flight(), 0);
 }
 
-/// `with_available` is the only gated data-plane entry: it must refuse after
-/// withdrawal instead of calling into the runtime.
 #[def_test(serial)]
-fn with_available_refuses_after_withdrawal() {
-    static CLASS: Class<u32, NoHooks> = Class::new(NoHooks);
-
-    struct NoHooks;
-    impl ClassHooks<u32> for NoHooks {}
-
-    let publication = CLASS.publish(owner(4), 9u32, "gate2").expect("publish");
-    let borrowed = publication.clone();
-    let before =
-        borrowed.with_available(|runtime| Ok::<u32, kerrno::KError>(*runtime) as KResult<u32>);
-    assert_eq!(before.ok(), Some(9));
-
-    drop(publication);
-    assert!(borrowed.with_available(|_| Ok(0u32)).is_err());
-}
-
-/// Publication ids are freshly allocated, and the owner identity is the
-/// device's — not a copy: two publications of one device share liveness and
-/// DEVPATH, but have distinct handles.
-#[def_test(serial)]
-fn publications_share_the_owner_identity_but_not_the_handle() {
-    static CLASS: Class<u32, NoHooks> = Class::new(NoHooks);
-
-    struct NoHooks;
-    impl ClassHooks<u32> for NoHooks {}
-
-    let device = owner(5);
-    let first = CLASS.publish(device.clone(), 1u32, "a").expect("publish a");
-    let second = CLASS.publish(device, 2u32, "b").expect("publish b");
-
-    assert!(first.id() != second.id());
-    assert_eq!(first.location(), second.location());
-    assert_eq!(first.driver_name(), Some("test-driver"));
-    first.mark_offline();
-    assert!(!first.is_available());
-    assert!(!second.is_available());
-}
-
-/// One class serves many devices (class 1:N), and one device identity can be
-/// the owner of publications in several classes (device/class N:M).
-///
-/// Liveness is shared: publication availability reads the device's online
-/// flag, so withdrawing ONE publication marks the whole device offline — the
-/// other classes' entries stay registered but stop being available, and their
-/// own drop completes the withdrawal. That is the model's unit of life: one
-/// device, not one publication.
-#[def_test(serial)]
-fn one_class_serves_many_devices_and_publications_share_device_liveness() {
-    static CHAR_LIKE: Class<u32, NoHooks> = Class::new(NoHooks);
-    static BLOCK_LIKE: Class<u64, NoHooks> = Class::new(NoHooks);
-
-    struct NoHooks;
-    impl ClassHooks<u32> for NoHooks {}
-    impl ClassHooks<u64> for NoHooks {}
-
-    let first = CHAR_LIKE.publish(owner(10), 1, "a").expect("publish a");
-    let second = CHAR_LIKE.publish(owner(11), 2, "b").expect("publish b");
-    assert_eq!(CHAR_LIKE.devices().len(), 2);
-
-    // One device, two classes: the owner identity is shared, the handles are
-    // distinct.
-    let device = owner(12);
-    let char_side = CHAR_LIKE
-        .publish(device.clone(), 3, "c")
-        .expect("publish c");
-    let block_side = BLOCK_LIKE.publish(device, 4, "d").expect("publish d");
-    assert_ne!(char_side.id(), block_side.id());
-    assert_eq!(char_side.location(), block_side.location());
-
-    // Withdrawing one publication flips the shared device identity: the
-    // sibling is no longer handed out ...
-    drop(char_side);
-    assert!(BLOCK_LIKE.find(block_side.id()).is_none());
-    // ... but its runtime stays reachable for its own teardown, and its drop
-    // removes the registry entry.
-    assert_eq!(block_side.with(|value| *value), 4);
-    drop(block_side);
-    assert_eq!(BLOCK_LIKE.devices().len(), 0);
-
+fn publication_withdrawal_does_not_retire_source_or_siblings() {
+    static FIRST: Class<u32> = Class::new(());
+    static SECOND: Class<u32> = Class::new(());
+    let source = owner(4);
+    let first = FIRST.publish(source.clone(), 1, "same").expect("first");
+    let sibling = FIRST.publish(source.clone(), 2, "other").expect("sibling");
+    let second = SECOND.publish(source.clone(), 3, "same").expect("second");
+    let old = first.publication();
     drop(first);
-    drop(second);
+    assert!(source.is_online());
+    assert!(!old.is_available());
+    assert_eq!(
+        sibling.publication().with_available(|value| Ok(*value)),
+        Ok(2)
+    );
+    assert_eq!(
+        second.publication().with_available(|value| Ok(*value)),
+        Ok(3)
+    );
+    let replacement = FIRST.publish(source.clone(), 4, "same").expect("republish");
+    assert!(!old.same_publication(&replacement.publication()));
+    source.mark_offline();
+    assert!(sibling.publication().acquire_use().is_err());
+    assert!(second.publication().acquire_use().is_err());
+    assert!(replacement.publication().acquire_use().is_err());
+    assert!(FIRST.devices().is_empty());
+    assert_eq!(
+        FIRST.publish(source, 5, "offline").unwrap_err(),
+        KError::BadState
+    );
 }
 
-/// Publishing the same runtime name twice off the same owning device is a
-/// driver bug and must be refused with `AlreadyExists` — the registry's
-/// duplicate-identity contract (same name under a different owner is fine).
 #[def_test(serial)]
-fn duplicate_publish_of_same_owner_and_name_is_refused() {
-    static CLASS: Class<u32, NoHooks2> = Class::new(NoHooks2);
-    struct NoHooks2;
-    impl ClassHooks<u32> for NoHooks2 {
-        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {}
+fn duplicate_publish_preserves_original_registration() {
+    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    static CLASS: Class<u32, Hooks> = Class::new(Hooks);
+    struct Hooks;
+    impl ClassHooks<u32> for Hooks {
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+            UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
+        }
     }
-
-    let host = owner(9);
-    // Hold the owning publication: dropping it would withdraw the entry
-    // and the duplicate test below would see an empty registry.
-    let first = CLASS
-        .publish(host.clone(), 1u32, "dev")
-        .expect("first publish must succeed");
-    let second = CLASS.publish(host, 2u32, "dev");
-    assert!(matches!(second, Err(KError::AlreadyExists)));
-
-    // A different owner may reuse the name (Linux: same name under a
-    // different parent is a different device).
-    let other = CLASS.publish(owner(10), 3u32, "dev");
-    assert!(
-        other.is_ok(),
-        "same name under a different owner is allowed"
+    UNPUBLISHED.store(0, Ordering::SeqCst);
+    let source = owner(5);
+    let first = CLASS.publish(source.clone(), 1, "dev").expect("first");
+    assert_eq!(
+        CLASS.publish(source.clone(), 2, "dev").unwrap_err(),
+        KError::AlreadyExists
+    );
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+    assert!(source.is_online());
+    assert_eq!(
+        first.publication().with_available(|value| Ok(*value)),
+        Ok(1)
     );
     drop(first);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 2);
+}
+
+#[def_test(serial)]
+fn publication_identity_is_instance_scoped() {
+    static FIRST: Class<u32> = Class::new(());
+    static SECOND: Class<u32> = Class::new(());
+    let first = FIRST.publish(owner(6), 1, "same").expect("first");
+    let borrowed = first.publication();
+    let second = SECOND.publish(owner(7), 1, "same").expect("second");
+    assert!(first.publication().same_publication(&borrowed));
+    assert!(!borrowed.same_publication(&second.publication()));
+    drop(first);
+    assert_eq!(SECOND.devices().len(), 1);
+    let replacement = FIRST.publish(owner(6), 1, "same").expect("replacement");
+    assert!(!borrowed.same_publication(&replacement.publication()));
+    assert!(borrowed.same_publication(&borrowed.clone()));
+    drop(borrowed);
+    assert_eq!(FIRST.devices().len(), 1);
+}
+
+#[def_test(serial)]
+fn failed_hook_rolls_back_without_publishing_or_retiring_source() {
+    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    static CLASS: Class<u32, Hooks> = Class::new(Hooks);
+    struct Hooks;
+    impl ClassHooks<u32> for Hooks {
+        fn publish(&self, _runtime: &u32, _node: &PublicationNode) -> KResult<()> {
+            Err(KError::Io)
+        }
+
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+            UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    UNPUBLISHED.store(0, Ordering::SeqCst);
+    let source = owner(8);
+    assert_eq!(
+        CLASS.publish(source.clone(), 1, "failure").unwrap_err(),
+        KError::Io
+    );
+    assert!(source.is_online());
+    assert!(CLASS.devices().is_empty());
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+}
+
+#[def_test(serial)]
+fn removal_callback_observes_closed_gate_and_may_release_last_use() {
+    static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static UNPUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    static CLASS: Class<u32, Hooks> = Class::new(Hooks);
+    struct Hooks;
+    impl ClassHooks<u32> for Hooks {
+        fn unpublish(&self, _runtime: &u32, _node: &PublicationNode) {
+            UNPUBLISHED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    CALLBACKS.store(0, Ordering::SeqCst);
+    UNPUBLISHED.store(0, Ordering::SeqCst);
+    let registration = CLASS.publish(owner(9), 9, "callback").expect("publish");
+    let permit = Arc::new(kspin::SpinNoPreempt::new(Some(
+        registration.publication().acquire_use().expect("permit"),
+    )));
+    CLASS.subscribe_removed(Arc::new(move |publication| {
+        let is_closed = !publication.is_available() && publication.acquire_use().is_err();
+        let is_absent = CLASS.devices().is_empty();
+        let last_use = permit.lock().take();
+        drop(last_use);
+        if is_closed && is_absent && UNPUBLISHED.load(Ordering::SeqCst) == 0 {
+            CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    drop(registration);
+    assert_eq!(CALLBACKS.load(Ordering::SeqCst), 1);
+    assert_eq!(UNPUBLISHED.load(Ordering::SeqCst), 1);
+}
+
+#[def_test(serial)]
+fn payload_memory_outlives_registration_until_last_consumer_leaves() {
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    static CLASS: Class<Payload> = Class::new(());
+    struct Payload;
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    DROPS.store(0, Ordering::SeqCst);
+    let registration = CLASS.publish(owner(10), Payload, "payload").unwrap();
+    let consumer = registration.publication();
+    drop(registration);
+    assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+    assert!(consumer.acquire_use().is_err());
+    drop(consumer);
+    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
 }

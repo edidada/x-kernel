@@ -10,11 +10,10 @@
 use super::*;
 
 impl DeviceDomain {
-    /// Tear a device down in the Linux order: `remove()` (quiesce), then
-    /// drop `Data` (class publications withdraw inside it — while the
-    /// hardware is still mapped — followed by IRQ release, transport
-    /// teardown, MMIO unmap last), then mark removed. There is no remove
-    /// notifier in this model.
+    /// Mark the source offline, call remove to quiesce, drop Data and mark removed.
+    /// Class registrations withdraw during Data drop. The driver must join
+    /// operations or retain their resources in the shared runtime before
+    /// independent guards are dropped. There is no model remove notifier.
     ///
     /// A device that never reached `Active` (Pending/Deferred/Probing/
     /// Unclaimed — e.g. hotplug of an unmatched card) takes the light path:
@@ -122,6 +121,7 @@ impl DeviceDomain {
         };
         let (driver, mut data, services) = (driver, data, services);
 
+        core.mark_offline();
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
             driver.remove(&desc, id, &core, data.as_mut(), services.as_ref());
         }

@@ -39,3 +39,13 @@ and malicious-device isolation remain outside this crate.
 
 Check caller-buffer lifetime, exclusive consumption, wait-error cleanup,
 notification outside device locks, and task-context validation in each provider.
+
+## Consumer capability isolation
+
+HwrngPublication exposes only metadata and guarded RNG operations, not raw T or
+Arc<dyn HwrngDevice>. Both reads and failure queries hold an operation permit;
+after withdrawal they return BadState without calling the driver. Consumers
+must distinguish unavailable publication from terminal device failure. Entropy
+stops its selected collector for either condition, without inventing a hardware
+failure flag. Registration drop does not cancel outstanding DMA or replace the
+driver's quiesce/join protocol.

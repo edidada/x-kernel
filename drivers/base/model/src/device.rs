@@ -54,7 +54,7 @@ pub(crate) struct DeviceCore {
     driver_name: kspin::SpinNoPreempt<Option<&'static str>>,
     /// The bus-vocabulary path component, derived once at `add_device`.
     physical_path: alloc::string::String,
-    /// Flipped by the removal orchestration (after quiesce, before the
+    /// Flipped by the removal orchestration (before quiesce and before the
     /// class publications withdraw). Every publication of this device —
     /// and any consumer holding a clone — observes it.
     offline: core::sync::atomic::AtomicBool,
@@ -71,10 +71,6 @@ impl driver_class::PublicationSource for DeviceCore {
 
     fn is_online(&self) -> bool {
         self.is_online()
-    }
-
-    fn mark_offline(&self) {
-        self.mark_offline();
     }
 }
 
@@ -213,17 +209,17 @@ impl<'a, B: Bus> Device<'a, B> {
     /// Publish a runtime capability into a device class (`device_create` /
     /// `add_disk`): the ONE class-publication door.
     ///
-    /// The returned [`Publication`](driver_class::Publication) is the owner: store it
-    /// in `DriverOps::Data` (first field) and dropping it unpublishes — after
-    /// the last in-flight consumer leaves. `dev` supplies the shared device
-    /// identity (driver name, DEVPATH, liveness); the class supplies the
-    /// runtime type and its hooks.
+    /// Store the returned Registration in DriverOps::Data. Dropping it closes
+    /// admission immediately; class teardown waits for existing permits.
+    /// This does not delay destruction of Data's other fields. The runtime must
+    /// own resources needed by operations, or remove must join those operations
+    /// before releasing resources. Field order alone is not sufficient.
     pub fn publish<T, H>(
         &self,
         class: &'static driver_class::Class<T, H>,
         runtime: T,
         name: impl Into<alloc::string::String>,
-    ) -> kerrno::KResult<driver_class::Publication<T>>
+    ) -> kerrno::KResult<driver_class::Registration<T>>
     where
         T: Send + Sync + 'static,
         H: driver_class::ClassHooks<T>,

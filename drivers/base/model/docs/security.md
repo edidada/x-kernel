@@ -10,8 +10,8 @@
 
 通用 class 已移到独立 `driver-class`，见 [class 安全分析](../../class/docs/security.md)。
 模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationSource` 提供
-只读身份查询与幂等退休回调。跨 crate 传递同一个 `Arc` allocation，保证重复
-发布检测和共享在线状态不因拆分改变。class 不依赖模型或访问其私有字段。
+只读身份查询。跨 crate 传递同一个 `Arc` allocation，保证重复
+发布检测使用共享身份；单项撤销不修改来源在线状态。class 不依赖模型或访问其私有字段。
 
 ## 信任模型
 
@@ -21,7 +21,7 @@
 | `DriverOps` 实现 → 域 | `drv/**` 里的驱动 | **可信内核代码**。域不防御驱动的错误，但把驱动能造成的破坏限制在"这一个设备"内（generation 守卫、独占移除声明） |
 | `DeviceServices` 实现 → 域 | `driver-host::Host` 或测试 mock | **可信**。契约要求返回的 guard 携带正确的 `ReleaseHook` |
 | 驱动 → provider 注册表 | `dev.env().provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
-| 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Publication` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是不撤销的 clone |
+| 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Registration` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是无撤销权限的 Publication |
 
 关键的分层判断：本 crate 是**模型**，它不做硬件访问，因此它的 soundness 责任
 集中在两处——`IoMap` 的 volatile 访问器，以及"guard 的释放钩子恰好被调用一次"。
@@ -207,3 +207,10 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 - [ ] 是否引入了对某个设备家族的命名？如果是，应该改成 `ExtensionService`。
 - [ ] 新增的公共名词能否归入 Device / Driver / Bus / Resource / Class /
       Provider / Host？不能归入就是设计问题，不是命名问题。
+
+## 注册与在途操作的资源约束
+
+PublicationSource 不再提供 mark_offline。model 在 remove 回调前关闭来源，
+class 的独立撤销仅关闭该发布。InUse 只直接延迟 class unpublish hook，不延迟
+Data 的独立字段释放；驱动必须先停止并 join 操作，或由共享 runtime 保有资源。
+类型拆分不等同于跨所有 class 的自动资源 drain，当前模型不提供此保证。

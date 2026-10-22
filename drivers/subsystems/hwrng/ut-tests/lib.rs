@@ -96,3 +96,40 @@ fn waiting_errors_do_not_consume_bytes() {
         assert_eq!(&*device.bytes.lock(), &[17]);
     }
 }
+
+#[def_test(serial)]
+fn withdrawn_consumer_cannot_access_driver_payload() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static CLASS: HwrngClass = HwrngClass::new();
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    struct Probe;
+    impl HwrngDevice for Probe {
+        fn read(&self, _buf: &mut [u8]) -> KResult<usize> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        }
+
+        fn is_failed(&self) -> bool {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+    CALLS.store(0, Ordering::SeqCst);
+    let registration = CLASS
+        .attach_legacy(
+            "test-rng",
+            alloc::string::String::from("test"),
+            Arc::new(Probe),
+            "rng",
+        )
+        .unwrap();
+    let consumer = registration.publication();
+    assert_eq!(consumer.is_failed(), Ok(false));
+    assert_eq!(consumer.read(&mut []), Ok(0));
+    drop(registration);
+    assert_eq!(consumer.is_failed(), Err(KError::BadState));
+    assert_eq!(consumer.read(&mut []), Err(KError::BadState));
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+    assert!(CLASS.devices().is_empty());
+}

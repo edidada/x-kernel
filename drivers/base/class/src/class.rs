@@ -21,8 +21,8 @@
 //! let publication = dev.publish(&CHAR, runtime, "serial")?;
 //! ```
 //!
-//! The returned [`Publication`] is the owner: dropping it unpublishes (after
-//! the last in-flight use), and it carries the class-side teardown.
+//! The returned [`Registration`] owns registration; consumer [`Publication`]
+//! handles do not withdraw. Final teardown waits for existing uses.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -30,18 +30,16 @@ use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
 use crate::{
-    Publication, PublicationId,
+    Publication, Registration,
     owner::{LegacyOwner, PublicationSource},
 };
 
-/// The identity a class hook needs to publish its user-visible projection
+/// The source metadata a class hook needs to publish its user-visible projection
 /// (`devnode::publish`, `add_disk`, ...).
 ///
 /// Owned, because the teardown hook runs from the publication's deferred
 /// finalizer and outlives the borrow of the device.
 pub struct PublicationNode {
-    /// The publication handle — the node registry's key.
-    pub id: PublicationId,
     /// The claiming driver's name (DEVPATH/uevent metadata).
     pub driver_name: String,
     /// The device's physical path (DEVPATH/sysfs parent).
@@ -55,7 +53,7 @@ pub struct PublicationNode {
 /// cardN/eventN projection — provides a small unit struct implementing this
 /// trait and passes it to [`Class::new`]. The impl is on the subsystem's OWN
 /// hook type, so the orphan rule is satisfied structurally. Hooks take the
-/// payload by reference (`&T`) plus the publication identity.
+/// payload by reference (`&T`) plus the source metadata.
 pub trait ClassHooks<T>: Send + Sync + 'static {
     /// Class-side publish hook (`add_disk`, devnode projection, ...), run
     /// before registry insert; on registry failure [`unpublish`](Self::unpublish)
@@ -105,17 +103,16 @@ where
         owner: Arc<dyn PublicationSource>,
         runtime: T,
         name: impl Into<String>,
-    ) -> KResult<Publication<T>> {
+    ) -> KResult<Registration<T>> {
         // A publication without a claiming driver has no DEVPATH/uevent
         // identity to project; reject it at the boundary.
-        if owner.driver_name().is_none() {
+        if owner.driver_name().is_none() || !owner.is_online() {
             return Err(kerrno::KError::BadState);
         }
         let name = name.into();
-        let id = PublicationId::next();
+        let id = self.registry.lock().allocate_id()?;
         let publication = Publication::new(owner, runtime, name, id);
         let node = PublicationNode {
-            id,
             driver_name: String::from(publication.driver_name().unwrap_or("")),
             parent_path: String::from(publication.location()),
         };
@@ -125,7 +122,6 @@ where
             publication.with(|runtime| self.hooks.unpublish(runtime, &node));
             return Err(error);
         }
-        publication.install_withdraw(move || self.withdraw(id));
         let is_active = publication.is_available();
         // Bind the registry result first: the 2024-edition `if let` keeps
         // scrutinee temporaries alive through the whole expression, and the
@@ -141,10 +137,11 @@ where
             id,
             publication.driver_name().unwrap_or("<none>")
         );
+        let registration = Registration::new(publication.clone(), move || self.withdraw(id));
         if is_active {
             self.notify_available(publication.clone());
         }
-        Ok(publication)
+        Ok(registration)
     }
 
     /// Transitional door for a publisher still living on the legacy device
@@ -163,7 +160,7 @@ where
         path: alloc::string::String,
         runtime: T,
         name: impl Into<String>,
-    ) -> KResult<Publication<T>> {
+    ) -> KResult<Registration<T>> {
         let owner = LegacyOwner::new(driver_name, path);
         self.publish(owner, runtime, name)
     }
@@ -171,11 +168,6 @@ where
     /// Return every currently available device in this class.
     pub fn devices(&self) -> Vec<Publication<T>> {
         self.registry.lock().devices()
-    }
-
-    /// Find one currently available device by its publication handle.
-    pub fn find(&self, id: PublicationId) -> Option<Publication<T>> {
-        self.registry.lock().find(id)
     }
 
     /// Subscribe to future availability notifications for this class.
@@ -188,12 +180,9 @@ where
         self.registry.lock().subscribe_removed(callback);
     }
 
-    /// The withdrawal path, run exactly once by the owning publication's drop:
-    /// remove from the registry, close the usage gate, run removal callbacks,
-    /// flip the device offline, withdraw the devnode projection, then run the
-    /// class's unpublish hook (deferred to the last in-flight use when one is
-    /// still running).
-    fn withdraw(&'static self, id: PublicationId) {
+    /// Withdraw one registration, close its gate and notify consumers.
+    /// Source identity is unchanged. The unpublish hook waits for existing uses.
+    fn withdraw(&'static self, id: u64) {
         let (removed, callbacks) = {
             let mut registry = self.registry.lock();
             let removed = registry.remove(id);
@@ -207,13 +196,11 @@ where
         // in-flight count at close time is what the class-side teardown
         // waits on. Then removal callbacks still see a live runtime (their
         // final operations run under the guard they already hold). Only then
-        // flip the shared offline flag every consumer clone observes, and
-        // withdraw the projection.
+        // withdraw this publication's projection.
         device.begin_drain();
         for callback in callbacks {
             callback(device.clone());
         }
-        device.mark_offline();
         let in_flight = device.in_flight();
         if in_flight != 0 {
             log::debug!(
@@ -223,7 +210,6 @@ where
             );
         }
         let node = PublicationNode {
-            id: device.id(),
             driver_name: String::from(device.driver_name().unwrap_or("")),
             parent_path: String::from(device.location()),
         };
@@ -258,9 +244,10 @@ pub type ClassRemovalCallback<T> = Arc<dyn Fn(Publication<T>) + Send + Sync>;
 
 /// Typed registry for one runtime device class.
 ///
-/// Holds borrows, not owners: the withdrawal belongs to the driver's
-/// `Publication`. Entries exist exactly between `publish` and that drop.
+/// Holds consumer references, not registration credentials. Entries exist
+/// between successful publish and the Registration's drop.
 struct ClassRegistry<T> {
+    next_id: u64,
     devices: Vec<Publication<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
     removal_subscribers: Vec<ClassRemovalCallback<T>>,
@@ -269,10 +256,17 @@ struct ClassRegistry<T> {
 impl<T> ClassRegistry<T> {
     const fn new() -> Self {
         Self {
+            next_id: 1,
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
             removal_subscribers: Vec::new(),
         }
+    }
+
+    fn allocate_id(&mut self) -> KResult<u64> {
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(KError::BadState)?;
+        Ok(id)
     }
 
     /// Publish one runtime class device.
@@ -304,14 +298,14 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Find one device by its publication handle.
-    fn find(&self, id: PublicationId) -> Option<Publication<T>> {
+    fn find(&self, id: u64) -> Option<Publication<T>> {
         self.devices
             .iter()
             .find(|device| device.id() == id && device.is_available())
             .cloned()
     }
 
-    fn remove(&mut self, id: PublicationId) -> Option<Publication<T>> {
+    fn remove(&mut self, id: u64) -> Option<Publication<T>> {
         let position = self.devices.iter().position(|device| device.id() == id)?;
         Some(self.devices.swap_remove(position))
     }

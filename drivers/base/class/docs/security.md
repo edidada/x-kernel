@@ -1,39 +1,44 @@
 # driver-class — 安全分析
 
-## 范围与信任边界
+## 信任边界
 
-分析 `src/publication.rs`、`src/class.rs` 和 `src/owner.rs`；`src/lib.rs` 仅组织模块与导出。本 crate 不包含 unsafe。
-模型提供受信任的 `PublicationSource`，具体子系统提供 hooks 和 runtime payload。
-不直接解析固件或用户输入，也不实现 MMIO、DMA 或 IRQ 操作。
+模型实现只读 PublicationSource，子系统实现 hooks 与 runtime。
+同一设备必须复用同一个 Arc 来源，路径稳定，在线状态由模型管理。
+class 无 unsafe，不解析固件、用户输入，也不执行 MMIO、DMA 或 IRQ 操作。
 
-模型必须为同一设备复用相同的 `Arc` 身份 allocation，返回稳定路径、实时在线状态，
-并实现幂等且不可逆的 `mark_offline`。trait 不允许 class 修改驱动名或拓扑；私有
-`DeviceCore` 仍由模型拥有。遗留合成身份是独立旧设备的状态，不是模型身份的副本。
+## 生命周期不变量
 
-## 内存与并发安全
+Registration 唯一拥有撤销回调，不实现 Clone 或 Deref；Publication 的所有克隆
+具有相同语义，只保活共享内存。InUse 不可 Clone，每个实例对应一次在途计数。
+撤销关闭 gate 后，新的使用失败；已有许可结束前不能执行 class unpublish hook。
+来源在线不代表本项发布仍有效；可用性同时受本项 gate 约束。
+撤销不会更改来源状态，也不会影响其他注册的 gate。
 
-`Arc` 保证身份和 payload 的存活；使用计数保证在途操作结束前不执行 class teardown。
-`Send + Sync` 约束跨执行上下文共享的对象。注册表锁不跨越外部回调；任务上下文
-限制避免硬中断重入不关中断的 `SpinNoPreempt` 锁。
+## 失败模式与限制
 
-## 失败分析与限制
-
-| 风险 | 处理与限制 |
+| 风险 | 控制与限制 |
 |---|---|
-| 未绑定设备发布 | claiming driver 为 `None` 时返回 `BadState` |
-| 同身份同名称重复发布 | 返回 `AlreadyExists`，回退新投影，保留旧发布 |
-| 撤销与获取许可并发 | 增加计数后重新检查 gate，失败回退；最后一个使用者执行 finalizer |
-| 使用者尚未退出 | teardown 延迟至最后一个 `InUse` Drop |
-| 外部身份实现不遵守契约 | 无法通过类型系统验证，属于受信任模型集成的审计责任 |
-| 一项发布撤销影响同设备其他发布 | 保留原有共享 offline 协议；改变此行为应另立行为提交 |
-| `with` 绕过可用性检查 | 仅用于 teardown 或明确允许离线读取的操作，调用者负责语义 |
-| 遗留发布者无模型域 | `attach_legacy` 仅作迁移适配，不用于新设备模型路径 |
+| 消费者误撤销注册 | 消费者类型无撤销权限；唯一 Registration Drop 撤销 |
+| 撤销后访问裸 payload | Publication::with 仅 crate 内可见；外部访问必须持有许可 |
+| 通过许可克隆 T 内的 Arc | 泛型层不能阻止，受信任适配器不得让能力逃逸；hwrng 提供封装句柄 |
+| 驱动 Data 的其他字段提前释放 | 许可只保护 class finalizer；驱动必须 join 操作或把资源保存在 runtime 中 |
+| 同源同名重复发布 | 返回 AlreadyExists，回退新投影，保留旧注册和来源状态 |
+| 撤销与获取许可并发 | 计数后重查 gate，失败回退，最后使用者接管已安装 finalizer |
+| 最后一个许可先于 finalizer 安装退出 | 安装后在槽位锁内检查零计数，锁外执行一次 |
+| 来源下线 | 拒绝新使用，已获准操作由驱动 quiesce/资源协议处理 |
+| 序号回绕或跨表误用 | 私有注册表分配，溢出拒绝，不暴露数字查找入口 |
+| hook/回调违反上下文约束 | 受信任代码的审计责任；最后许可 Drop 可能执行清理 |
+| 持有许可永不释放 | teardown 被延迟；本 crate 不提供超时或强制释放 |
 
-路径和驱动名用于设备投影及诊断，可能暴露硬件拓扑；用户可见投影的权限控制由
-对应子系统和 host integration 负责。此处不增加用户态访问入口。
+## 并发与隐私
+
+注册表锁不跨越 hooks 和订阅回调；来源在线查询可能在锁内执行，必须非阻塞且
+不重入 class。任务上下文限制避免硬中断重入。
+Arc 保活对象不保证外部硬件在线，必须遵守驱动资源所有权契约。
+名称、路径可能暴露硬件拓扑，用户可见投影的权限由子系统与宿主实现控制。
 
 ## 审计与验证
 
-class UT 覆盖 owning/borrow handle、重复发布及 drain；model 的 domain UT 验证
-跨 crate 身份实时可见、重复身份保持、共享退休及在途 payload 保活。
-修改接口时检查锁外回调、单一状态归属、错误回退和最后使用者 teardown 协议。
+测试覆盖消费者克隆不撤销、撤销后拒绝使用、多许可延迟清理、仅剩消费者时
+已执行清理、最后引用释放 payload、回调释放最后许可、同源多发布独立撤销、
+同名重新发布、hook 失败回退。model 测试验证只读身份与来源下线。

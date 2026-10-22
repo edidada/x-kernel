@@ -18,7 +18,7 @@ fn test_is_virtio_rng_name_matching() {
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use subsys_hwrng::{KError, KResult};
+use subsys_hwrng::{HwrngClass, HwrngDevice, KError, KResult};
 
 #[derive(Default)]
 struct HardwareState {
@@ -69,9 +69,34 @@ impl HwrngDevice for Hardware {
         Ok(output.len())
     }
 }
+
 #[def_test(serial)]
-fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
--> unittest::TestResult {
+fn withdrawn_source_stops_collector_without_calling_hardware() {
+    static CLASS: HwrngClass = HwrngClass::new();
+    let hardware = Arc::new(Hardware {
+        state: Arc::new(SpinNoIrq::new(HardwareState::default())),
+        reads: AtomicUsize::new(0),
+        ready: WaitQueue::new(),
+        entered: WaitQueue::new(),
+    });
+    let registration = CLASS
+        .attach_legacy(
+            "entropy-collector-test",
+            alloc::string::String::from("withdrawn"),
+            hardware.clone(),
+            "virtio-rng-test",
+        )
+        .unwrap();
+    let source = VirtioEntropySource::new(registration.publication()).unwrap();
+    drop(registration);
+    source.request();
+    source.work.flush().unwrap();
+    assert!(source.collector.state.lock().is_failed);
+    assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
+    source.work.shutdown().unwrap();
+}
+#[def_test(serial)]
+fn collector_retries_without_new_demand_and_stops_only_on_device_failure() -> unittest::TestResult {
     for index in 0..3u32 {
         let hardware = Arc::new(Hardware {
             state: Arc::new(SpinNoIrq::new(HardwareState::default())),
@@ -79,14 +104,16 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
             ready: WaitQueue::new(),
             entered: WaitQueue::new(),
         });
-        let class: Publication<HwrngDeviceImpl> = driver_class::Publication::detached(
-            index as u64,
-            "entropy-collector-test",
-            alloc::string::String::from("ram-disk"),
-            hardware.clone(),
-            "virtio-rng-test",
-            false,
-        );
+        static CLASS: HwrngClass = HwrngClass::new();
+        let registration = CLASS
+            .attach_legacy(
+                "entropy-collector-test",
+                alloc::string::String::from("ram-disk"),
+                hardware.clone(),
+                "virtio-rng-test",
+            )
+            .unwrap();
+        let class = registration.publication();
         let source = VirtioEntropySource::new(class.clone()).unwrap();
         assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
         source.request();
@@ -131,6 +158,7 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
         assert_eq!(hardware.reads.load(Ordering::Acquire), reads);
         source.work.shutdown().unwrap();
         drop(class);
+        drop(registration);
     }
     unittest::TestResult::Ok
 }

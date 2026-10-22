@@ -12,7 +12,7 @@ use unittest::{TestResult, assert, assert_eq, def_test};
 
 use super::*;
 
-fn find_device() -> Option<Publication<HwrngDeviceImpl>> {
+fn find_device() -> Option<HwrngPublication> {
     HWRNG
         .devices()
         .into_iter()

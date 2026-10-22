@@ -2,58 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Publication identity, owning and borrowed handles, and in-flight teardown.
+//! Registration ownership, consumer identity, and in-flight teardown.
 
 use alloc::{boxed::Box, string::String, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
 use crate::PublicationSource;
 
-/// Opaque handle of one class publication.
-///
-/// Allocated from a dedicated id space when a driver publishes. Consumers
-/// treat it as an opaque capability handle (compare, store, pass back to
-/// `find_*`/console APIs). It is distinct from `DeviceId` (the domain's
-/// identity space) and from the devnode's node id, which reuses this value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PublicationId(u64);
-
-/// THE publication-id source: one process-wide counter, no tag range. The
-/// legacy-model high-bit fence is gone — nothing else allocates a
-/// `PublicationId`, and `from_raw` only round-trips values that already
-/// came from here (devfs projection keys, tests).
-static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
-
-impl PublicationId {
-    /// Allocate a fresh publication id.
-    pub fn next() -> Self {
-        Self(NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Wrap an existing raw id without re-deriving it.
-    ///
-    /// For lookups where the caller already holds the id's owner (e.g. the
-    /// devfs projection, whose node ids ARE publication ids): the value is
-    /// preserved exactly — any re-derivation (hashing) could never match the
-    /// registry entry it came from.
-    pub const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
 /// Class-side teardown run once, after the last in-flight use (or
 /// immediately when there was none).
 type Finalize<T> = Box<dyn FnOnce(&T) + Send + Sync>;
 
 struct Inner<T> {
-    id: PublicationId,
+    id: u64,
     /// The device this publication belongs to — THE shared identity: name,
     /// path and liveness all come from here, never from a snapshot.
     owner: Arc<dyn PublicationSource>,
@@ -68,50 +32,77 @@ struct Inner<T> {
     /// Deferred class-side teardown, installed by the withdrawal when
     /// operations are still in flight.
     finalize: SpinNoPreempt<Option<Finalize<T>>>,
-    /// The withdrawal action (registry removal + callbacks + projection +
-    /// class teardown). Taken and run exactly once, by the owning handle's
-    /// drop.
-    withdraw: SpinNoPreempt<Option<Box<dyn FnOnce() + Send + Sync>>>,
 }
 
-/// One published class device.
+/// The unique registration credential returned to the publisher.
 ///
-/// `Drop` withdraws only for the owning handle returned by `publish`; clones
-/// (consumers, registry, callbacks) are borrows.
+/// Dropping it withdraws the publication without waiting for existing uses.
+/// Resources needed by those uses must remain owned by the payload or be
+/// released only after the driver's quiesce/join protocol completes.
+/// This type deliberately implements neither Clone nor Deref.
+#[must_use = "dropping the registration immediately withdraws the capability"]
+pub struct Registration<T> {
+    publication: Publication<T>,
+    withdraw: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl<T> Registration<T> {
+    pub(crate) fn new(
+        publication: Publication<T>,
+        withdraw: impl FnOnce() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            publication,
+            withdraw: Some(Box::new(withdraw)),
+        }
+    }
+
+    /// Obtain a consumer handle without transferring registration ownership.
+    pub fn publication(&self) -> Publication<T> {
+        self.publication.clone()
+    }
+}
+
+impl<T> Drop for Registration<T> {
+    fn drop(&mut self) {
+        if let Some(withdraw) = self.withdraw.take() {
+            withdraw();
+        }
+    }
+}
+
+impl<T> core::fmt::Debug for Registration<T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Registration")
+            .field("publication", &self.publication)
+            .finish()
+    }
+}
+
+/// A cloneable consumer reference to one published capability.
+///
+/// References keep the payload's memory alive, not its registration or
+/// permission to perform I/O. Obtain an InUse before accessing the payload.
 pub struct Publication<T> {
     inner: Arc<Inner<T>>,
-    owns_withdrawal: bool,
 }
 
 impl<T> Clone for Publication<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            owns_withdrawal: false,
-        }
-    }
-}
-
-impl<T> Drop for Publication<T> {
-    fn drop(&mut self) {
-        if !self.owns_withdrawal {
-            return;
-        }
-        let withdraw = self.inner.withdraw.lock().take();
-        if let Some(withdraw) = withdraw {
-            withdraw();
         }
     }
 }
 
 impl<T> Publication<T> {
-    /// Build a publication. The withdrawal action is installed separately by
-    /// `Class::publish` once the owning class is known.
+    /// Build the shared state before installing it in a class.
     pub(crate) fn new(
         owner: Arc<dyn PublicationSource>,
         runtime: T,
         name: String,
-        id: PublicationId,
+        id: u64,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -122,19 +113,21 @@ impl<T> Publication<T> {
                 uses: AtomicUsize::new(0),
                 draining: AtomicBool::new(false),
                 finalize: SpinNoPreempt::new(None),
-                withdraw: SpinNoPreempt::new(None),
             }),
-            owns_withdrawal: true,
         }
     }
 
-    pub(crate) fn install_withdraw(&self, withdraw: impl FnOnce() + Send + Sync + 'static) {
-        *self.inner.withdraw.lock() = Some(Box::new(withdraw));
+    /// Registry-local sequence, never exposed to consumers.
+    pub(crate) fn id(&self) -> u64 {
+        self.inner.id
     }
 
-    /// Unique class-publication handle.
-    pub fn id(&self) -> PublicationId {
-        self.inner.id
+    /// Whether both handles refer to the same publication instance.
+    ///
+    /// Clones compare equal even after withdrawal. A new publication is
+    /// distinct even when its source and name match.
+    pub fn same_publication(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Whether both handles publish the same runtime name off the same
@@ -158,16 +151,17 @@ impl<T> Publication<T> {
         self.inner.owner.physical_path()
     }
 
-    /// Whether the owning device is still standing behind this publication.
+    /// Whether this publication admits new operations and its source is online.
+    /// This is a snapshot, not an operation permit.
     pub fn is_available(&self) -> bool {
-        self.inner.owner.is_online()
+        !self.inner.draining.load(Ordering::SeqCst) && self.inner.owner.is_online()
     }
 
     /// Access the runtime payload without the availability gate.
     ///
     /// For internal teardown paths and class hooks; data-plane consumers use
     /// [`Self::with_available`].
-    pub fn with<'a, R>(&'a self, f: impl FnOnce(&'a T) -> R) -> R {
+    pub(crate) fn with<'a, R>(&'a self, f: impl FnOnce(&'a T) -> R) -> R {
         f(&self.inner.runtime)
     }
 
@@ -176,6 +170,9 @@ impl<T> Publication<T> {
     /// Every consumer-facing class operation that returns a [`KResult`] goes
     /// through here: after removal the operation fails with
     /// [`KError::BadState`] instead of touching a torn-down runtime object.
+    ///
+    /// Intended for trusted subsystem adapters. Do not retain cloned runtime
+    /// capabilities beyond this call; expose operation-only facades to consumers.
     pub fn with_available<R>(&self, f: impl FnOnce(&T) -> KResult<R>) -> KResult<R> {
         if !self.is_available() {
             return Err(KError::BadState);
@@ -215,12 +212,6 @@ impl<T> Publication<T> {
         Ok(InUse {
             publication: self.clone(),
         })
-    }
-
-    /// Flip the shared device identity offline. Removal-orchestration
-    /// internal: one flip covers every publication of the device.
-    pub(crate) fn mark_offline(&self) {
-        self.inner.owner.mark_offline();
     }
 
     /// In-flight operation count (diagnostics, removal orchestration).
@@ -277,16 +268,16 @@ pub struct InUse<T> {
 }
 
 impl<T> InUse<T> {
+    /// Access the payload under this already-acquired permit, even after withdrawal.
+    ///
+    /// Trusted subsystem adapters must not let cloned runtime capabilities
+    /// escape the permit's lifetime.
+    pub fn with<R>(&self, operation: impl FnOnce(&T) -> R) -> R {
+        operation(&self.publication.inner.runtime)
+    }
+
     /// The publication this use belongs to.
     pub fn publication(&self) -> &Publication<T> {
-        &self.publication
-    }
-}
-
-impl<T> core::ops::Deref for InUse<T> {
-    type Target = Publication<T>;
-
-    fn deref(&self) -> &Self::Target {
         &self.publication
     }
 }

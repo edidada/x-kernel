@@ -8,10 +8,10 @@
 //! Its registry is private to the class module. [`PublicationSource`] supplies
 //! the live device identity without exposing the device model's private state.
 //!
-//! [`Publication`] owns the withdrawal of one published capability. Its clones
-//! are borrows and never withdraw. [`InUse`] keeps an operation in flight and
-//! defers class-side teardown until the last use leaves. Both handles and their
-//! shared lifecycle state belong to the publication module.
+//! [`Registration`] owns withdrawal and cannot be cloned. [`Publication`] is a
+//! consumer reference whose drop never withdraws. [`InUse`] permits an operation
+//! and defers class-side teardown until the last use leaves. All three roles
+//! share one publication lifecycle and belong to the publication module.
 //!
 //! Modules remain private; consumers use the types re-exported at the crate root.
 
@@ -27,6 +27,6 @@ pub use class::{
     Class, ClassAvailabilityCallback, ClassHooks, ClassRemovalCallback, PublicationNode,
 };
 pub use owner::PublicationSource;
-pub use publication::{InUse, Publication, PublicationId};
+pub use publication::{InUse, Publication, Registration};
 
 unittest::path_mod_test!(tests, "../ut-tests/class.rs");

@@ -273,7 +273,7 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
             // the legacy model. The synthetic identity goes away together
             // with this bridge when the virtio family migrates.
             let device = VirtIoRng::try_new(transport, irq)?;
-            let publication = subsys_hwrng::HWRNG
+            let registration = subsys_hwrng::HWRNG
                 .attach_legacy(
                     "virtio-rng",
                     alloc::string::String::from("/legacy/virtio-rng"),
@@ -287,13 +287,13 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
                     kerrno::KError::AlreadyExists => DriverError::AlreadyExists,
                     _ => DriverError::Io,
                 })?;
-            // The publication is the class-side owner; dropping it would
+            // The registration is the class-side owner; dropping it would
             // withdraw the device again. The legacy tree has no removal
             // path for this device, so hold it for the kernel lifetime —
             // the same strong-reference semantics the old kclass registry
             // provided. Forgotten once the virtio family migrates and the
             // bridge dies.
-            core::mem::forget(publication);
+            core::mem::forget(registration);
             Ok(())
         }
         _ => Err(DriverError::Unsupported),

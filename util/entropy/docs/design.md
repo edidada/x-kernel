@@ -23,6 +23,13 @@ The four `EntropySource` implementations live in `source/arch_cpu.rs`,
 They delegate to the existing crate-level backends; `virtio.rs` adapts the
 Hwrng class into asynchronous pool replenishment.
 
+Consumers retain the operation-only HwrngPublication facade, not generic
+driver-class payload handles. The backend depends on subsys-hwrng only.
+Every read and failure query acquires a permit; withdrawal returns BadState.
+The collector stops when hardware is terminally failed or its publication is
+unavailable, instead of retrying a withdrawn source indefinitely. The mock
+fixture owns an explicit HwrngRegistration until its work has been shut down.
+
 ## Architecture and execution context
 
 Initialization mixes eligible eager sources and registers VirtIO discovery.

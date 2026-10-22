@@ -6,14 +6,13 @@
 
 use alloc::sync::Arc;
 
-use driver_class::Publication;
 use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
 use kworkng::{HandleCreateError, SubmitError, WorkHandle};
-use subsys_hwrng::{HwrngDevice, HwrngDeviceImpl, class::HWRNG};
+use subsys_hwrng::{HwrngPublication, class::HWRNG};
 
 // Back off failed reads, not in-flight device completion waits.
 const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(100);
@@ -30,7 +29,7 @@ struct VirtioEntropySource {
 
 // Work owns the collector, which never owns Work: no reference cycle is formed.
 struct EntropyCollector {
-    device: Publication<HwrngDeviceImpl>,
+    device: HwrngPublication,
     state: SpinNoIrq<CollectorState>,
 }
 
@@ -47,7 +46,7 @@ impl VirtioEntropySource {
     /// collector and class-registry locks must not enclose this call. The KERNEL
     /// callback allocation precedes publication; failure retains the old source.
     /// Nested Arc and worker allocations keep their existing failure behavior.
-    fn new(device: Publication<HwrngDeviceImpl>) -> KResult<Arc<Self>> {
+    fn new(device: HwrngPublication) -> KResult<Arc<Self>> {
         if !ktask::is_sleepable_context() {
             return Err(KError::InvalidInput);
         }
@@ -114,8 +113,10 @@ impl EntropyCollector {
                     break;
                 }
                 Err(error) => {
-                    if self.device.is_failed() {
-                        log::warn!("entropy: VirtIO entropy device failed: {error:?}");
+                    if self.device.is_failed().unwrap_or(true) {
+                        log::warn!(
+                            "entropy: VirtIO entropy device failed or was withdrawn: {error:?}"
+                        );
                         self.fail();
                         return;
                     }
@@ -158,7 +159,7 @@ pub(crate) fn is_disabled() -> bool {
 
 // Subscribe before enumerating to avoid missing newly published devices.
 pub(crate) fn register_sources() {
-    fn note_device(device: Publication<HwrngDeviceImpl>) {
+    fn note_device(device: HwrngPublication) {
         if !is_virtio_rng(device.name(), device.driver_name().unwrap_or("")) {
             return;
         }
@@ -166,7 +167,7 @@ pub(crate) fn register_sources() {
             let slot = SELECTED_SOURCE.lock();
             if let Some(source) = slot.as_ref() {
                 // Rediscovery of the same device must not restart a failed instance.
-                if source.collector.device.id() == device.id() {
+                if source.collector.device.same_publication(&device) {
                     return;
                 }
                 // Keep the selected healthy source; only a failed source may be replaced.

@@ -24,6 +24,10 @@ pub trait DriverOps<B: Bus>: Send + Sync + 'static {
 
     /// Quiesce the device. Guards inside `Data` are still alive here and are
     /// released after this returns; `dev` is the same handle probe received.
+    /// The model first marks the source offline to refuse new class uses.
+    /// Stop and join ongoing operations before releasing their independent
+    /// resources, or retain those resources in the shared runtime. Dropping a
+    /// Registration defers only its class hook, not the rest of Data.
     ///
     /// Linux shape: `remove(pdev)` then `dev_get_drvdata(pdev)`. Here the
     /// drvdata is passed typed and mutably as the second argument instead of

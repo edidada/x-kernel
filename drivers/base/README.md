@@ -20,7 +20,7 @@
 | `model/` / `driver-model` | `driver_model` | 设备模型、绑定与退出编排 |
 | `class/` / `driver-class` | `driver_class` | 通用发布、使用许可和撤销协调 |
 
-依赖方向为 `model → class`；hwrng 与 entropy 直接依赖 class，不依赖模型。
+依赖方向为 `model → class`、`hwrng → class`、`entropy → hwrng`；能力消费者不依赖模型。
 它们与 `drivers/contracts/driver_base` 中的旧 `driver_base` crate 分别演进。
 内核 `entry` 仅在 `unittest` feature 下链接 model，保证模型 UT 在迁移期间仍被执行。
 资源契约与 platform 总线暂留 model，后续按本文边界迁移。
@@ -53,10 +53,10 @@
 ### class 的内容归属
 
 - `Class<T>`、注册表和订阅机制：管理一类能力的发布集合。
-- `Publication<T>`、发布身份：区分发布所有者与消费者持有的借用句柄。
+- `Registration<T>`：唯一注册权；`Publication<T>`：可克隆的消费者引用。
 - `InUse<T>`、使用许可、在途计数：协调数据面操作与撤销。
 - 通用 hooks、撤销和延迟 teardown：完成发布生命周期。
-- `PublicationSource`：访问提供者的活身份，并请求模型执行共享身份的退出操作。
+- `PublicationSource`：只读访问提供者的活身份和在线状态，不授予设备退休权限。
 
 class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口和读取语义
 属于 hwrng 子系统；同理，block 和 net 的能力接口属于各自子系统。
@@ -77,10 +77,9 @@ class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口�
 模型仍拥有唯一的设备在线状态；class 的 drain gate 表示某项发布是否接受新
 操作，在途计数表示该发布尚有多少操作未退出，都不是设备在线状态的副本。
 
-当前实现保留原有协议：撤销一项 publication 时，通过 `mark_offline` 回调使
-共享设备身份 offline，其他 publication 也会观察到这一变化。模型拥有状态，
-但 class 能通过契约触发这个状态变化。因此“是否应允许一项能力独立撤销而
-设备仍在线”是需要单独 review 的行为问题，不能用拆成两个 crate 当作已经解决。
+Registration Drop 只撤销该项能力，不使共享设备身份 offline。设备移除时由
+model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalizer，不延迟
+驱动 Data 其他字段的析构。驱动必须等待操作退出或由共享 runtime 保有资源。
 
 ## base 拥有的职责
 
@@ -153,7 +152,7 @@ class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口�
 
 class 定义 `PublicationSource` 契约，model 的私有 `DeviceCore` 实现它；
 `Device::publish` 向 class 传递同一个身份的 `Arc`。模型仍持有唯一在线状态，
-class 通过模型实现的 `mark_offline` 回调完成原有共享退出协议。
+class 只读来源在线状态，单项注册独立撤销；设备下线由 model 决定。
 没有复制状态、公开 `DeviceCore` 或增加反向依赖。
 遗留设备的合成身份由 class 内部过渡适配器拥有，不依赖 model。
 
@@ -191,9 +190,9 @@ trait crate。
 
 review 优先确认以下事项，再决定下一项结构工作：
 
-1. `PublicationSource` 的查询与退休权限是否足够小，设备身份是否始终只有一个权威来源。
-2. 设备移除与单项 publication 撤销是否应具有相同效果，特别是多能力设备。
-3. 发布拥有者、消费者借用、在途操作与驱动私有数据的生命周期是否一致。
+1. `PublicationSource` 的只读查询权限是否足够小，设备身份是否始终只有一个权威来源。
+2. 设备移除与单项 publication 撤销是否保持隔离，特别是多能力设备。
+3. 注册凭证、消费者引用、在途操作与驱动私有数据的生命周期是否一致。
 4. 遗留桥接和新模型入口是否清楚区分，错误回退与跨 crate 测试是否覆盖交接处。
 
 这些行为判断不会仅靠增加 crate 数量得到答案；review 发现的问题应按状态和

@@ -6,8 +6,8 @@
 `src/completion.rs` defines the host-injected wait capability. Neither owns
 scheduler state, DMA storage, entropy accounting, or source trust policy.
 
-`src/class.rs` defines the hwrng-specific `HWRNG` registry and implements
-the read contract for `driver_class::Publication`. Generic admission,
+`src/class.rs` defines HwrngClass, its HWRNG instance, HwrngRegistration
+and the operation-only HwrngPublication consumer facade. Generic admission,
 withdrawal and in-flight teardown belong to `drivers/base/class`; this crate
 does not depend on the device binding model in `drivers/base/model`.
 
@@ -42,3 +42,18 @@ Retries require a valid sleepable context and consumer-owned backoff. A read
 error delivers no bytes and does not invalidate a submitted DMA request. The
 contract does not define hotplug, reset or an offline event protocol; the
 driver and host own resource lifetime.
+
+## Publication lifecycle
+
+HwrngRegistration is non-cloneable and owns generic Registration. Its drop
+withdraws the capability; HwrngPublication clones only keep shared memory alive.
+The registry and callbacks expose HwrngPublication, never the generic payload.
+Both read and is_failed acquire operation permits. is_failed returns KResult<bool>:
+BadState means the capability is unavailable, not terminal hardware failure.
+There is no raw runtime accessor or Deref on the consumer facade, preventing
+consumers from cloning the underlying driver Arc out of an operation permit.
+The provider trait HwrngDevice remains unchanged; its raw failure query is bool.
+Existing reads retain their permits until completion. Withdrawal cannot cancel a
+hung device request; DMA stop/reset and joining hardware operations remain the
+concrete driver's responsibility. The legacy boot bridge retains its registration
+for kernel lifetime and does not implement hot removal.

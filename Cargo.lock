@@ -1405,7 +1405,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entropy"
 version = "0.3.0-dev"
 dependencies = [
- "driver-class",
  "kalloc-types",
  "karch",
  "kerrno",

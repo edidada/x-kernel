@@ -21,6 +21,12 @@ Real-device fixtures retain serial execution and borrow boot-owned RNG handles;
 the controlled collector fixture retains its serial device-registration and
 cleanup sequence.
 
+HwrngPublication does not expose the raw driver Arc. Reads and failure queries
+are gated; a withdrawn publication stops the collector without calling hardware.
+Unavailable publication and terminal hardware failure both disable collection,
+but withdrawal does not assert a hardware fault. A held consumer reference alone
+neither keeps registration active nor grants permission to access the device.
+
 Hardware, firmware and VMM-produced bytes enter through source adapters. This
 crate does not access user pointers, MMIO or DMA directly. VirtIO bytes depend
 on host trust expressed by enabling `entropy_virtio_rng`; the Hwrng class itself

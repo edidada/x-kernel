@@ -1358,6 +1358,49 @@ mod publication_contract {
 
     use crate::device::{DeviceCore, DeviceId};
 
+    #[def_test(serial)]
+    fn device_removal_closes_source_before_driver_quiesce() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        static CLASS: Class<u32> = Class::new(());
+        static CLOSED_AT_REMOVE: AtomicBool = AtomicBool::new(false);
+        struct Publisher;
+        impl crate::driver::DriverOps<crate::PlatformBus> for Publisher {
+            type Data = driver_class::Registration<u32>;
+
+            fn probe(
+                &self,
+                dev: &mut crate::Device<'_, crate::PlatformBus>,
+            ) -> Result<Self::Data, crate::ProbeError> {
+                dev.publish(&CLASS, 42, "model-runtime")
+                    .map_err(|_| crate::ProbeError::Fatal(crate::RuntimeError::BadState))
+            }
+
+            fn remove(
+                &self,
+                _dev: &mut crate::Device<'_, crate::PlatformBus>,
+                data: &mut Self::Data,
+            ) {
+                CLOSED_AT_REMOVE.store(data.publication().acquire_use().is_err(), Ordering::SeqCst);
+            }
+        }
+        CLOSED_AT_REMOVE.store(false, Ordering::SeqCst);
+        let (domain, _services) = super::fresh_domain();
+        domain.register_driver(crate::driver::DriverDesc::new(
+            "publisher",
+            super::IDS,
+            Publisher,
+        ));
+        let device = domain.add_device(super::test_descriptor()).unwrap();
+        let consumer = CLASS.devices().pop().unwrap();
+        let permit = consumer.acquire_use().unwrap();
+        domain.remove_device(device).unwrap();
+        assert!(CLOSED_AT_REMOVE.load(Ordering::SeqCst));
+        assert!(!consumer.is_available());
+        assert!(CLASS.devices().is_empty());
+        assert_eq!(permit.with(|value| *value), 42);
+    }
+
     impl DeviceCore {
         pub(crate) fn synthetic(
             device_id: DeviceId,
@@ -1381,14 +1424,18 @@ mod publication_contract {
         );
         owner.bind_driver("model-test-driver");
         let publication = CLASS.publish(owner.clone(), 1, "device").unwrap();
-        assert_eq!(publication.driver_name(), Some("model-test-driver"));
-        assert_eq!(publication.location(), "platform/model-test");
+        assert_eq!(
+            publication.publication().driver_name(),
+            Some("model-test-driver")
+        );
+        let consumer = publication.publication();
+        assert_eq!(consumer.location(), "platform/model-test");
         assert_eq!(
             CLASS.publish(owner.clone(), 2, "device").unwrap_err(),
             kerrno::KError::AlreadyExists
         );
         assert!(owner.is_online());
-        let borrow = publication.clone();
+        let borrow = publication.publication();
         owner.mark_offline();
         assert!(!borrow.is_available());
         drop(publication);
@@ -1396,7 +1443,7 @@ mod publication_contract {
     }
 
     #[def_test(serial)]
-    fn class_withdrawal_retires_shared_model_identity_without_freeing_in_flight_data() {
+    fn class_withdrawal_preserves_siblings_and_in_flight_data() {
         static FIRST: Class<u32> = Class::new(());
         static SECOND: Class<u32> = Class::new(());
 
@@ -1404,12 +1451,12 @@ mod publication_contract {
             DeviceCore::synthetic(DeviceId(2), "model-test", String::from("platform/shared"));
         let first = FIRST.publish(owner.clone(), 11, "first").unwrap();
         let second = SECOND.publish(owner.clone(), 22, "second").unwrap();
-        let in_flight = first.acquire_use().unwrap();
+        let in_flight = first.publication().acquire_use().unwrap();
         drop(first);
-        assert!(!owner.is_online());
-        assert!(!second.is_available());
+        assert!(owner.is_online());
+        assert!(second.publication().is_available());
         assert_eq!(in_flight.with(|value| *value), 11);
-        assert!(second.acquire_use().is_err());
+        assert!(second.publication().acquire_use().is_ok());
         drop(in_flight);
         drop(second);
         assert!(FIRST.devices().is_empty());
