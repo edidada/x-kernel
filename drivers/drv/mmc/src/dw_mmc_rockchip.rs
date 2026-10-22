@@ -39,18 +39,10 @@ static IDS: &[PlatformId] = &[
     PlatformId::Of(OfMatch::compatible("rockchip,rk3288-dw-mshc")),
 ];
 
-/// Driver-private data (`struct dw_mci` ownership): the IRQ binding and
-/// one reference to the shared host.
-///
-/// Drop order is the safety argument: this Data drops first at remove,
-/// which unbinds the IRQ (`_irq`); the host itself — owning its DMA
-/// mappings — lives until the LAST reference goes, which is the card
-/// device's Data, cascaded away through the parent edge before this
-/// device finishes teardown.
+/// Driver-private data: the IRQ binding and one reference to the shared
+/// host (which owns the DMA mappings — see the dw_mmc drop-order note).
 pub struct DwMmcRockchipData {
-    /// Pins the host for the device's lifetime (see the drop-order note).
     _host: Arc<DwMmcHost>,
-    /// Keeps the card-detect/data IRQ bound for the device's lifetime.
     _irq: driver_base::DevIrq,
 }
 
