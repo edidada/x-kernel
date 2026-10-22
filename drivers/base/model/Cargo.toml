@@ -1,5 +1,5 @@
 [package]
-name = "driver-base"
+name = "driver-model"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,6 +11,7 @@ keywords = ["driver", "x-kernel"]
 categories = ["os", "no-std"]
 
 [dependencies]
+driver_class.workspace = true
 kerrno.workspace = true
 kspin.workspace = true
 kirq = { workspace = true }

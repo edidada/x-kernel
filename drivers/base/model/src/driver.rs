@@ -63,10 +63,10 @@ impl<B: Bus, P: DriverOps<B>> DriverDesc<B, P> {
 ///
 /// ```ignore
 /// static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
-/// driver_base::declare_driver!(PlatformBus, Pl011Driver, "pl011-serial", IDS);
+/// driver_model::declare_driver!(PlatformBus, Pl011Driver, "pl011-serial", IDS);
 ///
 /// // A family with two entry points names the generated function:
-/// driver_base::declare_driver!(PlatformBus, Ns16550MmioDriver, "ns16550-mmio", MMIO_IDS => register_mmio);
+/// driver_model::declare_driver!(PlatformBus, Ns16550MmioDriver, "ns16550-mmio", MMIO_IDS => register_mmio);
 /// ```
 #[macro_export]
 macro_rules! declare_driver {

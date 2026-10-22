@@ -6,6 +6,11 @@
 `src/completion.rs` defines the host-injected wait capability. Neither owns
 scheduler state, DMA storage, entropy accounting, or source trust policy.
 
+`src/class.rs` defines the hwrng-specific `HWRNG` registry and implements
+the read contract for `driver_class::Publication`. Generic admission,
+withdrawal and in-flight teardown belong to `drivers/base/class`; this crate
+does not depend on the device binding model in `drivers/base/model`.
+
 ## Architecture and execution context
 
 Consumers use `HwrngDevice::read`; concrete drivers receive an

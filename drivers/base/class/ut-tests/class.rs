@@ -14,15 +14,37 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kerrno::{KError, KResult};
 use unittest::{assert_eq, def_test};
 
-use super::class_api::{Class, ClassHooks, PublicationNode};
-use crate::device::{DeviceCore, DeviceId};
+use super::{
+    Publication, PublicationId,
+    class_api::{Class, ClassHooks, PublicationNode},
+};
+use crate::{PublicationOwner, owner::LegacyOwner};
+
+impl<T> Publication<T> {
+    /// Detached publication for tests: its own device identity, no registry,
+    /// no withdrawal. `offline` mirrors an already-removed device.
+    pub fn detached(
+        _device_id: u64,
+        driver_name: &'static str,
+        path: String,
+        runtime: T,
+        name: &str,
+        offline: bool,
+    ) -> Self {
+        let owner = LegacyOwner::new(driver_name, path);
+        if offline {
+            owner.mark_offline();
+        }
+        Self::new(owner, runtime, String::from(name), PublicationId::next())
+    }
+}
 
 fn loc(id: u32) -> String {
     format!("platform/firmware{id}")
 }
 
-fn owner(id: u32) -> Arc<DeviceCore> {
-    DeviceCore::synthetic(DeviceId(id as u64), "test-driver", loc(id))
+fn owner(id: u32) -> Arc<LegacyOwner> {
+    LegacyOwner::new("test-driver", loc(id))
 }
 
 /// One publication: the value `publish` returns is the owner; clones handed
@@ -219,6 +241,9 @@ fn duplicate_publish_of_same_owner_and_name_is_refused() {
     // A different owner may reuse the name (Linux: same name under a
     // different parent is a different device).
     let other = CLASS.publish(owner(10), 3u32, "dev");
-    assert!(other.is_ok(), "same name under a different owner is allowed");
+    assert!(
+        other.is_ok(),
+        "same name under a different owner is allowed"
+    );
     drop(first);
 }

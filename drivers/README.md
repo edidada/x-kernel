@@ -3,6 +3,11 @@
 The driver subsystem is split by role. Keep new code in the layer that owns the
 contract it is implementing or consuming.
 
+The new device model is being migrated under [`base/`](base/README.md):
+`driver-model` owns binding and device lifecycle, while `driver-class` owns
+generic publication and withdrawal. The legacy crates listed below remain
+in use during migration; hwrng already consumes the independent class crate.
+
 ## Layers
 
 ```text

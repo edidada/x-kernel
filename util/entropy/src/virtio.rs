@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use driver_base_ng::Publication;
+use driver_class::Publication;
 use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use klazy::Lazy;

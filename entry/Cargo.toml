@@ -10,6 +10,7 @@ homepage.workspace = true
 [features]
 unittest = [
     "kfeat/kernel-tests",
+    "dep:driver_model",
     "kruntime/irq-work-test",
     "dep:kworkerpool_ng",
     "dep:kworkqueue_ng",
@@ -20,6 +21,7 @@ unittest = [
 dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]
+driver_model = { workspace = true, optional = true }
 kvfs.workspace = true
 kcred.workspace = true
 fs_context.workspace = true

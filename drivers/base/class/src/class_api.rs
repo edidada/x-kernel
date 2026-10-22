@@ -30,7 +30,7 @@ use kerrno::KResult;
 use kspin::SpinNoPreempt;
 
 use super::{ClassRegistry, Publication, PublicationId};
-use crate::device::DeviceCore;
+use crate::owner::{LegacyOwner, PublicationOwner};
 
 /// The identity a class hook needs to publish its user-visible projection
 /// (`devnode::publish`, `add_disk`, ...).
@@ -93,14 +93,14 @@ where
 
     /// Publish a runtime capability into this class.
     ///
-    /// Called by [`Device::publish`](crate::Device::publish) — the driver-side
+    /// Called by `Device::publish` — the driver-side
     /// door — with the device's live identity. The name arrives explicitly:
     /// the driver built it, it owns it. The class's publish hook runs before
     /// the registry insert; on registry failure the hook is unwound so no
     /// class-side state leaks.
-    pub(crate) fn publish(
+    pub fn publish(
         &'static self,
-        owner: Arc<DeviceCore>,
+        owner: Arc<dyn PublicationOwner>,
         runtime: T,
         name: impl Into<String>,
     ) -> KResult<Publication<T>> {
@@ -147,7 +147,7 @@ where
 
     /// Transitional door for a publisher still living on the legacy device
     /// model: publish `runtime` under a synthetic identity instead of a
-    /// probed [`Device`](crate::Device). `driver_name` and `path` stand in
+    /// probed `Device`. `driver_name` and `path` stand in
     /// for the DEVPATH identity the legacy tree cannot supply.
     ///
     /// This exists only while the legacy virtio publisher migrates onto the
@@ -162,7 +162,7 @@ where
         runtime: T,
         name: impl Into<String>,
     ) -> KResult<Publication<T>> {
-        let owner = DeviceCore::synthetic(crate::DeviceId(0), driver_name, path);
+        let owner = LegacyOwner::new(driver_name, path);
         self.publish(owner, runtime, name)
     }
 

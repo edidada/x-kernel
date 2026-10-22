@@ -7,7 +7,7 @@
 
 use alloc::sync::Arc;
 
-use driver_base_ng::{Publication, class::class_api::Class};
+use driver_class::{Class, Publication};
 use kerrno::KResult;
 
 use super::HwrngDevice;

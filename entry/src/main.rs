@@ -10,6 +10,8 @@
 extern crate klogger;
 
 extern crate alloc;
+#[cfg(feature = "unittest")]
+extern crate driver_model;
 extern crate kfeat;
 extern crate kpm;
 extern crate kruntime;

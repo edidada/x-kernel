@@ -1,12 +1,17 @@
-# driver-base — 安全与可靠性分析
+# driver-model — 安全与可靠性分析
 
 ## Scope
 
-`drivers/base/src/`：`bus/`、`driver.rs`、`device.rs`、`error.rs`、`resource.rs`、
-`provider.rs`、`devres/`（含 `host_api.rs` 的 host 侧 Op 契约）、`class/`、
+`drivers/base/model/src/`：`bus/`、`driver.rs`、`device.rs`、`error.rs`、`resource.rs`、
+`provider.rs`、`devres/`（含 `host_api.rs` 的 host 侧 Op 契约）、
 `domain/{mod,registry,probe,dependency,lifecycle}.rs`。
-测试 `domain/tests.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
+测试 `ut-tests/domain.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
 一个具体实例。
+
+通用 class 已移到独立 `driver-class`，见 [class 安全分析](../../class/docs/security.md)。
+模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationOwner` 提供
+只读身份查询与幂等退休回调。跨 crate 传递同一个 `Arc` allocation，保证重复
+发布检测和共享在线状态不因拆分改变。class 不依赖模型或访问其私有字段。
 
 ## 信任模型
 
@@ -52,7 +57,7 @@
 
 | 位置 | 依赖的不变量 | 为什么安全 | 由谁保证 |
 |---|---|---|---|
-| `device.rs:205` `IoMap::new`（**唯一的 `pub unsafe fn`**） | `vaddr` 指向一个至少 `region.size` 字节、在本句柄生命周期内有效的映射，且调用方拥有该映射（配对最终的 release） | 这是把裸地址变成受检句柄的唯一入口；标记 `unsafe` 正是为了让"任意 `usize` 到达 volatile 访问器"在类型上不可能 | 全树两个调用点：`driver-host/src/lib.rs:182`（provider 刚 `map_mmio` 成功）、`domain/tests.rs:101`（mock，`release = None`） |
+| `device.rs:205` `IoMap::new`（**唯一的 `pub unsafe fn`**） | `vaddr` 指向一个至少 `region.size` 字节、在本句柄生命周期内有效的映射，且调用方拥有该映射（配对最终的 release） | 这是把裸地址变成受检句柄的唯一入口；标记 `unsafe` 正是为了让"任意 `usize` 到达 volatile 访问器"在类型上不可能 | 全树两个调用点：`driver-host/src/lib.rs:182`（provider 刚 `map_mmio` 成功）、`ut-tests/domain.rs`（mock，`release = None`） |
 | `device.rs:252` `access_ptr` 末尾的 `as_ptr().add(offset)` | `offset + size <= region.size` 且 `vaddr + offset` 按 `size` 对齐 | 两个条件在同一函数内**先检查后计算**：对齐不满足 panic，越界 `assert!` | `access_ptr` 是私有函数，8 个访问器全部经过它 |
 | `device.rs:259/268/277/286` `read_volatile` | 指针有效且对齐 | `access_ptr` 已保证；`read8` 无对齐要求 | 同上 |
 | `device.rs:295/302/309/316` `write_volatile` | 同上 | 同上 | 同上 |
@@ -61,7 +66,7 @@
 `debug_assert!`，release 构建下未对齐的 `read_volatile::<u32>` 直接是 UB；
 本 crate 改成总是检查（`access_ptr` 里带 `CG-021` 例外说明的 `panic!`）。
 
-`domain/tests.rs` 另有 2 处 `unsafe`（mock 的 `IoMap::new`、把
+`ut-tests/domain.rs` 另有 2 处 `unsafe`（mock 的 `IoMap::new`、把
 `Arc<MockServices>` 泄漏成 `&'static`），仅 `cfg(unittest)`。
 
 ## 内存安全不变量
@@ -197,7 +202,7 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
       或过早 `Unclaimed`。
 - [ ] 新的 `unsafe` 是否有紧邻的 `SAFETY:` 说明，并写清哪个 safe 入口保证不变量？
 - [ ] 新的公开 API 是否有 rustdoc（含 `# Errors` / `# Panics` / `# Safety`）？
-- [ ] `domain/tests.rs` 是否覆盖了新的状态迁移？特别注意：涉及关联/ID 的修复，
+- [ ] `ut-tests/domain.rs` 是否覆盖了新的状态迁移？特别注意：涉及关联/ID 的修复，
       回归测试必须覆盖那条关联链本身（`docs/driver-framework-review.md` §8.4 教训 2）。
 - [ ] 是否引入了对某个设备家族的命名？如果是，应该改成 `ExtensionService`。
 - [ ] 新增的公共名词能否归入 Device / Driver / Bus / Resource / Class /

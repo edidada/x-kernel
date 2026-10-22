@@ -7,6 +7,11 @@ pointers or DMA, and provides no entropy-quality guarantee. Consumers decide
 whether to credit returned bytes as entropy. Implementations must validate
 device lengths before copying into caller-owned buffers.
 
+The hwrng publication adapter delegates availability and in-flight admission
+to `driver_class`, which owns the generic withdrawal protocol. Device-model
+identity remains behind its `PublicationOwner` contract; hwrng neither reads
+model internals nor maintains a second device-online flag.
+
 ## Memory and thread safety
 
 The contract contains no unsafe code. Drivers serialize consumption so concurrent

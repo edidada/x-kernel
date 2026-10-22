@@ -60,6 +60,24 @@ pub(crate) struct DeviceCore {
     offline: core::sync::atomic::AtomicBool,
 }
 
+impl driver_class::PublicationOwner for DeviceCore {
+    fn driver_name(&self) -> Option<&'static str> {
+        self.driver_name()
+    }
+
+    fn physical_path(&self) -> &str {
+        self.physical_path()
+    }
+
+    fn is_online(&self) -> bool {
+        self.is_online()
+    }
+
+    fn mark_offline(&self) {
+        self.mark_offline();
+    }
+}
+
 impl DeviceCore {
     /// The driver that claimed this device, once probing started.
     pub(crate) fn driver_name(&self) -> Option<&'static str> {
@@ -85,23 +103,6 @@ impl DeviceCore {
     pub(crate) fn mark_offline(&self) {
         self.offline
             .store(true, core::sync::atomic::Ordering::Release);
-    }
-
-    /// A synthetic core for tests and model-external devices: same shape,
-    /// no domain behind it. Production paths always publish under a core
-    /// the domain created; the one production consumer is the legacy-
-    /// publisher bridge in [`Class::attach_legacy`](class::class_api::Class::attach_legacy).
-    pub(crate) fn synthetic(
-        id: DeviceId,
-        driver_name: &'static str,
-        physical_path: alloc::string::String,
-    ) -> alloc::sync::Arc<Self> {
-        let _ = id;
-        alloc::sync::Arc::new(Self {
-            driver_name: kspin::SpinNoPreempt::new(Some(driver_name)),
-            physical_path,
-            offline: core::sync::atomic::AtomicBool::new(false),
-        })
     }
 
     pub(crate) fn new(
@@ -212,20 +213,20 @@ impl<'a, B: Bus> Device<'a, B> {
     /// Publish a runtime capability into a device class (`device_create` /
     /// `add_disk`): the ONE class-publication door.
     ///
-    /// The returned [`Publication`](crate::Publication) is the owner: store it
+    /// The returned [`Publication`](driver_class::Publication) is the owner: store it
     /// in `DriverOps::Data` (first field) and dropping it unpublishes — after
     /// the last in-flight consumer leaves. `dev` supplies the shared device
     /// identity (driver name, DEVPATH, liveness); the class supplies the
     /// runtime type and its hooks.
     pub fn publish<T, H>(
         &self,
-        class: &'static crate::class::class_api::Class<T, H>,
+        class: &'static driver_class::Class<T, H>,
         runtime: T,
         name: impl Into<alloc::string::String>,
-    ) -> kerrno::KResult<crate::Publication<T>>
+    ) -> kerrno::KResult<driver_class::Publication<T>>
     where
         T: Send + Sync + 'static,
-        H: crate::class::class_api::ClassHooks<T>,
+        H: driver_class::ClassHooks<T>,
     {
         class.publish(self.core.clone(), runtime, name)
     }

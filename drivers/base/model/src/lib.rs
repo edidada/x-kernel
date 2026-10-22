@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device model spine for porting Linux drivers into x-kernel.
+//! Device identity, binding and lifecycle model for portable drivers.
 //!
 //! This crate is the device model core of the driver framework. It keeps a
 //! deliberate structural homomorphism with the Linux driver model so that
@@ -21,6 +21,10 @@
 //! | `dma_alloc_coherent` / `dmam_alloc_coherent` | [`Device::alloc_coherent`] |
 //! | `clk_get(dev, "apb_pclk")` | [`Device::clk`] |
 //! | `-EPROBE_DEFER` | [`ProbeError::Deferred`] |
+//!
+//! Class publication is provided by `driver_class`; this crate owns the device
+//! identity and implements its `PublicationOwner` contract without exposing
+//! internal device state.
 //!
 //! # Ownership model
 //!
@@ -69,7 +73,7 @@
 //! **L0-b — the contracts here are host-free.** [`DeviceResourceServices`],
 //! [`ClockConsumerServices`] and [`DeviceServices`] must not name a
 //! host-kernel type in their signatures, because that is what lets the model
-//! be exercised against a mock (`domain/tests.rs` runs 19 state-machine tests
+//! be exercised against a mock (`ut-tests/domain.rs` runs 19 state-machine tests
 //! on `MockServices`). The one deliberate exception is the IRQ *vocabulary*
 //! re-exported by [`crate::resource`] (`IrqTrigger`, `IrqController`,
 //! `IrqDomainId`): those shapes are defined exactly once in the tree, in
@@ -84,7 +88,6 @@
 extern crate alloc;
 
 pub mod bus;
-pub mod class;
 mod device;
 pub mod devres;
 mod domain;
@@ -105,9 +108,6 @@ pub use bus::{
     platform_bus::{
         AliasMatch, OfMatch, PlatformBus, PlatformBusData, PlatformBusIdentity, PlatformId,
     },
-};
-pub use class::{
-    ClassAvailabilityCallback, ClassRemovalCallback, InUse, Publication, PublicationId,
 };
 pub use desc::DeviceDescriptor;
 pub use device::{Device, DeviceId};

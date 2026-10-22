@@ -1257,9 +1257,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "driver-base"
+name = "driver-class"
 version = "0.3.0-dev"
 dependencies = [
+ "kerrno",
+ "kspin",
+ "log",
+ "unittest",
+]
+
+[[package]]
+name = "driver-model"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-class",
  "kerrno",
  "kirq",
  "kspin",
@@ -1394,7 +1405,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "entropy"
 version = "0.3.0-dev"
 dependencies = [
- "driver-base",
+ "driver-class",
  "kalloc-types",
  "karch",
  "kerrno",
@@ -1417,6 +1428,7 @@ dependencies = [
 name = "entry"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-model",
  "fs_context",
  "kbuild_config",
  "kcpu_id_map",
@@ -5424,7 +5436,7 @@ dependencies = [
 name = "subsys-hwrng"
 version = "0.3.0-dev"
 dependencies = [
- "driver-base",
+ "driver-class",
  "kerrno",
  "kspin",
  "unittest",

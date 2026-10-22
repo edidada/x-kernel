@@ -1,18 +1,24 @@
-# driver-base — 设计文档
+# driver-model — 设计文档
 
 ## 定位
 
-X-Kernel 唯一的设备模型核心。它拥有 bus/device/driver 三类契约、const id 表、
+新驱动设备模型。它拥有 bus/device/driver 三类契约、const id 表、
 deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceServices`）。
 
-依赖它的层：`drivers/host`（实现服务契约）、`drivers/init`（组合根）、
-`bus/pci`（实现 `Bus`）、`drv/**`（实现 `DriverOps`）。`devnode` **不**在这一层：
-它不依赖 `driver-base`，也不认识 `Device`/`DeviceDomain`（见 `drivers/devnode/docs/design.md`）。
+当前作为独立 workspace member 保留模型与 UT；hwrng 和 entropy 直接依赖
+`driver-class`，不再经此 crate 使用发布能力。host 服务实现、总线枚举和具体
+驱动后续通过对应契约接入，旧设备模型仍在迁移中。
+`entry` 的 `unittest` feature 显式链接本 crate，保证模型测试没有随着生产依赖拆分而丢失。
 
-它**不**依赖任何设备家族，也**不**依赖 `memspace`/`kdma`/`khal`。唯一的主机侧
-依赖是 `kirq` 的**类型词汇**（`IrqTrigger`/`IrqController`/`IrqDomainId`，
-在 `resource.rs` 里 re-export），这是全树 IRQ 形状只定义一次的刻意决定，
-见 `docs/ai/driver-subsystem-boundaries.md` 的"kirq is common vocabulary"一节。
+它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`。当前资源描述引用
+`kirq` 类型，`devres/host_api.rs` 还引用 `kirq::IrqHandler`；这是后续资源契约
+迁移需要处理的遗留依赖，不是可移植边界的永久例外。
+
+依赖方向为 `driver-model → driver-class`。私有 `DeviceCore` 实现
+`PublicationOwner`，`Device::publish` 将同一个 `Arc` 身份交给 class。
+class 通过模型实现的退休回调更新共享 offline 状态，不能修改绑定信息。
+`domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
+发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
 
 ## 背景
 
@@ -43,14 +49,16 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/resource.rs` | `ResourceMap`（命名资源表）、`ResourceKind`、`MmioRegion`、`IoPortRange`、`IrqSpec`、`ClkSpec`、`Virq`（OS 可见中断号，与固件 hwirq 结构性区分） |
 | `src/provider.rs` | provider 注册惯例（**唯一一条**）：`ProviderClass`（一个 provider 家族 = key/lookup/`DepKind` 描述符）、`ProviderRegistration`（类型擦除的一次发布）、`ProviderServices`（host 侧落点） |
 | `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
-| `src/class/` | `Class<T,H>`（registry + hooks）+ `Publication<T>`（所有者/数据面/teardown）+ `InUse<T>`（在途计数 guard）+ `PublicationId`；devnode 投影与撤销在 `Publication` 的发布/撤销路径里。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
+| `driver_class`（独立 crate） | `Class<T,H>`（registry + hooks）+ `Publication<T>`（所有者/数据面/teardown）+ `InUse<T>`（在途计数 guard）+ `PublicationId`；devnode 投影与撤销在 `Publication` 的发布/撤销路径里。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
 | `src/devres/host_api.rs` | 主机实现的 Op 契约（每资源家族一个 vtable）：`MmioOp`/`IrqOp`/`DmaOp`/`ClkOps` + `IrqRouteDesc`/`MsiResource`；host 面，`drv/**` 不得命名 |
 | `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（唯一的进程级域名入口，组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
 | `src/domain/lifecycle.rs` | 移除编排：独占声明、children-first 级联、teardown 分相（`remove()` → drop `Data`；没有观察者/通知旁路） |
-| `src/domain/tests.rs` | 模型单测（`MockServices` 上运行），含 `dev.provide` provider 门与 defer/wake 链路 |
+| `ut-tests/domain.rs` | 模型单测（`MockServices` 上运行），含 `dev.provide` provider 门与 defer/wake 链路 |
+| `ut-tests/domain.rs` 中的 publication 契约测试 | 模型测试身份构造与跨 crate 发布生命周期验证 |
+| `ut-tests/firmware.rs`、`ut-tests/platform_bus.rs` | firmware 与 platform bus 单测 |
 
 ## 架构
 
@@ -97,7 +105,7 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时 id 仍全�
 - 没有 lifecycle observer / remove notifier：域状态机是移除的唯一权威，
   发布回收由 `Data` 持有的 `Publication` 完成。类发布的 `ClassHooks::unpublish`
   （`del_gendisk`、transport close）在仍有在途 `Publication` 时推迟到最后一个 drop
-  ——见 `src/class/mod.rs` 的 `finish_or_defer`。
+  ——见 `../class/src/lib.rs` 的 `finish_or_defer`。
 - `global_domain()` 可在早期启动调用（`LazyInit::call_once`）；但
   `set_services` 之前所有资源获取都落到 `NoServices`，返回
   `RuntimeError::Unsupported`。这是刻意的"响亮失败"，不是静默降级。
@@ -220,7 +228,7 @@ pending/deferred 工作表摘掉、直接释放 entry。
   `select_batch` 对每个待探测设备深拷贝 `DeviceDescriptor`（含
   `Vec<String>` compatibles），`modalias` 每次重算。probe 是每设备一次性路径，
   不是热路径；优化需要改 `matches()` 的返回形状，等有真实吞吐需求再做。
-- class 注册表（`driver-base::class` 的 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
+- class 注册表（`driver-model::class` 的 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
   但同样是已知的、被接受的小集合线性扫描。
 
 ## 设计决策
@@ -244,7 +252,7 @@ pub unsafe fn new(vaddr: usize, region: MmioRegion, release: Option<ReleaseHook>
 
 一个 safe 构造器会让任意 `usize` 到达 volatile 访问器——那是 soundness 洞，
 不是使用不便。全树只有两个调用点：`driver-host`（provider 刚映射完）和
-`domain/tests.rs` 的 `MockServices`。
+`ut-tests/domain.rs` 的 `MockServices`。
 
 ### 一把锁，而不是分层锁
 
@@ -262,7 +270,7 @@ pub trait Bus: Sized + Send + Sync + 'static {
 }
 ```
 
-新总线在自己的 crate 里实现，`driver-base` 不枚举任何东西。旧模型的
+新总线在自己的 crate 里实现，`driver-model` 不枚举任何东西。旧模型的
 `BusTypeId` 虽然是 `&'static str` newtype，但 `BusTypeObject::new_builtin` 对
 非 PCI/PLATFORM 直接 panic，匹配策略硬编码在模型 crate 里。
 
@@ -333,4 +341,4 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 `ReleaseHook = Arc<dyn Fn() + Send + Sync>` 是每个 guard 携带的延迟释放钩子，
 由 `driver-host` 在构造 guard 时注入（例如 `move || provider.unmap_mmio(mapping)`）。
-`driver-base` 自己从不实现释放动作。
+`driver-model` 自己从不实现释放动作。

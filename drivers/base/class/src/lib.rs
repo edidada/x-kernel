@@ -21,9 +21,13 @@
 //! [`Class::devices`]/[`Class::find`]/subscriptions are **borrows**: they
 //! never withdraw. Only the value produced by `publish` is the owner.
 //!
-//! [`Class::publish`]: crate::class::class_api::Class::publish
-//! [`Class::devices`]: crate::class::class_api::Class::devices
-//! [`Class::find`]: crate::class::class_api::Class::find
+//! [`Class::publish`]: crate::class_api::Class::publish
+//! [`Class::devices`]: crate::class_api::Class::devices
+//! [`Class::find`]: crate::class_api::Class::find
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -31,9 +35,76 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 
-use crate::device::DeviceCore;
+mod owner {
+    //! Live identity supplied by the device model or the legacy publisher bridge.
 
-pub mod class_api;
+    use alloc::{string::String, sync::Arc};
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// Device-model contract for a publication's shared live identity.
+    ///
+    /// The model retains ownership of the state and must reuse the same `Arc`
+    /// allocation for all publications of one device. Class registries compare
+    /// allocation identity, not paths or numeric identifiers, for duplicate detection.
+    /// Methods run outside the class registry lock in task context; they must not
+    /// reenter publication withdrawal. The path must remain stable for this identity.
+    pub trait PublicationOwner: Send + Sync + 'static {
+        /// Driver currently claiming the device; `None` prevents publication.
+        fn driver_name(&self) -> Option<&'static str>;
+
+        /// Stable physical path used by class projections.
+        fn physical_path(&self) -> &str;
+
+        /// Whether the device still backs its published capabilities.
+        fn is_online(&self) -> bool;
+
+        /// Permanently retire this identity after a publication is withdrawn.
+        ///
+        /// This idempotent model callback preserves the shared-device retirement
+        /// protocol: all publications observe the same offline state. It must not
+        /// free runtime payloads; class teardown waits for its own in-flight users.
+        fn mark_offline(&self);
+    }
+
+    pub(crate) struct LegacyOwner {
+        driver_name: &'static str,
+        physical_path: String,
+        offline: AtomicBool,
+    }
+
+    impl LegacyOwner {
+        pub(crate) fn new(driver_name: &'static str, physical_path: String) -> Arc<Self> {
+            Arc::new(Self {
+                driver_name,
+                physical_path,
+                offline: AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl PublicationOwner for LegacyOwner {
+        fn driver_name(&self) -> Option<&'static str> {
+            Some(self.driver_name)
+        }
+
+        fn physical_path(&self) -> &str {
+            &self.physical_path
+        }
+
+        fn is_online(&self) -> bool {
+            !self.offline.load(Ordering::Acquire)
+        }
+
+        fn mark_offline(&self) {
+            self.offline.store(true, Ordering::Release);
+        }
+    }
+}
+
+pub use class_api::{Class, ClassHooks, PublicationNode};
+pub use owner::PublicationOwner;
+
+mod class_api;
 
 /// Opaque handle of one class publication.
 ///
@@ -79,7 +150,7 @@ struct Inner<T> {
     id: PublicationId,
     /// The device this publication belongs to — THE shared identity: name,
     /// path and liveness all come from here, never from a snapshot.
-    owner: Arc<DeviceCore>,
+    owner: Arc<dyn PublicationOwner>,
     runtime: T,
     name: String,
     /// In-flight operation count. `class_remove` flips `draining` BEFORE the
@@ -130,7 +201,12 @@ impl<T> Drop for Publication<T> {
 impl<T> Publication<T> {
     /// Build a publication. The withdrawal action is installed separately by
     /// `Class::publish` once the owning class is known.
-    pub(crate) fn new(owner: Arc<DeviceCore>, runtime: T, name: String, id: PublicationId) -> Self {
+    pub(crate) fn new(
+        owner: Arc<dyn PublicationOwner>,
+        runtime: T,
+        name: String,
+        id: PublicationId,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -277,26 +353,6 @@ impl<T> Publication<T> {
     }
 }
 
-#[cfg(unittest)]
-impl<T> Publication<T> {
-    /// Detached publication for tests: its own device identity, no registry,
-    /// no withdrawal. `offline` mirrors an already-removed device.
-    pub fn detached(
-        device_id: u64,
-        driver_name: &'static str,
-        path: String,
-        runtime: T,
-        name: &str,
-        offline: bool,
-    ) -> Self {
-        let owner = DeviceCore::synthetic(crate::DeviceId(device_id), driver_name, path);
-        if offline {
-            owner.mark_offline();
-        }
-        Self::new(owner, runtime, String::from(name), PublicationId::next())
-    }
-}
-
 impl<T> core::fmt::Debug for Publication<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Publication")
@@ -425,4 +481,4 @@ impl<T> ClassRegistry<T> {
     }
 }
 
-unittest::path_mod_test!(tests, "../../ut-tests/class.rs");
+unittest::path_mod_test!(tests, "../ut-tests/class.rs");

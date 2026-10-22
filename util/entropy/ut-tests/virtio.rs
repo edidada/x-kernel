@@ -79,7 +79,7 @@ fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
             ready: WaitQueue::new(),
             entered: WaitQueue::new(),
         });
-        let class: Publication<HwrngDeviceImpl> = driver_base_ng::Publication::detached(
+        let class: Publication<HwrngDeviceImpl> = driver_class::Publication::detached(
             index as u64,
             "entropy-collector-test",
             alloc::string::String::from("ram-disk"),

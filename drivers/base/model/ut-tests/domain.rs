@@ -484,15 +484,15 @@ fn duplicate_registration_cannot_retry_a_fatal_device() {
 #[def_test(serial)]
 fn remove_cascades_children_first() {
     #[expect(
-    clippy::allow_attributes,
-    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
-)]
-#[allow(
-    unknown_lints,
-    unregistered_static_spinlock,
-    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
-)]
-static ORDER: SpinNoPreempt<Vec<&'static str>> = SpinNoPreempt::new(Vec::new());
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unregistered_static_spinlock,
+        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+    )]
+    static ORDER: SpinNoPreempt<Vec<&'static str>> = SpinNoPreempt::new(Vec::new());
     struct ChildDriver;
     struct ParentDriver;
     impl DriverOps<PlatformBus> for ChildDriver {
@@ -567,15 +567,15 @@ static ORDER: SpinNoPreempt<Vec<&'static str>> = SpinNoPreempt::new(Vec::new());
 #[def_test(serial)]
 fn parent_teardown_waits_for_probing_child() {
     #[expect(
-    clippy::allow_attributes,
-    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
-)]
-#[allow(
-    unknown_lints,
-    unregistered_static_spinlock,
-    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
-)]
-static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unregistered_static_spinlock,
+        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+    )]
+    static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
     struct ChildDriver {
         domain: &'static DeviceDomain,
         parent: u64,
@@ -800,15 +800,15 @@ fn resolve_irq_maps_firmware_routes_through_services() {
     // probe wrote into ITS copy; read it back via with_data is
     // impossible (unit Data). Use a static slot instead.
     #[expect(
-    clippy::allow_attributes,
-    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
-)]
-#[allow(
-    unknown_lints,
-    unregistered_static_spinlock,
-    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
-)]
-static RESOLVED: SpinNoPreempt<Option<crate::Virq>> = SpinNoPreempt::new(None);
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unregistered_static_spinlock,
+        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+    )]
+    static RESOLVED: SpinNoPreempt<Option<crate::Virq>> = SpinNoPreempt::new(None);
     struct SlotDriver;
     impl DriverOps<PlatformBus> for SlotDriver {
         type Data = ();
@@ -1346,4 +1346,73 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
     assert_eq!(domain.snapshot(second).unwrap().state, DeviceState::Active);
     // Two deferred first attempts plus one re-probe per woken consumer.
     assert_eq!(PROBES.load(Ordering::Relaxed), 4);
+}
+
+mod publication_contract {
+    //! Device-model integration with the independent class publication contract.
+
+    use alloc::{string::String, sync::Arc};
+
+    use driver_class::Class;
+    use unittest::{assert_eq, def_test};
+
+    use crate::device::{DeviceCore, DeviceId};
+
+    impl DeviceCore {
+        pub(crate) fn synthetic(
+            device_id: DeviceId,
+            driver_name: &'static str,
+            path: String,
+        ) -> Arc<Self> {
+            let owner = Self::new(device_id, path);
+            owner.bind_driver(driver_name);
+            owner
+        }
+    }
+
+    #[def_test(serial)]
+    fn class_uses_live_model_identity_and_rejects_duplicate_publication() {
+        static CLASS: Class<u32> = Class::new(());
+
+        let owner = DeviceCore::new(DeviceId(1), String::from("platform/model-test"));
+        assert_eq!(
+            CLASS.publish(owner.clone(), 1, "device").unwrap_err(),
+            kerrno::KError::BadState
+        );
+        owner.bind_driver("model-test-driver");
+        let publication = CLASS.publish(owner.clone(), 1, "device").unwrap();
+        assert_eq!(publication.driver_name(), Some("model-test-driver"));
+        assert_eq!(publication.location(), "platform/model-test");
+        assert_eq!(
+            CLASS.publish(owner.clone(), 2, "device").unwrap_err(),
+            kerrno::KError::AlreadyExists
+        );
+        assert!(owner.is_online());
+        let borrow = publication.clone();
+        owner.mark_offline();
+        assert!(!borrow.is_available());
+        drop(publication);
+        assert!(CLASS.devices().is_empty());
+    }
+
+    #[def_test(serial)]
+    fn class_withdrawal_retires_shared_model_identity_without_freeing_in_flight_data() {
+        static FIRST: Class<u32> = Class::new(());
+        static SECOND: Class<u32> = Class::new(());
+
+        let owner =
+            DeviceCore::synthetic(DeviceId(2), "model-test", String::from("platform/shared"));
+        let first = FIRST.publish(owner.clone(), 11, "first").unwrap();
+        let second = SECOND.publish(owner.clone(), 22, "second").unwrap();
+        let in_flight = first.acquire_use().unwrap();
+        drop(first);
+        assert!(!owner.is_online());
+        assert!(!second.is_available());
+        assert_eq!(in_flight.with(|value| *value), 11);
+        assert!(second.acquire_use().is_err());
+        drop(in_flight);
+        drop(second);
+        assert!(FIRST.devices().is_empty());
+        assert!(SECOND.devices().is_empty());
+    }
 }

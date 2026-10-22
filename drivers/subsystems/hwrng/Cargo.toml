@@ -11,7 +11,7 @@ categories.workspace = true
 
 
 [dependencies]
-driver_base_ng = { workspace = true }
+driver_class = { workspace = true }
 kerrno.workspace = true
 kspin.workspace = true
 unittest.workspace = true
