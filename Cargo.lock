@@ -1689,7 +1689,6 @@ dependencies = [
  "bpffs",
  "cgroup2fs",
  "devfs",
- "devnode",
  "driver-base",
  "fs_context",
  "kbuild_config",
