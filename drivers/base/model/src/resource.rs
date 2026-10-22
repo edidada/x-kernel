@@ -17,7 +17,9 @@
 
 use alloc::{string::String, vec::Vec};
 
-pub use device_res::{IrqController, IrqDomainId, IrqTrigger};
+// IRQ vocabulary lives in kirq exactly once (the review's dedup table):
+// trigger, controller and domain ids are kirq's domain, not resource.rs's.
+pub use kirq::{IrqController, IrqDomainId, IrqTrigger};
 
 /// A physical MMIO region described by firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

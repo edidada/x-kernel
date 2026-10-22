@@ -74,12 +74,14 @@
 //! [`ClockConsumerServices`] and [`DeviceServices`] must not name a
 //! host-kernel type in their signatures, because that is what lets the model
 //! be exercised against a mock (`ut-tests/domain.rs` runs 19 state-machine tests
-//! on `MockServices`). IRQ resource vocabulary and provider contracts come
-//! from the OS-neutral device_res crate; there is no kirq exception.
+//! on `MockServices`). The one deliberate exception is the IRQ *vocabulary*
+//! re-exported by [`crate::resource`] (`IrqTrigger`, `IrqController`,
+//! `IrqDomainId`): those shapes are defined exactly once in the tree, in
+//! `kirq`, and are data rather than host behaviour.
 //!
-//! Host-facing Op contracts must remain host-free too. Only their adapter
-//! implementations may depend on kernel facilities. Drivers acquire resources
-//! through Device, not through a second provider entry point.
+//! Providers — the [`provider`] Op traits — are the host-facing surface and
+//! are *not* covered by L0-b; `driver-host` implements them. Drivers do not
+//! touch them (rule L1: one acquisition path, [`Device`]).
 
 #![no_std]
 

@@ -1270,9 +1270,9 @@ dependencies = [
 name = "driver-model"
 version = "0.3.0-dev"
 dependencies = [
- "device-res",
  "driver-class",
  "kerrno",
+ "kirq",
  "kspin",
  "lazyinit",
  "log",

@@ -53,6 +53,14 @@ pub enum IrqAction {
     NotHandled,
 }
 
+// NOTE: there is deliberately no `WakeThread` variant. kirq has no
+// threaded-handler vocabulary yet; a half-supported variant whose
+// "wake the thread" half silently degrades to Handled at the runtime
+// adapter would let drivers believe they run work in task context while
+// actually running it in IRQ context. Re-add it together with a real
+// threaded-IRQ path (DeviceServices::request_threaded_irq + a scheduler
+// handoff), never as a silent degradation.
+
 /// Type-erased interrupt handler registered by [`Device::request_irq`].
 ///
 /// The handler carries its own context (the `dev_id` pattern): drivers close
