@@ -159,13 +159,13 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 
 ## 已知限制
 
-1. **无 threaded IRQ**。`IrqAction` 只有 `Handled`/`NotHandled`；`devres::host_api::IrqOp`
+1. **model 驱动侧尚无 threaded IRQ 入口**。`IrqAction` 只有 `Handled`/`NotHandled`；`devres::host_api::IrqOp`
    有 `request_threaded_irq`，但 `DeviceServices` 与 `Device` 两层都没有对应
-   入口。Linux `devm_request_threaded_irq` **禁止机械映射**。
+   入口，当前 X-Kernel resource adapter 也返回 `Unsupported`。
+   Linux `devm_request_threaded_irq` **禁止机械映射**。
 2. **无 MSI-X per-vector 暴露**。`devres::host_api::MsiResource` 有分配接口，`Device`
-   没有方法；当前只有 virtio-net 在 x86_64 通过 transport 内部的 config+queue
-   双向量使用（例外 E-01）。三层 handler 签名并存（`Fn(usize)` /
-   `Fn(usize)->IrqEvent` / `Fn()->IrqAction`）是这个缺口的症状。
+   没有方法。provider 契约复用 `device_res`，但模型服务的生产适配仍待接入；
+   不能以旧 virtio transport 的使用情况声称 model 已支持 MSI-X。
 3. **无 runtime PM / suspend-resume**。`DriverOps` 只有 `probe`/`remove`，
    **没有** `suspend`/`resume` 预留位。
 4. **无热插拔再枚举入口**。`add_device` 是增量的，但没有旧模型
@@ -214,3 +214,9 @@ PublicationSource 不再提供 mark_offline。model 在 remove 回调前关闭�
 class 的独立撤销仅关闭该发布。InUse 只直接延迟 class unpublish hook，不延迟
 Data 的独立字段释放；驱动必须先停止并 join 操作，或由共享 runtime 保有资源。
 类型拆分不等同于跨所有 class 的自动资源 drain，当前模型不提供此保证。
+
+## IRQ 契约边界
+
+model 不依赖 `kirq`，IRQ provider 类型复用 `device_res`。host adapter 负责
+中断域映射、handler 结果转换及同步释放；模型的使用方不能直接调用内核 IRQ API。
+这是代码审查约束，当前没有专门的自动边界检查脚本。

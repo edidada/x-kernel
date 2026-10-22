@@ -126,8 +126,9 @@ model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalize
 由 base 定义。RAII 释放也不能替代 remove 阶段显式停止硬件和协调在途操作。
 
 仓库已有 `device-res` 能力契约。调整此处资源抽象前，必须明确与它的复用、演进
-或替代关系，避免维护两套平行契约。当前对 `kirq` 的直接依赖也不能因为已有代码
-或移动目录而视为永久例外，应按驱动子系统边界规则明确契约与宿主适配的归属。
+或替代关系，避免维护两套平行契约。model 的 IRQ provider 契约现已复用
+`device_res`，不再直接依赖 `kirq`；内核转换属于 host adapter。
+MMIO/DMA 等其他资源契约仍需分别收敛，不能据此宣称整个 devres 已完成迁移。
 
 ## crate 与 mod 的划分
 

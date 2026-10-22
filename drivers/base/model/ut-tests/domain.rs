@@ -18,6 +18,66 @@ use crate::{
     driver::{DriverDesc, DriverOps},
 };
 
+#[def_test]
+fn irq_contract_uses_neutral_resources_and_handlers() {
+    use crate::devres::host_api::{IrqHandler, IrqResource, IrqRouteDesc};
+
+    let route = IrqRouteDesc {
+        hwirq: 9,
+        trigger: device_res::IrqTrigger::Unknown(0x80),
+        controller: device_res::IrqController::Gic,
+        domain: Some(device_res::IrqDomainId(3)),
+    };
+    let spec = crate::IrqSpec::FirmwareRoute {
+        controller: route.controller,
+        domain: route.domain,
+        hwirq: route.hwirq,
+        trigger: route.trigger,
+    };
+    assert_eq!(spec.virq(), None);
+    assert_eq!(spec.hwirq(), Some(9));
+    assert_eq!(spec.trigger(), device_res::IrqTrigger::Unknown(0x80));
+
+    let resource: IrqResource = device_res::IrqResource::new(41, route.trigger)
+        .with_controller(route.controller)
+        .with_domain(device_res::IrqDomainId(3))
+        .with_hwirq(route.hwirq);
+    let handler: alloc::sync::Arc<dyn IrqHandler> = alloc::sync::Arc::new(|irq| {
+        if irq == 41 {
+            device_res::IrqEvent::HANDLED
+        } else {
+            device_res::IrqEvent::NOT_HANDLED
+        }
+    });
+    assert_eq!(resource.number, 41);
+    assert_eq!(resource.hwirq, Some(9));
+    assert_eq!(resource.domain, route.domain);
+    assert_eq!(
+        handler.handle(route.hwirq),
+        device_res::IrqEvent::NOT_HANDLED
+    );
+    assert_eq!(
+        handler.handle(resource.number),
+        device_res::IrqEvent::HANDLED
+    );
+}
+
+#[def_test]
+fn neutral_resource_errors_map_to_model_errors() {
+    use crate::devres::host_api::ResError;
+
+    for (provider_error, expected) in [
+        (ResError::InvalidResource, RuntimeError::Invalid),
+        (ResError::MappingFailed, RuntimeError::Io),
+        (ResError::NoMemory, RuntimeError::NoMemory),
+        (ResError::Busy, RuntimeError::Busy),
+        (ResError::Unsupported, RuntimeError::Unsupported),
+    ] {
+        let neutral_error: device_res::ResError = provider_error;
+        assert_eq!(RuntimeError::from(neutral_error), expected);
+    }
+}
+
 struct FixedClk {
     rate: u64,
 }

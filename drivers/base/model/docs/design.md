@@ -9,9 +9,14 @@ deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceSer
 驱动后续通过对应契约接入，旧设备模型仍在迁移中。
 `entry` 的 `unittest` feature 显式链接本 crate，保证模型测试没有随着生产依赖拆分而丢失。
 
-它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`。当前资源描述引用
-`kirq` 类型，`devres/host_api.rs` 还引用 `kirq::IrqHandler`；这是后续资源契约
-迁移需要处理的遗留依赖，不是可移植边界的永久例外。
+它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`/`kirq`。
+IRQ 描述词汇、handler、Op、资源与 token 复用 OS 中立的 `device_res` 契约，
+不保留平行的 IRQ provider 定义。`devres::host_api` 仅重新导出这些 IRQ 类型。
+现有 `drivers/adapters/xkernel/device-res` 负责与 `kirq` 的转换；model 的
+`DeviceResourceServices` 接入该 provider 的生产适配尚未实现，本轮不声称已接通。
+`IrqSpec` 保留固件路由/已解析 virq 的区分；适配方在调用 provider 时转换为
+`device_res` 描述，不能将 hwirq 当作已完成域映射的 virq。
+边界目前依靠代码审查，没有名为 `scripts/ci/check_driver_boundaries.sh` 的检查。
 
 依赖方向为 `driver-model → driver-class`。私有 `DeviceCore` 实现
 `PublicationSource`，`Device::publish` 将同一个 `Arc` 身份交给 class。
@@ -307,9 +312,11 @@ let Some(service) = dev.env().extension::<PciTransportService>() else { … };
 
 ### `IrqAction` 没有 `WakeThread` 变体
 
-`services.rs` 里有整段注释说明：`kirq` 目前没有线程化 handler 词汇，一个"唤醒
-线程"的半支持变体会在主机适配层静默降级成 `Handled`，让驱动以为自己跑在任务
-上下文、实际跑在中断上下文。要加就和一个真的 threaded-IRQ 通道一起加。
+`device_res::IrqOp` 已有 threaded IRQ 契约，但当前 X-Kernel resource adapter
+仍使用返回 `Unsupported` 的默认实现；model 的 `DeviceResourceServices` 与
+`Device` 也尚未暴露该能力。当前 `IrqAction` 只表达
+同步 handler 是否处理了中断，不得将唤醒线程请求静默降级为 `Handled`。
+未来应连同线程注册、退出同步和驱动侧入口一起接入。
 
 ### 驱动身份是注册键，不是对象地址
 

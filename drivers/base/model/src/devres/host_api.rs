@@ -4,217 +4,26 @@
 
 //! The host capability contract (the provider Op traits).
 //!
-//! Who implements it: the host bridge (`driver-host`'s provider module,
-//! binding to memspace/kirq/kdma). Who consumes it: the runtime adapter and
-//! the one registered transport exception (E-01, the virtio PCI MSI-X
-//! config vector). Living in `driver-base` keeps the dependency direction
-//! flat — every consumer already depends on this crate.
+//! Host adapters implement these OS-neutral contracts using kernel facilities.
+//! IRQ contracts are re-exported from device_res, whose X-Kernel adapter
+//! translates resource descriptions and handlers to kirq. Other resource
+//! contracts remain local pending their own migration.
 //!
-//! Note this is a **host-facing** surface, not a driver-facing one, and it is
-//! `#[doc(hidden)]` on purpose: a transcribed driver must never see two ways
-//! to acquire a resource. Concrete drivers acquire resources through
-//! [`crate::Device`] so every guard lands in their `DriverOps::Data`;
-//! reaching for these Op traits directly from `drv/**` is the boundary
-//! violation described by rule L1 in
-//! `docs/ai/driver-subsystem-boundaries.md`, and
-//! `scripts/ci/check_driver_boundaries.sh` enforces it.
+//! Concrete drivers use Device resource services so acquisition participates
+//! in device lifetime management. This hidden provider surface is for host
+//! integration, not an alternate driver acquisition path.
+//! The policy is documented in docs/ai/driver-subsystem-boundaries.md;
+//! no dedicated automated driver-boundary check currently enforces it.
 
-use alloc::sync::Arc;
 use core::ptr::NonNull;
 
-use kirq::IrqHandler;
+pub use device_res::{
+    IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiMessage, MsiResource,
+    ResError, ResResult,
+};
 
 use crate::error::RuntimeError;
 pub use crate::resource::{IrqController, IrqDomainId, IrqTrigger, MmioRegion, Virq};
-
-/// Device-visible MSI message returned by the host IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
-pub struct MsiMessage {
-    /// Message address programmed into the device.
-    pub address: u64,
-    /// Message data programmed into the device.
-    pub data: u32,
-}
-
-impl MsiMessage {
-    /// Creates a device-visible MSI message.
-    pub const fn new(address: u64, data: u32) -> Self {
-        Self { address, data }
-    }
-}
-
-/// An interrupt resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqResource {
-    /// A plain virtual irq with no retained origin.
-    PlainVirq { virq: Virq, trigger: IrqTrigger },
-    /// A domain-mapped irq that remembers its firmware origin: the
-    /// controller/domain/hwirq the mapping went through — identity audits
-    /// and release go through the same domain the mapping came from,
-    /// never a re-derived guess. The mapping has HAPPENED: `virq` is
-    /// the real virq (request paths resolve firmware routes through
-    /// `map_irq` before registering — no pre-mapping placeholder state
-    /// exists in this shape anymore).
-    DomainMapped {
-        /// OS-visible irq number (the domain translation's output).
-        virq: Virq,
-        trigger: IrqTrigger,
-        controller: IrqController,
-        /// The domain the mapping used: firmware-stated, or the
-        /// controller's root domain when firmware named none (single-domain
-        /// controllers).
-        domain: Option<IrqDomainId>,
-        hwirq: usize,
-    },
-}
-
-/// MSI/MSI-X interrupt resource allocated by the host IRQ core.
-#[derive(Debug, PartialEq, Eq)]
-pub struct MsiResource {
-    /// OS-visible IRQ used for handler registration.
-    pub irq: IrqResource,
-    /// Device-visible message to program into MSI/MSI-X registers.
-    pub message: MsiMessage,
-}
-
-/// A discovered interrupt route awaiting translation into an [`IrqResource`].
-///
-/// Firmware (device-tree / ACPI) or bus discovery produces this raw
-/// description; the provider's [`IrqOp::map_irq`] turns it into the OS-visible
-/// [`IrqResource`].
-#[derive(Debug, Clone, Copy)]
-pub struct IrqRouteDesc {
-    /// Hardware IRQ number as discovered (e.g. GIC SPI number, PLIC source).
-    pub hwirq: usize,
-    /// Trigger mode.
-    pub trigger: IrqTrigger,
-    /// Controller family that owns this route.
-    pub controller: IrqController,
-    /// Domain id, when the host partitions IRQ number space.
-    pub domain: Option<IrqDomainId>,
-}
-
-/// Provider-owned identity for one registered interrupt handler.
-///
-/// Shared hardirq registrations are released by the provider-local action id.
-/// Non-shared regular registrations, including current threaded IRQ requests,
-/// own the whole IRQ action and are released without a per-action id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqHandlerToken {
-    /// One handler within a shared IRQ action list.
-    SharedAction(usize),
-    /// The sole regular action installed on an IRQ line.
-    RegularAction,
-}
-
-/// Interrupt capability: handler registration, interrupt-domain translation,
-/// and MSI-X vector allocation.
-///
-/// A host kernel implements this and passes it to its driver framework. The
-/// domain-translation and MSI-X methods have default implementations so a host
-/// only overrides what its interrupt controller supports (e.g. non-x86 leaves
-/// MSI-X as `Unsupported`).
-pub trait IrqOp: Send + Sync {
-    /// Register an interrupt handler for `irq`.
-    fn request_irq(
-        &self,
-        irq: IrqResource,
-        handler: Arc<dyn IrqHandler>,
-    ) -> ResResult<IrqHandlerToken>;
-
-    /// Release an interrupt handler previously registered for `irq`.
-    fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken);
-
-    /// Enable or disable delivery of `irq`.
-    fn set_irq_enabled(&self, irq: IrqResource, enabled: bool);
-
-    /// Translate a discovered interrupt route into an OS-visible IRQ resource.
-    ///
-    /// Default: treat the hardware number as the OS-visible number with no
-    /// translation.
-    fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        Ok(IrqResource::mapped(
-            Virq::new(route.hwirq),
-            route.trigger,
-            route.controller,
-            route.domain,
-            route.hwirq,
-        ))
-    }
-
-    /// Allocate a PCI MSI-X interrupt resource.
-    ///
-    /// The returned IRQ is OS-visible and suitable for handler registration.
-    /// The returned message is device-visible and suitable for programming an
-    /// MSI-X table entry. Controller-local vectors and APIC destination details
-    /// remain host IRQ-core implementation details.
-    fn alloc_msix(&self) -> ResResult<MsiResource> {
-        Err(ResError::Unsupported)
-    }
-
-    /// Release an MSI-X resource previously allocated by [`Self::alloc_msix`].
-    /// Default: no-op.
-    fn free_msix(&self, resource: MsiResource) {
-        let _ = resource;
-    }
-}
-
-/// A collection of resources for a single device.
-/// Error returned by resource acquisition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResError {
-    /// The resource descriptor was invalid (e.g. zero-sized region).
-    InvalidResource,
-    /// The host failed to establish the requested mapping.
-    MappingFailed,
-    /// The host ran out of memory while acquiring the resource.
-    NoMemory,
-    /// The resource is already in use and cannot be shared.
-    Busy,
-    /// The host does not support this kind of resource.
-    Unsupported,
-}
-
-impl IrqResource {
-    /// A plain (origin-less) virtual irq.
-    pub const fn plain(virq: Virq, trigger: IrqTrigger) -> Self {
-        Self::PlainVirq { virq, trigger }
-    }
-
-    /// A domain-mapped irq with its firmware origin.
-    pub const fn mapped(
-        virq: Virq,
-        trigger: IrqTrigger,
-        controller: IrqController,
-        domain: Option<IrqDomainId>,
-        hwirq: usize,
-    ) -> Self {
-        Self::DomainMapped {
-            virq,
-            trigger,
-            controller,
-            domain,
-            hwirq,
-        }
-    }
-
-    /// The OS-visible virtual irq of either shape.
-    pub const fn virq(&self) -> Virq {
-        match self {
-            Self::PlainVirq { virq, .. } | Self::DomainMapped { virq, .. } => *virq,
-        }
-    }
-
-    /// The trigger mode of either shape.
-    pub const fn trigger(&self) -> IrqTrigger {
-        match self {
-            Self::PlainVirq { trigger, .. } | Self::DomainMapped { trigger, .. } => *trigger,
-        }
-    }
-}
-
-pub type ResResult<T = ()> = Result<T, ResError>;
 
 /// The ONE provider-error → driver-error mapping in the tree.
 ///
@@ -231,25 +40,6 @@ impl From<ResError> for crate::error::RuntimeError {
             ResError::Busy => Self::Busy,
             ResError::Unsupported => Self::Unsupported,
         }
-    }
-}
-
-impl MsiResource {
-    /// Creates an MSI resource from an IRQ and device message.
-    pub const fn new(irq: IrqResource, message: MsiMessage) -> Self {
-        Self { irq, message }
-    }
-}
-
-impl IrqHandlerToken {
-    /// Create a token for one shared IRQ action.
-    pub const fn shared_action(id: usize) -> Self {
-        Self::SharedAction(id)
-    }
-
-    /// Create a token for a non-shared regular IRQ action.
-    pub const fn regular_action() -> Self {
-        Self::RegularAction
     }
 }
 
