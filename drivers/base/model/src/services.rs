@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Per-device service contracts: what a `Device` offers a driver.
+//! Per-device service contracts: what a `DeviceAccess` offers a driver.
 //!
 //! The host implements these over its kernel capabilities; mock services
 //! in tests keep the model host-free (L0-b).
@@ -38,7 +38,7 @@ impl<'a> DeviceContext<'a> {
 /// Service errors, including deferred dependencies.
 ///
 /// Unlike [`ProbeError`], a service can report that *one* acquisition is
-/// deferred while others might still succeed; [`Device`] folds
+/// deferred while others might still succeed; [`DeviceAccess`](crate::DeviceAccess) folds
 /// [`ServiceError::Deferred`] into [`ProbeError::Deferred`] for the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceError {
@@ -55,7 +55,7 @@ impl From<RuntimeError> for ServiceError {
 /// The per-device service surface, implemented by the runtime layer.
 ///
 /// This is a framework-internal seam: drivers touch it only through
-/// [`Device`]. It exists so the runtime (and test doubles) can be swapped
+/// [`DeviceAccess`](crate::DeviceAccess). It exists so the runtime (and test doubles) can be swapped
 /// without the model depending on any host implementation.
 /// MMIO/IRQ/DMA acquisition — the resource capabilities every host must
 /// provide. Split from the clock and extension capabilities so the contract
@@ -124,7 +124,7 @@ pub trait ClockConsumerServices: Send + Sync {
     ) -> Result<ClkHandle, ServiceError>;
 }
 
-/// The aggregate a [`Device`](crate::Device) holds: every mandatory
+/// The host aggregate borrowed by device access and the environment: every mandatory
 /// capability, provider publication, plus the host's extension table.
 ///
 /// Capabilities are added as supertraits, never through `as_any`: the host's

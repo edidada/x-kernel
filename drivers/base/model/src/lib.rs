@@ -14,12 +14,12 @@
 //! | `struct device` private data (`dev_get_drvdata`) | [`DriverOps::Data`] owned by the framework |
 //! | `static const struct of_device_id foo_of_match[]` | `ids: &'static [OfMatch]` on [`DriverDesc`] |
 //! | `module_pci_driver()` / `module_init()` | [`DeviceDomain::register_driver`] |
-//! | `platform_get_resource(pdev, IORESOURCE_MEM, n)` | [`Device::mmio`] / [`Device::mmio_by_name`] |
-//! | `platform_get_irq_byname` | [`Device::irq_by_name`] |
-//! | `devm_ioremap_resource` | [`Device::iomap`] returning an owned [`IoMap`] guard |
-//! | `devm_request_irq` | [`Device::request_irq`] returning an owned [`DevIrq`] guard |
-//! | `dma_alloc_coherent` / `dmam_alloc_coherent` | [`Device::alloc_coherent`] |
-//! | `clk_get(dev, "apb_pclk")` | [`Device::clk`] |
+//! | `platform_get_resource(pdev, IORESOURCE_MEM, n)` | `dev.res().mmio()` / `dev.res().mmio_by_name()` |
+//! | `platform_get_irq_byname` | `dev.res().irq_by_name()` |
+//! | `devm_ioremap_resource` | `dev.res().iomap()` returning an owned [`IoMap`] guard |
+//! | `devm_request_irq` | `dev.res().request_irq()` returning an owned [`DevIrq`] guard |
+//! | `dma_alloc_coherent` / `dmam_alloc_coherent` | `dev.res().alloc_coherent()` |
+//! | `clk_get(dev, "apb_pclk")` | `dev.res().clk()` |
 //! | `-EPROBE_DEFER` | [`ProbeError::Deferred`] |
 //!
 //! Class publication is provided by `driver_class`; this crate owns the device
@@ -28,7 +28,7 @@
 //!
 //! # Ownership model
 //!
-//! Every resource acquired through [`Device`] is returned as a RAII guard.
+//! Every resource acquired through [`DeviceAccess`] is returned as a RAII guard.
 //! The intended discipline is: **store all guards in [`DriverOps::Data`]**.
 //! Probe failure then means "drop `Data`", which releases every guard in
 //! field-declaration order (Rust drops fields first-to-last); device removal
@@ -59,12 +59,12 @@
 //!
 //! **L0-a — this crate names no device family.** No `virtio`, `nvme`, `ahci`,
 //! `mmc`, `i2c` or `usb` may appear in this crate's API, and no family-specific
-//! method may be added to [`Device`] or [`DeviceServices`]. This is a
+//! method may be added to [`DeviceAccess`] or [`DeviceServices`]. This is a
 //! *fan-in* rule rather than a portability rule: every driver in the tree
 //! shares this crate and its test suite, so a family-specific addition here is
 //! a change that risks all of them. A family that needs host machinery beyond
 //! the capability traits declares an [`ExtensionService`] in its own crate and
-//! recovers it through [`Device::extension`] — the extension names the host
+//! recovers it through [`Environment::extension`] — the extension names the host
 //! type it supports, this crate never does.
 //!
 //! Check: `grep -rni 'virtio|nvme|ahci|mmc|i2c|usb' src/` must return
@@ -81,7 +81,7 @@
 //!
 //! Host-facing provider Op contracts obey the same dependency restriction.
 //! Only their implementations may call kernel APIs. Drivers acquire resources
-//! through Device rather than invoking providers directly.
+//! through DeviceAccess rather than invoking providers directly.
 
 #![no_std]
 
@@ -91,14 +91,13 @@ pub mod bus;
 mod device;
 mod domain;
 mod driver;
+mod environment;
 mod error;
 pub mod extension;
 pub mod firmware;
 pub mod provider;
 mod resource;
 mod services;
-
-pub mod desc;
 
 // The platform bus vocabulary has exactly one path. The former
 // `driver_base::platform` module was a second name for these items — an alias
@@ -109,8 +108,7 @@ pub use bus::{
         AliasMatch, OfMatch, PlatformBus, PlatformBusData, PlatformBusIdentity, PlatformId,
     },
 };
-pub use desc::DeviceDescriptor;
-pub use device::{Device, DeviceRef};
+pub use device::{DeviceAccess, DeviceDescriptor, DeviceRef};
 pub use domain::{
     AddDeviceError, DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
@@ -119,6 +117,7 @@ pub use driver::{DriverDesc, DriverOps};
 pub use driver_os_api::{
     ClkHandle, CoherentMem, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn, ReleaseHook,
 };
+pub use environment::Environment;
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use extension::{ExtensionRegistry, ExtensionService, ExtensionServices};
 pub use firmware::{FirmwareNodeInfo, FirmwareProp};

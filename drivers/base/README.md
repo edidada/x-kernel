@@ -42,7 +42,8 @@ OS 能力契约已抽到 os-api；设备服务协调和 platform 总线暂留 mo
 ### model 的内容归属
 
 - `DeviceRef`：可长期持有的只读设备身份与静态描述，不保留驱动绑定资源。
-- `Device`：probe/remove 回调期间的类型化操作视图；`DeviceContext` 是传给设备服务的借用上下文。
+- `DeviceAccess`：probe/remove 回调期间的类型化操作视图；`DeviceContext` 是传给设备服务的借用上下文。
+- `Environment`：独立传给回调的框架环境，提供 host provider 注册与扩展查询，不拥有设备或 provider 的撤销生命周期。
 - 私有 `DeviceCore`：共享描述符与来源状态；内部 `DeviceId` 只用于索引、调度和诊断，不作为公开身份 API。
 - `DriverOps`、驱动注册描述：驱动如何参与绑定与移除。
 - `DeviceDomain`：设备表、驱动表、拓扑和绑定状态的所有者。
@@ -78,7 +79,7 @@ class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口�
 
 ### 两者如何交接
 
-`Device::publish` 将同一个 `Arc<DeviceCore>` 作为 `PublicationSource` 交给 class。
+`DeviceAccess::publish` 将同一个 `Arc<DeviceCore>` 作为 `PublicationSource` 交给 class。
 模型仍拥有唯一的设备在线状态；class 的 drain gate 表示某项发布是否接受新
 操作，在途计数表示该发布尚有多少操作未退出，都不是设备在线状态的副本。
 
@@ -127,7 +128,7 @@ model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalize
 - **资源能力契约**：资源如何描述、获取、操作和释放，包括 MMIO、IRQ、DMA、
   时钟句柄及 provider 契约。这些属于驱动能力契约层，宿主实现位于适配层。
 
-例如，`Device::iomap()` 可以属于 base，但返回的映射对象和底层映射契约不必
+例如，`dev.res().iomap()` 可以属于 base，但返回的映射对象和底层映射契约不必
 由 base 定义。RAII 释放也不能替代 remove 阶段显式停止硬件和协调在途操作。
 
 仓库已有 `device-res` 能力契约。调整此处资源抽象前，必须明确与它的复用、演进
@@ -158,7 +159,7 @@ OS 能力契约已独立归位；宿主接入与旧模型迁移另行推进，�
 依赖设计决定，本文不预先固定。
 
 class 定义 `PublicationSource` 契约，model 的私有 `DeviceCore` 实现它；
-`Device::publish` 向 class 传递同一个身份的 `Arc`。模型仍持有唯一在线状态，
+`DeviceAccess::publish` 向 class 传递同一个身份的 `Arc`。模型仍持有唯一在线状态，
 class 只读来源在线状态，单项注册独立撤销；设备下线由 model 决定。
 没有复制状态、公开 `DeviceCore` 或增加反向依赖。
 遗留设备的合成身份由 class 内部过渡适配器拥有，不依赖 model。

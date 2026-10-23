@@ -9,7 +9,7 @@
 //! device-data vocabulary. [`BusDeviceData`] is the erased vtable the
 //! domain's single heterogeneous device table dispatches through; the
 //! typed [`Bus`] side (associated types + [`Bus::match_device`]) is used
-//! wherever the bus is statically known (`Device`, `DriverOps`).
+//! wherever the bus is statically known (`DeviceAccess`, `DriverOps`).
 
 pub mod platform_bus;
 

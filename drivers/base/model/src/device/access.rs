@@ -2,154 +2,32 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Device identity references and scoped, typed probe/remove views.
+//! Typed device access and its callback-scoped information and service views.
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
 
+use super::DeviceRef;
 use crate::{
     ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction,
     bus::Bus,
-    domain::DeviceId,
-    error::{DepSource, ProbeError, RuntimeError},
-    extension::ExtensionService,
+    error::{ProbeError, RuntimeError},
     firmware::{FirmwareNodeInfo, FirmwareProp},
     resource::{ClkSpec, IrqSpec, MmioRegion, ResourceMap, Virq},
 };
 
-/// The device's live identity card — the shared, domain-owned side of a
-/// registered device (Linux's refcounted `struct device` the class layer
-/// points at). Created by the domain at `add_device`; class publications
-/// and consumers hold `Arc`s and read facts LIVE instead of carrying
-/// value snapshots that drift.
+/// Callback-scoped, typed access to one registered device.
 ///
-/// The authoritative home of "which driver bound this device", "where it
-/// sits on the bus topology", and "is it still there". One fact, one
-/// home: a device with three class publications has ONE name, ONE path,
-/// ONE offline flag.
-pub(crate) struct DeviceCore {
-    pub(crate) id: DeviceId,
-    pub(crate) desc: crate::DeviceDescriptor,
-    /// Set by the domain when a driver's probe starts (the claim is known
-    /// then, not at bind-commit).
-    driver_name: kspin::SpinNoPreempt<Option<&'static str>>,
-    /// The bus-vocabulary path component, derived once at `add_device`.
-    physical_path: alloc::string::String,
-    /// Flipped by the removal orchestration (before quiesce and before the
-    /// class publications withdraw). Every publication of this device —
-    /// and any consumer holding a clone — observes it.
-    offline: core::sync::atomic::AtomicBool,
-}
-
-impl driver_class::PublicationSource for DeviceCore {
-    fn driver_name(&self) -> Option<&'static str> {
-        self.driver_name()
-    }
-
-    fn physical_path(&self) -> &str {
-        self.physical_path()
-    }
-
-    fn is_online(&self) -> bool {
-        self.is_online()
-    }
-}
-
-impl DeviceCore {
-    /// The driver that claimed this device, once probing started.
-    pub(crate) fn driver_name(&self) -> Option<&'static str> {
-        *self.driver_name.lock()
-    }
-
-    /// Record the claiming driver. Domain-internal.
-    pub(crate) fn bind_driver(&self, name: &'static str) {
-        *self.driver_name.lock() = Some(name);
-    }
-
-    /// The physical path (DEVPATH source), as derived from the bus data.
-    pub(crate) fn physical_path(&self) -> &str {
-        self.physical_path.as_str()
-    }
-
-    /// Whether the device is still standing behind its publications.
-    pub(crate) fn is_online(&self) -> bool {
-        !self.offline.load(core::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Mark the device gone. Removal-orchestration internal.
-    pub(crate) fn mark_offline(&self) {
-        self.offline
-            .store(true, core::sync::atomic::Ordering::Release);
-    }
-
-    pub(crate) fn new(id: DeviceId, desc: crate::DeviceDescriptor) -> alloc::sync::Arc<Self> {
-        let physical_path = desc.bus_data.path_component();
-        alloc::sync::Arc::new(Self {
-            id,
-            desc,
-            driver_name: kspin::SpinNoPreempt::new(None),
-            physical_path,
-            offline: core::sync::atomic::AtomicBool::new(false),
-        })
-    }
-}
-
-/// An owning reference to a registered device's identity and immutable facts.
+/// Borrows identity and host services without owning device state or the
+/// acquired resource guards. Framework-wide services are passed separately
+/// through [`Environment`](crate::Environment).
 ///
-/// Cloning this reference does not retain the binding or its resources. After
-/// removal, metadata remains readable, but it grants no hardware access.
-/// Dropping a reference never unregisters the device. Final metadata destruction
-/// runs in the last owner's context; bus data must not require sleepable Drop.
-#[derive(Clone)]
-pub struct DeviceRef {
-    pub(crate) core: Arc<DeviceCore>,
-}
-
-impl DeviceRef {
-    /// Immutable enumeration facts, retained even after device removal.
-    pub fn descriptor(&self) -> &crate::DeviceDescriptor {
-        &self.core.desc
-    }
-
-    /// Physical location derived from the registered bus data.
-    pub fn path(&self) -> &str {
-        self.core.physical_path()
-    }
-
-    /// The last driver whose probe started, not proof of a current binding.
-    pub fn driver_name(&self) -> Option<&'static str> {
-        self.core.driver_name()
-    }
-
-    /// Whether removal has not yet closed this device's publication source.
-    /// This snapshot is neither a binding check nor an in-flight operation permit.
-    pub fn is_online(&self) -> bool {
-        self.core.is_online()
-    }
-
-    /// Whether both references designate the same registered object.
-    pub fn same_device(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.core, &other.core)
-    }
-}
-
-impl core::fmt::Debug for DeviceRef {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("DeviceRef")
-            .field("registration_key", &self.core.id)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Handle to one device (`struct device *`).
-///
-/// The scoped callback view: probe receives `&mut Device<'_, B>`, remove receives
+/// The scoped callback view: probe receives `&mut DeviceAccess<'_, B>`, remove receives
 /// the same plus `&mut Self::Data`. There is no second, remove-only variant
 /// to learn — a transcribed driver carries `dev` through both callbacks.
 /// A [`DeviceRef`] retains only identity and enumeration facts beyond them.
 ///
-/// The surface is split into four views, one per role, so a reader (or a
+/// The surface is split into three views, one per role, so a reader (or a
 /// model) never has to hold 25 flat methods in mind:
 ///
 /// | view | answers | Linux analogue |
@@ -157,11 +35,10 @@ impl core::fmt::Debug for DeviceRef {
 /// | [`DeviceInfo`] (`dev.info()`) | which device is this | `dev_name`/`dev->of_node` identity |
 /// | [`Resources`] (`dev.res()`) | what may I acquire from it | `platform_get_*`, `devm_*` |
 /// | [`Firmware`] (`dev.fw()`) | what did firmware say | `of_property_read_*` |
-/// | [`Environment`] (`dev.env()`) | how do I talk to the framework | `-EPROBE_DEFER`, provider publication, extensions |
 ///
-/// Class publication is the fifth verb and stays on the handle:
-/// [`Device::publish`].
-pub struct Device<'a, B: Bus> {
+/// Class publication attaches this device as its source:
+/// [`DeviceAccess::publish`].
+pub struct DeviceAccess<'a, B: Bus> {
     /// The bus's own data vocabulary — typed: probe runs where the bus is
     /// statically known, so drivers read bus facts without any erasure.
     bus_data: &'a B::DeviceData,
@@ -172,7 +49,7 @@ pub struct Device<'a, B: Bus> {
     _bus: PhantomData<fn(&B)>,
 }
 
-impl<'a, B: Bus> Device<'a, B> {
+impl<'a, B: Bus> DeviceAccess<'a, B> {
     /// Constructed by the domain when it probes or removes a device.
     /// Returns `None` when the device's bus payload has the wrong concrete type.
     pub(crate) fn new(
@@ -221,14 +98,6 @@ impl<'a, B: Bus> Device<'a, B> {
         }
     }
 
-    /// Framework interaction: deferral, provider publication, extensions.
-    pub fn env(&self) -> Environment<'a, B> {
-        Environment {
-            services: self.services,
-            _bus: PhantomData,
-        }
-    }
-
     /// Publish a runtime capability into a device class (`device_create` /
     /// `add_disk`): the ONE class-publication door.
     ///
@@ -251,9 +120,9 @@ impl<'a, B: Bus> Device<'a, B> {
 }
 
 /// Borrowed identity view (`struct device`'s identity half).
-/// Use [`Device::reference`] to retain identity beyond the callback view.
+/// Use [`DeviceAccess::reference`] to retain identity beyond the callback view.
 pub struct DeviceInfo<'a, B: Bus> {
-    device: &'a Device<'a, B>,
+    device: &'a DeviceAccess<'a, B>,
 }
 
 impl<B: Bus> DeviceInfo<'_, B> {
@@ -463,49 +332,5 @@ impl Firmware<'_> {
     /// `of_property_read_bool` on the snapshot: presence is the value.
     pub fn flag(&self, name: &str) -> bool {
         self.prop(name).is_some()
-    }
-}
-
-/// Framework-interaction view: deferral, provider publication, extensions.
-pub struct Environment<'a, B: Bus> {
-    services: &'a dyn DeviceServices,
-    _bus: PhantomData<fn(&B)>,
-}
-
-impl<B: Bus> Environment<'_, B> {
-    /// Build a `-EPROBE_DEFER` return value for an out-of-band dependency.
-    pub fn defer(&self, dep: DepSource) -> ProbeError {
-        ProbeError::Deferred(dep)
-    }
-
-    /// Look up a family-specific service extension on the installed host
-    /// (e.g. the virtio transport service). The core names no family: the
-    /// family registers its extension value at host install time, and the
-    /// driver asks by type.
-    pub fn extension<E: ExtensionService>(&self) -> Option<&'static E> {
-        self.services.extensions().get::<E>()
-    }
-
-    /// Publish a provider this device owns (`of_clk_add_hw_provider`,
-    /// `gpiochip_add_data`, `regulator_register`): the resource OTHER drivers
-    /// acquire by firmware handle, and the thing their probe defers on until
-    /// it appears.
-    ///
-    /// `C` is the provider family's [`ProviderClass`](crate::ProviderClass)
-    /// descriptor; `key` is the class-scoped handle consumers name in their
-    /// firmware reference; `lookup` is the class's lookup object. This is the
-    /// single provider-registration door.
-    ///
-    /// Call it as the LAST fallible step of a provider driver's probe: a
-    /// registration that wakes parked consumers cannot be rolled back by
-    /// returning `Err` afterwards.
-    pub fn provide<C: crate::ProviderClass>(
-        &self,
-        key: C::Key,
-        lookup: &'static C::Lookup,
-    ) -> Result<(), ProbeError> {
-        self.services
-            .register_provider(crate::ProviderRegistration::new::<C>(key, lookup))
-            .map_err(ProbeError::Fatal)
     }
 }

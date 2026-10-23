@@ -14,7 +14,7 @@
 //! exactly one of it:
 //!
 //! ```text
-//! provider driver, end of probe:   dev.env().provide::<ClkProvider>(phandle, lookup)?
+//! provider driver, end of probe:   env.provide::<ClkProvider>(phandle, lookup)?
 //! consumer driver:                 dev.res().clk("baudclk")?   // -EPROBE_DEFER while absent
 //! ```
 //!
@@ -55,7 +55,7 @@ pub trait ProviderClass: Send + Sync + 'static {
 }
 
 /// One erased provider publication — what a driver hands to
-/// [`Device::provide`](crate::Device::provide).
+/// [`Environment::provide`](crate::Environment::provide).
 ///
 /// The payload is the class's `&'static dyn Lookup`, type-erased to `Any`
 /// because the device model must not name a family. The owning class
@@ -69,7 +69,7 @@ pub struct ProviderRegistration {
 
 impl ProviderRegistration {
     /// Erase a provider into its class. Built by
-    /// [`Device::provide`](crate::Device::provide), never by drivers.
+    /// [`Environment::provide`](crate::Environment::provide).
     pub fn new<C: ProviderClass>(key: C::Key, lookup: &'static C::Lookup) -> Self {
         Self {
             kind: C::KIND,
@@ -99,7 +99,7 @@ impl ProviderRegistration {
 }
 
 /// Provider publication, the host-facing capability behind
-/// [`Device::provide`](crate::Device::provide).
+/// [`Environment::provide`](crate::Environment::provide).
 ///
 /// Split from the resource capabilities so a host states exactly which
 /// provider families it can serve: unsupported classes fail loudly at
@@ -113,7 +113,7 @@ pub trait ProviderServices: Send + Sync {
 /// A host with no provider registry (tests, firmware-less boards).
 ///
 /// Registration is refused rather than ignored: a provider driver whose
-/// `dev.provide` fails sees a fatal probe error, which is diagnosable;
+/// `env.provide` fails sees a fatal probe error, which is diagnosable;
 /// a silently dropped registration parks its consumers with no trace.
 impl ProviderServices for () {
     fn register_provider(&self, _registration: ProviderRegistration) -> Result<(), RuntimeError> {

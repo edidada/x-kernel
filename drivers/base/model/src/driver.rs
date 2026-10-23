@@ -4,7 +4,7 @@
 
 //! Driver contracts: id tables plus probe/remove with typed private data.
 
-use crate::{bus::Bus, device::Device, error::ProbeError};
+use crate::{bus::Bus, device::DeviceAccess, error::ProbeError};
 
 /// Driver operations with a typed private-data association.
 ///
@@ -20,20 +20,31 @@ pub trait DriverOps<B: Bus>: Send + Sync + 'static {
     /// Initialize the device. Store every acquired guard in the returned
     /// `Data`; returning `Err` drops nothing but locals, so partial
     /// initialization rolls back through ordinary RAII.
-    fn probe(&self, dev: &mut Device<'_, B>) -> Result<Self::Data, ProbeError>;
+    /// `dev` accesses this device; `env` supplies host-wide framework services.
+    fn probe(
+        &self,
+        dev: &mut DeviceAccess<'_, B>,
+        env: &crate::Environment<'_>,
+    ) -> Result<Self::Data, ProbeError>;
 
     /// Quiesce the device. Guards inside `Data` are still alive here and are
-    /// released after this returns; `dev` is the same handle probe received.
+    /// released after this returns; `dev` accesses the same device as probe.
+    /// `env` supplies the same host service implementation used during probe.
     /// The model first marks the source offline to refuse new class uses.
     /// Stop and join ongoing operations before releasing their independent
     /// resources, or retain those resources in the shared runtime. Dropping a
     /// Registration defers only its class hook, not the rest of Data.
     ///
     /// Linux shape: `remove(pdev)` then `dev_get_drvdata(pdev)`. Here the
-    /// drvdata is passed typed and mutably as the second argument instead of
+    /// drvdata is passed typed and mutably as the third argument instead of
     /// recovered through an untyped accessor, so no downcast (and no panic
     /// path) exists in the driver-facing surface.
-    fn remove(&self, dev: &mut Device<'_, B>, data: &mut Self::Data) {
+    fn remove(
+        &self,
+        dev: &mut DeviceAccess<'_, B>,
+        _env: &crate::Environment<'_>,
+        data: &mut Self::Data,
+    ) {
         let _ = (dev, data);
     }
 }

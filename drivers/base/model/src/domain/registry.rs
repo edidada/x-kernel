@@ -13,8 +13,8 @@ use kspin::SpinNoPreempt;
 
 use super::*;
 use crate::{
+    DeviceDescriptor,
     bus::{Bus, BusId, BusInstanceId, MatchScore},
-    desc::DeviceDescriptor,
     domain::DeviceId,
     error::DepSource,
     services::DeviceServices,

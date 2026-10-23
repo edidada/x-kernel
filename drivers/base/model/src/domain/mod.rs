@@ -57,9 +57,9 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 use crate::{
+    DeviceDescriptor,
     bus::{Bus, BusDeviceData, BusId, MatchScore},
-    desc::DeviceDescriptor,
-    device::Device,
+    device::DeviceAccess,
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
     services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
@@ -271,9 +271,12 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is \
                       a domain-internal invariant violation, not a driver error"
         )]
-        let mut ctx = Device::new(&reference, modalias.as_deref(), services)
+        let mut ctx = DeviceAccess::new(&reference, modalias.as_deref(), services)
             .expect("the domain only probes devices the driver matched");
-        let data = self.desc.ops.probe(&mut ctx)?;
+        let data = self
+            .desc
+            .ops
+            .probe(&mut ctx, &crate::Environment::new(services))?;
         Ok(Box::new(data))
     }
 
@@ -296,9 +299,11 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             clippy::expect_used,
             reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
         )]
-        let mut dev = Device::new(&reference, None, services)
+        let mut dev = DeviceAccess::new(&reference, None, services)
             .expect("the domain only removes devices the driver bound");
-        self.desc.ops.remove(&mut dev, data);
+        self.desc
+            .ops
+            .remove(&mut dev, &crate::Environment::new(services), data);
     }
 }
 

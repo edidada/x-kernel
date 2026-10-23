@@ -52,7 +52,7 @@ pub struct DeviceDescriptor {
     pub resources: ResourceMap,
     /// The firmware node snapshot (`of_property_read_*` surface). True of the
     /// DEVICE, not of the bus: reachable from every bus through
-    /// `Device::fw()`.
+    /// `DeviceAccess::fw()`.
     #[builder(default, setter(strip_option(fallback = fw_opt)))]
     pub fw: Option<FirmwareNodeInfo>,
     /// Optional DMA configuration (address mask, offset and coherency).
@@ -76,4 +76,4 @@ impl Clone for DeviceDescriptor {
     }
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/desc.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/desc.rs");

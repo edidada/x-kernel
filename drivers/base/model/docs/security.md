@@ -2,7 +2,12 @@
 
 ## 设备引用生命周期边界
 
-回调 Device 借用适配层的 DeviceRef；DeviceInfo 只借用 Device，不增加强引用。
+驱动的 DeviceAccess 与 Environment 由回调适配层分别构造，前者关联当前设备，
+后者仅暴露框架服务。Environment 不代表设备在线状态或设备资源所有权。
+provider 注册仍使用静态 lookup，不随设备移除撤销；不能用它代替具有
+撤销句柄和在途许可协议的 class 发布。延迟探测只是错误结果，不是环境状态。
+
+回调 DeviceAccess 借用适配层的 DeviceRef；DeviceInfo 只借用 DeviceAccess，不增加强引用。
 类型化 bus_data 只能从该引用的描述符构造，避免身份与总线数据来自不同设备。
 这些借用不改变注销协议或 binding 资源释放时机；长期引用仍不授予硬件权限。
 
@@ -56,8 +61,8 @@ Deferred 时部分获取的资源立即回滚。未配置 DMA 的原有测试继
 
 ## Scope
 
-`drivers/base/model/src/`：`bus/`、`driver.rs`、`device.rs`、`error.rs`、`resource.rs`、
-`provider.rs`、`services.rs`（带设备上下文的服务契约）、
+`drivers/base/model/src/`：`bus/`、`driver.rs`、`device/{mod,descriptor,access}.rs`、`error.rs`、`resource.rs`、
+`provider.rs`、`environment.rs`（框架服务入口）、`services.rs`（带设备上下文的服务契约）、
 `domain/{mod,registry,probe,dependency,lifecycle}.rs`。
 测试 `ut-tests/domain.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
 一个具体实例。
@@ -84,7 +89,7 @@ UT 验证未配置时宿主调用次数为零，配置后保留地址转换和�
 | 固件 → 描述符 | DT / ACPI / PCI 配置空间（`driver-init`、`bus/pci`、`firmware/of` 转换后交给 `add_device`） | **半可信**：地址、大小、中断号、compatible 字符串都可能与真实硬件不符或被篡改。本 crate 只做结构校验，不做"这段物理地址真的是 MMIO"的判断——那是 `driver-host` + `memspace` 的职责 |
 | `DriverOps` 实现 → 域 | `drv/**` 里的驱动 | **可信内核代码**。域不防御驱动的错误，但把驱动能造成的破坏限制在"这一个设备"内（generation 守卫、独占移除声明） |
 | `DeviceServices` 实现 → 域 | `driver-host::Host` 或测试 mock | **可信**。契约要求返回的 guard 携带正确的 `ReleaseHook` |
-| 驱动 → provider 注册表 | `dev.env().provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
+| 驱动 → provider 注册表 | `env.provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
 | 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Registration` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是无撤销权限的 Publication |
 
 本 crate 负责设备绑定、probe 状态、发布来源与退出协调。MMIO 访问器与资源句柄
@@ -99,7 +104,7 @@ UT 验证未配置时宿主调用次数为零，配置后保留地址转换和�
 | 板级静态表 | 同上（`driver-init::enumerate_static_devices`） | x86 COM 口 `IoPortRange{base, size: 8}`、ramdisk alias |
 | MMIO 寄存器 | driver-os-api 的 `IoMap::read*/write*` | 访问器不在 model 内；设备服务返回句柄，不直接操作寄存器 |
 | 用户内存 / 用户指针 | 无 | 本 crate 不接受任何用户态指针 |
-| 驱动宣告的 provider key | `Device::provide` | 与 lookup 自身 id 交叉校验；冲突即失败，不覆盖 |
+| 驱动宣告的 provider key | `Environment::provide` | key 校验与冲突处理由宿主注册实现负责 |
 | DMA 缓冲 | 无（`CoherentMem` 只是所有者句柄） | 分配与映射在 `driver-host`/`kdma` |
 | 中断上下文 | **不接受** | 见"线程安全" |
 
@@ -214,10 +219,10 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 ## 已知限制
 
 1. **新模型无 threaded IRQ 入口**。`IrqAction` 只有 `Handled`/`NotHandled`；
-   `driver_os_api::IrqOp`、`DeviceServices` 与 `Device` 均没有线程化注册入口。
+   `driver_os_api::IrqOp`、`DeviceServices` 与 `DeviceAccess` 均没有线程化注册入口。
    普通设备 IRQ handler 不得阻塞或作为 pseudo-NMI handler 使用。
    Linux `devm_request_threaded_irq` **禁止机械映射**。
-2. **无 MSI-X per-vector 暴露**。`driver_os_api::MsiResource` 有分配接口，`Device`
+2. **无 MSI-X per-vector 暴露**。`driver_os_api::MsiResource` 有分配接口，`DeviceAccess`
    没有方法。旧 virtio transport 使用的是旧资源模型，不代表新模型已接入。
    driver-os-api 的 provider 与 model 的设备服务均使用 `Fn()->IrqAction`；宿主负责内核回调转换。
 3. **无 runtime PM / suspend-resume**。`DriverOps` 只有 `probe`/`remove`，

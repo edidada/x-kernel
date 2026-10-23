@@ -12,9 +12,8 @@ use unittest::{assert_eq, def_test};
 
 use super::*;
 use crate::{
-    ClkHandle, DepKind, DevIrq, IoMap, IrqAction, OfMatch, PlatformBus,
+    ClkHandle, DepKind, DevIrq, DeviceDescriptor, IoMap, IrqAction, OfMatch, PlatformBus,
     bus::{BusInstanceId, PlatformId, platform_bus::PlatformBusData},
-    desc::DeviceDescriptor,
     driver::{DriverDesc, DriverOps},
 };
 
@@ -69,6 +68,7 @@ struct ServiceRequest {
 }
 
 struct MockServices {
+    extensions: crate::ExtensionRegistry,
     requests: SpinNoPreempt<Vec<ServiceRequest>>,
     released: Arc<AtomicUsize>,
     clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
@@ -78,7 +78,7 @@ struct MockServices {
     /// simulating a provider registering between the dependency check
     /// and the Deferred submission (the lost-wakeup window).
     mid_check_hook: SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Every `dev.provide` publication, in order: what the host would
+    /// Every `env.provide` publication, in order: what the host would
     /// downcast and register.
     providers: SpinNoPreempt<alloc::vec::Vec<(DepKind, u64)>>,
     /// The host's wake hook (`Host::domain().wake`), installed by tests that
@@ -137,6 +137,7 @@ impl MockServices {
 
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            extensions: crate::ExtensionRegistry::new(),
             requests: SpinNoPreempt::new(Vec::new()),
             released: Arc::new(AtomicUsize::new(0)),
             mid_check_hook: SpinNoPreempt::new(None),
@@ -285,7 +286,7 @@ impl crate::ProviderServices for MockServices {
 
 impl crate::ExtensionServices for MockServices {
     fn extensions(&self) -> &crate::ExtensionRegistry {
-        crate::extension::empty_registry()
+        &self.extensions
     }
 }
 
@@ -311,7 +312,11 @@ static IDS: &[crate::PlatformId] = &[crate::PlatformId::Of(OfMatch::compatible("
 impl DriverOps<PlatformBus> for TestSer {
     type Data = SerData;
 
-    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<SerData, ProbeError> {
+    fn probe(
+        &self,
+        dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+    ) -> Result<SerData, ProbeError> {
         PROBES.fetch_add(1, Ordering::Relaxed);
         let regs = dev.res().iomap(0)?;
         let irq = dev.res().request_irq_at(0, || IrqAction::Handled)?;
@@ -320,7 +325,12 @@ impl DriverOps<PlatformBus> for TestSer {
         Ok(SerData { regs, irq, clk })
     }
 
-    fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut SerData) {
+    fn remove(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+        _data: &mut SerData,
+    ) {
         REMOVE_RAN.store(true, Ordering::Release);
     }
 }
@@ -333,7 +343,11 @@ static PICKY_IDS: &[crate::PlatformId] =
 impl DriverOps<PlatformBus> for PickyDriver {
     type Data = ();
 
-    fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    fn probe(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+    ) -> Result<(), ProbeError> {
         Err(ProbeError::Fatal(RuntimeError::Io))
     }
 }
@@ -383,12 +397,76 @@ fn fresh_domain() -> (DeviceDomain, Arc<MockServices>, crate::BusInstanceId) {
 }
 
 #[def_test]
+fn framework_environment_is_supplied_to_probe_and_remove() {
+    struct TestExtension;
+    impl crate::ExtensionService for TestExtension {}
+    static EXTENSION: TestExtension = TestExtension;
+
+    struct EnvironmentDriver(Arc<AtomicUsize>);
+    impl DriverOps<PlatformBus> for EnvironmentDriver {
+        type Data = crate::DeviceRef;
+
+        fn probe(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            env: &crate::Environment<'_>,
+        ) -> Result<Self::Data, ProbeError> {
+            core::assert!(core::ptr::eq(
+                env.extension::<TestExtension>().unwrap(),
+                &EXTENSION
+            ));
+            self.0.fetch_add(1, Ordering::Relaxed);
+            env.provide::<TestClkClass>(0x42, &TEST_CLK_PROVIDER)?;
+            Ok(dev.reference())
+        }
+
+        fn remove(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            env: &crate::Environment<'_>,
+            data: &mut Self::Data,
+        ) {
+            core::assert!(core::ptr::eq(
+                env.extension::<TestExtension>().unwrap(),
+                &EXTENSION
+            ));
+            core::assert!(dev.reference().same_device(data));
+            core::assert!(!data.is_online());
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let (domain, services, root) = fresh_domain();
+    services.extensions.register(&EXTENSION);
+    let calls = Arc::new(AtomicUsize::new(0));
+    domain.register_driver(DriverDesc::new(
+        "environment",
+        IDS,
+        EnvironmentDriver(calls.clone()),
+    ));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    domain.probe_pending();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    domain.remove_device(&device).unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(services.provider_keys(), alloc::vec![(DepKind::Clk, 0x42)]);
+    assert!(services.clk_providers.lock().contains_key(&0x42));
+    let other_services = MockServices::new();
+    let other_environment = crate::Environment::new(&*other_services);
+    assert!(other_environment.extension::<TestExtension>().is_none());
+}
+
+#[def_test]
 fn resource_services_receive_the_same_device_and_release_each_guard_once() {
     struct ResourceDriver;
     impl DriverOps<PlatformBus> for ResourceDriver {
         type Data = (DevIrq, IoMap, crate::CoherentMem, ClkHandle);
 
-        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+        fn probe(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<Self::Data, ProbeError> {
             let resources = dev.res();
             let mapping = resources.iomap(0)?;
             let _virq = resources.resolve_irq(0)?;
@@ -453,7 +531,11 @@ fn deferred_clock_request_releases_partial_acquisitions() {
     impl DriverOps<PlatformBus> for DeferredDriver {
         type Data = ();
 
-        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+        fn probe(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<Self::Data, ProbeError> {
             let _mapping = dev.res().iomap(0)?;
             let _irq = dev.res().request_irq_at(0, || IrqAction::Handled)?;
             let _clock = dev.res().clk("baudclk")?;
@@ -491,14 +573,23 @@ fn retained_reference_does_not_retain_binding_resources() {
     impl DriverOps<PlatformBus> for ReferenceDriver {
         type Data = BoundData;
 
-        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+        fn probe(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<Self::Data, ProbeError> {
             Ok(BoundData {
                 device: dev.reference(),
                 drops: self.drops.clone(),
             })
         }
 
-        fn remove(&self, dev: &mut Device<'_, PlatformBus>, data: &mut Self::Data) {
+        fn remove(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            data: &mut Self::Data,
+        ) {
             assert!(dev.reference().same_device(&data.device));
             assert!(!data.device.is_online());
             core::assert_eq!(self.drops.load(Ordering::Relaxed), 0);
@@ -682,7 +773,11 @@ static TIE_IDS: &[crate::PlatformId] = &[crate::PlatformId::Of(OfMatch::compatib
 impl DriverOps<PlatformBus> for TieA {
     type Data = ();
 
-    fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    fn probe(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+    ) -> Result<(), ProbeError> {
         Ok(())
     }
 }
@@ -690,7 +785,11 @@ impl DriverOps<PlatformBus> for TieA {
 impl DriverOps<PlatformBus> for TieB {
     type Data = ();
 
-    fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    fn probe(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+    ) -> Result<(), ProbeError> {
         Ok(())
     }
 }
@@ -773,22 +872,40 @@ fn remove_cascades_children_first() {
     impl DriverOps<PlatformBus> for ChildDriver {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
             ORDER.lock().push("child");
         }
     }
     impl DriverOps<PlatformBus> for ParentDriver {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
             ORDER.lock().push("parent");
         }
     }
@@ -868,7 +985,11 @@ fn parent_teardown_waits_for_probing_child() {
     impl DriverOps<PlatformBus> for ChildDriver {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             // Mid-probe: the parent removal runs while THIS probe is
             // in flight — the child entry is `Probing` on the
             // registry, the exact interleave the Busy error exists
@@ -882,7 +1003,12 @@ fn parent_teardown_waits_for_probing_child() {
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
             // The parent's teardown is IN PROGRESS (its cascade is
             // removing us): a concurrent remove_device(parent) must
             // see Busy — the exclusive-claim semantics — and NOT join
@@ -899,11 +1025,21 @@ fn parent_teardown_waits_for_probing_child() {
     impl DriverOps<PlatformBus> for ParentDriver {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {}
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
+        }
     }
     static CHILD_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,child"))];
     static PARENT_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,parent"))];
@@ -1095,11 +1231,20 @@ fn management_requires_the_registered_object_not_just_its_key() {
     impl DriverOps<PlatformBus> for IdentityDriver {
         type Data = u32;
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<u32, ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<u32, ProbeError> {
             Ok(42)
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut u32) {
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut u32,
+        ) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1275,7 +1420,7 @@ fn add_device_rejects_missing_parent() {
     assert_eq!(err, AddDeviceError::ParentMissing(parent.core.id.raw()));
 }
 
-/// `Device::resolve_irq` resolves a firmware route through the
+/// `dev.res().resolve_irq()` resolves a firmware route through the
 /// host service — the seam the virtio-input shared-line handler filter
 /// depends on (reading the route's raw fields confuses hwirq with
 /// virq; rejecting routes broke the only firmware-enumerated path).
@@ -1316,12 +1461,22 @@ fn resolve_irq_maps_firmware_routes_through_services() {
     impl DriverOps<PlatformBus> for SlotDriver {
         type Data = ();
 
-        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             *RESOLVED.lock() = Some(dev.res().resolve_irq(0)?);
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {}
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
+        }
     }
     domain.register_driver(DriverDesc::new("resolver-slot", IDS, SlotDriver));
     domain.add_device(desc).expect("add device");
@@ -1594,7 +1749,7 @@ fn unmatched_descriptor_is_unclaimed() {
 
 #[def_test]
 fn probe_reads_firmware_property_snapshot() {
-    use crate::{device::Device, firmware::FirmwareNodeInfo};
+    use crate::{device::DeviceAccess, firmware::FirmwareNodeInfo};
 
     let (domain, services, root) = fresh_domain();
     let firmware = FirmwareNodeInfo {
@@ -1625,7 +1780,7 @@ fn probe_reads_firmware_property_snapshot() {
 
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let reference = crate::DeviceRef { core };
-    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert_eq!(ctx.fw().u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw().string("vendor,label"), Some("rev-b"));
     assert!(ctx.fw().flag("dma-coherent"));
@@ -1655,7 +1810,7 @@ fn device_views_borrow_the_registered_identity() {
     let modalias = reference.descriptor().bus_data.modalias();
     let initial_count = Arc::strong_count(&reference.core);
     {
-        let device = Device::<PlatformBus>::new(&reference, modalias.as_deref(), &*services)
+        let device = DeviceAccess::<PlatformBus>::new(&reference, modalias.as_deref(), &*services)
             .expect("platform payload");
         let info = device.info();
         assert_eq!(Arc::strong_count(&reference.core), initial_count);
@@ -1677,7 +1832,7 @@ fn device_views_borrow_the_registered_identity() {
         assert_eq!(Arc::strong_count(&reference.core), initial_count + 1);
     }
     assert_eq!(Arc::strong_count(&reference.core), initial_count);
-    let remove_view = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let remove_view = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert!(remove_view.info().modalias().is_none());
 }
 
@@ -1690,7 +1845,7 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
     assert!(desc.dma.is_none());
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let reference = crate::DeviceRef { core };
-    let device = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let device = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert!(matches!(
         device.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::Unsupported))
@@ -1703,7 +1858,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     // The mock's fake allocator hands out identity CPU-physical pages
     // around 0x4000_0000; the DEVICE-visible address must come back
     // translated through the descriptor's dma view.
-    use crate::device::Device;
+    use crate::device::DeviceAccess;
 
     let (_domain, services, root) = fresh_domain();
     let mut desc = DeviceDescriptor::builder()
@@ -1724,7 +1879,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
 
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let reference = crate::DeviceRef { core };
-    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
     let mem = ctx.res().alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
@@ -1738,7 +1893,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     });
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let reference = crate::DeviceRef { core };
-    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert!(matches!(
         ctx.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::NoMemory))
@@ -1747,7 +1902,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
 }
 
 // ---------------------------------------------------------------------------
-// The provider door: `dev.env().provide::<C>` is the single publication path, and
+// The provider door: `env.provide::<C>` is the single publication path, and
 // publishing wakes exactly the consumers parked on that class+key.
 // ---------------------------------------------------------------------------
 
@@ -1771,8 +1926,12 @@ static CCU_IDS: &[crate::PlatformId] = &[crate::PlatformId::Of(OfMatch::compatib
 impl DriverOps<PlatformBus> for TestCcu {
     type Data = ();
 
-    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
-        dev.env().provide::<TestClkClass>(0x42, &TEST_CLK_PROVIDER)
+    fn probe(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        env: &crate::Environment<'_>,
+    ) -> Result<(), ProbeError> {
+        env.provide::<TestClkClass>(0x42, &TEST_CLK_PROVIDER)
     }
 }
 
@@ -1785,7 +1944,11 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
     impl DriverOps<PlatformBus> for Controller {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             Ok(())
         }
     }
@@ -1809,7 +1972,11 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
     impl DriverOps<PlatformBus> for Member {
         type Data = ();
 
-        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+        fn probe(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+        ) -> Result<(), ProbeError> {
             assert!(matches!(
                 self.domain.remove_device(&self.controller),
                 Err(RuntimeError::Busy)
@@ -1823,7 +1990,12 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
             Ok(())
         }
 
-        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {
+        fn remove(
+            &self,
+            _dev: &mut DeviceAccess<'_, PlatformBus>,
+            _env: &crate::Environment<'_>,
+            _data: &mut (),
+        ) {
             self.assert_closed();
         }
     }
@@ -2055,7 +2227,8 @@ mod publication_contract {
 
             fn probe(
                 &self,
-                dev: &mut crate::Device<'_, crate::PlatformBus>,
+                dev: &mut crate::DeviceAccess<'_, crate::PlatformBus>,
+                _env: &crate::Environment<'_>,
             ) -> Result<Self::Data, crate::ProbeError> {
                 dev.publish(&CLASS, 42)
                     .map_err(|_| crate::ProbeError::Fatal(crate::RuntimeError::BadState))
@@ -2063,7 +2236,8 @@ mod publication_contract {
 
             fn remove(
                 &self,
-                _dev: &mut crate::Device<'_, crate::PlatformBus>,
+                _dev: &mut crate::DeviceAccess<'_, crate::PlatformBus>,
+                _env: &crate::Environment<'_>,
                 data: &mut Self::Data,
             ) {
                 CLOSED_AT_REMOVE.store(data.publication().acquire_use().is_err(), Ordering::SeqCst);

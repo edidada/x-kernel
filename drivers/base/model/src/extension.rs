@@ -10,7 +10,7 @@
 //! driver asks for it by type:
 //!
 //! ```ignore
-//! let Some(transport) = dev.env().extension::<driver_host::virtio_transport::PciTransportService>()
+//! let Some(transport) = env.extension::<driver_host::virtio_transport::PciTransportService>()
 //! else { return Err(...) };
 //! ```
 //!
@@ -23,7 +23,7 @@ use core::any::{Any, TypeId};
 
 use kspin::SpinNoPreempt;
 
-/// A type that device families may fetch through `Device::env().extension()`.
+/// A type that device families may fetch through `Environment::extension()`.
 pub trait ExtensionService: Send + Sync + 'static {}
 
 /// The host's extension table: one boot-static value per extension type.
@@ -70,7 +70,7 @@ pub(crate) fn empty_registry() -> &'static ExtensionRegistry {
     &EMPTY_REGISTRY
 }
 
-/// The host capability behind `Device::env().extension()`.
+/// The host capability behind `Environment::extension()`.
 pub trait ExtensionServices: Send + Sync {
     /// The host's extension table.
     fn extensions(&self) -> &ExtensionRegistry;

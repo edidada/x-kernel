@@ -1,12 +1,29 @@
 # driver-model — 设计文档
 
+## 设备模块组织
+
+`device/` 按设备描述、注册对象和驱动访问聚合；内部子模块不作为公开路径。
+`DeviceDescriptor`、`DeviceRef` 和 `DeviceAccess` 统一从 crate 根导出，原 `desc`
+模块入口移除。描述符只保存枚举事实；绑定资源与状态机仍归 domain。
+宿主服务契约、通用资源类型和固件属性类型保持原有模块归属。
+描述符 UT 仍在 `ut-tests/desc.rs`，不随实现搬进 src。
+
 ## 回调视图的借用关系
 
+驱动回调显式接收两个入口：`probe(dev, env)` 与 `remove(dev, env, data)`。
+`DeviceAccess` 只提供设备身份、信息、固件、资源和 class 发布接口；
+它不拥有设备状态或返回的资源句柄。`Environment` 位于 `environment.rs`，
+不携带设备身份或总线类型，只提供 host provider 注册和扩展查询。
+两者借用同一宿主 DeviceServices 实现，不增加新的宿主聚合契约。
+原 `Device` 名称和 `env()` 入口移除；延迟探测直接构造 `ProbeError::Deferred`。
+provider 注册不记录设备来源，不返回撤销句柄，也不随 remove 自动清理；
+保持现有静态 lookup 和唤醒语义，不把它描述为设备拥有的 class publication。
+
 `DeviceCore` 是设备描述与身份的唯一存储。回调适配层持有 `DeviceRef`，
-`Device<'a, B>` 借用该引用与宿主服务，不另存 descriptor 引用。
+`DeviceAccess<'a, B>` 借用该引用与宿主服务，不另存 descriptor 引用。
 构造时从同一描述符 downcast 出类型化 bus_data 借用；不允许调用方单独
 传入其他设备的总线数据，类型不匹配则构造失败。
-`DeviceInfo` 仅借用 Device，查询不克隆 Arc，也不能脱离 Device 的借用期。
+`DeviceInfo` 仅借用 DeviceAccess，查询不克隆 Arc，也不能脱离 DeviceAccess 的借用期。
 需要跨回调保留身份必须显式调用 `reference()`；class 发布仍持有同一核心。
 modalias 保持回调期借用：probe 提供总线派生值，remove 保持 None。
 资源、固件视图均读取同一 DeviceRef 的描述符，不持有独立事实副本。
@@ -78,7 +95,7 @@ model 拥有带借用设备上下文的设备服务、deferred probe、ResourceM
 边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
 依赖方向为 `driver-model → driver-class` 和 `driver-model → driver-os-api`。私有 `DeviceCore` 实现
-`PublicationSource`，`Device::publish` 将同一个 `Arc` 身份交给 class。
+`PublicationSource`，`DeviceAccess::publish` 将同一个 `Arc` 身份交给 class。
 class 只读身份与在线状态；model 在 remove 回调前标记来源 offline。
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
 发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
@@ -118,10 +135,12 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 |---|---|
 | `src/lib.rs` | crate 门面 + Linux↔x-kernel 映射表 + 所有权模型说明 |
 | `src/bus/mod.rs`, `src/bus/platform_bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch`（`driver_base` 根上各导出一次，不再有用 `platform::` 二次路径） |
-| `src/desc.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
+| `src/device/descriptor.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
-| `src/device.rs` | `DeviceCore` 持有注册描述符与共享身份；`DeviceRef` 保留只读身份；`Device` 是 probe/remove 期间借用描述符和服务的类型化视图 |
+| `src/device/mod.rs` | `DeviceCore` 持有注册描述符与共享状态；`DeviceRef` 管理同一对象的共享引用 |
+| `src/device/access.rs` | `DeviceAccess` 与 info/res/fw 视图：回调期间的设备访问、资源申请和 class 发布 |
+| `src/environment.rs` | 不关联设备身份的框架环境：host provider 注册与扩展查询 |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
 | `../os-api/src/{mmio,irq,dma,clock}.rs` | 已抽出的 OS 能力描述、Op 与句柄，按能力与生命周期聚合；不属于 model 实现 |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
@@ -135,7 +154,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
 | `src/domain/lifecycle.rs` | 移除编排：独占声明、children-first 级联、teardown 分相（`remove()` → drop `Data`；没有观察者/通知旁路） |
-| `ut-tests/domain.rs` | 模型单测（`MockServices` 上运行），含 `dev.provide` provider 门与 defer/wake 链路 |
+| `ut-tests/domain.rs` | 模型单测（`MockServices` 上运行），含 `env.provide` provider 门与 defer/wake 链路 |
 | `ut-tests/domain.rs` 中的 publication 契约测试 | 模型测试身份构造与跨 crate 发布生命周期验证 |
 | `ut-tests/firmware.rs`、`ut-tests/platform_bus.rs` | firmware 与 platform bus 单测 |
 
@@ -190,8 +209,8 @@ NotFound/None，绑定过的 Removed 条目仍可快照查询，重复移除返�
 `DeviceCore` 是已注册描述符的唯一持有者，同时保存管理键、物理路径、
 最近开始 probe 的驱动名和 offline 状态。域条目、`DeviceRef` 与 class 发布
 共享同一个核心。probe 批次及 remove 只克隆 Arc，不再克隆描述符；
-`Device<'a, B>` 仍是回调期间借用核心中描述符和服务的类型化视图。
-`Device::reference()` 可保留对象身份，不延长回调服务借用。
+`DeviceAccess<'a, B>` 仍是回调期间借用核心中描述符和服务的类型化视图。
+`DeviceAccess::reference()` 可保留对象身份，不延长回调服务借用。
 
 `DeviceRef` 只提供不可变描述、路径、驱动名、online 快照和对象同一性比较，
 不暴露核心 Deref、不允许外部构造，不提供硬件操作或资源申请入口。
@@ -231,7 +250,7 @@ online 不能证明可以挂载子设备。Probing 父设备仍可枚举孩子�
 ## 设备服务上下文
 
 MMIO、IRQ 注册、IRQ 映射、DMA 和时钟获取统一接收 `DeviceContext<'_>`，
-不再接收裸 DeviceId。上下文定义在服务契约旁，由 `Device::res()` 的资源视图
+不再接收裸 DeviceId。上下文定义在服务契约旁，由 `DeviceAccess::res()` 的资源视图
 在同步调用时构造，借用当前回调的 DeviceRef；没有公开构造器，也不能从长期
 DeviceRef 转换而来。宿主通过 `context.device()` 直接读取同一设备的描述符、
 父设备和来源信息，无需额外查表。宿主需要保留身份时可 clone DeviceRef，
@@ -272,7 +291,7 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 
 ## 公开名词预算
 
-驱动面只允许出现这些名词，其余都是实现细节：`Device`、`Driver`/`DriverDesc`、
+驱动面只允许出现这些名词，其余都是实现细节：`DeviceAccess`、`Driver`/`DriverDesc`、
 `Bus`、`Resource`（devm guard 族）、`Class`（发布）、`Provider`（家族描述符）、
 `Host`（进程级根，driver-host 侧）。新增一个公共名词要说明它归并/删除了哪个既有
 名词；只有单个使用者的抽象不进公共面。
@@ -433,7 +452,7 @@ pub trait Bus: Sized + Send + Sync + 'static {
 // host 安装时注册一次（boot-static）：
 extensions.register(Box::leak(Box::new(PciTransportService::new(&provider))));
 // 驱动按类型取：
-let Some(service) = dev.env().extension::<PciTransportService>() else { … };
+let Some(service) = env.extension::<PciTransportService>() else { … };
 ```
 
 家族 transport 需要超出能力契约的主机机制时，扩展自己是**一个值**，按类型
@@ -445,7 +464,7 @@ let Some(service) = dev.env().extension::<PciTransportService>() else { … };
 
 ### `IrqAction` 没有 `WakeThread` 变体
 
-本模型的 `IrqAction` 只表示同步处理结果，Op、设备服务和 Device 均没有
+本模型的 `IrqAction` 只表示同步处理结果，Op、设备服务和 DeviceAccess 均没有
 threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是对底层能力的判断。
 未来需要连同线程注册、退出同步和驱动侧入口一起设计，不得静默降级唤醒请求。
 
@@ -498,12 +517,12 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 ## 注册与资源清理约束
 
-Device::publish 返回不可克隆的 Registration；publication() 返回不撤销注册的
+DeviceAccess::publish 返回不可克隆的 Registration；publication() 返回不撤销注册的
 消费者引用。remove_device 在调用驱动 remove 之前使 DeviceCore offline，拒绝
 新使用；remove 必须停止并等待已获准操作，或者把所需资源保留在共享 runtime 中。
 Registration Drop 只延迟 class hook，不阻塞 Data 的后续字段析构。
 当前 model 不持有所有 class 注册的 drain/join 集合，不能声称字段顺序自动保证
 MMIO、IRQ、DMA 生命周期安全。具体资源析构不得先于依赖它们的操作退出。
 
-Device::publish 仅接收 Class 与 runtime，不接收发布名。通用 class 允许同源多项
+DeviceAccess::publish 仅接收 Class 与 runtime，不接收发布名。通用 class 允许同源多项
 独立注册；这不改变 model 自己的驱动注册去重或 provider 的业务键检查。
