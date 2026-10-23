@@ -651,11 +651,22 @@ impl DwMmcHost {
                 }
                 Err(err) => {
                     log::warn!(
-                        "dwmmc: data-read cmd {} bytes {} attempt {}: {err:?} ({})",
+                        "dwmmc: data-read cmd {} bytes {} attempt {}: {err:?} ({}) ctrl={:#x} \
+                         status={:#x} rintsts={:#x} intmask={:#x} clkena={:#x} clkdiv={:#x} \
+                         ctype={:#x} blksiz={:#x} bytcnt={:#x}",
                         cmd.opcode,
                         bytes,
                         attempt,
                         Self::status_names(self.xfer.load()),
+                        self.readl(SDMMC_CTRL),
+                        self.readl(SDMMC_STATUS),
+                        self.readl(SDMMC_RINTSTS),
+                        self.readl(SDMMC_INTMASK),
+                        self.readl(SDMMC_CLKENA),
+                        self.readl(SDMMC_CLKDIV),
+                        self.readl(SDMMC_CTYPE),
+                        self.readl(SDMMC_BLKSIZ),
+                        self.readl(SDMMC_BYTCNT),
                     );
                     self.recover_after_data_error(cmd);
                 }

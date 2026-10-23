@@ -247,7 +247,7 @@ pub fn detect_card(
             ),
         )?;
         host_ref.set_ios(&MmcIos {
-            clock_hz: 400_000,
+            clock_hz: 25_000_000,
             bus_width: BusWidth::Bit4,
             power_on: true,
         })?;
