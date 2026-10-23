@@ -14,7 +14,7 @@ use crate::{
     SocketErrorOrigin,
     buf::PacketType,
     ip::{IpAddress, IpEndpoint},
-    ipv4::{Icmpv4Error, Ipv4Header},
+    ipv4::Icmpv4Error,
     udp::{UdpSocketState, register_udp_state_for_test},
 };
 
@@ -203,7 +203,7 @@ fn test_icmpv4_error_accepts_truncated_original_datagram() {
         &udp,
     )
     .unwrap();
-    let original_header = Ipv4Header::parse_input(&original).unwrap();
+    let original_header = crate::ipv4::parse_input(&original).unwrap();
     let error = ipv4::build_icmpv4_error_packet(
         Icmpv4Error::PortUnreachable,
         PacketType::Host,
@@ -221,6 +221,19 @@ fn test_icmpv4_error_accepts_truncated_original_datagram() {
     let queued = connected.pop_error().unwrap();
     assert!(queued.payload.is_empty());
     assert_eq!(queued.addr, SocketAddr::V4(remote));
+
+    let ip_len = ipv4::parse_input(&error).unwrap().header_len();
+    for (field_offset, value) in [(10, error[ip_len + 8 + 10] ^ 0xff), (0, 0x4f)] {
+        let mut invalid = error.clone();
+        invalid[ip_len + 8 + field_offset] = value;
+        // Keep the outer ICMP checksum valid to exercise quoted-header checks.
+        let icmp = Icmpv4Slice::from_slice(&invalid[ip_len..]).unwrap();
+        let checksum = icmp.icmp_type().calc_checksum(icmp.payload());
+        invalid[ip_len + 2..ip_len + 4].copy_from_slice(&checksum.to_be_bytes());
+        inspect_icmpv4_error(&invalid, 1);
+        assert_eq!(connected.consume_socket_error(), 0);
+        assert!(connected.pop_error().is_none());
+    }
     clear_registry();
 }
 

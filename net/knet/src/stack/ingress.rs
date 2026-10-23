@@ -198,7 +198,7 @@ pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut Socke
         };
         match ipv4::ip_version(ip_packet) {
             Some(4) => {
-                let Ok(header) = Ipv4Header::parse_input(ip_packet) else {
+                let Ok(header) = crate::ipv4::parse_input(ip_packet) else {
                     continue;
                 };
                 let Some(payload) = ipv4::payload(ip_packet, &header) else {

@@ -109,7 +109,7 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
 /// This mirrors Linux's UDP ICMP error lookup in
 /// `net/ipv4/udp.c::__udp4_lib_err()`.
 pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
-    let ip_packet = match Ipv4Header::parse_input(packet) {
+    let ip_packet = match crate::ipv4::parse_input(packet) {
         Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
         _ => return,
     };
@@ -131,10 +131,20 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
     };
 
     let original_packet = icmp.payload();
-    let original_ip = match Ipv4Header::parse_icmp_quote(original_packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_UDP => header,
-        _ => return,
+    let original_view = match Ipv4Header::parse_header(original_packet) {
+        Ok(header) => header,
+        Err(_) => return,
     };
+    // Quotes may omit the original payload, but must retain a valid IP header.
+    if usize::from(original_view.total_len()) < original_view.slice().len()
+        || Ipv4Header::check_header_checksum(&original_view).is_err()
+    {
+        return;
+    }
+    let original_ip = Ipv4Header::from_slice(&original_view);
+    if original_ip.protocol() != ipv4::PROTOCOL_UDP {
+        return;
+    }
     let original_udp = match original_packet.get(original_ip.header_len()..) {
         Some(payload) => payload,
         _ => return,

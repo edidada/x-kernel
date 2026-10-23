@@ -723,7 +723,10 @@ impl Router {
     }
 
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
-        let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
+        if packet.len() > usize::from(u16::MAX) {
+            return Err(KError::InvalidInput);
+        }
+        let header = Ipv4Header::parse(&packet).map_err(|_| KError::InvalidInput)?;
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
         let Some(mtu) = self.route_mtu(&dst_addr) else {
             return Ok(vec![packet]);

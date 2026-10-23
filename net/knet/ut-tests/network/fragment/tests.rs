@@ -62,7 +62,7 @@ fn test_ipv4_reassembly_accepts_in_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
+    let header = crate::ipv4::parse_input(ip_packet).unwrap();
     assert!(!header.is_fragmented());
     assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
 }
@@ -75,7 +75,7 @@ fn test_ipv4_reassembly_accepts_reverse_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
+    let header = crate::ipv4::parse_input(ip_packet).unwrap();
     assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
 }
 

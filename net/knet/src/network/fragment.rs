@@ -229,7 +229,7 @@ impl Ipv4Reassembler {
             let Some(first_packet) = queue.first_fragment_packet() else {
                 continue;
             };
-            let Ok(header) = Ipv4Header::parse_input(&first_packet) else {
+            let Ok(header) = crate::ipv4::parse_input(&first_packet) else {
                 continue;
             };
             fragments.push(ExpiredIpv4Fragment {

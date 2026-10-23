@@ -75,6 +75,7 @@ net/knet/
     ├── network/
     │   ├── ipv4/
     │   │   ├── mod.rs
+    │   │   ├── header.rs
     │   │   └── process.rs
     │   ├── interface_address.rs
     │   ├── fragment.rs
@@ -253,6 +254,31 @@ this boundary separates the smoltcp adapter from routing and device dispatch
 without changing lock order, queue capacity, or loopback delivery. A later queue
 ownership change can replace the adapter's backing owner without exposing the
 routing table to smoltcp again.
+
+### IPv4 Header Snapshots
+
+`network/ipv4/header.rs` owns immutable `Ipv4Header` field snapshots, their
+parsing errors and internal `Ipv4FragmentInfo`. All fields are private. Read-only
+accessors expose the decoded values; fragment offsets remain in eight-byte wire
+units internally, while byte offsets and fragmentation status are derived.
+
+`Ipv4Header::parse` checks header structure and decodes wire fields. It does
+not check checksum or require the original payload to be present. The snapshot's
+`total_len` always represents the wire field. `Ipv4Header::parse_header` exposes the existing
+borrowed `Ipv4HeaderSlice` for processing stages that need checksum validation
+before constructing a snapshot; no additional view type is introduced.
+
+`process::parse_input` requires a complete datagram with a valid header checksum
+and permits trailing link padding. The ICMP error consumer checks the quoted
+header and checksum while allowing a truncated original payload. Output uses
+storage length, finalizes wire length and checksum, and then takes a snapshot.
+Snapshots retain header length, including options, but not the original header
+bytes or a borrow of packet storage.
+
+`process.rs` retains packet-buffer validation and finalization, payload slicing,
+header emission, ICMP error handling and fragmentation. Its existing buffer
+adapters return snapshots through the same `Ipv4Header` methods. Reassembly
+continues to retain the first fragment's raw header bytes to preserve options.
 
 ### IPv4 Filter Table Model
 

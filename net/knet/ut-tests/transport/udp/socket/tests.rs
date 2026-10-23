@@ -151,7 +151,7 @@ fn udp_datagram_is_written_into_preallocated_ipv4_packet() {
         )
         .unwrap();
 
-    let header = ipv4::Ipv4Header::parse_input(&packet).unwrap();
+    let header = ipv4::parse_input(&packet).unwrap();
     let udp_packet = &packet[header.header_len()..];
     assert_eq!(header.total_len(), packet.len());
     assert!(has_valid_udp_checksum(src_addr, dst_addr, udp_packet));
