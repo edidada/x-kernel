@@ -1,11 +1,15 @@
-# 总线归属校验
+# driver-model — 安全与可靠性分析
+
+## 总线归属校验
 
 设备仅持有必填的总线实例标识。注册时在域锁内验证实例属于当前 domain，
 并检查设备数据词汇的类型与实例类型一致；外域或不存在的实例不能注册设备。
 匹配与快照读取实例中的总线类型，避免描述符与实例分别声明归属而发生漂移。
 实例标识只是关联键，不是硬件初始化凭据；创建方和枚举方负责传递真实的拓扑。
-
-## driver-model — 安全与可靠性分析
+控制器的 `Removing` 状态在获取级联快照前发布，`add_device` 在同一域锁内
+检查它，阻止无 `parent` 的新成员绕过父子拓扑门禁。控制器删除或保留为
+`Removed` 后，其实例也不能再接收成员。UT 覆盖 probe 中触发移除而暂时
+返回 Busy、remove 回调期间以及最终移除后的挂载拒绝，并验证其他实例不受影响。
 
 ## Scope
 
@@ -50,7 +54,8 @@
 
 - **本 crate 校验**：`add_device` 的父设备存在性与可用性
   （`AddDeviceError::ParentMissing` / `ParentUnavailable`）、bus instance 存在性
-  与类型一致性（`BusInstanceMissing` / `BusInstanceTypeMismatch`）、
+  与类型一致性及控制器可用性（`BusInstanceMissing` / `BusInstanceTypeMismatch` /
+  `BusInstanceUnavailable`）、
   `DeviceLocation::FirmwareNode{id}` 的唯一性（由 compose 侧的单调分配器 +
   耗尽拒绝保证）。
 - **本 crate 不校验、由下游校验**：`MmioRegion` 是否与真实硬件相符、是否与其他
@@ -119,7 +124,7 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |---|---|---|---|---|---|---|
-| F-01 | `add_device` 被拒 | 父设备不存在 / 正在拆 / bus instance 缺失或类型不符 | 该设备不进入模型 | 该设备无驱动；`driver-init` `log::warn` 后继续枚举其余节点 | 3 | 返回结构化 `AddDeviceError`，四种原因可区分；compose 侧不 panic |
+| F-01 | `add_device` 被拒 | 父设备不存在 / 正在拆 / bus instance 缺失、数据类型不符或控制器不可用 | 该设备不进入模型 | 枚举方获得错误，决定是否继续枚举其余节点 | 3 | 返回结构化 `AddDeviceError`，五种原因可区分 |
 | F-02 | 探测返回 `Fatal` | 驱动判定自己不该认领（如 virtio-blk 发现 `VirtioDeviceKind != Block`） | 驱动进 `attempted` | 同一轮换下一个候选；穷尽则 `Unclaimed` | 4 | 正常控制流，`log::debug` |
 | F-03 | 探测返回 `Deferred` | clock/irq-domain/gpio/regulator provider 未就绪 | 设备 parked | provider 发布时被精确唤醒；阶段结束仍未唤醒则报告 + 降级 `Unclaimed` | 3 | 见 T-07 / T-08 |
 | F-04 | 服务未安装就取资源 | `set_services` 之前调用，或某个域没有自己的 runtime | 所有资源获取返回 `RuntimeError::Unsupported` | 该域上所有驱动 probe 失败 → `Unclaimed` | 2 | 刻意的"响亮失败"：`NoServices` 是一个真实类型而不是 `Option::None` 静默路径；启动日志会显示 0 active |

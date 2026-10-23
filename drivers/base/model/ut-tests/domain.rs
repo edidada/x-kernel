@@ -779,6 +779,10 @@ fn bus_instances_validate_query_and_bridge_eject() {
     );
     // The member is gone from the instance's listing.
     assert!(domain.bus_instance_devices(secondary).is_empty());
+    assert!(matches!(
+        domain.add_device(bus_device(secondary, 6)),
+        Err(AddDeviceError::BusInstanceUnavailable(_))
+    ));
     assert_eq!(domain.bus_instance_devices(root), alloc::vec![member]);
     assert_eq!(domain.snapshot(member).unwrap().bus, PlatformBus::ID);
     let devices = domain.devices();
@@ -1246,6 +1250,112 @@ impl DriverOps<PlatformBus> for TestCcu {
     fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
         dev.env().provide::<TestClkClass>(0x42, &TEST_CLK_PROVIDER)
     }
+}
+
+#[def_test(serial)]
+fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
+    use crate::domain::AddDeviceError;
+
+    struct Controller;
+
+    impl DriverOps<PlatformBus> for Controller {
+        type Data = ();
+
+        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+            Ok(())
+        }
+    }
+
+    struct Member {
+        domain: &'static DeviceDomain,
+        controller: DeviceId,
+        instance: crate::BusInstanceId,
+    }
+
+    impl Member {
+        fn assert_closed(&self) {
+            assert!(matches!(
+                self.domain.add_device(test_descriptor(self.instance)),
+                Err(AddDeviceError::BusInstanceUnavailable(_))
+            ));
+            assert!(self.domain.bus_instance_devices(self.instance).len() == 1);
+        }
+    }
+
+    impl DriverOps<PlatformBus> for Member {
+        type Data = ();
+
+        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+            assert!(matches!(
+                self.domain.remove_device(self.controller),
+                Err(RuntimeError::Busy)
+            ));
+            self.assert_closed();
+            assert!(matches!(
+                self.domain
+                    .add_bus_instance(PlatformBus::ID, Some(self.controller), "late"),
+                Err(AddDeviceError::ParentUnavailable { .. })
+            ));
+            Ok(())
+        }
+
+        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut ()) {
+            self.assert_closed();
+        }
+    }
+
+    static CONTROLLER_IDS: &[PlatformId] =
+        &[PlatformId::Of(OfMatch::compatible("gate,controller"))];
+    static MEMBER_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,member"))];
+    let (domain, _services, root) = fresh_domain();
+    let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
+    domain.register_driver(DriverDesc::new("controller", CONTROLLER_IDS, Controller));
+    let controller = domain
+        .add_device(DeviceDescriptor::new(
+            root,
+            Box::new(PlatformBusData::firmware_node(1, &["gate,controller"])),
+        ))
+        .unwrap();
+    let instance = domain
+        .add_bus_instance(PlatformBus::ID, Some(controller), "downstream")
+        .unwrap();
+    domain.register_driver(DriverDesc::new(
+        "member",
+        MEMBER_IDS,
+        Member {
+            domain,
+            controller,
+            instance,
+        },
+    ));
+    let member = domain
+        .add_device(DeviceDescriptor::new(
+            instance,
+            Box::new(PlatformBusData::firmware_node(2, &["gate,member"])),
+        ))
+        .unwrap();
+    assert_eq!(
+        domain.snapshot(controller).unwrap().state,
+        DeviceState::Removing
+    );
+    assert_eq!(domain.snapshot(member).unwrap().state, DeviceState::Active);
+    let unrelated = domain.add_device(test_descriptor(root)).unwrap();
+
+    domain.remove_device(controller).unwrap();
+    assert_eq!(
+        domain.snapshot(controller).unwrap().state,
+        DeviceState::Removed
+    );
+    assert_eq!(domain.snapshot(member).unwrap().state, DeviceState::Removed);
+    assert_eq!(domain.snapshot(member).unwrap().bus, PlatformBus::ID);
+    assert_eq!(
+        domain.snapshot(unrelated).unwrap().state,
+        DeviceState::Unclaimed
+    );
+    assert!(matches!(
+        domain.add_device(test_descriptor(instance)),
+        Err(AddDeviceError::BusInstanceUnavailable(_))
+    ));
 }
 
 fn ccu_descriptor(root: crate::BusInstanceId) -> DeviceDescriptor {

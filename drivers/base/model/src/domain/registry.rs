@@ -190,10 +190,47 @@ impl DeviceDomain {
             .map(|entry| (entry.bus, entry.bridge.map(DeviceId), entry.label.clone()))
     }
 
+    fn validate_bus_membership(
+        inner: &DomainInner,
+        desc: &DeviceDescriptor,
+    ) -> Result<(), AddDeviceError> {
+        let instance = desc.bus_instance;
+        let entry = inner
+            .bus_instances
+            .get(&instance.raw())
+            .ok_or(AddDeviceError::BusInstanceMissing(instance.raw()))?;
+        if entry.bus != desc.data.bus_id() {
+            return Err(AddDeviceError::BusInstanceTypeMismatch {
+                instance: instance.raw(),
+                instance_bus: entry.bus.name(),
+                device_bus: desc.data.bus_id().name(),
+            });
+        }
+        if let Some(controller) = entry.bridge {
+            match inner
+                .devices
+                .get(&controller)
+                .map(|entry| entry.lifecycle.state)
+            {
+                Some(
+                    DeviceState::Pending
+                    | DeviceState::Probing
+                    | DeviceState::Active
+                    | DeviceState::Deferred
+                    | DeviceState::Unclaimed,
+                ) => {}
+                Some(DeviceState::Removing | DeviceState::Removed) | None => {
+                    return Err(AddDeviceError::BusInstanceUnavailable(instance.raw()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Insert an enumeration product into its existing bus instance and probe it.
     ///
-    /// Returns an error if the instance or parent is missing, the parent is
-    /// being removed, or the device data belongs to another bus type.
+    /// Returns an error if the instance or parent is missing, its controller
+    /// or parent is being removed, or the data belongs to another bus type.
     pub fn add_device(&self, desc: DeviceDescriptor) -> Result<DeviceId, AddDeviceError> {
         let id = {
             let mut inner = self.inner.lock();
@@ -209,18 +246,7 @@ impl DeviceDomain {
             }
             let id = DeviceId(inner.next_device_id);
             inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-            let instance = desc.bus_instance;
-            let entry = inner
-                .bus_instances
-                .get(&instance.raw())
-                .ok_or(AddDeviceError::BusInstanceMissing(instance.raw()))?;
-            if entry.bus != desc.data.bus_id() {
-                return Err(AddDeviceError::BusInstanceTypeMismatch {
-                    instance: instance.raw(),
-                    instance_bus: entry.bus.name(),
-                    device_bus: desc.data.bus_id().name(),
-                });
-            }
+            Self::validate_bus_membership(&inner, &desc)?;
             // Topology validation, under the SAME lock that governs
             // removal: a stated parent must exist AND be accepting
             // children. A parent mid-teardown (Removing) or gone

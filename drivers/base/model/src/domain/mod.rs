@@ -110,9 +110,10 @@ pub enum AddDeviceError {
     /// The parent exists but is tearing down (`Removing`) or is already
     /// removed — it cannot accept children.
     ParentUnavailable { parent: u64, state: &'static str },
-    /// The stated bus instance does not exist (never created, or its
-    /// bridge was removed first).
+    /// The stated bus instance does not exist in this domain.
     BusInstanceMissing(u64),
+    /// The instance's controller is being removed or no longer exists.
+    BusInstanceUnavailable(u64),
     /// The device's bus type disagrees with the instance's.
     BusInstanceTypeMismatch {
         instance: u64,
@@ -306,7 +307,7 @@ struct BusInstanceEntry {
 }
 
 struct DeviceEntry {
-    /// Identity: the immutable descriptor (bus type, instance, parent,
+    /// Identity: the immutable descriptor (bus instance, parent,
     /// resources, firmware identity).
     desc: DeviceDescriptor,
     /// The live identity card, shared with this device's class
