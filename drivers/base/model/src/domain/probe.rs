@@ -72,7 +72,7 @@ impl DeviceDomain {
                                 log::debug!(
                                     "driver-core: `{}` activated device {id} ({})",
                                     driver.name(),
-                                    desc.data.display_identity()
+                                    desc.bus_data.display_identity()
                                 );
                             }
                             // Stale probe: the device's generation moved
@@ -140,7 +140,10 @@ impl DeviceDomain {
                 .map(|driver| {
                     (
                         driver.clone(),
-                        driver.matches(bus_type(&inner.bus_instances, &desc), desc.data.as_ref()),
+                        driver.matches(
+                            bus_type(&inner.bus_instances, &desc),
+                            desc.bus_data.as_ref(),
+                        ),
                     )
                 })
                 .filter(|(_, score)| *score != MatchScore::NoMatch)

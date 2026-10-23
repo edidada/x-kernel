@@ -239,7 +239,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         // MODALIAS is DEVICE-derived (of_modalias semantics: the first
         // compatible string), not id-row-derived — module loading matches
         // the same string the bus published.
-        let modalias = desc.data.modalias();
+        let modalias = desc.bus_data.modalias();
         // The bus_id check happened in matches(); probe runs on a device
         // this driver bound, so the downcast is total. A mismatching bus
         // is a domain-internal invariant violation, not a driver error.
@@ -249,7 +249,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
                       a domain-internal invariant violation, not a driver error"
         )]
         let typed = desc
-            .data
+            .bus_data
             .as_any()
             .downcast_ref::<B::DeviceData>()
             .expect("the domain only probes devices the driver matched");
@@ -279,7 +279,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
         )]
         let typed = desc
-            .data
+            .bus_data
             .as_any()
             .downcast_ref::<B::DeviceData>()
             .expect("the domain only removes devices the driver bound");
@@ -531,7 +531,7 @@ fn snapshot_of(id: DeviceId, entry: &DeviceEntry, bus: BusId) -> DeviceSnapshot 
         bus,
         state: entry.lifecycle.state,
         driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
-        identity: Some(entry.desc.data.display_identity()),
+        identity: Some(entry.desc.bus_data.display_identity()),
     }
 }
 

@@ -360,6 +360,7 @@ ouroboros = { version = "0.18.5", default-features = false }
 paste = "1.0"
 proc-macro2 = "1.0"
 quote = "1.0"
+typed-builder = "0.23.2"
 rand_chacha = { version = "0.3", default-features = false }
 
 safe-mmio = "0.3.0"

@@ -10,6 +10,8 @@
 
 `add_device` 在域锁内验证实例存在，并核对 `BusDeviceData::bus_id()` 与
 实例类型一致。数据携带的类型用于验证词汇，不是第二个可独立配置的总线归属。
+描述符的 `bus_data` 是枚举方提供的总线专属设备描述，不是 probe 返回的
+`DriverOps::Data`；后者持有驱动运行状态和资源。
 驱动候选筛选和设备快照从实例取得类型；具体驱动匹配仍保留数据 downcast 检查。
 `parent` 继续表示设备父子拓扑，不能由实例归属替代。
 
@@ -24,10 +26,28 @@
 
 `DeviceDescriptor::dma` 为 `Option<DmaInfo>`，默认 `None`，表示 DMA 尚未配置，
 不代表对硬件能力作否定判断。枚举方或平台代码确认设备的地址与一致性约束后，
-通过 `with_dma(info)` 显式配置；不因缺少固件属性而自动采用 `DmaInfo::DEFAULT`。
+通过 builder 的 `dma(info)` 或 `dma_opt(option)` 显式配置；不因缺少固件属性
+而自动采用 `DmaInfo::DEFAULT`。
 `Resources::alloc_coherent` 在未配置时返回 `Fatal(Unsupported)`，不调用宿主；
 已配置时把 `DmaInfo` 原样传给宿主，保留地址转换、mask 校验和错误传播语义。
 MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 与宿主服务签名不变。
+
+## 描述符构造接口
+
+`DeviceDescriptor` 使用 workspace 依赖 `typed-builder`，只提供一套
+`builder() ... build()` 构造接口，不保留旧的 `new` 和 `with_*` 方法。
+`bus_instance`、`bus_data` 必填；资源集合默认空，`parent`、`fw`、`dma` 默认
+`None`。可选字段提供接收值的 setter 和接收 `Option` 的 `_opt` setter，
+方便枚举方传入条件解析结果而不暴露 builder 的泛型状态类型。
+
+builder 通过类型状态检查缺少或重复设置字段，按所有权移动总线数据，不要求
+`Box<dyn BusDeviceData>` 实现 `Clone`。它不检查实例是否存在、父设备是否可用，
+也不初始化硬件；这些动态约束仍在 domain 的注册边界验证。描述符字段仍然公开，
+builder 不是不可绕过的安全边界，也不禁止构造后的字段修改。
+
+相邻的 `DriverDesc::new`、`DmaSpec::new/with_direction` 保留：前者是三个必填
+参数的简单构造，后者只有一个可选配置且支持 const 构造。资源所有者句柄的
+构造函数承担资源与释放协议的关联，不为统一外观改成 builder。
 
 ## 定位
 
@@ -87,7 +107,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 |---|---|
 | `src/lib.rs` | crate 门面 + Linux↔x-kernel 映射表 + 所有权模型说明 |
 | `src/bus/mod.rs`, `src/bus/platform_bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch`（`driver_base` 根上各导出一次，不再有用 `platform::` 二次路径） |
-| `src/desc.rs` | 描述符：`DeviceDescriptor`（`ident` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
+| `src/desc.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
 | `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`Device`（**唯一**设备句柄：probe 收 `&mut Device<'_, B>`，remove 收同一句柄 + `&mut Data`；`publish(&CLASS, …)` 即从它取 core） |

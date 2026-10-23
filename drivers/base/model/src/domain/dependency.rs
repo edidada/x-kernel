@@ -133,7 +133,7 @@ impl DeviceDomain {
             .any(|candidate| {
                 candidate.matches(
                     bus_type(&inner.bus_instances, &entry.desc),
-                    entry.desc.data.as_ref(),
+                    entry.desc.bus_data.as_ref(),
                 ) != MatchScore::NoMatch
             });
         if retryable {

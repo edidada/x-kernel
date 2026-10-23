@@ -94,7 +94,7 @@ impl DeviceDomain {
                         !entry.binding.attempted.contains(&candidate.key())
                             && candidate.matches(
                                 bus_type(&inner.bus_instances, &entry.desc),
-                                entry.desc.data.as_ref(),
+                                entry.desc.bus_data.as_ref(),
                             ) != MatchScore::NoMatch
                     })
                 })
@@ -199,11 +199,11 @@ impl DeviceDomain {
             .bus_instances
             .get(&instance.raw())
             .ok_or(AddDeviceError::BusInstanceMissing(instance.raw()))?;
-        if entry.bus != desc.data.bus_id() {
+        if entry.bus != desc.bus_data.bus_id() {
             return Err(AddDeviceError::BusInstanceTypeMismatch {
                 instance: instance.raw(),
                 instance_bus: entry.bus.name(),
-                device_bus: desc.data.bus_id().name(),
+                device_bus: desc.bus_data.bus_id().name(),
             });
         }
         if let Some(controller) = entry.bridge {
@@ -295,7 +295,7 @@ impl DeviceDomain {
             // The live identity card: physical path derives from the bus's
             // own vocabulary ONCE, here — every later publication and
             // consumer reads it through the shared core.
-            let core = crate::device::DeviceCore::new(id, desc.data.path_component());
+            let core = crate::device::DeviceCore::new(id, desc.bus_data.path_component());
             inner.devices.insert(
                 id.raw(),
                 DeviceEntry {

@@ -23,31 +23,42 @@ use crate::{
 /// The product of bus enumeration: everything the domain knows about a
 /// device before any driver binds.
 ///
-/// `data` is the owning bus's vocabulary (`PlatformBusData` for the
+/// `bus_data` is the owning bus's vocabulary (`PlatformBusData` for the
 /// platform bus); the core reads it ONLY through the
 /// [`BusDeviceData`] vtable. Ids are assigned by the
 /// [`DeviceDomain`](crate::DeviceDomain) on insertion.
-#[derive(Debug)]
+/// Construct through [`Self::builder`]: `bus_instance` and `bus_data` are
+/// required; resources default to empty and parent, firmware and DMA to `None`.
+/// Optional setters accept a value or an `Option` via their `_opt` counterpart.
+/// Domain insertion remains responsible for validating topology and bus data.
+#[derive(Debug, typed_builder::TypedBuilder)]
 pub struct DeviceDescriptor {
     /// The existing bus instance on which the enumerator discovered this device.
-    /// Its registered type owns `data`'s vocabulary; insertion validates that
+    /// Its registered type owns `bus_data`'s vocabulary; insertion validates that
     /// the data agrees with that type. Root devices also require an instance.
     pub bus_instance: BusInstanceId,
     /// Bus-specific device data (identity, discovery source) — the
     /// bus's vocabulary, opaque to the core. The firmware property
     /// snapshot is the descriptor's own `fw` field, not bus vocabulary.
-    pub data: Box<dyn BusDeviceData>,
+    pub bus_data: Box<dyn BusDeviceData>,
     /// The parent device (the topology link). The domain validates the
     /// parent exists at `add_device` time and cascades removals through
     /// children first — a parent never disappears while a child
     /// references it. `None` (the default) marks root devices.
+    #[builder(default, setter(strip_option(fallback = parent_opt)))]
     pub parent: Option<DeviceId>,
+    #[builder(default)]
     pub resources: ResourceMap,
     /// The firmware node snapshot (`of_property_read_*` surface). True of the
     /// DEVICE, not of the bus: reachable from every bus through
     /// `Device::fw()`.
+    #[builder(default, setter(strip_option(fallback = fw_opt)))]
     pub fw: Option<FirmwareNodeInfo>,
-    /// Optional DMA configuration; None rejects DMA allocation before invoking the host.
+    /// Optional DMA configuration (address mask, offset and coherency).
+    /// Enumerators or platform code supply it before DMA can be used.
+    /// `None` means unconfigured, not proof that the hardware lacks DMA;
+    /// model DMA allocation fails without invoking the host service.
+    #[builder(default, setter(strip_option(fallback = dma_opt)))]
     pub dma: Option<DmaInfo>,
 }
 
@@ -55,7 +66,7 @@ impl Clone for DeviceDescriptor {
     fn clone(&self) -> Self {
         Self {
             bus_instance: self.bus_instance,
-            data: alloc::boxed::Box::from(self.data.as_ref()).clone_erased(),
+            bus_data: alloc::boxed::Box::from(self.bus_data.as_ref()).clone_erased(),
             parent: self.parent,
             resources: self.resources.clone(),
             fw: self.fw.clone(),
@@ -64,43 +75,4 @@ impl Clone for DeviceDescriptor {
     }
 }
 
-impl DeviceDescriptor {
-    /// Describe a device discovered on an existing bus instance.
-    ///
-    /// The platform or controller creates the instance before enumeration.
-    /// The enumerator passes its instance here, rather than choosing by bus type.
-    pub fn new(bus_instance: BusInstanceId, data: Box<dyn BusDeviceData>) -> Self {
-        Self {
-            bus_instance,
-            parent: None,
-            data,
-            resources: ResourceMap::new(),
-            fw: None,
-            dma: None,
-        }
-    }
-
-    pub fn with_resources(mut self, resources: ResourceMap) -> Self {
-        self.resources = resources;
-        self
-    }
-
-    /// Attach the firmware node snapshot read at enumeration.
-    pub fn with_firmware(mut self, fw: Option<FirmwareNodeInfo>) -> Self {
-        self.fw = fw;
-        self
-    }
-
-    /// Configure DMA using constraints established by the enumerator or platform.
-    /// Missing firmware facts do not implicitly enable DMA.
-    pub fn with_dma(mut self, dma: DmaInfo) -> Self {
-        self.dma = Some(dma);
-        self
-    }
-
-    /// Set the parent device (the topology link).
-    pub fn with_parent(mut self, parent: Option<DeviceId>) -> Self {
-        self.parent = parent;
-        self
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/desc.rs");

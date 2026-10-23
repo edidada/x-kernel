@@ -325,11 +325,14 @@ fn test_descriptor(root: crate::BusInstanceId) -> DeviceDescriptor {
 /// so several test devices never share a path or dedupe accidentally.
 fn test_descriptor_for_node(root: crate::BusInstanceId, node_id: u32) -> DeviceDescriptor {
     let resources = test_resources();
-    DeviceDescriptor::new(
-        root,
-        alloc::boxed::Box::new(PlatformBusData::firmware_node(node_id, &["test,serial"])),
-    )
-    .with_resources(resources)
+    DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            node_id,
+            &["test,serial"],
+        )))
+        .resources(resources)
+        .build()
 }
 
 fn fresh_domain() -> (DeviceDomain, Arc<MockServices>, crate::BusInstanceId) {
@@ -407,7 +410,7 @@ fn late_driver_registration_claims_unclaimed_device() {
 fn late_driver_registration_skips_unmatched_unclaimed() {
     let (domain, _services, root) = fresh_domain();
     let mut desc = test_descriptor(root);
-    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
+    desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
     let id = domain.add_device(desc).expect("add device");
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 
@@ -491,7 +494,7 @@ fn duplicate_registration_cannot_retry_a_fatal_device() {
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 }
 
-/// Topology: with_parent links entries, removal cascades
+/// Topology: the parent field links entries, removal cascades
 /// children-first (the child's teardown completes before the parent's
 /// begins), and the parent's children list stays accurate after.
 #[def_test(serial)]
@@ -538,10 +541,13 @@ fn remove_cascades_children_first() {
     domain.register_driver(DriverDesc::new("topo-child", CHILD_IDS, ChildDriver));
     domain.register_driver(DriverDesc::new("topo-parent", PARENT_IDS, ParentDriver));
 
-    let parent_desc = DeviceDescriptor::new(
-        root,
-        alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["topo,parent"])),
-    );
+    let parent_desc = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            1,
+            &["topo,parent"],
+        )))
+        .build();
     let parent_id = domain.add_device(parent_desc.clone()).expect("add device");
     let _ = domain.probe_pending();
     assert_eq!(
@@ -550,11 +556,14 @@ fn remove_cascades_children_first() {
         "parent must bind before the child references it"
     );
 
-    let child_desc = DeviceDescriptor::new(
-        root,
-        alloc::boxed::Box::new(PlatformBusData::firmware_node(2, &["topo,child"])),
-    )
-    .with_parent(Some(parent_id));
+    let child_desc = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            2,
+            &["topo,child"],
+        )))
+        .parent_opt(Some(parent_id))
+        .build();
     let child_id = domain.add_device(child_desc).expect("add device");
     let _ = domain.probe_pending();
     assert_eq!(
@@ -640,11 +649,16 @@ fn parent_teardown_waits_for_probing_child() {
         root: crate::BusInstanceId,
         compatible: &str,
         firmware: u32,
+        parent: Option<DeviceId>,
     ) -> DeviceDescriptor {
-        DeviceDescriptor::new(
-            root,
-            alloc::boxed::Box::new(PlatformBusData::firmware_node(firmware, &[compatible])),
-        )
+        DeviceDescriptor::builder()
+            .bus_instance(root)
+            .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+                firmware,
+                &[compatible],
+            )))
+            .parent_opt(parent)
+            .build()
     }
 
     // The child driver needs to re-enter the domain: tests are serial,
@@ -655,7 +669,7 @@ fn parent_teardown_waits_for_probing_child() {
     domain.set_services(services);
     domain.register_driver(DriverDesc::new("gate-parent", PARENT_IDS, ParentDriver));
     let parent_id = domain
-        .add_device(gated_descriptor(root, "gate,parent", 1))
+        .add_device(gated_descriptor(root, "gate,parent", 1, None))
         .expect("add parent");
     let _ = domain.probe_pending();
     assert_eq!(
@@ -673,7 +687,7 @@ fn parent_teardown_waits_for_probing_child() {
         },
     ));
     let child_id = domain
-        .add_device(gated_descriptor(root, "gate,child", 2).with_parent(Some(parent_id)))
+        .add_device(gated_descriptor(root, "gate,child", 2, Some(parent_id)))
         .expect("add child");
     let _ = domain.probe_pending();
     // The in-probe removal aborted: the parent is mid-teardown
@@ -689,7 +703,7 @@ fn parent_teardown_waits_for_probing_child() {
 
     // While the parent is mid-teardown it takes no new children.
     let err = domain
-        .add_device(gated_descriptor(root, "gate,late", 3).with_parent(Some(parent_id)))
+        .add_device(gated_descriptor(root, "gate,late", 3, Some(parent_id)))
         .expect_err("Removing parent must reject children");
     assert!(matches!(
         err,
@@ -721,10 +735,13 @@ fn parent_teardown_waits_for_probing_child() {
 #[def_test(serial)]
 fn bus_instances_validate_query_and_bridge_eject() {
     fn bus_device(instance: BusInstanceId, firmware: u32) -> DeviceDescriptor {
-        DeviceDescriptor::new(
-            instance,
-            alloc::boxed::Box::new(PlatformBusData::firmware_node(firmware, &["bus,test"])),
-        )
+        DeviceDescriptor::builder()
+            .bus_instance(instance)
+            .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+                firmware,
+                &["bus,test"],
+            )))
+            .build()
     }
 
     let (domain, services, _root) = fresh_domain();
@@ -806,7 +823,17 @@ fn add_device_rejects_missing_parent() {
     let (domain, services, root) = fresh_domain();
     domain.set_services(services);
     let err = domain
-        .add_device(test_descriptor(root).with_parent(Some(DeviceId(0xdead))))
+        .add_device(
+            DeviceDescriptor::builder()
+                .bus_instance(root)
+                .bus_data(Box::new(PlatformBusData::firmware_node(
+                    1,
+                    &["test,serial"],
+                )))
+                .resources(test_resources())
+                .parent(DeviceId(0xdead))
+                .build(),
+        )
         .expect_err("missing parent");
     assert_eq!(err, AddDeviceError::ParentMissing(0xdead));
 }
@@ -825,7 +852,14 @@ fn resolve_irq_maps_firmware_routes_through_services() {
         crate::resource::IrqTrigger::LevelHigh,
     )));
     let (domain, services, root) = fresh_domain();
-    let desc = test_descriptor(root).with_resources(resources);
+    let desc = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(Box::new(PlatformBusData::firmware_node(
+            1,
+            &["test,serial"],
+        )))
+        .resources(resources)
+        .build();
     domain.set_services(services);
     // The ops instance the domain holds is a CLONE of the struct by
     // value — capture the answer through the registry instead: the
@@ -1023,7 +1057,7 @@ fn removing_unbound_device_frees_entry_and_worklists() {
 
     // Unclaimed device (no driver for it).
     let mut desc = test_descriptor(root);
-    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
+    desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
     let unclaimed = domain.add_device(desc).expect("add device");
     assert_eq!(
         domain.snapshot(unclaimed).unwrap().state,
@@ -1095,7 +1129,7 @@ fn fatal_failure_falls_through_to_next_candidate() {
 fn unmatched_descriptor_is_unclaimed() {
     let (domain, _services, root) = fresh_domain();
     let mut desc = test_descriptor(root);
-    desc.data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
+    desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
     let id = domain.add_device(desc).expect("add device");
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 }
@@ -1123,14 +1157,17 @@ fn probe_reads_firmware_property_snapshot() {
         ],
     };
     let data = PlatformBusData::firmware_node(1, &["test,serial"]);
-    let desc = DeviceDescriptor::new(root, alloc::boxed::Box::new(data))
-        .with_resources(test_resources())
-        .with_firmware(Some(firmware));
+    let desc = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(alloc::boxed::Box::new(data))
+        .resources(test_resources())
+        .fw(firmware)
+        .build();
     let _ = domain;
 
     let ctx = Device::<PlatformBus>::new(
         &desc,
-        desc.data
+        desc.bus_data
             .as_any()
             .downcast_ref::<PlatformBusData>()
             .unwrap(),
@@ -1171,7 +1208,7 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
     let desc = desc.clone();
     assert!(desc.dma.is_none());
     let bus_data = desc
-        .data
+        .bus_data
         .as_any()
         .downcast_ref::<PlatformBusData>()
         .unwrap();
@@ -1202,16 +1239,24 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     use crate::device::Device;
 
     let (_domain, services, root) = fresh_domain();
-    let mut desc = test_descriptor(root).with_dma(crate::DmaInfo {
-        mask: 0xFFFF_FFFF,
-        offset: 0x2000_0000,
-        coherent: false,
-    });
+    let mut desc = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(Box::new(PlatformBusData::firmware_node(
+            1,
+            &["test,serial"],
+        )))
+        .resources(test_resources())
+        .dma(crate::DmaInfo {
+            mask: 0xFFFF_FFFF,
+            offset: 0x2000_0000,
+            coherent: false,
+        })
+        .build();
     let cloned = desc.clone();
     assert_eq!(cloned.dma, desc.dma);
 
     let data = desc
-        .data
+        .bus_data
         .as_any()
         .downcast_ref::<PlatformBusData>()
         .unwrap();
@@ -1239,7 +1284,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         coherent: true,
     });
     let data = desc
-        .data
+        .bus_data
         .as_any()
         .downcast_ref::<PlatformBusData>()
         .unwrap();
@@ -1351,10 +1396,15 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
     let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
     domain.register_driver(DriverDesc::new("controller", CONTROLLER_IDS, Controller));
     let controller = domain
-        .add_device(DeviceDescriptor::new(
-            root,
-            Box::new(PlatformBusData::firmware_node(1, &["gate,controller"])),
-        ))
+        .add_device(
+            DeviceDescriptor::builder()
+                .bus_instance(root)
+                .bus_data(Box::new(PlatformBusData::firmware_node(
+                    1,
+                    &["gate,controller"],
+                )))
+                .build(),
+        )
         .unwrap();
     let instance = domain
         .add_bus_instance(PlatformBus::ID, Some(controller), "downstream")
@@ -1369,10 +1419,15 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
         },
     ));
     let member = domain
-        .add_device(DeviceDescriptor::new(
-            instance,
-            Box::new(PlatformBusData::firmware_node(2, &["gate,member"])),
-        ))
+        .add_device(
+            DeviceDescriptor::builder()
+                .bus_instance(instance)
+                .bus_data(Box::new(PlatformBusData::firmware_node(
+                    2,
+                    &["gate,member"],
+                )))
+                .build(),
+        )
         .unwrap();
     assert_eq!(
         domain.snapshot(controller).unwrap().state,
@@ -1399,10 +1454,13 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
 }
 
 fn ccu_descriptor(root: crate::BusInstanceId) -> DeviceDescriptor {
-    DeviceDescriptor::new(
-        root,
-        alloc::boxed::Box::new(PlatformBusData::firmware_node(2, &["test,ccu"])),
-    )
+    DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
+            2,
+            &["test,ccu"],
+        )))
+        .build()
 }
 
 #[def_test(serial)]
