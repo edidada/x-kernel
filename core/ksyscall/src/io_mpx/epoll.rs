@@ -204,3 +204,8 @@ unittest::path_mod_test!(
     mod tests_epoll_legacy,
     "../../ut-tests/io_mpx/epoll/tests_epoll_legacy.rs"
 );
+
+unittest::path_mod_test!(
+    tests_epoll_sigmask,
+    "../../ut-tests/io_mpx/epoll/tests_epoll_sigmask.rs"
+);

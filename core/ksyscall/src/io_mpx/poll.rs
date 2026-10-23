@@ -154,3 +154,8 @@ unittest::path_mod_test!(
     tests_poll_results,
     "../../ut-tests/io_mpx/poll/tests_poll_results.rs"
 );
+
+unittest::path_mod_test!(
+    tests_ppoll_sigmask,
+    "../../ut-tests/io_mpx/poll/tests_ppoll_sigmask.rs"
+);
