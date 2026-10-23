@@ -122,6 +122,9 @@ const fn fifoth(msize: u32, rx_wmark: u32, tx_wmark: u32) -> u32 {
     ((msize & 0x7) << 28) | ((rx_wmark & 0xFFF) << 16) | (tx_wmark & 0xFFF)
 }
 
+/// Legal DMA burst sizes, words (Linux `mszs[]` in dw_mci_adjust_fifoth).
+const DMA_BURST_WORDS: [u32; 8] = [1, 4, 8, 16, 32, 64, 128, 256];
+
 /// Command-issue poll budget (START clear + clock-inform frames).
 const CMD_POLL_LIMIT: u32 = 1 << 21;
 /// Data-transfer poll budget for non-task context.
@@ -335,6 +338,33 @@ impl DwMmcHost {
         self.writel(self.fifo_off, value)
     }
 
+    /// FIFOTH for an IDMAC data phase of `bytes` (Linux
+    /// `dw_mci_adjust_fifoth`): pick the largest burst dividing both the
+    /// block depth and the TX-mark inverse; fall back to burst 1 /
+    /// RX_WMARK 1 when nothing divides. A burst/threshold mismatch
+    /// mis-sequences the FIFO and shows up as data CRC / SBE failures.
+    fn fifoth_for(&self, bytes: usize) -> u32 {
+        let fifo_width = 4u32;
+        let tx_wmark = self.fifo_depth / 2;
+        let tx_inverse = self.fifo_depth - tx_wmark;
+        let mut msize = 0u32;
+        let mut rx_wmark = 1u32;
+        if bytes % fifo_width as usize == 0 {
+            let blksz_depth = bytes / fifo_width as usize;
+            let mut index = DMA_BURST_WORDS.len() - 1;
+            while index > 0 {
+                let burst = u32::from(DMA_BURST_WORDS[index]);
+                if blksz_depth.is_multiple_of(burst as usize) && tx_inverse.is_multiple_of(burst) {
+                    msize = index as u32;
+                    rx_wmark = burst - 1;
+                    break;
+                }
+                index -= 1;
+            }
+        }
+        fifoth(msize, rx_wmark, tx_wmark)
+    }
+
     /// Bytes currently held in the FIFO.
     fn fifo_bytes(&self) -> usize {
         let fcnt = (self.readl(SDMMC_STATUS) >> STATUS_FCNT_SHIFT) & 0x1FFF;
@@ -511,6 +541,10 @@ impl DwMmcHost {
         bytes: usize,
     ) -> Result<(), MmcError> {
         self.prepare_idmac(bytes);
+        // Per-transfer FIFO thresholds (Linux dw_mci_adjust_fifoth): the
+        // burst size must match the block geometry or the FIFO and the
+        // DMA burst desynchronize mid-transfer.
+        self.writel(SDMMC_FIFOTH, self.fifoth_for(bytes));
         let blksz: u32 = if bytes.is_multiple_of(512) {
             512
         } else {
