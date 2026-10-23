@@ -101,11 +101,28 @@ runs on CPUs 0 through 3. Each bound child confirmed its requested CPU using
 `sched_getcpu()`. This is a standalone guest regression, not a Starry suite
 result.
 
-**Status of the `zva` mode:** the recorded run above predates it — it covered
-the five UCT/UCI modes only. The `zva` mode was added in review follow-up to
-give the separately introduced `DZE` grant positive and negative observable
-coverage; its before/after run on this tree is pending and will be recorded
-here when executed. Until then, `DZE` has no recorded guest validation.
+**DZE/`zva` validation on this tree:** the run above predates `zva` — it
+covered the five UCT/UCI modes only. A separate before/after run was recorded
+for the six-mode probe on this repository's kernels: baseline upstream `main`
+(`ca9c0e800`, no EL0 grant) versus the DZE/UCT/UCI change (`9cad479a5`,
+non-VMM gated), both built from the official `kplat-aarch64/qemu_defconfig`,
+release mode, and run on QEMU 10.0.13 TCG (`virt,gic-version=3`, `cortex-a76`,
+four CPUs, 1 GiB), booting this repository's Debian/OpenRC ext4 rootfs with
+the probe at `/root`, built with AArch64 musl GCC 11.2.1 and the flags above.
+Each side ran `all --all-cpus`: one unbound run and singleton-affinity runs on
+CPUs 0–3 per mode.
+
+| `all --all-cpus` result | Baseline `main` (`ca9c0e800`) | With DZE/UCT/UCI (`9cad479a5`) |
+| --- | --- | --- |
+| `ctr`, `dc`, `ic`, `jit` | All 20 terminate with SIGILL | All 20 pass |
+| `zva` | 5 skips — with `DZE=0` the architecture reports `DCZID_EL0.DZP=1`, so the probe records "unsupported" instead of trapping | All 5 pass — `DZP=0`, `DC ZVA` zeroes the 64-byte line, read-back verified |
+| `udf` negative control | All 5 correctly terminate with SIGILL | All 5 correctly terminate with SIGILL |
+| Summary / exit status | 5 pass, 20 fail, 5 skip / 1 | 30 pass, 0 fail, 0 skip / 0 |
+
+The `zva` skip-on-baseline behavior is architectural: `SCTLR_EL1.DZE=0` traps
+`DC ZVA` at EL0 *and* makes `DCZID_EL0.DZP` read as 1. The patched run showing
+`DZP=0` with verified line zeroing is therefore also positive evidence that
+the DZE grant targets the correct control.
 
 ### Coverage limits
 
