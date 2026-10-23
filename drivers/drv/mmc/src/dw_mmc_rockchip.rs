@@ -27,7 +27,6 @@ use subsys_mmc::{
     bus::{MmcBus, MmcCardData},
     sd,
 };
-use subsys_mmc_host::TaskXferSignal;
 
 use super::dw_mmc::{DMA_WINDOW_BYTES, DwMmcHost, RING_PAGE};
 
@@ -39,11 +38,10 @@ static IDS: &[PlatformId] = &[
     PlatformId::Of(OfMatch::compatible("rockchip,rk3288-dw-mshc")),
 ];
 
-/// Driver-private data: the IRQ binding and one reference to the shared
-/// host (which owns the DMA mappings — see the dw_mmc drop-order note).
+/// Driver-private data: one reference to the shared host, which owns the
+/// DMA mappings (card consumers hold Arc clones; see the dw_mmc note).
 pub struct DwMmcRockchipData {
     _host: Arc<DwMmcHost>,
-    _irq: driver_base::DevIrq,
 }
 
 /// Host slot index allocator (`mmc_host->index`): probe order defines
@@ -92,29 +90,8 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
         let window = dev.res().alloc_coherent(DMA_WINDOW_BYTES, RING_PAGE)?;
 
         let host = Arc::new(
-            DwMmcHost::new(
-                regs,
-                ciu_hz,
-                fifo_depth,
-                slot,
-                ring,
-                window,
-                TaskXferSignal::shared(),
-            )
-            .map_err(host_error)?,
+            DwMmcHost::new(regs, ciu_hz, fifo_depth, slot, ring, window).map_err(host_error)?,
         );
-
-        // Data-completion interrupt: the handler upgrades into the host
-        // state and publishes transfer status. The Weak keeps removal
-        // safe — after Data drops the handler safely declines.
-        let weak = Arc::downgrade(&host);
-        let spec = dev.res().irq(0)?;
-        let irq = dev
-            .res()
-            .request_irq(spec, "dwmmc-rockchip", move || match weak.upgrade() {
-                Some(host) if host.on_irq() => IrqAction::Handled,
-                _ => IrqAction::NotHandled,
-            })?;
 
         // Card detection (Linux mmc_detect_card): no card is a clean
         // outcome — the slot stays claimed for a future re-scan.
@@ -134,10 +111,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             }
         }
 
-        Ok(DwMmcRockchipData {
-            _host: host,
-            _irq: irq,
-        })
+        Ok(DwMmcRockchipData { _host: host })
     }
 }
 

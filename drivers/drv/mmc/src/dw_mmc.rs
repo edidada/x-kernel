@@ -214,7 +214,6 @@ pub struct DwMmcHost {
     /// Data bounce window (coherent, owned — see `ring`).
     window: CoherentMem,
     /// Transfer completion status slot (IRQ → waiter).
-    xfer: subsys_mmc::xfer::XferStatus,
     /// Current configured bus clock (0 = gated).
     current_clock: AtomicU32,
 }
@@ -236,7 +235,6 @@ impl DwMmcHost {
         slot: u8,
         ring: CoherentMem,
         window: CoherentMem,
-        signal: alloc::sync::Arc<dyn subsys_mmc::XferSignal>,
     ) -> Result<Self, MmcError> {
         if ciu_hz == 0 || fifo_depth < 2 {
             return Err(MmcError::Unsupported);
@@ -257,7 +255,6 @@ impl DwMmcHost {
             fifo_off: SDMMC_DATA_240A_OFFSET,
             ring,
             window,
-            xfer: subsys_mmc::xfer::XferStatus::new(signal),
             current_clock: AtomicU32::new(0),
         };
 
@@ -513,7 +510,6 @@ impl DwMmcHost {
         dir: DataDir,
         bytes: usize,
     ) -> Result<(), MmcError> {
-        self.arm_irq_masks();
         self.prepare_idmac(bytes);
         let blksz: u32 = if bytes.is_multiple_of(512) {
             512
@@ -522,7 +518,6 @@ impl DwMmcHost {
         };
         self.writel(SDMMC_BLKSIZ, blksz);
         self.writel(SDMMC_BYTCNT, bytes as u32);
-        self.xfer.reset();
 
         // Fence: the descriptor chain must be visible to the DMA engine
         // before it is enabled.
@@ -539,67 +534,37 @@ impl DwMmcHost {
         self.ciu_cmd(cmdr, cmd.arg)
     }
 
-    /// The completion predicate + fallible state read, carrying the
-    /// published status word for failure diagnostics.
-    fn xfer_result(&self) -> Option<Result<u32, MmcError>> {
-        let status = self.xfer.load();
-        if status == 0 {
-            return None;
-        }
-        Some(if status == subsys_mmc::xfer::XFER_DONE {
-            Ok(status)
-        } else {
-            Err(Self::status_error(status))
-        })
-    }
-
-    /// Wait for a started data transfer: park via the signal when this is
-    /// a task, fall back to a bounded poll otherwise (probe context).
-    /// Returns the published status word on completion (XFER_DONE or the
-    /// raw error bitset) and Timeout when nothing fired within budget.
+    /// Wait for a started data transfer by polling the controller:
+    /// DATA_OVER + DMA-completion (RI/TI) or an error bit, bounded.
     fn wait_transfer(&self) -> Result<u32, MmcError> {
-        let signal = self.xfer.signal().clone();
-        let parked = signal.wait_until(&mut || self.xfer_result().is_some());
-        if parked.is_err() {
-            for _ in spin_budget(DATA_POLL_LIMIT) {
-                if self.xfer_result().is_some() {
-                    break;
-                }
+        for _ in spin_budget(DATA_POLL_LIMIT) {
+            let rintsts = self.readl(SDMMC_RINTSTS);
+            if rintsts & INT_ERRORS != 0 {
+                self.writel(SDMMC_RINTSTS, rintsts & INT_ERRORS);
+                return Err(Self::status_error(rintsts));
             }
+            let idsts = self.readl(SDMMC_IDSTS);
+            if idsts & IDINT_ERRORS != 0 {
+                self.writel(SDMMC_IDSTS, idsts & IDINT_CLR_ALL);
+                return Err(MmcError::Io);
+            }
+            if rintsts & INT_DATA_OVER != 0 {
+                self.writel(SDMMC_RINTSTS, INT_DATA_OVER);
+                // DMA drain: wait for the engine to hand the last words to
+                // memory (RI or TI), bounded.
+                for _ in spin_budget(CMD_POLL_LIMIT) {
+                    let idsts = self.readl(SDMMC_IDSTS);
+                    if idsts & (IDINT_RI | IDINT_TI) != 0 {
+                        self.writel(SDMMC_IDSTS, idsts & IDINT_CLR_ALL);
+                        return Ok(idsts);
+                    }
+                    core::hint::spin_loop();
+                }
+                return Err(MmcError::Io);
+            }
+            core::hint::spin_loop();
         }
-        match self.xfer_result() {
-            Some(Ok(status)) => Ok(status),
-            Some(Err(err)) => Err(err),
-            None => Err(MmcError::Timeout),
-        }
-    }
-
-    /// The IRQ hook: sample, clear, publish, wake. Handler context —
-    /// register reads and lock-free atomics only.
-    pub fn on_irq(&self) -> bool {
-        let rintsts = self.readl(SDMMC_RINTSTS);
-        let interesting = rintsts & (INT_ERRORS | INT_DATA_OVER | INT_ACD);
-        if interesting == 0 {
-            return false;
-        }
-        self.writel(SDMMC_RINTSTS, interesting);
-        let idsts = self.readl(SDMMC_IDSTS);
-        if idsts & (IDINT_RI | IDINT_TI | IDINT_ERRORS) != 0 {
-            self.writel(SDMMC_IDSTS, idsts & IDINT_CLR_ALL);
-        }
-        let id_error = idsts & IDINT_ERRORS;
-        if interesting & INT_ERRORS != 0 || id_error != 0 {
-            self.xfer.publish(interesting | id_error);
-        } else {
-            self.xfer.publish(subsys_mmc::xfer::XFER_DONE);
-        }
-        true
-    }
-
-    /// Unmask the data-completion interrupts (called once, before the
-    /// first parked transfer — block I/O).
-    pub fn arm_irq_masks(&self) {
-        self.writel(SDMMC_INTMASK, INT_DATA_OVER | INT_ACD | INT_ERRORS);
+        Err(MmcError::Timeout)
     }
 
     /// Boot-time data-integrity probe: read block 0 with the interrupt
@@ -616,7 +581,6 @@ impl DwMmcHost {
             head.copy_from_slice(&block[..32]);
             Some(head)
         })();
-        self.arm_irq_masks();
         let head = result?;
         let hex: alloc::vec::Vec<alloc::string::String> =
             head.iter().map(|b| alloc::format!("{b:02x}")).collect();
@@ -662,7 +626,7 @@ impl DwMmcHost {
                         cmd.opcode,
                         bytes,
                         attempt,
-                        Self::status_names(self.xfer.load()),
+                        Self::status_names(0),
                         ctrl_snapshot,
                         self.readl(SDMMC_STATUS),
                         self.readl(SDMMC_RINTSTS),
@@ -696,7 +660,7 @@ impl DwMmcHost {
                  idsts {:#x})",
                 cmd.opcode,
                 bytes,
-                self.xfer.load(),
+                0,
                 self.readl(SDMMC_RINTSTS),
                 self.readl(SDMMC_IDSTS),
             );
@@ -736,7 +700,7 @@ impl DwMmcHost {
         log::warn!(
             "dwmmc: recovered after data error on cmd {} ({}) status_now={:#x}",
             failed_cmd.opcode,
-            Self::status_names(self.xfer.load()),
+            Self::status_names(0),
             self.readl(SDMMC_STATUS),
         );
     }

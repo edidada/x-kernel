@@ -1302,7 +1302,6 @@ dependencies = [
  "kbuild_config",
  "log",
  "subsys-mmc",
- "subsys-mmc-host",
  "unittest",
 ]
 
