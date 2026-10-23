@@ -361,7 +361,11 @@ impl<'a> Nameidata<'a> {
                 "" if *at_start => Some((LastType::Root, "/")),
                 "" => None,
                 "." if *at_start => Some((LastType::Dot, ".")),
-                "." => None,
+                // A non-leading "." stays a component: Linux keeps it, so the
+                // walk must still verify that the component it follows sits in
+                // a directory (`d_can_lookup` -> ENOTDIR). Dropping it here made
+                // `file/.` resolve as `file` and succeed.
+                "." => Some((LastType::Dot, ".")),
                 ".." => Some((LastType::Dotdot, "..")),
                 name => Some((LastType::Norm, name)),
             };
@@ -419,6 +423,15 @@ impl<'a> Nameidata<'a> {
         {
             let has_more = Self::has_more_path_components(pathname, at_start);
             if last_type != LastType::Root {
+                // The component being resolved must sit in a directory, and
+                // Linux checks that before the search permission: `d_can_lookup`
+                // reports ENOTDIR first, `may_lookup` only then EACCES
+                // (fs/namei.c `link_path_walk`). Without this ordering a path
+                // like `file/child` or `file/.` failed the MAY_EXEC check on the
+                // regular file itself and surfaced EACCES instead.
+                if !d_is_dir(self.path.dentry()) {
+                    return Err(VfsError::NotADirectory);
+                }
                 self.path.permission(crate::Permission::MAY_EXEC, cred)?;
             }
             if !has_more {
@@ -771,6 +784,12 @@ impl<'a> Nameidata<'a> {
         let mut name = filename.clone();
         let mut walk_base = base.clone();
         let mut total_link_count = 0;
+        // A trailing slash demands a directory for the final resolved path, and
+        // Linux keeps that demand in `nd->flags` while it expands symlinks
+        // (`path_openat`/`link_path_walk`). The demand cannot live in the path
+        // string: `link/` where `link` points at a regular file must fail with
+        // ENOTDIR, yet the expanded target ("target") carries no slash.
+        let mut require_directory = filename.as_pathname().as_str().ends_with('/');
         loop {
             let mut nd = Nameidata::new(
                 root,
@@ -783,6 +802,9 @@ impl<'a> Nameidata<'a> {
             nd.link_path_walk(&walk_base, cred)?;
             let Some(next) = nd.open_last_lookups(&mut file, flags, umask, cred)? else {
                 let path = nd.path.clone();
+                if require_directory && !d_is_dir(path.dentry()) {
+                    return Err(VfsError::NotADirectory);
+                }
                 let may_open = Self::may_open_resolved(&path, flags, file.was_created(), cred)?;
                 let opened = file.vfs_open(path)?;
                 Self::handle_truncate(&opened, &may_open)?;
@@ -795,6 +817,7 @@ impl<'a> Nameidata<'a> {
             };
             total_link_count = nd.total_link_count;
             name = Filename::new(next);
+            require_directory |= name.as_pathname().as_str().ends_with('/');
         }
     }
 
