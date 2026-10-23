@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 
 use crate::{
     bus::{BusDeviceData, BusInstanceId},
-    device::DeviceId,
+    domain::DeviceId,
     firmware::FirmwareNodeInfo,
     resource::{DmaInfo, ResourceMap},
 };

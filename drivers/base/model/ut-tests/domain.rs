@@ -135,7 +135,7 @@ impl MockServices {
 impl DeviceResourceServices for MockServices {
     fn iomap(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         region: MmioRegion,
         _: &'static str,
     ) -> Result<IoMap, RuntimeError> {
@@ -147,7 +147,7 @@ impl DeviceResourceServices for MockServices {
 
     fn request_irq(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         spec: IrqSpec,
         _: &'static str,
         _: crate::IrqHandlerFn,
@@ -165,7 +165,7 @@ impl DeviceResourceServices for MockServices {
 
     fn alloc_coherent(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         dma: crate::DmaInfo,
         _: usize,
         _: usize,
@@ -183,7 +183,7 @@ impl DeviceResourceServices for MockServices {
 
     fn map_irq(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         spec: crate::resource::IrqSpec,
     ) -> Result<crate::resource::Virq, RuntimeError> {
         // Test mock: identity resolution — firmware routes "map" to
@@ -199,11 +199,7 @@ impl DeviceResourceServices for MockServices {
 }
 
 impl ClockConsumerServices for MockServices {
-    fn clk_get(
-        &self,
-        _: crate::device::DeviceId,
-        spec: ClkSpec,
-    ) -> Result<ClkHandle, ServiceError> {
+    fn clk_get(&self, _: crate::DeviceId, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
         // Bind the lookup OUTSIDE the match: a match scrutinee's
         // temporary lock guard lives for the whole match arm, and the
         // mid-check hook re-enters publish_clk (same clk_providers
@@ -1171,11 +1167,11 @@ fn probe_reads_firmware_property_snapshot() {
             .as_any()
             .downcast_ref::<PlatformBusData>()
             .unwrap(),
-        crate::device::DeviceId(1),
+        crate::DeviceId(1),
         None,
         &*services,
         crate::device::DeviceCore::synthetic(
-            crate::device::DeviceId(1),
+            crate::DeviceId(1),
             "test-driver",
             alloc::string::String::from("platform/test"),
         ),
@@ -1263,11 +1259,11 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     let ctx = Device::<PlatformBus>::new(
         &desc,
         data,
-        crate::device::DeviceId(1),
+        crate::DeviceId(1),
         None,
         &*services,
         crate::device::DeviceCore::synthetic(
-            crate::device::DeviceId(1),
+            crate::DeviceId(1),
             "test-driver",
             alloc::string::String::from("platform/test"),
         ),
@@ -1291,11 +1287,11 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     let ctx = Device::<PlatformBus>::new(
         &desc,
         data,
-        crate::device::DeviceId(2),
+        crate::DeviceId(2),
         None,
         &*services,
         crate::device::DeviceCore::synthetic(
-            crate::device::DeviceId(1),
+            crate::DeviceId(1),
             "test-driver",
             alloc::string::String::from("platform/test"),
         ),
@@ -1596,7 +1592,7 @@ mod publication_contract {
     use driver_class::Class;
     use unittest::{assert_eq, def_test};
 
-    use crate::device::{DeviceCore, DeviceId};
+    use crate::{DeviceId, device::DeviceCore};
 
     #[def_test(serial)]
     fn device_removal_closes_source_before_driver_quiesce() {

@@ -127,7 +127,7 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 | T-07 | provider 在"驱动检查依赖"与"域记录 Deferred"之间注册，唤醒丢失，设备永久 parked | 中 | 启动期时钟 provider 与消费者并发探测 | **已实现**：`dep_generations` 对每个 `DepSource` 计数，**即使无设备 parked 也自增**；提交 Deferred 时发现 generation 前进就重新入队。测试注入 `mid_check_hook` 精确复现该窗口 |
 | T-08 | 依赖永不发布，设备静默停在 Deferred，故障不可见 | 中 | 固件引用了一个不存在的 clock phandle | **已实现**：`finish_probe_phase(false)` + `deferred_report()` 在探测阶段结束时把卡住的设备 `log::warn` 出来并降级为 `Unclaimed`。实测启动日志可见 `device 70 gave up waiting on dependency clk:66 (provider never registered)` |
 | T-09 | 后注册的驱动抢走一个已被别的驱动认领的设备 | 中 | 驱动注册顺序变化 | **已实现**：`select_batch` 跳过 `Active`/`Removing`/`Removed`；`attempted` 集合防止同一个失败驱动被反复选中。测试 `late_driver_registration_claims_unclaimed_device`、`late_driver_registration_skips_unmatched_unmatched` |
-| T-10 | 两个 `DeviceDomain` 同时存活时设备 id 撞号，以 owner id 为键的外部注册表（class 发布、devnode）被跨域误撤 | 中 | 单元测试并行、或未来多域 | **已实现**：id 从 crate 级 `DEVICE_ID_ALLOCATOR` 分配，跨域唯一。测试 `device_ids_are_unique_across_domains` |
+| T-10 | 两个 `DeviceDomain` 的设备管理键冲突，设备服务无法正确区分请求归属 | 中 | 多域共享按设备键记录的服务实现 | **已实现**：DeviceId 归属 domain，从 crate 级 `DEVICE_ID_ALLOCATOR` 分配。测试 `device_ids_are_unique_across_domains`；数字键不保证对象存活或提供访问授权，class 发布不依赖它管理身份 |
 | T-12 | `DeviceDescriptor` 的 `compatibles: Vec<String>` 来自固件，超长或超多导致枚举期分配放大 | 低 | 恶意/畸形 DT | **部分实现**：`driver-init` 侧的 `FirmwareNode{id}` 分配器有 u32 耗尽拒绝；本 crate 不限制字符串长度或 compatible 条数。**残余风险**：启动期内存放大，不影响运行期。加固建议：在 `firmware/of` 解析处限长 |
 
 ## 故障模式与影响分析（FMEA）

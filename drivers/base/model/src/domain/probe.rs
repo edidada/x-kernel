@@ -60,7 +60,7 @@ impl DeviceDomain {
                         .expect("batch devices are registered");
                     (entry.lifecycle.generation, entry.core.clone())
                 };
-                match driver.probe(&desc, crate::device::DeviceId(id), &core, services.as_ref()) {
+                match driver.probe(&desc, crate::DeviceId(id), &core, services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
                         match inner.devices.get_mut(&id) {

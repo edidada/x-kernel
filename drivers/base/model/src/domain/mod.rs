@@ -59,11 +59,37 @@ use lazyinit::LazyInit;
 use crate::{
     bus::{Bus, BusDeviceData, BusId, MatchScore},
     desc::DeviceDescriptor,
-    device::{Device, DeviceId},
+    device::Device,
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
     services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
 };
+
+/// Domain-managed registration key for a device.
+///
+/// Domains allocate keys from a crate-wide counter, shared across domain
+/// instances. This is a runtime association key, not a hardware identifier
+/// or an owning reference: holding it neither keeps a device alive nor
+/// guarantees that the device remains registered, bound or online.
+///
+/// Public while descriptors and device-service contracts use it; the crate
+/// root re-exports it independently of its domain implementation home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub(crate) u64);
+
+impl DeviceId {
+    /// Numeric key for diagnostics or explicitly typed record associations.
+    /// The value is not a device reference or a persistent hardware identifier.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Erased driver-private data (DriverOps::Data boxed by the framework).
 pub type DataBox = dyn Any + Send + Sync;
@@ -154,8 +180,8 @@ pub struct DeviceSnapshot {
 /// would silently alias a failed registration onto its successor. The
 /// fatal verdict belongs to the DEFINITION, and identity does not depend
 /// on drivers being immortal. Domain-local: attempted sets and the
-/// registry are domain-internal bookkeeping (unlike `DeviceId`, which
-/// must be globally unique because owner-keyed global registries exist).
+/// registry are domain-internal bookkeeping; DeviceId currently also crosses
+/// the domain boundary through device-service contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DriverKey(u64);
 
@@ -372,7 +398,7 @@ struct NoServices;
 impl DeviceResourceServices for NoServices {
     fn iomap(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         _: MmioRegion,
         _: &'static str,
     ) -> Result<crate::IoMap, RuntimeError> {
@@ -381,7 +407,7 @@ impl DeviceResourceServices for NoServices {
 
     fn request_irq(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         _: IrqSpec,
         _: &'static str,
         _: crate::IrqHandlerFn,
@@ -391,7 +417,7 @@ impl DeviceResourceServices for NoServices {
 
     fn alloc_coherent(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         _: crate::DmaInfo,
         _: usize,
         _: usize,
@@ -401,7 +427,7 @@ impl DeviceResourceServices for NoServices {
 
     fn map_irq(
         &self,
-        _: crate::device::DeviceId,
+        _: crate::DeviceId,
         _: crate::resource::IrqSpec,
     ) -> Result<crate::resource::Virq, RuntimeError> {
         Err(RuntimeError::Unsupported)
@@ -409,11 +435,7 @@ impl DeviceResourceServices for NoServices {
 }
 
 impl ClockConsumerServices for NoServices {
-    fn clk_get(
-        &self,
-        _: crate::device::DeviceId,
-        _: ClkSpec,
-    ) -> Result<crate::ClkHandle, ServiceError> {
+    fn clk_get(&self, _: crate::DeviceId, _: ClkSpec) -> Result<crate::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }
@@ -439,10 +461,8 @@ struct DomainInner {
     /// Concrete bus instances (`struct pci_bus`-shaped: bridge device +
     /// addressing label), keyed by globally-unique id.
     bus_instances: BTreeMap<u64, BusInstanceEntry>,
-    /// Domain-local allocation cursor into the GLOBAL device-id space (see
-    /// DEVICE_ID_ALLOCATOR): domains never hand out colliding ids, so
-    /// owner-keyed global registries (class publications, devnode) stay
-    /// unambiguous with multiple live domains.
+    /// Reserved next device key from the crate-wide allocator.
+    /// Device-service association keys remain distinct across domain instances.
     next_device_id: u64,
     services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
@@ -469,13 +489,9 @@ struct SchedulingState {
     dep_generations: Vec<(DepSource, u64)>,
 }
 
-/// The GLOBAL device-id allocator: every `DeviceDomain` reserves ids from
-/// this one atomic space. The old per-domain `0, 1, 2…` counters made two
-/// instantiated domains collide on owner-keyed global registries (class
-/// publications keyed by `dev.info().id().raw()`, devnode withdrawal) — removing
-/// domain A's device 0 could withdraw domain B's publication. Ids remain
-/// small (a domain claims its next id on creation and on every add);
-/// uniqueness across domains is the invariant that matters.
+/// Crate-wide allocation source for device keys and bus-instance identifiers.
+/// Domain creation reserves a device key; device insertion reserves the next.
+/// Numeric allocation does not grant ownership, liveness or cross-domain access.
 static DEVICE_ID_ALLOCATOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Scope guard for the probe-pump serialization flag: releases it on

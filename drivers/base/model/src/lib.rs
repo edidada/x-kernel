@@ -110,9 +110,9 @@ pub use bus::{
     },
 };
 pub use desc::DeviceDescriptor;
-pub use device::{Device, DeviceId};
+pub use device::Device;
 pub use domain::{
-    DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
+    DataBox, DeviceDomain, DeviceId, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
 };
 pub use driver::{DriverDesc, DriverOps};

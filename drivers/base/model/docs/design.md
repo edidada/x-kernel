@@ -110,7 +110,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/desc.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
-| `src/device.rs` | 设备本体：`DeviceId`（domain 分配的运行时身份）、`DeviceCore`（活身份卡——id/驱动名/物理路径/offline 的唯一权威归宿，`add_device` 创建、Arc 共享给类发布）、`Device`（**唯一**设备句柄：probe 收 `&mut Device<'_, B>`，remove 收同一句柄 + `&mut Data`；`publish(&CLASS, …)` 即从它取 core） |
+| `src/device.rs` | 驱动设备视图：`DeviceCore`（驱动名/物理路径/offline，由 domain 创建并以 Arc 共享给类发布）、`Device`（probe/remove 期间借用描述符和服务的类型化视图） |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
 | `../os-api/src/{mmio,irq,dma,clock}.rs` | 已抽出的 OS 能力描述、Op 与句柄，按能力与生命周期聚合；不属于 model 实现 |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
@@ -119,7 +119,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
 | `driver_class`（独立 crate） | `Class<T,H>`（registry + hooks）+ `Registration<T>`（注册权）+ `Publication<T>`（消费者引用）+ `InUse<T>`（在途计数 guard）；投影与撤销由 class hooks 管理。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
 | `src/error.rs` | OS 能力错误到 RuntimeError / ProbeError 的转换，ServiceError 转换位于 services.rs |
-| `src/domain/mod.rs` | `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（唯一的进程级域名入口，组合根与 `declare_driver!` 之外不应出现） |
+| `src/domain/mod.rs` | `DeviceId` 管理键与 `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
@@ -157,8 +157,11 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 
 `DeviceDomain` **可实例化**：crate 内没有进程级注册表，`global_domain()` 只是
 组合根用的那一个 LazyInit 实例，测试各自 `DeviceDomain::new()`。设备 id 从
-crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时 id 仍全局唯一——
-以 owner id 为键的外部注册表（class 发布、devnode）不会被跨域误撤。
+crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时设备服务关联键不冲突。
+`DeviceId` 定义在 `domain/mod.rs`，是注册表、拓扑及调度使用的运行时管理键，
+不是硬件编号或持有设备的引用。描述符和设备服务的公开契约暂时仍使用它，
+因此保留 crate 根部 `driver_model::DeviceId` 导出；这不意味着必须长期公开全局 ID。
+本轮仅整理归属，不改变分配、查找和移除行为，也不引入对象引用方案。
 
 ## 调用约束 / 执行上下文
 
@@ -370,8 +373,8 @@ threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是�
 的永久失败历史）以它为键。身份安全性因此不依赖"驱动永生"假设：地址只能作
 生命周期限定的对象借用，一旦允许注销，地址复用（ABA）会把一次失败注册静默
 别名到它的继任者身上；键不复用使历史里的死键无害。键是域内的——`attempted`
-和注册表都是域内部簿记，不像 `DeviceId` 因 owner-keyed 全局注册表而必须全局
-唯一。
+和注册表都是域内部簿记；`DeviceId` 当前还用于设备服务契约，使用 crate 级分配器
+保持跨域键不冲突。class 发布已不依赖该数字键管理发布身份。
 
 驱动注册按（总线类型， 名字）去重并拒绝（Linux `driver_register` 对同一情形
 返回 `-EBUSY`）：同一 probe 体出现两个键，一次 Fatal 失败会留下仍匹配的孪生

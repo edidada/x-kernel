@@ -15,7 +15,7 @@ use super::*;
 use crate::{
     bus::{Bus, BusId, BusInstanceId, MatchScore},
     desc::DeviceDescriptor,
-    device::DeviceId,
+    domain::DeviceId,
     error::DepSource,
     services::DeviceServices,
 };

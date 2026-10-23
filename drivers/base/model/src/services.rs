@@ -44,7 +44,7 @@ pub trait DeviceResourceServices: Send + Sync {
     /// Map an MMIO region for the device (`devm_ioremap`).
     fn iomap(
         &self,
-        device: crate::device::DeviceId,
+        device: crate::DeviceId,
         region: MmioRegion,
         name: &'static str,
     ) -> Result<IoMap, RuntimeError>;
@@ -53,7 +53,7 @@ pub trait DeviceResourceServices: Send + Sync {
     /// captured in the handler).
     fn request_irq(
         &self,
-        device: crate::device::DeviceId,
+        device: crate::DeviceId,
         spec: IrqSpec,
         name: &'static str,
         handler: IrqHandlerFn,
@@ -67,7 +67,7 @@ pub trait DeviceResourceServices: Send + Sync {
     /// descriptor, not in host-global assumptions.
     fn alloc_coherent(
         &self,
-        device: crate::device::DeviceId,
+        device: crate::DeviceId,
         dma: DmaInfo,
         len: usize,
         align: usize,
@@ -82,8 +82,7 @@ pub trait DeviceResourceServices: Send + Sync {
     /// filter, an MSI-X vector pairing — must resolve here; reading a
     /// firmware route's fields directly confuses the hardware irq with
     /// the logical one on every non-identity domain.
-    fn map_irq(&self, device: crate::device::DeviceId, spec: IrqSpec)
-    -> Result<Virq, RuntimeError>;
+    fn map_irq(&self, device: crate::DeviceId, spec: IrqSpec) -> Result<Virq, RuntimeError>;
 }
 
 /// Clock acquisition — the capability that can DEFER (a provider may not
@@ -91,11 +90,7 @@ pub trait DeviceResourceServices: Send + Sync {
 pub trait ClockConsumerServices: Send + Sync {
     /// Acquire a clock input (`clk_get`); may report that the provider has
     /// not registered yet.
-    fn clk_get(
-        &self,
-        device: crate::device::DeviceId,
-        spec: ClkSpec,
-    ) -> Result<ClkHandle, ServiceError>;
+    fn clk_get(&self, device: crate::DeviceId, spec: ClkSpec) -> Result<ClkHandle, ServiceError>;
 }
 
 /// The aggregate a [`Device`](crate::Device) holds: every mandatory
