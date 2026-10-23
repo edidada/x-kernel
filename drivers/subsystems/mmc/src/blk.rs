@@ -245,13 +245,17 @@ fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
 }
 
 fn lba0_integrity_probe(host: &dyn crate::MmcHost) {
-    let mut head = [0u8; 32];
-    if read_blocks(host, 0, 1, &mut head).is_ok() {
-        let hex: alloc::vec::Vec<alloc::string::String> =
-            head.iter().map(|b| alloc::format!("{b:02x}")).collect();
-        log::info!("mmcblk: LBA0 head: {}", hex.join(" "));
-    } else {
-        log::warn!("mmcblk: LBA0 integrity probe read failed");
+    // Ladder: the failing size localizes the data-path limit (FIFO
+    // geometry / threshold / transfer-length dependent).
+    for size in [8usize, 64, 256, 512] {
+        let mut buf = [0u8; 512];
+        if read_blocks(host, 0, 1, &mut buf[..size]).is_err() {
+            log::warn!("mmcblk: LBA0 read {size}B FAILED");
+            return;
+        }
+        let head: alloc::vec::Vec<alloc::string::String> =
+            buf[..8].iter().map(|b| alloc::format!("{b:02x}")).collect();
+        log::info!("mmcblk: LBA0 read {size}B ok, head: {}", head.join(" "));
     }
 }
 

@@ -536,6 +536,11 @@ impl DwMmcHost {
                 if drained < bytes {
                     drained += self.drain_rx(&mut buf[drained..]);
                 }
+                // Card-side status: RESP0 holds the R1 word of the data
+                // command — an ILLEGAL_COMMAND/error bit here means the
+                // card accepted the command but refused the data phase.
+                let r1 = self.readl(SDMMC_RESP0);
+                log::info!("dwmmc: data resp R1={r1:#010x}");
                 break;
             }
         }
