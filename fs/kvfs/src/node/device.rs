@@ -253,6 +253,12 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.poll(file)
     }
 
+    /// Provides a poll handler, so the file may be waited on (see
+    /// [`FileOperations::can_poll`]).
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        true
+    }
+
     fn register_poll(
         &self,
         file: &VfsFile,
@@ -680,6 +686,11 @@ pub trait DeviceFileOps: Send + Sync {
     /// Polls an open device file.
     fn poll(&self, _file: &VfsFile) -> IoEvents {
         IoEvents::IN | IoEvents::OUT
+    }
+    /// Provides a poll handler, so the file may be waited on (see
+    /// [`FileOperations::can_poll`]).
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        true
     }
 
     /// Registers a poll waiter for an open device file.

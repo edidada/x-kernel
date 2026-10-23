@@ -477,6 +477,12 @@ impl DeviceFileOps for EventDev {
             .map_or(IoEvents::ERR | IoEvents::HUP, |client| client.poll())
     }
 
+    /// Provides a poll handler, so the file may be waited on (see
+    /// [`FileOperations::can_poll`]).
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        true
+    }
+
     fn register_poll(
         &self,
         file: &VfsFile,

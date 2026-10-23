@@ -374,6 +374,22 @@ pub trait FileOperations: Send + Sync + 'static {
         IoEvents::IN | IoEvents::OUT
     }
 
+    /// Returns whether this file type may be waited on.
+    ///
+    /// Mirrors Linux `file->f_op->poll != NULL` (`file_can_poll`): `epoll_ctl`
+    /// rejects an unpollable target with `EPERM`, which is how a user-space
+    /// runtime learns that a descriptor has to stay in blocking mode (the Go
+    /// runtime's poller relies on exactly that for regular files). Note that
+    /// `poll`/`select` are different: they fall back to reporting an unpollable
+    /// file as always ready (`DEFAULT_POLLMASK` in fs/select.c), which is what
+    /// the default [`FileOperations::poll`] above models.
+    ///
+    /// Regular files and directories provide no poll handler, so the default is
+    /// `false`; every implementation with a real `poll` opts in.
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        false
+    }
+
     /// Registers a poll waiter for an open file description.
     ///
     /// Used when no captured source was provided.
@@ -1255,6 +1271,14 @@ impl VfsFile {
     /// Polls this open file.
     pub fn poll(&self) -> IoEvents {
         self.operations().poll(self)
+    }
+
+    /// Returns whether this open file may be waited on with `epoll_ctl`.
+    ///
+    /// See [`FileOperations::can_poll`]: an unpollable target is rejected with
+    /// `EPERM`, mirroring Linux `file_can_poll`.
+    pub fn can_poll(&self) -> bool {
+        self.operations().can_poll(self)
     }
 
     /// Registers a poll waiter for this open file.

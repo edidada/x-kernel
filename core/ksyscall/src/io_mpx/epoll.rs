@@ -60,6 +60,15 @@ pub(crate) fn sys_epoll_ctl(
     let file = kprocess::current_files().get_file(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
+    // The target must provide a poll handler. Linux checks `file_can_poll()`
+    // before looking at the operation, so an unpollable target (a regular file
+    // or a directory) is rejected with EPERM for every op, DEL included.
+    // `poll`/`select` keep their own fallback of reporting such a file as
+    // always ready; only epoll requires the capability.
+    if !file.can_poll() {
+        return Err(KError::OperationNotPermitted);
+    }
+
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
         let event = event.read_vm()?;
         let events = IoEvents::from_bits_truncate(event.events());
@@ -209,4 +218,9 @@ unittest::path_mod_test!(
 unittest::path_mod_test!(
     tests_epoll_sigmask,
     "../../ut-tests/io_mpx/epoll/tests_epoll_sigmask.rs"
+);
+
+unittest::path_mod_test!(
+    tests_epoll_pollable,
+    "../../ut-tests/io_mpx/epoll/tests_epoll_pollable.rs"
 );

@@ -853,6 +853,12 @@ impl FileOperations for PipeFileOperations {
         pipe_poll(file)
     }
 
+    /// Provides a poll handler, so the file may be waited on (see
+    /// [`FileOperations::can_poll`]).
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        true
+    }
+
     fn register_poll(
         &self,
         file: &VfsFile,
@@ -940,6 +946,12 @@ impl FileOperations for FifoFileOperations {
 
     fn poll(&self, file: &VfsFile) -> IoEvents {
         pipe_poll(file)
+    }
+
+    /// Provides a poll handler, so the file may be waited on (see
+    /// [`FileOperations::can_poll`]).
+    fn can_poll(&self, _file: &VfsFile) -> bool {
+        true
     }
 
     fn register_poll(
