@@ -1624,16 +1624,8 @@ fn probe_reads_firmware_property_snapshot() {
     let _ = domain;
 
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
-    let ctx = Device::<PlatformBus>::new(
-        &core,
-        core.desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<PlatformBusData>()
-            .unwrap(),
-        None,
-        &*services,
-    );
+    let reference = crate::DeviceRef { core };
+    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert_eq!(ctx.fw().u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw().string("vendor,label"), Some("rev-b"));
     assert!(ctx.fw().flag("dma-coherent"));
@@ -1655,6 +1647,41 @@ fn probe_reads_firmware_property_snapshot() {
 }
 
 #[def_test]
+fn device_views_borrow_the_registered_identity() {
+    let (_domain, services, root) = fresh_domain();
+    let reference = crate::DeviceRef {
+        core: crate::device::DeviceCore::new(DeviceId(1), test_descriptor(root)),
+    };
+    let modalias = reference.descriptor().bus_data.modalias();
+    let initial_count = Arc::strong_count(&reference.core);
+    {
+        let device = Device::<PlatformBus>::new(&reference, modalias.as_deref(), &*services)
+            .expect("platform payload");
+        let info = device.info();
+        assert_eq!(Arc::strong_count(&reference.core), initial_count);
+        assert_eq!(info.path(), reference.path());
+        assert_eq!(info.modalias(), modalias.as_deref());
+        let expected_data = reference
+            .descriptor()
+            .bus_data
+            .as_any()
+            .downcast_ref::<PlatformBusData>()
+            .unwrap();
+        assert!(core::ptr::eq(info.bus_data(), expected_data));
+        assert!(core::ptr::eq(
+            device.res().map(),
+            &reference.descriptor().resources
+        ));
+        let retained = device.reference();
+        assert!(retained.same_device(&reference));
+        assert_eq!(Arc::strong_count(&reference.core), initial_count + 1);
+    }
+    assert_eq!(Arc::strong_count(&reference.core), initial_count);
+    let remove_view = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    assert!(remove_view.info().modalias().is_none());
+}
+
+#[def_test]
 fn unconfigured_dma_is_rejected_before_host_allocation() {
     let (_domain, services, root) = fresh_domain();
     let desc = test_descriptor(root);
@@ -1662,16 +1689,8 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
     let desc = desc.clone();
     assert!(desc.dma.is_none());
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
-    let device = Device::<PlatformBus>::new(
-        &core,
-        core.desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<PlatformBusData>()
-            .unwrap(),
-        None,
-        &*services,
-    );
+    let reference = crate::DeviceRef { core };
+    let device = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert!(matches!(
         device.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::Unsupported))
@@ -1704,16 +1723,8 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     assert_eq!(cloned.dma, desc.dma);
 
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
-    let ctx = Device::<PlatformBus>::new(
-        &core,
-        core.desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<PlatformBusData>()
-            .unwrap(),
-        None,
-        &*services,
-    );
+    let reference = crate::DeviceRef { core };
+    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
     let mem = ctx.res().alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
@@ -1726,16 +1737,8 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         coherent: true,
     });
     let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
-    let ctx = Device::<PlatformBus>::new(
-        &core,
-        core.desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<PlatformBusData>()
-            .unwrap(),
-        None,
-        &*services,
-    );
+    let reference = crate::DeviceRef { core };
+    let ctx = Device::<PlatformBus>::new(&reference, None, &*services).unwrap();
     assert!(matches!(
         ctx.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::NoMemory))

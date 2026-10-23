@@ -260,7 +260,8 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         // MODALIAS is DEVICE-derived (of_modalias semantics: the first
         // compatible string), not id-row-derived — module loading matches
         // the same string the bus published.
-        let desc = &core.desc;
+        let reference = crate::DeviceRef { core: core.clone() };
+        let desc = reference.descriptor();
         let modalias = desc.bus_data.modalias();
         // The bus_id check happened in matches(); probe runs on a device
         // this driver bound, so the downcast is total. A mismatching bus
@@ -270,13 +271,8 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is \
                       a domain-internal invariant violation, not a driver error"
         )]
-        let typed = core
-            .desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<B::DeviceData>()
+        let mut ctx = Device::new(&reference, modalias.as_deref(), services)
             .expect("the domain only probes devices the driver matched");
-        let mut ctx = Device::new(core, typed, modalias.as_deref(), services);
         let data = self.desc.ops.probe(&mut ctx)?;
         Ok(Box::new(data))
     }
@@ -295,17 +291,13 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         let data = data
             .downcast_mut::<P::Data>()
             .expect("device data belongs to the driver that probed it");
+        let reference = crate::DeviceRef { core: core.clone() };
         #[expect(
             clippy::expect_used,
             reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
         )]
-        let typed = core
-            .desc
-            .bus_data
-            .as_any()
-            .downcast_ref::<B::DeviceData>()
+        let mut dev = Device::new(&reference, None, services)
             .expect("the domain only removes devices the driver bound");
-        let mut dev = Device::new(core, typed, None, services);
         self.desc.ops.remove(&mut dev, data);
     }
 }

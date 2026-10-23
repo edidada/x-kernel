@@ -162,36 +162,36 @@ impl core::fmt::Debug for DeviceRef {
 /// Class publication is the fifth verb and stays on the handle:
 /// [`Device::publish`].
 pub struct Device<'a, B: Bus> {
-    /// The enumeration product: identity, named resources, firmware
-    /// snapshot, DMA view and topology. One home for every device FACT; the
-    /// handle does not copy fields out of it.
-    desc: &'a crate::DeviceDescriptor,
     /// The bus's own data vocabulary — typed: probe runs where the bus is
     /// statically known, so drivers read bus facts without any erasure.
     bus_data: &'a B::DeviceData,
     modalias: Option<&'a str>,
     services: &'a dyn DeviceServices,
     /// The live device identity: what class publications attach to.
-    reference: DeviceRef,
+    reference: &'a DeviceRef,
     _bus: PhantomData<fn(&B)>,
 }
 
 impl<'a, B: Bus> Device<'a, B> {
     /// Constructed by the domain when it probes or removes a device.
+    /// Returns `None` when the device's bus payload has the wrong concrete type.
     pub(crate) fn new(
-        core: &'a Arc<DeviceCore>,
-        bus_data: &'a B::DeviceData,
+        reference: &'a DeviceRef,
         modalias: Option<&'a str>,
         services: &'a dyn DeviceServices,
-    ) -> Self {
-        Self {
-            desc: &core.desc,
+    ) -> Option<Self> {
+        let bus_data = reference
+            .descriptor()
+            .bus_data
+            .as_any()
+            .downcast_ref::<B::DeviceData>()?;
+        Some(Self {
             bus_data,
             modalias,
             services,
-            reference: DeviceRef { core: core.clone() },
+            reference,
             _bus: PhantomData,
-        }
+        })
     }
 
     /// Retain identity and static facts, without retaining driver resources.
@@ -199,21 +199,16 @@ impl<'a, B: Bus> Device<'a, B> {
         self.reference.clone()
     }
 
-    /// Identity: path, driver name, modalias, liveness, bus data.
-    pub fn info(&self) -> DeviceInfo<'a, B> {
-        DeviceInfo {
-            bus_data: self.bus_data,
-            modalias: self.modalias,
-            core: self.reference.core.clone(),
-            _bus: PhantomData,
-        }
+    /// Borrow identity information without retaining the device independently.
+    pub fn info(&self) -> DeviceInfo<'_, B> {
+        DeviceInfo { device: self }
     }
 
     /// Resources: the firmware-stated table and the `devm_*` acquisition
     /// door for MMIO/IRQ/DMA/clocks.
     pub fn res(&self) -> Resources<'_, B> {
         Resources {
-            device: &self.reference,
+            device: self.reference,
             services: self.services,
             _bus: PhantomData,
         }
@@ -222,7 +217,7 @@ impl<'a, B: Bus> Device<'a, B> {
     /// Firmware: the node snapshot (`of_property_read_*`).
     pub fn fw(&self) -> Firmware<'a> {
         Firmware {
-            node: self.desc.fw.as_ref(),
+            node: self.reference.descriptor().fw.as_ref(),
         }
     }
 
@@ -255,29 +250,27 @@ impl<'a, B: Bus> Device<'a, B> {
     }
 }
 
-/// Identity view (`struct device`'s identity half).
+/// Borrowed identity view (`struct device`'s identity half).
+/// Use [`Device::reference`] to retain identity beyond the callback view.
 pub struct DeviceInfo<'a, B: Bus> {
-    bus_data: &'a B::DeviceData,
-    modalias: Option<&'a str>,
-    core: alloc::sync::Arc<DeviceCore>,
-    _bus: PhantomData<fn(&B)>,
+    device: &'a Device<'a, B>,
 }
 
 impl<B: Bus> DeviceInfo<'_, B> {
     /// The bus-vocabulary path component (DEVPATH source).
     pub fn path(&self) -> &str {
-        self.core.physical_path()
+        self.device.reference.path()
     }
 
     /// The `MODALIAS` derived from the device's own bus data.
     pub fn modalias(&self) -> Option<&str> {
-        self.modalias
+        self.device.modalias
     }
 
     /// The bus's device data — typed: probe runs where the bus is statically
     /// known.
     pub const fn bus_data(&self) -> &B::DeviceData {
-        self.bus_data
+        self.device.bus_data
     }
 }
 

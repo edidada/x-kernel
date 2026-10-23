@@ -1,5 +1,16 @@
 # driver-model — 设计文档
 
+## 回调视图的借用关系
+
+`DeviceCore` 是设备描述与身份的唯一存储。回调适配层持有 `DeviceRef`，
+`Device<'a, B>` 借用该引用与宿主服务，不另存 descriptor 引用。
+构造时从同一描述符 downcast 出类型化 bus_data 借用；不允许调用方单独
+传入其他设备的总线数据，类型不匹配则构造失败。
+`DeviceInfo` 仅借用 Device，查询不克隆 Arc，也不能脱离 Device 的借用期。
+需要跨回调保留身份必须显式调用 `reference()`；class 发布仍持有同一核心。
+modalias 保持回调期借用：probe 提供总线派生值，remove 保持 None。
+资源、固件视图均读取同一 DeviceRef 的描述符，不持有独立事实副本。
+
 ## 总线实例归属
 
 `DeviceDescriptor` 必须携带一个已经注册的 `BusInstanceId`，不再独立保存
