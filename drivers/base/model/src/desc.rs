@@ -47,13 +47,8 @@ pub struct DeviceDescriptor {
     /// DEVICE, not of the bus: reachable from every bus through
     /// `Device::fw()`.
     pub fw: Option<FirmwareNodeInfo>,
-    /// The device's DMA view (mask/offset/coherency), derived from
-    /// firmware (`dma-ranges`, `dma-coherent`, PCI bridge windows) at
-    /// enumeration. Defaults to [`DmaInfo::DEFAULT`] for board-static
-    /// devices; consulted by every DMA allocation — the
-    /// `dev->dma_mask`/`dev->dma_pfn_offset` analogue, snapshotted
-    /// instead of living in the host allocator.
-    pub dma: DmaInfo,
+    /// Optional DMA configuration; None rejects DMA allocation before invoking the host.
+    pub dma: Option<DmaInfo>,
 }
 
 impl Clone for DeviceDescriptor {
@@ -81,7 +76,7 @@ impl DeviceDescriptor {
             data,
             resources: ResourceMap::new(),
             fw: None,
-            dma: DmaInfo::DEFAULT,
+            dma: None,
         }
     }
 
@@ -96,14 +91,10 @@ impl DeviceDescriptor {
         self
     }
 
-    /// Set the device's DMA view (the `dma-ranges`/`dma-coherent` derived
-    /// mask/offset/coherency). Enumerators that found no firmware DMA
-    /// facts leave the [`DmaInfo::DEFAULT`] static-device view in place —
-    /// but a firmware-DESCRIBED device with no DMA facts is the
-    /// enumerator's call (DT nodes get strict facts: non-coherent,
-    /// identity, full mask — per what firmware did NOT say).
+    /// Configure DMA using constraints established by the enumerator or platform.
+    /// Missing firmware facts do not implicitly enable DMA.
     pub fn with_dma(mut self, dma: DmaInfo) -> Self {
-        self.dma = dma;
+        self.dma = Some(dma);
         self
     }
 

@@ -20,6 +20,15 @@
 返回 `BusInstanceUnavailable`；保留的实例记录只承担身份查询，不复活硬件。
 本次接口迁移的调用点均在 model UT；旧驱动资源链路和 legacy class 接入不变。
 
+## 可选 DMA 配置
+
+`DeviceDescriptor::dma` 为 `Option<DmaInfo>`，默认 `None`，表示 DMA 尚未配置，
+不代表对硬件能力作否定判断。枚举方或平台代码确认设备的地址与一致性约束后，
+通过 `with_dma(info)` 显式配置；不因缺少固件属性而自动采用 `DmaInfo::DEFAULT`。
+`Resources::alloc_coherent` 在未配置时返回 `Fatal(Unsupported)`，不调用宿主；
+已配置时把 `DmaInfo` 原样传给宿主，保留地址转换、mask 校验和错误传播语义。
+MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 与宿主服务签名不变。
+
 ## 定位
 
 新驱动设备模型。它拥有 bus/device/driver 三类契约、const id 表、

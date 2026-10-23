@@ -266,7 +266,7 @@ impl<B: Bus> DeviceInfo<'_, B> {
 pub struct Resources<'a, B: Bus> {
     id: DeviceId,
     map: &'a ResourceMap,
-    dma: crate::resource::DmaInfo,
+    dma: Option<crate::resource::DmaInfo>,
     services: &'a dyn DeviceServices,
     _bus: PhantomData<fn(&B)>,
 }
@@ -381,9 +381,16 @@ impl<B: Bus> Resources<'_, B> {
     /// `dmam_alloc_coherent(dev, size, dma_handle, gfp)` — the device's own
     /// DMA view travels with the request; the returned
     /// `CoherentMem::bus_addr` is the DEVICE-visible address.
+    ///
+    /// # Errors
+    /// Returns `ProbeError::Fatal(RuntimeError::Unsupported)` without invoking
+    /// the host when DMA is unconfigured. Otherwise propagates host errors.
     pub fn alloc_coherent(&self, len: usize, align: usize) -> Result<CoherentMem, ProbeError> {
+        let dma = self
+            .dma
+            .ok_or(ProbeError::Fatal(RuntimeError::Unsupported))?;
         self.services
-            .alloc_coherent(self.id, self.dma, len, align)
+            .alloc_coherent(self.id, dma, len, align)
             .map_err(ProbeError::Fatal)
     }
 

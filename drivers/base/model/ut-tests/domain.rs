@@ -66,6 +66,7 @@ type WakeHook = Arc<dyn Fn(DepSource) + Send + Sync>;
 struct MockServices {
     clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
     mapped: AtomicUsize,
+    dma_requests: AtomicUsize,
     /// Test injection: fired on the clk Deferred path (mid-probe),
     /// simulating a provider registering between the dependency check
     /// and the Deferred submission (the lost-wakeup window).
@@ -118,6 +119,7 @@ impl MockServices {
             mid_check_hook: SpinNoPreempt::new(None),
             clk_providers: SpinNoPreempt::new(BTreeMap::new()),
             mapped: AtomicUsize::new(0),
+            dma_requests: AtomicUsize::new(0),
             providers: SpinNoPreempt::new(alloc::vec::Vec::new()),
             wake: SpinNoPreempt::new(None),
         })
@@ -168,6 +170,7 @@ impl DeviceResourceServices for MockServices {
         _: usize,
         _: usize,
     ) -> Result<crate::CoherentMem, RuntimeError> {
+        self.dma_requests.fetch_add(1, Ordering::Relaxed);
         // Test mock: fake identity allocator honoring the device's DMA
         // view through the same translate() the real host uses, so the
         // mask/offset contract is exercised in tests too.
@@ -1161,6 +1164,37 @@ fn probe_reads_firmware_property_snapshot() {
 }
 
 #[def_test]
+fn unconfigured_dma_is_rejected_before_host_allocation() {
+    let (_domain, services, root) = fresh_domain();
+    let desc = test_descriptor(root);
+    assert!(desc.dma.is_none());
+    let desc = desc.clone();
+    assert!(desc.dma.is_none());
+    let bus_data = desc
+        .data
+        .as_any()
+        .downcast_ref::<PlatformBusData>()
+        .unwrap();
+    let device = Device::<PlatformBus>::new(
+        &desc,
+        bus_data,
+        DeviceId(1),
+        None,
+        &*services,
+        crate::device::DeviceCore::synthetic(
+            DeviceId(1),
+            "test-driver",
+            alloc::string::String::from("platform/test"),
+        ),
+    );
+    assert!(matches!(
+        device.res().alloc_coherent(0x1000, 0x1000),
+        Err(ProbeError::Fatal(RuntimeError::Unsupported))
+    ));
+    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
 fn alloc_coherent_translates_through_the_devices_dma_view() {
     // The mock's fake allocator hands out identity CPU-physical pages
     // around 0x4000_0000; the DEVICE-visible address must come back
@@ -1168,12 +1202,13 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     use crate::device::Device;
 
     let (_domain, services, root) = fresh_domain();
-    let mut desc = test_descriptor(root);
-    desc.dma = crate::DmaInfo {
+    let mut desc = test_descriptor(root).with_dma(crate::DmaInfo {
         mask: 0xFFFF_FFFF,
         offset: 0x2000_0000,
         coherent: false,
-    };
+    });
+    let cloned = desc.clone();
+    assert_eq!(cloned.dma, desc.dma);
 
     let data = desc
         .data
@@ -1195,13 +1230,14 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     let mem = ctx.res().alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
+    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 1);
 
     // A device whose window cannot address the mock's pages fails CLEANLY.
-    desc.dma = crate::DmaInfo {
+    desc.dma = Some(crate::DmaInfo {
         mask: 0x0FFF_FFFF,
         offset: 0,
         coherent: true,
-    };
+    });
     let data = desc
         .data
         .as_any()
@@ -1219,7 +1255,11 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
             alloc::string::String::from("platform/test"),
         ),
     );
-    assert!(ctx.res().alloc_coherent(0x1000, 0x1000).is_err());
+    assert!(matches!(
+        ctx.res().alloc_coherent(0x1000, 0x1000),
+        Err(ProbeError::Fatal(RuntimeError::NoMemory))
+    ));
+    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 2);
 }
 
 // ---------------------------------------------------------------------------
