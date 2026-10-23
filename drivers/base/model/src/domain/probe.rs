@@ -137,7 +137,12 @@ impl DeviceDomain {
                 .drivers
                 .iter()
                 .filter(|driver| !attempted.contains(&driver.key()))
-                .map(|driver| (driver.clone(), driver.matches(desc.data.as_ref())))
+                .map(|driver| {
+                    (
+                        driver.clone(),
+                        driver.matches(bus_type(&inner.bus_instances, &desc), desc.data.as_ref()),
+                    )
+                })
                 .filter(|(_, score)| *score != MatchScore::NoMatch)
                 .max_by_key(|(_, score)| *score)
                 .map(|(driver, _)| driver);

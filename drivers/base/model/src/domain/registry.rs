@@ -92,7 +92,10 @@ impl DeviceDomain {
                 .filter(|(_, entry)| {
                     inner.drivers.iter().any(|candidate| {
                         !entry.binding.attempted.contains(&candidate.key())
-                            && candidate.matches(entry.desc.data.as_ref()) != MatchScore::NoMatch
+                            && candidate.matches(
+                                bus_type(&inner.bus_instances, &entry.desc),
+                                entry.desc.data.as_ref(),
+                            ) != MatchScore::NoMatch
                     })
                 })
                 .map(|(id, _)| *id)
@@ -112,7 +115,6 @@ impl DeviceDomain {
         true
     }
 
-    /// Insert an enumeration product and probe it eagerly.
     /// Create a concrete bus instance (`pci_register_bus` /
     /// `i2c_add_adapter` shape): the addressing anchor for devices
     /// discovered on one physical bus. `bridge` names the controller
@@ -170,7 +172,7 @@ impl DeviceDomain {
         inner
             .devices
             .iter()
-            .filter(|(_, entry)| entry.desc.bus_instance == Some(instance))
+            .filter(|(_, entry)| entry.desc.bus_instance == instance)
             .map(|(id, _)| DeviceId(*id))
             .collect()
     }
@@ -188,6 +190,10 @@ impl DeviceDomain {
             .map(|entry| (entry.bus, entry.bridge.map(DeviceId), entry.label.clone()))
     }
 
+    /// Insert an enumeration product into its existing bus instance and probe it.
+    ///
+    /// Returns an error if the instance or parent is missing, the parent is
+    /// being removed, or the device data belongs to another bus type.
     pub fn add_device(&self, desc: DeviceDescriptor) -> Result<DeviceId, AddDeviceError> {
         let id = {
             let mut inner = self.inner.lock();
@@ -203,24 +209,17 @@ impl DeviceDomain {
             }
             let id = DeviceId(inner.next_device_id);
             inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-            // Bus-instance validation, under the same lock: a stated
-            // instance must exist and its bus TYPE must agree with the
-            // descriptor's — "this PCI function sits on bus 0000:00"
-            // cannot name a platform-bus instance.
-            if let Some(instance) = desc.bus_instance {
-                match inner.bus_instances.get(&instance.raw()) {
-                    Some(entry) if entry.bus == desc.bus => {}
-                    Some(entry) => {
-                        return Err(AddDeviceError::BusInstanceTypeMismatch {
-                            instance: instance.raw(),
-                            instance_bus: entry.bus.name(),
-                            device_bus: desc.bus.name(),
-                        });
-                    }
-                    None => {
-                        return Err(AddDeviceError::BusInstanceMissing(instance.raw()));
-                    }
-                }
+            let instance = desc.bus_instance;
+            let entry = inner
+                .bus_instances
+                .get(&instance.raw())
+                .ok_or(AddDeviceError::BusInstanceMissing(instance.raw()))?;
+            if entry.bus != desc.data.bus_id() {
+                return Err(AddDeviceError::BusInstanceTypeMismatch {
+                    instance: instance.raw(),
+                    instance_bus: entry.bus.name(),
+                    device_bus: desc.data.bus_id().name(),
+                });
             }
             // Topology validation, under the SAME lock that governs
             // removal: a stated parent must exist AND be accepting

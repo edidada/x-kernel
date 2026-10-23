@@ -197,9 +197,7 @@ impl DeviceDomain {
         for (instance_id, instance) in inner.bus_instances.iter() {
             if instance.bridge.as_ref() == Some(id) {
                 for (member, entry) in inner.devices.iter() {
-                    if entry.desc.bus_instance.map(|b| b.raw()) == Some(*instance_id)
-                        && !set.contains(member)
-                    {
+                    if entry.desc.bus_instance.raw() == *instance_id && !set.contains(member) {
                         set.push(*member);
                     }
                 }
@@ -232,7 +230,11 @@ impl DeviceDomain {
     pub fn snapshot(&self, id: DeviceId) -> Option<DeviceSnapshot> {
         let inner = self.inner.lock();
         let entry = inner.devices.get(&id.raw())?;
-        Some(snapshot_of(id, entry))
+        Some(snapshot_of(
+            id,
+            entry,
+            bus_type(&inner.bus_instances, &entry.desc),
+        ))
     }
 
     pub fn devices(&self) -> Vec<DeviceSnapshot> {
@@ -240,7 +242,13 @@ impl DeviceDomain {
         inner
             .devices
             .iter()
-            .map(|(id, entry)| snapshot_of(DeviceId(*id), entry))
+            .map(|(id, entry)| {
+                snapshot_of(
+                    DeviceId(*id),
+                    entry,
+                    bus_type(&inner.bus_instances, &entry.desc),
+                )
+            })
             .collect()
     }
 

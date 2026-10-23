@@ -14,7 +14,7 @@
 use alloc::boxed::Box;
 
 use crate::{
-    bus::{BusDeviceData, BusId, BusInstanceId},
+    bus::{BusDeviceData, BusInstanceId},
     device::DeviceId,
     firmware::FirmwareNodeInfo,
     resource::{DmaInfo, ResourceMap},
@@ -29,12 +29,10 @@ use crate::{
 /// [`DeviceDomain`](crate::DeviceDomain) on insertion.
 #[derive(Debug)]
 pub struct DeviceDescriptor {
-    /// The bus that owns `data`'s vocabulary.
-    pub bus: BusId,
-    /// The CONCRETE bus instance this device sits on (`pci_dev->bus`),
-    /// when the bus has instances. Validated at `add_device`: the
-    /// instance must exist and its type must equal `bus`.
-    pub bus_instance: Option<BusInstanceId>,
+    /// The existing bus instance on which the enumerator discovered this device.
+    /// Its registered type owns `data`'s vocabulary; insertion validates that
+    /// the data agrees with that type. Root devices also require an instance.
+    pub bus_instance: BusInstanceId,
     /// Bus-specific device data (identity, discovery source) — the
     /// bus's vocabulary, opaque to the core. The firmware property
     /// snapshot is the descriptor's own `fw` field, not bus vocabulary.
@@ -61,7 +59,6 @@ pub struct DeviceDescriptor {
 impl Clone for DeviceDescriptor {
     fn clone(&self) -> Self {
         Self {
-            bus: self.bus,
             bus_instance: self.bus_instance,
             data: alloc::boxed::Box::from(self.data.as_ref()).clone_erased(),
             parent: self.parent,
@@ -73,11 +70,13 @@ impl Clone for DeviceDescriptor {
 }
 
 impl DeviceDescriptor {
-    /// A descriptor for a device on `bus`, carrying the bus's own data.
-    pub fn new(bus: BusId, data: Box<dyn BusDeviceData>) -> Self {
+    /// Describe a device discovered on an existing bus instance.
+    ///
+    /// The platform or controller creates the instance before enumeration.
+    /// The enumerator passes its instance here, rather than choosing by bus type.
+    pub fn new(bus_instance: BusInstanceId, data: Box<dyn BusDeviceData>) -> Self {
         Self {
-            bus,
-            bus_instance: None,
+            bus_instance,
             parent: None,
             data,
             resources: ResourceMap::new(),
@@ -105,15 +104,6 @@ impl DeviceDescriptor {
     /// identity, full mask — per what firmware did NOT say).
     pub fn with_dma(mut self, dma: DmaInfo) -> Self {
         self.dma = dma;
-        self
-    }
-
-    /// Attach to a concrete bus instance (`pci_set_dev` on the bus
-    /// object): the instance must have been created with
-    /// [`DeviceDomain::add_bus_instance`](crate::DeviceDomain::add_bus_instance)
-    /// and its bus type must equal this descriptor's.
-    pub fn with_bus_instance(mut self, instance: BusInstanceId) -> Self {
-        self.bus_instance = Some(instance);
         self
     }
 

@@ -166,7 +166,7 @@ trait AnyDriver: Send + Sync {
     fn bus_id(&self) -> BusId;
     /// The registration key the domain handed out for this driver.
     fn key(&self) -> DriverKey;
-    fn matches(&self, data: &dyn BusDeviceData) -> MatchScore;
+    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> MatchScore;
     fn probe(
         &self,
         desc: &DeviceDescriptor,
@@ -202,11 +202,11 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         self.key
     }
 
-    fn matches(&self, data: &dyn BusDeviceData) -> MatchScore {
+    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> MatchScore {
         // Bus identity first (Linux separates bus_type matching from
         // structural checks): a driver registered for one bus never sees
         // another bus's devices.
-        if data.bus_id() != B::ID {
+        if bus != B::ID || data.bus_id() != B::ID {
             return MatchScore::NoMatch;
         }
         // The one downcast in the match path, guarded by the bus_id check
@@ -294,8 +294,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
 /// semantics (`pci_stop_and_remove_bus_device` walking the secondary
 /// bus).
 struct BusInstanceEntry {
-    /// The bus TYPE this instance carries (a device's descriptor must
-    /// agree).
+    /// The authoritative bus type for this instance's devices.
     bus: BusId,
     /// The bridge/controller device that created this bus, if any (a
     /// root bus has none). Removal of this device tears the instance's
@@ -509,14 +508,26 @@ pub struct DeviceDomain {
     pump_requested: SpinNoPreempt<bool>,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: insertion validates instance membership; \
+              instance records remain for removed-device snapshots"
+)]
+fn bus_type(instances: &BTreeMap<u64, BusInstanceEntry>, desc: &DeviceDescriptor) -> BusId {
+    instances
+        .get(&desc.bus_instance.raw())
+        .expect("registered device retains its bus instance")
+        .bus
+}
+
 /// Build a consistent snapshot: one filling for `snapshot()` and
 /// `devices()` alike (they used to disagree — identity was dead in
 /// `snapshot()`). `kind` stays None until a class view exists; the field
 /// is documented as driver-bound.
-fn snapshot_of(id: DeviceId, entry: &DeviceEntry) -> DeviceSnapshot {
+fn snapshot_of(id: DeviceId, entry: &DeviceEntry, bus: BusId) -> DeviceSnapshot {
     DeviceSnapshot {
         id,
-        bus: entry.desc.bus,
+        bus,
         state: entry.lifecycle.state,
         driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
         identity: Some(entry.desc.data.display_identity()),

@@ -130,7 +130,12 @@ impl DeviceDomain {
             .drivers
             .iter()
             .filter(|candidate| !entry.binding.attempted.contains(&candidate.key()))
-            .any(|candidate| candidate.matches(entry.desc.data.as_ref()) != MatchScore::NoMatch);
+            .any(|candidate| {
+                candidate.matches(
+                    bus_type(&inner.bus_instances, &entry.desc),
+                    entry.desc.data.as_ref(),
+                ) != MatchScore::NoMatch
+            });
         if retryable {
             entry.lifecycle.state = DeviceState::Pending;
             inner.sched.pending.push(id);
