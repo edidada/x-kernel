@@ -110,9 +110,9 @@ pub use bus::{
     },
 };
 pub use desc::DeviceDescriptor;
-pub use device::Device;
+pub use device::{Device, DeviceRef};
 pub use domain::{
-    DataBox, DeviceDomain, DeviceId, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
+    AddDeviceError, DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
 };
 pub use driver::{DriverDesc, DriverOps};
@@ -127,4 +127,6 @@ pub use resource::{
     ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
     ResourceEntry, ResourceKind, ResourceMap, Virq,
 };
-pub use services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError};
+pub use services::{
+    ClockConsumerServices, DeviceContext, DeviceResourceServices, DeviceServices, ServiceError,
+};

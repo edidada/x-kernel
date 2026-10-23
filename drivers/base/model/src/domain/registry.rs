@@ -93,8 +93,8 @@ impl DeviceDomain {
                     inner.drivers.iter().any(|candidate| {
                         !entry.binding.attempted.contains(&candidate.key())
                             && candidate.matches(
-                                bus_type(&inner.bus_instances, &entry.desc),
-                                entry.desc.bus_data.as_ref(),
+                                bus_type(&inner.bus_instances, &entry.core.desc),
+                                entry.core.desc.bus_data.as_ref(),
                             ) != MatchScore::NoMatch
                     })
                 })
@@ -120,10 +120,12 @@ impl DeviceDomain {
     /// discovered on one physical bus. `bridge` names the controller
     /// device that created it (None for a root bus); removing that device
     /// tears the instance's members down with it.
+    /// A controller reference must name the exact registered object in this
+    /// domain and not be Removing/Removed. The instance retains only its identity.
     pub fn add_bus_instance(
         &self,
         bus: BusId,
-        bridge: Option<DeviceId>,
+        bridge: Option<&crate::DeviceRef>,
         label: &str,
     ) -> Result<BusInstanceId, AddDeviceError> {
         let mut inner = self.inner.lock();
@@ -134,16 +136,17 @@ impl DeviceDomain {
             // remove phase froze, and would never be cascaded.
             match inner
                 .devices
-                .get(&bridge.raw())
+                .get(&bridge.core.id.raw())
+                .filter(|entry| Arc::ptr_eq(&entry.core, &bridge.core))
                 .map(|entry| entry.lifecycle.state)
             {
                 Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
                     return Err(AddDeviceError::ParentUnavailable {
-                        parent: bridge.raw(),
+                        parent: bridge.core.id.raw(),
                         state: state.as_str(),
                     });
                 }
-                None => return Err(AddDeviceError::ParentMissing(bridge.raw())),
+                None => return Err(AddDeviceError::ParentMissing(bridge.core.id.raw())),
                 _ => {}
             }
         }
@@ -154,17 +157,17 @@ impl DeviceDomain {
             id.raw(),
             BusInstanceEntry {
                 bus,
-                bridge: bridge.map(|b| b.raw()),
+                bridge: bridge.cloned(),
                 label: alloc::string::String::from(label),
             },
         );
         Ok(id)
     }
 
-    /// The devices attached to one bus instance, in id order — the
+    /// The devices attached to one bus instance, in registration order — the
     /// `list_for_each_entry(bus->devices)` surface (instance-scoped
     /// rescan, eject, /proc listing).
-    pub fn bus_instance_devices(&self, instance: BusInstanceId) -> Vec<DeviceId> {
+    pub fn bus_instance_devices(&self, instance: BusInstanceId) -> Vec<crate::DeviceRef> {
         let inner = self.inner.lock();
         if !inner.bus_instances.contains_key(&instance.raw()) {
             return Vec::new();
@@ -172,22 +175,26 @@ impl DeviceDomain {
         inner
             .devices
             .iter()
-            .filter(|(_, entry)| entry.desc.bus_instance == instance)
-            .map(|(id, _)| DeviceId(*id))
+            .filter(|(_, entry)| entry.core.desc.bus_instance == instance)
+            .map(|(_, entry)| crate::DeviceRef {
+                core: entry.core.clone(),
+            })
             .collect()
     }
 
     /// A snapshot of one instance's addressing identity: (bus type,
     /// bridge device, label).
+    /// The controller identity remains available after removal, even when its
+    /// unbound device entry was deleted. It does not imply hardware availability.
     pub fn bus_instance_identity(
         &self,
         instance: BusInstanceId,
-    ) -> Option<(BusId, Option<DeviceId>, alloc::string::String)> {
+    ) -> Option<(BusId, Option<crate::DeviceRef>, alloc::string::String)> {
         let inner = self.inner.lock();
         inner
             .bus_instances
             .get(&instance.raw())
-            .map(|entry| (entry.bus, entry.bridge.map(DeviceId), entry.label.clone()))
+            .map(|entry| (entry.bus, entry.bridge.clone(), entry.label.clone()))
     }
 
     fn validate_bus_membership(
@@ -206,10 +213,11 @@ impl DeviceDomain {
                 device_bus: desc.bus_data.bus_id().name(),
             });
         }
-        if let Some(controller) = entry.bridge {
+        if let Some(controller) = &entry.bridge {
             match inner
                 .devices
-                .get(&controller)
+                .get(&controller.core.id.raw())
+                .filter(|entry| Arc::ptr_eq(&entry.core, &controller.core))
                 .map(|entry| entry.lifecycle.state)
             {
                 Some(
@@ -229,10 +237,14 @@ impl DeviceDomain {
 
     /// Insert an enumeration product into its existing bus instance and probe it.
     ///
+    /// The returned reference retains identity and static facts, not the binding
+    /// or its resources. It may already be offline if removal raced with probe
+    /// completion; successful registration does not promise a successful bind.
+    ///
     /// Returns an error if the instance or parent is missing, its controller
     /// or parent is being removed, or the data belongs to another bus type.
-    pub fn add_device(&self, desc: DeviceDescriptor) -> Result<DeviceId, AddDeviceError> {
-        let id = {
+    pub fn add_device(&self, desc: DeviceDescriptor) -> Result<crate::DeviceRef, AddDeviceError> {
+        let device = {
             let mut inner = self.inner.lock();
             if !inner.services_installed {
                 // NoServices rejects every service call as Fatal-Unsupported
@@ -255,52 +267,37 @@ impl DeviceDomain {
             // child at the parent's teardown. A missing parent is an
             // error, not a silent root placement: the descriptor's own
             // `parent` field would disagree with the registry topology.
-            if let Some(parent) = desc.parent {
-                let parent_state = inner
+            if let Some(parent) = &desc.parent {
+                let parent_id = parent.core.id.raw();
+                let parent_entry = inner
                     .devices
-                    .get(&parent.raw())
-                    .map(|entry| entry.lifecycle.state);
-                match parent_state {
-                    Some(
-                        DeviceState::Pending
-                        | DeviceState::Probing
-                        | DeviceState::Active
-                        | DeviceState::Deferred
-                        | DeviceState::Unclaimed,
-                    ) => {
-                        #[expect(
-                            clippy::expect_used,
-                            reason = "CG-021-no-panic-on-reachable-failure: the parent state \\
-                                      matched an accepting state above"
-                        )]
-                        {
-                            inner
-                                .devices
-                                .get_mut(&parent.raw())
-                                .expect("parent present")
-                                .topology
-                                .children
-                                .push(id.raw());
-                        }
+                    .get_mut(&parent_id)
+                    .filter(|entry| Arc::ptr_eq(&entry.core, &parent.core))
+                    .ok_or(AddDeviceError::ParentMissing(parent_id))?;
+                match parent_entry.lifecycle.state {
+                    DeviceState::Pending
+                    | DeviceState::Probing
+                    | DeviceState::Active
+                    | DeviceState::Deferred
+                    | DeviceState::Unclaimed => {
+                        parent_entry.topology.children.push(id.raw());
                     }
-                    Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
+                    state @ (DeviceState::Removing | DeviceState::Removed) => {
                         return Err(AddDeviceError::ParentUnavailable {
-                            parent: parent.raw(),
+                            parent: parent_id,
                             state: state.as_str(),
                         });
                     }
-                    None => return Err(AddDeviceError::ParentMissing(parent.raw())),
                 }
             }
             // The live identity card: physical path derives from the bus's
             // own vocabulary ONCE, here — every later publication and
             // consumer reads it through the shared core.
-            let core = crate::device::DeviceCore::new(id, desc.bus_data.path_component());
+            let core = crate::device::DeviceCore::new(id, desc);
             inner.devices.insert(
                 id.raw(),
                 DeviceEntry {
-                    desc,
-                    core,
+                    core: core.clone(),
                     lifecycle: LifecycleState {
                         state: DeviceState::Pending,
                         generation: 0,
@@ -321,19 +318,34 @@ impl DeviceDomain {
                 },
             );
             inner.sched.pending.push(id.raw());
-            id
+            crate::DeviceRef { core }
         };
         self.probe_pending();
-        Ok(id)
+        Ok(device)
     }
 
-    /// One line per device still parked on a dependency: `(id, dep)`.
+    /// One entry per registered device parked on a dependency: `(device, dep)`.
     ///
     /// The composition root logs this at boot end — Linux's
     /// `deferred_probe_timeout` diagnostics analogue, minus the timer: the
     /// root knows when enumeration + provider registration completed, so it
     /// decides when a deferred device is stuck rather than still waiting.
-    pub fn deferred_report(&self) -> Vec<(u64, DepSource)> {
-        self.inner.lock().sched.deferred.clone()
+    pub fn deferred_report(&self) -> Vec<(crate::DeviceRef, DepSource)> {
+        let inner = self.inner.lock();
+        inner
+            .sched
+            .deferred
+            .iter()
+            .filter_map(|(id, dependency)| {
+                inner.devices.get(id).map(|entry| {
+                    (
+                        crate::DeviceRef {
+                            core: entry.core.clone(),
+                        },
+                        *dependency,
+                    )
+                })
+            })
+            .collect()
     }
 }

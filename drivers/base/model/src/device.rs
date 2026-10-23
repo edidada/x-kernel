@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The device handle: `Device` — the one object a driver holds, in probe
-//! and in remove (Linux `struct device *`).
+//! Device identity references and scoped, typed probe/remove views.
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
@@ -29,6 +28,8 @@ use crate::{
 /// home: a device with three class publications has ONE name, ONE path,
 /// ONE offline flag.
 pub(crate) struct DeviceCore {
+    pub(crate) id: DeviceId,
+    pub(crate) desc: crate::DeviceDescriptor,
     /// Set by the domain when a driver's probe starts (the claim is known
     /// then, not at bind-commit).
     driver_name: kspin::SpinNoPreempt<Option<&'static str>>,
@@ -81,11 +82,11 @@ impl DeviceCore {
             .store(true, core::sync::atomic::Ordering::Release);
     }
 
-    pub(crate) fn new(
-        _id: DeviceId,
-        physical_path: alloc::string::String,
-    ) -> alloc::sync::Arc<Self> {
+    pub(crate) fn new(id: DeviceId, desc: crate::DeviceDescriptor) -> alloc::sync::Arc<Self> {
+        let physical_path = desc.bus_data.path_component();
         alloc::sync::Arc::new(Self {
+            id,
+            desc,
             driver_name: kspin::SpinNoPreempt::new(None),
             physical_path,
             offline: core::sync::atomic::AtomicBool::new(false),
@@ -93,11 +94,60 @@ impl DeviceCore {
     }
 }
 
+/// An owning reference to a registered device's identity and immutable facts.
+///
+/// Cloning this reference does not retain the binding or its resources. After
+/// removal, metadata remains readable, but it grants no hardware access.
+/// Dropping a reference never unregisters the device. Final metadata destruction
+/// runs in the last owner's context; bus data must not require sleepable Drop.
+#[derive(Clone)]
+pub struct DeviceRef {
+    pub(crate) core: Arc<DeviceCore>,
+}
+
+impl DeviceRef {
+    /// Immutable enumeration facts, retained even after device removal.
+    pub fn descriptor(&self) -> &crate::DeviceDescriptor {
+        &self.core.desc
+    }
+
+    /// Physical location derived from the registered bus data.
+    pub fn path(&self) -> &str {
+        self.core.physical_path()
+    }
+
+    /// The last driver whose probe started, not proof of a current binding.
+    pub fn driver_name(&self) -> Option<&'static str> {
+        self.core.driver_name()
+    }
+
+    /// Whether removal has not yet closed this device's publication source.
+    /// This snapshot is neither a binding check nor an in-flight operation permit.
+    pub fn is_online(&self) -> bool {
+        self.core.is_online()
+    }
+
+    /// Whether both references designate the same registered object.
+    pub fn same_device(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.core, &other.core)
+    }
+}
+
+impl core::fmt::Debug for DeviceRef {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("DeviceRef")
+            .field("registration_key", &self.core.id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Handle to one device (`struct device *`).
 ///
-/// THE one device type: probe receives `&mut Device<'_, B>`, remove receives
+/// The scoped callback view: probe receives `&mut Device<'_, B>`, remove receives
 /// the same plus `&mut Self::Data`. There is no second, remove-only variant
 /// to learn — a transcribed driver carries `dev` through both callbacks.
+/// A [`DeviceRef`] retains only identity and enumeration facts beyond them.
 ///
 /// The surface is split into four views, one per role, so a reader (or a
 /// model) never has to hold 25 flat methods in mind:
@@ -119,53 +169,51 @@ pub struct Device<'a, B: Bus> {
     /// The bus's own data vocabulary — typed: probe runs where the bus is
     /// statically known, so drivers read bus facts without any erasure.
     bus_data: &'a B::DeviceData,
-    id: DeviceId,
     modalias: Option<&'a str>,
     services: &'a dyn DeviceServices,
     /// The live device identity: what class publications attach to.
-    core: alloc::sync::Arc<DeviceCore>,
+    reference: DeviceRef,
     _bus: PhantomData<fn(&B)>,
 }
 
 impl<'a, B: Bus> Device<'a, B> {
     /// Constructed by the domain when it probes or removes a device.
     pub(crate) fn new(
-        desc: &'a crate::DeviceDescriptor,
+        core: &'a Arc<DeviceCore>,
         bus_data: &'a B::DeviceData,
-        id: DeviceId,
         modalias: Option<&'a str>,
         services: &'a dyn DeviceServices,
-        core: alloc::sync::Arc<DeviceCore>,
     ) -> Self {
         Self {
-            desc,
+            desc: &core.desc,
             bus_data,
-            id,
             modalias,
             services,
-            core,
+            reference: DeviceRef { core: core.clone() },
             _bus: PhantomData,
         }
     }
 
-    /// Identity: id, path, driver name, modalias, liveness, bus data.
+    /// Retain identity and static facts, without retaining driver resources.
+    pub fn reference(&self) -> DeviceRef {
+        self.reference.clone()
+    }
+
+    /// Identity: path, driver name, modalias, liveness, bus data.
     pub fn info(&self) -> DeviceInfo<'a, B> {
         DeviceInfo {
-            id: self.id,
             bus_data: self.bus_data,
             modalias: self.modalias,
-            core: self.core.clone(),
+            core: self.reference.core.clone(),
             _bus: PhantomData,
         }
     }
 
     /// Resources: the firmware-stated table and the `devm_*` acquisition
     /// door for MMIO/IRQ/DMA/clocks.
-    pub fn res(&self) -> Resources<'a, B> {
+    pub fn res(&self) -> Resources<'_, B> {
         Resources {
-            id: self.id,
-            map: &self.desc.resources,
-            dma: self.desc.dma,
+            device: &self.reference,
             services: self.services,
             _bus: PhantomData,
         }
@@ -203,13 +251,12 @@ impl<'a, B: Bus> Device<'a, B> {
         T: Send + Sync + 'static,
         H: driver_class::ClassHooks<T>,
     {
-        class.publish(self.core.clone(), runtime)
+        class.publish(self.reference.core.clone(), runtime)
     }
 }
 
 /// Identity view (`struct device`'s identity half).
 pub struct DeviceInfo<'a, B: Bus> {
-    id: DeviceId,
     bus_data: &'a B::DeviceData,
     modalias: Option<&'a str>,
     core: alloc::sync::Arc<DeviceCore>,
@@ -217,11 +264,6 @@ pub struct DeviceInfo<'a, B: Bus> {
 }
 
 impl<B: Bus> DeviceInfo<'_, B> {
-    /// The domain-allocated device id.
-    pub const fn id(&self) -> DeviceId {
-        self.id
-    }
-
     /// The bus-vocabulary path component (DEVPATH source).
     pub fn path(&self) -> &str {
         self.core.physical_path()
@@ -244,43 +286,41 @@ impl<B: Bus> DeviceInfo<'_, B> {
 /// Every acquisition returns an owned guard; store all of them in
 /// `DriverOps::Data`, whose field order is the release order.
 pub struct Resources<'a, B: Bus> {
-    id: DeviceId,
-    map: &'a ResourceMap,
-    dma: Option<crate::resource::DmaInfo>,
+    device: &'a DeviceRef,
     services: &'a dyn DeviceServices,
     _bus: PhantomData<fn(&B)>,
 }
 
 impl<B: Bus> Resources<'_, B> {
     /// The whole named resource table.
-    pub const fn map(&self) -> &ResourceMap {
-        self.map
+    pub fn map(&self) -> &ResourceMap {
+        &self.device.descriptor().resources
     }
 
     /// `platform_get_resource(pdev, IORESOURCE_MEM, n)`.
     pub fn mmio(&self, index: usize) -> Result<MmioRegion, ProbeError> {
-        self.map
+        self.map()
             .mmio(index)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))
     }
 
     /// `platform_get_resource_byname(pdev, IORESOURCE_MEM, name)`.
     pub fn mmio_by_name(&self, name: &str) -> Result<MmioRegion, ProbeError> {
-        self.map
+        self.map()
             .mmio_by_name(name)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))
     }
 
     /// `platform_get_irq(pdev, n)`.
     pub fn irq(&self, index: usize) -> Result<IrqSpec, ProbeError> {
-        self.map
+        self.map()
             .irq(index)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))
     }
 
     /// `platform_get_irq_byname(pdev, name)`.
     pub fn irq_by_name(&self, name: &str) -> Result<IrqSpec, ProbeError> {
-        self.map
+        self.map()
             .irq_by_name(name)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))
     }
@@ -295,7 +335,7 @@ impl<B: Bus> Resources<'_, B> {
     pub fn resolve_irq(&self, index: usize) -> Result<Virq, ProbeError> {
         let spec = self.irq(index)?;
         self.services
-            .map_irq(self.id, spec)
+            .map_irq(crate::DeviceContext::new(self.device), spec)
             .map_err(ProbeError::from)
     }
 
@@ -319,7 +359,7 @@ impl<B: Bus> Resources<'_, B> {
         name: &'static str,
     ) -> Result<IoMap, ProbeError> {
         self.services
-            .iomap(self.id, region, name)
+            .iomap(crate::DeviceContext::new(self.device), region, name)
             .map_err(ProbeError::Fatal)
     }
 
@@ -336,7 +376,12 @@ impl<B: Bus> Resources<'_, B> {
         F: Fn() -> IrqAction + Send + Sync + 'static,
     {
         self.services
-            .request_irq(self.id, spec, name, Arc::new(handler))
+            .request_irq(
+                crate::DeviceContext::new(self.device),
+                spec,
+                name,
+                Arc::new(handler),
+            )
             .map_err(ProbeError::Fatal)
     }
 
@@ -366,11 +411,12 @@ impl<B: Bus> Resources<'_, B> {
     /// Returns `ProbeError::Fatal(RuntimeError::Unsupported)` without invoking
     /// the host when DMA is unconfigured. Otherwise propagates host errors.
     pub fn alloc_coherent(&self, len: usize, align: usize) -> Result<CoherentMem, ProbeError> {
-        let dma = self
+        self.device
+            .descriptor()
             .dma
             .ok_or(ProbeError::Fatal(RuntimeError::Unsupported))?;
         self.services
-            .alloc_coherent(self.id, dma, len, align)
+            .alloc_coherent(crate::DeviceContext::new(self.device), len, align)
             .map_err(ProbeError::Fatal)
     }
 
@@ -378,7 +424,7 @@ impl<B: Bus> Resources<'_, B> {
     /// clock; returns [`ProbeError::Deferred`] while the provider is missing.
     pub fn clk(&self, name: &str) -> Result<ClkHandle, ProbeError> {
         let spec = self
-            .map
+            .map()
             .clk_by_name(name)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
         self.clk_spec(spec)
@@ -387,7 +433,7 @@ impl<B: Bus> Resources<'_, B> {
     /// [`Self::clk`] on an explicit spec.
     pub fn clk_spec(&self, spec: ClkSpec) -> Result<ClkHandle, ProbeError> {
         self.services
-            .clk_get(self.id, spec)
+            .clk_get(crate::DeviceContext::new(self.device), spec)
             .map_err(ProbeError::from)
     }
 }

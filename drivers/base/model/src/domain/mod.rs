@@ -72,15 +72,15 @@ use crate::{
 /// or an owning reference: holding it neither keeps a device alive nor
 /// guarantees that the device remains registered, bound or online.
 ///
-/// Public while descriptors and device-service contracts use it; the crate
-/// root re-exports it independently of its domain implementation home.
+/// Kept inside the model for indexing and diagnostics; public callers use
+/// device object references instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DeviceId(pub(crate) u64);
+pub(crate) struct DeviceId(pub(crate) u64);
 
 impl DeviceId {
     /// Numeric key for diagnostics or explicitly typed record associations.
     /// The value is not a device reference or a persistent hardware identifier.
-    pub const fn raw(self) -> u64 {
+    pub(crate) const fn raw(self) -> u64 {
         self.0
     }
 }
@@ -130,8 +130,8 @@ impl DeviceState {
 /// Why [`DeviceDomain::add_device`] rejected a descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddDeviceError {
-    /// The stated parent id does not exist in this domain (firmware typo,
-    /// discovery-order bug, or the parent was removed first).
+    /// The referenced parent object is not registered in this domain.
+    /// This includes foreign-domain references and already deleted entries.
     ParentMissing(u64),
     /// The parent exists but is tearing down (`Removing`) or is already
     /// removed — it cannot accept children.
@@ -162,7 +162,8 @@ pub struct ProbeStats {
 /// Read-only view of one device for introspection and tests.
 #[derive(Debug, Clone)]
 pub struct DeviceSnapshot {
-    pub id: DeviceId,
+    /// Identity retained independently of the captured lifecycle state.
+    pub device: crate::DeviceRef,
     pub bus: BusId,
     pub state: DeviceState,
     pub driver: Option<&'static str>,
@@ -180,8 +181,8 @@ pub struct DeviceSnapshot {
 /// would silently alias a failed registration onto its successor. The
 /// fatal verdict belongs to the DEFINITION, and identity does not depend
 /// on drivers being immortal. Domain-local: attempted sets and the
-/// registry are domain-internal bookkeeping; DeviceId currently also crosses
-/// the domain boundary through device-service contracts.
+/// registry and device registration keys are domain-internal bookkeeping;
+/// public device identity is represented by object references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DriverKey(u64);
 
@@ -196,15 +197,11 @@ trait AnyDriver: Send + Sync {
     fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> MatchScore;
     fn probe(
         &self,
-        desc: &DeviceDescriptor,
-        id: DeviceId,
         core: &alloc::sync::Arc<crate::device::DeviceCore>,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError>;
     fn remove(
         &self,
-        desc: &DeviceDescriptor,
-        id: DeviceId,
         core: &alloc::sync::Arc<crate::device::DeviceCore>,
         data: &mut DataBox,
         services: &dyn DeviceServices,
@@ -254,8 +251,6 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
 
     fn probe(
         &self,
-        desc: &DeviceDescriptor,
-        id: DeviceId,
         core: &alloc::sync::Arc<crate::device::DeviceCore>,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError> {
@@ -265,6 +260,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         // MODALIAS is DEVICE-derived (of_modalias semantics: the first
         // compatible string), not id-row-derived — module loading matches
         // the same string the bus published.
+        let desc = &core.desc;
         let modalias = desc.bus_data.modalias();
         // The bus_id check happened in matches(); probe runs on a device
         // this driver bound, so the downcast is total. A mismatching bus
@@ -274,20 +270,19 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is \
                       a domain-internal invariant violation, not a driver error"
         )]
-        let typed = desc
+        let typed = core
+            .desc
             .bus_data
             .as_any()
             .downcast_ref::<B::DeviceData>()
             .expect("the domain only probes devices the driver matched");
-        let mut ctx = Device::new(desc, typed, id, modalias.as_deref(), services, core.clone());
+        let mut ctx = Device::new(core, typed, modalias.as_deref(), services);
         let data = self.desc.ops.probe(&mut ctx)?;
         Ok(Box::new(data))
     }
 
     fn remove(
         &self,
-        desc: &DeviceDescriptor,
-        id: DeviceId,
         core: &alloc::sync::Arc<crate::device::DeviceCore>,
         data: &mut DataBox,
         services: &dyn DeviceServices,
@@ -304,12 +299,13 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             clippy::expect_used,
             reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
         )]
-        let typed = desc
+        let typed = core
+            .desc
             .bus_data
             .as_any()
             .downcast_ref::<B::DeviceData>()
             .expect("the domain only removes devices the driver bound");
-        let mut dev = Device::new(desc, typed, id, None, services, core.clone());
+        let mut dev = Device::new(core, typed, None, services);
         self.desc.ops.remove(&mut dev, data);
     }
 }
@@ -326,19 +322,17 @@ struct BusInstanceEntry {
     /// The bridge/controller device that created this bus, if any (a
     /// root bus has none). Removal of this device tears the instance's
     /// members down with it.
-    bridge: Option<u64>,
+    /// Retained for instance introspection after device teardown; this reference
+    /// owns no driver binding or hardware resource.
+    bridge: Option<crate::DeviceRef>,
     /// Addressing label ("0000:00", "i2c-3") — the `bus->name`/number
     /// surface transcribed drivers print and match on.
     label: alloc::string::String,
 }
 
 struct DeviceEntry {
-    /// Identity: the immutable descriptor (bus instance, parent,
-    /// resources, firmware identity).
-    desc: DeviceDescriptor,
-    /// The live identity card, shared with this device's class
-    /// publications (driver name, physical path, offline flag — one
-    /// authoritative home).
+    /// Shared identity and immutable descriptor, retained by device references
+    /// and class publications independently of this entry's binding.
     core: alloc::sync::Arc<crate::device::DeviceCore>,
     /// Lifecycle: state machine + teardown bookkeeping.
     lifecycle: LifecycleState,
@@ -398,7 +392,7 @@ struct NoServices;
 impl DeviceResourceServices for NoServices {
     fn iomap(
         &self,
-        _: crate::DeviceId,
+        _: crate::DeviceContext<'_>,
         _: MmioRegion,
         _: &'static str,
     ) -> Result<crate::IoMap, RuntimeError> {
@@ -407,7 +401,7 @@ impl DeviceResourceServices for NoServices {
 
     fn request_irq(
         &self,
-        _: crate::DeviceId,
+        _: crate::DeviceContext<'_>,
         _: IrqSpec,
         _: &'static str,
         _: crate::IrqHandlerFn,
@@ -417,8 +411,7 @@ impl DeviceResourceServices for NoServices {
 
     fn alloc_coherent(
         &self,
-        _: crate::DeviceId,
-        _: crate::DmaInfo,
+        _: crate::DeviceContext<'_>,
         _: usize,
         _: usize,
     ) -> Result<crate::CoherentMem, RuntimeError> {
@@ -427,7 +420,7 @@ impl DeviceResourceServices for NoServices {
 
     fn map_irq(
         &self,
-        _: crate::DeviceId,
+        _: crate::DeviceContext<'_>,
         _: crate::resource::IrqSpec,
     ) -> Result<crate::resource::Virq, RuntimeError> {
         Err(RuntimeError::Unsupported)
@@ -435,7 +428,11 @@ impl DeviceResourceServices for NoServices {
 }
 
 impl ClockConsumerServices for NoServices {
-    fn clk_get(&self, _: crate::DeviceId, _: ClkSpec) -> Result<crate::ClkHandle, ServiceError> {
+    fn clk_get(
+        &self,
+        _: crate::DeviceContext<'_>,
+        _: ClkSpec,
+    ) -> Result<crate::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }
@@ -462,7 +459,7 @@ struct DomainInner {
     /// addressing label), keyed by globally-unique id.
     bus_instances: BTreeMap<u64, BusInstanceEntry>,
     /// Reserved next device key from the crate-wide allocator.
-    /// Device-service association keys remain distinct across domain instances.
+    /// Management keys remain distinct across domain instances.
     next_device_id: u64,
     services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
@@ -539,15 +536,17 @@ fn bus_type(instances: &BTreeMap<u64, BusInstanceEntry>, desc: &DeviceDescriptor
 
 /// Build a consistent snapshot: one filling for `snapshot()` and
 /// `devices()` alike (they used to disagree — identity was dead in
-/// `snapshot()`). `kind` stays None until a class view exists; the field
-/// is documented as driver-bound.
-fn snapshot_of(id: DeviceId, entry: &DeviceEntry, bus: BusId) -> DeviceSnapshot {
+/// `snapshot()`). The identity reference remains live metadata, while state
+/// and driver capture the domain's view at the time of the snapshot.
+fn snapshot_of(entry: &DeviceEntry, bus: BusId) -> DeviceSnapshot {
     DeviceSnapshot {
-        id,
+        device: crate::DeviceRef {
+            core: entry.core.clone(),
+        },
         bus,
         state: entry.lifecycle.state,
         driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
-        identity: Some(entry.desc.bus_data.display_identity()),
+        identity: Some(entry.core.desc.bus_data.display_identity()),
     }
 }
 

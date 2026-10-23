@@ -15,12 +15,16 @@ impl DeviceDomain {
     /// operations or retain their resources in the shared runtime before
     /// independent guards are dropped. There is no model remove notifier.
     ///
-    /// A device that never reached `Active` (Pending/Deferred/Probing/
+    /// A device that never reached `Active` (Pending/Deferred/
     /// Unclaimed — e.g. hotplug of an unmatched card) takes the light path:
     /// it is withdrawn from the pending/deferred worklists and its entry is
-    /// freed immediately; there is no binding to quiesce. `Removing`/`
-    /// `Removed` entries reject re-removal with `BadState`.
-    pub fn remove_device(&self, id: DeviceId) -> Result<(), RuntimeError> {
+    /// freed outside the lock; retained references keep only its offline core.
+    /// A probing device rejects removal with `Busy`. Concurrent removal is
+    /// `Busy`, completed bound removal is `BadState`, and an absent entry is
+    /// `NotFound`; aborted cascades remain retryable.
+    /// Foreign-domain or mismatched object references return `NotFound`.
+    pub fn remove_device(&self, device: &crate::DeviceRef) -> Result<(), RuntimeError> {
+        let id = device.core.id;
         // Three phases, with the topology entrance CLOSED first:
         //
         // 1. Under one lock: validate, flip to `Removing` (this stops
@@ -43,7 +47,11 @@ impl DeviceDomain {
         // remove walk; the device model here owns the link.)
         let (children, light_path) = {
             let mut inner = self.inner.lock();
-            let Some(entry) = inner.devices.get_mut(&id.raw()) else {
+            let Some(entry) = inner
+                .devices
+                .get_mut(&id.raw())
+                .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+            else {
                 return Err(RuntimeError::NotFound);
             };
             match entry.lifecycle.state {
@@ -94,25 +102,33 @@ impl DeviceDomain {
         if light_path {
             let mut inner = self.inner.lock();
             Self::unlink_from_parent(&mut inner, &id.raw());
-            inner.devices.remove(&id.raw());
+            let removed = inner.devices.remove(&id.raw());
+            if let Some(entry) = &removed {
+                entry.core.mark_offline();
+            }
             inner.sched.pending.retain(|pending| *pending != id.raw());
             inner
                 .sched
                 .deferred
                 .retain(|(deferred, _)| *deferred != id.raw());
+            drop(inner);
+            drop(removed);
             log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
             return Ok(());
         }
-        let (desc, driver, core, data, services) = {
+        let (driver, core, data, services) = {
             let mut inner = self.inner.lock();
-            let Some(entry) = inner.devices.get_mut(&id.raw()) else {
+            let Some(entry) = inner
+                .devices
+                .get_mut(&id.raw())
+                .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+            else {
                 return Err(RuntimeError::NotFound);
             };
             if entry.lifecycle.state != DeviceState::Removing {
                 return Err(RuntimeError::BadState);
             }
             (
-                entry.desc.clone(),
                 entry.binding.driver.take(),
                 entry.core.clone(),
                 entry.binding.data.take(),
@@ -123,7 +139,7 @@ impl DeviceDomain {
 
         core.mark_offline();
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
-            driver.remove(&desc, id, &core, data.as_mut(), services.as_ref());
+            driver.remove(&core, data.as_mut(), services.as_ref());
         }
 
         // The publications are Data-owned: they withdraw inside
@@ -146,7 +162,14 @@ impl DeviceDomain {
     /// other failure aborts the teardown for a retry.
     pub(super) fn cascade(&self, members: Vec<u64>) -> Result<(), RuntimeError> {
         for member in members {
-            match self.remove_device(DeviceId(member)) {
+            let device = {
+                let inner = self.inner.lock();
+                inner.devices.get(&member).map(|entry| crate::DeviceRef {
+                    core: entry.core.clone(),
+                })
+            };
+            let Some(device) = device else { continue };
+            match self.remove_device(&device) {
                 Ok(()) => {}
                 // Already gone: satisfies the children-first requirement.
                 Err(RuntimeError::NotFound) => {}
@@ -195,9 +218,13 @@ impl DeviceDomain {
             .map(|entry| entry.topology.children.clone())
             .unwrap_or_default();
         for (instance_id, instance) in inner.bus_instances.iter() {
-            if instance.bridge.as_ref() == Some(id) {
+            if instance
+                .bridge
+                .as_ref()
+                .is_some_and(|bridge| bridge.core.id.raw() == *id)
+            {
                 for (member, entry) in inner.devices.iter() {
-                    if entry.desc.bus_instance.raw() == *instance_id && !set.contains(member) {
+                    if entry.core.desc.bus_instance.raw() == *instance_id && !set.contains(member) {
                         set.push(*member);
                     }
                 }
@@ -217,50 +244,60 @@ impl DeviceDomain {
 
     /// Remove `id` from its parent's children list (topology unlink).
     fn unlink_from_parent(inner: &mut DomainInner, id: &u64) {
-        let Some(parent) = inner.devices.get(id).map(|entry| entry.desc.parent) else {
+        let Some(parent) = inner.devices.get(id).and_then(|entry| {
+            entry
+                .core
+                .desc
+                .parent
+                .as_ref()
+                .map(|parent| parent.core.id.raw())
+        }) else {
             return;
         };
-        let Some(parent) = parent else { return };
-        let parent = parent.raw();
         if let Some(parent_entry) = inner.devices.get_mut(&parent) {
             parent_entry.topology.children.retain(|child| child != id);
         }
     }
 
-    pub fn snapshot(&self, id: DeviceId) -> Option<DeviceSnapshot> {
+    /// Capture this domain's state for the exact referenced object.
+    /// Foreign or deleted objects return None; bound Removed entries remain
+    /// inspectable. The retained identity does not freeze later state changes.
+    pub fn snapshot(&self, device: &crate::DeviceRef) -> Option<DeviceSnapshot> {
         let inner = self.inner.lock();
-        let entry = inner.devices.get(&id.raw())?;
+        let entry = inner
+            .devices
+            .get(&device.core.id.raw())
+            .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))?;
         Some(snapshot_of(
-            id,
             entry,
-            bus_type(&inner.bus_instances, &entry.desc),
+            bus_type(&inner.bus_instances, &entry.core.desc),
         ))
     }
 
+    /// Capture registered entries, including retained Removed snapshots.
     pub fn devices(&self) -> Vec<DeviceSnapshot> {
         let inner = self.inner.lock();
         inner
             .devices
-            .iter()
-            .map(|(id, entry)| {
-                snapshot_of(
-                    DeviceId(*id),
-                    entry,
-                    bus_type(&inner.bus_instances, &entry.desc),
-                )
-            })
+            .values()
+            .map(|entry| snapshot_of(entry, bus_type(&inner.bus_instances, &entry.core.desc)))
             .collect()
     }
 
     /// Borrow a device's driver data under the domain lock (read-only view
     /// for class layers and tests).
+    /// Foreign, deleted or unbound objects return None. The visitor must not
+    /// block or re-enter the domain while this lock is held.
     pub fn with_data<D: Any + Send + Sync, R>(
         &self,
-        id: DeviceId,
+        device: &crate::DeviceRef,
         visit: impl FnOnce(&D) -> R,
     ) -> Option<R> {
         let inner = self.inner.lock();
-        let entry = inner.devices.get(&id.raw())?;
+        let entry = inner
+            .devices
+            .get(&device.core.id.raw())
+            .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))?;
         let data = entry.binding.data.as_ref()?.as_ref().downcast_ref::<D>()?;
         Some(visit(data))
     }

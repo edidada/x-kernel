@@ -70,6 +70,9 @@ impl MatchScore {
 /// (`dev_name`, `dev_uevent`, `match`): a small, closed set of generic
 /// operations. The payload type itself is bus vocabulary and lives with
 /// its bus (e.g. [`PlatformBusData`]) — the core never inspects it.
+/// Registered data is retained by device references after removal. It must
+/// contain only descriptive facts, not binding-owned hardware resources, and
+/// its destructor must not require a sleepable context.
 pub trait BusDeviceData: core::fmt::Debug + Send + Sync + 'static {
     /// The bus that owns this vocabulary.
     fn bus_id(&self) -> BusId;

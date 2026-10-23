@@ -7,7 +7,8 @@ use alloc::boxed::Box;
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    BusInstanceId, DeviceDescriptor, DeviceId, DmaInfo, FirmwareNodeInfo, PlatformBusData,
+    Bus, BusInstanceId, DeviceDescriptor, DeviceDomain, DmaInfo, FirmwareNodeInfo, PlatformBus,
+    PlatformBusData,
 };
 
 #[def_test]
@@ -31,13 +32,28 @@ fn descriptor_builder_defaults_leave_optional_capabilities_absent() {
 
 #[def_test]
 fn descriptor_builder_accepts_optional_enumerator_inputs() {
+    let domain = DeviceDomain::new();
+    let instance = domain
+        .add_bus_instance(PlatformBus::ID, None, "builder-test")
+        .unwrap();
+    let parent = domain
+        .add_device(
+            DeviceDescriptor::builder()
+                .bus_instance(instance)
+                .bus_data(Box::new(PlatformBusData::firmware_node(
+                    7,
+                    &["test,parent"],
+                )))
+                .build(),
+        )
+        .unwrap();
     let descriptor = DeviceDescriptor::builder()
         .bus_instance(BusInstanceId::from_raw(1))
         .bus_data(Box::new(PlatformBusData::firmware_node(
             1,
             &["test,device"],
         )))
-        .parent_opt(Some(DeviceId(7)))
+        .parent_opt(Some(parent.clone()))
         .fw_opt(Some(FirmwareNodeInfo {
             phandle: Some(9),
             ..FirmwareNodeInfo::EMPTY
@@ -45,7 +61,10 @@ fn descriptor_builder_accepts_optional_enumerator_inputs() {
         .dma_opt(Some(DmaInfo::DEFAULT))
         .build();
 
-    assert_eq!(descriptor.parent, Some(DeviceId(7)));
+    assert!(descriptor.parent.as_ref().unwrap().same_device(&parent));
+    let cloned = descriptor.clone();
+    assert!(cloned.parent.as_ref().unwrap().same_device(&parent));
+    domain.remove_device(&parent).unwrap();
     assert_eq!(descriptor.fw.as_ref().unwrap().phandle, Some(9));
     assert_eq!(descriptor.dma, Some(DmaInfo::DEFAULT));
 

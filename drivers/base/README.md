@@ -41,7 +41,9 @@ OS 能力契约已抽到 os-api；设备服务协调和 platform 总线暂留 mo
 
 ### model 的内容归属
 
-- `Device`、`DeviceId`、私有 `DeviceCore`：设备身份及模型允许驱动进行的操作。
+- `DeviceRef`：可长期持有的只读设备身份与静态描述，不保留驱动绑定资源。
+- `Device`：probe/remove 回调期间的类型化操作视图；`DeviceContext` 是传给设备服务的借用上下文。
+- 私有 `DeviceCore`：共享描述符与来源状态；内部 `DeviceId` 只用于索引、调度和诊断，不作为公开身份 API。
 - `DriverOps`、驱动注册描述：驱动如何参与绑定与移除。
 - `DeviceDomain`：设备表、驱动表、拓扑和绑定状态的所有者。
 - probe、deferred dependency、remove 编排：设备绑定状态机的内部实现。
@@ -50,6 +52,8 @@ OS 能力契约已抽到 os-api；设备服务协调和 platform 总线暂留 mo
 枚举代码提交设备描述，model 选择驱动并调用 probe，保存成功建立的驱动私有
 数据。缺少依赖时暂缓探测，依赖就绪后重试；退出时协调子设备移除、remove
 以及私有数据释放。具体总线枚举和资源的宿主实现由外部提供。
+注册返回 `DeviceRef`，管理和父子关系使用对象引用。域在锁内核对对象归属与状态，
+注销不等待外部身份引用耗尽；保留下来的引用只能继续读取离线元数据。
 
 ### class 的内容归属
 

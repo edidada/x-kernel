@@ -44,9 +44,9 @@ impl DeviceDomain {
                     break stats;
                 }
             }
-            for (id, desc, driver) in batch {
+            for (id, core, driver) in batch {
                 let services = self.inner.lock().services.clone();
-                let (generation, core) = {
+                let generation = {
                     let inner = self.inner.lock();
                     #[expect(
                         clippy::expect_used,
@@ -58,9 +58,9 @@ impl DeviceDomain {
                         .devices
                         .get(&id)
                         .expect("batch devices are registered");
-                    (entry.lifecycle.generation, entry.core.clone())
+                    entry.lifecycle.generation
                 };
-                match driver.probe(&desc, crate::DeviceId(id), &core, services.as_ref()) {
+                match driver.probe(&core, services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
                         match inner.devices.get_mut(&id) {
@@ -72,7 +72,7 @@ impl DeviceDomain {
                                 log::debug!(
                                     "driver-core: `{}` activated device {id} ({})",
                                     driver.name(),
-                                    desc.bus_data.display_identity()
+                                    core.desc.bus_data.display_identity()
                                 );
                             }
                             // Stale probe: the device's generation moved
@@ -112,19 +112,19 @@ impl DeviceDomain {
     /// LATER registration (`max_by_key` over the registration-ordered
     /// registry returns the last maximum) — pinned by
     /// `same_score_later_registration_wins`.
-    fn select_batch(&self) -> Vec<(u64, DeviceDescriptor, Arc<dyn AnyDriver>)> {
+    fn select_batch(&self) -> Vec<(u64, Arc<crate::device::DeviceCore>, Arc<dyn AnyDriver>)> {
         let mut inner = self.inner.lock();
         let mut batch = Vec::new();
         let pending = core::mem::take(&mut inner.sched.pending);
         for id in pending {
-            let (state, attempted, desc) = {
+            let (state, attempted, core) = {
                 let Some(entry) = inner.devices.get_mut(&id) else {
                     continue;
                 };
                 (
                     entry.lifecycle.state,
                     entry.binding.attempted.clone(),
-                    entry.desc.clone(),
+                    entry.core.clone(),
                 )
             };
             if matches!(
@@ -141,8 +141,8 @@ impl DeviceDomain {
                     (
                         driver.clone(),
                         driver.matches(
-                            bus_type(&inner.bus_instances, &desc),
-                            desc.bus_data.as_ref(),
+                            bus_type(&inner.bus_instances, &core.desc),
+                            core.desc.bus_data.as_ref(),
                         ),
                     )
                 })
@@ -154,7 +154,7 @@ impl DeviceDomain {
                     if let Some(entry) = inner.devices.get_mut(&id) {
                         entry.lifecycle.state = DeviceState::Probing;
                     }
-                    batch.push((id, desc, driver));
+                    batch.push((id, core, driver));
                 }
                 None => {
                     if let Some(entry) = inner.devices.get_mut(&id) {

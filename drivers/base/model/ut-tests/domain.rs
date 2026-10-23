@@ -63,7 +63,14 @@ impl ClkOps for FixedClk {
 /// Host wake hook installed in tests (the `Host::domain().wake` analogue).
 type WakeHook = Arc<dyn Fn(DepSource) + Send + Sync>;
 
+struct ServiceRequest {
+    operation: &'static str,
+    device: alloc::sync::Weak<crate::device::DeviceCore>,
+}
+
 struct MockServices {
+    requests: SpinNoPreempt<Vec<ServiceRequest>>,
+    released: Arc<AtomicUsize>,
     clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
     mapped: AtomicUsize,
     dma_requests: AtomicUsize,
@@ -97,6 +104,20 @@ impl crate::ProviderClass for TestClkClass {
 }
 
 impl MockServices {
+    fn record_request(&self, operation: &'static str, context: &crate::DeviceContext<'_>) {
+        self.requests.lock().push(ServiceRequest {
+            operation,
+            device: Arc::downgrade(&context.device().core),
+        });
+    }
+
+    fn release_hook(&self) -> driver_os_api::ReleaseHook {
+        let released = self.released.clone();
+        Arc::new(move || {
+            released.fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
     /// Install the mid-check wake hook (see the struct field docs).
     fn mid_check_hook(&self, hook: &SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>>) {
         *self.mid_check_hook.lock() = hook.lock().clone();
@@ -116,6 +137,8 @@ impl MockServices {
 
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            requests: SpinNoPreempt::new(Vec::new()),
+            released: Arc::new(AtomicUsize::new(0)),
             mid_check_hook: SpinNoPreempt::new(None),
             clk_providers: SpinNoPreempt::new(BTreeMap::new()),
             mapped: AtomicUsize::new(0),
@@ -135,23 +158,25 @@ impl MockServices {
 impl DeviceResourceServices for MockServices {
     fn iomap(
         &self,
-        _: crate::DeviceId,
+        device: crate::DeviceContext<'_>,
         region: MmioRegion,
         _: &'static str,
     ) -> Result<IoMap, RuntimeError> {
+        self.record_request("iomap", &device);
         self.mapped.fetch_add(1, Ordering::Relaxed);
         // SAFETY: test mock — the handle is never accessed, only
         // carried; the vaddr is a dummy that satisfies alignment.
-        Ok(unsafe { IoMap::new(region.base, region, None) })
+        Ok(unsafe { IoMap::new(region.base, region, Some(self.release_hook())) })
     }
 
     fn request_irq(
         &self,
-        _: crate::DeviceId,
+        device: crate::DeviceContext<'_>,
         spec: IrqSpec,
         _: &'static str,
         _: crate::IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
+        self.record_request("request_irq", &device);
         Ok(DevIrq::new(
             match spec {
                 IrqSpec::ResolvedVirq { virq, .. } => virq,
@@ -159,33 +184,44 @@ impl DeviceResourceServices for MockServices {
                 // suffices for the tests that exercise this service.
                 IrqSpec::FirmwareRoute { hwirq, .. } => crate::Virq::new(hwirq),
             },
-            None,
+            Some(self.release_hook()),
         ))
     }
 
     fn alloc_coherent(
         &self,
-        _: crate::DeviceId,
-        dma: crate::DmaInfo,
+        device: crate::DeviceContext<'_>,
         _: usize,
         _: usize,
     ) -> Result<crate::CoherentMem, RuntimeError> {
+        self.record_request("alloc_coherent", &device);
         self.dma_requests.fetch_add(1, Ordering::Relaxed);
+        let dma = device
+            .device()
+            .descriptor()
+            .dma
+            .ok_or(RuntimeError::Unsupported)?;
         // Test mock: fake identity allocator honoring the device's DMA
         // view through the same translate() the real host uses, so the
         // mask/offset contract is exercised in tests too.
         let paddr = 0x4000_0000u64 + self.mapped.load(Ordering::Relaxed) as u64;
         match dma.translate(paddr) {
-            Some(bus) => Ok(crate::CoherentMem::new(paddr as usize, bus, 0x1000, None)),
+            Some(bus) => Ok(crate::CoherentMem::new(
+                paddr as usize,
+                bus,
+                0x1000,
+                Some(self.release_hook()),
+            )),
             None => Err(RuntimeError::NoMemory),
         }
     }
 
     fn map_irq(
         &self,
-        _: crate::DeviceId,
+        device: crate::DeviceContext<'_>,
         spec: crate::resource::IrqSpec,
     ) -> Result<crate::resource::Virq, RuntimeError> {
+        self.record_request("map_irq", &device);
         // Test mock: identity resolution — firmware routes "map" to
         // their hwirq (the identity domain), resolved virqs pass
         // through.
@@ -199,7 +235,12 @@ impl DeviceResourceServices for MockServices {
 }
 
 impl ClockConsumerServices for MockServices {
-    fn clk_get(&self, _: crate::DeviceId, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
+    fn clk_get(
+        &self,
+        device: crate::DeviceContext<'_>,
+        spec: ClkSpec,
+    ) -> Result<ClkHandle, ServiceError> {
+        self.record_request("clk_get", &device);
         // Bind the lookup OUTSIDE the match: a match scrutinee's
         // temporary lock guard lives for the whole match arm, and the
         // mid-check hook re-enters publish_clk (same clk_providers
@@ -207,7 +248,7 @@ impl ClockConsumerServices for MockServices {
         // for registry callbacks.
         let existing = self.clk_providers.lock().get(&spec.provider).cloned();
         match existing {
-            Some(ops) => Ok(ClkHandle::new(ops, None)),
+            Some(ops) => Ok(ClkHandle::new(ops, Some(self.release_hook()))),
             None => {
                 if let Some(hook) = self.mid_check_hook.lock().clone() {
                     hook();
@@ -341,6 +382,201 @@ fn fresh_domain() -> (DeviceDomain, Arc<MockServices>, crate::BusInstanceId) {
     (domain, services, root)
 }
 
+#[def_test]
+fn resource_services_receive_the_same_device_and_release_each_guard_once() {
+    struct ResourceDriver;
+    impl DriverOps<PlatformBus> for ResourceDriver {
+        type Data = (DevIrq, IoMap, crate::CoherentMem, ClkHandle);
+
+        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+            let resources = dev.res();
+            let mapping = resources.iomap(0)?;
+            let _virq = resources.resolve_irq(0)?;
+            let irq = resources.request_irq_at(0, || IrqAction::Handled)?;
+            let dma = resources.alloc_coherent(0x1000, 0x1000)?;
+            let clock = resources.clk("baudclk")?;
+            Ok((irq, mapping, dma, clock))
+        }
+    }
+
+    let (domain, services, root) = fresh_domain();
+    services.publish_clk(0x42);
+    domain.register_driver(DriverDesc::new("resources", IDS, ResourceDriver));
+    let mut descriptor = test_descriptor(root);
+    descriptor.dma = Some(crate::DmaInfo::DEFAULT);
+    let device = domain.add_device(descriptor).unwrap();
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    let observed = services
+        .requests
+        .lock()
+        .iter()
+        .map(|request| {
+            (
+                request.operation,
+                request.device.ptr_eq(&Arc::downgrade(&device.core)),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        alloc::vec![
+            ("iomap", true),
+            ("map_irq", true),
+            ("request_irq", true),
+            ("alloc_coherent", true),
+            ("clk_get", true),
+        ]
+    );
+    assert_eq!(services.released.load(Ordering::Relaxed), 0);
+    domain.remove_device(&device).unwrap();
+    assert_eq!(services.released.load(Ordering::Relaxed), 4);
+    let mut rejected = test_descriptor_for_node(root, 2);
+    rejected.dma = Some(crate::DmaInfo {
+        mask: 0,
+        ..crate::DmaInfo::DEFAULT
+    });
+    let rejected = domain.add_device(rejected).unwrap();
+    assert_eq!(
+        domain.snapshot(&rejected).unwrap().state,
+        DeviceState::Unclaimed
+    );
+    assert_eq!(services.released.load(Ordering::Relaxed), 6);
+    domain.remove_device(&rejected).unwrap();
+    drop(device);
+    drop(domain);
+    assert_eq!(services.released.load(Ordering::Relaxed), 6);
+}
+
+#[def_test]
+fn deferred_clock_request_releases_partial_acquisitions() {
+    struct DeferredDriver;
+    impl DriverOps<PlatformBus> for DeferredDriver {
+        type Data = ();
+
+        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+            let _mapping = dev.res().iomap(0)?;
+            let _irq = dev.res().request_irq_at(0, || IrqAction::Handled)?;
+            let _clock = dev.res().clk("baudclk")?;
+            Ok(())
+        }
+    }
+    let (domain, services, root) = fresh_domain();
+    domain.register_driver(DriverDesc::new("deferred-context", IDS, DeferredDriver));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
+    assert_eq!(services.released.load(Ordering::Relaxed), 2);
+    domain.remove_device(&device).unwrap();
+    assert_eq!(services.released.load(Ordering::Relaxed), 2);
+}
+
+#[def_test]
+fn retained_reference_does_not_retain_binding_resources() {
+    struct BoundData {
+        device: crate::DeviceRef,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Drop for BoundData {
+        fn drop(&mut self) {
+            assert!(!self.device.is_online());
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    struct ReferenceDriver {
+        removes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl DriverOps<PlatformBus> for ReferenceDriver {
+        type Data = BoundData;
+
+        fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError> {
+            Ok(BoundData {
+                device: dev.reference(),
+                drops: self.drops.clone(),
+            })
+        }
+
+        fn remove(&self, dev: &mut Device<'_, PlatformBus>, data: &mut Self::Data) {
+            assert!(dev.reference().same_device(&data.device));
+            assert!(!data.device.is_online());
+            core::assert_eq!(self.drops.load(Ordering::Relaxed), 0);
+            self.removes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let (domain, _services, root) = fresh_domain();
+    let removes = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    domain.register_driver(DriverDesc::new(
+        "reference-test",
+        IDS,
+        ReferenceDriver {
+            removes: removes.clone(),
+            drops: drops.clone(),
+        },
+    ));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    let retained = device.clone();
+    let weak = Arc::downgrade(&device.core);
+    assert!(device.same_device(&retained));
+    assert!(device.is_online());
+    assert_eq!(device.driver_name(), Some("reference-test"));
+    assert_eq!(
+        domain.with_data::<BoundData, bool>(&device, |data| {
+            device.same_device(&data.device)
+                && core::ptr::eq(device.descriptor(), data.device.descriptor())
+        }),
+        Some(true)
+    );
+
+    domain.remove_device(&device).unwrap();
+    assert_eq!(removes.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(!retained.is_online());
+    assert_eq!(retained.descriptor().bus_instance, root);
+    assert_eq!(retained.path(), "platform/firmware1");
+    assert!(domain.with_data::<BoundData, ()>(&device, |_| ()).is_none());
+    assert_eq!(domain.remove_device(&device), Err(RuntimeError::BadState));
+    drop(domain);
+    drop(device);
+    assert!(weak.upgrade().is_some());
+    drop(retained);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(removes.load(Ordering::Relaxed), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn unbound_removal_retires_identity_without_invalidating_metadata() {
+    let (domain, _services, root) = fresh_domain();
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    let weak = Arc::downgrade(&device.core);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
+    let retained = device.clone();
+    drop(device);
+    assert!(retained.is_online());
+    assert!(domain.snapshot(&retained).is_some());
+    domain.remove_device(&retained).unwrap();
+    assert!(!retained.is_online());
+    assert!(domain.snapshot(&retained).is_none());
+    assert_eq!(retained.descriptor().bus_instance, root);
+    assert_eq!(retained.path(), "platform/firmware1");
+    assert_eq!(domain.remove_device(&retained), Err(RuntimeError::NotFound));
+    let replacement = domain.add_device(test_descriptor(root)).unwrap();
+    assert!(!replacement.same_device(&retained));
+    assert_eq!(domain.remove_device(&retained), Err(RuntimeError::NotFound));
+    assert!(domain.snapshot(&retained).is_none());
+    assert!(replacement.is_online());
+    domain.remove_device(&replacement).unwrap();
+    drop(retained);
+    assert!(weak.upgrade().is_none());
+}
+
 #[def_test(serial)]
 fn probe_binds_data_and_remove_quiesces() {
     REMOVE_RAN.store(false, Ordering::Release);
@@ -348,19 +584,22 @@ fn probe_binds_data_and_remove_quiesces() {
     services.publish_clk(0x42);
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    let snapshot = domain.snapshot(id).unwrap();
+    let snapshot = domain.snapshot(&device).unwrap();
     assert_eq!(snapshot.state, DeviceState::Active);
     assert_eq!(snapshot.driver, Some("test-serial"));
 
-    let rate = domain.with_data::<SerData, u64>(id, |data| data.clk.get_rate());
+    let rate = domain.with_data::<SerData, u64>(&device, |data| data.clk.get_rate());
     assert_eq!(rate, Some(24_000_000));
 
-    domain.remove_device(id).unwrap();
+    domain.remove_device(&device).unwrap();
     assert!(REMOVE_RAN.load(Ordering::Acquire));
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Removed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Removed
+    );
 }
 
 #[def_test(serial)]
@@ -369,19 +608,25 @@ fn deferred_probe_wakes_exactly_on_dependency() {
     let (domain, services, root) = fresh_domain();
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
     assert_eq!(PROBES.load(Ordering::Relaxed), 1);
 
     // An unrelated dependency must not wake the device.
     assert_eq!(domain.wake(DepSource::clk(0x99)), 0);
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
 
     services.publish_clk(0x42);
     assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
     assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 }
 
@@ -391,15 +636,21 @@ fn late_driver_registration_claims_unclaimed_device() {
     services.publish_clk(0x42);
 
     // Device arrives before any driver: goes Unclaimed.
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 
     // A driver registered later must still claim it.
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
-    assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().driver,
+        Some("test-serial")
+    );
 }
 
 #[def_test(serial)]
@@ -407,12 +658,18 @@ fn late_driver_registration_skips_unmatched_unclaimed() {
     let (domain, _services, root) = fresh_domain();
     let mut desc = test_descriptor(root);
     desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
-    let id = domain.add_device(desc).expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    let device = domain.add_device(desc).expect("add device");
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 
     // A driver that does not match must not disturb the terminal state.
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 }
 
 /// Tie-break fixture: both drivers match `test,serial` with the SAME
@@ -448,10 +705,10 @@ fn same_score_later_registration_wins() {
     domain.register_driver(DriverDesc::new("tie-a", TIE_IDS, TieA));
     domain.register_driver(DriverDesc::new("tie-b", TIE_IDS, TieB));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().driver, Some("tie-b"));
+    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("tie-b"));
 }
 
 /// One driver definition, one registration (Linux `driver_register`
@@ -466,10 +723,10 @@ fn duplicate_registration_is_rejected() {
     assert!(domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer)));
     assert!(!domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer)));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
     // Exactly one probe body ran for the device.
     assert_eq!(PROBES.load(Ordering::Relaxed), 1);
 }
@@ -481,13 +738,19 @@ fn duplicate_registration_is_rejected() {
 fn duplicate_registration_cannot_retry_a_fatal_device() {
     let (domain, _services, root) = fresh_domain();
     assert!(domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver)));
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 
     assert!(!domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver)));
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 }
 
 /// Topology: the parent field links entries, removal cascades
@@ -544,10 +807,11 @@ fn remove_cascades_children_first() {
             &["topo,parent"],
         )))
         .build();
-    let parent_id = domain.add_device(parent_desc.clone()).expect("add device");
+    let parent = domain.add_device(parent_desc).expect("add device");
+    let parent_ref = parent.clone();
     let _ = domain.probe_pending();
     assert_eq!(
-        domain.snapshot(parent_id).unwrap().state,
+        domain.snapshot(&parent_ref).unwrap().state,
         DeviceState::Active,
         "parent must bind before the child references it"
     );
@@ -558,20 +822,23 @@ fn remove_cascades_children_first() {
             2,
             &["topo,child"],
         )))
-        .parent_opt(Some(parent_id))
+        .parent(parent.clone())
         .build();
-    let child_id = domain.add_device(child_desc).expect("add device");
+    let child = domain.add_device(child_desc).expect("add device");
     let _ = domain.probe_pending();
-    assert_eq!(
-        domain.snapshot(child_id).unwrap().state,
-        DeviceState::Active
-    );
+    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
 
     // Removing the parent tears the child down first.
-    domain.remove_device(parent_id).expect("cascade remove");
+    domain.remove_device(&parent_ref).expect("cascade remove");
     assert_eq!(*ORDER.lock(), alloc::vec!["child", "parent"]);
+    let mut late_child = test_descriptor(root);
+    late_child.parent = Some(parent.clone());
+    assert!(matches!(domain.add_device(late_child),
+        Err(AddDeviceError::ParentUnavailable { parent: id, state: "removed" })
+            if id == parent_ref.core.id.raw()
+    ));
     assert_eq!(
-        domain.snapshot(child_id).map(|s| s.state),
+        domain.snapshot(&child).map(|s| s.state),
         Some(DeviceState::Removed)
     );
 }
@@ -596,7 +863,7 @@ fn parent_teardown_waits_for_probing_child() {
     static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
     struct ChildDriver {
         domain: &'static DeviceDomain,
-        parent: u64,
+        parent: crate::DeviceRef,
     }
     impl DriverOps<PlatformBus> for ChildDriver {
         type Data = ();
@@ -609,7 +876,7 @@ fn parent_teardown_waits_for_probing_child() {
             // re-entrancy is lock-clean.
             let err = self
                 .domain
-                .remove_device(DeviceId(self.parent))
+                .remove_device(&self.parent)
                 .expect_err("parent remove must abort on busy child");
             assert!(matches!(err, RuntimeError::Busy));
             Ok(())
@@ -622,7 +889,7 @@ fn parent_teardown_waits_for_probing_child() {
             // the teardown.
             let err = self
                 .domain
-                .remove_device(DeviceId(self.parent))
+                .remove_device(&self.parent)
                 .expect_err("concurrent parent remove must be Busy");
             assert!(matches!(err, RuntimeError::Busy));
             *CHILD_REMOVE_SAW_BUSY.lock() = true;
@@ -645,7 +912,7 @@ fn parent_teardown_waits_for_probing_child() {
         root: crate::BusInstanceId,
         compatible: &str,
         firmware: u32,
-        parent: Option<DeviceId>,
+        parent: Option<crate::DeviceRef>,
     ) -> DeviceDescriptor {
         DeviceDescriptor::builder()
             .bus_instance(root)
@@ -664,12 +931,13 @@ fn parent_teardown_waits_for_probing_child() {
     let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
     domain.set_services(services);
     domain.register_driver(DriverDesc::new("gate-parent", PARENT_IDS, ParentDriver));
-    let parent_id = domain
+    let parent = domain
         .add_device(gated_descriptor(root, "gate,parent", 1, None))
         .expect("add parent");
+    let parent_ref = parent.clone();
     let _ = domain.probe_pending();
     assert_eq!(
-        domain.snapshot(parent_id).unwrap().state,
+        domain.snapshot(&parent_ref).unwrap().state,
         DeviceState::Active
     );
 
@@ -679,49 +947,48 @@ fn parent_teardown_waits_for_probing_child() {
         CHILD_IDS,
         ChildDriver {
             domain,
-            parent: parent_id.raw(),
+            parent: parent_ref.clone(),
         },
     ));
-    let child_id = domain
-        .add_device(gated_descriptor(root, "gate,child", 2, Some(parent_id)))
+    let child = domain
+        .add_device(gated_descriptor(
+            root,
+            "gate,child",
+            2,
+            Some(parent.clone()),
+        ))
         .expect("add child");
     let _ = domain.probe_pending();
     // The in-probe removal aborted: the parent is mid-teardown
     // (Removing — closed to children, retryable), its binding intact.
     assert_eq!(
-        domain.snapshot(parent_id).unwrap().state,
+        domain.snapshot(&parent_ref).unwrap().state,
         DeviceState::Removing
     );
-    assert_eq!(
-        domain.snapshot(child_id).unwrap().state,
-        DeviceState::Active
-    );
+    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
 
     // While the parent is mid-teardown it takes no new children.
     let err = domain
-        .add_device(gated_descriptor(root, "gate,late", 3, Some(parent_id)))
+        .add_device(gated_descriptor(root, "gate,late", 3, Some(parent.clone())))
         .expect_err("Removing parent must reject children");
     assert!(matches!(
         err,
         AddDeviceError::ParentUnavailable { parent, state: "removing" }
-            if parent == parent_id.raw()
+            if parent == parent_ref.core.id.raw()
     ));
 
     // Retry: the child finished probing; the cascade completes and the
     // parent tears down fully (child Removed first).
-    domain.remove_device(parent_id).expect("retry completes");
+    domain.remove_device(&parent_ref).expect("retry completes");
     // The child's remove hook verified the in-progress exclusion
     // (recorded in the static slot — the ops instance the domain
     // holds is a by-value copy).
     assert!(*CHILD_REMOVE_SAW_BUSY.lock());
     assert_eq!(
-        domain.snapshot(parent_id).unwrap().state,
+        domain.snapshot(&parent_ref).unwrap().state,
         DeviceState::Removed
     );
-    assert_eq!(
-        domain.snapshot(child_id).unwrap().state,
-        DeviceState::Removed
-    );
+    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Removed);
 }
 
 /// Bus instances: a descriptor's `bus_instance` must exist and its
@@ -750,7 +1017,7 @@ fn bus_instances_validate_query_and_bridge_eject() {
     // Identity surface: type + no bridge + label.
     let (bus, bridge, label) = domain.bus_instance_identity(root).expect("identity");
     assert_eq!(bus, crate::PlatformBus::ID);
-    assert_eq!(bridge, None);
+    assert!(bridge.is_none());
     assert_eq!(label, "test-0");
 
     let foreign = domain
@@ -766,7 +1033,9 @@ fn bus_instances_validate_query_and_bridge_eject() {
         .expect("typed member attaches");
 
     // Membership query.
-    assert_eq!(domain.bus_instance_devices(root), alloc::vec![member]);
+    let members = domain.bus_instance_devices(root);
+    assert_eq!(members.len(), 1);
+    assert!(members[0].same_device(&member));
 
     // Missing instance is rejected.
     let err = domain
@@ -779,18 +1048,24 @@ fn bus_instances_validate_query_and_bridge_eject() {
     // parent links.
     let bridge_dev = domain.add_device(bus_device(root, 3)).expect("add bridge");
     let secondary = domain
-        .add_bus_instance(crate::PlatformBus::ID, Some(bridge_dev), "test-1")
+        .add_bus_instance(crate::PlatformBus::ID, Some(&bridge_dev), "test-1")
         .expect("secondary instance");
     let behind = domain
         .add_device(bus_device(secondary, 4))
         .expect("member behind bridge");
-    assert_eq!(domain.bus_instance_devices(secondary), alloc::vec![behind]);
+    let members = domain.bus_instance_devices(secondary);
+    assert_eq!(members.len(), 1);
+    assert!(members[0].same_device(&behind));
 
-    domain.remove_device(bridge_dev).expect("bridge eject");
+    domain.remove_device(&bridge_dev).expect("bridge eject");
+    let (_, retained_bridge, _) = domain.bus_instance_identity(secondary).unwrap();
+    let retained_bridge = retained_bridge.unwrap();
+    assert!(retained_bridge.same_device(&bridge_dev));
+    assert!(!retained_bridge.is_online());
     // The member never bound — the light path FREES its entry, so the
     // snapshot is gone entirely (equivalently: fully removed).
     assert!(
-        domain.snapshot(behind).is_none(),
+        domain.snapshot(&behind).is_none(),
         "bridge removal must eject the secondary instance's members"
     );
     // The member is gone from the instance's listing.
@@ -799,17 +1074,181 @@ fn bus_instances_validate_query_and_bridge_eject() {
         domain.add_device(bus_device(secondary, 6)),
         Err(AddDeviceError::BusInstanceUnavailable(_))
     ));
-    assert_eq!(domain.bus_instance_devices(root), alloc::vec![member]);
-    assert_eq!(domain.snapshot(member).unwrap().bus, PlatformBus::ID);
+    let members = domain.bus_instance_devices(root);
+    assert_eq!(members.len(), 1);
+    assert!(members[0].same_device(&member));
+    assert_eq!(domain.snapshot(&member).unwrap().bus, PlatformBus::ID);
     let devices = domain.devices();
     assert_eq!(
         devices
             .iter()
-            .find(|device| device.id == member)
+            .find(|device| device.device.same_device(&member))
             .unwrap()
             .bus,
         PlatformBus::ID
     );
+}
+
+#[def_test]
+fn management_requires_the_registered_object_not_just_its_key() {
+    struct IdentityDriver(Arc<AtomicUsize>);
+    impl DriverOps<PlatformBus> for IdentityDriver {
+        type Data = u32;
+
+        fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<u32, ProbeError> {
+            Ok(42)
+        }
+
+        fn remove(&self, _dev: &mut Device<'_, PlatformBus>, _data: &mut u32) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let (domain, _services, root) = fresh_domain();
+    let removes = Arc::new(AtomicUsize::new(0));
+    domain.register_driver(DriverDesc::new(
+        "identity",
+        IDS,
+        IdentityDriver(removes.clone()),
+    ));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    let (other, _other_services, other_root) = fresh_domain();
+    let foreign = other.add_device(test_descriptor(other_root)).unwrap();
+    let impostor = crate::DeviceRef {
+        core: crate::device::DeviceCore::new(device.core.id, device.descriptor().clone()),
+    };
+    let visits = AtomicUsize::new(0);
+    for rejected in [&foreign, &impostor] {
+        assert_eq!(domain.remove_device(rejected), Err(RuntimeError::NotFound));
+        assert!(domain.snapshot(rejected).is_none());
+        assert!(
+            domain
+                .with_data::<u32, ()>(rejected, |_| {
+                    visits.fetch_add(1, Ordering::Relaxed);
+                })
+                .is_none()
+        );
+        assert!(matches!(
+            domain.add_bus_instance(PlatformBus::ID, Some(rejected), "rejected"),
+            Err(AddDeviceError::ParentMissing(_))
+        ));
+    }
+    assert_eq!(visits.load(Ordering::Relaxed), 0);
+    assert_eq!(removes.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        domain.with_data::<u32, u32>(&device, |data| *data),
+        Some(42)
+    );
+    assert!(
+        domain
+            .snapshot(&device)
+            .unwrap()
+            .device
+            .same_device(&device)
+    );
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(other.remove_device(&device), Err(RuntimeError::NotFound));
+    domain.remove_device(&device).unwrap();
+    assert_eq!(removes.load(Ordering::Relaxed), 1);
+    other.remove_device(&foreign).unwrap();
+}
+
+#[def_test]
+fn parent_reference_must_belong_to_the_registering_domain() {
+    let (first, _first_services, first_root) = fresh_domain();
+    let (second, _second_services, second_root) = fresh_domain();
+    let parent = first.add_device(test_descriptor(first_root)).unwrap();
+    let mut descriptor = test_descriptor(second_root);
+    descriptor.parent = Some(parent.clone());
+    assert!(matches!(
+        second.add_device(descriptor),
+        Err(AddDeviceError::ParentMissing(id)) if id == parent.core.id.raw()
+    ));
+    assert!(second.devices().is_empty());
+    assert!(parent.is_online());
+    first.remove_device(&parent).unwrap();
+}
+
+#[def_test]
+fn parent_key_alone_does_not_validate_object_identity() {
+    let (domain, _services, root) = fresh_domain();
+    let parent = domain.add_device(test_descriptor(root)).unwrap();
+    let different_object = crate::DeviceRef {
+        core: crate::device::DeviceCore::new(parent.core.id, test_descriptor(root)),
+    };
+    let mut descriptor = test_descriptor(root);
+    descriptor.parent = Some(different_object);
+    assert!(matches!(
+        domain.add_device(descriptor),
+        Err(AddDeviceError::ParentMissing(id)) if id == parent.core.id.raw()
+    ));
+    assert_eq!(domain.devices().len(), 1);
+    domain.remove_device(&parent).unwrap();
+}
+
+#[def_test]
+fn child_reference_retains_offline_parent_without_a_reference_cycle() {
+    let (domain, _services, root) = fresh_domain();
+    let parent = domain.add_device(test_descriptor(root)).unwrap();
+    let parent_weak = Arc::downgrade(&parent.core);
+    let mut descriptor = test_descriptor_for_node(root, 2);
+    descriptor.parent = Some(parent.clone());
+    let child = domain.add_device(descriptor).unwrap();
+    let child_weak = Arc::downgrade(&child.core);
+    assert!(
+        child
+            .descriptor()
+            .parent
+            .as_ref()
+            .unwrap()
+            .same_device(&parent)
+    );
+    drop(parent);
+
+    domain
+        .remove_device(child.descriptor().parent.as_ref().unwrap())
+        .unwrap();
+    assert!(domain.devices().is_empty());
+    assert!(!child.is_online());
+    let retained_parent = child.descriptor().parent.as_ref().unwrap();
+    assert!(!retained_parent.is_online());
+    assert_eq!(retained_parent.path(), "platform/firmware1");
+    assert_eq!(retained_parent.descriptor().bus_instance, root);
+    drop(domain);
+    assert!(parent_weak.upgrade().is_some());
+    drop(child);
+    assert!(child_weak.upgrade().is_none());
+    assert!(parent_weak.upgrade().is_none());
+}
+
+#[def_test]
+fn removing_child_unlinks_reverse_topology_without_losing_parent_metadata() {
+    let (domain, _services, root) = fresh_domain();
+    let parent = domain.add_device(test_descriptor(root)).unwrap();
+    let mut descriptor = test_descriptor_for_node(root, 2);
+    descriptor.parent = Some(parent.clone());
+    let child = domain.add_device(descriptor).unwrap();
+    domain.remove_device(&child).unwrap();
+    assert!(parent.is_online());
+    assert!(
+        child
+            .descriptor()
+            .parent
+            .as_ref()
+            .unwrap()
+            .same_device(&parent)
+    );
+    let children = domain
+        .inner
+        .lock()
+        .devices
+        .get(&parent.core.id.raw())
+        .unwrap()
+        .topology
+        .children
+        .clone();
+    assert!(children.is_empty());
+    domain.remove_device(&parent).unwrap();
+    assert!(!child.descriptor().parent.as_ref().unwrap().is_online());
 }
 
 /// `add_device` rejects a missing parent outright — the descriptor's
@@ -818,6 +1257,8 @@ fn bus_instances_validate_query_and_bridge_eject() {
 fn add_device_rejects_missing_parent() {
     let (domain, services, root) = fresh_domain();
     domain.set_services(services);
+    let parent = domain.add_device(test_descriptor(root)).unwrap();
+    domain.remove_device(&parent).unwrap();
     let err = domain
         .add_device(
             DeviceDescriptor::builder()
@@ -827,11 +1268,11 @@ fn add_device_rejects_missing_parent() {
                     &["test,serial"],
                 )))
                 .resources(test_resources())
-                .parent(DeviceId(0xdead))
+                .parent(parent.clone())
                 .build(),
         )
         .expect_err("missing parent");
-    assert_eq!(err, AddDeviceError::ParentMissing(0xdead));
+    assert_eq!(err, AddDeviceError::ParentMissing(parent.core.id.raw()));
 }
 
 /// `Device::resolve_irq` resolves a firmware route through the
@@ -889,13 +1330,10 @@ fn resolve_irq_maps_firmware_routes_through_services() {
     assert_eq!(*RESOLVED.lock(), Some(crate::Virq::new(77)));
 }
 
-/// Two instantiated domains never hand out the same device id: the
-/// global allocator keeps owner-keyed global registries (class
-/// publications, devnode) unambiguous. Regression for the per-domain
-/// `0, 1, 2…` counters that made domain A's removal withdraw domain
-/// B's publications.
+/// Independently registered devices have distinct object identities, including
+/// equal bus descriptions in different domains.
 #[def_test(serial)]
-fn device_ids_are_unique_across_domains() {
+fn devices_have_distinct_object_identity_across_domains() {
     let (domain_a, _services_a, root_a) = fresh_domain();
     let (domain_b, _services_b, root_b) = fresh_domain();
 
@@ -914,9 +1352,9 @@ fn device_ids_are_unique_across_domains() {
         .add_device(test_descriptor(root_a))
         .expect("add device");
 
-    assert_ne!(a0.raw(), b0.raw(), "first ids of two domains collide");
-    assert_ne!(a0.raw(), a1.raw());
-    assert_ne!(a1.raw(), b0.raw());
+    assert!(!a0.same_device(&b0));
+    assert!(!a0.same_device(&a1));
+    assert!(!a1.same_device(&b0));
     let _ = domain_a.probe_pending();
     let _ = domain_b.probe_pending();
 }
@@ -970,7 +1408,7 @@ fn wake_during_probe_window_does_not_lose_the_device() {
 
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
     let probes_before = PROBES.load(Ordering::Relaxed);
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
 
@@ -982,9 +1420,12 @@ fn wake_during_probe_window_does_not_lose_the_device() {
     // The device must not be parked in Deferred — the generation guard
     // sees the dependency moved and the pump re-attempts; TestSer's
     // second probe finds the provider and binds.
-    let state = domain.snapshot(id).unwrap().state;
+    let state = domain.snapshot(&device).unwrap().state;
     assert_eq!(state, DeviceState::Active);
-    assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+    assert_eq!(
+        domain.snapshot(&device).unwrap().driver,
+        Some("test-serial")
+    );
     // The guard re-attempted (at least two probe passes for this
     // device) — without it the FIRST pass would have parked the
     // device in Deferred forever.
@@ -1003,14 +1444,20 @@ fn late_provider_wakes_unclaimed_device() {
     let (domain, services, root) = fresh_domain();
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
 
     // Boot end: the stuck device converts to Unclaimed...
     domain.finish_probe_phase(false);
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 
     // ...and the provider arrives only now. The device must wake and
     // bind (previously it stayed Unclaimed until an unrelated
@@ -1019,8 +1466,11 @@ fn late_provider_wakes_unclaimed_device() {
     // Mock services publish without auto-waking (the real runtime's
     // registry wake hook does); drive it explicitly as the runtime would.
     assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
-    assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().driver,
+        Some("test-serial")
+    );
 }
 
 #[def_test(serial)]
@@ -1029,15 +1479,24 @@ fn finish_probe_phase_unsticks_deferred_with_diagnostics() {
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
     // Provider 0x42 never publishes: the device stays deferred.
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
     assert_eq!(domain.deferred_report().len(), 1);
+    let deferred = domain.deferred_report();
+    assert!(deferred[0].0.same_device(&device));
+    assert_eq!(deferred[0].1, DepSource::clk(0x42));
 
     // Boot end: the stuck device converts to Unclaimed, not parked forever.
     domain.finish_probe_phase(false);
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
     assert!(domain.deferred_report().is_empty());
 
     // And the provider arriving late still claims it (resweep path).
@@ -1056,7 +1515,7 @@ fn removing_unbound_device_frees_entry_and_worklists() {
     desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
     let unclaimed = domain.add_device(desc).expect("add device");
     assert_eq!(
-        domain.snapshot(unclaimed).unwrap().state,
+        domain.snapshot(&unclaimed).unwrap().state,
         DeviceState::Unclaimed
     );
 
@@ -1066,16 +1525,16 @@ fn removing_unbound_device_frees_entry_and_worklists() {
         .add_device(test_descriptor(root))
         .expect("add device");
     assert_eq!(
-        domain.snapshot(deferred).unwrap().state,
+        domain.snapshot(&deferred).unwrap().state,
         DeviceState::Deferred
     );
 
     // Light-path removal: entries freed, worklists drained, not kept
     // as tombstones — the table does not grow under hotplug churn.
-    domain.remove_device(unclaimed).unwrap();
-    domain.remove_device(deferred).unwrap();
-    assert!(domain.snapshot(unclaimed).is_none());
-    assert!(domain.snapshot(deferred).is_none());
+    domain.remove_device(&unclaimed).unwrap();
+    domain.remove_device(&deferred).unwrap();
+    assert!(domain.snapshot(&unclaimed).is_none());
+    assert!(domain.snapshot(&deferred).is_none());
     assert_eq!(domain.devices().len(), 0);
     assert!(domain.deferred_report().is_empty());
 
@@ -1085,7 +1544,7 @@ fn removing_unbound_device_frees_entry_and_worklists() {
         .add_device(test_descriptor(root))
         .expect("add device");
     assert_eq!(
-        domain.snapshot(readded).unwrap().state,
+        domain.snapshot(&readded).unwrap().state,
         DeviceState::Deferred
     );
 }
@@ -1095,13 +1554,13 @@ fn removing_twice_rejects_with_bad_state() {
     let (domain, services, root) = fresh_domain();
     services.publish_clk(0x42);
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
 
-    domain.remove_device(id).unwrap();
+    domain.remove_device(&device).unwrap();
     assert!(matches!(
-        domain.remove_device(id),
+        domain.remove_device(&device),
         Err(crate::RuntimeError::BadState)
     ));
 }
@@ -1113,10 +1572,10 @@ fn fatal_failure_falls_through_to_next_candidate() {
     domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver));
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-    let id = domain
+    let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    let snapshot = domain.snapshot(id).unwrap();
+    let snapshot = domain.snapshot(&device).unwrap();
     assert_eq!(snapshot.state, DeviceState::Active);
     assert_eq!(snapshot.driver, Some("test-serial"));
 }
@@ -1126,8 +1585,11 @@ fn unmatched_descriptor_is_unclaimed() {
     let (domain, _services, root) = fresh_domain();
     let mut desc = test_descriptor(root);
     desc.bus_data = alloc::boxed::Box::new(PlatformBusData::firmware_node(1, &["nobody,matches"]));
-    let id = domain.add_device(desc).expect("add device");
-    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    let device = domain.add_device(desc).expect("add device");
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Unclaimed
+    );
 }
 
 #[def_test]
@@ -1161,20 +1623,16 @@ fn probe_reads_firmware_property_snapshot() {
         .build();
     let _ = domain;
 
+    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let ctx = Device::<PlatformBus>::new(
-        &desc,
-        desc.bus_data
+        &core,
+        core.desc
+            .bus_data
             .as_any()
             .downcast_ref::<PlatformBusData>()
             .unwrap(),
-        crate::DeviceId(1),
         None,
         &*services,
-        crate::device::DeviceCore::synthetic(
-            crate::DeviceId(1),
-            "test-driver",
-            alloc::string::String::from("platform/test"),
-        ),
     );
     assert_eq!(ctx.fw().u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw().string("vendor,label"), Some("rev-b"));
@@ -1203,22 +1661,16 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
     assert!(desc.dma.is_none());
     let desc = desc.clone();
     assert!(desc.dma.is_none());
-    let bus_data = desc
-        .bus_data
-        .as_any()
-        .downcast_ref::<PlatformBusData>()
-        .unwrap();
+    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let device = Device::<PlatformBus>::new(
-        &desc,
-        bus_data,
-        DeviceId(1),
+        &core,
+        core.desc
+            .bus_data
+            .as_any()
+            .downcast_ref::<PlatformBusData>()
+            .unwrap(),
         None,
         &*services,
-        crate::device::DeviceCore::synthetic(
-            DeviceId(1),
-            "test-driver",
-            alloc::string::String::from("platform/test"),
-        ),
     );
     assert!(matches!(
         device.res().alloc_coherent(0x1000, 0x1000),
@@ -1251,22 +1703,16 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     let cloned = desc.clone();
     assert_eq!(cloned.dma, desc.dma);
 
-    let data = desc
-        .bus_data
-        .as_any()
-        .downcast_ref::<PlatformBusData>()
-        .unwrap();
+    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let ctx = Device::<PlatformBus>::new(
-        &desc,
-        data,
-        crate::DeviceId(1),
+        &core,
+        core.desc
+            .bus_data
+            .as_any()
+            .downcast_ref::<PlatformBusData>()
+            .unwrap(),
         None,
         &*services,
-        crate::device::DeviceCore::synthetic(
-            crate::DeviceId(1),
-            "test-driver",
-            alloc::string::String::from("platform/test"),
-        ),
     );
     let mem = ctx.res().alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
@@ -1279,22 +1725,16 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         offset: 0,
         coherent: true,
     });
-    let data = desc
-        .bus_data
-        .as_any()
-        .downcast_ref::<PlatformBusData>()
-        .unwrap();
+    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
     let ctx = Device::<PlatformBus>::new(
-        &desc,
-        data,
-        crate::DeviceId(2),
+        &core,
+        core.desc
+            .bus_data
+            .as_any()
+            .downcast_ref::<PlatformBusData>()
+            .unwrap(),
         None,
         &*services,
-        crate::device::DeviceCore::synthetic(
-            crate::DeviceId(1),
-            "test-driver",
-            alloc::string::String::from("platform/test"),
-        ),
     );
     assert!(matches!(
         ctx.res().alloc_coherent(0x1000, 0x1000),
@@ -1349,7 +1789,7 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
 
     struct Member {
         domain: &'static DeviceDomain,
-        controller: DeviceId,
+        controller: crate::DeviceRef,
         instance: crate::BusInstanceId,
     }
 
@@ -1368,13 +1808,13 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
 
         fn probe(&self, _dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
             assert!(matches!(
-                self.domain.remove_device(self.controller),
+                self.domain.remove_device(&self.controller),
                 Err(RuntimeError::Busy)
             ));
             self.assert_closed();
             assert!(matches!(
                 self.domain
-                    .add_bus_instance(PlatformBus::ID, Some(self.controller), "late"),
+                    .add_bus_instance(PlatformBus::ID, Some(&self.controller), "late"),
                 Err(AddDeviceError::ParentUnavailable { .. })
             ));
             Ok(())
@@ -1403,14 +1843,14 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
         )
         .unwrap();
     let instance = domain
-        .add_bus_instance(PlatformBus::ID, Some(controller), "downstream")
+        .add_bus_instance(PlatformBus::ID, Some(&controller), "downstream")
         .unwrap();
     domain.register_driver(DriverDesc::new(
         "member",
         MEMBER_IDS,
         Member {
             domain,
-            controller,
+            controller: controller.clone(),
             instance,
         },
     ));
@@ -1426,21 +1866,24 @@ fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
         )
         .unwrap();
     assert_eq!(
-        domain.snapshot(controller).unwrap().state,
+        domain.snapshot(&controller).unwrap().state,
         DeviceState::Removing
     );
-    assert_eq!(domain.snapshot(member).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&member).unwrap().state, DeviceState::Active);
     let unrelated = domain.add_device(test_descriptor(root)).unwrap();
 
-    domain.remove_device(controller).unwrap();
+    domain.remove_device(&controller).unwrap();
     assert_eq!(
-        domain.snapshot(controller).unwrap().state,
+        domain.snapshot(&controller).unwrap().state,
         DeviceState::Removed
     );
-    assert_eq!(domain.snapshot(member).unwrap().state, DeviceState::Removed);
-    assert_eq!(domain.snapshot(member).unwrap().bus, PlatformBus::ID);
     assert_eq!(
-        domain.snapshot(unrelated).unwrap().state,
+        domain.snapshot(&member).unwrap().state,
+        DeviceState::Removed
+    );
+    assert_eq!(domain.snapshot(&member).unwrap().bus, PlatformBus::ID);
+    assert_eq!(
+        domain.snapshot(&unrelated).unwrap().state,
         DeviceState::Unclaimed
     );
     assert!(matches!(
@@ -1479,7 +1922,7 @@ fn provider_registration_wakes_exactly_its_consumer() {
         .add_device(test_descriptor(root))
         .expect("add consumer");
     assert_eq!(
-        domain.snapshot(consumer).unwrap().state,
+        domain.snapshot(&consumer).unwrap().state,
         DeviceState::Deferred
     );
     assert_eq!(PROBES.load(Ordering::Relaxed), 1);
@@ -1491,17 +1934,17 @@ fn provider_registration_wakes_exactly_its_consumer() {
         .add_device(ccu_descriptor(root))
         .expect("add provider");
     assert_eq!(
-        domain.snapshot(provider).unwrap().state,
+        domain.snapshot(&provider).unwrap().state,
         DeviceState::Active
     );
     assert_eq!(services.provider_keys(), alloc::vec![(DepKind::Clk, 0x42)]);
     assert_eq!(
-        domain.snapshot(consumer).unwrap().state,
+        domain.snapshot(&consumer).unwrap().state,
         DeviceState::Active
     );
     assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 
-    let rate = domain.with_data::<SerData, u64>(consumer, |data| data.clk.get_rate());
+    let rate = domain.with_data::<SerData, u64>(&consumer, |data| data.clk.get_rate());
     assert_eq!(rate, Some(24_000_000));
 }
 
@@ -1523,21 +1966,21 @@ fn one_driver_binds_many_devices() {
         .add_device(test_descriptor_for_node(root, 3))
         .expect("add second");
 
-    for id in [first, second] {
-        let snapshot = domain.snapshot(id).unwrap();
+    for device in [&first, &second] {
+        let snapshot = domain.snapshot(device).unwrap();
         assert_eq!(snapshot.state, DeviceState::Active);
         assert_eq!(snapshot.driver, Some("test-serial"));
         assert_eq!(
-            domain.with_data::<SerData, u64>(id, |data| data.clk.get_rate()),
+            domain.with_data::<SerData, u64>(device, |data| data.clk.get_rate()),
             Some(24_000_000)
         );
     }
     assert_eq!(PROBES.load(Ordering::Relaxed) - probes_before, 2);
 
     // Tearing one device down leaves the other binding intact.
-    domain.remove_device(first).expect("remove first");
-    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Removed);
-    assert_eq!(domain.snapshot(second).unwrap().state, DeviceState::Active);
+    domain.remove_device(&first).expect("remove first");
+    assert_eq!(domain.snapshot(&first).unwrap().state, DeviceState::Removed);
+    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Active);
 }
 
 /// One provider key wakes every consumer parked on it (provider 1:N
@@ -1564,9 +2007,12 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
     let second = domain
         .add_device(test_descriptor_for_node(root, 3))
         .expect("add second");
-    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Deferred);
     assert_eq!(
-        domain.snapshot(second).unwrap().state,
+        domain.snapshot(&first).unwrap().state,
+        DeviceState::Deferred
+    );
+    assert_eq!(
+        domain.snapshot(&second).unwrap().state,
         DeviceState::Deferred
     );
     assert_eq!(services.provider_keys(), alloc::vec![]);
@@ -1575,11 +2021,11 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
         .add_device(ccu_descriptor(root))
         .expect("add provider");
     assert_eq!(
-        domain.snapshot(provider).unwrap().state,
+        domain.snapshot(&provider).unwrap().state,
         DeviceState::Active
     );
-    assert_eq!(domain.snapshot(first).unwrap().state, DeviceState::Active);
-    assert_eq!(domain.snapshot(second).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&first).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Active);
     // Two deferred first attempts plus one re-probe per woken consumer.
     assert_eq!(PROBES.load(Ordering::Relaxed), 4);
 }
@@ -1587,12 +2033,12 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
 mod publication_contract {
     //! Device-model integration with the independent class publication contract.
 
-    use alloc::{string::String, sync::Arc};
+    use alloc::sync::Arc;
 
     use driver_class::Class;
     use unittest::{assert_eq, def_test};
 
-    use crate::{DeviceId, device::DeviceCore};
+    use crate::{device::DeviceCore, domain::DeviceId};
 
     #[def_test(serial)]
     fn device_removal_closes_source_before_driver_quiesce() {
@@ -1630,7 +2076,9 @@ mod publication_contract {
         let device = domain.add_device(super::test_descriptor(root)).unwrap();
         let consumer = CLASS.devices().pop().unwrap();
         let permit = consumer.acquire_use().unwrap();
-        domain.remove_device(device).unwrap();
+        domain.remove_device(&device).unwrap();
+        assert!(!device.is_online());
+        assert_eq!(consumer.location(), device.path());
         assert!(CLOSED_AT_REMOVE.load(Ordering::SeqCst));
         assert!(!consumer.is_available());
         assert!(CLASS.devices().is_empty());
@@ -1638,12 +2086,11 @@ mod publication_contract {
     }
 
     impl DeviceCore {
-        pub(crate) fn synthetic(
-            device_id: DeviceId,
-            driver_name: &'static str,
-            path: String,
-        ) -> Arc<Self> {
-            let owner = Self::new(device_id, path);
+        pub(crate) fn synthetic(device_id: DeviceId, driver_name: &'static str) -> Arc<Self> {
+            let owner = Self::new(
+                device_id,
+                super::test_descriptor(crate::BusInstanceId::from_raw(0)),
+            );
             owner.bind_driver(driver_name);
             owner
         }
@@ -1653,7 +2100,10 @@ mod publication_contract {
     fn class_uses_live_model_identity_for_independent_publications() {
         static CLASS: Class<u32> = Class::new(());
 
-        let owner = DeviceCore::new(DeviceId(1), String::from("platform/model-test"));
+        let owner = DeviceCore::new(
+            DeviceId(1),
+            super::test_descriptor(crate::BusInstanceId::from_raw(0)),
+        );
         assert_eq!(
             CLASS.publish(owner.clone(), 1).unwrap_err(),
             kerrno::KError::BadState
@@ -1665,7 +2115,7 @@ mod publication_contract {
             Some("model-test-driver")
         );
         let consumer = publication.publication();
-        assert_eq!(consumer.location(), "platform/model-test");
+        assert_eq!(consumer.location(), owner.physical_path());
         let second = CLASS.publish(owner.clone(), 2).unwrap();
         assert!(!consumer.same_publication(&second.publication()));
         assert_eq!(CLASS.devices().len(), 2);
@@ -1682,8 +2132,7 @@ mod publication_contract {
         static FIRST: Class<u32> = Class::new(());
         static SECOND: Class<u32> = Class::new(());
 
-        let owner =
-            DeviceCore::synthetic(DeviceId(2), "model-test", String::from("platform/shared"));
+        let owner = DeviceCore::synthetic(DeviceId(2), "model-test");
         let first = FIRST.publish(owner.clone(), 11).unwrap();
         let second = SECOND.publish(owner.clone(), 22).unwrap();
         let in_flight = first.publication().acquire_use().unwrap();

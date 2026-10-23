@@ -14,8 +14,8 @@
 use alloc::boxed::Box;
 
 use crate::{
+    DeviceRef,
     bus::{BusDeviceData, BusInstanceId},
-    domain::DeviceId,
     firmware::FirmwareNodeInfo,
     resource::{DmaInfo, ResourceMap},
 };
@@ -41,12 +41,13 @@ pub struct DeviceDescriptor {
     /// bus's vocabulary, opaque to the core. The firmware property
     /// snapshot is the descriptor's own `fw` field, not bus vocabulary.
     pub bus_data: Box<dyn BusDeviceData>,
-    /// The parent device (the topology link). The domain validates the
-    /// parent exists at `add_device` time and cascades removals through
-    /// children first — a parent never disappears while a child
-    /// references it. `None` (the default) marks root devices.
+    /// The parent object, retained for topology inspection even after removal.
+    /// Registration requires this exact object to belong to the same domain
+    /// and still accept children. Removal cascades children-first; retaining
+    /// the parent preserves metadata, not its binding or hardware resources.
+    /// `None` (the default) marks root devices.
     #[builder(default, setter(strip_option(fallback = parent_opt)))]
-    pub parent: Option<DeviceId>,
+    pub parent: Option<DeviceRef>,
     #[builder(default)]
     pub resources: ResourceMap,
     /// The firmware node snapshot (`of_property_read_*` surface). True of the
@@ -67,7 +68,7 @@ impl Clone for DeviceDescriptor {
         Self {
             bus_instance: self.bus_instance,
             bus_data: alloc::boxed::Box::from(self.bus_data.as_ref()).clone_erased(),
-            parent: self.parent,
+            parent: self.parent.clone(),
             resources: self.resources.clone(),
             fw: self.fw.clone(),
             dma: self.dma,

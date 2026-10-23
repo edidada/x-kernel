@@ -29,8 +29,8 @@
 通过 builder 的 `dma(info)` 或 `dma_opt(option)` 显式配置；不因缺少固件属性
 而自动采用 `DmaInfo::DEFAULT`。
 `Resources::alloc_coherent` 在未配置时返回 `Fatal(Unsupported)`，不调用宿主；
-已配置时把 `DmaInfo` 原样传给宿主，保留地址转换、mask 校验和错误传播语义。
-MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 与宿主服务签名不变。
+已配置时宿主通过借用的设备上下文读取原始 `DmaInfo`，保留地址转换、mask 校验和错误传播语义。
+MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 不变；model 的宿主服务接收 `DeviceContext`，不再单独传 DMA 副本。
 
 ## 描述符构造接口
 
@@ -62,7 +62,7 @@ deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceSer
 OS 能力契约、句柄和纯资源描述现位于 `drivers/base/os-api`。
 model 通过 driver-os-api 使用 irq-types 的基础 IRQ 词汇，不依赖 kirq 或旧 device_res。
 新旧资源模型暂时并存，本轮不迁移旧调用方。生产宿主服务仍待通过契约接入。
-model 拥有带 DeviceId 的设备服务、deferred probe、ResourceMap 以及错误转换。
+model 拥有带借用设备上下文的设备服务、deferred probe、ResourceMap 以及错误转换。
 宿主适配方实现 OS Op；普通 IRQ 回调通过 IrqHandlerFn / IrqAction 交接，不暴露内核 handler。
 边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
@@ -110,7 +110,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/desc.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
-| `src/device.rs` | 驱动设备视图：`DeviceCore`（驱动名/物理路径/offline，由 domain 创建并以 Arc 共享给类发布）、`Device`（probe/remove 期间借用描述符和服务的类型化视图） |
+| `src/device.rs` | `DeviceCore` 持有注册描述符与共享身份；`DeviceRef` 保留只读身份；`Device` 是 probe/remove 期间借用描述符和服务的类型化视图 |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
 | `../os-api/src/{mmio,irq,dma,clock}.rs` | 已抽出的 OS 能力描述、Op 与句柄，按能力与生命周期聚合；不属于 model 实现 |
 | `src/error.rs` | `ProbeError`（Deferred/Fatal）、`DepSource`/`DepKind`、`RuntimeError`、`ServiceError` |
@@ -146,7 +146,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
     DomainInner { bus_instances, drivers, devices, sched, services,
                   next_device_id, services_installed }
 
-    DeviceEntry { desc          ← 身份（不可变）
+    DeviceEntry { core          ← Arc<DeviceCore>：不可变描述符 + 共享身份
                   lifecycle     ← 状态机 + generation + remove_retryable
                   binding       ← driver / Data / attempted
                   topology      ← children
@@ -157,11 +157,83 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 
 `DeviceDomain` **可实例化**：crate 内没有进程级注册表，`global_domain()` 只是
 组合根用的那一个 LazyInit 实例，测试各自 `DeviceDomain::new()`。设备 id 从
-crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时设备服务关联键不冲突。
+crate 级 `DEVICE_ID_ALLOCATOR` 取，继续作为内部索引与日志关联键。
 `DeviceId` 定义在 `domain/mod.rs`，是注册表、拓扑及调度使用的运行时管理键，
-不是硬件编号或持有设备的引用。描述符和设备服务的公开契约暂时仍使用它，
-因此保留 crate 根部 `driver_model::DeviceId` 导出；这不意味着必须长期公开全局 ID。
-本轮仅整理归属，不改变分配、查找和移除行为，也不引入对象引用方案。
+不是硬件编号或持有设备的引用，已取消 crate 根部导出和公开 id 访问器。
+`add_device` 返回 `DeviceRef`；remove、snapshot、with_data 接收借用对象引用。
+这些入口在域锁内同时核对内部键与 Arc 对象身份，外域或旧对象不能借相同数字键
+访问当前条目。数字只用于内部索引、调度及错误/日志诊断，没有公开按数字查找入口。
+
+`DeviceSnapshot::device`、总线成员列表及 deferred_report 携带对象引用；
+快照的状态和驱动名是获取时刻的值，不是并发操作许可。无绑定条目移除后仍返回
+NotFound/None，绑定过的 Removed 条目仍可快照查询，重复移除返回 BadState。
+同一路径重新注册产生新对象，旧引用只保留旧元数据，不会匹配新注册。
+
+`add_bus_instance` 的控制器参数为 `Option<&DeviceRef>`，同样在锁内验证身份和
+可挂载状态。实例记录强持有控制器身份，以便未绑定控制器删除后仍返回原控制器
+的离线元数据；它不持有绑定 Data，也没有设备核心到域/实例对象的反向强引用。
+总线实例自身仍由 BusInstanceId 标识，本轮不把总线实例也改造成引用对象。
+
+## 设备引用与注销
+
+`DeviceCore` 是已注册描述符的唯一持有者，同时保存管理键、物理路径、
+最近开始 probe 的驱动名和 offline 状态。域条目、`DeviceRef` 与 class 发布
+共享同一个核心。probe 批次及 remove 只克隆 Arc，不再克隆描述符；
+`Device<'a, B>` 仍是回调期间借用核心中描述符和服务的类型化视图。
+`Device::reference()` 可保留对象身份，不延长回调服务借用。
+
+`DeviceRef` 只提供不可变描述、路径、驱动名、online 快照和对象同一性比较，
+不暴露核心 Deref、不允许外部构造，不提供硬件操作或资源申请入口。
+`same_device` 按 Arc 对象身份判断；相同总线位置再次注册也是另一个对象。
+online 不表示已绑定，也不是并发操作许可；Probing 期间仍允许发布 class。
+
+注销继续执行 children-first 级联，在实际 teardown 前关闭来源，随后锁外调用
+remove、销毁绑定 Data。未绑定路径同样关闭来源并从域表删除，条目的最终析构
+移到域锁外。外部引用不会推迟 remove、Data 的资源释放或 class 注册撤销，
+最后一个引用的 Drop 也不会再次触发注销。级联 Busy 时保留原有重试语义，
+不提前撤掉父设备仍被子设备使用的来源。
+
+移除后，绑定过的条目仍保留 Removed 快照，未绑定条目仍直接删除；
+两种情况下外部引用均可继续读取静态信息。只有域与所有外部持有者都释放核心后，
+静态元数据才销毁。总线数据必须是无硬件所有权的描述，其 Drop 不得依赖可睡眠
+上下文，因此这里使用普通 Arc，不引入 DeferredArc。驱动资源仍由绑定 Data 或
+class 在途 runtime 持有，不能藏进描述符。销毁整个域不能替代显式注销协议。
+
+## 父设备对象引用
+
+`DeviceDescriptor::parent` 是 `Option<DeviceRef>`，由枚举者传入父设备注册所得
+引用的 clone。子设备可通过描述符直接读取父设备，无需用 DeviceId 再查注册表。
+描述符克隆保留同一个父对象，不复制父设备身份。
+
+注册在同一域锁内完成查找、Arc 身份核对、状态校验及反向 children 更新。
+外域对象、已从表中删除的对象或同键不同对象返回 `ParentMissing`；
+域内 Removing/Removed 条目返回 `ParentUnavailable`。仅持有引用或观察到
+online 不能证明可以挂载子设备。Probing 父设备仍可枚举孩子，保持原有行为。
+
+引用方向是子设备强持有父设备，反向 children 仅保存域内部管理键，父设备不持有
+孩子的强引用。注册后描述符不可变、只能引用已注册父对象，不提供 reparent，
+因此正常构造不能形成拓扑强引用环。移除仍按 children-first，并合并控制器
+所提供总线实例的成员；移除孩子从父条目的反向列表摘除，但不清空静态父引用。
+孩子的外部引用可保留父设备离线元数据，不延迟父设备的 remove 或绑定资源释放。
+总线实例成员级联规则不变；控制器关联同样使用设备对象引用。
+
+## 设备服务上下文
+
+MMIO、IRQ 注册、IRQ 映射、DMA 和时钟获取统一接收 `DeviceContext<'_>`，
+不再接收裸 DeviceId。上下文定义在服务契约旁，由 `Device::res()` 的资源视图
+在同步调用时构造，借用当前回调的 DeviceRef；没有公开构造器，也不能从长期
+DeviceRef 转换而来。宿主通过 `context.device()` 直接读取同一设备的描述符、
+父设备和来源信息，无需额外查表。宿主需要保留身份时可 clone DeviceRef，
+但资源守卫的释放闭包必须拥有释放所需状态，不能借用短期上下文。
+
+资源视图也直接读取共享描述符，移除单独保存的资源表、DMA 副本和管理键。
+DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取得 DMA 配置，
+防御性拒绝缺失配置，继续执行地址转换、mask 校验和错误传播。
+失败 probe 的局部守卫仍按 RAII 回滚，成功绑定的守卫仍由 Data 持有并在注销时释放。
+
+上下文只表达请求归属与借用范围，不是并发准入令牌；offline 快照不能替代
+同步、IRQ 屏蔽、quiesce 或 class 在途计数。本步不新增运行期资源操作接口，
+不改变 provider/extension 契约，不新增生产 V2 host adapter，也不迁移旧 device-res。
 
 ## 调用约束 / 执行上下文
 
@@ -284,8 +356,9 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，因此多个域同时存活时设备服务
    然后锁外跑 teardown：`DriverOps::remove()`（quiesce）→ drop
    `Data`（类发布在其中撤销，guards 按字段序释放；没有观察者/通知旁路）。
 
-未绑定过的设备（Pending/Deferred/Probing 之外/Unclaimed）走轻路径：从
-pending/deferred 工作表摘掉、直接释放 entry。
+未绑定过的设备（Pending/Deferred/Unclaimed）走轻路径：关闭来源，从
+pending/deferred 工作表摘掉、锁外释放 entry；外部引用可继续保留离线核心。
+Probing 状态返回 Busy，不在回调执行期间移除。
 
 ## 并发模型
 
@@ -295,10 +368,8 @@ pending/deferred 工作表摘掉、直接释放 entry。
 - 驱动代码全部在锁外，所以锁内没有 MMIO、没有分配、没有回调。
 - `probing: SpinNoPreempt<bool>` 是独立的泵级标志，不与域锁嵌套获取。
 - `DEVICE_ID_ALLOCATOR` 是 crate 级 `AtomicU64`，`fetch_add`，跨域唯一。
-- 已知代价（记录在 `docs/driver-framework-review.md` §8.3 类别 B）：
-  `select_batch` 对每个待探测设备深拷贝 `DeviceDescriptor`（含
-  `Vec<String>` compatibles），`modalias` 每次重算。probe 是每设备一次性路径，
-  不是热路径；优化需要改 `matches()` 的返回形状，等有真实吞吐需求再做。
+- `select_batch` 只克隆共享核心的 Arc，不再深拷贝描述符和 compatibles。
+  attempted 集合仍按批次复制，`modalias` 每次 probe 重算；本次不改变匹配策略。
 - class 注册表（`driver-class` 的私有 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
   但同样是已知的、被接受的小集合线性扫描。
 
@@ -373,8 +444,8 @@ threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是�
 的永久失败历史）以它为键。身份安全性因此不依赖"驱动永生"假设：地址只能作
 生命周期限定的对象借用，一旦允许注销，地址复用（ABA）会把一次失败注册静默
 别名到它的继任者身上；键不复用使历史里的死键无害。键是域内的——`attempted`
-和注册表都是域内部簿记；`DeviceId` 当前还用于设备服务契约，使用 crate 级分配器
-保持跨域键不冲突。class 发布已不依赖该数字键管理发布身份。
+和注册表都是域内部簿记；`DeviceId` 也已封装为内部键。设备管理接口核对对象
+身份，class 发布不依赖数字键管理发布身份。
 
 驱动注册按（总线类型， 名字）去重并拒绝（Linux `driver_register` 对同一情形
 返回 `-EBUSY`）：同一 probe 体出现两个键，一次 Fatal 失败会留下仍匹配的孪生

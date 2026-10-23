@@ -1,6 +1,45 @@
 # driver-model — 安全与可靠性分析
 
+## 设备引用生命周期边界
+
+公开管理入口只接受设备引用，不再暴露 DeviceId 类型、数字查找或 id 访问器。
+内部键定位后还必须核对 Arc 身份；remove 的身份校验与 Removing 声明共用域锁，
+查询与 with_data 的校验和读取也在同一持锁区间完成。外域及同键不同对象返回
+NotFound/None，且不调用驱动 remove 或数据访问 visitor。
+快照与 deferred 报告携带对象引用，只保留身份，不维持硬件可用性。
+总线实例保留原控制器身份用于诊断，离线控制器即使仍被引用也不能新增实例成员。
+
+`DeviceRef` 保留身份和静态描述，不保留绑定 Data 或硬件操作权限。
+注销使共享核心 offline；已绑定设备在锁外执行 remove 和 Data drop，
+未绑定设备也关闭来源并删除域条目。外部引用不能阻止这些动作，
+online 仅为快照，不能用作同步或在途操作许可。
+已移除对象不会因同一路径的新设备注册而复活；对象同一性使用 Arc 指针比较。
+描述符随最后一个核心引用释放，总线数据必须无硬件所有权且允许非睡眠析构。
+销毁域前仍须显式完成注销，不把域析构当作驱动 quiesce 协议。
+
+回归覆盖：`retained_reference_does_not_retain_binding_resources` 验证引用保留期间
+remove/Data drop 各执行一次、描述符共享且移除后可读；
+`unbound_removal_retires_identity_without_invalidating_metadata` 验证轻路径 offline、
+引用 Drop 不注销、重复移除拒绝和同位置重新注册的身份隔离；
+`device_removal_closes_source_before_driver_quiesce` 验证 DeviceRef 与 class 来源一致。
+
+## 设备服务上下文
+
+设备资源服务通过 `DeviceContext<'_>` 借用当前回调的身份，不接受裸数字键。
+上下文只能由模型资源视图构造，不作为在线许可或同步屏障。资源释放闭包不得
+捕获短期上下文；clone 身份只延长静态元数据寿命，不延长绑定资源。
+UT 验证五类请求指向同一核心、正常注销的四类守卫各释放一次、DMA 失败与时钟
+Deferred 时部分获取的资源立即回滚。未配置 DMA 的原有测试继续验证宿主未被调用。
+
 ## 总线归属校验
+
+父设备关系使用 `DeviceRef`，但引用存活不授予注册孩子的权限。域在锁内核对
+父条目与引用指向同一核心，并拒绝跨域、已删除、Removing/Removed 父对象；
+校验与反向 children 更新不可分割，避免级联移除快照遗漏新孩子。
+子设备仅强持有父设备，反向列表没有强引用；不支持修改已注册 parent。
+保留离线孩子仅保留父设备元数据，不保留硬件资源。
+回归覆盖跨域父引用、同键不同对象、Removing/Removed 拒绝、孩子摘链，
+以及级联移除后父元数据可读、最终弱引用失效（无拓扑引用环）。
 
 设备仅持有必填的总线实例标识。注册时在域锁内验证实例属于当前 domain，
 并检查设备数据词汇的类型与实例类型一致；外域或不存在的实例不能注册设备。
@@ -127,7 +166,7 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
 | T-07 | provider 在"驱动检查依赖"与"域记录 Deferred"之间注册，唤醒丢失，设备永久 parked | 中 | 启动期时钟 provider 与消费者并发探测 | **已实现**：`dep_generations` 对每个 `DepSource` 计数，**即使无设备 parked 也自增**；提交 Deferred 时发现 generation 前进就重新入队。测试注入 `mid_check_hook` 精确复现该窗口 |
 | T-08 | 依赖永不发布，设备静默停在 Deferred，故障不可见 | 中 | 固件引用了一个不存在的 clock phandle | **已实现**：`finish_probe_phase(false)` + `deferred_report()` 在探测阶段结束时把卡住的设备 `log::warn` 出来并降级为 `Unclaimed`。实测启动日志可见 `device 70 gave up waiting on dependency clk:66 (provider never registered)` |
 | T-09 | 后注册的驱动抢走一个已被别的驱动认领的设备 | 中 | 驱动注册顺序变化 | **已实现**：`select_batch` 跳过 `Active`/`Removing`/`Removed`；`attempted` 集合防止同一个失败驱动被反复选中。测试 `late_driver_registration_claims_unclaimed_device`、`late_driver_registration_skips_unmatched_unmatched` |
-| T-10 | 两个 `DeviceDomain` 的设备管理键冲突，设备服务无法正确区分请求归属 | 中 | 多域共享按设备键记录的服务实现 | **已实现**：DeviceId 归属 domain，从 crate 级 `DEVICE_ID_ALLOCATOR` 分配。测试 `device_ids_are_unique_across_domains`；数字键不保证对象存活或提供访问授权，class 发布不依赖它管理身份 |
+| T-10 | 外域或同键不同对象被误认为本域设备 | 中 | 管理调用、控制器挂载 | **已实现**：内部键不导出；remove/snapshot/with_data/控制器挂载在域锁内核对 Arc 身份。测试 `management_requires_the_registered_object_not_just_its_key` 和 `devices_have_distinct_object_identity_across_domains`；旧引用不会影响同位置新注册 |
 | T-12 | `DeviceDescriptor` 的 `compatibles: Vec<String>` 来自固件，超长或超多导致枚举期分配放大 | 低 | 恶意/畸形 DT | **部分实现**：`driver-init` 侧的 `FirmwareNode{id}` 分配器有 u32 耗尽拒绝；本 crate 不限制字符串长度或 compatible 条数。**残余风险**：启动期内存放大，不影响运行期。加固建议：在 `firmware/of` 解析处限长 |
 
 ## 故障模式与影响分析（FMEA）
@@ -181,15 +220,15 @@ remove 的 `Busy` 拒绝由 `remove_retryable` 的独占声明在锁内保证 |
    **没有** `suspend`/`resume` 预留位。
 4. **无热插拔再枚举入口**。`add_device` 是增量的，但没有旧模型
    `DeviceManager::rescan()` 的等价物；bus instance 级别的 rescan 也未实现。
-5. **`DeviceSnapshot::kind` 恒为 `None`**（`domain/mod.rs` 的 `snapshot_of`
-   里注释"until a class view exists"）。后果是 `/proc/devices` 丢失了按设备类
-   分组与状态列——相对旧模型是观测面回退。
+5. **设备快照不提供 class 分类**。`DeviceSnapshot` 返回设备引用、总线类型、
+   生命周期状态、绑定驱动名和总线身份描述；按 class 分类的观测面由具体子系统提供。
 6. **provider 家族仍是闭集**。`ProviderServices` 的 host 实现只认 `DepKind::Clk`
    对应的 `ClkProvider`；新增 gpio/regulator 要在 `driver-host` 增加匹配分支与其
    `ProviderClass` 描述符，但**不需要**新注册路径、新 wake 机制或驱动侧新 API。
    未知家族返回 `RuntimeError::Unsupported`（响亮失败，不静默丢弃）。
-7. **`select_batch` 每轮深拷贝 `DeviceDescriptor`**（现在连 `fw` 快照一起），`modalias` 每次重算。
-   probe 非热路径，已记录为可接受代价（`docs/driver-framework-review.md` §8.3 类别 B）。
+7. **probe 批次仍有集合复制和字符串生成成本**。`select_batch` 只克隆共享核心的
+   Arc，不再复制描述符或 `fw`；attempted 集合仍按批次复制，`modalias` 每次 probe 重算。
+   probe 非热路径，本轮不改变匹配策略。
 8. **`PlatformBus` 的参考实现住在本 crate**（`src/bus/platform_bus.rs`）。
    它应该在独立的 `bus-platform` crate 里；只要枚举只由组合根做，暂时留在这里。
 

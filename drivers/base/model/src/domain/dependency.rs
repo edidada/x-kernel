@@ -132,8 +132,8 @@ impl DeviceDomain {
             .filter(|candidate| !entry.binding.attempted.contains(&candidate.key()))
             .any(|candidate| {
                 candidate.matches(
-                    bus_type(&inner.bus_instances, &entry.desc),
-                    entry.desc.bus_data.as_ref(),
+                    bus_type(&inner.bus_instances, &entry.core.desc),
+                    entry.core.desc.bus_data.as_ref(),
                 ) != MatchScore::NoMatch
             });
         if retryable {
