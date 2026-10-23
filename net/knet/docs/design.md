@@ -911,6 +911,8 @@ Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__
 
 The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
 
+`Ipv4ReassemblyQueue` owns per-datagram insertion, terminal-length and overlap checks, first-header retention, ECN accumulation, and completeness detection. Its consuming `into_packet` method returns a packet or an assembly error; only the reassembler exposes the pending state. `Ipv4Reassembler` owns queue lookup, expiration, eviction, and global retained-byte accounting, using the payload-plus-header byte count returned by insertion.
+
 `IngressProcessor::ipv4_reassembler` owns reassembly queues and is protected by `Service::ingress`, a `Mutex<IngressProcessor>`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 
 The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the peer endpoint uses `SpinNoIrq` for softirq lookup. The asynchronous-error queue has its own mutex; error status, shutdown flags, and receive-error enablement use atomics. Socket-local waiter sets report data, errors, write readiness, and shutdown independently of device RX notifications.

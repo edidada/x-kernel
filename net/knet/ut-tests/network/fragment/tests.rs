@@ -211,3 +211,44 @@ fn test_ipv4_reassembly_expiration_respects_timer_budget() {
     assert_eq!(second.fragments.len(), 1);
     assert_eq!(reassembler.expiration_deadline(), None);
 }
+
+#[def_test]
+fn test_ipv4_reassembly_waits_for_payload_gap() {
+    let mut reassembler = Ipv4Reassembler::new();
+    let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+    for (offset, more, payload) in [(0, true, b"abcdefgh"), (16, false, b"qrstuvwx")] {
+        let (packet, header) = fragment(offset, more, payload);
+        assert!(matches!(
+            reassembler.reassemble(packet, header, now),
+            Ipv4ReassemblyResult::Pending
+        ));
+    }
+    let (packet, header) = fragment(8, true, b"ijklmnop");
+    let Ipv4ReassemblyResult::Complete(packet) = reassembler.reassemble(packet, header, now) else {
+        panic!("expected complete packet after filling gap");
+    };
+    let ip_packet = packet.network_packet().unwrap();
+    let header = Ipv4Header::parse_input(ip_packet).unwrap();
+    assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijklmnopqrstuvwx");
+    assert_eq!(reassembler.memory_bytes, 0);
+    assert_eq!(reassembler.expiration_deadline(), None);
+}
+
+#[def_test]
+fn test_ipv4_reassembly_checks_terminal_length_before_duplicate() {
+    let mut reassembler = Ipv4Reassembler::new();
+    let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+    let (packet, header) = fragment(8, false, b"ijklmnop");
+    assert!(matches!(
+        reassembler.reassemble(packet, header, now),
+        Ipv4ReassemblyResult::Pending
+    ));
+    // The shorter terminal fragment is fully covered, but contradicts the known total.
+    let (packet, header) = fragment(8, false, b"ijkl");
+    assert!(matches!(
+        reassembler.reassemble(packet, header, now),
+        Ipv4ReassemblyResult::Dropped
+    ));
+    assert_eq!(reassembler.memory_bytes, 0);
+    assert_eq!(reassembler.expiration_deadline(), None);
+}

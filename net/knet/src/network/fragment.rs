@@ -89,6 +89,15 @@ enum InsertResult {
     Inserted { memory_bytes: usize },
     Duplicate,
     Overlap,
+    ConflictingLength,
+}
+
+#[derive(Debug)]
+enum ReassemblyError {
+    Incomplete,
+    InvalidEcn,
+    PacketTooLong,
+    InvalidHeader,
 }
 
 impl Ipv4Reassembler {
@@ -146,61 +155,27 @@ impl Ipv4Reassembler {
             Entry::Vacant(entry) => {
                 let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
                 self.expirations.insert(Ipv4Expiration { expires_at, key });
-                entry.insert(Ipv4ReassemblyQueue {
-                    packet_type: packet.packet_type(),
-                    first_header: None,
-                    fragments: BTreeMap::new(),
-                    received_len: 0,
-                    total_payload_len: None,
-                    ecn_mask: 0,
-                    expires_at,
-                })
+                entry.insert(Ipv4ReassemblyQueue::new(packet.packet_type(), expires_at))
             }
         };
 
-        if !header.more_fragments() {
-            if queue
-                .total_payload_len
-                .is_some_and(|old_total| old_total != end)
-                || queue
-                    .last_fragment_end()
-                    .is_some_and(|old_end| old_end > end)
-            {
-                self.remove_queue(&key);
-                return Ipv4ReassemblyResult::Dropped;
-            }
-            queue.total_payload_len = Some(end);
-        } else if queue
-            .total_payload_len
-            .is_some_and(|total_payload_len| end > total_payload_len)
-        {
-            self.remove_queue(&key);
-            return Ipv4ReassemblyResult::Dropped;
-        }
-
-        match queue.insert_fragment(offset, end, fragment_payload) {
+        match queue.insert_fragment(&header, ip_packet, offset, end, fragment_payload) {
             InsertResult::Inserted { memory_bytes } => {
                 self.memory_bytes = self.memory_bytes.saturating_add(memory_bytes);
             }
             InsertResult::Duplicate => return Ipv4ReassemblyResult::Pending,
-            InsertResult::Overlap => {
+            InsertResult::Overlap | InsertResult::ConflictingLength => {
                 self.remove_queue(&key);
                 return Ipv4ReassemblyResult::Dropped;
             }
         }
-        queue.ecn_mask |= ecn_bit(header.ecn());
-        if offset == 0 && queue.first_header.is_none() {
-            let first_header = Ipv4FirstFragmentHeader {
-                bytes: ip_packet[..header.header_len()].to_vec(),
-                ecn: header.ecn(),
-            };
-            self.memory_bytes = self.memory_bytes.saturating_add(first_header.bytes.len());
-            queue.first_header = Some(first_header);
-        }
 
         if queue.is_complete() {
             let queue = self.remove_queue(&key).expect("queue exists after insert");
-            return build_reassembled_packet(key.ifindex, queue);
+            return match queue.into_packet(key.ifindex) {
+                Ok(packet) => Ipv4ReassemblyResult::Complete(packet),
+                Err(_) => Ipv4ReassemblyResult::Dropped,
+            };
         }
 
         self.enforce_limits();
@@ -279,7 +254,61 @@ impl Ipv4Reassembler {
 }
 
 impl Ipv4ReassemblyQueue {
-    fn insert_fragment(&mut self, offset: usize, end: usize, payload: Vec<u8>) -> InsertResult {
+    fn new(packet_type: PacketType, expires_at: MonotonicInstant) -> Self {
+        Self {
+            packet_type,
+            first_header: None,
+            fragments: BTreeMap::new(),
+            received_len: 0,
+            total_payload_len: None,
+            ecn_mask: 0,
+            expires_at,
+        }
+    }
+
+    /// Updates one datagram and reports retained bytes added, including its first header.
+    /// The caller must discard the queue on overlap or conflicting length.
+    fn insert_fragment(
+        &mut self,
+        header: &Ipv4Header,
+        ip_packet: &[u8],
+        offset: usize,
+        end: usize,
+        payload: Vec<u8>,
+    ) -> InsertResult {
+        // Preserve terminal-length validation before duplicate detection.
+        if !header.more_fragments() {
+            if self
+                .total_payload_len
+                .is_some_and(|old_total| old_total != end)
+                || self
+                    .last_fragment_end()
+                    .is_some_and(|old_end| old_end > end)
+            {
+                return InsertResult::ConflictingLength;
+            }
+            self.total_payload_len = Some(end);
+        } else if self.total_payload_len.is_some_and(|total| end > total) {
+            return InsertResult::ConflictingLength;
+        }
+
+        let mut memory_bytes = match self.insert_payload(offset, end, payload) {
+            InsertResult::Inserted { memory_bytes } => memory_bytes,
+            result => return result,
+        };
+        self.ecn_mask |= ecn_bit(header.ecn());
+        if offset == 0 && self.first_header.is_none() {
+            let first_header = Ipv4FirstFragmentHeader {
+                bytes: ip_packet[..header.header_len()].to_vec(),
+                ecn: header.ecn(),
+            };
+            memory_bytes += first_header.bytes.len();
+            self.first_header = Some(first_header);
+        }
+        InsertResult::Inserted { memory_bytes }
+    }
+
+    fn insert_payload(&mut self, offset: usize, end: usize, payload: Vec<u8>) -> InsertResult {
         debug_assert_eq!(end.checked_sub(offset), Some(payload.len()));
 
         if let Some((&start, existing)) = self.fragments.range(..=offset).next_back() {
@@ -309,7 +338,41 @@ impl Ipv4ReassemblyQueue {
         let Some(total_payload_len) = self.total_payload_len else {
             return false;
         };
+        // Non-overlapping ranges bounded by total_payload_len leave no holes
+        // when their combined length reaches the total.
         self.first_header.is_some() && self.received_len == total_payload_len
+    }
+
+    fn into_packet(self, ifindex: i32) -> Result<PacketBuf, ReassemblyError> {
+        if !self.is_complete() {
+            return Err(ReassemblyError::Incomplete);
+        }
+        let first_header = self.first_header.ok_or(ReassemblyError::Incomplete)?;
+        let total_payload_len = self.total_payload_len.ok_or(ReassemblyError::Incomplete)?;
+        let ecn =
+            reassembled_ecn(self.ecn_mask, first_header.ecn).ok_or(ReassemblyError::InvalidEcn)?;
+        let first_header = first_header.bytes;
+        let packet_len = match first_header.len().checked_add(total_payload_len) {
+            Some(packet_len) if packet_len <= u16::MAX as usize => packet_len,
+            _ => return Err(ReassemblyError::PacketTooLong),
+        };
+
+        let mut packet = alloc::vec![0u8; packet_len];
+        packet[..first_header.len()].copy_from_slice(&first_header);
+        for (offset, payload) in self.fragments {
+            let start = first_header.len() + offset;
+            let end = start + payload.len();
+            packet[start..end].copy_from_slice(&payload);
+        }
+        ipv4::rewrite_reassembled_header(&mut packet, total_payload_len, ecn)
+            .map_err(|_| ReassemblyError::InvalidHeader)?;
+
+        Ok(PacketBuf::from_ip_packet_vec_with_type(
+            ifindex,
+            packet,
+            PacketOwner::Ipv4Stack,
+            self.packet_type,
+        ))
     }
 
     fn first_fragment_packet(&self) -> Option<Vec<u8>> {
@@ -335,41 +398,6 @@ impl Ipv4ReassemblyQueue {
             .map_or(0, |first_header| first_header.bytes.len());
         self.received_len.saturating_add(header_len)
     }
-}
-
-fn build_reassembled_packet(ifindex: i32, queue: Ipv4ReassemblyQueue) -> Ipv4ReassemblyResult {
-    let Some(first_header) = queue.first_header else {
-        return Ipv4ReassemblyResult::Dropped;
-    };
-    let Some(total_payload_len) = queue.total_payload_len else {
-        return Ipv4ReassemblyResult::Dropped;
-    };
-    let Some(ecn) = reassembled_ecn(queue.ecn_mask, first_header.ecn) else {
-        return Ipv4ReassemblyResult::Dropped;
-    };
-    let first_header = first_header.bytes;
-    let packet_len = match first_header.len().checked_add(total_payload_len) {
-        Some(packet_len) if packet_len <= u16::MAX as usize => packet_len,
-        _ => return Ipv4ReassemblyResult::Dropped,
-    };
-
-    let mut packet = alloc::vec![0u8; packet_len];
-    packet[..first_header.len()].copy_from_slice(&first_header);
-    for (offset, payload) in queue.fragments {
-        let start = first_header.len() + offset;
-        let end = start + payload.len();
-        packet[start..end].copy_from_slice(&payload);
-    }
-    if ipv4::rewrite_reassembled_header(&mut packet, total_payload_len, ecn).is_err() {
-        return Ipv4ReassemblyResult::Dropped;
-    }
-
-    Ipv4ReassemblyResult::Complete(PacketBuf::from_ip_packet_vec_with_type(
-        ifindex,
-        packet,
-        PacketOwner::Ipv4Stack,
-        queue.packet_type,
-    ))
 }
 
 fn aligned_payload_len(payload_len: usize, more_fragments: bool) -> usize {

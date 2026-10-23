@@ -482,6 +482,8 @@ Before local delivery, the version, header length, total length, and header chec
 
 ### 16. IPv4 Reassembly Boundary
 
+Each queue maintains non-overlapping payload ranges bounded by the known total length, so completeness follows from a retained first header and a matching received-byte count. Queue insertion reports newly retained payload and header bytes to the global memory accounting. Assembly consumes the queue and rejects incomplete state, invalid ECN combinations, and oversized packets.
+
 Fragments are isolated by source address, destination address, identification, protocol, and interface.
 Fragments fully covered by an existing range are discarded as duplicates. Partial overlap or conflicting ranges cause the entire queue to be deleted.
 Reassembly state is limited to 64 queues, a 4 MiB high watermark, a 3 MiB low watermark, and a 30-second timeout. Queue creation registers a fixed expiration event, which is canceled on completion, deletion due to an error, or capacity eviction. An expired queue that retains the first fragment generates ICMPv4 Time Exceeded.
