@@ -60,6 +60,7 @@ const CTRL_DMA_RESET: u32 = 1 << 2;
 const CTRL_FIFO_RESET: u32 = 1 << 1;
 const CTRL_RESET: u32 = 1 << 0;
 const CTRL_USE_IDMAC: u32 = 1 << 25;
+const CTRL_ABORT_READ_DATA: u32 = 1 << 8;
 const CTRL_ALL_RESET: u32 = CTRL_RESET | CTRL_FIFO_RESET | CTRL_DMA_RESET;
 
 // CTYPE bits.
@@ -640,6 +641,10 @@ impl DwMmcHost {
         for attempt in 0..2 {
             self.start_data_phase(cmd, DataDir::Read, bytes)?;
             let outcome = self.wait_transfer();
+            // Dump BEFORE idmac_stop: it clears the IDMAC routing bits,
+            // which made the previous ctrl dump read as 0x10 regardless
+            // of the failure-time state.
+            let ctrl_snapshot = self.readl(SDMMC_CTRL);
             self.idmac_stop();
             match outcome {
                 Ok(status) => {
@@ -658,7 +663,7 @@ impl DwMmcHost {
                         bytes,
                         attempt,
                         Self::status_names(self.xfer.load()),
-                        self.readl(SDMMC_CTRL),
+                        ctrl_snapshot,
                         self.readl(SDMMC_STATUS),
                         self.readl(SDMMC_RINTSTS),
                         self.readl(SDMMC_INTMASK),
@@ -699,28 +704,40 @@ impl DwMmcHost {
         outcome.map(|_| ())
     }
 
-    /// Recovery after a failed data transfer (Linux `dw_mci` error path):
-    /// reset the FIFO, force-stop the card with CMD12, clear the raw
-    /// status — without this, a card parked mid-data-state poisons every
-    /// later command (SBE/RTO cascades).
+    /// Recovery after a failed data transfer — the databook sequence for
+    /// a wedged data state machine: abort the in-flight read, wait for
+    /// DAT0 to release, reset DMA + FIFO, force-stop with CMD12, clear
+    /// the raw status. Without the abort step the state machine stays
+    /// DATA_STATE_MC_BUSY and every later command cascades (SBE/RTO).
     fn recover_after_data_error(&self, failed_cmd: &MmcCommand) {
-        // FIFO reset (self-clearing).
-        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
-        for _ in spin_budget(10_000) {
-            if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
+        // 1. Abort an in-flight read, then wait for DAT0 to release.
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_ABORT_READ_DATA);
+        for _ in spin_budget(50_000) {
+            if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
-        // Force-stop: CMD12 with STOP_ABORT_CMD (bypasses the normal
-        // response-decode path; errors here are best-effort cleared).
+        // 2. Reset the DMA engine and the FIFO (both self-clearing).
+        self.writel(
+            SDMMC_CTRL,
+            self.readl(SDMMC_CTRL) | CTRL_DMA_RESET | CTRL_FIFO_RESET,
+        );
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & (CTRL_DMA_RESET | CTRL_FIFO_RESET) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // 3. Force-stop the card (best-effort; errors cleared below).
         let cmdr = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
         let _ = self.ciu_cmd(cmdr, 0);
         self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         log::warn!(
-            "dwmmc: recovered after data error on cmd {} ({})",
+            "dwmmc: recovered after data error on cmd {} ({}) status_now={:#x}",
             failed_cmd.opcode,
-            Self::status_names(self.xfer.load())
+            Self::status_names(self.xfer.load()),
+            self.readl(SDMMC_STATUS),
         );
     }
 
