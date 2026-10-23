@@ -28,7 +28,7 @@ use subsys_mmc::{
     sd,
 };
 
-use super::dw_mmc::{DMA_WINDOW_BYTES, DwMmcHost, RING_PAGE};
+use super::dw_mmc::DwMmcHost;
 
 /// `static const struct of_device_id dw_mmc_rockchip_match[]`.
 static IDS: &[PlatformId] = &[
@@ -84,14 +84,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             regs.region().base
         );
 
-        // One coherent page of descriptors + the bounce window; the host
-        // takes ownership of both (card consumers may outlive this Data).
-        let ring = dev.res().alloc_coherent(RING_PAGE, RING_PAGE)?;
-        let window = dev.res().alloc_coherent(DMA_WINDOW_BYTES, RING_PAGE)?;
-
-        let host = Arc::new(
-            DwMmcHost::new(regs, ciu_hz, fifo_depth, slot, ring, window).map_err(host_error)?,
-        );
+        let host = Arc::new(DwMmcHost::new(regs, ciu_hz, fifo_depth, slot).map_err(host_error)?);
 
         // Card detection (Linux mmc_detect_card): no card is a clean
         // outcome — the slot stays claimed for a future re-scan.

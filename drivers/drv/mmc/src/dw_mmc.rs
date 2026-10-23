@@ -2,24 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! DesignWare Mobile Storage Host controller core (Linux
-//! `drivers/mmc/host/dw_mmc.c`, the PIO-mode subset verified on
-//! RK3588-class boards): register map, clock sequencing, and the
-//! FIFO-polled data path the SoC glue ([`crate::dw_mmc_rockchip`])
-//! wires up.
+//! DesignWare Mobile Storage Host controller core — the **PIO-mode**
+//! subset of Linux `drivers/mmc/host/dw_mmc.c`, transcribed from the
+//! board-verified reference (`drivers/blk/dwmmc-host` in the tgoskits
+//! tree): register map, clock sequencing, and the FIFO-polled data path.
 //!
-//! Data path is **PIO** — the same shape as the board-verified
-//! reference driver: the data phase is issued with `DATA_EXPECT` and
-//! the transfer drains/fills the FIFO data port, FCNT-gated, until
-//! `DATA_OVER`. The IDMAC engine (descriptor chains, coherent rings)
-//! is deliberately not used here; enabling it without a fully ported
-//! descriptor implementation routes the FIFO to an idle engine and
-//! hangs every transfer. Controller completion is observed by polling
-//! RINTSTS; the device interrupt stays masked (`INTMASK = 0`).
+//! The data phase is PIO by deliberate choice (the verified reference is
+//! PIO too, and it documents the trap: with IDMAC routing left armed,
+//! the FIFO feeds the DMA engine and `DATA_OVER` never fires). The data
+//! phase is issued with `DATA_EXPECT`, then the loop polls RINTSTS —
+//! **error bits first** (a data error never raises DATA_OVER) — draining
+//! the FIFO by FCNT until the transfer completes, tail words included.
+//! The internal-DMA engine (IDMAC) is a follow-up optimization.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use driver_base::{CoherentMem, IoMap};
+use driver_base::IoMap;
 use subsys_mmc::{BusWidth, DataDir, MmcCommand, MmcError, MmcHost, MmcIos, MmcResponse, RespKind};
 
 // ---------------------------------------------------------------------------
@@ -28,6 +26,7 @@ use subsys_mmc::{BusWidth, DataDir, MmcCommand, MmcError, MmcHost, MmcIos, MmcRe
 const SDMMC_CTRL: usize = 0x000;
 const SDMMC_PWREN: usize = 0x004;
 const SDMMC_CLKDIV: usize = 0x008;
+const SDMMC_CLKSRC: usize = 0x00c;
 const SDMMC_CLKENA: usize = 0x010;
 const SDMMC_TMOUT: usize = 0x014;
 const SDMMC_CTYPE: usize = 0x018;
@@ -37,21 +36,19 @@ const SDMMC_INTMASK: usize = 0x024;
 const SDMMC_CMDARG: usize = 0x028;
 const SDMMC_CMD: usize = 0x02c;
 const SDMMC_RESP0: usize = 0x030;
+const SDMMC_MINTSTS: usize = 0x040;
 const SDMMC_RINTSTS: usize = 0x044;
 const SDMMC_STATUS: usize = 0x048;
 const SDMMC_FIFOTH: usize = 0x04c;
 const SDMMC_CDETECT: usize = 0x050;
 const SDMMC_VERID: usize = 0x06c;
-const SDMMC_CLKSRC: usize = 0x00c;
+const SDMMC_CLKSRC_HI: usize = 0x078; // unused placeholder; CLKSRC at 0x0c
 /// FIFO data port: pre-2.40a at 0x100, 2.40a+ at 0x200 (Linux
 /// `DATA_OFFSET` / `DATA_240A_OFFSET`).
 const SDMMC_DATA_OFFSET: usize = 0x100;
 const SDMMC_DATA_240A_OFFSET: usize = 0x200;
-const SDMMC_BMOD: usize = 0x080;
-const SDMMC_PLDMND: usize = 0x084;
-const SDMMC_DBADDR: usize = 0x088;
-const SDMMC_IDSTS: usize = 0x08c;
-const SDMMC_IDINTEN: usize = 0x090;
+/// VERID register value that moved the data port to 0x200.
+const DW_MMC_240A: u32 = 0x240a;
 
 // CTRL bits.
 const CTRL_INT_ENABLE: u32 = 1 << 4;
@@ -60,7 +57,6 @@ const CTRL_DMA_RESET: u32 = 1 << 2;
 const CTRL_FIFO_RESET: u32 = 1 << 1;
 const CTRL_RESET: u32 = 1 << 0;
 const CTRL_USE_IDMAC: u32 = 1 << 25;
-const CTRL_ABORT_READ_DATA: u32 = 1 << 8;
 const CTRL_ALL_RESET: u32 = CTRL_RESET | CTRL_FIFO_RESET | CTRL_DMA_RESET;
 
 // CTYPE bits.
@@ -82,7 +78,7 @@ const INT_HLE: u32 = 1 << 12;
 const INT_SBE: u32 = 1 << 13;
 const INT_ACD: u32 = 1 << 14;
 const INT_EBE: u32 = 1 << 15;
-/// Controller error vocabulary this driver maps onto [`MmcError`].
+/// Data-phase error vocabulary (Linux `dw_mci_adjust_fifoth`-era set).
 const INT_ERRORS: u32 = INT_EBE
     | INT_SBE
     | INT_HTO
@@ -93,6 +89,8 @@ const INT_ERRORS: u32 = INT_EBE
     | INT_RTO
     | INT_DRTO
     | INT_RESP_ERR;
+const INT_DATA_ERRORS: u32 =
+    INT_EBE | INT_SBE | INT_HTO | INT_FRUN | INT_HLE | INT_DCRC | INT_RCRC | INT_RTO | INT_DRTO;
 
 // CMD bits.
 const CMD_START: u32 = 1 << 31;
@@ -107,6 +105,10 @@ const CMD_DAT_EXP: u32 = 1 << 9;
 const CMD_RESP_CRC: u32 = 1 << 8;
 const CMD_RESP_LONG: u32 = 1 << 7;
 const CMD_RESP_EXP: u32 = 1 << 6;
+/// The CMD register index field is bits [5:0] — six bits. The 0x1F mask
+/// in Linux dw_mmc.h is a macro that driver itself does not apply
+/// (`cmdr = cmd->opcode` verbatim); masking to five bits silently
+/// rewrites ACMD41 (41) into CMD9.
 const CMD_INDX_MASK: u32 = 0x3F;
 
 // CLKENA bits.
@@ -114,7 +116,7 @@ const CLKEN_ENABLE: u32 = 1 << 0;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
-/// STATUS FIFO count field [29:17] (entries).
+/// STATUS FIFO count field [28:17] (32-bit words).
 const STATUS_FCNT_SHIFT: u32 = 17;
 
 // FIFOTH layout: MSIZE [30:28], RX_WMARK [27:16], TX_WMARK [11:0].
@@ -122,81 +124,15 @@ const fn fifoth(msize: u32, rx_wmark: u32, tx_wmark: u32) -> u32 {
     ((msize & 0x7) << 28) | ((rx_wmark & 0xFFF) << 16) | (tx_wmark & 0xFFF)
 }
 
-/// Legal DMA burst sizes, words (Linux `mszs[]` in dw_mci_adjust_fifoth).
-const DMA_BURST_WORDS: [u32; 8] = [1, 4, 8, 16, 32, 64, 128, 256];
-
 /// Command-issue poll budget (START clear + clock-inform frames).
 const CMD_POLL_LIMIT: u32 = 1 << 21;
-/// Data-transfer poll budget for non-task context.
-const DATA_POLL_LIMIT: u32 = 1 << 28;
+/// Data-phase poll budget — a full 512-byte block at 400 kHz worst case
+/// needs ~11 ms; the bound covers it many times over.
+const DATA_POLL_LIMIT: u32 = 1 << 26;
 
-/// Bounded poll iterator with a spin hint (bring-up-grade waits; a few
-/// ms at any sane clock).
+/// Bounded poll iterator with a spin hint (bring-up-grade waits).
 fn spin_budget(limit: u32) -> impl Iterator<Item = u32> {
     (0..limit).inspect(|_| core::hint::spin_loop())
-}
-
-// ---------------------------------------------------------------------------
-// Internal DMA (IDMAC) — Linux `dw_mci_idmac_*`, shape verified against
-// the board-running tgoskits dwmmc-host implementation.
-// ---------------------------------------------------------------------------
-// IDMAC descriptor bits (DES0).
-const DESC_OWN: u32 = 1 << 31;
-const DESC_LD: u32 = 1 << 2;
-const DESC_FS: u32 = 1 << 3;
-const DESC_CH: u32 = 1 << 4;
-const DESC_DIC: u32 = 1 << 1;
-const DESC_ER: u32 = 1 << 5;
-// IDMAC interrupt bits (IDSTS).
-const IDINT_TI: u32 = 1 << 0;
-const IDINT_RI: u32 = 1 << 1;
-const IDINT_FBE: u32 = 1 << 2;
-const IDINT_DU: u32 = 1 << 4;
-const IDINT_CES: u32 = 1 << 5;
-const IDINT_NI: u32 = 1 << 8;
-const IDINT_AI: u32 = 1 << 9;
-const IDINT_ERRORS: u32 = IDINT_FBE | IDINT_DU | IDINT_CES | IDINT_AI;
-const IDINT_CLR_ALL: u32 =
-    IDINT_AI | IDINT_NI | IDINT_CES | IDINT_DU | IDINT_FBE | IDINT_RI | IDINT_TI;
-// BMOD bits.
-const IDMAC_ENABLE: u32 = 1 << 7;
-const IDMAC_FB: u32 = 1 << 1;
-const IDMAC_SWRESET: u32 = 1 << 0;
-
-/// Per-descriptor data payload cap (Linux `DW_MCI_DESC_DATA_SIZE`).
-const DESC_MAX_BYTES: usize = 0x1000;
-/// Descriptor ring: one 4 KiB coherent page of 16 entries.
-pub const RING_PAGE: usize = 4096;
-const RING_DESC_COUNT: usize = RING_PAGE / 16;
-/// The data bounce window: the largest single transfer this host accepts.
-pub const DMA_WINDOW_BYTES: usize = DESC_MAX_BYTES * RING_DESC_COUNT;
-/// IDMAC descriptors and buffers must stay below the 4 GiB line (the
-/// 32-bit descriptor address fields).
-const IDMAC_ADDR_LIMIT: u64 = 1 << 32;
-/// A descriptor's data may not straddle a 4 KiB boundary (verified
-/// driver splits chunks on it — DesignWare internal-DMA behavior).
-const DESC_BOUNDARY_BYTES: u64 = 4096;
-
-/// One IDMAC descriptor (Linux `struct idmac_desc`, 32-bit addressing).
-#[repr(C)]
-struct IdmacDesc {
-    des0: u32,
-    des1: u32,
-    /// Buffer bus address.
-    des2: u32,
-    /// Next-descriptor bus address (ring-linked).
-    des3: u32,
-}
-
-impl IdmacDesc {
-    const fn zeroed() -> Self {
-        Self {
-            des0: 0,
-            des1: 0,
-            des2: 0,
-            des3: 0,
-        }
-    }
 }
 
 /// The DW MMC host slot state (Linux `struct dw_mci`).
@@ -204,60 +140,39 @@ pub struct DwMmcHost {
     /// Mapped register block (probe-scoped `IoMap`).
     regs: IoMap,
     /// CIU input clock in Hz (board fact — see the rockchip glue).
-    ciu_hz: u32,
+    bus_hz: u32,
     /// FIFO depth in 32-bit entries (DT `fifo-depth`).
     fifo_depth: u32,
-    /// Host slot index (`mmc_host->index`).
-    slot: u8,
     /// Offset of the FIFO data register (VERID-dependent).
     fifo_off: usize,
-    /// Descriptor ring (coherent, owned — card consumers hold Arc clones
-    /// of this host and may outlive the probe Data).
-    ring: CoherentMem,
-    /// Data bounce window (coherent, owned — see `ring`).
-    window: CoherentMem,
-    /// Transfer completion status slot (IRQ → waiter).
+    /// Host slot index (`mmc_host->index`).
+    slot: u8,
     /// Current configured bus clock (0 = gated).
     current_clock: AtomicU32,
 }
 
 // SAFETY: `regs` is a probe-owned MMIO mapping; all accessors go through
-// `&self` with only lock-free atomics shared across contexts.
+// `&self` with no shared mutable state outside the slot's own command
+// sequence (single-threaded per slot by the model's discipline).
 unsafe impl Sync for DwMmcHost {}
 // SAFETY: no thread-local state; see the `Sync` note.
 unsafe impl Send for DwMmcHost {}
 
 impl DwMmcHost {
-    /// Controller bring-up (Linux `dw_mci_probe`, PIO subset): power,
-    /// all-reset, interrupt clear + full mask, timeouts, IDMAC routing
-    /// disabled, FIFO thresholds, VERID-dependent FIFO port.
-    pub fn new(
-        regs: IoMap,
-        ciu_hz: u32,
-        fifo_depth: u32,
-        slot: u8,
-        ring: CoherentMem,
-        window: CoherentMem,
-    ) -> Result<Self, MmcError> {
-        if ciu_hz == 0 || fifo_depth < 2 {
+    /// Controller bring-up (Linux `dw_mci_probe` PIO subset + U-Boot
+    /// `dwmci_init` order): power, all-reset, status clear, full line
+    /// mask (poll-only), timeouts, IDMAC routing disabled, FIFO
+    /// thresholds, VERID-dependent FIFO port, CIU clock gated.
+    pub fn new(regs: IoMap, bus_hz: u32, fifo_depth: u32, slot: u8) -> Result<Self, MmcError> {
+        if bus_hz == 0 || fifo_depth < 2 {
             return Err(MmcError::Unsupported);
         }
-        if ring.len() < RING_PAGE || window.len() < 4096 {
-            return Err(MmcError::Unsupported);
-        }
-        // 32-bit descriptor/buffer addresses (see IDMAC_ADDR_LIMIT).
-        let top = u64::max(ring.bus_addr(), window.bus_addr()).saturating_add(4096);
-        if top >= IDMAC_ADDR_LIMIT {
-            return Err(MmcError::Unsupported);
-        }
-        let host = Self {
+        let mut host = Self {
             regs,
-            ciu_hz,
+            bus_hz,
             fifo_depth,
             slot,
             fifo_off: SDMMC_DATA_240A_OFFSET,
-            ring,
-            window,
             current_clock: AtomicU32::new(0),
         };
 
@@ -271,48 +186,32 @@ impl DwMmcHost {
                 break;
             }
         }
-        // Clear all raw status; the data-completion interrupt line is
-        // armed per transfer (see start_data_phase).
+        // Clear all raw status; the line stays masked for good — this
+        // driver is poll-only by design.
         host.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         host.writel(SDMMC_INTMASK, 0);
         host.writel(SDMMC_TMOUT, 0xFFFF_FFFF);
-        // FIFO burst marks: burst 8, RX at half-minus-1, TX at half.
+        // Route the FIFO away from the IDMAC: the CTRL reset pulses
+        // DMA_RESET but does NOT clear USE_IDMAC/DMA_ENABLE, and a stale
+        // routing makes every PIO read hang (verified driver's note).
+        let ctrl = host.readl(SDMMC_CTRL) & !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE);
+        host.writel(SDMMC_CTRL, ctrl);
+        // FIFO thresholds: baseline burst 8, RX at half-minus-1, TX at
+        // half (Linux `dw_mci_adjust_fifoth` fallback shape).
         let half = host.fifo_depth / 2;
         host.writel(SDMMC_FIFOTH, fifoth(0x2, half - 1, half));
         // Gate CIU clock before the first setup_bus.
         host.writel(SDMMC_CLKENA, 0);
         host.writel(SDMMC_CLKSRC, 0);
 
-        // IDMAC: reset the engine, link the descriptor ring, program the
-        // base address. Per-transfer engine setup (CTRL.IDMAC routing,
-        // IDINTEN, BMOD, PLDMND) happens in start_data_phase — the
-        // CTRL.DMA_RESET/BMOD.SWR pulses above and below clear those
-        // registers, so they cannot be one-time init.
-        host.reset_dma_engine();
-        host.reset_ring();
-        host.writel(SDMMC_IDSTS, IDINT_CLR_ALL);
-        host.writel(SDMMC_DBADDR, host.ring_base());
+        // VERID selects the FIFO data-port offset.
+        let verid = host.readl(SDMMC_VERID) & 0xFFFF;
+        host.fifo_off = if verid < 0x240a {
+            SDMMC_DATA_OFFSET
+        } else {
+            SDMMC_DATA_240A_OFFSET
+        };
         Ok(host)
-    }
-
-    /// Two-stage DMA engine reset (verified driver `reset_dma_engine`):
-    /// CTRL.DMA_RESET polled to self-clear, then BMOD.SWR polled to
-    /// self-clear.
-    fn reset_dma_engine(&self) {
-        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_DMA_RESET);
-        for _ in spin_budget(10_000) {
-            if self.readl(SDMMC_CTRL) & CTRL_DMA_RESET == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        self.writel(SDMMC_BMOD, self.readl(SDMMC_BMOD) | IDMAC_SWRESET);
-        for _ in spin_budget(10_000) {
-            if self.readl(SDMMC_BMOD) & IDMAC_SWRESET == 0 {
-                return;
-            }
-            core::hint::spin_loop();
-        }
     }
 
     /// The host slot index (disk naming + bus-instance label).
@@ -338,33 +237,6 @@ impl DwMmcHost {
         self.writel(self.fifo_off, value)
     }
 
-    /// FIFOTH for an IDMAC data phase of `bytes` (Linux
-    /// `dw_mci_adjust_fifoth`): pick the largest burst dividing both the
-    /// block depth and the TX-mark inverse; fall back to burst 1 /
-    /// RX_WMARK 1 when nothing divides. A burst/threshold mismatch
-    /// mis-sequences the FIFO and shows up as data CRC / SBE failures.
-    fn fifoth_for(&self, bytes: usize) -> u32 {
-        let fifo_width = 4u32;
-        let tx_wmark = self.fifo_depth / 2;
-        let tx_inverse = self.fifo_depth - tx_wmark;
-        let mut msize = 0u32;
-        let mut rx_wmark = 1u32;
-        if bytes % fifo_width as usize == 0 {
-            let blksz_depth = bytes / fifo_width as usize;
-            let mut index = DMA_BURST_WORDS.len() - 1;
-            while index > 0 {
-                let burst = u32::from(DMA_BURST_WORDS[index]);
-                if blksz_depth.is_multiple_of(burst as usize) && tx_inverse.is_multiple_of(burst) {
-                    msize = index as u32;
-                    rx_wmark = burst - 1;
-                    break;
-                }
-                index -= 1;
-            }
-        }
-        fifoth(msize, rx_wmark, tx_wmark)
-    }
-
     /// Bytes currently held in the FIFO.
     fn fifo_bytes(&self) -> usize {
         let fcnt = (self.readl(SDMMC_STATUS) >> STATUS_FCNT_SHIFT) & 0x1FFF;
@@ -373,8 +245,17 @@ impl DwMmcHost {
 
     /// Issue one command frame and poll the START bit (the controller
     /// clears it when the CIU accepts the command — Linux `mci_send_cmd`).
-    fn ciu_cmd(&self, cmdr: u32, arg: u32) -> Result<(), MmcError> {
+    /// `wait_busy` mirrors `dw_mci_wait_while_busy`: with PRV_DAT_WAIT the
+    /// software also waits for DAT0 to release before writing START.
+    fn ciu_cmd(&self, cmdr: u32, arg: u32, wait_busy: bool) -> Result<(), MmcError> {
         self.writel(SDMMC_CMDARG, arg);
+        if wait_busy {
+            for _ in spin_budget(CMD_POLL_LIMIT) {
+                if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
+                    break;
+                }
+            }
+        }
         self.writel(SDMMC_CMD, cmdr | CMD_START);
         for _ in spin_budget(CMD_POLL_LIMIT) {
             if self.readl(SDMMC_CMD) & CMD_START == 0 {
@@ -385,17 +266,17 @@ impl DwMmcHost {
     }
 
     /// Clock sequencing (Linux `dw_mci_setup_bus`): gate → inform CIU →
-    /// divider → inform CIU → enable → inform CIU.
+    /// divider → inform CIU → enable → inform CIU → CTYPE.
     fn setup_bus(&self, clock_hz: u32, force: bool) -> Result<(), MmcError> {
         if clock_hz == self.current_clock.load(Ordering::Acquire) && !force {
             return Ok(());
         }
         let div: u32 = match clock_hz {
             0 => 0,
-            _ if self.ciu_hz == clock_hz => 0,
+            _ if self.bus_hz == clock_hz => 0,
             _ => {
-                let mut div = self.ciu_hz / clock_hz;
-                if !self.ciu_hz.is_multiple_of(clock_hz) && self.ciu_hz > clock_hz {
+                let mut div = self.bus_hz / clock_hz;
+                if !self.bus_hz.is_multiple_of(clock_hz) && self.bus_hz > clock_hz {
                     div += 1;
                 }
                 div.div_ceil(2)
@@ -403,15 +284,17 @@ impl DwMmcHost {
         };
         let inform = CMD_UPD_CLK | CMD_PRV_DAT_WAIT;
         self.writel(SDMMC_CLKENA, 0);
-        self.ciu_cmd(inform, 0)?;
+        self.ciu_cmd(inform, 0, false)?;
         self.writel(SDMMC_CLKDIV, div);
-        self.ciu_cmd(inform, 0)?;
+        self.ciu_cmd(inform, 0, false)?;
         self.writel(SDMMC_CLKENA, CLKEN_ENABLE);
-        self.ciu_cmd(inform, 0)?;
+        self.ciu_cmd(inform, 0, false)?;
         Ok(())
     }
 
-    /// Command register encoding (Linux `dw_mci_prepare_command`).
+    /// Command register encoding (Linux `dw_mci_prepare_command`): USE_HOLD
+    /// and WAIT_PRVDATA (non-CMD13 data commands) always on, response bits
+    /// by kind, INIT/AUTO_STOP by request.
     fn cmdr_of(&self, cmd: &MmcCommand, dir: Option<DataDir>, bytes: usize) -> u32 {
         let mut cmdr = u32::from(cmd.opcode) & CMD_INDX_MASK;
         match cmd.resp {
@@ -427,6 +310,8 @@ impl DwMmcHost {
             if dir == DataDir::Write {
                 cmdr |= CMD_DAT_WR;
             }
+            // Auto-stop rides the data command (CMD18 multi-block reads);
+            // u16::from(CMD12) for the explicit stop variant.
             if cmd.auto_stop && bytes > 512 {
                 cmdr |= CMD_SEND_AUTO_STOP;
             }
@@ -434,9 +319,13 @@ impl DwMmcHost {
         if cmd.init_clocks {
             cmdr |= CMD_INIT;
         }
-        // Hold register on every command (the verified driver defaults it
-        // on; RK3588 does not declare NO_USE_HOLD).
+        // Hold register always on (verified driver default; RK3588 does
+        // not declare NO_USE_HOLD), and data commands wait for previous
+        // data to finish.
         cmdr |= CMD_USE_HOLD_REG;
+        if dir.is_some() {
+            cmdr |= CMD_PRV_DAT_WAIT;
+        }
         cmdr
     }
 
@@ -454,36 +343,13 @@ impl DwMmcHost {
                     self.readl(SDMMC_RESP0 + 0xC),
                 ],
             },
-            RespKind::R3 | RespKind::R1 | RespKind::R1b | RespKind::ShortNoCrc => MmcResponse {
+            _ => MmcResponse {
                 raw: [self.readl(SDMMC_RESP0), 0, 0, 0],
             },
         }
     }
 
-    /// Human-readable names for a raw RINTSTS status word (diagnostics).
-    fn status_names(status: u32) -> alloc::string::String {
-        const NAMES: [(u32, &str); 10] = [
-            (INT_RESP_ERR, "RESP_ERR"),
-            (INT_CMD_DONE, "CMD_DONE"),
-            (INT_DATA_OVER, "DATA_OVER"),
-            (INT_RCRC, "RCRC"),
-            (INT_DCRC, "DCRC"),
-            (INT_RTO, "RTO"),
-            (INT_DRTO, "DRTO"),
-            (INT_HTO, "HTO"),
-            (INT_SBE, "SBE"),
-            (INT_EBE, "EBE"),
-        ];
-        let names: alloc::vec::Vec<&str> = NAMES
-            .iter()
-            .filter(|(bit, _)| status & bit != 0)
-            .map(|(_, name)| *name)
-            .collect();
-        alloc::format!("{status:#x} [{}]", names.join("|"))
-    }
-
-    /// Map a published status word (already known not to be DONE) onto
-    /// the error vocabulary.
+    /// Map a raw RINTSTS error word onto the error vocabulary.
     fn status_error(status: u32) -> MmcError {
         if status & (INT_RTO | INT_RCRC | INT_RESP_ERR) != 0 {
             MmcError::Crc
@@ -494,8 +360,32 @@ impl DwMmcHost {
         }
     }
 
-    /// Drain whatever the FIFO holds into `buf` (FCNT-bounded), Linux
-    /// `dw_mci_read_data_pio` polling shape. Returns bytes drained.
+    /// Human-readable names for a raw RINTSTS status word (diagnostics).
+    fn status_names(status: u32) -> alloc::string::String {
+        const NAMES: [(u32, &str); 11] = [
+            (INT_RESP_ERR, "RESP_ERR"),
+            (INT_CMD_DONE, "CMD_DONE"),
+            (INT_DATA_OVER, "DATA_OVER"),
+            (INT_RCRC, "RCRC"),
+            (INT_DCRC, "DCRC"),
+            (INT_RTO, "RTO"),
+            (INT_DRTO, "DRTO"),
+            (INT_HTO, "HTO"),
+            (INT_SBE, "SBE"),
+            (INT_EBE, "EBE"),
+            (INT_FRUN, "FRUN"),
+        ];
+        let names: alloc::vec::Vec<&str> = NAMES
+            .iter()
+            .filter(|(bit, _)| status & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        alloc::format!("{status:#x} [{}]", names.join("|"))
+    }
+
+    /// Drain whatever the FIFO holds into `buf` (FCNT-bounded, word
+    /// granularity), Linux `dw_mci_read_data_pio` inner loop. Returns
+    /// bytes drained.
     fn drain_rx(&self, out: &mut [u8]) -> usize {
         let available = self.fifo_bytes();
         let n = available.min(out.len()) & !0x3;
@@ -506,363 +396,44 @@ impl DwMmcHost {
         n
     }
 
-    /// Two-stage DMA reset (see `reset_dma_engine`), then re-link and
-    /// program the descriptor chain over the bounce window for `bytes`.
-    fn prepare_idmac(&self, bytes: usize) {
-        self.reset_dma_engine();
-        self.reset_ring();
-        self.arm_descriptors(bytes);
-        self.writel(SDMMC_IDSTS, IDINT_CLR_ALL);
-        self.writel(SDMMC_DBADDR, self.ring_base());
-    }
-
-    /// Stage `bytes` into the coherent bounce window (write direction).
-    fn stage_out(&self, bytes: usize, buf: &[u8]) {
-        // SAFETY: the window is a coherent, host-owned allocation of at
-        // least `bytes` (bounded by the caller's window check).
-        let window = unsafe { core::slice::from_raw_parts_mut(self.window.as_ptr(), bytes) };
-        window.copy_from_slice(&buf[..bytes]);
-    }
-
-    /// Collect `bytes` from the coherent bounce window (read direction).
-    fn stage_in(&self, bytes: usize, buf: &mut [u8]) {
-        // SAFETY: same bounds as `stage_out`.
-        let window = unsafe { core::slice::from_raw_parts_mut(self.window.as_ptr(), bytes) };
-        buf[..bytes].copy_from_slice(window);
-    }
-
-    /// IDMAC data phase (verified driver `submit_idmac_transfer_mapped`
-    /// shape): engine reset → descriptors → status clear → geometry →
-    /// fence → DBADDR → CTRL routing → IDINTEN → BMOD → PLDMND → command.
-    fn start_data_phase(
-        &self,
-        cmd: &MmcCommand,
-        dir: DataDir,
-        bytes: usize,
-    ) -> Result<(), MmcError> {
-        self.prepare_idmac(bytes);
-        // Per-transfer FIFO thresholds (Linux dw_mci_adjust_fifoth): the
-        // burst size must match the block geometry or the FIFO and the
-        // DMA burst desynchronize mid-transfer.
-        self.writel(SDMMC_FIFOTH, self.fifoth_for(bytes));
-        let blksz: u32 = if bytes.is_multiple_of(512) {
-            512
+    /// Clear a fired RINTSTS error set and map it (Linux
+    /// `dw_mci_command_complete` error decode).
+    fn take_errors(&self, pending: u32) -> MmcError {
+        self.writel(SDMMC_RINTSTS, pending & INT_ERRORS);
+        if pending & (INT_RTO | INT_RCRC | INT_RESP_ERR) != 0 {
+            MmcError::Crc
+        } else if pending & (INT_DRTO | INT_HTO) != 0 {
+            MmcError::Timeout
         } else {
-            bytes as u32
-        };
-        self.writel(SDMMC_BLKSIZ, blksz);
-        self.writel(SDMMC_BYTCNT, bytes as u32);
-
-        // Fence: the descriptor chain must be visible to the DMA engine
-        // before it is enabled.
-        karch::dsb_ishst();
-        self.writel(SDMMC_DBADDR, self.ring_base());
-        let ctrl = self.readl(SDMMC_CTRL) | CTRL_USE_IDMAC | CTRL_DMA_ENABLE | CTRL_INT_ENABLE;
-        self.writel(SDMMC_CTRL, ctrl);
-        self.writel(SDMMC_IDINTEN, IDINT_NI | IDINT_RI | IDINT_TI | IDINT_ERRORS);
-        self.writel(SDMMC_BMOD, IDMAC_FB | IDMAC_ENABLE);
-        // Poll demand: nudge the engine to start fetching the chain.
-        self.writel(SDMMC_PLDMND, 1);
-
-        let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
-        self.ciu_cmd(cmdr, cmd.arg)
+            MmcError::Io
+        }
     }
 
-    /// Wait for a started data transfer by polling the controller:
-    /// DATA_OVER + DMA-completion (RI/TI) or an error bit, bounded.
-    fn wait_transfer(&self) -> Result<u32, MmcError> {
-        for _ in spin_budget(DATA_POLL_LIMIT) {
-            let rintsts = self.readl(SDMMC_RINTSTS);
-            if rintsts & INT_ERRORS != 0 {
-                self.writel(SDMMC_RINTSTS, rintsts & INT_ERRORS);
-                return Err(Self::status_error(rintsts));
-            }
-            let idsts = self.readl(SDMMC_IDSTS);
-            if idsts & IDINT_ERRORS != 0 {
-                self.writel(SDMMC_IDSTS, idsts & IDINT_CLR_ALL);
-                return Err(MmcError::Io);
-            }
-            if rintsts & INT_DATA_OVER != 0 {
-                self.writel(SDMMC_RINTSTS, INT_DATA_OVER);
-                // DMA drain: wait for the engine to hand the last words to
-                // memory (RI or TI), bounded.
-                for _ in spin_budget(CMD_POLL_LIMIT) {
-                    let idsts = self.readl(SDMMC_IDSTS);
-                    if idsts & (IDINT_RI | IDINT_TI) != 0 {
-                        self.writel(SDMMC_IDSTS, idsts & IDINT_CLR_ALL);
-                        return Ok(idsts);
-                    }
-                    core::hint::spin_loop();
-                }
-                return Err(MmcError::Io);
-            }
-            core::hint::spin_loop();
-        }
-        Err(MmcError::Timeout)
-    }
-
-    /// Boot-time data-integrity probe: read block 0 with the interrupt
-    /// line temporarily masked so the polling loop exclusively owns
-    /// RINTSTS (an armed line lets the handler clear bits out from under
-    /// the poll — the exact failure this closes). Safe in any context.
-    pub fn polled_lba0_head(&self) -> Option<[u8; 32]> {
-        self.writel(SDMMC_INTMASK, 0);
-        let result = (|| {
-            let mut block = [0u8; 512];
-            let cmd = MmcCommand::with(17, 0, RespKind::R1);
-            let () = self.data_cmd_read(&cmd, 512, &mut block).ok()?;
-            let mut head = [0u8; 32];
-            head.copy_from_slice(&block[..32]);
-            Some(head)
-        })();
-        let head = result?;
-        let hex: alloc::vec::Vec<alloc::string::String> =
-            head.iter().map(|b| alloc::format!("{b:02x}")).collect();
-        log::info!("dwmmc: LBA0 head: {}", hex.join(" "));
-        Some(head)
-    }
-
-    /// Read data phase: IDMAC into the bounce window, then collect into
-    /// `buf`.
-    fn data_cmd_read(
-        &self,
-        cmd: &MmcCommand,
-        bytes: usize,
-        buf: &mut [u8],
-    ) -> Result<(), MmcError> {
-        if bytes > DMA_WINDOW_BYTES || buf.len() < bytes {
-            return Err(MmcError::Io);
-        }
-        // One retry after the card-recovery sequence: first data-phase
-        // failures are frequently transient state left by the previous
-        // transfer or the boot stages.
-        for attempt in 0..2 {
-            self.start_data_phase(cmd, DataDir::Read, bytes)?;
-            let outcome = self.wait_transfer();
-            // Dump BEFORE idmac_stop: it clears the IDMAC routing bits,
-            // which made the previous ctrl dump read as 0x10 regardless
-            // of the failure-time state.
-            let ctrl_snapshot = self.readl(SDMMC_CTRL);
-            self.idmac_stop();
-            match outcome {
-                Ok(status) => {
-                    if attempt > 0 {
-                        log::warn!("dwmmc: data-read cmd {} succeeded on retry", cmd.opcode);
-                    }
-                    self.stage_in(bytes, buf);
-                    return Ok(());
-                }
-                Err(err) => {
-                    log::warn!(
-                        "dwmmc: data-read cmd {} bytes {} attempt {}: {err:?} ({}) ctrl={:#x} \
-                         status={:#x} rintsts={:#x} intmask={:#x} clkena={:#x} clkdiv={:#x} \
-                         ctype={:#x} blksiz={:#x} bytcnt={:#x}",
-                        cmd.opcode,
-                        bytes,
-                        attempt,
-                        Self::status_names(0),
-                        ctrl_snapshot,
-                        self.readl(SDMMC_STATUS),
-                        self.readl(SDMMC_RINTSTS),
-                        self.readl(SDMMC_INTMASK),
-                        self.readl(SDMMC_CLKENA),
-                        self.readl(SDMMC_CLKDIV),
-                        self.readl(SDMMC_CTYPE),
-                        self.readl(SDMMC_BLKSIZ),
-                        self.readl(SDMMC_BYTCNT),
-                    );
-                    self.recover_after_data_error(cmd);
-                }
-            }
-        }
-        Err(MmcError::Io)
-    }
-
-    /// Write data phase: stage `buf` through the bounce window out to the
-    /// card.
-    fn data_cmd_write(&self, cmd: &MmcCommand, bytes: usize, buf: &[u8]) -> Result<(), MmcError> {
-        if bytes > DMA_WINDOW_BYTES || buf.len() < bytes {
-            return Err(MmcError::Io);
-        }
-        self.stage_out(bytes, buf);
-        self.start_data_phase(cmd, DataDir::Write, bytes)?;
-        let outcome = self.wait_transfer();
-        self.idmac_stop();
-        if let Err(err) = &outcome {
-            log::warn!(
-                "dwmmc: data-write cmd {} bytes {} failed: {err:?} status={:#x} (rintsts {:#x} \
-                 idsts {:#x})",
-                cmd.opcode,
-                bytes,
-                0,
-                self.readl(SDMMC_RINTSTS),
-                self.readl(SDMMC_IDSTS),
-            );
-        }
-        outcome.map(|_| ())
-    }
-
-    /// Recovery after a failed data transfer — the databook sequence for
-    /// a wedged data state machine: abort the in-flight read, wait for
-    /// DAT0 to release, reset DMA + FIFO, force-stop with CMD12, clear
-    /// the raw status. Without the abort step the state machine stays
-    /// DATA_STATE_MC_BUSY and every later command cascades (SBE/RTO).
+    /// Recovery after a failed data transfer: FIFO reset, force-stop with
+    /// CMD12, full raw-status clear (Linux error path). Without this a
+    /// card parked mid-data-state poisons every later command.
     fn recover_after_data_error(&self, failed_cmd: &MmcCommand) {
-        // 1. Abort an in-flight read, then wait for DAT0 to release.
-        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_ABORT_READ_DATA);
-        for _ in spin_budget(50_000) {
-            if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        // 2. Reset the DMA engine and the FIFO (both self-clearing).
-        self.writel(
-            SDMMC_CTRL,
-            self.readl(SDMMC_CTRL) | CTRL_DMA_RESET | CTRL_FIFO_RESET,
-        );
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
         for _ in spin_budget(10_000) {
-            if self.readl(SDMMC_CTRL) & (CTRL_DMA_RESET | CTRL_FIFO_RESET) == 0 {
+            if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
-        // 3. Force-stop the card (best-effort; errors cleared below).
-        let cmdr = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
-        let _ = self.ciu_cmd(cmdr, 0);
+        let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
+        let _ = self.ciu_cmd(stop, 0, true);
         self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         log::warn!(
-            "dwmmc: recovered after data error on cmd {} ({}) status_now={:#x}",
+            "dwmmc: recovered after data error on cmd {} ({})",
             failed_cmd.opcode,
-            Self::status_names(0),
-            self.readl(SDMMC_STATUS),
+            Self::status_names(self.readl(SDMMC_STATUS)),
         );
-    }
-
-    /// Stop and reset the DMA engine after a transfer (verified driver
-    /// `disable_idmac` shape).
-    fn idmac_stop(&self) {
-        let ctrl = self.readl(SDMMC_CTRL) & !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE);
-        self.writel(SDMMC_CTRL, ctrl);
-        self.writel(SDMMC_BMOD, 0);
-    }
-
-    /// The no-data command path: issue, wait CMD_DONE via RINTSTS
-    /// (polled — the INTMASK only routes data bits to the line), decode
-    /// the response, wait out R1b busy.
-    fn send_cmd_inner(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
-        let cmdr = self.cmdr_of(cmd, None, 0);
-        self.ciu_cmd(cmdr, cmd.arg)?;
-        let mut response = MmcResponse { raw: [0; 4] };
-        let mut done = false;
-        for _ in spin_budget(CMD_POLL_LIMIT) {
-            let pending = self.readl(SDMMC_RINTSTS);
-            if pending & INT_ERRORS != 0 {
-                self.writel(SDMMC_RINTSTS, pending & INT_ERRORS);
-                return Err(if pending & (INT_RTO | INT_RCRC | INT_RESP_ERR) != 0 {
-                    MmcError::Crc
-                } else {
-                    MmcError::Io
-                });
-            }
-            if pending & INT_CMD_DONE != 0 {
-                self.writel(SDMMC_RINTSTS, INT_CMD_DONE);
-                response = self.read_response(cmd);
-                done = true;
-                break;
-            }
-        }
-        if !done {
-            return Err(MmcError::Timeout);
-        }
-        // R1b: wait out the card-side busy (DAT0 low) with a budget.
-        if cmd.resp == RespKind::R1b {
-            for _ in spin_budget(CMD_POLL_LIMIT) {
-                if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
-                    break;
-                }
-            }
-        }
-        Ok(response)
-    }
-
-    /// The ring base as the 32-bit descriptor address.
-    fn ring_base(&self) -> u32 {
-        u32::try_from(self.ring.bus_addr()).unwrap_or(0)
-    }
-
-    /// Relink the descriptor ring: entries chained head→tail, the last
-    /// flagged end-of-ring pointing back at the head.
-    fn reset_ring(&self) {
-        // SAFETY: `ring` is a coherent, host-owned `RING_PAGE` page
-        // holding exactly `RING_DESC_COUNT` descriptors.
-        let descs = unsafe {
-            core::slice::from_raw_parts_mut(self.ring.as_ptr() as *mut IdmacDesc, RING_DESC_COUNT)
-        };
-        let base = self.ring.bus_addr();
-        let stride = 16u64;
-        for (i, desc) in descs.iter_mut().enumerate() {
-            *desc = IdmacDesc::zeroed();
-            desc.des3 = u32::try_from(base + stride * (i as u64 + 1)).unwrap_or(0);
-        }
-        if let Some(last) = descs.last_mut() {
-            last.des3 = u32::try_from(base).unwrap_or(0);
-            last.des0 = DESC_ER;
-        }
-    }
-
-    /// Program the descriptor chain for `bytes` over the bounce window,
-    /// splitting chunks on 4 KiB boundaries (verified driver
-    /// `prepare_idmac_descriptors`). Non-final descriptors carry
-    /// CH | DIC; the final one carries FD | LD.
-    fn arm_descriptors(&self, bytes: usize) {
-        // SAFETY: same coherent page discipline as `reset_ring`.
-        let descs = unsafe {
-            core::slice::from_raw_parts_mut(self.ring.as_ptr() as *mut IdmacDesc, RING_DESC_COUNT)
-        };
-        let window_base = self.window.bus_addr();
-        let mut remaining = bytes;
-        let mut offset = 0usize;
-        let mut index = 0usize;
-        while remaining > 0 && index < RING_DESC_COUNT {
-            let dma_addr = window_base + offset as u64;
-            let boundary_left = (DESC_BOUNDARY_BYTES - dma_addr % DESC_BOUNDARY_BYTES) as usize;
-            let chunk = remaining.min(DESC_MAX_BYTES).min(boundary_left);
-            let first = index == 0;
-            let last = remaining == chunk;
-            let mut des0 = DESC_OWN;
-            if !last {
-                des0 |= DESC_CH | DESC_DIC;
-            }
-            if first {
-                des0 |= DESC_FS;
-            }
-            if last {
-                des0 |= DESC_LD;
-            }
-            let d = &mut descs[index];
-            d.des0 = des0;
-            d.des1 = chunk as u32 & 0x1FFF;
-            d.des2 = u32::try_from(dma_addr).unwrap_or(0);
-            index += 1;
-            remaining -= chunk;
-            offset += chunk;
-        }
-        // Terminate: the last used descriptor ends the chain (LD already
-        // set); restore the end-of-ring marker on the next entry.
-        if index < RING_DESC_COUNT {
-            let d = &mut descs[index];
-            d.des0 = DESC_ER;
-        }
-        self.writel(SDMMC_DBADDR, self.ring_base());
     }
 }
 
 impl MmcHost for DwMmcHost {
     fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
-        // Fallback diagnostics: EVERY command failure names itself here,
-        // so a silent protocol-layer failure can never hide behind a
-        // missing step() wrapper.
+        // Fallback diagnostics: EVERY command failure names itself here.
         match self.send_cmd_inner(cmd) {
             Ok(resp) => Ok(resp),
             Err(err) => {
@@ -891,7 +462,6 @@ impl MmcHost for DwMmcHost {
     }
 
     fn set_ios(&self, ios: &MmcIos) -> Result<(), MmcError> {
-        // Power (Linux `__dw_mci_set_ios` PWREN handling).
         self.writel(SDMMC_PWREN, u32::from(ios.power_on));
         self.setup_bus(ios.clock_hz, false)?;
         self.current_clock.store(ios.clock_hz, Ordering::Release);
@@ -906,5 +476,147 @@ impl MmcHost for DwMmcHost {
     fn card_present(&self) -> bool {
         // CDETECT bit n set == card absent (active low).
         self.readl(SDMMC_CDETECT) & 1 == 0
+    }
+}
+
+impl DwMmcHost {
+    /// The no-data command path: issue, wait CMD_DONE via RINTSTS
+    /// (polled — the line stays masked), decode the response, wait out
+    /// R1b busy.
+    fn send_cmd_inner(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
+        let cmdr = self.cmdr_of(cmd, None, 0);
+        let wait_busy = cmd.resp == RespKind::R1b;
+        self.ciu_cmd(cmdr, cmd.arg, wait_busy)?;
+        let mut response = MmcResponse { raw: [0; 4] };
+        let mut done = false;
+        for _ in spin_budget(CMD_POLL_LIMIT) {
+            let pending = self.readl(SDMMC_RINTSTS);
+            if pending & INT_ERRORS != 0 {
+                let err = self.take_errors(pending);
+                return Err(err);
+            }
+            if pending & INT_CMD_DONE != 0 {
+                self.writel(SDMMC_RINTSTS, INT_CMD_DONE);
+                response = self.read_response(cmd);
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            return Err(MmcError::Timeout);
+        }
+        Ok(response)
+    }
+
+    /// Read data phase: FIFO-polled drain into `buf` (Linux
+    /// `dw_mci_read_data_pio` polling shape).
+    fn data_cmd_read(
+        &self,
+        cmd: &MmcCommand,
+        bytes: usize,
+        buf: &mut [u8],
+    ) -> Result<(), MmcError> {
+        if buf.len() < bytes {
+            return Err(MmcError::Io);
+        }
+        self.start_data_phase(cmd, DataDir::Read, bytes)?;
+        let mut drained = 0usize;
+        for _ in spin_budget(DATA_POLL_LIMIT) {
+            let pending = self.readl(SDMMC_RINTSTS);
+            if pending & INT_DATA_ERRORS != 0 {
+                let err = self.take_errors(pending);
+                self.recover_after_data_error(cmd);
+                return Err(err);
+            }
+            if drained < bytes {
+                drained += self.drain_rx(&mut buf[drained..]);
+            }
+            if pending & INT_DATA_OVER != 0 {
+                self.writel(SDMMC_RINTSTS, INT_DATA_OVER);
+                if drained < bytes {
+                    drained += self.drain_rx(&mut buf[drained..]);
+                }
+                break;
+            }
+        }
+        if drained < bytes {
+            log::warn!(
+                "dwmmc: cmd {} short read {drained}/{bytes} (rintsts {:#x})",
+                cmd.opcode,
+                self.readl(SDMMC_RINTSTS),
+            );
+            return Err(MmcError::Io);
+        }
+        // Auto-stop command-done (ACD) arrives after DATA_OVER on
+        // multi-block reads; clear it if present.
+        let pending = self.readl(SDMMC_RINTSTS);
+        if pending & INT_ACD != 0 {
+            self.writel(SDMMC_RINTSTS, INT_ACD);
+        }
+        Ok(())
+    }
+
+    /// Write data phase: FIFO-polled fill from `buf`, then DATA_OVER.
+    fn data_cmd_write(&self, cmd: &MmcCommand, bytes: usize, buf: &[u8]) -> Result<(), MmcError> {
+        if buf.len() < bytes {
+            return Err(MmcError::Io);
+        }
+        self.start_data_phase(cmd, DataDir::Write, bytes)?;
+        let mut filled = 0usize;
+        while filled < bytes {
+            let pending = self.readl(SDMMC_RINTSTS);
+            if pending & INT_DATA_ERRORS != 0 {
+                let err = self.take_errors(pending);
+                self.recover_after_data_error(cmd);
+                return Err(err);
+            }
+            let free = (self.fifo_depth as usize * 4).saturating_sub(self.fifo_bytes());
+            let chunk = (bytes - filled).min(free) & !0x3;
+            for i in (0..chunk).step_by(4) {
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&buf[filled + i..filled + i + 4]);
+                self.fifo_write32(u32::from_le_bytes(word));
+            }
+            filled += chunk;
+            if chunk == 0 {
+                core::hint::spin_loop();
+            }
+        }
+        for _ in spin_budget(DATA_POLL_LIMIT) {
+            let pending = self.readl(SDMMC_RINTSTS);
+            if pending & INT_DATA_OVER != 0 {
+                self.writel(SDMMC_RINTSTS, INT_DATA_OVER);
+                return Ok(());
+            }
+            if pending & INT_DATA_ERRORS != 0 {
+                let err = self.take_errors(pending);
+                self.recover_after_data_error(cmd);
+                return Err(err);
+            }
+        }
+        Err(MmcError::Timeout)
+    }
+
+    /// Shared data-phase head: thresholds, geometry, command issue.
+    fn start_data_phase(
+        &self,
+        cmd: &MmcCommand,
+        dir: DataDir,
+        bytes: usize,
+    ) -> Result<(), MmcError> {
+        // Per-transfer FIFO thresholds (Linux dw_mci_adjust_fifoth): the
+        // burst must match the block geometry or FIFO and DMA burst (here:
+        // the CPU drain) desynchronize.
+        let half = self.fifo_depth / 2;
+        self.writel(SDMMC_FIFOTH, fifoth(0x2, half - 1, half));
+        let blksz: u32 = if bytes.is_multiple_of(512) {
+            512
+        } else {
+            bytes as u32
+        };
+        self.writel(SDMMC_BLKSIZ, blksz);
+        self.writel(SDMMC_BYTCNT, bytes as u32);
+        let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
+        self.ciu_cmd(cmdr, cmd.arg, true)
     }
 }
