@@ -14,7 +14,7 @@ use super::{sys_epoll_create, sys_epoll_ctl, sys_epoll_wait};
 use crate::{ipc::sys_eventfd2, vfs::sys_close};
 
 // x86_64 keeps the legacy epoll_create(213)/epoll_wait(232) entries that
-// newer architectures dropped; musl and older libcs call them directly.
+// newer architectures dropped; programs may call them directly.
 
 #[def_test(user)]
 fn test_epoll_create_rejects_nonpositive_size() {
@@ -48,7 +48,7 @@ fn test_epoll_wait_reports_ready_and_timeout() {
     assert_eq!(ready, 1);
     let bytes = buf.read_bytes(size_of::<k_epoll_event>()).unwrap();
     let events = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    let data = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    let data = u64::from_le_bytes(bytes[bytes.len() - size_of::<u64>()..].try_into().unwrap());
     assert_eq!(events & EPOLLIN, EPOLLIN);
     assert_eq!(data, 7);
 

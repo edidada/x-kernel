@@ -40,6 +40,7 @@ pub(crate) fn sys_epoll_create1(flags: u32) -> KResult<isize> {
 
 /// Creates an epoll instance (legacy `epoll_create`): `size` must be
 /// positive but is otherwise ignored, exactly like `epoll_create1(0)`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn sys_epoll_create(size: i32) -> KResult<isize> {
     if size <= 0 {
         return Err(KError::InvalidInput);
@@ -154,6 +155,7 @@ pub(crate) fn sys_epoll_pwait(
 
 /// Waits for epoll events with a millisecond timeout (legacy `epoll_wait`):
 /// identical to `epoll_pwait` without a signal mask.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn sys_epoll_wait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
@@ -192,6 +194,7 @@ unittest::path_mod_test!(
 );
 
 unittest::path_mod_test!(
-    tests_epoll_legacy,
+    #[cfg(target_arch = "x86_64")]
+    mod tests_epoll_legacy,
     "../../ut-tests/io_mpx/epoll/tests_epoll_legacy.rs"
 );
