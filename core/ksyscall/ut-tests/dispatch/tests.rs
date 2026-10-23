@@ -98,3 +98,19 @@ fn dispatch_legacy_epoll_wait_maps_number_and_arguments() {
         KError::BadFileDescriptor.into_syscall_return() as usize
     );
 }
+
+// The other half of the legacy wiring: epoll_create(213) must reach the
+// size check instead of the ENOSYS fallback.
+#[cfg(target_arch = "x86_64")]
+#[def_test(user)]
+fn dispatch_legacy_epoll_create_maps_number_and_arguments() {
+    let mut uctx = UserContext::new(0, 0x8000usize.into(), 0);
+    uctx.set_sysno(Sysno::epoll_create.id() as usize);
+    uctx.set_arg0(0); // a non-positive size is rejected before any allocation
+
+    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(
+        uctx.retval(),
+        KError::InvalidInput.into_syscall_return() as usize
+    );
+}
