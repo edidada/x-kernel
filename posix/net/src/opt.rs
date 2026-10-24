@@ -324,12 +324,6 @@ pub fn sys_getsockopt(
     optlen_ptr: UserPtr<socklen_t>,
 ) -> KResult<isize> {
     let mut optlen = optlen_ptr.read_vm()?;
-    // Linux reads the length as a signed `int` and rejects a negative value
-    // before touching the value buffer (net/core/sock.c `sk_getsockopt`). A
-    // `socklen_t` carries the same four bytes here, so the sign bit is the test.
-    if (optlen as i32) < 0 {
-        return Err(KError::InvalidInput);
-    }
     debug!(
         "sys_getsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
         fd, level, optname, optlen,
@@ -363,6 +357,14 @@ pub fn sys_getsockopt(
 
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    // Linux resolves the descriptor first (`__sys_getsockopt` reports `EBADF`
+    // or `ENOTSOCK` before the protocol layer runs) and only then reads the
+    // length as a signed `int`, rejecting a negative value before touching the
+    // value buffer (net/core/sock.c `sk_getsockopt`). A `socklen_t` carries the
+    // same four bytes here, so the sign bit is the test.
+    if (optlen as i32) < 0 {
+        return Err(KError::InvalidInput);
+    }
 
     macro_rules! dispatch {
         ($which:ident) => {

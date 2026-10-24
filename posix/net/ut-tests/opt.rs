@@ -162,4 +162,11 @@ fn so_type_reports_the_socket_type_and_truncates_short_buffers() {
         Err(KError::InvalidInput)
     );
     assert_eq!(optlen.read(), u32::MAX);
+
+    // The descriptor is resolved first, so an invalid one reports `EBADF` even
+    // when the length is invalid too, matching `__sys_getsockopt`.
+    assert_eq!(
+        sys_getsockopt(-1, SOL_SOCKET, SO_TYPE, UserPtr::default(), optlen_ptr),
+        Err(KError::BadFileDescriptor)
+    );
 }
