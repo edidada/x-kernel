@@ -341,6 +341,23 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
+    /// Writes `value` the way Linux `sk_getsockopt` does: it copies
+    /// `min(optlen, size_of::<T>())` bytes and reports back the length it
+    /// actually wrote, so a short buffer truncates instead of failing and a
+    /// zero length leaves the buffer untouched (and may be a null pointer).
+    fn put_truncated<T>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
+        let written = (*len as usize).min(size_of::<T>());
+        if written > 0 {
+            // SAFETY: `value` is a live `T`, so its first `written` bytes are
+            // readable as a byte slice.
+            let bytes =
+                unsafe { core::slice::from_raw_parts((value as *const T).cast::<u8>(), written) };
+            osvm::write_vm_bytes(dst.as_ptr() as *mut u8, bytes)?;
+        }
+        *len = written as socklen_t;
+        Ok(())
+    }
+
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
 
@@ -360,9 +377,9 @@ pub fn sys_getsockopt(
     if level == SOL_SOCKET && optname == SO_TYPE {
         // `SO_TYPE` is a property of the socket itself, not a stored option.
         // Runtime supervisors (containerd-shim, ttrpc) validate inherited
-        // descriptors with it right after spawn.
-        let sock_type = socket.socket_type();
-        put(optval, &mut optlen, &sock_type)?;
+        // descriptors with it right after spawn. Linux copies it with the
+        // caller's length, so a short buffer truncates rather than failing.
+        put_truncated(optval, &mut optlen, &socket.socket_type())?;
     } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;
         socket.get_option(GetSocketOption::BindToDevice(&mut name))?;

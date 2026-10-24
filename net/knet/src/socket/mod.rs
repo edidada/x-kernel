@@ -12,6 +12,11 @@ pub(crate) mod state;
 unittest::path_mod_test!(test_options, "../../ut-tests/socket/test_options.rs");
 #[cfg(unittest)]
 unittest::path_mod_test!(test_state, "../../ut-tests/socket/test_state.rs");
+#[cfg(unittest)]
+unittest::path_mod_test!(
+    test_socket_type,
+    "../../ut-tests/socket/test_socket_type.rs"
+);
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -309,6 +314,10 @@ pub trait SocketOps: Configurable {
 }
 
 impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
+    fn socket_type(&self) -> i32 {
+        (**self).socket_type()
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         (**self).bind(local_addr)
     }
