@@ -324,6 +324,12 @@ pub fn sys_getsockopt(
     optlen_ptr: UserPtr<socklen_t>,
 ) -> KResult<isize> {
     let mut optlen = optlen_ptr.read_vm()?;
+    // Linux reads the length as a signed `int` and rejects a negative value
+    // before touching the value buffer (net/core/sock.c `sk_getsockopt`). A
+    // `socklen_t` carries the same four bytes here, so the sign bit is the test.
+    if (optlen as i32) < 0 {
+        return Err(KError::InvalidInput);
+    }
     debug!(
         "sys_getsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
         fd, level, optname, optlen,
@@ -341,18 +347,15 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
-    /// Writes `value` the way Linux `sk_getsockopt` does: it copies
-    /// `min(optlen, size_of::<T>())` bytes and reports back the length it
+    /// Writes an `int` option the way Linux `sk_getsockopt` does: it copies
+    /// `min(optlen, size_of::<i32>())` bytes and reports back the length it
     /// actually wrote, so a short buffer truncates instead of failing and a
     /// zero length leaves the buffer untouched (and may be a null pointer).
-    fn put_truncated<T>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
-        let written = (*len as usize).min(size_of::<T>());
+    fn put_truncated(dst: UserPtr<u8>, len: &mut socklen_t, value: i32) -> KResult<()> {
+        let bytes = value.to_ne_bytes();
+        let written = (*len as usize).min(bytes.len());
         if written > 0 {
-            // SAFETY: `value` is a live `T`, so its first `written` bytes are
-            // readable as a byte slice.
-            let bytes =
-                unsafe { core::slice::from_raw_parts((value as *const T).cast::<u8>(), written) };
-            osvm::write_vm_bytes(dst.as_ptr() as *mut u8, bytes)?;
+            osvm::write_vm_bytes(dst.as_ptr() as *mut u8, &bytes[..written])?;
         }
         *len = written as socklen_t;
         Ok(())
@@ -379,7 +382,7 @@ pub fn sys_getsockopt(
         // Runtime supervisors (containerd-shim, ttrpc) validate inherited
         // descriptors with it right after spawn. Linux copies it with the
         // caller's length, so a short buffer truncates rather than failing.
-        put_truncated(optval, &mut optlen, &socket.socket_type())?;
+        put_truncated(optval, &mut optlen, socket.socket_type())?;
     } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;
         socket.get_option(GetSocketOption::BindToDevice(&mut name))?;

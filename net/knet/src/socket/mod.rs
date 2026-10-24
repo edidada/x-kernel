@@ -305,12 +305,13 @@ pub trait SocketOps: Configurable {
     fn shutdown(&self, how: Shutdown) -> KResult;
 
     /// Returns the `SO_TYPE` value reported by `getsockopt(SOL_SOCKET,
-    /// SO_TYPE)`. Runtime supervisors (containerd-shim, ttrpc) validate
-    /// inherited descriptors with it right after spawn. The default covers
-    /// stream sockets; datagram and raw sockets override it.
-    fn socket_type(&self) -> i32 {
-        linux_raw_sys::net::SOCK_STREAM as i32
-    }
+    /// SO_TYPE)`: the type the socket was created with, which runtime
+    /// supervisors (containerd-shim, ttrpc) use to validate inherited
+    /// descriptors right after spawn.
+    ///
+    /// Deliberately has no default: a socket whose type is not reported would
+    /// silently answer with `SOCK_STREAM`, so every implementation states it.
+    fn socket_type(&self) -> i32;
 }
 
 impl<T: SocketOps + ?Sized> SocketOps for Box<T> {

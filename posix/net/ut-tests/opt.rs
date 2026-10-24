@@ -153,4 +153,13 @@ fn so_type_reports_the_socket_type_and_truncates_short_buffers() {
         Ok(0)
     );
     assert_eq!(optlen.read(), 0);
+
+    // A negative length is rejected before the buffer is touched, like Linux
+    // (`sk_getsockopt` reads a signed `int` and returns `EINVAL` below zero).
+    optlen.write(u32::MAX);
+    assert_eq!(
+        sys_getsockopt(fd, SOL_SOCKET, SO_TYPE, UserPtr::default(), optlen_ptr),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(optlen.read(), u32::MAX);
 }

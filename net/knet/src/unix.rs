@@ -259,7 +259,7 @@ fn lookup_or_create_bind_entry<R>(
 ///
 /// Linux keeps it in `sk_type` and reports it back from `SO_TYPE`, so it cannot
 /// be derived from the transport: `SOCK_DGRAM` and `SOCK_SEQPACKET` pairs both
-/// use the datagram transport (`fs/select.c`-style `sock_getsockopt` reports the
+/// use the datagram transport (`sk_getsockopt` in `net/core/sock.c` reports the
 /// stored type; `unix_create` keeps `SOCK_SEQPACKET` and rewrites only
 /// `SOCK_RAW` to `SOCK_DGRAM`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
