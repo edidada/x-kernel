@@ -169,4 +169,18 @@ fn so_type_reports_the_socket_type_and_truncates_short_buffers() {
         sys_getsockopt(-1, SOL_SOCKET, SO_TYPE, UserPtr::default(), optlen_ptr),
         Err(KError::BadFileDescriptor)
     );
+
+    // The same order holds for the length pointer itself: a bad descriptor
+    // wins over an unreachable length, which Linux only reads inside
+    // `sk_getsockopt`.
+    assert_eq!(
+        sys_getsockopt(
+            -1,
+            SOL_SOCKET,
+            SO_TYPE,
+            UserPtr::default(),
+            UserPtr::default()
+        ),
+        Err(KError::BadFileDescriptor)
+    );
 }
