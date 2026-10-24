@@ -12,6 +12,7 @@ use kfd_objects::epoll::{Epoll, EpollEvent, EpollFlags};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use ktime_types::TimeSpan;
+use kvfs::VfsFile;
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, timespec,
 };
@@ -60,14 +61,17 @@ pub(crate) fn sys_epoll_ctl(
     let file = kprocess::current_files().get_file(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
-    // The target must provide a poll handler. Linux checks `file_can_poll()`
-    // before looking at the operation, so an unpollable target (a regular file
-    // or a directory) is rejected with EPERM for every op, DEL included.
-    // `poll`/`select` keep their own fallback of reporting such a file as
-    // always ready; only epoll requires the capability.
-    if !file.can_poll() {
-        return Err(KError::OperationNotPermitted);
-    }
+    // Linux copies the user event inside the syscall wrapper
+    // (`copy_from_user` -> EFAULT) before `do_epoll_ctl` validates the target
+    // (`file_can_poll` -> EPERM), and `EPOLL_CTL_DEL` has no event to copy. Keep
+    // that order per operation.
+    let require_pollable = |file: &VfsFile| -> KResult<()> {
+        if file.can_poll() {
+            Ok(())
+        } else {
+            Err(KError::OperationNotPermitted)
+        }
+    };
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
         let event = event.read_vm()?;
@@ -86,13 +90,16 @@ pub(crate) fn sys_epoll_ctl(
     match op {
         EPOLL_CTL_ADD => {
             let (event, flags) = parse_event()?;
+            require_pollable(&file)?;
             epoll.add(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_MOD => {
             let (event, flags) = parse_event()?;
+            require_pollable(&file)?;
             epoll.modify(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_DEL => {
+            require_pollable(&file)?;
             epoll.delete(fd, file)?;
         }
         _ => return Err(KError::InvalidInput),

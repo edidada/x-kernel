@@ -637,14 +637,8 @@ impl FileOperations for TimerfdFops {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::timerfd(file).map_or(IoEvents::ERR, |timerfd| timerfd.poll())
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Self::timerfd(file).map_or(IoEvents::ERR, |timerfd| timerfd.poll()))
     }
 
     fn register_poll(

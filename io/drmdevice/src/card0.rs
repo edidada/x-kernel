@@ -1071,14 +1071,8 @@ impl DeviceFileOps for DrmCard {
         NodeFlags::NON_CACHEABLE
     }
 
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        Pollable::poll(self)
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(Pollable::poll(self))
     }
 
     fn register_poll(

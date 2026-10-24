@@ -948,14 +948,8 @@ impl FileOperations for EventpollFops {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Epoll::from_file(file).map_or(IoEvents::ERR, |epoll| epoll.poll())
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Epoll::from_file(file).map_or(IoEvents::ERR, |epoll| epoll.poll()))
     }
 
     fn register_poll(

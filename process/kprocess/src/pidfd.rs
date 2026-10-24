@@ -152,14 +152,8 @@ impl FileOperations for PidfdFops {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::pidfd(file).map_or(IoEvents::ERR, |pidfd| pidfd.poll())
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Self::pidfd(file).map_or(IoEvents::ERR, |pidfd| pidfd.poll()))
     }
 
     fn register_poll(

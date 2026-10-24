@@ -459,14 +459,8 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         NodeFlags::NON_CACHEABLE
     }
 
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        Pollable::poll(self)
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(Pollable::poll(self))
     }
 
     fn register_poll(
@@ -547,17 +541,13 @@ impl DeviceFileOps for CurrentTty {
         tty.tty.ioctl(file, cred, cmd, arg)
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        // Forward the tty backend's handler: a file that is not backed by a tty
+        // provides none, exactly like a device whose backend has no `poll`.
         match tty_file_private(file) {
             Ok(tty) => tty.tty.poll(file),
-            Err(_) => IoEvents::empty(),
+            Err(_) => None,
         }
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
     }
 
     fn register_poll(

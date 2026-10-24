@@ -276,14 +276,8 @@ impl FileOperations for SignalfdFops {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::access(file).map_or(IoEvents::ERR, |access| access.poll())
-    }
-
-    /// Provides a poll handler, so the file may be waited on (see
-    /// [`FileOperations::can_poll`]).
-    fn can_poll(&self, _file: &VfsFile) -> bool {
-        true
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Self::access(file).map_or(IoEvents::ERR, |access| access.poll()))
     }
 
     fn register_poll(
