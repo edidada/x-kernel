@@ -198,3 +198,8 @@ pub(crate) fn sys_pselect6(
         sigmask,
     )
 }
+
+unittest::path_mod_test!(
+    tests_pselect6_sigmask,
+    "../../ut-tests/io_mpx/select/tests_pselect6_sigmask.rs"
+);
