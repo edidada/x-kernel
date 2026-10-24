@@ -542,11 +542,16 @@ impl DeviceFileOps for CurrentTty {
     }
 
     fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
-        // Forward the tty backend's handler: a file that is not backed by a tty
-        // provides none, exactly like a device whose backend has no `poll`.
+        // `/dev/tty` is a tty and its file type always provides a poll handler,
+        // exactly as `tty_fops` does in Linux. The error arm models a file that
+        // never went through `CurrentTty::open`, i.e. one that is not a
+        // `/dev/tty` at all; reporting it as "not ready" keeps `epoll_ctl`
+        // accepting the node and leaves the `poll`/`select` fallback alone,
+        // whereas `None` would mean "no handler" and turn that fallback into
+        // always-ready.
         match tty_file_private(file) {
             Ok(tty) => tty.tty.poll(file),
-            Err(_) => None,
+            Err(_) => Some(IoEvents::empty()),
         }
     }
 
