@@ -43,6 +43,24 @@ fn fixture_with_ram_status(
     malformed_reg: bool,
     last_ram_status: &[u8],
 ) -> Vec<u8> {
+    fixture_with_ancestor_status(
+        nested,
+        status,
+        ram_count,
+        malformed_reg,
+        last_ram_status,
+        None,
+    )
+}
+
+fn fixture_with_ancestor_status(
+    nested: bool,
+    status: &[u8],
+    ram_count: usize,
+    malformed_reg: bool,
+    last_ram_status: &[u8],
+    ancestor_status: Option<&[u8]>,
+) -> Vec<u8> {
     let mut structure = Vec::new();
     let mut strings = Vec::new();
     word(&mut structure, 1);
@@ -52,6 +70,9 @@ fn fixture_with_ram_status(
     }
     property(&mut structure, &mut strings, "dma-coherent", &[]);
     property(&mut structure, &mut strings, "compatible", b"test,board\0");
+    if !nested && let Some(status) = ancestor_status {
+        property(&mut structure, &mut strings, "status", status);
+    }
     for index in 0..ram_count {
         word(&mut structure, 1);
         padded(&mut structure, b"memory@40000000\0");
@@ -73,6 +94,9 @@ fn fixture_with_ram_status(
         word(&mut structure, 1);
         padded(&mut structure, b"bus\0");
         property(&mut structure, &mut strings, "compatible", b"test,board\0");
+        if let Some(status) = ancestor_status {
+            property(&mut structure, &mut strings, "status", status);
+        }
     }
     for (name, base) in [
         (b"good\0".as_slice(), 0x1000u32),
@@ -80,7 +104,12 @@ fn fixture_with_ram_status(
     ] {
         word(&mut structure, 1);
         padded(&mut structure, name);
-        property(&mut structure, &mut strings, "compatible", b"test,dma\0");
+        property(
+            &mut structure,
+            &mut strings,
+            "compatible",
+            b"test,dma\0test,fallback\0",
+        );
         property(&mut structure, &mut strings, "status", status);
         let reg: Vec<u8> = [base, 0x100]
             .iter()
@@ -117,6 +146,96 @@ fn fixture_with_ram_status(
     bytes.extend(structure);
     bytes.extend(strings);
     bytes
+}
+
+#[def_test]
+fn discovery_view_identity_and_compatibles_ignore_matcher_selection() {
+    let bytes = Box::leak(fixture().into_boxed_slice());
+    let tree = Box::leak(Box::new(of::LinuxFdt::new(bytes).unwrap()));
+    let mut first_results = vec![];
+    visit_tree_devices(
+        tree,
+        |compatible| (compatible == "test,dma").then_some("alias,first"),
+        |view| {
+            first_results.push((
+                view.node_id(),
+                view.description().firmware_id,
+                view.is_available(),
+                view.compatibles()
+                    .map(alloc::string::String::from)
+                    .collect::<Vec<_>>(),
+            ));
+        },
+    );
+    let first_ids: Vec<_> = first_results.iter().map(|result| result.0).collect();
+    assert_eq!(first_ids, vec![2, 3]);
+    for (_, firmware_id, is_available, compatibles) in first_results {
+        assert_eq!(firmware_id, "alias,first");
+        assert_eq!(is_available, true);
+        assert_eq!(compatibles, vec!["test,dma", "test,fallback"]);
+    }
+    let mut second_ids = vec![];
+    visit_tree_devices(
+        tree,
+        |compatible| match compatible {
+            "test,board" => Some("alias,root"),
+            "test,fallback" => Some("alias,second"),
+            _ => None,
+        },
+        |view| second_ids.push(view.node_id()),
+    );
+    assert_eq!(second_ids, vec![0, 2, 3]);
+    assert_eq!(&second_ids[1..], first_ids.as_slice());
+}
+
+#[def_test]
+fn discovery_view_availability_preserves_unavailable_nodes() {
+    for (status, expected) in [
+        (b"okay\0".as_slice(), true),
+        (b"ok\0".as_slice(), true),
+        (b"disabled\0".as_slice(), false),
+        (b"unknown\0".as_slice(), false),
+        (b"okay".as_slice(), false),
+        (b"okay\0garbage".as_slice(), false),
+    ] {
+        let bytes = Box::leak(topology_fixture(false, status, 1, false).into_boxed_slice());
+        let tree = Box::leak(Box::new(of::LinuxFdt::new(bytes).unwrap()));
+        let mut results = vec![];
+        visit_tree_devices(
+            tree,
+            |compatible| match compatible {
+                "test,board" | "test,dma" => Some("alias"),
+                _ => None,
+            },
+            |view| results.push((view.node_id(), view.is_available())),
+        );
+        assert_eq!(results, vec![(0, true), (2, expected), (3, expected)]);
+    }
+}
+
+#[def_test]
+fn discovery_view_availability_checks_root_and_intermediate_ancestors() {
+    for nested in [false, true] {
+        for (status, expected) in [
+            (b"okay\0".as_slice(), true),
+            (b"disabled\0".as_slice(), false),
+            (b"unknown\0".as_slice(), false),
+            (b"okay".as_slice(), false),
+        ] {
+            let bytes = Box::leak(
+                fixture_with_ancestor_status(nested, b"okay\0", 1, false, b"okay\0", Some(status))
+                    .into_boxed_slice(),
+            );
+            let tree = Box::leak(Box::new(of::LinuxFdt::new(bytes).unwrap()));
+            let mut results = vec![];
+            visit_tree_devices(
+                tree,
+                |compatible| (compatible == "test,dma").then_some("alias"),
+                |view| results.push(view.is_available()),
+            );
+            assert_eq!(results, vec![expected; 2]);
+        }
+    }
 }
 
 #[def_test]

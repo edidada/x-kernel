@@ -29,6 +29,14 @@ next rewind refreshes it, and this text view grants no device access.
 
 ## Trust Model
 
+With `device-model` enabled, topology reads briefly retain model DeviceRefs
+while formatting an owned snapshot; no binding, IRQ or DMA lifetime is acquired.
+Legacy and model snapshots are collected independently and are not an atomic
+cross-registry view. Model path labels use an explicit `model:` namespace and
+must not be interpreted as legacy numeric IDs or authorization handles. A
+subsequent rewind omits devices removed from the model domain. Reading the
+global summary can initialize an empty domain, but installs no services or drivers.
+
 Procfs accepts filesystem operations through `kvfs` and publishes kernel-owned
 information. It trusts `kvfs` for path resolution, credentials, generic access
 checks, buffer validity, and open-file serialization; it trusts `kprocess` and

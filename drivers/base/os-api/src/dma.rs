@@ -183,6 +183,11 @@ impl DmaWindow {
         last_offset: u64::MAX,
     };
 
+    /// Whether CPU and device addresses coincide throughout this window.
+    pub const fn is_identity(&self) -> bool {
+        self.cpu_start == self.bus_start
+    }
+
     /// Construct a resolved window with a length in bytes.
     ///
     /// # Errors

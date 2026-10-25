@@ -209,3 +209,10 @@ to unrelated topology. Direct-root checks use actual parent identity, not bus
 names or matcher-returned identifiers. RAM queries require complete reg tuples
 and checked endpoints. These checks trust firmware to describe the machine;
 they neither authenticate firmware nor grant DMA access to reserved RAM.
+
+Discovery node IDs identify positions only within the immutable boot DT snapshot.
+They are not phandles or persistent hardware identities and must not be reused
+against a replacement tree. Checked u32 conversion stops dispatch rather than
+truncating or fabricating an ID. Borrowed compatible strings are firmware facts,
+not matcher-supplied names or authenticated hardware claims. Availability checks
+include every ancestor but do not authorize MMIO/DMA access.

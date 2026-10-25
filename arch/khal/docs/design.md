@@ -260,3 +260,16 @@ unsupported cell widths, overflow and ambiguous active RAM are rejected. This
 is firmware evidence, not allocator state. Platform DMA policy stays in kdriver.
 Discovery currently retains the OF interrupt resolver's static-tree requirement;
 isolated fixture trees are leaked only in guest tests, without replacing boot DT.
+
+`FirmwareDeviceView::node_id()` exposes the zero-based full-tree traversal index
+assigned before matching, including unmatched and unavailable nodes in the
+numbering. It is stable only for the fixed boot DT snapshot, not across boots,
+overlays or tree replacement; indices that cannot fit u32 are not dispatched.
+`compatibles()` borrows the original strings in firmware order, independently
+of matcher aliases. Consumers can copy these strings and the ID into owned
+staging records without copying the tree or adding model dependencies here.
+`is_available()` checks the node and every ancestor (status absent or exactly
+ok/okay); any disabled, unknown or malformed status rejects availability.
+Discovery still visits disabled nodes.
+Fixture tests compare IDs across different matchers/aliases and verify original
+compatible lists and availability, including missing and malformed status.

@@ -34,6 +34,21 @@ column. This is a snapshot view, not a held device lifetime.
 
 ## Purpose and Background
 
+The optional `device-model` feature appends a `Model devices (model:path
+namespace)` section to `/proc/devices`, `/proc/bus/devices`, and
+`/proc/bus/topology`, using `driver_model::global_topology_summary()`. Procfs has
+no kdriver dependency; the optional portable dependency adds no host provider.
+The composition root must enable this feature when routing devices into the
+new model. Legacy rows remain unchanged. Empty model snapshots add no section.
+Rows contain `model:<device path> bus=<bus> <identity> [<state>]
+driver=<driver> parent=model:<parent path>` (or `parent=<root>`). These paths are
+diagnostic labels, not legacy numeric DeviceRecord IDs or public model handles.
+The snapshot lacks device-kind and driver-registry enumeration, so rows are not
+guessed into legacy kind groups and `/proc/bus/drivers` remains legacy-only.
+Each rewind fetches a fresh snapshot; formatting neither registers a legacy
+device nor probes or publishes a class device. External formatting tests cover
+namespace separation, parent paths, missing metadata and empty refreshed views.
+
 `procfs` is a `no_std` virtual filesystem exposing process information, kernel
 statistics, and selected control files through `kvfs`. It formats subsystem-owned
 state; it does not own process lifecycle, address-space replacement, mapping

@@ -208,11 +208,42 @@ pub fn for_each_compatible(
 /// This view is for enumeration policy, not runtime device ownership.
 pub struct FirmwareDeviceView<'a> {
     description: FirmwareDevice,
+    node_id: u32,
     node: of::FdtNode<'a, 'a>,
     tree: &'a of::LinuxFdt<'a>,
 }
 
 impl FirmwareDeviceView<'_> {
+    /// Zero-based full-tree traversal index, assigned before compatible matching.
+    ///
+    /// Stable only within this fixed boot DT snapshot; independent of matcher
+    /// aliases and filtering. It is not a phandle, a cross-boot identity or a
+    /// key valid after tree replacement/overlay. Nodes beyond u32 are not visited.
+    pub fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    /// Whether this node and every ancestor have absent or exactly `ok`/`okay` status.
+    ///
+    /// Disabled, unknown and malformed status values anywhere on this path are
+    /// unavailable. This does not change legacy discovery filtering.
+    pub fn is_available(&self) -> bool {
+        let mut current = Some(self.node);
+        while let Some(node) = current {
+            if !node_is_available(node) {
+                return false;
+            }
+            current = node.parent();
+        }
+        true
+    }
+
+    /// Borrow the original compatible strings in firmware order, not matcher aliases.
+    /// Consumers needing owned staging records must copy the strings they retain.
+    pub fn compatibles(&self) -> impl Iterator<Item = &str> {
+        self.node.compatibles()
+    }
+
     /// Return the discovered resources, including any unresolved DMA error.
     pub fn description(&self) -> &FirmwareDevice {
         &self.description
@@ -307,7 +338,10 @@ fn visit_tree_devices(
     mut matcher: impl FnMut(&str) -> Option<&'static str>,
     mut visitor: impl FnMut(FirmwareDeviceView<'static>),
 ) {
-    for node in tree.all_nodes() {
+    for (index, node) in tree.all_nodes().enumerate() {
+        let Ok(node_id) = u32::try_from(index) else {
+            break;
+        };
         let Some(firmware_id) = node.compatibles().find_map(&mut matcher) else {
             continue;
         };
@@ -330,6 +364,7 @@ fn visit_tree_devices(
         };
         visitor(FirmwareDeviceView {
             description,
+            node_id,
             node,
             tree,
         });

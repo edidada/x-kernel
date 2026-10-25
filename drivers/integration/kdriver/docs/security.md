@@ -1,12 +1,67 @@
 # kdriver — Security and Reliability Analysis
 
+## Scoped production RNG ownership boundary
+
+The new path is restricted to fixed boot-DT, available direct QEMU Arm virt
+modern MMIO RNG nodes. Availability includes ancestors; real compatible strings
+and root provenance come from FirmwareDeviceView, not matcher aliases. Full-tree
+node IDs are valid only within that single immutable snapshot. Firmware remains
+trusted for board identity and physical ranges: header/numeric checks do not
+authenticate hardware or authorize arbitrary MMIO. No overlay, replacement-tree
+or general cross-bus resource ownership scheme is supplied here.
+
+EnumerationContext::new uses the LazyInit<Arc<PlatformModel>> production owner;
+separate DeviceManager/default bus-manager instances must not create independent
+ownership tables or per-manager owner fields. The platform backend's shared
+owner.discovery SpinNoPreempt lock spans ownership checks, temporary
+classification and reservation or legacy registration. Reserved and registered
+model ranges prevent remapping during pending probe, unbound and probe-failed
+states. Legacy descriptors also prevent alias classification. A second virtual
+mapping cannot bypass a live UniqueMmioPointer's exclusive-region contract.
+Independent registration outside this composition root remains unsupported.
+Model-selected conversion/registration/probe failure never authorizes legacy
+fallback. Classification is pre-transport only, not a safe active-device rescan.
+
+Unsafe RNG driver registration is scoped to one bus instance and must stay true
+for future additions and rebinds: exclusive QEMU/no-IOMMU provenance, coherent
+identity DMA, stable native providers and non-sleeping DMA callbacks under the
+request lock/ordinary IRQ context. Probe checks instance, context, descriptor
+and header facts but cannot infer all platform guarantees from the header.
+Both ACCESS_PLATFORM modes rely on this scope; arbitrary translated/IOMMU
+devices are not admitted by this binding. Later service replacement must not
+violate the native-provider assumptions established at root initialization.
+
+Bus-manager, shared discovery and slot locks are absent during device
+registration/probe. Root initialization uses a sleepable mutex; device lifecycle
+uses retained per-device management locks. Scheduler, allocator, mappings and
+IRQ domains must already be ready. Native registration can enable delivery, so
+callback-visible runtime state exists before request. Release must detach/drain
+the exact retained IRQ token without callback-needed locks. This relies on the
+external IRQ contract rather than proving real IRQ-core synchronization.
+
+RngBinding retains IoMap in ManuallyDrop through construction and shutdown.
+Cleanup closes reads, unregisters/drains publication, confirms reset, releases
+and drains IRQ ownership, then cancels remaining requests and releases DMA before
+unmapping. Data Drop also covers successful-but-rejected probes; publication
+failure cleans up before returning an error. Old readers retain only an inert
+runtime, not a transport capable of MMIO access. Reset polling has no
+timeout-based reclamation shortcut. If shutdown cannot establish quiescence,
+the infallible remove/Drop path panics and does not unmap: fail-closed, not
+successful cleanup or recoverable retry support.
+
+Production wiring does not certify real hardware DMA/cache behavior, physical
+IRQ delivery/drain or final remove/rebind acceptance. Controlled fixtures retain
+their narrower scope; no complete R1-08 hardware lifecycle or G-IRQ acceptance
+is claimed here.
+
 ## Non-destructive MMIO discovery
 
 Enumeration reuses descriptors for known MMIO ranges before mapping or reading
 registers. This protects the unique-access contract of live transports; raw
 volatile reads would not by themselves make aliasing a UniqueMmioPointer legal.
-Overlapping descriptions are rejected. The bus owner serializes discovery and
-registration; this check is not a general cross-bus physical-resource allocator.
+Overlapping descriptions are rejected. With virtio-rng enabled the shared
+production owner serializes discovery through reservation/descriptor publication
+across managers; this is not a general cross-bus physical-resource allocator.
 
 For unregistered slots enumeration receives copied type/version information, not a temporary
 transport with reset-on-drop behavior. Repeat classification cannot write status,
@@ -73,7 +128,8 @@ native bus token, buffer address, length and direction, so a translated device
 address is never passed to native unmap. Successful unmap performs the required
 directional copy-back but never frees the caller's buffer. Mapping state remains
 owned by kdma, whose synchronized global pool outlives individual capabilities.
-This adds no hardware isolation, non-coherent support or production activation.
+This adds no hardware isolation or non-coherent support. Production activation
+belongs to the scoped binding, not capability acquisition itself.
 
 Capability construction uses normal probe/task context after native allocator
 and mapping initialization. Acquisitions and release are non-sleeping and may run
@@ -627,7 +683,7 @@ Callers:
 | T-09 | A PCI BAR allocator race assigns the same MMIO address to two devices | Medium | Concurrent BAR allocation is not serialized correctly | `PCI_BAR_ALLOCATOR` is protected by `SpinNoPreempt`, and allocation occurs under the lock. |
 | T-10 | The serial driver remaps the stdout UART's MMIO and creates duplicate ownership | Medium | The serial driver calls `devm_iomap` again for the stdout node | Serial probe uses `take_early_port` and `SerialIdent` to adopt the early stdout instance without a second mapping. |
 | T-11 | Incorrect devres release ordering frees resources while a device still uses them | Medium | The driver's remove callback returns without stopping device DMA | Devres LIFO cleanup preserves release ordering; the driver's remove callback is responsible for stopping the device. |
-| T-12 | VirtIO MMIO discovery reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `probe_mmio_device` first checks `MagicValue` and returns `None` if the VirtIO protocol is not present. |
+| T-12 | VirtIO MMIO discovery reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `classify_mmio_device` checks extent/alignment and identification without a transport; ownership lookup precedes mapping. Firmware must still describe readable hardware. |
 | T-13 | An unchecked firmware IRQ number is registered on the wrong vector | Medium | `kirq::register` does not validate the IRQ number sufficiently | Depends on the platform IRQ backend and `kirq` descriptor handling; IRQ numbers passed by `kdriver` come from firmware or PCI INTx routing. |
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
 | T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, lost source bitmaps, or unwoken IRQ threads | Medium | The `device-res-xkernel` adapter omits trigger/controller/event/wake-thread fields | `device-res-xkernel` centralizes `device_res` to `kirq` conversion; the IRQ core does not depend on devres. |
@@ -848,7 +904,8 @@ that normal remove and probe failure after publication both stop DMA ownership
 before Data destruction, even while stale consumers retain the runtime.
 Counting HAL wrappers observe allocation/mapping release; they do not establish
 IOMMU/cache correctness. The IRQ provider is a synchronous simulation, not a
-concurrent interrupt-core acceptance test. No new production binding is enabled.
+concurrent interrupt-core acceptance test. The separate production binding now
+uses these contracts; the fixture does not validate its hardware.
 ## Model MMIO guard ownership
 
 The new host MMIO helper is for trusted model resource callbacks, not untrusted

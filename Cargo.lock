@@ -4659,6 +4659,7 @@ dependencies = [
 name = "procfs"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-model",
  "kaddr_layout",
  "kalloc",
  "kalloc-types",

@@ -127,6 +127,8 @@ impl SeqIterator for DevicesIter {
                 s.push_str(l);
             }
         }
+        #[cfg(feature = "device-model")]
+        append_model_devices(s);
         if s.is_empty() {
             s.push_str("No devices registered.\n");
         }
@@ -199,6 +201,8 @@ impl SeqIterator for BusDevicesIter {
             }
         }
 
+        #[cfg(feature = "device-model")]
+        append_model_devices(s);
         if s.is_empty() {
             s.push_str("No devices on any bus.\n");
         }
@@ -374,6 +378,8 @@ impl SeqIterator for BusTopologyIter {
             }
         }
 
+        #[cfg(feature = "device-model")]
+        append_model_devices(s);
         if s.is_empty() {
             s.push_str("No buses registered.\n");
         }
@@ -401,6 +407,63 @@ impl SeqIterator for BusTopologyIter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "device-model")]
+struct ModelDeviceRow<'a> {
+    path: &'a str,
+    parent: Option<&'a str>,
+    bus: &'a str,
+    identity: Option<&'a str>,
+    driver: Option<&'a str>,
+    state: &'a str,
+}
+
+#[cfg(feature = "device-model")]
+fn append_model_devices(text: &mut String) {
+    let snapshots = driver_model::global_topology_summary();
+    append_model_rows(
+        text,
+        snapshots.iter().map(|snapshot| ModelDeviceRow {
+            path: snapshot.device.path(),
+            parent: snapshot
+                .device
+                .descriptor()
+                .parent
+                .as_ref()
+                .map(driver_model::DeviceRef::path),
+            bus: snapshot.bus.name(),
+            identity: snapshot.identity.as_deref(),
+            driver: snapshot.driver,
+            state: snapshot.state.as_str(),
+        }),
+    );
+}
+
+#[cfg(feature = "device-model")]
+fn append_model_rows<'a>(text: &mut String, rows: impl IntoIterator<Item = ModelDeviceRow<'a>>) {
+    let mut rows = rows.into_iter().peekable();
+    if rows.peek().is_none() {
+        return;
+    }
+    text.push_str("Model devices (model:path namespace):\n");
+    for row in rows {
+        let _ = write!(
+            text,
+            "  model:{} bus={} {} [{}] driver={} parent=",
+            row.path,
+            row.bus,
+            row.identity.unwrap_or("<unknown>"),
+            row.state,
+            row.driver.unwrap_or("<none>"),
+        );
+        match row.parent {
+            Some(parent) => {
+                let _ = writeln!(text, "model:{parent}");
+            }
+            None => text.push_str("<root>\n"),
+        }
+    }
+}
 
 fn format_identity(identity: &DeviceIdentity, transport: Option<TransportInfo>) -> String {
     let virtio_type = transport.map(|TransportInfo::Virtio { device_type }| device_type);

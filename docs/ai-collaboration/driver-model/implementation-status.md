@@ -56,12 +56,12 @@ IRQ worktree or redo Completion. R1-07 remains partially accepted:
   Hardware unbind/rebind safety and final acceptance must not be declared
   complete until the actual provider contract and pending IRQ cases are checked.
 
-## Next: R1-08
+## R1-08 integration and remaining acceptance
 
-First trace aarch64 QEMU firmware discovery, MMIO ownership and DMA constraints
-(mask, offset, coherency) before selecting the host adapter. Do not infer an
-unlimited DMA mask solely from absent dma-ranges. Then implement the single
-RNG discovery handoff, instance resources and production model binding.
+The slices below trace firmware discovery, MMIO ownership and DMA constraints
+(mask, offset, coherency), then implement the single RNG discovery handoff,
+instance resources and production model binding. Do not infer an unlimited
+DMA mask solely from absent dma-ranges.
 Retain separate evidence for controlled inputs, real Version=2 MMIO, sampling,
 pending unbind, stale handles and rebind. Legacy PCI RNG is a regression target,
 not a substitute for modern MMIO evidence.
@@ -641,3 +641,77 @@ also passes **280/280** with coverage extracted (`ut-final.log`); `make clippy`
 and `make build` pass. Formatting, new-file headers and whitespace checks pass.
 Existing third-party future-Rust warnings remain. This slice is ready for local
 commit only; no push or production new-model activation is included.
+
+### R1-08 fifteenth slice: production modern-MMIO RNG binding
+
+Available direct QEMU Arm virt modern-MMIO RNG nodes now enter the existing
+global model domain instead of the legacy descriptor/publisher path. Selection
+is exclusive: conversion, initialization and probe errors never fall back to
+legacy. PCI RNG, legacy-MMIO RNG and other supported devices retain their paths.
+HAL exposes fixed-boot full-tree node identity, original compatibles and ancestor
+availability; it does not create a cross-boot ID or infer hardware ownership.
+
+PlatformModel owns pending reservations and registered DeviceRefs. Permanent
+MMIO facts come from the registered descriptor rather than a second metadata
+copy. Reservations survive unlocked probe and are cancelled when staging fails
+or is dropped. Root initialization installs native services and the scoped RNG
+driver once; actual device registration/probe runs outside discovery locks.
+
+Independent review caught a multi-manager aliasing bug in the initial patch:
+per-manager claims could not protect an already-owned transport from another
+manager's read-only classification. All public enumeration contexts now share
+one production owner and the discovery lock spans lookup, classification and
+reservation/legacy registration. The regression checks independent contexts
+share both the claims and this serialization boundary.
+
+The binding acquires MMIO, per-device DMA and IRQ through model services and
+publishes the concrete RNG with the device source. Publication failure and
+normal removal close reads, withdraw/drain consumers, confirm reset and release
+IRQ/pending DMA before unmapping. Old handles retain a closed runtime only.
+This relies on the synchronous IRQ-provider contract, not a new proof of it.
+Procfs appends model snapshots under an explicit model:path namespace without
+duplicating device registration. Existing random/urandom ownership is unchanged.
+
+Modern-MMIO QEMU regression passes **339/339**, including actual model Active
+state, absence of a same-address legacy descriptor, real sampling boundary tests
+and 128 queue reuses. The boot assertion is enabled explicitly with compile-time
+`XK_EXPECT_MODEL_MMIO_RNG=1` and QEMU
+`-global virtio-mmio.force-legacy=false`; it is not skipped when the model is
+empty. Ordinary runs ignore this modern-only acceptance test. The QEMU command
+uses virtio-rng-device, the local disk and no network/vsock. Coverage is persisted
+and extracted. Final-source evidence: `r1-08-production/ut-mmio-final.log` and
+`mmio.config`; the earlier `ut-mmio.log` also passed before the helper extraction.
+The guest suite is selected with
+`UNITTEST_CRATE=khal,kdma,kdriver,virtio,driver_os_api,driver_model,subsys_hwrng,entropy,procfs`
+through `make unittest XKMAKE_ARGS='--no-net --no-vsock'`; the modern command
+adds the environment switch above and
+`QEMU_ARGS='-global virtio-mmio.force-legacy=false'`.
+
+The first PCI run exposed a test-only hardcoded LevelHigh expectation; firmware
+may describe another supported trigger. The test now verifies the original
+trigger rather than forcing a production conversion change. Independent
+Standards and Spec re-review report no remaining blocker after the ownership
+fix. Clippy's function-length check prompted extraction of the cohesive MMIO
+selection helper, without suppressing the lint. Modern-MMIO `make clippy` and
+the subsequent final-source 339-test rerun pass. With the environment switch
+unset and `force-legacy=true`, legacy-MMIO regression passes **338 tests, zero
+failures, one modern-only test ignored**; real sampling and queue reuse pass,
+and coverage is extracted (`ut-mmio-legacy.log`). After restoring the canonical
+aarch64 PCI defconfig, the final-source suite also passes **338 tests, zero
+failures, one modern-only test ignored**, with coverage extracted
+(`ut-pci-final.log`). PCI `make clippy` passes (`clippy-pci.log`). Both legacy
+runs pass the real entropy sampling tests; neither is presented as new-model
+hardware evidence.
+
+The restored default-PCI `make build` passes (`build-pci.log`). Targeted pinned
+formatting, header/layout checks through clippy and whitespace checks pass.
+Only existing third-party future-Rust warnings remain. The selection-helper
+extraction also passed independent re-review. This slice is ready for a local
+commit; no push is requested and build products remain untracked evidence.
+
+Remaining R1-08 acceptance includes real pending-request removal, retained old
+handles and rebind, dual-source handoff, and the deferred IRQ synchronization
+gate. R1-09 retirement of unused transitional capability layers and full
+requirements-mapped regression remains afterward; bridges with existing
+consumers must be retained or explicitly migrated. Production boot and sampling
+do not mean the whole driver-framework task is complete.

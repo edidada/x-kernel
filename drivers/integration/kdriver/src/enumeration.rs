@@ -22,18 +22,38 @@ use kdevice::{
 /// step so bus/firmware discovery does not directly manufacture runtime device
 /// objects.
 pub struct EnumerationContext {
+    #[cfg(feature = "virtio-rng")]
+    pub(crate) model_owner: alloc::sync::Arc<crate::platform_model::PlatformModel>,
+    #[cfg(feature = "virtio-rng")]
+    model_pending: Vec<crate::platform_model::StagedRng>,
     pending: Vec<DeviceDesc>,
     unclaimed: Vec<DeviceDesc>,
     registered_count: usize,
 }
 
 impl EnumerationContext {
-    /// Create an empty enumeration context.
+    /// Create an empty enumeration context sharing the production platform owner.
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "virtio-rng")]
+            model_owner: crate::platform_model::production_owner(),
+            #[cfg(feature = "virtio-rng")]
+            model_pending: Vec::new(),
             pending: Vec::new(),
             unclaimed: Vec::new(),
             registered_count: 0,
+        }
+    }
+
+    #[cfg(feature = "virtio-rng")]
+    pub(crate) fn stage_model_rng(
+        &mut self,
+        view: &khal::firmware::devices::FirmwareDeviceView<'_>,
+    ) {
+        match self.model_owner.stage(view) {
+            Ok(Some(pending)) => self.model_pending.push(pending),
+            Ok(None) => {}
+            Err(error) => log::warn!("model RNG resource conversion rejected: {error:?}"),
         }
     }
 
@@ -45,10 +65,15 @@ impl EnumerationContext {
 
     /// Reuse an existing MMIO descriptor without accessing its owned registers.
     ///
-    /// Enumeration is serialized by the bus manager. Exact matches are queued
+    /// Platform discovery is serialized by the shared owner's discovery lock.
+    /// Exact matches are queued
     /// for the core's existing probe/skip decision; overlapping descriptions are
     /// rejected rather than creating an alias of another transport's mapping.
     pub(crate) fn revisit_mmio(&mut self, base: usize, size: usize) -> bool {
+        #[cfg(feature = "virtio-rng")]
+        if self.model_owner.owns_range(base, size) {
+            return true;
+        }
         let existing = kdevice::device_descs_snapshot().into_iter().find(|desc| {
             let DeviceLocation::Mmio {
                 base: start,
@@ -118,7 +143,17 @@ impl EnumerationContext {
     }
 
     /// Probe every descriptor registered during this enumeration pass.
+    ///
+    /// Requires sleepable task context with all bus-manager and platform
+    /// discovery locks released. Model registration can initialize the root,
+    /// install native services and synchronously invoke driver callbacks.
     pub fn probe_pending(&mut self) -> usize {
+        #[cfg(feature = "virtio-rng")]
+        for pending in core::mem::take(&mut self.model_pending) {
+            if let Err(error) = pending.register() {
+                log::warn!("model RNG registration failed without legacy fallback: {error:?}");
+            }
+        }
         let pending = core::mem::take(&mut self.pending);
         let mut activated = 0usize;
 

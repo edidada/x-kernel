@@ -7,6 +7,25 @@ use unittest::{assert_eq, def_test};
 use crate::{DmaInfo, DmaWindow, ResError};
 
 #[def_test]
+fn identity_dma_window_does_not_imply_unbounded_addressability() {
+    let window = DmaWindow::new(0x8000, 0x8000, 0x1000).unwrap();
+    assert_eq!(window.is_identity(), true);
+    assert_eq!(
+        DmaWindow::new(0x8000, 0x4000, 0x1000)
+            .unwrap()
+            .is_identity(),
+        false
+    );
+    let view = DmaInfo {
+        window,
+        ..DmaInfo::DEFAULT
+    };
+    assert_eq!(view.translate(0x7fff), None);
+    assert_eq!(view.translate(0x8000), Some(0x8000));
+    assert_eq!(view.translate(0x9000), None);
+}
+
+#[def_test]
 fn streaming_guard_retains_release_owner_and_releases_once_after_move() {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

@@ -1,13 +1,78 @@
 # kdriver — Design
 
+## Scoped production MMIO RNG model binding
+
+With `virtio-rng`, EnumerationContext::new always obtains the same
+`production_owner()` from LazyInit<Arc<PlatformModel>>; managers have no separate
+platform-owner field.
+DeviceManager instances and public default bus-manager enumeration routes share
+one PlatformModel, root bus and native-service installation; manager identity
+is not hardware ownership. The source is the single immutable boot DT. HAL node
+IDs are full-tree u32 indices, stable independently of matching but not across
+boots, overlays or tree replacement. Staging copies the original compatible
+strings into PlatformBusData rather than trusting matcher aliases.
+
+The new path selects only aarch64, available direct `virtio,mmio` children of
+the `linux,dummy-virt` root classified as modern RNGs. Availability includes
+ancestors. Other supported devices retain legacy routing. Once selected,
+resource conversion, root setup, registration or probe failure never falls
+back to the legacy RNG publisher. Staging requires a complete MMIO extent,
+supported GIC route/trigger and coherent identity DMA. Explicit QEMU policy
+may fill only MissingWindow from the same tree's single RAM interval; explicit
+windows and firmware errors retain precedence.
+
+The platform backend holds the shared owner.discovery SpinNoPreempt lock across
+ownership lookup, temporary read-only
+classification, and reservation or legacy descriptor registration. This closes
+the gap across separate managers, not just rescans of one manager. Known model
+ranges are not mapped or read again; exact legacy descriptors are reused for
+their probe/skip decision and overlapping ranges are skipped. A model candidate
+becomes Slot::Reserved, keyed by boot node ID and rejecting overlapping ranges.
+Its reservation survives the unlocked registration/probe interval. Dropping
+failed staging removes its reservation; successful registration replaces it
+with Slot::Registered and retains DeviceRef even if probe has not succeeded.
+This fixed-tree ownership is not hotplug slot reclamation or a retry framework.
+
+DeviceManager releases its bus-manager lock before probe_pending consumes owned
+staging. The shared discovery lock and slot lock are also absent during model
+registration/probe. Root setup is serialized by a sleepable mutex, installs
+native services on global_domain, creates the parentless PlatformBus instance
+`firmware-platform`, registers its scoped RNG driver and caches success/failure.
+Device registration runs after the root mutex is released. Devices retain native
+MMIO/DMA/ordinary IRQ services and per-device management locks. Legacy descriptor
+counters are not a census of model activations.
+
+`driver_registry/virtio/rng_model.rs` validates instance, context, DMA and modern
+RNG identification before transport construction. RngBinding owns IoMap, the
+concrete VirtIoRngDev with DeviceDmaBackend, and an explicit HwrngRegistration
+published with the binding's immutable source identity. IRQ acquisition uses
+the model resource factory. Constructor errors unmap only after the runtime's
+rollback contract releases queues/transport; publication failure explicitly
+stops the constructed runtime before returning an error.
+
+Remove and Data Drop share idempotent shutdown: close reads, unregister/drain
+publication, then finish_stop with yielding reset polls. Reset confirmation
+precedes synchronous IRQ release and pending-request cancellation/DMA release.
+Data Drop unmaps only after shutdown succeeds, including successful-but-rejected
+probe cleanup. Old consumer handles retain an inert runtime, not a live transport
+or the binding's MMIO ownership. Shutdown failure panics at the current
+infallible remove/Drop boundary and retains the manually held mapping rather
+than claiming quiescence; no recoverable teardown retry protocol is supplied.
+
+This is production routing/binding code, not merely a fixture. It does not
+establish final hardware remove/rebind, DMA/cache correctness or IRQ
+synchronization acceptance. Controlled fixture and host ownership tests retain
+their narrower evidence scope; whole R1-08 hardware acceptance is not claimed.
+
 ## Read-only VirtIO MMIO discovery
 
 Platform enumeration first reuses an existing MMIO descriptor, queuing its ID
 for the existing core probe/skip decision without rereading owned registers or
 creating another descriptor. Overlapping, nonidentical ranges are skipped. The
-bus-manager lock serializes this discovery path; independent registration of the
-same physical device outside its bus owner is not supported. This reuses the
-existing descriptor registry, not a second identity cache. A registered descriptor
+shared production discovery lock serializes this path across bus managers when
+virtio-rng is enabled; independent registration outside this owner is unsupported.
+Legacy reuse uses its existing registry; model devices use the reservations
+described above. A registered descriptor
 reserves its MMIO range even while a probe is in progress or has not yet succeeded.
 
 Previously unregistered slots are classified through virtio::classify_mmio_device,
@@ -20,9 +85,9 @@ transport's UniqueMmioPointer; it is a pre-ownership operation only.
 
 This follows the separation visible in Linux drivers/virtio/virtio_mmio.c:
 identification reads precede device registration and transport operation.
-This change alone does not transfer RNG ownership to the new model. Exclusive
-handoff, descriptors staged outside the enumeration lock, and production probe
-installation remain required before enabling that path.
+The scoped production path adds reservations and owned staging to this seam;
+registration/probing runs outside discovery locks. Classification alone still
+conveys no binding ownership.
 
 ## Native ordinary IRQ composition
 
@@ -30,7 +95,8 @@ installation remain required before enabling that path.
 DMA and management-lock services with `host_irq::NativeIrq`. Construction does
 not install services, enumerate firmware, activate a bus or probe any device.
 The `device-model` feature enables the direct kirq dependency independently of
-block drivers. Startup and read-only discovery integration remain separate work.
+block drivers. The scoped PlatformModel root now installs this composition;
+constructing the bundle alone still performs no discovery.
 
 Firmware routes go through kirq::try_map once per host-service request. Explicit
 domains are preserved; only absent domains select GIC, PLIC or IO-APIC roots.
@@ -58,7 +124,8 @@ External host_irq UT exercise pure conversion and injected map/register/free
 helper seams, including nonidentity numbering, explicit domains, callback results,
 context rejection and release errors. They do not register real interrupts or
 modify production root domains, and do not prove IRQ hardware or synchronization
-acceptance. This composition does not complete boot activation or R1-08 acceptance.
+acceptance. Production use of this composition does not complete hardware
+lifecycle/IRQ acceptance or establish whole-ticket completion.
 
 ## Retained device DMA capability
 
@@ -92,7 +159,8 @@ therefore does not rely on a consumer's subsequent queue barrier. This ordering
 does not add cache maintenance or support for non-coherent devices.
 
 Guards do not require the capability to remain alive. There is no second mapping
-registry, retry policy, implicit hardware stop or production activation. The
+registry, retry policy or implicit hardware stop. Production activation belongs
+to the scoped binding above. The
 private publish_streaming helper accepts an acquired unpublished native mapping
 for deterministic publication/rejection tests, not submitted-DMA cancellation.
 
@@ -117,7 +185,7 @@ entry and VMA. A model callback fixture also checks descriptor-indexed mapping
 through bind/unbind/rebind and removal. This verifies host mapping ownership,
 not real hardware register behavior.
 The smoke test targets the ordinary QEMU configuration, not optional KVM MMIO
-guard hypercalls. Production model service installation remains pending.
+guard hypercalls. The scoped production root now installs this mapping service.
 
 ## New-model firmware DMA configuration
 
@@ -127,7 +195,8 @@ typed, missing range/coherency is explicit failure, and device masks are supplie
 separately from the firmware bus window. It revalidates public range values at
 this seam. No fallback, memory allocation, MMIO access or model registration
 occurs here. This is an enumeration capability, not a concrete-driver dependency.
-The production MMIO handoff and constrained host allocation remain pending.
+The scoped production handoff uses this converter plus explicit QEMU policy;
+constrained allocation search remains unsupported by the native adapter.
 
 ## Purpose
 
@@ -1001,8 +1070,8 @@ Guest tests exercise actual page allocation/mapping/free, independent translated
 views, zeroed padding, invalid inputs and full-range rejection. A model callback
 fixture delegates its DMA service to this helper and checks two descriptor views
 across bind/unbind/rebind. It does not hand the addresses to real hardware.
-Production provider installation and MMIO RNG enumeration remain R1-08 work;
-the helper alone does not enable a new boot path.
+The scoped production root installs this provider and routes eligible MMIO RNGs
+to the model; these helper tests alone do not establish hardware acceptance.
 
 ### Explicit QEMU Arm virt DMA policy
 
@@ -1017,8 +1086,8 @@ The native allocator remains responsible for free/reserved-memory ownership.
 This policy follows QEMU Arm virt's direct virtio-mmio system-memory DMA path;
 it is not a general DT rule for missing dma-ranges. No support is inferred for
 nested buses, other boards, multiple RAM banks or an IOMMU path. Boot discovery
-tests exercise the policy but do not install the new model's production provider
-or demonstrate real RNG DMA. Those remain subsequent R1-08 integration work.
+tests exercise the policy without demonstrating real RNG DMA. The production
+enumerator now applies it before registering a scoped model descriptor.
 
 ### Model host service composition
 
@@ -1043,5 +1112,6 @@ services delegate to this composition, retaining only factory-call counting and
 an unavailable IRQ test provider. New controlled-provider tests cover translated
 and resolved IRQs, failed mapping/request/probe, and unbind/rebind release counts.
 They validate adaptation, not real IRQ detach/drain or hardware quiescence.
-Production provider installation, exclusive new/legacy enumeration handoff and
-real MMIO RNG sampling remain R1-08 work, not claims of this slice.
+The scoped production root now supplies provider installation and exclusive
+new/legacy enumeration routing. Real hardware lifecycle and IRQ acceptance
+remain separate from these controlled-provider tests.

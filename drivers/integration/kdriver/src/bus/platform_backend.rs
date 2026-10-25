@@ -63,6 +63,10 @@ impl PlatformBackend {
         context: &mut EnumerationContext,
         bus_id: BusId,
     ) -> DriverResult {
+        #[cfg(feature = "virtio-rng")]
+        let owner = context.model_owner.clone();
+        #[cfg(feature = "virtio-rng")]
+        let _discovery = owner.discovery.lock();
         let mut first_error = None;
 
         let firmware_specs = kdevice::firmware_match_specs_for_bus_type(BusTypeId::PLATFORM);
@@ -73,7 +77,7 @@ impl PlatformBackend {
              enumeration"
         );
 
-        fw::for_each_compatible(
+        fw::for_each_compatible_view(
             |compatible| {
                 if compatible == VIRTIO_MMIO_DT_COMPATIBLE {
                     Some(VIRTIO_MMIO_DT_COMPATIBLE)
@@ -83,13 +87,8 @@ impl PlatformBackend {
                         .find_map(|spec| spec.match_dt(compatible))
                 }
             },
-            |dev| {
-                if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE
-                    && let Some(mmio) = dev.mmio
-                    && context.revisit_mmio(mmio.base, mmio.size)
-                {
-                    return;
-                }
+            |view| {
+                let dev = view.description();
                 let mut resources: ResourceSet = smallvec![];
                 if let Some(mmio) = dev.mmio {
                     resources.push(ResourceDesc::Mmio(MmioRegion {
@@ -105,19 +104,7 @@ impl PlatformBackend {
                 }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
-                    match dev.mmio {
-                        #[cfg(feature = "virtio")]
-                        Some(mmio) => virtio_mmio_registration(mmio),
-                        #[cfg(not(feature = "virtio"))]
-                        Some(_) => None,
-                        None => {
-                            log::warn!(
-                                "platform: skipping {} node without MMIO resource",
-                                VIRTIO_MMIO_DT_COMPATIBLE
-                            );
-                            None
-                        }
-                    }
+                    select_virtio_mmio_registration(&view, context)
                 } else {
                     let id = match self.id_alloc.alloc() {
                         Ok(id) => id,
@@ -166,14 +153,52 @@ impl PlatformBackend {
     }
 }
 
-#[cfg(feature = "virtio")]
-fn virtio_mmio_registration(
-    mmio: fw::MmioResource,
+fn select_virtio_mmio_registration(
+    view: &fw::FirmwareDeviceView<'_>,
+    context: &mut EnumerationContext,
 ) -> Option<(
     DeviceLocation,
     DeviceIdentity,
     Option<kdevice::TransportInfo>,
 )> {
+    if !view.is_available() {
+        return None;
+    }
+    let Some(mmio) = view.description().mmio else {
+        log::warn!(
+            "platform: skipping {} node without MMIO resource",
+            VIRTIO_MMIO_DT_COMPATIBLE
+        );
+        return None;
+    };
+    if context.revisit_mmio(mmio.base, mmio.size) {
+        return None;
+    }
+    #[cfg(feature = "virtio")]
+    {
+        let (kind, version) = virtio_mmio_classification(mmio)?;
+        #[cfg(feature = "virtio-rng")]
+        if cfg!(target_arch = "aarch64")
+            && kind == driver_base::DeviceKind::Hwrng
+            && version == virtio::MmioVersion::Modern
+            && view.is_root_child_of("linux,dummy-virt")
+        {
+            context.stage_model_rng(view);
+            return None;
+        }
+        let _ = version;
+        virtio_mmio_registration(mmio, kind)
+    }
+    #[cfg(not(feature = "virtio"))]
+    {
+        None
+    }
+}
+
+#[cfg(feature = "virtio")]
+fn virtio_mmio_classification(
+    mmio: fw::MmioResource,
+) -> Option<(driver_base::DeviceKind, virtio::MmioVersion)> {
     let regs = match crate::iomap_mmio(mmio.base, mmio.size, "virtio-mmio-discovery") {
         Ok(regs) => regs,
         Err(err) => {
@@ -197,15 +222,18 @@ fn virtio_mmio_registration(
             mmio.base
         );
     }
-    let Some((device_kind, _version)) = classification else {
-        log::trace!(
-            "platform: skipping empty {} slot at {:#x}",
-            VIRTIO_MMIO_DT_COMPATIBLE,
-            mmio.base,
-        );
-        return None;
-    };
+    classification
+}
 
+#[cfg(feature = "virtio")]
+fn virtio_mmio_registration(
+    mmio: fw::MmioResource,
+    device_kind: driver_base::DeviceKind,
+) -> Option<(
+    DeviceLocation,
+    DeviceIdentity,
+    Option<kdevice::TransportInfo>,
+)> {
     let Some(device_type) =
         crate::driver_registry::virtio::ids::device_kind_to_virtio_type(device_kind)
     else {

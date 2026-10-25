@@ -10,6 +10,9 @@
 
 pub(crate) mod ids;
 
+#[cfg(feature = "virtio-rng")]
+pub(crate) mod rng_model;
+
 #[cfg(feature = "virtio")]
 mod glue;
 

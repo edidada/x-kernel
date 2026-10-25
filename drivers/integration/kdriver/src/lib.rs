@@ -55,6 +55,8 @@ pub mod host_mmio;
 #[cfg(feature = "device-model")]
 pub mod host_services;
 mod manager;
+#[cfg(feature = "virtio-rng")]
+mod platform_model;
 mod resource;
 #[cfg(feature = "hwrng")]
 pub mod rng_completion;
