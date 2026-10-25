@@ -1,5 +1,28 @@
 # kdriver — Design
 
+## Model host MMIO mapping
+
+`host_mmio::iomap` delegates the model's resource-service operation to memspace.
+It accepts explicit bus-resolved regions as well as descriptor-indexed resources;
+it does not invent a second device resource registry or authorization policy.
+The returned IoMap owns one native mapping reference, not necessarily the entire
+mapping: overlapping guards may share the native mapping, and pinned boot
+mappings must survive guard Drop. Each successful acquisition installs a private
+release hook calling `iounmap` once with the exact returned virtual address,
+including page offset. Native errors retain Invalid/NoMemory/Io distinctions;
+release failures are logged because Drop cannot return an error.
+
+The native backend reserves registry capacity before creating a mapping and
+rejects overflow of page-rounded physical endpoints. Its internal page-table or
+platform-preparation recovery is not replaced by the adapter. Guest tests map
+but never access a synthetic test physical interval: two guards must share
+one mapping, the first Drop preserves it, and the last removes its registry
+entry and VMA. A model callback fixture also checks descriptor-indexed mapping
+through bind/unbind/rebind and removal. This verifies host mapping ownership,
+not real hardware register behavior.
+The smoke test targets the ordinary QEMU configuration, not optional KVM MMIO
+guard hypercalls. Production model service installation remains pending.
+
 ## New-model firmware DMA configuration
 
 `firmware_dma::from_firmware` converts the DMA result carried by `FirmwareDevice`

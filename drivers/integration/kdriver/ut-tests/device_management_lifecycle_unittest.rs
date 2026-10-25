@@ -64,11 +64,11 @@ impl ClockConsumerServices for HostServices {
 impl DeviceResourceServices for HostServices {
     fn iomap(
         &self,
-        _: DeviceContext<'_>,
-        _: MmioRegion,
-        _: &'static str,
+        device: DeviceContext<'_>,
+        region: MmioRegion,
+        name: &'static str,
     ) -> Result<IoMap, RuntimeError> {
-        Err(RuntimeError::Unsupported)
+        crate::host_mmio::iomap(device, region, name)
     }
 
     fn request_irq(
@@ -150,6 +150,57 @@ fn model_callbacks_allocate_with_each_descriptor_dma_view() {
         assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
         domain.remove_device(&device).unwrap();
     }
+}
+
+struct MmioProbe;
+
+impl DriverOps<PlatformBus> for MmioProbe {
+    type Data = IoMap;
+
+    fn probe(
+        &self,
+        device: &mut DeviceAccess<'_, PlatformBus>,
+        _: &Environment<'_>,
+    ) -> Result<IoMap, ProbeError> {
+        device.res().iomap(0)
+    }
+}
+
+#[def_test(serial)]
+fn model_callbacks_release_mmio_across_unbind_and_rebind() {
+    let physical_page = 0x0b01_0000;
+    let domain = DeviceDomain::new();
+    domain.set_services(Arc::new(HostServices::new()));
+    let root = domain
+        .add_bus_instance(PlatformBus::ID, None, "host-mmio-ut")
+        .unwrap();
+    static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("test,host-mmio"))];
+    domain.register_driver(DriverDesc::new("host-mmio-ut", IDS, MmioProbe));
+    let mut resources = driver_model::ResourceMap::new();
+    resources.push_kind(driver_model::ResourceKind::Mmio(MmioRegion::new(
+        physical_page,
+        4096,
+    )));
+    let descriptor = DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(Box::new(PlatformBusData::firmware_node(
+            1,
+            &["test,host-mmio"],
+        )))
+        .resources(resources)
+        .build();
+    let is_mapped =
+        || memspace::device_regions().any(|entry| entry.paddr.as_usize() == physical_page);
+    assert!(!is_mapped());
+    let device = domain.add_device(descriptor).unwrap();
+    domain.probe_pending();
+    let first_mapping = is_mapped();
+    domain.unbind_device(&device).unwrap();
+    let first_release = !is_mapped();
+    domain.bind_device(&device).unwrap();
+    let second_mapping = is_mapped();
+    domain.remove_device(&device).unwrap();
+    assert!(first_mapping && first_release && second_mapping && !is_mapped());
 }
 
 type RemoveHook = Arc<dyn Fn(&DeviceRef) + Send + Sync>;

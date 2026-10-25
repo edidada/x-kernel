@@ -255,3 +255,52 @@ warnings are unchanged. This checkpoint is committed locally, not pushed.
 Next: explicit QEMU MMIO platform policy and production host service composition,
 then unique enumeration handoff and real RNG acceptance within R1-08. This helper
 does not by itself enable the production MMIO boot path or close the IRQ gate.
+
+### R1-08 sixth slice: host MMIO ownership and native publication prerequisite
+
+Pre-wiring inspection found that the flattened firmware device record does not
+prove direct attachment to the QEMU root bus. A generic `virtio,mmio` match must
+not silently select a QEMU identity-DMA fallback. Platform policy remains pending
+explicit provenance validation; this slice completes the native MMIO ownership
+operation needed by the same production host service composition.
+
+The native `memspace::iomap_device` path created a mapping before attempting
+registry Vec growth. If that growth failed, the caller received no token for
+cleanup. Capacity reservation now precedes mapping creation under the existing
+registry lock. Page-rounded endpoint overflow is also rejected before side
+effects. These are narrowly scoped prerequisite fixes, not a claim to have solved
+all platform-prepare/page-table internal rollback. The capacity-failure ordering
+is reviewed structurally; no allocator OOM injection facility was introduced.
+
+`kdriver::host_mmio::iomap` owns one native mapping reference per model IoMap
+guard and releases the exact returned address on Drop. It preserves explicit
+bus-resolved ranges, page offsets, counted sharing, pinned mappings and distinct
+Invalid/NoMemory/Io errors. Unmap failures are logged rather than swallowed.
+No device resource facts are copied into another registry, and no real device is
+enabled by adding this helper. Design/security/rustdoc contracts are synchronized.
+
+Tests cover byte/page-end overflow and local counted/pinned lookup semantics.
+The real mapping smoke test acquires two guards for one synthetic physical
+interval, verifies first Drop retains the mapping and final Drop removes both
+registry entry and VMA. A model callback test maps a descriptor-indexed resource,
+unbinds, rebinds and removes using the production host helper. Both use serial
+guest execution and never access the synthetic MMIO addresses. They do not prove
+hardware quiescence or optional KVM MMIO guard hypercall behavior.
+
+Self-review and independent standards/spec reviews found no blocker, including
+the follow-up model callback and VMA assertions. Final validation evidence is
+recorded under local `r1-08-host-mmio/`.
+
+Final aarch64 guest regression selects
+`memspace,kdma,khal,kdriver,of,driver_os_api,driver_model`: **234 passed, 0 failed**,
+coverage extracted (`ut-final.log`). This includes all selected memspace cases,
+not only the new mapping cases. Runs use this worktree's disk with network/vsock
+disabled. No platform identity-DMA fallback, production service installation or
+IRQ acceptance result is implied by these tests.
+
+Final `make clippy` and `make build` pass (`clippy.log`, `build.log`); formatting,
+new-file headers and whitespace checks pass. Existing third-party future-Rust
+compatibility warnings remain unchanged. The native prerequisite and host helper
+are committed separately after review; no push is performed. Next is explicit
+platform/node provenance for the DMA policy and production host composition,
+not broadening the generic converter into an implicit identity fallback.

@@ -763,6 +763,18 @@ before Data destruction, even while stale consumers retain the runtime.
 Counting HAL wrappers observe allocation/mapping release; they do not establish
 IOMMU/cache correctness. The IRQ provider is a synchronous simulation, not a
 concurrent interrupt-core acceptance test. No new production binding is enabled.
+## Model MMIO guard ownership
+
+The new host MMIO helper is for trusted model resource callbacks, not untrusted
+physical-address requests. Explicit regions are valid for bus-resolved BARs and
+are not forced to duplicate descriptor entries. Safe IoMap construction is backed
+by a successful native mapping covering the full requested extent. A unique
+private release hook pairs one native reference with one guard Drop; shared and
+pinned mappings retain memspace's existing lifetime policy. Native unmap errors
+are logged, not silently swallowed or retried. Callers must stop IRQ/register
+access before dropping their final mapping guard. Tests never dereference the
+synthetic physical test interval and do not certify hardware quiescence.
+
 # New-model firmware DMA conversion
 
 `firmware_dma::from_firmware` rejects malformed or unsupported firmware paths

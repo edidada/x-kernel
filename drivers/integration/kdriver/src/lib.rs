@@ -48,6 +48,8 @@ mod enumeration;
 pub mod firmware_dma;
 #[cfg(feature = "device-model")]
 pub mod host_dma;
+#[cfg(feature = "device-model")]
+pub mod host_mmio;
 mod manager;
 mod resource;
 #[cfg(feature = "hwrng")]
