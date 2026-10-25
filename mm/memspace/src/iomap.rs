@@ -117,21 +117,18 @@ pub fn device_regions() -> DeviceRegionIter {
 ///
 /// Each successful call takes one reference on the underlying mapping. Callers
 /// that want lifetime-managed teardown should pair this with [`iounmap`].
+///
+/// # Errors
+/// Returns `InvalidRange` for empty ranges or byte/page-rounded end overflow.
+/// Registry capacity is acquired before mapping creation; a registry allocation
+/// failure returns `NoMemory` without leaving an unpublished new mapping.
+/// Platform or page-table failures return `MappingFailed`.
 pub fn iomap_device(
     paddr: PhysAddr,
     size: usize,
     name: &'static str,
 ) -> Result<VirtAddr, IoMapError> {
-    if size == 0 || paddr.checked_add(size).is_none() {
-        return Err(IoMapError::InvalidRange);
-    }
-
-    let start = paddr.align_down_4k();
-    let end = paddr
-        .checked_add(size)
-        .ok_or(IoMapError::InvalidRange)?
-        .align_up_4k();
-    let span = end.sub_addr(start);
+    let (start, span) = mapping_range(paddr, size)?;
 
     if let Some(vaddr) = acquire_mapping_locked(&mut DEVICE_REGISTRY.lock(), start, span) {
         return Ok(vaddr + paddr.align_offset_4k());
@@ -146,6 +143,7 @@ pub fn iomap_device(
         return Ok(vaddr + paddr.align_offset_4k());
     }
 
+    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
     let limit = iomap_window();
     let hint = limit.start;
     let mapped_start = kernel_aspace
@@ -172,12 +170,24 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
     regions.push(RegionEntry {
         region,
         refs: RegionRefs::Counted(1),
     });
     Ok(mapped_start + paddr.align_offset_4k())
+}
+
+fn mapping_range(paddr: PhysAddr, size: usize) -> Result<(PhysAddr, usize), IoMapError> {
+    if size == 0 {
+        return Err(IoMapError::InvalidRange);
+    }
+    let start = paddr.align_down_4k();
+    let end = paddr
+        .checked_add(size)
+        .and_then(|end| end.checked_add(memaddr::PAGE_SIZE_4K - 1))
+        .ok_or(IoMapError::InvalidRange)?
+        .align_down_4k();
+    Ok((start, end.sub_addr(start)))
 }
 
 /// Release a reference previously taken by [`iomap_device`].
@@ -262,3 +272,5 @@ fn acquire_mapping_locked(
     }
     Some(mapped_start + paddr.sub_addr(entry.region.paddr))
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/iomap.rs");

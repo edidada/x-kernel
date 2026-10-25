@@ -66,6 +66,16 @@ Linux 对应关系：
 - `src/backend/*`
 - `src/iomap.rs`
 
+### Runtime MMIO publication
+
+`iomap_device` validates both the byte interval and page-rounded end before
+platform preparation or registry access. The registry reserves capacity while
+its lock is held, before creating a new mapping; after successful `map_linear`,
+publishing the record cannot fail due to Vec growth. This prevents a successful
+mapping becoming unreachable when metadata allocation fails. Existing mapped
+regions retain their counted/pinned behavior. This ordering does not claim
+rollback for failures internal to the platform preparation or page-table APIs.
+
 ### 内核单元测试布局
 
 测试源码位于 crate 根目录的 `ut-tests/`，通过 `unittest::path_mod_test!`
@@ -75,6 +85,7 @@ Linux 对应关系：
 | 测试文件 | 原模块路径 | 用例数 |
 | --- | --- | --- |
 | `ut-tests/lib.rs` | `tests_memspace` | 3 |
+| `ut-tests/iomap.rs` | `iomap::tests` | 3 |
 | `ut-tests/aspace.rs` | `aspace::tests` | 16 |
 | `ut-tests/vma.rs` | `vma::tests` | 17 |
 | `ut-tests/fault.rs` | `fault::tests` | 2 |
@@ -83,8 +94,8 @@ Linux 对应关系：
 | `ut-tests/backend_shared.rs` | `backend::shared::tests` | 1 |
 | `ut-tests/aarch64_asid.rs` | `aarch64_asid::tests` | 6 |
 
-共 8 个测试模块、54 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
-其他架构选择其余 48 个用例。测试没有额外的 feature 门控或 serial/user 标记。
+共 9 个测试模块、57 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
+其他架构选择其余 51 个用例。测试没有额外的 feature 门控或 serial/user 标记。
 使用已配置内核的 guest unittest 流程验证，不通过 host Cargo 测试替代。
 
 ## 架构

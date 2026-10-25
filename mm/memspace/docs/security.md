@@ -48,6 +48,13 @@ backends construct no post-populate hooks.
 
 ## 外部边界 / 攻击面
 
+Runtime MMIO requests reject overflow of both the byte range and its rounded
+page end before any mapping side effect. Registry capacity is reserved before
+new PTE/VMA creation, so a later registry growth failure cannot leak an
+unpublished mapping. Page-table/platform internal failure recovery is a separate
+contract; these changes do not add platform unprepare or claim that all MMIO
+acquisition failures are transactional.
+
 - `mmap` / `munmap` / `mprotect` / `mremap` / `brk` 等地址空间编辑请求。
 - CPU page fault 或 user-runtime fault request。
 - `fork()` / clone address-space copy。
