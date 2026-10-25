@@ -1700,3 +1700,16 @@ fn test_mutation_queue_reservation_failure_preserves_network_state() {
         entry.addr.address() == address.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
 }
+
+/// `getsockopt(SOL_SOCKET, SO_TYPE)` must report the type requested at
+/// creation — netlink serves both RAW and DGRAM, so the record-and-report
+/// path (containerd-shim's inherited-fd classification) is exercised with a
+/// non-stream type.
+#[def_test]
+fn test_socket_type_reports_the_requested_creation_type() {
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
+    assert_eq!(socket.socket_type(), NetlinkSocketType::Raw.as_raw());
+
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Datagram);
+    assert_eq!(socket.socket_type(), NetlinkSocketType::Datagram.as_raw());
+}
