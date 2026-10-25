@@ -414,3 +414,36 @@ Final regression passes **232/232**, with coverage persisted and extracted.
 Self-review and independent standards/spec re-review have no remaining blocker.
 Formatting and whitespace checks pass; existing third-party future-Rust warnings
 are unchanged. This slice is prepared for a local commit, not a push.
+
+### R1-08 tenth slice: unpublished streaming DMA rollback prerequisite
+
+Before implementing the host instance backend, inspection found that kdma's
+receive/bidirectional unmap copies bounce bytes back. Rejecting a native mapping
+after device-window validation must instead preserve the original buffer: no
+device has received that mapping yet. The host must not fake a transmit direction
+to bypass copy-back, nor implement another bounce allocator.
+
+kdma now provides explicit unsafe discard_dma_buffer for this unpublished-only
+case. It consumes the original mapping record and recycles bounce storage without
+copy-back, sharing the ordinary finalization path. Normal completion semantics
+remain unchanged. It is not cancellation of an already published DMA request.
+
+Tests cover all directions for discard versus normal completion. Independent
+review requested exact resource-recovery evidence; a locked baseline regression
+now verifies active-record removal and restoration of available bounce capacity,
+with assertions after cleanup/unlock. The capacity observation is test-only.
+The re-review reports no remaining blocker. Logs are under local
+`r1-08-streaming-rollback/`.
+
+This is a narrowly scoped native prerequisite, not completion of the host
+instance DMA backend or production MMIO RNG handoff. The model's held DMA
+capability, host adapter and VirtIO binding still need integration before the
+old enumeration path can relinquish device ownership.
+
+Final aarch64 guest selection
+`kdma,kdriver,virtio,driver_model,subsys_hwrng,entropy` passes **240/240** with
+coverage extracted (`ut-final.log`). QEMU uses the worktree-local disk and no
+network/vsock. `make clippy` and `make build` pass after adding the required
+Safety rustdoc to the private finalization helper; no behavior changed in that
+follow-up. Formatting, new-file license and whitespace checks pass. Existing
+third-party future-Rust warnings remain. Local commit only; no push requested.

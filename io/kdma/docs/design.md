@@ -196,3 +196,20 @@ internal forwardings, each with `# Safety` sections and matching
 - `dma-trace` feature: coherent allocations record their call site and
   detect duplicate or mismatched frees at runtime, which is the cheapest
   way to debug DMA leaks without a full MMU tracer.
+
+## Unpublished streaming rollback
+
+`discard_dma_buffer` consumes a successful streaming mapping that has not been
+published to hardware. It removes the same active record and recycles the same
+bounce allocation as ordinary unmap, but does not copy bytes back for any
+direction. This supports a host adapter rejecting a native mapping after checking
+its actual physical span against a device-specific window/mask. A failed receive
+mapping must not overwrite the caller's original bytes with unused bounce data.
+
+Normal `unmap_dma_buffer` preserves directional copy-back for completed transfers.
+Both paths share private finalization and the exact-once active-mapping checks;
+there is no second registry, allocation policy or fake direction at the call site.
+Discard is not reset/cancellation of an already submitted DMA operation.
+Guest tests use real bounce allocations, simulate writes locally, and distinguish
+discard from normal completion for all three directions. They do not certify
+physical device quiescence or host device-window enforcement.

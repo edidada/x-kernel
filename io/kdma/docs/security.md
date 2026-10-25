@@ -142,6 +142,12 @@ the transaction, not actual hypervisor permission revocation or cache behavior.
 
 ## Audit Checklist
 
+- Unpublished streaming rejection uses `discard_dma_buffer`, not receive unmap:
+  discard returns bounce storage without writing the original buffer. Its unsafe
+  contract forbids device publication and requires the exact live original
+  buffer/address pair, consumed once. Ordinary unmap retains directional
+  synchronization; discard must not replace completion of a successful receive.
+
 - Every new unsafe block cites the mapping table or containment assert it
   relies on.
 - Attribute updates remain page-granular and paired with platform hooks.

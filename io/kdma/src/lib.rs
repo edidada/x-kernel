@@ -154,7 +154,8 @@ pub enum DmaDirection {
 /// # Safety
 ///
 /// `buffer` must remain live and exclusively owned until it is later passed to
-/// [`unmap_dma_buffer`]. The caller must not let the device keep using the
+/// [`unmap_dma_buffer`] or, before publication, [`discard_dma_buffer`].
+/// The caller must not let the device keep using the
 /// returned bus address after unmapping.
 pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
@@ -193,6 +194,28 @@ pub unsafe fn unmap_dma_buffer(
             .lock()
             .unmap_dma_buffer(dma_addr, buffer, direction)
     }
+}
+
+/// Discard a successful streaming mapping before publishing it to a device.
+///
+/// Returns its bounce storage to the pool without copying bytes back to the
+/// original buffer, regardless of the mapping's direction. Use this when a
+/// higher layer rejects the mapped address after allocation (for example its
+/// device-specific DMA window or mask). Ordinary completed transfers still use
+/// [`unmap_dma_buffer`] so receive data is synchronized back.
+///
+/// # Safety
+/// `dma_addr` must identify a still-active mapping returned by [`map_dma_buffer`]
+/// for this exact live, exclusively held buffer. The mapping must not have been
+/// published to a device. This consumes the mapping exactly once; do not unmap
+/// or discard it again. The original buffer remains owned by the caller.
+///
+/// # Panics
+/// Panics for an inactive address or mismatched buffer length, as for unmap.
+pub unsafe fn discard_dma_buffer(dma_addr: DmaBusAddress, buffer: NonNull<[u8]>) {
+    // SAFETY: forwards the caller's unpublished, unique mapping ownership and
+    // original live-buffer contract to the same allocator that created it.
+    unsafe { ALLOCATOR.lock().discard_dma_buffer(dma_addr, buffer) };
 }
 
 /// A bus memory address.

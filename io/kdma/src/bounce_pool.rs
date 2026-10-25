@@ -29,6 +29,11 @@ pub(super) struct BounceMapping {
 }
 
 impl BouncePool {
+    #[cfg(unittest)]
+    pub(super) fn available_bytes(&self) -> usize {
+        self.allocator.available_bytes()
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             region: None,

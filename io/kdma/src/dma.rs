@@ -113,7 +113,7 @@ impl DmaAllocator {
     /// # Safety
     ///
     /// `buffer` must remain live and exclusively owned by the caller until the
-    /// matching [`unmap_dma_buffer`] call. The caller must not let the device
+    /// matching unmap or unpublished discard. The caller must not let the device
     /// access the returned bus address after unmapping.
     pub(crate) unsafe fn map_dma_buffer(
         &mut self,
@@ -176,6 +176,38 @@ impl DmaAllocator {
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
     ) {
+        // SAFETY: the caller supplies the active mapping and its original buffer,
+        // with device access stopped, for exactly one completion.
+        unsafe { self.finish_mapping(dma_addr, buffer, direction != DmaDirection::DriverToDevice) };
+    }
+
+    /// Consume an unpublished mapping without copying bounce data back.
+    ///
+    /// # Safety
+    /// The address and live exclusive buffer must match one active mapping
+    /// that was never published to hardware; consume it exactly once.
+    pub(crate) unsafe fn discard_dma_buffer(
+        &mut self,
+        dma_addr: DmaBusAddress,
+        buffer: NonNull<[u8]>,
+    ) {
+        // SAFETY: the caller owns the active unpublished mapping and original
+        // buffer; no device was given the bounce address and no copy-back is due.
+        unsafe { self.finish_mapping(dma_addr, buffer, false) };
+    }
+
+    /// Remove one active mapping, optionally completing its receive copy-back.
+    ///
+    /// # Safety
+    /// The address and original exclusive buffer must identify one live mapping.
+    /// All device access must have stopped. The caller must consume the mapping
+    /// exactly once and select copy-back according to completion versus discard.
+    unsafe fn finish_mapping(
+        &mut self,
+        dma_addr: DmaBusAddress,
+        buffer: NonNull<[u8]>,
+        should_copy_back: bool,
+    ) {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
@@ -196,7 +228,7 @@ impl DmaAllocator {
         );
 
         fence(Ordering::SeqCst);
-        if direction != DmaDirection::DriverToDevice {
+        if should_copy_back {
             // SAFETY: the bounce buffer and destination slice are distinct live
             // regions of `len` bytes tracked by the active mapping record.
             unsafe {
@@ -364,3 +396,5 @@ fn layout_for_pages(num_pages: usize) -> Layout {
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }
+
+unittest::path_mod_test!(streaming_tests, "../ut-tests/streaming.rs");
