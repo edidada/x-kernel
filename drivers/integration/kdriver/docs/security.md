@@ -2,6 +2,15 @@
 
 ## Scoped production RNG ownership boundary
 
+The explicitly enabled real-MMIO lifecycle test operates only on a fixture with
+one matching model device and one matching hwrng publication, checked before
+mutation. A driver name alone is not an instance selector when multiple devices
+exist. The test uses the public unbind/bind contracts and retains registration;
+it does not reset registers directly, replace services or unregister a device
+behind its bus owner. Restoration failures must fail the test and be reported,
+not be treated as successful cleanup. Passing ordinary unbind/rebind does not
+prove a hardware request was pending or complete the deferred IRQ safety gate.
+
 The new path is restricted to fixed boot-DT, available direct QEMU Arm virt
 modern MMIO RNG nodes. Availability includes ancestors; real compatible strings
 and root provenance come from FirmwareDeviceView, not matcher aliases. Full-tree

@@ -715,3 +715,65 @@ gate. R1-09 retirement of unused transitional capability layers and full
 requirements-mapped regression remains afterward; bridges with existing
 consumers must be retained or explicitly migrated. Production boot and sampling
 do not mean the whole driver-framework task is complete.
+
+### R1-08 sixteenth slice: real-device unbind/rebind acceptance
+
+This slice adds an external, opt-in hardware lifecycle regression; it changes
+no production behavior or public API. The existing global-domain unbind/bind
+operations act on the one model RNG in the fixture. The test first requires
+exactly one matching model device and one publication, rather than treating a
+driver name as a multi-device instance selector.
+
+It retains the old handle across unbind and rebind, observes Unclaimed with no
+driver/publication while registration stays online, and verifies the same device
+object returns to Active. Both stale nonempty reads must return BadState without
+altering sentinel storage. A distinct new publication must perform a nonempty
+read with valid length, preserved buffer guards and unchanged unreported suffix.
+No random-value inequality or entropy-quality assertion is made.
+
+A restoration guard is installed before unbind. Destructive-phase observations
+are asserted only after explicit restoration, which requires Active state as
+well as a successful bind call. A failed first restoration is not hidden by its
+Drop retry. Panic or a permanent hardware hang cannot guarantee restoration;
+the outer QEMU watchdog treats those as failure, never as successful cleanup.
+
+The test is serial and explicitly enabled by compile-time
+`XK_TEST_MODEL_MMIO_LIFECYCLE=1`; ordinary runs ignore it. Serial UT execution
+does not suspend the kernel entropy worker. Consequently this proves neither
+an idle-only teardown nor a confirmed pending-request cancellation or racing
+IRQ notification-tail drain. Standards and Spec/logic review report no blocker.
+
+The PCI negative control intentionally enabled the lifecycle test on the wrong
+transport: it failed at the MMIO configuration guard, before mutation, with
+338 other tests passing and one modern-boot test ignored. Evidence is local at
+`r1-08-lifecycle/ut-pci-negative.log`. This expected failure verifies that an
+enabled hardware acceptance test cannot silently skip an unsuitable fixture.
+
+The modern-MMIO positive run passes **340/340**, including the new lifecycle
+case, the boot-model assertion and existing real entropy sampling regressions.
+Coverage is persisted and extracted. It uses the saved `r1-08-lifecycle/mmio.config`,
+the same nine-crate suite as the fifteenth slice, both
+`XK_EXPECT_MODEL_MMIO_RNG=1` and `XK_TEST_MODEL_MMIO_LIFECYCLE=1`,
+`XKMAKE_ARGS='--no-net --no-vsock'`, and
+`QEMU_ARGS='-global virtio-mmio.force-legacy=false'`. The fixture uses its own
+worktree disk; evidence is `r1-08-lifecycle/ut-mmio.log`. No production fix was
+needed for this acceptance case.
+
+After restoring the canonical aarch64 PCI defconfig and leaving both opt-in
+variables unset, regression passes **338 tests, zero failures, two explicit
+modern-MMIO cases ignored**, with coverage extracted (`ut-pci-final.log`). This
+also verifies the ordinary suite does not silently mutate hardware through the
+new opt-in case. Modern-MMIO `make clippy` passes (`clippy-mmio.log`).
+Default-PCI `make clippy` and `make build` pass (`clippy-pci.log`,
+`build-pci.log`); pinned formatting, header/layout and whitespace checks pass.
+Only existing third-party future-Rust warnings remain. This slice is ready for
+local commit only; the worktree is left on the canonical PCI configuration.
+
+For deterministic pending acceptance, the next proposed fixture will withhold
+all responses from a controlled QEMU rng-egd backend, disable the entropy
+worker in that dedicated configuration, and correlate a blocked reader with a
+host-side request observation. Throttling or a fixed sleep is not proof of
+pending state. Reset/late-response behavior of that backend still needs
+verification before combining it with reopened-backend/rebind sampling. This
+is a test-harness prerequisite, not a reason to add state or hooks to the driver
+framework. Real pending, dual-instance and deferred IRQ acceptance remain open.

@@ -2,6 +2,17 @@
 
 ## Scoped production MMIO RNG model binding
 
+The opt-in `model_mmio_lifecycle` regression uses the existing global-domain
+unbind/bind operations and hwrng consumer handles against a single real model
+RNG. Enable it only with `XK_TEST_MODEL_MMIO_LIFECYCLE=1` on the modern-MMIO
+QEMU fixture, without competing device-management operations. It preserves the
+registered device, restores a live binding before checking destructive-phase
+observations, and keeps a fallback restoration guard for early returns.
+Ordinary test configurations skip this hardware-mutating acceptance case.
+Serial test execution excludes other test cases, not the kernel entropy worker;
+the case does not establish that a request was pending at withdrawal or certify
+IRQ notification-tail synchronization.
+
 With `virtio-rng`, EnumerationContext::new always obtains the same
 `production_owner()` from LazyInit<Arc<PlatformModel>>; managers have no separate
 platform-owner field.
