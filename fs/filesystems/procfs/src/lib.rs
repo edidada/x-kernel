@@ -72,3 +72,6 @@ fn new_procfs_with_type(
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");
+
+#[cfg(feature = "device-model")]
+unittest::path_mod_test!(model_mmio_tests, "../ut-tests/model_mmio.rs");

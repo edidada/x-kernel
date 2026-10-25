@@ -226,7 +226,7 @@ def timeout_seconds(value):
 def experiment_environment(environment, wrapper_dir, real_qemu, log_dir):
     environment = environment.copy()
     for key in ("XK_TEST_MODEL_MMIO_LIFECYCLE", "XK_TEST_MODEL_MMIO_ISOLATION",
-                "XK_TEST_MODEL_MMIO_UNREGISTER",
+                "XK_TEST_MODEL_MMIO_UNREGISTER", "XK_TEST_MODEL_MMIO_PROCFS",
                 "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES"):
         environment.pop(key, None)
     environment.update({

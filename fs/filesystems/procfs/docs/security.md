@@ -37,6 +37,18 @@ must not be interpreted as legacy numeric IDs or authorization handles. A
 subsequent rewind omits devices removed from the model domain. Reading the
 global summary can initialize an empty domain, but installs no services or drivers.
 
+The opt-in real-MMIO projection fixture checks its exact module filter before
+sampling or mutation. Serial test execution alone does not exclude the entropy
+worker or other kernel consumers: the dedicated guest must disable those and
+competing lifecycle operations. The fixture uses only existing domain lifecycle
+APIs, retains the DeviceRef, and restores binding before asserting unbind-phase
+observations. A failed restoration fails the test. Its final remove has no
+resurrection guard because registration removal is terminal for that boot;
+the guest must proceed only to result collection and shutdown. VFS reads are
+bounded in total bytes, but hardware teardown can hang and needs an outer
+watchdog. Passing projection checks would not certify IRQ-tail synchronization,
+DMA quiescence, entropy quality or hotplug/re-enumeration safety.
+
 Procfs accepts filesystem operations through `kvfs` and publishes kernel-owned
 information. It trusts `kvfs` for path resolution, credentials, generic access
 checks, buffer validity, and open-file serialization; it trusts `kprocess` and

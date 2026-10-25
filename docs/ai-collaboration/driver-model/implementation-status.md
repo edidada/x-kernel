@@ -1001,3 +1001,61 @@ Modern-MMIO/default-PCI `make clippy`, default-PCI `make build`, pinned formatti
 and whitespace checks pass (`clippy-mmio.log`, `clippy-pci.log`, `build-pci.log`).
 Only existing dependency future-Rust warnings remain. The worktree is restored
 to the canonical PCI configuration; this slice is a local commit without push.
+
+### R1-08 twenty-second slice: real procfs lifecycle and feature wiring
+
+The first dedicated run found no tests: the default feature graph did not
+enable procfs model support. `kfeat/driver_virtio_rng` weakly forwarded
+`procfs?/device-model`, but procfs was selected through `fs_boot`, not kfeat's
+optional dependency. Earlier suite totals did not include the two model-row
+formatter tests and must not be interpreted as projection coverage. The failed
+run is retained in `r1-08-procfs/ut-procfs-missing-feature.log`.
+
+The feature now explicitly enables `procfs/device-model`. This is a production
+feature-composition correction, not just a test addition; RNG-enabled PCI
+configurations receive the same projection support. No production Rust API,
+test hook or lifecycle implementation changes.
+
+The opt-in `procfs::model_mmio_tests` fixture opens all three real device views
+through VFS and reads to EOF with a 64-KiB per-file bound. The exact model-path
+row is active initially, retained unclaimed/without a driver after unbind,
+active again on the same registration after rebind, and absent after terminal
+domain removal. Unbound observations are captured before restoring the binding
+and asserted afterward. Final removal deliberately has no resurrection in this
+one-shot guest. No hardware-progress or IRQ-tail safety claim follows from
+these diagnostic reads.
+
+The exact-filter fixture passes **one test, zero failures/ignored**, with
+coverage extracted (`r1-08-procfs/ut-procfs.log`). It uses aarch64 modern MMIO,
+the private worktree disk, no entropy VirtIO worker, no network/vsock and a
+300-second failure watchdog. Configuration is saved as `mmio.config`. Reproduce
+with `XK_TEST_MODEL_MMIO_PROCFS=1 make unittest
+UNITTEST_CRATE=procfs::model_mmio_tests XKMAKE_ARGS='--no-net --no-vsock'
+QEMU_ARGS='-global virtio-mmio.force-legacy=false'` after preparing that config.
+
+The negative run with `UNITTEST_CRATE=procfs` is rejected at the exact-filter
+assertion before lifecycle mutation: **37 passed, one expected failure**, exit
+2, not a timeout (`ut-reject-broad-filter.log`). Both model formatter tests are
+now actually collected and pass. The pending-experiment host runner clears the
+new destructive opt-in; its **15 Python tests pass** (`host-tests.log`).
+
+Independent Standards and Spec reviews find no blocker, including a follow-up
+review of the feature fix. The native shared-IRQ/notification-tail prerequisite
+remains open; this does not complete R1-08 or unblock R1-09 retirement.
+
+The modern-MMIO nine-crate regression passes **328 tests, zero failures,
+five ignored (333 total)** with coverage (`ut-mmio.log`); the boot-model opt-in
+and both formatter tests pass, while destructive fixtures remain disabled.
+This run keeps the entropy VirtIO worker disabled like the dedicated fixture,
+so its total is not directly comparable with earlier worker-enabled suites.
+Modern-MMIO `make clippy` passes (`clippy-mmio.log`).
+
+Restoring canonical aarch64 PCI with the normal entropy worker and all model
+opt-ins unset passes **341 tests, zero failures, six ignored (347 total)**,
+with coverage (`ut-pci.log`, `pci.config`). Both model formatter tests are
+collected and pass; the opt-in lifecycle tests remain ignored as intended.
+
+Default-PCI `make clippy` and `make build`, focused pinned formatting and
+whitespace checks pass (`clippy-pci.log`, `build-pci.log`). Existing third-party
+future-Rust warnings remain. The worktree is left on canonical PCI; this slice
+is committed locally without push.

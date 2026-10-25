@@ -16,7 +16,7 @@ slice results supersede them.
 | Provider installation before probe and failure rollback | Native composition and controlled failure/rollback tests, slices 8–15 | Software contract coverage present; native shared-IRQ/notification-tail gate remains open |
 | Real sampling, pending unbind, old-handle rebind and domain unregister | Slices 15–19 | Covered individually; withheld-response test is not late-response cancellation proof |
 | Two instances and stale binding separation | Slice 18, 257-byte reads force fresh I/O in each phase | Sequential isolation covered; not a concurrent IRQ-tail stress claim |
-| Existing nodes, attributes and events | Inventory below; devfs/sysfs/uevent/procfs tests | Scoped compatibility evidence; real procfs observation across lifecycle still to be added |
+| Existing nodes, attributes and events | Inventory below; devfs/sysfs/uevent tests; dedicated real procfs lifecycle run | Three model device views verified across unbind/rebind/unregister; driver list remains legacy-only |
 | Legacy PCI and unaffected paths | Repeated canonical PCI regressions; expanded projection suite in current slice | Keep current-run results separate from historical evidence |
 | Documentation and reproducibility | Saved configurations/commands/logs; per-slice tracked status | Ongoing until remaining gates close |
 
@@ -53,18 +53,27 @@ Sources inspected:
 - `fs/filesystems/procfs/src/device_nodes/root.rs`: model rows in three device
   views, but not in the driver-registry view.
 
-The procfs model-row formatting tests verify refreshing/omitting rows, and real
-model lifecycle tests verify the underlying registration states. Neither alone
-is an end-to-end read of those proc files during real unbind/remove. Keep that
-acceptance gap explicit. The legacy-only driver-list view is also a documented
-diagnostic limitation, not silently counted as model-driver introspection.
+The model-row formatter tests existed in source but were not collected in the
+previous default/MMIO regression logs: `kfeat` weakly forwarded the feature to
+its unselected optional procfs dependency, while `fs_boot` brought procfs in
+through another edge. Those earlier logs are not model projection evidence.
+Explicitly enabling `procfs/device-model` from `driver_virtio_rng` fixes the
+production feature composition, including RNG-enabled PCI configurations.
+
+The dedicated `procfs::model_mmio_tests` run now passes its one real-device
+test: each of `/proc/devices`, `/proc/bus/devices` and `/proc/bus/topology` is
+reopened through VFS and read to EOF in four phases. Unbind keeps the same
+online registration with an unclaimed/no-driver row; rebind restores its active
+row; terminal domain unregister removes it. Evidence is
+`r1-08-procfs/ut-procfs.log`; the initial no-tests-found failure is retained as
+`ut-procfs-missing-feature.log`. This is a production feature fix plus acceptance
+tests, not a test-only change. The legacy-only driver-list view remains a
+diagnostic limitation, not model-driver introspection. Pool-node readability
+is separate evidence, not inferred from this fixture.
 
 ## Next work
 
-1. Add real procfs lifecycle observations: unbind retains the device row with no
-   bound driver; domain unregister removes the row. Pool-node presence/readability
-   and unrelated projections must remain independent of hwrng binding state.
-2. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
+1. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
    is ready. No mock, ordinary lifecycle run or withholding backend replaces it.
-3. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
+2. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
    full requirements-mapped acceptance. No old projection facility is retired now.

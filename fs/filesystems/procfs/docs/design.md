@@ -49,6 +49,23 @@ Each rewind fetches a fresh snapshot; formatting neither registers a legacy
 device nor probes or publishes a class device. External formatting tests cover
 namespace separation, parent paths, missing metadata and empty refreshed views.
 
+The `kfeat/driver_virtio_rng` feature explicitly enables `procfs/device-model`.
+Weak forwarding through `procfs?/device-model` does not enable this view when
+procfs is selected only through the separate `fs_boot` dependency edge.
+
+The opt-in `procfs::model_mmio_tests` module adds a real-device projection
+fixture, `real_model_mmio_rng_procfs_tracks_unbind_rebind_and_remove`. It requires
+`XK_TEST_MODEL_MMIO_PROCFS=1`, the exact `UNITTEST_CRATE=procfs::model_mmio_tests`
+filter, `device-model`, aarch64 modern MMIO, one active model RNG, no VirtIO
+entropy worker and no other lifecycle opt-ins. Each phase opens `/devices`,
+`/bus/devices` and `/bus/topology` under a real procfs root using Filename/VFS,
+then reads with an explicit position to EOF with a 64-KiB per-file bound.
+It checks the exact model-path row across active, retained unclaimed with no
+driver, rebound active on the same registration, and terminal removal absent.
+Unbind observations are saved until restoration completes; terminal removal
+is intentionally permanent in this dedicated guest. Recorded runs and limits
+are tracked in the driver-model R1-08 acceptance audit.
+
 `procfs` is a `no_std` virtual filesystem exposing process information, kernel
 statistics, and selected control files through `kvfs`. It formats subsystem-owned
 state; it does not own process lifecycle, address-space replacement, mapping
