@@ -923,3 +923,29 @@ it is not a general DT rule for missing dma-ranges. No support is inferred for
 nested buses, other boards, multiple RAM banks or an IOMMU path. Boot discovery
 tests exercise the policy but do not install the new model's production provider
 or demonstrate real RNG DMA. Those remain subsequent R1-08 integration work.
+
+### Model host service composition
+
+`host_services::new_device_services` composes the native MMIO/DMA helpers and
+management-lock factory into the existing DeviceServices contract. Construction
+does not change the global domain or enumerate hardware. The caller supplies an
+owned OS-api IrqOp capability; the host aggregate keeps no copied device facts.
+The domain must receive these services before registering its devices.
+
+Firmware IRQ routes are resolved by the supplied provider, never treated as
+virtual IRQ numbers. Already resolved virtual IRQs bypass mapping. A successful
+request creates one DevIrq guard capturing the exact returned resource, action
+token and provider. Drop releases that registration without reconstructing its
+route or consulting a replaceable global service. The provider owns mapping
+lifetime and enable/mask semantics; the adapter does not mask shared lines.
+The current IrqOp contract has no diagnostic name parameter, so model request
+names are not forwarded. No new IRQ registration semantics are introduced here.
+
+Clock acquisition and provider publication explicitly return Unsupported; each
+service aggregate owns an independent extension registry. Existing lifecycle UT
+services delegate to this composition, retaining only factory-call counting and
+an unavailable IRQ test provider. New controlled-provider tests cover translated
+and resolved IRQs, failed mapping/request/probe, and unbind/rebind release counts.
+They validate adaptation, not real IRQ detach/drain or hardware quiescence.
+Production provider installation, exclusive new/legacy enumeration handoff and
+real MMIO RNG sampling remain R1-08 work, not claims of this slice.

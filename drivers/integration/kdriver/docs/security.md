@@ -808,3 +808,15 @@ DMA. Rejected firmware paths, invalid masks/windows and explicit windows are
 never replaced. A bounded RAM window is an address constraint, not permission
 to use arbitrary RAM; allocation and hardware quiescence obligations above remain.
 This platform-specific policy trusts the boot firmware's platform identification.
+
+Host service composition retains the IRQ provider and its exact resource/action
+token in each guard; removing or replacing a domain's service bundle cannot
+redirect release to another provider. Firmware mapping failures never proceed
+to registration, and failed registrations never create a release obligation.
+The IRQ provider is trusted to detach and synchronously drain the selected action
+on release, and to return stable mappings for repeated resolution. Drivers must
+stop hardware before releasing guards in the provider's permitted context. The
+void release contract does not provide a recoverable teardown-error protocol.
+The host adapter neither invents one nor treats this contract test as IRQ-core
+acceptance. Services do not cache descriptor DMA/MMIO facts or grant new device
+ownership; production boot selection is unchanged by constructing the aggregate.

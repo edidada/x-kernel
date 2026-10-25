@@ -50,6 +50,8 @@ pub mod firmware_dma;
 pub mod host_dma;
 #[cfg(feature = "device-model")]
 pub mod host_mmio;
+#[cfg(feature = "device-model")]
+pub mod host_services;
 mod manager;
 mod resource;
 #[cfg(feature = "hwrng")]

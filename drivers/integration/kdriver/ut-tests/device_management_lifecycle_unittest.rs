@@ -20,17 +20,15 @@ use kspin::{IrqSave, NoPreempt};
 use ksync::Mutex;
 use unittest::{assert, assert_eq, def_test};
 
-use super::new_device_management_lock;
-
 pub(super) struct HostServices {
-    extensions: ExtensionRegistry,
+    inner: Arc<dyn DeviceServices>,
     factory_calls: AtomicUsize,
 }
 
 impl HostServices {
     pub(super) fn new() -> Self {
         Self {
-            extensions: ExtensionRegistry::new(),
+            inner: crate::host_services::new_device_services(Arc::new(UnavailableIrq)),
             factory_calls: AtomicUsize::new(0),
         }
     }
@@ -39,25 +37,25 @@ impl HostServices {
 impl DeviceServices for HostServices {
     fn create_management_lock(&self) -> Result<Arc<dyn DeviceManagementLock>, RuntimeError> {
         self.factory_calls.fetch_add(1, Ordering::Relaxed);
-        new_device_management_lock().map_err(RuntimeError::from)
+        self.inner.create_management_lock()
     }
 }
 
 impl ExtensionServices for HostServices {
     fn extensions(&self) -> &ExtensionRegistry {
-        &self.extensions
+        self.inner.extensions()
     }
 }
 
 impl ProviderServices for HostServices {
-    fn register_provider(&self, _: ProviderRegistration) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Unsupported)
+    fn register_provider(&self, registration: ProviderRegistration) -> Result<(), RuntimeError> {
+        self.inner.register_provider(registration)
     }
 }
 
 impl ClockConsumerServices for HostServices {
-    fn clk_get(&self, _: DeviceContext<'_>, _: ClkSpec) -> Result<ClkHandle, ServiceError> {
-        Err(RuntimeError::Unsupported.into())
+    fn clk_get(&self, device: DeviceContext<'_>, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
+        self.inner.clk_get(device, spec)
     }
 }
 
@@ -68,17 +66,17 @@ impl DeviceResourceServices for HostServices {
         region: MmioRegion,
         name: &'static str,
     ) -> Result<IoMap, RuntimeError> {
-        crate::host_mmio::iomap(device, region, name)
+        self.inner.iomap(device, region, name)
     }
 
     fn request_irq(
         &self,
-        _: DeviceContext<'_>,
-        _: IrqSpec,
-        _: &'static str,
-        _: IrqHandlerFn,
+        device: DeviceContext<'_>,
+        spec: IrqSpec,
+        name: &'static str,
+        handler: IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
-        Err(RuntimeError::Unsupported)
+        self.inner.request_irq(device, spec, name, handler)
     }
 
     fn alloc_coherent(
@@ -87,11 +85,34 @@ impl DeviceResourceServices for HostServices {
         len: usize,
         align: usize,
     ) -> Result<CoherentMem, RuntimeError> {
-        crate::host_dma::alloc_coherent(device, len, align)
+        self.inner.alloc_coherent(device, len, align)
     }
 
-    fn map_irq(&self, _: DeviceContext<'_>, _: IrqSpec) -> Result<Virq, RuntimeError> {
-        Err(RuntimeError::Unsupported)
+    fn map_irq(&self, device: DeviceContext<'_>, spec: IrqSpec) -> Result<Virq, RuntimeError> {
+        self.inner.map_irq(device, spec)
+    }
+}
+
+struct UnavailableIrq;
+
+impl driver_os_api::IrqOp for UnavailableIrq {
+    fn request_irq(
+        &self,
+        _: driver_os_api::IrqResource,
+        _: IrqHandlerFn,
+    ) -> driver_os_api::ResResult<driver_os_api::IrqHandlerToken> {
+        Err(driver_os_api::ResError::Unsupported)
+    }
+
+    fn release_irq(&self, _: driver_os_api::IrqResource, _: driver_os_api::IrqHandlerToken) {}
+
+    fn set_irq_enabled(&self, _: driver_os_api::IrqResource, _: bool) {}
+
+    fn map_irq(
+        &self,
+        _: driver_os_api::IrqRouteDesc,
+    ) -> driver_os_api::ResResult<driver_os_api::IrqResource> {
+        Err(driver_os_api::ResError::Unsupported)
     }
 }
 

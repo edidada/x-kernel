@@ -344,3 +344,38 @@ nonminimal-bool suggestion was applied without changing the topology predicate.
 Existing third-party future-Rust compatibility warnings remain unchanged.
 Formatting and whitespace checks pass. This slice is committed locally after
 review; no push is requested or performed.
+
+### R1-08 eighth slice: host service composition
+
+`host_services::new_device_services` now composes native MMIO, descriptor-scoped
+DMA and per-device management locks behind the existing DeviceServices contract.
+The caller supplies the existing OS-api IrqOp capability; there is no new IRQ
+abstraction, global IRQ provider lookup or change to kirq. Firmware routes map
+through that provider, while resolved virqs bypass mapping. Each DevIrq guard
+retains the exact mapped resource, returned action token and provider until its
+single release. The adapter does not independently mask/enable shared lines.
+Unsupported clock/provider families fail explicitly; extension tables are local
+to each aggregate, and device facts remain solely in descriptors.
+
+Existing lifecycle test services now delegate to this production composition,
+retaining only factory-call instrumentation and an unavailable IRQ capability.
+Real MMIO/DMA, management-lock and hwrng lifecycle regressions therefore exercise
+the same composition rather than reimplementing host behavior. Controlled IRQ
+tests cover nonidentity translation, resolved-number bypass, original release
+identity, unbind/rebind, failed mapping/request/probe and extension isolation.
+They do not validate physical IRQ delivery, IRQ drain or hardware shutdown.
+
+The first aarch64 regression run selects
+`memspace,kdma,khal,kdriver,of,driver_os_api,driver_model`: **244 passed, 0 failed**,
+coverage extracted (`r1-08-host-services/ut.log`). QEMU uses the worktree-local
+disk with network/vsock disabled. Production global installation, the concrete
+IRQ provider connection, exclusive new/legacy MMIO handoff and real RNG hardware
+acceptance remain in R1-08. The deferred IRQ acceptance gate is not reopened or
+claimed complete by this composition slice.
+
+Self-review and independent standards/spec reviews found no blocker. Final
+`make clippy` and `make build` pass (`clippy.log`, `build.log`); formatting,
+new-file license headers and whitespace checks pass. Cargo regenerated the
+lockfile to include kdriver's direct optional driver-os-api dependency, without
+changing package versions. Existing third-party future-Rust warnings are
+unchanged. The slice is prepared for a local commit; no push is requested.

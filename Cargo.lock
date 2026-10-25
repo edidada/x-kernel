@@ -2344,6 +2344,7 @@ dependencies = [
  "device-res-xkernel",
  "display",
  "driver-model",
+ "driver-os-api",
  "driver_base",
  "input",
  "kalloc",
