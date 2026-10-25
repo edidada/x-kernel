@@ -75,5 +75,8 @@ is separate evidence, not inferred from this fixture.
 
 1. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
    is ready. No mock, ordinary lifecycle run or withholding backend replaces it.
+   The [IRQ acceptance handoff](irq-acceptance-handoff.md) separates delivery of
+   the existing core tests, native adapter integration and concrete RNG tail
+   evidence; the independent worktree remains unmodified and uncommitted.
 2. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
    full requirements-mapped acceptance. No old projection facility is retired now.

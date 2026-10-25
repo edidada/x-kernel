@@ -1059,3 +1059,17 @@ Default-PCI `make clippy` and `make build`, focused pinned formatting and
 whitespace checks pass (`clippy-pci.log`, `build-pci.log`). Existing third-party
 future-Rust warnings remain. The worktree is left on canonical PCI; this slice
 is committed locally without push.
+
+### Remaining IRQ prerequisite reconciliation
+
+After `ca8e22486`, read-only inspection confirms that the independent IRQ
+acceptance worktree still has uncommitted changes on `11fd96a60`. Its historical
+247-case pass and negative control do not constitute current-branch delivery.
+The core tests, current injected adapter tests and concrete RNG notification
+tail cover different paths; none substitutes for the others.
+
+`irq-acceptance-handoff.md` records the ordered handoff and test predicates.
+Reuse the core's delivered test-only dispatch seam; do not fabricate a hardware
+claim through the public IRQ entry, duplicate the IRQ framework or modify the
+independent dirty worktree. This documentation-only reconciliation runs no new
+kernel tests and closes no IRQ gate. R1-09 remains gated.
