@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Ownership of the fixed boot-DT MMIO RNG devices selected for the new model.
+//!
+//! The selected modern transport carries 64-bit queue and buffer addresses.
+//! Its mask is independent of the firmware/platform DMA window and allocator
+//! ownership. The scoped QEMU rationale is recorded in the repository's
+//! `docs/ai-collaboration/driver-model/qemu-mmio-dma-mask.md`.
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
@@ -17,6 +22,8 @@ use ksync::Mutex;
 use lazyinit::LazyInit;
 
 static PLATFORM_MODEL: LazyInit<Arc<PlatformModel>> = LazyInit::new();
+
+const QEMU_MODERN_MMIO_DMA_MASK: u64 = u64::MAX;
 
 /// Shared production owner for every public enumeration entry point.
 ///
@@ -131,8 +138,11 @@ impl PlatformModel {
             InterruptTrigger::LevelLow => IrqTrigger::LevelLow,
             InterruptTrigger::Unknown(_) => return Err(RuntimeError::Invalid),
         };
-        let dma = crate::firmware_dma::from_firmware_with_qemu_virt_mmio_policy(view, u64::MAX)
-            .map_err(|_| RuntimeError::Invalid)?;
+        let dma = crate::firmware_dma::from_firmware_with_qemu_virt_mmio_policy(
+            view,
+            QEMU_MODERN_MMIO_DMA_MASK,
+        )
+        .map_err(|_| RuntimeError::Invalid)?;
         if !dma.coherent || !dma.window.is_identity() {
             return Err(RuntimeError::Invalid);
         }

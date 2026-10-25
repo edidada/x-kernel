@@ -1185,6 +1185,13 @@ to the model; these helper tests alone do not establish hardware acceptance.
 
 ### Explicit QEMU Arm virt DMA policy
 
+The production owner supplies `QEMU_MODERN_MMIO_DMA_MASK` (64 address bits),
+not a mask inferred from the RAM interval. Modern queue register pairs and
+buffer descriptors retain all 64 bits; the pinned QEMU source uses its system
+memory address space for this direct-MMIO RNG. The evidence and scope caveats
+are in `docs/ai-collaboration/driver-model/qemu-mmio-dma-mask.md` at repository
+root. This is not an unrestricted identity window or a generic VirtIO default.
+
 `from_firmware_with_qemu_virt_mmio_policy` is a separate enumeration operation,
 not a default in `from_firmware`. Only MissingWindow permits fallback: an
 available direct root child with actual `virtio,mmio` compatibility under

@@ -10,7 +10,7 @@ slice results supersede them.
 | Acceptance item | Evidence | Current decision |
 |---|---|---|
 | Real modern-MMIO discovery, exclusive new/legacy ownership | Slices 14/15; boot assertion and non-destructive classification tests | Covered for the scoped direct QEMU Arm virt nodes |
-| DMA facts from firmware/platform policy | Slices 1–7; saved QEMU DT, original-node provenance, bounded RAM window and coherency tests | Partial: document the transport/device basis for production `u64::MAX` mask; it is not permission to use all physical addresses |
+| DMA facts from firmware/platform policy | Slices 1–7; saved QEMU DT, original-node provenance, bounded RAM window and coherency tests; [scoped mask basis](qemu-mmio-dma-mask.md) | Source rationale covered for the selected QEMU modern-MMIO path; 64-bit width is not permission to use all physical addresses or proof of above-4-GiB execution |
 | Missing/malformed/unrepresentable DMA inputs | `of`, HAL topology and kdriver firmware-DMA tests; slice 7 regression | Covered for the supported representable window policy |
 | Descriptor authority, host bounds, per-instance acquisition/release | Slices 5–13 plus real two-device slice 18 | Covered for coherent identity-DMA QEMU scope; no IOMMU/non-coherent claim |
 | Provider installation before probe and failure rollback | Native composition and controlled failure/rollback tests, slices 8–15 | Software contract coverage present; native shared-IRQ/notification-tail gate remains open |
@@ -61,12 +61,10 @@ diagnostic limitation, not silently counted as model-driver introspection.
 
 ## Next work
 
-1. Close the production DMA-mask rationale against the actual transport/platform
-   contract without weakening the bounded-window validation.
-2. Add real procfs lifecycle observations: unbind retains the device row with no
+1. Add real procfs lifecycle observations: unbind retains the device row with no
    bound driver; domain unregister removes the row. Pool-node presence/readability
    and unrelated projections must remain independent of hwrng binding state.
-3. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
+2. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
    is ready. No mock, ordinary lifecycle run or withholding backend replaces it.
-4. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
+3. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
    full requirements-mapped acceptance. No old projection facility is retired now.

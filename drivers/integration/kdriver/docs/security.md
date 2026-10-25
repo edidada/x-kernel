@@ -1014,6 +1014,14 @@ never replaced. A bounded RAM window is an address constraint, not permission
 to use arbitrary RAM; allocation and hardware quiescence obligations above remain.
 This platform-specific policy trusts the boot firmware's platform identification.
 
+The selected modern-MMIO transport's 64-bit mask records address representability,
+not access permission. Every allocation remains constrained by the independent
+descriptor window and native allocator ownership. The pinned-source mask basis
+does not certify every 64-bit address, physical hardware, a different IOMMU path,
+or above-4-GiB guest execution; changes to the scoped machine/transport policy
+require renewed evidence. The staged-policy regression checks complete RAM
+coverage, both window edges, crossing intervals and upper-address rejection.
+
 Host service composition retains the IRQ provider and its exact resource/action
 token in each guard; removing or replacing a domain's service bundle cannot
 redirect release to another provider. Firmware mapping failures never proceed

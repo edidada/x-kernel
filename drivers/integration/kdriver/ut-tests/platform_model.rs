@@ -86,6 +86,46 @@ fn staged_registration_rejects_atomic_context_and_releases_reservation() {
     assert_eq!(observed, (Err(RuntimeError::BadState), true, true));
 }
 
+#[def_test]
+#[cfg(target_arch = "aarch64")]
+fn staged_qemu_dma_mask_does_not_expand_the_ram_window() {
+    if !kbuild_config::MACHINE_AARCH64_QEMU {
+        return unittest::TestResult::Ignored;
+    }
+    let owner = PlatformModel::new();
+    let mut observed = None;
+    khal::firmware::devices::for_each_compatible_view(
+        |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
+        |view| {
+            if observed.is_some() || !view.is_root_child_of("linux,dummy-virt") {
+                return;
+            }
+            let Some((start, size)) = view.single_root_ram_range() else {
+                return;
+            };
+            let start = start as u64;
+            let size = size as u64;
+            let Some(end) = start.checked_add(size).filter(|_| size > 0) else {
+                return;
+            };
+            let staged = owner.stage(&view).unwrap().unwrap();
+            let dma = staged.dma;
+            observed = Some((dma, start, end));
+            drop(staged);
+        },
+    );
+    let (dma, start, end) = observed.unwrap();
+    assert_eq!(dma.mask, u64::MAX);
+    assert!(dma.coherent);
+    assert_eq!(dma.translate_range(start, end - start), Some(start));
+    assert_eq!(dma.translate_range(end - 1, 1), Some(end - 1));
+    assert_eq!(dma.translate_range(end, 1), None);
+    assert_eq!(dma.translate_range(end - 1, 2), None);
+    assert_eq!(dma.translate_range(u64::MAX, 2), None);
+    assert!(start == 0 || dma.translate_range(start - 1, 1).is_none());
+    assert!(owner.slots.lock().is_empty());
+}
+
 #[def_test(serial)]
 fn modern_mmio_boot_rng_is_active_in_the_model() {
     if option_env!("XK_EXPECT_MODEL_MMIO_RNG") != Some("1") {

@@ -959,3 +959,45 @@ formatting and whitespace checks pass. Logs are `clippy-mmio.log`,
 `clippy-pci.log` and `build-pci.log` in the same evidence directory. Existing
 third-party future-Rust warnings remain. This is a local commit only; the
 worktree is left on the canonical PCI configuration.
+
+### R1-08 twenty-first slice: scoped modern-MMIO DMA mask rationale
+
+`qemu-mmio-dma-mask.md` closes the missing source rationale against the OASIS
+draft edition actually inspected, pinned upstream QEMU v10.0.11 and the recorded
+local Linux HEAD. Queue register pairs and buffer descriptors preserve 64-bit
+addresses; the selected QEMU MMIO bus uses system memory and RNG uses that
+virtqueue mapping path. Linux's modern-MMIO 64-bit request with a platform DMA
+API fallback corroborates the separation of width from platform feasibility,
+not a requirement to copy its fallback into this scoped adapter.
+
+The production literal is named `QEMU_MODERN_MMIO_DMA_MASK`, still `u64::MAX`.
+No value or allocation policy changes. Firmware/platform window bounds, native
+allocation ownership and complete-range checks remain independent constraints.
+The note explicitly does not prove all possible 64-bit addresses, execution
+above 4 GiB, or Debian package/source byte equivalence. It is not a generic
+VirtIO/PCI/legacy-MMIO or IOMMU DMA default.
+
+A new test exercises the actual platform staging path on QEMU Arm virt, checks
+the full RAM interval and last byte, rejects both outside edges, a crossing
+range and an upper-address range, and confirms its temporary reservation is
+released. Other aarch64 machines ignore this QEMU-specific fixture. Assertions
+run after releasing the temporary slot; no MMIO transport or device is created.
+
+Final modern-MMIO nine-crate regression passes **340 tests, zero failures,
+four ignored (344 total)** with coverage (`r1-08-dma-mask/ut-mmio-final.log`).
+The boot-model opt-in verifies the real selected RNG, while the staged-policy
+test verifies width/window separation. `ut-mmio.log` is preliminary evidence
+before the final machine guard/test cleanup. `mmio.config` saves configuration;
+the run uses the private worktree disk without network/vsock and a failure
+watchdog. Real procfs lifecycle observation and the native IRQ gate remain open.
+
+Canonical aarch64 PCI regression with model opt-ins unset passes **339 tests,
+zero failures, five ignored (344 total)**, with coverage extracted
+(`r1-08-dma-mask/ut-pci.log`). The new policy test also passes there without
+claiming PCI transport coverage: it stages the QEMU firmware view only.
+Standards and independent Spec review find no blocker; the research note's
+scope and package-source caveats remain part of the decision.
+Modern-MMIO/default-PCI `make clippy`, default-PCI `make build`, pinned formatting
+and whitespace checks pass (`clippy-mmio.log`, `clippy-pci.log`, `build-pci.log`).
+Only existing dependency future-Rust warnings remain. The worktree is restored
+to the canonical PCI configuration; this slice is a local commit without push.
