@@ -124,8 +124,8 @@ pub use extension::{ExtensionRegistry, ExtensionService, ExtensionServices};
 pub use firmware::{FirmwareNodeInfo, FirmwareProp};
 pub use provider::{ProviderClass, ProviderRegistration, ProviderServices};
 pub use resource::{
-    ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
-    ResourceEntry, ResourceKind, ResourceMap, Virq,
+    ClkSpec, DmaInfo, DmaWindow, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger,
+    MmioRegion, ResourceEntry, ResourceKind, ResourceMap, Virq,
 };
 pub use services::{
     ClockConsumerServices, DeviceContext, DeviceManagementError, DeviceManagementLock,

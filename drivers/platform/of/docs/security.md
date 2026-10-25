@@ -2,12 +2,11 @@
 
 ## Scope
 
-This analysis covers the entire crate — `src/lib.rs` (global DTB state,
-semantic accessors, PCI/interrupt/memory decoding) plus
-`ut-tests/of_unittest.rs`, which is test-only and reachable exclusively
-through the audited public entry points. The four unsafe entry points
-are the only direct external-input boundaries; the DTB blob itself is
-validated by `rs_fdtree` (see its own security document).
+This analysis covers `src/lib.rs` (global DTB state, semantic accessors,
+PCI/interrupt/memory decoding), `src/dma.rs` (DMA decoding and resolution),
+and their external tests in `ut-tests/`. The four unsafe entry points accept
+raw DTB pointers; the DTB blob itself is validated by `rs_fdtree` (see its own
+security document). The safe DMA decoder additionally accepts property slices.
 
 
 ### `chosen_log_level`
@@ -31,6 +30,23 @@ potentially truncated, oversized, or lying, and degrades to `None` /
 init, drivers) are trusted to check those `Option`s.
 
 ## External Boundaries
+
+`resolve_dma` follows structural parents only and rejects interconnect or IOMMU
+properties rather than mistaking those paths for direct DMA. Nearest coherency
+markers win, but malformed/conflicting markers are errors. Numeric translation
+requires full child-window containment and preserves the device-side base.
+Missing ranges never manufacture an unrestricted mapping. Explicit platform
+fallback, host resource ownership and cache operations are outside this parser.
+
+`dma::parse_dma_ranges` also accepts raw property bytes independently of the
+global DTB. Nonempty properties require one- or two-cell fields and complete
+tuples. Iteration rejects zero sizes and checks both inclusive window ends,
+including the valid case ending at `u64::MAX`. Three-cell PCI encodings are
+unsupported. It neither allocates nor uses unsafe code. A decoded range is a
+firmware assertion, not authorization to access memory: callers must resolve
+ancestry and enforce platform/device constraints on the full DMA allocation.
+An invalid later tuple must invalidate the view rather than leave a partial
+set of permitted windows.
 
 - The boot DTB pointer handed to `init_device_tree_ptr` is the root trust
   boundary: the blob must be valid and must remain accessible for the

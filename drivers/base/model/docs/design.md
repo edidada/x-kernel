@@ -130,7 +130,9 @@ modalias 保持回调期借用：probe 提供总线派生值，remove 保持 Non
 而自动采用 `DmaInfo::DEFAULT`。
 `Resources::alloc_coherent` 在未配置时返回 `Fatal(Unsupported)`，不调用宿主；
 已配置时宿主通过借用的设备上下文读取原始 `DmaInfo`，保留地址转换、mask 校验和错误传播语义。
-MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 不变；model 的宿主服务接收 `DeviceContext`，不再单独传 DMA 副本。
+MMIO、IRQ、时钟等非 DMA 能力不受影响。os-api 的 `DmaInfo` 持有经过验证的
+`DmaWindow`，替代不能表达范围的 offset；model 的宿主服务接收 `DeviceContext`，
+不再单独传 DMA 副本。宿主必须校验完整分配区间，不仅校验起点。
 
 ## 描述符构造接口
 

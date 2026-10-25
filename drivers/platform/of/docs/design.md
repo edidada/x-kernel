@@ -63,9 +63,12 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
 ```text
 drivers/platform/of/
 ├── src/
-│   └── lib.rs      # global DTB, semantic accessors, PCI/interrupt/memory decoding
+│   ├── lib.rs      # global DTB, semantic accessors, PCI/interrupt/memory decoding
+│   └── dma.rs      # local decoding and restricted DMA ancestor resolution
 ├── ut-tests/
-│   └── of_unittest.rs  # unit tests (unittest harness)
+│   ├── of_unittest.rs  # unit tests (unittest harness)
+│   ├── dma_unittest.rs # local DMA property boundary tests
+│   └── dma_resolution.rs # tree translation, coherency and NOP regressions
 └── Cargo.toml
 ```
 
@@ -124,13 +127,30 @@ interrupt counts, a 5-cell GIC parent and the 16/17-cell parent boundary.
 - `PMU_IRQ_CACHE` is a relaxed-use single-word cache: `0` means unresolved,
   a resolved non-zero IRQ is stored with `Release` and read with `Acquire`;
   resolution is idempotent, so a redundant re-resolve is harmless.
-- All accessors take `&'static` snapshots of an immutable tree; no locking.
+- Global accessors use the immutable boot-lifetime tree; explicit-tree DMA
+  helpers also accept shorter-lived validated trees. Neither needs locking.
 
 ## Error Model
 
+- DMA property decoding: `dma::parse_dma_ranges` distinguishes absent, empty
+  (local identity), and explicit windows. It accepts one- and two-cell numeric
+  encodings without allocation, preserving all window bases and sizes. Layout
+  errors fail at construction; zero-size and overflowing windows fail during
+  iteration. Consumers must check every result, not filter out errors.
+- `dma::resolve_dma` resolves numeric single-window paths through structural
+  parents and inherits the nearest coherency declaration. Each child window
+  must fit wholly in its parent's window; empty ranges are local identity.
+  Missing ranges before translation prevent inheritance across that bus;
+  after translation starts they are an error. The root terminates translation.
+  IOMMU/interconnect paths, PCI/ISA encodings and multiple windows are rejected.
+  Explicit cell widths are required for tuples. Unknown range/coherency facts
+  remain unknown: platform policy is separate and no device mask is inferred.
+  Lookup is discovery-only O(depth * node count), allocation-free, using the
+  structural parser's node identity rather than names.
+
 - Initialization: `Result<(), FirmwareInitError>` with `MissingDeviceTreePtr`
   and `BadDeviceTree(FdtError)`.
-- Everything else: `Option` — absent nodes, properties, phandles, or
+- Other accessors: `Option` — absent nodes, properties, phandles, or
   undecodable cells yield `None`; malformed sizes fall back to defaults
   where the spec allows (for example `bus-range` defaults to `[0, 0xff]`,
   `#address-cells` to 1 or 2).

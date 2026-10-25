@@ -44,6 +44,8 @@ mod bus;
 pub mod device_management;
 pub mod driver_registry;
 mod enumeration;
+#[cfg(feature = "device-model")]
+pub mod firmware_dma;
 mod manager;
 mod resource;
 #[cfg(feature = "hwrng")]

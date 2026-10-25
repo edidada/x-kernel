@@ -27,7 +27,9 @@ use alloc::sync::Arc;
 pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 pub use clock::{ClkHandle, ClkOps, ClkSpec, EnabledClock};
-pub use dma::{CoherentMem, DmaAllocation, DmaDirection, DmaInfo, DmaMapping, DmaOp, DmaSpec};
+pub use dma::{
+    CoherentMem, DmaAllocation, DmaDirection, DmaInfo, DmaMapping, DmaOp, DmaSpec, DmaWindow,
+};
 pub use error::{ResError, ResResult};
 pub use irq::{
     DevIrq, IrqAction, IrqController, IrqDomainId, IrqHandlerFn, IrqHandlerToken, IrqOp,

@@ -11,6 +11,11 @@ which adds kernel-specific semantics.
 
 ## Responsibilities
 
+`FdtNode::parent` recovers the structural parent by matching the stored borrowed
+property-slice identity in the same tree. Duplicate names are not identities.
+The lookup is allocation-free O(node count); ancestor walking belongs to
+discovery, not hot runtime paths. DMA interpretation remains in `of`.
+
 - Validate the FDT container: header magic (`0xd00dfeed`), declared total
   size versus the available buffer (`LinuxFdt::new`), nonoverlapping block
   ranges, reservation termination, and the entire structure token stream.

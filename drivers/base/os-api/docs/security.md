@@ -32,6 +32,12 @@ EnabledClock Drop 平衡一次成功 enable；enable 失败由 provider 自行�
 
 ## IRQ 与错误边界
 
+DMA 窗口构造检查 CPU 与 bus 两侧区间末端，不使用可能截断的有符号差转 u64。
+完整区间转换拒绝零长度、窗口越界、长度加法溢出、非连续 mask 及跨 mask 上界。
+窗口字段私有，转换中的 bus 加法由构造不变量与区间检查共同保证不溢出。
+这只验证地址范围，不能证明物理内存归属、缓存协议或设备已停机。
+宿主分配后若验证失败，必须释放该分配；不得只验证起点后把整个缓冲区交给设备。
+
 irq-types 的 IrqDomainId 不证明域存在，宿主必须验证并执行正确映射。
 IRQ handler 只用于普通设备 IRQ，不能睡眠或被当作 pseudo-NMI 回调。
 默认恒等 map_irq 不适用于非恒等中断域。新模型没有 threaded IRQ 入口。

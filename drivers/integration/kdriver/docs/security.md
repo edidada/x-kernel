@@ -763,3 +763,11 @@ before Data destruction, even while stale consumers retain the runtime.
 Counting HAL wrappers observe allocation/mapping release; they do not establish
 IOMMU/cache correctness. The IRQ provider is a synchronous simulation, not a
 concurrent interrupt-core acceptance test. No new production binding is enabled.
+# New-model firmware DMA conversion
+
+`firmware_dma::from_firmware` rejects malformed or unsupported firmware paths
+without replacing them with defaults. Missing window/coherency requires explicit
+platform handling elsewhere. A successful result establishes numeric address
+constraints only, not hardware identity, resource ownership or cache handling.
+Every subsequent host allocation must validate its complete interval and unwind
+the allocation on rejection. Legacy provider behavior is unchanged.

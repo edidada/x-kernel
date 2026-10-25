@@ -55,7 +55,7 @@ pub struct DeviceDescriptor {
     /// `DeviceAccess::fw()`.
     #[builder(default, setter(strip_option(fallback = fw_opt)))]
     pub fw: Option<FirmwareNodeInfo>,
-    /// Optional DMA configuration (address mask, offset and coherency).
+    /// Optional DMA configuration (address mask, resolved window and coherency).
     /// Enumerators or platform code supply it before DMA can be used.
     /// `None` means unconfigured, not proof that the hardware lacks DMA;
     /// model DMA allocation fails without invoking the host service.

@@ -42,6 +42,18 @@ pub struct FdtNode<'b, 'a> {
 }
 
 impl<'b, 'a: 'b> FdtNode<'b, 'a> {
+    /// Return the structural parent, or `None` for the root.
+    ///
+    /// Uses property-slice identity, not potentially duplicated node names.
+    /// This allocation-free lookup scans the tree: O(number of nodes), intended
+    /// for firmware discovery rather than runtime device operations.
+    pub fn parent(self) -> Option<Self> {
+        let props = self.parent_props?;
+        self.header
+            .all_nodes()
+            .find(|node| node.props.as_ptr() == props.as_ptr() && node.props.len() == props.len())
+    }
+
     /// Returns an iterator over the current node properties.
     pub fn properties(self) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
         let mut stream = FdtData::new(self.props);
@@ -397,8 +409,8 @@ pub(crate) fn find_node<'b, 'a: 'b>(
         Some(part) => part,
     };
 
-    stream.skip_nops();
     let parent_props = Some(stream.remaining());
+    stream.skip_nops();
 
     while stream.peek_u32()?.get() == FDT_PROP {
         let _ = NodeProperty::parse(stream, header);

@@ -199,7 +199,7 @@ impl DeviceResourceServices for MockServices {
     fn alloc_coherent(
         &self,
         device: crate::DeviceContext<'_>,
-        _: usize,
+        len: usize,
         _: usize,
     ) -> Result<crate::CoherentMem, RuntimeError> {
         self.record_request("alloc_coherent", &device);
@@ -209,15 +209,12 @@ impl DeviceResourceServices for MockServices {
             .descriptor()
             .dma
             .ok_or(RuntimeError::Unsupported)?;
-        // Test mock: fake identity allocator honoring the device's DMA
-        // view through the same translate() the real host uses, so the
-        // mask/offset contract is exercised in tests too.
         let paddr = 0x4000_0000u64 + self.mapped.load(Ordering::Relaxed) as u64;
-        match dma.translate(paddr) {
+        match dma.translate_range(paddr, len as u64) {
             Some(bus) => Ok(crate::CoherentMem::new(
                 paddr as usize,
                 bus,
-                0x1000,
+                len,
                 Some(self.release_hook()),
             )),
             None => Err(RuntimeError::NoMemory),
@@ -1819,7 +1816,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         .resources(test_resources())
         .dma(crate::DmaInfo {
             mask: 0xFFFF_FFFF,
-            offset: 0x2000_0000,
+            window: crate::DmaWindow::new(0x4000_0000, 0x2000_0000, 0x1000).unwrap(),
             coherent: false,
         })
         .build();
@@ -1841,11 +1838,16 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
     assert_eq!(services.dma_requests.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        ctx.res().alloc_coherent(0x1001, 0x1000),
+        Err(ProbeError::Fatal(RuntimeError::NoMemory))
+    ));
+    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 2);
 
     // A device whose window cannot address the mock's pages fails CLEANLY.
     desc.dma = Some(crate::DmaInfo {
         mask: 0x0FFF_FFFF,
-        offset: 0,
+        window: crate::DmaWindow::IDENTITY,
         coherent: true,
     });
     let core = crate::device::DeviceCore::new(
@@ -1863,7 +1865,7 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         ctx.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::NoMemory))
     ));
-    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 2);
+    assert_eq!(services.dma_requests.load(Ordering::Relaxed), 3);
 }
 
 // ---------------------------------------------------------------------------

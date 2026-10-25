@@ -1,5 +1,15 @@
 # kdriver — Design
 
+## New-model firmware DMA configuration
+
+`firmware_dma::from_firmware` converts the DMA result carried by `FirmwareDevice`
+into a portable `DmaInfo` for a new-model descriptor. Firmware errors remain
+typed, missing range/coherency is explicit failure, and device masks are supplied
+separately from the firmware bus window. It revalidates public range values at
+this seam. No fallback, memory allocation, MMIO access or model registration
+occurs here. This is an enumeration capability, not a concrete-driver dependency.
+The production MMIO handoff and constrained host allocation remain pending.
+
 ## Purpose
 
 `kdriver` is x-kernel's device-driver orchestration and host-integration

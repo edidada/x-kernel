@@ -34,6 +34,20 @@ NotFound 和一般 Io 分类，MappingFailed 仍供映射失败使用。
 
 ## 生命周期
 
+### DMA 地址约束
+
+`DmaInfo` 将设备 mask、总线窗口与 coherency 分开。`DmaWindow` 保存已解析的
+CPU 起点、设备起点和窗口最后偏移，构造时验证两端不溢出且长度非零。
+不再用一个有符号 offset 代替窗口；地址差大于 i64 也能无损表达。
+参考 Linux `include/linux/dma-direct.h` 的 `bus_dma_region` 职责，但当前只支持
+一个连续窗口。固件多段窗口不能包成一个大窗口，转换方应拒绝尚不支持的配置。
+OF 的局部 parent 地址必须先完成祖先转换，不能直接当作 CPU 地址。
+
+宿主对完整分配/映射调用 `translate_range(paddr, len)`，同时检查窗口下界、
+上界、长度溢出以及连续低位设备 mask；单地址 `translate` 仅用于单字节查询。
+`DmaWindow::IDENTITY` 是显式全地址恒等策略，不表示缺失固件属性。
+设备描述仍为唯一配置来源，宿主通过设备上下文读取；不增加第二份可变配置。
+
 IoMap、DevIrq、CoherentMem、ClkHandle 保存宿主提供的 ReleaseHook，
 Drop 通过 Option::take 至多调用一次。没有 hook 不代表拥有实际硬件资源；
 宿主负责建立正确的获取/释放配对，驱动必须先停止硬件和依赖它的操作。

@@ -20,6 +20,11 @@ vocabulary and rejects what it cannot parse.
 
 ## Trust Model
 
+Parent lookup compares slice pointers and lengths within the validated immutable
+tree; it never matches names or dereferences fabricated pointers. Root has no
+parent. Repeated lookup is bounded by the validated tree depth, but performs a
+linear scan per level and is intended only for firmware discovery.
+
 The DTB blob is external, untrusted input until validated. This crate is
 the structural validation gate for the whole device-tree stack: once
 `LinuxFdt::new` accepts a blob, its container ranges, reservation terminator,

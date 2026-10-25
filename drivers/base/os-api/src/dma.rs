@@ -62,27 +62,58 @@ impl Drop for CoherentMem {
     }
 }
 
-/// A device's DMA view of physical memory — `struct device`'s
-/// `dma_mask`/`dma_pfn_offset`/coherency triad, snapshotted at enumeration
-/// from firmware facts.
+/// One resolved, contiguous CPU-physical to device-bus DMA window.
 ///
-/// * `mask` (`dev->dma_mask`): the address bits the device actually drives.
-///   Every allocation handed to the device must land under it.
-/// * `offset` (`dev->dma_pfn_offset << PAGE_SHIFT` with sign): the
-///   cumulative `dma-ranges` translation, `dma_addr = paddr - offset`.
-///   Signed: a bus can map device ids ABOVE the CPU window.
-/// * `coherent` (`dev_is_dma_coherent`): whether the device sees CPU caches;
-///   when `false` the host must run the DmaOp cache-maintenance protocol
-///   around buffers.
+/// Unlike a local firmware range, both address spaces are fully resolved.
+/// Private fields preserve nonempty, nonoverflowing window invariants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaWindow {
+    cpu_start: u64,
+    bus_start: u64,
+    last_offset: u64,
+}
+
+impl DmaWindow {
+    /// Explicit full-address-space identity mapping, not a missing-data fallback.
+    pub const IDENTITY: Self = Self {
+        cpu_start: 0,
+        bus_start: 0,
+        last_offset: u64::MAX,
+    };
+
+    /// Construct a resolved window with a length in bytes.
+    ///
+    /// # Errors
+    /// Returns `InvalidResource` for zero length or either address-end overflow.
+    pub const fn new(cpu_start: u64, bus_start: u64, len: u64) -> ResResult<Self> {
+        let Some(last_offset) = len.checked_sub(1) else {
+            return Err(ResError::InvalidResource);
+        };
+        if cpu_start.checked_add(last_offset).is_none()
+            || bus_start.checked_add(last_offset).is_none()
+        {
+            return Err(ResError::InvalidResource);
+        }
+        Ok(Self {
+            cpu_start,
+            bus_start,
+            last_offset,
+        })
+    }
+}
+
+/// A device's resolved DMA window, device address mask and cache coherency.
 ///
-/// Firmware facts supplied by the device model and applied by the host.
+/// The device model owns these facts; the host applies them to every allocation
+/// and mapping. A bus window is not a device mask. This direct-DMA contract
+/// supports one continuous window, not an IOMMU or disjoint range map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaInfo {
-    /// Device-usable address bits (`DMA_BIT_MASK(n)`); translated device
-    /// addresses must satisfy `addr & !mask == 0`.
+    /// Device-usable low address bits (`DMA_BIT_MASK(n)`).
+    /// Noncontiguous masks are rejected by translation.
     pub mask: u64,
-    /// `dma_addr = paddr - offset` (signed, cumulative `dma-ranges`).
-    pub offset: i64,
+    /// Resolved CPU-to-device window, independently bounded from the mask.
+    pub window: DmaWindow,
     /// Firmware-stated cache coherency (`dma-coherent`).
     pub coherent: bool,
 }
@@ -94,27 +125,40 @@ impl DmaInfo {
     /// carry firmware's statement instead.
     pub const DEFAULT: Self = Self {
         mask: u64::MAX,
-        offset: 0,
+        window: DmaWindow::IDENTITY,
         coherent: true,
     };
 
-    /// Translate a CPU physical address into this device's DMA address,
-    /// rejecting addresses the device cannot address.
-    ///
-    /// `None` means the allocation cannot work for this device (outside the
-    /// `dma-ranges` window or above `mask`) — callers fail the request
-    /// instead of silently wrapping a 64-bit bus address into 32 truncated
-    /// device bits.
+    /// Translate one byte. Allocators must use [`Self::translate_range`] instead.
     pub const fn translate(&self, paddr: u64) -> Option<u64> {
-        let dma = paddr as i128 - self.offset as i128;
-        if dma < 0 {
+        self.translate_range(paddr, 1)
+    }
+
+    /// Translate a complete nonempty physical interval, returning its bus base.
+    ///
+    /// Rejects lower/upper window violations, zero length, arithmetic overflow,
+    /// invalid masks and intervals whose last bus byte exceeds the device mask.
+    /// This does not allocate memory or perform cache maintenance.
+    pub const fn translate_range(&self, paddr: u64, len: u64) -> Option<u64> {
+        if self.mask != u64::MAX && self.mask & (self.mask + 1) != 0 {
             return None;
         }
-        let dma = dma as u64;
-        if dma & !self.mask != 0 {
+        let Some(offset) = paddr.checked_sub(self.window.cpu_start) else {
+            return None;
+        };
+        let Some(last_byte) = len.checked_sub(1) else {
+            return None;
+        };
+        let Some(last_offset) = offset.checked_add(last_byte) else {
+            return None;
+        };
+        if last_offset > self.window.last_offset {
             return None;
         }
-        Some(dma)
+        if self.window.bus_start + last_offset > self.mask {
+            return None;
+        }
+        Some(self.window.bus_start + offset)
     }
 }
 

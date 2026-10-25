@@ -242,3 +242,11 @@ destruction and borrowed root entries. It uses the real `PagingHandlerImpl` and
 global `PageRef`; the generic page-table `TestHandler` has no such ownership or
 reclaim protocol. Test tables are never activated in hardware, so these cases do
 not validate generic page-table algorithms or TLB shootdown.
+# Firmware device discovery: DMA facts
+
+`firmware::devices::FirmwareDevice` carries `Result<DmaFacts, DmaResolveError>`
+alongside existing MMIO/IRQ discovery facts. `for_each_compatible` obtains this
+from the OF resolver; errors are preserved rather than dropping a device that
+may have non-DMA consumers. This layer does not depend on the driver model,
+choose a device mask, or introduce a platform fallback. Host integration converts
+the transient discovery facts into the model descriptor's owned configuration.

@@ -26,7 +26,9 @@
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
-    InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo, PciRangeInfo,
+    InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo,
+    PciRangeInfo,
+    dma::{DmaFacts, DmaRangeError, DmaResolveError, ResolvedDmaRange},
 };
 
 /// Cached IO-APIC physical address from ACPI MADT.
@@ -61,6 +63,10 @@ pub struct FirmwareDevice {
     pub source: FirmwareSource,
     pub mmio: Option<MmioResource>,
     pub irq: Option<InterruptInfo>,
+    /// Resolved DMA facts or an explicit unsupported/malformed-path error.
+    /// Missing facts inside `Ok` require platform policy, not an unlimited mask.
+    /// DMA errors do not hide the device from non-DMA consumers.
+    pub dma: Result<DmaFacts, DmaResolveError>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -190,14 +196,22 @@ pub fn io_apic_paddr() -> Option<usize> {
 /// without touching callers — the matcher signature stays string-based and
 /// firmware-neutral.
 pub fn for_each_compatible(
-    mut matcher: impl FnMut(&str) -> Option<&'static str>,
-    mut visitor: impl FnMut(FirmwareDevice),
+    matcher: impl FnMut(&str) -> Option<&'static str>,
+    visitor: impl FnMut(FirmwareDevice),
 ) {
     let Some(fdt) = of::fdt() else {
         return;
     };
 
-    for node in fdt.all_nodes() {
+    visit_compatible_nodes(fdt.all_nodes(), matcher, visitor);
+}
+
+fn visit_compatible_nodes(
+    nodes: impl Iterator<Item = of::FdtNode<'static, 'static>>,
+    mut matcher: impl FnMut(&str) -> Option<&'static str>,
+    mut visitor: impl FnMut(FirmwareDevice),
+) {
+    for node in nodes {
         let Some(firmware_id) = node.compatibles().find_map(&mut matcher) else {
             continue;
         };
@@ -216,6 +230,9 @@ pub fn for_each_compatible(
             source: FirmwareSource::DeviceTree,
             mmio,
             irq,
+            dma: of::dma::resolve_dma(node),
         });
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/firmware_devices.rs");

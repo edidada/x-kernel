@@ -6,6 +6,8 @@
 
 #![no_std]
 
+pub mod dma;
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;

@@ -125,6 +125,8 @@ pub trait DeviceResourceServices: Send + Sync {
     /// descriptor, not in host-global assumptions.
     /// The resource view rejects unconfigured DMA before dispatch. Hosts must
     /// also return `Unsupported` if the context has no DMA configuration.
+    /// Validate the whole allocation with `DmaInfo::translate_range`, not just
+    /// its first address; release rejected host allocations before returning.
     fn alloc_coherent(
         &self,
         device: crate::DeviceContext<'_>,

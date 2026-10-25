@@ -16,6 +16,8 @@ const FDT_END_NODE: u32 = 2;
 const FDT_PROP: u32 = 3;
 const FDT_END: u32 = 9;
 
+unittest::path_mod_test!(dma_resolution, "dma_resolution.rs");
+
 struct TestDtbBuilder {
     structs: Vec<u8>,
     strings: Vec<u8>,

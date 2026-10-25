@@ -196,3 +196,10 @@ restoration consumes only the handler's exact transfer. A live observer keeps
 the page unavailable to another allocation; after the last hold ends, the page
 is reused from the local PCP. IRQ and preemption exclusion makes this reuse
 check deterministic. The tests do not forge raw releases to inspect lifetimes.
+# Firmware device DMA boundary
+
+DMA interpretation can reject malformed or unsupported paths independently of
+device discovery. Callers requiring DMA must check the result and both optional
+facts; ignoring a DMA error does not authorize DMA. The existing MMIO/IRQ and
+matching behavior remains unchanged. OF ancestor resolution is allocation-free
+discovery work; its result is not a runtime allocator or ownership guarantee.

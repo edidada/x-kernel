@@ -11,8 +11,8 @@
 use alloc::{string::String, vec::Vec};
 
 pub use driver_os_api::{
-    ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
-    Virq,
+    ClkSpec, DmaInfo, DmaWindow, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger,
+    MmioRegion, Virq,
 };
 
 /// The kind of a resource entry.
