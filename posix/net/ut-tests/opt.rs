@@ -112,6 +112,12 @@ fn classic_filter_rejects_out_of_range_jumps() {
     );
 }
 
+/// Releases a descriptor a test created, so cases stay independent of each
+/// other in the shared process rather than leaking into the next one.
+fn close_socket(fd: i32) {
+    kprocess::current_files().close_file(fd).unwrap();
+}
+
 /// Linux `sk_getsockopt` copies `min(optlen, sizeof(int))` bytes and reports the
 /// length it wrote, so a buffer shorter than the value truncates instead of
 /// failing and a zero length succeeds without touching the buffer.
@@ -186,6 +192,8 @@ fn so_type_reports_the_socket_type_and_truncates_short_buffers() {
         ),
         Err(KError::BadFileDescriptor)
     );
+
+    close_socket(fd);
 }
 
 /// `SO_DOMAIN` and `SO_PROTOCOL` describe the socket the way `SO_TYPE` does, so
@@ -265,5 +273,11 @@ fn so_domain_and_protocol_report_the_creation_family_and_protocol() {
         Ok(0)
     );
     assert_eq!(optlen.read(), 1);
-    assert_eq!(short.read_bytes(1).unwrap(), (AF_INET as i32).to_ne_bytes()[..1].to_vec());
+    assert_eq!(
+        short.read_bytes(1).unwrap(),
+        (AF_INET as i32).to_ne_bytes()[..1].to_vec()
+    );
+
+    close_socket(stream);
+    close_socket(dgram);
 }

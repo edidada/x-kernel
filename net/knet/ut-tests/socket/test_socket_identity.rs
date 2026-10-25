@@ -17,8 +17,8 @@
 use alloc::boxed::Box;
 
 use linux_raw_sys::net::{
-    AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM,
-    SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM,
+    AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP,
+    IPPROTO_UDP, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM,
 };
 use unittest::{assert_eq, def_test};
 
@@ -35,6 +35,11 @@ use crate::{
 /// reported values depends on it.
 const PACKET_PROTOCOL: u16 = 0;
 
+/// A non-zero netlink protocol, so a case expecting it cannot also be satisfied
+/// by an implementation that answers a constant zero: `NETLINK_ROUTE` is 0,
+/// which is exactly what a broken `socket_protocol()` would return.
+const NETLINK_USERSOCK: i32 = 2;
+
 #[def_test]
 fn socket_identity_reports_creation_family_type_and_protocol() {
     let cases = [
@@ -49,13 +54,13 @@ fn socket_identity_reports_creation_family_type_and_protocol() {
             Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp))),
             SOCK_RAW as i32,
             AF_INET as i32,
-            u8::from(IpProtocol::Icmp) as i32,
+            IPPROTO_ICMP as i32,
         ),
         (
             Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv6, IpProtocol::Icmpv6))),
             SOCK_RAW as i32,
             AF_INET6 as i32,
-            u8::from(IpProtocol::Icmpv6) as i32,
+            IPPROTO_ICMPV6 as i32,
         ),
         (
             Socket::Packet(Box::new(
@@ -90,6 +95,15 @@ fn socket_identity_reports_creation_family_type_and_protocol() {
             SOCK_DGRAM as i32,
             AF_NETLINK as i32,
             NETLINK_ROUTE,
+        ),
+        (
+            Socket::Netlink(Box::new(NetlinkSocket::new(
+                NETLINK_USERSOCK,
+                NetlinkSocketType::Raw,
+            ))),
+            SOCK_RAW as i32,
+            AF_NETLINK as i32,
+            NETLINK_USERSOCK,
         ),
         (
             Socket::Unix(Box::new(UnixDomainSocket::new(
