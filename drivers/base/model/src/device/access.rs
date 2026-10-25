@@ -279,6 +279,23 @@ impl<B: Bus> Resources<'_, B> {
         self.request_irq(spec, "irq", handler)
     }
 
+    /// Capture the device's DMA capability beyond this callback borrow.
+    ///
+    /// The host retains the stable descriptor view and original provider, not
+    /// this callback. The driver must still stop hardware before guard cleanup.
+    ///
+    /// # Errors
+    /// Unconfigured DMA fails before host dispatch; host errors remain fatal.
+    pub fn dma(&self) -> Result<Arc<dyn crate::DeviceDma>, ProbeError> {
+        self.device
+            .descriptor()
+            .dma
+            .ok_or(ProbeError::Fatal(RuntimeError::Unsupported))?;
+        self.services
+            .dma(crate::DeviceContext::new(self.device))
+            .map_err(ProbeError::Fatal)
+    }
+
     /// `dmam_alloc_coherent(dev, size, dma_handle, gfp)` — the device's own
     /// DMA view travels with the request; the returned
     /// `CoherentMem::bus_addr` is the DEVICE-visible address.

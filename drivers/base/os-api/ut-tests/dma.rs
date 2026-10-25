@@ -7,6 +7,33 @@ use unittest::{assert_eq, def_test};
 use crate::{DmaInfo, DmaWindow, ResError};
 
 #[def_test]
+fn streaming_guard_retains_release_owner_and_releases_once_after_move() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let releases = Arc::new(AtomicUsize::new(0));
+    let owner = Arc::new(());
+    let weak_owner = Arc::downgrade(&owner);
+    let observed = releases.clone();
+    let hook: crate::ReleaseHook = Arc::new(move || {
+        let _retained = &owner;
+        observed.fetch_add(1, Ordering::Relaxed);
+    });
+    // SAFETY: this synthetic mapping is never submitted or dereferenced. Its
+    // sole release hook retains the simulated provider and records cleanup.
+    let mapping = unsafe { crate::StreamingMapping::new(0, 64, hook) };
+    assert_eq!(mapping.bus_addr(), 0);
+    assert_eq!(mapping.len(), 64);
+    assert_eq!(mapping.is_empty(), false);
+    let moved = mapping;
+    assert_eq!(weak_owner.upgrade().is_some(), true);
+    assert_eq!(releases.load(Ordering::Relaxed), 0);
+    drop(moved);
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+    assert_eq!(weak_owner.upgrade().is_none(), true);
+}
+
+#[def_test]
 fn dma_window_checks_both_ends_of_the_allocation() {
     let view = DmaInfo {
         mask: u64::MAX,

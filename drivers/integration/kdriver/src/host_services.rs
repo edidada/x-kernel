@@ -15,7 +15,7 @@ use driver_model::{
     ExtensionServices, IoMap, IrqHandlerFn, IrqSpec, MmioRegion, ProviderRegistration,
     ProviderServices, RuntimeError, ServiceError, Virq,
 };
-use driver_os_api::{IrqOp, IrqResource, IrqRouteDesc};
+use driver_os_api::{DeviceDma, IrqOp, IrqResource, IrqRouteDesc};
 
 /// Compose MMIO, per-device DMA, management locks and a supplied IRQ capability.
 ///
@@ -64,6 +64,10 @@ impl HostDeviceServices {
 }
 
 impl DeviceResourceServices for HostDeviceServices {
+    fn dma(&self, device: DeviceContext<'_>) -> Result<Arc<dyn DeviceDma>, RuntimeError> {
+        crate::host_dma::new_device_dma(device)
+    }
+
     fn iomap(
         &self,
         device: DeviceContext<'_>,

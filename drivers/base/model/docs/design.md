@@ -1,5 +1,19 @@
 # driver-model — 设计文档
 
+## Held per-device DMA capability
+
+`Resources::dma` rejects an absent descriptor DMA view before host
+dispatch, then returns `Arc<dyn DeviceDma>` from the callback's service snapshot.
+`DeviceResourceServices::dma` defaults to Unsupported, preserving existing
+providers. The held capability captures the same stable device view and original
+provider without borrowing DeviceAccess; guards retain their own cleanup owners.
+The model reexports DeviceDma, StreamingMapping and DmaDirection from os-api.
+Legacy immediate coherent allocation remains unchanged.
+
+External tests verify missing-view rejection without host dispatch, exact device
+context delivery, the unsupported default and capability use after callback
+borrows end. No host implementation or production service activation is added.
+
 ## R1-04 驱动身份与发布来源
 
 注册入口消费 DriverDesc，将只读 DriverIdentity（唯一驱动名）与 ids/ops 分开。

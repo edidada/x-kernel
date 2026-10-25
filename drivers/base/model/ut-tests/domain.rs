@@ -164,6 +164,14 @@ impl MockServices {
 }
 
 impl DeviceResourceServices for MockServices {
+    fn dma(
+        &self,
+        device: crate::DeviceContext<'_>,
+    ) -> Result<Arc<dyn crate::DeviceDma>, RuntimeError> {
+        self.record_request("dma", &device);
+        Ok(Arc::new(TestHeldDma))
+    }
+
     fn iomap(
         &self,
         device: crate::DeviceContext<'_>,
@@ -1797,6 +1805,73 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
         Err(ProbeError::Fatal(RuntimeError::Unsupported))
     ));
     assert_eq!(services.dma_requests.load(Ordering::Relaxed), 0);
+    let before = services.requests.lock().len();
+    assert!(matches!(
+        device.res().dma(),
+        Err(ProbeError::Fatal(RuntimeError::Unsupported))
+    ));
+    let after = services.requests.lock().len();
+    assert_eq!(after, before);
+}
+
+struct TestHeldDma;
+
+// SAFETY: this capability never acquires memory or mappings; every operation
+// returns Unsupported without touching buffers or creating release obligations.
+unsafe impl crate::DeviceDma for TestHeldDma {
+    fn alloc_coherent(&self, _: usize, _: usize) -> driver_os_api::ResResult<crate::CoherentMem> {
+        Err(driver_os_api::ResError::Unsupported)
+    }
+
+    unsafe fn map_streaming(
+        &self,
+        _: core::ptr::NonNull<[u8]>,
+        _: crate::DmaDirection,
+    ) -> driver_os_api::ResResult<crate::StreamingMapping> {
+        Err(driver_os_api::ResError::Unsupported)
+    }
+}
+
+#[def_test]
+fn held_dma_outlives_callback_and_default_service_remains_unsupported() {
+    let held = {
+        let (_domain, services, root) = fresh_domain();
+        let mut descriptor = test_descriptor(root);
+        descriptor.dma = Some(crate::DmaInfo::DEFAULT);
+        let reference = crate::DeviceRef {
+            core: crate::device::DeviceCore::new(
+                DeviceId(1),
+                descriptor,
+                Arc::new(TestManagementLock::new()),
+                Arc::new(()),
+            ),
+        };
+        let identity = Arc::new(crate::driver::DriverIdentity { name: "held-dma" });
+        let context =
+            DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
+        let held = context.res().dma().unwrap();
+        let (operation, same_device) = {
+            let requests = services.requests.lock();
+            let request = requests.last().unwrap();
+            (
+                request.operation,
+                Arc::ptr_eq(&request.device.upgrade().unwrap(), &reference.core),
+            )
+        };
+        assert_eq!(operation, "dma");
+        assert!(same_device);
+        let unsupported =
+            DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &NoServices).unwrap();
+        assert!(matches!(
+            unsupported.res().dma(),
+            Err(ProbeError::Fatal(RuntimeError::Unsupported))
+        ));
+        held
+    };
+    assert!(matches!(
+        held.alloc_coherent(64, 8),
+        Err(driver_os_api::ResError::Unsupported)
+    ));
 }
 
 #[def_test]

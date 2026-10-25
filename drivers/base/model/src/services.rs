@@ -93,12 +93,26 @@ impl From<RuntimeError> for ServiceError {
 /// This is a framework-internal seam: drivers touch it only through
 /// [`DeviceAccess`](crate::DeviceAccess). It exists so the runtime (and test doubles) can be swapped
 /// without the model depending on any host implementation.
-/// MMIO/IRQ/DMA acquisition — the resource capabilities every host must
-/// provide. Split from the clock and extension capabilities so the contract
-/// states WHAT is mandatory per category instead of one flat "misc
-/// interface"; future capabilities (I/O ports, streaming DMA, MSI) join as
-/// their own traits, never as more methods on the aggregate.
+/// MMIO/IRQ and immediate coherent DMA acquisition share this resource surface.
+/// Hosts may additionally provide a held [`crate::DeviceDma`] capability for
+/// coherent allocation and streaming mappings beyond a callback borrow; its
+/// default is `Unsupported`, not a fallback to another device or provider.
+/// Clock, provider-publication and extension services remain separate contracts.
+/// An implemented service surface does not imply support for every operation.
 pub trait DeviceResourceServices: Send + Sync {
+    /// Capture a held DMA capability for this device's descriptor view.
+    ///
+    /// The capability must retain its original provider and stable device view,
+    /// independently of callback lifetime or later service replacement. This
+    /// does not keep a binding active or permit DMA after hardware teardown.
+    /// Hosts without this capability return `Unsupported`.
+    fn dma(
+        &self,
+        _: crate::DeviceContext<'_>,
+    ) -> Result<alloc::sync::Arc<dyn crate::DeviceDma>, RuntimeError> {
+        Err(RuntimeError::Unsupported)
+    }
+
     /// Map an MMIO region for the device (`devm_ioremap`).
     fn iomap(
         &self,

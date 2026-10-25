@@ -447,3 +447,47 @@ network/vsock. `make clippy` and `make build` pass after adding the required
 Safety rustdoc to the private finalization helper; no behavior changed in that
 follow-up. Formatting, new-file license and whitespace checks pass. Existing
 third-party future-Rust warnings remain. Local commit only; no push requested.
+
+### R1-08 eleventh slice: held device DMA capability and native adapter
+
+The model now acquires a held OS-neutral DeviceDma capability through the
+callback-bound resource view. The host retains the original DeviceRef, not a
+second DmaInfo or a global current-device selector. Coherent allocations and
+streaming mappings consult the same authoritative descriptor. The legacy DmaOp
+interface remains unchanged; this is the new model's owned-capability path.
+
+StreamingMapping owns one release obligation. Native adaptation translates the
+complete bounce-buffer physical interval, while retaining the original native
+bus token for release. Rejected unpublished mappings use discard_dma_buffer,
+preserving caller bytes. Normal Drop performs directional copy-back without
+freeing the caller-owned buffer. Missing/non-coherent configuration and invalid
+masks cannot fall back to unrestricted native DMA.
+
+Tests cover callback lifetime, two independent descriptor views, retained
+capabilities after logical removal, unique guard release, full-range rejection,
+directional copy-back and repeated rejection beyond total bounce-pool capacity.
+These are software ownership/translation regressions, not hardware acceptance.
+
+VirtIO's raw DmaBackend token adaptation, production provider installation,
+exclusive new/legacy enumeration handoff and real RNG acceptance remain pending.
+In particular, rejecting a host mapping before publication is not cancellation
+of a published request or proof of vendor descriptor-rollback semantics. The
+deferred IRQ acceptance gate is unchanged. Validation evidence for this slice
+is recorded under local `r1-08-device-dma/`.
+
+Self-review and independent standards/spec review caught an RX initialization
+obligation: native receive bounce storage can contain unwritten bytes. The host
+now initializes the complete receive interval before publication, with an
+immediate-Drop regression. Acquisition/release context documentation matches the
+native non-sleeping path, including request-lock use and lock-order restrictions.
+The re-review reports no remaining blocker. This does not promise allocation-free
+operation or bounded spinlock latency.
+
+Final aarch64 selection
+`kdma,kdriver,virtio,driver_os_api,driver_model,subsys_hwrng,entropy` passes
+**258/258**, with coverage persisted and extracted (`ut-final.log`). The first
+compile exposed two test assertion temporary-guard lifetimes; both now assert
+on snapshots after releasing the mutex. `make clippy`, `make build`, formatting
+and whitespace checks pass. QEMU used the worktree-local disk without network
+or vsock. Existing third-party future-Rust warnings remain. Local commit only;
+no push requested.

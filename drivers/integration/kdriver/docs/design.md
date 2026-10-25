@@ -1,5 +1,27 @@
 # kdriver — Design
 
+## Retained device DMA capability
+
+`host_dma::new_device_dma` creates the OS-api DeviceDma capability from the
+current DeviceContext. It retains the original DeviceRef and reads its descriptor
+on each operation, without caching DmaInfo or consulting a replacement domain
+service. HostDeviceServices delegates its DMA factory here. Missing configuration,
+non-coherent devices and invalid masks are rejected. Coherent allocation retains
+the existing page-rounded validation and original-token release path.
+
+Streaming operations use kdma's coherent bounce pool. Translation checks the
+bounce buffer's CPU physical address and entire requested length, not the
+caller's buffer address or native bus token. Rejection consumes the unpublished
+mapping through discard_dma_buffer without receive copy-back. Success transfers
+the native token, original buffer address, length and direction into a private
+StreamingMapping release hook. Drop invokes normal unmap once, preserving
+directional copy-back; the original buffer remains caller-owned.
+
+Guards do not require the capability to remain alive. There is no second mapping
+registry, retry policy, implicit hardware stop or production activation. The
+private publish_streaming helper accepts an acquired unpublished native mapping
+for deterministic publication/rejection tests, not submitted-DMA cancellation.
+
 ## Model host MMIO mapping
 
 `host_mmio::iomap` delegates the model's resource-service operation to memspace.

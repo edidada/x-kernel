@@ -1,5 +1,15 @@
 # driver-model — 安全与可靠性分析
 
+## Held DMA capability lifetime
+
+The model checks descriptor DMA presence but does not manufacture an identity
+mapping or validate a host's allocation/cache implementation. The unsafe os-api
+DeviceDma provider contract owns those invariants. Capturing a capability must
+not consult a replaceable global provider on later allocation or release.
+Keeping an Arc alive does not keep a binding active or authorize access after
+removal. Drivers must stop hardware before coherent or streaming guard Drop,
+and keep streaming buffers exclusive and live until cleanup completes.
+
 ## R1-04 来源不可漂移
 
 DeviceAccess 只能由模型回调适配层构造，显式借用 RegisteredDriver 的只读身份。

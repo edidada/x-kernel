@@ -1,5 +1,21 @@
 # driver-os-api — 安全与可靠性
 
+## Held DMA provider boundary
+
+Implementing `DeviceDma` is unsafe: successful coherent allocations must be
+valid, exclusive, aligned, zeroed and coherent throughout their lifetime, and
+all results must obey the captured device view. Guards retain the exact native
+release token and provider; service replacement must not redirect cleanup.
+Streaming errors must not copy unused receive data into the original buffer.
+
+The unsafe streaming caller supplies initialized bytes and keeps its buffer
+live and exclusive until guard cleanup completes, stopping device access before
+Drop. Providers must not copy back uninitialized receive bounce bytes, even
+when hardware wrote only part of the buffer. A mapping guard does not
+own the original buffer or stop hardware. Release contexts are provider-defined;
+Send + Sync does not promise IRQ-safe or non-sleeping operations. The mandatory
+private release hook cannot be extracted from or cloned through the guard.
+
 ## 范围与信任
 
 覆盖 mmio、irq、dma、clock、error 和 ReleaseHook。宿主 provider 是可信实现，

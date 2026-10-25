@@ -165,3 +165,134 @@ fn host_dma_rejects_native_allocation_outside_device_window() {
     let memory = allocate_for_view(Some(&DmaInfo::DEFAULT), 4096, 4096).unwrap();
     assert_eq!(memory.len(), 4096);
 }
+
+#[def_test(serial)]
+fn streaming_guard_translates_bounce_and_releases_original_native_mapping() {
+    for direction in [
+        kdma::DmaDirection::DriverToDevice,
+        kdma::DmaDirection::DeviceToDriver,
+        kdma::DmaDirection::Bidirectional,
+    ] {
+        let mut original = [0xa5u8; 64];
+        let buffer = NonNull::from(original.as_mut_slice());
+        // SAFETY: the original array is exclusively held until the returned
+        // guard is dropped; this test never submits the address to hardware.
+        let native = unsafe { kdma::map_dma_buffer(buffer, direction) }.unwrap();
+        let physical =
+            v2p(VirtAddr::from_usize(native.cpu_addr.as_ptr() as usize)).as_usize() as u64;
+        let view = DmaInfo {
+            window: DmaWindow::new(physical, 0x2000, 64).unwrap(),
+            ..DmaInfo::DEFAULT
+        };
+        // SAFETY: the live native bounce allocation has 64 exclusive bytes;
+        // simulated device writes do not touch the original caller buffer.
+        unsafe { native.cpu_addr.as_ptr().write_bytes(0x37, 64) };
+        // SAFETY: ownership of this active unpublished native mapping is
+        // transferred exactly once; the original buffer remains live.
+        let mapping = unsafe { publish_streaming(&view, native, buffer, direction) }.unwrap();
+        let observed = (mapping.bus_addr(), mapping.len());
+        drop(mapping);
+        let expected = if direction == kdma::DmaDirection::DriverToDevice {
+            0xa5
+        } else {
+            0x37
+        };
+        assert_eq!(observed, (0x2000, 64));
+        assert_eq!(original, [expected; 64]);
+    }
+}
+
+#[def_test]
+fn streaming_acquisition_rejects_unsupported_views_and_empty_buffers() {
+    let noncoherent = DmaInfo {
+        coherent: false,
+        ..DmaInfo::DEFAULT
+    };
+    let invalid_mask = DmaInfo {
+        mask: 0x17ff,
+        ..DmaInfo::DEFAULT
+    };
+    for (view, len, expected) in [
+        (None, 64, driver_os_api::ResError::Unsupported),
+        (Some(&noncoherent), 64, driver_os_api::ResError::Unsupported),
+        (
+            Some(&invalid_mask),
+            64,
+            driver_os_api::ResError::InvalidResource,
+        ),
+        (
+            Some(&DmaInfo::DEFAULT),
+            0,
+            driver_os_api::ResError::InvalidResource,
+        ),
+    ] {
+        let mut original = [0xa5u8; 64];
+        let buffer = NonNull::from(&mut original[..len]);
+        // SAFETY: the local buffer stays exclusive and live through rejection
+        // or immediate guard cleanup; no device receives the mapping.
+        let result = unsafe {
+            map_streaming_for_view(view, buffer, driver_os_api::DmaDirection::DriverToDevice)
+        };
+        let error = result.err();
+        assert_eq!(error, Some(expected));
+        assert_eq!(original, [0xa5; 64]);
+    }
+}
+
+#[def_test(serial)]
+fn rejected_streaming_publication_preserves_bytes_and_recycles_bounce_capacity() {
+    for direction in [
+        kdma::DmaDirection::DriverToDevice,
+        kdma::DmaDirection::DeviceToDriver,
+        kdma::DmaDirection::Bidirectional,
+    ] {
+        let mut original = alloc::vec![0xa5u8; 65536];
+        for iteration in 0..80 {
+            let buffer = NonNull::from(original.as_mut_slice());
+            // SAFETY: the buffer stays live and exclusive until publication
+            // rejects and discards this never-submitted mapping.
+            let native = unsafe { kdma::map_dma_buffer(buffer, direction) }.unwrap();
+            let physical =
+                v2p(VirtAddr::from_usize(native.cpu_addr.as_ptr() as usize)).as_usize() as u64;
+            let view = if iteration % 2 == 0 {
+                DmaInfo {
+                    window: DmaWindow::new(physical, 0, 65535).unwrap(),
+                    ..DmaInfo::DEFAULT
+                }
+            } else {
+                DmaInfo {
+                    window: DmaWindow::new(physical, 1, 65536).unwrap(),
+                    mask: 0xffff,
+                    coherent: true,
+                }
+            };
+            // SAFETY: the native mapping owns a distinct writable bounce
+            // buffer; dirtying it detects accidental receive copy-back.
+            unsafe { native.cpu_addr.as_ptr().write_bytes(0x37, 65536) };
+            // SAFETY: the mapping is active, never submitted, and consumed
+            // once; rejection must discard it before the original is read.
+            let result = unsafe { publish_streaming(&view, native, buffer, direction) };
+            let error = result.err();
+            assert_eq!(error, Some(driver_os_api::ResError::NoMemory));
+            assert!(original.iter().all(|byte| *byte == 0xa5));
+        }
+    }
+}
+
+#[def_test(serial)]
+fn receive_mapping_without_device_writes_returns_initialized_bytes() {
+    let mut original = [0xa5u8; 64];
+    let buffer = NonNull::from(original.as_mut_slice());
+    // SAFETY: the original buffer remains live and exclusive through guard
+    // cleanup. No device ever receives this mapping, so there are no writes.
+    let mapping = unsafe {
+        map_streaming_for_view(
+            Some(&DmaInfo::DEFAULT),
+            buffer,
+            driver_os_api::DmaDirection::DeviceToDriver,
+        )
+    }
+    .unwrap();
+    drop(mapping);
+    assert_eq!(original, [0; 64]);
+}

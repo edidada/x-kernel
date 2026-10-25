@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The DMA family: the coherent-memory guard.
+//! Device DMA capabilities and owned coherent/streaming guards.
 
 use core::{fmt, ptr::NonNull};
 
@@ -59,6 +59,105 @@ impl Drop for CoherentMem {
         if let Some(release) = self.release.take() {
             release();
         }
+    }
+}
+
+/// A held capability for one stable device DMA view.
+///
+/// Holding the capability does not authorize DMA after device removal. Each
+/// returned guard retains its original provider and cleanup dependencies even
+/// if the capability or originating service bundle is dropped.
+///
+/// # Safety
+/// Implementations must apply the same stable device window, mask and cache
+/// policy to every operation, never select a device from ambient state.
+/// Coherent allocations must be valid, exclusive, zeroed, correctly aligned
+/// CPU/device-accessible memory for their entire lifetime. Guards must release
+/// exactly the original native allocation or mapping once, including required
+/// directional synchronization/copy-back. Errors retain no acquired resources;
+/// streaming errors must leave the original buffer unchanged. Implementations
+/// must never read or copy back uninitialized bytes, including receive bounce
+/// storage not written by the device. Implementations must document supported
+/// acquisition and guard-release execution contexts.
+pub unsafe trait DeviceDma: Send + Sync {
+    /// Allocate owned coherent memory for this device.
+    ///
+    /// Stop device access before dropping the returned guard.
+    ///
+    /// # Errors
+    /// Rejects invalid size/alignment, unsupported policy, or unavailable memory.
+    fn alloc_coherent(&self, len: usize, align: usize) -> ResResult<CoherentMem>;
+
+    /// Map caller-owned memory until the returned guard is dropped.
+    ///
+    /// # Safety
+    /// The buffer must contain initialized bytes at entry and remain valid,
+    /// live and exclusively held for the whole mapping lifetime, including
+    /// cleanup. Do not access it through the CPU while
+    /// mapped. Device access must stop before guard Drop, which completes any
+    /// required copy-back/cache synchronization in the provider's permitted
+    /// context. The caller retains ownership of the original buffer.
+    ///
+    /// # Errors
+    /// Mapping failure leaves the buffer unchanged and no live mapping behind.
+    unsafe fn map_streaming(
+        &self,
+        buffer: NonNull<[u8]>,
+        direction: DmaDirection,
+    ) -> ResResult<StreamingMapping>;
+}
+
+/// One non-cloneable streaming mapping, released exactly once on Drop.
+pub struct StreamingMapping {
+    bus: u64,
+    len: usize,
+    release: ReleaseHook,
+}
+
+impl fmt::Debug for StreamingMapping {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamingMapping")
+            .field("bus", &self.bus)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StreamingMapping {
+    /// Transfer one active mapping into an owned guard.
+    ///
+    /// # Safety
+    /// `bus` and `len` must describe a valid device mapping of the original
+    /// exclusive, live buffer. `release` must retain its provider and exact
+    /// native token, synchronize and release that mapping once without freeing
+    /// the original buffer or copying uninitialized receive bytes. No other
+    /// owner may invoke the release operation.
+    /// Device access must stop before Drop; the buffer must remain exclusively
+    /// held until cleanup completes in the provider's permitted context.
+    pub unsafe fn new(bus: u64, len: usize, release: ReleaseHook) -> Self {
+        Self { bus, len, release }
+    }
+
+    /// Device-visible base address; zero may be a valid bus address.
+    pub const fn bus_addr(&self) -> u64 {
+        self.bus
+    }
+
+    /// Mapped length in bytes.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the mapping has an empty extent.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for StreamingMapping {
+    fn drop(&mut self) {
+        (self.release)();
     }
 }
 

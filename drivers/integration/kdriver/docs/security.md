@@ -1,5 +1,39 @@
 # kdriver — Security and Reliability Analysis
 
+## Retained DMA capability
+
+DeviceToDriver acquisition zeroes the native bounce bytes before publication,
+so partial device writes cannot copy stale pool contents back to the caller.
+Other directions retain the original-buffer initialization performed by kdma.
+The private publication test seam does not overwrite simulated device writes.
+
+The host DeviceDma implementation retains the original DeviceRef rather than a
+copied DMA configuration. Each operation validates the authoritative descriptor;
+missing, invalid or non-coherent views cannot fall back to unrestricted DMA.
+Device removal does not revoke this capability or stop hardware. Drivers remain
+responsible for admission, quiescence and releasing guards in a valid context.
+
+Streaming callers must keep their original buffer live and exclusive until guard
+cleanup. The host validates the complete native bounce interval before publishing
+its translated bus address. Rejected mappings are discarded without copy-back,
+including receive mappings. The unique private release hook retains the original
+native bus token, buffer address, length and direction, so a translated device
+address is never passed to native unmap. Successful unmap performs the required
+directional copy-back but never frees the caller's buffer. Mapping state remains
+owned by kdma, whose synchronized global pool outlives individual capabilities.
+This adds no hardware isolation, non-coherent support or production activation.
+
+Capability construction uses normal probe/task context after native allocator
+and mapping initialization. Acquisitions and release are non-sleeping and may run
+under a request spinlock or in ordinary IRQ context, not NMI. They can acquire
+kdma, page-table and allocator spinlocks, including lazy bounce-pool setup;
+callers must respect that lock order and not hold those locks recursively.
+The native heap/page allocators use IRQ-safe locking and heap growth directly
+allocates pages rather than sleeping or performing reclaim waits. This does not
+promise allocation-free operation or bounded contention/latency. Arc hooks and
+native bookkeeping use the kernel's infallible metadata allocation policy rather
+than a recoverable metadata-exhaustion protocol.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/manager.rs`,

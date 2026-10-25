@@ -1,5 +1,19 @@
 # driver-os-api — 设计
 
+## Held per-device DMA
+
+`DeviceDma` is an unsafe, Send + Sync provider contract for one stable device
+DMA view. Unlike the legacy `DmaOp` records, it returns owned `CoherentMem` and
+non-Clone `StreamingMapping` guards. Streaming construction requires a release
+hook; Drop invokes it once with cleanup dependencies retained by the hook.
+The bus address may be zero. The original streaming buffer remains caller-owned.
+
+Providers enforce window/mask/cache policy and native allocation pairing.
+Streaming failure leaves the buffer unchanged and no live mapping; successful
+mapping ends with directional synchronization at Drop. This API adds neither
+a host allocator nor a global provider registry. Tests cover guard movement,
+release-owner retention and exactly-once cleanup without hardware access.
+
 ## 职责与依赖
 
 本 crate 表达驱动框架需要 OS 提供什么能力，以及使用者如何持有和释放能力。

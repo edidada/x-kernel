@@ -4,8 +4,11 @@
 
 //! Lifecycle regressions using the real host management-lock factory.
 
-use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use driver_model::{
     AddDeviceError, Bus, BusInstanceId, ClkHandle, ClkSpec, ClockConsumerServices, CoherentMem,
@@ -60,6 +63,13 @@ impl ClockConsumerServices for HostServices {
 }
 
 impl DeviceResourceServices for HostServices {
+    fn dma(
+        &self,
+        device: DeviceContext<'_>,
+    ) -> Result<Arc<dyn driver_os_api::DeviceDma>, RuntimeError> {
+        self.inner.dma(device)
+    }
+
     fn iomap(
         &self,
         device: DeviceContext<'_>,
@@ -171,6 +181,172 @@ fn model_callbacks_allocate_with_each_descriptor_dma_view() {
         assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
         domain.remove_device(&device).unwrap();
     }
+}
+
+struct HeldDmaProbe(Arc<Mutex<Vec<Result<(), ProbeError>>>>);
+
+impl DriverOps<PlatformBus> for HeldDmaProbe {
+    type Data = Arc<dyn driver_os_api::DeviceDma>;
+
+    fn probe(
+        &self,
+        device: &mut DeviceAccess<'_, PlatformBus>,
+        _: &Environment<'_>,
+    ) -> Result<Self::Data, ProbeError> {
+        let capability = device.res().dma();
+        self.0
+            .lock()
+            .push(capability.as_ref().map(|_| ()).map_err(Clone::clone));
+        capability
+    }
+}
+
+fn held_dma_domain(probe: HeldDmaProbe) -> (DeviceDomain, BusInstanceId) {
+    let domain = DeviceDomain::new();
+    domain.set_services(Arc::new(HostServices::new()));
+    let root = domain
+        .add_bus_instance(PlatformBus::ID, None, "held-dma-ut")
+        .unwrap();
+    static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("test,held-dma"))];
+    domain.register_driver(DriverDesc::new("held-dma-ut", IDS, probe));
+    (domain, root)
+}
+
+fn held_dma_descriptor(
+    root: BusInstanceId,
+    node: u32,
+    view: Option<driver_model::DmaInfo>,
+) -> DeviceDescriptor {
+    DeviceDescriptor::builder()
+        .bus_instance(root)
+        .bus_data(Box::new(PlatformBusData::firmware_node(
+            node,
+            &["test,held-dma"],
+        )))
+        .dma_opt(view)
+        .build()
+}
+
+/// Exercise retained capabilities without starting hardware; release every native
+/// allocation/mapping before returning observations to the test assertions.
+fn exercise_held_dma(
+    capability: &dyn driver_os_api::DeviceDma,
+    view: driver_model::DmaInfo,
+) -> driver_os_api::ResResult<bool> {
+    let memory = capability.alloc_coherent(4097, 8192)?;
+    let physical =
+        khal::mem::v2p(memaddr::VirtAddr::from_usize(memory.as_ptr() as usize)).as_usize() as u64;
+    let allocation_matches = view.translate_range(physical, 8192) == Some(memory.bus_addr());
+    drop(memory);
+
+    let mut bytes = [0x5a_u8; 128];
+    let buffer = NonNull::from(&mut bytes[..]);
+    // SAFETY: bytes remains live and exclusive until mapping is dropped below;
+    // no CPU accesses occur while mapped, and no hardware receives its address.
+    // The test runs and releases the guard in sleepable task context.
+    let mapping =
+        unsafe { capability.map_streaming(buffer, driver_os_api::DmaDirection::DriverToDevice) }?;
+    let bus = mapping.bus_addr();
+    let mapped_len = mapping.len();
+    let translated = view
+        .translate(0)
+        .and_then(|bus_start| bus.checked_sub(bus_start))
+        .and_then(|physical| view.translate_range(physical, mapped_len as u64));
+    drop(mapping);
+    Ok(allocation_matches
+        && mapped_len == bytes.len()
+        && translated == Some(bus)
+        && bytes == [0x5a; 128])
+}
+
+#[def_test(serial)]
+fn held_dma_keeps_two_device_views_after_callbacks_and_removal() {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let (domain, root) = held_dma_domain(HeldDmaProbe(attempts.clone()));
+    let first_view = driver_model::DmaInfo {
+        window: driver_model::DmaWindow::new(0, 0x1_0000_0000, 0x1_0000_0000).unwrap(),
+        ..driver_model::DmaInfo::DEFAULT
+    };
+    let second_view = driver_model::DmaInfo {
+        window: driver_model::DmaWindow::new(0, 0x2_0000_0000, 0x1_0000_0000).unwrap(),
+        ..driver_model::DmaInfo::DEFAULT
+    };
+    let first = domain
+        .add_device(held_dma_descriptor(root, 1, Some(first_view)))
+        .unwrap();
+    let second = domain
+        .add_device(held_dma_descriptor(root, 2, Some(second_view)))
+        .unwrap();
+    let first_dma = domain
+        .with_data::<Arc<dyn driver_os_api::DeviceDma>, _>(&first, Arc::clone)
+        .unwrap();
+    let second_dma = domain
+        .with_data::<Arc<dyn driver_os_api::DeviceDma>, _>(&second, Arc::clone)
+        .unwrap();
+    domain.set_services(Arc::new(HostServices::new()));
+    let after_callbacks = [
+        exercise_held_dma(first_dma.as_ref(), first_view),
+        exercise_held_dma(second_dma.as_ref(), second_view),
+    ];
+    let removals = [domain.remove_device(&first), domain.remove_device(&second)];
+    let registrations_gone =
+        domain.snapshot(&first).is_none() && domain.snapshot(&second).is_none();
+    drop(first);
+    drop(second);
+    drop(domain);
+    let after_removal = [
+        exercise_held_dma(second_dma.as_ref(), second_view),
+        exercise_held_dma(first_dma.as_ref(), first_view),
+    ];
+    drop(first_dma);
+    drop(second_dma);
+    let attempts_snapshot = attempts.lock().clone();
+    assert_eq!(attempts_snapshot.as_slice(), &[Ok(()), Ok(())]);
+    assert_eq!(after_callbacks, [Ok(true), Ok(true)]);
+    assert_eq!(removals, [Ok(()), Ok(())]);
+    assert!(registrations_gone);
+    assert_eq!(after_removal, [Ok(true), Ok(true)]);
+}
+
+#[def_test(serial)]
+fn held_dma_acquisition_rejects_missing_and_noncoherent_views() {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let (domain, root) = held_dma_domain(HeldDmaProbe(attempts.clone()));
+    let missing = domain
+        .add_device(held_dma_descriptor(root, 1, None))
+        .unwrap();
+    let noncoherent = domain
+        .add_device(held_dma_descriptor(
+            root,
+            2,
+            Some(driver_model::DmaInfo {
+                coherent: false,
+                ..driver_model::DmaInfo::DEFAULT
+            }),
+        ))
+        .unwrap();
+    let states = [
+        domain.snapshot(&missing).map(|snapshot| snapshot.state),
+        domain.snapshot(&noncoherent).map(|snapshot| snapshot.state),
+    ];
+    let removals = [
+        domain.remove_device(&missing),
+        domain.remove_device(&noncoherent),
+    ];
+    drop(domain);
+    let attempts_snapshot = attempts.lock().clone();
+    assert_eq!(
+        attempts_snapshot.as_slice(),
+        &[
+            Err(ProbeError::Fatal(RuntimeError::Unsupported)),
+            Err(ProbeError::Fatal(RuntimeError::Unsupported)),
+        ]
+    );
+    assert_eq!(
+        states,
+        [Some(DeviceState::Unclaimed), Some(DeviceState::Unclaimed)]
+    );
+    assert_eq!(removals, [Ok(()), Ok(())]);
 }
 
 struct MmioProbe;

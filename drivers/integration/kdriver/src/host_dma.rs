@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Coherent DMA adaptation for model device resource services.
+//! Device-scoped DMA adaptation for model device resource services.
 //!
 //! Enumeration owns the DMA view. This module owns native allocation pairing,
 //! translating CPU physical addresses rather than reinterpreting native bus IDs.
@@ -10,9 +10,157 @@
 use alloc::sync::Arc;
 use core::{alloc::Layout, ptr::NonNull};
 
-use driver_model::{CoherentMem, DeviceContext, DmaInfo, RuntimeError};
+use driver_model::{CoherentMem, DeviceContext, DeviceRef, DmaInfo, RuntimeError};
+use driver_os_api::{DeviceDma, DmaDirection, ResError, ResResult, StreamingMapping};
 use khal::mem::v2p;
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
+
+/// Retain the original device for coherent allocation and streaming mappings.
+///
+/// Every operation reads the retained descriptor, not a cached DMA view or a
+/// replacement domain service. Construction follows the Arc OOM policy. Guards
+/// own native release tokens independently of the capability's lifetime.
+///
+/// Construct in normal probe/task context after native allocator and mapping
+/// initialization. Acquisitions and guard release are non-sleeping and support
+/// request-spinlock and ordinary IRQ contexts, but not NMI. kdma, page-table
+/// and allocator spinlocks can be acquired, including lazy bounce-pool setup;
+/// callers must not already hold those locks or locks ordered after them.
+/// Spinlock contention is not latency-bounded. Capability/release-hook Arc
+/// allocation and native mapping metadata follow the kernel's infallible
+/// metadata-allocation policy, not an allocation-free or bounded-latency promise.
+///
+/// # Errors
+/// Missing or non-coherent configuration returns `Unsupported`; an invalid
+/// device mask returns `Invalid`. This does not activate hardware or revoke
+/// access on removal: the driver must stop DMA before releasing its guards.
+pub fn new_device_dma(device: DeviceContext<'_>) -> Result<Arc<dyn DeviceDma>, RuntimeError> {
+    validate_view(device.device().descriptor().dma.as_ref())?;
+    Ok(Arc::new(HostDeviceDma {
+        device: device.device().clone(),
+    }))
+}
+
+struct HostDeviceDma {
+    device: DeviceRef,
+}
+
+// SAFETY: All operations consult the retained device's immutable DMA view.
+// Coherent guards own original native tokens; streaming guards retain the exact
+// buffer tuple and native bounce token until one unmap. kdma serializes native
+// operations and provides global mappings. Callers retain exclusive buffer
+// access and stop hardware before guard destruction as required by DeviceDma.
+unsafe impl DeviceDma for HostDeviceDma {
+    fn alloc_coherent(&self, len: usize, align: usize) -> ResResult<CoherentMem> {
+        allocate_for_view(self.device.descriptor().dma.as_ref(), len, align).map_err(resource_error)
+    }
+
+    unsafe fn map_streaming(
+        &self,
+        buffer: NonNull<[u8]>,
+        direction: DmaDirection,
+    ) -> ResResult<StreamingMapping> {
+        // SAFETY: forwards the caller's live, exclusive buffer and stopped-device
+        // release obligations to the native mapping owner.
+        unsafe { map_streaming_for_view(self.device.descriptor().dma.as_ref(), buffer, direction) }
+    }
+}
+
+fn validate_view(view: Option<&DmaInfo>) -> Result<&DmaInfo, RuntimeError> {
+    let view = view.ok_or(RuntimeError::Unsupported)?;
+    if !view.coherent {
+        return Err(RuntimeError::Unsupported);
+    }
+    if view.mask != u64::MAX && view.mask & (view.mask + 1) != 0 {
+        return Err(RuntimeError::Invalid);
+    }
+    Ok(view)
+}
+
+fn resource_error(error: RuntimeError) -> ResError {
+    match error {
+        RuntimeError::Unsupported => ResError::Unsupported,
+        RuntimeError::Invalid => ResError::InvalidResource,
+        RuntimeError::NoMemory => ResError::NoMemory,
+        RuntimeError::BadState => ResError::BadState,
+        _ => ResError::Io,
+    }
+}
+
+/// Acquire a native mapping and publish it only after device-view validation.
+///
+/// # Safety
+/// The caller must keep the entire buffer live and exclusive until the returned
+/// guard is dropped, with all hardware access stopped before Drop. Acquisition
+/// and cleanup must obey the contexts documented by [`new_device_dma`]. On error
+/// no mapping remains and the caller may access the unchanged buffer again.
+unsafe fn map_streaming_for_view(
+    view: Option<&DmaInfo>,
+    buffer: NonNull<[u8]>,
+    direction: DmaDirection,
+) -> ResResult<StreamingMapping> {
+    let view = validate_view(view).map_err(resource_error)?;
+    let len = buffer.len();
+    if len == 0 {
+        return Err(ResError::InvalidResource);
+    }
+    let direction = match direction {
+        DmaDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
+        DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
+        DmaDirection::Bidirectional => kdma::DmaDirection::Bidirectional,
+    };
+    // SAFETY: the caller retains this live exclusive buffer until the returned
+    // guard unmaps it; no device has received the bounce address yet.
+    let native =
+        unsafe { kdma::map_dma_buffer(buffer, direction) }.map_err(|_| ResError::NoMemory)?;
+    if direction == kdma::DmaDirection::DeviceToDriver {
+        // SAFETY: native owns a live writable bounce interval of len bytes,
+        // disjoint from the original buffer and not yet published to hardware.
+        // Initialize unwritten RX bytes before a later full-length copy-back.
+        unsafe { native.cpu_addr.as_ptr().write_bytes(0, len) };
+    }
+    // SAFETY: native is the unique unpublished mapping for this exact buffer
+    // and direction; publication consumes it on both success and rejection.
+    unsafe { publish_streaming(view, native, buffer, direction) }
+}
+
+/// Validate and transfer one unpublished native streaming mapping.
+///
+/// # Safety
+/// `native`, `buffer` and `direction` must be the exact tuple from one live
+/// kdma mapping, not yet exposed to hardware. The entire bounce interval must
+/// contain initialized bytes. This consumes that mapping even
+/// on error. On success the caller retains the exclusive buffer until guard
+/// destruction, which must follow the end of all device access.
+unsafe fn publish_streaming(
+    view: &DmaInfo,
+    native: kdma::DmaInfo,
+    buffer: NonNull<[u8]>,
+    direction: kdma::DmaDirection,
+) -> ResResult<StreamingMapping> {
+    let len = buffer.len();
+    let physical = v2p(VirtAddr::from_usize(native.cpu_addr.as_ptr() as usize)).as_usize() as u64;
+    let Some(bus) = view.translate_range(physical, len as u64) else {
+        // SAFETY: this exact mapping is still unpublished. Discard consumes it
+        // once without copying unused receive data into the original buffer.
+        unsafe { kdma::discard_dma_buffer(native.bus_addr, buffer) };
+        return Err(ResError::NoMemory);
+    };
+    let original = buffer.as_ptr() as *mut u8 as usize;
+    let native_bus = native.bus_addr;
+    let release = Arc::new(move || {
+        // SAFETY: original is the caller's nonnull buffer address, retained live
+        // for len bytes until this sole guard releases its matching mapping.
+        let pointer = unsafe { NonNull::new_unchecked(original as *mut u8) };
+        let buffer = NonNull::slice_from_raw_parts(pointer, len);
+        // SAFETY: the private hook consumes the original native token, buffer,
+        // length and direction once, after the caller has stopped device access.
+        unsafe { kdma::unmap_dma_buffer(native_bus, buffer, direction) };
+    });
+    // SAFETY: bus covers the entire checked bounce interval. The private hook
+    // owns its unique native mapping and performs directional copy-back once.
+    Ok(unsafe { StreamingMapping::new(bus, len, release) })
+}
 
 /// Allocate through the current callback's authoritative device DMA view.
 ///
@@ -43,11 +191,8 @@ fn allocate_for_view(
     len: usize,
     align: usize,
 ) -> Result<CoherentMem, RuntimeError> {
-    let view = view.ok_or(RuntimeError::Unsupported)?;
-    if !view.coherent {
-        return Err(RuntimeError::Unsupported);
-    }
-    if len == 0 || (view.mask != u64::MAX && view.mask & (view.mask + 1) != 0) {
+    let view = validate_view(view)?;
+    if len == 0 {
         return Err(RuntimeError::Invalid);
     }
     let layout = Layout::from_size_align(len, align).map_err(|_| RuntimeError::Invalid)?;
