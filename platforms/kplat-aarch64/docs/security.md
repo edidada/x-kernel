@@ -1,5 +1,15 @@
 # kplat-aarch64 Test Security Scope
 
+## DMA Hook Failure Boundary
+
+The optional KVM DMA hooks propagate share/unshare failures instead of treating
+warnings as success. Partial sharing can leave host-visible pages; the allocator
+must retain the allocation if whole-range unshare cannot establish success.
+Release attempts all pages even after one failure. This trades capacity loss for
+preventing potentially shared pages from being reused as ordinary kernel memory.
+The transaction's mock tests do not prove hypervisor behavior on repeated or
+unprepared-page unshare; runtime validation requires the matching KVM extension.
+
 ## Scope
 
 This note covers the guest tests in `ut-tests/peripherals_smccc.rs` and

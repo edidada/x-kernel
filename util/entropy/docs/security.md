@@ -2,11 +2,23 @@
 
 ## Fallible work callbacks
 
-Collector construction returns KResult: owner OOM is NoMemory, invalid work context
-is InvalidInput, and unavailable worker services are OperationNotSupported. Failed
-preparation logs the distinct error without replacing the selected source. The
-unpublished collector and captured device reference are released without starting
-work. Arc and WorkHandle storage retain their existing allocation behavior. Existing
+`EntropyCollection::new` returns `KResult`: callback KBox allocation failure is
+`NoMemory`, invalid work context is `InvalidInput`, and unavailable worker services
+are `OperationNotSupported`. It checks sleepable context before allocating owners.
+KERNEL allocation additionally requires reclaim-safe context outside source,
+collector and registry locks; `register_sources` releases `COLLECTION` before
+preparation and reacquires it only to publish if still empty.
+
+Fallible preparation errors are logged without publishing a collection, installing
+subscriptions or starting work; the unpublished collector and callback are
+released. Initialization remains retryable if no other caller published a winner.
+A successfully prepared candidate has subscribed and queued its initial scan
+before publication. A concurrent loser is dropped outside `COLLECTION`; its
+registry-lifetime Weak subscriber closures can remain inert, but do not retain
+the losing collection. This is distinct from allocation failure rollback.
+
+Arc, subscription and WorkHandle storage retain their existing allocation
+behavior; this is not a claim that every nested allocation is fallible. Existing
 mock-device tests exercise collector callbacks and cleanup; no global OOM injection
 is added. Callback execution and eventual worker-owned destruction retain their
 existing task-context requirements.

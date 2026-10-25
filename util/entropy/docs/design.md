@@ -3,14 +3,21 @@
 ## Fallible work callbacks
 
 The VirtIO collector uses `KBox<dyn Fn() + Send + Sync>` with default KERNEL
-allocation. Boot initialization runs from kruntime's late-init task; source::init_all
-iterates static sources without a lock. Class availability callbacks are dispatched
-after releasing the class registry and driver-core locks. note_device releases its
-SELECTED_SOURCE/collector-state checks before constructing a source and reacquires
-the selection mutex only for publication. Preparation requires sleepable,
-reclaim-safe task context and rejects non-sleepable callers before owner allocation.
-No NOWAIT restriction is needed at this lock-free construction point; callers must
-preserve the reclaim/IO/filesystem re-entry contract on future notification paths.
+allocation. Boot initialization runs from kruntime's late-init task;
+`source::init_all` iterates static sources without a lock. `register_sources`
+checks `COLLECTION`, releases its mutex, then prepares an `EntropyCollection`.
+Preparation requires sleepable, reclaim-safe task context with IRQs and preemption
+enabled, outside non-sleepable RCU sections; it rejects non-sleepable callers
+before owner allocation. Source, collector and registry locks must not enclose
+this allocation. No NOWAIT restriction is needed at this construction point;
+callers must preserve the reclaim/IO/filesystem re-entry contract.
+
+Fallible callback and WorkHandle preparation precedes available/removed registry
+subscriptions and the initial queued scan. The collection is then published under
+`COLLECTION` after a second empty-slot check. Concurrent preparation can produce
+a losing candidate, which is dropped outside the mutex; its Weak subscriptions
+do not retain a collection. Registry notifications only enqueue rescans of the
+existing collection, rather than constructing per-device workers.
 
 ## Scope
 

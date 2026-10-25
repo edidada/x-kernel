@@ -1,5 +1,15 @@
 # kplat-aarch64 Design
 
+## DMA Preparation Failures
+
+With `kvm-guest-mem-share`, DMA preparation stops and returns `KError::Io` on
+the first rejected share hypercall. Release attempts every page and returns an
+error if any unshare fails. It must not report success after only logging a
+hypervisor failure: the DMA allocator uses success to authorize page reuse.
+After a partial prepare, kdma releases the entire attempted range. If the
+hypervisor rejects unsharing an unprepared page, the allocation is conservatively
+retained, not assumed safe. TCG tests do not validate these vendor hypercalls.
+
 ## Scope
 
 This crate implements the generic AArch64 device-tree platform and common

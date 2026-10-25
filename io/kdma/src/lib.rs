@@ -45,6 +45,7 @@
 
 extern crate alloc;
 
+mod allocation;
 mod bounce_pool;
 mod dma;
 
@@ -83,13 +84,15 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 ///   requirements of the requested memory.
 ///
 /// Returns an [`DmaInfo`] structure containing details about the allocated
-/// memory, such as the starting address and size. If it's not possible to
-/// allocate memory meeting the criteria, returns [`None`].
+/// memory, such as the starting address. Allocation failures return an error.
 ///
 /// # Errors
 ///
 /// Returns `AllocError::NoMemory` when pages cannot be allocated, the
 /// mapping-attribute update fails, or the platform `prepare` hook fails.
+/// A zero-sized layout returns `AllocError::InvalidInput`. Failed acquisition
+/// rolls back mapping and platform changes; if cleanup fails, pages are logged
+/// and retained rather than returned to the reusable allocator.
 ///
 /// # Safety
 ///
@@ -105,8 +108,8 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 /// Frees coherent memory previously allocated.
 ///
 /// This function releases the memory block that was previously allocated and
-/// marked as coherent. It ensures proper deallocation and management of resources
-/// associated with the memory block.
+/// marked as coherent. Failed platform release or mapping restoration is logged
+/// and retains the pages instead of allowing unsafe reuse. No retry is scheduled.
 ///
 /// - `dma_info`: An instance of [`DmaInfo`] containing the details of the memory
 ///   block to be freed, such as its starting address and size.
@@ -115,6 +118,8 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 ///
 /// `dma` must come from a prior successful [`allocate_dma_memory`] call, and
 /// `layout` must exactly match that allocation.
+/// All device access must have stopped before this call; the allocation must
+/// not be accessed or freed again, even if cleanup retains its pages.
 #[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
     // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.

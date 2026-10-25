@@ -116,9 +116,31 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 
 ## Error Model
 
+Coherent allocation uses the private `allocation` transaction module: allocate
+pages, change mapping attributes, then prepare platform access. It publishes a
+`DmaInfo` only after all three stages succeed. A failed mapping update may have
+changed a prefix, so rollback restores the entire attempted range. A failed
+platform prepare may have shared a prefix, so rollback first releases the entire
+attempted range, then restores mappings, then frees pages. The original allocation
+error is preserved. Zero-sized coherent layouts are rejected before acquisition.
+
+Ordinary deallocation uses the same release/restore/free sequence. If platform
+release or attribute restoration fails, cleanup stops, logs the address and page
+count, and retains the pages. `kalloc` returns DMA pages to its common page
+allocator, not a dedicated DMA-only free pool; uncertain permissions must never
+escape into reuse. This is deliberate memory retention, not automatic recovery:
+there is no retry queue. Existing `dma-trace` records are removed only after
+successful cleanup; unpublished failed allocations have no coherent trace record
+and are diagnosed through the cleanup log and allocator usage accounting.
+
+`AllocationOps` is a private test seam, not another public allocator or driver
+contract. Guest fault-injection tests run the production transaction against local
+operations, checking failure ordering, full-range rollback, and retained pages.
+Real platform hypercall failures still require platform-specific validation.
+
 - `AllocResult` (from `alloc-engine`): `NoMemory` when pages, mapping
   flag updates, or platform prepare fail; `InvalidInput` for zero-length
-  mappings or an already-active bus address.
+  mappings/coherent allocations or an already-active bus address.
 - Panics mark contract violations: unmapping a non-active address,
   length mismatch between map and unmap, bounce recycling outside the
   initialized pool, and initializing an already registered pool.

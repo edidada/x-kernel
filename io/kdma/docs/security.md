@@ -114,18 +114,24 @@ each with `# Safety` sections and `SAFETY:` comments:
 | T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Grant sizes are page-exact and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
 | T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
 | T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Restore failures are currently ignored (`let _ =`) after logging in the release path; accepted because the pages are returned to the DMA-only pool, not the general allocator. |
+| T-05 | Shared or uncached pages returned to ordinary reuse | High — disclosure or cache-coherency corruption | Platform release or mapping restoration fails | Cleanup retains and logs the pages unless both operations succeed. DMA pages use the common kalloc page allocator, not a separate DMA-only free pool. |
 
 ## Failure Modes
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Checked allocation; pages returned on the failure path. |
-| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release logs and continues | Share/unshare accounting skew on TEE platforms | 3 | Allocation aborts; release cannot roll back and is logged. |
+| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Failed mapping attempts restore the complete range before freeing; failed restoration retains pages and logs the address/count. |
+| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release failure retains pages | Capacity loss rather than unsafe reuse | 3 | Partial prepare is rolled back through whole-range release, then mapping restore; any cleanup failure stops reuse. No retry is scheduled. |
 | F-03 | Zero-length map request | `AllocError::InvalidInput` | Caller fixes the request | 4 | Explicit input validation. |
 | F-04 | Unmap of an inactive address | Panic | Kernel aborts the offending path | 2 | Contract violation — loud failure preferred over silent corruption. |
 
 ## Known Limitations
+
+Cleanup failure deliberately leaks capacity. Failed unpublished allocations have
+no coherent trace record; cleanup logs and kalloc usage accounting are the
+available evidence. Retention does not stop hardware DMA: callers must quiesce
+device access before ordinary deallocation. Guest fault-injection tests validate
+the transaction, not actual hypervisor permission revocation or cache behavior.
 
 - No IOMMU: the crate cannot prevent a device from DMA-ing outside its
   grant; isolation depends on hardware and descriptor correctness.

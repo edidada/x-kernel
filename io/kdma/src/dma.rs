@@ -8,15 +8,14 @@ use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult};
-use kalloc::{UsageKind, global_allocator};
 use khal::mem::v2p;
-use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
-use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
+use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
 use crate::{
     DmaBusAddress, DmaDirection, DmaInfo,
+    allocation::{self, KernelAllocationOps},
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
     p2b,
 };
@@ -78,14 +77,8 @@ impl DmaAllocator {
     #[track_caller]
     fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_dma_pages(
-            num_pages,
-            PAGE_SIZE_4K.max(layout.align()),
-            UsageKind::Dma,
-        )?;
-        let vaddr = va!(vaddr_raw);
-        self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
-        self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
+        let vaddr_raw = allocation::allocate(layout, &mut KernelAllocationOps)?;
+        let vaddr = VirtAddr::from_usize(vaddr_raw);
         let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
             // and therefore cannot be null.
@@ -96,34 +89,7 @@ impl DmaAllocator {
         Ok(dma_info)
     }
 
-    fn update_mapping_mode(
-        &mut self,
-        vaddr: VirtAddr,
-        num_pages: usize,
-        mode: DmaMappingMode,
-    ) -> AllocResult<()> {
-        let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
-            error!("change table flag fail");
-            AllocError::NoMemory
-        })
-    }
-
-    fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma prepare failed");
-            AllocError::NoMemory
-        })
-    }
-
-    fn release_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma release failed");
-            AllocError::NoMemory
-        })
-    }
-
-    /// Gives back the allocated region to the byte allocator.
+    /// Returns pages only after platform release and mapping restoration succeed.
     ///
     /// # Safety
     ///
@@ -136,15 +102,10 @@ impl DmaAllocator {
             return;
         }
         let virt_raw = dma.cpu_addr.as_ptr() as usize;
-        let size = num_pages * PAGE_SIZE_4K;
-        let vaddr = va!(virt_raw);
-
-        // Deallocation cannot fail; the helper already logs platform release errors.
-        let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
-        let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
-
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        if allocation::release(virt_raw, num_pages, &mut KernelAllocationOps) {
+            #[cfg(feature = "dma-trace")]
+            self.coherent_allocs.remove(&virt_raw);
+        }
     }
 
     /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.
@@ -323,7 +284,6 @@ impl DmaAllocator {
                 );
                 return false;
             }
-            self.coherent_allocs.remove(&cpu_addr);
             return true;
         }
 

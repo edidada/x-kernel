@@ -13,13 +13,11 @@ use kplat::dma::PlatformDmaIf;
 #[kiface::provide]
 impl PlatformDmaIf {
     fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
-        dma_share_pages(paddr, size);
-        Ok(())
+        dma_share_pages(paddr, size)
     }
 
     fn release(paddr: usize, size: usize) -> kerrno::KResult {
-        dma_unshare_pages(paddr, size);
-        Ok(())
+        dma_unshare_pages(paddr, size)
     }
 }
 
@@ -27,23 +25,28 @@ impl PlatformDmaIf {
 kplat::default_dma_if_impl!();
 
 #[cfg(feature = "kvm-guest-mem-share")]
-fn dma_unshare_pages(paddr: usize, size: usize) {
+fn dma_unshare_pages(paddr: usize, size: usize) -> kerrno::KResult {
     let pages = size / PAGE_SIZE_4K;
+    let mut result = Ok(());
     for page_index in 0..pages {
         let page_paddr = paddr + PAGE_SIZE_4K * page_index;
         if !crate::peripherals::kvm::guest_mem_unshare_page(page_paddr) {
             log::warn!("[virtio hal impl] cannot unshare 0x{page_paddr:x}");
+            result = Err(kerrno::KError::Io);
         }
     }
+    result
 }
 
 #[cfg(feature = "kvm-guest-mem-share")]
-fn dma_share_pages(paddr: usize, size: usize) {
+fn dma_share_pages(paddr: usize, size: usize) -> kerrno::KResult {
     let pages = size / PAGE_SIZE_4K;
     for page_index in 0..pages {
         let page_paddr = paddr + PAGE_SIZE_4K * page_index;
         if !crate::peripherals::kvm::guest_mem_share_page(page_paddr) {
             log::warn!("[virtio hal impl] cannot share 0x{page_paddr:x}");
+            return Err(kerrno::KError::Io);
         }
     }
+    Ok(())
 }
