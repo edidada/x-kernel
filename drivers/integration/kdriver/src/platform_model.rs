@@ -216,3 +216,5 @@ unittest::path_mod_test!(lifecycle_tests, "../ut-tests/model_mmio_lifecycle.rs")
 unittest::path_mod_test!(pending_tests, "../ut-tests/model_mmio_pending.rs");
 
 unittest::path_mod_test!(isolation_tests, "../ut-tests/model_mmio_isolation.rs");
+
+unittest::path_mod_test!(unregister_tests, "../ut-tests/model_mmio_unregister.rs");

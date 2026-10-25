@@ -873,3 +873,49 @@ Modern-MMIO and default-PCI `make clippy` pass (`clippy-mmio.log`,
 `clippy-pci.log`), as does default-PCI `make build` (`build-pci.log`). Only the
 existing third-party future-Rust warnings remain. This slice is a local
 test/documentation commit only; no push or rebase is part of this validation.
+
+### R1-08 nineteenth slice: real one-shot domain unregistration
+
+`model_mmio_unregister` exercises real `remove_device`, not unbind with a new
+name. Its opt-in requires the exact module filter before mutation; background
+VirtIO entropy consumption and all other lifecycle opt-ins must be disabled.
+The one-test guest intentionally ends with the registration removed, persists
+coverage and shuts down. No resurrection, private slot-map mutation, replacement
+core or production API is introduced solely to restore a test environment.
+
+Before removal, a guarded 257-byte cumulative sample requires fresh progress
+beyond the driver's 256-byte cache. The single real model RNG has no same-address
+legacy descriptor. After domain removal, retained references preserve path and
+MMIO descriptor facts but become offline; snapshots and enumeration no longer
+contain the device. Its publication disappears, the retained handle rejects a
+nonempty read with BadState without modifying storage, and bind/unbind reject
+the old object with NotFound. Repeated remove succeeds without resurrecting it.
+
+The fixed boot-DT owner still claims this MMIO range; a new enumeration context
+recognizes the claim and does not adopt a legacy descriptor. That is the current
+boot ownership policy, not evidence of platform-slot reclamation, final core
+deallocation, hotplug or re-enumeration. Pending teardown and IRQ notification
+tails are not inferred from this one-shot test.
+
+The dedicated modern-MMIO guest passes **one test, zero failures/ignored** and
+extracts coverage (`r1-08-unregister/ut-unregister.log`). The saved `mmio.config`
+records configuration; kdriver design.md records the exact command/filter.
+Runs use a private worktree disk, no network/vsock and an outer failure watchdog.
+Standards and Spec reviews report no blocker. The pending harness now clears
+the unregister opt-in from inherited environments; all 15 host tests pass.
+
+The broad-filter negative control deliberately uses `UNITTEST_CRATE=kdriver`
+with unregister enabled. It fails at the exact-filter assertion before sampling
+or removal: **89 pass, one expected failure, four ignored**, make exit 2
+(`ut-filter-negative.log`, `negative-exit`). Thus an enabled destructive case
+cannot silently run inside a wider suite or hide behind an ignored result.
+
+The canonical aarch64 PCI configuration, with model opt-ins unset, passes the
+nine-crate regression: **338 tests, zero failures, five ignored (343 total)**,
+with coverage extracted (`r1-08-unregister/ut-pci.log`). The additional ignored
+case is the explicitly destructive guest fixture. Pinned formatting and
+whitespace checks pass. No production behavior was changed.
+Modern-MMIO and default-PCI `make clippy`, plus default-PCI `make build`, pass
+(`clippy-mmio.log`, `clippy-pci.log`, `build-pci.log`). Only existing third-party
+future-Rust warnings remain. The worktree is left on the canonical PCI defconfig;
+this is a local test/documentation commit, not a push or whole-ticket completion.

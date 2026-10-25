@@ -52,6 +52,18 @@ restore a binding fails acceptance; an outer watchdog bounds a stuck read or
 teardown without authorizing forced release. Successful sequential isolation
 does not establish pending-request, shared-IRQ, DMA-tail or hot-unplug safety.
 
+The one-shot unregister fixture enforces an exact module filter and disables
+background entropy consumption before permanently removing the real device.
+It intentionally does not restore registration: the dedicated guest exits after
+coverage. Invalid filter/configuration/device count fails before removal. This
+scope prevents a later test from relying on a device removed by the fixture.
+Retained references preserve metadata, not binding-resource access; nonempty
+consumer reads and attempted bind/unbind must reject the removed object. The
+boot owner's retained MMIO claim prevents legacy rediscovery while the hardware
+remains physically present. Successful removal does not prove final DeviceCore
+deallocation, platform-slot reclamation, pending-request teardown or IRQ-tail
+synchronization. Those are distinct ownership/acceptance boundaries.
+
 The new path is restricted to fixed boot-DT, available direct QEMU Arm virt
 modern MMIO RNG nodes. Availability includes ancestors; real compatible strings
 and root provenance come from FirmwareDeviceView, not matcher aliases. Full-tree

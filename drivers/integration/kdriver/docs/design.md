@@ -77,6 +77,33 @@ Use the prepared aarch64 MMIO configuration, a private worktree disk,
 `XKMAKE_ARGS='--no-net --no-vsock'`, and an outer failure watchdog. Ordinary runs
 ignore this test; enabled runs reject the wrong device count before mutation.
 
+### Dedicated one-shot unregistration fixture
+
+`model_mmio_unregister` tests real registration removal, not another unbind.
+It requires `XK_TEST_MODEL_MMIO_UNREGISTER=1` and the exact filter
+`UNITTEST_CRATE=kdriver::platform_model::unregister_tests`. The opt-in rejects
+a broader suite before mutation because a removed registration is permanently
+offline. The dedicated guest intentionally ends with this boot device removed;
+coverage persistence and guest shutdown do not require its RNG. There is no
+manual registry restoration, fabricated replacement core or new test-only API.
+
+Use the single-device aarch64 modern-MMIO configuration with VirtIO entropy
+consumption disabled and the lifecycle, pending and isolation flags unset:
+`XK_TEST_MODEL_MMIO_UNREGISTER=1 make unittest UNITTEST_CRATE=kdriver::platform_model::unregister_tests XKMAKE_ARGS='--no-net --no-vsock' QEMU_ARGS='-global virtio-mmio.force-legacy=false'`.
+Use a private disk and an outer failure watchdog. The test samples more than the
+current 256-byte cache bound before removing through the global domain. Retained
+device references must keep readable identity/descriptor metadata but become
+offline, disappear from domain snapshots, and reject bind/unbind. The retained
+consumer must close and reject nonempty reads without buffer mutation. Repeated
+remove must succeed without restoring publication or registration.
+
+The fixed boot-DT platform owner deliberately retains its MMIO claim after
+domain removal; another enumeration context must still recognize the range as
+owned rather than hand it to the legacy path. This verifies domain unregister
+under the existing boot ownership policy, not releasing the platform slot or
+supporting physical hot-unplug/re-enumeration. Those require an owner-level
+policy, not direct test mutation of the slot map.
+
 ### Production ownership
 
 With `virtio-rng`, EnumerationContext::new always obtains the same
