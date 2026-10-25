@@ -212,3 +212,5 @@ impl Drop for StagedRng {
 unittest::path_mod_test!(tests, "../ut-tests/platform_model.rs");
 
 unittest::path_mod_test!(lifecycle_tests, "../ut-tests/model_mmio_lifecycle.rs");
+
+unittest::path_mod_test!(pending_tests, "../ut-tests/model_mmio_pending.rs");

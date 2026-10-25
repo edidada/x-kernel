@@ -776,4 +776,51 @@ host-side request observation. Throttling or a fixed sleep is not proof of
 pending state. Reset/late-response behavior of that backend still needs
 verification before combining it with reopened-backend/rebind sampling. This
 is a test-harness prerequisite, not a reason to add state or hooks to the driver
-framework. Real pending, dual-instance and deferred IRQ acceptance remain open.
+framework. At this slice, real pending, dual-instance and deferred IRQ acceptance
+remained open; the next slice addresses pending teardown only.
+
+### R1-08 seventeenth slice: withheld-response pending teardown
+
+The opt-in `model_mmio_pending` test uses the real global domain and MMIO RNG,
+without production hooks or state changes. Its dedicated configuration disables
+the VirtIO entropy consumer; the kdriver-only suite excludes other real sampling
+tests. The host harness replaces the runner's existing RNG backend with rng-egd,
+keeps its socket connected, and never sends response bytes, including after
+unbind/rebind. No second RNG device is added.
+
+The sole reader reaches Started + Blocked + unfinished before unbind. Successful
+acceptance requires BadState with an untouched buffer, reader exit, an Unclaimed
+interval without publication, and restoration of the same registered device with
+a distinct publication. The old handle stays closed. There is no post-rebind
+nonempty read against the withholding backend. Cleanup observations precede
+assertions; failed cleanup cannot authorize rebind or forced task reclamation.
+
+Host validation requires positive EGD requests, zero responses, ordered unique
+BLOCKED/CLOSED guest markers, named-test success, suite success and successful
+make/QEMU/coverage completion. Cross-FD receipt ordering is not interpreted as
+guest chronology. Timeouts fail the experiment and terminate only its process
+group; they do not prove quiescence.
+
+The real modern-MMIO run passes **91 tests, zero failures, one ignored**. QEMU
+10.0.11 reports **two EGD requests totalling 256 requested bytes, zero response
+bytes**, with both markers and the pending test passing. Coverage extraction
+passes. Evidence is local at `r1-08-pending/run-01/` under the existing evidence
+root; `pending.config` preserves the dedicated configuration. Reproduction:
+`python3 scripts/tests/run_model_rng_pending.py --log-dir <fresh-directory>`.
+The configuration and private worktree disk prerequisites are enforced before
+launch. Fifteen host tests pass, including the generated launcher, fragmented
+protocol input, invalid evidence rejection and process-group cleanup.
+
+Standards and Spec/logic reviews find no blocker. This is pending-read teardown
+acceptance, not evidence of active DMA writes, reset cancellation of late backend
+responses, shared-IRQ notification-tail safety, or whole-ticket completion.
+Dual-instance isolation, unregister and the deferred IRQ gate remain open.
+
+Canonical aarch64 PCI regression, with all model opt-ins unset, passes **338
+tests, zero failures, three explicit opt-in cases ignored (341 total)** and
+extracts coverage successfully (`r1-08-pending/ut-pci.log`). Modern-MMIO and
+default-PCI `make clippy` pass (`clippy-mmio.log`, `clippy-pci.log`); pinned
+Rust formatting and whitespace checks pass. Default-PCI `make build` also
+passes (`build-pci.log`). The worktree configuration is restored to the canonical
+aarch64 PCI defconfig. No production behavior was changed; this slice is a local
+test/documentation commit, not a push or declaration of R1-08 completion.

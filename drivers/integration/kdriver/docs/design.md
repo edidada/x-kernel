@@ -13,6 +13,45 @@ Serial test execution excludes other test cases, not the kernel entropy worker;
 the case does not establish that a request was pending at withdrawal or certify
 IRQ notification-tail synchronization.
 
+### Opt-in withheld-response pending read fixture
+
+`ut-tests/model_mmio_pending.rs` provides
+`real_model_mmio_rng_pending_unbind_releases_reader`, separate from the sampling
+lifecycle case. Reproduction requires an aarch64 QEMU modern-MMIO configuration
+with the RNG driver enabled, the VirtIO entropy consumer disabled, exactly one
+matching model device/publication, and no competing consumers or management
+operations. Build with `XK_TEST_MODEL_MMIO_PENDING=1` and leave
+`XK_TEST_MODEL_MMIO_LIFECYCLE` unset. Serial execution excludes other tests, not
+kernel workers; disabling the entropy consumer is a separate prerequisite.
+
+The host harness `scripts/tests/run_model_rng_pending.py` runs the kdriver-only
+suite with a controlled `rng-egd` backend withholding all response bytes from
+boot. With the prepared configuration and a private regular `disk.img` in this
+worktree, its entry point is
+`python3 scripts/tests/run_model_rng_pending.py --log-dir /tmp/pending-01`.
+The harness supplies the pending and boot-expectation opt-ins; ordinary boot
+checks do not sample the RNG. The pending fixture is the sole nonempty reader
+of the real RNG in this configuration.
+
+The guest observes Started + Blocked + unfinished before printing the exact raw
+line `MODEL_MMIO_PENDING: BLOCKED` through `unittest::ktest_println!`. It then
+unbinds through the existing global domain, retains registration, waits for the
+reader to exit, and restores the binding only after successful cleanup. It
+checks the reader's BadState result and unchanged buffer, the unclaimed interval,
+replacement publication identity, and rejection of a retained old handle without
+buffer mutation. There is no post-rebind nonempty read while responses remain
+withheld. `MODEL_MMIO_PENDING: CLOSED` is printed only after cleanup, restoration
+and every assertion succeed.
+
+Host acceptance requires both exact markers in order, the named test passing,
+the suite all-pass result, positive EGD request count and zero responses. Guest
+Blocked state alone is insufficient; socket and console buffering also preclude
+cross-FD chronology claims. These are fixture responsibilities and acceptance
+criteria, not a recorded validation result or proof of late-response/IRQ-tail
+safety.
+
+### Production ownership
+
 With `virtio-rng`, EnumerationContext::new always obtains the same
 `production_owner()` from LazyInit<Arc<PlatformModel>>; managers have no separate
 platform-owner field.

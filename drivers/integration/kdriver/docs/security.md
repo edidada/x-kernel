@@ -11,6 +11,35 @@ behind its bus owner. Restoration failures must fail the test and be reported,
 not be treated as successful cleanup. Passing ordinary unbind/rebind does not
 prove a hardware request was pending or complete the deferred IRQ safety gate.
 
+The separate `model_mmio_pending` opt-in fixture trusts a controlled host EGD
+gate to withhold every response byte from boot. It requires the VirtIO entropy
+consumer and lifecycle sampling opt-in to be disabled, a kdriver-only suite,
+one matching device/publication, and no other real-RNG consumer or management
+operation. A serial test annotation alone cannot enforce the kernel-worker
+exclusion. Positive EGD requests and zero responses must corroborate the exact
+ordered BLOCKED/CLOSED lines, named-test success and suite all-pass result;
+neither a marker nor a blocked task alone is sufficient evidence. Independent
+socket/console buffering does not establish cross-FD event ordering.
+
+The reader owns its handle, buffer and shared observation state; task-context
+results use SpinNoPreempt, not an IRQ-disabled lock. Observations are collected
+before assertions, and failed readiness still attempts normal unbind cleanup.
+Five-second deadlines are failure watchdogs, never evidence of quiescence.
+Join occurs only after observing Exited. Rebinding requires successful unbind
+and a zero reader exit code; otherwise the fixture fails without attempting to
+reuse the binding. Dropping the observer's task reference neither cancels nor
+force-frees a live task: scheduler/waiter ownership and the closure's owned
+inputs remain. A hung unbind/reset or non-exiting reader requires the outer
+guest timeout, not a forced resource-release shortcut.
+
+CLOSED is emitted only after successful cleanup, restoration and assertions.
+Restoration preserves the registered device and performs no new nonempty read;
+this fixture therefore does not demonstrate rebound queue data delivery. The
+withholding gate does not inject a late response or exercise an IRQ callback
+tail race, and no IRQ-tail, cache/DMA hardware safety or whole-ticket acceptance
+claim follows. Validation results must be recorded separately after the main
+run; this documentation records only the fixture's contract and limitations.
+
 The new path is restricted to fixed boot-DT, available direct QEMU Arm virt
 modern MMIO RNG nodes. Availability includes ancestors; real compatible strings
 and root provenance come from FirmwareDeviceView, not matcher aliases. Full-tree
