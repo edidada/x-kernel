@@ -15,21 +15,17 @@ documentation.workspace = true
 # `cfg(unittest)` regressions under `ut-tests/` that the workspace excludes
 # from cargo-shear (`ignored-paths` in the root manifest). `kcpu_id_map` is the
 # second shape: `--cfg unittest` builds call `kcpu_id_map::nr_cpus()` from the
-# block ut-tests mounted with `path_mod_test!`. `kdma` is a third shape: the
-# crate only forwards `dma-trace` to the DMA core's own feature, and cargo-shear
-# still reports it after the forwarding was made explicit with `dep:kdma`,
-# because a feature reference is not a use. (The DMA core stays in the graph
-# regardless: `device_res_xkernel` depends on it unconditionally.)
+# block ut-tests mounted with `path_mod_test!`.
 # `krcu` is used only by the external device-management unit tests mounted
 # with `path_mod_test!`: `krcu::with_read` verifies rejection of RCU read
 # context. Those `ut-tests/` sources are excluded from cargo-shear analysis.
-ignored = ["display", "kalloc", "vsock", "kcpu_id_map", "kdma", "krcu"]
+ignored = ["display", "kalloc", "vsock", "kcpu_id_map", "krcu"]
 
 [features]
 pci-non-ecam = []
 net = ["dep:net", "kclass/net"]
 block = ["dep:block", "kclass/block", "dep:ktask", "dep:kcompletion", "dep:kirq", "dep:linked_list_r4l", "dep:kcpu_id_map", "dep:ksync"]
-device-model = ["dep:driver_model", "dep:ktask", "dep:ksync"]
+device-model = ["dep:driver_model", "dep:ktask", "dep:ksync", "dep:kdma"]
 hwrng = ["dep:subsys_hwrng", "device-model", "dep:kcompletion", "dep:krcu"]
 char = ["dep:char_driver", "kclass/char"]
 display = ["dep:display", "kclass/display"]

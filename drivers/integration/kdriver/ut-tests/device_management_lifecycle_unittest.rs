@@ -83,15 +83,72 @@ impl DeviceResourceServices for HostServices {
 
     fn alloc_coherent(
         &self,
-        _: DeviceContext<'_>,
-        _: usize,
-        _: usize,
+        device: DeviceContext<'_>,
+        len: usize,
+        align: usize,
     ) -> Result<CoherentMem, RuntimeError> {
-        Err(RuntimeError::Unsupported)
+        crate::host_dma::alloc_coherent(device, len, align)
     }
 
     fn map_irq(&self, _: DeviceContext<'_>, _: IrqSpec) -> Result<Virq, RuntimeError> {
         Err(RuntimeError::Unsupported)
+    }
+}
+
+struct DmaProbe;
+
+impl DriverOps<PlatformBus> for DmaProbe {
+    type Data = CoherentMem;
+
+    fn probe(
+        &self,
+        device: &mut DeviceAccess<'_, PlatformBus>,
+        _: &Environment<'_>,
+    ) -> Result<CoherentMem, ProbeError> {
+        let memory = device.res().alloc_coherent(4097, 8192)?;
+        let reference = device.reference();
+        let view = reference
+            .descriptor()
+            .dma
+            .as_ref()
+            .ok_or(RuntimeError::BadState)?;
+        let physical = khal::mem::v2p(memaddr::VirtAddr::from_usize(memory.as_ptr() as usize))
+            .as_usize() as u64;
+        if view.translate_range(physical, 8192) != Some(memory.bus_addr()) {
+            return Err(RuntimeError::BadState.into());
+        }
+        Ok(memory)
+    }
+}
+
+#[def_test]
+fn model_callbacks_allocate_with_each_descriptor_dma_view() {
+    let domain = DeviceDomain::new();
+    domain.set_services(Arc::new(HostServices::new()));
+    let root = domain
+        .add_bus_instance(PlatformBus::ID, None, "host-dma-ut")
+        .unwrap();
+    static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("test,host-dma"))];
+    domain.register_driver(DriverDesc::new("host-dma-ut", IDS, DmaProbe));
+    for (node, bus_start) in [(1, 0x1_0000_0000), (2, 0x2_0000_0000)] {
+        let descriptor = DeviceDescriptor::builder()
+            .bus_instance(root)
+            .bus_data(Box::new(PlatformBusData::firmware_node(
+                node,
+                &["test,host-dma"],
+            )))
+            .dma(driver_model::DmaInfo {
+                window: driver_model::DmaWindow::new(0, bus_start, 0x1_0000_0000).unwrap(),
+                ..driver_model::DmaInfo::DEFAULT
+            })
+            .build();
+        let device = domain.add_device(descriptor).unwrap();
+        domain.probe_pending();
+        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+        domain.unbind_device(&device).unwrap();
+        domain.bind_device(&device).unwrap();
+        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+        domain.remove_device(&device).unwrap();
     }
 }
 
@@ -666,7 +723,9 @@ fn explicit_bind_waits_for_same_device_probe_without_probing_twice() {
     drop(gate);
     let counts_after_binding = fixture.observations.counts();
     let cleanup = if registration_exit == Some(0) && binder_exit == Some(0) {
-        registration.device().map(|device| fixture.domain.remove_device(&device))
+        registration
+            .device()
+            .map(|device| fixture.domain.remove_device(&device))
     } else {
         None
     };

@@ -771,3 +771,21 @@ platform handling elsewhere. A successful result establishes numeric address
 constraints only, not hardware identity, resource ownership or cache handling.
 Every subsequent host allocation must validate its complete interval and unwind
 the allocation on rejection. Legacy provider behavior is unchanged.
+
+## Model coherent DMA host adaptation
+
+`host_dma` accepts a borrowed model context, not caller-forged global DMA facts.
+It checks all page-rounded bytes against descriptor window/mask and checks bus
+alignment before exposing an address. The private unpublished native owner
+releases on rejection. Once published, one CoherentMem hook owns release using
+the original native bus token and layout; translated device addresses must never
+be passed back as native tokens. The pointer reconstructed by that hook comes
+from the original nonzero address, never an external integer input.
+
+Zeroing includes page padding to avoid exposing prior allocation contents.
+The adapter rejects non-coherent configurations rather than silently treating
+missing cache maintenance as success. Numeric validation is not device isolation:
+there is no IOMMU enforcement here, and callers must stop hardware DMA before
+dropping the guard. kdma cleanup failures retain pages and log rather than reuse
+pages whose mapping/share state is uncertain. Tests use real allocator/mapping
+services but no hardware DMA; they do not certify cache or IRQ teardown behavior.

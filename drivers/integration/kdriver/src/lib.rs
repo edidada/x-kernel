@@ -46,6 +46,8 @@ pub mod driver_registry;
 mod enumeration;
 #[cfg(feature = "device-model")]
 pub mod firmware_dma;
+#[cfg(feature = "device-model")]
+pub mod host_dma;
 mod manager;
 mod resource;
 #[cfg(feature = "hwrng")]

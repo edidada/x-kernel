@@ -850,3 +850,37 @@ no repeated simulated resource cleanup. This is not real IRQ/DMA teardown proof.
 The model's existing synthetic generation-mismatch test separately verifies
 remove-before-Data-drop for a successful but rejected probe; no public injection
 API is added merely to reach that serialized defensive path from kdriver.
+
+## Per-device coherent DMA adapter
+
+`host_dma::alloc_coherent` is a host service implementation helper, not a new
+driver-facing contract or allocator. It consumes the model's borrowed
+`DeviceContext`, reads `descriptor().dma` on each call and allocates through
+kdma. It does not cache descriptor facts, infer firmware defaults, or use the
+legacy global bus address as the device's physical address. Translation starts
+with `khal::mem::v2p` of the allocated CPU address.
+
+The complete page-rounded allocation must fit the resolved window and device
+mask; the translated bus base must satisfy requested alignment. Rejection drops
+an unpublished native owner, returning the original allocation to kdma's cleanup
+path. Successful buffers, including padding, are zeroed before publication.
+The non-Clone `CoherentMem` guard receives the original CPU/native-bus/layout
+release token in a private hook; its device-visible bus address is independent
+of that token. Ownership transfers once, without another global allocation map.
+The private native owner carries its release operation until transfer. Tests
+substitute only this operation to observe the original CPU/bus/layout token and
+assert one release on rejection or guard Drop; production uses kdma directly.
+There is no global fault-injection state or public alternate allocator interface.
+
+Absent configuration and non-coherent devices return `Unsupported`. This slice
+does not claim a cache-maintenance protocol for non-coherent devices, streaming
+DMA, IOMMU support, or constrained allocation search. If kdma's selected region
+cannot satisfy the device view, allocation returns `NoMemory` after cleanup.
+Metadata allocation retains the kernel's existing infallible Arc policy.
+
+Guest tests exercise actual page allocation/mapping/free, independent translated
+views, zeroed padding, invalid inputs and full-range rejection. A model callback
+fixture delegates its DMA service to this helper and checks two descriptor views
+across bind/unbind/rebind. It does not hand the addresses to real hardware.
+Production provider installation and MMIO RNG enumeration remain R1-08 work;
+the helper alone does not enable a new boot path.

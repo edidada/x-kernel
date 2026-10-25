@@ -217,3 +217,41 @@ The optional `KFEAT_KVM_GUEST_MEM_SHARE=y` configuration also passes `make clipp
 compile/lint coverage only, not a KVM runtime acceptance result.
 No commit/push. Per-device host DMA adapter and explicit platform policy remain
 pending; `desc.dma` remains the sole device DMA authority, not `ResourceMap`.
+
+### R1-08 fifth slice: per-device host coherent DMA
+
+Previous reviewed slices are now committed: `ba056eff0` contains kdma rollback
+and `456b29d11` contains firmware resolution/discovery and bounded model views.
+Following the user's updated delivery instruction, subsequent implementation
+slices receive self-review, standards/spec review and validation before commit.
+
+`kdriver::host_dma::alloc_coherent` implements the host DMA service operation
+using `DeviceContext` and authoritative `desc.dma`. It checks the complete
+page-rounded native allocation against the window/mask and translated alignment,
+zeroes it including padding and returns a CoherentMem guard. Native CPU/bus/layout
+ownership is independent of the translated bus address, including when rejecting
+an allocation. No duplicate device DMA configuration or allocation registry is
+introduced. Missing configuration and non-coherent devices are rejected; cache
+maintenance, constrained allocation search and streaming DMA remain unsupported.
+
+Standards review found no issue. Spec review identified two test gaps: successful
+allocation after rejection did not prove rollback, and plain Drop did not prove
+original-token release exactly once. A private release-operation seam and local
+observer test now verify original CPU/native-bus/layout, no release while live,
+one release after Drop/rejection, full-padding zeroing and no writes on rejection.
+Follow-up review confirmed both gaps closed with no remaining blocker.
+
+Aarch64 guest regression: **169 passed, 0 failed**, coverage extracted. Tests use
+actual native pages for allocation and two translated views, plus a model callback
+fixture through DeviceResourceServices that allocates, unbinds and rebinds using
+each descriptor. No addresses are submitted to hardware; native cleanup failure
+remains subject to kdma's logged-retention policy. Logs are local under
+`r1-08-host-dma/`, with final guest evidence in `ut-final.log`.
+Final `make clippy` and `make build` pass (`clippy.log`, `build.log`); formatting,
+new-file license headers and whitespace checks pass. No outstanding review
+finding remains for this slice. Existing third-party future-incompatibility
+warnings are unchanged. This checkpoint is committed locally, not pushed.
+
+Next: explicit QEMU MMIO platform policy and production host service composition,
+then unique enumeration handoff and real RNG acceptance within R1-08. This helper
+does not by itself enable the production MMIO boot path or close the IRQ gate.
