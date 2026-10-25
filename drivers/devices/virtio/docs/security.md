@@ -1,5 +1,21 @@
 # VirtIO — 安全与可靠性分析
 
+## Read-only MMIO discovery boundary
+
+Classification validates numerical extent/alignment but cannot prove that a
+physical mapping exists or that reads are safe on arbitrary hardware. Its unsafe
+caller supplies live readable VirtIO identification registers for the duration
+of the call. The vendor helper uses volatile u32 reads through the existing
+header field addresses, without creating Rust references, unique MMIO ownership
+or a reset-on-Drop transport. Results own no mapping and are not an exclusive
+hardware claim. Actual transport creation still requires its separate ownership
+and lifetime proof; classification does not resolve new/legacy driver handoff.
+Both read APIs require use before transport creation, with no active exclusive
+owner of the accessed registers and no concurrent acquisition of that ownership.
+An existing UniqueMmioPointer owns its entire region: raw field reads or a
+second virtual mapping do not bypass this exclusion. Rescanning an active
+transport is forbidden; repeated discovery must reuse stored metadata instead.
+
 ## RNG IRQ factory boundary
 
 The model IRQ factory borrows its caller's real acquisition context only during

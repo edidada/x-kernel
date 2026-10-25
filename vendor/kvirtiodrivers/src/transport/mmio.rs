@@ -215,6 +215,41 @@ pub struct VirtIOHeader {
 }
 
 impl VirtIOHeader {
+    /// Read identification registers without constructing or resetting a transport.
+    ///
+    /// # Safety
+    /// `header` must be aligned and readable for a complete `VirtIOHeader` for
+    /// this call. Identification registers must permit side-effect-free u32
+    /// volatile reads. The mapping must remain live; no Rust references to
+    /// ordinary memory may conflict with these accesses.
+    /// Call before transport creation, with no live `UniqueMmioPointer`,
+    /// `MmioTransport` or other exclusive owner covering the accessed registers,
+    /// even through an alias mapping of the same physical region. The caller
+    /// must exclude concurrent acquisition of such ownership. Raw reads do not
+    /// permit rescanning a region owned by an active transport.
+    pub unsafe fn read_device_info(
+        header: NonNull<Self>,
+    ) -> Result<(DeviceType, MmioVersion), MmioError> {
+        let base = header.as_ptr().cast::<u8>();
+        let magic_register = base
+            .wrapping_add(core::mem::offset_of!(Self, magic))
+            .cast::<u32>();
+        let device_id_register = base
+            .wrapping_add(core::mem::offset_of!(Self, device_id))
+            .cast::<u32>();
+        let version_register = base
+            .wrapping_add(core::mem::offset_of!(Self, version))
+            .cast::<u32>();
+        // SAFETY: the caller supplies a live aligned header; magic is a
+        // side-effect-free ReadPure<u32> register at this existing field offset.
+        let magic = unsafe { magic_register.read_volatile() };
+        // SAFETY: the same live header covers the aligned ReadPure<u32> device ID.
+        let device_id = unsafe { device_id_register.read_volatile() };
+        // SAFETY: the same live header covers the aligned ReadPure<u32> version.
+        let version = unsafe { version_register.read_volatile() };
+        decode_device_info(magic, device_id, version)
+    }
+
     /// Constructs a fake VirtIO header for use in unit tests.
     #[cfg(test)]
     pub fn make_fake_header(
@@ -311,13 +346,11 @@ impl<'a> MmioTransport<'a> {
         header: UniqueMmioPointer<'a, VirtIOHeader>,
         config_space: UniqueMmioPointer<'a, [u8]>,
     ) -> Result<Self, MmioError> {
-        let magic = field_shared!(header, magic).read();
-        if magic != MAGIC_VALUE {
-            return Err(MmioError::BadMagic(magic));
-        }
-        let device_id = field_shared!(header, device_id).read();
-        let device_type = DeviceType::try_from(device_id).map_err(MmioError::InvalidDeviceID)?;
-        let version = field_shared!(header, version).read().try_into()?;
+        let (device_type, version) = decode_device_info(
+            field_shared!(header, magic).read(),
+            field_shared!(header, device_id).read(),
+            field_shared!(header, version).read(),
+        )?;
         Ok(Self {
             header,
             version,
@@ -335,6 +368,18 @@ impl<'a> MmioTransport<'a> {
     pub fn vendor_id(&self) -> u32 {
         field_shared!(self.header, vendor_id).read()
     }
+}
+
+fn decode_device_info(
+    magic: u32,
+    device_id: u32,
+    version: u32,
+) -> Result<(DeviceType, MmioVersion), MmioError> {
+    if magic != MAGIC_VALUE {
+        return Err(MmioError::BadMagic(magic));
+    }
+    let device_type = DeviceType::try_from(device_id).map_err(MmioError::InvalidDeviceID)?;
+    Ok((device_type, version.try_into()?))
 }
 
 // SAFETY: `&MmioTransport` only allows MMIO reads or getting the config space, both of which are

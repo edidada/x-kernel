@@ -79,8 +79,59 @@ use driver_base::{DeviceKind, DriverError};
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, DmaBackend, Hal as VirtIoHal, PhysAddr, StaticHal,
-    transport::{Transport, mmio::MmioTransport},
+    transport::{
+        Transport,
+        mmio::{MmioTransport, MmioVersion},
+    },
 };
+
+/// Classify a mapped VirtIO MMIO slot without constructing a transport.
+///
+/// Reads only magic, device ID and version. No register is written and no
+/// transport destructor runs. Returns None for null/misaligned pointers,
+/// short/overflowing extents, invalid identification, empty slots or device
+/// types not supported by this wrapper. The result owns no mapping or device.
+///
+/// # Safety
+/// For an extent that passes validation, `reg_base` must refer to a live,
+/// readable MMIO mapping covering `reg_size` bytes for this call. Identification
+/// registers must permit side-effect-free aligned u32 reads. For ordinary
+/// memory fixtures, no concurrent mutation or conflicting references may exist.
+/// Use this API before creating a transport: no live `UniqueMmioPointer`,
+/// `MmioTransport` or other exclusive owner may cover any accessed register,
+/// including through another mapping of the same physical region. Raw reads
+/// do not bypass an existing owner's exclusivity; do not rescan an active
+/// transport. The caller must exclude concurrent acquisition of such ownership.
+pub unsafe fn classify_mmio_device(
+    reg_base: *mut u8,
+    reg_size: usize,
+) -> Option<(DeviceKind, MmioVersion)> {
+    use core::{
+        mem::{align_of, size_of},
+        ptr::NonNull,
+    };
+
+    use virtio_drivers::transport::mmio::VirtIOHeader;
+
+    let header = NonNull::new(reg_base.cast::<VirtIOHeader>())?;
+    if !(reg_base as usize).is_multiple_of(align_of::<VirtIOHeader>())
+        || reg_size < size_of::<VirtIOHeader>()
+        || reg_size > isize::MAX as usize
+        || (reg_base as usize).checked_add(reg_size).is_none()
+    {
+        return None;
+    }
+    // SAFETY: extent and alignment are checked above; the caller retains the
+    // readable mapping and excludes live or concurrently acquired exclusive
+    // owners. The vendor helper reads only identification fields.
+    let (device_type, version) = unsafe { VirtIOHeader::read_device_info(header) }.ok()?;
+    Some((as_device_kind(device_type)?, version))
+}
+
+unittest::path_mod_test!(
+    mmio_classification_tests,
+    "../ut-tests/mmio_classification.rs"
+);
 
 #[cfg(feature = "socket")]
 pub use self::socket::VirtIoVsockDev;

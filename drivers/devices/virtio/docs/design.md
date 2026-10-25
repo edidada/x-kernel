@@ -1,5 +1,29 @@
 # VirtIO — 设计文档
 
+## Read-only MMIO classification
+
+`classify_mmio_device(base, size)` returns DeviceKind and MmioVersion without
+constructing a transport. The unsafe caller retains a readable mapping for the
+call only. Null, misaligned, short and overflowing extents fail before any read;
+invalid magic/version/device IDs and empty slots return None. Unsupported wrapper
+device kinds also return None. Classification acquires no mapping reference.
+
+The vendor VirtIOHeader exposes `read_device_info` using its own private field
+addresses and identification decoder. No duplicate production register layout,
+UniqueMmioPointer, Transport or destructor is involved. Only three read-only
+identification registers are read; status, feature selectors and queue state
+are untouched. The legacy transport-producing probe API remains available.
+Callers must release their temporary mapping reference after classification;
+successful classification does not reserve ownership or authorize a binding.
+Classification is a pre-transport operation: no live UniqueMmioPointer,
+MmioTransport or other exclusive owner may cover the accessed registers,
+including through another mapping of the same physical region. The caller
+must also exclude concurrent ownership acquisition. Existing devices must be
+recognized from stored discovery metadata, not rescanned through this raw API
+while a transport owns their region.
+External fixture tests compare the entire register image across repeated valid
+and invalid classification, including legacy/modern, empty slots and bad extents.
+
 ## RNG caller-owned IRQ acquisition
 
 `VirtIoRngDev::try_new_with_irq_factory(transport, backend, completion, request,

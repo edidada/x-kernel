@@ -1,5 +1,29 @@
 # kdriver — Design
 
+## Read-only VirtIO MMIO discovery
+
+Platform enumeration first reuses an existing MMIO descriptor, queuing its ID
+for the existing core probe/skip decision without rereading owned registers or
+creating another descriptor. Overlapping, nonidentical ranges are skipped. The
+bus-manager lock serializes this discovery path; independent registration of the
+same physical device outside its bus owner is not supported. This reuses the
+existing descriptor registry, not a second identity cache. A registered descriptor
+reserves its MMIO range even while a probe is in progress or has not yet succeeded.
+
+Previously unregistered slots are classified through virtio::classify_mmio_device,
+which reads identification registers without constructing a transport. Discovery
+must not run MmioTransport::Drop: its reset would alter a device owned by an
+existing binding on rescan. Actual activation still creates the transport.
+The temporary discovery mapping reference is released after classification,
+including invalid and empty slots. Raw classification must not alias an active
+transport's UniqueMmioPointer; it is a pre-ownership operation only.
+
+This follows the separation visible in Linux drivers/virtio/virtio_mmio.c:
+identification reads precede device registration and transport operation.
+This change alone does not transfer RNG ownership to the new model. Exclusive
+handoff, descriptors staged outside the enumeration lock, and production probe
+installation remain required before enabling that path.
+
 ## Native ordinary IRQ composition
 
 `host_services::new_native_device_services` composes the existing native MMIO,

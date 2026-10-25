@@ -66,3 +66,40 @@ fn test_probe_pending_requeues_unmatched_descriptor() {
         })
     );
 }
+
+#[def_test(serial)]
+fn mmio_rescan_reuses_descriptor_and_rejects_overlapping_aliases() {
+    let bus = reset_model();
+    let mut first = EnumerationContext::new();
+    let id = first
+        .register_device(
+            bus.id(),
+            DeviceLocation::Mmio {
+                base: 0x1000,
+                size: 0x200,
+            },
+            DiscoveryOrigin::DeviceTree,
+            DeviceIdentity::Platform(PlatformIdentity {
+                alias: None,
+                firmware_id: Some("virtio,mmio"),
+            }),
+            None,
+            ResourceSet::new(),
+        )
+        .unwrap();
+    let mut rescan = EnumerationContext::new();
+    assert_eq!(rescan.revisit_mmio(0x1000, 0x200), true);
+    assert_eq!(rescan.revisit_mmio(0x1000, 0x200), true);
+    assert_eq!(rescan.revisit_mmio(0x1100, 0x200), true);
+    assert_eq!(rescan.revisit_mmio(0x0f00, 0x200), true);
+    assert_eq!(rescan.revisit_mmio(0x1000, 0x100), true);
+    assert_eq!(rescan.revisit_mmio(0x1200, 0x200), false);
+    assert_eq!(rescan.revisit_mmio(0x1000, 0), false);
+    assert_eq!(rescan.registered_count(), 0);
+    assert_eq!(rescan.pending.len(), 1);
+    assert_eq!(rescan.pending[0].id(), id);
+    assert_eq!(kdevice::device_descs_snapshot().len(), 1);
+    assert_eq!(rescan.probe_pending(), 0);
+    assert_eq!(rescan.unclaimed_count(), 1);
+    assert_eq!(rescan.unclaimed()[0].id(), id);
+}

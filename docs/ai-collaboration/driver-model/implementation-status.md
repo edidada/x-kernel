@@ -587,3 +587,57 @@ old consumer handles retained. They do not validate a physical IRQ route.
 `make clippy` and `make build` pass (`clippy.log`, `build.log`), as do targeted
 format, header and whitespace checks. Existing third-party future-Rust warnings
 remain. This slice is ready for a local commit; no push requested.
+
+### R1-08 fourteenth slice: non-destructive MMIO discovery
+
+Platform enumeration no longer constructs a temporary MmioTransport just to
+identify a slot. Its destructor resets status, which could disrupt an existing
+binding on rescan. The vendor header now supplies read-only identification using
+its existing register layout and decoder; the portable wrapper validates extent
+and alignment and returns copied kind/version information. Empty, malformed and
+unsupported slots do not create a transport. Discovery releases its temporary
+native mapping reference after either successful or rejected classification.
+
+Spec review caught a further constraint: safe-mmio's UniqueMmioPointer forbids
+independent raw access while the transport exists, even if those reads do not
+reset hardware. Enumeration now consults existing descriptors first, queues an
+exact match for the core's existing probe/skip logic, and rejects overlapping
+aliases without reading registers. Repeated matches do not create descriptors or
+duplicate pending entries. Classification is restricted to unowned slots; the
+bus manager serializes the discovery/registration path. No second cache is added.
+
+This is the safe discovery prerequisite, not the new-model ownership switch.
+The next slice must stage owned firmware facts before legacy registration, keep
+one enumeration identity per fixed boot-DT node, and add/probe only after leaving
+the enumeration spinlock. Native services, root bus and RNG driver installation
+must be one-time and share the existing global domain. Selection of the new RNG
+path must never fall back to legacy after a conversion/probe error. Production
+binding and that handoff must activate together, not strand devices in an empty
+staging path. Deferred IRQ acceptance remains open.
+
+Final-source modern-MMIO QEMU regression passes **280/280**, with coverage
+persisted and extracted (`r1-08-mmio-discovery/ut-mmio.log`). The saved configuration
+selects KFEAT_VIRTIO_BUS_MMIO; the command line contains virtio-rng-device,
+virtio-blk-device and virtio-mmio.force-legacy=false, without network or vsock.
+The real entropy RNG tests pass read-boundary checks and 128 repeated queue
+reuses. This exercises the existing legacy binding after the discovery change,
+not new-model binding or real-device unbind/rebind. No live-device rescan claim
+is made: descriptor reuse is covered by the controlled enumeration UT.
+
+The read-only fixture retains nonzero status and checks every register across
+repeated classification. A control using the old transport-producing probe and
+Drop resets that same fixture's status, demonstrating that these tests distinguish
+the old side effect. Invalid/empty/unsupported IDs, versions, pointer alignment
+and extent rejection are covered. Independent standards/spec review reports no
+remaining blocker after the unique-access fix.
+
+Vendor standalone regression passes **76 unit tests + 6 doctests** with all
+features and **40 unit tests + 4 doctests** without default features. Modern-MMIO
+`make clippy` passes. Logs and the MMIO config are local under
+`r1-08-mmio-discovery/`; build products and disk images are not source deliverables.
+
+After restoring the default aarch64 PCI configuration, final-source regression
+also passes **280/280** with coverage extracted (`ut-final.log`); `make clippy`
+and `make build` pass. Formatting, new-file headers and whitespace checks pass.
+Existing third-party future-Rust warnings remain. This slice is ready for local
+commit only; no push or production new-model activation is included.

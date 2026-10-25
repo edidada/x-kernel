@@ -1,5 +1,21 @@
 # kdriver — Security and Reliability Analysis
 
+## Non-destructive MMIO discovery
+
+Enumeration reuses descriptors for known MMIO ranges before mapping or reading
+registers. This protects the unique-access contract of live transports; raw
+volatile reads would not by themselves make aliasing a UniqueMmioPointer legal.
+Overlapping descriptions are rejected. The bus owner serializes discovery and
+registration; this check is not a general cross-bus physical-resource allocator.
+
+For unregistered slots enumeration receives copied type/version information, not a temporary
+transport with reset-on-drop behavior. Repeat classification cannot write status,
+queue or feature registers. Firmware still supplies the trusted MMIO extent;
+structural header validation does not authorize arbitrary physical addresses or
+make a stale hardware mapping safe. Discovery releases only its own mapping
+reference and does not claim another binding's transport or IRQ/DMA resources.
+Unmap failures are logged and are not retried by releasing another reference.
+
 ## Native ordinary IRQ provider
 
 NativeIrq requests reject non-sleepable context before registration. Callbacks

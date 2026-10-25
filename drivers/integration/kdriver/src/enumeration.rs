@@ -43,6 +43,39 @@ impl EnumerationContext {
         self.unclaimed.push(desc);
     }
 
+    /// Reuse an existing MMIO descriptor without accessing its owned registers.
+    ///
+    /// Enumeration is serialized by the bus manager. Exact matches are queued
+    /// for the core's existing probe/skip decision; overlapping descriptions are
+    /// rejected rather than creating an alias of another transport's mapping.
+    pub(crate) fn revisit_mmio(&mut self, base: usize, size: usize) -> bool {
+        let existing = kdevice::device_descs_snapshot().into_iter().find(|desc| {
+            let DeviceLocation::Mmio {
+                base: start,
+                size: len,
+            } = desc.location()
+            else {
+                return false;
+            };
+            size != 0
+                && len != 0
+                && base < start.saturating_add(len)
+                && start < base.saturating_add(size)
+        });
+        let Some(desc) = existing else {
+            return false;
+        };
+        if desc.location() != (DeviceLocation::Mmio { base, size }) {
+            log::warn!(
+                "platform: skipping MMIO range overlapping descriptor {:?}",
+                desc.id()
+            );
+        } else if !self.pending.iter().any(|pending| pending.id() == desc.id()) {
+            self.pending.push(desc);
+        }
+        true
+    }
+
     /// Add a newly enumerated descriptor to the shared device core.
     pub fn register_device(
         &mut self,

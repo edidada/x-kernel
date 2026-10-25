@@ -84,6 +84,12 @@ impl PlatformBackend {
                 }
             },
             |dev| {
+                if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE
+                    && let Some(mmio) = dev.mmio
+                    && context.revisit_mmio(mmio.base, mmio.size)
+                {
+                    return;
+                }
                 let mut resources: ResourceSet = smallvec![];
                 if let Some(mmio) = dev.mmio {
                     resources.push(ResourceDesc::Mmio(MmioRegion {
@@ -181,11 +187,17 @@ fn virtio_mmio_registration(
         }
     };
 
-    // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
-    // physical MMIO region, and `mmio.size` matches the region size.
-    let Some((device_kind, _transport)) =
-        (unsafe { virtio::probe_mmio_device(regs.as_ptr(), mmio.size) })
-    else {
+    // SAFETY: iomap_mmio retains a readable mapping of the firmware-described
+    // VirtIO region until iounmap below. Classification validates extent and
+    // alignment and reads only side-effect-free identification registers.
+    let classification = unsafe { virtio::classify_mmio_device(regs.as_ptr(), mmio.size) };
+    if let Err(error) = memspace::iounmap(memaddr::VirtAddr::from_usize(regs.as_ptr() as usize)) {
+        log::error!(
+            "platform: discovery MMIO release failed at {:#x}: {error:?}",
+            mmio.base
+        );
+    }
+    let Some((device_kind, _version)) = classification else {
         log::trace!(
             "platform: skipping empty {} slot at {:#x}",
             VIRTIO_MMIO_DT_COMPATIBLE,
