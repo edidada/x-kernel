@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use kvfs::{DeviceFileOps, NodeFlags};
+use kvfs::{Filename, Mount, NodePermission, NodeType, Path, SuperBlockFlags};
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use super::*;
@@ -14,6 +15,38 @@ fn random_node() -> EntropyNode {
 
 fn urandom_node() -> EntropyNode {
     EntropyNode::new(Kind::Urandom)
+}
+
+/// Covers shared devtmpfs publication and VFS reads of the pool-backed nodes,
+/// not the identity, availability or output quality of a hardware RNG source.
+#[def_test]
+fn shared_devtmpfs_random_nodes_are_readable_character_devices() {
+    let super_block = crate::new_devfs(SuperBlockFlags::empty());
+    let second_mount = crate::new_devfs(SuperBlockFlags::empty());
+    assert!(alloc::sync::Arc::ptr_eq(&super_block, &second_mount));
+    let root = Path::new(Mount::new_root(&super_block), super_block.root_dir());
+    for (name, minor) in [("random", 8), ("urandom", 9)] {
+        let file = Filename::new(name)
+            .open_with_flags_at(
+                &root,
+                &root,
+                0,
+                NodePermission::default(),
+                NodePermission::default(),
+                kcred::initial_cred(),
+            )
+            .expect("shared devtmpfs must publish readable random nodes");
+        let node_type = file.node_type();
+        let device_id = file.inode().rdev();
+        let mut buffer = [0xa5u8; 40];
+        let result = file.read(&mut buffer[4..36]);
+        drop(file);
+        assert_eq!(node_type, NodeType::CharacterDevice);
+        assert_eq!(device_id, DeviceId::new(1, minor));
+        assert_eq!(result, Ok(32));
+        assert_eq!(&buffer[..4], &[0xa5; 4]);
+        assert_eq!(&buffer[36..], &[0xa5; 4]);
+    }
 }
 
 #[def_test]

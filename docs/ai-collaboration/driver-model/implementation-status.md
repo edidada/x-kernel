@@ -919,3 +919,43 @@ Modern-MMIO and default-PCI `make clippy`, plus default-PCI `make build`, pass
 (`clippy-mmio.log`, `clippy-pci.log`, `build-pci.log`). Only existing third-party
 future-Rust warnings remain. The worktree is left on the canonical PCI defconfig;
 this is a local test/documentation commit, not a push or whole-ticket completion.
+
+### R1-08 twentieth slice: requirement audit and filesystem compatibility
+
+`r1-08-acceptance-audit.md` maps existing evidence to current requirements rather
+than treating historical pending notes as current gaps. It records the scoped
+DMA/provider coverage and keeps the mask rationale, real procfs lifecycle
+observations and native shared-IRQ/notification-tail acceptance open.
+
+The source inventory covers the pre-R1 branch and immediately pre-production
+MMIO baseline. RNG had no DeviceNode/sysfs class/uevent projection; random and
+urandom are static entropy-pool nodes. Input/DRM projections are separate and
+must remain. Existing procfs model rows distinguish registration from binding;
+the driver-list view remains legacy-only and is explicitly documented as such.
+Source inspection is not presented as a historical guest run or wire-event
+capture. No production behavior or public ABI changes in this slice.
+
+A new devfs regression opens both actual shared-root random nodes through VFS,
+checks character-device numbers 1:8/1:9, reads 32 bytes with buffer guards and
+verifies singleton mount identity. It does not infer hardware provenance from
+pool bytes, compare random values or create duplicate character registrations.
+
+The expanded 13-crate modern-MMIO suite passes **396 tests, zero failures,
+three ignored (399 total)**, with coverage extracted. Selection includes the
+previous nine crates plus devfs, sysfs, kdevice and kdevice_uevent. Boot-model
+and real unbind/rebind opt-ins are enabled; the new VFS test and existing
+projection/event-format tests pass. Evidence is local at
+`r1-08-compatibility/ut-mmio.log`; `mmio.config` preserves the configuration.
+The run uses a private disk with network/vsock disabled and a failure watchdog.
+
+Restoring the canonical aarch64 PCI configuration and clearing all model opt-ins
+passes the same selection with **394 tests, zero failures, five ignored
+(399 total)**, with coverage extracted (`r1-08-compatibility/ut-pci.log`). The
+new actual-root random-node test passes in both configurations. Standards and
+Spec reviews find no blocker; the audit does not unblock R1-09 or close the
+remaining R1-08 requirements merely because this regression passes.
+Modern-MMIO and default-PCI `make clippy`, default-PCI `make build`, pinned
+formatting and whitespace checks pass. Logs are `clippy-mmio.log`,
+`clippy-pci.log` and `build-pci.log` in the same evidence directory. Existing
+third-party future-Rust warnings remain. This is a local commit only; the
+worktree is left on the canonical PCI configuration.

@@ -2,6 +2,12 @@
 
 ## Scoped production MMIO RNG model binding
 
+The compatibility inventory and remaining acceptance gaps are tracked in
+`docs/ai-collaboration/driver-model/r1-08-acceptance-audit.md` at repository root.
+Pool-backed random nodes are not owned by an individual RNG binding. Existing
+Input/DRM projections remain on their current contracts; migrating RNG is not
+permission to retire those facilities or invent a per-RNG filesystem ABI.
+
 The opt-in `model_mmio_lifecycle` regression uses the existing global-domain
 unbind/bind operations and hwrng consumer handles against a single real model
 RNG. Enable it only with `XK_TEST_MODEL_MMIO_LIFECYCLE=1` on the modern-MMIO
