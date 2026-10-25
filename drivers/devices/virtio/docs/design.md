@@ -1,5 +1,28 @@
 # VirtIO — 设计文档
 
+## RNG caller-owned IRQ acquisition
+
+`VirtIoRngDev::try_new_with_irq_factory(transport, backend, completion, request,
+wait_reset)` accepts a one-shot factory from an os-api IrqHandlerFn to an owned
+DevIrq, returning DriverError on failure. The factory may borrow the actual
+model DeviceAccess and call its resource service; neither the callback context
+nor a fabricated IRQ number is stored. The registered callback holds only a
+Weak runtime reference and translates the shared private handle_interrupt
+result into os-api Handled/NotHandled.
+
+Legacy constructors retain their provider/resource API. Both paths share queue
+construction, IRQ acquisition, guard installation and queue-interrupt enable.
+A private enum owns either the legacy Irq or model DevIrq. Acquisition failure
+closes admission and confirms reset before DMA release. Explicit stop extracts
+the guard and releases it outside request/guard locks, before canceling pending
+DMA. The injected registration must synchronously drain callback notification
+tails on release; this seam does not implement IRQ-core synchronization.
+
+The factory is called once only after successful queue construction; its error
+must leave no live registration. Sleepable construction/teardown and existing
+backend IRQ-context requirements remain unchanged. No production enumeration,
+MMIO lifetime owner or host service installation is introduced here.
+
 ## Held DMA capability adapter
 
 With `rng`, `DeviceDmaBackend` adapts an owned os-api `DeviceDma` capability to

@@ -544,3 +544,46 @@ versions are unchanged. Existing third-party future-Rust warnings remain.
 
 The post-lint regression also passes **267/267**, with coverage extracted
 (`ut-final.log`). This slice is ready for a local commit; no push requested.
+
+### R1-08 thirteenth slice: model IRQ acquisition for concrete RNG
+
+The native ordinary IRQ provider adapts os-api routes and exact action tokens
+to kirq without a second registration table. Explicit firmware domains survive
+mapping; resolved virqs remain handles rather than being guessed as hwirqs.
+The native service constructor only composes capabilities, without globally
+installing them or triggering enumeration. Release delegates synchronous drain
+to kirq and cannot report successful reclamation after a failed detach.
+
+The portable RNG accepts a one-shot IRQ factory that can borrow the real model
+callback's Resources and return an owned DevIrq. Legacy static-provider callers
+remain compatible. Both paths share construction, weak callback dispatch,
+failed-acquisition reset and explicit stop ordering. The real model lifecycle
+regression now acquires through Resources::request_irq_at rather than bypassing
+the model with a test-global legacy provider.
+
+This does not enable production startup or complete deferred IRQ-core hardware
+acceptance. The next integration step must classify MMIO devices without
+constructing a transport whose Drop resets hardware, then stage model discovery
+until after releasing the legacy enumeration lock: add_device can auto-probe and
+must run in sleepable context. Exclusive handoff must precede old device_desc_add;
+the new path must never reset or register an already-owned legacy device.
+
+Self-review added a native plain-virq preflight: reject a missing descriptor or
+a conflicting specified trigger rather than silently using the core's legacy
+fallback. Unknown trigger leaves configuration unchanged. This check does not
+pin the mapping; its owner must keep it stable. Independent standards and
+spec/logic review report no blocking findings on the final implementation.
+
+The aarch64 guest selection
+`kdma,kdriver,virtio,driver_os_api,driver_model,subsys_hwrng,entropy` passes
+**275/275**, with coverage persisted and extracted. Evidence is local under
+`r1-08-model-irq/ut-final.log`; QEMU used the worktree disk without network or
+vsock. The first compile caught a missing Msi controller match; the unsupported
+default-domain case is now explicit and tested. Tests cover pure adapter
+conversion and error decisions, weak callbacks, reset-before-release,
+release-before-pending-DMA cleanup, and model removal/failed-probe rollback with
+old consumer handles retained. They do not validate a physical IRQ route.
+
+`make clippy` and `make build` pass (`clippy.log`, `build.log`), as do targeted
+format, header and whitespace checks. Existing third-party future-Rust warnings
+remain. This slice is ready for a local commit; no push requested.

@@ -1,5 +1,15 @@
 # driver-os-api — 设计
 
+## IRQ acquisition and release
+
+IrqOp request may invoke a fully initialized callback before returning; failure
+must leave no new registration. DevIrq owns one action, not an entire shared
+line. Its release hook must detach that exact registration and synchronously
+drain in-flight callbacks before returning. Device stop and provider-specific
+teardown context are caller obligations; no handler-needed lock may be held.
+The interface remains infallible at release and does not introduce a new IRQ
+core shutdown protocol.
+
 ## Held per-device DMA
 
 `DeviceDma` is an unsafe, Send + Sync provider contract for one stable device

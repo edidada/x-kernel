@@ -218,7 +218,21 @@ pub struct VirtIoRngDev<H: Hal, T: Transport, B: DmaBackend = StaticHal<H>> {
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
     // unregisters its completion handler.
-    irq_guard: SpinNoIrq<Option<Irq>>,
+    irq_guard: SpinNoIrq<Option<RngIrq>>,
+}
+
+enum RngIrq {
+    Legacy(Irq),
+    Model(driver_os_api::DevIrq),
+}
+
+impl RngIrq {
+    fn release(self) {
+        match self {
+            Self::Legacy(guard) => drop(guard),
+            Self::Model(guard) => drop(guard),
+        }
+    }
 }
 
 impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> {
@@ -274,22 +288,88 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
         resource: IrqResource,
         wait_reset: impl FnMut(),
     ) -> DriverResult<Arc<Self>> {
+        Self::try_new_with_registration(
+            transport,
+            backend,
+            completion,
+            |device| {
+                let weak = Arc::downgrade(device);
+                Irq::request_with(
+                    provider,
+                    resource,
+                    Arc::new(move |number| {
+                        weak.upgrade()
+                            .map_or(IrqEvent::NOT_HANDLED, |device| device.handle(number))
+                    }),
+                )
+                .map(RngIrq::Legacy)
+                .map_err(map_irq_error)
+            },
+            wait_reset,
+        )
+    }
+
+    /// Construct with an owned OS-api IRQ guard acquired by the caller.
+    ///
+    /// The factory can borrow the real model callback to request its IRQ. It
+    /// receives a weak-runtime handler, is invoked once after queue creation,
+    /// and must either return the unique registration guard or leave no live
+    /// registration on error. The factory itself is not retained. The guard
+    /// must synchronously detach and drain callbacks, including notification
+    /// tails, on Drop in the sleepable teardown context.
+    ///
+    /// Requires sleepable context and the backend/context obligations of
+    /// [`Self::try_new_irq_with_dma`]. Delivery may start during registration;
+    /// device queue interrupts are enabled only after the guard is installed.
+    /// Reads remain unpublished until construction returns. Normal teardown is
+    /// close, publication drain, then [`Self::finish_stop`].
+    ///
+    /// # Errors
+    /// Queue/DMA failure skips the factory. Factory failure closes admission
+    /// and confirms reset before releasing DMA, then returns its error.
+    pub fn try_new_with_irq_factory(
+        transport: T,
+        backend: B,
+        completion: Arc<dyn RngCompletion>,
+        request: impl FnOnce(driver_os_api::IrqHandlerFn) -> DriverResult<driver_os_api::DevIrq>,
+        wait_reset: impl FnMut(),
+    ) -> DriverResult<Arc<Self>> {
+        Self::try_new_with_registration(
+            transport,
+            backend,
+            completion,
+            |device| {
+                let weak = Arc::downgrade(device);
+                let handler: driver_os_api::IrqHandlerFn = Arc::new(move || {
+                    if weak
+                        .upgrade()
+                        .is_some_and(|device| device.handle_interrupt().handled())
+                    {
+                        driver_os_api::IrqAction::Handled
+                    } else {
+                        driver_os_api::IrqAction::NotHandled
+                    }
+                });
+                request(handler).map(RngIrq::Model)
+            },
+            wait_reset,
+        )
+    }
+
+    fn try_new_with_registration(
+        transport: T,
+        backend: B,
+        completion: Arc<dyn RngCompletion>,
+        request: impl FnOnce(&Arc<Self>) -> DriverResult<RngIrq>,
+        wait_reset: impl FnMut(),
+    ) -> DriverResult<Arc<Self>> {
         let device = Arc::new(Self::new_with_dma(transport, backend, completion)?);
-        let handler: Arc<dyn IrqHandler> = device.clone();
-        let weak = Arc::downgrade(&handler);
-        let irq = match Irq::request_with(
-            provider,
-            resource,
-            Arc::new(move |number| {
-                weak.upgrade()
-                    .map_or(IrqEvent::NOT_HANDLED, |device| device.handle(number))
-            }),
-        ) {
+        let irq = match request(&device) {
             Ok(irq) => irq,
             Err(error) => {
                 device.close_reads();
                 device.finish_stop(wait_reset)?;
-                return Err(map_irq_error(error));
+                return Err(error);
             }
         };
         *device.irq_guard.lock() = Some(irq);
@@ -369,7 +449,9 @@ impl<H: Hal, T: Transport, B: DmaBackend> VirtIoRngDev<H, T, B> {
             wait_reset();
         }
         let irq = self.irq_guard.lock().take();
-        drop(irq);
+        if let Some(irq) = irq {
+            irq.release();
+        }
         if let RequestState::Pending(token) = state {
             let RequestResources { device, buffer } = &mut *resources;
             // SAFETY: Reset is confirmed, IRQ release has drained callbacks, and
@@ -387,7 +469,7 @@ impl<H: Hal, T: Transport, B: DmaBackend> VirtIoRngDev<H, T, B> {
         Ok(())
     }
 
-    // Only try_new_irq publishes this object; tests drive its IRQ explicitly.
+    // Production constructors install IRQ ownership before returning this object.
     fn new_with_dma(
         transport: T,
         backend: B,
@@ -451,6 +533,12 @@ impl<H: Hal + Send, T: Transport + Send, B: DmaBackend + Send> IrqHandler
     for VirtIoRngDev<H, T, B>
 {
     fn handle(&self, _irq: usize) -> IrqEvent {
+        self.handle_interrupt()
+    }
+}
+
+impl<H: Hal, T: Transport, B: DmaBackend> VirtIoRngDev<H, T, B> {
+    fn handle_interrupt(&self) -> IrqEvent {
         let mut request = self.request.lock();
         if request.is_closed {
             return IrqEvent::NOT_HANDLED;

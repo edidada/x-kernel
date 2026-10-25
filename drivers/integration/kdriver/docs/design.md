@@ -1,5 +1,41 @@
 # kdriver — Design
 
+## Native ordinary IRQ composition
+
+`host_services::new_native_device_services` composes the existing native MMIO,
+DMA and management-lock services with `host_irq::NativeIrq`. Construction does
+not install services, enumerate firmware, activate a bus or probe any device.
+The `device-model` feature enables the direct kirq dependency independently of
+block drivers. Startup and read-only discovery integration remain separate work.
+
+Firmware routes go through kirq::try_map once per host-service request. Explicit
+domains are preserved; only absent domains select GIC, PLIC or IO-APIC roots.
+Other controller families without an explicit domain are unsupported. A returned
+resource retains the actual virq, domain, controller, hwirq and trigger. Resolved
+virqs use PlainVirq without firmware remapping. Registration, enable and release
+convert the retained resource, never reconstruct a domain from its controller.
+
+Plain-virq requests first query kirq::descriptor by the virq. Missing descriptors
+and conflicts with a specified trigger are rejected before registration; an
+Unknown trigger supplies no new configuration requirement. Successful requests
+still pass PlainVirq, preserving stored hwirq/domain/trigger rather than using
+the virq as a hardware number. The lookup is a preflight snapshot: the bus owner
+must keep the resolved mapping stable through registration and release. Missing
+MSI domains have no default-root fallback; MSI allocation remains unsupported.
+
+Requests require sleepable context and adapt ordinary IrqAction callbacks to
+kirq shared actions. The first action retains kirq's auto-enable policy; this
+is not a disabled-registration API. The host guard captures the provider,
+resource and returned action ID. Release removes that exact shared action and
+synchronously drains it before returning, outside locks needed by callbacks.
+There is no host action registry, threaded IRQ, pseudo-NMI or MSI allocation.
+
+External host_irq UT exercise pure conversion and injected map/register/free
+helper seams, including nonidentity numbering, explicit domains, callback results,
+context rejection and release errors. They do not register real interrupts or
+modify production root domains, and do not prove IRQ hardware or synchronization
+acceptance. This composition does not complete boot activation or R1-08 acceptance.
+
 ## Retained device DMA capability
 
 `host_dma::new_device_dma` creates the OS-api DeviceDma capability from the

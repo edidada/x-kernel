@@ -961,3 +961,189 @@ fn rng_irq_registration_failure_confirms_reset_before_freeing_queue() {
     assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
 }
+
+#[def_test(serial)]
+fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
+    use driver_os_api::{DevIrq, IrqAction, Virq};
+
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+    let queue = Arc::new(SpinNoIrq::new(MockQueue::default()));
+    let reset = Arc::new(MockReset::default());
+    let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
+    transport.queue = Some(queue.clone());
+    transport.reset = Some(reset.clone());
+    let status = transport.interrupt_status.clone();
+    let acknowledgements = transport.interrupt_ack_count.clone();
+    let completion = Arc::new(Completion::default());
+    let releases = Arc::new(AtomicUsize::new(0));
+    let release_is_ordered = Arc::new(AtomicBool::new(false));
+    let mut captured_handler = None;
+    let mut registration_action = None;
+    let mut requests = 0;
+    let device = Device::try_new_with_irq_factory(
+        transport,
+        StaticHal::<TrackedHal>::default(),
+        completion.clone(),
+        |handler| {
+            requests += 1;
+            registration_action = Some(handler());
+            captured_handler = Some(handler.clone());
+            let reset = reset.clone();
+            let releases = releases.clone();
+            let release_is_ordered = release_is_ordered.clone();
+            Ok(DevIrq::new(
+                Virq::new(7),
+                Some(Arc::new(move || {
+                    release_is_ordered.store(
+                        reset.confirmations.load(Ordering::Relaxed) > 0
+                            && MAPPINGS.load(Ordering::Relaxed) == mappings + 1
+                            && DMA_BLOCKS.load(Ordering::Relaxed) > dma
+                            && handler() == IrqAction::NotHandled,
+                        Ordering::Relaxed,
+                    );
+                    releases.fetch_add(1, Ordering::Relaxed);
+                })),
+            ))
+        },
+        || {},
+    )
+    .unwrap();
+    let handler = captured_handler.unwrap();
+    let unrelated = handler();
+    status.store(2, Ordering::Relaxed);
+    let configuration = handler();
+    let config_notifications = completion.notifications.load(Ordering::Relaxed);
+    device.request.lock().submit().unwrap();
+    // SAFETY: The sole live submission owns the queue and buffer until this callback reclaims it.
+    unsafe { finish(&queue.lock(), 8, false) };
+    status.store(1, Ordering::Relaxed);
+    let completed = handler();
+    let completed_mappings = MAPPINGS.load(Ordering::Relaxed);
+    let completed_notifications = completion.notifications.load(Ordering::Relaxed);
+    let mut output = [0xaa; 8];
+    let read = device.read(&mut output);
+    device.request.lock().submit().unwrap();
+    let retained_source: Arc<dyn HwrngDevice> = device.clone();
+    let weak = Arc::downgrade(&device);
+    reset.is_pending.store(true, Ordering::Relaxed);
+    device.close_reads();
+    let mut waits = 0;
+    let mut retained_until_reset = true;
+    let stopped = device.finish_stop(|| {
+        waits += 1;
+        retained_until_reset &= releases.load(Ordering::Relaxed) == 0
+            && MAPPINGS.load(Ordering::Relaxed) == mappings + 1
+            && DMA_BLOCKS.load(Ordering::Relaxed) > dma;
+        reset.is_pending.store(false, Ordering::Relaxed);
+    });
+    let repeated = device.finish_stop(|| waits += 1);
+    let ack_after_stop = acknowledgements.load(Ordering::Relaxed);
+    let notifications_after_stop = completion.notifications.load(Ordering::Relaxed);
+    status.store(3, Ordering::Relaxed);
+    let stopped_action = handler();
+    let mut late_output = [0xaa; 8];
+    let late_read = retained_source.read(&mut late_output);
+    drop(device);
+    drop(retained_source);
+    let is_released = weak.upgrade().is_none();
+    let expired_action = handler();
+    drop(handler);
+
+    assert_eq!(requests, 1);
+    assert_eq!(registration_action, Some(IrqAction::NotHandled));
+    assert_eq!(unrelated, IrqAction::NotHandled);
+    assert_eq!(configuration, IrqAction::Handled);
+    assert_eq!(config_notifications, 0);
+    assert_eq!(completed, IrqAction::Handled);
+    assert_eq!(completed_mappings, mappings);
+    assert_eq!(completed_notifications, 1);
+    assert_eq!(read, Ok(8));
+    assert_eq!(stopped, Ok(()));
+    assert_eq!(repeated, Ok(()));
+    assert_eq!(waits, 1);
+    assert!(retained_until_reset);
+    assert!(release_is_ordered.load(Ordering::Relaxed));
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+    assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(stopped_action, IrqAction::NotHandled);
+    assert_eq!(expired_action, IrqAction::NotHandled);
+    assert!(is_released);
+    assert_eq!(late_read, Err(KError::BadState));
+    assert_eq!(late_output, [0xaa; 8]);
+    assert_eq!(acknowledgements.load(Ordering::Relaxed), ack_after_stop);
+    assert_eq!(
+        completion.notifications.load(Ordering::Relaxed),
+        notifications_after_stop
+    );
+    assert_eq!(status.load(Ordering::Relaxed), 3);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+    assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
+}
+
+#[def_test(serial)]
+fn rng_irq_factory_failure_resets_before_dma_rollback_and_expires_callback() {
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+    let queue = Arc::new(SpinNoIrq::new(MockQueue::default()));
+    let reset = Arc::new(MockReset::default());
+    reset.is_pending.store(true, Ordering::Relaxed);
+    let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
+    transport.queue = Some(queue.clone());
+    transport.reset = Some(reset.clone());
+    let status = transport.interrupt_status.clone();
+    let acknowledgements = transport.interrupt_ack_count.clone();
+    let completion = Arc::new(Completion::default());
+    let mut captured_handler = None;
+    let mut requests = 0;
+    let mut waits = 0;
+    let mut retained_until_reset = true;
+    let result = Device::try_new_with_irq_factory(
+        transport,
+        StaticHal::<TrackedHal>::default(),
+        completion.clone(),
+        |handler| {
+            requests += 1;
+            captured_handler = Some(handler);
+            Err(DriverError::ResourceBusy)
+        },
+        || {
+            waits += 1;
+            retained_until_reset &= DMA_BLOCKS.load(Ordering::Relaxed) == dma + 2
+                && MAPPINGS.load(Ordering::Relaxed) == mappings
+                && queue.lock().descriptors != 0;
+            reset.is_pending.store(false, Ordering::Relaxed);
+        },
+    );
+    let error = match result {
+        Ok(device) => {
+            reset.is_pending.store(false, Ordering::Relaxed);
+            device.close_reads();
+            device.finish_stop(|| {}).unwrap();
+            None
+        }
+        Err(error) => Some(error),
+    };
+    let handler = captured_handler.unwrap();
+    let ack_after_rollback = acknowledgements.load(Ordering::Relaxed);
+    let notifications_after_rollback = completion.notifications.load(Ordering::Relaxed);
+    status.store(3, Ordering::Relaxed);
+    let expired_action = handler();
+    drop(handler);
+
+    assert_eq!(error, Some(DriverError::ResourceBusy));
+    assert_eq!(requests, 1);
+    assert_eq!(waits, 1);
+    assert!(retained_until_reset);
+    assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(reset.confirmations.load(Ordering::Relaxed), 1);
+    assert_eq!(expired_action, driver_os_api::IrqAction::NotHandled);
+    assert_eq!(acknowledgements.load(Ordering::Relaxed), ack_after_rollback);
+    assert_eq!(
+        completion.notifications.load(Ordering::Relaxed),
+        notifications_after_rollback
+    );
+    assert_eq!(status.load(Ordering::Relaxed), 3);
+    assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+}

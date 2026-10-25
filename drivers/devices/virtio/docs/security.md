@@ -1,5 +1,23 @@
 # VirtIO — 安全与可靠性分析
 
+## RNG IRQ factory boundary
+
+The model IRQ factory borrows its caller's real acquisition context only during
+construction and returns an owned DevIrq. The runtime retains that unique guard,
+not a static provider leak or a copied device capability. Legacy Irq remains a
+separate private enum variant with its original release semantics. Both handler
+forms call the same private completion path; the os-api callback needs no IRQ
+number and returns NotHandled when its Weak runtime cannot be upgraded.
+
+Factories may deliver callbacks during registration, but must return either a
+guard that synchronously detaches/drains them or an error with no registration
+left live. Queue interrupts are enabled only after guard installation. Failed
+acquisition closes and resets before freeing DMA. Normal removal still requires
+close, publication drain, reset confirmation, lock-free IRQ guard release, then
+pending cancellation and resource release. Provider synchronization includes
+notification tails; this is an external contract, not newly verified IRQ-core
+behavior. MMIO backing must remain valid through the full teardown sequence.
+
 ## DeviceDmaBackend ownership boundary
 
 `DeviceDmaBackend::new` is unsafe because os-api providers specify their own

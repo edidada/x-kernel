@@ -12,8 +12,11 @@ pub use irq_types::{IrqController, IrqDomainId, IrqTrigger};
 use super::ReleaseHook;
 use crate::{ResError, ResResult};
 
-/// A registered device interrupt; released (handler freed, line freed) on
-/// drop.
+/// One registered device interrupt action, synchronously released on Drop.
+///
+/// Stop device access first and drop in the provider's permitted teardown
+/// context, without locks needed by handlers. Releasing an action does not
+/// imply exclusive ownership of its interrupt line.
 pub struct DevIrq {
     virq: Virq,
     release: Option<ReleaseHook>,
@@ -266,9 +269,17 @@ pub trait IrqOp: Send + Sync {
     /// The handler captures its device context and returns IrqAction. The host
     /// adapts this to its own callback and result types; it must not dispatch
     /// this callback through a pseudo-NMI path. Invocation must not sleep.
+    /// The callback may run before this method returns. On error the provider
+    /// must retain neither a new registration nor its callback.
     fn request_irq(&self, irq: IrqResource, handler: IrqHandlerFn) -> ResResult<IrqHandlerToken>;
 
-    /// Release an interrupt handler previously registered for `irq`.
+    /// Detach the exact previously registered action and drain in-flight calls.
+    ///
+    /// Returning means the callback can no longer execute. Callers must stop
+    /// device access and use the provider's permitted teardown context without
+    /// locks needed by handlers. This infallible interface must not turn a
+    /// failed detach/drain into a successful return, nor disable other actions
+    /// sharing the line. The original resource and token must be supplied once.
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken);
 
     /// Enable or disable delivery of `irq`.

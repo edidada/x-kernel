@@ -1,5 +1,14 @@
 # driver-os-api — 安全与可靠性
 
+## IRQ teardown boundary
+
+An IRQ release hook returning successfully authorizes callback-owned state to
+be reclaimed. It must detach the original action and drain existing callbacks,
+not log a rejected release and continue freeing resources. Callers must meet
+the provider's context contract and not hold locks required by handlers. Shared
+line ownership does not transfer with one action. Request failures must leave
+no newly registered callback; successful requests may invoke it before return.
+
 ## Held DMA provider boundary
 
 Implementing `DeviceDma` is unsafe: successful coherent allocations must be

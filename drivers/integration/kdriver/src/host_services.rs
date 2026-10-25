@@ -36,6 +36,19 @@ pub fn new_device_services(irq: Arc<dyn IrqOp>) -> Arc<dyn DeviceServices> {
     })
 }
 
+/// Compose native MMIO, DMA, management locks and ordinary shared IRQ services.
+///
+/// This only constructs capabilities: it neither installs them globally nor
+/// enumerates or probes devices. IRQ domains and the scheduler must be ready
+/// before use. Requests require sleepable task context; first registration uses
+/// kirq's auto-enable policy. IRQ guards must be dropped exactly once in sleepable
+/// task context after hardware stops, without locks needed by handlers. Release
+/// synchronously drains the exact registration and panics on failure rather
+/// than permitting unsafe reclamation. See [`crate::host_irq::NativeIrq`].
+pub fn new_native_device_services() -> Arc<dyn DeviceServices> {
+    new_device_services(Arc::new(crate::host_irq::NativeIrq))
+}
+
 struct HostDeviceServices {
     irq: Arc<dyn IrqOp>,
     extensions: ExtensionRegistry,

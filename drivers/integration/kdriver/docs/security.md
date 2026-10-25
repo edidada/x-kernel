@@ -1,5 +1,37 @@
 # kdriver — Security and Reliability Analysis
 
+## Native ordinary IRQ provider
+
+NativeIrq requests reject non-sleepable context before registration. Callbacks
+are ordinary non-sleeping hardirq callbacks, not threaded or pseudo-NMI handlers.
+The driver must stop hardware before dropping its IRQ guard and must release in
+sleepable task context without locks or resources required by the handler.
+Admission checks are snapshots, not permission across later context changes.
+
+Explicit firmware domains and returned action IDs are retained without a global
+host lookup table. Resolved virqs bypass firmware mapping. Native release uses
+the retained resource and action ID. Plain-virq acquisition rejects an absent
+descriptor or a conflicting specified trigger; Unknown means unspecified and
+does not override stored configuration. This prevents admission through kirq's
+unknown-virq compatibility fallback in the stable-mapping case. Descriptor lookup
+and registration are separate operations, so mapping ownership must exclude
+concurrent removal or reconfiguration; no atomic lifetime pin is claimed.
+Native release uses
+kirq's exact-action synchronous removal; a missing action, invalid token kind or
+core error is not treated as proof of quiescence. Because IrqOp::release_irq has
+no error return, the release site panics rather than logging and permitting
+driver resource reclamation. Its narrow CG-021 exception identifies a future
+fallible teardown contract that must retain resources on failure; no such core
+protocol or retry mechanism is introduced here. Correct release requires the
+original resource/token exactly once, without external removal of that action.
+
+Mapping depends on initialized IRQ domains, and teardown depends on the current
+branch's scheduler-backed kirq synchronization contract. First shared registration
+can enable delivery; callers must make callback-visible state ready beforehand.
+The constructor does not activate hardware or install global services. Pure
+helper UT establish adapter decisions only, not real IRQ draining, physical
+interrupt routing or acceptance of the deferred IRQ work.
+
 ## Retained DMA capability
 
 DeviceToDriver acquisition copies the initialized original bytes into native

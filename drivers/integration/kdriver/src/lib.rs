@@ -49,6 +49,8 @@ pub mod firmware_dma;
 #[cfg(feature = "device-model")]
 pub mod host_dma;
 #[cfg(feature = "device-model")]
+pub mod host_irq;
+#[cfg(feature = "device-model")]
 pub mod host_mmio;
 #[cfg(feature = "device-model")]
 pub mod host_services;

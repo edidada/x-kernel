@@ -10,12 +10,12 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use device_res::{
-    IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, ResResult,
-};
 use driver_model::{
     Bus, DeviceAccess, DeviceDescriptor, DeviceDomain, DeviceState, DriverDesc, DriverOps,
     Environment, OfMatch, PlatformBus, PlatformBusData, PlatformId, ProbeError, RuntimeError,
+};
+use driver_os_api::{
+    IrqAction, IrqHandlerFn, IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, ResResult, Virq,
 };
 use kerrno::{KError, KResult};
 use kspin::{IrqSave, SpinNoIrq, SpinNoPreempt};
@@ -26,13 +26,12 @@ use virtio::{
     mock_virtio::{MockHal, MockReset, MockTransport},
 };
 
-use super::device_management_lifecycle_unittest::HostServices;
 use crate::rng_completion::{new_rng_completion, new_rng_drain};
 
 static RINGS: AtomicUsize = AtomicUsize::new(0);
 static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static RELEASES: AtomicUsize = AtomicUsize::new(0);
-static HANDLER: SpinNoIrq<Option<Arc<dyn IrqHandler>>> = SpinNoIrq::new(None);
+static HANDLER: SpinNoIrq<Option<IrqHandlerFn>> = SpinNoIrq::new(None);
 static REGISTRY: HwrngRegistry = HwrngRegistry::new();
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible(
     "test,actual-virtio-rng",
@@ -90,14 +89,16 @@ unsafe impl VirtIoHal for TrackingHal {
 }
 
 struct TestIrq;
-static IRQ: TestIrq = TestIrq;
 
 impl IrqOp for TestIrq {
     fn request_irq(
         &self,
-        _: IrqResource,
-        handler: Arc<dyn IrqHandler>,
+        resource: IrqResource,
+        handler: IrqHandlerFn,
     ) -> ResResult<IrqHandlerToken> {
+        if resource != IrqResource::plain(Virq::new(7), IrqTrigger::LevelHigh) {
+            return Err(driver_os_api::ResError::InvalidResource);
+        }
         *HANDLER.lock() = Some(handler);
         Ok(IrqHandlerToken::shared_action(1))
     }
@@ -106,7 +107,7 @@ impl IrqOp for TestIrq {
         core::assert_eq!(token, IrqHandlerToken::shared_action(1));
         let handler = HANDLER.lock().take();
         if let Some(handler) = handler {
-            core::assert_eq!(handler.handle(7), IrqEvent::NOT_HANDLED);
+            core::assert_eq!(handler(), IrqAction::NotHandled);
         }
         RELEASES.fetch_add(1, Ordering::Relaxed);
     }
@@ -194,11 +195,15 @@ impl DriverOps<PlatformBus> for TestDriver {
         let drain = new_rng_drain().map_err(|_| RuntimeError::BadState)?;
         let mut transport = MockTransport::new_rng();
         transport.reset = Some(self.0.reset.clone());
-        let runtime = Runtime::try_new_irq(
+        let runtime = Runtime::try_new_with_irq_factory(
             transport,
+            virtio::StaticHal::default(),
             new_rng_completion(),
-            &IRQ,
-            IrqResource::new(7, IrqTrigger::Unknown(0)),
+            |handler| {
+                dev.res()
+                    .request_irq_at(0, move || handler())
+                    .map_err(|_| driver_base::DriverError::Io)
+            },
             ktask::yield_now,
         )
         .map_err(|_| RuntimeError::Io)?;
@@ -266,7 +271,7 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
         let mappings = MAPPINGS.load(Ordering::Relaxed);
         let releases = RELEASES.load(Ordering::Relaxed);
         let domain = DeviceDomain::new();
-        domain.set_services(Arc::new(HostServices::new()));
+        domain.set_services(crate::host_services::new_device_services(Arc::new(TestIrq)));
         let root = domain
             .add_bus_instance(PlatformBus::ID, None, "rng-model-ut")
             .unwrap();
@@ -276,6 +281,10 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
             IDS,
             TestDriver(observations.clone()),
         ));
+        let mut resources = driver_model::ResourceMap::new();
+        resources.push_kind(driver_model::ResourceKind::Irq(
+            driver_model::IrqSpec::resolved(Virq::new(7), IrqTrigger::LevelHigh),
+        ));
         let device = domain
             .add_device(
                 DeviceDescriptor::builder()
@@ -284,6 +293,7 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
                         1,
                         &["test,actual-virtio-rng"],
                     )))
+                    .resources(resources)
                     .build(),
             )
             .unwrap();
