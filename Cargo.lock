@@ -4374,7 +4374,6 @@ dependencies = [
  "klockstat",
  "klogger",
  "kns",
- "kpoll",
  "kprocess",
  "ktask",
  "ktime_types",
