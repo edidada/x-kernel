@@ -96,3 +96,32 @@ fn printk_node_reads_and_writes_runtime_log_level() {
 
     klogger::set_log_level_filter(previous);
 }
+
+/// Every `/proc` file answers `file_can_poll` in Linux, because procfs wraps
+/// them in `proc_reg_file_ops` whose `proc_reg_poll` falls back to
+/// `DEFAULT_POLLMASK`. `/cmdline` is the generated form and `/meminfo` the
+/// iterator form; both must be pollable, so `epoll_ctl` accepts them.
+#[def_test(serial)]
+fn proc_nodes_are_pollable_like_linux() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        add_root_entries(&mut root, fs.clone());
+        crate::mem_nodes::root::add_root_entries(&mut root, fs.clone());
+        SimpleDir::new_maker(fs, Arc::new(root))
+    });
+    let root = Mount::new_root(&super_block).root_path();
+
+    for path in ["/cmdline", "/meminfo"] {
+        let file = Filename::new(path)
+            .open_with_flags_at(
+                &root,
+                &root,
+                OpenFlags::empty().bits(),
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert!(file.can_poll(), "{path} must be pollable");
+    }
+}

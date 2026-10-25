@@ -12,7 +12,6 @@ use kfd_objects::epoll::{Epoll, EpollEvent, EpollFlags};
 use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use ktime_types::TimeSpan;
-use kvfs::VfsFile;
 use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, timespec,
 };
@@ -61,20 +60,25 @@ pub(crate) fn sys_epoll_ctl(
     let file = kprocess::current_files().get_file(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
-    // Linux copies the user event inside the syscall wrapper
-    // (`copy_from_user` -> EFAULT) before `do_epoll_ctl` validates the target
-    // (`file_can_poll` -> EPERM), and `EPOLL_CTL_DEL` has no event to copy. Keep
-    // that order per operation.
-    let require_pollable = |file: &VfsFile| -> KResult<()> {
-        if file.can_poll() {
-            Ok(())
-        } else {
-            Err(KError::OperationNotPermitted)
-        }
+    // Linux orders this exactly so: the syscall wrapper copies the user event
+    // for every operation except `DEL` (`ep_op_has_event`, `__do_sys_epoll_ctl`
+    // -> EFAULT), then `do_epoll_ctl` tests `file_can_poll` (-> EPERM) *before*
+    // dispatching on `op`, and only the dispatch reports an unknown operation
+    // (-> EINVAL). Keeping the copy here and the gate before the dispatch means
+    // an unpollable target answers EPERM even when `op` is also invalid, as
+    // Linux does.
+    let user_event = if op == EPOLL_CTL_DEL {
+        None
+    } else {
+        Some(event.read_vm()?)
     };
+    if !file.can_poll() {
+        return Err(KError::OperationNotPermitted);
+    }
 
-    let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
-        let event = event.read_vm()?;
+    // Bit validation stays with the operation that needs the event, after the
+    // gate: Linux rejects unknown event bits inside `ep_insert`/`ep_modify`.
+    let parse_event = |event: k_epoll_event| -> KResult<(EpollEvent, EpollFlags)> {
         let events = IoEvents::from_bits_truncate(event.events());
         let flags =
             EpollFlags::from_bits(event.events() & !events.bits()).ok_or(KError::InvalidInput)?;
@@ -89,17 +93,14 @@ pub(crate) fn sys_epoll_ctl(
 
     match op {
         EPOLL_CTL_ADD => {
-            let (event, flags) = parse_event()?;
-            require_pollable(&file)?;
+            let (event, flags) = parse_event(user_event.ok_or(KError::InvalidInput)?)?;
             epoll.add(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_MOD => {
-            let (event, flags) = parse_event()?;
-            require_pollable(&file)?;
+            let (event, flags) = parse_event(user_event.ok_or(KError::InvalidInput)?)?;
             epoll.modify(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_DEL => {
-            require_pollable(&file)?;
             epoll.delete(fd, file)?;
         }
         _ => return Err(KError::InvalidInput),

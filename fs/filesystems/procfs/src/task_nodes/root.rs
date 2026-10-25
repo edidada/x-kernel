@@ -16,6 +16,7 @@ use core::{ffi::CStr, fmt, iter, str};
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use kcred::Cred;
 use khal::paging::MappingFlags;
+use kpoll::IoEvents;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
@@ -433,6 +434,15 @@ impl FileOperations for ProcFdLink {
         true
     }
 
+    /// Implements the poll operation every `/proc` file carries.
+    ///
+    /// Linux serves proc files through `proc_reg_file_ops`, and `proc_reg_poll`
+    /// answers `DEFAULT_POLLMASK` when the entry provides no handler of its own,
+    /// so `file_can_poll` accepts them for `epoll_ctl`.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
+    }
+
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let target = self.display_target()?;
         let data = target.as_bytes();
@@ -596,6 +606,15 @@ impl InodeSymlinkOperations for ProcExeLink {
 impl FileOperations for ProcExeLink {
     fn supports_read(&self) -> bool {
         true
+    }
+
+    /// Implements the poll operation every `/proc` file carries.
+    ///
+    /// Linux serves proc files through `proc_reg_file_ops`, and `proc_reg_poll`
+    /// answers `DEFAULT_POLLMASK` when the entry provides no handler of its own,
+    /// so `file_can_poll` accepts them for `epoll_ctl`.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
@@ -927,6 +946,15 @@ impl FileOperations for NsProcFile {
 
     fn supports_read(&self) -> bool {
         true
+    }
+
+    /// Implements the poll operation every `/proc` file carries.
+    ///
+    /// Linux serves proc files through `proc_reg_file_ops`, and `proc_reg_poll`
+    /// answers `DEFAULT_POLLMASK` when the entry provides no handler of its own,
+    /// so `file_can_poll` accepts them for `epoll_ctl`.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {

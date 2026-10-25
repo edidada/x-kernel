@@ -72,3 +72,38 @@ fn test_epoll_ctl_accepts_pollable_target() {
     sys_close(target).unwrap();
     sys_close(epfd).unwrap();
 }
+/// The event copy, the capability gate and the operation dispatch happen in
+/// that order, as in Linux: `__do_sys_epoll_ctl` copies the user event for
+/// every operation except `DEL`, `do_epoll_ctl` then tests `file_can_poll`
+/// before `switch (op)`.
+#[def_test(user)]
+fn test_epoll_ctl_orders_copy_gate_and_dispatch() {
+    let epfd = sys_epoll_create1(0).unwrap() as i32;
+    let unpollable = memfd();
+    let pollable = sys_eventfd2(0, 0).unwrap() as i32;
+    let event = interest();
+    let valid = || UserConstPtr::from(event.as_user_ptr().addr());
+    // An unknown operation still carries an event in Linux (`ep_op_has_event`
+    // only excludes DEL), so the copy runs before anything else.
+    const UNKNOWN_OP: u32 = 0xdead_beef;
+
+    // A bad event pointer answers EFAULT even though the target is unpollable.
+    assert_eq!(
+        sys_epoll_ctl(epfd, EPOLL_CTL_ADD, unpollable, UserConstPtr::from(1)),
+        Err(KError::BadAddress)
+    );
+    // Unpollable target: the gate answers before the dispatch sees the bad op.
+    assert_eq!(
+        sys_epoll_ctl(epfd, UNKNOWN_OP, unpollable, valid()),
+        Err(KError::OperationNotPermitted)
+    );
+    // Pollable target: the dispatch is what rejects the unknown operation.
+    assert_eq!(
+        sys_epoll_ctl(epfd, UNKNOWN_OP, pollable, valid()),
+        Err(KError::InvalidInput)
+    );
+
+    sys_close(pollable).unwrap();
+    sys_close(unpollable).unwrap();
+    sys_close(epfd).unwrap();
+}
