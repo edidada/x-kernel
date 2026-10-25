@@ -50,6 +50,33 @@ cross-FD chronology claims. These are fixture responsibilities and acceptance
 criteria, not a recorded validation result or proof of late-response/IRQ-tail
 safety.
 
+### Opt-in dual-device isolation fixture
+
+`model_mmio_isolation` is a serial hardware acceptance case enabled only by
+`XK_TEST_MODEL_MMIO_ISOLATION=1`. It requires exactly two modern-MMIO model RNGs,
+independent host RNG backends, no VirtIO entropy worker, and neither the lifecycle
+nor pending opt-in. The two registered devices must have distinct identities,
+paths and non-overlapping MMIO ranges. No consumer metadata API is added for
+testing: handles are associated behaviorally by observing exactly one original
+publication close when a selected device is unbound, while the other stays live.
+
+Each device is unbound and rebound in turn. While one is Unclaimed, the peer
+must retain its Active registration and exact publication and perform guarded
+reads totalling more than the driver's 256-byte request/cache bound. This forces
+new device I/O rather than accepting only data cached before peer teardown.
+Rebinding must retain the selected device identity, introduce a
+new publication, and permit a fresh read while the old handle remains closed.
+Restoration precedes destructive-phase assertions, with a fallback guard for
+early returns. This tests symmetric lifecycle isolation, not concurrent reader
+races, pending cancellation, entropy quality or IRQ-tail synchronization.
+
+Run the kdriver-only suite with the pending/lifecycle flags unset and
+`XK_EXPECT_MODEL_MMIO_RNG=1 XK_TEST_MODEL_MMIO_ISOLATION=1`, adding
+`QEMU_ARGS='-global virtio-mmio.force-legacy=false -object rng-random,id=host_rng1 -device virtio-rng-device,rng=host_rng1'`.
+Use the prepared aarch64 MMIO configuration, a private worktree disk,
+`XKMAKE_ARGS='--no-net --no-vsock'`, and an outer failure watchdog. Ordinary runs
+ignore this test; enabled runs reject the wrong device count before mutation.
+
 ### Production ownership
 
 With `virtio-rng`, EnumerationContext::new always obtains the same

@@ -824,3 +824,52 @@ Rust formatting and whitespace checks pass. Default-PCI `make build` also
 passes (`build-pci.log`). The worktree configuration is restored to the canonical
 aarch64 PCI defconfig. No production behavior was changed; this slice is a local
 test/documentation commit, not a push or declaration of R1-08 completion.
+
+### R1-08 eighteenth slice: real dual-device lifecycle isolation
+
+The opt-in `model_mmio_isolation` fixture exercises two real modern-MMIO RNGs
+with independent QEMU rng-random objects. No production API or driver behavior
+changes. The dedicated configuration disables the VirtIO entropy worker and
+excludes other lifecycle opt-ins. Exactly two distinct registered devices,
+paths and non-overlapping MMIO ranges are required before mutation.
+
+Both devices take a turn being unbound and rebound. In the unbound interval the
+selected core stays online/Unclaimed, exactly one old publication closes, and
+the surviving core/publication remains Active and usable. Restoration keeps the
+same registered core, creates a distinct publication and leaves the old handle
+closed with BadState and unchanged storage. Handles are distinguished by unique
+closure and publication identity, never zipped with device iteration order.
+Restoration occurs before destructive-phase assertions and has a fallback guard.
+
+Spec review caught that a 16-byte peer read could consume previously cached data
+and hide a broken peer queue. The final fixture cumulatively reads **257 bytes
+per sampling phase**, exceeding the driver's 256-byte cache bound, checking
+positive short-read progress, buffer guards and untouched suffixes each time.
+This forces fresh device progress in both directions; it is not an entropy
+quality assertion or pending/IRQ-tail concurrency test. Re-review closes the
+finding; Standards review reports no blocker.
+
+The final two-device kdriver run passes **91 tests, zero failures, two ignored**,
+with coverage extracted (`r1-08-isolation/ut-dual-final.log`). The earlier
+`ut-dual.log` is preliminary 16-byte evidence, not final isolation acceptance.
+`mmio.config` preserves the dedicated configuration; the command is documented
+in kdriver design.md and recorded in the run log. Each run uses the private
+worktree disk, no network/vsock, and a 300-second outer failure watchdog.
+
+The single-device negative control deliberately retains the opt-in but omits
+the second QEMU RNG. It fails at `devices.len() == 2` before any binding mutation:
+**90 pass, one expected failure, two ignored**, make exit 2
+(`ut-single-negative.log`, `negative-exit`). The pending-backend harness also
+clears the new isolation opt-in from inherited environments; its 15 host tests
+pass. Real unregister and the deferred IRQ gate remain open. This does not
+declare the whole R1-08 ticket complete.
+
+With all model opt-ins unset and the canonical aarch64 PCI defconfig restored,
+the nine-crate regression passes **338 tests, zero failures, four ignored
+(342 total)** and extracts coverage (`r1-08-isolation/ut-pci.log`). Pinned
+formatting and whitespace checks pass. The additional ignored case is explicit
+hardware acceptance, not lost ordinary coverage.
+Modern-MMIO and default-PCI `make clippy` pass (`clippy-mmio.log`,
+`clippy-pci.log`), as does default-PCI `make build` (`build-pci.log`). Only the
+existing third-party future-Rust warnings remain. This slice is a local
+test/documentation commit only; no push or rebase is part of this validation.

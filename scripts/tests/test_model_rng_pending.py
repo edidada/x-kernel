@@ -190,9 +190,11 @@ class SetupTests(unittest.TestCase):
 
     def test_flags_are_scoped_and_lifecycle_is_removed(self):
         original = {"PATH": "/usr/bin", "XK_TEST_MODEL_MMIO_LIFECYCLE": "1",
+                    "XK_TEST_MODEL_MMIO_ISOLATION": "1",
                     "MAKEFLAGS": "inherited"}
         environment = harness.experiment_environment(original, "/wrapper", "/real/qemu", "/logs")
         self.assertNotIn("XK_TEST_MODEL_MMIO_LIFECYCLE", environment)
+        self.assertNotIn("XK_TEST_MODEL_MMIO_ISOLATION", environment)
         self.assertNotIn("MAKEFLAGS", environment)
         self.assertEqual(environment["XK_TEST_MODEL_MMIO_PENDING"], "1")
         self.assertEqual(environment["XK_EXPECT_MODEL_MMIO_RNG"], "1")

@@ -40,6 +40,18 @@ tail race, and no IRQ-tail, cache/DMA hardware safety or whole-ticket acceptance
 claim follows. Validation results must be recorded separately after the main
 run; this documentation records only the fixture's contract and limitations.
 
+The dual-device isolation fixture disables background entropy consumption and
+requires exactly two model devices before changing either binding. It does not
+infer device-to-publication identity from iteration order or the shared driver
+name. It observes the unique closing publication and retains the surviving
+publication identity across each round. Guarded nonempty reads check lengths
+and untouched buffer guards/suffixes, not random-byte inequality. Each sampling
+phase consumes more than the driver's 256-byte cache bound, including after the
+roles are swapped, so cached data cannot hide a broken peer queue. A failure to
+restore a binding fails acceptance; an outer watchdog bounds a stuck read or
+teardown without authorizing forced release. Successful sequential isolation
+does not establish pending-request, shared-IRQ, DMA-tail or hot-unplug safety.
+
 The new path is restricted to fixed boot-DT, available direct QEMU Arm virt
 modern MMIO RNG nodes. Availability includes ancestors; real compatible strings
 and root provenance come from FirmwareDeviceView, not matcher aliases. Full-tree
