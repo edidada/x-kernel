@@ -360,10 +360,11 @@ impl SocketOps for PacketSocket {
         linux_raw_sys::net::AF_PACKET as i32
     }
 
-    /// `sk_alloc` hands out a zeroed socket (`net/core/sock.c` passes
-    /// `__GFP_ZERO` and clears the object on the slab path) and nothing in the
-    /// packet family assigns `sk_protocol` afterwards, so Linux reports 0 here
-    /// for every ethertype even though the socket remembers one.
+    /// `sk_alloc` hands out a socket whose `sk_protocol` is zero-initialised
+    /// (`net/core/sock.c` passes `__GFP_ZERO`; the slab path clears the object
+    /// apart from the one word it preserves for RCU, which is not this field)
+    /// and nothing in the packet family assigns it afterwards, so Linux reports
+    /// 0 here for every ethertype even though the socket remembers one.
     fn socket_protocol(&self) -> i32 {
         0
     }

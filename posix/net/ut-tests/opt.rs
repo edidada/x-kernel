@@ -112,8 +112,8 @@ fn classic_filter_rejects_out_of_range_jumps() {
     );
 }
 
-/// Releases a descriptor a test created, so cases stay independent of each
-/// other in the shared process rather than leaking into the next one.
+/// Releases a descriptor a test created, so the case cleans up after itself
+/// instead of relying on the task being torn down.
 fn close_socket(fd: i32) {
     kprocess::current_files().close_file(fd).unwrap();
 }

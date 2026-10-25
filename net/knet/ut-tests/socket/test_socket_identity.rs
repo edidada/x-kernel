@@ -24,7 +24,7 @@ use unittest::{assert_eq, def_test};
 
 use crate::{
     Socket, SocketOps,
-    netlink::{NETLINK_ROUTE, NetlinkSocket, NetlinkSocketType},
+    netlink::{NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NetlinkSocket, NetlinkSocketType},
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
     udp::UdpSocket,
@@ -34,11 +34,6 @@ use crate::{
 /// A zero protocol leaves the packet socket protocol unset; none of the three
 /// reported values depends on it.
 const PACKET_PROTOCOL: u16 = 0;
-
-/// A non-zero netlink protocol, so a case expecting it cannot also be satisfied
-/// by an implementation that answers a constant zero: `NETLINK_ROUTE` is 0,
-/// which is exactly what a broken `socket_protocol()` would return.
-const NETLINK_USERSOCK: i32 = 2;
 
 #[def_test]
 fn socket_identity_reports_creation_family_type_and_protocol() {
@@ -96,14 +91,16 @@ fn socket_identity_reports_creation_family_type_and_protocol() {
             AF_NETLINK as i32,
             NETLINK_ROUTE,
         ),
+        // A non-zero protocol, so this case cannot also be satisfied by an
+        // implementation that answers a constant zero: `NETLINK_ROUTE` is 0.
         (
             Socket::Netlink(Box::new(NetlinkSocket::new(
-                NETLINK_USERSOCK,
+                NETLINK_KOBJECT_UEVENT,
                 NetlinkSocketType::Raw,
             ))),
             SOCK_RAW as i32,
             AF_NETLINK as i32,
-            NETLINK_USERSOCK,
+            NETLINK_KOBJECT_UEVENT,
         ),
         (
             Socket::Unix(Box::new(UnixDomainSocket::new(
