@@ -17,6 +17,7 @@ use console_driver::runtime::stdout_console_id;
 use driver_base::DriverError;
 use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
 use kerrno::KError;
+use kpoll::IoEvents;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,
     VfsInode, VfsResult,
@@ -69,6 +70,28 @@ impl DeviceFileOps for SerialDev {
 
     fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         CharDevice::write(&self.device, buf).map_err(map_err)
+    }
+
+    /// Implements `tty_poll` for this node.
+    ///
+    /// The node is what user space sees for a UART, and Linux gives a UART
+    /// `tty_fops`, whose `poll` is what makes `epoll_ctl` accept it; a file
+    /// operation set without one would answer `EPERM`, which no Linux UART
+    /// does. The UART id here is the Linux ttyS major/minor for the same
+    /// reason.
+    ///
+    /// The raw [`CharDevice`] contract exposes read/write/flush only, and only
+    /// the console port has buffered input with an IRQ waker attached
+    /// (`prepare_irq_input` runs for the stdout port alone). An auxiliary UART
+    /// therefore has neither a way to ask whether input is waiting nor a source
+    /// to register, so `tty_poll`'s input half cannot be reproduced yet. Report
+    /// the stream as read/write ready rather than claiming no handler: that is
+    /// the answer a file without one gets from `vfs_poll` anyway, and it keeps a
+    /// poll-driven reader making progress instead of blocking for a wake that
+    /// cannot arrive. Giving auxiliary UARTs buffered input and an IRQ waker
+    /// would let this become a real readiness query.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn flags(&self) -> NodeFlags {
