@@ -356,6 +356,16 @@ impl SocketOps for PacketSocket {
         }
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_PACKET as i32
+    }
+
+    /// AF_PACKET never assigns `sk_protocol`, so Linux reports 0 here even
+    /// though the ethertype is remembered elsewhere.
+    fn socket_protocol(&self) -> i32 {
+        0
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut addr = local_addr.into_packet()?;
         validate_ifindex_or_any(addr.ifindex)?;
