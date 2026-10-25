@@ -445,3 +445,18 @@ Input notification probing never pops/requeues descriptors, because HAL
 streaming DMA mapping can allocate. The IRQ handler exclusively acknowledges the
 transport; the timer-side probe only reads the atomic readiness hint. Pending input is consumed only through normal `read_event`.
 False-positive wakes are harmless because callers drain and recheck.
+
+# Instance DMA ownership
+
+The RNG runtime retains its supplied DmaBackend in vendor queue/request storage.
+Its unsafe contract requires coherent ring mappings, exclusive shared buffers,
+matching releases and clones bound to the original device address space. Runtime
+Send additionally requires a Send backend; moving runtime state does not move
+the backing allocations. Implementations must keep mappings valid across tasks
+and CPUs and support request-lock completion cleanup without sleeping.
+
+Reset confirmation, synchronized IRQ release and original-buffer cancellation
+remain prerequisites to final release. Selecting an instance backend does not
+relax that ordering or authorize a global fallback on allocation failure. Tests
+use identity-mapped controlled backends and do not certify hardware isolation,
+non-coherent DMA or the eventual production host backend.

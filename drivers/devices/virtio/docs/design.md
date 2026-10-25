@@ -654,3 +654,24 @@ readiness probe only reads that hint and never touches the ISR. Neither path
 pops or recycles descriptors. Event reads set the hint
 from the actual dequeue result, so an empty queue clears it only after a task
 observes it.
+
+## Per-instance RNG DMA integration
+
+`VirtIoRngDev<H, T, B = StaticHal<H>>` carries the vendor's existing DmaBackend
+through RngRequest and VirtIORng. `try_new_irq_with_dma` selects one backend for
+both rings and request sharing; its clones retain that same device address
+space until release. There is no current-device lookup or new allocator trait.
+The old constructor and two-parameter type preserve the StaticHal path used by
+legacy PCI callers. HAL still supplies transport-side operations independently.
+
+The backend moves with request state and must be Send for cross-task runtime
+use. Normal completion may unshare under the request spinlock; reset-confirmed
+final teardown and constructor IRQ rollback retain their existing outside-lock
+cleanup order. Backend implementations must honor both execution contexts.
+Explicit stop releases DMA even while old runtime references remain alive.
+
+Controlled tests use two independently counted backends for pending cancellation
+and an IRQ-registration failure rollback. The static HAL counters remain unchanged
+on the instance path. These establish forwarding and ownership, not host DMA
+address translation or real MMIO sampling. A native instance backend and exclusive
+new/legacy device selection remain R1-08 work; no boot ownership changes here.

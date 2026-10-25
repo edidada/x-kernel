@@ -18,6 +18,147 @@ use crate::mock_virtio::{MockHal, MockQueue, MockReset, MockTransport};
 static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static DMA_BLOCKS: AtomicUsize = AtomicUsize::new(0);
 static BUFFER_ADDRESS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Default)]
+struct InstanceCounts {
+    allocations: AtomicUsize,
+    mappings: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct InstanceDma(Arc<InstanceCounts>);
+
+// SAFETY: All memory operations delegate unchanged to the identity-mapped
+// MockHal backend. Clones retain the same counter owner and address space;
+// counters never affect allocation validity, synchronization or release.
+unsafe impl DmaBackend for InstanceDma {
+    fn allocate(
+        &self,
+        pages: usize,
+        direction: BufferDirection,
+        platform: bool,
+    ) -> virtio_drivers::Result<(PhysAddr, NonNull<u8>)> {
+        let allocation = StaticHal::<MockHal>::default().allocate(pages, direction, platform)?;
+        self.0.allocations.fetch_add(1, Ordering::Relaxed);
+        Ok(allocation)
+    }
+
+    unsafe fn deallocate(
+        &self,
+        address: PhysAddr,
+        pointer: NonNull<u8>,
+        pages: usize,
+        direction: BufferDirection,
+        platform: bool,
+    ) {
+        self.0.allocations.fetch_sub(1, Ordering::Relaxed);
+        // SAFETY: The live allocation tuple is forwarded unchanged to its backend.
+        unsafe {
+            StaticHal::<MockHal>::default().deallocate(address, pointer, pages, direction, platform)
+        };
+    }
+
+    unsafe fn share(
+        &self,
+        buffer: NonNull<[u8]>,
+        direction: BufferDirection,
+        platform: bool,
+    ) -> virtio_drivers::Result<PhysAddr> {
+        // SAFETY: The request retains this exclusive buffer until matching unshare.
+        let address =
+            unsafe { StaticHal::<MockHal>::default().share(buffer, direction, platform) }?;
+        self.0.mappings.fetch_add(1, Ordering::Relaxed);
+        Ok(address)
+    }
+
+    unsafe fn unshare(
+        &self,
+        address: PhysAddr,
+        buffer: NonNull<[u8]>,
+        direction: BufferDirection,
+        platform: bool,
+    ) {
+        self.0.mappings.fetch_sub(1, Ordering::Relaxed);
+        // SAFETY: Completion or confirmed reset stopped device access; the same
+        // live buffer and mapping parameters are forwarded to the original backend.
+        unsafe { StaticHal::<MockHal>::default().unshare(address, buffer, direction, platform) };
+    }
+}
+
+#[def_test(serial)]
+fn instance_dma_stays_with_each_rng_until_pending_cancellation() {
+    type InstanceDevice = VirtIoRngDev<TrackedHal, MockTransport, InstanceDma>;
+    let legacy_allocations = DMA_BLOCKS.load(Ordering::Relaxed);
+    let legacy_mappings = MAPPINGS.load(Ordering::Relaxed);
+    let first_counts = Arc::new(InstanceCounts::default());
+    let second_counts = Arc::new(InstanceCounts::default());
+    let make_device = |counts| {
+        Arc::new(
+            InstanceDevice::new_with_dma(
+                MockTransport::new_with_type(DeviceType::EntropySource),
+                InstanceDma(counts),
+                Arc::new(Completion {
+                    after: Some(DriverError::NoMemory),
+                    ..Default::default()
+                }),
+            )
+            .unwrap(),
+        )
+    };
+    let first = make_device(first_counts.clone());
+    let second = make_device(second_counts.clone());
+    let first_read = first.read(&mut [0u8; 8]);
+    let second_read = second.read(&mut [0u8; 8]);
+    let first_pending = first_counts.mappings.load(Ordering::Relaxed);
+    let second_pending = second_counts.mappings.load(Ordering::Relaxed);
+    let first_allocated = first_counts.allocations.load(Ordering::Relaxed);
+    first.close_reads();
+    let first_stop = first.finish_stop(|| {});
+    let first_allocations_after_stop = first_counts.allocations.load(Ordering::Relaxed);
+    let first_mappings_after_stop = first_counts.mappings.load(Ordering::Relaxed);
+    let second_allocations_before_stop = second_counts.allocations.load(Ordering::Relaxed);
+    let second_mappings_before_stop = second_counts.mappings.load(Ordering::Relaxed);
+    second.close_reads();
+    let second_stop = second.finish_stop(|| {});
+    let stale_read = first.read(&mut [0u8; 8]);
+    drop(first);
+    drop(second);
+    assert_eq!(first_read, Err(KError::NoMemory));
+    assert_eq!(second_read, Err(KError::NoMemory));
+    assert_eq!(first_pending, 1);
+    assert_eq!(second_pending, 1);
+    assert!(first_allocated > 0);
+    assert_eq!(first_stop, Ok(()));
+    assert_eq!(second_stop, Ok(()));
+    assert_eq!(first_allocations_after_stop, 0);
+    assert_eq!(first_mappings_after_stop, 0);
+    assert!(second_allocations_before_stop > 0);
+    assert_eq!(second_mappings_before_stop, 1);
+    assert_eq!(second_counts.allocations.load(Ordering::Relaxed), 0);
+    assert_eq!(second_counts.mappings.load(Ordering::Relaxed), 0);
+    assert_eq!(stale_read, Err(KError::BadState));
+    assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), legacy_allocations);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), legacy_mappings);
+}
+
+#[def_test(serial)]
+fn instance_dma_constructor_irq_failure_releases_original_backend() {
+    let counts = Arc::new(InstanceCounts::default());
+    STOP_IRQ.fail_request.store(true, Ordering::Relaxed);
+    let result = VirtIoRngDev::<TrackedHal, MockTransport, InstanceDma>::try_new_irq_with_dma(
+        MockTransport::new_with_type(DeviceType::EntropySource),
+        InstanceDma(counts.clone()),
+        Arc::new(Completion::default()),
+        &STOP_IRQ,
+        IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+        || {},
+    );
+    STOP_IRQ.fail_request.store(false, Ordering::Relaxed);
+    assert!(result.is_err());
+    assert_eq!(counts.allocations.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.mappings.load(Ordering::Relaxed), 0);
+}
+
 struct TrackedHal;
 
 // SAFETY: allocation/translation delegate to the identity-mapped test HAL.

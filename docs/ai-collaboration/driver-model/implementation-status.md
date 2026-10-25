@@ -379,3 +379,38 @@ new-file license headers and whitespace checks pass. Cargo regenerated the
 lockfile to include kdriver's direct optional driver-os-api dependency, without
 changing package versions. Existing third-party future-Rust warnings are
 unchanged. The slice is prepared for a local commit; no push is requested.
+
+### R1-08 ninth slice: concrete RNG instance-DMA forwarding
+
+Tracing the production handoff exposed a remaining prerequisite: the vendored
+RNG already accepts DmaBackend, but the concrete VirtIoRngDev wrapper still fixed
+every binding to the global static HAL. Switching enumeration first would not
+make queue/request DMA obey the new device's constraints. This slice closes that
+forwarding gap before enabling new/legacy ownership selection.
+
+VirtIoRngDev now carries a defaulted DMA backend through its request and vendor
+RNG. The new try_new_irq_with_dma constructor retains one backend instance for
+rings, sharing and release; the legacy constructor uses StaticHal unchanged.
+The backend must be Send for a cross-task runtime, and its completion cleanup
+must be legal under the request lock. Reset, IRQ drain and cancellation ordering
+remain unchanged; no host-kernel dependency or new allocator contract is added.
+
+Two controlled tests cover separate instance ownership with pending requests,
+stopping one without releasing the other, old closed references and IRQ-constructor
+failure rollback. Static-HAL counters remain untouched on the instance path.
+The first aarch64 guest selection `virtio,kdriver,driver_model,subsys_hwrng,entropy`
+passes **232 tests**, with coverage extracted. Build and clippy also pass.
+This suite selection differs from the previous host-service slice's 244 tests.
+
+Independent review identified an early-assert cleanup gap in the new pending
+test; it now snapshots observations, stops both instances and drops references
+before asserting. Final regression evidence is recorded in local
+`r1-08-rng-instance/ut-final.log`. Production native instance DMA adaptation,
+concrete IRQ-provider connection, exclusive MMIO enumeration handoff and real
+modern-MMIO RNG lifecycle acceptance remain pending. No boot ownership changes
+or hardware-acceptance claims are made by this slice.
+
+Final regression passes **232/232**, with coverage persisted and extracted.
+Self-review and independent standards/spec re-review have no remaining blocker.
+Formatting and whitespace checks pass; existing third-party future-Rust warnings
+are unchanged. This slice is prepared for a local commit, not a push.

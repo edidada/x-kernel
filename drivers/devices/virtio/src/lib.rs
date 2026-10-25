@@ -9,6 +9,8 @@
 //! trait (alias of `virtio_drivers::Hal`), to allocate DMA regions and
 //! translate between physical addresses (as seen by devices) and virtual
 //! addresses (as seen by your program).
+//! RNG additionally accepts a per-instance [`DmaBackend`] for queue and request
+//! memory. Its default [`StaticHal`] preserves existing HAL-based callers.
 //!
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
 //! [`driver_base`]: driver_base
@@ -72,7 +74,7 @@ mod socket;
 use driver_base::{DeviceKind, DriverError};
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
-    BufferDirection, Hal as VirtIoHal, PhysAddr,
+    BufferDirection, DmaBackend, Hal as VirtIoHal, PhysAddr, StaticHal,
     transport::{Transport, mmio::MmioTransport},
 };
 
