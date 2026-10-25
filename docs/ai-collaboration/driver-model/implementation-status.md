@@ -491,3 +491,56 @@ on snapshots after releasing the mutex. `make clippy`, `make build`, formatting
 and whitespace checks pass. QEMU used the worktree-local disk without network
 or vsock. Existing third-party future-Rust warnings remain. Local commit only;
 no push requested.
+
+### R1-08 twelfth slice: portable VirtIO device-DMA adapter
+
+DeviceDmaBackend bridges the held OS-api capability to the vendored raw tuple
+ABI. Clones retain one device's private allocation/mapping guards; complete
+release tuples select the original guard. Provider calls and guard destruction
+occur outside the record locks. The adapter has no host dependency, copied DMA
+configuration or cross-device registry. Metadata retains the current infallible
+allocation policy. The integration contract now explicitly records this private
+guard-storage refinement rather than pretending the raw vendor descriptors can
+hold an OS-api guard directly.
+
+Queue rollback revealed that the previous slice's receive bounce zeroing was
+insufficient: ordinary unshare of an unpublished mapping overwrote its original
+bytes, and partial completion clobbered untouched tails. Native RX initialization
+now copies the initialized original buffer, matching Linux swiotlb's transparent
+bounce semantics. DeviceDma requires no-write round-trip and partial-write
+preservation. Internal address-validation rejection still uses discard; no new
+vendor cancellation protocol is introduced.
+
+Construction is unsafe: callers must establish IRQ/request-lock-compatible
+provider contexts and usable addresses/platform-sharing effects in both VirtIO
+ACCESS_PLATFORM modes. The intended QEMU identity binding satisfies this; the
+adapter does not claim arbitrary translated/IOMMU-mode support. Existing static
+HAL paths are unchanged. Production provider installation, exclusive MMIO handoff,
+real RNG acceptance and deferred IRQ acceptance remain separate work.
+
+Tests exercise exact clone release, independent instances, zero bus addresses,
+native model-to-VirtIO adaptation, allocation failure, direct/indirect queue
+rollback and RX partial-write preservation. Evidence is recorded under local
+`r1-08-virtio-device-dma/`; mock queues do not prove hardware shutdown.
+
+Self-review and independent standards/spec review identified a mock pointer
+provenance issue: writable bounce addresses must not come from a shared slice
+pointer. The test now transfers Box ownership to a raw allocation and uniquely
+reconstructs it after copy-back. Re-review reports no remaining blocker.
+
+The aarch64 guest selection
+`kdma,kdriver,virtio,driver_os_api,driver_model,subsys_hwrng,entropy` passes
+**267/267**, with coverage persisted and extracted (`ut.log`). This includes
+native capability-to-backend clone release and RX round-trip under a request
+spinlock, but not real concurrent device IRQ acceptance. QEMU used the
+worktree-local disk without network or vsock.
+
+`make clippy` and `make build` pass (`clippy-final.log`, `build.log`). Clippy's
+initial run caught four test-only pointer-arithmetic blocks containing multiple
+unsafe operations; bounded pointer arithmetic now uses wrapping_add, leaving
+only the volatile access unsafe. Formatting, headers and whitespace checks pass.
+The lockfile adds only virtio's optional driver-os-api dependency; package
+versions are unchanged. Existing third-party future-Rust warnings remain.
+
+The post-lint regression also passes **267/267**, with coverage extracted
+(`ut-final.log`). This slice is ready for a local commit; no push requested.

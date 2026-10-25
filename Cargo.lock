@@ -6120,6 +6120,7 @@ dependencies = [
  "block",
  "device-res",
  "display",
+ "driver-os-api",
  "driver_base",
  "input",
  "kerrno",

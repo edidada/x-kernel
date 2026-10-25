@@ -2,8 +2,11 @@
 
 ## Retained DMA capability
 
-DeviceToDriver acquisition zeroes the native bounce bytes before publication,
-so partial device writes cannot copy stale pool contents back to the caller.
+DeviceToDriver acquisition copies the initialized original bytes into native
+bounce storage before publication. Partial device writes preserve the original
+unwritten bytes rather than copying stale pool contents or zeros back. Ordinary
+unmap without device writes leaves the original unchanged, including unpublished
+queue rollback; it is not cancellation of submitted DMA.
 Other directions retain the original-buffer initialization performed by kdma.
 The private publication test seam does not overwrite simulated device writes.
 
@@ -13,8 +16,9 @@ missing, invalid or non-coherent views cannot fall back to unrestricted DMA.
 Device removal does not revoke this capability or stop hardware. Drivers remain
 responsible for admission, quiescence and releasing guards in a valid context.
 
-Streaming callers must keep their original buffer live and exclusive until guard
-cleanup. The host validates the complete native bounce interval before publishing
+Streaming callers must initialize their entire original buffer for every DMA
+direction and keep it live and exclusive until guard cleanup. The host validates
+the complete native bounce interval before publishing
 its translated bus address. Rejected mappings are discarded without copy-back,
 including receive mappings. The unique private release hook retains the original
 native bus token, buffer address, length and direction, so a translated device

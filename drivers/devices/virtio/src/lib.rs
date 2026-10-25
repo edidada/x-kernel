@@ -55,7 +55,11 @@ mod net;
 pub use self::net::VirtIoNetDev;
 
 #[cfg(feature = "rng")]
+mod device_dma;
+#[cfg(feature = "rng")]
 mod rng;
+#[cfg(feature = "rng")]
+pub use self::device_dma::DeviceDmaBackend;
 #[cfg(feature = "rng")]
 pub use self::rng::VirtIoRngDev;
 

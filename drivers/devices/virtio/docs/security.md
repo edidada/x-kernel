@@ -1,5 +1,30 @@
 # VirtIO — 安全与可靠性分析
 
+## DeviceDmaBackend ownership boundary
+
+`DeviceDmaBackend::new` is unsafe because os-api providers specify their own
+execution contexts while vendor queues complete in hard IRQ/request-lock
+contexts. Construction must establish non-sleeping acquisition, synchronization,
+release and metadata allocation. All streaming buffers must be initialized and
+exclusive through unshare, with device access stopped before guard cleanup.
+Provider guards retain their native tokens; the adapter never reconstructs a
+native address from a translated bus address. Clones share exactly one provider.
+
+Private SpinNoIrq maps serialize raw-tuple ownership. Removal takes a guard out
+under the lock and drops it after unlocking; duplicate insertion drops only the
+rejected guard outside the lock. A mismatched or repeated unsafe release panics
+without removing another record. Keep a backend clone alive until all raw
+resources are released; dropping the last clone is not a device-stop protocol.
+
+No-write map/unshare round trips must preserve original bytes, including RX;
+partial writes must preserve unwritten bytes. Provider failure and adapter
+post-map rejection must not overwrite the caller's original buffer.
+The constructor additionally requires one capability valid for BOTH negotiated
+access_platform modes, including platform-sharing effects. Intended use is
+identity/no-IOMMU QEMU; translated or IOMMU configurations are not automatically
+supported. This adapter does not authenticate platform policy or certify hardware
+quiescence. Metadata OOM follows kernel fatal allocation policy.
+
 ## 信任模型
 
 ```

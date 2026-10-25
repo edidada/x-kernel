@@ -77,7 +77,10 @@ impl Drop for CoherentMem {
 /// directional synchronization/copy-back. Errors retain no acquired resources;
 /// streaming errors must leave the original buffer unchanged. Implementations
 /// must never read or copy back uninitialized bytes, including receive bounce
-/// storage not written by the device. Implementations must document supported
+/// storage not written by the device. Mapping followed by release without any
+/// device writes must preserve the original bytes; partial device writes must
+/// preserve the untouched bytes, including on receive-only mappings.
+/// Implementations must document supported
 /// acquisition and guard-release execution contexts.
 pub unsafe trait DeviceDma: Send + Sync {
     /// Allocate owned coherent memory for this device.

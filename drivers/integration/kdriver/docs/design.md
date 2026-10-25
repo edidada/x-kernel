@@ -17,6 +17,20 @@ the native token, original buffer address, length and direction into a private
 StreamingMapping release hook. Drop invokes normal unmap once, preserving
 directional copy-back; the original buffer remains caller-owned.
 
+All streaming buffers must be initialized, including receive buffers. Before
+publication, map_native_streaming copies the original bytes into receive bounce
+storage; kdma already initializes the other directions from the original. This
+matches Linux swiotlb's transparent bounce semantics: partial device writes
+preserve unwritten bytes, and ordinary unmap without device writes preserves the
+entire original buffer, including unpublished queue rollback. It does not add a
+submitted-DMA cancellation protocol or change the requested DMA direction.
+
+The host receive pre-copy is followed by a SeqCst fence before returning the
+native mapping for publication, matching kdma's outbound post-copy ordering.
+The earlier native mapping fence cannot order this later host copy; initialization
+therefore does not rely on a consumer's subsequent queue barrier. This ordering
+does not add cache maintenance or support for non-coherent devices.
+
 Guards do not require the capability to remain alive. There is no second mapping
 registry, retry policy, implicit hardware stop or production activation. The
 private publish_streaming helper accepts an acquired unpublished native mapping

@@ -11,7 +11,10 @@ Streaming errors must not copy unused receive data into the original buffer.
 The unsafe streaming caller supplies initialized bytes and keeps its buffer
 live and exclusive until guard cleanup completes, stopping device access before
 Drop. Providers must not copy back uninitialized receive bounce bytes, even
-when hardware wrote only part of the buffer. A mapping guard does not
+when hardware wrote only part of the buffer. They must preserve original bytes
+not written by hardware, rather than clearing those bytes on copy-back. Thus
+rollback before hardware publication cannot overwrite earlier receive buffers.
+A mapping guard does not
 own the original buffer or stop hardware. Release contexts are provider-defined;
 Send + Sync does not promise IRQ-safe or non-sleeping operations. The mandatory
 private release hook cannot be extracted from or cloned through the guard.

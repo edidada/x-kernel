@@ -280,7 +280,7 @@ fn rejected_streaming_publication_preserves_bytes_and_recycles_bounce_capacity()
 }
 
 #[def_test(serial)]
-fn receive_mapping_without_device_writes_returns_initialized_bytes() {
+fn receive_mapping_without_device_writes_preserves_original_bytes() {
     let mut original = [0xa5u8; 64];
     let buffer = NonNull::from(original.as_mut_slice());
     // SAFETY: the original buffer remains live and exclusive through guard
@@ -294,5 +294,25 @@ fn receive_mapping_without_device_writes_returns_initialized_bytes() {
     }
     .unwrap();
     drop(mapping);
-    assert_eq!(original, [0; 64]);
+    assert_eq!(original, [0xa5; 64]);
+}
+
+#[def_test(serial)]
+fn receive_mapping_partial_device_write_preserves_unwritten_suffix() {
+    let mut original = [0xa5u8; 64];
+    let buffer = NonNull::from(original.as_mut_slice());
+    let direction = kdma::DmaDirection::DeviceToDriver;
+    // SAFETY: the initialized original remains live and exclusive through
+    // publication and guard cleanup. No hardware receives this mapping.
+    let native = unsafe { map_native_streaming(buffer, direction) }.unwrap();
+    // SAFETY: native owns a distinct writable 64-byte bounce interval. Only
+    // its first 13 bytes are changed to simulate a partial device write.
+    unsafe { native.cpu_addr.as_ptr().write_bytes(0x37, 13) };
+    // SAFETY: this exact unpublished mapping has fully initialized bounce
+    // bytes and is consumed once; no device access needs to be stopped.
+    let result = unsafe { publish_streaming(&DmaInfo::DEFAULT, native, buffer, direction) };
+    let error = result.err();
+    assert_eq!(error, None);
+    assert_eq!(&original[..13], &[0x37; 13]);
+    assert_eq!(&original[13..], &[0xa5; 51]);
 }

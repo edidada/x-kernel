@@ -114,6 +114,25 @@ TLS、不使用一个全局“当前设备”，也不按设备实例生成全�
 映射表来恢复上下文。库不依赖 X-Kernel 或 driver-model；具体 os-api 到库契约
 适配位于具体驱动/宿主接入的自然边界。
 
+当前 vendor 的 DmaBackend 返回裸地址，并在完成/回滚时以原 tuple 释放，不能
+直接存放 os-api guard。本轮采用设备实例私有的适配记录保存 guard，backend
+clone 共享同一记录；记录只保存释放凭证，不复制设备配置，也不跨设备共享。
+释放校验完整 tuple，锁内摘出、锁外 Drop；不得覆盖仍有效的记录。这是在现有
+库接口上的所有权适配，不新增全局 DMA 注册表，也不另造 queue 生命周期。
+元数据遵循当前内核的不可恢复分配失败策略，不承诺无分配或固定延迟。
+
+回滚继续调用普通 unshare，无需新增 vendor 撤销接口。DeviceDma 必须保证未发生
+设备写入时 map→release 保留原内容，部分写入时保留其余字节。宿主 RX bounce
+因此预拷贝原 buffer，而不是仅清零；本地 Linux kernel/dma/swiotlb.c 的
+swiotlb_tbl_map_single 同样无条件预拷贝，以保持 bounce 对部分写入透明。
+这不允许在硬件仍可能访问时释放已发布请求，reset/quiescence 责任不变。
+
+ACCESS_PLATFORM 不能从“没有 IOMMU”推导为可忽略。当前适配构造要求调用方证明
+held capability 对 platform-DMA 和 bypass 两种协商模式都返回设备实际可用的
+地址，并完成平台共享；目前计划的 QEMU identity DMA 路径满足这一条件。
+任意非 identity window 或未来 IOMMU 路径不能自动沿用，需先补显式模式能力，
+不能为了兼容 false 就跳过平台共享或绕开 descriptor 的 DMA 约束。
+
 ### 固件配置的边界
 
 补充 firmware discovery 输出到设备描述的转换；固件解析层保持宿主/固件

@@ -10,7 +10,10 @@ The bus address may be zero. The original streaming buffer remains caller-owned.
 
 Providers enforce window/mask/cache policy and native allocation pairing.
 Streaming failure leaves the buffer unchanged and no live mapping; successful
-mapping ends with directional synchronization at Drop. This API adds neither
+mapping ends with directional synchronization at Drop. A mapping released before
+any device write preserves the original bytes. Partial device writes preserve
+untouched bytes, including receive-only bounce mappings; this also makes ordinary
+release safe for rollback before queue publication. This API adds neither
 a host allocator nor a global provider registry. Tests cover guard movement,
 release-owner retention and exactly-once cleanup without hardware access.
 

@@ -1,5 +1,31 @@
 # VirtIO — 设计文档
 
+## Held DMA capability adapter
+
+With `rng`, `DeviceDmaBackend` adapts an owned os-api `DeviceDma` capability to
+the vendor's raw DmaBackend ABI. Clones share one instance-private state with
+separate coherent and streaming guard records, not a cross-device registry or
+another copy of descriptor DMA policy. Exact keys include bus/CPU addresses,
+page count or byte length, direction and access_platform. Bus address zero is
+valid. Duplicate keys reject the new guard without replacing the original.
+Provider calls and all guard drops occur outside the record locks. Allocation
+size/overflow and returned extent/alignment checks precede publication.
+
+This guard storage is the compatibility bridge for the current raw tuple ABI,
+not a new queue algorithm. Metadata uses infallible Arc/BTreeMap allocation;
+metadata OOM is not a recoverable mapping failure. Unshare also handles queue
+setup rollback, so providers must preserve original bytes without device writes
+and preserve untouched bytes after partial RX writes. No discard ABI is added.
+
+The unsafe constructor requires non-sleeping IRQ/request-lock-compatible
+providers and initialized, exclusive streaming buffers until release. Both
+values of access_platform use the same capability: the constructor requires
+addresses AND platform-sharing effects valid for both DMA-bypass and platform
+DMA. The intended binding is QEMU identity DMA without an IOMMU; arbitrary
+translated/IOMMU capabilities require a future explicit mode contract. Merely
+retaining the flag in release keys does not prove hardware compatibility.
+No host/kernel dependency, production boot activation or MMIO handoff is added.
+
 ## 定位
 
 本模块是 x-kernel 的 VirtIO 驱动适配层，将 [`virtio-drivers`] crate 提供的各类
@@ -7,8 +33,9 @@ VirtIO 设备封装为 [`driver_base`] 系列 trait 的实现。块设备、网�
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
-IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `device_res` provider
-contract 传入。
+IRQ 映射和时间能力必须通过 `virtio_drivers::Hal`、`device_res` provider
+contract 或 `driver_os_api` 能力契约传入。实例 DMA 路径由 `DeviceDmaBackend`
+持有 `driver_os_api::DeviceDma`，再适配为 vendor `DmaBackend`，不直接调用宿主 API。
 
 ## 背景
 
@@ -29,6 +56,8 @@ drivers/devices/virtio/
 │   ├── gpu.rs          # VirtIO GPU 适配器
 │   ├── input.rs        # VirtIO Input 适配器
 │   ├── net.rs          # VirtIO Net 适配器（含 IRQ 管理）
+│   ├── rng.rs          # IRQ-driven RNG 适配器（静态或实例 DMA 后端）
+│   ├── device_dma.rs   # 持有 DeviceDma 的实例后端适配器（rng feature）
 │   ├── socket.rs       # VirtIO Vsock 适配器
 │   ├── virtio_9p.rs    # VirtIO 9p 适配器
 │   └── mock_virtio.rs  # 单元测试 Mock（Hal + Transport）
@@ -43,6 +72,7 @@ Feature flags 控制编译哪些设备适配器：
 | `gpu`     | gpu       | `alloc`, `display` crate |
 | `input`   | input     | `alloc`, `input` crate |
 | `net`     | net       | `alloc`, `net` crate |
+| `rng`     | rng, device_dma | `alloc`, `subsys_hwrng`, `driver_os_api` |
 | `socket`  | socket    | `alloc`, `vsock` crate |
 | `virtio-9p` | virtio_9p | `alloc` |
 

@@ -90,6 +90,7 @@ fn resource_error(error: RuntimeError) -> ResError {
 /// Acquire a native mapping and publish it only after device-view validation.
 ///
 /// # Safety
+/// The entire buffer must contain initialized bytes, including for receive DMA.
 /// The caller must keep the entire buffer live and exclusive until the returned
 /// guard is dropped, with all hardware access stopped before Drop. Acquisition
 /// and cleanup must obey the contexts documented by [`new_device_dma`]. On error
@@ -109,19 +110,44 @@ unsafe fn map_streaming_for_view(
         DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
         DmaDirection::Bidirectional => kdma::DmaDirection::Bidirectional,
     };
-    // SAFETY: the caller retains this live exclusive buffer until the returned
-    // guard unmaps it; no device has received the bounce address yet.
-    let native =
-        unsafe { kdma::map_dma_buffer(buffer, direction) }.map_err(|_| ResError::NoMemory)?;
-    if direction == kdma::DmaDirection::DeviceToDriver {
-        // SAFETY: native owns a live writable bounce interval of len bytes,
-        // disjoint from the original buffer and not yet published to hardware.
-        // Initialize unwritten RX bytes before a later full-length copy-back.
-        unsafe { native.cpu_addr.as_ptr().write_bytes(0, len) };
-    }
+    // SAFETY: the caller retains this initialized, exclusive buffer until
+    // guard cleanup; no device has received the bounce address yet.
+    let native = unsafe { map_native_streaming(buffer, direction) }?;
     // SAFETY: native is the unique unpublished mapping for this exact buffer
     // and direction; publication consumes it on both success and rejection.
     unsafe { publish_streaming(view, native, buffer, direction) }
+}
+
+/// Acquire a bounce mapping that preserves bytes not written by the device.
+///
+/// # Safety
+/// The entire buffer must be initialized and remain live and exclusive until
+/// final discard or unmap, including after transfer to a publication guard.
+/// The caller owns the returned unpublished mapping and must arrange release
+/// exactly once using its exact buffer and direction, after any device access
+/// ends. The contexts of [`new_device_dma`] apply to acquisition and release.
+unsafe fn map_native_streaming(
+    buffer: NonNull<[u8]>,
+    direction: kdma::DmaDirection,
+) -> ResResult<kdma::DmaInfo> {
+    // SAFETY: the caller retains the initialized, live exclusive buffer until
+    // the exact returned mapping is released; it is not yet exposed to hardware.
+    let native =
+        unsafe { kdma::map_dma_buffer(buffer, direction) }.map_err(|_| ResError::NoMemory)?;
+    if direction == kdma::DmaDirection::DeviceToDriver {
+        // SAFETY: the original is initialized and readable for buffer.len()
+        // bytes. Native owns a disjoint writable bounce interval of that size,
+        // not yet exposed to hardware. Preserve unwritten bytes on copy-back.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buffer.as_ptr() as *const u8,
+                native.cpu_addr.as_ptr(),
+                buffer.len(),
+            )
+        };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(native)
 }
 
 /// Validate and transfer one unpublished native streaming mapping.

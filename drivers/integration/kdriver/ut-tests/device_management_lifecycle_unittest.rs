@@ -351,6 +351,58 @@ fn held_dma_acquisition_rejects_missing_and_noncoherent_views() {
 
 struct MmioProbe;
 
+#[cfg(feature = "hwrng")]
+#[def_test(serial)]
+fn native_device_dma_works_through_virtio_backend_and_clone_release() {
+    use virtio::{BufferDirection, DeviceDmaBackend, DmaBackend};
+
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let (domain, root) = held_dma_domain(HeldDmaProbe(attempts));
+    let device = domain
+        .add_device(held_dma_descriptor(
+            root,
+            1,
+            Some(driver_model::DmaInfo::DEFAULT),
+        ))
+        .unwrap();
+    let capability = domain
+        .with_data::<Arc<dyn driver_os_api::DeviceDma>, _>(&device, Arc::clone)
+        .unwrap();
+    domain.remove_device(&device).unwrap();
+    drop(device);
+    drop(domain);
+    // SAFETY: this native QEMU identity capability uses non-sleeping allocation
+    // and release and provides the same direct addresses in both VirtIO modes.
+    // No hardware receives the addresses; all raw releases use original tuples.
+    let backend = unsafe { DeviceDmaBackend::new(capability) };
+    let clone = backend.clone();
+    let (bus, pointer) = backend.allocate(1, BufferDirection::Both, true).unwrap();
+    let physical =
+        khal::mem::v2p(memaddr::VirtAddr::from_usize(pointer.as_ptr() as usize)).as_usize() as u64;
+    let allocation_matches = bus == physical;
+    // SAFETY: clone retains the allocating instance; this live original tuple
+    // is released once, with no hardware or CPU users of the allocation.
+    unsafe { clone.deallocate(bus, pointer, 1, BufferDirection::Both, true) };
+    let mut original = [0xa5u8; 64];
+    let buffer = NonNull::from(original.as_mut_slice());
+    let request_lock = kspin::SpinNoIrq::new(());
+    let request = request_lock.lock();
+    // SAFETY: the original array stays live/exclusive through matching unshare;
+    // this native capability supports request-lock context, and no DMA starts.
+    let mapped = unsafe { backend.share(buffer, BufferDirection::DeviceToDriver, false) };
+    let did_map = mapped.is_ok();
+    if let Ok(address) = mapped {
+        // SAFETY: this is the original active tuple, released once through a
+        // clone of the same instance before the original array is accessed.
+        unsafe { clone.unshare(address, buffer, BufferDirection::DeviceToDriver, false) };
+    }
+    drop(request);
+    drop(backend);
+    drop(clone);
+    assert!(allocation_matches && did_map);
+    assert_eq!(original, [0xa5; 64]);
+}
+
 impl DriverOps<PlatformBus> for MmioProbe {
     type Data = IoMap;
 

@@ -17,13 +17,14 @@ block = ["dep:block", "alloc", "dep:linked_list_r4l"]
 gpu = ["alloc", "display"]
 input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
-rng = ["alloc", "dep:subsys_hwrng"]
+rng = ["alloc", "dep:subsys_hwrng", "dep:driver_os_api"]
 socket = ["alloc", "dep:vsock"]
 virtio-9p = ["alloc"]
 
 [dependencies]
 bitflags = { workspace = true }
 driver_base = { workspace = true }
+driver_os_api = { workspace = true, optional = true }
 device_res = { workspace = true }
 block = { workspace = true, optional = true }
 kerrno = { workspace = true }
