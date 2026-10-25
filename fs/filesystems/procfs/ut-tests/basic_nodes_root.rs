@@ -97,10 +97,16 @@ fn printk_node_reads_and_writes_runtime_log_level() {
     klogger::set_log_level_filter(previous);
 }
 
-/// Every `/proc` file answers `file_can_poll` in Linux, because procfs wraps
-/// them in `proc_reg_file_ops` whose `proc_reg_poll` falls back to
-/// `DEFAULT_POLLMASK`. `/cmdline` is the generated form and `/meminfo` the
-/// iterator form; both must be pollable, so `epoll_ctl` accepts them.
+/// Linux installs `proc_reg_file_ops` (whose `proc_reg_poll` falls back to
+/// `DEFAULT_POLLMASK`) on the regular-file shape of a `/proc` entry, so those
+/// entries answer `file_can_poll` and `epoll_ctl` accepts them. `/cmdline` is
+/// the generated form and `/meminfo` the iterator form; both are regular files
+/// and must be pollable.
+///
+/// The shape is what matters: a proc symlink inode is left with `i_fop = NULL`
+/// (`fs/proc/inode.c`) and an `O_PATH` open installs `EmptyFileOperations`, so
+/// neither answers `file_can_poll` — this test must not be read as licence to
+/// give a poll handler to `/proc/<pid>/ns/*`, `exe` or `fd/N`.
 #[def_test(serial)]
 fn proc_nodes_are_pollable_like_linux() {
     let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
