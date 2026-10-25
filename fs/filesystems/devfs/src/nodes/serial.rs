@@ -80,16 +80,25 @@ impl DeviceFileOps for SerialDev {
     /// does. The UART id here is the Linux ttyS major/minor for the same
     /// reason.
     ///
-    /// The raw [`CharDevice`] contract exposes read/write/flush only, and only
-    /// the console port has buffered input with an IRQ waker attached
-    /// (`prepare_irq_input` runs for the stdout port alone). An auxiliary UART
-    /// therefore has neither a way to ask whether input is waiting nor a source
-    /// to register, so `tty_poll`'s input half cannot be reproduced yet. Report
-    /// the stream as read/write ready rather than claiming no handler: that is
-    /// the answer a file without one gets from `vfs_poll` anyway, and it keeps a
-    /// poll-driven reader making progress instead of blocking for a wake that
-    /// cannot arrive. Giving auxiliary UARTs buffered input and an IRQ waker
-    /// would let this become a real readiness query.
+    /// Readiness is reported as `IN | OUT` because that is what a read and a
+    /// write on this node actually do: [`Self::write`] accepts whenever the
+    /// port is up, and [`Self::read`] completes without blocking — draining
+    /// whatever the UART holds, which for an empty receiver is a zero-length
+    /// read, i.e. end of stream. `IN` therefore says "a read returns now", not
+    /// "a byte is waiting", and the zero-length answer belongs to the read
+    /// contract rather than being a contradiction poll introduces.
+    ///
+    /// Making `IN` mean "a byte is waiting" — as `n_tty_poll` does with
+    /// `input_available_p` — needs three things this node does not have: a
+    /// non-destructive receiver query (the raw [`CharDevice`] contract exposes
+    /// read/write/flush only, and it consumes), buffered input, and a wake
+    /// source. Only the console port has the last two (`prepare_irq_input`
+    /// runs for the stdout port alone, and `attach_input_waker` is used by the
+    /// console N_TTY), so with the query alone a blocking poll would wait for
+    /// input it could never be woken for. Withholding `IN` instead is not the
+    /// safer interim: it turns today's immediate zero-length read into a wait
+    /// with no wake, where a reader hangs rather than observes the end of
+    /// stream the read path already reports.
     fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
         Some(IoEvents::IN | IoEvents::OUT)
     }
