@@ -801,3 +801,10 @@ there is no IOMMU enforcement here, and callers must stop hardware DMA before
 dropping the guard. kdma cleanup failures retain pages and log rather than reuse
 pages whose mapping/share state is uncertain. Tests use real allocator/mapping
 services but no hardware DMA; they do not certify cache or IRQ teardown behavior.
+
+The opt-in QEMU MMIO DMA policy requires HAL-provided original-node provenance,
+not the caller's matcher alias. Missing ranges alone do not authorize identity
+DMA. Rejected firmware paths, invalid masks/windows and explicit windows are
+never replaced. A bounded RAM window is an address constraint, not permission
+to use arbitrary RAM; allocation and hardware quiescence obligations above remain.
+This platform-specific policy trusts the boot firmware's platform identification.

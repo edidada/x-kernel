@@ -203,3 +203,9 @@ device discovery. Callers requiring DMA must check the result and both optional
 facts; ignoring a DMA error does not authorize DMA. The existing MMIO/IRQ and
 matching behavior remains unchanged. OF ancestor resolution is allocation-free
 discovery work; its result is not a runtime allocator or ownership guarantee.
+
+Discovery views have private fields so callers cannot attach forged descriptions
+to unrelated topology. Direct-root checks use actual parent identity, not bus
+names or matcher-returned identifiers. RAM queries require complete reg tuples
+and checked endpoints. These checks trust firmware to describe the machine;
+they neither authenticate firmware nor grant DMA access to reserved RAM.

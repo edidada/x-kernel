@@ -250,3 +250,13 @@ from the OF resolver; errors are preserved rather than dropping a device that
 may have non-DMA consumers. This layer does not depend on the driver model,
 choose a device mask, or introduce a platform fallback. Host integration converts
 the transient discovery facts into the model descriptor's owned configuration.
+
+`for_each_compatible_view` supplies a transient `FirmwareDeviceView` tied to its
+original node and tree. Matching aliases cannot forge compatibility or direct
+root attachment. Availability is checked by the topology query, not imposed on
+legacy discovery. The existing flat visitor delegates to this path unchanged.
+The view can report one complete, nonempty root RAM interval; multiple ranges,
+unsupported cell widths, overflow and ambiguous active RAM are rejected. This
+is firmware evidence, not allocator state. Platform DMA policy stays in kdriver.
+Discovery currently retains the OF interrupt resolver's static-tree requirement;
+isolated fixture trees are leaked only in guest tests, without replacing boot DT.

@@ -8,7 +8,7 @@
 //! masks come from device capability, never from the size of a firmware window.
 
 use driver_model::{DmaInfo, DmaWindow};
-use khal::firmware::devices::{DmaResolveError, FirmwareDevice};
+use khal::firmware::devices::{DmaResolveError, FirmwareDevice, FirmwareDeviceView};
 
 /// Why enumeration cannot yet configure a device's DMA view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,10 @@ pub enum DmaConfigurationError {
     InvalidMask,
     /// The supplied resolved window is empty or overflows either address space.
     InvalidWindow,
+    /// The node is not an available direct QEMU Arm virt MMIO device.
+    UnsupportedPlatformPolicy,
+    /// Firmware does not describe one unambiguous nonempty root RAM interval.
+    MissingPlatformRam,
 }
 
 /// Build configuration for a descriptor from a firmware discovery result.
@@ -46,6 +50,57 @@ pub fn from_firmware(device: &FirmwareDevice, mask: u64) -> Result<DmaInfo, DmaC
         .ok_or(DmaConfigurationError::MissingCoherency)?;
     let window = DmaWindow::new(range.cpu_addr, range.bus_addr, range.size)
         .map_err(|_| DmaConfigurationError::InvalidWindow)?;
+    Ok(DmaInfo {
+        mask,
+        window,
+        coherent,
+    })
+}
+
+/// Apply the explicit QEMU Arm virt direct-MMIO identity-DMA policy if needed.
+///
+/// Explicit firmware windows and errors take precedence. Only an available
+/// `virtio,mmio` child of `linux,dummy-virt` may substitute the single root RAM
+/// interval for missing `dma-ranges`. Coherency and the caller's device mask
+/// remain independent requirements. This does not authorize arbitrary DMA or
+/// bypass the native allocator's reserved-memory accounting.
+///
+/// # Errors
+/// Returns conversion errors unchanged, or rejects unsupported topology/RAM.
+pub fn from_firmware_with_qemu_virt_mmio_policy(
+    view: &FirmwareDeviceView<'_>,
+    mask: u64,
+) -> Result<DmaInfo, DmaConfigurationError> {
+    with_platform_window(view.description(), mask, || {
+        if !cfg!(target_arch = "aarch64")
+            || !view.is_compatible("virtio,mmio")
+            || !view.is_root_child_of("linux,dummy-virt")
+        {
+            return Err(DmaConfigurationError::UnsupportedPlatformPolicy);
+        }
+        let (start, size) = view
+            .single_root_ram_range()
+            .ok_or(DmaConfigurationError::MissingPlatformRam)?;
+        DmaWindow::new(start as u64, start as u64, size as u64)
+            .map_err(|_| DmaConfigurationError::InvalidWindow)
+    })
+}
+
+fn with_platform_window(
+    device: &FirmwareDevice,
+    mask: u64,
+    platform_window: impl FnOnce() -> Result<DmaWindow, DmaConfigurationError>,
+) -> Result<DmaInfo, DmaConfigurationError> {
+    match from_firmware(device, mask) {
+        Err(DmaConfigurationError::MissingWindow) => {}
+        result => return result,
+    }
+    let window = platform_window()?;
+    let coherent = device
+        .dma
+        .map_err(DmaConfigurationError::Firmware)?
+        .coherent
+        .ok_or(DmaConfigurationError::MissingCoherency)?;
     Ok(DmaInfo {
         mask,
         window,

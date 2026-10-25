@@ -304,3 +304,43 @@ compatibility warnings remain unchanged. The native prerequisite and host helper
 are committed separately after review; no push is performed. Next is explicit
 platform/node provenance for the DMA policy and production host composition,
 not broadening the generic converter into an implicit identity fallback.
+
+### R1-08 seventh slice: provenance-bound QEMU MMIO DMA policy
+
+HAL discovery now offers a transient FirmwareDeviceView with private original
+node/tree provenance, while preserving the existing flat visitor. Host policy
+queries actual compatibles, available direct-root attachment and one complete,
+nonempty root RAM interval. Matcher aliases cannot forge any of these facts.
+No additional metadata is stored on model devices.
+
+The explicit kdriver QEMU Arm virt policy fills only MissingWindow, and only for
+direct available virtio,mmio children of linux,dummy-virt on aarch64. It uses a
+bounded identity RAM window, preserves independent mask/coherency requirements,
+and never overwrites explicit windows or firmware errors. Generic from_firmware
+remains strict. Native allocator ownership/reserved-memory checks still apply.
+
+Self-review and independent standards/spec review found an overly permissive
+disabled-RAM string check and a deterministic precedence-test gap. Both are
+fixed: only exact disabled status is ignored; malformed trailing bytes reject
+the RAM evidence. Deterministic tests cover explicit translated windows, rejected
+facts, invalid masks/windows, absent/false coherency and mask-limited fallback.
+Topology fixtures cover matcher spoofing, nested buses, unavailable nodes,
+missing/multiple RAM and malformed tuples without replacing the global boot DT.
+Boot discovery tests additionally exercise the actual QEMU policy path.
+Both independent re-reviews report no remaining blocker.
+
+This is not production provider installation or real RNG hardware acceptance.
+R1-08 still needs host service composition, exclusive new/legacy MMIO ownership
+handoff and modern-MMIO RNG bring-up. Deferred IRQ acceptance stays separate.
+Final validation logs for this slice are under local `r1-08-dma-policy/`.
+
+Final aarch64 guest regression selects
+`memspace,kdma,khal,kdriver,of,driver_os_api,driver_model`: **241 passed, 0 failed**
+with coverage extracted (`ut-final.log`). The worktree-local QEMU run disables
+network/vsock and does not claim an exclusive performance measurement window.
+
+`make clippy` and `make build` pass (`clippy.log`, `build.log`). Clippy's
+nonminimal-bool suggestion was applied without changing the topology predicate.
+Existing third-party future-Rust compatibility warnings remain unchanged.
+Formatting and whitespace checks pass. This slice is committed locally after
+review; no push is requested or performed.

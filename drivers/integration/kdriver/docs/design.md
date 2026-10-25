@@ -907,3 +907,19 @@ fixture delegates its DMA service to this helper and checks two descriptor views
 across bind/unbind/rebind. It does not hand the addresses to real hardware.
 Production provider installation and MMIO RNG enumeration remain R1-08 work;
 the helper alone does not enable a new boot path.
+
+### Explicit QEMU Arm virt DMA policy
+
+`from_firmware_with_qemu_virt_mmio_policy` is a separate enumeration operation,
+not a default in `from_firmware`. Only MissingWindow permits fallback: an
+available direct root child with actual `virtio,mmio` compatibility under
+`linux,dummy-virt`, on aarch64, can use the same tree's single root RAM interval
+as a bounded identity window. Explicit windows and all other errors win.
+The caller supplies the device mask; firmware must still specify coherency.
+The native allocator remains responsible for free/reserved-memory ownership.
+
+This policy follows QEMU Arm virt's direct virtio-mmio system-memory DMA path;
+it is not a general DT rule for missing dma-ranges. No support is inferred for
+nested buses, other boards, multiple RAM banks or an IOMMU path. Boot discovery
+tests exercise the policy but do not install the new model's production provider
+or demonstrate real RNG DMA. Those remain subsequent R1-08 integration work.

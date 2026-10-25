@@ -197,21 +197,117 @@ pub fn io_apic_paddr() -> Option<usize> {
 /// firmware-neutral.
 pub fn for_each_compatible(
     matcher: impl FnMut(&str) -> Option<&'static str>,
-    visitor: impl FnMut(FirmwareDevice),
+    mut visitor: impl FnMut(FirmwareDevice),
+) {
+    for_each_compatible_view(matcher, |view| visitor(*view.description()));
+}
+
+/// A transient discovery description tied to its original device-tree node.
+///
+/// Topology queries inspect firmware, not the identity returned by a matcher.
+/// This view is for enumeration policy, not runtime device ownership.
+pub struct FirmwareDeviceView<'a> {
+    description: FirmwareDevice,
+    node: of::FdtNode<'a, 'a>,
+    tree: &'a of::LinuxFdt<'a>,
+}
+
+impl FirmwareDeviceView<'_> {
+    /// Return the discovered resources, including any unresolved DMA error.
+    pub fn description(&self) -> &FirmwareDevice {
+        &self.description
+    }
+
+    /// Test the original node's compatibles, independently of matcher aliases.
+    pub fn is_compatible(&self, compatible: &str) -> bool {
+        self.node.is_compatible(compatible)
+    }
+
+    /// Whether this available node is directly attached to an available root
+    /// with the specified compatible. Nested buses never satisfy this query.
+    pub fn is_root_child_of(&self, compatible: &str) -> bool {
+        self.node.parent().is_some_and(|parent| {
+            parent.parent().is_none()
+                && parent.is_compatible(compatible)
+                && node_is_available(parent)
+                && node_is_available(self.node)
+        })
+    }
+
+    /// Return a single nonempty root RAM interval from this same firmware tree.
+    ///
+    /// Rejects multiple active RAM nodes/ranges, malformed tuples, unsupported
+    /// cell widths and overflow. Disabled RAM nodes are ignored. This describes
+    /// physical RAM, not free/allocatable memory or permission to perform DMA.
+    pub fn single_root_ram_range(&self) -> Option<crate::mem::MemRange> {
+        let root = self.tree.find_node("/")?;
+        let cells = |name, default| match root.property(name) {
+            None => Some(default),
+            Some(property) if property.value.len() == 4 => root.property_u32(name),
+            Some(_) => None,
+        };
+        let address_cells = cells("#address-cells", 2)?;
+        let size_cells = cells("#size-cells", 1)?;
+        if !(1..=2).contains(&address_cells) || !(1..=2).contains(&size_cells) {
+            return None;
+        }
+        let mut range = None;
+        for node in self.tree.all_nodes() {
+            if node.property_str("device_type") != Some("memory") {
+                continue;
+            }
+            if node
+                .property("status")
+                .is_some_and(|property| property.value == b"disabled\0")
+            {
+                continue;
+            }
+            if !node_is_available(node)
+                || node.parent().is_none_or(|parent| parent.parent().is_some())
+                || range.is_some()
+                || node.property("reg")?.value.len() != ((address_cells + size_cells) * 4) as usize
+            {
+                return None;
+            }
+            let region = node.reg()?.next()?;
+            let start = region.starting_address as usize;
+            if region.size == 0 || start.checked_add(region.size).is_none() {
+                return None;
+            }
+            range = Some((start, region.size));
+        }
+        range
+    }
+}
+
+fn node_is_available(node: of::FdtNode<'_, '_>) -> bool {
+    match node.property("status") {
+        None => true,
+        Some(property) => matches!(property.value, b"okay\0" | b"ok\0"),
+    }
+}
+
+/// Visit matched device-tree nodes with borrowed topology provenance.
+///
+/// Like [`for_each_compatible`], this preserves devices with DMA errors and
+/// does not filter disabled nodes. Policy users must validate availability.
+pub fn for_each_compatible_view(
+    matcher: impl FnMut(&str) -> Option<&'static str>,
+    visitor: impl FnMut(FirmwareDeviceView<'_>),
 ) {
     let Some(fdt) = of::fdt() else {
         return;
     };
 
-    visit_compatible_nodes(fdt.all_nodes(), matcher, visitor);
+    visit_tree_devices(fdt, matcher, visitor);
 }
 
-fn visit_compatible_nodes(
-    nodes: impl Iterator<Item = of::FdtNode<'static, 'static>>,
+fn visit_tree_devices(
+    tree: &'static of::LinuxFdt<'static>,
     mut matcher: impl FnMut(&str) -> Option<&'static str>,
-    mut visitor: impl FnMut(FirmwareDevice),
+    mut visitor: impl FnMut(FirmwareDeviceView<'static>),
 ) {
-    for node in nodes {
+    for node in tree.all_nodes() {
         let Some(firmware_id) = node.compatibles().find_map(&mut matcher) else {
             continue;
         };
@@ -225,12 +321,17 @@ fn visit_compatible_nodes(
             });
         let irq = of::first_interrupt_desc(node);
 
-        visitor(FirmwareDevice {
+        let description = FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
             mmio,
             irq,
             dma: of::dma::resolve_dma(node),
+        };
+        visitor(FirmwareDeviceView {
+            description,
+            node,
+            tree,
         });
     }
 }
