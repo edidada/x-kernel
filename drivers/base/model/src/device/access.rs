@@ -36,8 +36,8 @@ use crate::{
 /// | [`Resources`] (`dev.res()`) | what may I acquire from it | `platform_get_*`, `devm_*` |
 /// | [`Firmware`] (`dev.fw()`) | what did firmware say | `of_property_read_*` |
 ///
-/// Class publication attaches this device as its source:
-/// [`DeviceAccess::publish`].
+/// Subsystems obtain immutable publication provenance through
+/// [`DeviceAccess::publication_source`]; this grants no hardware access.
 pub struct DeviceAccess<'a, B: Bus> {
     /// The bus's own data vocabulary — typed: probe runs where the bus is
     /// statically known, so drivers read bus facts without any erasure.
@@ -46,6 +46,7 @@ pub struct DeviceAccess<'a, B: Bus> {
     services: &'a dyn DeviceServices,
     /// The live device identity: what class publications attach to.
     reference: &'a DeviceRef,
+    driver: &'a Arc<crate::driver::DriverIdentity>,
     _bus: PhantomData<fn(&B)>,
 }
 
@@ -54,6 +55,7 @@ impl<'a, B: Bus> DeviceAccess<'a, B> {
     /// Returns `None` when the device's bus payload has the wrong concrete type.
     pub(crate) fn new(
         reference: &'a DeviceRef,
+        driver: &'a Arc<crate::driver::DriverIdentity>,
         modalias: Option<&'a str>,
         services: &'a dyn DeviceServices,
     ) -> Option<Self> {
@@ -67,6 +69,7 @@ impl<'a, B: Bus> DeviceAccess<'a, B> {
             modalias,
             services,
             reference,
+            driver,
             _bus: PhantomData,
         })
     }
@@ -98,8 +101,19 @@ impl<'a, B: Bus> DeviceAccess<'a, B> {
         }
     }
 
-    /// Publish a runtime capability into a device class (`device_create` /
-    /// `add_disk`): the ONE class-publication door.
+    /// Retain this callback's driver identity and device metadata as provenance.
+    ///
+    /// Later unbind/rebind cannot change the reported driver. This source keeps
+    /// no ops, binding Data or acquired hardware resources alive. Its online
+    /// bit describes device registration, not permission to access hardware.
+    pub fn publication_source(&self) -> Arc<dyn driver_class::PublicationSource> {
+        Arc::new(super::source::BindingSource {
+            device: self.reference.clone(),
+            driver: self.driver.clone(),
+        })
+    }
+
+    /// Legacy generic class-publication adapter using this binding's provenance.
     ///
     /// Store the returned Registration in DriverOps::Data. Dropping it closes
     /// admission immediately; class teardown waits for existing permits.
@@ -115,7 +129,7 @@ impl<'a, B: Bus> DeviceAccess<'a, B> {
         T: Send + Sync + 'static,
         H: driver_class::ClassHooks<T>,
     {
-        class.publish(self.reference.core.clone(), runtime)
+        class.publish(self.publication_source(), runtime)
     }
 }
 

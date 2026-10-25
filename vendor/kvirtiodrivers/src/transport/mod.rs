@@ -4,6 +4,9 @@
 pub mod fake;
 pub mod mmio;
 pub mod pci;
+#[cfg(test)]
+#[path = "../../ut-tests/transport_reset.rs"]
+mod reset_tests;
 mod some;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
@@ -41,6 +44,28 @@ pub trait Transport {
 
     /// Sets the device status.
     fn set_status(&mut self, status: DeviceStatus);
+
+    /// Starts a whole-device reset without waiting.
+    ///
+    /// The owner must stop queue/configuration operations before calling this
+    /// and retain all DMA resources until `poll_reset` confirms completion.
+    /// Call once per reset attempt, then poll outside request locks. Neither
+    /// method sleeps or synchronizes host IRQ handlers.
+    fn begin_reset(&mut self) {
+        self.set_status(DeviceStatus::empty());
+    }
+
+    /// Polls a reset previously started by `begin_reset`, without waiting.
+    ///
+    /// Returning true guarantees that the device can no longer access its old
+    /// queues or DMA buffers, until explicitly reinitialized. It does not imply
+    /// that software callbacks have finished; the OS must synchronize those.
+    /// The default reads back zero status to confirm the reset write. Transports
+    /// needing additional completion steps must override this method and return
+    /// false until those steps finish. Wrappers must forward both reset methods.
+    fn poll_reset(&mut self) -> bool {
+        self.get_status().is_empty()
+    }
 
     /// Sets the guest page size.
     fn set_guest_page_size(&mut self, guest_page_size: u32);

@@ -4,58 +4,63 @@
 
 //! VirtIO demand-driven entropy collection (requires Host trust).
 
-use alloc::sync::Arc;
+#[cfg(unittest)]
+use alloc::boxed::Box;
+use alloc::{sync::Arc, vec::Vec};
 
 use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
-use kspin::SpinNoIrq;
+use kspin::SpinNoPreempt;
 use ksync::Mutex;
 use kworkng::{HandleCreateError, SubmitError, WorkHandle};
-use subsys_hwrng::{HwrngPublication, class::HWRNG};
+use subsys_hwrng::{HWRNG, HwrngHandle, HwrngRegistry};
 
-// Back off failed reads, not in-flight device completion waits.
 const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_millis(100);
 
-static SELECTED_SOURCE: Lazy<Mutex<Option<Arc<VirtioEntropySource>>>> =
-    Lazy::new(|| Mutex::new(None));
+static COLLECTION: Lazy<Mutex<Option<Arc<EntropyCollection>>>> = Lazy::new(|| Mutex::new(None));
 
 type CollectorWork = WorkHandle<KBox<dyn Fn() + Send + Sync>>;
 
-struct VirtioEntropySource {
+struct EntropyCollection {
     collector: Arc<EntropyCollector>,
     work: CollectorWork,
 }
 
-// Work owns the collector, which never owns Work: no reference cycle is formed.
 struct EntropyCollector {
-    device: HwrngPublication,
-    state: SpinNoIrq<CollectorState>,
+    registry: &'static HwrngRegistry,
+    state: SpinNoPreempt<CollectorState>,
+    mix: fn(&[u8]),
+    #[cfg(unittest)]
+    tail_hook: SpinNoPreempt<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct CollectorState {
-    /// A coalesced read request waiting for the worker.
     has_demand: bool,
-    /// A terminal read failure prevents further requests.
-    is_failed: bool,
+    selected: Option<HwrngHandle>,
+    failed: Vec<HwrngHandle>,
 }
 
-impl VirtioEntropySource {
+impl EntropyCollection {
     /// Prepares a collector in sleepable, reclaim-safe task context with IRQs
     /// and preemption enabled, outside non-sleepable RCU sections. Source,
     /// collector and class-registry locks must not enclose this call. The KERNEL
-    /// callback allocation precedes publication; failure retains the old source.
+    /// callback allocation precedes registry subscription and publication.
     /// Nested Arc and worker allocations keep their existing failure behavior.
-    fn new(device: HwrngPublication) -> KResult<Arc<Self>> {
+    fn new(registry: &'static HwrngRegistry, mix: fn(&[u8])) -> KResult<Arc<Self>> {
         if !ktask::is_sleepable_context() {
             return Err(KError::InvalidInput);
         }
         let collector = Arc::new(EntropyCollector {
-            device,
-            state: SpinNoIrq::new(CollectorState {
+            registry,
+            state: SpinNoPreempt::new(CollectorState {
                 has_demand: false,
-                is_failed: false,
+                selected: None,
+                failed: Vec::new(),
             }),
+            mix,
+            #[cfg(unittest)]
+            tail_hook: SpinNoPreempt::new(None),
         });
         let callback = collector.clone();
         let callback: KBox<dyn Fn() + Send + Sync> = KBox::new(move || callback.run())?;
@@ -63,80 +68,147 @@ impl VirtioEntropySource {
             HandleCreateError::InvalidContext => KError::InvalidInput,
             HandleCreateError::ServicesUnavailable => KError::OperationNotSupported,
         })?;
-        Ok(Arc::new(Self { collector, work }))
+        let collection = Arc::new(Self { collector, work });
+        for subscribe in [
+            HwrngRegistry::subscribe_available,
+            HwrngRegistry::subscribe_removed,
+        ] {
+            let weak = Arc::downgrade(&collection);
+            subscribe(
+                registry,
+                Arc::new(move |device| {
+                    if let Some(collection) = weak.upgrade() {
+                        collection.note_change(device);
+                    }
+                }),
+            );
+        }
+        collection.kick();
+        Ok(collection)
+    }
+
+    fn kick(&self) {
+        match self.work.queue_default(None) {
+            Ok(_) | Err(SubmitError::AlreadyQueued) => {}
+            Err(error) => log::warn!("entropy: failed to queue VirtIO entropy work: {error:?}"),
+        }
+    }
+
+    fn note_change(&self, _device: HwrngHandle) {
+        self.kick();
     }
 
     fn request(&self) {
-        let mut state = self.collector.state.lock();
-        if state.is_failed {
-            return;
-        }
-        let had_demand = state.has_demand;
-        state.has_demand = true;
-        // Publish demand and enqueue under one lock. A running callback can
-        // acquire one pending occurrence, including during its return window.
-        // AlreadyQueued coalesces requests; work is never an event counter.
-        match self.work.queue_default(None) {
-            Ok(_) | Err(SubmitError::AlreadyQueued) => {}
-            Err(error) => {
-                state.has_demand = had_demand;
-                drop(state);
-                log::warn!("entropy: failed to queue VirtIO entropy work: {error:?}");
-            }
-        }
+        self.collector.state.lock().has_demand = true;
+        self.kick();
     }
 }
 
 impl EntropyCollector {
-    fn fail(&self) {
-        let mut state = self.state.lock();
-        state.is_failed = true;
-        state.has_demand = false;
+    fn refresh(&self) {
+        let devices: Vec<_> = self
+            .registry
+            .devices()
+            .into_iter()
+            .filter(|device| is_virtio_rng(device.driver_name().unwrap_or("")))
+            .collect();
+        let (selected, mut failed) = {
+            let state = self.state.lock();
+            (state.selected.clone(), state.failed.clone())
+        };
+        failed.retain(|old| devices.iter().any(|device| old.same_publication(device)));
+        let eligible =
+            |device: &HwrngHandle| !failed.iter().any(|old| old.same_publication(device));
+        let selected = selected
+            .filter(|old| {
+                devices.iter().any(|device| old.same_publication(device)) && eligible(old)
+            })
+            .or_else(|| devices.into_iter().find(eligible));
+        let retired = {
+            let mut state = self.state.lock();
+            (
+                core::mem::replace(&mut state.selected, selected),
+                core::mem::replace(&mut state.failed, failed),
+            )
+        };
+        drop(retired);
+    }
+
+    fn retain_demand(&self, device: &HwrngHandle, is_terminal: bool) {
+        let mut failed = self.state.lock().failed.clone();
+        if is_terminal
+            && device.is_available()
+            && !failed.iter().any(|old| old.same_publication(device))
+        {
+            failed.push(device.clone());
+        }
+        let retired = {
+            let mut state = self.state.lock();
+            state.has_demand = true;
+            core::mem::replace(&mut state.failed, failed)
+        };
+        drop(retired);
     }
 
     fn run(&self) {
+        self.collect();
+        #[cfg(unittest)]
         {
-            let mut state = self.state.lock();
-            if state.is_failed || !state.has_demand {
-                return;
+            let hook = self.tail_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
             }
-            state.has_demand = false;
         }
-        let mut bytes = [0; super::HW_RESEED_BYTES];
-        let mut has_reported_error = false;
-        // Retain this demand across errors: a getrandom caller may already
-        // be asleep and cannot be relied on to request another sample.
+    }
+
+    fn collect(&self) {
         loop {
-            match self.device.read(&mut bytes) {
-                Ok(len) if len > 0 && len <= bytes.len() => {
-                    super::mix_virtio_entropy(&bytes[..len]);
-                    break;
+            self.refresh();
+            let device = {
+                let mut state = self.state.lock();
+                if !state.has_demand {
+                    return;
                 }
-                Err(error) => {
-                    if self.device.is_failed().unwrap_or(true) {
-                        log::warn!(
-                            "entropy: VirtIO entropy device failed or was withdrawn: {error:?}"
-                        );
-                        self.fail();
+                let Some(device) = state.selected.clone() else {
+                    return;
+                };
+                state.has_demand = false;
+                device
+            };
+            let mut bytes = [0; super::HW_RESEED_BYTES];
+            let mut has_reported_error = false;
+            loop {
+                match device.read(&mut bytes) {
+                    Ok(len) if len > 0 && len <= bytes.len() => {
+                        (self.mix)(&bytes[..len]);
                         return;
                     }
-                    if !has_reported_error {
-                        log::warn!("entropy: retrying VirtIO entropy read: {error:?}");
-                        has_reported_error = true;
+                    Err(error) => match device.is_failed() {
+                        Err(_) => {
+                            self.retain_demand(&device, false);
+                            break;
+                        }
+                        Ok(true) => {
+                            log::warn!("entropy: VirtIO entropy device failed: {error:?}");
+                            self.retain_demand(&device, true);
+                            break;
+                        }
+                        Ok(false) => {
+                            if !has_reported_error {
+                                log::warn!("entropy: retrying VirtIO entropy read: {error:?}");
+                                has_reported_error = true;
+                            }
+                            ktask::sleep(READ_RETRY_DELAY);
+                        }
+                    },
+                    Ok(len) => {
+                        log::warn!(
+                            "entropy: disabling VirtIO entropy instance after invalid read \
+                             length: {len}"
+                        );
+                        self.retain_demand(&device, true);
+                        break;
                     }
-                    // This shared worker holds no device/source lock.
-                    // Failed wait setup must neither offline the source nor
-                    // turn a persistent host error into a busy loop.
-                    ktask::sleep(READ_RETRY_DELAY);
-                }
-                Ok(len) => {
-                    log::warn!(
-                        "entropy: permanently disabling VirtIO entropy source after invalid read \
-                         length: {len} (expected 1..={})",
-                        bytes.len()
-                    );
-                    self.fail();
-                    return;
                 }
             }
         }
@@ -144,66 +216,43 @@ impl EntropyCollector {
 }
 
 pub(crate) fn is_present() -> bool {
-    SELECTED_SOURCE
-        .lock()
-        .as_ref()
-        .is_some_and(|source| !source.collector.state.lock().is_failed)
+    let collection = COLLECTION.lock().clone();
+    let selected =
+        collection.and_then(|collection| collection.collector.state.lock().selected.clone());
+    selected.is_some_and(|device| device.is_available())
 }
 
 pub(crate) fn is_disabled() -> bool {
-    SELECTED_SOURCE
-        .lock()
-        .as_ref()
-        .is_some_and(|source| source.collector.state.lock().is_failed)
+    COLLECTION.lock().as_ref().is_some_and(|collection| {
+        let state = collection.collector.state.lock();
+        state.selected.is_none() && !state.failed.is_empty()
+    })
 }
 
-// Subscribe before enumerating to avoid missing newly published devices.
 pub(crate) fn register_sources() {
-    fn note_device(device: HwrngPublication) {
-        if !is_virtio_rng(device.driver_name().unwrap_or("")) {
+    if COLLECTION.lock().is_some() {
+        return;
+    }
+    let prepared = match EntropyCollection::new(&HWRNG, super::mix_virtio_entropy) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            log::warn!("entropy: failed to prepare VirtIO entropy work: {error:?}");
             return;
         }
-        {
-            let slot = SELECTED_SOURCE.lock();
-            if let Some(source) = slot.as_ref() {
-                // Rediscovery of the same device must not restart a failed instance.
-                if source.collector.device.same_publication(&device) {
-                    return;
-                }
-                // Keep the selected healthy source; only a failed source may be replaced.
-                if !source.collector.state.lock().is_failed {
-                    return;
-                }
-            }
-        }
-        let source = match VirtioEntropySource::new(device) {
-            Ok(source) => source,
-            Err(error) => {
-                log::warn!("entropy: failed to prepare VirtIO entropy work: {error:?}");
-                return;
-            }
-        };
-        let mut slot = SELECTED_SOURCE.lock();
-        if slot
-            .as_ref()
-            .is_none_or(|current: &Arc<VirtioEntropySource>| {
-                current.collector.state.lock().is_failed
-            })
-        {
-            *slot = Some(source);
-        }
+    };
+    let mut collection = COLLECTION.lock();
+    if collection.is_none() {
+        *collection = Some(prepared);
+        return;
     }
-    HWRNG.subscribe_available(Arc::new(note_device));
-    for device in HWRNG.devices() {
-        note_device(device);
-    }
+    drop(collection);
+    drop(prepared);
 }
 
-// Release the registry lock before queuing collection work.
 pub(crate) fn request_entropy() {
-    let source = SELECTED_SOURCE.lock().clone();
-    if let Some(source) = source {
-        source.request();
+    let collection = COLLECTION.lock().clone();
+    if let Some(collection) = collection {
+        collection.request();
     }
 }
 
@@ -212,5 +261,4 @@ fn is_virtio_rng(driver_name: &str) -> bool {
 }
 
 unittest::path_mod_test!(real_device_tests, "../ut-tests/virtio_real_device_tests.rs");
-
 unittest::path_mod_test!(tests, "../ut-tests/virtio.rs");

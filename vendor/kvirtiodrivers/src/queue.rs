@@ -4,12 +4,16 @@
 //! drivers provided (rather than implementing drivers for other devices) then you shouldn't need to
 //! use anything from this module.
 
+#[cfg(test)]
+#[path = "../ut-tests/queue_dma.rs"]
+mod dma_tests;
+
 #[cfg(feature = "alloc")]
 mod owning;
 
 #[cfg(feature = "alloc")]
 pub use self::owning::OwningQueue;
-use crate::hal::{BufferDirection, Dma, Hal, PhysAddr};
+use crate::hal::{BufferDirection, Dma, DmaBackend, Hal, PhysAddr, StaticHal};
 use crate::transport::Transport;
 use crate::{Error, PAGE_SIZE, Result, align_up, pages};
 #[cfg(feature = "alloc")]
@@ -33,9 +37,10 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 /// * `SIZE`: The size of the queue. This is both the number of descriptors, and the number of slots
 ///   in the available and used rings. It must be a power of 2 and fit in a [`u16`].
 #[derive(Debug)]
-pub struct VirtQueue<H: Hal, const SIZE: usize> {
+pub struct VirtQueue<H: Hal, const SIZE: usize, B: DmaBackend = StaticHal<H>> {
+    backend: B,
     /// DMA guard
-    layout: VirtQueueLayout<H>,
+    layout: VirtQueueLayout<H, B>,
     /// Descriptor table
     ///
     /// The device may be able to modify this, even though it's not supposed to, so we shouldn't
@@ -73,8 +78,6 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
 }
 
 impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
-    const SIZE_OK: () = assert!(SIZE.is_power_of_two() && SIZE <= u16::MAX as usize);
-
     /// Creates a new VirtQueue.
     ///
     /// * `indirect`: Whether to use indirect descriptors. This should be set if the
@@ -89,6 +92,31 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         event_idx: bool,
         access_platform: bool,
     ) -> Result<Self> {
+        Self::new_with_dma(
+            transport,
+            idx,
+            indirect,
+            event_idx,
+            access_platform,
+            StaticHal::default(),
+        )
+    }
+}
+
+impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
+    const SIZE_OK: () = assert!(SIZE.is_power_of_two() && SIZE <= u16::MAX as usize);
+
+    /// Creates a queue whose rings and buffer mappings use the supplied device backend.
+    /// Backend clones must retain the same device address space. Allocation failures
+    /// release already acquired rings before returning without configuring the transport.
+    pub fn new_with_dma<T: Transport>(
+        transport: &mut T,
+        idx: u16,
+        indirect: bool,
+        event_idx: bool,
+        access_platform: bool,
+        backend: B,
+    ) -> Result<Self> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::SIZE_OK;
 
@@ -101,9 +129,9 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         let size = SIZE as u16;
 
         let layout = if transport.requires_legacy_layout() {
-            VirtQueueLayout::allocate_legacy(size, access_platform)?
+            VirtQueueLayout::allocate_legacy(size, access_platform, backend.clone())?
         } else {
-            VirtQueueLayout::allocate_flexible(size, access_platform)?
+            VirtQueueLayout::allocate_flexible(size, access_platform, backend.clone())?
         };
 
         transport.queue_set(
@@ -133,6 +161,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         #[cfg(feature = "alloc")]
         const NONE: Option<NonNull<[Descriptor]>> = None;
         Ok(VirtQueue {
+            backend,
             layout,
             desc,
             avail,
@@ -158,6 +187,9 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     ///
     /// Ref: linux virtio_ring.c virtqueue_add
     ///
+    /// On a mapping failure, all mappings acquired for this submission are
+    /// released and no available entry is published. The queue remains usable.
+    ///
     /// # Safety
     ///
     /// The input and output buffers must remain valid and not be accessed until a call to
@@ -170,7 +202,10 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         if inputs.is_empty() && outputs.is_empty() {
             return Err(Error::InvalidParam);
         }
-        let descriptors_needed = inputs.len() + outputs.len();
+        let descriptors_needed = inputs
+            .len()
+            .checked_add(outputs.len())
+            .ok_or(Error::InvalidParam)?;
         // Only consider indirect descriptors if the alloc feature is enabled, as they require
         // allocation.
         #[cfg(feature = "alloc")]
@@ -185,14 +220,20 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             return Err(Error::QueueFull);
         }
 
+        if InputOutputIter::new(inputs, outputs)
+            .any(|(buffer, _)| buffer.is_empty() || buffer.len() > u32::MAX as usize)
+        {
+            return Err(Error::InvalidParam);
+        }
+
         #[cfg(feature = "alloc")]
         let head = if self.indirect && descriptors_needed > 1 {
-            self.add_indirect(inputs, outputs)
+            self.add_indirect(inputs, outputs)?
         } else {
-            self.add_direct(inputs, outputs)
+            self.add_direct(inputs, outputs)?
         };
         #[cfg(not(feature = "alloc"))]
-        let head = self.add_direct(inputs, outputs);
+        let head = self.add_direct(inputs, outputs)?;
 
         let avail_slot = self.avail_idx & (SIZE as u16 - 1);
         // SAFETY: `self.avail` is properly aligned, dereferenceable and initialised.
@@ -224,36 +265,47 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         &mut self,
         inputs: &'a [&'b [u8]],
         outputs: &'a mut [&'b mut [u8]],
-    ) -> u16 {
-        // allocate descriptors from free list
+    ) -> Result<u16> {
         let head = self.free_head;
-        let mut last = self.free_head;
-
-        for (buffer, direction) in InputOutputIter::new(inputs, outputs) {
-            assert_ne!(buffer.len(), 0);
-
-            // Write to desc_shadow then copy.
-            let desc = &mut self.desc_shadow[usize::from(self.free_head)];
-            // SAFETY: Our caller promises that the buffers live at least until `pop_used`
-            // returns them.
-            unsafe {
-                desc.set_buf::<H>(buffer, direction, DescFlags::NEXT, self.access_platform);
+        let mut next = head;
+        let mut last = head;
+        for (mapped, (buffer, direction)) in InputOutputIter::new(inputs, outputs).enumerate() {
+            let desc = &mut self.desc_shadow[usize::from(next)];
+            // SAFETY: add's caller retains these buffers until completion; none are published yet.
+            let result = unsafe {
+                desc.set_buf(
+                    &self.backend,
+                    buffer,
+                    direction,
+                    DescFlags::NEXT,
+                    self.access_platform,
+                )
+            };
+            if let Err(error) = result {
+                let mut rollback = head;
+                for (buffer, direction) in InputOutputIter::new(inputs, outputs).take(mapped) {
+                    let desc = &mut self.desc_shadow[usize::from(rollback)];
+                    // SAFETY: This successful mapping has not been published to the device.
+                    unsafe {
+                        self.backend
+                            .unshare(desc.addr, buffer, direction, self.access_platform);
+                    }
+                    desc.unset_buf();
+                    rollback = desc.next;
+                }
+                return Err(error);
             }
-            last = self.free_head;
-            self.free_head = desc.next;
-
+            last = next;
+            next = desc.next;
             self.write_desc(last);
         }
-
-        // set last_elem.next = NULL
         self.desc_shadow[usize::from(last)]
             .flags
             .remove(DescFlags::NEXT);
         self.write_desc(last);
-
+        self.free_head = next;
         self.num_used += (inputs.len() + outputs.len()) as u16;
-
-        head
+        Ok(head)
     }
 
     #[cfg(feature = "alloc")]
@@ -261,54 +313,70 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         &mut self,
         inputs: &'a [&'b [u8]],
         outputs: &'a mut [&'b mut [u8]],
-    ) -> u16 {
+    ) -> Result<u16> {
         let head = self.free_head;
-
-        // Allocate and fill in indirect descriptor list.
         let mut indirect_list =
-            <[Descriptor]>::new_box_zeroed_with_elems(inputs.len() + outputs.len()).unwrap();
-        for (i, (buffer, direction)) in InputOutputIter::new(inputs, outputs).enumerate() {
-            let desc = &mut indirect_list[i];
-            // SAFETY: Our caller promises that the buffers live at least until `pop_used`
-            // returns them.
-            unsafe {
-                desc.set_buf::<H>(buffer, direction, DescFlags::NEXT, self.access_platform);
+            <[Descriptor]>::new_box_zeroed_with_elems(inputs.len() + outputs.len())
+                .map_err(|_| Error::DmaError)?;
+        let mut mapped = 0;
+        let result = (|| {
+            for (index, (buffer, direction)) in InputOutputIter::new(inputs, outputs).enumerate() {
+                let desc = &mut indirect_list[index];
+                // SAFETY: add's caller retains these buffers until completion.
+                unsafe {
+                    desc.set_buf(
+                        &self.backend,
+                        buffer,
+                        direction,
+                        DescFlags::NEXT,
+                        self.access_platform,
+                    )?;
+                }
+                mapped += 1;
+                desc.next = (index + 1) as u16;
             }
-            desc.next = (i + 1) as u16;
+            indirect_list
+                .last_mut()
+                .unwrap()
+                .flags
+                .remove(DescFlags::NEXT);
+            let direct_desc = &mut self.desc_shadow[usize::from(head)];
+            // SAFETY: The box remains owned until mapping succeeds, then is retained
+            // in indirect_lists until completion. It has not been published yet.
+            unsafe {
+                direct_desc.set_buf(
+                    &self.backend,
+                    indirect_list.as_mut_bytes().into(),
+                    BufferDirection::DriverToDevice,
+                    DescFlags::INDIRECT,
+                    self.access_platform,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for (index, (buffer, direction)) in InputOutputIter::new(inputs, outputs)
+                .take(mapped)
+                .enumerate()
+            {
+                // SAFETY: Only successful mappings are released, before any device publication.
+                unsafe {
+                    self.backend.unshare(
+                        indirect_list[index].addr,
+                        buffer,
+                        direction,
+                        self.access_platform,
+                    );
+                }
+            }
+            return Err(error);
         }
-        indirect_list
-            .last_mut()
-            .unwrap()
-            .flags
-            .remove(DescFlags::NEXT);
-
-        // Need to store pointer to indirect_list too, because direct_desc.set_buf will only store
-        // the physical DMA address which might be different.
         assert!(self.indirect_lists[usize::from(head)].is_none());
-        self.indirect_lists[usize::from(head)] = Some(indirect_list.as_mut().into());
-
-        // Write a descriptor pointing to indirect descriptor list. We use Box::leak to prevent the
-        // indirect list from being freed when this function returns; recycle_descriptors is instead
-        // responsible for freeing the memory after the buffer chain is popped.
-        let direct_desc = &mut self.desc_shadow[usize::from(head)];
-        self.free_head = direct_desc.next;
-
-        // SAFETY: Using `Box::leak` on `indirect_list` guarantees it won't be deallocated
-        // when this function returns. The allocation isn't freed until
-        // `recycle_descriptors` is called, at which point the allocation is no longer being
-        // used.
-        unsafe {
-            direct_desc.set_buf::<H>(
-                Box::leak(indirect_list).as_bytes().into(),
-                BufferDirection::DriverToDevice,
-                DescFlags::INDIRECT,
-                self.access_platform,
-            );
-        }
+        self.indirect_lists[usize::from(head)] = Some(NonNull::from(Box::leak(indirect_list)));
+        self.free_head = self.desc_shadow[usize::from(head)].next;
         self.write_desc(head);
         self.num_used += 1;
-
-        head
+        Ok(head)
     }
 
     /// Add the given buffers to the virtqueue, notifies the device, blocks until the device uses
@@ -453,11 +521,11 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                 self.num_used -= 1;
                 head_desc.next = original_free_head;
 
-                // SAFETY: `paddr` comes from a previous call `H::share` (inside
+                // SAFETY: `paddr` comes from this backend's previous `share` (inside
                 // `Descriptor::set_buf`, which was called from `add_direct` or `add_indirect`).
                 // `indirect_list` is owned by this function and is not accessed from any other threads.
                 unsafe {
-                    H::unshare(
+                    self.backend.unshare(
                         paddr,
                         indirect_list.as_mut_bytes().into(),
                         BufferDirection::DriverToDevice,
@@ -475,7 +543,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                     unsafe {
                         // Unshare the buffer (and perhaps copy its contents back to the original
                         // buffer).
-                        H::unshare(
+                        self.backend.unshare(
                             indirect_list[i].addr,
                             buffer,
                             direction,
@@ -508,7 +576,8 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                 // from which we got `paddr`.
                 unsafe {
                     // Unshare the buffer (and perhaps copy its contents back to the original buffer).
-                    H::unshare(paddr, buffer, direction, self.access_platform);
+                    self.backend
+                        .unshare(paddr, buffer, direction, self.access_platform);
                 }
             }
 
@@ -516,6 +585,30 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                 panic!("Descriptor chain was longer than expected.");
             }
         }
+    }
+
+    /// Reclaims one chain without trusting the used ring after device reset.
+    ///
+    /// # Safety
+    ///
+    /// The device must have completed reset and all software access must be
+    /// serialized. Buffers must match the original live submission exactly.
+    /// The queue must never be reused after this operation.
+    pub(crate) unsafe fn reclaim_after_reset<'a>(
+        &mut self,
+        token: u16,
+        inputs: &'a [&'a [u8]],
+        outputs: &'a mut [&'a mut [u8]],
+    ) -> Result<()> {
+        if usize::from(token) >= SIZE || self.desc_shadow[usize::from(token)].len == 0 {
+            return Err(Error::WrongToken);
+        }
+        // SAFETY: The caller guarantees reset and original buffers; this live
+        // chain is no longer accessed by hardware and has not been reclaimed.
+        unsafe {
+            self.recycle_descriptors(token, inputs, outputs);
+        }
+        Ok(())
     }
 
     /// If the given token is next on the device used queue, pops it and returns the total buffer
@@ -573,44 +666,49 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     }
 }
 
-// SAFETY: None of the virt queue resources are tied to a particular thread.
-unsafe impl<H: Hal, const SIZE: usize> Send for VirtQueue<H, SIZE> {}
+// SAFETY: Ring memory and pointers may move between threads; the retained backend is Send.
+unsafe impl<H: Hal, const SIZE: usize, B: DmaBackend + Send> Send for VirtQueue<H, SIZE, B> {}
 
 // SAFETY: A `&VirtQueue` only allows reading from the various pointers it contains, so there is no
-// data race.
-unsafe impl<H: Hal, const SIZE: usize> Sync for VirtQueue<H, SIZE> {}
+// data race. The retained backend is also Sync.
+unsafe impl<H: Hal, const SIZE: usize, B: DmaBackend + Sync> Sync for VirtQueue<H, SIZE, B> {}
 
 /// The inner layout of a VirtQueue.
 ///
 /// Ref: 2.6 Split Virtqueues
 #[derive(Debug)]
-enum VirtQueueLayout<H: Hal> {
+enum VirtQueueLayout<H: Hal, B: DmaBackend> {
     Legacy {
-        dma: Dma<H>,
+        dma: Dma<H, B>,
         avail_offset: usize,
         used_offset: usize,
     },
     Modern {
         /// The region used for the descriptor area and driver area.
-        driver_to_device_dma: Dma<H>,
+        driver_to_device_dma: Dma<H, B>,
         /// The region used for the device area.
-        device_to_driver_dma: Dma<H>,
+        device_to_driver_dma: Dma<H, B>,
         /// The offset from the start of the `driver_to_device_dma` region to the driver area
         /// (available ring).
         avail_offset: usize,
     },
 }
 
-impl<H: Hal> VirtQueueLayout<H> {
+impl<H: Hal, B: DmaBackend> VirtQueueLayout<H, B> {
     /// Allocates a single DMA region containing all parts of the virtqueue, following the layout
     /// required by legacy interfaces.
     ///
     /// Ref: 2.6.2 Legacy Interfaces: A Note on Virtqueue Layout
-    fn allocate_legacy(queue_size: u16, access_platform: bool) -> Result<Self> {
+    fn allocate_legacy(queue_size: u16, access_platform: bool, backend: B) -> Result<Self> {
         let (desc, avail, used) = queue_part_sizes(queue_size);
         let size = align_up(desc + avail) + align_up(used);
         // Allocate contiguous pages.
-        let dma = Dma::new(size / PAGE_SIZE, BufferDirection::Both, access_platform)?;
+        let dma = Dma::new_with_dma(
+            size / PAGE_SIZE,
+            BufferDirection::Both,
+            access_platform,
+            backend,
+        )?;
         Ok(Self::Legacy {
             dma,
             avail_offset: desc,
@@ -623,17 +721,19 @@ impl<H: Hal> VirtQueueLayout<H> {
     ///
     /// This is preferred over `allocate_legacy` where possible as it reduces memory fragmentation
     /// and allows the HAL to know which DMA regions are used in which direction.
-    fn allocate_flexible(queue_size: u16, access_platform: bool) -> Result<Self> {
+    fn allocate_flexible(queue_size: u16, access_platform: bool, backend: B) -> Result<Self> {
         let (desc, avail, used) = queue_part_sizes(queue_size);
-        let driver_to_device_dma = Dma::new(
+        let driver_to_device_dma = Dma::new_with_dma(
             pages(desc + avail),
             BufferDirection::DriverToDevice,
             access_platform,
+            backend.clone(),
         )?;
-        let device_to_driver_dma = Dma::new(
+        let device_to_driver_dma = Dma::new_with_dma(
             pages(used),
             BufferDirection::DeviceToDriver,
             access_platform,
+            backend,
         )?;
         Ok(Self::Modern {
             driver_to_device_dma,
@@ -750,18 +850,19 @@ impl Descriptor {
     /// # Safety
     ///
     /// The caller must ensure that the buffer lives at least as long as the descriptor is active.
-    unsafe fn set_buf<H: Hal>(
+    unsafe fn set_buf<B: DmaBackend>(
         &mut self,
+        backend: &B,
         buf: NonNull<[u8]>,
         direction: BufferDirection,
         extra_flags: DescFlags,
         access_platform: bool,
-    ) {
+    ) -> Result<()> {
+        let len = buf.len().try_into().map_err(|_| Error::InvalidParam)?;
         // SAFETY: Our caller promises that the buffer is valid.
-        unsafe {
-            self.addr = H::share(buf, direction, access_platform);
-        }
-        self.len = buf.len().try_into().unwrap();
+        let address = unsafe { backend.share(buf, direction, access_platform)? };
+        self.addr = address;
+        self.len = len;
         self.flags = extra_flags
             | match direction {
                 BufferDirection::DeviceToDriver => DescFlags::WRITE,
@@ -770,6 +871,7 @@ impl Descriptor {
                     panic!("Buffer passed to device should never use BufferDirection::Both.")
                 }
             };
+        Ok(())
     }
 
     /// Sets the buffer address and length to 0.

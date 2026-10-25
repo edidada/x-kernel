@@ -107,6 +107,8 @@ impl fmt::Display for ProbeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    /// Management entry failed before executing a lifecycle operation.
+    Management(crate::DeviceManagementError),
     Invalid,
     NoMemory,
     Busy,
@@ -120,6 +122,12 @@ pub enum RuntimeError {
 impl RuntimeError {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Management(crate::DeviceManagementError::InvalidContext) => {
+                "invalid management context"
+            }
+            Self::Management(crate::DeviceManagementError::Reentrant) => {
+                "recursive device management"
+            }
             Self::Invalid => "invalid argument",
             Self::NoMemory => "out of memory",
             Self::Busy => "resource busy",
@@ -135,6 +143,12 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<crate::DeviceManagementError> for RuntimeError {
+    fn from(error: crate::DeviceManagementError) -> Self {
+        Self::Management(error)
     }
 }
 

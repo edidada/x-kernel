@@ -18,8 +18,3 @@ unittest.workspace = true
 
 [lints]
 workspace = true
-
-[package.metadata.cargo-shear]
-# kspin is used by the ut-tests fixture (ut-tests/lib.rs) only; workspace
-# cargo-shear excludes ut-tests from its scan.
-ignored = ["kspin"]

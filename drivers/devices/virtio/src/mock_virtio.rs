@@ -5,7 +5,7 @@
 use core::{
     cell::RefCell,
     ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use virtio_drivers::{
@@ -105,6 +105,14 @@ pub struct MockTransport {
     pub interrupt_ack_count: Arc<AtomicUsize>,
     pub interrupt_status: Arc<AtomicUsize>,
     pub queue: Option<Arc<kspin::SpinNoIrq<MockQueue>>>,
+    pub reset: Option<Arc<MockReset>>,
+}
+
+#[derive(Default)]
+pub struct MockReset {
+    pub is_pending: AtomicBool,
+    pub requests: AtomicUsize,
+    pub confirmations: AtomicUsize,
 }
 
 /// Optional ring addresses for tests that emulate a device on real descriptors.
@@ -117,6 +125,10 @@ pub struct MockQueue {
 }
 
 impl MockTransport {
+    pub fn new_rng() -> Self {
+        Self::new_with_type(DeviceType::EntropySource)
+    }
+
     pub fn new() -> Self {
         Self::new_with_type(DeviceType::Block)
     }
@@ -132,6 +144,7 @@ impl MockTransport {
             interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             queue: None,
+            reset: None,
         }
     }
 }
@@ -143,6 +156,23 @@ impl Default for MockTransport {
 }
 
 impl Transport for MockTransport {
+    fn begin_reset(&mut self) {
+        self.set_status(DeviceStatus::empty());
+        if let Some(reset) = &self.reset {
+            reset.requests.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn poll_reset(&mut self) -> bool {
+        if let Some(reset) = &self.reset {
+            if reset.is_pending.load(Ordering::Relaxed) {
+                return false;
+            }
+            reset.confirmations.fetch_add(1, Ordering::Relaxed);
+        }
+        self.get_status().is_empty()
+    }
+
     fn device_type(&self) -> DeviceType {
         self.device_type
     }

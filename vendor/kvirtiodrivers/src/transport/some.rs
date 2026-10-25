@@ -67,6 +67,14 @@ impl Transport for SomeTransport<'_> {
         dispatch!(self, set_status, status)
     }
 
+    fn begin_reset(&mut self) {
+        dispatch!(self, begin_reset)
+    }
+
+    fn poll_reset(&mut self) -> bool {
+        dispatch!(self, poll_reset)
+    }
+
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
         dispatch!(self, set_guest_page_size, guest_page_size)
     }

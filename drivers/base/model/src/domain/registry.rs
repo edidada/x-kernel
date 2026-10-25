@@ -14,7 +14,7 @@ use kspin::SpinNoPreempt;
 use super::*;
 use crate::{
     DeviceDescriptor,
-    bus::{Bus, BusId, BusInstanceId, MatchScore},
+    bus::{Bus, BusId, BusInstanceId},
     domain::DeviceId,
     error::DepSource,
     services::DeviceServices,
@@ -23,8 +23,9 @@ use crate::{
 impl DeviceDomain {
     pub fn new() -> Self {
         Self {
-            probing: SpinNoPreempt::new(false),
-            pump_requested: SpinNoPreempt::new(false),
+            identity: Arc::new(()),
+            #[cfg(unittest)]
+            dispatch_hook_fn: SpinNoPreempt::new(None),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
                 next_driver_key: 0,
@@ -37,17 +38,20 @@ impl DeviceDomain {
                 drivers: Vec::new(),
                 devices: BTreeMap::new(),
                 services: Arc::new(NoServices),
-                services_installed: false,
             }),
         }
     }
 
-    /// Install the service bundle used by probes (MMIO/IRQ/DMA/clk). Must be
-    /// called before probing; the clock registry wakes this domain.
+    /// Install services for subsequently registered devices.
+    ///
+    /// Each registration retains its chosen host for probe and teardown.
+    /// Replacing this bundle does not change existing devices' service owner.
     pub fn set_services(&self, services: Arc<dyn DeviceServices>) {
-        let mut inner = self.inner.lock();
-        inner.services = services;
-        inner.services_installed = true;
+        let previous = {
+            let mut inner = self.inner.lock();
+            core::mem::replace(&mut inner.services, services)
+        };
+        drop(previous);
     }
 
     /// Register a driver and immediately probe anything waiting for it.
@@ -78,8 +82,14 @@ impl DeviceDomain {
             }
             let key = DriverKey(inner.next_driver_key);
             inner.next_driver_key += 1;
-            let name = desc.name;
-            inner.drivers.push(Arc::new(RegisteredDriver { desc, key }));
+            let crate::DriverDesc { name, ids, ops } = desc;
+            let identity = Arc::new(crate::driver::DriverIdentity { name });
+            inner.drivers.push(Arc::new(RegisteredDriver {
+                identity,
+                ids,
+                ops,
+                key,
+            }));
             // Resweep: an Unclaimed device is a per-registration-generation
             // verdict, not a terminal one. A driver registered later (module
             // load, rebind) must be able to claim it; otherwise runtime
@@ -89,15 +99,6 @@ impl DeviceDomain {
                 .devices
                 .iter()
                 .filter(|(_, entry)| entry.lifecycle.state == DeviceState::Unclaimed)
-                .filter(|(_, entry)| {
-                    inner.drivers.iter().any(|candidate| {
-                        !entry.binding.attempted.contains(&candidate.key())
-                            && candidate.matches(
-                                bus_type(&inner.bus_instances, &entry.core.desc),
-                                entry.core.desc.bus_data.as_ref(),
-                            ) != MatchScore::NoMatch
-                    })
-                })
                 .map(|(id, _)| *id)
                 .collect();
             for id in resweep {
@@ -118,8 +119,8 @@ impl DeviceDomain {
     /// Create a concrete bus instance (`pci_register_bus` /
     /// `i2c_add_adapter` shape): the addressing anchor for devices
     /// discovered on one physical bus. `bridge` names the controller
-    /// device that created it (None for a root bus); removing that device
-    /// tears the instance's members down with it.
+    /// device that created it (None for a root bus). The controller, not this
+    /// registry, is responsible for unregistering its owned members.
     /// A controller reference must name the exact registered object in this
     /// domain and not be Removing/Removed. The instance retains only its identity.
     pub fn add_bus_instance(
@@ -200,17 +201,18 @@ impl DeviceDomain {
     fn validate_bus_membership(
         inner: &DomainInner,
         desc: &DeviceDescriptor,
+        device_bus: BusId,
     ) -> Result<(), AddDeviceError> {
         let instance = desc.bus_instance;
         let entry = inner
             .bus_instances
             .get(&instance.raw())
             .ok_or(AddDeviceError::BusInstanceMissing(instance.raw()))?;
-        if entry.bus != desc.bus_data.bus_id() {
+        if entry.bus != device_bus {
             return Err(AddDeviceError::BusInstanceTypeMismatch {
                 instance: instance.raw(),
                 instance_bus: entry.bus.name(),
-                device_bus: desc.bus_data.bus_id().name(),
+                device_bus: device_bus.name(),
             });
         }
         if let Some(controller) = &entry.bridge {
@@ -244,21 +246,42 @@ impl DeviceDomain {
     /// Returns an error if the instance or parent is missing, its controller
     /// or parent is being removed, or the data belongs to another bus type.
     pub fn add_device(&self, desc: DeviceDescriptor) -> Result<crate::DeviceRef, AddDeviceError> {
-        let device = {
+        let services = self.inner.lock().services.clone();
+        let management = services
+            .create_management_lock()
+            .map_err(AddDeviceError::Management)?;
+        let mut descriptor = Some(desc);
+        let mut inserted = Err(AddDeviceError::Management(RuntimeError::BadState));
+        management
+            .run_locked(&mut || {
+                if let Some(desc) = descriptor.take() {
+                    inserted = self.insert_device(desc, management.clone(), services.clone());
+                }
+            })
+            .map_err(|error| AddDeviceError::Management(error.into()))?;
+        let device = inserted?;
+        self.probe_pending();
+        Ok(device)
+    }
+
+    fn insert_device(
+        &self,
+        desc: DeviceDescriptor,
+        management: Arc<dyn crate::DeviceManagementLock>,
+        services: Arc<dyn DeviceServices>,
+    ) -> Result<crate::DeviceRef, AddDeviceError> {
+        let id = {
             let mut inner = self.inner.lock();
-            if !inner.services_installed {
-                // NoServices rejects every service call as Fatal-Unsupported
-                // and failed probes are never retried — a device added
-                // before set_services is permanently lost. Make the
-                // ordering violation loud instead of silent.
-                log::error!(
-                    "driver-core: device added before services were installed; probes will fail \
-                     permanently — call set_services first"
-                );
-            }
             let id = DeviceId(inner.next_device_id);
             inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-            Self::validate_bus_membership(&inner, &desc)?;
+            id
+        };
+        let core = crate::device::DeviceCore::new(id, desc, management, self.identity.clone());
+        let device_bus = core.desc.bus_data.bus_id();
+        let device = {
+            let mut inner = self.inner.lock();
+            let desc = &core.desc;
+            Self::validate_bus_membership(&inner, desc, device_bus)?;
             // Topology validation, under the SAME lock that governs
             // removal: a stated parent must exist AND be accepting
             // children. A parent mid-teardown (Removing) or gone
@@ -290,18 +313,14 @@ impl DeviceDomain {
                     }
                 }
             }
-            // The live identity card: physical path derives from the bus's
-            // own vocabulary ONCE, here — every later publication and
-            // consumer reads it through the shared core.
-            let core = crate::device::DeviceCore::new(id, desc);
             inner.devices.insert(
                 id.raw(),
                 DeviceEntry {
+                    services,
                     core: core.clone(),
                     lifecycle: LifecycleState {
                         state: DeviceState::Pending,
                         generation: 0,
-                        remove_retryable: false,
                     },
                     binding: BindingState {
                         driver: None,
@@ -320,7 +339,6 @@ impl DeviceDomain {
             inner.sched.pending.push(id.raw());
             crate::DeviceRef { core }
         };
-        self.probe_pending();
         Ok(device)
     }
 

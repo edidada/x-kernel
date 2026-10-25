@@ -11,6 +11,17 @@ use unittest::{assert_eq, def_test};
 
 use super::{completion::*, *};
 
+struct ImmediateDrain;
+
+impl RngDrain for ImmediateDrain {
+    fn wait_until(&self, drained: &mut dyn FnMut() -> bool) -> KResult {
+        core::assert!(drained());
+        Ok(())
+    }
+
+    fn notify(&self) {}
+}
+
 struct ScriptedCompletion {
     error: Option<KError>,
     produce: Box<dyn Fn() + Send + Sync>,
@@ -101,7 +112,7 @@ fn waiting_errors_do_not_consume_bytes() {
 fn withdrawn_consumer_cannot_access_driver_payload() {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    static CLASS: HwrngClass = HwrngClass::new();
+    static CLASS: HwrngRegistry = HwrngRegistry::new();
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     struct Probe;
     impl HwrngDevice for Probe {
@@ -116,19 +127,152 @@ fn withdrawn_consumer_cannot_access_driver_payload() {
         }
     }
     CALLS.store(0, Ordering::SeqCst);
-    let registration = CLASS
+    let mut registration = CLASS
         .attach_legacy(
             "test-rng",
             alloc::string::String::from("test"),
             Arc::new(Probe),
+            Arc::new(ImmediateDrain),
         )
         .unwrap();
     let consumer = registration.publication();
     assert_eq!(consumer.is_failed(), Ok(false));
     assert_eq!(consumer.read(&mut []), Ok(0));
-    drop(registration);
+    assert_eq!(registration.unregister(), Ok(()));
+    assert_eq!(registration.unregister(), Ok(()));
     assert_eq!(consumer.is_failed(), Err(KError::BadState));
     assert_eq!(consumer.read(&mut []), Err(KError::BadState));
     assert_eq!(CALLS.load(Ordering::SeqCst), 2);
     assert!(CLASS.devices().is_empty());
+}
+
+#[def_test(serial)]
+fn preparation_failure_does_not_invoke_predicate_or_close_registration() {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Drain {
+        reject: AtomicBool,
+        checks: AtomicUsize,
+    }
+    impl RngDrain for Drain {
+        fn wait_until(&self, drained: &mut dyn FnMut() -> bool) -> KResult {
+            if self.reject.load(Ordering::Acquire) {
+                return Err(KError::InvalidInput);
+            }
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            core::assert!(drained());
+            Ok(())
+        }
+
+        fn notify(&self) {}
+    }
+    static REGISTRY: HwrngRegistry = HwrngRegistry::new();
+    let drain = Arc::new(Drain {
+        reject: AtomicBool::new(true),
+        checks: AtomicUsize::new(0),
+    });
+    let mut registration = REGISTRY
+        .attach_legacy(
+            "prepare",
+            "prepare".into(),
+            Arc::new(device(None)),
+            drain.clone(),
+        )
+        .unwrap();
+    let handle = registration.publication();
+    assert_eq!(registration.unregister(), Err(KError::InvalidInput));
+    assert_eq!(drain.checks.load(Ordering::Relaxed), 0);
+    assert!(handle.is_available());
+    assert_eq!(REGISTRY.devices().len(), 1);
+    drain.reject.store(false, Ordering::Release);
+    assert_eq!(registration.unregister(), Ok(()));
+    assert_eq!(drain.checks.load(Ordering::Relaxed), 1);
+    assert!(!handle.is_available());
+    assert!(REGISTRY.devices().is_empty());
+}
+
+#[def_test(serial)]
+fn forgotten_credential_retains_observable_runtime_without_cleanup() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    struct Runtime(Arc<AtomicUsize>);
+    impl Drop for Runtime {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    impl HwrngDevice for Runtime {
+        fn read(&self, _: &mut [u8]) -> KResult<usize> {
+            Ok(0)
+        }
+
+        fn is_failed(&self) -> bool {
+            false
+        }
+    }
+    static REGISTRY: HwrngRegistry = HwrngRegistry::new();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let notifications = Arc::new(AtomicUsize::new(0));
+    REGISTRY.subscribe_removed(Arc::new({
+        let notifications = notifications.clone();
+        move |_| {
+            notifications.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    let registration = REGISTRY
+        .attach_legacy(
+            "forgotten",
+            "forgotten".into(),
+            Arc::new(Runtime(drops.clone())),
+            Arc::new(ImmediateDrain),
+        )
+        .unwrap();
+    let handle = registration.publication();
+    drop(registration);
+    assert!(handle.is_available());
+    drop(handle);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(notifications.load(Ordering::Relaxed), 0);
+    assert_eq!(REGISTRY.devices().len(), 1);
+    assert_eq!(REGISTRY.devices()[0].read(&mut []), Ok(0));
+}
+
+#[def_test(serial)]
+fn registrations_are_independent_and_old_handles_do_not_reopen() {
+    static REGISTRY: HwrngRegistry = HwrngRegistry::new();
+    let runtime = Arc::new(device(None));
+    let mut first = REGISTRY
+        .attach_legacy(
+            "same-driver",
+            "same-path".into(),
+            runtime.clone(),
+            Arc::new(ImmediateDrain),
+        )
+        .unwrap();
+    let mut sibling = REGISTRY
+        .attach_legacy(
+            "same-driver",
+            "same-path".into(),
+            runtime.clone(),
+            Arc::new(ImmediateDrain),
+        )
+        .unwrap();
+    let old = first.publication();
+    assert!(!old.same_publication(&sibling.publication()));
+    assert_eq!(REGISTRY.devices().len(), 2);
+    assert_eq!(first.unregister(), Ok(()));
+    assert_eq!(old.is_failed(), Err(KError::BadState));
+    assert_eq!(sibling.publication().is_failed(), Ok(false));
+    let mut replacement = REGISTRY
+        .attach_legacy(
+            "same-driver",
+            "same-path".into(),
+            runtime,
+            Arc::new(ImmediateDrain),
+        )
+        .unwrap();
+    assert!(!old.same_publication(&replacement.publication()));
+    assert_eq!(old.read(&mut []), Err(KError::BadState));
+    assert_eq!(replacement.publication().read(&mut []), Ok(0));
+    assert_eq!(sibling.unregister(), Ok(()));
+    assert_eq!(replacement.unregister(), Ok(()));
+    assert!(REGISTRY.devices().is_empty());
 }

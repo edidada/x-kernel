@@ -21,10 +21,11 @@ Real-device fixtures retain serial execution and borrow boot-owned RNG handles;
 the controlled collector fixture retains its serial device-registration and
 cleanup sequence.
 
-HwrngPublication does not expose the raw driver Arc. Reads and failure queries
-are gated; a withdrawn publication stops the collector without calling hardware.
-Unavailable publication and terminal hardware failure both disable collection,
-but withdrawal does not assert a hardware fault. A held consumer reference alone
+HwrngHandle does not expose the raw driver Arc. Reads and failure queries
+are gated; a withdrawn publication is rejected without calling its hardware.
+Unavailable publication and terminal hardware failure both trigger reselection,
+but withdrawal does not blacklist the hardware. Unsatisfied demand survives either.
+A held consumer reference alone
 neither keeps registration active nor grants permission to access the device.
 
 Hardware, firmware and VMM-produced bytes enter through source adapters. This
@@ -39,8 +40,13 @@ must use the readiness contract before treating pool output as securely seeded.
 The VirtIO collector contains no unsafe code. It gives a temporary stack buffer
 to `read`; the Hwrng contract requires driver-owned storage for outstanding
 DMA. A nonempty success is checked against the buffer capacity before mixing.
-State transitions use one lock and all blocking reads and retry sleeps occur outside it. Prepared work submission
-is nonblocking and is serialized with demand publication.
+State snapshots use a short task-context lock; only the single work callback
+changes selected/failed records. All reads, driver failure queries, reference
+retirement, mixing and retry sleeps occur outside it. Demand is published before
+nonblocking submission; running Work accepts a pending occurrence at its tail.
+Subscriber callbacks only enqueue a rescan and restore context before returning;
+they do not wait for hardware, old work or device management. Late events carry
+no authority to clear a newer selected instance.
 Pool mixing completes before readiness is published. Class handles retain Rust
 objects, but do not establish hardware resource validity after hot removal.
 
@@ -53,7 +59,10 @@ objects, but do not establish hardware resource validity after hot removal.
 | Read error without terminal device failure | Delayed seeding | Retain demand and sleep 100 ms before retry; log once per demand |
 | Confirmed terminal device failure or invalid successful length | Hardware source becomes unavailable | Warn and permanently fail the instance |
 | Repeated demands | Excess work/threads | One reusable Work with serialized callbacks and one coalesced pending demand |
-| Device removed while a handle survives | Resource lifetime hazard | Hot removal/rebinding unsupported; driver/host must retain resources |
+| Device removed while a handle survives | Resource lifetime hazard | Closed handles reject new operations; driver stops/wakes readers before unregister and owns hardware cleanup |
+| Old event after new selection | Lost demand or wrong source | Events queue a fresh registry scan, never blindly clear selected |
+| Terminal instance repeatedly discovered | Repeated invalid input or busy retry | Per-publication failure records; prune revoked instances on the next scan |
+| No provider for pending demand | Sleeping consumer cannot request again | Keep demand without requeueing a busy loop; later availability schedules the same work |
 
 ## Privacy and audit
 
@@ -61,6 +70,15 @@ Warnings contain errors or lengths, never random bytes. Review trust gating,
 readiness publication, buffer-length validation, work reuse, failure logging,
 and absence of blocking calls under the source spinlock. These tests establish
 functional behavior, not randomness quality or a hard IRQ latency bound.
+
+Initial reseed requests now reach asynchronous adapters even if unavailable;
+trust-tier checks remain before dispatch, and synchronous adapters check their
+own availability. HostTrusted still requires entropy_virtio_rng, eager boot reads
+still exclude it, and no other RNG family is accepted. Test-only sink injection
+avoids crediting predictable synthetic bytes to the real pool. A hung hardware
+read or endless transient error still prevents this one worker from serving
+another provider until the driver wakes/stops that read; this ticket adds no reset
+or cancellation guarantee. Failed-instance pruning is eventual after that progress.
 
 VirtIO discovery retains its driver-name filter and removes the independent
 publication-name fallback. This does not broaden acceptance to all RNG devices.

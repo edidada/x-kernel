@@ -310,7 +310,9 @@ tree so later sysfs/device query paths can discover it.
 
 ### Device core states
 
-Each `DeviceRecord` in `kdevice` moves through:
+Each `DeviceRecord` in the legacy `kdevice` pipeline moves through the states
+below. This is separate from `driver_model::DeviceDomain`, whose unregister
+operation deletes the entry; see the R1-01 management section below.
 
 ```text
                     ┌──────────┐
@@ -692,6 +694,87 @@ Platform location IDs use a fallible monotonic allocator. Exhaustion returns
 `DriverError::NoMemory`; firmware discovery records it in its existing first-error
 result, and static discovery propagates it before registering another device.
 
+## Device management lock adapter (R1-01)
+
+`device_management.rs` implements the portable `driver_model::DeviceManagementLock`
+capability with one private `ksync::Mutex<()>` per factory call.
+The optional `device-model` feature enables only `driver_model`, `ktask`, and
+`ksync`; `hwrng` selects it. The factory validates sleepability before allocating.
+Execution validates current context first, checks the safe mutex owner query for
+same-task recursion, then invokes the borrowed callback once under an RAII guard.
+The guard is released before success is returned; independent capabilities have
+independent serialization domains.
+
+The model now stores this capability in each `DeviceCore`, alongside an `Arc`
+domain identity. `add_device` calls `DeviceServices::create_management_lock`
+before publication and inserts the device inside `run_locked`. Each entry keeps
+the host services bundle selected at registration; replacing domain defaults
+does not redirect existing devices' probe or teardown services. The lifecycle
+test host implements that factory with this adapter and installs it on a real
+`DeviceDomain`.
+Production service installation remains a composition-root concern; these tests
+do not migrate the legacy discovery pipeline or attach real RNG hardware.
+
+Model bind, unbind, unregister, and typed Data visits use the per-device lock.
+Unbind retains registration in `Unclaimed`; bind retries that registration.
+Unregister deletes only the specified entry, and repeated same-domain removal
+succeeds after management-entry checks; foreign references are rejected.
+Matching and Data visitors execute outside the domain spinlock. Probe dispatch
+has no global pump flag, so different devices can execute concurrently; host
+services must not assume domain-wide serialization.
+
+External tests live in `ut-tests/device_management_unittest.rs`, mounted with
+`path_mod_test!`. Basic tests run with `device-model`; `hwrng` additionally enables
+the Completion contention test and the optional `krcu` dependency for RCU context
+coverage. Contention uses a Completion start handshake, an observed blocked
+contender, and a Completion finish handshake. Five-second monotonic deadlines
+only act as failure watchdogs, not success performance thresholds; no sleep
+duration establishes ordering. A separate two-task test completes work under
+an independent lock while the first lock remains owned. The owner
+waits only for the contender to block, never for lock-dependent work to finish.
+Atomic flags use release/acquire for observations across tasks. Before assertions,
+tests wait for task exit with a watchdog and join exited tasks, including when
+earlier observations failed. No unbounded join is attempted if a regression
+leaves a task stuck; that failure requires the enclosing test-run watchdog.
+
+`ut-tests/device_management_lifecycle_unittest.rs` exercises the model lifecycle
+with this installed host under `hwrng`. Its resource services return `Unsupported`,
+and its extension/provider surfaces are empty; no MMIO, IRQ registration, or DMA
+is required. A rejected factory call leaves no bus membership or pending probe.
+IRQ-off, preempt-disabled, and RCU read contexts reject bind/unbind/remove without
+changing callbacks, private-data lifetime, source online status, or registry state.
+The fixture also checks successful unbind to `Unclaimed`, rebind, idempotent
+unregister with an absent snapshot, and reentry rejection from a remove callback.
+
+Two-task tests hold the first remove callback at a Completion-controlled gate.
+A same-device contender must block until release and produce exactly one remove
+and private-data drop; a different-device contender must complete while that
+gate remains closed. Release happens before joins and assertions. Hook references
+are cleared before reporting results, and callbacks never run under the fixture's
+hook-storage mutex. Release/acquire observations and Completion establish ordering;
+monotonic deadlines are failure watchdogs, not performance requirements.
+The model performs no automatic parent/bridge recursion or retryable cascade.
+The R1-02 same-device bind regression pauses registration inside probe, starts
+an explicit binder on a second task, and observes that task blocked before
+releasing probe. The binder then reports zero new activations: one probe, one
+binding, and one subsequent remove/Data drop. This complements the model's
+deterministic dequeued-candidate tests with the real sleepable host lock.
+Buses own enumeration shutdown, downstream teardown and cross-device lock order.
+`ut-tests/device_management_downstream_unittest.rs` supplies a test-only controller
+whose binding owns an enumeration gate and a set of committed children. Shutdown
+closes the gate and takes that set, then releases the gate before child removal;
+the separate parent transaction/service lock remains available until all owned
+children are removed. A same-parent device outside the owned set survives.
+The concurrent case pauses a child probe, observes controller shutdown blocked
+on the enumeration gate, then releases the probe and checks that its successful
+commit is drained before parent stop and private-data drop. After parent rebind,
+the old binding's gate still rejects late commits while the new binding accepts
+children. Weak domain links avoid fixture ownership cycles. These cases validate
+the ownership protocol with the real host adapter, not a production bus or hardware.
+Legacy class integration is not migrated, and
+Unbind keeps the device registered and online; publication drain remains the
+subsystem's explicit responsibility, not an effect of device identity changes.
+
 ## Hardware entropy completion provider
 
 `rng_completion.rs` is the X-Kernel implementation of the driver-facing
@@ -700,7 +783,60 @@ registers a scoped stack node with `kcompletion::WaitQueue`, checks the driver's
 predicate, and parks if the request is still pending.
 `notify` wakes registered tasks so they can check readiness again. The
 provider owns wait registrations; the concrete driver owns its request and DMA
-buffer. The current entropy integration uses one worker per selected VirtIO RNG source,
-issuing reads serially.
+buffer. Entropy owns one reusable collection work across source changes,
+issuing reads serially and retaining demand when a provider disappears.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
+
+R1-03 adds `new_rng_drain`, a distinct reliable `RngDrain` with its own WaitQueue.
+Construction rejects non-sleepable context before publication. Unregister calls
+CompletionWait::prepare before invoking the subsystem predicate; after that point
+it waits without a fallible registration, timeout or signal exit. Final operation
+release notifies outside admission locks. No kpoll/block_on path is introduced.
+The legacy VirtIO RNG boot publisher constructs the drain before creating the
+device, then intentionally drops the credential: the subsystem registry retains
+the runtime for kernel lifetime. This does not implement hardware removal.
+The legacy RNG factory validates sleepable context before initialization and
+supplies `ktask::yield_now` as the reset-poll interval for IRQ-registration
+rollback. No scheduler dependency is added to the concrete driver. The factory
+returns the concrete Arc so the publisher can explicitly close/finish the device
+if registration fails, rather than losing the teardown interface through early
+trait-object erasure. Successful legacy publication remains boot-only; it does
+not become a new-model binding or acquire an unbind/remove callback.
+External tests cover atomic/RCU rejection, early notification, detached nodes,
+and an in-flight read that must finish before unregister returns or emits removed.
+
+## R1-04 binding publication acceptance
+
+R1-07 adds `virtio_rng_lifecycle_unittest.rs` beside the earlier model-only
+fixture. A test DriverOps binds the actual VirtIoRngDev and publishes through
+the real registry with DeviceAccess's binding source. Real host completion and
+drain providers are injected. A spawned consumer blocks on a pending request
+while probe holds management serialization; remove or an injected error after
+publication closes/wakes that reader, unregisters/drains, then invokes the
+actual reset/IRQ/cancellation helper before Data is dropped. The test checks
+that old handles preserve provenance but cannot read, and that queue/request
+allocations are released while those handles still exist. Releasing the final
+consumer in IRQ-disabled context causes no additional IRQ release.
+
+Only the transport, identity-mapped DMA HAL and synchronous IRQ provider are
+controlled test implementations. This is an integration test of model callbacks
+with the real driver, not a production MMIO probe or proof of real IRQ-core drain.
+Production firmware discovery, instance resource adaptation and remove/rebind
+wiring belong to R1-08 and are not supplied by this fixture.
+
+`ut-tests/hwrng_binding_unittest.rs` connects a model test driver to a private
+hwrng registry using the real management lock and drain provider. Data owns
+the unique registration, a strong runtime reference and a simulated resource
+guard. Failure at resource acquisition, before publication and after publication
+is checked independently; rollback stops the runtime, unregisters when published,
+then releases resources before returning an error. The framework does not call
+remove for these failed probes. Successful binding removal follows the same order.
+
+Tests cover A-to-B replacement, same-driver rebind, sibling independence,
+illegal-context rejection before remove, and metadata/old handles surviving
+driver ops destruction. Final consumer drops in IRQ-disabled context perform
+no repeated simulated resource cleanup. This is not real IRQ/DMA teardown proof.
+The model's existing synthetic generation-mismatch test separately verifies
+remove-before-Data-drop for a successful but rejected probe; no public injection
+API is added merely to reach that serialized defensive path from kdriver.

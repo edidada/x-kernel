@@ -54,7 +54,7 @@ enum SourceAvailability {
         all(feature = "entropy_smccc_trng", target_arch = "aarch64")
     ))]
     Unavailable,
-    /// The source was present but has been disabled after repeated failures.
+    /// Present instances have been disabled after confirmed terminal failures.
     Failed,
 }
 
@@ -95,6 +95,7 @@ trait EntropySource: Sync {
     fn availability(&self) -> SourceAvailability;
 
     /// Read up to `len` bytes from the source.
+    /// Validate current availability internally, or retain asynchronous demand.
     fn read(&self, len: usize) -> SourceReadResult;
 }
 
@@ -224,12 +225,13 @@ pub(crate) fn read_all_eager(len: usize) -> Vec<SourceSample> {
     samples
 }
 
-/// Read from every available source that succeeds.
+/// Ask each permitted source; asynchronous sources may retain unserved demand.
+/// Synchronous adapters validate their own availability before hardware access.
 pub(crate) fn read_all_available(len: usize) -> Vec<SourceSample> {
     let mut samples = Vec::new();
 
     for source in sources() {
-        if !include_in_reseed(*source) {
+        if !source_tier_allowed_for_reseed(*source) {
             continue;
         }
         if let Ok(data) = source.read(len) {

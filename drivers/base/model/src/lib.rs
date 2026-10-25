@@ -30,7 +30,8 @@
 //!
 //! Every resource acquired through [`DeviceAccess`] is returned as a RAII guard.
 //! The intended discipline is: **store all guards in [`DriverOps::Data`]**.
-//! Probe failure then means "drop `Data`", which releases every guard in
+//! Probe failure must first stop active work and unregister publications;
+//! only then may it drop local guards. Dropping guards releases them in
 //! field-declaration order (Rust drops fields first-to-last); device removal
 //! means "quiesce hardware in `remove()`, then drop `Data`". Arrange field
 //! order so dependents release before their dependencies (e.g. the IRQ guard
@@ -127,5 +128,8 @@ pub use resource::{
     ResourceEntry, ResourceKind, ResourceMap, Virq,
 };
 pub use services::{
-    ClockConsumerServices, DeviceContext, DeviceResourceServices, DeviceServices, ServiceError,
+    ClockConsumerServices, DeviceContext, DeviceManagementError, DeviceManagementLock,
+    DeviceResourceServices, DeviceServices, ServiceError,
 };
+
+unittest::path_mod_test!(management_tests, "../ut-tests/management.rs");

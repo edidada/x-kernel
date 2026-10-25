@@ -657,6 +657,62 @@ When modifying this module, verify:
   rather than panicking.
 - New `VirtIoHal` methods preserve `share`/`unshare` and `dma_alloc`/`dma_dealloc` pairing.
 
+## Device management lock adapter (R1-01)
+
+The factory and every `run_locked` call reject a non-sleepable current context
+before allocation or lock acquisition, respectively. IRQ-off, preemption-disabled,
+and explicit RCU read scopes are rejected. Invalid context takes precedence over
+same-task recursion, which otherwise returns `Reentrant`. Neither error invokes
+the callback. The adapter uses the safe mutex ownership query and adds no unsafe
+code or manual Send/Sync implementation.
+
+The callback is trusted kernel code, borrowed only for this synchronous call.
+It must restore its execution context before returning and must not wait for work
+requiring the same lock. The adapter detects same-task recursion but cannot detect
+cross-task dependency cycles, enforce ordering between distinct locks, or bound
+callback duration. RAII releases the lock on normal return; this does not promise
+recovery from an aborting kernel panic. Arc allocation follows kernel OOM policy.
+The capability introduces no user-memory, MMIO, DMA, or firmware input boundary.
+
+The model retains the lock and domain identity with the device core, validates
+foreign-domain references before entering the host lock, and revalidates the
+registered object under its short state lock. Registration prepares and enters
+management before publishing an entry. Probe and teardown retain the services
+bundle chosen at registration, even if the domain default is later replaced.
+Unregister deletes the entry; same-domain repeated removal does not repeat
+cleanup. Unbind preserves registration and can be followed by a fresh bind.
+Callbacks and Data visitors run outside the domain spinlock but inside the
+device management lock. Different devices can progress concurrently, so the
+adapter does not protect host-global mutable resources between devices.
+
+The lifecycle test host now installs the real factory through `DeviceServices`.
+Registration failure, invalid-context zero-side-effect behavior, same-task
+callback reentry, same-device removal serialization, and independent-device
+callback progress have external regression coverage. The test resources are
+unsupported stubs, so these cases do not establish hardware teardown safety.
+The host fixture uses private per-test domains and weak domain references in
+reentrant hooks, avoiding global registrations and domain/driver ownership cycles.
+Concurrent tests release callback gates and join exited workers before assertions;
+if a regression prevents exit, a bounded watchdog reports failure rather than
+entering an unbounded join. The enclosing run must terminate stuck kernel tasks.
+R1-02 also covers an explicit binder contending with the same device's in-flight
+probe: Completion and task-state observations establish contention, then one
+probe and one cleanup are asserted after both tasks exit. No timing threshold
+is used as evidence of serialization.
+
+Production composition-root wiring and real controller/bus teardown still require
+separate integration and validation. The model does not recursively remove children
+or bridge members; the bus must stop enumeration and order downstream teardown.
+The downstream test controller covers owned-only teardown, parent service lifetime,
+an in-progress enumeration commit drained by shutdown, and old-binding rejection
+after rebind. Its enumeration gate is separate from the service transaction lock;
+child removal verifies that the latter is available and still live. Completion and
+task-state handshakes order the race, with watchdogs only for failure detection.
+No production enumeration gate or generic recursive removal is added. Legacy class migration
+is still incomplete: ordinary unbind keeps the registration source online,
+and neither this lock nor a retained DeviceRef
+proves that publications or hardware operations have drained.
+
 ## Hardware entropy completion provider
 
 `wait_until` requires a sleepable current task. `CompletionWait::prepare`
@@ -671,3 +727,39 @@ spurious wakes only trigger another check. The driver must call IRQ-safe
 The provider retains neither the predicate nor DMA storage. Invalid context and
 preparation failures do not establish a device fault. Once the predicate is invoked,
 scoped registration and wakeup are allocation-free and cannot return registration errors.
+
+R1-03 reliable drain uses a distinct WaitQueue and RngDrain contract. Illegal
+context returns before the first private predicate call and leaves the registry
+unchanged. After the predicate closes admission, the host must not return an
+ordinary wait error; it uses CompletionWait's stack-scoped registration. Removed
+subscribers are invoked by hwrng only after operations drain, not by the host wait
+provider. Final source/runtime/provider destructors must not sleep; runtime
+hardware teardown remains explicit driver work, not a consumer-handle Drop action.
+
+R1-04 audits the normal remove chain: the domain enters the device management
+provider, which rejects atomic context before callbacks; its sleepable mutex
+does not disable preemption or IRQs across callbacks. The driver stops/wakes
+runtime operations, then calls explicit unregister. CompletionWait preparation
+therefore receives valid context if callbacks restored their context as required.
+The private drain predicate only holds short locks, and removed notifications
+run after drain without those locks. Resources are released after unregister.
+The test driver records unexpected cleanup errors for assertion instead of
+adding a blanket expect to normal fallible interfaces. Production drivers must
+individually justify their teardown preconditions and hardware-stop invariants.
+The test resource guard is simulated: real MMIO/IRQ/DMA teardown remains unverified.
+
+The legacy RNG factory rejects non-sleepable context before hardware
+initialization. It injects a yielding reset-wait interval for constructor
+rollback, and its publisher retains a concrete runtime reference until
+registration succeeds. Registration failure invokes explicit close/finish;
+reset confirmation, not the yield callback or a timeout, authorizes release.
+This does not establish a production hot-unplug path or certify the external
+IRQ core's synchronization implementation.
+
+The R1-07 concrete RNG lifecycle fixture exercises the real model management
+lock and real completion/drain providers with a sleeping consumer. It checks
+that normal remove and probe failure after publication both stop DMA ownership
+before Data destruction, even while stale consumers retain the runtime.
+Counting HAL wrappers observe allocation/mapping release; they do not establish
+IOMMU/cache correctness. The IRQ provider is a synchronous simulation, not a
+concurrent interrupt-core acceptance test. No new production binding is enabled.

@@ -583,7 +583,64 @@ IRQ-safe and non-sleeping. X-Kernel's backend takes the global kdma allocator
 lock during unmap; one-request reclamation does not imply bounded IRQ latency.
 This change preserves inline reclaim and does not introduce a softirq path.
 
-Device removal/rebinding is unsupported. Dropping a Pending request retains
+The first removal step is available as `close_reads`: under the request lock it
+permanently closes admission, then notifies readers outside the lock. The same
+lock serializes this gate against submission, cached-byte reads and IRQ entry.
+Waiting and future nonempty reads return BadState; empty reads remain no-ops.
+Closure is not a hardware fault. Late handlers return NOT_HANDLED before
+acknowledging transport state or touching the queue. An earlier handler can still
+be finishing its notification tail, so this gate is not IRQ synchronization.
+Repeated closure does not emit duplicate notifications.
+
+Closure leaves Pending, its buffer, mappings, transport and IRQ guard intact.
+It must precede explicit hwrng unregistration/drain, not replace it.
+The removal owner then calls `finish_stop` under its management serialization.
+The request stores its resource bundle in an Option: the method takes that
+bundle and request state under the short lock, leaving a permanently closed
+shell. Outside the lock it starts reset, polls transport completion with a
+host-supplied sleep/yield interval, takes/releases the IRQ guard, and cancels
+the original pending token before dropping its queue and buffer. IRQ release
+is synchronous by provider contract, including the handler notification tail.
+No shared-line mask operation is issued by this helper.
+
+The reset wait callback is only a scheduling interval, not a completion oracle.
+Only the transport can authorize progress. No timeout authorizes reclamation.
+Calls require sleepable context and external per-device management serialization;
+concurrent/reentrant finish calls are not supported. Successful serial repeats
+are no-ops. The helper rejects an open request without changing resources.
+A private token invariant error retains the closed resource bundle rather than
+freeing an unresolved mapping; this is diagnostic containment, not a supported
+hardware-stop failure/recovery state machine.
+
+Controlled tests compose a real hwrng registration with delayed mock reset and a
+synchronous mock IRQ provider. They verify DMA remains mapped through registry
+drain/reset waiting/IRQ release, that cancellation does not deliver bytes, and
+that retained runtime/consumer references cannot use hardware after release.
+Both an absent used entry and an unconsumed used entry take the same cancel path;
+idle and normally completed requests release without a second unmap.
+The mock provider checks callback/lock ordering but does not certify the external
+IRQ core's concurrent synchronization implementation.
+
+IRQ-registration failure now uses this same close/finish sequence on the
+unpublished device before returning the original registration error. The
+constructor receives the host reset-wait interval explicitly; the success path
+does not call it. Before queue publication, the library's fallible ring allocation
+releases partial allocations without configuring a queue; after queue_set there
+is no fallible queue-construction step. Thus this rollback covers the later
+failure where the device has already reached DRIVER_OK and owns published rings.
+A controlled failure test delays reset confirmation and checks that both ring
+allocations remain live until confirmation, with no request mapping or IRQ
+action to release.
+
+Production bus remove/rebind wiring, post-publication probe-failure integration
+and instance DMA adapter integration remain pending; the helper alone is not
+the complete R1-07/R1-08 delivery.
+Tests cover closing idle, pending and cached-readable states, waking a pending
+reader, notification outside the request lock, retained references and late IRQs.
+The pending-closure test uses a controlled normal completion to clean up its
+fixture, not a production teardown or hardware-reset path.
+
+Dropping a Pending request retains
 its queue and buffer rather than freeing live DMA storage; normal idle/readable
 requests are released. Tests emulate ring completion and IRQ delivery to check
 reclaim-before-wake, short reads, spurious interrupts, malformed completions,

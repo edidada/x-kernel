@@ -39,18 +39,6 @@ impl DeviceDomain {
         }
     }
 
-    /// Announce that a dependency published itself; parked devices waiting
-    /// on it are re-probed. Returns how many devices were woken.
-    /// Wake devices waiting on `dep`.
-    ///
-    /// Concurrency note: a provider may register BETWEEN a probe's
-    /// dependency check and its Deferred submission — that wake finds an
-    /// empty deferred list and the device would park forever (the review's
-    /// lost-wakeup window). The wake therefore also nudges the probe pump:
-    /// the next `probe_pending` pass re-examines parked entries, and a
-    /// device whose dependency has since appeared rebinds instead of
-    /// parking. Exactness (only this dep's waiters re-run) is preserved for
-    /// the deferred list; the pump nudge is the safety net for the window.
     /// Set `entry`'s state bookkeeping for `dep` at `generation`: the
     /// lost-wakeup guard compares this against the domain generation when a
     /// Deferred probe parks, and refreshes it on every retry or wake.
@@ -126,24 +114,18 @@ impl DeviceDomain {
             return;
         };
         entry.binding.attempted.push(attempted_key);
-        let retryable = inner
-            .drivers
-            .iter()
-            .filter(|candidate| !entry.binding.attempted.contains(&candidate.key()))
-            .any(|candidate| {
-                candidate.matches(
-                    bus_type(&inner.bus_instances, &entry.core.desc),
-                    entry.core.desc.bus_data.as_ref(),
-                ) != MatchScore::NoMatch
-            });
-        if retryable {
-            entry.lifecycle.state = DeviceState::Pending;
-            inner.sched.pending.push(id);
-        } else {
-            entry.lifecycle.state = DeviceState::Unclaimed;
-        }
+        entry.lifecycle.state = DeviceState::Pending;
+        inner.sched.pending.push(id);
     }
 
+    /// Publish a dependency notification and synchronously dispatch its waiters.
+    ///
+    /// Returns the number queued, not the number successfully bound. Every
+    /// notification advances the dependency generation, even with no waiters;
+    /// a probe returning Deferred after that notification retries at commit.
+    /// Call from sleepable context without locks needed by affected callbacks.
+    /// Rejected management entries stay pending for a later `probe_pending`
+    /// call; this method does not create a background executor.
     pub fn wake(&self, dep: DepSource) -> usize {
         let woken = {
             let mut inner = self.inner.lock();
@@ -211,26 +193,7 @@ impl DeviceDomain {
             woken
         };
         if woken > 0 {
-            // Re-entrant-safe pump: if a probe pump already runs (this wake
-            // fired mid-probe — the generation guard will re-attempt in
-            // ITS loop), don't recurse into the pump (the serialization
-            // lock would deadlock). Standalone wakes run the full pump.
-            let already_probing = {
-                let mut probing = self.probing.lock();
-                if *probing {
-                    // The running pump may already hold an empty final
-                    // batch; ask for one more pass over `sched.pending`.
-                    *self.pump_requested.lock() = true;
-                    true
-                } else {
-                    *probing = true;
-                    false
-                }
-            };
-            if !already_probing {
-                let _guard = ProbePumpGuard { domain: self };
-                self.probe_pending_locked();
-            }
+            self.probe_pending();
         }
         woken
     }

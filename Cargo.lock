@@ -1416,6 +1416,7 @@ version = "0.3.0-dev"
 dependencies = [
  "kalloc-types",
  "karch",
+ "kcompletion",
  "kerrno",
  "khal",
  "klazy",
@@ -2342,6 +2343,7 @@ dependencies = [
  "device-res",
  "device-res-xkernel",
  "display",
+ "driver-model",
  "driver_base",
  "input",
  "kalloc",
@@ -2355,6 +2357,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kirq",
+ "krcu",
  "kspin",
  "ksync",
  "ktask",

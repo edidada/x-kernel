@@ -36,9 +36,6 @@ impl EntropySource for VirtioRngSource {
         if len == 0 {
             return Err(SourceReadError::EmptyRequest);
         }
-        if !crate::virtio::is_present() {
-            return Err(SourceReadError::Unavailable);
-        }
         crate::virtio::request_entropy();
         // The collector mixes completed bytes directly; keep walking other sources.
         Err(SourceReadError::NoEntropy)

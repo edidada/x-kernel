@@ -40,6 +40,8 @@ unittest::path_mod_test!(
     "../ut-tests/block_requests_unittest.rs"
 );
 mod bus;
+#[cfg(feature = "device-model")]
+pub mod device_management;
 pub mod driver_registry;
 mod enumeration;
 mod manager;

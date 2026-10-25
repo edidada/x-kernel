@@ -29,6 +29,19 @@ pub struct FakeTransport<C> {
 }
 
 impl<C: FromBytes + Immutable + IntoBytes> Transport for FakeTransport<C> {
+    fn begin_reset(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        state.reset_requests += 1;
+        state.status = DeviceStatus::empty();
+        state.status_history.push(DeviceStatus::empty());
+    }
+
+    fn poll_reset(&mut self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.reset_polls += 1;
+        state.status.is_empty() && !state.is_reset_pending
+    }
+
     fn device_type(&self) -> DeviceType {
         self.device_type
     }
@@ -52,17 +65,13 @@ impl<C: FromBytes + Immutable + IntoBytes> Transport for FakeTransport<C> {
     }
 
     fn get_status(&self) -> DeviceStatus {
-        self.state
-            .lock()
-            .unwrap()
-            .status_history
-            .last()
-            .copied()
-            .unwrap_or_default()
+        self.state.lock().unwrap().status
     }
 
     fn set_status(&mut self, status: DeviceStatus) {
-        self.state.lock().unwrap().status_history.push(status);
+        let mut state = self.state.lock().unwrap();
+        state.status = status;
+        state.status_history.push(status);
     }
 
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
@@ -156,7 +165,15 @@ impl<C: FromBytes + Immutable + IntoBytes> Transport for FakeTransport<C> {
 
 /// The mutable state of a fake transport.
 pub struct State<C> {
-    /// Every status the driver has set, in order. The last element is the current status.
+    /// Additional transport completion work, independent of device status.
+    pub is_reset_pending: bool,
+    /// Number of reset requests received through the transport interface.
+    pub reset_requests: usize,
+    /// Number of reset completion polls.
+    pub reset_polls: usize,
+    /// The status of the fake device.
+    pub status: DeviceStatus,
+    /// Status writes in order; direct test status injection does not append a write.
     pub status_history: Vec<DeviceStatus>,
     /// The features which the driver says it supports.
     pub driver_features: u64,
@@ -175,6 +192,7 @@ pub struct State<C> {
 impl<C> Debug for State<C> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("State")
+            .field("status", &self.status)
             .field("status_history", &self.status_history)
             .field("driver_features", &self.driver_features)
             .field("guest_page_size", &self.guest_page_size)
@@ -190,7 +208,11 @@ impl<C> State<C> {
     /// Creates a state for a fake transport, with the given queues and VirtIO configuration space.
     pub const fn new(queues: Vec<QueueStatus>, config_space: C) -> Self {
         Self {
+            status: DeviceStatus::empty(),
             status_history: Vec::new(),
+            is_reset_pending: false,
+            reset_requests: 0,
+            reset_polls: 0,
             driver_features: 0,
             guest_page_size: 0,
             interrupt_pending: false,

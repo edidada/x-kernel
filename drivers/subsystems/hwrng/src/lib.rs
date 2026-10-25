@@ -5,7 +5,7 @@
 //! Hardware entropy devices and the host capabilities needed to read them.
 //!
 //! Drivers implement [`HwrngDevice`]; the entropy subsystem consumes it.
-//! The host implements [`completion::RngCompletion`] and injects it into drivers.
+//! The host injects read completion and a separate reliable drain capability.
 //! This crate owns neither tasks nor DMA buffers and makes
 //! no claim about the quality or trustworthiness of returned bytes.
 
@@ -17,12 +17,12 @@ pub mod completion;
 
 pub use kerrno::{KError, KResult};
 
-pub mod class;
-pub use class::*;
+mod registration;
+pub use registration::*;
 
 /// A raw entropy source, implemented by a concrete device driver.
 ///
-/// Report [`DeviceKind::Hwrng`]. Concurrent reads must not consume the same
+/// Concurrent reads must not consume the same
 /// bytes twice. Empty reads return zero without I/O or waiting; a nonempty success
 /// is in `1..=buf.len()` and may be short. Errors
 /// deliver no bytes. Returning from a read must not leave the caller's buffer

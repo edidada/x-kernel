@@ -90,13 +90,17 @@ cfg_if! {
             pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
                 irq: Option<usize>,
-            ) -> DriverResult<subsys_hwrng::HwrngDeviceImpl> {
+            ) -> DriverResult<alloc::sync::Arc<virtio::VirtIoRngDev<VirtIoHalImpl, T>>> {
+                if !ktask::is_sleepable_context() {
+                    return Err(driver_base::DriverError::InvalidInput);
+                }
                 let irq = irq.ok_or(driver_base::DriverError::InvalidInput)?;
                 let device = virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new_irq(
                     transport,
                     crate::rng_completion::new_rng_completion(),
                     crate::resource::resource_provider(),
                     device_res::IrqResource::new(irq, device_res::IrqTrigger::Unknown(0)),
+                    ktask::yield_now,
                 )?;
                 Ok(device)
             }

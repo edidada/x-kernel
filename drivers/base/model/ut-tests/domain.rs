@@ -10,11 +10,18 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use driver_os_api::ClkOps;
 use unittest::{assert_eq, def_test};
 
+#[path = "lifecycle.rs"]
+mod lifecycle;
+
+#[path = "probe_progress.rs"]
+mod probe_progress;
+
 use super::*;
 use crate::{
     ClkHandle, DepKind, DevIrq, DeviceDescriptor, IoMap, IrqAction, OfMatch, PlatformBus,
     bus::{BusInstanceId, PlatformId, platform_bus::PlatformBusData},
     driver::{DriverDesc, DriverOps},
+    management_tests::TestManagementLock,
 };
 
 struct FixedClk {
@@ -251,7 +258,8 @@ impl ClockConsumerServices for MockServices {
         match existing {
             Some(ops) => Ok(ClkHandle::new(ops, Some(self.release_hook()))),
             None => {
-                if let Some(hook) = self.mid_check_hook.lock().clone() {
+                let hook = self.mid_check_hook.lock().clone();
+                if let Some(hook) = hook {
                     hook();
                 }
                 Err(ServiceError::Deferred(DepSource::clk(spec.provider)))
@@ -290,7 +298,11 @@ impl crate::ExtensionServices for MockServices {
     }
 }
 
-impl DeviceServices for MockServices {}
+impl DeviceServices for MockServices {
+    fn create_management_lock(&self) -> Result<Arc<dyn crate::DeviceManagementLock>, RuntimeError> {
+        Ok(Arc::new(TestManagementLock::new()))
+    }
+}
 
 #[expect(
     dead_code,
@@ -629,7 +641,7 @@ fn retained_reference_does_not_retain_binding_resources() {
     assert_eq!(retained.descriptor().bus_instance, root);
     assert_eq!(retained.path(), "platform/firmware1");
     assert!(domain.with_data::<BoundData, ()>(&device, |_| ()).is_none());
-    assert_eq!(domain.remove_device(&device), Err(RuntimeError::BadState));
+    assert_eq!(domain.remove_device(&device), Ok(()));
     drop(domain);
     drop(device);
     assert!(weak.upgrade().is_some());
@@ -657,10 +669,10 @@ fn unbound_removal_retires_identity_without_invalidating_metadata() {
     assert!(domain.snapshot(&retained).is_none());
     assert_eq!(retained.descriptor().bus_instance, root);
     assert_eq!(retained.path(), "platform/firmware1");
-    assert_eq!(domain.remove_device(&retained), Err(RuntimeError::NotFound));
+    assert_eq!(domain.remove_device(&retained), Ok(()));
     let replacement = domain.add_device(test_descriptor(root)).unwrap();
     assert!(!replacement.same_device(&retained));
-    assert_eq!(domain.remove_device(&retained), Err(RuntimeError::NotFound));
+    assert_eq!(domain.remove_device(&retained), Ok(()));
     assert!(domain.snapshot(&retained).is_none());
     assert!(replacement.is_online());
     domain.remove_device(&replacement).unwrap();
@@ -687,10 +699,8 @@ fn probe_binds_data_and_remove_quiesces() {
 
     domain.remove_device(&device).unwrap();
     assert!(REMOVE_RAN.load(Ordering::Acquire));
-    assert_eq!(
-        domain.snapshot(&device).unwrap().state,
-        DeviceState::Removed
-    );
+    assert!(domain.snapshot(&device).is_none());
+    assert!(domain.devices().is_empty());
 }
 
 #[def_test(serial)]
@@ -852,11 +862,9 @@ fn duplicate_registration_cannot_retry_a_fatal_device() {
     );
 }
 
-/// Topology: the parent field links entries, removal cascades
-/// children-first (the child's teardown completes before the parent's
-/// begins), and the parent's children list stays accurate after.
+/// The controller explicitly chooses children-first teardown ordering.
 #[def_test(serial)]
-fn remove_cascades_children_first() {
+fn controller_explicitly_removes_children_before_parent() {
     #[expect(
         clippy::allow_attributes,
         reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
@@ -912,6 +920,7 @@ fn remove_cascades_children_first() {
     static CHILD_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("topo,child"))];
     static PARENT_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("topo,parent"))];
 
+    ORDER.lock().clear();
     let (domain, services, root) = fresh_domain();
     domain.set_services(services.clone());
     domain.register_driver(DriverDesc::new("topo-child", CHILD_IDS, ChildDriver));
@@ -945,42 +954,33 @@ fn remove_cascades_children_first() {
     let _ = domain.probe_pending();
     assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
 
-    // Removing the parent tears the child down first.
-    domain.remove_device(&parent_ref).expect("cascade remove");
+    domain.remove_device(&child).unwrap();
+    assert_eq!(*ORDER.lock(), alloc::vec!["child"]);
+    assert!(parent_ref.is_online());
+    assert_eq!(
+        domain.snapshot(&parent_ref).unwrap().state,
+        DeviceState::Active
+    );
+    domain.remove_device(&parent_ref).unwrap();
     assert_eq!(*ORDER.lock(), alloc::vec!["child", "parent"]);
     let mut late_child = test_descriptor(root);
     late_child.parent = Some(parent.clone());
     assert!(matches!(domain.add_device(late_child),
-        Err(AddDeviceError::ParentUnavailable { parent: id, state: "removed" })
+        Err(AddDeviceError::ParentMissing(id))
             if id == parent_ref.core.id.raw()
     ));
-    assert_eq!(
-        domain.snapshot(&child).map(|s| s.state),
-        Some(DeviceState::Removed)
-    );
+    assert!(domain.snapshot(&child).is_none());
+    assert!(domain.snapshot(&parent_ref).is_none());
+    assert!(domain.devices().is_empty());
 }
 
-/// Parent teardown is GATED on child teardown completion — a real
-/// behavior test, not an enum assertion: the child's own probe
-/// re-enters `remove_device(parent)` while the child is `Probing`
-/// (exactly the interleave the Busy error exists for). The parent
-/// must abort BEFORE releasing any binding resource, stay closed to
-/// new children, and complete on retry.
-#[def_test(serial)]
-fn parent_teardown_waits_for_probing_child() {
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
-    )]
-    #[allow(
-        unknown_lints,
-        unregistered_static_spinlock,
-        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
-    )]
-    static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
+/// Managing a different device during probe does not recurse into the probing child.
+#[def_test]
+fn parent_removal_during_child_probe_leaves_child_registered() {
     struct ChildDriver {
-        domain: &'static DeviceDomain,
+        domain: alloc::sync::Weak<DeviceDomain>,
         parent: crate::DeviceRef,
+        removes: Arc<AtomicUsize>,
     }
     impl DriverOps<PlatformBus> for ChildDriver {
         type Data = ();
@@ -990,16 +990,7 @@ fn parent_teardown_waits_for_probing_child() {
             _dev: &mut DeviceAccess<'_, PlatformBus>,
             _env: &crate::Environment<'_>,
         ) -> Result<(), ProbeError> {
-            // Mid-probe: the parent removal runs while THIS probe is
-            // in flight — the child entry is `Probing` on the
-            // registry, the exact interleave the Busy error exists
-            // for. remove_device does not pump probes, so the
-            // re-entrancy is lock-clean.
-            let err = self
-                .domain
-                .remove_device(&self.parent)
-                .expect_err("parent remove must abort on busy child");
-            assert!(matches!(err, RuntimeError::Busy));
+            self.domain.upgrade().unwrap().remove_device(&self.parent)?;
             Ok(())
         }
 
@@ -1009,130 +1000,45 @@ fn parent_teardown_waits_for_probing_child() {
             _env: &crate::Environment<'_>,
             _data: &mut (),
         ) {
-            // The parent's teardown is IN PROGRESS (its cascade is
-            // removing us): a concurrent remove_device(parent) must
-            // see Busy — the exclusive-claim semantics — and NOT join
-            // the teardown.
-            let err = self
-                .domain
-                .remove_device(&self.parent)
-                .expect_err("concurrent parent remove must be Busy");
-            assert!(matches!(err, RuntimeError::Busy));
-            *CHILD_REMOVE_SAW_BUSY.lock() = true;
+            self.removes.fetch_add(1, Ordering::Relaxed);
         }
     }
-    struct ParentDriver;
-    impl DriverOps<PlatformBus> for ParentDriver {
-        type Data = ();
-
-        fn probe(
-            &self,
-            _dev: &mut DeviceAccess<'_, PlatformBus>,
-            _env: &crate::Environment<'_>,
-        ) -> Result<(), ProbeError> {
-            Ok(())
-        }
-
-        fn remove(
-            &self,
-            _dev: &mut DeviceAccess<'_, PlatformBus>,
-            _env: &crate::Environment<'_>,
-            _data: &mut (),
-        ) {
-        }
-    }
+    let (domain, _services, root) = fresh_domain();
+    let domain = Arc::new(domain);
+    let parent = domain.add_device(test_descriptor(root)).unwrap();
+    let removes = Arc::new(AtomicUsize::new(0));
     static CHILD_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,child"))];
-    static PARENT_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,parent"))];
-
-    fn gated_descriptor(
-        root: crate::BusInstanceId,
-        compatible: &str,
-        firmware: u32,
-        parent: Option<crate::DeviceRef>,
-    ) -> DeviceDescriptor {
-        DeviceDescriptor::builder()
-            .bus_instance(root)
-            .bus_data(alloc::boxed::Box::new(PlatformBusData::firmware_node(
-                firmware,
-                &[compatible],
-            )))
-            .parent_opt(parent)
-            .build()
-    }
-
-    // The child driver needs to re-enter the domain: tests are serial,
-    // so a leaked static domain is bounded and safe here.
-    let (domain, services, root) = fresh_domain();
-    let services = services;
-    let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
-    domain.set_services(services);
-    domain.register_driver(DriverDesc::new("gate-parent", PARENT_IDS, ParentDriver));
-    let parent = domain
-        .add_device(gated_descriptor(root, "gate,parent", 1, None))
-        .expect("add parent");
-    let parent_ref = parent.clone();
-    let _ = domain.probe_pending();
-    assert_eq!(
-        domain.snapshot(&parent_ref).unwrap().state,
-        DeviceState::Active
-    );
-
-    // Child whose probe re-enters the parent removal mid-flight.
     domain.register_driver(DriverDesc::new(
         "gate-child",
         CHILD_IDS,
         ChildDriver {
-            domain,
-            parent: parent_ref.clone(),
+            domain: Arc::downgrade(&domain),
+            parent: parent.clone(),
+            removes: removes.clone(),
         },
     ));
     let child = domain
-        .add_device(gated_descriptor(
-            root,
-            "gate,child",
-            2,
-            Some(parent.clone()),
-        ))
-        .expect("add child");
-    let _ = domain.probe_pending();
-    // The in-probe removal aborted: the parent is mid-teardown
-    // (Removing — closed to children, retryable), its binding intact.
-    assert_eq!(
-        domain.snapshot(&parent_ref).unwrap().state,
-        DeviceState::Removing
-    );
+        .add_device(
+            DeviceDescriptor::builder()
+                .bus_instance(root)
+                .bus_data(Box::new(PlatformBusData::firmware_node(2, &["gate,child"])))
+                .parent(parent.clone())
+                .build(),
+        )
+        .unwrap();
+    assert!(domain.snapshot(&parent).is_none());
+    assert!(!parent.is_online());
     assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
-
-    // While the parent is mid-teardown it takes no new children.
-    let err = domain
-        .add_device(gated_descriptor(root, "gate,late", 3, Some(parent.clone())))
-        .expect_err("Removing parent must reject children");
-    assert!(matches!(
-        err,
-        AddDeviceError::ParentUnavailable { parent, state: "removing" }
-            if parent == parent_ref.core.id.raw()
-    ));
-
-    // Retry: the child finished probing; the cascade completes and the
-    // parent tears down fully (child Removed first).
-    domain.remove_device(&parent_ref).expect("retry completes");
-    // The child's remove hook verified the in-progress exclusion
-    // (recorded in the static slot — the ops instance the domain
-    // holds is a by-value copy).
-    assert!(*CHILD_REMOVE_SAW_BUSY.lock());
-    assert_eq!(
-        domain.snapshot(&parent_ref).unwrap().state,
-        DeviceState::Removed
-    );
-    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Removed);
+    assert_eq!(removes.load(Ordering::Relaxed), 0);
+    assert_eq!(domain.devices().len(), 1);
+    domain.remove_device(&child).unwrap();
+    assert_eq!(removes.load(Ordering::Relaxed), 1);
+    assert!(domain.devices().is_empty());
 }
 
-/// Bus instances: a descriptor's `bus_instance` must exist and its
-/// TYPE must agree; members are queryable (`bus->devices`); removing
-/// the BRIDGE device ejects the instance's members (Linux
-/// bridge-eject semantics).
+/// Bus membership validation remains independent of explicit member teardown.
 #[def_test(serial)]
-fn bus_instances_validate_query_and_bridge_eject() {
+fn bus_instances_validate_query_and_explicit_bridge_exit() {
     fn bus_device(instance: BusInstanceId, firmware: u32) -> DeviceDescriptor {
         DeviceDescriptor::builder()
             .bus_instance(instance)
@@ -1179,9 +1085,6 @@ fn bus_instances_validate_query_and_bridge_eject() {
         .expect_err("missing instance");
     assert!(matches!(err, AddDeviceError::BusInstanceMissing(0xdead)));
 
-    // Bridge eject: anchor an instance on a bridge device; removing
-    // the bridge cascades the instance's members even without device
-    // parent links.
     let bridge_dev = domain.add_device(bus_device(root, 3)).expect("add bridge");
     let secondary = domain
         .add_bus_instance(crate::PlatformBus::ID, Some(&bridge_dev), "test-1")
@@ -1198,13 +1101,14 @@ fn bus_instances_validate_query_and_bridge_eject() {
     let retained_bridge = retained_bridge.unwrap();
     assert!(retained_bridge.same_device(&bridge_dev));
     assert!(!retained_bridge.is_online());
-    // The member never bound — the light path FREES its entry, so the
-    // snapshot is gone entirely (equivalently: fully removed).
-    assert!(
-        domain.snapshot(&behind).is_none(),
-        "bridge removal must eject the secondary instance's members"
+    assert_eq!(
+        domain.snapshot(&behind).unwrap().state,
+        DeviceState::Unclaimed
     );
-    // The member is gone from the instance's listing.
+    assert!(behind.is_online());
+    assert_eq!(domain.bus_instance_devices(secondary).len(), 1);
+    domain.remove_device(&behind).unwrap();
+    assert!(domain.snapshot(&behind).is_none());
     assert!(domain.bus_instance_devices(secondary).is_empty());
     assert!(matches!(
         domain.add_device(bus_device(secondary, 6)),
@@ -1259,11 +1163,18 @@ fn management_requires_the_registered_object_not_just_its_key() {
     let (other, _other_services, other_root) = fresh_domain();
     let foreign = other.add_device(test_descriptor(other_root)).unwrap();
     let impostor = crate::DeviceRef {
-        core: crate::device::DeviceCore::new(device.core.id, device.descriptor().clone()),
+        core: crate::device::DeviceCore::new(
+            device.core.id,
+            device.descriptor().clone(),
+            Arc::new(TestManagementLock::new()),
+            domain.identity.clone(),
+        ),
     };
     let visits = AtomicUsize::new(0);
     for rejected in [&foreign, &impostor] {
         assert_eq!(domain.remove_device(rejected), Err(RuntimeError::NotFound));
+        assert_eq!(domain.unbind_device(rejected), Err(RuntimeError::NotFound));
+        assert_eq!(domain.bind_device(rejected), Err(RuntimeError::NotFound));
         assert!(domain.snapshot(rejected).is_none());
         assert!(
             domain
@@ -1318,7 +1229,12 @@ fn parent_key_alone_does_not_validate_object_identity() {
     let (domain, _services, root) = fresh_domain();
     let parent = domain.add_device(test_descriptor(root)).unwrap();
     let different_object = crate::DeviceRef {
-        core: crate::device::DeviceCore::new(parent.core.id, test_descriptor(root)),
+        core: crate::device::DeviceCore::new(
+            parent.core.id,
+            test_descriptor(root),
+            Arc::new(TestManagementLock::new()),
+            domain.identity.clone(),
+        ),
     };
     let mut descriptor = test_descriptor(root);
     descriptor.parent = Some(different_object);
@@ -1352,6 +1268,10 @@ fn child_reference_retains_offline_parent_without_a_reference_cycle() {
     domain
         .remove_device(child.descriptor().parent.as_ref().unwrap())
         .unwrap();
+    assert_eq!(domain.devices().len(), 1);
+    assert!(child.is_online());
+    assert!(domain.snapshot(&child).is_some());
+    domain.remove_device(&child).unwrap();
     assert!(domain.devices().is_empty());
     assert!(!child.is_online());
     let retained_parent = child.descriptor().parent.as_ref().unwrap();
@@ -1705,7 +1625,7 @@ fn removing_unbound_device_frees_entry_and_worklists() {
 }
 
 #[def_test(serial)]
-fn removing_twice_rejects_with_bad_state() {
+fn removing_twice_is_idempotent() {
     let (domain, services, root) = fresh_domain();
     services.publish_clk(0x42);
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
@@ -1714,10 +1634,9 @@ fn removing_twice_rejects_with_bad_state() {
         .expect("add device");
 
     domain.remove_device(&device).unwrap();
-    assert!(matches!(
-        domain.remove_device(&device),
-        Err(crate::RuntimeError::BadState)
-    ));
+    assert_eq!(domain.remove_device(&device), Ok(()));
+    assert!(domain.snapshot(&device).is_none());
+    assert!(domain.devices().is_empty());
 }
 
 #[def_test(serial)]
@@ -1778,9 +1697,17 @@ fn probe_reads_firmware_property_snapshot() {
         .build();
     let _ = domain;
 
-    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
+    let core = crate::device::DeviceCore::new(
+        DeviceId(1),
+        desc.clone(),
+        Arc::new(TestManagementLock::new()),
+        Arc::new(()),
+    );
     let reference = crate::DeviceRef { core };
-    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let identity = Arc::new(crate::driver::DriverIdentity {
+        name: "test-driver",
+    });
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
     assert_eq!(ctx.fw().u32("vendor,quirk-cap"), Some(7));
     assert_eq!(ctx.fw().string("vendor,label"), Some("rev-b"));
     assert!(ctx.fw().flag("dma-coherent"));
@@ -1805,13 +1732,26 @@ fn probe_reads_firmware_property_snapshot() {
 fn device_views_borrow_the_registered_identity() {
     let (_domain, services, root) = fresh_domain();
     let reference = crate::DeviceRef {
-        core: crate::device::DeviceCore::new(DeviceId(1), test_descriptor(root)),
+        core: crate::device::DeviceCore::new(
+            DeviceId(1),
+            test_descriptor(root),
+            Arc::new(TestManagementLock::new()),
+            Arc::new(()),
+        ),
     };
     let modalias = reference.descriptor().bus_data.modalias();
     let initial_count = Arc::strong_count(&reference.core);
+    let identity = Arc::new(crate::driver::DriverIdentity {
+        name: "test-driver",
+    });
     {
-        let device = DeviceAccess::<PlatformBus>::new(&reference, modalias.as_deref(), &*services)
-            .expect("platform payload");
+        let device = DeviceAccess::<PlatformBus>::new(
+            &reference,
+            &identity,
+            modalias.as_deref(),
+            &*services,
+        )
+        .expect("platform payload");
         let info = device.info();
         assert_eq!(Arc::strong_count(&reference.core), initial_count);
         assert_eq!(info.path(), reference.path());
@@ -1832,7 +1772,8 @@ fn device_views_borrow_the_registered_identity() {
         assert_eq!(Arc::strong_count(&reference.core), initial_count + 1);
     }
     assert_eq!(Arc::strong_count(&reference.core), initial_count);
-    let remove_view = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let remove_view =
+        DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
     assert!(remove_view.info().modalias().is_none());
 }
 
@@ -1843,9 +1784,17 @@ fn unconfigured_dma_is_rejected_before_host_allocation() {
     assert!(desc.dma.is_none());
     let desc = desc.clone();
     assert!(desc.dma.is_none());
-    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
+    let core = crate::device::DeviceCore::new(
+        DeviceId(1),
+        desc.clone(),
+        Arc::new(TestManagementLock::new()),
+        Arc::new(()),
+    );
     let reference = crate::DeviceRef { core };
-    let device = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let identity = Arc::new(crate::driver::DriverIdentity {
+        name: "test-driver",
+    });
+    let device = DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
     assert!(matches!(
         device.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::Unsupported))
@@ -1877,9 +1826,17 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
     let cloned = desc.clone();
     assert_eq!(cloned.dma, desc.dma);
 
-    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
+    let core = crate::device::DeviceCore::new(
+        DeviceId(1),
+        desc.clone(),
+        Arc::new(TestManagementLock::new()),
+        Arc::new(()),
+    );
     let reference = crate::DeviceRef { core };
-    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let identity = Arc::new(crate::driver::DriverIdentity {
+        name: "test-driver",
+    });
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
     let mem = ctx.res().alloc_coherent(0x1000, 0x1000).expect("alloc");
     // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
     assert_eq!(mem.bus_addr(), 0x2000_0000);
@@ -1891,9 +1848,17 @@ fn alloc_coherent_translates_through_the_devices_dma_view() {
         offset: 0,
         coherent: true,
     });
-    let core = crate::device::DeviceCore::new(DeviceId(1), desc.clone());
+    let core = crate::device::DeviceCore::new(
+        DeviceId(1),
+        desc.clone(),
+        Arc::new(TestManagementLock::new()),
+        Arc::new(()),
+    );
     let reference = crate::DeviceRef { core };
-    let ctx = DeviceAccess::<PlatformBus>::new(&reference, None, &*services).unwrap();
+    let identity = Arc::new(crate::driver::DriverIdentity {
+        name: "test-driver",
+    });
+    let ctx = DeviceAccess::<PlatformBus>::new(&reference, &identity, None, &*services).unwrap();
     assert!(matches!(
         ctx.res().alloc_coherent(0x1000, 0x1000),
         Err(ProbeError::Fatal(RuntimeError::NoMemory))
@@ -1935,136 +1900,49 @@ impl DriverOps<PlatformBus> for TestCcu {
     }
 }
 
-#[def_test(serial)]
-fn controller_removal_closes_instance_before_cascade_and_preserves_snapshots() {
-    use crate::domain::AddDeviceError;
-
-    struct Controller;
-
-    impl DriverOps<PlatformBus> for Controller {
-        type Data = ();
-
-        fn probe(
-            &self,
-            _dev: &mut DeviceAccess<'_, PlatformBus>,
-            _env: &crate::Environment<'_>,
-        ) -> Result<(), ProbeError> {
-            Ok(())
-        }
-    }
-
-    struct Member {
-        domain: &'static DeviceDomain,
-        controller: crate::DeviceRef,
-        instance: crate::BusInstanceId,
-    }
-
-    impl Member {
-        fn assert_closed(&self) {
-            assert!(matches!(
-                self.domain.add_device(test_descriptor(self.instance)),
-                Err(AddDeviceError::BusInstanceUnavailable(_))
-            ));
-            assert!(self.domain.bus_instance_devices(self.instance).len() == 1);
-        }
-    }
-
-    impl DriverOps<PlatformBus> for Member {
-        type Data = ();
-
-        fn probe(
-            &self,
-            _dev: &mut DeviceAccess<'_, PlatformBus>,
-            _env: &crate::Environment<'_>,
-        ) -> Result<(), ProbeError> {
-            assert!(matches!(
-                self.domain.remove_device(&self.controller),
-                Err(RuntimeError::Busy)
-            ));
-            self.assert_closed();
-            assert!(matches!(
-                self.domain
-                    .add_bus_instance(PlatformBus::ID, Some(&self.controller), "late"),
-                Err(AddDeviceError::ParentUnavailable { .. })
-            ));
-            Ok(())
-        }
-
-        fn remove(
-            &self,
-            _dev: &mut DeviceAccess<'_, PlatformBus>,
-            _env: &crate::Environment<'_>,
-            _data: &mut (),
-        ) {
-            self.assert_closed();
-        }
-    }
-
-    static CONTROLLER_IDS: &[PlatformId] =
-        &[PlatformId::Of(OfMatch::compatible("gate,controller"))];
-    static MEMBER_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,member"))];
+#[def_test]
+fn controller_exit_explicitly_drains_members_and_preserves_saved_snapshots() {
     let (domain, _services, root) = fresh_domain();
-    let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
-    domain.register_driver(DriverDesc::new("controller", CONTROLLER_IDS, Controller));
-    let controller = domain
-        .add_device(
-            DeviceDescriptor::builder()
-                .bus_instance(root)
-                .bus_data(Box::new(PlatformBusData::firmware_node(
-                    1,
-                    &["gate,controller"],
-                )))
-                .build(),
-        )
-        .unwrap();
+    domain.register_driver(DriverDesc::new("controller-members", IDS, TieA));
+    let controller = domain.add_device(test_descriptor(root)).unwrap();
     let instance = domain
         .add_bus_instance(PlatformBus::ID, Some(&controller), "downstream")
         .unwrap();
-    domain.register_driver(DriverDesc::new(
-        "member",
-        MEMBER_IDS,
-        Member {
-            domain,
-            controller: controller.clone(),
-            instance,
-        },
-    ));
     let member = domain
-        .add_device(
-            DeviceDescriptor::builder()
-                .bus_instance(instance)
-                .bus_data(Box::new(PlatformBusData::firmware_node(
-                    2,
-                    &["gate,member"],
-                )))
-                .build(),
-        )
+        .add_device(test_descriptor_for_node(instance, 2))
         .unwrap();
+    let unrelated = domain
+        .add_device(test_descriptor_for_node(root, 3))
+        .unwrap();
+    let snapshot = domain.snapshot(&member).unwrap();
     assert_eq!(
         domain.snapshot(&controller).unwrap().state,
-        DeviceState::Removing
+        DeviceState::Active
     );
-    assert_eq!(domain.snapshot(&member).unwrap().state, DeviceState::Active);
-    let unrelated = domain.add_device(test_descriptor(root)).unwrap();
+    assert_eq!(snapshot.state, DeviceState::Active);
 
+    for owned in domain.bus_instance_devices(instance) {
+        domain.remove_device(&owned).unwrap();
+    }
+    assert!(domain.bus_instance_devices(instance).is_empty());
+    assert!(controller.is_online());
     domain.remove_device(&controller).unwrap();
-    assert_eq!(
-        domain.snapshot(&controller).unwrap().state,
-        DeviceState::Removed
-    );
-    assert_eq!(
-        domain.snapshot(&member).unwrap().state,
-        DeviceState::Removed
-    );
-    assert_eq!(domain.snapshot(&member).unwrap().bus, PlatformBus::ID);
+    assert!(domain.snapshot(&controller).is_none());
+    assert!(domain.snapshot(&member).is_none());
+    assert_eq!(snapshot.bus, PlatformBus::ID);
+    assert!(snapshot.device.same_device(&member));
+    assert!(!snapshot.device.is_online());
+    assert_eq!(snapshot.state, DeviceState::Active);
     assert_eq!(
         domain.snapshot(&unrelated).unwrap().state,
-        DeviceState::Unclaimed
+        DeviceState::Active
     );
     assert!(matches!(
         domain.add_device(test_descriptor(instance)),
         Err(AddDeviceError::BusInstanceUnavailable(_))
     ));
+    assert_eq!(domain.devices().len(), 1);
+    domain.remove_device(&unrelated).unwrap();
 }
 
 fn ccu_descriptor(root: crate::BusInstanceId) -> DeviceDescriptor {
@@ -2154,7 +2032,7 @@ fn one_driver_binds_many_devices() {
 
     // Tearing one device down leaves the other binding intact.
     domain.remove_device(&first).expect("remove first");
-    assert_eq!(domain.snapshot(&first).unwrap().state, DeviceState::Removed);
+    assert!(domain.snapshot(&first).is_none());
     assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Active);
 }
 
@@ -2262,13 +2140,31 @@ mod publication_contract {
         assert_eq!(permit.with(|value| *value), 42);
     }
 
+    impl driver_class::PublicationSource for DeviceCore {
+        fn driver_name(&self) -> Option<&'static str> {
+            self.driver_name()
+        }
+
+        fn physical_path(&self) -> &str {
+            self.physical_path()
+        }
+
+        fn is_online(&self) -> bool {
+            self.is_online()
+        }
+    }
+
     impl DeviceCore {
         pub(crate) fn synthetic(device_id: DeviceId, driver_name: &'static str) -> Arc<Self> {
             let owner = Self::new(
                 device_id,
                 super::test_descriptor(crate::BusInstanceId::from_raw(0)),
+                Arc::new(super::TestManagementLock::new()),
+                Arc::new(()),
             );
-            owner.bind_driver(driver_name);
+            owner.bind_driver(Arc::new(crate::driver::DriverIdentity {
+                name: driver_name,
+            }));
             owner
         }
     }
@@ -2280,12 +2176,16 @@ mod publication_contract {
         let owner = DeviceCore::new(
             DeviceId(1),
             super::test_descriptor(crate::BusInstanceId::from_raw(0)),
+            Arc::new(super::TestManagementLock::new()),
+            Arc::new(()),
         );
         assert_eq!(
             CLASS.publish(owner.clone(), 1).unwrap_err(),
             kerrno::KError::BadState
         );
-        owner.bind_driver("model-test-driver");
+        owner.bind_driver(Arc::new(crate::driver::DriverIdentity {
+            name: "model-test-driver",
+        }));
         let publication = CLASS.publish(owner.clone(), 1).unwrap();
         assert_eq!(
             publication.publication().driver_name(),

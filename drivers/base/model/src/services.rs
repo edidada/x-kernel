@@ -13,6 +13,42 @@ use crate::{
     resource::{ClkSpec, IrqSpec, MmioRegion, Virq},
 };
 
+/// Failure to enter a device's exclusive management operation.
+///
+/// Neither failure executes the operation. These are management-entry errors,
+/// not probe failures or reasons to retry a partially completed removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceManagementError {
+    /// The caller cannot sleep in the current execution context.
+    InvalidContext,
+    /// The current task already owns this device's management lock.
+    Reentrant,
+}
+
+/// Host-provided serialization for one device's binding lifecycle.
+///
+/// Construct a separate lock for each device before publishing it. Keep it
+/// alive while management callers may retain that device; taking the lock
+/// does not itself establish that the device is still registered.
+///
+/// Implementations validate sleepable context and reject same-task reentry
+/// before calling the operation. On success they acquire exclusive ownership,
+/// invoke the operation synchronously exactly once, and unlock before returning.
+/// They never retain the borrowed callback. Contention from another task waits
+/// rather than returning an ordinary error after lifecycle changes have begun.
+///
+/// Callers must not hold the domain's short state lock when entering. The
+/// operation must restore its calling context before returning and must not
+/// wait for work that needs this same lock. Parent/child lock ordering belongs
+/// to the bus or controller, not to a generic recursive-removal protocol.
+pub trait DeviceManagementLock: Send + Sync {
+    /// Run one management operation, or reject entry without invoking it.
+    ///
+    /// The host uses a local guard; no heap-allocated erased guard is required.
+    /// This contract does not promise allocation-free contended acquisition.
+    fn run_locked(&self, operation: &mut dyn FnMut()) -> Result<(), DeviceManagementError>;
+}
+
 /// Borrowed device context supplied by a scoped callback resource view.
 ///
 /// Only the model constructs this context; a long-lived DeviceRef cannot
@@ -139,6 +175,16 @@ pub trait DeviceServices:
     + Send
     + Sync
 {
+    /// Prepare an independent management lock before publishing a device.
+    ///
+    /// Called outside the domain state lock. Hosts must reject contexts that
+    /// cannot sleep before allocating or exposing a device. The default
+    /// rejects registration until a management provider has been installed.
+    fn create_management_lock(
+        &self,
+    ) -> Result<alloc::sync::Arc<dyn DeviceManagementLock>, RuntimeError> {
+        Err(RuntimeError::Unsupported)
+    }
 }
 
 impl From<ServiceError> for ProbeError {

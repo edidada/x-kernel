@@ -9,13 +9,11 @@
 //! root creates one global domain ([`global_domain`]); tests create their
 //! own — no process-global registries live in this crate.
 //!
-//! # Architecture (one lock, four engines)
+//! # Architecture (short domain lock, per-device management locks)
 //!
-//! All state lives under ONE `SpinNoPreempt`: the atomicity of the
-//! check-then-act protocols (add-time parent validation, batch selection,
-//! exclusive removal claims) is a domain invariant, not an accident. The
-//! engines are module boundaries — each owns its state domain and logic,
-//! none owns a lock:
+//! Registry and queue updates share a `SpinNoPreempt`. Each device has a host
+//! management lock that serializes its probe, unbind and unregister callbacks.
+//! The short domain lock never spans these callbacks or Data destruction.
 //!
 //! * [`registry`] — device/driver/bus-instance registries: entry types,
 //!   the per-entry state domains, validation, snapshots, topology links.
@@ -23,8 +21,8 @@
 //!   execution, generation-guarded commits.
 //! * [`dependency`] — the deferred-probe waiter: parking, wake (with the
 //!   late-provider resweep), the lost-wakeup generation guard.
-//! * [`lifecycle`] — removal orchestration: exclusive claims, the
-//!   children-first cascade, teardown phases.
+//! * [`lifecycle`] — per-device unbind and unregister; downstream ownership
+//!   remains with the bus or controller.
 //!
 //! [`DeviceDomain`] is the thin facade owning the lock and sequencing the
 //! engines; cross-engine ordering (probe ↔ remove ↔ wake) lives in
@@ -109,7 +107,7 @@ pub enum DeviceState {
     Unclaimed,
     /// Being torn down.
     Removing,
-    /// Torn down; kept for topology queries.
+    /// Reserved terminal state; unregistered entries are deleted from the domain.
     Removed,
 }
 
@@ -130,6 +128,8 @@ impl DeviceState {
 /// Why [`DeviceDomain::add_device`] rejected a descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddDeviceError {
+    /// The host could not prepare or enter management before publication.
+    Management(RuntimeError),
     /// The referenced parent object is not registered in this domain.
     /// This includes foreign-domain references and already deleted entries.
     ParentMissing(u64),
@@ -151,6 +151,8 @@ pub enum AddDeviceError {
 /// Summary of one `probe_pending` pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProbeStats {
+    /// Management entry was rejected; the device remains queued unchanged.
+    pub rejected: usize,
     /// Devices re-attempted because a dependency woke during their
     /// check-then-submit window (lost-wakeup guard).
     pub retried: usize,
@@ -209,13 +211,15 @@ trait AnyDriver: Send + Sync {
 }
 
 struct RegisteredDriver<B: Bus, P: crate::driver::DriverOps<B>> {
-    desc: crate::driver::DriverDesc<B, P>,
+    identity: Arc<crate::driver::DriverIdentity>,
+    ids: &'static [B::IdEntry],
+    ops: P,
     key: DriverKey,
 }
 
 impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P> {
     fn name(&self) -> &'static str {
-        self.desc.name
+        self.identity.name
     }
 
     fn bus_id(&self) -> BusId {
@@ -239,8 +243,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         data.as_any()
             .downcast_ref::<B::DeviceData>()
             .map(|typed| {
-                self.desc
-                    .ids
+                self.ids
                     .iter()
                     .map(|entry| B::match_device(typed, entry))
                     .max()
@@ -256,7 +259,7 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
     ) -> Result<Box<DataBox>, ProbeError> {
         // The claim is known when probing STARTS — record the driver on
         // the live identity card before any publication can occur.
-        core.bind_driver(self.desc.name);
+        core.bind_driver(self.identity.clone());
         // MODALIAS is DEVICE-derived (of_modalias semantics: the first
         // compatible string), not id-row-derived — module loading matches
         // the same string the bus published.
@@ -271,10 +274,9 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             reason = "CG-021: matches() gated on bus_id before probe is scheduled — a mismatch is \
                       a domain-internal invariant violation, not a driver error"
         )]
-        let mut ctx = DeviceAccess::new(&reference, modalias.as_deref(), services)
+        let mut ctx = DeviceAccess::new(&reference, &self.identity, modalias.as_deref(), services)
             .expect("the domain only probes devices the driver matched");
         let data = self
-            .desc
             .ops
             .probe(&mut ctx, &crate::Environment::new(services))?;
         Ok(Box::new(data))
@@ -299,26 +301,22 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
             clippy::expect_used,
             reason = "CG-021: the binding was created by this driver's probe — the domain never                       hands foreign data to it"
         )]
-        let mut dev = DeviceAccess::new(&reference, None, services)
+        let mut dev = DeviceAccess::new(&reference, &self.identity, None, services)
             .expect("the domain only removes devices the driver bound");
-        self.desc
-            .ops
+        self.ops
             .remove(&mut dev, &crate::Environment::new(services), data);
     }
 }
 
 /// One concrete bus instance (see [`BusInstanceId`](crate::BusInstanceId)): created by a bus
 /// controller/bridge driver (or the composition root for a root bus),
-/// anchoring the devices discovered on it. Removing the BRIDGE device
-/// cascades the instance's member devices — the Linux bridge-eject
-/// semantics (`pci_stop_and_remove_bus_device` walking the secondary
-/// bus).
+/// anchoring the devices discovered on it. The bus controller owns member
+/// teardown; the model does not infer recursive ownership from topology.
 struct BusInstanceEntry {
     /// The authoritative bus type for this instance's devices.
     bus: BusId,
     /// The bridge/controller device that created this bus, if any (a
-    /// root bus has none). Removal of this device tears the instance's
-    /// members down with it.
+    /// root bus has none). The controller must arrange member teardown.
     /// Retained for instance introspection after device teardown; this reference
     /// owns no driver binding or hardware resource.
     bridge: Option<crate::DeviceRef>,
@@ -328,6 +326,8 @@ struct BusInstanceEntry {
 }
 
 struct DeviceEntry {
+    /// Host chosen at registration, including the management-lock factory.
+    services: Arc<dyn DeviceServices>,
     /// Shared identity and immutable descriptor, retained by device references
     /// and class publications independently of this entry's binding.
     core: alloc::sync::Arc<crate::device::DeviceCore>,
@@ -345,15 +345,8 @@ struct DeviceEntry {
 /// Lifecycle state domain of [`DeviceEntry`].
 struct LifecycleState {
     state: DeviceState,
-    /// Bumped on every teardown — the stale-probe-commit guard (see
-    /// `probe_pending_locked`).
+    /// Bumped on teardown; successful probe results are checked before commit.
     generation: u64,
-    /// A cascade ABORTED mid-teardown: the entry is `Removing` and the
-    /// NEXT `remove_device` may CLAIM the resume — exactly one caller
-    /// flips this back to false under the domain lock; concurrent
-    /// removers see `Busy` (single-owner semantics, Linux
-    /// `begin_removing`'s exclusive-claim equivalent).
-    remove_retryable: bool,
 }
 
 /// Binding state domain of [`DeviceEntry`].
@@ -458,7 +451,6 @@ struct DomainInner {
     /// Reserved next device key from the crate-wide allocator.
     /// Management keys remain distinct across domain instances.
     next_device_id: u64,
-    services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
     /// Allocation cursor for [`DriverKey`]s (domain-local: keys are
     /// only ever compared against this domain's own registries).
@@ -488,35 +480,14 @@ struct SchedulingState {
 /// Numeric allocation does not grant ownership, liveness or cross-domain access.
 static DEVICE_ID_ALLOCATOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Scope guard for the probe-pump serialization flag: releases it on
-/// every exit, including panics under `panic = "unwind"` builds (see
-/// [`DeviceDomain::probe_pending`]). Under `panic = "abort"` a panic ends
-/// the system anyway; the guard is for the unwind configurations.
-struct ProbePumpGuard<'a> {
-    domain: &'a DeviceDomain,
-}
-
-impl Drop for ProbePumpGuard<'_> {
-    fn drop(&mut self) {
-        *self.domain.probing.lock() = false;
-    }
-}
+#[cfg(unittest)]
+type DispatchHookFn = dyn Fn(&DeviceDomain, bool) + Send + Sync;
 
 pub struct DeviceDomain {
+    identity: Arc<()>,
     inner: SpinNoPreempt<DomainInner>,
-    /// Serializes the probe pump across callers. The probe path runs
-    /// driver code outside the domain lock, and parts of the host runtime
-    /// (the MMIO lease collector) rely on probe serialization — the
-    /// review asked for that contract to be enforced at the entry, not
-    /// assumed. A second probe_pending while one runs returns immediately:
-    /// the running pump owns the pending queue's progress.
-    probing: SpinNoPreempt<bool>,
-    /// Set by a caller that found the pump already running: its device is
-    /// enqueued but the running pump may have already selected an empty
-    /// batch and be about to release the flag. Before exiting, the pump
-    /// drains this request and runs one more pass, so no enqueued device
-    /// is ever left Pending until an unrelated trigger.
-    pump_requested: SpinNoPreempt<bool>,
+    #[cfg(unittest)]
+    dispatch_hook_fn: SpinNoPreempt<Option<Arc<DispatchHookFn>>>,
 }
 
 #[expect(
@@ -543,7 +514,7 @@ fn snapshot_of(entry: &DeviceEntry, bus: BusId) -> DeviceSnapshot {
         bus,
         state: entry.lifecycle.state,
         driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
-        identity: Some(entry.core.desc.bus_data.display_identity()),
+        identity: None,
     }
 }
 

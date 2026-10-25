@@ -7,10 +7,10 @@ pointers or DMA, and provides no entropy-quality guarantee. Consumers decide
 whether to credit returned bytes as entropy. Implementations must validate
 device lengths before copying into caller-owned buffers.
 
-The hwrng publication adapter delegates availability and in-flight admission
-to `driver_class`, which owns the generic withdrawal protocol. Device-model
-identity remains behind its `PublicationSource` contract; hwrng neither reads
-model internals nor maintains a second device-online flag.
+The hwrng registry owns admission and in-flight accounting independently of
+device-online state. driver_class supplies only PublicationSource metadata,
+not generic withdrawal. Model publishers supply provenance retaining the
+original driver's immutable identity, not the device's later binding name.
 
 ## Memory and thread safety
 
@@ -42,10 +42,32 @@ notification outside device locks, and task-context validation in each provider.
 
 ## Consumer capability isolation
 
-HwrngPublication exposes only metadata and guarded RNG operations, not raw T or
+HwrngHandle exposes only metadata and guarded RNG operations, not raw T or
 Arc<dyn HwrngDevice>. Both reads and failure queries hold an operation permit;
 after withdrawal they return BadState without calling the driver. Consumers
 must distinguish unavailable publication from terminal device failure. Entropy
 stops its selected collector for either condition, without inventing a hardware
 failure flag. Registration drop does not cancel outstanding DMA or replace the
 driver's quiesce/join protocol.
+
+## Synchronous unregistration
+
+Admission closure and count increments use the same short SpinNoPreempt lock.
+Only task-context handle use is supported; read and unregister require sleepable
+context. All driver calls, host waits and notifications happen outside source
+and registry locks. Runtime destructors must not perform sleeping teardown on a
+last consumer reference; drivers must release active resources explicitly.
+
+RngDrain is a trusted host contract, not interchangeable with fallible read wait
+providers. Preparation failure invokes the predicate zero times and changes no
+registration state. After its first invocation, a conforming provider must drain
+to completion. Violating this contract is not recoverable via a partial-unregister
+retry protocol. The X-Kernel adapter validates before checking/registering and
+uses a stack CompletionWait node; no new allocation is required during drain.
+
+Removed callbacks run after in-flight operations reach zero and before unregister
+returns. They cannot wake reads needed for that drain; the driver must do so
+first. They must restore execution context and avoid reverse dependencies on
+the publisher's management lock. Notification does not mean DMA/IRQ teardown
+has completed. Credential Drop deliberately leaves the registry/runtime alive;
+this observable leak is a publisher bug, not an automatic recovery path.

@@ -1,5 +1,77 @@
 # driver-model — 设计文档
 
+## R1-04 驱动身份与发布来源
+
+注册入口消费 DriverDesc，将只读 DriverIdentity（唯一驱动名）与 ids/ops 分开。
+RegisteredDriver、设备当前关联和 BindingSource 共享身份引用，不重复缓存名称。
+DeviceAccess 借用当次回调的身份，publication_source() 返回只读来源：设备引用
+提供原有 path，身份引用提供该次发布的驱动名。来源不持有 ops、Data 或硬件资源；
+A 解绑后换到 B，设备当前关联为 B，而旧发布仍解释为 A。同驱动重绑也重新注册
+provider，不把旧消费者转接新 runtime。来源 online 仅表示设备注册，不是操作许可。
+
+probe 失败由驱动先停运行活动并显式注销已发布能力，再释放资源、返回错误；
+模型不会对失败 probe 调 remove。成功 probe 若提交校验失败，模型先调用 remove
+再销毁返回的 Data，已有 generation 失配 UT 覆盖这个防御分支。正常管理锁串行下
+它不是一个可自然制造的并发卸载窗口，不新增公共故障注入接口。
+
+kdriver 外置测试组合模型与 hwrng，使用真实管理锁和 RngDrain、模拟运行对象/资源，
+验证发布前后失败、A/B 与同驱动重绑、多设备隔离、身份不保活 ops、最后引用
+不重复退出。硬件 IRQ/DMA stop 和真实 MMIO 接入仍属于后续票。
+
+已批准目标：[驱动模型 R1](../../../../docs/ai-collaboration/driver-model/design-proposal.md)。
+该目标正在分票实施；除明确标注的实施进度外，本文描述当前代码。
+早期[生命周期方案](binding-lifecycle-proposal.md)仅作历史调查记录。
+
+## R1-01 每设备管理与注册
+
+`services.rs` 的 `DeviceManagementLock` 是 model 所需的宿主能力，不是
+驱动可用的通用同步 API。每个设备在发布前需要独立实例，宿主实现位于
+`kdriver::device_management`，model 不依赖 ktask 或 ksync。
+
+`run_locked` 接受借用的回调；成功时同步执行恰好一次，返回前释放宿主局部
+mutex guard。非法上下文返回 `DeviceManagementError::InvalidContext`，
+同任务重入返回 `Reentrant`，两种错误都不得执行回调。其他任务竞争应等待，
+不能因竞争返回 Busy 后让调用者跳过必要退出。mutex 的竞争等待仍可能分配，
+本合同不承诺端到端无分配。
+
+回调不能带着改变后的 IRQ/preempt/RCU 上下文返回，不能等待需要同锁的工作。
+模型在获取该锁后仍须检查设备是否注册；锁本身不是注册凭证或硬件访问许可。
+`DeviceCore.management` 保存每设备锁，`DeviceCore.domain` 保存域身份 `Arc<()>`。
+`add_device` 先在域锁外调用 `DeviceServices::create_management_lock`，再在
+`run_locked` 内校验拓扑并入表。工厂或管理入口失败时不发布设备。
+每个 entry 保存注册时的 `services` bundle；后续 `set_services` 只影响新注册。
+bind、unbind、remove 和 `with_data` 均通过该设备的管理锁执行。
+
+当前已接入模型生命周期与真实宿主锁测试。kdriver 的下游测试控制器以每次绑定
+独立的枚举门禁和 owned 集合验证退出：关闭入口并取走 owned 集合后释放门禁，
+再退出孩子，最后停止父服务。孩子退出使用的父事务锁独立于枚举门禁；父方
+不能持事务锁等待孩子。已开始的枚举提交被纳入退出，重绑也不重新开放旧门禁。
+这是总线所有权协议的测试实现，不是 model 新增的递归退出机制或真实总线迁移。
+旧 class 接入仍未完全退役；绑定来源已固定为原驱动身份，但 unbind 保留设备在线，
+不能据此推导旧发布已被统一撤销或排空。
+
+## R1-02 探测交接验收
+
+R1-01 移除全局 probe owner 后，认领单位是域锁内取走的 pending 批次，
+不是一个跨回调存活的全局执行权。入队与取走批次使用同一短锁：入队在前，
+当前或其他分派者取得它；判空在前，生产者自己的同步分派取得它。不再有
+“观察全局 owner 忙而只入队，owner 却已经准备退出”的交接窗口。
+Fatal 和代次变化导致的重试由当前分派循环继续处理，不新增 worker/executor。
+
+依赖通知即使没有 Deferred 等待者，也更新该依赖的代次。probe 检查依赖后
+到返回 Deferred 前发生通知时，提交阶段比较代次并重试；已经停车则由 wake
+取出相应等待者。无关依赖不能触发该设备重试，普通 Fatal 仍记入 attempted。
+已出队候选不是绑定许可：取得设备管理锁后复核注册和 Pending，注销对象
+返回 NotFound，已由显式 bind 激活的对象不再 probe。
+
+`ut-tests/probe_progress.rs` 通过真实模型入口验证这三个通知时机、判空后的
+wake/注册、出队后的注销/显式绑定。每域一次性 `dispatch_hook_fn` 只在
+`cfg(unittest)` 中存在，取走批次之后在域锁外调用；用精确插入操作模拟交错，
+不依赖 sleep、调度次数或墙钟。已有 kdriver 真宿主并发用例继续验证管理锁。
+非法上下文或同锁重入被拒绝后不会新增后台重试：调用方须在合法上下文
+重新调用 probe_pending。同步分派可以等待候选的管理锁；这不是无等待 API，
+总线仍须遵守跨设备锁序，不能等待反向依赖本设备锁的任务。
+
 ## 设备模块组织
 
 `device/` 按设备描述、注册对象和驱动访问聚合；内部子模块不作为公开路径。
@@ -43,10 +115,10 @@ modalias 保持回调期借用：probe 提供总线派生值，remove 保持 Non
 驱动候选筛选和设备快照从实例取得类型；具体驱动匹配仍保留数据 downcast 检查。
 `parent` 继续表示设备父子拓扑，不能由实例归属替代。
 
-实例记录随 domain 保留，以支持已移除设备的快照；记录存在不代表控制器可用。
+实例记录随 domain 保留，以支持实例身份查询；记录存在不代表控制器可用。
 注册成员时同时检查控制器状态；控制器进入 `Removing` 后，不论新设备是否填写
 `parent`，都拒绝向其下游实例挂载。检查和插入与移除状态迁移共用域锁，确保
-移除取得成员快照后没有新增成员漏出级联。控制器不存在或已移除时也拒绝挂载，
+进入 teardown 后不会再接受新成员。控制器不存在或已移除时也拒绝挂载，
 返回 `BusInstanceUnavailable`；保留的实例记录只承担身份查询，不复活硬件。
 本次接口迁移的调用点均在 model UT；旧驱动资源链路和 legacy class 接入不变。
 
@@ -94,9 +166,11 @@ model 拥有带借用设备上下文的设备服务、deferred probe、ResourceM
 宿主适配方实现 OS Op；普通 IRQ 回调通过 IrqHandlerFn / IrqAction 交接，不暴露内核 handler。
 边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
-依赖方向为 `driver-model → driver-class` 和 `driver-model → driver-os-api`。私有 `DeviceCore` 实现
-`PublicationSource`，`DeviceAccess::publish` 将同一个 `Arc` 身份交给 class。
-class 只读身份与在线状态；model 在 remove 回调前标记来源 offline。
+依赖方向为 `driver-model → driver-class` 和 `driver-model → driver-os-api`。
+`DeviceAccess::publication_source` 构造 BindingSource，保留共享设备与当次驱动身份；
+旧 `publish` 入口也使用该来源，不再读取设备后来绑定的驱动名。
+model 在注销的 remove 回调前标记设备 offline，普通 unbind 保持设备在线；
+家族操作准入和同步排空由子系统负责，不属于只读来源。
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
 发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
 
@@ -140,6 +214,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
 | `src/device/mod.rs` | `DeviceCore` 持有注册描述符与共享状态；`DeviceRef` 管理同一对象的共享引用 |
 | `src/device/access.rs` | `DeviceAccess` 与 info/res/fw 视图：回调期间的设备访问、资源申请和 class 发布 |
+| `src/device/source.rs` | `BindingSource`：共享设备事实与固定驱动身份，不保活 ops/Data |
 | `src/environment.rs` | 不关联设备身份的框架环境：host provider 注册与扩展查询 |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
 | `../os-api/src/{mmio,irq,dma,clock}.rs` | 已抽出的 OS 能力描述、Op 与句柄，按能力与生命周期聚合；不属于 model 实现 |
@@ -149,35 +224,37 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
 | `driver_class`（独立 crate） | `Class<T,H>`（registry + hooks）+ `Registration<T>`（注册权）+ `Publication<T>`（消费者引用）+ `InUse<T>`（在途计数 guard）；投影与撤销由 class hooks 管理。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
 | `src/error.rs` | OS 能力错误到 RuntimeError / ProbeError 的转换，ServiceError 转换位于 services.rs |
-| `src/domain/mod.rs` | `DeviceId` 管理键与 `DeviceDomain` 门面：一把锁、entry 的四个状态域、`global_domain()`（组合根与 `declare_driver!` 之外不应出现） |
+| `src/domain/mod.rs` | `DeviceId` 管理键与 `DeviceDomain` 门面：域身份、短状态锁、entry 的四个状态域、`global_domain()`（组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
 | `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
-| `src/domain/lifecycle.rs` | 移除编排：独占声明、children-first 级联、teardown 分相（`remove()` → drop `Data`；没有观察者/通知旁路） |
+| `src/domain/lifecycle.rs` | 每设备管理入口、解绑与注销、锁外 Data visitor；teardown 为 `remove()` → drop `Data`，不自动处理下游设备 |
 | `ut-tests/domain.rs` | 模型单测（`MockServices` 上运行），含 `env.provide` provider 门与 defer/wake 链路 |
+| `ut-tests/lifecycle.rs`、`ut-tests/management.rs` | 管理锁入口、服务 bundle 归属、绑定/解绑/注销及重入回归 |
 | `ut-tests/domain.rs` 中的 publication 契约测试 | 模型测试身份构造与跨 crate 发布生命周期验证 |
 | `ut-tests/firmware.rs`、`ut-tests/platform_bus.rs` | firmware 与 platform bus 单测 |
 
 ## 架构
 
-一把锁，四个引擎。所有状态在一个 `SpinNoPreempt<DomainInner>` 下；
-"引擎"是模块边界，各自拥有自己的状态域和逻辑，**没有一个拥有锁**：
+四个引擎共享 `SpinNoPreempt<DomainInner>`，保护注册表、队列和短状态迁移。
+每设备管理锁负责跨回调的串行化，锁序为管理锁 → 域短锁；等待管理锁时不持域锁。
 
 ```text
-                    DeviceDomain  (薄门面：持锁 + 排序跨引擎动作)
+                    DeviceDomain  (域身份 + 短状态锁 + 管理入口)
                              │
         ┌────────────┬───────┴────────┬─────────────────┐
         ▼            ▼                ▼                 ▼
     registry      probe          dependency        lifecycle
-   （三张表 +    （批选择 →      （park / wake /   （独占声明 →
-    entry 的      锁外执行 →      generation 守卫   children-first
-    四个状态域）   守卫式提交）     / late provider）  级联 → teardown）
+   （三张表 +    （队列分派 →    （park / wake /   （设备管理锁 →
+    entry 的      锁外匹配执行 →   generation 守卫   unbind / remove
+    四个状态域）   守卫式提交）     / late provider）  → teardown）
 
     DomainInner { bus_instances, drivers, devices, sched, services,
-                  next_device_id, services_installed }
+                  next_device_id, next_driver_key }
 
-    DeviceEntry { core          ← Arc<DeviceCore>：不可变描述符 + 共享身份
-                  lifecycle     ← 状态机 + generation + remove_retryable
+    DeviceEntry { core          ← Arc<DeviceCore>：描述符 + 身份 + management + domain
+                  services      ← 注册时选定的宿主 bundle
+                  lifecycle     ← 状态机 + generation
                   binding       ← driver / Data / attempted
                   topology      ← children
                   probe         ← last_deferred_dep / dep_seen_generations }
@@ -195,8 +272,9 @@ crate 级 `DEVICE_ID_ALLOCATOR` 取，继续作为内部索引与日志关联键
 访问当前条目。数字只用于内部索引、调度及错误/日志诊断，没有公开按数字查找入口。
 
 `DeviceSnapshot::device`、总线成员列表及 deferred_report 携带对象引用；
-快照的状态和驱动名是获取时刻的值，不是并发操作许可。无绑定条目移除后仍返回
-NotFound/None，绑定过的 Removed 条目仍可快照查询，重复移除返回 BadState。
+快照的状态和驱动名是获取时刻的值，不是并发操作许可。注销统一删除 entry，
+之后 snapshot 返回 None；同域已注销对象通过管理入口后重复 remove 返回 Ok，
+foreign 对象在进入宿主锁前即被域身份检查拒绝。
 同一路径重新注册产生新对象，旧引用只保留旧元数据，不会匹配新注册。
 
 `add_bus_instance` 的控制器参数为 `Option<&DeviceRef>`，同样在锁内验证身份和
@@ -207,7 +285,8 @@ NotFound/None，绑定过的 Removed 条目仍可快照查询，重复移除返�
 ## 设备引用与注销
 
 `DeviceCore` 是已注册描述符的唯一持有者，同时保存管理键、物理路径、
-最近开始 probe 的驱动名和 offline 状态。域条目、`DeviceRef` 与 class 发布
+当前 probe/绑定的驱动名和 offline 状态；失败探测与解绑会清空驱动名。
+域条目、`DeviceRef` 与 class 发布
 共享同一个核心。probe 批次及 remove 只克隆 Arc，不再克隆描述符；
 `DeviceAccess<'a, B>` 仍是回调期间借用核心中描述符和服务的类型化视图。
 `DeviceAccess::reference()` 可保留对象身份，不延长回调服务借用。
@@ -217,14 +296,14 @@ NotFound/None，绑定过的 Removed 条目仍可快照查询，重复移除返�
 `same_device` 按 Arc 对象身份判断；相同总线位置再次注册也是另一个对象。
 online 不表示已绑定，也不是并发操作许可；Probing 期间仍允许发布 class。
 
-注销继续执行 children-first 级联，在实际 teardown 前关闭来源，随后锁外调用
-remove、销毁绑定 Data。未绑定路径同样关闭来源并从域表删除，条目的最终析构
-移到域锁外。外部引用不会推迟 remove、Data 的资源释放或 class 注册撤销，
-最后一个引用的 Drop 也不会再次触发注销。级联 Busy 时保留原有重试语义，
-不提前撤掉父设备仍被子设备使用的来源。
+`unbind_device` 取消 pending/deferred 工作，在域锁外调用 remove 并销毁 Data，
+清空驱动名后回到 `Unclaimed`；注册、身份和 online 状态保留，可用 `bind_device` 重试。
+`remove_device` 只注销指定设备，在 teardown 前关闭来源，完成后从域表删除 entry，
+entry 析构也在域锁外。父子设备和控制器下游成员的顺序由总线负责，模型不递归退出。
+外部引用不会推迟 remove 或 Data 释放，最后一个引用的 Drop 不触发注销。
 
-移除后，绑定过的条目仍保留 Removed 快照，未绑定条目仍直接删除；
-两种情况下外部引用均可继续读取静态信息。只有域与所有外部持有者都释放核心后，
+无论是否绑定过，注销后外部引用均可继续读取静态信息，域中不保留 Removed 快照。
+只有域与所有外部持有者都释放核心后，
 静态元数据才销毁。总线数据必须是无硬件所有权的描述，其 Drop 不得依赖可睡眠
 上下文，因此这里使用普通 Arc，不引入 DeferredArc。驱动资源仍由绑定 Data 或
 class 在途 runtime 持有，不能藏进描述符。销毁整个域不能替代显式注销协议。
@@ -242,10 +321,10 @@ online 不能证明可以挂载子设备。Probing 父设备仍可枚举孩子�
 
 引用方向是子设备强持有父设备，反向 children 仅保存域内部管理键，父设备不持有
 孩子的强引用。注册后描述符不可变、只能引用已注册父对象，不提供 reparent，
-因此正常构造不能形成拓扑强引用环。移除仍按 children-first，并合并控制器
-所提供总线实例的成员；移除孩子从父条目的反向列表摘除，但不清空静态父引用。
+因此正常构造不能形成拓扑强引用环。移除孩子从父条目的反向列表摘除，
+但不清空静态父引用；移除父设备不自动移除孩子或控制器所提供实例的成员。
 孩子的外部引用可保留父设备离线元数据，不延迟父设备的 remove 或绑定资源释放。
-总线实例成员级联规则不变；控制器关联同样使用设备对象引用。
+总线负责停止枚举、处理下游设备并确定锁序；控制器关联同样使用设备对象引用。
 
 ## 设备服务上下文
 
@@ -259,7 +338,8 @@ DeviceRef 转换而来。宿主通过 `context.device()` 直接读取同一设�
 资源视图也直接读取共享描述符，移除单独保存的资源表、DMA 副本和管理键。
 DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取得 DMA 配置，
 防御性拒绝缺失配置，继续执行地址转换、mask 校验和错误传播。
-失败 probe 的局部守卫仍按 RAII 回滚，成功绑定的守卫仍由 Data 持有并在注销时释放。
+失败 probe 必须先停运行活动、显式注销已发布能力，再由 RAII 释放无活动的局部守卫；
+模型无法替未返回的 Data 调用 remove。成功绑定的守卫由 Data 持有并在 remove 后释放。
 
 上下文只表达请求归属与借用范围，不是并发准入令牌；offline 快照不能替代
 同步、IRQ 屏蔽、quiesce 或 class 在途计数。本步不新增运行期资源操作接口，
@@ -270,8 +350,9 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 - 域锁是 `kspin::SpinNoPreempt`：**禁抢占、不关中断**。因此 `add_device` /
   `remove_device` / `probe_pending` / `wake` / 各类快照都**不得在硬中断上下文
   调用**——持锁期间来中断会在同一把锁上自死锁。
-- **驱动代码在域锁外运行**（`probe.rs` 的 `select_batch` 之后释放锁），所以
-  `DriverOps::probe` / `remove` 可以睡眠、可以回调域、可以做慢速 MMIO。
+- matching、`DriverOps::probe` / `remove` 和 `with_data` visitor 在域锁外、
+  设备管理锁内运行，可以睡眠，但不能重入同设备管理或等待需要该锁的工作。
+  不同设备可以并行；跨设备调用仍须由调用方避免锁依赖环。
 - `remove_device` 的 teardown 相（`DriverOps::remove` → drop `Data`）
   同样在锁外，且按构造运行在任务上下文——这是各驱动 `Drop` 里
   `block_wait::prepare_block_wait()` 之类可睡眠调用的前提。
@@ -279,9 +360,9 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
   发布回收由 `Data` 持有的 `Registration` 完成。类发布的 `ClassHooks::unpublish`
   （`del_gendisk`、transport close）在仍有在途 `InUse` 时推迟到最后一个许可 drop
   ——见 `../class/src/publication.rs` 的 `finish_or_defer`。
-- `global_domain()` 可在早期启动调用（`LazyInit::call_once`）；但
-  `set_services` 之前所有资源获取都落到 `NoServices`，返回
-  `RuntimeError::Unsupported`。这是刻意的"响亮失败"，不是静默降级。
+- `global_domain()` 的初始化不代表设备已可注册。`NoServices` 使用默认工厂，
+  `add_device` 返回 `AddDeviceError::Management(RuntimeError::Unsupported)`，
+  不入表也不探测。真实宿主工厂与管理入口要求已初始化的可睡眠任务上下文。
 - `IoMap` 的访问器带边界与对齐检查，越界/未对齐**总是 panic**（不是
   `debug_assert`）——release 下同样是 panic，因为 MMIO 上的未对齐 volatile
   访问是 UB。
@@ -298,70 +379,51 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 
 ## 状态机
 
-`DeviceState`，7 态：
+注册与绑定分开：`Unclaimed` 仍在域表中，注销则删除 entry。
+枚举中保留的 `Removed` 变体不表示当前注销路径会留下该状态的条目。
 
 ```text
-                add_device
-                     │
-                     ▼
-   ┌────────────  Pending ◄──────────────────────┐
-   │                 │ select_batch              │ wake(dep) 命中
-   │        ┌────────┴─────────┐                 │
-   │        ▼                  ▼                 │
-   │   无候选驱动            Probing ────────────┼──────┐
-   │        │                  │                 │      │
-   │        ▼         ┌────────┼────────┐        │      │
-   │   Unclaimed ─────┘        │        │        │      │
-   │   （late driver /          ▼        ▼        │      │
-   │     late provider       Ok(Data)  Deferred ──┘      │
-   │     可再次唤醒）           │        │               │
-   │                           ▼        └── Fatal ──────┘
-   │                        Active          （记入 attempted，
-   │                           │              同轮换下一个候选）
-   │        remove_device      │
-   │      ┌────────────────────┴──────────────┐
-   │      ▼                                   ▼
-   └─  Removing ──（级联子设备成功）──►   Removed
-         │
-         └─（子设备 Busy/BadState）──► 停在 Removing，
-                                        remove_retryable = true，
-                                        下一个调用者可独占续做
+add_device ──► Pending ── matching ──► Probing ── Ok(Data) ──► Active
+                  │                     │
+                  │ 无候选               ├─ Fatal ──► Pending（记录 attempted）
+                  ▼                     └─ Deferred(dep) ──► Deferred
+               Unclaimed ◄── finish_probe_phase(false) ───────┘
+                  │                                           │
+                  └─ bind / late driver / late provider ──► Pending ◄─ wake
+
+Pending / Deferred / Unclaimed / Active
+                  │ unbind_device 或 remove_device
+                  ▼
+               Removing ── unbind ──► Unclaimed（保留注册与 online）
+                  └─────── remove ──► 删除 entry（offline）
 ```
 
 要点：
 
-- `Probing` 中的设备**拒绝移除**（返回 `RuntimeError::Busy`）。probe 正在锁外
-  产生副作用（class 发布、IRQ 注册、provider 发布），此时摘掉 entry 会让这些
-  副作用失去归属者。
-- `Removing` 有两种：正在进行的（`remove_retryable == false`，并发移除者看到
-  `Busy`）与级联中断后可续做的（`true`，**恰好一个**调用者能在锁内翻回 false）。
-  这是 Linux `begin_removing` 独占声明的等价物。
+- 同设备其他任务的管理请求等待当前 probe/teardown 释放管理锁；同任务重入
+  返回 `Management(Reentrant)`，非法上下文返回 `Management(InvalidContext)`。
+  `Removing` 表示当前管理操作正在 teardown，没有可续做标记或自动下游回滚。
 - `Unclaimed` 不是终态：后注册的驱动（`late_driver_registration_*` 测试）与
   后发布的 provider（`late_provider_wakes_unclaimed_device` 测试）都能把它捞回来。
   `ProbeState::last_deferred_dep` 因此要跨 `finish_probe_phase` → Unclaimed 保留。
-- `Removed` 的 entry 保留供拓扑查询；`Removing`/`Removed` 上再次 remove 返回
-  `BadState`。
+- `bind_device` 对未绑定设备清除 attempted/deferred 记录后重新尝试，Active 不变。
+  注销后的引用不能再次绑定；同域重复注销通过上下文检查后返回 Ok。
 
 ## 算法流程
 
 ### 探测（`probe_pending`）
 
-1. `probing` 标志做泵级串行化：已有泵在跑就直接返回默认 `ProbeStats`
-   （它的批次覆盖了此前入队的设备）。`ProbePumpGuard` 在 panic 展开时也释放标志。
-   这同时保护了主机侧的单槽资源（MMIO lease collector 断言串行）。
-2. `select_batch`（持锁）：取走 `sched.pending`，对每个 entry 选出**未永久失败
-   且得分最高**的驱动（`MatchScore`：`Exact > Generic > Fallback > NoMatch`；
-   先比 `desc.bus == B::ID` 再比 `B::accepts`，一条总线的驱动永远看不到另一条
-   总线的设备）；置 `Probing`；无候选则置 `Unclaimed`。
-3. 锁外跑 `driver.probe(&desc, id, services)`。probe 前先记下 entry 的
-   `lifecycle.generation`。
-4. 提交（重新持锁）：
-   - `Ok(data)` 且 generation 未变 → `Active`，`Data` 由域持有；
-   - `Ok(data)` 但 generation 变了（设备被拆过又重加）→ **drop 这个陈旧 Data**
-     并告警，绝不写进 entry；
-   - `Err(Deferred(dep))` → `park_deferred`；
-   - `Err(Fatal)` → 驱动进 `attempted`，同一轮的下次 `select_batch` 换候选。
-5. 循环到 `select_batch` 返回空。
+1. 在域短锁内取走 `sched.pending` 并取得设备引用，随后逐设备进入管理锁。
+   没有全局 probe 标志；并发分派者可处理不同设备，同一设备仍串行。
+2. 核对注册对象与 Pending 状态，快照驱动列表、attempted、注册时的 services
+   及 generation。域锁外 matching 选择未永久失败且得分最高的驱动。
+3. 重新持域锁置 Probing；无候选且驱动注册表未变化时置 Unclaimed，
+   若注册表有变化则重新入队。probe 在域锁外使用该 entry 的宿主 bundle。
+4. 提交时校验 generation 与 Probing 状态：成功转 Active；未能提交的 Data
+   先经 driver.remove 再 drop，并返回 BadState；Deferred 进入依赖等待，
+   Fatal 记入 attempted 并重新入队以尝试其他候选。
+5. 循环至队列为空。管理入口被拒绝的设备计入 `ProbeStats::rejected`，
+   本轮结束时仍为 Pending 的对象重新入队，不在同轮无限重试。
 
 ### 依赖等待（`dependency.rs`）
 
@@ -375,30 +437,32 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 
 ### 移除（`lifecycle.rs`）
 
-三相，**先关拓扑入口**：
+1. 核对域身份，进入设备管理锁，再在域短锁内核对注册对象。注销已完成的
+   同域对象返回 Ok；foreign 返回 NotFound。
+2. 置 Removing、增加 generation、取消 pending/deferred，取出 driver/Data
+   与 entry.services。只有注销关闭来源；普通 unbind 保持 online。
+3. 域锁外运行 `DriverOps::remove`，然后 drop Data、清空驱动名。
+4. unbind 将状态恢复为 Unclaimed；remove 从父反向列表摘链并删除 entry，
+   在域锁外释放条目。管理锁覆盖整个流程，包括资源析构。
 
-1. 持锁：校验、翻 `Removing`（此后 `add_device` 不能再挂子设备，所以下面的
-   级联快照不会看到之后新增的 entry）、`generation += 1`、快照 teardown 集合
-   （device children ∪ 该设备桥接的 bus instance 成员）。**此时还不取 driver/Data。**
-2. 锁外：children-first 级联。任一子设备失败即中止——父设备停在 `Removing`、
-   `remove_retryable = true`、binding 完整，错误返回给调用者重试。
-3. 重新持锁（只有这个流程会把该 id 从 `Removing` 往前推）：取出 driver/Data，
-   然后锁外跑 teardown：`DriverOps::remove()`（quiesce）→ drop
-   `Data`（类发布在其中撤销，guards 按字段序释放；没有观察者/通知旁路）。
+流程只作用于本设备，不遍历 parent children 或 bridge 实例成员。
+总线/控制器负责停止枚举、安排下游退出及跨设备锁序。
 
-未绑定过的设备（Pending/Deferred/Unclaimed）走轻路径：关闭来源，从
-pending/deferred 工作表摘掉、锁外释放 entry；外部引用可继续保留离线核心。
-Probing 状态返回 Busy，不在回调执行期间移除。
+### 数据访问（`with_data`）
+
+持设备管理锁，在域短锁内验证 Active 并暂取 Data；释放域锁后运行类型化 visitor，
+再持域锁归还 Data，最后释放管理锁。visitor 不可重入同设备管理。
+管理入口失败、foreign、未绑定或类型不匹配均返回 None，不执行 visitor。
 
 ## 并发模型
 
-- **一把 `SpinNoPreempt`**。check-then-act 协议的原子性（add 时的父设备校验、
-  批选择、独占移除声明）是**域不变量**，不是靠调用者纪律。旧模型用 5 类锁 +
-  一段手写锁序文档来得到同样的性质。
-- 驱动代码全部在锁外，所以锁内没有 MMIO、没有分配、没有回调。
-- `probing: SpinNoPreempt<bool>` 是独立的泵级标志，不与域锁嵌套获取。
+- `SpinNoPreempt<DomainInner>` 保护表、队列及短状态迁移；每设备管理锁
+  保护跨回调的绑定操作。必须先取得管理锁，再短暂获取域锁。
+- matching、probe、remove、Data drop 和 visitor 均在域锁外。表和队列操作
+  仍可能分配，不能声称所有域锁内路径无分配。
+- 不存在全局 probe 泵锁；宿主服务必须支持不同设备并发，不得依赖单槽串行假设。
 - `DEVICE_ID_ALLOCATOR` 是 crate 级 `AtomicU64`，`fetch_add`，跨域唯一。
-- `select_batch` 只克隆共享核心的 Arc，不再深拷贝描述符和 compatibles。
+- 队列分派只克隆共享核心的 Arc，不深拷贝描述符和 compatibles。
   attempted 集合仍按批次复制，`modalias` 每次 probe 重算；本次不改变匹配策略。
 - class 注册表（`driver-class` 的私有 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
   但同样是已知的、被接受的小集合线性扫描。
@@ -426,11 +490,10 @@ pub unsafe fn new(vaddr: usize, region: MmioRegion, release: Option<ReleaseHook>
 不是使用不便。实现已迁到 driver-os-api，安全契约见其安全文档。
 model 的 MockServices 仍按这个契约构造测试映射，生产适配必须同样满足它。
 
-### 一把锁，而不是分层锁
+### 域短锁与每设备管理锁
 
-见"并发模型"。取舍是：更粗的锁粒度换"协议原子性由结构保证"。因为驱动代码
-一律在锁外，锁内只做表操作，实测启动期 56 个描述符的枚举 + 探测没有可观测的
-争用。
+域短锁使注册表校验与状态变更原子化；可睡眠管理锁覆盖单设备回调与资源清理，
+让同设备请求等待、不同设备独立推进。总线自己的跨设备依赖与锁序不由域推断。
 
 ### `Bus` 是开放 trait，`IdEntry` 是关联类型
 
@@ -480,7 +543,7 @@ threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是�
 驱动注册按（总线类型， 名字）去重并拒绝（Linux `driver_register` 对同一情形
 返回 `-EBUSY`）：同一 probe 体出现两个键，一次 Fatal 失败会留下仍匹配的孪生
 键，让每个设备把同一个 probe 跑两遍；per 总线名字唯一同时保证 `DeviceCore`
-驱动名身份卡无歧义。同分 tie-break：`select_batch` 用 `max_by_key` 在注册序
+驱动名身份卡无歧义。同分 tie-break：锁外 matching 用 `max_by_key` 在注册序
 Vec 上取最高分，平分时后注册者胜——这是显式决定，由
 `same_score_later_registration_wins` 钉住。
 
@@ -506,10 +569,9 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 域侧的释放责任：
 
-- probe 提交时发现 generation 变了 → 就地 drop 陈旧 `Data`，guards 对着创建
-  它们的 services 释放；
-- 移除路径 → `remove()` 先跑，然后 drop `Data`，然后才把 entry 置 `Removed`；
-- 轻路径（未绑定设备）→ 没有 `Data`，只清工作表和 entry。
+- probe 结果无法提交 → 使用注册时的 services 调用 remove，再 drop 未提交 Data；
+- unbind → remove、drop Data、清驱动名、恢复 Unclaimed；
+- 注销 → 关闭来源、清工作表、remove、drop Data、删除 entry；未绑定时无驱动清理。
 
 `ReleaseHook = Arc<dyn Fn() + Send + Sync>` 是每个 guard 携带的延迟释放钩子，
 由 `driver-host` 在构造 guard 时注入（例如 `move || provider.unmap_mmio(mapping)`）。

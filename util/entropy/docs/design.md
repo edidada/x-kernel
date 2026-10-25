@@ -23,40 +23,56 @@ The four `EntropySource` implementations live in `source/arch_cpu.rs`,
 They delegate to the existing crate-level backends; `virtio.rs` adapts the
 Hwrng class into asynchronous pool replenishment.
 
-Consumers retain the operation-only HwrngPublication facade, not generic
+Consumers retain the operation-only HwrngHandle facade, not generic
 driver-class payload handles. The backend depends on subsys-hwrng only.
 Every read and failure query acquires a permit; withdrawal returns BadState.
-The collector stops when hardware is terminally failed or its publication is
-unavailable, instead of retrying a withdrawn source indefinitely. The mock
-fixture owns an explicit HwrngRegistration until its work has been shut down.
+The collector leaves a terminal or withdrawn instance without losing its
+outstanding demand. Fixtures explicitly unregister providers before shutting
+down their private collection work.
 
 ## Architecture and execution context
 
 Initialization mixes eligible eager sources and registers VirtIO discovery.
-VirtIO discovery enumerates existing devices and subscribes to later class
-availability. It does not synchronously read hardware during probe or boot.
+VirtIO initialization prepares work, subscribes to available and removed events,
+then queues enumeration. It does not synchronously read hardware during probe or boot.
 Enabling `entropy_virtio_rng` trusts host-provided entropy for pool seeding.
 
-Each source prepares one reusable `kworkng::WorkHandle` during registration,
-after normal workqueue services are ready. A demand queues one callback that
-performs blocking `HwrngDevice::read`, mixes the result, and returns. No
+Entropy prepares one reusable `kworkng::WorkHandle`, independent of provider
+lifetimes, after normal workqueue services are ready. A demand queues a callback
+that performs blocking `HwrngDevice::read`, mixes the result, and returns. No
 dedicated entropy task or idle demand wait remains. An unresponsive device or
 persistent retry errors can still occupy one shared worker and its queue active
 allowance indefinitely; this migration does not add completion timeouts.
 
 ## State and concurrency
 
-`SELECTED_SOURCE` holds the selected `VirtioEntropySource` behind a mutex.
-Its `EntropyCollector` owns `has_demand` and `is_failed` in a
-`SpinNoIrq<CollectorState>`. Demand publication and
-nonblocking work submission share that lock. The same Work serializes callbacks
-and permits one pending occurrence while running, so requests during callback
-exit are not lost. AlreadyQueued coalesces demand; other submission errors are
-logged and restore the previous demand flag. No read or retry sleep holds the
-source lock. Work preparation failure is logged before publishing the source.
+`COLLECTION` retains the prepared `EntropyCollection` behind an initialization
+mutex. Work captures the collector, which never owns Work. Its task-context
+`SpinNoPreempt<CollectorState>` holds coalesced demand, the selected handle and
+failed-instance handles. Only the serialized worker changes selection/failures;
+requesters only set demand. Readiness events merely enqueue a rescan: they never
+clear a selection based on an old event, wait for work, or acquire management locks.
+Subscriptions retain Weak collection references, not per-provider work owners.
+
+Demand is published before nonblocking submission. Work permits one pending
+occurrence while running, including after the callback's final state check.
+AlreadyQueued coalesces requests. Other submission errors are logged without
+discarding demand; later requests/events can retry. Production never shuts down
+this kernel-lifetime work. Work preparation failure leaves initialization unset
+so a later init can retry; it installs no partial subscriptions.
+
+At each collection pass, the worker enumerates the registry outside its state
+lock, preserves a still-eligible selected instance, otherwise selects another
+virtio-rng instance. Failed records are pruned against the current registry;
+old references and records are dropped outside state locks. No read, hardware
+failure query, mixing or retry sleep holds the state lock. Without a source,
+the worker returns with demand set, rather than polling for registration.
 The pool mutex protects mixing; readiness is published after the mix completes.
-The source's synchronous sampling method requests work and returns `NoEntropy`
-so the caller continues checking other sources.
+The source's synchronous sampling method requests work even when currently
+unavailable, then returns `NoEntropy`. `read_all_available` admits requests by
+trust tier, leaving availability validation to each adapter. Synchronous adapters
+already reject unavailable hardware; asynchronous VirtIO retains its first demand.
+Eager sampling still excludes HostTrusted sources, and trust policy is unchanged.
 After a reseed attempt yields no immediate sample, the next attempt still waits
 for another output interval; the pending VirtIO read does not trigger a new
 request on every pool read.
@@ -74,12 +90,17 @@ recovery runs. Context errors are not evidence of device failure; this worker
 always calls read with no source/device lock in sleepable task context.
 Retries have no failure-count cutoff; a persistent host failure can still
 prevent seeding, but cannot establish a terminal device failure.
-A failed source can be replaced by a newly discovered device instance.
+Withdrawal is not terminal hardware failure. Either withdrawal or terminal failure
+restores the active demand before reselecting, so an already registered sibling
+can satisfy it without another getrandom or registration event. A terminal instance
+is not retried on rediscovery; records cover only instances in the last registry
+snapshot and are pruned at the next pass after removal. There is no historical
+name/path blacklist. New publication instances remain eligible.
 
-The source and Work both retain an Arc to the collector; the collector does not
-own Work, avoiding an ownership cycle. The callback retains the class handle.
-Device hot removal and rebind are not supported by the VirtIO adapter. The collector does not reset hardware
-or release outstanding DMA; those responsibilities stay with the driver/host.
+The collector does not stop/reset hardware or release DMA. Drivers must stop and
+wake reads before synchronous unregister; removed notification occurs after drain
+and is not what wakes the blocked read. This supports capability handoff, not
+proof that the legacy concrete VirtIO driver implements hardware hot removal.
 
 ## Validation
 
@@ -94,20 +115,31 @@ All seven modules retain `cfg(unittest)`, their module names and parent access.
 | `ut-tests/arch_cpu.rs` | `arch_cpu::tests` | 2 | `entropy_arch_cpu` |
 | `ut-tests/smccc_trng.rs` | `smccc_trng::tests` | 2 | `entropy_smccc_trng` and AArch64 |
 | `ut-tests/jitter.rs` | `jitter::tests` | 5 | `entropy_jitter` |
-| `ut-tests/virtio.rs` | `virtio::tests` | 2 | `entropy_virtio_rng` |
+| `ut-tests/virtio.rs` | `virtio::tests` | 10 | `entropy_virtio_rng` |
 | `ut-tests/virtio_real_device_tests.rs` | `virtio::real_device_tests` | 3 | `entropy_virtio_rng` |
 
-There are 34 cases across all gates: 19 without additional case/module gates,
-two CPU, five jitter, two AArch64 SMCCC, and six VirtIO-dependent cases.
-Four cases retain `serial`: the controlled collector case and all three
-real-device cases. No cases carry a `user` flag. The real-device module remains
+There are 42 cases across all gates. Controlled work fixtures and real-device
+cases are serial; the name filter test needs no serialization. No cases carry a
+`user` flag. The real-device module remains
 registered, requires a published VirtIO RNG device, and fails rather than skips
 when no device is present. Use the configured kernel guest unittest workflow;
 these files are not host Cargo integration-test targets.
 
-Controlled collector tests cover demand coalescing, return to idle, reuse,
-repeated read errors without new demand, successful recovery, and explicit
-terminal device failure.
+Controlled tests run real Work and stack-scoped Completion waits: idle/in-flight
+withdrawal, a preexisting sibling, late old events, absent-source retention,
+filtering, terminal/invalid instances, pruning, transient retries, coalescing,
+reuse and request/registration at callback return. Private test hooks run only
+under cfg(unittest). Five-second watchdogs detect lost progress, not performance;
+an outer guest timeout isolates an arbitrarily stuck implementation. Fixtures stop
+all synthetic readers before unregister and shutdown, including on assertion failure.
+Test sinks never mix synthetic bytes into the real pool. One serial test briefly
+overrides COLLECTION with RAII while invoking the real read_all_available→VirtIO
+adapter path, restores it before waiting, then proves a single later registration
+satisfies the retained demand. The harness runs serial tests before parallel tests.
+Private static test registries retain only bounded inert Weak subscriber closures
+after fixture destruction because hwrng subscriptions currently last for registry
+lifetime. `kcompletion` is cargo-shear-exempt solely for these external UTs;
+production entropy uses ktask/kworkng and does not implement a new wait primitive.
 Real-device QEMU tests cover empty/short reads, destination guards and repeated
 queue reuse. A separate VirtIO-only guest getrandom test exercises initialization
 and replenishment without other credited entropy sources.

@@ -131,11 +131,45 @@ they do not emulate the hardware mechanism that latches physical error bits.
 
 ## kvirtiodrivers
 
-- Published version: 0.13.5
+- Base version: 0.13.5
 - Upstream: https://github.com/727Hsj/kvirtiodrivers.git
-- Imported branch: `kmain` (rebased on the upstream virtio-drivers line)
-- Source revision: ab99294a6860704142d3b18a9a4884349adceede
-- License: MIT; original license file is retained.
+- Main import revision: ab99294a6860704142d3b18a9a4884349adceede (`kmain`).
+- R1 instance-DMA/reset patch baseline: 5464361169822b3dbd3956017083bf8bbf7a7c2e.
+- Reconciliation retains the main import's GPU/EDID, vsock counter handling,
+  queue notification barrier and ordered transport initialization updates.
+- License: MIT; upstream LICENSE and source notices are retained.
+- Imported scope: Cargo manifest, source tree, README and LICENSE, plus local
+  instance-DMA changes, documentation, external unit tests and a standalone
+  test lockfile. Upstream CI and standalone OS examples are not imported.
 
-Local changes belong in separate commits. When updating, re-import the target branch, reapply only required patches, and rerun the kernel virtio driver build and boot tests. Remove the
-patch override once an upstream release supplies the required behavior.
+The root Cargo patch selects this in-tree snapshot for the existing exact
+0.13.5 dependency. It does not depend on an absolute path, a registry-cache
+edit, or an unpublished external Git commit. The kernel uses its root lockfile;
+the library's own lockfile pins its standalone host tests.
+Its local rustfmt and Clippy configurations preserve upstream defaults instead
+of inheriting the kernel's formatting and lint-parameter policies. These do
+not disable lint checks; the library keeps its own crate-level lint settings.
+
+Local R1-06 changes add a per-device DMA backend for allocation, ring layouts,
+buffer/indirect mappings and RNG, retaining static Hal compatibility. See
+`kvirtiodrivers/docs/instance-dma.md` for ownership, rollback and safety limits.
+R1-07 also adds transport-owned reset confirmation and explicit RNG cancellation.
+This is not completed new-model integration or hardware IRQ-tail acceptance.
+
+During this temporary vendoring period, further kernel-delivered library
+changes are made here. The external source checkout is a provenance/patch
+reference, not a second automatically synchronized source of truth. Keep
+library changes separable for upstream submission; do not introduce kernel
+crate dependencies into the library. When upstream supplies the changes,
+switch to a fixed release/revision, remove the patch and rerun library plus
+kernel regression tests. Do not replace this snapshot with an unreviewed copy.
+
+Standalone validation from this directory (using the kernel's pinned toolchain):
+
+```sh
+cargo +nightly-2026-03-08 test --manifest-path kvirtiodrivers/Cargo.toml --locked --all-features
+cargo +nightly-2026-03-08 test --manifest-path kvirtiodrivers/Cargo.toml --locked --no-default-features
+```
+
+Kernel integration must also pass the normal configured Makefile build/test
+flow; standalone host tests are not hardware or full-driver acceptance.

@@ -153,6 +153,14 @@ impl Transport for PciTransport {
         self.inner.get_status()
     }
 
+    fn begin_reset(&mut self) {
+        self.inner.begin_reset();
+    }
+
+    fn poll_reset(&mut self) -> bool {
+        self.inner.poll_reset()
+    }
+
     fn set_status(&mut self, status: DeviceStatus) {
         #[cfg(target_arch = "x86_64")]
         if self.irq_state.is_failed() && status.contains(DeviceStatus::DRIVER_OK) {

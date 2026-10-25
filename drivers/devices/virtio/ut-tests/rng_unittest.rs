@@ -13,7 +13,7 @@ use unittest::{assert, assert_eq, assert_ne, def_test};
 use virtio_drivers::{BufferDirection, PhysAddr, transport::DeviceType};
 
 use super::*;
-use crate::mock_virtio::{MockHal, MockQueue, MockTransport};
+use crate::mock_virtio::{MockHal, MockQueue, MockReset, MockTransport};
 
 static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static DMA_BLOCKS: AtomicUsize = AtomicUsize::new(0);
@@ -48,11 +48,7 @@ unsafe impl Hal for TrackedHal {
         unsafe { MockHal::mmio_phys_to_virt(paddr, size) }
     }
 
-    unsafe fn share(
-        buffer: NonNull<[u8]>,
-        direction: BufferDirection,
-        platform: bool,
-    ) -> PhysAddr {
+    unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, platform: bool) -> PhysAddr {
         core::assert_eq!(buffer.len(), MAX_REQUEST_BYTES);
         BUFFER_ADDRESS.store(buffer.as_ptr() as *mut u8 as usize, Ordering::Relaxed);
         MAPPINGS.fetch_add(1, Ordering::Relaxed);
@@ -149,6 +145,7 @@ struct Completion {
     after: Option<DriverError>,
     has_returned_error: AtomicBool,
     action: SpinNoIrq<Option<Action>>,
+    on_notify: SpinNoIrq<Option<Action>>,
     notifications: AtomicUsize,
 }
 impl RngCompletion for Completion {
@@ -176,6 +173,10 @@ impl RngCompletion for Completion {
 
     fn notify(&self) {
         self.notifications.fetch_add(1, Ordering::Relaxed);
+        let action = self.on_notify.lock().take();
+        if let Some(action) = action {
+            action();
+        }
     }
 }
 fn device(
@@ -481,4 +482,341 @@ fn lost_owner_retains_pending_dma_even_after_wrong_token() {
         assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
         assert_ne!(queue.lock().descriptors, 0);
     }
+}
+
+#[def_test(serial)]
+fn closing_reads_wakes_pending_reader_without_reclaiming_dma() {
+    let completion = Arc::new(Completion::default());
+    let (device, queue, irq) = device(completion.clone());
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+    let notified_after_close = Arc::new(AtomicBool::new(false));
+    let observed = notified_after_close.clone();
+    let weak_for_notify = Arc::downgrade(&device);
+    *completion.on_notify.lock() = Some(Box::new(move || {
+        let device = weak_for_notify.upgrade().unwrap();
+        observed.store(
+            device.request.lock().is_closed && MAPPINGS.load(Ordering::Relaxed) == mappings + 1,
+            Ordering::Relaxed,
+        );
+    }));
+    let weak = Arc::downgrade(&device);
+    *completion.action.lock() = Some(Box::new(move || {
+        weak.upgrade().unwrap().close_reads();
+    }));
+    let mut output = [0xaa; 8];
+    let read_result = device.read(&mut output);
+    let notifications = completion.notifications.load(Ordering::Relaxed);
+    let retained_mapping = MAPPINGS.load(Ordering::Relaxed);
+    let retained_dma = DMA_BLOCKS.load(Ordering::Relaxed);
+    let is_pending = matches!(device.request.lock().state, RequestState::Pending(_));
+    device.close_reads();
+    let repeated_notifications = completion.notifications.load(Ordering::Relaxed);
+    irq.store(1, Ordering::Relaxed);
+    let handled = device.handle(0).handled();
+    let pending_irq = irq.load(Ordering::Relaxed);
+    let mapping_after_irq = MAPPINGS.load(Ordering::Relaxed);
+    let is_failed = device.is_failed();
+    let submit_result = device.request.lock().submit();
+    // SAFETY: The test owns the retained queue and original buffer; no IRQ runs concurrently.
+    unsafe { finish(&queue.lock(), 8, false) };
+    let completed = device.request.lock().complete();
+    let closed_read = device.read(&mut output);
+    drop(device);
+    assert_eq!(read_result, Err(KError::BadState));
+    assert_eq!(output, [0xaa; 8]);
+    assert!(notified_after_close.load(Ordering::Relaxed));
+    assert_eq!(notifications, 1);
+    assert_eq!(retained_mapping, mappings + 1);
+    assert_eq!(retained_dma, dma);
+    assert!(is_pending);
+    assert_eq!(repeated_notifications, 1);
+    assert!(!handled);
+    assert_eq!(pending_irq, 1);
+    assert_eq!(mapping_after_irq, mappings + 1);
+    assert!(!is_failed);
+    assert_eq!(submit_result, Err(DriverError::BadState));
+    assert_eq!(completed, Ok(true));
+    assert_eq!(closed_read, Err(KError::BadState));
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+}
+
+#[def_test(serial)]
+fn closing_reads_rejects_cached_bytes_and_retained_references() {
+    let completion = Arc::new(Completion::default());
+    let (device, queue, irq) = device(completion.clone());
+    let retained = device.clone();
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    device.request.lock().submit().unwrap();
+    // SAFETY: A single live submission owns this test queue and its buffer.
+    unsafe { finish(&queue.lock(), 8, false) };
+    irq.store(1, Ordering::Relaxed);
+    assert!(device.handle(0).handled());
+    assert!(matches!(
+        device.request.lock().state,
+        RequestState::Readable(_)
+    ));
+    device.close_reads();
+    drop(device);
+    let mut output = [0xaa; 8];
+    assert_eq!(retained.read(&mut output), Err(KError::BadState));
+    assert_eq!(retained.request.lock().read(&mut output), 0);
+    assert_eq!(output, [0xaa; 8]);
+    assert_eq!(retained.read(&mut []), Ok(0));
+    assert!(!retained.is_failed());
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+}
+
+#[def_test(serial)]
+fn closing_idle_rng_never_submits_or_acknowledges() {
+    let completion = Arc::new(Completion::default());
+    let (device, _queue, irq) = device(completion);
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    device.close_reads();
+    assert_eq!(device.read(&mut [0; 8]), Err(KError::BadState));
+    assert!(matches!(device.request.lock().state, RequestState::Idle));
+    irq.store(3, Ordering::Relaxed);
+    assert!(!device.handle(0).handled());
+    assert_eq!(irq.load(Ordering::Relaxed), 3);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+}
+
+struct StopIrqProvider {
+    fail_request: AtomicBool,
+    handler: SpinNoIrq<Option<Arc<dyn IrqHandler>>>,
+    on_release: SpinNoIrq<Option<Action>>,
+    releases: AtomicUsize,
+    line_changes: AtomicUsize,
+}
+
+static STOP_IRQ: StopIrqProvider = StopIrqProvider {
+    fail_request: AtomicBool::new(false),
+    handler: SpinNoIrq::new(None),
+    on_release: SpinNoIrq::new(None),
+    releases: AtomicUsize::new(0),
+    line_changes: AtomicUsize::new(0),
+};
+
+impl IrqOp for StopIrqProvider {
+    fn request_irq(
+        &self,
+        _irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> device_res::ResResult<device_res::IrqHandlerToken> {
+        if self.fail_request.load(Ordering::Relaxed) {
+            return Err(ResError::Busy);
+        }
+        *self.handler.lock() = Some(handler);
+        Ok(device_res::IrqHandlerToken::shared_action(42))
+    }
+
+    fn release_irq(&self, _irq: IrqResource, token: device_res::IrqHandlerToken) {
+        core::assert_eq!(token, device_res::IrqHandlerToken::shared_action(42));
+        let handler = self.handler.lock().take();
+        let action = self.on_release.lock().take();
+        if let Some(action) = action {
+            action();
+        }
+        drop(handler);
+        self.releases.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {
+        self.line_changes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct QuiescentDrain;
+
+impl subsys_hwrng::completion::RngDrain for QuiescentDrain {
+    fn wait_until(&self, drained: &mut dyn FnMut() -> bool) -> KResult {
+        core::assert!(drained(), "test readers must return before unregister");
+        Ok(())
+    }
+
+    fn notify(&self) {}
+}
+
+#[def_test(serial)]
+fn rng_removal_resets_then_releases_irq_before_canceling_pending_dma() {
+    static REGISTRY: subsys_hwrng::HwrngRegistry = subsys_hwrng::HwrngRegistry::new();
+    for has_used_entry in [false, true] {
+        let mappings = MAPPINGS.load(Ordering::Relaxed);
+        let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+        let releases = STOP_IRQ.releases.load(Ordering::Relaxed);
+        let line_changes = STOP_IRQ.line_changes.load(Ordering::Relaxed);
+        let queue = Arc::new(SpinNoIrq::new(MockQueue::default()));
+        let reset = Arc::new(MockReset::default());
+        reset.is_pending.store(true, Ordering::Relaxed);
+        let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
+        transport.queue = Some(queue.clone());
+        transport.reset = Some(reset.clone());
+        let completion = Arc::new(Completion {
+            after: Some(DriverError::NoMemory),
+            ..Default::default()
+        });
+        let device = Device::try_new_irq(
+            transport,
+            completion,
+            &STOP_IRQ,
+            IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+            || {},
+        )
+        .unwrap();
+        let mut registration = REGISTRY
+            .attach_legacy(
+                "test-rng-stop",
+                alloc::string::String::new(),
+                device.clone(),
+                Arc::new(QuiescentDrain),
+            )
+            .unwrap();
+        let consumer = registration.publication();
+        let mut output = [0xaa; 8];
+        let initial_read = consumer.read(&mut output);
+        if has_used_entry {
+            // SAFETY: The failed wait retained the original live submission and no IRQ runs here.
+            unsafe { finish(&queue.lock(), 8, false) };
+        }
+        device.close_reads();
+        let unregister_result = registration.unregister();
+        let mappings_after_drain = MAPPINGS.load(Ordering::Relaxed);
+        let checked_release = Arc::new(AtomicBool::new(false));
+        let observation = checked_release.clone();
+        let weak = Arc::downgrade(&device);
+        let reset_at_release = reset.clone();
+        *STOP_IRQ.on_release.lock() = Some(Box::new(move || {
+            let device = weak.upgrade().unwrap();
+            observation.store(
+                reset_at_release.confirmations.load(Ordering::Relaxed) > 0
+                    && device.request.lock().resources.is_none()
+                    && device.irq_guard.lock().is_none()
+                    && !device.handle(7).handled()
+                    && MAPPINGS.load(Ordering::Relaxed) == mappings + 1
+                    && DMA_BLOCKS.load(Ordering::Relaxed) > dma,
+                Ordering::Relaxed,
+            );
+        }));
+        let mut waits = 0;
+        let mut retained_while_waiting = true;
+        let result = device.finish_stop(|| {
+            waits += 1;
+            retained_while_waiting &= device.request.lock().resources.is_none()
+                && device.irq_guard.lock().is_some()
+                && MAPPINGS.load(Ordering::Relaxed) == mappings + 1
+                && STOP_IRQ.releases.load(Ordering::Relaxed) == releases;
+            if waits == 2 {
+                reset.is_pending.store(false, Ordering::Relaxed);
+            }
+        });
+        let mut repeated_waits = 0;
+        let repeated = device.finish_stop(|| repeated_waits += 1);
+        let late_read = device.read(&mut output);
+        let consumer_read = consumer.read(&mut output);
+        let resources_gone = device.request.lock().resources.is_none();
+        let closed_without_fault = !device.is_failed();
+        let mappings_after_stop = MAPPINGS.load(Ordering::Relaxed);
+        let dma_after_stop = DMA_BLOCKS.load(Ordering::Relaxed);
+        drop(device);
+        drop(registration);
+        drop(consumer);
+        assert_eq!(initial_read, Err(KError::NoMemory));
+        assert_eq!(unregister_result, Ok(()));
+        assert_eq!(mappings_after_drain, mappings + 1);
+        assert_eq!(result, Ok(()));
+        assert_eq!(waits, 2);
+        assert!(retained_while_waiting);
+        assert!(checked_release.load(Ordering::Relaxed));
+        assert!(resources_gone);
+        assert!(closed_without_fault);
+        assert_eq!(mappings_after_stop, mappings);
+        assert_eq!(dma_after_stop, dma);
+        assert_eq!(repeated, Ok(()));
+        assert_eq!(repeated_waits, 0);
+        assert_eq!(late_read, Err(KError::BadState));
+        assert_eq!(consumer_read, Err(KError::BadState));
+        assert_eq!(output, [0xaa; 8]);
+        assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(STOP_IRQ.releases.load(Ordering::Relaxed), releases + 1);
+        assert_eq!(STOP_IRQ.line_changes.load(Ordering::Relaxed), line_changes);
+        assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+        assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
+        assert!(REGISTRY.devices().is_empty());
+    }
+}
+
+#[def_test(serial)]
+fn rng_finish_stop_rejects_open_device_and_releases_idle_or_completed_resources() {
+    for has_completed in [false, true] {
+        let mappings = MAPPINGS.load(Ordering::Relaxed);
+        let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+        let (device, queue, irq) = device(Arc::new(Completion::default()));
+        let premature = device.finish_stop(|| {});
+        let retained_open = device.request.lock().resources.is_some();
+        if has_completed {
+            device.request.lock().submit().unwrap();
+            // SAFETY: The single original submission remains alive until the IRQ completion.
+            unsafe { finish(&queue.lock(), 8, false) };
+            irq.store(1, Ordering::Relaxed);
+            device.handle(0);
+        }
+        device.close_reads();
+        let mut waits = 0;
+        let result = device.finish_stop(|| waits += 1);
+        let resources_gone = device.request.lock().resources.is_none();
+        drop(device);
+        assert_eq!(premature, Err(DriverError::BadState));
+        assert!(retained_open);
+        assert_eq!(result, Ok(()));
+        assert_eq!(waits, 0);
+        assert!(resources_gone);
+        assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
+        assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
+    }
+}
+
+#[def_test(serial)]
+fn rng_irq_registration_failure_confirms_reset_before_freeing_queue() {
+    let mappings = MAPPINGS.load(Ordering::Relaxed);
+    let dma = DMA_BLOCKS.load(Ordering::Relaxed);
+    let releases = STOP_IRQ.releases.load(Ordering::Relaxed);
+    let queue = Arc::new(SpinNoIrq::new(MockQueue::default()));
+    let reset = Arc::new(MockReset::default());
+    reset.is_pending.store(true, Ordering::Relaxed);
+    let mut transport = MockTransport::new_with_type(DeviceType::EntropySource);
+    transport.queue = Some(queue.clone());
+    transport.reset = Some(reset.clone());
+    let completion = Arc::new(Completion::default());
+    STOP_IRQ.fail_request.store(true, Ordering::Relaxed);
+    let mut waits = 0;
+    let mut retained_until_reset = true;
+    let result = Device::try_new_irq(
+        transport,
+        completion.clone(),
+        &STOP_IRQ,
+        IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+        || {
+            waits += 1;
+            retained_until_reset &= DMA_BLOCKS.load(Ordering::Relaxed) == dma + 2
+                && MAPPINGS.load(Ordering::Relaxed) == mappings
+                && queue.lock().descriptors != 0
+                && STOP_IRQ.handler.lock().is_none()
+                && STOP_IRQ.releases.load(Ordering::Relaxed) == releases;
+            if waits == 2 {
+                reset.is_pending.store(false, Ordering::Relaxed);
+            }
+        },
+    );
+    STOP_IRQ.fail_request.store(false, Ordering::Relaxed);
+    let error = result.err();
+    assert_eq!(error, Some(DriverError::ResourceBusy));
+    assert_eq!(waits, 2);
+    assert!(retained_until_reset);
+    assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(reset.confirmations.load(Ordering::Relaxed), 1);
+    assert_eq!(completion.notifications.load(Ordering::Relaxed), 1);
+    assert_eq!(STOP_IRQ.releases.load(Ordering::Relaxed), releases);
+    assert!(STOP_IRQ.handler.lock().is_none());
+    assert_eq!(DMA_BLOCKS.load(Ordering::Relaxed), dma);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), mappings);
 }

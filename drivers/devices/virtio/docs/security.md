@@ -409,8 +409,10 @@ and transport types. Shared access is separately serialized by the device's
 transport mappings and IRQ resources for the published device lifetime.
 
 The IRQ callback holds a Weak reference and upgrades only for the call. IRQ
-registration precedes enabling interrupts; registration failure drops an idle
-request. Notification runs after releasing the request lock. Host wait errors
+registration precedes enabling interrupts; registration failure closes the
+unpublished device and confirms reset before freeing the idle queue. Failed IRQ
+registration must not leave a registered action; there is no acquired IRQ guard
+to release on this path. Notification runs after releasing the request lock. Host wait errors
 do not imply a device fault or revoke live DMA. `is_failed` reports only the
 sticky device fault. Empty used rings (`NotReady`) retain Pending without
 poisoning the source; mismatched tokens remain terminal and cannot justify
@@ -418,7 +420,21 @@ freeing or resubmitting storage whose DMA ownership is unresolved.
 
 The VMM controls bytes, completion length and timing. Length validation protects
 CPU copies but cannot establish entropy quality or force device progress.
-There is no completion timeout and no reset/hotplug protocol. With X-Kernel HAL,
+The permanent `close_reads` gate prevents further submission, data delivery and
+IRQ transport/queue access under the same request lock. Notification occurs
+after unlocking so readers can observe closure and finish. It does not certify
+hardware quiescence or drain a handler's notification tail: DMA resources remain
+owned and cannot be reclaimed on the strength of this gate.
+`finish_stop` detaches the closed resource bundle under lock and performs reset
+confirmation, synchronous IRQ release and pending cancellation outside locks,
+in that order. It trusts the transport's hardware-quiescence guarantee and the
+IRQ provider's software-drain guarantee; neither substitutes for the other.
+The owner must supply sleepable context and serialize teardown via its device
+management lock. Host reset waiting cannot return an error or authorize release;
+the driver keeps polling the transport until confirmation. Retained runtime
+references see a closed shell, not live DMA resources. Production removal and
+post-publication probe rollback still require integration before hotplug is supported.
+There is no completion timeout. With X-Kernel HAL,
 reclaim competes for the global kdma lock, also used by other DMA operations and
 page-table changes. Lock-wait latency in hard IRQ context is an accepted,
 unbounded-by-this-driver limitation, not a verified latency guarantee.

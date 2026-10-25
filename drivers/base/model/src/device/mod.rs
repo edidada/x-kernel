@@ -9,6 +9,7 @@
 
 mod access;
 mod descriptor;
+mod source;
 
 use alloc::sync::Arc;
 
@@ -24,15 +25,19 @@ use crate::domain::DeviceId;
 /// value snapshots that drift.
 ///
 /// Owns the immutable enumeration descriptor and shared publication-source
-/// state. The driver name records the last started probe, not a successful
-/// binding. Binding state and runtime resources remain owned by the domain.
+/// state. The driver name records the current probe/binding and is cleared
+/// on failure or teardown. Runtime resources remain owned by the domain.
 /// References retain metadata, not hardware availability or operation permits.
 pub(crate) struct DeviceCore {
     pub(crate) id: DeviceId,
     pub(crate) desc: crate::DeviceDescriptor,
+    /// Per-device lifecycle serialization, retained even by stale references.
+    pub(crate) management: Arc<dyn crate::DeviceManagementLock>,
+    /// Membership token for rejecting foreign domains after registry removal.
+    pub(crate) domain: Arc<()>,
     /// Set by the domain when a driver's probe starts (the claim is known
     /// then, not at bind-commit).
-    driver_name: kspin::SpinNoPreempt<Option<&'static str>>,
+    driver: kspin::SpinNoPreempt<Option<Arc<crate::driver::DriverIdentity>>>,
     /// The bus-vocabulary path component, derived once at `add_device`.
     physical_path: alloc::string::String,
     /// Flipped by the removal orchestration (before quiesce and before the
@@ -41,29 +46,19 @@ pub(crate) struct DeviceCore {
     offline: core::sync::atomic::AtomicBool,
 }
 
-impl driver_class::PublicationSource for DeviceCore {
-    fn driver_name(&self) -> Option<&'static str> {
-        self.driver_name()
-    }
-
-    fn physical_path(&self) -> &str {
-        self.physical_path()
-    }
-
-    fn is_online(&self) -> bool {
-        self.is_online()
-    }
-}
-
 impl DeviceCore {
     /// The driver that claimed this device, once probing started.
     pub(crate) fn driver_name(&self) -> Option<&'static str> {
-        *self.driver_name.lock()
+        self.driver.lock().as_ref().map(|driver| driver.name)
     }
 
     /// Record the claiming driver. Domain-internal.
-    pub(crate) fn bind_driver(&self, name: &'static str) {
-        *self.driver_name.lock() = Some(name);
+    pub(crate) fn bind_driver(&self, identity: Arc<crate::driver::DriverIdentity>) {
+        *self.driver.lock() = Some(identity);
+    }
+
+    pub(crate) fn clear_driver(&self) {
+        *self.driver.lock() = None;
     }
 
     /// The physical path (DEVPATH source), as derived from the bus data.
@@ -82,12 +77,19 @@ impl DeviceCore {
             .store(true, core::sync::atomic::Ordering::Release);
     }
 
-    pub(crate) fn new(id: DeviceId, desc: crate::DeviceDescriptor) -> alloc::sync::Arc<Self> {
+    pub(crate) fn new(
+        id: DeviceId,
+        desc: crate::DeviceDescriptor,
+        management: Arc<dyn crate::DeviceManagementLock>,
+        domain: Arc<()>,
+    ) -> alloc::sync::Arc<Self> {
         let physical_path = desc.bus_data.path_component();
         alloc::sync::Arc::new(Self {
             id,
             desc,
-            driver_name: kspin::SpinNoPreempt::new(None),
+            management,
+            domain,
+            driver: kspin::SpinNoPreempt::new(None),
             physical_path,
             offline: core::sync::atomic::AtomicBool::new(false),
         })
@@ -116,7 +118,7 @@ impl DeviceRef {
         self.core.physical_path()
     }
 
-    /// The last driver whose probe started, not proof of a current binding.
+    /// The current probe/binding driver, not proof of hardware availability.
     pub fn driver_name(&self) -> Option<&'static str> {
         self.core.driver_name()
     }

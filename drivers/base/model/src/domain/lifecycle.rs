@@ -2,244 +2,153 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Removal orchestration: the exclusive claim protocol (retryable vs
-//! in-progress), the children-first cascade (device children ∪ bridged
-//! bus-instance members) and the teardown phases
-//! (quiesce → Data drop → Removed).
+//! Per-device binding teardown and registration removal.
+//!
+//! Management locks serialize callbacks for each device. The domain lock
+//! protects short state changes only; driver callbacks and Data destruction
+//! run outside it. Buses own downstream teardown and lock ordering.
 
 use super::*;
 
 impl DeviceDomain {
-    /// Mark the source offline, call remove to quiesce, drop Data and mark removed.
-    /// Class registrations withdraw during Data drop. The driver must join
-    /// operations or retain their resources in the shared runtime before
-    /// independent guards are dropped. There is no model remove notifier.
+    /// Enter this device's management lock without holding the domain lock.
     ///
-    /// A device that never reached `Active` (Pending/Deferred/
-    /// Unclaimed — e.g. hotplug of an unmatched card) takes the light path:
-    /// it is withdrawn from the pending/deferred worklists and its entry is
-    /// freed outside the lock; retained references keep only its offline core.
-    /// A probing device rejects removal with `Busy`. Concurrent removal is
-    /// `Busy`, completed bound removal is `BadState`, and an absent entry is
-    /// `NotFound`; aborted cascades remain retryable.
-    /// Foreign-domain or mismatched object references return `NotFound`.
+    /// Operations must revalidate the entry's object identity after entry.
+    /// Foreign domains are rejected before invoking the host lock.
+    pub(super) fn with_management<R>(
+        &self,
+        device: &crate::DeviceRef,
+        operation: impl FnOnce() -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        if !Arc::ptr_eq(&self.identity, &device.core.domain) {
+            return Err(RuntimeError::NotFound);
+        }
+        let mut operation = Some(operation);
+        let mut result = None;
+        device.core.management.run_locked(&mut || {
+            if let Some(operation) = operation.take() {
+                result = Some(operation());
+            }
+        })?;
+        result.unwrap_or(Err(RuntimeError::BadState))
+    }
+
+    /// End the current binding while preserving registration and identity.
+    ///
+    /// Pending and deferred work is cancelled. A bound driver's remove callback
+    /// runs before its Data is dropped, with neither under the domain lock.
+    /// The device returns to `Unclaimed` and may be explicitly rebound.
+    /// An unbound device needs no driver callback.
+    ///
+    /// Requires sleepable management context and rejects same-device reentry.
+    /// Foreign or unregistered objects return `NotFound`.
+    /// Buses must stop their own enumeration and manage their downstream devices.
+    pub fn unbind_device(&self, device: &crate::DeviceRef) -> Result<(), RuntimeError> {
+        self.with_management(device, || self.unbind_locked(device, false))
+    }
+
+    /// End the binding and unregister this exact device object.
+    ///
+    /// The device becomes offline before driver teardown. Its registration
+    /// and pending work are removed, and subsequent snapshots return `None`.
+    /// Retained references keep identity alive but cannot bind again.
+    /// Repeating removal of an already unregistered object in this domain
+    /// succeeds without repeating cleanup. Foreign or mismatched objects
+    /// return `NotFound`.
+    ///
+    /// Requires sleepable management context and rejects same-device reentry.
+    /// No children or controller-owned bus members are removed automatically:
+    /// their owning bus must arrange downstream teardown and lock ordering.
     pub fn remove_device(&self, device: &crate::DeviceRef) -> Result<(), RuntimeError> {
-        let id = device.core.id;
-        // Three phases, with the topology entrance CLOSED first:
-        //
-        // 1. Under one lock: validate, flip to `Removing` (this stops
-        //    add_device from attaching new children — the cascade snapshot
-        //    below cannot see an entry added after it), bump the binding
-        //    generation, and snapshot the children. The binding's
-        //    driver/data are NOT taken yet.
-        // 2. Outside the lock: cascade children-first (a child's driver
-        //    may hold resources referencing this device's hardware).
-        //    ANY child failure aborts: the parent stays `Removing` —
-        //    closed to new children, binding intact — and the error is
-        //    returned for retry. A child mid-probe (Busy) or mid-teardown
-        //    (BadState) MUST block the parent's teardown: proceeding
-        //    would free the parent's resources under the child's feet.
-        // 3. Retake the lock (only this flow transitions Removing forward
-        //    for this id), take driver/data, and run the teardown:
-        //    remove() → drop(Data).
-        //
-        // (Linux expresses the same ordering through the bus driver's own
-        // remove walk; the device model here owns the link.)
-        let (children, light_path) = {
-            let mut inner = self.inner.lock();
-            let Some(entry) = inner
-                .devices
-                .get_mut(&id.raw())
-                .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
-            else {
-                return Err(RuntimeError::NotFound);
-            };
-            match entry.lifecycle.state {
-                // A fresh claim: flip to `Removing` (closed to new
-                // children), bump the generation, snapshot. `light` is
-                // whether a binding exists to tear down — recorded here
-                // because the resume path re-derives it from the same
-                // field.
-                DeviceState::Active
-                | DeviceState::Pending
-                | DeviceState::Deferred
-                | DeviceState::Unclaimed => {
-                    let light = entry.binding.driver.is_none();
-                    entry.lifecycle.state = DeviceState::Removing;
-                    entry.lifecycle.generation += 1;
-                    entry.lifecycle.remove_retryable = false;
-                    (Self::teardown_set(&inner, &id.raw()), light)
+        self.with_management(device, || {
+            let id = device.core.id.raw();
+            {
+                let inner = self.inner.lock();
+                match inner.devices.get(&id) {
+                    Some(entry) if Arc::ptr_eq(&entry.core, &device.core) => {}
+                    None if !device.core.is_online() => return Ok(()),
+                    _ => return Err(RuntimeError::NotFound),
                 }
-                // Resuming an ABORTED cascade: only the caller that
-                // atomically claims the flag under THIS lock proceeds —
-                // concurrent removers see `Busy`. A removal genuinely in
-                // progress (retryable == false) is owned by its caller.
-                DeviceState::Removing if entry.lifecycle.remove_retryable => {
-                    let light = entry.binding.driver.is_none();
-                    entry.lifecycle.remove_retryable = false;
-                    (Self::teardown_set(&inner, &id.raw()), light)
-                }
-                DeviceState::Removing => {
-                    return Err(RuntimeError::Busy);
-                }
-                DeviceState::Removed => {
+            }
+            self.unbind_locked(device, true)?;
+            let removed = {
+                let mut inner = self.inner.lock();
+                let entry = inner
+                    .devices
+                    .get(&id)
+                    .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+                    .ok_or(RuntimeError::NotFound)?;
+                if entry.lifecycle.state != DeviceState::Removing {
                     return Err(RuntimeError::BadState);
                 }
-                // A probe is in flight on another thread: its side effects
-                // (class publication, IRQ registration, provider publish)
-                // are happening NOW. Removing the entry here would orphan
-                // every one of those — the probe has no owner to hand them
-                // back to. Reject with Busy; retry after probe completes.
-                DeviceState::Probing => {
+                Self::unlink_from_parent(&mut inner, &id);
+                inner.devices.remove(&id)
+            };
+            drop(removed);
+            Ok(())
+        })
+    }
+
+    /// Drain a binding while the caller owns the management lock.
+    ///
+    /// Unregistration keeps the entry closed through deletion; ordinary
+    /// unbinding reopens it only after remove and Data destruction complete.
+    fn unbind_locked(
+        &self,
+        device: &crate::DeviceRef,
+        unregister: bool,
+    ) -> Result<(), RuntimeError> {
+        let id = device.core.id.raw();
+        let (driver, mut data, services) = {
+            let mut inner = self.inner.lock();
+            let entry = inner
+                .devices
+                .get_mut(&id)
+                .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+                .ok_or(RuntimeError::NotFound)?;
+            match entry.lifecycle.state {
+                DeviceState::Pending
+                | DeviceState::Deferred
+                | DeviceState::Unclaimed
+                | DeviceState::Active => {}
+                DeviceState::Probing | DeviceState::Removing => {
                     return Err(RuntimeError::Busy);
                 }
+                DeviceState::Removed => return Err(RuntimeError::BadState),
             }
-        };
-        if let Err(err) = self.cascade(children) {
-            Self::mark_remove_retryable(self, id.raw());
-            return Err(err);
-        }
-        if light_path {
-            let mut inner = self.inner.lock();
-            Self::unlink_from_parent(&mut inner, &id.raw());
-            let removed = inner.devices.remove(&id.raw());
-            if let Some(entry) = &removed {
+            entry.lifecycle.state = DeviceState::Removing;
+            entry.lifecycle.generation += 1;
+            entry.probe.last_deferred_dep = None;
+            if unregister {
                 entry.core.mark_offline();
             }
-            inner.sched.pending.retain(|pending| *pending != id.raw());
-            inner
-                .sched
-                .deferred
-                .retain(|(deferred, _)| *deferred != id.raw());
-            drop(inner);
-            drop(removed);
-            log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
-            return Ok(());
+            let driver = entry.binding.driver.take();
+            let data = entry.binding.data.take();
+            let services = entry.services.clone();
+            inner.sched.pending.retain(|pending| *pending != id);
+            inner.sched.deferred.retain(|(deferred, _)| *deferred != id);
+            (driver, data, services)
+        };
+
+        if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
+            driver.remove(&device.core, data.as_mut(), services.as_ref());
         }
-        let (driver, core, data, services) = {
+        drop(data);
+        device.core.clear_driver();
+
+        if !unregister {
             let mut inner = self.inner.lock();
-            let Some(entry) = inner
+            let entry = inner
                 .devices
-                .get_mut(&id.raw())
+                .get_mut(&id)
                 .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
-            else {
-                return Err(RuntimeError::NotFound);
-            };
+                .ok_or(RuntimeError::NotFound)?;
             if entry.lifecycle.state != DeviceState::Removing {
                 return Err(RuntimeError::BadState);
             }
-            (
-                entry.binding.driver.take(),
-                entry.core.clone(),
-                entry.binding.data.take(),
-                inner.services.clone(),
-            )
-        };
-        let (driver, mut data, services) = (driver, data, services);
-
-        core.mark_offline();
-        if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
-            driver.remove(&core, data.as_mut(), services.as_ref());
-        }
-
-        // The publications are Data-owned: they withdraw inside
-        // `drop(data)` below, sequenced by each Data's field order — this
-        // model has no remove notifier; the state flip to `Removed`
-        // happens right after the drop.
-        drop(data);
-        {
-            let mut inner = self.inner.lock();
-            Self::unlink_from_parent(&mut inner, &id.raw());
-            if let Some(entry) = inner.devices.get_mut(&id.raw()) {
-                entry.lifecycle.state = DeviceState::Removed;
-            }
+            entry.lifecycle.state = DeviceState::Unclaimed;
         }
         Ok(())
-    }
-
-    /// Phase 2: remove each cascaded member, children-first. A member
-    /// already gone (prior pass / concurrent remove) counts as done; any
-    /// other failure aborts the teardown for a retry.
-    pub(super) fn cascade(&self, members: Vec<u64>) -> Result<(), RuntimeError> {
-        for member in members {
-            let device = {
-                let inner = self.inner.lock();
-                inner.devices.get(&member).map(|entry| crate::DeviceRef {
-                    core: entry.core.clone(),
-                })
-            };
-            let Some(device) = device else { continue };
-            match self.remove_device(&device) {
-                Ok(()) => {}
-                // Already gone: satisfies the children-first requirement.
-                Err(RuntimeError::NotFound) => {}
-                Err(RuntimeError::BadState) => {
-                    let member_gone = {
-                        let inner = self.inner.lock();
-                        matches!(
-                            inner
-                                .devices
-                                .get(&member)
-                                .map(|entry| entry.lifecycle.state),
-                            Some(DeviceState::Removed) | None
-                        )
-                    };
-                    if !member_gone {
-                        log::warn!(
-                            "driver-core: cascade remove of {member} hit BadState mid-teardown; \
-                             teardown ABORTED — retry to continue"
-                        );
-                        return Err(RuntimeError::BadState);
-                    }
-                }
-                // Busy (member probing) or any other failure: the member
-                // still holds (or is acquiring) resources against this
-                // device — abort for a retry.
-                Err(err) => {
-                    log::warn!(
-                        "driver-core: cascade remove of {member} failed ({err:?}); teardown \
-                         ABORTED — retry to continue"
-                    );
-                    return Err(err);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The devices a removal must cascade through: device children PLUS
-    /// the members of every bus instance this device bridges (Linux
-    /// bridge-eject: `pci_stop_and_remove_bus_device` walks the secondary
-    /// bus). Deduplicated, child-first order preserved within each group.
-    pub(super) fn teardown_set(inner: &DomainInner, id: &u64) -> Vec<u64> {
-        let mut set: Vec<u64> = inner
-            .devices
-            .get(id)
-            .map(|entry| entry.topology.children.clone())
-            .unwrap_or_default();
-        for (instance_id, instance) in inner.bus_instances.iter() {
-            if instance
-                .bridge
-                .as_ref()
-                .is_some_and(|bridge| bridge.core.id.raw() == *id)
-            {
-                for (member, entry) in inner.devices.iter() {
-                    if entry.core.desc.bus_instance.raw() == *instance_id && !set.contains(member) {
-                        set.push(*member);
-                    }
-                }
-            }
-        }
-        set
-    }
-
-    /// Mark an aborted removal as claimable: the entry stays `Removing`
-    /// (closed to new children) but the next `remove_device` caller may
-    /// exclusively take over the resume.
-    pub(super) fn mark_remove_retryable(domain: &DeviceDomain, id: u64) {
-        if let Some(entry) = domain.inner.lock().devices.get_mut(&id) {
-            entry.lifecycle.remove_retryable = true;
-        }
     }
 
     /// Remove `id` from its parent's children list (topology unlink).
@@ -260,45 +169,78 @@ impl DeviceDomain {
     }
 
     /// Capture this domain's state for the exact referenced object.
-    /// Foreign or deleted objects return None; bound Removed entries remain
-    /// inspectable. The retained identity does not freeze later state changes.
+    ///
+    /// Foreign or unregistered objects return `None`. The retained identity
+    /// does not freeze later state changes or grant access to binding resources.
     pub fn snapshot(&self, device: &crate::DeviceRef) -> Option<DeviceSnapshot> {
-        let inner = self.inner.lock();
-        let entry = inner
-            .devices
-            .get(&device.core.id.raw())
-            .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))?;
-        Some(snapshot_of(
-            entry,
-            bus_type(&inner.bus_instances, &entry.core.desc),
-        ))
+        let mut snapshot = {
+            let inner = self.inner.lock();
+            let entry = inner
+                .devices
+                .get(&device.core.id.raw())
+                .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))?;
+            snapshot_of(entry, bus_type(&inner.bus_instances, &entry.core.desc))
+        };
+        snapshot.identity = Some(device.core.desc.bus_data.display_identity());
+        Some(snapshot)
     }
 
-    /// Capture registered entries, including retained Removed snapshots.
+    /// Capture currently registered entries, including unbound devices.
     pub fn devices(&self) -> Vec<DeviceSnapshot> {
-        let inner = self.inner.lock();
-        inner
-            .devices
-            .values()
-            .map(|entry| snapshot_of(entry, bus_type(&inner.bus_instances, &entry.core.desc)))
-            .collect()
+        let mut snapshots: Vec<_> = {
+            let inner = self.inner.lock();
+            inner
+                .devices
+                .values()
+                .map(|entry| snapshot_of(entry, bus_type(&inner.bus_instances, &entry.core.desc)))
+                .collect()
+        };
+        for snapshot in &mut snapshots {
+            snapshot.identity = Some(snapshot.device.core.desc.bus_data.display_identity());
+        }
+        snapshots
     }
 
-    /// Borrow a device's driver data under the domain lock (read-only view
-    /// for class layers and tests).
-    /// Foreign, deleted or unbound objects return None. The visitor must not
-    /// block or re-enter the domain while this lock is held.
+    /// Visit a bound device's typed Data under its management lock.
+    ///
+    /// Requires sleepable context. The visitor runs without the domain lock
+    /// and must not reenter management of this device or wait for work needing
+    /// its management lock. Data is restored before releasing management.
+    /// Entry errors, foreign or unbound devices, and type mismatches return
+    /// `None`; the visitor is not called in those cases.
     pub fn with_data<D: Any + Send + Sync, R>(
         &self,
         device: &crate::DeviceRef,
         visit: impl FnOnce(&D) -> R,
     ) -> Option<R> {
-        let inner = self.inner.lock();
-        let entry = inner
-            .devices
-            .get(&device.core.id.raw())
-            .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))?;
-        let data = entry.binding.data.as_ref()?.as_ref().downcast_ref::<D>()?;
-        Some(visit(data))
+        self.with_management(device, || {
+            let data = {
+                let mut inner = self.inner.lock();
+                let entry = inner
+                    .devices
+                    .get_mut(&device.core.id.raw())
+                    .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+                    .ok_or(RuntimeError::NotFound)?;
+                if entry.lifecycle.state != DeviceState::Active {
+                    return Err(RuntimeError::BadState);
+                }
+                entry.binding.data.take().ok_or(RuntimeError::NotFound)?
+            };
+            let result = data.as_ref().downcast_ref::<D>().map(visit);
+            {
+                let mut inner = self.inner.lock();
+                let entry = inner
+                    .devices
+                    .get_mut(&device.core.id.raw())
+                    .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
+                    .ok_or(RuntimeError::NotFound)?;
+                if entry.lifecycle.state != DeviceState::Active || entry.binding.data.is_some() {
+                    return Err(RuntimeError::BadState);
+                }
+                entry.binding.data = Some(data);
+            }
+            result.ok_or(RuntimeError::NotFound)
+        })
+        .ok()
     }
 }

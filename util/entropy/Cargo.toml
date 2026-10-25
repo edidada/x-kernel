@@ -10,16 +10,20 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
+# kcompletion provides reliable drain waiters in external ut-tests/, which
+# the workspace excludes from cargo-shear dependency-use discovery.
+ignored = ["kcompletion"]
 [features]
 default = []
 entropy_arch_cpu = ["dep:karch"]
 entropy_smccc_trng = ["dep:kplat-aarch64"]
 entropy_jitter = []
-entropy_virtio_rng = ["dep:subsys_hwrng", "dep:kspin", "dep:kworkng", "dep:kalloc-types", "dep:kerrno"]
+entropy_virtio_rng = ["dep:subsys_hwrng", "dep:kspin", "dep:kworkng", "dep:kalloc-types", "dep:kerrno", "dep:kcompletion"]
 
 [dependencies]
 kalloc-types = { workspace = true, optional = true }
 kerrno = { workspace = true, optional = true }
+kcompletion = { workspace = true, optional = true }
 kworkng = { workspace = true, optional = true }
 subsys_hwrng = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }

@@ -6,10 +6,17 @@
 `src/completion.rs` defines the host-injected wait capability. Neither owns
 scheduler state, DMA storage, entropy accounting, or source trust policy.
 
-`src/class.rs` defines HwrngClass, its HWRNG instance, HwrngRegistration
-and the operation-only HwrngPublication consumer facade. Generic admission,
-withdrawal and in-flight teardown belong to `drivers/base/class`; this crate
-does not depend on the device binding model in `drivers/base/model`.
+`src/registration.rs` defines HwrngRegistry, its HWRNG instance, HwrngRegistration
+and the operation-only HwrngHandle. This subsystem owns registration, admission
+and synchronous drain; it does not use generic Class/Registration/Publication.
+It does not depend on the device binding model in `drivers/base/model`.
+
+The registry is a subsystem provider registry, not a Linux device class.
+The remaining driver_class dependency supplies only the existing read-only
+PublicationSource interface. The model now constructs immutable per-binding
+provenance through DeviceAccess::publication_source; hwrng does not depend on
+that model or inspect its binding state. Retiring the legacy trait dependency
+remains R1-09 work.
 
 ## Architecture and execution context
 
@@ -45,9 +52,11 @@ driver and host own resource lifetime.
 
 ## Publication lifecycle
 
-HwrngRegistration is non-cloneable and owns generic Registration. Its drop
-withdraws the capability; HwrngPublication clones only keep shared memory alive.
-The registry and callbacks expose HwrngPublication, never the generic payload.
+HwrngRegistration is non-cloneable and explicitly unregisters through a mutable
+borrow. Its Drop does not unregister, wait, panic or invoke callbacks. The registry
+keeps a strong runtime reference; losing the credential leaves an observable
+registration rather than prematurely freeing hardware. HwrngHandle clones retain
+the original provider and expose no raw runtime accessor.
 Both read and is_failed acquire operation permits. is_failed returns KResult<bool>:
 BadState means the capability is unavailable, not terminal hardware failure.
 There is no raw runtime accessor or Deref on the consumer facade, preventing
@@ -55,9 +64,46 @@ consumers from cloning the underlying driver Arc out of an operation permit.
 The provider trait HwrngDevice remains unchanged; its raw failure query is bool.
 Existing reads retain their permits until completion. Withdrawal cannot cancel a
 hung device request; DMA stop/reset and joining hardware operations remain the
-concrete driver's responsibility. The legacy boot bridge retains its registration
-for kernel lifetime and does not implement hot removal.
+concrete driver's responsibility. The legacy boot bridge intentionally discards
+its credential; registry retention keeps the boot-only device alive. This bridge
+has no removal path and is not evidence of new-model hardware hot removal.
 
 Publication handles have no independent name. Publishers supply source identity
-and runtime only. Generic class registration does not impose source/path uniqueness;
-any future RNG-specific uniqueness rule belongs to this subsystem.
+and runtime plus a preconstructed reliable drain provider. Source/path uniqueness
+is not imposed. Source device-online state is not the operation gate; each provider
+has its own closed bit and in-flight count under one SpinNoPreempt lock.
+
+## Reliable synchronous drain
+
+RngDrain is separate from RngCompletion, with a separate host WaitQueue. A host
+may reject invalid context only before calling the private predicate. After the
+first call it must wait until true, without allocation failure, timeout or signal
+errors. Host construction precedes publication; X-Kernel uses the already merged
+CompletionWait stack waiter, not a new synchronization primitive.
+
+The predicate's first call closes admission, removes the registry entry, then
+checks the in-flight count. It executes no business callbacks. The credential
+retains the entry, and the removed registry reference is dropped outside locks
+after waiting, preventing final runtime destruction inside the predicate.
+Operation guards decrement under the admission lock and notify outside it when
+the closed provider reaches zero. Registry locks never span runtime methods,
+waits, source metadata calls or subscriber callbacks. Registry/handle APIs require
+task context; host drain notification itself is non-sleeping.
+
+After drain, unregister marks the credential completed and invokes removed
+subscribers before returning. Successful repeats do nothing. Removed is not the
+driver's read wakeup and does not certify reset/IRQ/DMA teardown. Drivers must stop
+and wake readers before draining; callbacks cannot wait for work needing the
+publisher's management lock. Retained handles do not delay drain but may delay
+final memory release; final source/runtime/wait-provider destructors must not
+sleep. Hardware guards must be explicitly released during driver teardown.
+
+External tests cover preparation rejection with zero predicate calls, unchanged
+registration on error, residual registration after credential Drop, old-handle
+rejection, in-flight drain, notification ordering, repeated unregister, early
+wake and waiter detachment. The deliberately forgotten test registration is
+private to its test registry and retained for that test kernel's lifetime.
+The in-flight test uses nonempty reads and explicit task-state handshakes.
+Five-second watchdogs only bound failure detection, not correctness; the test
+releases its read gate before collecting task results. A broken implementation
+that leaves a task permanently stuck still requires the outer guest timeout.

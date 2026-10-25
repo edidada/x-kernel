@@ -6,6 +6,28 @@
 
 use kerrno::KResult;
 
+/// Reliable host wait for draining admitted RNG operations.
+///
+/// Construct this capability before registration becomes visible. It is
+/// separate from fallible read completion: after invoking the predicate it
+/// cannot return a normal error, time out, or stop for a signal. The predicate
+/// only changes subsystem-private state under short locks and never sleeps.
+pub trait RngDrain: Send + Sync {
+    /// Prepare the current task, then wait until the private predicate is true.
+    ///
+    /// Invalid context must return `InvalidInput` before calling `drained`.
+    /// In valid context, preparation must not fail for memory pressure.
+    /// Register before checking, or check/register/recheck, to preserve early
+    /// notifications. After the first invocation, return only when true.
+    /// Never retain the predicate. The scoped waiter is removed before return.
+    fn wait_until(&self, drained: &mut dyn FnMut() -> bool) -> KResult;
+
+    /// Notify after publishing an in-flight count change, outside source locks.
+    ///
+    /// Non-sleeping and allocation-free; does not execute the predicate.
+    fn notify(&self);
+}
+
 /// Host capability for waiting on driver-owned read completion state.
 ///
 /// Notification prompts a recheck; it is not a stored completion count or a

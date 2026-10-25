@@ -6,20 +6,33 @@
 
 use crate::{bus::Bus, device::DeviceAccess, error::ProbeError};
 
+/// Immutable registration metadata, independent of driver ops and resources.
+pub(crate) struct DriverIdentity {
+    pub(crate) name: &'static str,
+}
+
 /// Driver operations with a typed private-data association.
 ///
 /// `Data` is the Linux `struct foo_priv`: allocated in probe, owned by the
 /// framework for the lifetime of the binding, passed back mutably in
 /// `remove`, and dropped (releasing every guard it holds) after `remove`
 /// returns.
+///
+/// Probe, remove, and destruction of successfully bound `Data` run in sleepable
+/// task context under this device's management lock, without the domain state
+/// lock. Same-device management reentry is rejected. Callbacks and destructors
+/// must restore their execution context and must not wait for tasks that need
+/// this device's management lock, including tasks entering `with_data`.
+/// Cross-device lock ordering remains the bus/controller's responsibility.
 pub trait DriverOps<B: Bus>: Send + Sync + 'static {
     /// Driver-private data; must be `Send + Sync` because interrupt handlers
     /// and work items share it through `Weak` handles.
     type Data: Send + Sync + 'static;
 
     /// Initialize the device. Store every acquired guard in the returned
-    /// `Data`; returning `Err` drops nothing but locals, so partial
-    /// initialization rolls back through ordinary RAII.
+    /// `Data`. Before returning `Err`, explicitly stop active operations and
+    /// unregister published capabilities; only inactive guards may rely on RAII.
+    /// The framework cannot call remove for Data that probe did not return.
     /// `dev` accesses this device; `env` supplies host-wide framework services.
     fn probe(
         &self,
@@ -30,10 +43,12 @@ pub trait DriverOps<B: Bus>: Send + Sync + 'static {
     /// Quiesce the device. Guards inside `Data` are still alive here and are
     /// released after this returns; `dev` accesses the same device as probe.
     /// `env` supplies the same host service implementation used during probe.
-    /// The model first marks the source offline to refuse new class uses.
+    /// Unregister marks the device source offline before this callback;
+    /// unbind preserves registration. The driver must close its published
+    /// operations explicitly rather than treating device identity as a gate.
     /// Stop and join ongoing operations before releasing their independent
-    /// resources, or retain those resources in the shared runtime. Dropping a
-    /// Registration defers only its class hook, not the rest of Data.
+    /// resources. A publication credential's Drop is not a substitute for
+    /// explicit synchronous unregistration.
     ///
     /// Linux shape: `remove(pdev)` then `dev_get_drvdata(pdev)`. Here the
     /// drvdata is passed typed and mutably as the third argument instead of
