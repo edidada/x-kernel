@@ -366,10 +366,12 @@ BootInfo*
     → memspace::init_memory_management
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
-        (Log filtering, first match wins: /chosen/x-kernel,log-level, then the
-         `loglevel=` / `quiet` / `debug` command line, then Kconfig `LOG_FILTER`,
-         then the `LOG_LEVEL_*` choice. Every source takes the same filter spec;
-         on the command line a full spec stays inside one word, e.g.
+        (Log filtering: the `LOG_LEVEL_*` choice is installed first, then the
+         first accepted source wins — /chosen/x-kernel,log-level, the
+         `loglevel=` / `quiet` / `debug` command line, then Kconfig
+         `LOG_FILTER`. Every source takes the same filter spec, and a spec with
+         only `target=level` rules keeps the build level as its default. On the
+         command line a full spec stays inside one word, e.g.
          `loglevel=warn,ksyscall=debug`.)
     → prepare_interrupts
     → init_scheduler

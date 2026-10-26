@@ -74,6 +74,7 @@ unittest::path_mod_test!(
     tests_irq_management_lifecycle,
     "../ut-tests/irq_management_lifecycle.rs"
 );
+unittest::path_mod_test!(log_filter_tests, "../ut-tests/log_filter.rs");
 
 #[macro_use]
 extern crate klogger;
@@ -206,8 +207,16 @@ const fn configured_log_level() -> &'static str {
 /// `target=level` overrides, e.g. `warn ksyscall=debug`. Whitespace separates
 /// kernel command-line parameters, so a full spec stays inside one word there:
 /// `loglevel=warn,ksyscall=debug` (the comma form works in every source).
-/// Invalid input is reported and ignored rather than applied.
+///
+/// The build's level is installed **before** any source is consulted
+/// ([`apply_build_log_level`]): a source may carry rules only (`ksyscall=trace`),
+/// and such a spec keeps the level already in force as its default. Without that
+/// step the default would be the logger's hard-coded value instead of the
+/// `LOG_LEVEL_*` choice, and a rules-only spec would silently change verbosity
+/// for every other module. Invalid input is reported and ignored rather than
+/// applied.
 fn resolve_boot_log_filter() -> &'static str {
+    let build_level = apply_build_log_level();
     if let Some(spec) = khal::firmware::dt_log_level() {
         if klogger::set_filter_spec(spec).is_ok() {
             return spec;
@@ -242,12 +251,28 @@ fn resolve_boot_log_filter() -> &'static str {
         }
     }
     let configured = kbuild_config::LOG_FILTER.trim();
-    if !configured.is_empty() && klogger::set_filter_spec(configured).is_ok() {
-        return configured;
+    if !configured.is_empty() {
+        if klogger::set_filter_spec(configured).is_ok() {
+            return configured;
+        }
+        // Report a rejected build-time spec like the other sources do: it is
+        // compiled in, so a typo is otherwise invisible and the kernel silently
+        // runs at the `LOG_LEVEL_*` default instead.
+        warn!(
+            "ignoring invalid LOG_FILTER=\"{configured}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace, optionally with target=level overrides"
+        );
     }
+    build_level
+}
+
+/// Installs the build's log level, which is the default every later source and
+/// every rules-only spec builds on.
+///
+/// The `LOG_LEVEL_*` choice only ever yields a valid level, but a rejected spec
+/// must not abort boot: the previous filter stays in place.
+fn apply_build_log_level() -> &'static str {
     let level = configured_log_level();
-    // The Kconfig choice only ever yields a valid level, but a rejected spec
-    // must not abort boot: the previous filter stays in place.
     let _ = klogger::set_filter_spec(level);
     level
 }

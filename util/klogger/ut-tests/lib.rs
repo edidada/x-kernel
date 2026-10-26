@@ -218,7 +218,7 @@ fn logbuf_captures_records_the_console_filter_hides() {
         logbuf_len() > 0,
         "capture did not grow the kernel log buffer"
     );
-    let len = logbuf_read(&mut buf).copied;
+    let len = logbuf_read(&mut buf).copied();
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let line_with = |needle: &str| -> &str {
         text.lines()
@@ -241,7 +241,7 @@ fn logbuf_captures_records_the_console_filter_hides() {
 
     // Clearing drops this test's records; unrelated records may follow.
     logbuf_clear();
-    let len = logbuf_read(&mut buf).copied;
+    let len = logbuf_read(&mut buf).copied();
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     assert!(
         !text.contains("klogger logbuf"),
@@ -274,7 +274,7 @@ fn logbuf_read_starts_at_the_oldest_unread_byte() {
 
     let mut buf = [0u8; 4096];
     let read = logbuf_read(&mut buf);
-    let text = core::str::from_utf8(&buf[..read.copied]).expect("log text is utf-8");
+    let text = core::str::from_utf8(&buf[..read.copied()]).expect("log text is utf-8");
     let first = text.find("klogger order marker one").expect("first record");
     let second = text.find("klogger order marker two").expect("second record");
     assert!(
@@ -286,7 +286,7 @@ fn logbuf_read_starts_at_the_oldest_unread_byte() {
     // sequence position advances by exactly what was released.
     let mut small = [0u8; 16];
     let window = logbuf_read(&mut small);
-    assert_eq!(window.copied, small.len());
+    assert_eq!(window.copied(), small.len());
     assert_eq!(logbuf_release(window), small.len());
     let next = logbuf_read(&mut small);
     assert_eq!(
@@ -302,7 +302,7 @@ fn logbuf_read_starts_at_the_oldest_unread_byte() {
 
     // The records survive a partial release; only the released bytes are gone.
     let mut rest = [0u8; 4096];
-    let rest_len = logbuf_read(&mut rest).copied;
+    let rest_len = logbuf_read(&mut rest).copied();
     let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
     assert!(
         text.contains("klogger order marker two"),
@@ -327,7 +327,7 @@ fn logbuf_release_ignores_an_overwritten_window() {
     super::info!("klogger stale marker");
     let mut small = [0u8; 16];
     let window = logbuf_read(&mut small);
-    assert_eq!(window.copied, small.len());
+    assert_eq!(window.copied(), small.len());
 
     // `logbuf_clear` is the cheapest way to invalidate the reader's position,
     // and it reports the same staleness a ring wrap does.
@@ -335,7 +335,7 @@ fn logbuf_release_ignores_an_overwritten_window() {
     assert_eq!(logbuf_release(window), 0);
     super::info!("klogger after stale marker");
     let mut buf = [0u8; 4096];
-    let len = logbuf_read(&mut buf).copied;
+    let len = logbuf_read(&mut buf).copied();
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     assert!(
         text.contains("klogger after stale marker"),
@@ -367,7 +367,7 @@ fn logbuf_terminates_truncated_records() {
     super::info!("{}", String::from("\u{5b57}").repeat(120));
 
     let mut buf = [0u8; 4096];
-    let len = logbuf_read(&mut buf).copied;
+    let len = logbuf_read(&mut buf).copied();
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let marker_lines: alloc::vec::Vec<&str> = text
         .lines()

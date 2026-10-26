@@ -118,9 +118,10 @@ outstanding reader position.
 ### Reading and releasing
 
 `logbuf_read(out)` copies the **oldest unread** bytes, in log order, and returns
-a `LogRead { copied, from }` where `from` is the sequence position of the first
-copied byte. Reading does not consume: `logbuf_release(read)` drops that window
-and nothing else, and only if `read.from` still matches the ring, i.e. the window
+a `LogRead` window whose private `from` field is the sequence position of the
+first copied byte (the byte count is readable through `LogRead::copied()`).
+Reading does not consume: `logbuf_release(read)` drops that window and nothing
+else, and only if the window's sequence position still matches the ring, i.e. it
 was neither already released nor overwritten while the caller was copying the
 bytes to user space. A stale window drops nothing: its bytes no longer exist, and
 dropping a same-sized range instead would discard records the reader never
@@ -187,14 +188,17 @@ The public entry points and their directions:
 | `set_log_level_filter(level)` | set the default level and drop every override (`procfs` tests and internal resets) |
 | `filter_spec(buf)` | `procfs` read side and the boot banner report the active spec |
 | `current_log_level()` | reports the filter's **default** level (not the `log` ceiling, which also includes the overrides) |
-| `logbuf_len` / `logbuf_read` / `logbuf_release` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests |
+| `logbuf_len` / `logbuf_read` / `logbuf_release` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests; `LogRead` has private fields, so only a window returned by `logbuf_read` can be released |
 
 ### Where the boot filter comes from
 
 Precedence is decided by `kruntime`; `klogger` only validates and applies:
 `/chosen/x-kernel,log-level` → `loglevel=` / `quiet` / `debug` on the command
-line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. An invalid value is reported
-and the next source is tried, so a typo cannot mute the kernel.
+line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. The `LOG_LEVEL_*` choice is
+installed **first**, before any source is consulted: a source may carry rules
+only, and such a spec keeps the level already in force, so it has to be the build
+level rather than the logger's hard-coded default. Every rejected value is
+reported and the next source is tried, so a typo cannot mute the kernel.
 
 Whitespace separates command-line parameters, so a full spec must stay inside one
 word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source.

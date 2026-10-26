@@ -357,15 +357,23 @@ pub fn logbuf_len() -> usize {
 
 /// A window of the kernel log buffer handed out by [`logbuf_read`].
 ///
-/// `from` is the reader's position in the ring's byte sequence. It is what lets
-/// [`logbuf_release`] drop exactly the bytes this reader received, even if the
-/// read, the user copy and the release happen at different times.
+/// The fields are private on purpose: a window is a capability over the bytes a
+/// reader actually received. A caller outside this crate can obtain one only
+/// from [`logbuf_read`], so it cannot hand [`logbuf_release`] a window larger
+/// than what it was given and drop records it never read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogRead {
     /// Bytes copied into the reader's buffer.
-    pub copied: usize,
+    copied: usize,
     /// Sequence position of the first copied byte.
-    pub from: u64,
+    from: u64,
+}
+
+impl LogRead {
+    /// Returns how many bytes this window copied into the reader's buffer.
+    pub fn copied(self) -> usize {
+        self.copied
+    }
 }
 
 /// Copies the oldest unread bytes of the kernel log buffer into `out`, in log

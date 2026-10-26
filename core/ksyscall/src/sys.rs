@@ -192,13 +192,13 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isi
             // destination must not happen with the log lock held.
             let mut kbuf = alloc::vec![0u8; klogger::logbuf_len().min(len)];
             let read = klogger::logbuf_read(&mut kbuf);
-            user.write_vm_slice(&kbuf[..read.copied])?;
+            user.write_vm_slice(&kbuf[..read.copied()])?;
             if action == SYSLOG_ACTION_READ_CLEAR {
                 // Only after a successful copy, and only this reader's window:
                 // an `EFAULT` or a short destination must not lose evidence.
                 klogger::logbuf_release(read);
             }
-            Ok(read.copied as isize)
+            Ok(read.copied() as isize)
         }
         _ => Err(KError::InvalidInput),
     }
