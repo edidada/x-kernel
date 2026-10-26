@@ -25,6 +25,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use driver_base::{CoherentMem, IoMap};
+use kspin::SpinNoPreempt;
 use subsys_mmc::{BusWidth, DataDir, MmcCommand, MmcError, MmcHost, MmcIos, MmcResponse, RespKind};
 
 // ---------------------------------------------------------------------------
@@ -266,6 +267,15 @@ pub struct DwMmcHost {
     slot: u8,
     /// Current configured bus clock (0 = gated).
     current_clock: AtomicU32,
+    /// Serializes command and data phases on this slot.
+    ///
+    /// One card is reachable through several disks (`mmcblk0p1`,
+    /// `mmcblk0p2`) and from several tasks at once; a second phase started
+    /// while one is in flight re-writes the descriptor ring, stops the
+    /// engine and clears the routing under the first, which then times out
+    /// with `TCBCNT` frozen. Preemption is what gets disabled rather than
+    /// IRQs: a transfer is milliseconds long and IRQs must keep running.
+    transfer: SpinNoPreempt<()>,
     /// Descriptor ring + bounce window for the internal DMA engine. `None`
     /// when the probe could not provide DMA-safe memory, which leaves the
     /// FIFO-polled PIO path in charge.
@@ -341,6 +351,7 @@ impl DwMmcHost {
             max_card_hz,
             max_width,
             current_clock: AtomicU32::new(0),
+            transfer: SpinNoPreempt::new(()),
             idmac,
             idmac_ok: AtomicBool::new(idmac_ok),
         };
@@ -788,10 +799,12 @@ impl MmcHost for DwMmcHost {
         // reliable "transfer in flight" signal (it stays asserted after a
         // completed phase), so it must not be used to decide whether to
         // send a stop command.
+        let _slot = self.transfer.lock();
         self.reset_data_path(false);
     }
 
     fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
+        let _slot = self.transfer.lock();
         // Fallback diagnostics: EVERY command failure names itself here.
         match self.send_cmd_inner(cmd) {
             Ok(resp) => Ok(resp),
@@ -813,6 +826,7 @@ impl MmcHost for DwMmcHost {
         bytes: usize,
         buf: &mut [u8],
     ) -> Result<(), MmcError> {
+        let _slot = self.transfer.lock();
         if self.idmac_wants(bytes) {
             match self.data_cmd_read_idmac(cmd, bytes, buf) {
                 Ok(()) => return Ok(()),
@@ -823,6 +837,7 @@ impl MmcHost for DwMmcHost {
     }
 
     fn write_data_cmd(&self, cmd: &MmcCommand, bytes: usize, buf: &[u8]) -> Result<(), MmcError> {
+        let _slot = self.transfer.lock();
         if self.idmac_wants(bytes) {
             match self.data_cmd_write_idmac(cmd, bytes, buf) {
                 Ok(()) => return Ok(()),
@@ -841,6 +856,8 @@ impl MmcHost for DwMmcHost {
     }
 
     fn set_ios(&self, ios: &MmcIos) -> Result<(), MmcError> {
+        // A clock or width change while a phase is in flight corrupts it.
+        let _slot = self.transfer.lock();
         self.writel(SDMMC_PWREN, u32::from(ios.power_on));
         // Host-side ceiling (Linux `mmc->f_max`): the SD clock source rate
         // is a board fact this driver cannot measure, so the board may
@@ -1282,12 +1299,12 @@ impl DwMmcHost {
         if self.idmac_start(window_bus, bytes).is_none() {
             // Nothing was asked of the card yet: controller hygiene only.
             self.idmac_stop();
-            self.recover();
+            self.reset_data_path(false);
             return Err(MmcError::Io);
         }
         if let Err(err) = self.issue_data_cmd(cmdr, cmd.arg) {
             self.idmac_stop();
-            self.recover();
+            self.reset_data_path(false);
             return Err(err);
         }
         if let Err(err) = self.idmac_wait(cmd) {
@@ -1323,12 +1340,12 @@ impl DwMmcHost {
         let cmdr = self.prepare_data_phase(cmd, DataDir::Write, bytes, true);
         if self.idmac_start(window_bus, bytes).is_none() {
             self.idmac_stop();
-            self.recover();
+            self.reset_data_path(false);
             return Err(MmcError::Io);
         }
         if let Err(err) = self.issue_data_cmd(cmdr, cmd.arg) {
             self.idmac_stop();
-            self.recover();
+            self.reset_data_path(false);
             return Err(err);
         }
         if let Err(err) = self.idmac_wait(cmd) {

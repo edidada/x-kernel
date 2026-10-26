@@ -185,6 +185,26 @@ failure, not the register after `take_errors` cleared it. The first IDMAC
 run printed `rintsts=0x4 [CMD_DONE]` for a phase that actually ended in an
 error, which is worse than no dump at all.
 
+## 15. One card, several disks, several tasks: the slot needs a guard
+
+The board booted to a shell and then wedged the storage stack the moment user
+space started real I/O:
+
+```
+CPU1: idmac timeout cmd 18  bytcnt=0x4000  tcbcnt=0  tbbcnt=2048
+CPU7: idmac data error ... bmod=0x202  dscaddr=0x201030  tbbcnt=12416
+```
+
+Two tasks were inside data phases on the same slot at the same time. `bmod`
+still showed `DE` set on one side while the other had already run
+`IDMAC_INT_CLEAR`, stopped the engine and cleared the routing. Every register
+the driver writes per phase — ring, `DBADDR`, `CTRL`, `BMOD`, `PLDMNT` — is
+shared state with no ownership, and `mmcblk0p1`/`mmcblk0p2` are two disks over
+one controller. Nothing above the driver serializes, so the driver must.
+
+A single-user boot hid this completely: detection and the first mount are
+sequential, so the corruption only appears once the shell runs jobs.
+
 ## Diagnostic rules that came out of this
 
 1. **A completed command is not a successful command.** Decode R1; log it when

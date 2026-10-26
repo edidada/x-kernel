@@ -117,6 +117,32 @@ drives the data lines at all — the controller sees only a start-bit error
 with zero bytes transferred, which is otherwise indistinguishable from a
 dead data path.
 
+## Execution context: one phase per slot
+
+Block I/O reaches one card through several disks (`mmcblk0p1`, `mmcblk0p2`)
+and from several tasks at once, and `MmcHost` is `Sync`: nothing above the
+driver serializes. Two overlapping phases on one slot are not slower — they
+are destructive. The second caller re-writes the descriptor ring, resets the
+engine and takes `CTRL.USE_IDMAC` down under the first, which then times out
+with `TCBCNT` frozen and `TBBCNT` advancing, while the ring's `DSCADDR` jumps
+by a descriptor count that belongs to nobody.
+
+`DwMmcHost` therefore holds a slot guard (`SpinNoPreempt<()>`) across every
+public entry point that touches the controller — `send_cmd`,
+`read_data_cmd`, `write_data_cmd`, `set_ios`, `recover` — so a command, a data
+phase and a clock change are mutually exclusive per slot. Internal helpers
+(`reset_data_path`, the IDMAC engine calls) are guard-free, and the error
+paths call those rather than the public `recover`, because a spin lock is not
+reentrant.
+
+Preemption is what the guard disables, not IRQs: a transfer is milliseconds
+long at the rates this board runs, and masking IRQs for that long on the
+holding CPU would starve timers and the console. The cost is real (a
+contending CPU spins for the duration of the current phase); the fix when
+throughput starts to matter is a sleeping host claim like Linux's
+`mmc_claim_host`, which needs a scheduler-aware primitive a `drv/**` crate
+does not use today.
+
 ## Recovery
 
 Failure and phase-boundary recovery share one sequence
