@@ -94,7 +94,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
         // works — one boot instead of one rebuild per guess.
         let base_ceiling = card_clock_ceiling(max_frequency);
         let widths = width_ladder();
-        let attempts = widths.len() * ceiling_steps(base_ceiling) as usize;
+        let attempts = widths.len() * ceiling_steps(base_ceiling) as usize * LADDER_REPEATS;
         let mut attempt_index = 0usize;
         loop {
             let (width, ceiling) = ladder_step(base_ceiling, &widths, attempt_index);
@@ -224,13 +224,24 @@ fn ceiling_steps(ceiling: u32) -> u32 {
     steps
 }
 
-/// The `index`-th `(width, ceiling)` pair: every clock step of the widest
-/// width first, then the next width down.
+/// How many times each `(width, ceiling)` pair is tried before the ladder
+/// steps down.
+///
+/// Two, because the board fails the *first* attempt at a pair that works on
+/// the next one at an identical width and clock (see the bring-up log): the
+/// marginal thing is entering 4-bit mode, not the rate. Repeating the pair is
+/// what keeps the fastest working rate instead of dropping a step for a
+/// one-shot failure.
+const LADDER_REPEATS: usize = 2;
+
+/// The `index`-th `(width, ceiling)` pair: [`LADDER_REPEATS`] tries at each
+/// clock step of the widest width, then the same for the next width down.
 fn ladder_step(base_ceiling: u32, widths: &[BusWidth], index: usize) -> (BusWidth, u32) {
-    let per_width = ceiling_steps(base_ceiling) as usize;
+    let per_width = ceiling_steps(base_ceiling) as usize * LADDER_REPEATS;
     let width = widths[(index / per_width).min(widths.len() - 1)];
+    let step = (index % per_width) / LADDER_REPEATS;
     let mut ceiling = base_ceiling;
-    for _ in 0..index % per_width {
+    for _ in 0..step {
         ceiling = (ceiling / 2).max(MIN_LADDER_HZ);
     }
     (width, ceiling)
