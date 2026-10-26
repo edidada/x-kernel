@@ -83,6 +83,9 @@ const CSD2_SIZE_LSB: u32 = 48;
 /// CSD command-class field (bit 10 = CCC_SWITCH).
 const CSD_CMDCLASS_MSB: u32 = 95;
 const CSD_CMDCLASS_LSB: u32 = 84;
+/// CSD structure version (`CSD_STRUCTURE`, bits [127:126]).
+const CSD_STRUCTURE_MSB: u32 = 127;
+const CSD_STRUCTURE_LSB: u32 = 126;
 /// ACMD41 attempt budget: the spec allows 1 s of busy polling.
 const OP_COND_ATTEMPTS: usize = 512;
 /// Switch-function status is 512 bits (Linux reads 64 bytes).
@@ -252,6 +255,14 @@ fn identify_card(host: &dyn MmcHost) -> Result<(MmcResponse, u16, MmcResponse, u
         )),
     )?;
     let sectors = csd_capacity(&csd)?;
+    // The CSD decode is the one place a word-order mistake is silent: it
+    // only shows up as a wrong capacity and a wrong CCC (which disables the
+    // speed switch), so the fields go on the record.
+    log::info!(
+        "sd: CSD structure={} capacity {sectors} sectors, ccc={:#05x}",
+        csd.bits(CSD_STRUCTURE_MSB, CSD_STRUCTURE_LSB),
+        csd.bits(CSD_CMDCLASS_MSB, CSD_CMDCLASS_LSB),
+    );
     step(
         "select card",
         CMD_SELECT,
@@ -276,7 +287,16 @@ fn setup_bus(
 ) -> Result<(bool, bool), MmcError> {
     // 5. SCR: spec version + advertised bus widths.
     let scr = read_scr(host, rca)?;
-    let bus_width_4bit = scr.bus_width_4bit;
+    log::info!(
+        "sd: SCR structure={} spec={} bus-widths={:#05x}",
+        scr.structure,
+        scr.sda_vsn,
+        scr.bus_widths
+    );
+    // Never ask for a bus the slot cannot drive (Linux
+    // `MMC_CAP_4_BIT_DATA`): a slot without usable DAT1..DAT3 would
+    // otherwise run every data phase into start-bit errors.
+    let bus_width_4bit = scr.bus_width_4bit && host.max_bus_width() == BusWidth::Bit4;
 
     // 6. Bus width, block length, then speed.
     if bus_width_4bit {
@@ -292,12 +312,20 @@ fn setup_bus(
                 RespKind::R1,
             ),
         )?;
-        host.set_ios(&MmcIos {
-            clock_hz: 25_000_000,
-            bus_width: BusWidth::Bit4,
-            power_on: true,
-        })?;
     }
+    // Raise the bus clock whatever the width: default speed is a 25 MHz
+    // mode on one data line too, and staying at the identification clock
+    // would make a width comparison meaningless (and block I/O 60x slower
+    // than the mode allows).
+    host.set_ios(&MmcIos {
+        clock_hz: 25_000_000,
+        bus_width: if bus_width_4bit {
+            BusWidth::Bit4
+        } else {
+            BusWidth::Bit1
+        },
+        power_on: true,
+    })?;
     // CMD16 (SET_BLOCKLEN) only matters for byte-addressed cards: SDHC/
     // SDXC fix the block length at 512 by definition (Linux skips it for
     // block-addressed cards as well), and several cards answer it with a
@@ -314,7 +342,18 @@ fn setup_bus(
             )),
         )?;
     }
-    let high_speed = switch_high_speed(host, csd, &scr, bus_width_4bit)?;
+    let high_speed = match switch_high_speed(host, csd, &scr, bus_width_4bit) {
+        Ok(high_speed) => high_speed,
+        Err(err) => {
+            // Best-effort, as documented on `switch_high_speed` and as the
+            // tgoskits reference does: a card or host that cannot serve the
+            // switch read keeps the default speed instead of failing
+            // identification.
+            log::warn!("sd: HS switch failed ({err:?}); staying at default speed");
+            host.recover();
+            false
+        }
+    };
     Ok((bus_width_4bit, high_speed))
 }
 
@@ -392,15 +431,21 @@ fn read_scr(host: &dyn MmcHost, rca: u16) -> Result<Scr, MmcError> {
         return Err(MmcError::Unsupported);
     }
     Ok(Scr {
+        structure,
         sda_vsn: scr.bits(59, 56),
+        bus_widths: scr.bits(51, 48),
         bus_width_4bit: scr.bits(51, 48) & 0x4 != 0,
     })
 }
 
 /// Decoded SCR fields (Linux `struct sd_scr`, the parts this core uses).
 struct Scr {
+    /// SCR structure version (bits [63:60]; only 0 is defined).
+    structure: u32,
     /// Spec version: 0 = 1.0/1.01, 1 = 1.10, 2 = 2.0+.
     sda_vsn: u32,
+    /// Raw `SD_BUS_WIDTHS` field (bits [51:48]).
+    bus_widths: u32,
     /// 4-bit bus advertised (Linux `SD_BUS_WIDTH_4`).
     bus_width_4bit: bool,
 }

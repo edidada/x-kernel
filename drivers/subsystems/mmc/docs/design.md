@@ -37,6 +37,15 @@ reads, per-block CMD24 for writes (multi-block writes + pre-erase
 bookkeeping are a deliberate follow-up), with `poll_card_ready` (CMD13)
 between writes.
 
+Long (`R2`) responses are carried as `{127:96} .. {31:0}` in
+`MmcResponse::raw`; a host must unshift the controller's response
+registers into that order (DW MMC keeps the least-significant word in
+`RESP0`), because CID/CSD decoding depends on it.
+
+The core never asks for a wider bus than `MmcHost::max_bus_width`
+(Linux `MMC_CAP_4_BIT_DATA`), and a failed CMD6 speed switch degrades to
+default speed rather than failing identification.
+
 Completion is a two-half design: `XferStatus` (this crate, lock-free
 atomics) is published by an IRQ-driven host's handler, and the waiter parks
 through `XferSignal`. The task-context implementation lives in

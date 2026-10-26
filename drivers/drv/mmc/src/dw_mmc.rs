@@ -189,6 +189,9 @@ pub struct DwMmcHost {
     /// Requested card clock ceiling (Linux `mmc->f_max`): the lower of the
     /// DT `max-frequency` and the board's `MMC_MAX_CARD_HZ` (0 = no cap).
     max_card_hz: u32,
+    /// Widest data bus this slot drives (Linux `MMC_CAP_4_BIT_DATA`), a
+    /// board fact: unusable DAT1..DAT3 lines fail every data phase.
+    max_width: BusWidth,
     /// Host slot index (`mmc_host->index`).
     slot: u8,
     /// Current configured bus clock (0 = gated).
@@ -218,6 +221,7 @@ impl DwMmcHost {
         fifo_depth: u32,
         slot: u8,
         max_card_hz: u32,
+        max_width: BusWidth,
     ) -> Result<Self, MmcError> {
         if bus_hz == 0 || fifo_depth < 2 {
             return Err(MmcError::Unsupported);
@@ -230,6 +234,7 @@ impl DwMmcHost {
             slot,
             fifo_off: SDMMC_DATA_240A_OFFSET,
             max_card_hz,
+            max_width,
             current_clock: AtomicU32::new(0),
         };
 
@@ -431,15 +436,20 @@ impl DwMmcHost {
     /// Read the response registers (Linux `dw_mci_get_resp`): RESP0 holds
     /// the most-significant word `{127:96}`, matching the raw layout
     /// [`MmcResponse::bits`] indexes.
+    /// Read the response registers (Linux `dw_mci_command_complete`): for a
+    /// long response `RESP0` holds the **least**-significant word — Linux
+    /// stores `resp[3] = RESP0 … resp[0] = RESP3` — so the {@link
+    /// MmcResponse::raw} layout, which indexes `{127:96}` first, needs the
+    /// registers reversed.
     fn read_response(&self, cmd: &MmcCommand) -> MmcResponse {
         match cmd.resp {
             RespKind::None => MmcResponse { raw: [0; 4] },
             RespKind::R2 => MmcResponse {
                 raw: [
-                    self.readl(SDMMC_RESP0),
-                    self.readl(SDMMC_RESP0 + 4),
-                    self.readl(SDMMC_RESP0 + 8),
-                    self.readl(SDMMC_RESP0 + 0xC),
+                    self.readl(SDMMC_RESP0 + 0xC), // {127:96}
+                    self.readl(SDMMC_RESP0 + 8),   // {95:64}
+                    self.readl(SDMMC_RESP0 + 4),   // {63:32}
+                    self.readl(SDMMC_RESP0),       // {31:0}
                 ],
             },
             _ => MmcResponse {
@@ -677,6 +687,7 @@ impl MmcHost for DwMmcHost {
         self.current_clock.store(clock_hz, Ordering::Release);
         let ctype = match ios.bus_width {
             BusWidth::Bit1 => 0,
+            _ if self.max_width == BusWidth::Bit1 => 0,
             BusWidth::Bit4 => CTYPE_4BIT,
         };
         self.writel(SDMMC_CTYPE, ctype);
@@ -686,6 +697,10 @@ impl MmcHost for DwMmcHost {
     fn card_present(&self) -> bool {
         // CDETECT bit n set == card absent (active low).
         self.readl(SDMMC_CDETECT) & 1 == 0
+    }
+
+    fn max_bus_width(&self) -> BusWidth {
+        self.max_width
     }
 }
 
@@ -718,7 +733,11 @@ impl DwMmcHost {
         // A completed exchange only means the response arrived: the card
         // still reports refusals inside R1. Without this a declined
         // ACMD6/CMD16/CMD7 looks exactly like a controller fault later on.
-        if matches!(cmd.resp, RespKind::R1 | RespKind::R1b) && response.word() & R1_ERROR_BITS != 0
+        // CMD3 (SEND_RELATIVE_ADDR) answers R6, whose upper half is the new
+        // RCA rather than card status, so it is checked only for presence.
+        if matches!(cmd.resp, RespKind::R1 | RespKind::R1b)
+            && cmd.opcode != 3
+            && response.word() & R1_ERROR_BITS != 0
         {
             log::warn!(
                 "dwmmc: cmd {} arg {:#x} answered with an error: {}",

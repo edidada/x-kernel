@@ -464,6 +464,16 @@ config MMC_CIU_HZ
       driver divides this down for 400 kHz init, 25 MHz default speed
       and 50 MHz high speed; it never reprograms the source.
 
+config MMC_4BIT
+    bool "MMC 4-bit bus support"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      Advertise the controller's DAT1..DAT3 lines to the SD core. Unset this
+      to keep every card in 1-bit mode: the bring-up switch for a slot whose
+      wide data lines do not reach the controller (every data phase then
+      fails with a start-bit error while commands stay healthy).
+
 config MMC_MAX_CARD_HZ
     hex "MMC card clock ceiling (Hz)"
     depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP

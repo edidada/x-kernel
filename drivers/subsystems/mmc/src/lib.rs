@@ -245,6 +245,15 @@ pub trait MmcHost: Send + Sync {
     /// Whether a card is currently seated in the slot (Linux `get_cd`).
     fn card_present(&self) -> bool;
 
+    /// Widest data bus this slot can drive (Linux `MMC_CAP_4_BIT_DATA`).
+    ///
+    /// The protocol core never asks for a wider bus than this, so a slot
+    /// whose `DAT1..DAT3` cannot be used keeps the card in 1-bit mode
+    /// instead of failing every data phase with start-bit errors.
+    fn max_bus_width(&self) -> BusWidth {
+        BusWidth::Bit4
+    }
+
     /// Error-recovery hook: reset the FIFO, force-stop the card with
     /// CMD12 and clear controller state (Linux's post-transfer error
     /// path). Called by the protocol core at phase boundaries where a

@@ -80,6 +80,12 @@ to the card-clock ceiling — `min(max-frequency, MMC_MAX_CARD_HZ)` — which
 is the bring-up knob for a board whose real source rate differs from the
 `MMC_CIU_HZ` assumption.
 
+The data bus width is capped the same way: `MmcHost::max_bus_width`
+(Linux `MMC_CAP_4_BIT_DATA`, board fact `MMC_4BIT`) keeps the card in
+1-bit mode when the slot's `DAT1..DAT3` cannot be driven. Without that
+ceiling a slot with dead wide lines fails every data phase with
+`RINTSTS.SBE` while commands stay perfectly healthy.
+
 UHS-I is out of scope, so the sample/drive phase clocks
 (`SCLK_SDMMC_DRV/SAMPLE`) are untouched. That is a deliberate gap with a
 known cost: Linux programs the drive phase (90°) and the sample phase on

@@ -23,7 +23,7 @@ use driver_base::{
     RuntimeError,
 };
 use subsys_mmc::{
-    DetectContext, MmcError,
+    BusWidth, DetectContext, MmcError,
     bus::{MmcBus, MmcCardData},
     sd,
 };
@@ -91,6 +91,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
                 fifo_depth,
                 slot,
                 card_clock_ceiling(max_frequency),
+                bus_width_ceiling(),
             )
             .map_err(host_error)?,
         );
@@ -165,6 +166,19 @@ fn card_clock_ceiling(dt_max_hz: u32) -> u32 {
         (0, board) => board,
         (dt, 0) => dt,
         (dt, board) => dt.min(board),
+    }
+}
+
+/// Widest data bus this board drives (Linux `MMC_CAP_4_BIT_DATA`).
+///
+/// `MMC_4BIT=n` is the bring-up lever for a slot whose `DAT1..DAT3` do not
+/// reach the controller: the card is then kept in 1-bit mode instead of
+/// failing every data phase with a start-bit error.
+fn bus_width_ceiling() -> BusWidth {
+    if kbuild_config::MMC_4BIT {
+        BusWidth::Bit4
+    } else {
+        BusWidth::Bit1
     }
 }
 
