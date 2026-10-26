@@ -177,9 +177,7 @@ Because the source rate is unreadable, and because a card that accepts
 commands but never drives the bus looks identical whether the clock is too
 fast or the wide lines are dead, the probe verifies **a block read** and then
 walks a ladder of `(width, ceiling)` pairs (`MMC_CLOCK_LADDER`: 4-bit at the
-configured ceiling, halved ceilings down to 4 MHz, then the same at 1-bit,
-with each pair tried twice because this board fails the first attempt at a
-pair that works on the next one).
+configured ceiling, halved ceilings down to 4 MHz, then the same at 1-bit).
 It logs the pair that worked, which is the measurement the divider math was
 missing; pin `MMC_MAX_CARD_HZ`/`MMC_4BIT` to it and turn the ladder off.
 

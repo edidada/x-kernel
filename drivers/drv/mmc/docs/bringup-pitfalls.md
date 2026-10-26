@@ -220,9 +220,16 @@ succeeded on a second full initialisation.
 Putting the two changes at opposite ends of the sequence removes the corner
 instead of retrying around it: the switch read happens on the slow, narrow bus
 where it is uncritical, and the first wide/fast transfer is ordinary block
-I/O. The lesson generalised: when a transfer fails right after a mode change,
+I/O. Confirmed on the board: the boot that carried this change reports
+`data path ok at 4-bit / 25000000 Hz` on the first attempt, with no `cmd 6
+`SBE`` and no retry — after four earlier hypotheses (clock ceiling, FIFO
+geometry, `BMOD` reset, power cycling) each absorbed the symptom without
+explaining it.
+
+The lesson generalised: when a transfer fails right after a mode change,
 compare *where* in the sequence Linux performs that transfer before suspecting
-the mode itself.
+the mode itself. The retry mechanisms added while guessing (`LADDER_REPEATS`,
+the clock ladder) stay only as safety nets, not as the fix.
 
 ## Diagnostic rules that came out of this
 

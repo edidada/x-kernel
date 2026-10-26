@@ -231,12 +231,12 @@ fn ceiling_steps(ceiling: u32) -> u32 {
 /// How many times each `(width, ceiling)` pair is tried before the ladder
 /// steps down.
 ///
-/// Two, because the board fails the *first* attempt at a pair that works on
-/// the next one at an identical width and clock (see the bring-up log): the
-/// marginal thing is entering 4-bit mode, not the rate. Repeating the pair is
-/// what keeps the fastest working rate instead of dropping a step for a
-/// one-shot failure.
-const LADDER_REPEATS: usize = 2;
+/// One: the pair is retried only when the ladder has reason to believe the
+/// attempt was one-shot. It was two while the board failed its first
+/// initialisation at every boot; that turned out to be the init *order* (the
+/// CMD6 switch read ran after the width and clock change instead of before
+/// them), not a marginal bus, so the repeat is gone.
+const LADDER_REPEATS: usize = 1;
 
 /// The `index`-th `(width, ceiling)` pair: [`LADDER_REPEATS`] tries at each
 /// clock step of the widest width, then the same for the next width down.

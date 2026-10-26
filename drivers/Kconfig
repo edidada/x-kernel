@@ -522,10 +522,9 @@ config MMC_CLOCK_LADDER
       data lines are usable (MMC_4BIT). A card that accepts commands but never
       drives the bus reports the same `SBE`/`TCBCNT=0` for both, so with this
       enabled the probe verifies a block read and walks a ladder: 4-bit at
-      the configured ceiling (tried twice — this board fails the first
-      attempt at a pair that works on the next one), then halved ceilings
-      down to 4 MHz, then the same for 1-bit. It logs the pair that worked
-      instead of leaving the board unable to boot.
+      the configured ceiling, then halved ceilings down to 4 MHz, then the
+      same for 1-bit. It logs the pair that worked instead of leaving the
+      board unable to boot.
 
       A working pair is also the measurement: if only X Hz works at 4-bit,
       set MMC_MAX_CARD_HZ to X; if only 1-bit works, unset MMC_4BIT. Turn the
