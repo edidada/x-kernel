@@ -56,7 +56,10 @@ MMC_CIU_HZ=0x17D7840
 # 25 MHz), so the bus is the limit at this setting; MMC_CLOCK_LADDER falls back
 # to 25 MHz on its own if a setting does not work.
 MMC_MAX_CARD_HZ=0x2FAF080
-MMC_4BIT=y
+# MEASUREMENT: 1-bit at the same clock as the 4-bit runs. Per-byte time is
+# 2/C + gap (4-bit) vs 8/C + gap (1-bit), so the same clock predicts ~2.7 MB/s
+# if the CIU input is 25 MHz and ~5.4 MB/s if it is 50 MHz.
+# MMC_4BIT is not set
 MMC_CLOCK_LADDER=y
 MMC_IDMAC=y
 MMC_MULTIBLOCK=y
