@@ -133,9 +133,56 @@ pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     Ok(0)
 }
 
-/// Access kernel log buffer (syslog)
-pub(crate) fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<isize> {
-    Ok(0)
+/// `syslog(2)` action: return the whole kernel log buffer (Linux
+/// `SYSLOG_ACTION_READ_ALL`).
+const SYSLOG_ACTION_READ_ALL: i32 = 3;
+/// `syslog(2)` action: like `READ_ALL`, then empty the buffer.
+const SYSLOG_ACTION_READ_CLEAR: i32 = 4;
+/// `syslog(2)` action: empty the buffer.
+const SYSLOG_ACTION_CLEAR: i32 = 5;
+/// `syslog(2)` action: return how many bytes are unread.
+const SYSLOG_ACTION_SIZE_UNREAD: i32 = 9;
+/// `syslog(2)` action: return the buffer's total size.
+const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
+
+/// Accesses the kernel log buffer (`dmesg`).
+///
+/// Only the read side is implemented, which is what `dmesg` uses; the console
+/// verbosity controls (`SYSLOG_ACTION_CONSOLE_*`) stay with
+/// `/proc/sys/kernel/printk`, whose value domain is X-Kernel's (higher = more
+/// verbose), so reusing Linux's inverted numbering here would be a trap.
+///
+/// `buf` carries user addresses from the raw syscall arguments, so it is
+/// rebuilt as a typed [`UserPtr`] here instead of in the dispatch arm.
+pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: usize) -> KResult<isize> {
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::OperationNotPermitted);
+    }
+    match action {
+        SYSLOG_ACTION_SIZE_BUFFER => Ok(klogger::LOGBUF_SIZE as isize),
+        SYSLOG_ACTION_SIZE_UNREAD => Ok(klogger::logbuf_len() as isize),
+        SYSLOG_ACTION_CLEAR => {
+            klogger::logbuf_clear();
+            Ok(0)
+        }
+        SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            let user = UserPtr::<u8>::from(buf as usize);
+            if user.is_null() {
+                return Err(KError::InvalidInput);
+            }
+            // Snapshot outside the syscall's user copy: a page fault on the
+            // destination must not happen with the log lock held.
+            let available = klogger::logbuf_len().min(len);
+            let mut kbuf = alloc::vec![0u8; available];
+            let copied = klogger::logbuf_snapshot(&mut kbuf);
+            user.write_vm_slice(&kbuf[..copied])?;
+            if action == SYSLOG_ACTION_READ_CLEAR {
+                klogger::logbuf_clear();
+            }
+            Ok(copied as isize)
+        }
+        _ => Err(KError::InvalidInput),
+    }
 }
 
 /// Sets the hostname in the calling process's UTS namespace.

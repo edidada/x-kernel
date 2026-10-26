@@ -243,7 +243,7 @@ vocabulary (`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
 
 | # | Layer | Scope | Needs |
 | --- | --- | --- | --- |
-| 1 | `echo 5 > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
+| 1 | `echo 'warn drv_mmc=trace' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
 | 2 | `/chosen/x-kernel,log-level = "debug";` | boot of that board | editing the DTB |
 | 3 | `loglevel=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
 | 4 | `LOG_LEVEL_*` Kconfig | build default | a rebuild |
@@ -258,6 +258,34 @@ defconfig therefore boots at `LOG_LEVEL_DEBUG` during bring-up.
 Values are validated; an invalid one is reported and ignored rather than
 silently applied. Note the value order is X-Kernel's (higher = more verbose),
 which is *not* Linux `console_loglevel` compatible.
+
+A layer-1 write takes a full spec, so logging can be *retargeted* mid-session
+instead of raised globally — the boot default on RK3588 is
+`warn drv_mmc=debug subsys_mmc=debug fs_boot=debug`, which keeps IPI and
+syscall chatter off the console while the storage stack talks.
+
+### `dmesg`: the console filter does not lose records
+
+The kernel keeps a 64 KiB log ring buffer. Every record that gets past the
+`log` ceiling is stored there **before** the console filter runs, so a quiet
+console and a complete log coexist — the filter decides what is *shown*, the
+buffer records what *happened*. Read it with the usual tool:
+
+```bash
+dmesg                 # everything captured, oldest first
+dmesg | tail -40
+dmesg | grep -i 'dwmmc\|mmcblk'
+dmesg -r | grep -E '^<(3|4)>' # level filter: 1=error 2=warn 3=info 4=debug 5=trace
+dmesg -c              # read and clear
+```
+
+Lines carry X-Kernel's level number as a `^<N>` prefix. It is the same value
+domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
+inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
+included) strip the prefix by default, hence `-r` above when filtering on it. The ceiling of the active spec is also the
+capture level: with `warn drv_mmc=debug` the buffer holds debug from every
+module but stops before `trace`; add a `target=trace` rule (at boot, or live
+through `/proc/sys/kernel/printk`) to capture trace as well.
 
 ### Symbolizing logs from real hardware
 
