@@ -59,9 +59,21 @@ impl BlockDeviceOperations for MmcBlkOps {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> KResult {
-        let addr = self.device_address(block_id);
-        let blocks = blocks_in(buf.len()).map_err(|_| KError::Io)?;
-        read_blocks(self.card.host.as_ref(), addr, blocks, buf).map_err(|err| err.to_kerror())
+        if !buf.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(KError::Io);
+        }
+        // One CMD17 per device block, not one CMD18 spanning the buffer.
+        // The multi-block read arms the controller's auto-stop
+        // (CMD18 + `SEND_STOP`), and on this controller/card combination
+        // that path is the one that intermittently fails the data phase
+        // with a start-bit error (`TCBCNT=0`), leaving the card parked in
+        // the data state; the per-block shape is what the board-verified
+        // reference driver uses. Cost is one command frame per 512 bytes.
+        for (index, chunk) in buf.chunks_mut(BLOCK_SIZE).enumerate() {
+            let addr = self.device_address(block_id + index as u64);
+            read_blocks(self.card.host.as_ref(), addr, 1, chunk).map_err(|err| err.to_kerror())?;
+        }
+        Ok(())
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> KResult {
@@ -244,23 +256,23 @@ fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
 }
 
 fn lba0_integrity_probe(host: &dyn crate::MmcHost) {
-    // Ladder over the transfer **length in blocks** — the failing step
-    // localizes a data-path limit (FIFO depth / drain rate / transfer
-    // length). A byte ladder is not expressible here: the block layer and
-    // the host contract both work in whole 512-byte blocks, so a shorter
-    // request would only fail the buffer-length check without ever
-    // reaching the controller.
-    for blocks in [1u16, 2, 4, 8] {
-        let bytes = usize::from(blocks) * BLOCK_SIZE;
-        let mut buf = alloc::vec![0u8; bytes];
-        if let Err(err) = read_blocks(host, 0, blocks, &mut buf) {
-            log::warn!("mmcblk: LBA0 {blocks}-block read ({bytes}B) FAILED: {err:?}");
-            return;
+    // Ladder over **repeated single-block reads** — the shape the block
+    // consumer actually uses (see `MmcBlkOps::read_block`). A failing rung
+    // localizes the first transfer that does not survive repetition, which
+    // is what a data-path state leak looks like.
+    let mut buf = [0u8; BLOCK_SIZE];
+    for blocks in [1usize, 2, 4, 8] {
+        for block in 0..blocks {
+            if let Err(err) = read_blocks(host, block as u32, 1, &mut buf) {
+                log::warn!("mmcblk: LBA{block} read in the {blocks}-block pass FAILED: {err:?}");
+                return;
+            }
         }
         let head: alloc::vec::Vec<alloc::string::String> =
             buf[..8].iter().map(|b| alloc::format!("{b:02x}")).collect();
         log::info!(
-            "mmcblk: LBA0 {blocks}-block read ({bytes}B) ok, head: {}",
+            "mmcblk: {blocks}-block pass ok, LBA{} head: {}",
+            blocks - 1,
             head.join(" ")
         );
     }

@@ -126,8 +126,6 @@ const CLKEN_ENABLE: u32 = 1 << 0;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
-/// STATUS register data-state machine busy indicator.
-const STATUS_DATA_STATE_MC_BUSY: u32 = 1 << 10;
 /// STATUS FIFO count field [28:17], in FIFO **entries** (the entry width
 /// is `HCON.HDATA_WIDTH`, not necessarily 32 bits — Linux
 /// `SDMMC_GET_FCNT` + `host->data_shift`).
@@ -592,20 +590,28 @@ impl DwMmcHost {
     /// Order matters and was verified the hard way on this board: FIFO
     /// reset + CMD12 alone leave `STATUS.DATA_STATE_MC_BUSY` set, and the
     /// next data phase then completes instantly with an empty FIFO.
-    fn reset_data_path(&self) {
-        if self.readl(SDMMC_STATUS) & (STATUS_DATA_STATE_MC_BUSY | STATUS_CARD_BUSY) != 0 {
-            self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_ABORT_READ_DATA);
-            // The abort pulse clears itself; then DAT0 (card busy) must
-            // release before the card is addressable again.
-            for _ in spin_budget(10_000) {
-                if self.readl(SDMMC_CTRL) & CTRL_ABORT_READ_DATA == 0 {
-                    break;
-                }
+    /// Unwedge the data path: abort an in-flight read (pulse
+    /// `ABORT_READ_DATA`), wait for DAT0 to release, reset the FIFO and
+    /// clear raw status. `stop_card` additionally force-stops the card with
+    /// CMD12.
+    ///
+    /// `stop_card` is only for the error path, where a data phase was armed
+    /// and the card has to be taken out of the data state. A CMD12 sent at a
+    /// phase boundary is illegal in TRAN and the card says so
+    /// (`R1.ILLEGAL_COMMAND`) — which then has to be told apart from a real
+    /// refusal later, so the two cases are not folded together.
+    fn reset_data_path(&self, stop_card: bool) {
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_ABORT_READ_DATA);
+        // The abort pulse clears itself; then DAT0 (card busy) must release
+        // before the card is addressable again.
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & CTRL_ABORT_READ_DATA == 0 {
+                break;
             }
-            for _ in spin_budget(CMD_POLL_LIMIT) {
-                if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
-                    break;
-                }
+        }
+        for _ in spin_budget(CMD_POLL_LIMIT) {
+            if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
+                break;
             }
         }
         self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
@@ -615,15 +621,17 @@ impl DwMmcHost {
             }
             core::hint::spin_loop();
         }
-        let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
-        let _ = self.ciu_cmd(stop, 0, true);
+        if stop_card {
+            let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
+            let _ = self.ciu_cmd(stop, 0, true);
+        }
         self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
     }
 
     /// Recovery after a failed data transfer (Linux error path). Without
     /// this a card parked mid-data-state poisons every later command.
     fn recover_after_data_error(&self, failed_cmd: &MmcCommand, rintsts: u32) {
-        self.reset_data_path();
+        self.reset_data_path(true);
         log::warn!(
             "dwmmc: recovered after data error on cmd {} (rintsts {})",
             failed_cmd.opcode,
@@ -634,14 +642,13 @@ impl DwMmcHost {
 
 impl MmcHost for DwMmcHost {
     fn recover(&self) {
-        // Only a data phase that is still in flight needs the full unwedge
-        // sequence; at a healthy phase boundary this is just status
-        // hygiene, and a CMD12 sent in TRAN state only adds noise.
-        if self.readl(SDMMC_STATUS) & (STATUS_DATA_STATE_MC_BUSY | STATUS_CARD_BUSY) != 0 {
-            self.reset_data_path();
-        } else {
-            self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
-        }
+        // Phase-boundary hygiene only: the protocol core owns the card's
+        // state here, and a data phase that ran to `DATA_OVER` leaves the
+        // card in TRAN by itself. `STATUS.DATA_STATE_MC_BUSY` is not a
+        // reliable "transfer in flight" signal (it stays asserted after a
+        // completed phase), so it must not be used to decide whether to
+        // send a stop command.
+        self.reset_data_path(false);
     }
 
     fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
