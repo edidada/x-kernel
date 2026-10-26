@@ -47,14 +47,11 @@ KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
 SCMI_SMC_ID=0x82000010
 MMC_CIU_HZ=0x2FAF080
 # Card-clock ceiling: the divider math rests on MMC_CIU_HZ being the real
-# source rate, which the firmware does not let us read. A 25 MHz ceiling was
-# measured while the init order was still wrong (the CMD6 switch read ran
-# after the width/clock change); with Linux's order in place the ceiling is
-# raised to 50 MHz so the switch can reach high speed — MMC_CLOCK_LADDER falls
-# back to 25 MHz on its own if this board cannot do it.
-# MEASUREMENT: half the previous clock, to separate bus rate from the card's
-# own sustained-read rate (identical throughput => card-limited).
-MMC_MAX_CARD_HZ=0x17D7840
+# source rate, which the firmware does not let us read. Measured: throughput
+# scales with the programmed clock (9.0 MB/s at the 50 MHz ceiling, 5.1 MB/s at
+# 25 MHz), so the bus is the limit at this setting; MMC_CLOCK_LADDER falls back
+# to 25 MHz on its own if a setting does not work.
+MMC_MAX_CARD_HZ=0x2FAF080
 MMC_4BIT=y
 MMC_CLOCK_LADDER=y
 MMC_IDMAC=y

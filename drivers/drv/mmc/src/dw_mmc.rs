@@ -562,6 +562,20 @@ impl DwMmcHost {
                 div.div_ceil(2)
             }
         };
+        // The protocol asks for a mode's nominal rate; the divider decides what
+        // the card actually sees. Log the programmed result, because a request
+        // that the host cannot reach (source slower than the mode) otherwise
+        // reads in the log as if the mode had been applied.
+        let programmed = if div == 0 {
+            self.bus_hz
+        } else {
+            self.bus_hz / (div * 2)
+        };
+        log::info!(
+            "dwmmc: slot {} clock: requested {clock_hz} Hz, programmed {programmed} Hz (clkdiv \
+             {div})",
+            self.slot
+        );
         let inform = CMD_UPD_CLK | CMD_PRV_DAT_WAIT;
         self.writel(SDMMC_CLKENA, 0);
         self.ciu_cmd(inform, 0, false)?;
