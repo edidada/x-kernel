@@ -39,7 +39,15 @@ fn fragment_with_id(
     let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
     bytes.extend_from_slice(payload);
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let header = ipv4::parse_input(packet.network_packet().unwrap())
+        .unwrap()
+        .to_header();
+    ipv4::normalize_packet(
+        &mut packet,
+        header.header_len(),
+        usize::from(header.total_len),
+    )
+    .unwrap();
     (packet, header)
 }
 
@@ -62,8 +70,8 @@ fn test_ipv4_reassembly_accepts_in_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
-    assert!(!header.is_fragmented());
+    let header = ipv4::parse_input(ip_packet).unwrap();
+    assert!(!header.is_fragmenting_payload());
     assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
 }
 
@@ -75,7 +83,7 @@ fn test_ipv4_reassembly_accepts_reverse_order_fragments() {
         panic!("expected complete packet");
     };
     let ip_packet = packet.network_packet().unwrap();
-    let header = Ipv4Header::parse_input(ip_packet).unwrap();
+    let header = ipv4::parse_input(ip_packet).unwrap();
     assert_eq!(ipv4::payload(ip_packet, &header).unwrap(), b"abcdefghijkl");
 }
 
@@ -147,9 +155,13 @@ fn test_ipv4_reassembly_expires_first_fragment() {
     assert_eq!(expired.timer_events, 1);
     assert_eq!(expired.fragments.len(), 1);
     assert_eq!(reassembler.expiration_deadline(), None);
-    assert_eq!(expired.fragments[0].header.fragment_offset(), 0);
+    assert_eq!(expired.fragments[0].header.fragment_offset.value(), 0);
     assert_eq!(
-        ipv4::payload(&expired.fragments[0].packet, &expired.fragments[0].header).unwrap(),
+        ipv4::payload(
+            &expired.fragments[0].packet,
+            &ipv4::parse_input(&expired.fragments[0].packet).unwrap()
+        )
+        .unwrap(),
         b"abcdefgh"
     );
 }
@@ -174,7 +186,7 @@ fn test_ipv4_reassembly_expire_advances_to_the_next_queue_deadline() {
 
     assert_eq!(expired.timer_events, 1);
     assert_eq!(expired.fragments.len(), 1);
-    assert_eq!(expired.fragments[0].header.identification(), 0x1234);
+    assert_eq!(expired.fragments[0].header.identification, 0x1234);
     assert_eq!(
         reassembler.expiration_deadline(),
         Some(later + IPV4_REASSEMBLY_TIMEOUT)

@@ -18,9 +18,10 @@ use alloc::{
     vec::Vec,
 };
 
+use etherparse::Ipv4Header;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use super::ipv4::{self, Ipv4Header};
+use super::ipv4;
 use crate::buf::{PacketBuf, PacketOwner, PacketType};
 
 const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
@@ -113,22 +114,23 @@ impl Ipv4Reassembler {
         now: MonotonicInstant,
     ) -> Ipv4ReassemblyResult {
         let key = Ipv4FragKey {
-            src_addr: header.src_addr().octets(),
-            dst_addr: header.dst_addr().octets(),
-            identification: header.identification(),
-            protocol: header.protocol(),
+            src_addr: header.source,
+            dst_addr: header.destination,
+            identification: header.identification,
+            protocol: header.protocol.0,
             ifindex: packet.ifindex(),
         };
         let Some(ip_packet) = packet.network_packet() else {
             return Ipv4ReassemblyResult::Dropped;
         };
-        let Some(payload) = ipv4::payload(ip_packet, &header) else {
+        let Some(payload) = ip_packet.get(header.header_len()..usize::from(header.total_len))
+        else {
             self.remove_queue(&key);
             return Ipv4ReassemblyResult::Dropped;
         };
 
-        let offset = header.fragment_offset();
-        let payload_len = aligned_payload_len(payload.len(), header.more_fragments());
+        let offset = usize::from(header.fragment_offset.value()) * IPV4_FRAGMENT_OFFSET_UNIT;
+        let payload_len = aligned_payload_len(payload.len(), header.more_fragments);
         if payload_len == 0 {
             self.remove_queue(&key);
             return Ipv4ReassemblyResult::Dropped;
@@ -158,7 +160,7 @@ impl Ipv4Reassembler {
             }
         };
 
-        if !header.more_fragments() {
+        if !header.more_fragments {
             if queue
                 .total_payload_len
                 .is_some_and(|old_total| old_total != end)
@@ -188,11 +190,11 @@ impl Ipv4Reassembler {
                 return Ipv4ReassemblyResult::Dropped;
             }
         }
-        queue.ecn_mask |= ecn_bit(header.ecn());
+        queue.ecn_mask |= ecn_bit(header.ecn.value());
         if offset == 0 && queue.first_header.is_none() {
             let first_header = Ipv4FirstFragmentHeader {
                 bytes: ip_packet[..header.header_len()].to_vec(),
-                ecn: header.ecn(),
+                ecn: header.ecn.value(),
             };
             self.memory_bytes = self.memory_bytes.saturating_add(first_header.bytes.len());
             queue.first_header = Some(first_header);
@@ -229,12 +231,12 @@ impl Ipv4Reassembler {
             let Some(first_packet) = queue.first_fragment_packet() else {
                 continue;
             };
-            let Ok(header) = Ipv4Header::parse_input(&first_packet) else {
+            let Ok(header) = ipv4::parse_input(&first_packet) else {
                 continue;
             };
             fragments.push(ExpiredIpv4Fragment {
                 packet_type: queue.packet_type,
-                header,
+                header: header.to_header(),
                 packet: first_packet,
             });
         }

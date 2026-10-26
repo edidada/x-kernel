@@ -74,6 +74,8 @@ net/knet/
     │   └── wire.rs
     ├── network/
     │   ├── ipv4/
+    │   │   ├── input.rs
+    │   │   ├── output.rs
     │   │   ├── mod.rs
     │   │   └── process.rs
     │   ├── interface_address.rs
@@ -253,6 +255,21 @@ this boundary separates the smoltcp adapter from routing and device dispatch
 without changing lock order, queue capacity, or loopback delivery. A later queue
 ownership change can replace the adapter's backing owner without exposing the
 routing table to smoltcp again.
+
+### IPv4 Header Processing
+
+IPv4 receive stages borrow etherparse's `Ipv4HeaderSlice`; construction,
+fragmentation and values that must outlive a buffer borrow use its `Ipv4Header`.
+`network/ipv4/input.rs` checks full datagram bounds and checksum, with a separate
+ICMP-quote entry allowing truncated payload. `normalize_packet` applies checked
+lengths and offsets after reads finish, since buffer mutation may detach shared
+storage. UDP extracts its existing endpoint and payload-range metadata before
+moving the buffer; ICMP inspection reuses ingress's decoded outer header.
+
+`network/ipv4/output.rs` decodes each queued byte packet once during finalization.
+Fragmentation reuses its caller's owned header and clones it per fragment,
+preserving the existing option bytes. Queue interfaces continue to transfer
+`PacketBuf`; parsing and validation across queue stages remain stage-local.
 
 ### IPv4 Filter Table Model
 

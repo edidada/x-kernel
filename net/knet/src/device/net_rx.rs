@@ -31,12 +31,7 @@ use alloc::{collections::VecDeque, vec::Vec};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
-use crate::{
-    buf::PacketBuf,
-    consts::SOCKET_BUFFER_SIZE,
-    ipv4::{self, Ipv4Header},
-    udp,
-};
+use crate::{buf::PacketBuf, consts::SOCKET_BUFFER_SIZE, ipv4, udp};
 
 /// Packets processed by one `NetRx` softirq invocation.
 pub(crate) const NET_RX_BUDGET: usize = 16;
@@ -105,13 +100,17 @@ pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
     );
     let udp_header = packet
         .network_packet()
-        .and_then(|ip_packet| Ipv4Header::parse_input(ip_packet).ok())
-        .filter(|header| header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented());
+        .and_then(|ip_packet| ipv4::parse_input(ip_packet).ok())
+        .filter(|header| {
+            header.protocol().0 == ipv4::PROTOCOL_UDP && !header.is_fragmenting_payload()
+        });
     match udp_header {
-        Some(header) => match udp::prepare_ipv4_packet(header, packet) {
-            Ok(prepared) => Some(prepared.into_packet()),
-            Err(_) => None,
-        },
+        Some(header) => {
+            let metadata = udp::parse_ipv4_packet(&header, packet.network_packet()?)?;
+            udp::prepare_ipv4_packet(metadata, packet)
+                .ok()
+                .map(udp::PreparedUdpPacket::into_packet)
+        }
         None => Some(packet),
     }
 }

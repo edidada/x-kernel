@@ -37,8 +37,12 @@ fn queued_packet(remote_addr: SocketAddrV4, payload: u8) -> PreparedUdpPacket {
     )
     .unwrap();
     let packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::DeviceRx);
-    let header = ipv4::Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
-    crate::udp::prepare_ipv4_packet(header, packet).unwrap()
+    let header = ipv4::parse_input(packet.network_packet().unwrap()).unwrap();
+    crate::udp::prepare_ipv4_packet(
+        crate::udp::parse_ipv4_packet(&header, packet.network_packet().unwrap()).unwrap(),
+        packet,
+    )
+    .unwrap()
 }
 
 #[def_test]

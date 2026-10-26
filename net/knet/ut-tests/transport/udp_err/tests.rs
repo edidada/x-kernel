@@ -14,7 +14,7 @@ use crate::{
     SocketErrorOrigin,
     buf::PacketType,
     ip::{IpAddress, IpEndpoint},
-    ipv4::{Icmpv4Error, Ipv4Header},
+    ipv4::Icmpv4Error,
     udp::{UdpSocketState, register_udp_state_for_test},
 };
 
@@ -203,16 +203,16 @@ fn test_icmpv4_error_accepts_truncated_original_datagram() {
         &udp,
     )
     .unwrap();
-    let original_header = Ipv4Header::parse_input(&original).unwrap();
+    let original_header = ipv4::parse_input(&original).unwrap();
     let error = ipv4::build_icmpv4_error_packet(
         Icmpv4Error::PortUnreachable,
         PacketType::Host,
-        original_header,
+        &original_header.to_header(),
         &original,
     )
     .unwrap();
 
-    inspect_icmpv4_error(&error, 1);
+    inspect_icmpv4_error(ipv4::parse_input(&error).unwrap(), &error, 1);
 
     assert_eq!(
         connected.consume_socket_error(),

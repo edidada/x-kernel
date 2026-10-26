@@ -7,18 +7,20 @@ use alloc::vec;
 use unittest::def_test;
 
 use super::*;
-use crate::buf::PacketOwner;
+use crate::{
+    buf::{ChecksumState, PacketBuf, PacketOwner},
+    ipv4::{self, Ipv4Error, Ipv4FragmentError, fragment_output_packet, prepare_output_header},
+};
 
 fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
     let mut packet = vec![0u8; IPV4_MIN_HEADER_LEN + payload.len()];
-    write_ipv4_header(
-        &mut packet[..IPV4_MIN_HEADER_LEN],
+    write_ipv4_packet_header(
+        &mut packet,
         Ipv4Address::new(192, 0, 2, 1),
         Ipv4Address::new(192, 0, 2, 2),
         protocol,
         64,
-        payload.len(),
-        Ipv4HeaderFragment::NONE,
+        false,
     )
     .unwrap();
     packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
@@ -37,44 +39,44 @@ fn dont_fragment_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 #[def_test]
-fn test_validate_input_packet_accepts_valid_checksum() {
-    let mut packet = PacketBuf::from_ip_packet_vec(
-        1,
-        ipv4_packet(PROTOCOL_UDP, &[1, 2]),
-        PacketOwner::DeviceRx,
-    );
+fn validated_input_lengths_normalize_packet_metadata() {
+    let mut packet =
+        PacketBuf::from_ip_packet_vec(1, ipv4_packet(PROTOCOL_UDP, &[1, 2]), PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let header = ipv4::parse_input(packet.network_packet().unwrap()).unwrap();
 
-    assert_eq!(header.protocol(), PROTOCOL_UDP);
-    assert_eq!(header.header_len(), IPV4_MIN_HEADER_LEN);
-    assert_eq!(header.total_len(), IPV4_MIN_HEADER_LEN + 2);
+    assert_eq!(header.protocol().0, PROTOCOL_UDP);
+    assert_eq!(header.slice().len(), IPV4_MIN_HEADER_LEN);
+    assert_eq!(usize::from(header.total_len()), IPV4_MIN_HEADER_LEN + 2);
+    let header_len = header.slice().len();
+    let total_len = usize::from(header.total_len());
+    ipv4::normalize_packet(&mut packet, header_len, total_len).unwrap();
     assert_eq!(packet.transport_offset(), Some(IPV4_MIN_HEADER_LEN));
     assert_eq!(packet.checksum_state(), ChecksumState::Verified);
 }
 
 #[def_test]
-fn test_validate_input_packet_marks_fragment() {
+fn input_header_preserves_fragment_flags() {
     let mut bytes = ipv4_packet(PROTOCOL_UDP, &[1, 2]);
     let mut header = Ipv4HeaderSlice::from_slice(&bytes).unwrap().to_header();
     header.more_fragments = true;
     header.header_checksum = header.calc_header_checksum();
     bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
-    let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+    let packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let header = ipv4::parse_input(packet.network_packet().unwrap()).unwrap();
 
-    assert!(header.is_fragmented());
+    assert!(header.is_fragmenting_payload());
 }
 
 #[def_test]
-fn test_validate_input_packet_rejects_bad_checksum() {
+fn input_rejects_bad_header_checksum() {
     let mut bytes = ipv4_packet(PROTOCOL_TCP, &[]);
     bytes[10] ^= 0xff;
-    let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+    let packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
     assert_eq!(
-        Ipv4Header::validate_input_packet(&mut packet),
+        ipv4::parse_input(packet.network_packet().unwrap()),
         Err(Ipv4Error::BadChecksum)
     );
 }
@@ -86,10 +88,10 @@ fn test_prepare_output_packet_repairs_checksum() {
     bytes[11] = 0;
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
 
-    Ipv4Header::prepare_output_packet(&mut packet).unwrap();
+    ipv4::prepare_output_packet(&mut packet).unwrap();
 
-    let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
-    assert_eq!(header.protocol(), PROTOCOL_ICMP);
+    let header = ipv4::parse_input(packet.network_packet().unwrap()).unwrap();
+    assert_eq!(header.protocol().0, PROTOCOL_ICMP);
 }
 
 #[def_test]
@@ -97,14 +99,23 @@ fn test_fragment_output_packet_splits_on_aligned_payload() {
     let original_payload: Vec<u8> = (0..40).collect();
     let packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
 
-    let fragments = fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 18, 0x1234).unwrap();
+    let fragments = fragment_output_packet(
+        &packet,
+        &prepare_output_header(&packet).unwrap(),
+        IPV4_MIN_HEADER_LEN + 18,
+        0x1234,
+    )
+    .unwrap();
 
     assert_eq!(fragments.len(), 3);
     let mut reassembled = Vec::new();
     for (idx, fragment) in fragments.iter().enumerate() {
-        let header = Ipv4Header::parse_input(fragment).unwrap();
+        let header = ipv4::parse_input(fragment).unwrap();
         assert_eq!(header.identification(), 0x1234);
-        assert_eq!(header.fragment_offset(), idx * 16);
+        assert_eq!(
+            (usize::from(header.fragments_offset().value()) * 8),
+            idx * 16
+        );
         assert_eq!(header.more_fragments(), idx != 2);
         assert!(!header.dont_fragment());
         reassembled.extend_from_slice(payload(fragment, &header).unwrap());
@@ -117,7 +128,12 @@ fn test_fragment_output_packet_rejects_dont_fragment() {
     let packet = dont_fragment_ipv4_packet(PROTOCOL_UDP, &[0u8; 32]);
 
     assert_eq!(
-        fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 16, 0x1234),
+        fragment_output_packet(
+            &packet,
+            &prepare_output_header(&packet).unwrap(),
+            IPV4_MIN_HEADER_LEN + 16,
+            0x1234
+        ),
         Err(Ipv4FragmentError::DontFragment)
     );
 }
@@ -125,20 +141,20 @@ fn test_fragment_output_packet_rejects_dont_fragment() {
 #[def_test]
 fn test_build_icmpv4_protocol_unreachable_packet() {
     let offending = ipv4_packet(99, &[1, 2, 3, 4]);
-    let header = Ipv4Header::parse_input(&offending).unwrap();
+    let header = ipv4::parse_input(&offending).unwrap();
 
     let error = build_icmpv4_error_packet(
         Icmpv4Error::ProtocolUnreachable,
         PacketType::Host,
-        header,
+        &header.to_header(),
         &offending,
     )
     .expect("ICMP error should be emitted");
 
-    let error_header = Ipv4Header::parse_input(&error).unwrap();
-    assert_eq!(error_header.protocol(), PROTOCOL_ICMP);
-    assert_eq!(error_header.src_addr(), header.dst_addr());
-    assert_eq!(error_header.dst_addr(), header.src_addr());
+    let error_header = ipv4::parse_input(&error).unwrap();
+    assert_eq!(error_header.protocol().0, PROTOCOL_ICMP);
+    assert_eq!(error_header.source_addr(), header.destination_addr());
+    assert_eq!(error_header.destination_addr(), header.source_addr());
     assert_eq!(
         error[IPV4_MIN_HEADER_LEN],
         etherparse::icmpv4::TYPE_DEST_UNREACH
@@ -147,4 +163,84 @@ fn test_build_icmpv4_protocol_unreachable_packet() {
         error[IPV4_MIN_HEADER_LEN + 1],
         etherparse::icmpv4::CODE_DST_UNREACH_PROTOCOL
     );
+}
+
+#[def_test]
+fn input_and_icmp_quote_have_distinct_payload_length_requirements() {
+    let bytes = ipv4_packet(PROTOCOL_UDP, &[0; 64]);
+    let quote = &bytes[..IPV4_MIN_HEADER_LEN + 8];
+    assert!(matches!(
+        ipv4::parse_input(quote),
+        Err(Ipv4Error::Malformed)
+    ));
+    let header = ipv4::parse_icmp_quote(quote).unwrap();
+    assert_eq!(usize::from(header.total_len()), bytes.len());
+    let mut bad_quote = quote.to_vec();
+    bad_quote[10] ^= 0xff;
+    assert!(matches!(
+        ipv4::parse_icmp_quote(&bad_quote),
+        Err(Ipv4Error::BadChecksum)
+    ));
+}
+
+#[def_test]
+fn input_bounds_payload_by_total_length_before_normalizing_padding() {
+    let mut bytes = ipv4_packet(PROTOCOL_TCP, b"abc");
+    bytes.extend_from_slice(&[0xff; 16]);
+    let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+    let header = ipv4::parse_input(packet.network_packet().unwrap()).unwrap();
+    assert_eq!(
+        payload(packet.network_packet().unwrap(), &header).unwrap(),
+        b"abc"
+    );
+    let header_len = header.slice().len();
+    let total_len = usize::from(header.total_len());
+    ipv4::normalize_packet(&mut packet, header_len, total_len).unwrap();
+    assert_eq!(
+        packet.network_packet().unwrap().len(),
+        IPV4_MIN_HEADER_LEN + 3
+    );
+}
+
+#[def_test]
+fn fragment_header_reuse_preserves_all_original_option_bytes() {
+    let mut header = Ipv4Header::new(
+        40,
+        64,
+        etherparse::IpNumber::UDP,
+        [192, 0, 2, 1],
+        [192, 0, 2, 2],
+    )
+    .unwrap();
+    header.dont_fragment = false;
+    let options = [0x1e, 4, 0xaa, 0xbb, 0x9e, 4, 0xcc, 0xdd];
+    header.options = etherparse::Ipv4Options::try_from(&options[..]).unwrap();
+    header.set_payload_len(40).unwrap();
+    header.header_checksum = header.calc_header_checksum();
+    let mut bytes = header.to_bytes().to_vec();
+    bytes.extend_from_slice(&[7; 40]);
+    let fragments = fragment_output_packet(&bytes, &header, 44, 7).unwrap();
+    assert!(fragments.len() > 1);
+    for fragment in fragments {
+        let parsed = ipv4::parse_input(&fragment).unwrap();
+        assert_eq!(parsed.options(), &options);
+    }
+}
+
+#[def_test]
+fn input_keeps_ah_fragment_payload_uninterpreted() {
+    let mut header = Ipv4Header::new(
+        8,
+        64,
+        etherparse::ip_number::AUTH,
+        [192, 0, 2, 1],
+        [192, 0, 2, 2],
+    )
+    .unwrap();
+    header.fragment_offset = etherparse::IpFragOffset::try_new(1).unwrap();
+    header.header_checksum = header.calc_header_checksum();
+    let mut bytes = header.to_bytes().to_vec();
+    bytes.extend_from_slice(&[0xff; 8]);
+    let header = ipv4::parse_input(&bytes).unwrap();
+    assert_eq!(payload(&bytes, &header).unwrap(), &[0xff; 8]);
 }

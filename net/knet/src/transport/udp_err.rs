@@ -5,14 +5,11 @@
 //! UDP asynchronous error queue support.
 
 use ::core::net::{SocketAddr, SocketAddrV4};
-use etherparse::{Icmpv4Slice, Icmpv4Type, UdpHeaderSlice};
+use etherparse::{Icmpv4Slice, Icmpv4Type, Ipv4HeaderSlice, UdpHeaderSlice};
 use kerrno::LinuxError;
 
 use super::udp::{self, UdpSocketQueuedError};
-use crate::{
-    SocketErrorInfo, SocketErrorOrigin,
-    ipv4::{self, Ipv4Header},
-};
+use crate::{SocketErrorInfo, SocketErrorOrigin, ipv4};
 
 const ICMPV4_DST_UNREACHABLE: u8 = 3;
 const ICMPV4_TIME_EXCEEDED: u8 = 11;
@@ -101,18 +98,22 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
 /// Inspect an IPv4 ICMP error and queue it for the affected UDP socket.
 ///
 /// ICMP errors quote the packet that triggered the error, so this path parses
-/// the outer IPv4 and ICMP headers, then the quoted IPv4 and UDP headers. The
-/// quoted UDP 4-tuple and `ingress_ifindex` determine the receiving socket: a
+/// the ICMP and quoted IPv4/UDP headers, reusing the validated outer IPv4
+/// header supplied by ingress. The quoted UDP 4-tuple and `ingress_ifindex`
+/// determine the receiving socket: a
 /// connected socket that matches the peer is preferred, and an unconnected
 /// socket bound to the local endpoint is used as a fallback.
 ///
 /// This mirrors Linux's UDP ICMP error lookup in
 /// `net/ipv4/udp.c::__udp4_lib_err()`.
-pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
-    let ip_packet = match Ipv4Header::parse_input(packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
-        _ => return,
-    };
+pub(crate) fn inspect_icmpv4_error(
+    ip_packet: Ipv4HeaderSlice<'_>,
+    packet: &[u8],
+    ingress_ifindex: i32,
+) {
+    if ip_packet.protocol().0 != ipv4::PROTOCOL_ICMP {
+        return;
+    }
     let icmp_packet = match ipv4::payload(packet, &ip_packet) {
         Some(payload) => payload,
         _ => return,
@@ -131,11 +132,11 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
     };
 
     let original_packet = icmp.payload();
-    let original_ip = match Ipv4Header::parse_icmp_quote(original_packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_UDP => header,
+    let original_ip = match ipv4::parse_icmp_quote(original_packet) {
+        Ok(header) if header.protocol().0 == ipv4::PROTOCOL_UDP => header,
         _ => return,
     };
-    let original_udp = match original_packet.get(original_ip.header_len()..) {
+    let original_udp = match original_packet.get(original_ip.slice().len()..) {
         Some(payload) => payload,
         _ => return,
     };
@@ -144,11 +145,14 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
         _ => return,
     };
 
-    let local = SocketAddrV4::new(original_ip.src_addr().into(), udp_header.source_port());
-    let remote = SocketAddrV4::new(original_ip.dst_addr().into(), udp_header.destination_port());
+    let local = SocketAddrV4::new(original_ip.source_addr(), udp_header.source_port());
+    let remote = SocketAddrV4::new(
+        original_ip.destination_addr(),
+        udp_header.destination_port(),
+    );
     // ICMP has no transport-layer port, so Linux reports the offender as the
     // ICMP source address with `sin_port` set to zero.
-    let offender = SocketAddr::V4(SocketAddrV4::new(ip_packet.src_addr().into(), 0));
+    let offender = SocketAddr::V4(SocketAddrV4::new(ip_packet.source_addr(), 0));
     let error = QueuedUdpError {
         payload: original_udp[udp_header.slice().len()..].to_vec(),
         addr: SocketAddr::V4(remote),

@@ -18,7 +18,7 @@ use crate::{
     ip::{Ipv4Address, Ipv4Cidr},
     network::{
         fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-        ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
+        ipv4::{self, Icmpv4Error, Ipv4Error},
     },
     udp, udp_err,
 };
@@ -59,7 +59,7 @@ impl IngressProcessor {
                 control_packets,
                 Icmpv4Error::FragmentReassemblyTimeout,
                 fragment.packet_type,
-                fragment.header,
+                &fragment.header,
                 &fragment.packet,
             );
         }
@@ -108,69 +108,69 @@ impl IngressProcessor {
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
-        let header = match Ipv4Header::validate_input_packet(&mut packet) {
+        let Some(ip_packet) = packet.network_packet() else {
+            return;
+        };
+        let header = match ipv4::parse_input(ip_packet) {
             Ok(header) => header,
             Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return,
         };
-
-        if !self.is_local_ipv4_destination(header.dst_addr()) {
+        if !self.is_local_ipv4_destination(header.destination_addr().into()) {
             return;
         }
-
-        if header.is_fragmented() {
-            match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
-                Ipv4ReassemblyResult::Complete(packet) => {
-                    self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets)
-                }
-                Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
+        let header_len = header.slice().len();
+        let total_len = usize::from(header.total_len());
+        if header.is_fragmenting_payload() {
+            let header = header.to_header();
+            if ipv4::normalize_packet(&mut packet, header_len, total_len).is_err() {
+                return;
+            }
+            if let Ipv4ReassemblyResult::Complete(packet) =
+                self.ipv4_reassembler.reassemble(packet, header, timestamp)
+            {
+                self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets);
             }
             return;
         }
-
-        if header.protocol() == ipv4::PROTOCOL_UDP {
-            let packet_type = packet.packet_type();
-            let packet = match udp::prepare_ipv4_packet(header, packet) {
+        if header.protocol().0 == ipv4::PROTOCOL_UDP {
+            let Some(metadata) = udp::parse_ipv4_packet(&header, ip_packet) else {
+                return;
+            };
+            if ipv4::normalize_packet(&mut packet, header_len, total_len).is_err() {
+                return;
+            }
+            let packet = match udp::prepare_ipv4_packet(metadata, packet) {
                 Ok(packet) => packet,
                 Err(_) => return,
             };
-            let (disposition, returned_packet) = udp::deliver_ipv4_packet(packet);
-            match disposition {
-                udp::InputDisposition::Accepted => return,
-                udp::InputDisposition::NoSocket if !header.is_broadcast_or_multicast() => {
-                    let Some(packet) = returned_packet else {
-                        return;
-                    };
-                    let Some(ip_packet) = packet.packet().network_packet() else {
-                        return;
-                    };
-                    queue_icmpv4_error(
-                        control_packets,
-                        Icmpv4Error::PortUnreachable,
-                        packet_type,
-                        header,
-                        ip_packet,
-                    );
-                    return;
-                }
-                udp::InputDisposition::NoSocket => return,
-            }
-        }
-
-        if should_emit_protocol_unreachable(header) {
-            if let Some(ip_packet) = packet.network_packet() {
+            if let (udp::InputDisposition::NoSocket, Some(packet)) =
+                udp::deliver_ipv4_packet(packet)
+                && let Some(ip_packet) = packet.packet().network_packet()
+                && let Ok(header) = etherparse::Ipv4HeaderSlice::from_slice(ip_packet)
+            {
                 queue_icmpv4_error(
                     control_packets,
-                    Icmpv4Error::ProtocolUnreachable,
-                    packet.packet_type(),
-                    header,
+                    Icmpv4Error::PortUnreachable,
+                    packet.packet().packet_type(),
+                    &header.to_header(),
                     ip_packet,
                 );
             }
             return;
         }
-
-        if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
+        if should_emit_protocol_unreachable(&header) {
+            queue_icmpv4_error(
+                control_packets,
+                Icmpv4Error::ProtocolUnreachable,
+                packet.packet_type(),
+                &header.to_header(),
+                ip_packet,
+            );
+            return;
+        }
+        udp_err::inspect_icmpv4_error(header, ip_packet, packet.ifindex());
+        if ipv4::normalize_packet(&mut packet, header_len, total_len).is_err() {
+            return;
         }
         accepted_packets.push(packet);
     }
@@ -198,16 +198,16 @@ pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut Socke
         };
         match ipv4::ip_version(ip_packet) {
             Some(4) => {
-                let Ok(header) = Ipv4Header::parse_input(ip_packet) else {
+                let Ok(header) = ipv4::parse_input(ip_packet) else {
                     continue;
                 };
                 let Some(payload) = ipv4::payload(ip_packet, &header) else {
                     continue;
                 };
                 snoop_tcp_segment(
-                    header.protocol(),
-                    SmoltcpIpAddress::Ipv4(header.src_addr().into()),
-                    SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
+                    header.protocol().0,
+                    SmoltcpIpAddress::Ipv4(header.source_addr()),
+                    SmoltcpIpAddress::Ipv4(header.destination_addr()),
                     payload,
                     sockets,
                 );
@@ -222,7 +222,7 @@ fn queue_icmpv4_error(
     control_packets: &mut Vec<Vec<u8>>,
     error: Icmpv4Error,
     packet_type: crate::buf::PacketType,
-    offending_header: Ipv4Header,
+    offending_header: &etherparse::Ipv4Header,
     offending_packet: &[u8],
 ) {
     let Some(packet) =
@@ -233,11 +233,12 @@ fn queue_icmpv4_error(
     control_packets.push(packet);
 }
 
-fn should_emit_protocol_unreachable(header: Ipv4Header) -> bool {
-    !header.is_fragmented()
-        && !header.is_broadcast_or_multicast()
+fn should_emit_protocol_unreachable(header: &etherparse::Ipv4HeaderSlice<'_>) -> bool {
+    !header.is_fragmenting_payload()
+        && !header.destination_addr().is_broadcast()
+        && !header.destination_addr().is_multicast()
         && !matches!(
-            header.protocol(),
+            header.protocol().0,
             ipv4::PROTOCOL_TCP | ipv4::PROTOCOL_UDP | ipv4::PROTOCOL_ICMP
         )
 }

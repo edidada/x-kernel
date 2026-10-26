@@ -3,15 +3,13 @@
 // See LICENSES for license details.
 
 use ::core::net::{SocketAddr, SocketAddrV4};
-use etherparse::UdpHeaderSlice;
+use etherparse::{Ipv4HeaderSlice, UdpHeaderSlice};
 
-use super::{
-    UDP_HEADER_LEN,
-    output::{has_valid_udp_checksum, ipv4_to_core},
-    pcb::PreparedUdpPacket,
-    registry,
+use super::{UDP_HEADER_LEN, output::has_valid_udp_checksum, pcb::PreparedUdpPacket, registry};
+use crate::{
+    buf::{PacketBuf, UdpPacketMetadata},
+    ipv4,
 };
-use crate::{buf::PacketBuf, ipv4};
 
 /// Result of UDP input delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,28 +18,24 @@ pub(crate) enum InputDisposition {
     NoSocket,
 }
 
-/// Validates an IPv4 UDP packet and records its receive metadata.
-///
-/// This function must run in task context. Loopback stamps packets before
-/// disabling BH; ordinary ingress is already processed by a task. The existing
-/// reference-counted `PacketBuf` is retained without another allocation.
+/// Stamps metadata produced by `parse_ipv4_packet` before transferring ownership.
+/// This runs in task context before loopback disables BH.
 pub(crate) fn prepare_ipv4_packet(
-    header: ipv4::Ipv4Header,
+    metadata: UdpPacketMetadata,
     packet: PacketBuf,
 ) -> Result<PreparedUdpPacket, PacketBuf> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_ipv4_packet requires task context"
     );
-    let Some((local_addr, remote_addr, payload_offset, payload_len)) = packet
-        .network_packet()
-        .and_then(|ip_packet| parse_udp_datagram(header, ip_packet))
-    else {
-        return Err(packet);
-    };
-    let packet =
-        PreparedUdpPacket::new(packet, payload_offset, payload_len, local_addr, remote_addr)?;
-    Ok(packet)
+    let range = metadata.payload_range();
+    PreparedUdpPacket::new(
+        packet,
+        range.start,
+        range.len(),
+        metadata.local_addr(),
+        metadata.remote_addr(),
+    )
 }
 
 /// Delivers a prepared packet through the non-sleeping PCB lookup path.
@@ -64,11 +58,15 @@ pub(crate) fn deliver_ipv4_packet(
     (InputDisposition::Accepted, None)
 }
 
-fn parse_udp_datagram(
-    header: ipv4::Ipv4Header,
+/// Validates UDP using the caller's already decoded IPv4 header.
+pub(crate) fn parse_ipv4_packet(
+    header: &Ipv4HeaderSlice<'_>,
     ip_packet: &[u8],
-) -> Option<(SocketAddr, SocketAddr, usize, usize)> {
-    let udp_packet = ipv4::payload(ip_packet, &header)?;
+) -> Option<UdpPacketMetadata> {
+    if header.protocol().0 != ipv4::PROTOCOL_UDP || header.is_fragmenting_payload() {
+        return None;
+    }
+    let udp_packet = ipv4::payload(ip_packet, header)?;
     let udp_header = UdpHeaderSlice::from_slice(udp_packet).ok()?;
     let udp_len = udp_header.length() as usize;
     if udp_len < UDP_HEADER_LEN || udp_len > udp_packet.len() {
@@ -76,23 +74,28 @@ fn parse_udp_datagram(
     }
 
     let udp_packet = &udp_packet[..udp_len];
-    if !has_valid_udp_checksum(header.src_addr(), header.dst_addr(), udp_packet) {
+    if !has_valid_udp_checksum(
+        header.source_addr().into(),
+        header.destination_addr().into(),
+        udp_packet,
+    ) {
         return None;
     }
 
     let remote = SocketAddr::V4(SocketAddrV4::new(
-        ipv4_to_core(header.src_addr()),
+        header.source_addr(),
         udp_header.source_port(),
     ));
     let local = SocketAddr::V4(SocketAddrV4::new(
-        ipv4_to_core(header.dst_addr()),
+        header.destination_addr(),
         udp_header.destination_port(),
     ));
 
-    Some((
+    let payload_start = header.slice().len() + UDP_HEADER_LEN;
+    Some(UdpPacketMetadata::new(
         local,
         remote,
-        header.header_len() + UDP_HEADER_LEN,
-        udp_len - UDP_HEADER_LEN,
+        payload_start,
+        payload_start + udp_len - UDP_HEADER_LEN,
     ))
 }
