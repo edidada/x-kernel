@@ -202,6 +202,28 @@ error, which is worse than no dump at all.
    50 MHz, 4-bit, 116.2 GiB). Every mismatch above was visible as a number that
    did not match that baseline.
 
+## The measurement that unblocked it
+
+Two unreadable board facts produced the same symptom (`SBE` + `TCBCNT=0`, card
+in TRAN, command answered cleanly): a card clock faster than the divider math
+assumes, and unusable wide data lines. Neither is observable from software, so
+the probe measures instead of assuming: it verifies a block read and walks
+`(width, ceiling)` pairs, logging the pair that works. On the bench that
+printed `data path only works at 4-bit / 25000000 Hz (configured 4-bit /
+50000000 Hz)` and the board booted — one boot instead of a rebuild per guess.
+
+Two lessons from the same boot:
+
+- **`IDSTS` silence is not an engine fault.** `idsts` had no error bit and
+  `DSCADDR == DBADDR`, which reads as "the engine never fetched". It had
+  nothing to fetch: the data phase itself died with `SBE`, so the card never
+  drove the bus. One boot later, at the working pair, the same engine carried
+  the self-test read with no complaint.
+- **The first attempt can fail where the second succeeds** at an identical
+  width and clock, which points at the switch into 4-bit mode being marginal
+  rather than at any register value. The ladder absorbs it by re-running the
+  whole initialisation; a retry of just the failing phase would not.
+
 ## Where the data path landed
 
 IDMAC is the default (`MMC_IDMAC`), PIO is the fallback the slot latches to

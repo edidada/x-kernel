@@ -47,9 +47,10 @@ KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
 SCMI_SMC_ID=0x82000010
 MMC_CIU_HZ=0x2FAF080
 # Card-clock ceiling: the divider math rests on MMC_CIU_HZ being the real
-# source rate, which the firmware does not let us read. Lower this to
-# bisect a clock/sampling failure; see the Kconfig help.
-MMC_MAX_CARD_HZ=0x2FAF080
+# source rate, which the firmware does not let us read. Measured on the bench
+# (MMC_CLOCK_LADDER): 4-bit works at a 25 MHz ceiling and fails at 50 MHz, so
+# that is the value until the real CIU rate is known.
+MMC_MAX_CARD_HZ=0x17D7840
 MMC_4BIT=y
 MMC_CLOCK_LADDER=y
 MMC_IDMAC=y
