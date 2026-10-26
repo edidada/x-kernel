@@ -76,7 +76,12 @@ PIO, so card detection never depends on the DMA path.
 
 FIFOTH uses the per-transfer burst geometry here (Linux
 `dw_mci_adjust_fifoth`), because the engine's burst has to match the block
-size.
+size. The thresholds follow the mechanism that moves *this* transfer, not the
+slot's capability: a transfer smaller than `IDMAC_MIN_BYTES`, or one that
+runs after the engine degraded, gets the PIO baseline (the CPU drains by
+polling `FCNT`, so there is no burst to match). Mixing them cost a boot: the
+8-byte SCR read passed with the DMA geometry and the 64-byte switch read
+fails with it.
 
 If the engine fails a transfer the slot **latches to PIO** (`idmac_ok`): the
 engine is stopped, the card unwedged, and the same transfer is retried on the

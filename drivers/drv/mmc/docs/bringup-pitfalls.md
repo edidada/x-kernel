@@ -169,6 +169,22 @@ pointers (`DSCADDR`, `BUFADDR`) belong in every IDMAC failure dump, and a
 stalled engine must not be waited on with the PIO budget (that attempt spent
 30 s before degrading).
 
+## 14. FIFOTH belongs to the mechanism, not to the slot
+
+`dw_mci_adjust_fifoth` is real for DMA and wrong for PIO, and "the slot has
+IDMAC" is not the same question as "this transfer uses IDMAC": a 64-byte
+register read stays on PIO even when the engine is enabled, and anything can
+land on PIO after the engine degrades. Keying FIFOTH off the slot's
+capability gave the PIO path a DMA burst geometry, and the board answered
+with `SBE` + `TCBCNT=0` on the switch-function read that had worked the boot
+before — a regression that looked like a hardware fault because the *only*
+change was two extra register writes per data phase.
+
+Corollary for diagnostics: dump the `RINTSTS` snapshot that triggered the
+failure, not the register after `take_errors` cleared it. The first IDMAC
+run printed `rintsts=0x4 [CMD_DONE]` for a phase that actually ended in an
+error, which is worse than no dump at all.
+
 ## Diagnostic rules that came out of this
 
 1. **A completed command is not a successful command.** Decode R1; log it when

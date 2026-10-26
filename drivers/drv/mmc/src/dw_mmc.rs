@@ -689,14 +689,14 @@ impl DwMmcHost {
     /// host↔FIFO) show whether the CIU moved any bytes at all for the
     /// phase, which separates "card never sent data" from "controller
     /// dropped it".
-    fn dump_state(&self, tag: &str) {
+    fn dump_state(&self, tag: &str, rintsts: u32) {
         log::warn!(
             "dwmmc: {tag}: ctrl={:#010x} status={:#010x} rintsts={} resp0={} intmask={:#x} \
              clkena={:#x} clksrc={:#x} clkdiv={:#x} ctype={:#x} blksiz={:#x} bytcnt={:#x} \
              tcbcnt={} tbbcnt={}",
             self.readl(SDMMC_CTRL),
             self.readl(SDMMC_STATUS),
-            Self::rintsts_names(self.readl(SDMMC_RINTSTS)),
+            Self::rintsts_names(rintsts),
             Self::r1_names(self.readl(SDMMC_RESP0)),
             self.readl(SDMMC_INTMASK),
             self.readl(SDMMC_CLKENA),
@@ -933,7 +933,7 @@ impl DwMmcHost {
             let pending = self.readl(SDMMC_RINTSTS);
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.dump_state(&alloc::format!("data-read cmd {}", cmd.opcode));
+                self.dump_state(&alloc::format!("data-read cmd {}", cmd.opcode), pending);
                 self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
@@ -964,7 +964,10 @@ impl DwMmcHost {
                 cmd.opcode,
                 Self::rintsts_names(self.readl(SDMMC_RINTSTS)),
             );
-            self.dump_state(&alloc::format!("short read cmd {}", cmd.opcode));
+            self.dump_state(
+                &alloc::format!("short read cmd {}", cmd.opcode),
+                self.readl(SDMMC_RINTSTS),
+            );
             return Err(MmcError::Io);
         }
         // Auto-stop command-done (ACD) arrives after DATA_OVER on
@@ -987,7 +990,7 @@ impl DwMmcHost {
             let pending = self.readl(SDMMC_RINTSTS);
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.dump_state(&alloc::format!("data-write cmd {}", cmd.opcode));
+                self.dump_state(&alloc::format!("data-write cmd {}", cmd.opcode), pending);
                 self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
@@ -1013,12 +1016,18 @@ impl DwMmcHost {
             }
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.dump_state(&alloc::format!("data-write tail cmd {}", cmd.opcode));
+                self.dump_state(
+                    &alloc::format!("data-write tail cmd {}", cmd.opcode),
+                    pending,
+                );
                 self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
         }
-        self.dump_state(&alloc::format!("data-write timeout cmd {}", cmd.opcode));
+        self.dump_state(
+            &alloc::format!("data-write timeout cmd {}", cmd.opcode),
+            self.readl(SDMMC_RINTSTS),
+        );
         Err(MmcError::Timeout)
     }
 
@@ -1210,17 +1219,16 @@ impl DwMmcHost {
         // for a transfer the engine is never going to complete.
         for _ in spin_budget(IDMAC_POLL_LIMIT) {
             let idsts = self.readl(SDMMC_IDSTS);
-            if idsts & IDMAC_INT_ERRORS != 0 {
-                self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
-                self.idmac_dump("engine error");
-                self.dump_state(&alloc::format!("idmac cmd {}", cmd.opcode));
-                return Err(MmcError::Io);
-            }
             let pending = self.readl(SDMMC_RINTSTS);
-            if pending & INT_DATA_ERRORS != 0 {
+            if idsts & IDMAC_INT_ERRORS != 0 || pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
                 self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
-                self.dump_state(&alloc::format!("idmac cmd {}", cmd.opcode));
+                self.idmac_dump(if idsts & IDMAC_INT_ERRORS != 0 {
+                    "engine error"
+                } else {
+                    "data error"
+                });
+                self.dump_state(&alloc::format!("idmac cmd {}", cmd.opcode), pending);
                 return Err(err);
             }
             if pending & INT_DATA_OVER != 0 && idsts & (IDMAC_INT_RI | IDMAC_INT_TI) != 0 {
@@ -1230,7 +1238,10 @@ impl DwMmcHost {
             }
         }
         self.idmac_dump("timeout");
-        self.dump_state(&alloc::format!("idmac timeout cmd {}", cmd.opcode));
+        self.dump_state(
+            &alloc::format!("idmac timeout cmd {}", cmd.opcode),
+            self.readl(SDMMC_RINTSTS),
+        );
         Err(MmcError::Timeout)
     }
 
@@ -1267,7 +1278,7 @@ impl DwMmcHost {
             return Err(MmcError::Unsupported);
         };
         let window_bus = buffers.window.bus_addr();
-        let cmdr = self.prepare_data_phase(cmd, DataDir::Read, bytes);
+        let cmdr = self.prepare_data_phase(cmd, DataDir::Read, bytes, true);
         if self.idmac_start(window_bus, bytes).is_none() {
             // Nothing was asked of the card yet: controller hygiene only.
             self.idmac_stop();
@@ -1281,6 +1292,8 @@ impl DwMmcHost {
         }
         if let Err(err) = self.idmac_wait(cmd) {
             self.idmac_stop();
+            // The authoritative bits are in the dump above; the register is
+            // already cleared by `take_errors` at this point.
             self.recover_after_data_error(cmd, self.readl(SDMMC_RINTSTS));
             return Err(err);
         }
@@ -1307,7 +1320,7 @@ impl DwMmcHost {
         // The staged bytes must be in memory before the engine can fetch
         // them, so the copy precedes the poll-demand kick.
         self.idmac_window_write(bytes, buf);
-        let cmdr = self.prepare_data_phase(cmd, DataDir::Write, bytes);
+        let cmdr = self.prepare_data_phase(cmd, DataDir::Write, bytes, true);
         if self.idmac_start(window_bus, bytes).is_none() {
             self.idmac_stop();
             self.recover();
@@ -1330,18 +1343,21 @@ impl DwMmcHost {
     /// return the encoded command **without issuing it**: the PIO path issues
     /// it directly, the IDMAC path has to arm the engine first (the card
     /// starts streaming as soon as the command is accepted).
-    fn prepare_data_phase(&self, cmd: &MmcCommand, dir: DataDir, bytes: usize) -> u32 {
+    fn prepare_data_phase(&self, cmd: &MmcCommand, dir: DataDir, bytes: usize, idmac: bool) -> u32 {
         let blksz: u32 = if bytes.is_multiple_of(512) {
             512
         } else {
             bytes as u32
         };
-        // PIO runs on the probe-time baseline (the CPU drains by polling
-        // `FCNT`, so there is no burst to match); the DMA engine needs the
-        // burst geometry for this block size.
+        // The thresholds follow the mechanism that actually moves *this*
+        // transfer, not the slot's capability: `uses_idmac()` is global, while
+        // a transfer can still go through the FIFO (below `IDMAC_MIN_BYTES`,
+        // or after the engine degraded). PIO runs on the probe-time baseline —
+        // the CPU drains by polling `FCNT`, so there is no burst to match and
+        // the DMA geometry costs it the known-good configuration.
         self.writel(
             SDMMC_FIFOTH,
-            if self.uses_idmac() {
+            if idmac {
                 self.dma_fifoth(blksz)
             } else {
                 self.baseline_fifoth()
@@ -1349,11 +1365,11 @@ impl DwMmcHost {
         );
         self.writel(SDMMC_BLKSIZ, blksz);
         self.writel(SDMMC_BYTCNT, bytes as u32);
-        // 0x100 is the card-read threshold on 2.40a+ (on older IP it is the
-        // FIFO port, which `fifo_off` already says). Linux enables it only
-        // for HS200/UHS; a stale bootloader value would gate the read
-        // stream, so default-speed transfers keep it off.
-        if self.fifo_off == SDMMC_DATA_240A_OFFSET {
+        if idmac && self.fifo_off == SDMMC_DATA_240A_OFFSET {
+            // 0x100 is the card-read threshold on 2.40a+ (on older IP it is
+            // the FIFO port, which `fifo_off` already says). Linux leaves it
+            // disabled below HS200/UHS, and a stale bootloader value would
+            // gate the DMA read stream.
             self.writel(SDMMC_CDTHRCTL, 0);
         }
         // Phase hygiene: nothing from an earlier phase may be mistaken for
@@ -1375,7 +1391,7 @@ impl DwMmcHost {
         dir: DataDir,
         bytes: usize,
     ) -> Result<(), MmcError> {
-        let cmdr = self.prepare_data_phase(cmd, dir, bytes);
+        let cmdr = self.prepare_data_phase(cmd, dir, bytes, false);
         self.issue_data_cmd(cmdr, cmd.arg)
     }
 }
