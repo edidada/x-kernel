@@ -452,82 +452,99 @@ fn mount_root_file_system(boot: &BootVfs) {
     // partition (`mmcblk0pN`, in table order) and the whole card only when
     // there is no partition table, so the candidate list is already ordered
     // by device number. `KFEAT_ROOT_BLOCK` overrides the choice by name;
-    // otherwise the lowest dev_t is the root (or the second-lowest when
-    // `KFEAT_ROOTFS_SECONDARY_BLOCK` asks for it).
-    let handle = select_root_block(&mut block_devs);
-    let device_number = handle.device_number();
-    let source = format!("/dev/{}", handle.name());
-
-    info!(
-        "  use block device 0: {:?} ({:?})",
-        handle.name(),
-        handle.device_number(),
-    );
-
+    // otherwise the preferred device is the lowest dev_t (or the
+    // second-lowest when `KFEAT_ROOTFS_SECONDARY_BLOCK` asks for it).
+    //
+    // The preference is only a *first try*: like Linux `mount_root_generic`,
+    // every remaining candidate is attempted before boot gives up, because
+    // "which partition carries the root filesystem" is an image fact, not a
+    // device-number fact.
+    let candidates = root_candidates(&mut block_devs);
     let file_system_types: Vec<_> = kvfs::registered_filesystems()
         .into_iter()
         .filter(|file_system_type| file_system_type.requires_device())
         .collect();
     let cred = kcred::initial_cred();
-    for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
-        let mut mount_flags = MountFlags::RELATIME;
-        if superblock_flags.contains(SuperBlockFlags::RDONLY) {
-            mount_flags.insert(MountFlags::RDONLY);
-        }
+    for handle in candidates {
+        let source = format!("/dev/{}", handle.name());
+        info!(
+            "  use block device: {:?} ({:?})",
+            handle.name(),
+            handle.device_number(),
+        );
+        for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
+            let mut mount_flags = MountFlags::RELATIME;
+            if superblock_flags.contains(SuperBlockFlags::RDONLY) {
+                mount_flags.insert(MountFlags::RDONLY);
+            }
 
-        for file_system_type in &file_system_types {
-            let result = kvfs::FsContext::new(
-                file_system_type,
-                Some(&source),
-                None,
-                superblock_flags,
-                &cred,
-            )
-            .and_then(|mut context| {
-                boot.namespace.mount_new(
-                    &boot.root,
-                    mount_flags,
-                    &mut context,
-                    &boot.root,
-                    &boot.root,
+            for file_system_type in &file_system_types {
+                let result = kvfs::FsContext::new(
+                    file_system_type,
+                    Some(&source),
+                    None,
+                    superblock_flags,
+                    &cred,
                 )
-            });
-            match result {
-                Ok(mount) => {
-                    info!("  filesystem type: {:?}", mount.filesystem_name());
-                    return;
-                }
-                Err(err)
-                    if matches!(
-                        kerrno::LinuxError::from(err),
-                        kerrno::LinuxError::EACCES | kerrno::LinuxError::EINVAL
-                    ) =>
-                {
-                    debug!(
-                        "root filesystem probe as {} failed: {err:?}",
-                        file_system_type.name()
-                    );
-                }
-                Err(err) => {
-                    error!(
-                        "Failed to mount root filesystem as {}: {err:?}",
-                        file_system_type.name()
-                    );
-                    panic!("VFS: Unable to mount root fs");
+                .and_then(|mut context| {
+                    boot.namespace.mount_new(
+                        &boot.root,
+                        mount_flags,
+                        &mut context,
+                        &boot.root,
+                        &boot.root,
+                    )
+                });
+                match result {
+                    Ok(mount) => {
+                        info!("  filesystem type: {:?}", mount.filesystem_name());
+                        return;
+                    }
+                    Err(err)
+                        if matches!(
+                            kerrno::LinuxError::from(err),
+                            kerrno::LinuxError::EACCES | kerrno::LinuxError::EINVAL
+                        ) =>
+                    {
+                        debug!(
+                            "root filesystem probe as {} failed: {err:?}",
+                            file_system_type.name()
+                        );
+                    }
+                    Err(err) => {
+                        // A device that errors under one filesystem may
+                        // still carry a usable one: keep probing and let the
+                        // exhausted candidate list be the failure.
+                        warn!(
+                            "root filesystem probe as {} on {source} failed: {err:?}",
+                            file_system_type.name()
+                        );
+                    }
                 }
             }
         }
+        warn!("no root filesystem on {source}; trying the next block device");
     }
-    error!("Failed to mount {source} using any registered block filesystem type");
-    panic!("VFS: Unable to mount root fs");
+    error!("Failed to mount any block device as the root filesystem");
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no block device carries a \
+                  registered filesystem; root mounting has no error return or recovery"
+    )]
+    {
+        panic!("VFS: Unable to mount root fs");
+    }
 }
 
-/// Chooses the block device used as the root filesystem.
-fn select_root_block(
+/// Block devices to try as the root filesystem, in preference order: the
+/// configured/preferred device first, then every other candidate.
+fn root_candidates(
     devs: &mut Vec<Arc<subsys_block::BlockDevice>>,
-) -> Arc<subsys_block::BlockDevice> {
+) -> Vec<Arc<subsys_block::BlockDevice>> {
     let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
     if !preferred.is_empty() {
+        // An explicit name is authoritative: boot fails rather than
+        // silently mounting some other partition.
         #[expect(
             clippy::panic,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured root block \
@@ -542,19 +559,27 @@ fn select_root_block(
                     devs.iter().map(|device| device.name()).collect::<Vec<_>>()
                 )
             });
-        return devs.remove(index);
+        return alloc::vec![devs.remove(index)];
     }
 
-    #[cfg(feature = "rootfs-secondary-block")]
-    {
-        assert!(devs.len() >= 2, "Less than two block devices found!");
-        devs.remove(1)
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no block device is \
+                  registered; root mounting has no error return or recovery"
+    )]
+    if devs.is_empty() {
+        panic!("No block device found!");
     }
-    #[cfg(not(feature = "rootfs-secondary-block"))]
-    {
-        assert!(!devs.is_empty(), "No block device found!");
-        devs.remove(0)
-    }
+    let preference = if cfg!(feature = "rootfs-secondary-block") {
+        1
+    } else {
+        0
+    };
+    let preference = preference.min(devs.len() - 1);
+    let mut candidates = Vec::with_capacity(devs.len());
+    candidates.push(devs.remove(preference));
+    candidates.append(devs);
+    candidates
 }
 
 /// Mounts the host-share 9P filesystem into the initial namespace.

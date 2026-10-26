@@ -60,12 +60,14 @@ mount 保证可见 mount 卸载后内核维护的树仍然存活。
 1. 统一 init 段执行各文件系统自己拥有的注册回调，发布 canonical type。
 2. 建立 bootstrap rootfs、initial namespace 和 init `FsStruct`。
 3. 在 bootstrap `/dev` 挂载 devtmpfs。
-4. 从非零容量的 canonical `BlockDevice` 中按 `KFEAT_ROOT_BLOCK` 选择 root；未配置时兼容
-   路径按 `dev_t` 顺序选择。
-5. 从 registry 遍历 `REQUIRES_DEV` 候选；先以 RW flags 完整尝试一轮，再加入
+4. 从非零容量的 canonical `BlockDevice` 中构造 root 候选序列：配了 `KFEAT_ROOT_BLOCK`
+   时就是那一个（名字不存在则启动失败，不做静默替换）；未配置时按 `dev_t` 顺序（开
+   `KFEAT_ROOTFS_SECONDARY_BLOCK` 则把次低者排在首位），并把其余设备作为后备。
+5. 对每个候选，从 registry 遍历 `REQUIRES_DEV` 候选；先以 RW flags 完整尝试一轮，再加入
    `SB_RDONLY`/`MNT_READONLY` 完整重试一轮。每次都以 `/dev/<disk_name>` 为 source 构造
-   `FsContext` 并调用 `MntNamespace::mount_new()`；与 Linux `mount_root_generic()` 一样，
-   只有 `EACCES`/`EINVAL` 会继续尝试下一种格式，其它错误立即停止启动。
+   `FsContext` 并调用 `MntNamespace::mount_new()`。与 Linux `mount_root_generic()` 一样，
+   单个 (device, format) 组合的失败只淘汰该组合；候选和格式都试尽才算启动失败。
+   这样"哪个分区带根文件系统"由镜像内容决定，而不是由 `dev_t` 顺序猜测。
 6. 成对更新 init root/pwd 到 overmount 后的真实 root。
 7. 初始化 `anon_inodefs` 与 `pipefs` 的 hidden mount。
 8. 在真实 root 上安装启动期虚拟文件系统；普通类型使用 `mount_new()`，启用的 cgroup2
@@ -84,6 +86,8 @@ registry，root 格式由 registry 探测结果决定。
 ## 设计决策
 
 - root device selection 是 boot policy；source resolution 和 fill-super 是通用 VFS 机制。
+  未配置 `KFEAT_ROOT_BLOCK` 时，`dev_t` 偏好只是"先试哪个"，其余候选仍会逐个探测：
+  根文件系统在哪个分区是镜像事实，不是设备编号事实。
 - 非空 `KFEAT_ROOT_BLOCK` 是权威配置，找不到同名 disk 时停止启动，不猜测其他介质。
 - `fs_boot` 不引用 ext4/FAT crate，也不维护 filesystem name switch；`kruntime` 只初始化
   统一 init 段，descriptor 注册由实现自己拥有。
