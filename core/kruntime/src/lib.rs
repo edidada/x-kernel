@@ -161,14 +161,29 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
-/// Resolve the boot-time log level: a `loglevel=` kernel command-line
-/// parameter overrides the Kconfig default, in the style of Linux's
-/// `loglevel=` parameter but using X-Kernel's own level values (`0..=5` in
-/// off/error/warn/info/debug/trace order, or a level name). `quiet` and
-/// `debug` are accepted as shorthand for `loglevel=2` (warn) and
-/// `loglevel=4` (debug) respectively. Invalid `loglevel=` values are
-/// reported and ignored, falling back to the Kconfig default.
+/// Resolve the boot-time log level, in this order:
+///
+/// 1. `/chosen/x-kernel,log-level` in the device tree (`"warn"`, `"debug"`,
+///    `"4"`, ...) — the knob a board can change without rebuilding the kernel
+///    or touching the boot loader's command line;
+/// 2. a `loglevel=` kernel command-line parameter, in the style of Linux's
+///    `loglevel=` but using X-Kernel's own level values (`0..=5` in
+///    off/error/warn/info/debug/trace order, or a level name), with `quiet`
+///    and `debug` as shorthand for `loglevel=2` (warn) and `loglevel=4`
+///    (debug);
+/// 3. the Kconfig default.
+///
+/// Invalid values are reported and ignored rather than silently applied.
 fn resolve_boot_log_level() -> &'static str {
+    if let Some(level) = khal::firmware::dt_log_level() {
+        if klogger::parse_log_level(level).is_some() {
+            return level;
+        }
+        warn!(
+            "ignoring invalid /chosen/x-kernel,log-level=\"{level}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace"
+        );
+    }
     if let Some(cmdline) = khal::cmdline() {
         for token in cmdline.split_ascii_whitespace() {
             if let Some(value) = token.strip_prefix("loglevel=")
