@@ -562,34 +562,43 @@ is retained through construction and arming; raw ABI IDs do not enter the backen
 `ut-tests/time_clock_id.rs` checks ABI identity, negative/unknown rejection before
 user-memory access and operation-specific restrictions.
 
-### 内核日志回读（`syslog`）
+### Kernel log read-back (`syslog`)
 
-`sys_syslog` 是 `klogger` 日志环形缓冲区的适配层：缓冲区、过滤器与等级域
-都归 `klogger` 所有，`ksyscall` 只做参数判定、快照与用户拷贝。
+`sys_syslog` is the adapter over `klogger`'s log ring. The ring, the filter and
+the level vocabulary all belong to `klogger`; `ksyscall` only validates the
+arguments, takes the snapshot and performs the user copy.
 
-实现的 action 与 Linux 同值：
+Implemented actions, with Linux's numbering:
 
-| action | 名称 | 行为 |
-|--------|------|------|
-| 3 | `READ_ALL` | 返回缓冲区内容，不清空 |
-| 4 | `READ_CLEAR` | 返回内容，拷贝成功后清空 |
-| 5 | `CLEAR` | 清空缓冲区，返回 0 |
-| 9 | `SIZE_UNREAD` | 返回当前已用字节数 |
-| 10 | `SIZE_BUFFER` | 返回缓冲区总容量 |
+| action | name | behaviour |
+|--------|------|-----------|
+| 3 | `READ_ALL` | return the buffered bytes, keep them |
+| 4 | `READ_CLEAR` | return the buffered bytes, drop the returned ones |
+| 5 | `CLEAR` | drop the whole buffer, return 0 |
+| 9 | `SIZE_UNREAD` | return the number of buffered bytes |
+| 10 | `SIZE_BUFFER` | return the ring's total capacity |
 
-顺序与失败处理：
+Order of operations and failure handling:
 
-1. 先做 `kprocess::current_cred().is_privileged()` 检查，不足返回
-   `OperationNotPermitted`；未授权调用不触碰缓冲区。
-2. `SIZE_*` 直接返回 `klogger` 的计数/容量。
-3. 读类 action 重建 `UserPtr<u8>`，空指针返回 `InvalidInput`。
-4. 在锁外分配内核快照缓冲（长度取 `logbuf_len().min(len)`），调用
-   `logbuf_snapshot` 取尾部数据；**用户拷贝不在持有日志锁时进行**，避免
-   缺页路径长时间关闭中断。
-5. `READ_CLEAR` 只在拷贝成功后清空，`EFAULT` 时保留日志。
-6. 其他 action（包括 Linux 的 `CONSOLE_*` 控制项）返回 `InvalidInput`：
-   控制台等级由 `/proc/sys/kernel/printk` 独占，二者的数值域相反，混用会
-   让用户态误以为写入了别的东西。
+1. `kprocess::current_cred().is_privileged()` runs first; an unprivileged
+   caller gets `OperationNotPermitted` and never touches the ring.
+2. The `SIZE_*` actions return `klogger`'s count and capacity.
+3. The read actions rebuild a typed `UserPtr<u8>` and reject a null destination
+   with `InvalidInput`.
+4. The kernel snapshot buffer is allocated outside the log lock, sized
+   `logbuf_len().min(len)`, and filled by `logbuf_snapshot`, which returns the
+   newest bytes. **The user copy never runs with the log lock held**, so a page
+   fault on the destination cannot keep the ring locked with interrupts off.
+5. `READ_CLEAR` calls `logbuf_consume(copied)` after a successful copy and only
+   for the bytes actually returned. A smaller destination (`len` is an
+   unvalidated syscall argument, including `len == 0`) therefore keeps the bytes
+   it could not receive, and records logged while the copy was in flight stay in
+   the ring; a copy failure keeps everything. Linux advances its clear cursor
+   over the records it returned, so this matches its contract.
+6. Every other action, including Linux's `CONSOLE_*` controls, returns
+   `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
+   value domain is inverted relative to Linux's, and mixing the two would let a
+   caller believe it changed something else.
 
-返回值是实际拷贝的字节数（`isize`）；`dmesg`、`dmesg -c`、`dmesg -r` 因此
-可以直接工作。
+The return value is the number of bytes copied (`isize`), so `dmesg`,
+`dmesg -c` and `dmesg -r` work unchanged.

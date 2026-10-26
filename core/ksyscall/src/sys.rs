@@ -136,7 +136,7 @@ pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
 /// `syslog(2)` action: return the whole kernel log buffer (Linux
 /// `SYSLOG_ACTION_READ_ALL`).
 const SYSLOG_ACTION_READ_ALL: i32 = 3;
-/// `syslog(2)` action: like `READ_ALL`, then empty the buffer.
+/// `syslog(2)` action: like `READ_ALL`, then drop the bytes that were returned.
 const SYSLOG_ACTION_READ_CLEAR: i32 = 4;
 /// `syslog(2)` action: empty the buffer.
 const SYSLOG_ACTION_CLEAR: i32 = 5;
@@ -151,6 +151,11 @@ const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
 /// verbosity controls (`SYSLOG_ACTION_CONSOLE_*`) stay with
 /// `/proc/sys/kernel/printk`, whose value domain is X-Kernel's (higher = more
 /// verbose), so reusing Linux's inverted numbering here would be a trap.
+///
+/// `READ_CLEAR` drops only the bytes this call returns, the way Linux advances
+/// its clear cursor: a caller whose `len` is smaller than the buffer (including
+/// `len == 0`) keeps the rest readable, and records logged while the copy was
+/// in flight are not thrown away.
 ///
 /// `buf` carries user addresses from the raw syscall arguments, so it is
 /// rebuilt as a typed [`UserPtr`] here instead of in the dispatch arm.
@@ -177,7 +182,9 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: usize) -> KResult<i
             let copied = klogger::logbuf_snapshot(&mut kbuf);
             user.write_vm_slice(&kbuf[..copied])?;
             if action == SYSLOG_ACTION_READ_CLEAR {
-                klogger::logbuf_clear();
+                // Only after a successful copy, and only the returned bytes: an
+                // `EFAULT` or a short destination must not lose evidence.
+                klogger::logbuf_consume(copied);
             }
             Ok(copied as isize)
         }

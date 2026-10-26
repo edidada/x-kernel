@@ -347,7 +347,7 @@ grant support for every syscall: the existing setter, sleep and timerfd subsets
 and their error ordering remain enforced. The timerfd backend accepts only
 `TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.
 
-### 内核日志回读（`syslog`）
+### Kernel log read-back (`syslog`)
 
 Canonical kernel log data leaves the kernel only through `syslog(2)`, and that
 path is privilege-gated: an unprivileged caller gets `OperationNotPermitted`
@@ -355,7 +355,13 @@ before any buffer access, so log contents (kernel addresses, module paths, task
 names) are not an unprivileged information channel. Read actions rebuild a
 typed `UserPtr<u8>` and reject a null destination as `InvalidInput`; the actual
 copy runs after the log ring's lock is released, and a failing copy returns its
-own error without clearing the buffer.
+own error without dropping anything.
+
+`READ_CLEAR` drops exactly the bytes it returned: `logbuf_consume(copied)` runs
+only after a successful copy and only for the returned prefix, so a short or
+zero-length destination, or a record logged while the copy was in flight, stays
+readable. Dropping the whole ring here would destroy log evidence a caller never
+received, and the return value could not even report the loss.
 
 Snapshot size is clamped to `min(requested_len, logbuf_len())`, so the kernel
 allocation is bounded by the ring (64 KiB) and never by the caller's `len`.
