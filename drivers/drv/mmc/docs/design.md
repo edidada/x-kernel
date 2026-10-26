@@ -1,5 +1,8 @@
 # drv-mmc — Design
 
+> Bring-up history, symptom→cause table and the diagnostic rules this driver
+> ended up with: [`bringup-pitfalls.md`](bringup-pitfalls.md).
+
 ## Purpose and scope
 
 MMC host controller drivers — the Linux `drivers/mmc/host` analogue. One
