@@ -74,9 +74,9 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 | ID | Threat | Severity | Trigger | Mitigation |
 |----|--------|----------|---------|------------|
-| T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, or a privileged write | The spec is validated as a whole before it is installed; a rejected spec only warns and keeps the previous filter; empty specs are rejected as well |
+| T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, a privileged write, or the compiled-in `LOG_FILTER` | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; every boot source reports its rejection on the console through the unfiltered `kprintln!` path (the level being installed would filter a `warn!`), `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
 | T-02 | An override widens the default ceiling and spills hot-path `trace` lines | Low | A `target=trace` rule | The ceiling is the maximum of all rules, so only that target is widened; hot paths such as `kipi` log at `trace` |
-| T-03 | A log flood overwrites boot evidence | Medium | More than 64 KiB of records | The ring overwrites the oldest bytes; the read side exposes only the newest tail; no rate limit (see Known limitations) |
+| T-03 | A log flood overwrites boot evidence | Medium | More than 64 KiB of records | The ring overwrites the oldest bytes; the read side returns the oldest unread window, so an unreleased window is what a reader sees until it is overwritten; no rate limit (see Known limitations) |
 | T-04 | Unauthorized reads leak kernel addresses and paths | Medium | An unprivileged `syslog(2)` call | `ksyscall::sys_syslog` checks `is_privileged()` first and returns `OperationNotPermitted` |
 | T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to `/proc/sys/kernel/printk` | `procfs` requires `cred().is_privileged()` on write; the node is owner-write, world-read |
 | T-06 | An over-long record loses its prefix or corrupts line boundaries | Low | A module prints a very long message | Truncation keeps the `<N>` prefix, reserves one byte for the terminator (so the record always ends with `\n`), and stops at a character boundary |
@@ -89,7 +89,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Mitigation |
 |----|--------------|-------|--------------|---------------|----------|------------|
-| F-01 | The boot filter stays at the build default | DT, command line and Kconfig all invalid or missing | Logging follows `LOG_LEVEL_*` | None | 4 | Every invalid source is reported with `warn!` and the resolver falls through to the next one, never to silence |
+| F-01 | The boot filter stays at the build default | DT, command line and Kconfig all invalid or missing | Logging follows `LOG_LEVEL_*` | None | 4 | Every invalid source is reported through the unfiltered `kprintln!` path (`warn!` would be filtered by the `error`/`off` level the resolver is installing) and the resolver falls through to the next one, never to silence |
 | F-02 | The ring stays full and old records are lost | Boot log volume above 64 KiB | Only the newest records remain | Missing evidence | 3 | Capacity and capture level are independent knobs; raise the capture level for a full boot log or capture the serial console |
 | F-03 | A `syslog(2)` copy to user space fails | Unwritable destination | `EFAULT`, records kept | `dmesg` retries | 3 | The read copies into a kernel buffer first and the window is released only after a successful copy |
 | F-04 | The filter lock waits on the logging hot path | Logging from inside a `FILTER` critical section | Interrupts stay off while spinning | Potential hang | 1 | Critical sections only touch fixed-size data; warnings are emitted outside the lock |
@@ -98,9 +98,11 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 ## Failure handling
 
-- An invalid filter spec returns `FilterSpecError`; the caller (`kruntime`,
-  `procfs`) maps it to a `warn!` or `VfsError::InvalidInput`, and the previous
-  filter keeps working.
+- An invalid filter spec returns `FilterSpecError` and the previous filter keeps
+  working. `kruntime`'s boot resolver reports the rejection with `kprintln!`
+  (unfiltered, so an `error`/`off` build cannot hide the diagnostic) and falls
+  through to the next source; `procfs`'s write path returns
+  `VfsError::InvalidInput` to the writer.
 - `init_klogger` panics if the global logger cannot be installed: that path has
   no error return and no recovery, so it is an explicit, documented exception
   (see the `#[expect]` reason in the code).
