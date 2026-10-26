@@ -188,7 +188,7 @@ const IDMAC_RING_DESCS: usize = IDMAC_RING_BYTES / IDMAC_DESC_SIZE;
 /// Bounce window: every transfer is staged through it, which is what keeps
 /// the descriptor addresses inside the 32-bit IDMAC limit and the cache
 /// maintenance out of the block path.
-pub(crate) const IDMAC_WINDOW_BYTES: usize = 64 * 1024;
+pub(crate) const IDMAC_WINDOW_BYTES: usize = 1024 * 1024;
 /// Smallest transfer worth handing to the engine. Below one block the setup
 /// cost dominates and the transfer is a register read (SCR 8 B, CMD6 64 B), so
 /// those stay on PIO — card detection then never depends on the DMA path.
