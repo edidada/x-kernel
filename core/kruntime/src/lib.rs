@@ -193,54 +193,61 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
-/// Resolve the boot-time log level, in this order:
+/// Resolve the boot-time log filter, in this order:
 ///
-/// 1. `/chosen/x-kernel,log-level` in the device tree (`"warn"`, `"debug"`,
-///    `"4"`, ...) — the knob a board can change without rebuilding the kernel
-///    or touching the boot loader's command line;
-/// 2. a `loglevel=` kernel command-line parameter, in the style of Linux's
-///    `loglevel=` but using X-Kernel's own level values (`0..=5` in
-///    off/error/warn/info/debug/trace order, or a level name), with `quiet`
-///    and `debug` as shorthand for `loglevel=2` (warn) and `loglevel=4`
-///    (debug);
-/// 3. the Kconfig default.
+/// 1. `/chosen/x-kernel,log-level` in the device tree — a board property that
+///    can change verbosity without rebuilding the kernel or touching the boot
+///    loader's command line;
+/// 2. `loglevel=` on the kernel command line (with `quiet`/`debug` as
+///    shorthand for `loglevel=2`/`loglevel=4`);
+/// 3. `LOG_FILTER` (and, when it is empty, the `LOG_LEVEL_*` choice).
 ///
-/// Invalid values are reported and ignored rather than silently applied.
-fn resolve_boot_log_level() -> &'static str {
-    if let Some(level) = khal::firmware::dt_log_level() {
-        if klogger::parse_log_level(level).is_some() {
-            return level;
+/// Every source takes the same filter spec: an optional default level plus
+/// `target=level` overrides, e.g. `warn ksyscall=debug`. Invalid input is
+/// reported and ignored rather than applied.
+fn resolve_boot_log_filter() -> &'static str {
+    if let Some(spec) = khal::firmware::dt_log_level() {
+        if klogger::set_filter_spec(spec).is_ok() {
+            return spec;
         }
         warn!(
-            "ignoring invalid /chosen/x-kernel,log-level=\"{level}\"; expected a level 0..=5 or \
-             off/error/warn/info/debug/trace"
+            "ignoring invalid /chosen/x-kernel,log-level=\"{spec}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace, optionally with target=level overrides"
         );
     }
     if let Some(cmdline) = khal::cmdline() {
         for token in cmdline.split_ascii_whitespace() {
-            if let Some(value) = token.strip_prefix("loglevel=")
-                && !value.is_empty()
+            if let Some(spec) = token.strip_prefix("loglevel=")
+                && !spec.is_empty()
             {
-                return if klogger::parse_log_level(value).is_some() {
-                    value
-                } else {
-                    warn!(
-                        "ignoring invalid loglevel={value} on the kernel command line; expected a \
-                         level 0..=5 or off/error/warn/info/debug/trace"
-                    );
-                    configured_log_level()
-                };
+                if klogger::set_filter_spec(spec).is_ok() {
+                    return spec;
+                }
+                warn!("ignoring invalid loglevel={spec} on the kernel command line");
+                break;
             }
         }
         for token in cmdline.split_ascii_whitespace() {
-            match token {
-                "quiet" => return "2",
-                "debug" => return "4",
-                _ => {}
+            let shorthand = match token {
+                "quiet" => Some("2"),
+                "debug" => Some("4"),
+                _ => None,
+            };
+            if let Some(level) = shorthand {
+                let _ = klogger::set_filter_spec(level);
+                return level;
             }
         }
     }
-    configured_log_level()
+    let configured = kbuild_config::LOG_FILTER.trim();
+    if !configured.is_empty() && klogger::set_filter_spec(configured).is_ok() {
+        return configured;
+    }
+    let level = configured_log_level();
+    // The Kconfig choice only ever yields a valid level, but a rejected spec
+    // must not abort boot: the previous filter stays in place.
+    let _ = klogger::set_filter_spec(level);
+    level
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -501,7 +508,7 @@ pub fn rust_main(arg: usize) -> ! {
     );
 
     klogger::init_klogger();
-    klogger::set_log_level(resolve_boot_log_level());
+    klogger::set_log_level(resolve_boot_log_filter());
     info!("Logging is enabled.");
     info!(
         "Primary CPU {} started, boot_info = {arg:#x}.",

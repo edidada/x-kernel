@@ -70,7 +70,9 @@ fn printk_node_reads_and_writes_runtime_log_level() {
         )
         .unwrap();
 
-    let previous = klogger::current_log_level();
+    // Restore whatever filter the boot (or a previous test) installed.
+    let mut previous_buf = [0u8; klogger::MAX_FILTER_SPEC];
+    let previous_len = klogger::filter_spec(&mut previous_buf).unwrap_or(0);
 
     // A level number (with trailing newline, as `echo` writes it) takes
     // effect immediately...
@@ -80,21 +82,37 @@ fn printk_node_reads_and_writes_runtime_log_level() {
     assert_eq!(printk.write(b"warn"), Ok(4));
     assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
 
-    // Reading reports the canonical number of the active level.
+    // Reading reports the canonical spec of the active filter.
     // (`read_from` with an explicit position sidesteps the file offset
     // advanced by the writes above.)
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 64];
     let mut pos = 0;
-    assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(2));
-    assert_eq!(&buf[..2], b"2\n");
+    assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(5));
+    assert_eq!(&buf[..5], b"warn\n");
 
-    // Invalid or out-of-range levels are rejected and leave the level
-    // unchanged.
+    // A spec carries per-target overrides, which is what makes targeted
+    // bring-up logging possible without a rebuild.
+    assert_eq!(printk.write(b"warn drv_uart=trace"), Ok(19));
+    assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
+    let mut pos = 0;
+    assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(20));
+    assert_eq!(&buf[..20], b"warn drv_uart=trace\n");
+
+    // Invalid or out-of-range levels are rejected and leave the filter
+    // unchanged (a bad token must not half-apply a spec).
     assert!(printk.write(b"banana").is_err());
     assert!(printk.write(b"6").is_err());
+    assert!(printk.write(b"warn bogus=4").is_err());
     assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
+    let mut pos = 0;
+    assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(20));
+    assert_eq!(&buf[..20], b"warn drv_uart=trace\n");
 
-    klogger::set_log_level_filter(previous);
+    if let Ok(text) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        klogger::set_log_level(text);
+    } else {
+        klogger::set_log_level_filter(log::LevelFilter::Warn);
+    }
 }
 
 /// Linux installs `proc_reg_file_ops` (whose `proc_reg_poll` falls back to

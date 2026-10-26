@@ -136,19 +136,21 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                         | NodePermission::GROUP_READ
                         | NodePermission::OTHER_READ,
                     CommandFile::new(|operation| match operation {
-                        SimpleFileOperation::Read => Ok(Some(format!(
-                            "{}\n",
-                            klogger::level_number(klogger::current_log_level())
-                        ))),
+                        SimpleFileOperation::Read => {
+                            let mut buf = [0u8; klogger::MAX_FILTER_SPEC];
+                            let len =
+                                klogger::filter_spec(&mut buf).ok_or(VfsError::InvalidInput)?;
+                            let spec = core::str::from_utf8(&buf[..len])
+                                .map_err(|_| VfsError::InvalidInput)?;
+                            Ok(Some(format!("{spec}\n")))
+                        }
                         SimpleFileOperation::Write { file, data } => {
                             if !file.cred().is_privileged() {
                                 return Err(VfsError::OperationNotPermitted);
                             }
                             let text =
                                 core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
-                            let level =
-                                klogger::parse_log_level(text).ok_or(VfsError::InvalidInput)?;
-                            klogger::set_log_level_filter(level);
+                            klogger::set_filter_spec(text).map_err(|_| VfsError::InvalidInput)?;
                             Ok(None)
                         }
                     }),

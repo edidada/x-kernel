@@ -1,5 +1,23 @@
 mainmenu "X-kernel Configuration"
 
+config LOG_FILTER
+    string "Boot log filter (spec: \"<level> [target=level]...\")"
+    default ""
+    help
+      Per-target veto over the build-time level, applied at boot and
+      changeable afterwards without a rebuild:
+
+        LOG_FILTER="warn ksyscall=debug drv_uart=debug"
+
+      Levels are 0..=5 or off/error/warn/info/debug/trace; a target is matched
+      by prefix against the record's module path, longest match wins, and a
+      bare level sets the default for everything else. Empty means "use the
+      LOG_LEVEL_* choice alone".
+
+      At runtime the same spec is written to /proc/sys/kernel/printk (a bare
+      level still works there), so bring-up sessions can retarget logging
+      live: `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk`.
+
 choice
     prompt "Build Type"
     default BUILD_TYPE_RELEASE

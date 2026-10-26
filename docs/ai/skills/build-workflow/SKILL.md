@@ -235,19 +235,57 @@ Disable with `XKMAKE_ARGS='--no-symbolize'`.
 
 ### Changing the log level without rebuilding
 
-Verbosity has three layers, most specific first, all using the same vocabulary
-(`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`, `5`/`trace`):
+The `log` crate here has no compile-time level cap (`log` is a plain `0.4`
+dependency, no `max_level_*` feature), so every level is compiled in and only
+filtered at runtime. Four layers, most specific first, all taking the same
+vocabulary (`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
+`5`/`trace`, optionally with `target=level` overrides):
 
-1. `/chosen/x-kernel,log-level = "debug";` in the device tree — a board
-   property, so a serial-console session can raise the level by editing the DTB
-   and rebooting (no kernel rebuild, no boot-loader change);
-2. `loglevel=5`, `quiet` or `debug` on the kernel command line
-   (`boot_info` cmdline, otherwise `/chosen/bootargs`);
-3. the `LOG_LEVEL_*` Kconfig choice (build-time default).
+| # | Layer | Scope | Needs |
+| --- | --- | --- | --- |
+| 1 | `echo 'warn ksyscall=debug' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
+| 2 | `/chosen/x-kernel,log-level = "debug";` | boot of that board | editing the DTB |
+| 3 | `loglevel=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` Kconfig | build default | a rebuild |
 
-Invalid runtime values are reported and ignored. Prefer layer 1 on hardware:
-it keeps the flashed image and the documented behaviour identical while the
-verbosity follows the board.
+Layer 1 is the one to reach for on hardware: it changes verbosity mid-session
+(`cat /proc/sys/kernel/printk` reports the whole spec) and keeps the flashed
+image and the documented behaviour identical. It cannot help with what the
+serial console **shows during boot** (the node only exists once userland
+runs), which is what layers 2-4 are for.
+
+Invalid values are reported and ignored rather than silently applied; the
+value order is X-Kernel's (higher = more verbose) and *not* Linux
+`console_loglevel` compatible.
+
+Every layer takes a full spec, so logging can be *retargeted* instead of
+raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console
+while one stack talks. The spec's ceiling is also what the ring buffer
+captures (see below), so a `target=level` rule widens both the console and
+`dmesg` for that target.
+
+### `dmesg`: the console filter does not lose records
+
+The kernel keeps a 64 KiB log ring buffer. Every record that gets past the
+`log` ceiling is stored there **before** the console filter runs, so a quiet
+console and a complete log coexist — the filter decides what is *shown*, the
+buffer records what *happened*. Read it with the usual tool:
+
+```bash
+dmesg                         # everything captured, oldest first
+dmesg | tail -40
+dmesg -r | grep -E '^<(3|4)>' # level filter: 1=error 2=warn 3=info 4=debug 5=trace
+dmesg -c                      # read and clear
+```
+
+Lines carry X-Kernel's level number as a `^<N>` prefix. It is the same value
+domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
+inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
+included) strip the prefix by default, hence `-r` above when filtering on it.
+The ceiling of the active spec is also the capture level: with
+`warn ksyscall=debug` the buffer holds debug from every module but stops
+before `trace`; add a `target=trace` rule (at boot, or live through
+`/proc/sys/kernel/printk`) to capture trace as well.
 
 ### Symbolizing logs from real hardware
 
