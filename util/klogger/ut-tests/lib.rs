@@ -155,6 +155,13 @@ fn logbuf_captures_records_the_console_filter_hides() {
     // `dmesg | grep '^<4>'` a level filter.
     assert!(text.lines().any(|line| line.starts_with("<3>") && line.contains("marker")));
     assert!(text.lines().any(|line| line.starts_with("<4>") && line.contains("marker")));
+    // Records are newline-terminated: without it `dmesg` prints the whole
+    // buffer as one run-on line.
+    assert!(text.ends_with('\n'), "record without newline: {text:?}");
+    assert!(
+        text.lines().count() >= 2,
+        "records ran together: {text:?}"
+    );
 
     logbuf_clear();
     assert_eq!(logbuf_len(), 0);
