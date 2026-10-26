@@ -205,6 +205,25 @@ one controller. Nothing above the driver serializes, so the driver must.
 A single-user boot hid this completely: detection and the first mount are
 sequential, so the corruption only appears once the shell runs jobs.
 
+## 16. The switch read must not be the first wide, fast data phase
+
+Diffing the init sequence against Linux `mmc_sd_init_card` showed the order was
+inverted. Linux runs, in this order: SCR, **CMD6 (the 64-byte switch read) at
+the identification clock on one data line**, then `mmc_set_clock` (25 MHz, or
+50 MHz when the switch reported HS), then `SET_BLOCKLEN` for byte-addressed
+cards, and only **last** `ACMD6` + the host's 4-bit width. This driver did the
+width and the clock first and the switch read afterwards, so its *first*
+4-bit/25 MHz data phase was the switch read itself — and that is exactly where
+the board failed, every boot, with `SBE` and `TCBCNT=0`, while the same read
+succeeded on a second full initialisation.
+
+Putting the two changes at opposite ends of the sequence removes the corner
+instead of retrying around it: the switch read happens on the slow, narrow bus
+where it is uncritical, and the first wide/fast transfer is ordinary block
+I/O. The lesson generalised: when a transfer fails right after a mode change,
+compare *where* in the sequence Linux performs that transfer before suspecting
+the mode itself.
+
 ## Diagnostic rules that came out of this
 
 1. **A completed command is not a successful command.** Decode R1; log it when

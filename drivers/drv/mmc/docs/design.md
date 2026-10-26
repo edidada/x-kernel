@@ -183,6 +183,11 @@ pair that works on the next one).
 It logs the pair that worked, which is the measurement the divider math was
 missing; pin `MMC_MAX_CARD_HZ`/`MMC_4BIT` to it and turn the ladder off.
 
+The detection sequence follows Linux `mmc_sd_init_card` step for step, and the
+order is load-bearing: the CMD6 switch read runs at the identification clock on
+one data line, the clock is raised afterwards, and the 4-bit width is switched
+last, so no transfer ever happens immediately after two mode changes at once.
+
 UHS-I is out of scope, so the sample/drive phase clocks
 (`SCLK_SDMMC_DRV/SAMPLE`) are untouched. That is a deliberate gap with a
 known cost: Linux programs the drive phase (90°) and the sample phase on

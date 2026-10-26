@@ -12,7 +12,9 @@
 //! 3. `ACMD41` voltage negotiation with HCS (up to 1 s per spec)
 //! 4. `ALL_SEND_CID` → `SET_RELATIVE_ADDR` → `SEND_CSD` → select
 //! 5. `SEND_SCR` (ACMD51) — bus-width + spec version
-//! 6. `ACMD6` 4-bit bus, `SET_BLOCKLEN`, high-speed switch (CMD6)
+//! 6. high-speed switch (CMD6) at the identification clock, then the default
+//!    or high-speed clock, `SET_BLOCKLEN` for byte-addressed cards, and the
+//!    4-bit bus (`ACMD6` + host width) last — Linux's ordering
 //!
 //! SDSC (byte addressing) and SDHC/SDXC (block addressing) both bind;
 //! UHS-I (1.8 V signaling) is out of scope — default speed and HS only.
@@ -95,6 +97,10 @@ const SCR_BYTES: usize = 8;
 /// `HIGH_SPEED_BUS_SPEED` function-selection argument (Linux
 /// `sd_switch(mode, 0, HIGH_SPEED_BUS_SPEED)` = 0x80FFFFF1).
 const HS_FUN_SEL_ARG: u32 = 0x80FF_FFF1;
+/// Default-speed card clock (SD spec `max_dtr` for the default speed mode).
+const DEFAULT_SPEED_HZ: u32 = 25_000_000;
+/// High-speed card clock (the HS mode's `max_dtr`).
+const HIGH_SPEED_HZ: u32 = 50_000_000;
 
 /// Scan a slot for an SD memory card and bring it to transfer-ready state.
 ///
@@ -287,9 +293,12 @@ fn identify_card(host: &dyn MmcHost) -> Result<(MmcResponse, u16, MmcResponse, u
     Ok((cid, rca, csd, sectors))
 }
 
-/// Bus width, block length and speed (Linux `mmc_sd_init_card` tail): SCR
-/// decode, ACMD6 + the 4-bit ios switch, the byte-addressed CMD16, then the
-/// CMD6 high-speed probe. Returns `(bus_width_4bit, high_speed)`.
+/// Speed, block length and bus width (Linux `mmc_sd_init_card` tail).
+///
+/// Order matters and follows Linux: SCR → **CMD6 speed switch (still at the
+/// identification clock, one data line)** → raise the clock → CMD16 for
+/// byte-addressed cards → ACMD6 and the 4-bit host width **last**.
+/// Returns `(bus_width_4bit, high_speed)`.
 fn setup_bus(
     host: &dyn MmcHost,
     rca: u16,
@@ -309,7 +318,56 @@ fn setup_bus(
     // otherwise run every data phase into start-bit errors.
     let bus_width_4bit = scr.bus_width_4bit && host.max_bus_width() == BusWidth::Bit4;
 
-    // 6. Bus width, block length, then speed.
+    // 6. Speed selection, still at the identification clock on one data line.
+    //
+    // This order is Linux `mmc_sd_init_card`: `mmc_sd_switch_hs` runs there
+    // before `mmc_set_clock` and before `mmc_app_set_bus_width`, so the
+    // switch-function read is never the first transfer after two changes at
+    // once. Doing width and clock first (as this driver did) makes the
+    // 64-byte switch read the *first* 4-bit/25 MHz data phase — the exact
+    // corner this board fails with `SBE`/`TCBCNT=0`.
+    let high_speed = match switch_high_speed(host, csd, &scr) {
+        Ok(high_speed) => high_speed,
+        Err(err) => {
+            // Best-effort: a card or slot that cannot serve the switch read
+            // keeps the default speed instead of failing identification.
+            log::warn!("sd: HS switch failed ({err:?}); staying at default speed");
+            host.recover();
+            false
+        }
+    };
+    let data_hz = if high_speed {
+        HIGH_SPEED_HZ
+    } else {
+        DEFAULT_SPEED_HZ
+    };
+
+    // 7. Raise the clock, still on one data line (Linux `mmc_set_clock` sits
+    //    between the switch and the width change).
+    host.set_ios(&MmcIos {
+        clock_hz: data_hz,
+        bus_width: BusWidth::Bit1,
+        power_on: true,
+    })?;
+
+    // CMD16 (SET_BLOCKLEN) only matters for byte-addressed cards: SDHC/
+    // SDXC fix the block length at 512 by definition (Linux skips it for
+    // block-addressed cards as well).
+    if !block_addressed {
+        step(
+            "set block length",
+            CMD_SET_BLOCKLEN,
+            BLOCK_SIZE as u32,
+            host.send_cmd(&MmcCommand::with(
+                CMD_SET_BLOCKLEN,
+                BLOCK_SIZE as u32,
+                RespKind::R1,
+            )),
+        )?;
+    }
+
+    // 8. Width last (Linux `mmc_app_set_bus_width` + `mmc_set_bus_width`):
+    //    the card switches first, then the host.
     if bus_width_4bit {
         step(
             "set 4-bit bus",
@@ -323,48 +381,12 @@ fn setup_bus(
                 RespKind::R1,
             ),
         )?;
+        host.set_ios(&MmcIos {
+            clock_hz: data_hz,
+            bus_width: BusWidth::Bit4,
+            power_on: true,
+        })?;
     }
-    // Raise the bus clock whatever the width: default speed is a 25 MHz
-    // mode on one data line too, and staying at the identification clock
-    // would make a width comparison meaningless (and block I/O 60x slower
-    // than the mode allows).
-    host.set_ios(&MmcIos {
-        clock_hz: 25_000_000,
-        bus_width: if bus_width_4bit {
-            BusWidth::Bit4
-        } else {
-            BusWidth::Bit1
-        },
-        power_on: true,
-    })?;
-    // CMD16 (SET_BLOCKLEN) only matters for byte-addressed cards: SDHC/
-    // SDXC fix the block length at 512 by definition (Linux skips it for
-    // block-addressed cards as well), and several cards answer it with a
-    // corrupted response right after the bus-width change.
-    if !block_addressed {
-        step(
-            "set block length",
-            CMD_SET_BLOCKLEN,
-            BLOCK_SIZE as u32,
-            host.send_cmd(&MmcCommand::with(
-                CMD_SET_BLOCKLEN,
-                BLOCK_SIZE as u32,
-                RespKind::R1,
-            )),
-        )?;
-    }
-    let high_speed = match switch_high_speed(host, csd, &scr, bus_width_4bit) {
-        Ok(high_speed) => high_speed,
-        Err(err) => {
-            // Best-effort, as documented on `switch_high_speed` and as the
-            // tgoskits reference does: a card or host that cannot serve the
-            // switch read keeps the default speed instead of failing
-            // identification.
-            log::warn!("sd: HS switch failed ({err:?}); staying at default speed");
-            host.recover();
-            false
-        }
-    };
     Ok((bus_width_4bit, high_speed))
 }
 
@@ -463,15 +485,11 @@ struct Scr {
 
 /// Attempt the CMD6 high-speed switch (Linux `mmc_sd_switch_hs`).
 ///
-/// Best-effort: every "can't switch" outcome degrades to default speed
-/// (25 MHz) and reports `false` rather than failing the card. The reply
-/// is a 64-byte bus read carried on the switch command itself.
-fn switch_high_speed(
-    host: &dyn MmcHost,
-    csd: &MmcResponse,
-    scr: &Scr,
-    bus_width_4bit: bool,
-) -> Result<bool, MmcError> {
+/// Best-effort: every "can't switch" outcome keeps the default speed and
+/// reports `false` rather than failing the card. The reply is a 64-byte bus
+/// read carried on the switch command itself, and it runs at the caller's
+/// current clock/width — Linux raises the clock only after this returns.
+fn switch_high_speed(host: &dyn MmcHost, csd: &MmcResponse, scr: &Scr) -> Result<bool, MmcError> {
     // Cards older than spec 1.10 never implement the switch function.
     if scr.sda_vsn < 1 || !csd_has_switch(csd) {
         return Ok(false);
@@ -486,20 +504,7 @@ fn switch_high_speed(
         host.read_data_cmd(&switch_cmd, SWITCH_STATUS_BYTES, &mut status),
     )?;
 
-    if status[16] & 0xF == 0x1 {
-        // The controller's divider math happens inside set_ios; the bus
-        // width stays whatever the negotiation above settled on.
-        let width = if bus_width_4bit {
-            BusWidth::Bit4
-        } else {
-            BusWidth::Bit1
-        };
-        host.set_ios(&MmcIos {
-            clock_hz: 50_000_000,
-            bus_width: width,
-            power_on: true,
-        })?;
-        return Ok(true);
-    }
-    Ok(false)
+    // The caller raises the clock (Linux `mmc_sd_get_max_clock` +
+    // `mmc_set_clock`), so this only reports the card's answer.
+    Ok(status[16] & 0xF == 0x1)
 }
