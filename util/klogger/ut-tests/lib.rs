@@ -190,11 +190,26 @@ fn logbuf_captures_records_the_console_filter_hides() {
 
 /// A destination smaller than the ring returns the newest bytes, not the
 /// oldest ones, so `dmesg` on a full buffer shows the tail of the boot log.
+///
+/// The record is emitted below `warn` on purpose: the level is pinned here
+/// because the ring only captures what clears the `log` ceiling, and the CI
+/// unittest build resolves that ceiling to `off`
+/// (`scripts/ci/prepare_unittest_config.sh` swaps the level tokens and leaves
+/// the Kconfig choice empty), so relying on the build default would capture
+/// nothing.
 #[def_test(serial)]
 fn logbuf_snapshot_returns_the_newest_bytes() {
+    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
+    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    assert_eq!(set_filter_spec("warn"), Ok(()));
+
     super::warn!("klogger newest-bytes marker");
     let mut small = [0u8; 16];
     let len = logbuf_snapshot(&mut small);
     assert_eq!(len, 16);
     assert!(core::str::from_utf8(&small).expect("utf-8").contains("marker"));
+
+    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        set_log_level(spec);
+    }
 }
