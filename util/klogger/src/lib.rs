@@ -381,7 +381,7 @@ impl Log for KernelLogger {
         // The trailing newline is part of the record: the console path adds its
         // own, and without it every buffered record runs into the next one, so
         // `dmesg` prints the whole log as a single line.
-        let _ = write!(line, "<{}>{}\n", level_number(level), LineText(record));
+        let _ = writeln!(line, "<{}>{}", level_number(level), LineText(record));
         LOGBUF.lock().push(line.as_bytes());
 
         if !filter_enabled(record.target(), record.level()) {
