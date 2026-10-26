@@ -356,6 +356,14 @@ impl Ext4SuperOperations {
                     }
                 }
             }
+            Err(error @ (Ext4Error::InvalidMagic(_) | Ext4Error::UnsupportedRevision(_))) => {
+                // "This device does not carry ext4" is the answer a probe is
+                // supposed to get: root mounting and `mount(2)` both offer a
+                // device to every registered block filesystem in turn. Only a
+                // real failure is worth an error line.
+                debug!("KExt4 rejected the device: {error:?}");
+                return Err(into_vfs_err(error));
+            }
             Err(error) => {
                 error!("KExt4 core mount failed: {error:?}");
                 return Err(into_vfs_err(error));
