@@ -172,11 +172,14 @@ pub fn set_filter_spec(spec: &str) -> Result<(), FilterSpecError> {
     if !saw_default && next.count == 0 {
         return Err(FilterSpecError);
     }
-    let ceiling = next.ceiling();
-    *FILTER.lock() = next;
+    // Publish the filter and the `log` ceiling in one critical section: two
+    // concurrent writers would otherwise be able to leave the installed spec
+    // and the ceiling describing different specs.
+    let mut filter = FILTER.lock();
+    *filter = next;
     // The `log` crate filter is the cheap pre-check; per-target rules can ask
     // for more than the default, so the ceiling admits the widest request.
-    log::set_max_level(ceiling);
+    log::set_max_level(filter.ceiling());
     Ok(())
 }
 
@@ -281,8 +284,25 @@ pub fn logbuf_len() -> usize {
 
 /// Copies the newest `out.len()` bytes of the kernel log buffer (oldest first)
 /// into `out` and returns how many bytes were written.
+///
+/// The buffer keeps its contents: use [`logbuf_consume`] to drop bytes that a
+/// reader has actually handed on.
 pub fn logbuf_snapshot(out: &mut [u8]) -> usize {
     LOGBUF.lock().snapshot(out)
+}
+
+/// Drops the oldest `count` bytes, i.e. exactly the prefix a reader has already
+/// returned; `count` is clamped to the buffered length.
+///
+/// A reader that could only take part of the buffer (a small `syslog(2)`
+/// destination) therefore leaves the unread records readable instead of
+/// destroying evidence, and records appended while the reader was copying stay
+/// in the buffer.
+pub fn logbuf_consume(count: usize) {
+    let mut buf = LOGBUF.lock();
+    let drop = count.min(buf.len);
+    buf.start = (buf.start + drop) % LOGBUF_SIZE;
+    buf.len -= drop;
 }
 
 /// Drops everything in the kernel log buffer.
@@ -310,12 +330,29 @@ impl LineBuf {
     fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
+
+    /// Appends the record's terminating newline.
+    ///
+    /// Kept separate from the formatting path so the terminator cannot be
+    /// truncated away: `write_str` reserves the byte, this writes it.
+    fn terminate(&mut self) {
+        self.buf[self.len] = b'\n';
+        self.len += 1;
+    }
 }
 
 impl fmt::Write for LineBuf {
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        let room = self.buf.len() - self.len;
-        let take = text.len().min(room);
+        // One byte is reserved for the record's terminating newline: the
+        // caller formats with `writeln!`, and a record that filled the buffer
+        // would otherwise lose its terminator and run into the next record.
+        let room = self.buf.len() - 1 - self.len;
+        let mut take = text.len().min(room);
+        // Copy whole characters only; a split code point would put invalid
+        // UTF-8 into the ring and into every `dmesg` reader.
+        while take > 0 && !text.is_char_boundary(take) {
+            take -= 1;
+        }
         self.buf[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
         self.len += take;
         Ok(())
@@ -371,8 +408,11 @@ impl Log for KernelLogger {
         let level = level_filter_of(record.level());
         // The trailing newline is part of the record: the console path adds its
         // own, and without it every buffered record runs into the next one, so
-        // `dmesg` prints the whole log as a single line.
-        let _ = writeln!(line, "<{}>{}", level_number(level), LineText(record));
+        // `dmesg` prints the whole log as a single line. It is appended after
+        // formatting because a record that fills the line buffer would otherwise
+        // lose it to truncation.
+        let _ = write!(line, "<{}>{}", level_number(level), LineText(record));
+        line.terminate();
         LOGBUF.lock().push(line.as_bytes());
 
         if !filter_enabled(record.target(), record.level()) {

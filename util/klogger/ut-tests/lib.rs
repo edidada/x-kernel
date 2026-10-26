@@ -10,8 +10,9 @@ use log::LevelFilter;
 use unittest::{assert_eq, def_test};
 
 use super::{
-    current_log_level, filter_spec, level_name, level_number, logbuf_clear, logbuf_len,
-    logbuf_snapshot, parse_log_level, set_filter_spec, set_log_level, set_log_level_filter,
+    current_log_level, filter_spec, level_name, level_number, logbuf_clear, logbuf_consume,
+    logbuf_len, logbuf_snapshot, parse_log_level, set_filter_spec, set_log_level,
+    set_log_level_filter,
 };
 
 #[def_test]
@@ -191,23 +192,117 @@ fn logbuf_captures_records_the_console_filter_hides() {
 /// A destination smaller than the ring returns the newest bytes, not the
 /// oldest ones, so `dmesg` on a full buffer shows the tail of the boot log.
 ///
-/// The record is emitted below `warn` on purpose: the level is pinned here
-/// because the ring only captures what clears the `log` ceiling, and the CI
-/// unittest build resolves that ceiling to `off`
-/// (`scripts/ci/prepare_unittest_config.sh` swaps the level tokens and leaves
-/// the Kconfig choice empty), so relying on the build default would capture
-/// nothing.
+/// Two properties make this reproducible on a shared ring:
+///
+/// - the level is pinned here, because the ring only captures what clears the
+///   `log` ceiling and the CI unittest build resolves that ceiling to `off`
+///   (`scripts/ci/prepare_unittest_config.sh` swaps the level tokens and leaves
+///   the Kconfig choice empty), so the build default captures nothing;
+/// - the record is emitted *below* this module's console level: the ceiling is
+///   `trace` so the ring takes it, while the default `warn` keeps the UART quiet
+///   and shrinks the window in which another context can append a record. The
+///   ring is still process-global, so the tail check retries a few times.
 #[def_test(serial)]
 fn logbuf_snapshot_returns_the_newest_bytes() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    assert_eq!(set_filter_spec("warn"), Ok(()));
+    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
 
-    super::warn!("klogger newest-bytes marker");
     let mut small = [0u8; 16];
-    let len = logbuf_snapshot(&mut small);
-    assert_eq!(len, 16);
-    assert!(core::str::from_utf8(&small).expect("utf-8").contains("marker"));
+    let mut tail_from_marker = false;
+    for _ in 0..8 {
+        super::info!("klogger newest-bytes marker");
+        let len = logbuf_snapshot(&mut small);
+        // A destination smaller than the ring is filled completely.
+        assert_eq!(len, small.len());
+        if core::str::from_utf8(&small).is_ok_and(|text| text.contains("marker")) {
+            tail_from_marker = true;
+            break;
+        }
+    }
+    assert!(
+        tail_from_marker,
+        "the newest 16 bytes never came from this test's record"
+    );
+
+    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        set_log_level(spec);
+    }
+}
+
+/// `logbuf_consume` drops exactly the prefix a reader returned: a destination
+/// smaller than the buffer must not destroy the records it could not deliver.
+#[def_test(serial)]
+fn logbuf_consume_keeps_the_unreturned_records() {
+    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
+    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    logbuf_clear();
+
+    super::info!("klogger consume marker one");
+    super::info!("klogger consume marker two");
+
+    // A short destination takes the tail and consumes only those bytes.
+    let mut small = [0u8; 16];
+    let copied = logbuf_snapshot(&mut small);
+    assert_eq!(copied, small.len());
+    logbuf_consume(copied);
+
+    let mut rest = [0u8; 4096];
+    let rest_len = logbuf_snapshot(&mut rest);
+    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
+    assert!(
+        text.contains("klogger consume marker one"),
+        "consuming the tail destroyed an unreturned record: {text}"
+    );
+
+    // Consuming more than is buffered clamps instead of underflowing; unrelated
+    // records may be appended by other contexts at any time, so check that this
+    // test's records are gone rather than that the buffer is empty.
+    logbuf_consume(usize::MAX);
+    let rest_len = logbuf_snapshot(&mut rest);
+    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
+    assert!(
+        !text.contains("klogger consume marker"),
+        "consume(usize::MAX) left records behind: {text}"
+    );
+
+    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        set_log_level(spec);
+    }
+}
+
+/// A record longer than the line buffer keeps its terminating newline and never
+/// ends in the middle of a code point, so `dmesg` still sees one line per
+/// record.
+#[def_test(serial)]
+fn logbuf_terminates_truncated_records() {
+    use alloc::string::String;
+
+    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
+    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    logbuf_clear();
+
+    // Four times the 256-byte line buffer, so both records are truncated.
+    let long = String::from("0123456789abcdef").repeat(16);
+    super::info!("marker-one {long}");
+    super::info!("marker-two {long}");
+    // Truncation must not split a three-byte code point.
+    super::info!("{}", String::from("\u{5b57}").repeat(120));
+
+    let mut buf = [0u8; 4096];
+    let len = logbuf_snapshot(&mut buf);
+    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    let marker_lines: alloc::vec::Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("marker-one") || line.contains("marker-two"))
+        .collect();
+    assert_eq!(marker_lines.len(), 2, "records ran together: {text}");
+    for line in marker_lines {
+        assert!(line.len() < 256, "record over the line budget: {line:?}");
+    }
+    assert!(text.ends_with('\n'), "record without terminator: {text:?}");
 
     if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
         set_log_level(spec);
