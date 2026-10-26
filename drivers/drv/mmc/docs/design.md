@@ -63,9 +63,16 @@ without it `IDSTS` never moves and the phase hangs with a clean status.
 
 Descriptors are chained 4 KiB chunks (`OWN|CH|DIC` on non-final, `FS` first,
 `LD` last), never crossing a 4 KiB boundary (Linux
-`dw_mci_idmac_start_dma`). Completion is polled (`INTMASK = 0`,
-`IDINTEN = 0`) — the first IRQ attempt on this board stormed because the
-level-triggered line stayed asserted on uncleared summary bits.
+`dw_mci_idmac_start_dma`). Completion is polled from `IDSTS` + `RINTSTS`
+with `INTMASK = 0` and `CTRL.INT_ENABLE = 0` (the first IRQ attempt on this
+board stormed because the level-triggered line stayed asserted on uncleared
+summary bits) — but **`IDINTEN` stays enabled**: the `IDSTS` completion bits
+do not latch with it cleared, which shows up as `DATA_OVER` arriving while
+`RI`/`TI` never do and the CIU staying `DATA_STATE_MC_BUSY`.
+
+Only transfers of at least one block go through the engine
+(`IDMAC_MIN_BYTES`): the SCR (8 B) and switch-function (64 B) reads stay on
+PIO, so card detection never depends on the DMA path.
 
 FIFOTH uses the per-transfer burst geometry here (Linux
 `dw_mci_adjust_fifoth`), because the engine's burst has to match the block

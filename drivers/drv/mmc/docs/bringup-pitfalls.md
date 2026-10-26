@@ -150,6 +150,25 @@ the multi-block path is an optimisation with a latch: the first failure
 downgrades the card to per-block reads for the rest of the session instead of
 turning a scheduling hiccup into an I/O error.
 
+## 13. `IDSTS` completion bits need `IDINTEN`, even when polling
+
+The first polled IDMAC attempt timed out on the very first data phase (the
+8-byte SCR read) with the CIU data machine still busy:
+
+```
+rintsts=0x2c [CMD_DONE|DATA_OVER]  tcbcnt=8 tbbcnt=8  status bit10 mc_busy=1
+```
+
+`DATA_OVER` had arrived and the bytes had crossed the BIU, but `IDSTS.RI/TI`
+never latched, so the completion condition never held. Cause: `IDINTEN` was
+written as 0 ("completion is polled"). The completion bits are gated by that
+enable; both the reference driver and Linux keep `IDINTEN` enabled in IDMAC
+mode and only mask the *interrupt line* (`CTRL.INT_ENABLE` = 0, `INTMASK` = 0)
+when they poll. Two other facts from the same dump: the engine-side progress
+pointers (`DSCADDR`, `BUFADDR`) belong in every IDMAC failure dump, and a
+stalled engine must not be waited on with the PIO budget (that attempt spent
+30 s before degrading).
+
 ## Diagnostic rules that came out of this
 
 1. **A completed command is not a successful command.** Decode R1; log it when

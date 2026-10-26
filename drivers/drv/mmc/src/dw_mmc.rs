@@ -57,6 +57,10 @@ const SDMMC_PLDMND: usize = 0x084;
 const SDMMC_DBADDR: usize = 0x088;
 const SDMMC_IDSTS: usize = 0x08c;
 const SDMMC_IDINTEN: usize = 0x090;
+/// Engine progress pointers: descriptor address being fetched and buffer
+/// address being written (32-bit descriptor mode).
+const SDMMC_DSCADDR: usize = 0x094;
+const SDMMC_BUFADDR: usize = 0x098;
 /// FIFO data port: pre-2.40a at 0x100, 2.40a+ at 0x200 (Linux
 /// `DATA_OFFSET` / `DATA_240A_OFFSET`).
 const SDMMC_DATA_OFFSET: usize = 0x100;
@@ -155,6 +159,12 @@ const IDMAC_INT_NI: u32 = 1 << 8;
 const IDMAC_INT_AI: u32 = 1 << 9;
 const IDMAC_INT_ERRORS: u32 = IDMAC_INT_FBE | IDMAC_INT_DU | IDMAC_INT_CES | IDMAC_INT_AI;
 const IDMAC_INT_CLEAR: u32 = IDMAC_INT_ERRORS | IDMAC_INT_NI | IDMAC_INT_RI | IDMAC_INT_TI;
+/// What `IDINTEN` enables. It stays enabled even though completion is polled:
+/// on this controller the `IDSTS` completion bits do not latch with
+/// `IDINTEN == 0` (the reference driver writes this unconditionally, and
+/// Linux never runs IDMAC with it cleared). `CTRL.INT_ENABLE` stays 0 and
+/// `INTMASK` stays 0, so nothing reaches the interrupt line.
+const IDMAC_INT_ENABLE: u32 = IDMAC_INT_NI | IDMAC_INT_RI | IDMAC_INT_TI | IDMAC_INT_ERRORS;
 
 /// One IDMAC descriptor (Linux `struct idmac_desc`), 16 bytes, 16-byte
 /// aligned; the DMA engine walks `des3` from `DBADDR`.
@@ -178,6 +188,10 @@ const IDMAC_RING_DESCS: usize = IDMAC_RING_BYTES / IDMAC_DESC_SIZE;
 /// the descriptor addresses inside the 32-bit IDMAC limit and the cache
 /// maintenance out of the block path.
 pub(crate) const IDMAC_WINDOW_BYTES: usize = 64 * 1024;
+/// Smallest transfer worth handing to the engine. Below one block the setup
+/// cost dominates and the transfer is a register read (SCR 8 B, CMD6 64 B), so
+/// those stay on PIO — card detection then never depends on the DMA path.
+const IDMAC_MIN_BYTES: usize = 512;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
@@ -220,6 +234,9 @@ const CMD_POLL_LIMIT: u32 = 1 << 21;
 /// Data-phase poll budget — a full 512-byte block at 400 kHz worst case
 /// needs ~11 ms; the bound covers it many times over.
 const DATA_POLL_LIMIT: u32 = 1 << 26;
+/// Engine-completion budget: far shorter than the PIO one, because a stalled
+/// DMA engine is not going to finish and the caller has a fallback to run.
+const IDMAC_POLL_LIMIT: u32 = 1 << 20;
 
 /// Bounded poll iterator with a spin hint (bring-up-grade waits).
 fn spin_budget(limit: u32) -> impl Iterator<Item = u32> {
@@ -796,7 +813,7 @@ impl MmcHost for DwMmcHost {
         bytes: usize,
         buf: &mut [u8],
     ) -> Result<(), MmcError> {
-        if self.uses_idmac() && bytes <= self.idmac_max_bytes() {
+        if self.idmac_wants(bytes) {
             match self.data_cmd_read_idmac(cmd, bytes, buf) {
                 Ok(()) => return Ok(()),
                 Err(err) => self.degrade_to_pio(cmd, err),
@@ -806,7 +823,7 @@ impl MmcHost for DwMmcHost {
     }
 
     fn write_data_cmd(&self, cmd: &MmcCommand, bytes: usize, buf: &[u8]) -> Result<(), MmcError> {
-        if self.uses_idmac() && bytes <= self.idmac_max_bytes() {
+        if self.idmac_wants(bytes) {
             match self.data_cmd_write_idmac(cmd, bytes, buf) {
                 Ok(()) => return Ok(()),
                 Err(err) => self.degrade_to_pio(cmd, err),
@@ -1020,6 +1037,11 @@ impl DwMmcHost {
         IDMAC_WINDOW_BYTES.min(usize::from(u16::MAX) * 512)
     }
 
+    /// Whether this transfer should go through the engine.
+    fn idmac_wants(&self, bytes: usize) -> bool {
+        self.uses_idmac() && (IDMAC_MIN_BYTES..=self.idmac_max_bytes()).contains(&bytes)
+    }
+
     /// Program the descriptor chain for `bytes` at `window_bus`, returning
     /// the chain base. Writes go through the raw CPU pointer of the coherent
     /// ring, so the whole ring is re-zeroed per transfer (the engine reads
@@ -1111,11 +1133,12 @@ impl DwMmcHost {
         self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
         self.idmac_reset();
         self.writel(SDMMC_DBADDR, chain as u32);
-        // `INT_ENABLE` stays 0: completion is polled, `IDINTEN` stays 0 for
-        // the same reason (the status bits are mask-independent).
+        // `INT_ENABLE` stays 0 so the interrupt line cannot assert (no handler
+        // is registered); `IDINTEN` is still enabled because the completion
+        // bits in `IDSTS` do not latch without it.
         let ctrl = self.readl(SDMMC_CTRL) | CTRL_USE_IDMAC | CTRL_DMA_ENABLE;
         self.writel(SDMMC_CTRL, ctrl);
-        self.writel(SDMMC_IDINTEN, 0);
+        self.writel(SDMMC_IDINTEN, IDMAC_INT_ENABLE);
         self.writel(SDMMC_BMOD, BMOD_FB | BMOD_ENABLE);
         // Linux `dw_mci_idmac_start_dma`: the poll demand write is what makes
         // the engine fetch the first descriptor. Without it `IDSTS` never
@@ -1182,14 +1205,15 @@ impl DwMmcHost {
     /// and both error sets. Errors first — a data error never raises
     /// `DATA_OVER`, and the engine reports its own faults in `IDSTS`.
     fn idmac_wait(&self, cmd: &MmcCommand) -> Result<(), MmcError> {
-        for _ in spin_budget(DATA_POLL_LIMIT) {
+        // A stalled engine must degrade quickly: the PIO budget is sized for a
+        // 512-byte block at 400 kHz, which is far too long to spend waiting
+        // for a transfer the engine is never going to complete.
+        for _ in spin_budget(IDMAC_POLL_LIMIT) {
             let idsts = self.readl(SDMMC_IDSTS);
             if idsts & IDMAC_INT_ERRORS != 0 {
                 self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
-                self.dump_state(&alloc::format!(
-                    "idmac cmd {} (idsts {idsts:#x})",
-                    cmd.opcode
-                ));
+                self.idmac_dump("engine error");
+                self.dump_state(&alloc::format!("idmac cmd {}", cmd.opcode));
                 return Err(MmcError::Io);
             }
             let pending = self.readl(SDMMC_RINTSTS);
@@ -1205,8 +1229,24 @@ impl DwMmcHost {
                 return Ok(());
             }
         }
+        self.idmac_dump("timeout");
         self.dump_state(&alloc::format!("idmac timeout cmd {}", cmd.opcode));
         Err(MmcError::Timeout)
+    }
+
+    /// Engine-side picture for a failure: `IDSTS` plus the two progress
+    /// pointers. `DSCADDR` still at the ring base means the engine never
+    /// fetched a descriptor (kick/reset/routing); a `BUFADDR` inside the
+    /// window means it ran and stopped mid-transfer.
+    fn idmac_dump(&self, tag: &str) {
+        log::warn!(
+            "dwmmc: idmac {tag}: idsts={:#x} bmod={:#x} dbaddr={:#x} dscaddr={:#x} bufaddr={:#x}",
+            self.readl(SDMMC_IDSTS),
+            self.readl(SDMMC_BMOD),
+            self.readl(SDMMC_DBADDR),
+            self.readl(SDMMC_DSCADDR),
+            self.readl(SDMMC_BUFADDR),
+        );
     }
 
     /// IDMAC read phase: arm the engine, issue the command, wait, copy out.
