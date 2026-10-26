@@ -47,6 +47,13 @@ DMA-burst concern, not a PIO one.
 `RINTSTS` is cleared at the head of every data phase so no earlier phase's
 `DATA_OVER`/error set can be mistaken for this one's.
 
+Diagnostics always report the command's `RESP0` (R1) next to the
+controller state: a card completes the exchange and *then* refuses the
+transfer (illegal command, block-length or address error), and in that
+case it never drives the data lines at all — the controller sees only a
+start-bit error with zero bytes transferred, which is otherwise
+indistinguishable from a dead data path.
+
 IDMAC (internal DMA) is a documented follow-up: the tgoskits reference
 (`drivers/blk/dwmmc-host`) is IDMAC-only and carries no FIFO fallback, so
 re-introducing it should port that path rather than re-derive it here.

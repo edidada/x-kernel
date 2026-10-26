@@ -147,6 +147,16 @@ const fn fifo_width_bytes(hcon: u32) -> u32 {
     }
 }
 
+/// R1 card-status bits that mean the card refused or failed a command
+/// (SD spec 4.10.1): bits 31..26 and 24..16. `READY_FOR_DATA` (8) and
+/// `CURRENT_STATE` (12:9) are status, not errors, and stay out of it.
+const R1_ERROR_BITS: u32 = 0xFDFF_0000;
+
+/// R1 `CURRENT_STATE` field names (`(r1 >> 9) & 0xF`).
+const CARD_STATES: [&str; 9] = [
+    "idle", "ready", "ident", "stby", "tran", "data", "rcv", "prg", "dis",
+];
+
 // FIFOTH layout: MSIZE [30:28], RX_WMARK [27:16], TX_WMARK [11:0].
 const fn fifoth(msize: u32, rx_wmark: u32, tx_wmark: u32) -> u32 {
     ((msize & 0x7) << 28) | ((rx_wmark & 0xFFF) << 16) | (tx_wmark & 0xFFF)
@@ -465,6 +475,48 @@ impl DwMmcHost {
         alloc::format!("{status:#x} [{}]", names.join("|"))
     }
 
+    /// Human-readable R1 card-status decode (diagnostics): error bits plus
+    /// the card state, which is what separates "the card refused the
+    /// command" from "the controller dropped the data".
+    fn r1_names(r1: u32) -> alloc::string::String {
+        const NAMES: [(u32, &str); 15] = [
+            (1 << 31, "OUT_OF_RANGE"),
+            (1 << 30, "ADDRESS_ERROR"),
+            (1 << 29, "BLOCK_LEN_ERROR"),
+            (1 << 28, "ERASE_SEQ_ERROR"),
+            (1 << 27, "ERASE_PARAM"),
+            (1 << 26, "WP_VIOLATION"),
+            (1 << 24, "LOCK_UNLOCK_FAILED"),
+            (1 << 23, "COM_CRC_ERROR"),
+            (1 << 22, "ILLEGAL_COMMAND"),
+            (1 << 21, "CARD_ECC_FAILED"),
+            (1 << 20, "CC_ERROR"),
+            (1 << 19, "ERROR"),
+            (1 << 18, "UNDERRUN"),
+            (1 << 17, "OVERRUN"),
+            (1 << 16, "CSD_OVERWRITE"),
+        ];
+        let names: alloc::vec::Vec<&str> = NAMES
+            .iter()
+            .filter(|(bit, _)| r1 & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        let state = usize::try_from((r1 >> 9) & 0xF)
+            .ok()
+            .and_then(|index| CARD_STATES.get(index))
+            .copied()
+            .unwrap_or("reserved");
+        let ready = if r1 & (1 << 8) != 0 { "ready" } else { "busy" };
+        alloc::format!(
+            "{r1:#010x} state={state} {ready}{}",
+            if names.is_empty() {
+                alloc::string::String::new()
+            } else {
+                alloc::format!(" [{}]", names.join("|"))
+            }
+        )
+    }
+
     /// Drain whatever the FIFO holds into `buf` (`FCNT`-bounded, one FIFO
     /// entry per access), Linux `dw_mci_read_data_pio` inner loop. A tail
     /// shorter than one entry is legal: the controller holds one entry of
@@ -491,11 +543,13 @@ impl DwMmcHost {
     /// dropped it".
     fn dump_state(&self, tag: &str) {
         log::warn!(
-            "dwmmc: {tag}: ctrl={:#010x} status={:#010x} rintsts={} intmask={:#x} clkena={:#x} \
-             clksrc={:#x} clkdiv={:#x} ctype={:#x} blksiz={:#x} bytcnt={:#x} tcbcnt={} tbbcnt={}",
+            "dwmmc: {tag}: ctrl={:#010x} status={:#010x} rintsts={} resp0={} intmask={:#x} \
+             clkena={:#x} clksrc={:#x} clkdiv={:#x} ctype={:#x} blksiz={:#x} bytcnt={:#x} \
+             tcbcnt={} tbbcnt={}",
             self.readl(SDMMC_CTRL),
             self.readl(SDMMC_STATUS),
             Self::rintsts_names(self.readl(SDMMC_RINTSTS)),
+            Self::r1_names(self.readl(SDMMC_RESP0)),
             self.readl(SDMMC_INTMASK),
             self.readl(SDMMC_CLKENA),
             self.readl(SDMMC_CLKSRC),
@@ -661,6 +715,18 @@ impl DwMmcHost {
         if !done {
             return Err(MmcError::Timeout);
         }
+        // A completed exchange only means the response arrived: the card
+        // still reports refusals inside R1. Without this a declined
+        // ACMD6/CMD16/CMD7 looks exactly like a controller fault later on.
+        if matches!(cmd.resp, RespKind::R1 | RespKind::R1b) && response.word() & R1_ERROR_BITS != 0
+        {
+            log::warn!(
+                "dwmmc: cmd {} arg {:#x} answered with an error: {}",
+                cmd.opcode,
+                cmd.arg,
+                Self::r1_names(response.word())
+            );
+        }
         Ok(response)
     }
 
@@ -697,7 +763,7 @@ impl DwMmcHost {
                 // command — an ILLEGAL_COMMAND/error bit here means the
                 // card accepted the command but refused the data phase.
                 let r1 = self.readl(SDMMC_RESP0);
-                log::info!("dwmmc: data resp R1={r1:#010x}");
+                log::info!("dwmmc: data resp R1={}", Self::r1_names(r1));
                 break;
             }
         }
