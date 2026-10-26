@@ -38,16 +38,24 @@ bookkeeping are a deliberate follow-up), with `poll_card_ready` (CMD13)
 between writes.
 
 Completion is a two-half design: `XferStatus` (this crate, lock-free
-atomics) is published by the host's IRQ handler, and the waiter parks
+atomics) is published by an IRQ-driven host's handler, and the waiter parks
 through `XferSignal`. The task-context implementation lives in
 `subsys-mmc-host` (`TaskXferSignal`, the `subsys-block-host` split); probe
 context falls back to a bounded poll when `wait_until` reports
 `InvalidInput`.
+
+No host implements the IRQ half today: the DW MMC backend polls its
+completion status outright (masking the line for good after the
+level-triggered storm that an uncleared summary bit caused), so the
+signalling contract is currently unused by drivers and kept for the host
+that reintroduces interrupts.
 
 ## Scope cuts (deliberate)
 
 - SD memory cards only (no eMMC `mmc.c` state machine, no SDIO bus).
 - Default speed (25 MHz) and high speed (50 MHz, CMD6); no UHS-I — the
   1.8 V switch and tuning need per-SoC PHY work.
-- No partition scanning (one minor per disk), no runtime re-scan of an
-  empty slot (a follow-up timer task would drive it).
+- No runtime re-scan of an empty slot (a follow-up timer task would
+  drive it). The block consumer does scan the partition table at probe
+  (`mmcblk0pN`, GPT or legacy MBR) and publishes one disk per used
+  partition, falling back to the whole card.

@@ -84,7 +84,16 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             regs.region().base
         );
 
-        let host = Arc::new(DwMmcHost::new(regs, ciu_hz, fifo_depth, slot).map_err(host_error)?);
+        let host = Arc::new(
+            DwMmcHost::new(
+                regs,
+                ciu_hz,
+                fifo_depth,
+                slot,
+                card_clock_ceiling(max_frequency),
+            )
+            .map_err(host_error)?,
+        );
 
         // Card detection (Linux mmc_detect_card): no card is a clean
         // outcome — the slot stays claimed for a future re-scan.
@@ -139,6 +148,23 @@ fn add_card_to_domain(
             log::warn!("dwmmc-rocks: card add rejected: {err:?}");
             Err(ProbeError::Fatal(RuntimeError::Invalid))
         }
+    }
+}
+
+/// Requested card-clock ceiling (Linux `mmc->f_max`): the DT
+/// `max-frequency` and the board fact `MMC_MAX_CARD_HZ`, whichever is
+/// lower. 0 (either side) means "no vote from that side".
+///
+/// The SD clock domain sits behind the firmware, so this driver cannot
+/// measure the rate it is dividing down; the ceiling is how a board says
+/// "my signal integrity tops out here" without pretending to know the
+/// source rate.
+fn card_clock_ceiling(dt_max_hz: u32) -> u32 {
+    let board_max_hz = u32::try_from(kbuild_config::MMC_MAX_CARD_HZ).unwrap_or(0);
+    match (dt_max_hz, board_max_hz) {
+        (0, board) => board,
+        (dt, 0) => dt,
+        (dt, board) => dt.min(board),
     }
 }
 

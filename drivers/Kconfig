@@ -448,10 +448,11 @@ config KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
     depends on KFEAT_MMC && ARCH_AARCH64
     help
       DW MSHC host driver (dw_mmc-rockchip shape) for RK3588-class SD
-      controllers: MMIO + IDMAC data path, DTO interrupt, card detection
-      onto the mmc card bus. The CIU input rate is a board fact
-      (MMC_CIU_HZ) — the SD clock domain sits behind the firmware and is
-      left configured by the boot stages.
+      controllers: MMIO + FIFO-polled PIO data path, card detection onto
+      the mmc card bus. The CIU input rate is a board fact (MMC_CIU_HZ)
+      and the card-clock ceiling is a board fact (MMC_MAX_CARD_HZ) — the
+      SD clock domain sits behind the firmware and is left configured by
+      the boot stages.
 
 config MMC_CIU_HZ
     hex "MMC CIU input clock rate (Hz)"
@@ -462,6 +463,21 @@ config MMC_CIU_HZ
       the firmware/boot stages configured for the SD clock domain). The
       driver divides this down for 400 kHz init, 25 MHz default speed
       and 50 MHz high speed; it never reprograms the source.
+
+config MMC_MAX_CARD_HZ
+    hex "MMC card clock ceiling (Hz)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default 0x2FAF080
+    help
+      Upper bound for the card clock the host programs, applied to every
+      set_ios request (the DT max-frequency caps it further; whichever is
+      lower wins). 0 disables the cap.
+
+      This is the bring-up knob for the divider arithmetic: because the
+      source rate is unmeasurable (MMC_CIU_HZ is an assumption), a board
+      that mis-samples at the nominal mode rate lowers this instead of
+      guessing a new source rate. If a lower ceiling makes the data phases
+      pass, the effective source rate was higher than MMC_CIU_HZ claims.
 
 
 config KFEAT_DRIVER_CLK_SCMI

@@ -4,27 +4,29 @@
 
 | Boundary | Input | Handling |
 | --- | --- | --- |
-| Device tree → driver | `fifo-depth`, `max-frequency`, reg/irq/clock specs | `fifo-depth < 2` and a zero ciu rate fail the probe; resources come only through the `Device` doors. |
-| Card → DMA engine | transfer geometry | BLKSIZ/BYTCNT and descriptor lengths are driver-computed from the caller's `bytes`, bounded by the 64 KiB window check before any descriptor is armed. |
-| Firmware → rate | `ciu.get_rate()` | Validated non-zero and `u32`-range; zero aborts the probe rather than dividing by it. |
+| Device tree → driver | `fifo-depth`, `max-frequency`, reg specs | `fifo-depth < 2` fails the probe; the card-clock ceiling is `min(max-frequency, MMC_MAX_CARD_HZ)`, 0 meaning "no cap" from that side; resources come only through the `Device` doors. |
+| Card → driver | transfer geometry, R1 responses | BLKSIZ/BYTCNT are driver-computed from the caller's `bytes` (512-byte blocks, or the exact byte count below one block); FIFO accesses are bounded by `STATUS.FCNT` and the destination slice, one FIFO entry per access, so a bogus `FCNT` can over-copy an entry but never leave the buffer. |
+| Card → driver | FIFO data width / IP revision | `HCON.HDATA_WIDTH` and `VERID` are read once at probe and only ever select between fixed access widths (16/32/64-bit) and two fixed register offsets; no value from the register file sizes an allocation or an index. |
+| Firmware → rate | `MMC_CIU_HZ`, `MMC_MAX_CARD_HZ` | Compile-time board facts, not runtime input; a zero CIU rate fails the probe instead of dividing by it. |
 
 ## Unsafe inventory
 
 - `unsafe impl Sync/Send for DwMmcHost` — the slot state is MMIO through
   `IoMap` (bounds-checked accessors) plus lock-free atomics; justified at
   the impl site.
-- Coherent staging slices (`coherent_slice`) — two call sites, each
-  bounded by the `bytes > DMA_WINDOW_BYTES` guard against the allocation
-  the host owns outright.
-- The DMA mappings are owned by the host (`Arc`), so the card consumers'
-  references cannot outlive them; the probe Data only pins the IRQ and
-  the host reference, and removal order (IRQ first, cascade second) is
-  documented on the Data struct.
+- The host is owned by an `Arc`, so card consumers' references cannot
+  outlive it; the probe Data pins the host reference and the card devices
+  are parented to the host device, so removal order is cascade-defined.
 
 ## Failure behavior
 
 Command timeouts/CRC errors map to `MmcError` and surface as probe `Fatal`
-or block-I/O errors; a detection failure never leaves the IDMAC enabled
-(`idmac_stop` runs on every exit path of a data transfer). Interrupt
-flooding is bounded: the handler only samples masked bits and clears what
-it read.
+or block-I/O errors. A failed data phase runs the full unwedge sequence
+(bounded waits on every step: abort pulse, DAT0 release, FIFO reset) before
+returning, so a card parked in the data state cannot silently poison later
+transfers. Diagnostics log register state and FIFO byte counters only —
+never card data.
+
+Polling has a fixed budget per phase (`CMD_POLL_LIMIT`, `DATA_POLL_LIMIT`);
+exhausting it reports a timeout instead of spinning forever. With the
+interrupt line masked for good, a stuck controller cannot flood the CPU.

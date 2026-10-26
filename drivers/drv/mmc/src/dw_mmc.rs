@@ -3,17 +3,24 @@
 // See LICENSES for license details.
 
 //! DesignWare Mobile Storage Host controller core — the **PIO-mode**
-//! subset of Linux `drivers/mmc/host/dw_mmc.c`, transcribed from the
-//! board-verified reference (`drivers/blk/dwmmc-host` in the tgoskits
-//! tree): register map, clock sequencing, and the FIFO-polled data path.
+//! subset of Linux `drivers/mmc/host/dw_mmc.c`: register map, clock
+//! sequencing, and the FIFO-polled data path.
 //!
-//! The data phase is PIO by deliberate choice (the verified reference is
-//! PIO too, and it documents the trap: with IDMAC routing left armed,
-//! the FIFO feeds the DMA engine and `DATA_OVER` never fires). The data
-//! phase is issued with `DATA_EXPECT`, then the loop polls RINTSTS —
-//! **error bits first** (a data error never raises DATA_OVER) — draining
-//! the FIFO by FCNT until the transfer completes, tail words included.
-//! The internal-DMA engine (IDMAC) is a follow-up optimization.
+//! The data phase is PIO by deliberate choice, with the trap the register
+//! map records: with IDMAC routing left armed, the FIFO feeds the DMA
+//! engine and `DATA_OVER` never fires. The phase is issued with
+//! `DATA_EXPECT`, then the loop polls RINTSTS — **error bits first** (a
+//! data error never raises DATA_OVER) — draining the FIFO by FCNT until
+//! the transfer completes, tail included.
+//!
+//! Note on provenance: the tgoskits reference this port started from
+//! (`drivers/blk/dwmmc-host`) is **IDMAC-only** — its FIFO/PIO fallback was
+//! removed upstream, and RK3588 SD boot was restored there through the
+//! IDMAC path (plus tolerating an unsupported CMD6). PIO here is this
+//! port's own path, so it is validated against Linux `dw_mci`, not against
+//! the reference. Both paths failed the same way on this board (response
+//! start-bit/CRC errors on the first wide data phase), which is why the
+//! clock facts below are stated so loudly.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -58,6 +65,10 @@ const CTRL_DMA_RESET: u32 = 1 << 2;
 const CTRL_FIFO_RESET: u32 = 1 << 1;
 const CTRL_RESET: u32 = 1 << 0;
 const CTRL_USE_IDMAC: u32 = 1 << 25;
+/// Abort an in-flight read data phase (databook `abort_read_data`, pulse
+/// bit). A FIFO reset alone does not clear a data state machine that is
+/// mid-transfer.
+const CTRL_ABORT_READ_DATA: u32 = 1 << 8;
 const CTRL_ALL_RESET: u32 = CTRL_RESET | CTRL_FIFO_RESET | CTRL_DMA_RESET;
 
 // CTYPE bits.
@@ -115,6 +126,8 @@ const CLKEN_ENABLE: u32 = 1 << 0;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
+/// STATUS register data-state machine busy indicator.
+const STATUS_DATA_STATE_MC_BUSY: u32 = 1 << 10;
 /// STATUS FIFO count field [28:17], in FIFO **entries** (the entry width
 /// is `HCON.HDATA_WIDTH`, not necessarily 32 bits — Linux
 /// `SDMMC_GET_FCNT` + `host->data_shift`).
@@ -156,10 +169,16 @@ pub struct DwMmcHost {
     regs: IoMap,
     /// CIU input clock in Hz (board fact — see the rockchip glue).
     bus_hz: u32,
-    /// FIFO depth in 32-bit entries (DT `fifo-depth`).
+    /// FIFO depth in entries (DT `fifo-depth`).
     fifo_depth: u32,
+    /// One FIFO entry in bytes (`HCON.HDATA_WIDTH`): fixes both the FIFO
+    /// access size and the unit of `STATUS.FCNT` (Linux `data_shift`).
+    fifo_width: usize,
     /// Offset of the FIFO data register (VERID-dependent).
     fifo_off: usize,
+    /// Requested card clock ceiling (Linux `mmc->f_max`): the lower of the
+    /// DT `max-frequency` and the board's `MMC_MAX_CARD_HZ` (0 = no cap).
+    max_card_hz: u32,
     /// Host slot index (`mmc_host->index`).
     slot: u8,
     /// Current configured bus clock (0 = gated).
@@ -178,7 +197,18 @@ impl DwMmcHost {
     /// `dwmci_init` order): power, all-reset, status clear, full line
     /// mask (poll-only), timeouts, IDMAC routing disabled, FIFO
     /// thresholds, VERID-dependent FIFO port, CIU clock gated.
-    pub fn new(regs: IoMap, bus_hz: u32, fifo_depth: u32, slot: u8) -> Result<Self, MmcError> {
+    ///
+    /// `max_card_hz` is the requested card-clock ceiling (Linux
+    /// `mmc->f_max`): every `set_ios` request is clamped to it, which is
+    /// how a board declares that its SD clock domain cannot tolerate the
+    /// nominal mode rate. 0 means "no cap".
+    pub fn new(
+        regs: IoMap,
+        bus_hz: u32,
+        fifo_depth: u32,
+        slot: u8,
+        max_card_hz: u32,
+    ) -> Result<Self, MmcError> {
         if bus_hz == 0 || fifo_depth < 2 {
             return Err(MmcError::Unsupported);
         }
@@ -186,8 +216,10 @@ impl DwMmcHost {
             regs,
             bus_hz,
             fifo_depth,
+            fifo_width: 4,
             slot,
             fifo_off: SDMMC_DATA_240A_OFFSET,
+            max_card_hz,
             current_clock: AtomicU32::new(0),
         };
 
@@ -211,10 +243,11 @@ impl DwMmcHost {
         // routing makes every PIO read hang (verified driver's note).
         let ctrl = host.readl(SDMMC_CTRL) & !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE);
         host.writel(SDMMC_CTRL, ctrl);
-        // FIFO thresholds: baseline burst 8, RX at half-minus-1, TX at
-        // half (Linux `dw_mci_adjust_fifoth` fallback shape).
-        let half = host.fifo_depth / 2;
-        host.writel(SDMMC_FIFOTH, fifoth(0x2, half - 1, half));
+        // FIFO thresholds: the baseline Linux programs at probe
+        // (`dw_mci_probe`). The per-transfer geometry in
+        // `dw_mci_adjust_fifoth` is DMA-only — it returns early when PIO
+        // is in use — so it is deliberately not applied here.
+        host.writel(SDMMC_FIFOTH, host.baseline_fifoth());
         // Gate CIU clock before the first setup_bus.
         host.writel(SDMMC_CLKENA, 0);
         host.writel(SDMMC_CLKSRC, 0);
@@ -231,11 +264,12 @@ impl DwMmcHost {
         // the unit of `STATUS.FCNT`, so they are the first thing to check
         // when a data phase misbehaves.
         let hcon = host.readl(SDMMC_HCON);
+        host.fifo_width = fifo_width_bytes(hcon) as usize;
         log::info!(
             "dwmmc: slot {} verid {verid:#06x} hcon {hcon:#010x} fifo {fifo_depth} x {}B, \
-             data-port {:#x}",
+             data-port {:#x}, ciu {bus_hz} Hz, card-clock ceiling {max_card_hz} Hz",
             host.slot,
-            fifo_width_bytes(hcon),
+            host.fifo_width,
             host.fifo_off,
         );
         Ok(host)
@@ -254,20 +288,42 @@ impl DwMmcHost {
         self.regs.write32(off, value)
     }
 
-    /// One 32-bit read of the FIFO data port.
-    fn fifo_read32(&self) -> u32 {
-        self.readl(self.fifo_off)
+    /// One FIFO entry read at the width `HCON` advertises (Linux
+    /// `dw_mci_pull_data16/32/64`). `entry` is zeroed beyond the width.
+    fn fifo_read_entry(&self, entry: &mut [u8; 8]) {
+        match self.fifo_width {
+            2 => entry[..2].copy_from_slice(&self.regs.read16(self.fifo_off).to_le_bytes()),
+            8 => entry[..8].copy_from_slice(&self.regs.read64(self.fifo_off).to_le_bytes()),
+            _ => entry[..4].copy_from_slice(&self.readl(self.fifo_off).to_le_bytes()),
+        }
     }
 
-    /// One 32-bit write of the FIFO data port.
-    fn fifo_write32(&self, value: u32) {
-        self.writel(self.fifo_off, value)
+    /// One FIFO entry write at the width `HCON` advertises.
+    fn fifo_write_entry(&self, entry: &[u8; 8]) {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&entry[..self.fifo_width]);
+        match self.fifo_width {
+            2 => self
+                .regs
+                .write16(self.fifo_off, u16::from_le_bytes([word[0], word[1]])),
+            8 => self.regs.write64(self.fifo_off, u64::from_le_bytes(word)),
+            _ => self.regs.write32(
+                self.fifo_off,
+                u32::from_le_bytes([word[0], word[1], word[2], word[3]]),
+            ),
+        }
     }
 
-    /// Bytes currently held in the FIFO.
+    /// Bytes currently held in the FIFO (`FCNT` counts FIFO entries).
     fn fifo_bytes(&self) -> usize {
         let fcnt = (self.readl(SDMMC_STATUS) >> STATUS_FCNT_SHIFT) & 0x1FFF;
-        (fcnt as usize) * 4
+        (fcnt as usize) * self.fifo_width
+    }
+
+    /// Baseline FIFO thresholds (Linux `fifoth_val`).
+    fn baseline_fifoth(&self) -> u32 {
+        let half = self.fifo_depth / 2;
+        fifoth(0x2, half - 1, half)
     }
 
     /// Issue one command frame and poll the START bit (the controller
@@ -346,6 +402,12 @@ impl DwMmcHost {
         if cmd.init_clocks {
             cmdr |= CMD_INIT;
         }
+        if cmd.stop {
+            // STOP/ABORT frame. Linux sets it for GO_IDLE (CMD0),
+            // GO_INACTIVE (CMD15) and STOP_TRANSMISSION (CMD12); without
+            // it the controller sends those as ordinary commands.
+            cmdr |= CMD_STOP;
+        }
         // Hold register always on (verified driver default; RK3588 does
         // not declare NO_USE_HOLD), and data commands wait for previous
         // data to finish.
@@ -403,17 +465,23 @@ impl DwMmcHost {
         alloc::format!("{status:#x} [{}]", names.join("|"))
     }
 
-    /// Drain whatever the FIFO holds into `buf` (FCNT-bounded, word
-    /// granularity), Linux `dw_mci_read_data_pio` inner loop. Returns
-    /// bytes drained.
+    /// Drain whatever the FIFO holds into `buf` (`FCNT`-bounded, one FIFO
+    /// entry per access), Linux `dw_mci_read_data_pio` inner loop. A tail
+    /// shorter than one entry is legal: the controller holds one entry of
+    /// which only the leading bytes belong to the transfer. Returns bytes
+    /// drained.
     fn drain_rx(&self, out: &mut [u8]) -> usize {
-        let available = self.fifo_bytes();
-        let n = available.min(out.len()) & !0x3;
-        for i in (0..n).step_by(4) {
-            let word = self.fifo_read32();
-            out[i..i + 4].copy_from_slice(&word.to_le_bytes());
+        let width = self.fifo_width;
+        let limit = self.fifo_bytes().min(out.len());
+        let mut drained = 0usize;
+        while drained < limit {
+            let mut entry = [0u8; 8];
+            self.fifo_read_entry(&mut entry);
+            let take = (limit - drained).min(width);
+            out[drained..drained + take].copy_from_slice(&entry[..take]);
+            drained += take;
         }
-        n
+        drained
     }
 
     /// Full controller snapshot for a failed data phase: the geometry
@@ -453,10 +521,29 @@ impl DwMmcHost {
         }
     }
 
-    /// Recovery after a failed data transfer: FIFO reset, force-stop with
-    /// CMD12, full raw-status clear (Linux error path). Without this a
-    /// card parked mid-data-state poisons every later command.
-    fn recover_after_data_error(&self, failed_cmd: &MmcCommand, rintsts: u32) {
+    /// Unwedge the data path: abort an in-flight read (pulse
+    /// `ABORT_READ_DATA`), wait for DAT0 to release, reset the FIFO, then
+    /// force-stop the card with CMD12 and clear raw status.
+    ///
+    /// Order matters and was verified the hard way on this board: FIFO
+    /// reset + CMD12 alone leave `STATUS.DATA_STATE_MC_BUSY` set, and the
+    /// next data phase then completes instantly with an empty FIFO.
+    fn reset_data_path(&self) {
+        if self.readl(SDMMC_STATUS) & (STATUS_DATA_STATE_MC_BUSY | STATUS_CARD_BUSY) != 0 {
+            self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_ABORT_READ_DATA);
+            // The abort pulse clears itself; then DAT0 (card busy) must
+            // release before the card is addressable again.
+            for _ in spin_budget(10_000) {
+                if self.readl(SDMMC_CTRL) & CTRL_ABORT_READ_DATA == 0 {
+                    break;
+                }
+            }
+            for _ in spin_budget(CMD_POLL_LIMIT) {
+                if self.readl(SDMMC_STATUS) & STATUS_CARD_BUSY == 0 {
+                    break;
+                }
+            }
+        }
         self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
         for _ in spin_budget(10_000) {
             if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
@@ -467,6 +554,12 @@ impl DwMmcHost {
         let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
         let _ = self.ciu_cmd(stop, 0, true);
         self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
+    }
+
+    /// Recovery after a failed data transfer (Linux error path). Without
+    /// this a card parked mid-data-state poisons every later command.
+    fn recover_after_data_error(&self, failed_cmd: &MmcCommand, rintsts: u32) {
+        self.reset_data_path();
         log::warn!(
             "dwmmc: recovered after data error on cmd {} (rintsts {})",
             failed_cmd.opcode,
@@ -477,18 +570,14 @@ impl DwMmcHost {
 
 impl MmcHost for DwMmcHost {
     fn recover(&self) {
-        // FIFO reset (self-clearing), then the force-stop CMD12, then a
-        // full raw-status clear (post-transfer hygiene).
-        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
-        for _ in spin_budget(10_000) {
-            if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
-                break;
-            }
-            core::hint::spin_loop();
+        // Only a data phase that is still in flight needs the full unwedge
+        // sequence; at a healthy phase boundary this is just status
+        // hygiene, and a CMD12 sent in TRAN state only adds noise.
+        if self.readl(SDMMC_STATUS) & (STATUS_DATA_STATE_MC_BUSY | STATUS_CARD_BUSY) != 0 {
+            self.reset_data_path();
+        } else {
+            self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         }
-        let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
-        let _ = self.ciu_cmd(stop, 0, true);
-        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
     }
 
     fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
@@ -522,8 +611,16 @@ impl MmcHost for DwMmcHost {
 
     fn set_ios(&self, ios: &MmcIos) -> Result<(), MmcError> {
         self.writel(SDMMC_PWREN, u32::from(ios.power_on));
-        self.setup_bus(ios.clock_hz, false)?;
-        self.current_clock.store(ios.clock_hz, Ordering::Release);
+        // Host-side ceiling (Linux `mmc->f_max`): the SD clock source rate
+        // is a board fact this driver cannot measure, so the board may
+        // declare a lower ceiling than the mode nominally allows.
+        let clock_hz = if self.max_card_hz == 0 {
+            ios.clock_hz
+        } else {
+            ios.clock_hz.min(self.max_card_hz)
+        };
+        self.setup_bus(clock_hz, false)?;
+        self.current_clock.store(clock_hz, Ordering::Release);
         let ctype = match ios.bus_width {
             BusWidth::Bit1 => 0,
             BusWidth::Bit4 => CTYPE_4BIT,
@@ -637,15 +734,17 @@ impl DwMmcHost {
                 self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
-            let free = (self.fifo_depth as usize * 4).saturating_sub(self.fifo_bytes());
-            let chunk = (bytes - filled).min(free) & !0x3;
-            for i in (0..chunk).step_by(4) {
-                let mut word = [0u8; 4];
-                word.copy_from_slice(&buf[filled + i..filled + i + 4]);
-                self.fifo_write32(u32::from_le_bytes(word));
+            let free =
+                (self.fifo_depth as usize * self.fifo_width).saturating_sub(self.fifo_bytes());
+            let entries = free.min((bytes - filled).div_ceil(self.fifo_width));
+            for _ in 0..entries {
+                let mut entry = [0u8; 8];
+                let take = (bytes - filled).min(self.fifo_width);
+                entry[..take].copy_from_slice(&buf[filled..filled + take]);
+                self.fifo_write_entry(&entry);
+                filled += take;
             }
-            filled += chunk;
-            if chunk == 0 {
+            if entries == 0 {
                 core::hint::spin_loop();
             }
         }
@@ -673,11 +772,10 @@ impl DwMmcHost {
         dir: DataDir,
         bytes: usize,
     ) -> Result<(), MmcError> {
-        // Per-transfer FIFO thresholds (Linux dw_mci_adjust_fifoth): the
-        // burst must match the block geometry or FIFO and DMA burst (here:
-        // the CPU drain) desynchronize.
-        let half = self.fifo_depth / 2;
-        self.writel(SDMMC_FIFOTH, fifoth(0x2, half - 1, half));
+        // Baseline FIFO thresholds: in PIO the controller works off the
+        // probe-time value (Linux `dw_mci_adjust_fifoth` is DMA-only), and
+        // the CPU drain keeps up by polling `FCNT` rather than a burst.
+        self.writel(SDMMC_FIFOTH, self.baseline_fifoth());
         let blksz: u32 = if bytes.is_multiple_of(512) {
             512
         } else {
@@ -685,6 +783,10 @@ impl DwMmcHost {
         };
         self.writel(SDMMC_BLKSIZ, blksz);
         self.writel(SDMMC_BYTCNT, bytes as u32);
+        // Phase hygiene: nothing from an earlier phase may be mistaken for
+        // this one's completion (`DATA_OVER`) or error set. DAT0 release is
+        // handled by PRV_DAT_WAIT on the command itself.
+        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
         self.ciu_cmd(cmdr, cmd.arg, true)
     }
