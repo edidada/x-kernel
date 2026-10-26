@@ -134,7 +134,11 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
                         return Ok(DwMmcRockchipData { _host: host });
                     }
                     Err(err) => {
-                        log::warn!(
+                        // Expected once on this board (the first initialisation
+                        // after power-on); a retry follows, so this is
+                        // information rather than a fault until the ladder is
+                        // exhausted.
+                        log::info!(
                             "dwmmc-rocks: slot {slot}: card detected, but a block read failed at \
                              {}-bit / {ceiling} Hz ({err:?})",
                             width_bits(width)

@@ -356,9 +356,18 @@ impl DwMmcHost {
             idmac_ok: AtomicBool::new(idmac_ok),
         };
 
-        // Power on the card BEFORE reset (U-Boot `dwmci_init` order):
-        // PWREN gates the card's vmmc rail on switchable boards.
+        // Power-cycle the card BEFORE the controller reset (Linux
+        // `mmc_power_up`: off, >=1 ms, on). `PWREN` gates the card's vmmc rail
+        // on switchable boards, and the boot loader may have left the card
+        // selected in 4-bit high-speed mode — in which case the first
+        // initialisation runs against a card whose state machine is not where
+        // CMD0 assumes, which is exactly the shape this board showed: the
+        // first attempt after power-on failed the first 4-bit data phase, and
+        // an identical second attempt worked.
+        host.writel(SDMMC_PWREN, 0);
+        host.power_delay();
         host.writel(SDMMC_PWREN, 1);
+        host.power_delay();
         // Global + FIFO + DMA reset, each bit self-clearing.
         host.writel(SDMMC_CTRL, CTRL_ALL_RESET);
         for _ in spin_budget(10_000) {
@@ -426,6 +435,15 @@ impl DwMmcHost {
             },
         );
         Ok(host)
+    }
+
+    /// Coarse wait covering the card power-up/power-down minimums (~1 ms each
+    /// at any rate this kernel runs). Boot/probe context only; a timer would be
+    /// the precise tool, but probe has no parking guarantee.
+    fn power_delay(&self) {
+        for _ in spin_budget(1_000_000) {
+            core::hint::spin_loop();
+        }
     }
 
     /// The host slot index (disk naming + bus-instance label).
