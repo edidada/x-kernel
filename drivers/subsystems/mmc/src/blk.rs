@@ -17,6 +17,7 @@
 //! filesystem actually mounts from.
 
 use alloc::{boxed::Box, string::String, sync::Arc};
+use core::sync::atomic::Ordering;
 
 use driver_base::{Device, DriverOps, ProbeError, Publication, RuntimeError};
 use kerrno::{KError, KResult};
@@ -40,6 +41,11 @@ static IDS: &[MmcIdEntry] = &[MmcIdEntry::kind(CardKind::Sd)];
 struct MmcBlkOps {
     card: MmcCardData,
     start_lba: u64,
+    /// Whether a multi-block (CMD18 + auto-stop) read is still worth
+    /// trying. Starts from `MMC_MULTIBLOCK` and latches off the first time
+    /// the controller loses a multi-block data phase, so the optimisation
+    /// can never turn into a persistent I/O failure.
+    multiblock: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl MmcBlkOps {
@@ -62,13 +68,25 @@ impl BlockDeviceOperations for MmcBlkOps {
         if !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(KError::Io);
         }
-        // One CMD17 per device block, not one CMD18 spanning the buffer.
-        // The multi-block read arms the controller's auto-stop
-        // (CMD18 + `SEND_STOP`), and on this controller/card combination
-        // that path is the one that intermittently fails the data phase
-        // with a start-bit error (`TCBCNT=0`), leaving the card parked in
-        // the data state; the per-block shape is what the board-verified
-        // reference driver uses. Cost is one command frame per 512 bytes.
+        let blocks = blocks_in(buf.len()).map_err(|_| KError::Io)?;
+        // Multi-block first (one CMD18 for the whole range), then the
+        // durable per-block shape. The auto-stop path streams blocks
+        // back-to-back, so a PIO drain that gets preempted can overrun the
+        // FIFO — a failure that says nothing about the media. Latch it off
+        // for the remaining I/O instead of retrying it on every request.
+        if blocks > 1 && self.multiblock.load(Ordering::Acquire) {
+            let addr = self.device_address(block_id);
+            match read_blocks(self.card.host.as_ref(), addr, blocks, buf) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    self.multiblock.store(false, Ordering::Release);
+                    log::warn!(
+                        "mmcblk: {blocks}-block read failed ({err:?}); falling back to one CMD17 \
+                         per block for the rest of this session"
+                    );
+                }
+            }
+        }
         for (index, chunk) in buf.chunks_mut(BLOCK_SIZE).enumerate() {
             let addr = self.device_address(block_id + index as u64);
             read_blocks(self.card.host.as_ref(), addr, 1, chunk).map_err(|err| err.to_kerror())?;
@@ -155,6 +173,11 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         let mut publications: alloc::vec::Vec<Publication<BlockDeviceImpl>> =
             alloc::vec::Vec::new();
         let mut disks: alloc::vec::Vec<Arc<Gendisk>> = alloc::vec::Vec::new();
+        // One latch for every view of this card: the multi-block capability
+        // belongs to the host, not to a partition.
+        let multiblock = Arc::new(core::sync::atomic::AtomicBool::new(
+            kbuild_config::MMC_MULTIBLOCK,
+        ));
         for (name, start_lba, minor) in views {
             let ops = Box::new(MmcBlkOps {
                 card: MmcCardData {
@@ -169,6 +192,7 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
                     host: bus_data.host.clone(),
                 },
                 start_lba,
+                multiblock: multiblock.clone(),
             });
             let path: String = alloc::format!("mmc/slot{}:{:04x}", bus_data.slot, bus_data.rca);
             let modalias: String = String::from("sd:block");

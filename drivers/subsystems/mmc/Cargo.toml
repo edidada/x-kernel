@@ -13,6 +13,7 @@ categories = ["os", "no-std"]
 [dependencies]
 driver_base = { workspace = true }
 subsys_block = { workspace = true }
+kbuild_config = { workspace = true }
 kerrno = { workspace = true }
 log = { workspace = true }
 unittest = { workspace = true }

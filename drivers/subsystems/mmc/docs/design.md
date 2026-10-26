@@ -37,6 +37,16 @@ reads, per-block CMD24 for writes (multi-block writes + pre-erase
 bookkeeping are a deliberate follow-up), with `poll_card_ready` (CMD13)
 between writes.
 
+Multi-block reads are an **optimisation with a durable fallback**: the
+block consumer issues one CMD18 for a multi-block range, and the first
+time that transfer fails it latches the capability off and reads one block
+per CMD17 for the rest of the session (`MMC_MULTIBLOCK` decides the first
+attempt only). The reason is structural rather than a workaround: the
+auto-stop path streams blocks back-to-back, so on a polled data path a
+drain loop that loses the CPU long enough overruns the FIFO, whereas
+per-block reads put a command frame — and a FIFO that empties — between
+blocks. A multi-block failure must therefore never become an I/O failure.
+
 Long (`R2`) responses are carried as `{127:96} .. {31:0}` in
 `MmcResponse::raw`; a host must unshift the controller's response
 registers into that order (DW MMC keeps the least-significant word in

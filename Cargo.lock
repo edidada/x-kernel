@@ -5093,6 +5093,7 @@ name = "subsys-mmc"
 version = "0.3.0-dev"
 dependencies = [
  "driver-base",
+ "kbuild_config",
  "kerrno",
  "log",
  "subsys-block",

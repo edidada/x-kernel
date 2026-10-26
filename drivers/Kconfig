@@ -443,6 +443,18 @@ config KFEAT_DRIVER_MMC_BLOCK
       The card-bus consumer publishing discovered SD cards as block
       devices (Gendisk major 179) into the block class.
 
+config MMC_MULTIBLOCK
+    bool "MMC multi-block reads (CMD18 + auto-stop)"
+    depends on KFEAT_DRIVER_MMC_BLOCK
+    default y
+    help
+      Read a multi-block request with one CMD18 instead of one CMD17 per
+      block. Cheaper per byte, but the auto-stop path streams blocks
+      back-to-back: on a polled (PIO) data path a drain loop that loses the
+      CPU long enough overruns the FIFO. The consumer therefore latches
+      this off after the first failed multi-block transfer and keeps going
+      with per-block reads, so the switch only decides the first attempt.
+
 config KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
     bool "DesignWare MMC host driver (Rockchip)"
     depends on KFEAT_MMC && ARCH_AARCH64
