@@ -152,10 +152,17 @@ const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
 /// `/proc/sys/kernel/printk`, whose value domain is X-Kernel's (higher = more
 /// verbose), so reusing Linux's inverted numbering here would be a trap.
 ///
-/// `READ_CLEAR` drops only the bytes this call returns, the way Linux advances
-/// its clear cursor: a caller whose `len` is smaller than the buffer (including
-/// `len == 0`) keeps the rest readable, and records logged while the copy was
-/// in flight are not thrown away.
+/// Both read actions copy forward from the oldest unread byte, the direction
+/// Linux's `syslog_print_all` uses, so a reader that drains in chunks makes
+/// progress through the log instead of re-reading the newest tail. `READ_CLEAR`
+/// then drops exactly the bytes it returned, the way Linux advances its clear
+/// cursor past the records it copied: a caller whose `len` is smaller than the
+/// buffer keeps the rest readable, and records logged while the copy was in
+/// flight are not thrown away.
+///
+/// A negative Linux `int` length arrives sign-extended in the register, so
+/// anything above `isize::MAX` is rejected with `InvalidInput` before the buffer
+/// or the ring is touched, which is what Linux does for `len < 0`.
 ///
 /// `buf` carries user addresses from the raw syscall arguments, so it is
 /// rebuilt as a typed [`UserPtr`] here instead of in the dispatch arm.
@@ -171,22 +178,24 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: usize) -> KResult<i
             Ok(0)
         }
         SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            if len > isize::MAX as usize {
+                return Err(KError::InvalidInput);
+            }
             let user = UserPtr::<u8>::from(buf as usize);
             if user.is_null() {
                 return Err(KError::InvalidInput);
             }
-            // Snapshot outside the syscall's user copy: a page fault on the
+            // Read outside the syscall's user copy: a page fault on the
             // destination must not happen with the log lock held.
-            let available = klogger::logbuf_len().min(len);
-            let mut kbuf = alloc::vec![0u8; available];
-            let copied = klogger::logbuf_snapshot(&mut kbuf);
-            user.write_vm_slice(&kbuf[..copied])?;
+            let mut kbuf = alloc::vec![0u8; klogger::logbuf_len().min(len)];
+            let read = klogger::logbuf_read(&mut kbuf);
+            user.write_vm_slice(&kbuf[..read.copied])?;
             if action == SYSLOG_ACTION_READ_CLEAR {
-                // Only after a successful copy, and only the returned bytes: an
-                // `EFAULT` or a short destination must not lose evidence.
-                klogger::logbuf_consume(copied);
+                // Only after a successful copy, and only this reader's window:
+                // an `EFAULT` or a short destination must not lose evidence.
+                klogger::logbuf_release(read);
             }
-            Ok(copied as isize)
+            Ok(read.copied as isize)
         }
         _ => Err(KError::InvalidInput),
     }

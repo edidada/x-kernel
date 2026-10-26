@@ -566,14 +566,14 @@ user-memory access and operation-specific restrictions.
 
 `sys_syslog` is the adapter over `klogger`'s log ring. The ring, the filter and
 the level vocabulary all belong to `klogger`; `ksyscall` only validates the
-arguments, takes the snapshot and performs the user copy.
+arguments, reads a window of the ring and performs the user copy.
 
 Implemented actions, with Linux's numbering:
 
 | action | name | behaviour |
 |--------|------|-----------|
-| 3 | `READ_ALL` | return the buffered bytes, keep them |
-| 4 | `READ_CLEAR` | return the buffered bytes, drop the returned ones |
+| 3 | `READ_ALL` | return the oldest unread bytes, keep them buffered |
+| 4 | `READ_CLEAR` | return the oldest unread bytes, drop those returned |
 | 5 | `CLEAR` | drop the whole buffer, return 0 |
 | 9 | `SIZE_UNREAD` | return the number of buffered bytes |
 | 10 | `SIZE_BUFFER` | return the ring's total capacity |
@@ -583,19 +583,26 @@ Order of operations and failure handling:
 1. `kprocess::current_cred().is_privileged()` runs first; an unprivileged
    caller gets `OperationNotPermitted` and never touches the ring.
 2. The `SIZE_*` actions return `klogger`'s count and capacity.
-3. The read actions rebuild a typed `UserPtr<u8>` and reject a null destination
-   with `InvalidInput`.
-4. The kernel snapshot buffer is allocated outside the log lock, sized
-   `logbuf_len().min(len)`, and filled by `logbuf_snapshot`, which returns the
-   newest bytes. **The user copy never runs with the log lock held**, so a page
-   fault on the destination cannot keep the ring locked with interrupts off.
-5. `READ_CLEAR` calls `logbuf_consume(copied)` after a successful copy and only
-   for the bytes actually returned. A smaller destination (`len` is an
-   unvalidated syscall argument, including `len == 0`) therefore keeps the bytes
-   it could not receive, and records logged while the copy was in flight stay in
-   the ring; a copy failure keeps everything. Linux advances its clear cursor
-   over the records it returned, so this matches its contract.
-6. Every other action, including Linux's `CONSOLE_*` controls, returns
+3. The read actions reject `len > isize::MAX` with `InvalidInput` before touching
+   the ring: Linux's `len` is a signed `int`, so a negative length arrives
+   sign-extended in the register and must fail like Linux's `len < 0` rather than
+   be clamped to the buffer size and copied past the caller's declared length.
+4. They then rebuild a typed `UserPtr<u8>` and reject a null destination with
+   `InvalidInput`.
+5. The kernel read buffer is allocated outside the log lock, sized
+   `logbuf_len().min(len)`, and filled by `logbuf_read`, which copies the oldest
+   unread bytes in log order — the direction Linux's `syslog_print_all` copies.
+   **The user copy never runs with the log lock held**, so a page fault on the
+   destination cannot keep the ring locked with interrupts off.
+6. `READ_CLEAR` calls `logbuf_release(read)` after a successful copy. The
+   `LogRead` window carries its sequence position, so the release drops exactly
+   the bytes this call returned: a smaller destination (`len` including `0`) keeps
+   the bytes it could not receive, records logged while the copy was in flight
+   stay in the ring, a copy failure keeps everything, and a window the ring
+   overwrote while the bytes were being copied is stale and drops nothing. Linux
+   advances its clear cursor over the records it returned, so this matches its
+   contract.
+7. Every other action, including Linux's `CONSOLE_*` controls, returns
    `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
    value domain is inverted relative to Linux's, and mixing the two would let a
    caller believe it changed something else.

@@ -357,11 +357,18 @@ typed `UserPtr<u8>` and reject a null destination as `InvalidInput`; the actual
 copy runs after the log ring's lock is released, and a failing copy returns its
 own error without dropping anything.
 
-`READ_CLEAR` drops exactly the bytes it returned: `logbuf_consume(copied)` runs
-only after a successful copy and only for the returned prefix, so a short or
-zero-length destination, or a record logged while the copy was in flight, stays
-readable. Dropping the whole ring here would destroy log evidence a caller never
-received, and the return value could not even report the loss.
+`len` is a signed 32-bit ABI argument, so anything above `isize::MAX` is rejected
+with `InvalidInput` before the ring or the destination is touched; clamping it to
+the buffer size would copy up to the whole ring past a length the caller declared
+as negative.
+
+`READ_CLEAR` drops exactly the window it returned: `logbuf_release(read)` runs
+only after a successful copy and only over the sequence range this call read, so
+a short or zero-length destination, a record logged while the copy was in flight,
+or a page fault on the destination all leave the buffer intact. A window the ring
+overwrote meanwhile is stale and drops nothing, because its bytes are already
+gone and dropping a same-sized range would discard records the caller never
+received.
 
 Snapshot size is clamped to `min(requested_len, logbuf_len())`, so the kernel
 allocation is bounded by the ring (64 KiB) and never by the caller's `len`.
