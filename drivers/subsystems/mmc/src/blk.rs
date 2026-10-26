@@ -123,19 +123,27 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         bus_data.host.recover();
         let partitions = scan_partitions(bus_data.host.as_ref());
         let slot = bus_data.slot;
-        let mut views: alloc::vec::Vec<(alloc::string::String, u64)> = alloc::vec::Vec::new();
+        let mut views: alloc::vec::Vec<(alloc::string::String, u64, u32)> = alloc::vec::Vec::new();
         if partitions.is_empty() {
-            views.push((alloc::format!("mmcblk{slot}"), 0));
+            views.push((alloc::format!("mmcblk{slot}"), 0, 0));
         } else {
+            // Disk numbering follows Linux `mmcblk0` / `mmcblk0pN`: the
+            // whole card would take minor 0, partition N takes minor N.
+            // Every view is its own gendisk here, so the minor has to be
+            // allocated per view — a fixed 0 makes the second publish
+            // collide in `add_disk` (`AlreadyExists`) and, because the
+            // probe then fails, withdraws the disks that did publish.
             for (index, start_lba) in partitions.iter().enumerate() {
-                views.push((alloc::format!("mmcblk{slot}p{}", index + 1), *start_lba));
+                let part =
+                    u32::try_from(index).map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))? + 1;
+                views.push((alloc::format!("mmcblk{slot}p{part}"), *start_lba, part));
             }
         }
 
         let mut publications: alloc::vec::Vec<Publication<BlockDeviceImpl>> =
             alloc::vec::Vec::new();
         let mut disks: alloc::vec::Vec<Arc<Gendisk>> = alloc::vec::Vec::new();
-        for (name, start_lba) in views {
+        for (name, start_lba, minor) in views {
             let ops = Box::new(MmcBlkOps {
                 card: MmcCardData {
                     kind: bus_data.kind,
@@ -153,7 +161,7 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
             let path: String = alloc::format!("mmc/slot{}:{:04x}", bus_data.slot, bus_data.rca);
             let modalias: String = String::from("sd:block");
             let disk = Arc::new(
-                Gendisk::new(name.clone(), MMC_BLOCK_MAJOR, 0, 1, ops)
+                Gendisk::new(name.clone(), MMC_BLOCK_MAJOR, minor, 1, ops)
                     .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?
                     .with_devnode_context(&path, Some(modalias)),
             );
@@ -161,8 +169,9 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
                 .publish(&BLOCK, disk.clone(), name.clone())
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
             log::info!(
-                "mmcblk: published {name} (start LBA {start_lba}, {} sectors, {}-bit bus)",
-                bus_data.sectors,
+                "mmcblk: published {name} (minor {minor}, start LBA {start_lba}, {} sectors, \
+                 {}-bit bus)",
+                bus_data.sectors.saturating_sub(start_lba),
                 if bus_data.bus_width_4bit { 4 } else { 1 },
             );
             publications.push(publication);

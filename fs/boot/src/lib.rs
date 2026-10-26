@@ -448,9 +448,12 @@ fn mount_root_file_system(boot: &BootVfs) {
         .into_iter()
         .filter(|device| device.num_blocks() != 0)
         .collect();
-    // Root selection: the block consumer publishes the whole card AND its
-    // partitions (mmcblk0, mmcblk0p1, ...); the LAST registered view is
-    // the highest partition — conventionally the root filesystem.
+    // Root selection: the block consumer publishes one view per used
+    // partition (`mmcblk0pN`, in table order) and the whole card only when
+    // there is no partition table, so the candidate list is already ordered
+    // by device number. `KFEAT_ROOT_BLOCK` overrides the choice by name;
+    // otherwise the lowest dev_t is the root (or the second-lowest when
+    // `KFEAT_ROOTFS_SECONDARY_BLOCK` asks for it).
     let handle = select_root_block(&mut block_devs);
     let device_number = handle.device_number();
     let source = format!("/dev/{}", handle.name());
