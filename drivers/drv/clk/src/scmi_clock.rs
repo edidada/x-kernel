@@ -278,9 +278,6 @@ impl ScmiChannel {
 #[derive(Debug)]
 enum ScmiError {
     ChannelBusy,
-    /// The agent flagged the channel ERROR (its response failed); the
-    /// sticky flag has been cleared by the consumer.
-    ChannelError,
     /// The agent returned a non-SUCCESS SCMI status code.
     Firmware(i32),
     /// The SMCCC doorbell itself returned a non-zero code.
@@ -294,10 +291,6 @@ impl ScmiError {
             ScmiError::ChannelBusy => {
                 log::warn!("scmi-clk: {what}: channel stuck busy");
                 ClkError::Busy
-            }
-            ScmiError::ChannelError => {
-                log::warn!("scmi-clk: {what}: agent flagged channel error");
-                ClkError::Io
             }
             ScmiError::Firmware(code) => {
                 log::warn!("scmi-clk: {what}: firmware status {code}");

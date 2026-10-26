@@ -39,9 +39,8 @@ fn card_reset_delay() {
 /// names the exact step (opcode + arg) — the difference between "card
 /// absent", "signal integrity" and "protocol mismatch" at a glance.
 fn step<T>(what: &str, opcode: u8, arg: u32, result: Result<T, MmcError>) -> Result<T, MmcError> {
-    result.map_err(|err| {
+    result.inspect_err(|err| {
         log::warn!("sd: {what} (cmd {opcode}, arg {arg:#x}) -> {err:?}");
-        err
     })
 }
 
@@ -110,13 +109,46 @@ pub fn detect_card(
         return Err(MmcError::NoCard);
     }
 
+    // 1-3. Init frame, voltage handshake, power-up negotiation.
+    let ocr = init_and_power_up(host_ref)?;
+    let block_addressed = ocr & OCR_CCS != 0;
+
+    // 4. Identification: CID → RCA → CSD → select.
+    let (cid, rca, csd, sectors) = identify_card(host_ref)?;
+
+    // 5-6. SCR, bus width, block length, speed.
+    let (bus_width_4bit, high_speed) = setup_bus(host_ref, rca, &csd, block_addressed)?;
+
+    // Phase-boundary hygiene: the switch/SCR data phases leave the
+    // controller's FIFO and the card's data state machine with residue;
+    // a force-stop + FIFO reset here gives the next transfer a clean
+    // start (Linux mmc_set_timing boundary housekeeping).
+    host_ref.recover();
+
+    Ok(MmcCardData {
+        kind: CardKind::Sd,
+        slot: ctx.slot,
+        rca,
+        cid: cid.raw,
+        sectors,
+        block_addressed,
+        high_speed,
+        bus_width_4bit,
+        host,
+    })
+}
+
+/// Reset frame plus voltage negotiation (Linux `mmc_sd_init_card` prologue):
+/// GO_IDLE at 400 kHz on one data line, the CMD8 echo check, then the
+/// ACMD41 power-up poll. Returns the card's OCR.
+fn init_and_power_up(host: &dyn MmcHost) -> Result<u32, MmcError> {
     // 1. Init frame: 400 kHz, 1-bit, power on. GO_IDLE carries the
     //    80-clock initialization pattern.
     step(
         "initial ios (400 kHz / 1-bit / power)",
         0,
         0,
-        host_ref.set_ios(&MmcIos {
+        host.set_ios(&MmcIos {
             clock_hz: 400_000,
             bus_width: BusWidth::Bit1,
             power_on: true,
@@ -125,7 +157,7 @@ pub fn detect_card(
     let mut idle = MmcCommand::none(CMD_GO_IDLE);
     idle.init_clocks = true;
     idle.stop = true;
-    step("go idle", CMD_GO_IDLE, 0, host_ref.send_cmd(&idle))?;
+    step("go idle", CMD_GO_IDLE, 0, host.send_cmd(&idle))?;
     // The card is busy resetting after GO_IDLE; hammering CMD8 at it
     // inside that window returns corrupted responses (Crc).
     card_reset_delay();
@@ -138,7 +170,7 @@ pub fn detect_card(
         "voltage handshake",
         CMD_SEND_IF_COND,
         IF_COND_ARG,
-        host_ref.send_cmd(&MmcCommand::with(
+        host.send_cmd(&MmcCommand::with(
             CMD_SEND_IF_COND,
             IF_COND_ARG,
             RespKind::ShortNoCrc,
@@ -157,7 +189,7 @@ pub fn detect_card(
     // iteration errors are tolerated; only exhausting the budget (the
     // spec's 1 s) fails the card.
     for attempt in 0..OP_COND_ATTEMPTS {
-        let resp = match app_cmd(host_ref, 0, ACMD_SEND_OP_COND, OP_COND_ARG, RespKind::R3) {
+        let resp = match app_cmd(host, 0, ACMD_SEND_OP_COND, OP_COND_ARG, RespKind::R3) {
             Ok(resp) => resp,
             // Cards mid-initialization commonly show Timeout (no
             // response yet) or Crc (partial response); keep polling.
@@ -188,21 +220,24 @@ pub fn detect_card(
         );
         return Err(MmcError::Timeout);
     }
-    let block_addressed = ocr & OCR_CCS != 0;
+    Ok(ocr)
+}
 
-    // 4. Identification: CID → RCA → CSD → select.
+/// Identification and select (Linux `mmc_sd_init_card` step 4): CID, RCA,
+/// CSD, capacity, then CMD7 so the card answers addressed commands.
+fn identify_card(host: &dyn MmcHost) -> Result<(MmcResponse, u16, MmcResponse, u64), MmcError> {
     let cid = step(
         "read CID",
         CMD_ALL_SEND_CID,
         0,
-        host_ref.send_cmd(&MmcCommand::with(CMD_ALL_SEND_CID, 0, RespKind::R2)),
+        host.send_cmd(&MmcCommand::with(CMD_ALL_SEND_CID, 0, RespKind::R2)),
     )?;
     let rca = {
         let resp = step(
             "assign RCA",
             CMD_SET_RELATIVE_ADDR,
             0,
-            host_ref.send_cmd(&MmcCommand::with(CMD_SET_RELATIVE_ADDR, 0, RespKind::R1)),
+            host.send_cmd(&MmcCommand::with(CMD_SET_RELATIVE_ADDR, 0, RespKind::R1)),
         )?;
         (resp.word() >> RCA_SHIFT) as u16
     };
@@ -210,7 +245,7 @@ pub fn detect_card(
         "read CSD",
         CMD_SEND_CSD,
         u32::from(rca) << RCA_SHIFT,
-        host_ref.send_cmd(&MmcCommand::with(
+        host.send_cmd(&MmcCommand::with(
             CMD_SEND_CSD,
             u32::from(rca) << RCA_SHIFT,
             RespKind::R2,
@@ -221,15 +256,26 @@ pub fn detect_card(
         "select card",
         CMD_SELECT,
         u32::from(rca) << RCA_SHIFT,
-        host_ref.send_cmd(&MmcCommand::with(
+        host.send_cmd(&MmcCommand::with(
             CMD_SELECT,
             u32::from(rca) << RCA_SHIFT,
             RespKind::R1b,
         )),
     )?;
+    Ok((cid, rca, csd, sectors))
+}
 
+/// Bus width, block length and speed (Linux `mmc_sd_init_card` tail): SCR
+/// decode, ACMD6 + the 4-bit ios switch, the byte-addressed CMD16, then the
+/// CMD6 high-speed probe. Returns `(bus_width_4bit, high_speed)`.
+fn setup_bus(
+    host: &dyn MmcHost,
+    rca: u16,
+    csd: &MmcResponse,
+    block_addressed: bool,
+) -> Result<(bool, bool), MmcError> {
     // 5. SCR: spec version + advertised bus widths.
-    let scr = read_scr(host_ref, rca)?;
+    let scr = read_scr(host, rca)?;
     let bus_width_4bit = scr.bus_width_4bit;
 
     // 6. Bus width, block length, then speed.
@@ -239,14 +285,14 @@ pub fn detect_card(
             ACMD_SET_BUS_WIDTH,
             (u32::from(rca) << RCA_SHIFT) | 0x2,
             app_cmd(
-                host_ref,
+                host,
                 rca,
                 ACMD_SET_BUS_WIDTH,
                 (u32::from(rca) << RCA_SHIFT) | 0x2,
                 RespKind::R1,
             ),
         )?;
-        host_ref.set_ios(&MmcIos {
+        host.set_ios(&MmcIos {
             clock_hz: 25_000_000,
             bus_width: BusWidth::Bit4,
             power_on: true,
@@ -261,32 +307,15 @@ pub fn detect_card(
             "set block length",
             CMD_SET_BLOCKLEN,
             BLOCK_SIZE as u32,
-            host_ref.send_cmd(&MmcCommand::with(
+            host.send_cmd(&MmcCommand::with(
                 CMD_SET_BLOCKLEN,
                 BLOCK_SIZE as u32,
                 RespKind::R1,
             )),
         )?;
     }
-    let high_speed = switch_high_speed(host_ref, &csd, &scr, bus_width_4bit)?;
-
-    // Phase-boundary hygiene: the switch/SCR data phases leave the
-    // controller's FIFO and the card's data state machine with residue;
-    // a force-stop + FIFO reset here gives the next transfer a clean
-    // start (Linux mmc_set_timing boundary housekeeping).
-    host_ref.recover();
-
-    Ok(MmcCardData {
-        kind: CardKind::Sd,
-        slot: ctx.slot,
-        rca,
-        cid: cid.raw,
-        sectors,
-        block_addressed,
-        high_speed,
-        bus_width_4bit,
-        host,
-    })
+    let high_speed = switch_high_speed(host, csd, &scr, bus_width_4bit)?;
+    Ok((bus_width_4bit, high_speed))
 }
 
 /// APP-command wrapper: CMD55 (with the card RCA) followed by the
