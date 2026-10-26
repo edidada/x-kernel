@@ -51,7 +51,9 @@ fn pty_nodes_report_limits_and_reject_root_writes() {
     }
 }
 
-#[def_test]
+/// `serial`: the printk node owns the process-global log filter, so it must
+/// not interleave with another test that reads or writes the same filter.
+#[def_test(serial)]
 fn printk_node_reads_and_writes_runtime_log_level() {
     let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
         let mut root = DirMapping::new();
@@ -102,7 +104,7 @@ fn printk_node_reads_and_writes_runtime_log_level() {
     // unchanged (a bad token must not half-apply a spec).
     assert!(printk.write(b"banana").is_err());
     assert!(printk.write(b"6").is_err());
-    assert!(printk.write(b"warn bogus=4").is_err());
+    assert!(printk.write(b"warn bogus=nonsense").is_err());
     assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
     let mut pos = 0;
     assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(20));

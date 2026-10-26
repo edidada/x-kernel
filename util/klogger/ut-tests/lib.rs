@@ -74,7 +74,9 @@ fn level_name_matches_acceptable_input() {
     }
 }
 
-#[def_test]
+/// `serial`: the level filter and the `log` ceiling are process-global, so a
+/// test that asserts on them must not share them with a parallel one.
+#[def_test(serial)]
 fn set_log_level_takes_effect_immediately() {
     let previous = current_log_level();
     set_log_level("3");
@@ -87,7 +89,7 @@ fn set_log_level_takes_effect_immediately() {
     set_log_level_filter(previous);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn filter_spec_reports_targets_and_longest_prefix_wins() {
     let previous = current_log_level();
     assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
@@ -109,7 +111,7 @@ fn filter_spec_reports_targets_and_longest_prefix_wins() {
     set_log_level_filter(previous);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn filter_spec_rejects_bad_input_without_half_applying() {
     let previous = current_log_level();
     assert_eq!(set_filter_spec("info subsys_uart=debug"), Ok(()));
@@ -128,58 +130,71 @@ fn filter_spec_rejects_bad_input_without_half_applying() {
     set_log_level_filter(previous);
 }
 
-#[def_test]
+/// A record the console filter drops still lands in the ring: that is the
+/// "quiet console, complete log" contract `dmesg` depends on.
+///
+/// `serial`: the ring, the filter and the `log` ceiling are one process-global
+/// resource. The assertions below are scoped to this test's own unique markers
+/// because other kernel threads keep logging concurrently.
+#[def_test(serial)]
 fn logbuf_captures_records_the_console_filter_hides() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    // Default `warn`, but the ceiling has to admit `debug` for the mmc rules.
+    // Default `warn`, but the ceiling has to admit `debug` for the override.
     assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
-    logbuf_clear();
-    assert_eq!(logbuf_len(), 0);
 
-    // `info` is below the default level, so the console would drop it; the
-    // buffer still has to keep it (that is the "quiet console, complete log"
-    // contract) because the ceiling is debug.
-    super::info!("klogger logbuf marker");
+    // `info` sits below the default level, so the console drops it; the ring
+    // keeps it anyway because the ceiling is debug.
+    super::info!("klogger logbuf info marker");
     super::debug!("klogger logbuf debug marker");
 
     let mut buf = [0u8; 4096];
+    assert!(
+        logbuf_len() > 0,
+        "capture did not grow the kernel log buffer"
+    );
     let len = logbuf_snapshot(&mut buf);
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
-    assert!(text.contains("klogger logbuf marker"), "info record missing: {text}");
-    assert!(
-        text.contains("klogger logbuf debug marker"),
-        "debug record missing: {text}"
-    );
+    let line_with = |needle: &str| -> &str {
+        text.lines()
+            .find(|line| line.contains(needle))
+            .expect("record missing from the kernel log buffer")
+    };
     // Each line carries X-Kernel's own level number, which is what makes
     // `dmesg | grep '^<4>'` a level filter.
-    assert!(text.lines().any(|line| line.starts_with("<3>") && line.contains("marker")));
-    assert!(text.lines().any(|line| line.starts_with("<4>") && line.contains("marker")));
+    assert!(
+        line_with("klogger logbuf info marker").starts_with("<3>"),
+        "info record lost its level: {text}"
+    );
+    assert!(
+        line_with("klogger logbuf debug marker").starts_with("<4>"),
+        "debug record lost its level: {text}"
+    );
     // Records are newline-terminated: without it `dmesg` prints the whole
     // buffer as one run-on line.
     assert!(text.ends_with('\n'), "record without newline: {text:?}");
-    assert!(
-        text.lines().count() >= 2,
-        "records ran together: {text:?}"
-    );
 
+    // Clearing drops this test's records; unrelated records may follow.
     logbuf_clear();
-    assert_eq!(logbuf_len(), 0);
-    assert_eq!(logbuf_snapshot(&mut buf), 0);
+    let len = logbuf_snapshot(&mut buf);
+    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    assert!(
+        !text.contains("klogger logbuf"),
+        "clear left stale records: {text}"
+    );
 
     if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
         set_log_level(spec);
     }
 }
 
-#[def_test]
+/// A destination smaller than the ring returns the newest bytes, not the
+/// oldest ones, so `dmesg` on a full buffer shows the tail of the boot log.
+#[def_test(serial)]
 fn logbuf_snapshot_returns_the_newest_bytes() {
-    logbuf_clear();
     super::warn!("klogger newest-bytes marker");
-    // A destination smaller than the buffer returns the tail (newest data).
     let mut small = [0u8; 16];
     let len = logbuf_snapshot(&mut small);
     assert_eq!(len, 16);
     assert!(core::str::from_utf8(&small).expect("utf-8").contains("marker"));
-    logbuf_clear();
 }
