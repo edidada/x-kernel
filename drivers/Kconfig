@@ -517,16 +517,18 @@ config MMC_CLOCK_LADDER
     depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
     default y
     help
-      The CIU input rate is a board fact this driver cannot read
-      (MMC_CIU_HZ), so every programmed card clock is only as good as that
-      assumption. With this enabled, a slot whose card detection fails
-      retries with a halved clock ceiling, down to 4 MHz, and logs which
-      ceiling worked instead of leaving the board unable to boot.
+      Two board facts this driver cannot read decide whether a data phase
+      works: the CIU input rate (MMC_CIU_HZ, behind EL3) and whether the wide
+      data lines are usable (MMC_4BIT). A card that accepts commands but never
+      drives the bus reports the same `SBE`/`TCBCNT=0` for both, so with this
+      enabled the probe verifies a block read and walks a ladder: 4-bit at
+      the configured ceiling, then halved ceilings down to 4 MHz, then the
+      same for 1-bit. It logs the pair that worked instead of leaving the
+      board unable to boot.
 
-      It costs one extra detection attempt per failure and it tells you the
-      real rate: if detection only works at X, then MMC_MAX_CARD_HZ should be
-      set to X (and MMC_CIU_HZ to twice that). Turn it off once the board's
-      numbers are known.
+      A working pair is also the measurement: if only X Hz works at 4-bit,
+      set MMC_MAX_CARD_HZ to X; if only 1-bit works, unset MMC_4BIT. Turn the
+      ladder off once the board's numbers are pinned.
 
 config MMC_MAX_CARD_HZ
     hex "MMC card clock ceiling (Hz)"

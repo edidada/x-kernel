@@ -145,11 +145,13 @@ The data bus width is capped the same way: `MmcHost::max_bus_width`
 ceiling a slot with dead wide lines fails every data phase with
 `RINTSTS.SBE` while commands stay perfectly healthy.
 
-Because the source rate is unreadable, a failed detection walks the ceiling
-down (`MMC_CLOCK_LADDER`, halving to 4 MHz) and logs the ceiling that worked
-instead of leaving the board unbootable — one boot then *measures* what the
-divider math had assumed. Once a rate is known, pin `MMC_MAX_CARD_HZ` and turn
-the ladder off.
+Because the source rate is unreadable, and because a card that accepts
+commands but never drives the bus looks identical whether the clock is too
+fast or the wide lines are dead, the probe verifies **a block read** and then
+walks a ladder of `(width, ceiling)` pairs (`MMC_CLOCK_LADDER`: 4-bit at the
+configured ceiling, halved ceilings down to 4 MHz, then the same at 1-bit).
+It logs the pair that worked, which is the measurement the divider math was
+missing; pin `MMC_MAX_CARD_HZ`/`MMC_4BIT` to it and turn the ladder off.
 
 UHS-I is out of scope, so the sample/drive phase clocks
 (`SCLK_SDMMC_DRV/SAMPLE`) are untouched. That is a deliberate gap with a

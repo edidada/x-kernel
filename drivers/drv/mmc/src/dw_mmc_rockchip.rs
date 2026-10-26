@@ -23,7 +23,7 @@ use driver_base::{
     RuntimeError,
 };
 use subsys_mmc::{
-    BusWidth, DetectContext, MmcError,
+    BusWidth, DetectContext, MmcError, MmcHost,
     bus::{MmcBus, MmcCardData},
     sd,
 };
@@ -84,69 +84,86 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             regs.region().base
         );
 
+        // Two board facts this driver cannot read are in play here: the CIU
+        // source rate (behind EL3) and whether the wide data lines are
+        // usable. A card that accepts commands but cannot transfer data shows
+        // up as `SBE` with `TCBCNT=0`, which is indistinguishable between "the
+        // card clock is faster than the divider math thinks" and "the wide
+        // bus does not work". So the probe verifies the data path and walks a
+        // ladder of (width, clock ceiling) pairs, reporting the pair that
+        // works — one boot instead of one rebuild per guess.
         let base_ceiling = card_clock_ceiling(max_frequency);
-        let mut ceiling = base_ceiling;
+        let widths = width_ladder();
+        let attempts = widths.len() * ceiling_steps(base_ceiling) as usize;
+        let mut attempt_index = 0usize;
         loop {
+            let (width, ceiling) = ladder_step(base_ceiling, &widths, attempt_index);
             // Every attempt needs its own mapping and DMA buffers: the host
             // owns both, and a retry has to start from a fresh controller.
             let regs = dev.res().iomap(0)?;
             let idmac = allocate_idmac(dev, slot);
             let host = Arc::new(
-                DwMmcHost::new(
-                    regs,
-                    ciu_hz,
-                    fifo_depth,
-                    slot,
-                    ceiling,
-                    bus_width_ceiling(),
-                    idmac,
-                )
-                .map_err(host_error)?,
+                DwMmcHost::new(regs, ciu_hz, fifo_depth, slot, ceiling, width, idmac)
+                    .map_err(host_error)?,
             );
 
-            // Card detection (Linux mmc_detect_card): no card is a clean
-            // outcome — the slot stays claimed for a future re-scan.
             let detect = DetectContext {
                 host: host.as_ref(),
                 slot,
             };
-            match sd::detect_card(&detect, host.clone()) {
-                Ok(card) => {
-                    add_card_to_domain(info.id(), &host, card)?;
-                    if ceiling != base_ceiling {
-                        // The interesting line: detection only worked below
-                        // the configured ceiling, so the CIU input rate the
-                        // divider math assumes is not the rate the firmware
-                        // left. Note it and run at the rate that works.
-                        log::warn!(
-                            "dwmmc-rocks: slot {slot}: detection needed a {ceiling} Hz ceiling \
-                             (configured {base_ceiling} Hz) — the real CIU rate is higher than \
-                             MMC_CIU_HZ assumes; record {ceiling} Hz in MMC_MAX_CARD_HZ"
-                        );
+            let failed = match sd::detect_card(&detect, host.clone()) {
+                Ok(card) => match data_path_ok(host.as_ref()) {
+                    Ok(()) => {
+                        add_card_to_domain(info.id(), &host, card)?;
+                        if width != widths[0] || ceiling != base_ceiling {
+                            // The line worth keeping: the configured pair does
+                            // not work on this board, and this one does.
+                            log::warn!(
+                                "dwmmc-rocks: slot {slot}: data path only works at {}-bit / \
+                                 {ceiling} Hz (configured {}-bit / {base_ceiling} Hz); pin \
+                                 MMC_4BIT/MMC_MAX_CARD_HZ to these values",
+                                width_bits(width),
+                                width_bits(widths[0]),
+                            );
+                        } else {
+                            log::info!(
+                                "dwmmc-rocks: slot {slot}: data path ok at {}-bit / {ceiling} Hz",
+                                width_bits(width)
+                            );
+                        }
+                        return Ok(DwMmcRockchipData { _host: host });
                     }
-                    return Ok(DwMmcRockchipData { _host: host });
-                }
+                    Err(err) => {
+                        log::warn!(
+                            "dwmmc-rocks: slot {slot}: card detected, but a block read failed at \
+                             {}-bit / {ceiling} Hz ({err:?})",
+                            width_bits(width)
+                        );
+                        err
+                    }
+                },
                 Err(MmcError::NoCard) => {
+                    // A genuinely empty slot does not pay for the ladder.
                     log::info!("dwmmc-rocks: slot {slot}: no card present");
                     return Ok(DwMmcRockchipData { _host: host });
                 }
                 Err(err) => {
-                    // The CIU source rate is a board fact this driver cannot
-                    // read, so the divider math rests on an assumption. Rather
-                    // than make the board unbootable, walk the ceiling down and
-                    // report which rate worked (MMC_CLOCK_LADDER).
-                    let next = (ceiling / 2).max(MIN_LADDER_HZ);
-                    if kbuild_config::MMC_CLOCK_LADDER && next < ceiling {
-                        log::warn!(
-                            "dwmmc-rocks: slot {slot}: detection failed at {ceiling} Hz \
-                             ({err:?}); retrying with a {next} Hz ceiling"
-                        );
-                        ceiling = next;
-                        continue;
-                    }
-                    log::warn!("dwmmc-rocks: slot {slot}: card detection failed: {err:?}");
-                    return Ok(DwMmcRockchipData { _host: host });
+                    log::warn!(
+                        "dwmmc-rocks: slot {slot}: card detection failed at {}-bit / {ceiling} Hz \
+                         ({err:?})",
+                        width_bits(width)
+                    );
+                    err
                 }
+            };
+
+            attempt_index += 1;
+            if attempt_index >= attempts || !kbuild_config::MMC_CLOCK_LADDER {
+                log::warn!(
+                    "dwmmc-rocks: slot {slot}: no working data path among {attempt_index} \
+                     attempt(s) (last error {failed:?}); slot left cardless"
+                );
+                return Ok(DwMmcRockchipData { _host: host });
             }
         }
     }
@@ -184,6 +201,54 @@ fn add_card_to_domain(
             Err(ProbeError::Fatal(RuntimeError::Invalid))
         }
     }
+}
+
+/// Data bus widths the ladder tries, widest first.
+fn width_ladder() -> alloc::vec::Vec<BusWidth> {
+    if bus_width_ceiling() == BusWidth::Bit4 {
+        alloc::vec![BusWidth::Bit4, BusWidth::Bit1]
+    } else {
+        alloc::vec![BusWidth::Bit1]
+    }
+}
+
+/// How many clock steps the ladder has for `ceiling` (halving, floored at
+/// [`MIN_LADDER_HZ`]).
+fn ceiling_steps(ceiling: u32) -> u32 {
+    let mut steps = 1;
+    let mut hz = ceiling;
+    while (hz / 2).max(MIN_LADDER_HZ) < hz {
+        hz = (hz / 2).max(MIN_LADDER_HZ);
+        steps += 1;
+    }
+    steps
+}
+
+/// The `index`-th `(width, ceiling)` pair: every clock step of the widest
+/// width first, then the next width down.
+fn ladder_step(base_ceiling: u32, widths: &[BusWidth], index: usize) -> (BusWidth, u32) {
+    let per_width = ceiling_steps(base_ceiling) as usize;
+    let width = widths[(index / per_width).min(widths.len() - 1)];
+    let mut ceiling = base_ceiling;
+    for _ in 0..index % per_width {
+        ceiling = (ceiling / 2).max(MIN_LADDER_HZ);
+    }
+    (width, ceiling)
+}
+
+/// `Bit4` → 4, `Bit1` → 1 (diagnostics).
+fn width_bits(width: BusWidth) -> u8 {
+    match width {
+        BusWidth::Bit1 => 1,
+        BusWidth::Bit4 => 4,
+    }
+}
+
+/// Reads one block so the probe covers the data path, not just the command
+/// layer: detection can complete on a bus that never transfers a byte.
+fn data_path_ok(host: &dyn MmcHost) -> Result<(), MmcError> {
+    let mut block = [0u8; 512];
+    subsys_mmc::read_blocks(host, 0, 1, &mut block)
 }
 
 /// Lowest ceiling the clock ladder walks down to. Block I/O at the 400 kHz
