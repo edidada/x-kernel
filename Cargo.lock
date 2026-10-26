@@ -4076,6 +4076,7 @@ name = "pagecache"
 version = "0.3.0-dev"
 dependencies = [
  "kalloc",
+ "kcpu_id_map",
  "kerrno",
  "kfinalize",
  "khal",

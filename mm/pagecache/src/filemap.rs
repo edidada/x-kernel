@@ -13,6 +13,7 @@ use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, PinnedFolio}
 
 impl MappingPages {
     fn get_or_create_folio(&self, index: PageIndex) -> KResult<Arc<Folio>> {
+        krcu::preflight_callback_submission()?;
         loop {
             let mut state = self.state.lock();
             if let Some(folio) = state.entries.get(&index) {
@@ -111,6 +112,11 @@ impl MappingPages {
     /// folio is not up to date. The owner must exclude invalidation and validate
     /// EOF around this operation. The returned reference keeps the allocation
     /// alive if the cache entry is later evicted.
+    ///
+    /// # Errors
+    /// Returns RCU admission errors before cache mutation when the caller is
+    /// outside sleepable watched task context or the service is not ready.
+    /// Allocation, residency admission and initialization errors propagate.
     pub fn pin_folio_or_create(
         &self,
         index: PageIndex,
@@ -125,6 +131,10 @@ impl MappingPages {
     ///
     /// Stops at the first hole or [`FolioBatch::CAPACITY`] without loading pages.
     /// References keep allocations alive; lookup uses RCU without the mapping lock.
+    ///
+    /// # Panics
+    /// Panics outside initialized watched task context (including IRQ/NMI,
+    /// exception or BH-disabled context). Requires the permanent RCU service.
     pub fn get_folios_contig(&self, start: PageIndex, count: usize) -> FolioBatch {
         self.get_folios_contig_with_run_len(start, count.min(FolioBatch::CAPACITY))
             .0
@@ -136,6 +146,10 @@ impl MappingPages {
     /// checking entries beyond capacity without retaining them. Entries are
     /// sampled individually under RCU, not as an atomic mapping snapshot;
     /// references do not guarantee residency during later access.
+    ///
+    /// # Panics
+    /// Panics outside initialized watched task context (including IRQ/NMI,
+    /// exception or BH-disabled context). Requires the permanent RCU service.
     pub fn get_folios_contig_with_run_len(
         &self,
         start: PageIndex,
@@ -169,6 +183,10 @@ impl MappingPages {
     /// non-uptodate folio is reported as `None`; partial read data is not exposed.
     /// Dirty-state changes made by `f` are reflected in the cache's writeback
     /// index before this method returns.
+    ///
+    /// # Panics
+    /// Panics outside initialized watched task context (including IRQ/NMI,
+    /// exception or BH-disabled context). Requires the permanent RCU service.
     pub fn with_folio<R>(
         &self,
         index: PageIndex,
@@ -219,6 +237,10 @@ impl MappingPages {
     ///
     /// Returns [`KError::InvalidInput`] if the bounded index range overflows,
     /// or an error from initialization or `visit`. Earlier visits remain valid.
+    ///
+    /// # Panics
+    /// Panics outside initialized watched task context (including IRQ/NMI,
+    /// exception or BH-disabled context). Requires the permanent RCU service.
     pub fn visit_resident_folios(
         &self,
         start: PageIndex,
@@ -306,6 +328,11 @@ impl MappingPages {
     /// The owner must exclude invalidation and recheck EOF around this operation.
     /// Neither callback may reenter the mapping; dirty changes made by `f`
     /// are reconciled before releasing the folio lock.
+    ///
+    /// # Errors
+    /// Returns RCU admission errors before cache mutation when the caller is
+    /// outside sleepable watched task context or the service is not ready.
+    /// Allocation, residency admission and callback errors propagate.
     pub fn with_folio_or_create<R>(
         &self,
         index: PageIndex,

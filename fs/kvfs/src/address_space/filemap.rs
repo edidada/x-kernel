@@ -62,11 +62,12 @@ impl AddressSpace {
         self.i_pages.with_folio(index, f)
     }
 
-    /// Visits a bounded resident-page snapshot without populating holes.
+    /// Visits a bounded sample of resident pages without populating holes.
     ///
     /// Holds one invalidate read guard through the batch, including EOF sampling
     /// and data copying in `visit`. At most [`pagecache::FolioBatch::CAPACITY`]
-    /// pages are visited after a single index snapshot; absent pages are `None`.
+    /// pages are sampled individually under RCU; absent pages are `None`.
+    /// The batch is not an atomic snapshot of the mapping.
     /// Retained initialization failures propagate instead of becoming holes.
     /// Callbacks must not reenter this mapping, change folio state, or wait for
     /// another folio. Returns the number visited, including a breaking page.

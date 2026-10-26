@@ -25,10 +25,15 @@ impl MappingPages {
     ///
     /// Task context only: waits hold neither the mapping state lock nor a folio
     /// lock. Growth dirties the retained tail without waiting for batch I/O.
+    ///
+    /// # Panics
+    /// Panics before mutation if a size change is requested outside sleepable
+    /// watched task context or before permanent RCU service startup.
     pub fn resize_cached_folios(&self, old_len: u64, len: u64) {
         if len == old_len {
             return;
         }
+        crate::resident_index::assert_retirement_context();
         if len > old_len {
             self.zero_growth_tail(old_len, len);
             return;
@@ -49,7 +54,12 @@ impl MappingPages {
     /// waits for outstanding writeback before discarding even dirty folios.
     /// RCU leaf cleanup and retained references can delay physical page and
     /// capacity-charge release beyond this call.
+    ///
+    /// # Errors
+    /// Returns RCU admission errors before changing the cache if the service
+    /// is not ready or the caller is outside sleepable watched task context.
     pub fn truncate_final(&self) -> KResult<()> {
+        krcu::preflight_callback_submission()?;
         self.remove_ready_folios_from(0);
         self.remove_folios_from(0);
         Ok(())
@@ -126,6 +136,7 @@ impl MappingPages {
         retained: &Arc<Folio>,
         folio: &mut FolioGuard<'_>,
     ) {
+        crate::resident_index::assert_retirement_context();
         let index = folio.index();
         folio.invalidate();
         state.remove_folio(index, retained);
@@ -192,9 +203,10 @@ impl Drop for MappingPages {
         // mapping operations, accessing these mutexes requires task context.
         let entries = {
             let mut state = self.state.lock();
+            let entries = state.take_folios();
             state.dirty_marks.clear();
             state.writeback_marks.clear();
-            state.take_folios()
+            entries
         };
         for entry in entries.values() {
             let mut folio = entry.lock();

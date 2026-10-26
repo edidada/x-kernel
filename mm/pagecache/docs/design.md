@@ -63,10 +63,12 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 ## 调用约束 / 执行上下文
 
 - 运行于普通 task context，可能分配内存并获取 sleepable mutex；
-- 不可在中断上下文调用；
+- 不可在中断、已有 RCU read scope 或其他禁止睡眠的上下文调用；
 - 不依赖 current process；
 - RCU 查询和节点摘除要求 boot-owned RCU service 已启动、当前 task 处于 watched kernel context；
 - 叶节点发布要求普通任务延迟析构服务已启动；最终页释放可能延后至 GP 和工作线程执行后；
+- 可失败的 materialize、预读和 final truncate 入口在修改缓存前检查 RCU admission，失败直接返回；
+- 内部索引更新及无错误返回通道的 resize/Drop 在修改前断言该上下文契约；
 - owner 必须在调用 resize/writeback 算法时提供已串行化的 inode 状态。
 
 ## 算法流程
@@ -89,6 +91,15 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 析构责任，由普通工作线程释放该引用，必要时完成物理页释放和配额归还。热读仍克隆普通
 `Arc<Folio>`，不改变 folio/pin/token 的身份。该包装增加每个叶节点的分配和回收调度成本。
 这增加了一个查询索引和每 resident folio 一个索引拥有引用，尚未合并为完整 Linux XArray。
+
+整体清空 `ResidentEntries::take` 在写锁下移出有序视图并原子摘除 radix 根，整棵旧树
+只提交一次 GP 回调。回调只释放预先准备的 `DeferredArc`，由普通任务工作线程遍历
+旧树，每释放 64 个节点主动让出 CPU；叶的 folio 引用继续通过普通延迟析构释放。
+树的递归深度最多 11 级分支加一层叶，但总释放工作量仍与节点数成正比。
+此优化用于 MappingPages 析构；显式 `truncate_final` 和范围截断仍逐页完成
+失效、写回等待和摘除，暂不合并其回调。工作线程不等待同一队列上的后续析构。
+提交前已检查永久服务和上下文；若摘除后的实际提交仍意外失败，保留受保护的 raw
+owner 并断言不变量失败，不能提前释放，也不能作为缓存未改变的普通错误返回。
 
 批量查询只提供逐项观察的有界引用集合，不提供多个索引位置的一致快照。run length 和
 hole 都是观察时的结果；后续页访问仍按 folio invalidation、uptodate 和 owner EOF 协议校验。

@@ -25,11 +25,16 @@ impl MappingPages {
     /// Returns the reserved prefix. Allocation or admission failures after a
     /// nonempty prefix are partial success; an error is returned only when no
     /// identity was reserved. Demand reads report a later admission failure.
+    ///
+    /// # Errors
+    /// Returns RCU admission errors before reserving any page when the service
+    /// is not ready or the caller is outside sleepable watched task context.
     pub fn readahead_folios(
         &self,
         range: Range<PageIndex>,
         read: impl FnOnce(&mut dyn ExactSizeIterator<Item = &mut FolioGuard<'_>>),
     ) -> KResult<usize> {
+        krcu::preflight_callback_submission()?;
         let mut batch = FolioBatch::new();
         for index in range {
             if batch.is_full() || self.state.lock().entries.contains_key(&index) {

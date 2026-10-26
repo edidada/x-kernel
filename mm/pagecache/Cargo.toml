@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 kalloc = { workspace = true }
+kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 kfinalize = { workspace = true }
 khal = { workspace = true }
@@ -21,3 +22,7 @@ unittest = { workspace = true }
 
 [lints]
 workspace = true
+
+# Guest SMP tests live in ut-tests/, which cargo-shear does not scan.
+[package.metadata.cargo-shear]
+ignored = ["kcpu_id_map"]

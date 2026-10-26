@@ -29,10 +29,16 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
    已清空，叶持有提前准备的 `DeferredArc<Arc<Folio>>`，因此回调不遍历整树、不获取
    sleepable lock、不访问 mapping。叶的普通 Arc 转交任务上下文释放；最终 Folio 析构
    和配额归还允许获取睡眠锁，绝不能直接放在 GP softirq 回调中执行。
-7. 回调提交要求永久 RCU service 已启动。若违反 admission 不变量则保留 raw owner 并断言失败，
+7. 修改前检查永久 RCU service 和 watched task admission；可失败的公开入口直接返回错误。
+   若已摘除后的提交仍违反 admission 不变量，保留 raw owner 并断言失败，
    不把 rejected submission 当成 GP 完成。叶发布还要求普通任务延迟析构服务已启动。
+   整树回调记录的取消只释放记录，把树指针置空而保留旧树，不提前释放读者数据。
 8. `ResidentIndex::drop` 的独占所有权排除所有查询，递归释放仍发布的树，最多 11 级分支和一层叶；
+   总释放工作量与节点数成正比，每 64 个节点在任务上下文让出 CPU。
    已摘除的节点自包含并归回调所有，无须回调借用已销毁 mapping。
+9. 整体清空一次摘除根并移交唯一树 owner；旧树不再更新，新插入建立独立树。
+   唯一 GP 回调只释放 `DeferredArc<DetachedTree>`，整个树的遍历在普通工作线程执行，
+   不扩大 softirq 回调工作量。遍历先清空子槽再释放节点，避免 Node::drop 重复递归释放。
 
 ## 内存安全不变量
 

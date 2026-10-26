@@ -272,3 +272,32 @@ fn pinned_folio_readonly_mapping_reports_existing_mapping() {
         Err(kerrno::KError::AlreadyExists)
     ));
 }
+
+#[def_test]
+fn rejected_mutation_context_preserves_resident_data() {
+    let cache = MappingPages::new();
+    let mut folio = Folio::new_zeroed(0).unwrap();
+    folio.data()[0] = 0x73;
+    assert!(cache.filemap_add_folio(folio).is_ok());
+    let before = cache.state.lock().entries.get(&0).unwrap().clone();
+    // An RCU scope is not a sleepable mutation context. Each fallible entry
+    // must reject it before locking, reserving pages, or invalidating data.
+    let (truncate, create, readahead) = krcu::with_read(|_| {
+        (
+            cache.truncate_final(),
+            cache.with_folio_or_create(1, |_| Ok(()), |_| Ok(())),
+            cache.readahead_folios(2..3, |_| unreachable!()),
+        )
+    });
+    assert_eq!(truncate, Err(kerrno::KError::InvalidInput));
+    assert_eq!(create, Err(kerrno::KError::InvalidInput));
+    assert_eq!(readahead, Err(kerrno::KError::InvalidInput));
+    let state = cache.state.lock();
+    assert_eq!(state.entries.len(), 1);
+    assert!(alloc::sync::Arc::ptr_eq(
+        state.entries.get(&0).unwrap(),
+        &before
+    ));
+    drop(state);
+    assert_eq!(cache.with_folio(0, |folio| folio.unwrap().data()[0]), 0x73);
+}
