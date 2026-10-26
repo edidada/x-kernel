@@ -233,7 +233,13 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
             disks.push(disk);
         }
 
-        lba0_integrity_probe(bus_data.host.as_ref());
+        // Boot-time I/O self-test: re-read the first blocks and print what
+        // came back. Diagnostic only, so it is opt-in (MMC_BOOT_IO_PROBE) —
+        // it distinguishes "no partition table" from "the read returned
+        // zeros", which is what pointed at the missing MBR on the board.
+        if kbuild_config::MMC_BOOT_IO_PROBE {
+            lba0_integrity_probe(bus_data.host.as_ref());
+        }
 
         Ok(MmcBlkData {
             _publications: publications,

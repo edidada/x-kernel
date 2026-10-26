@@ -169,16 +169,27 @@ fn init_and_power_up(host: &dyn MmcHost) -> Result<u32, MmcError> {
     //    low bits is a v1-era card this core does not drive.
     // R7's CRC bits are undefined on several DW_mshc boards — the
     // verified driver checks response presence only (ShortNoCrc).
-    let if_cond = step(
-        "voltage handshake",
+    let if_cond = match host.send_cmd(&MmcCommand::with(
         CMD_SEND_IF_COND,
         IF_COND_ARG,
-        host.send_cmd(&MmcCommand::with(
-            CMD_SEND_IF_COND,
-            IF_COND_ARG,
-            RespKind::ShortNoCrc,
-        )),
-    )?;
+        RespKind::ShortNoCrc,
+    )) {
+        Ok(resp) => resp,
+        // An empty slot leaves the CMD line floating, so the controller
+        // reports a response timeout or a CRC/start-bit mismatch on CMD8.
+        // That is "no card", not a signal-integrity fault — and CDETECT
+        // cannot settle it: on RK3588 both the sdmmc and the sdio node read
+        // "present" even when only one has a card. Linux treats a CMD8
+        // timeout the same way.
+        Err(err @ (MmcError::Crc | MmcError::Timeout)) => {
+            log::info!("sd: no card answered the voltage handshake ({err:?})");
+            return Err(MmcError::NoCard);
+        }
+        Err(err) => {
+            step::<()>("voltage handshake", CMD_SEND_IF_COND, IF_COND_ARG, Err(err))?;
+            return Err(err);
+        }
+    };
     if if_cond.word() & 0x0FFF != IF_COND_ARG & 0x0FFF {
         return Err(MmcError::Unsupported);
     }

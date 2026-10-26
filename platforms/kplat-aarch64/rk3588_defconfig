@@ -41,7 +41,9 @@ KFEAT_FS_TIMES=y
 KFEAT_MMC=y
 KFEAT_DRIVER_MMC_BLOCK=y
 KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
-KFEAT_DRIVER_CLK_SCMI=y
+# The EL3 SCMI agent rejects the SD clock domain (CLOCK_ATTRIBUTES ->
+# SCMI_HARDWARE_ERROR); the SD controller takes its clocks as board facts.
+# KFEAT_DRIVER_CLK_SCMI is not set
 SCMI_SMC_ID=0x82000010
 MMC_CIU_HZ=0x2FAF080
 # Card-clock ceiling: the divider math rests on MMC_CIU_HZ being the real
@@ -50,6 +52,7 @@ MMC_CIU_HZ=0x2FAF080
 MMC_MAX_CARD_HZ=0x2FAF080
 MMC_4BIT=y
 MMC_MULTIBLOCK=y
+# MMC_BOOT_IO_PROBE is not set
 SCMI_SHMEM_PADDR=0x10f000
 # KFEAT_NET is not set
 # KFEAT_TA_VERIFY_WITH_ROOT is not set

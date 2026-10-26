@@ -486,6 +486,17 @@ config MMC_4BIT
       wide data lines do not reach the controller (every data phase then
       fails with a start-bit error while commands stay healthy).
 
+config MMC_BOOT_IO_PROBE
+    bool "MMC boot-time I/O self-test"
+    depends on KFEAT_DRIVER_MMC_BLOCK
+    default n
+    help
+      After publishing the card's partitions, re-read LBA 0 a few times and
+      print what came back. Useful when bringing up a board or a new card
+      (it distinguishes "no partition table" from "the read returned
+      zeros" and shows whether repeated transfers stay healthy), but it is
+      diagnostic I/O on every boot, so it stays off by default.
+
 config MMC_MAX_CARD_HZ
     hex "MMC card clock ceiling (Hz)"
     depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
@@ -507,8 +518,14 @@ config KFEAT_DRIVER_CLK_SCMI
     depends on ARCH_AARCH64
     help
       SCMI clock-domain provider over an SMC-dispatched SMT channel
-      (clk-scmi shape). RK3588 keeps the SD controller clocks behind the
-      EL3 SCMI agent; without this provider their consumers defer.
+      (clk-scmi shape).
+
+      Leave this off on RK3588: the EL3 agent answers the base and clock
+      protocol VERSION probes but rejects CLOCK_ATTRIBUTES
+      (SCMI_HARDWARE_ERROR) for the SD clock domain, so the provider can
+      never publish `SCMI_CCLK_SD`/`SCMI_HCLK_SD`. The SD controller takes
+      both rates as board facts instead (MMC_CIU_HZ/MMC_MAX_CARD_HZ), and
+      enabling this only adds a guaranteed probe failure to every boot.
 
 config SCMI_SMC_ID
     hex "SCMI SMC function id"
