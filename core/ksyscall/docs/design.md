@@ -593,17 +593,22 @@ Order of operations and failure handling:
    `InvalidInput`.
 5. The kernel read buffer is allocated outside the log lock, sized
    `logbuf_len().min(len)`, and filled by `logbuf_read`, which copies the oldest
-   unread bytes in log order — the direction Linux's `syslog_print_all` copies.
-   **The user copy never runs with the log lock held**, so a page fault on the
-   destination cannot keep the ring locked with interrupts off.
+   unread bytes in log order. **The user copy never runs with the log lock
+   held**, so a page fault on the destination cannot keep the ring locked with
+   interrupts off. Starting at the oldest unread byte is a deliberate divergence
+   from Linux, whose `syslog_print_all` starts at the newest byte that fits and
+   skips older records for a short destination; here a read never drops an unread
+   record, and a caller that wants the whole ring sizes it from
+   `SYSLOG_ACTION_SIZE_BUFFER`.
 6. `READ_CLEAR` calls `logbuf_release(read)` after a successful copy. The
-   `LogRead` window carries its sequence position, so the release drops exactly
-   the bytes this call returned: a smaller destination (`len` including `0`) keeps
-   the bytes it could not receive, records logged while the copy was in flight
-   stay in the ring, a copy failure keeps everything, and a window the ring
-   overwrote while the bytes were being copied is stale and drops nothing. Linux
-   advances its clear cursor over the records it returned, so this matches its
-   contract.
+   `LogRead` window carries its sequence position, so the release drops what this
+   call returned that is still buffered: a smaller destination (`len` including
+   `0`) keeps the bytes it could not receive, records logged while the copy was in
+   flight stay in the ring, a copy failure keeps everything, and a window the ring
+   already overwrote in full drops nothing. When the ring is full, a record that
+   arrives during the copy overwrites the front of the window; the release then
+   drops the remaining suffix, which is what keeps `dmesg -c` effective on a busy
+   ring.
 7. Every other action, including Linux's `CONSOLE_*` controls, returns
    `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
    value domain is inverted relative to Linux's, and mixing the two would let a

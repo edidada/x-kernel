@@ -364,13 +364,14 @@ length the caller declared as negative. Truncating first means a caller cannot
 smuggle a "huge" length past the check by encoding the same value with a
 zero-extended register.
 
-`READ_CLEAR` drops exactly the window it returned: `logbuf_release(read)` runs
-only after a successful copy and only over the sequence range this call read, so
-a short or zero-length destination, a record logged while the copy was in flight,
-or a page fault on the destination all leave the buffer intact. A window the ring
-overwrote meanwhile is stale and drops nothing, because its bytes are already
-gone and dropping a same-sized range would discard records the caller never
-received.
+`READ_CLEAR` drops only what it returned that is still buffered:
+`logbuf_release(read)` runs after a successful copy and only over the sequence
+range this call read, so a short or zero-length destination, a record logged
+while the copy was in flight, or a page fault on the destination all leave the
+buffer intact. When a full ring overwrites the front of the window during the
+copy, only the remaining suffix is dropped; a window that is gone entirely drops
+nothing, because dropping a same-sized range would discard records the caller
+never received.
 
 Snapshot size is clamped to `min(requested_len, logbuf_len())`, so the kernel
 allocation is bounded by the ring (64 KiB) and never by the caller's `len`.

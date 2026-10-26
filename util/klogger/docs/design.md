@@ -80,9 +80,9 @@ KernelLogger::log
   `LineBuf` and the ring are fixed-size, so the record path never allocates.
 - User copies for `syslog(2)` happen **outside** `klogger`: `ksyscall` allocates
   a kernel buffer, calls `logbuf_read`, releases the lock and only then writes to
-  user space. `logbuf_release` runs after that copy succeeded and drops exactly
-  the window it was given; a window the ring overwrote in the meantime is stale
-  and drops nothing.
+  user space. `logbuf_release` runs after that copy succeeded and drops what is
+  still buffered of the window it was given; a window the ring overwrote entirely
+  drops nothing.
 - `set_filter_spec` is callable at runtime, including from the
   `/proc/sys/kernel/printk` write path. It replaces the rule set, the default
   level (only when the spec carries a bare level) and the ceiling in one
@@ -120,17 +120,21 @@ outstanding reader position.
 `logbuf_read(out)` copies the **oldest unread** bytes, in log order, and returns
 a `LogRead` window whose private `from` field is the sequence position of the
 first copied byte (the byte count is readable through `LogRead::copied()`).
-Reading does not consume: `logbuf_release(read)` drops that window and nothing
-else, and only if the window's sequence position still matches the ring, i.e. it
-was neither already released nor overwritten while the caller was copying the
-bytes to user space. A stale window drops nothing: its bytes no longer exist, and
+Reading does not consume: `logbuf_release(read)` drops the still-buffered part of
+that window and nothing else, so a reader that drains in chunks makes progress
+instead of re-reading the same window. A full ring may overwrite the front of the
+window while the bytes are being copied to user space; the release then drops only
+the remaining suffix, which keeps `READ_CLEAR` effective on a busy ring. A window
+that is gone entirely drops nothing: its bytes already left the buffer, and
 dropping a same-sized range instead would discard records the reader never
-received.
+received, as would a window whose start does not match the unread position.
 
-Reads therefore start where Linux's `syslog_print_all` starts — at the oldest
-unread record — so a reader that drains in chunks makes progress instead of
-re-reading the newest tail, and the released window is exactly the returned one
-even though the copy happens outside the lock.
+This is a deliberate divergence from Linux, whose `syslog_print_all` starts at the
+newest byte that still fits and lets a short destination skip (and, for
+`READ_CLEAR`, discard) the older records. Here a short destination receives the
+*oldest* unread bytes and a read never drops an unread record; a reader that wants
+the whole ring sizes its buffer from `SYSLOG_ACTION_SIZE_BUFFER`, as `dmesg`
+does.
 
 ## Algorithms
 

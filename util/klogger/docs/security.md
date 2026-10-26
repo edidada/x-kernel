@@ -122,8 +122,10 @@ personal data and never writes the ring to persistent storage.
   content.
 - A single record is limited to 255 bytes plus its terminator; `dmesg` shows the
   truncated line.
-- `filter_spec` caps the canonical text at `MAX_FILTER_SPEC` (256 bytes) and
-  returns `None` when the spec grows past it.
+- `filter_spec` needs a destination of `MAX_FILTER_SPEC` bytes (5 + 12 x (1 +
+  24 + 1 + 5) = 377, derived from the spec grammar) and returns `None` when the
+  caller's buffer is smaller, which is why `/proc/sys/kernel/printk` and the boot
+  banner allocate exactly that much.
 - `SYSLOG_ACTION_CONSOLE_*` is not implemented (the level domain is inverted);
   console verbosity is changed only through `/proc/sys/kernel/printk`.
 - The ring is a fixed 64 KiB static buffer with no size configuration.

@@ -323,16 +323,22 @@ impl LogBuf {
         }
     }
 
-    /// Drops the range a previous [`LogBuf::read`] returned, provided it has not
-    /// been overwritten in the meantime.
+    /// Drops the part of a previous [`LogBuf::read`] window that is still
+    /// buffered.
+    ///
+    /// A full ring overwrites the oldest bytes as soon as a record arrives, so by
+    /// the time a reader releases its window the ring may already have advanced
+    /// into it. Only the still-buffered suffix is dropped; bytes the ring
+    /// overwrote are gone anyway, and bytes before the window's start belong to
+    /// records the reader never received.
     fn release(&mut self, read: LogRead) -> usize {
-        if read.from != self.unread_from {
-            // The reader's window was overwritten (or already released): its
-            // bytes are gone, and dropping anything now would destroy records it
-            // never received.
+        let end = read.from + read.copied as u64;
+        if self.unread_from < read.from || self.unread_from >= end {
+            // The whole window is gone (overwritten or already released), or the
+            // window does not start at the unread position at all.
             return 0;
         }
-        let drop = read.copied.min(self.len);
+        let drop = ((end - self.unread_from) as usize).min(self.len);
         self.start = (self.start + drop) % LOGBUF_SIZE;
         self.len -= drop;
         self.unread_from += drop as u64;
@@ -381,20 +387,29 @@ impl LogRead {
 ///
 /// Reading does not consume: a reader that successfully delivered the bytes
 /// calls [`logbuf_release`] with the returned [`LogRead`]. Reads start at the
-/// oldest unread byte — the same direction Linux's `syslog(2)` copies — so a
-/// reader that drains in chunks makes progress through the log instead of
-/// re-reading the newest tail.
+/// oldest unread byte, so a reader that drains in chunks makes progress through
+/// the log instead of re-reading the newest tail.
+///
+/// This deliberately differs from Linux, whose `syslog_print_all` starts at the
+/// newest byte that still fits and lets the buffer size decide which older
+/// records are skipped (and, for `READ_CLEAR`, discarded). Here a short
+/// destination receives the *oldest* unread bytes, and an unread record is never
+/// dropped by a read; `SYSLOG_ACTION_SIZE_BUFFER` is what lets a reader take the
+/// whole ring in one call as Linux tools do.
 pub fn logbuf_read(out: &mut [u8]) -> LogRead {
     LOGBUF.lock().read(out)
 }
 
-/// Drops the bytes a previous [`logbuf_read`] returned and reports how many were
-/// dropped.
+/// Drops the part of a previous [`logbuf_read`] window that is still buffered and
+/// reports how many bytes were dropped.
 ///
-/// Returns `0` when the window is stale: the reader's bytes were overwritten by
-/// the ring wrapping (or the window was already released), so the bytes it
-/// received no longer exist and dropping anything would discard records it never
-/// saw. Records logged after the read stay in the buffer, because only the
+/// A ring that wrapped while the reader was copying may already have overwritten
+/// the front of the window: only the still-buffered suffix is dropped, so
+/// `READ_CLEAR` still clears what the reader received on a full, busy ring.
+/// Returns `0` when nothing of the window is left — it was fully overwritten or
+/// already released — or when the window does not start at the unread position,
+/// because dropping anything then would discard records the caller never
+/// received. Records logged after the read stay in the buffer, because only the
 /// reader's own window is removed.
 pub fn logbuf_release(read: LogRead) -> usize {
     LOGBUF.lock().release(read)

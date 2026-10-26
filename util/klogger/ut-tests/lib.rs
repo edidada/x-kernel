@@ -347,6 +347,51 @@ fn logbuf_release_ignores_an_overwritten_window() {
     }
 }
 
+/// On a full ring the oldest bytes are overwritten as soon as a record arrives,
+/// so a reader's window can already have lost its front by the time it is
+/// released: the still-buffered part must be dropped, otherwise `READ_CLEAR`
+/// could never clear anything on a busy ring.
+#[def_test(serial)]
+fn logbuf_release_drops_what_is_left_of_a_wrapped_window() {
+    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
+    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    logbuf_clear();
+
+    // Fill the ring: one record is far smaller than `LOGBUF_SIZE`, so this needs
+    // many more records than the buffer holds.
+    for _ in 0..1000 {
+        super::info!("klogger filler record for a full ring");
+    }
+    assert_eq!(logbuf_len(), super::LOGBUF_SIZE);
+
+    // Take a window much wider than one record, then let the ring wrap into it.
+    // The window is large enough that the records logged while it is out only
+    // overwrite its front, even with other kernel contexts logging concurrently.
+    let mut window_buf = [0u8; 8192];
+    let window = logbuf_read(&mut window_buf);
+    assert_eq!(window.copied(), window_buf.len());
+    super::info!("klogger record pushed during the copy");
+
+    let dropped = logbuf_release(window);
+    assert!(dropped > 0, "a wrapped window was never cleared");
+    assert!(
+        dropped < window.copied(),
+        "the release counted bytes the ring had already overwritten"
+    );
+    // The next read continues past the window instead of re-delivering it;
+    // `>=` because a concurrent writer may already have pushed it further.
+    let next = logbuf_read(&mut window_buf);
+    assert!(
+        next.from >= window.from + window.copied() as u64,
+        "the release did not advance past the window"
+    );
+
+    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        set_log_level(spec);
+    }
+}
+
 /// A record longer than the line buffer keeps its terminating newline and never
 /// ends in the middle of a code point, so `dmesg` still sees one line per
 /// record.
