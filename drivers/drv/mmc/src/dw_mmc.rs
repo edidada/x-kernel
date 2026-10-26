@@ -786,10 +786,15 @@ impl DwMmcHost {
                     drained += self.drain_rx(&mut buf[drained..]);
                 }
                 // Card-side status: RESP0 holds the R1 word of the data
-                // command — an ILLEGAL_COMMAND/error bit here means the
-                // card accepted the command but refused the data phase.
-                let r1 = self.readl(SDMMC_RESP0);
-                log::info!("dwmmc: data resp R1={}", Self::r1_names(r1));
+                // command. A clean `tran/ready` answer is the normal case and
+                // is only interesting while bringing the path up; a refusal
+                // is surfaced through `send_cmd_inner` and the failure dump
+                // (`dump_state` prints `resp0`), so this stays at trace to
+                // keep one line per 512-byte block out of the console.
+                log::trace!(
+                    "dwmmc: data resp R1={}",
+                    Self::r1_names(self.readl(SDMMC_RESP0))
+                );
                 break;
             }
         }
