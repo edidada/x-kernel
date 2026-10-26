@@ -299,9 +299,8 @@ Two lessons from the same boot:
   drove the bus. One boot later, at the working pair, the same engine carried
   the self-test read with no complaint.
 - **The first attempt can fail where the second succeeds** at an identical
-  width and clock, which points at the switch into 4-bit mode being marginal
-  rather than at any register value. The ladder absorbs it by re-running the
-  whole initialisation; a retry of just the failing phase would not.
+  width and clock. That turned out to be the init *order* (item 16), not a
+  marginal bus, so the extra retry the ladder carried for it is gone.
 
 ## Where the data path landed
 
@@ -314,3 +313,56 @@ mask was still wrong, so it never described the engine. Two facts made the
 retry reviewable rather than hopeful: the descriptor-format constraint (32-bit
 addresses) is checked at probe, and every engine failure degrades to a path
 that is already known good on this board.
+
+## Where this landed
+
+State of the SD path on the Orange Pi 5 Plus after this work, with the numbers
+that justify each line:
+
+| Property | Value | How it was established |
+| --- | --- | --- |
+| Init sequence | Linux `mmc_sd_init_card` order (switch read first, width last) | item 16; the first-attempt failure disappeared |
+| Bus | 4-bit, programmed 25 MHz, high speed mode negotiated | `sd: card bus high speed (requested … programmed 25000000 Hz, 4-bit)` |
+| CIU source rate | 25 MHz | item 17; three throughput runs, over-determined |
+| Sequential read | ~9 MB/s (bus ceiling for that source: 12.5 MB/s) | 128 MiB `dd`, identical for PIO and IDMAC |
+| Per-block overhead | ~13 us, card/bus side | solved from the two 4-bit runs |
+| Data path | IDMAC by default, PIO fallback (latch on engine failure) | both paths verified on the board, same throughput |
+| Concurrency | one phase per slot (`SpinNoPreempt` guard) | two disks, two tasks, 128 MiB each, no timeouts |
+| Cards | GPT with two partitions, ext4 root on `mmcblk0p2` | partition scan + `fs_boot` candidate probe |
+| Observability | `dmesg` (64 KiB ring + `syslog(2)`), per-target filter | `dmesg`, `/proc/sys/kernel/printk` |
+
+### What is left, and why it is not a bug
+
+- **Throughput is firmware-capped.** The card clock cannot exceed the 25 MHz
+  CIU input, and raising that input needs `SCMI_CCLK_SD` (the EL3 agent answers
+  `HARDWARE_ERROR`) or the Secure CRU (data abort at EL1). The divider, the
+  ceiling (`MMC_MAX_CARD_HZ`), and the diagnostics are already in place for a
+  faster source; nothing in the driver blocks it.
+- **Sample/drive phases are not programmed.** Linux's `dw_mmc-rockchip` sets
+  them on every `set_ios`; this driver inherits whatever the boot stages left.
+  At 25 MHz that is sufficient (long-shaped transfers pass), and it becomes the
+  next suspect only if the source rate is ever raised.
+- **IDMAC completion is polled.** `INTMASK`/`CTRL.INT_ENABLE` stay 0 because the
+  first IRQ attempt stormed on this board. IRQ-driven completion plus a request
+  queue is the next step *if* CPU time during I/O ever matters; IDMAC already
+  keeps the CPU out of the copy.
+- **PIO versus IDMAC is a wash for bandwidth** (~9 MB/s both). IDMAC wins on
+  CPU occupancy and on being immune to the preemption that can overrun a polled
+  FIFO drain, which is why it is the default.
+
+### The three logging mistakes worth remembering
+
+Every one of them made a *guessed* number look like a measured one, and each
+cost a wrong hypothesis:
+
+1. `data path only works at 4-bit / 25000000 Hz` printed the ladder's ceiling,
+   not the negotiated rate;
+2. `sd: card bus high speed (50000000 Hz)` printed the protocol's request, not
+   what the host programmed;
+3. the buffered log line was missing its newline, so `dmesg` printed one
+   run-on line.
+
+Fixes: `MmcHost::current_clock_hz` feeds the protocol log, `setup_bus` logs the
+divider's result, and the ring buffer terminates its records. A diagnostic that
+reports a request, a ceiling, or a cleared register as if it were the hardware
+state is worse than no diagnostic — it produces confident, wrong conclusions.

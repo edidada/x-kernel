@@ -173,9 +173,15 @@ The data bus width is capped the same way: `MmcHost::max_bus_width`
 ceiling a slot with dead wide lines fails every data phase with
 `RINTSTS.SBE` while commands stay perfectly healthy.
 
-Because the source rate is unreadable, and because a card that accepts
-commands but never drives the bus looks identical whether the clock is too
-fast or the wide lines are dead, the probe verifies **a block read** and then
+The source rate is not a guess any more: three throughput runs (4-bit at
+divider 0 and 1, 1-bit at divider 0) solve to a **25 MHz** CIU input with a
+~13 us per-block card delay, which is what `MMC_CIU_HZ` carries. That is also
+the ceiling of this board — ~9 MB/s sequential read, since raising the source
+needs the SD clock domain the EL3 firmware does not serve.
+
+Because the source rate is unreadable *at runtime*, and because a card that
+accepts commands but never drives the bus looks identical whether the clock is
+too fast or the wide lines are dead, the probe verifies **a block read** and then
 walks a ladder of `(width, ceiling)` pairs (`MMC_CLOCK_LADDER`: 4-bit at the
 configured ceiling, halved ceilings down to 4 MHz, then the same at 1-bit).
 It logs the pair that worked, which is the measurement the divider math was
