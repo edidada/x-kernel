@@ -36,13 +36,14 @@ const SDMMC_INTMASK: usize = 0x024;
 const SDMMC_CMDARG: usize = 0x028;
 const SDMMC_CMD: usize = 0x02c;
 const SDMMC_RESP0: usize = 0x030;
-const SDMMC_MINTSTS: usize = 0x040;
 const SDMMC_RINTSTS: usize = 0x044;
 const SDMMC_STATUS: usize = 0x048;
 const SDMMC_FIFOTH: usize = 0x04c;
 const SDMMC_CDETECT: usize = 0x050;
+const SDMMC_TCBCNT: usize = 0x05c;
+const SDMMC_TBBCNT: usize = 0x060;
 const SDMMC_VERID: usize = 0x06c;
-const SDMMC_CLKSRC_HI: usize = 0x078; // unused placeholder; CLKSRC at 0x0c
+const SDMMC_HCON: usize = 0x070;
 /// FIFO data port: pre-2.40a at 0x100, 2.40a+ at 0x200 (Linux
 /// `DATA_OFFSET` / `DATA_240A_OFFSET`).
 const SDMMC_DATA_OFFSET: usize = 0x100;
@@ -50,8 +51,8 @@ const SDMMC_DATA_240A_OFFSET: usize = 0x200;
 /// VERID register value that moved the data port to 0x200.
 const DW_MMC_240A: u32 = 0x240a;
 
-// CTRL bits.
-const CTRL_INT_ENABLE: u32 = 1 << 4;
+// CTRL bits. The interrupt line stays off for good (this driver is
+// poll-only), so `CTRL_INT_ENABLE` (bit 4) is never set anywhere below.
 const CTRL_DMA_ENABLE: u32 = 1 << 5;
 const CTRL_DMA_RESET: u32 = 1 << 2;
 const CTRL_FIFO_RESET: u32 = 1 << 1;
@@ -66,8 +67,6 @@ const CTYPE_4BIT: u32 = 1 << 0;
 const INT_RESP_ERR: u32 = 1 << 1;
 const INT_CMD_DONE: u32 = 1 << 2;
 const INT_DATA_OVER: u32 = 1 << 3;
-const INT_TXDR: u32 = 1 << 4;
-const INT_RXDR: u32 = 1 << 5;
 const INT_RCRC: u32 = 1 << 6;
 const INT_DCRC: u32 = 1 << 7;
 const INT_RTO: u32 = 1 << 8;
@@ -116,8 +115,24 @@ const CLKEN_ENABLE: u32 = 1 << 0;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
-/// STATUS FIFO count field [28:17] (32-bit words).
+/// STATUS FIFO count field [28:17], in FIFO **entries** (the entry width
+/// is `HCON.HDATA_WIDTH`, not necessarily 32 bits — Linux
+/// `SDMMC_GET_FCNT` + `host->data_shift`).
 const STATUS_FCNT_SHIFT: u32 = 17;
+
+/// HCON FIFO-width field [9:7] (Linux `SDMMC_GET_HDATA_WIDTH`):
+/// 0 = 16-bit, 2 = 64-bit, any other value means 32-bit.
+const HCON_HDATA_WIDTH_SHIFT: u32 = 7;
+
+/// FIFO entry width in bytes from `HCON.HDATA_WIDTH`. The width fixes
+/// both the FIFO access size and the unit of `STATUS.FCNT`.
+const fn fifo_width_bytes(hcon: u32) -> u32 {
+    match (hcon >> HCON_HDATA_WIDTH_SHIFT) & 0x7 {
+        0 => 2,
+        2 => 8,
+        _ => 4,
+    }
+}
 
 // FIFOTH layout: MSIZE [30:28], RX_WMARK [27:16], TX_WMARK [11:0].
 const fn fifoth(msize: u32, rx_wmark: u32, tx_wmark: u32) -> u32 {
@@ -206,11 +221,23 @@ impl DwMmcHost {
 
         // VERID selects the FIFO data-port offset.
         let verid = host.readl(SDMMC_VERID) & 0xFFFF;
-        host.fifo_off = if verid < 0x240a {
+        host.fifo_off = if verid < DW_MMC_240A {
             SDMMC_DATA_OFFSET
         } else {
             SDMMC_DATA_240A_OFFSET
         };
+        // Controller identity on the record: the IP revision and the FIFO
+        // geometry decide the data-port offset, the FIFO access width and
+        // the unit of `STATUS.FCNT`, so they are the first thing to check
+        // when a data phase misbehaves.
+        let hcon = host.readl(SDMMC_HCON);
+        log::info!(
+            "dwmmc: slot {} verid {verid:#06x} hcon {hcon:#010x} fifo {fifo_depth} x {}B, \
+             data-port {:#x}",
+            host.slot,
+            fifo_width_bytes(hcon),
+            host.fifo_off,
+        );
         Ok(host)
     }
 
@@ -349,19 +376,12 @@ impl DwMmcHost {
         }
     }
 
-    /// Map a raw RINTSTS error word onto the error vocabulary.
-    fn status_error(status: u32) -> MmcError {
-        if status & (INT_RTO | INT_RCRC | INT_RESP_ERR) != 0 {
-            MmcError::Crc
-        } else if status & (INT_DRTO | INT_HTO) != 0 {
-            MmcError::Timeout
-        } else {
-            MmcError::Io
-        }
-    }
-
-    /// Human-readable names for a raw RINTSTS status word (diagnostics).
-    fn status_names(status: u32) -> alloc::string::String {
+    /// Human-readable names for a raw **RINTSTS** snapshot (diagnostics).
+    ///
+    /// The bit vocabulary here is the interrupt/raw-status one; it must
+    /// never be applied to `STATUS`, whose layout is unrelated (FIFO
+    /// count, data state machine, response index).
+    fn rintsts_names(status: u32) -> alloc::string::String {
         const NAMES: [(u32, &str); 11] = [
             (INT_RESP_ERR, "RESP_ERR"),
             (INT_CMD_DONE, "CMD_DONE"),
@@ -396,6 +416,30 @@ impl DwMmcHost {
         n
     }
 
+    /// Full controller snapshot for a failed data phase: the geometry
+    /// registers plus the byte counters (`TCBCNT` card↔CIU, `TBBCNT`
+    /// host↔FIFO) show whether the CIU moved any bytes at all for the
+    /// phase, which separates "card never sent data" from "controller
+    /// dropped it".
+    fn dump_state(&self, tag: &str) {
+        log::warn!(
+            "dwmmc: {tag}: ctrl={:#010x} status={:#010x} rintsts={} intmask={:#x} clkena={:#x} \
+             clksrc={:#x} clkdiv={:#x} ctype={:#x} blksiz={:#x} bytcnt={:#x} tcbcnt={} tbbcnt={}",
+            self.readl(SDMMC_CTRL),
+            self.readl(SDMMC_STATUS),
+            Self::rintsts_names(self.readl(SDMMC_RINTSTS)),
+            self.readl(SDMMC_INTMASK),
+            self.readl(SDMMC_CLKENA),
+            self.readl(SDMMC_CLKSRC),
+            self.readl(SDMMC_CLKDIV),
+            self.readl(SDMMC_CTYPE),
+            self.readl(SDMMC_BLKSIZ),
+            self.readl(SDMMC_BYTCNT),
+            self.readl(SDMMC_TCBCNT),
+            self.readl(SDMMC_TBBCNT),
+        );
+    }
+
     /// Clear a fired RINTSTS error set and map it (Linux
     /// `dw_mci_command_complete` error decode).
     fn take_errors(&self, pending: u32) -> MmcError {
@@ -412,7 +456,7 @@ impl DwMmcHost {
     /// Recovery after a failed data transfer: FIFO reset, force-stop with
     /// CMD12, full raw-status clear (Linux error path). Without this a
     /// card parked mid-data-state poisons every later command.
-    fn recover_after_data_error(&self, failed_cmd: &MmcCommand) {
+    fn recover_after_data_error(&self, failed_cmd: &MmcCommand, rintsts: u32) {
         self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
         for _ in spin_budget(10_000) {
             if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
@@ -424,9 +468,9 @@ impl DwMmcHost {
         let _ = self.ciu_cmd(stop, 0, true);
         self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
         log::warn!(
-            "dwmmc: recovered after data error on cmd {} ({})",
+            "dwmmc: recovered after data error on cmd {} (rintsts {})",
             failed_cmd.opcode,
-            Self::status_names(self.readl(SDMMC_STATUS)),
+            Self::rintsts_names(rintsts),
         );
     }
 }
@@ -540,7 +584,8 @@ impl DwMmcHost {
             let pending = self.readl(SDMMC_RINTSTS);
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.recover_after_data_error(cmd);
+                self.dump_state(&alloc::format!("data-read cmd {}", cmd.opcode));
+                self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
             if drained < bytes {
@@ -561,10 +606,11 @@ impl DwMmcHost {
         }
         if drained < bytes {
             log::warn!(
-                "dwmmc: cmd {} short read {drained}/{bytes} (rintsts {:#x})",
+                "dwmmc: cmd {} short read {drained}/{bytes} (rintsts {})",
                 cmd.opcode,
-                self.readl(SDMMC_RINTSTS),
+                Self::rintsts_names(self.readl(SDMMC_RINTSTS)),
             );
+            self.dump_state(&alloc::format!("short read cmd {}", cmd.opcode));
             return Err(MmcError::Io);
         }
         // Auto-stop command-done (ACD) arrives after DATA_OVER on
@@ -587,7 +633,8 @@ impl DwMmcHost {
             let pending = self.readl(SDMMC_RINTSTS);
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.recover_after_data_error(cmd);
+                self.dump_state(&alloc::format!("data-write cmd {}", cmd.opcode));
+                self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
             let free = (self.fifo_depth as usize * 4).saturating_sub(self.fifo_bytes());
@@ -610,10 +657,12 @@ impl DwMmcHost {
             }
             if pending & INT_DATA_ERRORS != 0 {
                 let err = self.take_errors(pending);
-                self.recover_after_data_error(cmd);
+                self.dump_state(&alloc::format!("data-write tail cmd {}", cmd.opcode));
+                self.recover_after_data_error(cmd, pending);
                 return Err(err);
             }
         }
+        self.dump_state(&alloc::format!("data-write timeout cmd {}", cmd.opcode));
         Err(MmcError::Timeout)
     }
 

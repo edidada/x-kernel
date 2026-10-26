@@ -1298,7 +1298,6 @@ name = "drv-mmc"
 version = "0.3.0-dev"
 dependencies = [
  "driver-base",
- "karch",
  "kbuild_config",
  "log",
  "subsys-mmc",

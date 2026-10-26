@@ -116,17 +116,6 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         if bus_data.kind != CardKind::Sd {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
-        let card = MmcCardData {
-            kind: bus_data.kind,
-            slot: bus_data.slot,
-            rca: bus_data.rca,
-            cid: bus_data.cid,
-            sectors: bus_data.sectors,
-            block_addressed: bus_data.block_addressed,
-            high_speed: bus_data.high_speed,
-            bus_width_4bit: bus_data.bus_width_4bit,
-            host: bus_data.host.clone(),
-        };
 
         // Partition scan first (Linux mmc_blk creates mmcblk0pN devices):
         // one disk per used partition, falling back to the whole card
@@ -210,7 +199,7 @@ fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
         }
         let entry_lba = u64::from_le_bytes(header[72..80].try_into().unwrap_or([0; 8]));
         let entry_size = u32::from_le_bytes(header[84..88].try_into().unwrap_or([0; 4])) as usize;
-        if entry_lba == 0 || entry_size < 56 || entry_size > 512 {
+        if entry_lba == 0 || !(56..=512).contains(&entry_size) {
             return alloc::vec::Vec::new();
         }
         let mut entries = [0u8; 512];
@@ -246,17 +235,25 @@ fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
 }
 
 fn lba0_integrity_probe(host: &dyn crate::MmcHost) {
-    // Ladder: the failing size localizes the data-path limit (FIFO
-    // geometry / threshold / transfer-length dependent).
-    for size in [8usize, 64, 256, 512] {
-        let mut buf = [0u8; 512];
-        if read_blocks(host, 0, 1, &mut buf[..size]).is_err() {
-            log::warn!("mmcblk: LBA0 read {size}B FAILED");
+    // Ladder over the transfer **length in blocks** — the failing step
+    // localizes a data-path limit (FIFO depth / drain rate / transfer
+    // length). A byte ladder is not expressible here: the block layer and
+    // the host contract both work in whole 512-byte blocks, so a shorter
+    // request would only fail the buffer-length check without ever
+    // reaching the controller.
+    for blocks in [1u16, 2, 4, 8] {
+        let bytes = usize::from(blocks) * BLOCK_SIZE;
+        let mut buf = alloc::vec![0u8; bytes];
+        if let Err(err) = read_blocks(host, 0, blocks, &mut buf) {
+            log::warn!("mmcblk: LBA0 {blocks}-block read ({bytes}B) FAILED: {err:?}");
             return;
         }
         let head: alloc::vec::Vec<alloc::string::String> =
             buf[..8].iter().map(|b| alloc::format!("{b:02x}")).collect();
-        log::info!("mmcblk: LBA0 read {size}B ok, head: {}", head.join(" "));
+        log::info!(
+            "mmcblk: LBA0 {blocks}-block read ({bytes}B) ok, head: {}",
+            head.join(" ")
+        );
     }
 }
 

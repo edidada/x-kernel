@@ -19,8 +19,8 @@
 use alloc::sync::Arc;
 
 use driver_base::{
-    Bus, Device, DeviceDescriptor, DriverOps, IoMap, IrqAction, OfMatch, PlatformBus, PlatformId,
-    ProbeError, RuntimeError,
+    Bus, Device, DeviceDescriptor, DriverOps, IoMap, OfMatch, PlatformBus, PlatformId, ProbeError,
+    RuntimeError,
 };
 use subsys_mmc::{
     DetectContext, MmcError,

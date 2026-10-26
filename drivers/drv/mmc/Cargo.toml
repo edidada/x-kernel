@@ -17,7 +17,6 @@ dwmmc-rockchip = []
 [dependencies]
 subsys_mmc = { workspace = true }
 driver_base = { workspace = true }
-karch = { workspace = true }
 kbuild_config = { workspace = true }
 log = { workspace = true }
 unittest = { workspace = true }
