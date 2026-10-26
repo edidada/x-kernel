@@ -381,6 +381,21 @@ impl DwMmcHost {
         // `dw_mci_adjust_fifoth` is DMA-only — it returns early when PIO
         // is in use — so it is deliberately not applied here.
         host.writel(SDMMC_FIFOTH, host.baseline_fifoth());
+        // Reset the internal DMA engine as well (Linux `dw_mci_idmac_init`):
+        // the `CTRL` reset pulses the DMA reset but never touches `BMOD`, so a
+        // bootloader that left the engine enabled keeps it enabled across our
+        // probe — observed on this board as a stale `BMOD.DE | FB` with a stale
+        // `DBADDR`, and as "the first init attempt after power-on always fails,
+        // the second (after the engine was stopped) works".
+        host.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+        host.writel(SDMMC_BMOD, host.readl(SDMMC_BMOD) | BMOD_SWRESET);
+        for _ in spin_budget(10_000) {
+            if host.readl(SDMMC_BMOD) & BMOD_SWRESET == 0 {
+                break;
+            }
+        }
+        host.writel(SDMMC_BMOD, BMOD_FB);
+        host.writel(SDMMC_IDINTEN, 0);
         // Gate CIU clock before the first setup_bus.
         host.writel(SDMMC_CLKENA, 0);
         host.writel(SDMMC_CLKSRC, 0);

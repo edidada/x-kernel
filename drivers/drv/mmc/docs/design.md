@@ -26,7 +26,9 @@ crate per family, one module per controller core plus SoC glue:
 3. `alloc_coherent` the descriptor ring and the bounce window; both are
    dropped (and the slot falls back to PIO) if they are not below 4 GiB.
 4. `DwMmcHost::new`: power, all-reset, raw-status clear, line mask (the
-   driver is poll-only), max timeout, IDMAC routing forced off, baseline
+   driver is poll-only), max timeout, IDMAC routing forced off, `BMOD`
+   software reset (Linux `dw_mci_idmac_init`: the `CTRL` reset does not touch
+   `BMOD`, so a bootloader-left engine stays enabled otherwise), baseline
    FIFOTH, VERID-selected FIFO port, HCON FIFO width, CIU clock gated.
 5. `sd::detect_card` through the subsystem core; on success the card is
    added to the domain on the mmc bus (`add_bus_instance` +
