@@ -149,11 +149,16 @@ pub struct FilterSpecError;
 /// (a trailing `*` is accepted and redundant). Tokens may be separated by
 /// spaces or commas.
 ///
+/// A bare level sets the default level for every target; without one the
+/// **current default is kept** and only the rule set is replaced, so
+/// `ksyscall=trace` narrows one target instead of silently resetting the rest
+/// of the kernel to a hard-coded level.
+///
 /// The spec is validated before it is applied, so a bad token leaves the
 /// current filter untouched.
 pub fn set_filter_spec(spec: &str) -> Result<(), FilterSpecError> {
     let mut next = Filter::new();
-    let mut saw_default = false;
+    let mut default: Option<LevelFilter> = None;
     for token in spec.split(|c: char| c.is_ascii_whitespace() || c == ',') {
         let token = token.trim();
         if token.is_empty() {
@@ -177,19 +182,20 @@ pub fn set_filter_spec(spec: &str) -> Result<(), FilterSpecError> {
                 next.count += 1;
             }
             None => {
-                next.default = parse_log_level(token).ok_or(FilterSpecError)?;
-                saw_default = true;
+                default = Some(parse_log_level(token).ok_or(FilterSpecError)?);
             }
         }
     }
-    if !saw_default && next.count == 0 {
+    if default.is_none() && next.count == 0 {
         return Err(FilterSpecError);
     }
     // Publish the filter and the `log` ceiling in one critical section: two
     // concurrent writers would otherwise be able to leave the installed spec
     // and the ceiling describing different specs.
     let mut filter = FILTER.lock();
-    *filter = next;
+    filter.rules = next.rules;
+    filter.count = next.count;
+    filter.default = default.unwrap_or(filter.default);
     // The `log` crate filter is the cheap pre-check; per-target rules can ask
     // for more than the default, so the ceiling admits the widest request.
     log::set_max_level(filter.ceiling());
@@ -266,28 +272,50 @@ impl LogBuf {
         }
     }
 
+    /// Appends `line`, overwriting the oldest bytes when the ring is full.
+    ///
+    /// Both segments are copied with `copy_from_slice`, so the time spent under
+    /// the caller's IRQ-off guard depends on the byte count, not on a per-byte
+    /// loop with a modulo each iteration.
     fn push(&mut self, line: &[u8]) {
-        for &byte in line {
-            if self.len == LOGBUF_SIZE {
-                // Full: overwrite the oldest byte, which also leaves the unread
-                // window, so a reader holding a cursor over it becomes stale.
-                self.buf[self.start] = byte;
-                self.start = (self.start + 1) % LOGBUF_SIZE;
-                self.unread_from += 1;
-            } else {
-                let index = (self.start + self.len) % LOGBUF_SIZE;
-                self.buf[index] = byte;
-                self.len += 1;
-            }
+        // A record larger than the ring keeps its newest byte range.
+        let line = if line.len() > LOGBUF_SIZE {
+            &line[line.len() - LOGBUF_SIZE..]
+        } else {
+            line
+        };
+        let free = LOGBUF_SIZE - self.len;
+        if line.len() > free {
+            // The oldest bytes make room, and leaving the unread window makes
+            // any reader cursor over them stale.
+            let overwrite = line.len() - free;
+            self.start = (self.start + overwrite) % LOGBUF_SIZE;
+            self.len -= overwrite;
+            self.unread_from += overwrite as u64;
         }
+        let index = (self.start + self.len) % LOGBUF_SIZE;
+        let first = line.len().min(LOGBUF_SIZE - index);
+        self.buf[index..index + first].copy_from_slice(&line[..first]);
+        if first < line.len() {
+            let rest = line.len() - first;
+            self.buf[..rest].copy_from_slice(&line[first..]);
+        }
+        self.len += line.len();
     }
 
     /// Copies the oldest unread bytes, in log order, and hands back the range
     /// they occupy.
+    ///
+    /// At most two `copy_from_slice` calls (to the end of the ring, then from
+    /// its start), for the same reason as [`LogBuf::push`]: a reader with a
+    /// full-size destination must not spend the whole copy under the IRQ-off
+    /// guard.
     fn read(&self, out: &mut [u8]) -> LogRead {
         let take = out.len().min(self.len);
-        for (index, slot) in out[..take].iter_mut().enumerate() {
-            *slot = self.buf[(self.start + index) % LOGBUF_SIZE];
+        let head = take.min(LOGBUF_SIZE - self.start);
+        out[..head].copy_from_slice(&self.buf[self.start..self.start + head]);
+        if head < take {
+            out[head..take].copy_from_slice(&self.buf[..take - head]);
         }
         LogRead {
             copied: take,
@@ -400,9 +428,10 @@ impl LineBuf {
 
 impl fmt::Write for LineBuf {
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        // One byte is reserved for the record's terminating newline: the
-        // caller formats with `writeln!`, and a record that filled the buffer
-        // would otherwise lose its terminator and run into the next record.
+        // One byte is reserved for the record's terminating newline: the caller
+        // formats the body with `write!` and then appends the terminator through
+        // `LineBuf::terminate`, so a record that filled the buffer would
+        // otherwise lose it and run into the next record.
         let room = self.buf.len() - 1 - self.len;
         let mut take = text.len().min(room);
         // Copy whole characters only; a split code point would put invalid

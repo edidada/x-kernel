@@ -6,12 +6,12 @@ extern crate alloc;
 
 use alloc::string::ToString;
 
-use log::LevelFilter;
+use log::{Level, LevelFilter};
 use unittest::{assert_eq, def_test};
 
 use super::{
-    current_log_level, filter_spec, level_name, level_number, logbuf_clear, logbuf_len,
-    logbuf_read, logbuf_release, parse_log_level, set_filter_spec, set_log_level,
+    current_log_level, filter_enabled, filter_spec, level_name, level_number, logbuf_clear,
+    logbuf_len, logbuf_read, logbuf_release, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
 
@@ -91,7 +91,7 @@ fn set_log_level_takes_effect_immediately() {
 }
 
 #[def_test(serial)]
-fn filter_spec_reports_targets_and_longest_prefix_wins() {
+fn filter_spec_reports_the_canonical_text() {
     let previous = current_log_level();
     assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
     // The default stays visible to anything that reports "the level".
@@ -108,6 +108,67 @@ fn filter_spec_reports_targets_and_longest_prefix_wins() {
         core::str::from_utf8(&buf[..len]),
         Ok("warn drv_uart=trace drv_uart::dw_uart=error")
     );
+
+    set_log_level_filter(previous);
+}
+
+/// The console decision itself: the longest matching prefix wins, and a target
+/// without a rule falls back to the default level.
+#[def_test(serial)]
+fn filter_rules_match_the_longest_prefix() {
+    let previous = current_log_level();
+    assert_eq!(
+        set_filter_spec("error drv_uart=debug drv_uart::dw_uart=trace"),
+        Ok(())
+    );
+
+    // The most specific rule decides for the nested module.
+    assert!(filter_enabled("drv_uart::dw_uart", Level::Trace));
+    assert!(filter_enabled("drv_uart::dw_uart", Level::Debug));
+    assert!(filter_enabled("drv_uart::dw_uart", Level::Error));
+
+    // Its sibling inherits the shorter rule, not the nested one.
+    assert!(filter_enabled("drv_uart::other", Level::Debug));
+    assert!(!filter_enabled("drv_uart::other", Level::Trace));
+
+    // Everything else uses the default (`error`).
+    assert!(filter_enabled("ksyscall", Level::Error));
+    assert!(!filter_enabled("ksyscall", Level::Warn));
+    assert!(!filter_enabled("spi", Level::Warn));
+
+    // Matching is textual prefix, not path-segment: a longer module path that
+    // merely starts with the rule's target is covered by it.
+    assert!(filter_enabled("drv_uart_extra", Level::Debug));
+    assert!(!filter_enabled("drv_uart_extra", Level::Trace));
+
+    set_log_level_filter(previous);
+}
+
+/// A spec without a bare level keeps the default in force and replaces only the
+/// rule set: `ksyscall=trace` must not silently reset the rest of the kernel to
+/// a hard-coded `warn`.
+#[def_test(serial)]
+fn filter_spec_without_a_level_keeps_the_current_default() {
+    let previous = current_log_level();
+    set_log_level_filter(LevelFilter::Debug);
+
+    assert_eq!(set_filter_spec("ksyscall=trace"), Ok(()));
+    assert_eq!(current_log_level(), LevelFilter::Debug);
+    assert!(filter_enabled("drv_uart", Level::Debug));
+    assert!(filter_enabled("ksyscall", Level::Trace));
+
+    let mut buf = [0u8; super::MAX_FILTER_SPEC];
+    let len = filter_spec(&mut buf).expect("spec fits");
+    assert_eq!(
+        core::str::from_utf8(&buf[..len]),
+        Ok("debug ksyscall=trace")
+    );
+
+    // A bare level still replaces the default, and the rule set is replaced
+    // wholesale rather than merged.
+    assert_eq!(set_filter_spec("warn drv_uart=info"), Ok(()));
+    assert_eq!(current_log_level(), LevelFilter::Warn);
+    assert!(!filter_enabled("ksyscall", Level::Trace));
 
     set_log_level_filter(previous);
 }
@@ -143,6 +204,9 @@ fn logbuf_captures_records_the_console_filter_hides() {
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
     // Default `warn`, but the ceiling has to admit `debug` for the override.
     assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
+    // Reads start at the oldest unread byte, so drop whatever earlier contexts
+    // buffered: the 4 KiB window below must be this test's records.
+    logbuf_clear();
 
     // `info` sits below the default level, so the console drops it; the ring
     // keeps it anyway because the ceiling is debug.

@@ -84,22 +84,28 @@ KernelLogger::log
   the window it was given; a window the ring overwrote in the meantime is stale
   and drops nothing.
 - `set_filter_spec` is callable at runtime, including from the
-  `/proc/sys/kernel/printk` write path. It replaces the whole filter and the
-  ceiling in one critical section.
+  `/proc/sys/kernel/printk` write path. It replaces the rule set, the default
+  level (only when the spec carries a bare level) and the ceiling in one
+  critical section.
 - `init_klogger` runs once on the primary CPU during boot.
 
 ## State machine
 
-The filter is replaced as a whole; there are no partial updates:
+A spec is validated as a whole and installed as a whole; there are no partial
+updates. Its rule set always replaces the previous one; its default level
+replaces the previous default only when the spec has a bare level token, so
+`ksyscall=trace` retargets one module instead of silently resetting the rest of
+the kernel to a hard-coded level:
 
 ```
-boot default (LOG_LEVEL_*, warn)
+boot default (LOG_LEVEL_* / LOG_FILTER, warn)
     │ set_filter_spec(dt / loglevel= / quiet / debug / LOG_FILTER)
     ▼
-{ default, rules[] } ──set_filter_spec(new spec), validated──► replaced as a whole
+{ default, rules[] } ──set_filter_spec(spec), validated──► rules := spec rules
+                     │                                     default := spec level, or kept
                      └─rejected──► unchanged (no rule keeps a new value)
 
-set_log_level_filter(level) ≡ set only the default, drop every override
+set_log_level_filter(level) ≡ set the default, drop every override
 ```
 
 The ring has two states: appending while it has room, and overwriting the oldest
@@ -139,7 +145,9 @@ even though the copy happens outside the lock.
    truncated to 255 bytes and still ends with `\n`. Truncation also stops at a
    character boundary, so the ring never holds a split code point.
 4. The whole line is pushed into `LOGBUF` (overwriting the oldest bytes when
-   full).
+   full). Both the push and a ring read copy at most two contiguous segments
+   with `copy_from_slice`, so the time spent inside the IRQ-off guard scales with
+   the byte count rather than with a per-byte loop.
 5. Only then does `filter_enabled(target, level)` decide whether the record also
    goes to the console. A dropped record still stays in the ring — that is what
    makes a quiet console and a complete boot log compatible.
@@ -153,8 +161,9 @@ or commas:
    `0..=5` or `off/error/warn/info/debug/trace`; `target` is trimmed, its
    redundant trailing `*` removed, and its length must be `1..=MAX_FILTER_TARGET`;
    at most `MAX_FILTER_RULES` rules are accepted;
-2. a token without `=` sets the default level, the last one winning;
-3. a spec with neither a rule nor a default is invalid;
+2. a token without `=` sets the default level, the last one winning; a spec with
+   no such token keeps the level that is already in force;
+3. a spec with neither a rule nor a bare level is invalid;
 4. only after the whole spec validates is it installed, together with the
    ceiling, in one `FILTER` critical section. Any invalid token returns
    `FilterSpecError` and leaves the previous spec, and the previous ceiling,
@@ -173,7 +182,7 @@ The public entry points and their directions:
 
 | Entry point | Direction |
 |-------------|-----------|
-| `set_filter_spec(spec)` | `kruntime` (boot, from the DT/cmdline/Kconfig sources) and `procfs` (`/proc/sys/kernel/printk` write) install a spec; a rejected spec leaves the previous filter untouched |
+| `set_filter_spec(spec)` | `kruntime` (boot, from the DT/cmdline/Kconfig sources) and `procfs` (`/proc/sys/kernel/printk` write) install a spec's rules, plus its default level when it has one; a rejected spec leaves the previous filter untouched |
 | `set_log_level(spec)` | convenience wrapper that applies a spec and ignores a rejection; used by callers that only have a level string |
 | `set_log_level_filter(level)` | set the default level and drop every override (`procfs` tests and internal resets) |
 | `filter_spec(buf)` | `procfs` read side and the boot banner report the active spec |

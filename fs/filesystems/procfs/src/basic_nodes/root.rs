@@ -116,17 +116,19 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 );
                 SimpleDir::new_maker(fs.clone(), Arc::new(pty))
             });
-            // Runtime log-level control: `cat` shows the current level as a
-            // number in X-Kernel's own level order (0=off, 1=error, 2=warn,
-            // 3=info, 4=debug, 5=trace); a privileged write (`echo 4 >
-            // /proc/sys/kernel/printk` or `echo debug > ...`) switches the
-            // level immediately without a rebuild.
+            // Runtime log-filter control: reading returns the canonical text
+            // of the active spec (`warn ksyscall=debug`); a privileged write
+            // installs a whole spec — an optional bare level for the default
+            // plus `target=level` overrides — replacing the default level and
+            // the entire override set, or, when the spec carries no bare level,
+            // only the override set. Either way it takes effect immediately and
+            // needs no rebuild.
             //
             // NOTE: although this node reuses the Linux `/proc/sys/kernel/
             // printk` path, the value domain is X-Kernel-private and NOT
-            // Linux `console_loglevel`-compatible: here higher = more
-            // verbose (4 = debug), while Linux 4 means warn-only and its
-            // read side reports four numbers instead of one.
+            // Linux `console_loglevel`-compatible: levels here are
+            // `0..=5`/`off..trace` with higher = more verbose, while Linux's
+            // read side reports four console numbers instead of a filter spec.
             kernel.add(
                 "printk",
                 SimpleFile::new_regular_with_permission(

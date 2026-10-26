@@ -11,8 +11,10 @@ config LOG_FILTER
 
       Levels are 0..=5 or off/error/warn/info/debug/trace; a target is matched
       by prefix against the record's module path, longest match wins, and a
-      bare level sets the default for everything else. Tokens may be separated
-      by spaces or commas. Empty means "use the LOG_LEVEL_* choice alone".
+      bare level sets the default for everything else. A spec with only
+      target=level rules keeps the level in force (at boot: the LOG_LEVEL_*
+      choice) as its default. Tokens may be separated by spaces or commas.
+      Empty means "use the LOG_LEVEL_* choice alone".
 
       At runtime the same spec is written to /proc/sys/kernel/printk (a bare
       level still works there), so bring-up sessions can retarget logging
