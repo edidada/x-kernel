@@ -244,11 +244,20 @@ measurements derived the truth without any timer:
 | 4-bit, divider 1 | 5.1 MB/s |
 | PIO instead of IDMAC (same clock) | 9.0 MB/s |
 
-Bytes-per-second for a 4-bit bus is `512 / (1024/C + gap)`; the divider-0 and
-divider-1 runs give two equations, which solve to `C ≈ 23.5 MHz` and a ~13 us
-per-block card delay. The PIO run rules out the DMA bounce window as the cause.
-With `MMC_CIU_HZ` corrected to 25 MHz the programmed rates, the 400 kHz init
-divider and any future high-speed request all agree with the hardware.
+Bytes-per-second is `512 / (1024/C + gap)` for 4-bit and `512 / (4096/C + gap)`
+for 1-bit; the divider-0 and divider-1 runs give two equations, which solve to
+`C ≈ 23.5 MHz` and a ~13 us per-block card delay. The PIO run rules out the DMA
+bounce window as the cause, and a 1-bit run over-determines the model: it
+predicted ~2.9 MB/s for C = 25 MHz (and ~5.4 for C = 50) and measured **2.7**.
+With `MMC_CIU_HZ = 25 MHz` the programmed rates, the 400 kHz init divider and
+any future high-speed request all agree with the hardware.
+
+U-Boot's `mmc info` on the same board says `Bus Speed: 50000000` and
+`Mode: SD High Speed (50MHz)`, which looks like a contradiction. It is not a
+measurement: the bus speed is the rate U-Boot's own divider math requested
+(the same assumption chain this driver had), and the mode name is the SD
+spec's label taken from the switch-function reply. Two nominal numbers cannot
+overrule a measurement.
 
 Two things made this hard to see, and both were logging mistakes of mine:
 `data path ok at ... 50000000 Hz` printed the *ceiling*, and

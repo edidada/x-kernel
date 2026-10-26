@@ -245,6 +245,15 @@ pub trait MmcHost: Send + Sync {
     /// Whether a card is currently seated in the slot (Linux `get_cd`).
     fn card_present(&self) -> bool;
 
+    /// The card clock the host last programmed, in Hz (0 = not known/gated).
+    ///
+    /// The protocol layer asks for a mode's nominal rate; whether the host can
+    /// reach it is a board fact, so diagnostics report this value instead of
+    /// the request.
+    fn current_clock_hz(&self) -> u32 {
+        0
+    }
+
     /// Largest single data phase this host accepts, in bytes.
     ///
     /// Hosts with a DMA engine stage transfers through a bounce window, so

@@ -894,6 +894,10 @@ impl MmcHost for DwMmcHost {
         self.data_cmd_write(cmd, bytes, buf)
     }
 
+    fn current_clock_hz(&self) -> u32 {
+        self.current_clock.load(Ordering::Acquire)
+    }
+
     fn max_transfer_bytes(&self) -> usize {
         if self.uses_idmac() {
             self.idmac_max_bytes()

@@ -387,17 +387,23 @@ fn setup_bus(
             power_on: true,
         })?;
     }
-    // Report the *negotiated* mode, not the ceiling the host was configured
-    // with: a host ceiling of 50 MHz means nothing if the card stayed at the
-    // default speed.
+    // Report what the *host programmed*, not the request: a host ceiling of
+    // 50 MHz means nothing if the source clock cannot deliver it, and the
+    // protocol layer cannot tell the difference.
+    let programmed_hz = host.current_clock_hz();
     log::info!(
-        "sd: card bus {} ({} Hz, {}-bit){}",
+        "sd: card bus {} (requested {} Hz, programmed {} Hz, {}-bit){}",
         if high_speed {
             "high speed"
         } else {
             "default speed"
         },
         data_hz,
+        if programmed_hz == 0 {
+            data_hz
+        } else {
+            programmed_hz
+        },
         if bus_width_4bit { 4 } else { 1 },
         if high_speed {
             ""
