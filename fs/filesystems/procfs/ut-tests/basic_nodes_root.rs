@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc};
+use alloc::{format, string::String, sync::Arc};
 
 use kvfs::{
     DirMapping, FileSystemType, Filename, Mount, NodePermission, OpenFlags, SimpleDir, SimpleFs,
@@ -109,6 +109,31 @@ fn printk_node_reads_and_writes_runtime_log_level() {
     let mut pos = 0;
     assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(20));
     assert_eq!(&buf[..20], b"warn drv_uart=trace\n");
+
+    // A spec that is accepted must also be reportable: the canonical text is
+    // longer than any fixed 256-byte buffer once the rules are long, and a node
+    // that accepts a write but fails the read-back with EINVAL is worse than
+    // useless (the boot banner would silently show only the default level).
+    let mut long_spec = String::from("warn");
+    for index in 0..klogger::MAX_FILTER_RULES {
+        // Distinct 24-byte targets, one per rule: the maximum the spec grammar
+        // accepts.
+        long_spec.push_str(&format!(" {index:0>24}=debug"));
+    }
+    // The canonical form is larger than the 256-byte buffer an earlier revision
+    // used, which is exactly what made this read-back fail.
+    assert!(long_spec.len() > 256);
+    let written = printk.write(long_spec.as_bytes());
+    assert_eq!(written, Ok(long_spec.len()));
+
+    let mut long_buf = [0u8; klogger::MAX_FILTER_SPEC];
+    let mut pos = 0;
+    let read = printk.read_from(&mut long_buf, &mut pos);
+    assert_eq!(read, Ok(long_spec.len() + 1));
+    assert_eq!(
+        core::str::from_utf8(&long_buf[..long_spec.len()]),
+        Ok(long_spec.as_str())
+    );
 
     if let Ok(text) = core::str::from_utf8(&previous_buf[..previous_len]) {
         klogger::set_log_level(text);

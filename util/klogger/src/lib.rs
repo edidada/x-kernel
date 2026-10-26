@@ -65,8 +65,21 @@ enum AnsiBrightColor {
 pub const MAX_FILTER_RULES: usize = 12;
 /// Maximum length of one override's target prefix.
 pub const MAX_FILTER_TARGET: usize = 24;
-/// Canonical spec text can be this long (for `/proc/sys/kernel/printk` reads).
-pub const MAX_FILTER_SPEC: usize = 256;
+/// Longest level name (`error`, `debug`, `trace`, ...).
+const MAX_LEVEL_NAME: usize = 5;
+/// Longest canonical spec text, i.e. what [`filter_spec`] can produce for any
+/// spec [`set_filter_spec`] accepts.
+///
+/// This must cover the whole accepted domain: a spec that can be installed but
+/// not reported back would make `/proc/sys/kernel/printk` unreadable (the node
+/// returns `InvalidInput` when the text does not fit) and hide the active
+/// overrides from the boot banner. Layout:
+///
+/// ```text
+/// <default> ( [" " <target> "=" <level>]{0,MAX_FILTER_RULES} )
+/// ```
+pub const MAX_FILTER_SPEC: usize =
+    MAX_LEVEL_NAME + MAX_FILTER_RULES * (1 + MAX_FILTER_TARGET + 1 + MAX_LEVEL_NAME);
 
 #[derive(Clone, Copy)]
 struct FilterRule {
@@ -233,10 +246,14 @@ const LOGBUF_LINE: usize = 256;
 
 struct LogBuf {
     buf: [u8; LOGBUF_SIZE],
-    /// Index of the oldest byte.
+    /// Index of the oldest unread byte.
     start: usize,
-    /// Bytes currently valid (saturates at `LOGBUF_SIZE`).
+    /// Bytes currently unread (saturates at `LOGBUF_SIZE`).
     len: usize,
+    /// Sequence position of the oldest unread byte: advanced whenever bytes
+    /// leave the buffer, whether a reader released them or the ring overwrote
+    /// them. A reader proves its window is still current with it.
+    unread_from: u64,
 }
 
 impl LogBuf {
@@ -245,15 +262,18 @@ impl LogBuf {
             buf: [0; LOGBUF_SIZE],
             start: 0,
             len: 0,
+            unread_from: 0,
         }
     }
 
     fn push(&mut self, line: &[u8]) {
         for &byte in line {
             if self.len == LOGBUF_SIZE {
-                // Full: overwrite the oldest byte.
+                // Full: overwrite the oldest byte, which also leaves the unread
+                // window, so a reader holding a cursor over it becomes stale.
                 self.buf[self.start] = byte;
                 self.start = (self.start + 1) % LOGBUF_SIZE;
+                self.unread_from += 1;
             } else {
                 let index = (self.start + self.len) % LOGBUF_SIZE;
                 self.buf[index] = byte;
@@ -262,14 +282,39 @@ impl LogBuf {
         }
     }
 
-    /// Copies the newest `out.len()` bytes, oldest first. Returns the count.
-    fn snapshot(&self, out: &mut [u8]) -> usize {
+    /// Copies the oldest unread bytes, in log order, and hands back the range
+    /// they occupy.
+    fn read(&self, out: &mut [u8]) -> LogRead {
         let take = out.len().min(self.len);
-        let skip = self.len - take;
         for (index, slot) in out[..take].iter_mut().enumerate() {
-            *slot = self.buf[(self.start + skip + index) % LOGBUF_SIZE];
+            *slot = self.buf[(self.start + index) % LOGBUF_SIZE];
         }
-        take
+        LogRead {
+            copied: take,
+            from: self.unread_from,
+        }
+    }
+
+    /// Drops the range a previous [`LogBuf::read`] returned, provided it has not
+    /// been overwritten in the meantime.
+    fn release(&mut self, read: LogRead) -> usize {
+        if read.from != self.unread_from {
+            // The reader's window was overwritten (or already released): its
+            // bytes are gone, and dropping anything now would destroy records it
+            // never received.
+            return 0;
+        }
+        let drop = read.copied.min(self.len);
+        self.start = (self.start + drop) % LOGBUF_SIZE;
+        self.len -= drop;
+        self.unread_from += drop as u64;
+        drop
+    }
+
+    fn clear(&mut self) {
+        self.unread_from += self.len as u64;
+        self.start = 0;
+        self.len = 0;
     }
 }
 
@@ -282,34 +327,46 @@ pub fn logbuf_len() -> usize {
     LOGBUF.lock().len
 }
 
-/// Copies the newest `out.len()` bytes of the kernel log buffer (oldest first)
-/// into `out` and returns how many bytes were written.
+/// A window of the kernel log buffer handed out by [`logbuf_read`].
 ///
-/// The buffer keeps its contents: use [`logbuf_consume`] to drop bytes that a
-/// reader has actually handed on.
-pub fn logbuf_snapshot(out: &mut [u8]) -> usize {
-    LOGBUF.lock().snapshot(out)
+/// `from` is the reader's position in the ring's byte sequence. It is what lets
+/// [`logbuf_release`] drop exactly the bytes this reader received, even if the
+/// read, the user copy and the release happen at different times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogRead {
+    /// Bytes copied into the reader's buffer.
+    pub copied: usize,
+    /// Sequence position of the first copied byte.
+    pub from: u64,
 }
 
-/// Drops the oldest `count` bytes, i.e. exactly the prefix a reader has already
-/// returned; `count` is clamped to the buffered length.
+/// Copies the oldest unread bytes of the kernel log buffer into `out`, in log
+/// order, and returns the window that was handed out.
 ///
-/// A reader that could only take part of the buffer (a small `syslog(2)`
-/// destination) therefore leaves the unread records readable instead of
-/// destroying evidence, and records appended while the reader was copying stay
-/// in the buffer.
-pub fn logbuf_consume(count: usize) {
-    let mut buf = LOGBUF.lock();
-    let drop = count.min(buf.len);
-    buf.start = (buf.start + drop) % LOGBUF_SIZE;
-    buf.len -= drop;
+/// Reading does not consume: a reader that successfully delivered the bytes
+/// calls [`logbuf_release`] with the returned [`LogRead`]. Reads start at the
+/// oldest unread byte — the same direction Linux's `syslog(2)` copies — so a
+/// reader that drains in chunks makes progress through the log instead of
+/// re-reading the newest tail.
+pub fn logbuf_read(out: &mut [u8]) -> LogRead {
+    LOGBUF.lock().read(out)
+}
+
+/// Drops the bytes a previous [`logbuf_read`] returned and reports how many were
+/// dropped.
+///
+/// Returns `0` when the window is stale: the reader's bytes were overwritten by
+/// the ring wrapping (or the window was already released), so the bytes it
+/// received no longer exist and dropping anything would discard records it never
+/// saw. Records logged after the read stay in the buffer, because only the
+/// reader's own window is removed.
+pub fn logbuf_release(read: LogRead) -> usize {
+    LOGBUF.lock().release(read)
 }
 
 /// Drops everything in the kernel log buffer.
 pub fn logbuf_clear() {
-    let mut buf = LOGBUF.lock();
-    buf.start = 0;
-    buf.len = 0;
+    LOGBUF.lock().clear();
 }
 
 /// Fixed-capacity line writer: logging must not allocate, and a runaway

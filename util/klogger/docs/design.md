@@ -65,7 +65,7 @@ KernelLogger::log
 |-----------|----------------|
 | `Filter` | default level plus up to `MAX_FILTER_RULES` `target=level` rules; longest-prefix match |
 | `FILTER` | the global filter, guarded by `SpinNoIrq` |
-| `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `snapshot` copies the newest tail, `consume` drops a returned prefix |
+| `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `read` copies the oldest unread window, `release` drops exactly that window |
 | `LOGBUF` | the global ring, guarded by `SpinNoIrq` |
 | `LineBuf` | fixed 256-byte line writer; the last byte is reserved for the terminator and truncation never splits a character |
 | `print_fmt` | serializes console output |
@@ -79,9 +79,10 @@ KernelLogger::log
   sections perform no user-memory access, no sleeping and no allocation;
   `LineBuf` and the ring are fixed-size, so the record path never allocates.
 - User copies for `syslog(2)` happen **outside** `klogger`: `ksyscall` allocates
-  a kernel buffer, calls `logbuf_snapshot`, releases the lock and only then
-  writes to user space. Consuming (`logbuf_consume`) happens after that copy
-  succeeded.
+  a kernel buffer, calls `logbuf_read`, releases the lock and only then writes to
+  user space. `logbuf_release` runs after that copy succeeded and drops exactly
+  the window it was given; a window the ring overwrote in the meantime is stale
+  and drops nothing.
 - `set_filter_spec` is callable at runtime, including from the
   `/proc/sys/kernel/printk` write path. It replaces the whole filter and the
   ceiling in one critical section.
@@ -102,9 +103,27 @@ set_log_level_filter(level) ≡ set only the default, drop every override
 ```
 
 The ring has two states: appending while it has room, and overwriting the oldest
-byte once it is full. `logbuf_consume` advances the read start, which is how a
-`syslog(2)` reader acknowledges the bytes it has delivered; `logbuf_clear` resets
-the start and the length.
+byte once it is full. Every byte that leaves the buffer — either because a reader
+released it or because the ring overwrote it — advances the buffer's sequence
+position (`unread_from`), which is how a `syslog(2)` reader acknowledges exactly
+the bytes it delivered. `logbuf_clear` drops everything and invalidates every
+outstanding reader position.
+
+### Reading and releasing
+
+`logbuf_read(out)` copies the **oldest unread** bytes, in log order, and returns
+a `LogRead { copied, from }` where `from` is the sequence position of the first
+copied byte. Reading does not consume: `logbuf_release(read)` drops that window
+and nothing else, and only if `read.from` still matches the ring, i.e. the window
+was neither already released nor overwritten while the caller was copying the
+bytes to user space. A stale window drops nothing: its bytes no longer exist, and
+dropping a same-sized range instead would discard records the reader never
+received.
+
+Reads therefore start where Linux's `syslog_print_all` starts — at the oldest
+unread record — so a reader that drains in chunks makes progress instead of
+re-reading the newest tail, and the released window is exactly the returned one
+even though the copy happens outside the lock.
 
 ## Algorithms
 
@@ -143,7 +162,23 @@ or commas:
 
 `filter_spec(buf)` is the inverse: it writes the canonical text of the active
 filter into the caller's buffer and returns the length, or `None` when the buffer
-is too small. `/proc/sys/kernel/printk` and the boot banner share it.
+is too small. `/proc/sys/kernel/printk` and the boot banner share it, so the
+buffer they pass is `MAX_FILTER_SPEC`, which is derived from the grammar
+(`MAX_LEVEL_NAME + MAX_FILTER_RULES * (1 + MAX_FILTER_TARGET + 1 +
+MAX_LEVEL_NAME)`) and therefore covers every spec `set_filter_spec` accepts — a
+spec that could be installed but not reported back would make the world-readable
+node fail with `InvalidInput` and hide the active overrides from the boot banner.
+
+The public entry points and their directions:
+
+| Entry point | Direction |
+|-------------|-----------|
+| `set_filter_spec(spec)` | `kruntime` (boot, from the DT/cmdline/Kconfig sources) and `procfs` (`/proc/sys/kernel/printk` write) install a spec; a rejected spec leaves the previous filter untouched |
+| `set_log_level(spec)` | convenience wrapper that applies a spec and ignores a rejection; used by callers that only have a level string |
+| `set_log_level_filter(level)` | set the default level and drop every override (`procfs` tests and internal resets) |
+| `filter_spec(buf)` | `procfs` read side and the boot banner report the active spec |
+| `current_log_level()` | reports the filter's **default** level (not the `log` ceiling, which also includes the overrides) |
+| `logbuf_len` / `logbuf_read` / `logbuf_release` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests |
 
 ### Where the boot filter comes from
 
@@ -160,7 +195,7 @@ word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source
 | Shared state | Synchronization | Notes |
 |--------------|-----------------|-------|
 | filter `FILTER` | `SpinNoIrq<Filter>` | read on the logging hot path; rule lookup is a bounded scan of a fixed array |
-| ring `LOGBUF` | `SpinNoIrq<LogBuf>` | writes and snapshots are mutually exclusive; one record copies at most 256 bytes |
+| ring `LOGBUF` | `SpinNoIrq<LogBuf>` | writes, reads and releases are mutually exclusive; one record copies at most 256 bytes |
 | console output | `SpinNoIrq<()>` inside `print_fmt` | keeps multi-CPU output from interleaving |
 | `log` ceiling | atomic in the `log` crate | updated inside the same `FILTER` critical section that installs the spec |
 
@@ -187,12 +222,16 @@ is taken, and `print_fmt`'s lock is never held together with `LOGBUF`.
   `SYSLOG_ACTION_CONSOLE_*` actions are deliberately not implemented because
   `console_loglevel` is the inverted domain and mixing the two would mislead
   callers.
-- **Consuming instead of clearing**: `READ_CLEAR` drops only the bytes it
+- **Consuming instead of clearing**: `READ_CLEAR` drops only the window it
   returned, so a short or zero-length destination keeps the rest readable.
+- **Sequence positions instead of raw indices**: a reader's window is identified
+  by its sequence position, so a release stays correct across the gap in which
+  the bytes are copied to user space and the ring may wrap.
 
 ## Drop / resource release
 
 Nothing needs destructors: the filter and the ring are static storage and the
 installed logger is `&'static`. The closest operation to a release is
-`logbuf_clear`, which resets the indices without wiping the bytes (they disappear
-as later records overwrite them).
+`logbuf_clear`, which resets the indices (and invalidates outstanding reader
+positions) without wiping the bytes; they disappear as later records overwrite
+them.

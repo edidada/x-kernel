@@ -10,8 +10,8 @@ use log::LevelFilter;
 use unittest::{assert_eq, def_test};
 
 use super::{
-    current_log_level, filter_spec, level_name, level_number, logbuf_clear, logbuf_consume,
-    logbuf_len, logbuf_snapshot, parse_log_level, set_filter_spec, set_log_level,
+    current_log_level, filter_spec, level_name, level_number, logbuf_clear, logbuf_len,
+    logbuf_read, logbuf_release, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
 
@@ -154,7 +154,7 @@ fn logbuf_captures_records_the_console_filter_hides() {
         logbuf_len() > 0,
         "capture did not grow the kernel log buffer"
     );
-    let len = logbuf_snapshot(&mut buf);
+    let len = logbuf_read(&mut buf).copied;
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let line_with = |needle: &str| -> &str {
         text.lines()
@@ -177,7 +177,7 @@ fn logbuf_captures_records_the_console_filter_hides() {
 
     // Clearing drops this test's records; unrelated records may follow.
     logbuf_clear();
-    let len = logbuf_snapshot(&mut buf);
+    let len = logbuf_read(&mut buf).copied;
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     assert!(
         !text.contains("klogger logbuf"),
@@ -189,40 +189,60 @@ fn logbuf_captures_records_the_console_filter_hides() {
     }
 }
 
-/// A destination smaller than the ring returns the newest bytes, not the
-/// oldest ones, so `dmesg` on a full buffer shows the tail of the boot log.
+/// Reads start at the oldest unread byte and advance with each release, so a
+/// reader that drains in chunks makes progress through the log instead of
+/// re-reading the newest tail.
 ///
-/// Two properties make this reproducible on a shared ring:
-///
-/// - the level is pinned here, because the ring only captures what clears the
-///   `log` ceiling and the CI unittest build resolves that ceiling to `off`
-///   (`scripts/ci/prepare_unittest_config.sh` swaps the level tokens and leaves
-///   the Kconfig choice empty), so the build default captures nothing;
-/// - the record is emitted *below* this module's console level: the ceiling is
-///   `trace` so the ring takes it, while the default `warn` keeps the UART quiet
-///   and shrinks the window in which another context can append a record. The
-///   ring is still process-global, so the tail check retries a few times.
+/// Two properties make this reproducible on a shared ring: the level is pinned
+/// (the ring only captures what clears the `log` ceiling, and the CI unittest
+/// build resolves that ceiling to `off`), and the records are emitted below this
+/// module's console level (ceiling `trace`, default `warn`) so they never go
+/// through the UART.
 #[def_test(serial)]
-fn logbuf_snapshot_returns_the_newest_bytes() {
+fn logbuf_read_starts_at_the_oldest_unread_byte() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
     assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    logbuf_clear();
 
-    let mut small = [0u8; 16];
-    let mut tail_from_marker = false;
-    for _ in 0..8 {
-        super::info!("klogger newest-bytes marker");
-        let len = logbuf_snapshot(&mut small);
-        // A destination smaller than the ring is filled completely.
-        assert_eq!(len, small.len());
-        if core::str::from_utf8(&small).is_ok_and(|text| text.contains("marker")) {
-            tail_from_marker = true;
-            break;
-        }
-    }
+    super::info!("klogger order marker one");
+    super::info!("klogger order marker two");
+
+    let mut buf = [0u8; 4096];
+    let read = logbuf_read(&mut buf);
+    let text = core::str::from_utf8(&buf[..read.copied]).expect("log text is utf-8");
+    let first = text.find("klogger order marker one").expect("first record");
+    let second = text.find("klogger order marker two").expect("second record");
     assert!(
-        tail_from_marker,
-        "the newest 16 bytes never came from this test's record"
+        first < second,
+        "records are not in log order: {text}"
+    );
+
+    // A destination smaller than the buffer returns a full window, and the
+    // sequence position advances by exactly what was released.
+    let mut small = [0u8; 16];
+    let window = logbuf_read(&mut small);
+    assert_eq!(window.copied, small.len());
+    assert_eq!(logbuf_release(window), small.len());
+    let next = logbuf_read(&mut small);
+    assert_eq!(
+        next.from,
+        window.from + small.len() as u64,
+        "the next read did not advance past the released window"
+    );
+    assert_eq!(logbuf_release(next), small.len());
+
+    // Releasing the same window twice must not drop a second time: the bytes
+    // are already gone.
+    assert_eq!(logbuf_release(next), 0);
+
+    // The records survive a partial release; only the released bytes are gone.
+    let mut rest = [0u8; 4096];
+    let rest_len = logbuf_read(&mut rest).copied;
+    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
+    assert!(
+        text.contains("klogger order marker two"),
+        "a short read destroyed an undelivered record: {text}"
     );
 
     if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
@@ -230,41 +250,32 @@ fn logbuf_snapshot_returns_the_newest_bytes() {
     }
 }
 
-/// `logbuf_consume` drops exactly the prefix a reader returned: a destination
-/// smaller than the buffer must not destroy the records it could not deliver.
+/// A window that the ring overwrote while the reader was copying is stale:
+/// releasing it drops nothing rather than discarding records the reader never
+/// received.
 #[def_test(serial)]
-fn logbuf_consume_keeps_the_unreturned_records() {
+fn logbuf_release_ignores_an_overwritten_window() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
     assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
     logbuf_clear();
 
-    super::info!("klogger consume marker one");
-    super::info!("klogger consume marker two");
-
-    // A short destination takes the tail and consumes only those bytes.
+    super::info!("klogger stale marker");
     let mut small = [0u8; 16];
-    let copied = logbuf_snapshot(&mut small);
-    assert_eq!(copied, small.len());
-    logbuf_consume(copied);
+    let window = logbuf_read(&mut small);
+    assert_eq!(window.copied, small.len());
 
-    let mut rest = [0u8; 4096];
-    let rest_len = logbuf_snapshot(&mut rest);
-    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
+    // `logbuf_clear` is the cheapest way to invalidate the reader's position,
+    // and it reports the same staleness a ring wrap does.
+    logbuf_clear();
+    assert_eq!(logbuf_release(window), 0);
+    super::info!("klogger after stale marker");
+    let mut buf = [0u8; 4096];
+    let len = logbuf_read(&mut buf).copied;
+    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     assert!(
-        text.contains("klogger consume marker one"),
-        "consuming the tail destroyed an unreturned record: {text}"
-    );
-
-    // Consuming more than is buffered clamps instead of underflowing; unrelated
-    // records may be appended by other contexts at any time, so check that this
-    // test's records are gone rather than that the buffer is empty.
-    logbuf_consume(usize::MAX);
-    let rest_len = logbuf_snapshot(&mut rest);
-    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
-    assert!(
-        !text.contains("klogger consume marker"),
-        "consume(usize::MAX) left records behind: {text}"
+        text.contains("klogger after stale marker"),
+        "releasing a stale window dropped current records: {text}"
     );
 
     if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
@@ -292,7 +303,7 @@ fn logbuf_terminates_truncated_records() {
     super::info!("{}", String::from("\u{5b57}").repeat(120));
 
     let mut buf = [0u8; 4096];
-    let len = logbuf_snapshot(&mut buf);
+    let len = logbuf_read(&mut buf).copied;
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let marker_lines: alloc::vec::Vec<&str> = text
         .lines()
