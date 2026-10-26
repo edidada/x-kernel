@@ -55,7 +55,9 @@ MMC_CIU_HZ=0x2FAF080
 MMC_MAX_CARD_HZ=0x2FAF080
 MMC_4BIT=y
 MMC_CLOCK_LADDER=y
-MMC_IDMAC=y
+# EXPERIMENT (not the intended default): PIO never touches the DMA bounce
+# window, so measuring it against IDMAC isolates the window copy from the bus.
+# MMC_IDMAC is not set
 MMC_MULTIBLOCK=y
 # MMC_BOOT_IO_PROBE is not set
 SCMI_SHMEM_PADDR=0x10f000
