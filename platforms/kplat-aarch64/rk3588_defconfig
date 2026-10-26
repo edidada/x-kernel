@@ -52,12 +52,12 @@ MMC_CIU_HZ=0x2FAF080
 # after the width/clock change); with Linux's order in place the ceiling is
 # raised to 50 MHz so the switch can reach high speed — MMC_CLOCK_LADDER falls
 # back to 25 MHz on its own if this board cannot do it.
-MMC_MAX_CARD_HZ=0x2FAF080
+# MEASUREMENT: half the previous clock, to separate bus rate from the card's
+# own sustained-read rate (identical throughput => card-limited).
+MMC_MAX_CARD_HZ=0x17D7840
 MMC_4BIT=y
 MMC_CLOCK_LADDER=y
-# EXPERIMENT (not the intended default): PIO never touches the DMA bounce
-# window, so measuring it against IDMAC isolates the window copy from the bus.
-# MMC_IDMAC is not set
+MMC_IDMAC=y
 MMC_MULTIBLOCK=y
 # MMC_BOOT_IO_PROBE is not set
 SCMI_SHMEM_PADDR=0x10f000
