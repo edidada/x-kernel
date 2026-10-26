@@ -272,17 +272,20 @@ console and a complete log coexist — the filter decides what is *shown*, the
 buffer records what *happened*. Read it with the usual tool:
 
 ```bash
-dmesg                 # everything captured, oldest first
+dmesg                         # everything captured, oldest first
 dmesg | tail -40
 dmesg | grep -i 'dwmmc\|mmcblk'
-dmesg -r | grep -E '^<(3|4)>' # level filter: 1=error 2=warn 3=info 4=debug 5=trace
-dmesg -c              # read and clear
+dmesg | grep -E '^<(3|4)>'    # level filter: 1=error 2=warn 3=info 4=debug 5=trace
+dmesg | sed -E 's/^<[0-9]>//' # drop the level tag for reading
+dmesg -c > /tmp/boot.log      # read, save, clear
 ```
 
-Lines carry X-Kernel's level number as a `^<N>` prefix. It is the same value
-domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
-inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
-included) strip the prefix by default, hence `-r` above when filtering on it. The ceiling of the active spec is also the
+Lines carry X-Kernel's level number as a `^<N>` prefix — the same value domain
+as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's inverted
+console levels. Linux `dmesg` builds with `FEATURE_DMESG_PRETTY` strip the tag
+(the same as `-r` showing it); builds without it print the tag, which is why
+the `sed` above exists. Serial-capture timestamps (`[   19.8617]` in front of
+every line) come from the capture tool, not from `dmesg`. The ceiling of the active spec is also the
 capture level: with `warn drv_mmc=debug` the buffer holds debug from every
 module but stops before `trace`; add a `target=trace` rule (at boot, or live
 through `/proc/sys/kernel/printk`) to capture trace as well.
