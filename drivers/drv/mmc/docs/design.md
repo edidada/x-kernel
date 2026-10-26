@@ -23,43 +23,87 @@ crate per family, one module per controller core plus SoC glue:
    protocol rejects `SCMI_CCLK_SD` (`HARDWARE_ERROR`), and the source-rate
    registers live in the Secure CRU (reading them at EL1 faults), so the
    driver never reprograms the source and never reads it.
-3. `DwMmcHost::new`: power, all-reset, raw-status clear, line mask (the
+3. `alloc_coherent` the descriptor ring and the bounce window; both are
+   dropped (and the slot falls back to PIO) if they are not below 4 GiB.
+4. `DwMmcHost::new`: power, all-reset, raw-status clear, line mask (the
    driver is poll-only), max timeout, IDMAC routing forced off, baseline
    FIFOTH, VERID-selected FIFO port, HCON FIFO width, CIU clock gated.
-4. `sd::detect_card` through the subsystem core; on success the card is
+5. `sd::detect_card` through the subsystem core; on success the card is
    added to the domain on the mmc bus (`add_bus_instance` +
    `add_device`, parented to this device). No card is a clean outcome.
 
 ## Data path
 
-FIFO-polled PIO. The data phase is issued with `DATA_EXPECT` (plus
-`SEND_STOP` for multi-block reads) and the loop polls `RINTSTS`, **error
-bits first** — a data error never raises `DATA_OVER` — draining the FIFO
-`FCNT`-bounded until the transfer completes, tail included.
+Two mechanisms, one contract. The default is the controller's **internal DMA
+engine** (IDMAC, Linux `dw_mci_idmac_*`); the FIFO-polled **PIO** path stays
+as the fallback the slot latches to when the engine cannot run.
+
+### IDMAC (default)
+
+One 4 KiB descriptor ring plus one 64 KiB bounce window, both
+`alloc_coherent` (mapped `UNCACHED`, so no per-transfer cache maintenance)
+and both required to sit below 4 GiB because the descriptor carries 32-bit
+addresses.
+
+Order per data phase, and the order is load-bearing:
+
+1. stage the bounce window (writes only) — the engine may fetch immediately;
+2. program FIFOTH/BLKSIZ/BYTCNT/`CDTHRCTL=0`, clear `RINTSTS`;
+3. arm the engine: `IDSTS` clear → `CTRL.DMA_RESET` + `BMOD.SWRESET` polled to
+   self-clear → `DBADDR` → `CTRL |= USE_IDMAC|DMA_ENABLE` → `BMOD = FB|DE` →
+   `PLDMND = 1`;
+4. issue the data command;
+5. poll `RINTSTS` (`DATA_OVER`, errors) *and* `IDSTS` (`RI`/`TI`, engine
+   errors), then copy the window out for reads.
+
+Arming before the command is not cosmetic: the card starts streaming as soon
+as it accepts the command, so an engine reset after step 4 drops the first
+block. `PLDMND` is what makes the engine fetch the first descriptor —
+without it `IDSTS` never moves and the phase hangs with a clean status.
+
+Descriptors are chained 4 KiB chunks (`OWN|CH|DIC` on non-final, `FS` first,
+`LD` last), never crossing a 4 KiB boundary (Linux
+`dw_mci_idmac_start_dma`). Completion is polled (`INTMASK = 0`,
+`IDINTEN = 0`) — the first IRQ attempt on this board stormed because the
+level-triggered line stayed asserted on uncleared summary bits.
+
+FIFOTH uses the per-transfer burst geometry here (Linux
+`dw_mci_adjust_fifoth`), because the engine's burst has to match the block
+size.
+
+If the engine fails a transfer the slot **latches to PIO** (`idmac_ok`): the
+engine is stopped, the card unwedged, and the same transfer is retried on the
+FIFO path. A dead engine degrades throughput, never availability. Hosts
+report their per-transfer cap through `MmcHost::max_transfer_bytes` so block
+consumers split requests larger than the window.
+
+### PIO (fallback)
+
+The data phase is issued with `DATA_EXPECT` (plus `SEND_STOP` for multi-block
+reads) and the loop polls `RINTSTS`, **error bits first** — a data error
+never raises `DATA_OVER` — draining the FIFO `FCNT`-bounded until the
+transfer completes, tail included.
 
 Two properties of the FIFO are read from `HCON.HDATA_WIDTH` rather than
 assumed: the access width (16/32/64-bit, Linux `dw_mci_pull_data16/32/64`)
 and the unit of `STATUS.FCNT` (FIFO entries). Linux's `part_buf` logic is
-not needed here because every transfer this core issues is a multiple of
-the widest entry.
+not needed here because every transfer this core issues is a multiple of the
+widest entry.
 
-FIFOTH stays at the probe-time baseline: Linux's per-transfer
-`dw_mci_adjust_fifoth` returns early unless DMA is in use, so it is a
-DMA-burst concern, not a PIO one.
+FIFOTH stays at the probe-time baseline in this mode: Linux's
+`dw_mci_adjust_fifoth` returns early unless DMA is in use.
+
+### Both
 
 `RINTSTS` is cleared at the head of every data phase so no earlier phase's
 `DATA_OVER`/error set can be mistaken for this one's.
 
-Diagnostics always report the command's `RESP0` (R1) next to the
-controller state: a card completes the exchange and *then* refuses the
-transfer (illegal command, block-length or address error), and in that
-case it never drives the data lines at all — the controller sees only a
-start-bit error with zero bytes transferred, which is otherwise
-indistinguishable from a dead data path.
-
-IDMAC (internal DMA) is a documented follow-up: the tgoskits reference
-(`drivers/blk/dwmmc-host`) is IDMAC-only and carries no FIFO fallback, so
-re-introducing it should port that path rather than re-derive it here.
+Diagnostics always report the command's `RESP0` (R1) next to the controller
+state: a card completes the exchange and *then* refuses the transfer
+(illegal command, block-length or address error), and in that case it never
+drives the data lines at all — the controller sees only a start-bit error
+with zero bytes transferred, which is otherwise indistinguishable from a
+dead data path.
 
 ## Recovery
 

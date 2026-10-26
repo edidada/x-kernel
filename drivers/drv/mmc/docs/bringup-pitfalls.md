@@ -166,3 +166,15 @@ turning a scheduling hiccup into an I/O error.
 5. **Compare against a known-good run of the same board** (U-Boot `mmc info`:
    50 MHz, 4-bit, 116.2 GiB). Every mismatch above was visible as a number that
    did not match that baseline.
+
+## Where the data path landed
+
+IDMAC is the default (`MMC_IDMAC`), PIO is the fallback the slot latches to
+when the engine allocation is unusable (not below 4 GiB) or the engine fails
+a transfer. The engine was retried *after* items 2, 4 and 5 were understood:
+its original failure evidence ("IDSTS all zero", `SBE`, `RTO`) was produced
+while the CMD12-in-TRAN bug was still poisoning `resp0` and the command-index
+mask was still wrong, so it never described the engine. Two facts made the
+retry reviewable rather than hopeful: the descriptor-format constraint (32-bit
+addresses) is checked at probe, and every engine failure degrades to a path
+that is already known good on this board.

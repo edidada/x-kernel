@@ -28,7 +28,7 @@ use subsys_mmc::{
     sd,
 };
 
-use super::dw_mmc::DwMmcHost;
+use super::dw_mmc::{DwMmcHost, IDMAC_RING_BYTES, IDMAC_WINDOW_BYTES, IdmacBuffers};
 
 /// `static const struct of_device_id dw_mmc_rockchip_match[]`.
 static IDS: &[PlatformId] = &[
@@ -84,6 +84,29 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             regs.region().base
         );
 
+        // One coherent descriptor page + one bounce window for the internal
+        // DMA engine; both must stay addressable by 32-bit descriptors, so the
+        // ring/window pair is only installed when the allocation lands below
+        // 4 GiB (otherwise the host falls back to PIO).
+        let idmac = match (
+            dev.res().alloc_coherent(IDMAC_RING_BYTES, IDMAC_RING_BYTES),
+            dev.res().alloc_coherent(IDMAC_WINDOW_BYTES, 4096),
+        ) {
+            (Ok(ring), Ok(window)) => match IdmacBuffers::new(ring, window) {
+                Some(buffers) => Some(buffers),
+                None => {
+                    log::warn!(
+                        "dwmmc-rocks: slot {slot}: IDMAC buffers are not below 4 GiB; using PIO"
+                    );
+                    None
+                }
+            },
+            _ => {
+                log::warn!("dwmmc-rocks: slot {slot}: no coherent memory for IDMAC; using PIO");
+                None
+            }
+        };
+
         let host = Arc::new(
             DwMmcHost::new(
                 regs,
@@ -92,6 +115,7 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
                 slot,
                 card_clock_ceiling(max_frequency),
                 bus_width_ceiling(),
+                idmac,
             )
             .map_err(host_error)?,
         );

@@ -22,9 +22,9 @@
 //! start-bit/CRC errors on the first wide data phase), which is why the
 //! clock facts below are stated so loudly.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use driver_base::IoMap;
+use driver_base::{CoherentMem, IoMap};
 use subsys_mmc::{BusWidth, DataDir, MmcCommand, MmcError, MmcHost, MmcIos, MmcResponse, RespKind};
 
 // ---------------------------------------------------------------------------
@@ -51,9 +51,17 @@ const SDMMC_TCBCNT: usize = 0x05c;
 const SDMMC_TBBCNT: usize = 0x060;
 const SDMMC_VERID: usize = 0x06c;
 const SDMMC_HCON: usize = 0x070;
+// Internal DMA controller (Linux `dw_mci_idmac_*`).
+const SDMMC_BMOD: usize = 0x080;
+const SDMMC_PLDMND: usize = 0x084;
+const SDMMC_DBADDR: usize = 0x088;
+const SDMMC_IDSTS: usize = 0x08c;
+const SDMMC_IDINTEN: usize = 0x090;
 /// FIFO data port: pre-2.40a at 0x100, 2.40a+ at 0x200 (Linux
 /// `DATA_OFFSET` / `DATA_240A_OFFSET`).
 const SDMMC_DATA_OFFSET: usize = 0x100;
+/// Card-read threshold (2.40a+; at 0x100 the older IP has the FIFO port).
+const SDMMC_CDTHRCTL: usize = 0x100;
 const SDMMC_DATA_240A_OFFSET: usize = 0x200;
 /// VERID register value that moved the data port to 0x200.
 const DW_MMC_240A: u32 = 0x240a;
@@ -123,6 +131,53 @@ const CMD_INDX_MASK: u32 = 0x3F;
 
 // CLKENA bits.
 const CLKEN_ENABLE: u32 = 1 << 0;
+
+// BMOD bits (Linux `SDMMC_IDMAC_*`).
+const BMOD_SWRESET: u32 = 1 << 0;
+const BMOD_FB: u32 = 1 << 1;
+const BMOD_ENABLE: u32 = 1 << 7;
+
+// IDMAC descriptor word 0 (Linux `IDMAC_DESC_*`).
+const DESC_OWN: u32 = 1 << 31;
+const DESC_CH: u32 = 1 << 4;
+const DESC_FS: u32 = 1 << 3;
+const DESC_LD: u32 = 1 << 2;
+const DESC_DIC: u32 = 1 << 1;
+
+// IDSTS summary bits; `IDINTEN` stays 0 because completion is polled, but
+// the status bits are mask-independent.
+const IDMAC_INT_TI: u32 = 1 << 0;
+const IDMAC_INT_RI: u32 = 1 << 1;
+const IDMAC_INT_FBE: u32 = 1 << 2;
+const IDMAC_INT_DU: u32 = 1 << 4;
+const IDMAC_INT_CES: u32 = 1 << 5;
+const IDMAC_INT_NI: u32 = 1 << 8;
+const IDMAC_INT_AI: u32 = 1 << 9;
+const IDMAC_INT_ERRORS: u32 = IDMAC_INT_FBE | IDMAC_INT_DU | IDMAC_INT_CES | IDMAC_INT_AI;
+const IDMAC_INT_CLEAR: u32 = IDMAC_INT_ERRORS | IDMAC_INT_NI | IDMAC_INT_RI | IDMAC_INT_TI;
+
+/// One IDMAC descriptor (Linux `struct idmac_desc`), 16 bytes, 16-byte
+/// aligned; the DMA engine walks `des3` from `DBADDR`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Default)]
+struct IdmacDesc {
+    des0: u32,
+    des1: u32,
+    des2: u32,
+    des3: u32,
+}
+
+const IDMAC_DESC_SIZE: usize = core::mem::size_of::<IdmacDesc>();
+/// Descriptor payload cap. The length field is 13 bits, but Linux programs
+/// 4 KiB per descriptor and never cross a 4 KiB boundary with one
+/// descriptor — the engine's burst handling assumes it.
+const IDMAC_DESC_MAX_BYTES: usize = 4096;
+pub(crate) const IDMAC_RING_BYTES: usize = 4096;
+const IDMAC_RING_DESCS: usize = IDMAC_RING_BYTES / IDMAC_DESC_SIZE;
+/// Bounce window: every transfer is staged through it, which is what keeps
+/// the descriptor addresses inside the 32-bit IDMAC limit and the cache
+/// maintenance out of the block path.
+pub(crate) const IDMAC_WINDOW_BYTES: usize = 64 * 1024;
 
 /// STATUS register card-busy indicator (DAT0 driven low).
 const STATUS_CARD_BUSY: u32 = 1 << 9;
@@ -194,6 +249,39 @@ pub struct DwMmcHost {
     slot: u8,
     /// Current configured bus clock (0 = gated).
     current_clock: AtomicU32,
+    /// Descriptor ring + bounce window for the internal DMA engine. `None`
+    /// when the probe could not provide DMA-safe memory, which leaves the
+    /// FIFO-polled PIO path in charge.
+    idmac: Option<IdmacBuffers>,
+    /// Whether the data path still uses IDMAC. Latches off on the first
+    /// engine failure so a bad engine degrades to PIO instead of failing
+    /// every request.
+    idmac_ok: AtomicBool,
+}
+
+/// The two DMA allocations the engine needs (`dmam_alloc_coherent` in
+/// Linux terms). Both must be addressable by the 32-bit descriptor format.
+pub(crate) struct IdmacBuffers {
+    ring: CoherentMem,
+    window: CoherentMem,
+}
+
+impl IdmacBuffers {
+    /// Descriptor ring and bounce window, plus the 32-bit reachability
+    /// check the descriptor format imposes.
+    pub(crate) fn new(ring: CoherentMem, window: CoherentMem) -> Option<Self> {
+        let descriptor_limit = u64::try_from(IDMAC_RING_BYTES).unwrap_or(u64::MAX);
+        let window_limit = u64::try_from(IDMAC_WINDOW_BYTES).unwrap_or(u64::MAX);
+        let fits = |bus: u64, len: u64| bus.saturating_add(len) <= u64::from(u32::MAX) + 1;
+        if ring.len() < IDMAC_RING_BYTES
+            || window.len() < IDMAC_WINDOW_BYTES
+            || !fits(ring.bus_addr(), descriptor_limit)
+            || !fits(window.bus_addr(), window_limit)
+        {
+            return None;
+        }
+        Some(Self { ring, window })
+    }
 }
 
 // SAFETY: `regs` is a probe-owned MMIO mapping; all accessors go through
@@ -213,17 +301,19 @@ impl DwMmcHost {
     /// `mmc->f_max`): every `set_ios` request is clamped to it, which is
     /// how a board declares that its SD clock domain cannot tolerate the
     /// nominal mode rate. 0 means "no cap".
-    pub fn new(
+    pub(crate) fn new(
         regs: IoMap,
         bus_hz: u32,
         fifo_depth: u32,
         slot: u8,
         max_card_hz: u32,
         max_width: BusWidth,
+        idmac: Option<IdmacBuffers>,
     ) -> Result<Self, MmcError> {
         if bus_hz == 0 || fifo_depth < 2 {
             return Err(MmcError::Unsupported);
         }
+        let idmac_ok = kbuild_config::MMC_IDMAC && idmac.is_some();
         let mut host = Self {
             regs,
             bus_hz,
@@ -234,6 +324,8 @@ impl DwMmcHost {
             max_card_hz,
             max_width,
             current_clock: AtomicU32::new(0),
+            idmac,
+            idmac_ok: AtomicBool::new(idmac_ok),
         };
 
         // Power on the card BEFORE reset (U-Boot `dwmci_init` order):
@@ -280,10 +372,15 @@ impl DwMmcHost {
         host.fifo_width = fifo_width_bytes(hcon) as usize;
         log::info!(
             "dwmmc: slot {} verid {verid:#06x} hcon {hcon:#010x} fifo {fifo_depth} x {}B, \
-             data-port {:#x}, ciu {bus_hz} Hz, card-clock ceiling {max_card_hz} Hz",
+             data-port {:#x}, ciu {bus_hz} Hz, card-clock ceiling {max_card_hz} Hz, data path {}",
             host.slot,
             host.fifo_width,
             host.fifo_off,
+            if host.idmac_ok.load(Ordering::Acquire) {
+                "idmac"
+            } else {
+                "pio (fifo-polled)"
+            },
         );
         Ok(host)
     }
@@ -333,10 +430,36 @@ impl DwMmcHost {
         (fcnt as usize) * self.fifo_width
     }
 
-    /// Baseline FIFO thresholds (Linux `fifoth_val`).
+    /// Baseline FIFO thresholds (Linux `fifoth_val`): what the probe
+    /// programs and what PIO runs on.
     fn baseline_fifoth(&self) -> u32 {
         let half = self.fifo_depth / 2;
         fifoth(0x2, half - 1, half)
+    }
+
+    /// Per-transfer thresholds for the DMA burst (Linux
+    /// `dw_mci_adjust_fifoth`): the largest burst that divides both the
+    /// block depth and the TX-mark inverse, RX watermark one burst behind.
+    /// DMA-only — the same function returns early for PIO upstream.
+    fn dma_fifoth(&self, block_size: u32) -> u32 {
+        const MSIZE_WORDS: [u32; 8] = [1, 4, 8, 16, 32, 64, 128, 256];
+        let tx_wmark = self.fifo_depth / 2;
+        let tx_inverse = self.fifo_depth - tx_wmark;
+        let mut msize = 0u32;
+        let mut rx_wmark = 1u32;
+        let fifo_width = u32::try_from(self.fifo_width).unwrap_or(4);
+        if block_size.is_multiple_of(fifo_width) {
+            let block_depth = block_size / fifo_width;
+            for index in (1..MSIZE_WORDS.len()).rev() {
+                let burst = MSIZE_WORDS[index];
+                if block_depth.is_multiple_of(burst) && tx_inverse.is_multiple_of(burst) {
+                    msize = index as u32;
+                    rx_wmark = burst - 1;
+                    break;
+                }
+            }
+        }
+        fifoth(msize, rx_wmark, tx_wmark)
     }
 
     /// Issue one command frame and poll the START bit (the controller
@@ -673,11 +796,31 @@ impl MmcHost for DwMmcHost {
         bytes: usize,
         buf: &mut [u8],
     ) -> Result<(), MmcError> {
+        if self.uses_idmac() && bytes <= self.idmac_max_bytes() {
+            match self.data_cmd_read_idmac(cmd, bytes, buf) {
+                Ok(()) => return Ok(()),
+                Err(err) => self.degrade_to_pio(cmd, err),
+            }
+        }
         self.data_cmd_read(cmd, bytes, buf)
     }
 
     fn write_data_cmd(&self, cmd: &MmcCommand, bytes: usize, buf: &[u8]) -> Result<(), MmcError> {
+        if self.uses_idmac() && bytes <= self.idmac_max_bytes() {
+            match self.data_cmd_write_idmac(cmd, bytes, buf) {
+                Ok(()) => return Ok(()),
+                Err(err) => self.degrade_to_pio(cmd, err),
+            }
+        }
         self.data_cmd_write(cmd, bytes, buf)
+    }
+
+    fn max_transfer_bytes(&self) -> usize {
+        if self.uses_idmac() {
+            self.idmac_max_bytes()
+        } else {
+            usize::MAX
+        }
     }
 
     fn set_ios(&self, ios: &MmcIos) -> Result<(), MmcError> {
@@ -862,29 +1005,337 @@ impl DwMmcHost {
         Err(MmcError::Timeout)
     }
 
-    /// Shared data-phase head: thresholds, geometry, command issue.
+    // -----------------------------------------------------------------
+    // Internal DMA engine (Linux `dw_mci_idmac_*` + `dw_mci_submit_data`)
+    // -----------------------------------------------------------------
+
+    /// Whether IDMAC is still the data path for this slot.
+    fn uses_idmac(&self) -> bool {
+        self.idmac_ok.load(Ordering::Acquire)
+    }
+
+    /// Bytes one IDMAC transfer can carry: the bounce window, capped by what
+    /// one descriptor chain can describe.
+    fn idmac_max_bytes(&self) -> usize {
+        IDMAC_WINDOW_BYTES.min(usize::from(u16::MAX) * 512)
+    }
+
+    /// Program the descriptor chain for `bytes` at `window_bus`, returning
+    /// the chain base. Writes go through the raw CPU pointer of the coherent
+    /// ring, so the whole ring is re-zeroed per transfer (the engine reads
+    /// `des0` before anything else).
+    fn idmac_prepare(&self, window_bus: u64, bytes: usize) -> Option<u64> {
+        let buffers = self.idmac.as_ref()?;
+        let ring_bus = buffers.ring.bus_addr();
+        // Descriptors per transfer: 4 KiB each, never crossing a 4 KiB
+        // boundary (Linux `dw_mci_idmac_start_dma`).
+        let mut count = 0usize;
+        let mut offset = 0usize;
+        while offset < bytes {
+            let addr = window_bus.checked_add(offset as u64)?;
+            let boundary = IDMAC_DESC_MAX_BYTES - (addr as usize % IDMAC_DESC_MAX_BYTES);
+            offset += (bytes - offset).min(IDMAC_DESC_MAX_BYTES).min(boundary);
+            count += 1;
+        }
+        if count == 0 || count > IDMAC_RING_DESCS {
+            return None;
+        }
+
+        let ring = buffers.ring.as_ptr().cast::<IdmacDesc>();
+        // SAFETY: the ring is a probe-owned coherent allocation of
+        // `IDMAC_RING_BYTES`, so zeroing `IDMAC_RING_DESCS` descriptors stays
+        // inside it. No other CPU touches the ring while a slot transfer is
+        // in flight (one transfer per slot at a time).
+        unsafe { core::ptr::write_bytes(ring, 0, IDMAC_RING_DESCS) };
+        let mut offset = 0usize;
+        for index in 0..count {
+            let addr = window_bus + offset as u64;
+            let boundary = IDMAC_DESC_MAX_BYTES - (addr as usize % IDMAC_DESC_MAX_BYTES);
+            let chunk = (bytes - offset).min(IDMAC_DESC_MAX_BYTES).min(boundary);
+            let is_last = index + 1 == count;
+            let mut des0 = DESC_OWN;
+            if !is_last {
+                des0 |= DESC_CH | DESC_DIC;
+            }
+            if index == 0 {
+                des0 |= DESC_FS;
+            }
+            if is_last {
+                des0 |= DESC_LD;
+            }
+            let next = if is_last {
+                0
+            } else {
+                (ring_bus + ((index + 1) * IDMAC_DESC_SIZE) as u64) as u32
+            };
+            let desc = IdmacDesc {
+                des0,
+                des1: chunk as u32,
+                des2: addr as u32,
+                des3: next,
+            };
+            // SAFETY: `index < count <= IDMAC_RING_DESCS`, so the slot
+            // is inside the ring allocation and `IdmacDesc`-aligned.
+            unsafe { core::ptr::write_volatile(ring.wrapping_add(index), desc) };
+            offset += chunk;
+        }
+        // The engine fetches descriptors over the bus: the writes above must
+        // be visible before `PLDMND`.
+        core::sync::atomic::fence(Ordering::Release);
+        Some(ring_bus)
+    }
+
+    /// Two-stage engine reset (Linux `dw_mci_idmac_reset`): the `CTRL` pulse
+    /// and the `BMOD` software reset, both polled to self-clear. A stale
+    /// `SWRESET` holds the engine in reset and silently swallows `PLDMND`.
+    fn idmac_reset(&self) {
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_DMA_RESET);
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & CTRL_DMA_RESET == 0 {
+                break;
+            }
+        }
+        self.writel(SDMMC_BMOD, self.readl(SDMMC_BMOD) | BMOD_SWRESET);
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_BMOD) & BMOD_SWRESET == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Arm the engine for one data phase: statuses, geometry, ring, routing,
+    /// then the poll-demand kick that finally starts the descriptor fetch.
+    fn idmac_start(&self, window_bus: u64, bytes: usize) -> Option<u64> {
+        let chain = self.idmac_prepare(window_bus, bytes)?;
+        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
+        self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+        self.idmac_reset();
+        self.writel(SDMMC_DBADDR, chain as u32);
+        // `INT_ENABLE` stays 0: completion is polled, `IDINTEN` stays 0 for
+        // the same reason (the status bits are mask-independent).
+        let ctrl = self.readl(SDMMC_CTRL) | CTRL_USE_IDMAC | CTRL_DMA_ENABLE;
+        self.writel(SDMMC_CTRL, ctrl);
+        self.writel(SDMMC_IDINTEN, 0);
+        self.writel(SDMMC_BMOD, BMOD_FB | BMOD_ENABLE);
+        // Linux `dw_mci_idmac_start_dma`: the poll demand write is what makes
+        // the engine fetch the first descriptor. Without it `IDSTS` never
+        // moves and the data phase hangs with a clean status.
+        self.writel(SDMMC_PLDMND, 1);
+        Some(chain)
+    }
+
+    /// Stop the engine and take the controller back to PIO routing
+    /// (Linux `dw_mci_idmac_stop`).
+    fn idmac_stop(&self) {
+        let mut bmod = self.readl(SDMMC_BMOD);
+        bmod &= !BMOD_ENABLE;
+        let mut ctrl = self.readl(SDMMC_CTRL);
+        ctrl &= !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE);
+        self.writel(SDMMC_BMOD, bmod);
+        self.writel(SDMMC_CTRL, ctrl | CTRL_DMA_RESET);
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & CTRL_DMA_RESET == 0 {
+                break;
+            }
+        }
+        self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+    }
+
+    /// Drain a completed read transfer out of the bounce window.
+    fn idmac_window_read(&self, bytes: usize, out: &mut [u8]) {
+        let Some(buffers) = self.idmac.as_ref() else {
+            return;
+        };
+        // SAFETY: the window is a probe-owned coherent allocation of
+        // `IDMAC_WINDOW_BYTES` and `bytes` is bounded by `idmac_max_bytes`.
+        let window = unsafe { core::slice::from_raw_parts(buffers.window.as_ptr(), bytes) };
+        out[..bytes].copy_from_slice(window);
+    }
+
+    /// Stage a write transfer into the bounce window.
+    fn idmac_window_write(&self, bytes: usize, input: &[u8]) {
+        let Some(buffers) = self.idmac.as_ref() else {
+            return;
+        };
+        // SAFETY: see `idmac_window_read`; the slice is the window and the
+        // copy length is bounded by `idmac_max_bytes`.
+        let window = unsafe { core::slice::from_raw_parts_mut(buffers.window.as_ptr(), bytes) };
+        window.copy_from_slice(&input[..bytes]);
+        core::sync::atomic::fence(Ordering::Release);
+    }
+
+    /// Give up on the internal DMA engine for this slot: stop it and let the
+    /// caller retry the same transfer on the FIFO-polled path. The failure
+    /// site already unwedged the card (it knows whether a data phase was
+    /// armed); a dead engine must degrade, not fail I/O.
+    fn degrade_to_pio(&self, cmd: &MmcCommand, err: MmcError) {
+        self.idmac_ok.store(false, Ordering::Release);
+        self.idmac_stop();
+        log::warn!(
+            "dwmmc: IDMAC transfer on cmd {} failed ({err:?}); this slot now uses FIFO-polled PIO",
+            cmd.opcode
+        );
+    }
+
+    /// Poll one IDMAC data phase to completion (polled form of
+    /// `dw_mci_idmac_complete_dma`): controller `DATA_OVER`, engine `RI`/`TI`
+    /// and both error sets. Errors first — a data error never raises
+    /// `DATA_OVER`, and the engine reports its own faults in `IDSTS`.
+    fn idmac_wait(&self, cmd: &MmcCommand) -> Result<(), MmcError> {
+        for _ in spin_budget(DATA_POLL_LIMIT) {
+            let idsts = self.readl(SDMMC_IDSTS);
+            if idsts & IDMAC_INT_ERRORS != 0 {
+                self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+                self.dump_state(&alloc::format!(
+                    "idmac cmd {} (idsts {idsts:#x})",
+                    cmd.opcode
+                ));
+                return Err(MmcError::Io);
+            }
+            let pending = self.readl(SDMMC_RINTSTS);
+            if pending & INT_DATA_ERRORS != 0 {
+                let err = self.take_errors(pending);
+                self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+                self.dump_state(&alloc::format!("idmac cmd {}", cmd.opcode));
+                return Err(err);
+            }
+            if pending & INT_DATA_OVER != 0 && idsts & (IDMAC_INT_RI | IDMAC_INT_TI) != 0 {
+                self.writel(SDMMC_RINTSTS, INT_DATA_OVER);
+                self.writel(SDMMC_IDSTS, IDMAC_INT_CLEAR);
+                return Ok(());
+            }
+        }
+        self.dump_state(&alloc::format!("idmac timeout cmd {}", cmd.opcode));
+        Err(MmcError::Timeout)
+    }
+
+    /// IDMAC read phase: arm the engine, issue the command, wait, copy out.
+    ///
+    /// Ordering is the whole point: the engine is armed *before* the command
+    /// goes out, because the card starts streaming as soon as it accepts it
+    /// and an engine reset afterwards would drop the first block.
+    fn data_cmd_read_idmac(
+        &self,
+        cmd: &MmcCommand,
+        bytes: usize,
+        buf: &mut [u8],
+    ) -> Result<(), MmcError> {
+        if buf.len() < bytes {
+            return Err(MmcError::Io);
+        }
+        let Some(buffers) = self.idmac.as_ref() else {
+            return Err(MmcError::Unsupported);
+        };
+        let window_bus = buffers.window.bus_addr();
+        let cmdr = self.prepare_data_phase(cmd, DataDir::Read, bytes);
+        if self.idmac_start(window_bus, bytes).is_none() {
+            // Nothing was asked of the card yet: controller hygiene only.
+            self.idmac_stop();
+            self.recover();
+            return Err(MmcError::Io);
+        }
+        if let Err(err) = self.issue_data_cmd(cmdr, cmd.arg) {
+            self.idmac_stop();
+            self.recover();
+            return Err(err);
+        }
+        if let Err(err) = self.idmac_wait(cmd) {
+            self.idmac_stop();
+            self.recover_after_data_error(cmd, self.readl(SDMMC_RINTSTS));
+            return Err(err);
+        }
+        // Coherent memory: `alloc_coherent` maps the window UNCACHED, so the
+        // engine's writes are already visible to the CPU.
+        self.idmac_window_read(bytes, buf);
+        Ok(())
+    }
+
+    /// IDMAC write phase: stage into the window, arm, then issue the command.
+    fn data_cmd_write_idmac(
+        &self,
+        cmd: &MmcCommand,
+        bytes: usize,
+        buf: &[u8],
+    ) -> Result<(), MmcError> {
+        if buf.len() < bytes {
+            return Err(MmcError::Io);
+        }
+        let Some(buffers) = self.idmac.as_ref() else {
+            return Err(MmcError::Unsupported);
+        };
+        let window_bus = buffers.window.bus_addr();
+        // The staged bytes must be in memory before the engine can fetch
+        // them, so the copy precedes the poll-demand kick.
+        self.idmac_window_write(bytes, buf);
+        let cmdr = self.prepare_data_phase(cmd, DataDir::Write, bytes);
+        if self.idmac_start(window_bus, bytes).is_none() {
+            self.idmac_stop();
+            self.recover();
+            return Err(MmcError::Io);
+        }
+        if let Err(err) = self.issue_data_cmd(cmdr, cmd.arg) {
+            self.idmac_stop();
+            self.recover();
+            return Err(err);
+        }
+        if let Err(err) = self.idmac_wait(cmd) {
+            self.idmac_stop();
+            self.recover_after_data_error(cmd, self.readl(SDMMC_RINTSTS));
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Program thresholds and geometry for the upcoming data phase and
+    /// return the encoded command **without issuing it**: the PIO path issues
+    /// it directly, the IDMAC path has to arm the engine first (the card
+    /// starts streaming as soon as the command is accepted).
+    fn prepare_data_phase(&self, cmd: &MmcCommand, dir: DataDir, bytes: usize) -> u32 {
+        let blksz: u32 = if bytes.is_multiple_of(512) {
+            512
+        } else {
+            bytes as u32
+        };
+        // PIO runs on the probe-time baseline (the CPU drains by polling
+        // `FCNT`, so there is no burst to match); the DMA engine needs the
+        // burst geometry for this block size.
+        self.writel(
+            SDMMC_FIFOTH,
+            if self.uses_idmac() {
+                self.dma_fifoth(blksz)
+            } else {
+                self.baseline_fifoth()
+            },
+        );
+        self.writel(SDMMC_BLKSIZ, blksz);
+        self.writel(SDMMC_BYTCNT, bytes as u32);
+        // 0x100 is the card-read threshold on 2.40a+ (on older IP it is the
+        // FIFO port, which `fifo_off` already says). Linux enables it only
+        // for HS200/UHS; a stale bootloader value would gate the read
+        // stream, so default-speed transfers keep it off.
+        if self.fifo_off == SDMMC_DATA_240A_OFFSET {
+            self.writel(SDMMC_CDTHRCTL, 0);
+        }
+        // Phase hygiene: nothing from an earlier phase may be mistaken for
+        // this one's completion (`DATA_OVER`) or error set. DAT0 release is
+        // handled by PRV_DAT_WAIT on the command itself.
+        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
+        self.cmdr_of(cmd, Some(dir), bytes)
+    }
+
+    /// Issue the data command and wait for the CIU to accept it.
+    fn issue_data_cmd(&self, cmdr: u32, arg: u32) -> Result<(), MmcError> {
+        self.ciu_cmd(cmdr, arg, true)
+    }
+
+    /// PIO data-phase head: threshold/geometry programming plus the command.
     fn start_data_phase(
         &self,
         cmd: &MmcCommand,
         dir: DataDir,
         bytes: usize,
     ) -> Result<(), MmcError> {
-        // Baseline FIFO thresholds: in PIO the controller works off the
-        // probe-time value (Linux `dw_mci_adjust_fifoth` is DMA-only), and
-        // the CPU drain keeps up by polling `FCNT` rather than a burst.
-        self.writel(SDMMC_FIFOTH, self.baseline_fifoth());
-        let blksz: u32 = if bytes.is_multiple_of(512) {
-            512
-        } else {
-            bytes as u32
-        };
-        self.writel(SDMMC_BLKSIZ, blksz);
-        self.writel(SDMMC_BYTCNT, bytes as u32);
-        // Phase hygiene: nothing from an earlier phase may be mistaken for
-        // this one's completion (`DATA_OVER`) or error set. DAT0 release is
-        // handled by PRV_DAT_WAIT on the command itself.
-        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
-        let cmdr = self.cmdr_of(cmd, Some(dir), bytes);
-        self.ciu_cmd(cmdr, cmd.arg, true)
+        let cmdr = self.prepare_data_phase(cmd, dir, bytes);
+        self.issue_data_cmd(cmdr, cmd.arg)
     }
 }

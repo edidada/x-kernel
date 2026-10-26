@@ -71,28 +71,45 @@ impl BlockDeviceOperations for MmcBlkOps {
         if !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(KError::Io);
         }
-        let blocks = blocks_in(buf.len()).map_err(|_| KError::Io)?;
-        // Multi-block first (one CMD18 for the whole range), then the
-        // durable per-block shape. The auto-stop path streams blocks
-        // back-to-back, so a PIO drain that gets preempted can overrun the
-        // FIFO — a failure that says nothing about the media. Latch it off
-        // for the remaining I/O instead of retrying it on every request.
-        if blocks > 1 && self.multiblock.load(Ordering::Acquire) {
-            let addr = self.device_address(block_id);
-            match read_blocks(self.card.host.as_ref(), addr, blocks, buf) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    self.multiblock.store(false, Ordering::Release);
-                    log::warn!(
-                        "mmcblk: {blocks}-block read failed ({err:?}); falling back to one CMD17 \
-                         per block for the rest of this session"
-                    );
+        let host = self.card.host.as_ref();
+        // The block layer may hand in more than one host transfer (the DMA
+        // engine stages through a bounce window), so walk the buffer in
+        // host-sized pieces, each of which stays a whole number of blocks.
+        let max_bytes = host.max_transfer_bytes().max(BLOCK_SIZE);
+        let mut done = 0usize;
+        while done < buf.len() {
+            let take = (buf.len() - done).min(max_bytes);
+            let take = take - take % BLOCK_SIZE;
+            let chunk = &mut buf[done..done + take];
+            let blocks = blocks_in(take).map_err(|_| KError::Io)?;
+            let first_block = block_id + (done / BLOCK_SIZE) as u64;
+            // Multi-block first (one CMD18 for the whole piece), then the
+            // durable per-block shape. The auto-stop path streams blocks
+            // back-to-back, so a polled drain that gets preempted can
+            // overrun the FIFO — a failure that says nothing about the
+            // media. Latch it off for the remaining I/O instead of retrying
+            // it on every request.
+            let mut retry_per_block = true;
+            if blocks > 1 && self.multiblock.load(Ordering::Acquire) {
+                let addr = self.device_address(first_block);
+                match read_blocks(host, addr, blocks, chunk) {
+                    Ok(()) => retry_per_block = false,
+                    Err(err) => {
+                        self.multiblock.store(false, Ordering::Release);
+                        log::warn!(
+                            "mmcblk: {blocks}-block read failed ({err:?}); falling back to one \
+                             CMD17 per block for the rest of this session"
+                        );
+                    }
                 }
             }
-        }
-        for (index, chunk) in buf.chunks_mut(BLOCK_SIZE).enumerate() {
-            let addr = self.device_address(block_id + index as u64);
-            read_blocks(self.card.host.as_ref(), addr, 1, chunk).map_err(|err| err.to_kerror())?;
+            if retry_per_block {
+                for (index, piece) in chunk.chunks_mut(BLOCK_SIZE).enumerate() {
+                    let addr = self.device_address(first_block + index as u64);
+                    read_blocks(host, addr, 1, piece).map_err(|err| err.to_kerror())?;
+                }
+            }
+            done += take;
         }
         Ok(())
     }

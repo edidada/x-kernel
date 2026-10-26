@@ -497,6 +497,21 @@ config MMC_BOOT_IO_PROBE
       zeros" and shows whether repeated transfers stay healthy), but it is
       diagnostic I/O on every boot, so it stays off by default.
 
+config MMC_IDMAC
+    bool "MMC internal DMA engine (IDMAC)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      Drive data phases with the controller's internal DMA engine instead of
+      the FIFO-polled PIO path: one 4 KiB descriptor ring plus a 64 KiB
+      bounce window, completion polled from IDSTS/RINTSTS.
+
+      The engine is what this IP is designed for (Linux `dw_mci_idmac_*`), and
+      it keeps the CPU out of the copy. It needs memory below 4 GiB because
+      the descriptor format carries 32-bit addresses; when the probe cannot
+      provide that, or when the engine fails a transfer, the slot latches back
+      to PIO instead of failing I/O.
+
 config MMC_MAX_CARD_HZ
     hex "MMC card clock ceiling (Hz)"
     depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP

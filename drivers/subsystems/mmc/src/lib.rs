@@ -245,6 +245,15 @@ pub trait MmcHost: Send + Sync {
     /// Whether a card is currently seated in the slot (Linux `get_cd`).
     fn card_present(&self) -> bool;
 
+    /// Largest single data phase this host accepts, in bytes.
+    ///
+    /// Hosts with a DMA engine stage transfers through a bounce window, so
+    /// a request can be larger than one transfer. Block consumers split on
+    /// this; `usize::MAX` means "no host-side limit".
+    fn max_transfer_bytes(&self) -> usize {
+        usize::MAX
+    }
+
     /// Widest data bus this slot can drive (Linux `MMC_CAP_4_BIT_DATA`).
     ///
     /// The protocol core never asks for a wider bus than this, so a slot
