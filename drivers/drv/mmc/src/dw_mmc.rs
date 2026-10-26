@@ -432,6 +432,21 @@ impl DwMmcHost {
 }
 
 impl MmcHost for DwMmcHost {
+    fn recover(&self) {
+        // FIFO reset (self-clearing), then the force-stop CMD12, then a
+        // full raw-status clear (post-transfer hygiene).
+        self.writel(SDMMC_CTRL, self.readl(SDMMC_CTRL) | CTRL_FIFO_RESET);
+        for _ in spin_budget(10_000) {
+            if self.readl(SDMMC_CTRL) & CTRL_FIFO_RESET == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let stop = CMD_STOP | CMD_RESP_EXP | CMD_RESP_CRC | CMD_USE_HOLD_REG | 12;
+        let _ = self.ciu_cmd(stop, 0, true);
+        self.writel(SDMMC_RINTSTS, 0xFFFF_FFFF);
+    }
+
     fn send_cmd(&self, cmd: &MmcCommand) -> Result<MmcResponse, MmcError> {
         // Fallback diagnostics: EVERY command failure names itself here.
         match self.send_cmd_inner(cmd) {

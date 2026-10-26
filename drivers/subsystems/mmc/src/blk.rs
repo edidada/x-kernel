@@ -131,6 +131,7 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         // Partition scan first (Linux mmc_blk creates mmcblk0pN devices):
         // one disk per used partition, falling back to the whole card
         // when the card has no partition table.
+        bus_data.host.recover();
         let partitions = scan_partitions(bus_data.host.as_ref());
         let slot = bus_data.slot;
         let mut views: alloc::vec::Vec<(alloc::string::String, u64)> = alloc::vec::Vec::new();

@@ -244,6 +244,12 @@ pub trait MmcHost: Send + Sync {
 
     /// Whether a card is currently seated in the slot (Linux `get_cd`).
     fn card_present(&self) -> bool;
+
+    /// Error-recovery hook: reset the FIFO, force-stop the card with
+    /// CMD12 and clear controller state (Linux's post-transfer error
+    /// path). Called by the protocol core at phase boundaries where a
+    /// previous transfer may have left residue.
+    fn recover(&self) {}
 }
 
 /// Read whole 512-byte blocks (Linux `mmc_read_blocks`): CMD17 for one

@@ -270,6 +270,12 @@ pub fn detect_card(
     }
     let high_speed = switch_high_speed(host_ref, &csd, &scr, bus_width_4bit)?;
 
+    // Phase-boundary hygiene: the switch/SCR data phases leave the
+    // controller's FIFO and the card's data state machine with residue;
+    // a force-stop + FIFO reset here gives the next transfer a clean
+    // start (Linux mmc_set_timing boundary housekeeping).
+    host_ref.recover();
+
     Ok(MmcCardData {
         kind: CardKind::Sd,
         slot: ctx.slot,
