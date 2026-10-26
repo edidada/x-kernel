@@ -7,12 +7,14 @@ kernel modules (trusted) ──logging macros──────► klogger ─�
                                                        └──► LOGBUF ──► ksyscall::sys_syslog
 boot metadata (boot chain, semi-trusted) ──filter spec──► set_filter_spec
 privileged user ──/proc/sys/kernel/printk──► set_filter_spec
-privileged user ──syslog(2)──► logbuf_read / logbuf_release
+any user ──syslog(2) READ_ALL / SIZE_BUFFER──► logbuf_read
+privileged user ──syslog(2) READ_CLEAR / CLEAR / SIZE_UNREAD──► logbuf_read / logbuf_release
 ```
 
 `klogger` does not check privileges itself: the console-filter write path is
-gated by `procfs` (`cred().is_privileged()`) and the read-back path by `ksyscall`
-(`current_cred()`). The module's own security goal is therefore that no input it
+gated by `procfs` (`cred().is_privileged()`) and the read-back path by `ksyscall`,
+which allows `READ_ALL`/`SIZE_BUFFER` for any caller and requires `euid == 0`
+(Linux's `CAP_SYSLOG` stand-in) for the rest. The module's own security goal is therefore that no input it
 is fed can corrupt its state or its memory.
 
 ## External boundary / attack surface
@@ -77,7 +79,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 | T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, a privileged write, or the compiled-in `LOG_FILTER` | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; every boot source reports its rejection on the console through the unfiltered `kprintln!` path (the level being installed would filter a `warn!`), `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
 | T-02 | An override widens the default ceiling and spills hot-path `trace` lines | Low | A `target=trace` rule | The ceiling is the maximum of all rules, so only that target is widened; hot paths such as `kipi` log at `trace` |
 | T-03 | A log flood overwrites boot evidence | Medium | More than 64 KiB of records | The ring overwrites the oldest bytes; the read side returns the oldest unread window, so an unreleased window is what a reader sees until it is overwritten; no rate limit (see Known limitations) |
-| T-04 | Unauthorized reads leak kernel addresses and paths | Medium | An unprivileged `syslog(2)` call | `ksyscall::sys_syslog` checks `is_privileged()` first and returns `OperationNotPermitted` |
+| T-04 | Unauthorized reads leak kernel addresses and paths | Medium | An unprivileged `syslog(2)` call | `READ_ALL`/`SIZE_BUFFER` are open to every caller (Linux's default with `dmesg_restrict` off) so `dmesg` works for users; clearing, read-and-clear and the unread count require `euid == 0`, which stands in for `CAP_SYSLOG` until capability sets exist. A `dmesg_restrict` equivalent is not implemented (known limitation) |
 | T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to `/proc/sys/kernel/printk` | `procfs` requires `cred().is_privileged()` on write; the node is owner-write, world-read |
 | T-06 | An over-long record loses its prefix or corrupts line boundaries | Low | A module prints a very long message | Truncation keeps the `<N>` prefix, reserves one byte for the terminator (so the record always ends with `\n`), and stops at a character boundary |
 | T-07 | A read starts inside a multi-byte character, so `dmesg` prints invalid UTF-8 | Low | A release boundary lands mid-character | Records themselves are character-aligned, so this needs a reader that releases an arbitrary byte count (a short destination); `dmesg`'s chunked drain is the case, and user-space tools handle it because the kernel never parses the body |

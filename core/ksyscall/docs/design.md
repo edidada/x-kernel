@@ -580,8 +580,14 @@ Implemented actions, with Linux's numbering:
 
 Order of operations and failure handling:
 
-1. `kprocess::current_cred().is_privileged()` runs first; an unprivileged
-   caller gets `OperationNotPermitted` and never touches the ring.
+1. Privilege is decided **per action**, before the action is validated — the
+   order Linux's `check_syslog_permissions` uses. `READ_ALL` (3) and
+   `SIZE_BUFFER` (10) are open to every caller, matching Linux's default
+   (`dmesg_restrict` off); `READ_CLEAR` (4), `CLEAR` (5) and `SIZE_UNREAD` (9)
+   require privilege, and an unknown action counts as restricted so an
+   unprivileged caller sees `EPERM` where Linux also returns `EPERM` before its
+   `EINVAL` default. The predicate is `euid == 0`, standing in for `CAP_SYSLOG`
+   until capability sets exist (see the known limitation in `security.md`).
 2. The `SIZE_*` actions return `klogger`'s count and capacity.
 3. The read actions decode `len` at its ABI width (`i32`) and reject a negative
    value with `InvalidInput` before touching the ring: Linux declares the

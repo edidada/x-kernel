@@ -145,6 +145,22 @@ const SYSLOG_ACTION_SIZE_UNREAD: i32 = 9;
 /// `syslog(2)` action: return the buffer's total size.
 const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
 
+/// Whether `action` needs privilege, mirroring Linux's `syslog_action_restricted`.
+///
+/// With `dmesg_restrict` off (Linux's default, and X-Kernel has no restrict
+/// knob) Linux keeps `READ_ALL` and `SIZE_BUFFER` open to every caller, so
+/// `dmesg` works for an unprivileged user; clearing the log, read-and-clear and
+/// the unread count stay restricted. Unknown actions count as restricted, which
+/// is also how Linux reaches `EPERM` before it reaches its `EINVAL` default.
+///
+/// The privilege predicate is `euid == 0`, standing in for Linux's
+/// `CAP_SYSLOG` until X-Kernel's capability sets exist: a non-root caller that
+/// holds `CAP_SYSLOG` is treated as unprivileged, and root is trusted
+/// regardless of its capability set.
+fn action_needs_privilege(action: i32) -> bool {
+    !matches!(action, SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_SIZE_BUFFER)
+}
+
 /// Accesses the kernel log buffer (`dmesg`).
 ///
 /// Only the read side is implemented, which is what `dmesg` uses; the console
@@ -169,7 +185,10 @@ const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
 /// `buf` carries user addresses from the raw syscall arguments, so it is
 /// rebuilt as a typed [`UserPtr`] here instead of in the dispatch arm.
 pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isize> {
-    if !kprocess::current_cred().is_privileged() {
+    // Privilege is decided per action and before the action is validated, the
+    // order Linux's `check_syslog_permissions` uses: reading the log is open to
+    // any caller, while mutating it (or asking for the unread count) is not.
+    if action_needs_privilege(action) && !kprocess::current_cred().is_privileged() {
         return Err(KError::OperationNotPermitted);
     }
     match action {
@@ -388,3 +407,4 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     Ok(written as _)
 }
 unittest::path_mod_test!(tests_sysinfo, "../ut-tests/sys/tests_sysinfo.rs");
+unittest::path_mod_test!(tests_syslog, "../ut-tests/sys/tests_syslog.rs");

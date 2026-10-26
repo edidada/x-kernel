@@ -349,13 +349,23 @@ and their error ordering remain enforced. The timerfd backend accepts only
 
 ### Kernel log read-back (`syslog`)
 
-Canonical kernel log data leaves the kernel only through `syslog(2)`, and that
-path is privilege-gated: an unprivileged caller gets `OperationNotPermitted`
-before any buffer access, so log contents (kernel addresses, module paths, task
-names) are not an unprivileged information channel. Read actions rebuild a
-typed `UserPtr<u8>` and reject a null destination as `InvalidInput`; the actual
-copy runs after the log ring's lock is released, and a failing copy returns its
-own error without dropping anything.
+`syslog(2)` is gated per action, matching Linux with `dmesg_restrict` off (its
+default): `READ_ALL` and `SIZE_BUFFER` are readable by any caller — otherwise an
+unprivileged `dmesg` could not run at all — while `READ_CLEAR`, `CLEAR` and
+`SIZE_UNREAD` require privilege, as does any unknown action. That means the log
+contents (kernel addresses from backtraces, module paths, task names) are an
+unprivileged information channel exactly as on a stock Linux kernel; the way to
+close it is Linux's `dmesg_restrict`, which this kernel does not implement yet.
+
+The privilege predicate is `euid == 0`. X-Kernel has no capability sets yet, so
+it stands in for `CAP_SYSLOG`, with two consequences worth knowing: a non-root
+caller holding `CAP_SYSLOG` is treated as unprivileged, and root is trusted even
+after dropping that capability. Both disappear once `kcred` grows capability
+sets and the predicate becomes `has_cap_syslog()`.
+
+Read actions rebuild a typed `UserPtr<u8>` and reject a null destination as
+`InvalidInput`; the actual copy runs after the log ring's lock is released, and a
+failing copy returns its own error without dropping anything.
 
 `len` is a signed 32-bit ABI argument, so it is truncated to `i32` and a negative
 value is rejected with `InvalidInput` before the ring or the destination is
