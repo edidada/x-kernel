@@ -233,6 +233,22 @@ mirrored to `bundle/qemu.log` (alongside the live terminal output), and when
 the run ends with backtrace frames the addresses are resolved right away.
 Disable with `XKMAKE_ARGS='--no-symbolize'`.
 
+### Changing the log level without rebuilding
+
+Verbosity has three layers, most specific first, all using the same vocabulary
+(`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`, `5`/`trace`):
+
+1. `/chosen/x-kernel,log-level = "debug";` in the device tree — a board
+   property, so a serial-console session can raise the level by editing the DTB
+   and rebooting (no kernel rebuild, no boot-loader change);
+2. `loglevel=5`, `quiet` or `debug` on the kernel command line
+   (`boot_info` cmdline, otherwise `/chosen/bootargs`);
+3. the `LOG_LEVEL_*` Kconfig choice (build-time default).
+
+Invalid runtime values are reported and ignored. Prefer layer 1 on hardware:
+it keeps the flashed image and the documented behaviour identical while the
+verbosity follows the board.
+
 ### Symbolizing logs from real hardware
 
 Board logs work the same way. The kernel runs at its link-time virtual
