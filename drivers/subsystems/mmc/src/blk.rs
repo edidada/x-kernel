@@ -41,6 +41,9 @@ static IDS: &[MmcIdEntry] = &[MmcIdEntry::kind(CardKind::Sd)];
 struct MmcBlkOps {
     card: MmcCardData,
     start_lba: u64,
+    /// This view's size in 512-byte blocks: the card capacity for the
+    /// whole-card view, the partition's own bounds for a `mmcblk0pN` view.
+    blocks: u64,
     /// Whether a multi-block (CMD18 + auto-stop) read is still worth
     /// trying. Starts from `MMC_MULTIBLOCK` and latches off the first time
     /// the controller loses a multi-block data phase, so the optimisation
@@ -57,7 +60,7 @@ impl MmcBlkOps {
 
 impl BlockDeviceOperations for MmcBlkOps {
     fn num_blocks(&self) -> u64 {
-        self.card.sectors.saturating_sub(self.start_lba)
+        self.blocks
     }
 
     fn block_size(&self) -> usize {
@@ -153,9 +156,10 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         bus_data.host.recover();
         let partitions = scan_partitions(bus_data.host.as_ref());
         let slot = bus_data.slot;
-        let mut views: alloc::vec::Vec<(alloc::string::String, u64, u32)> = alloc::vec::Vec::new();
+        let mut views: alloc::vec::Vec<(alloc::string::String, u64, u64, u32)> =
+            alloc::vec::Vec::new();
         if partitions.is_empty() {
-            views.push((alloc::format!("mmcblk{slot}"), 0, 0));
+            views.push((alloc::format!("mmcblk{slot}"), 0, bus_data.sectors, 0));
         } else {
             // Disk numbering follows Linux `mmcblk0` / `mmcblk0pN`: the
             // whole card would take minor 0, partition N takes minor N.
@@ -163,10 +167,25 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
             // allocated per view — a fixed 0 makes the second publish
             // collide in `add_disk` (`AlreadyExists`) and, because the
             // probe then fails, withdraws the disks that did publish.
-            for (index, start_lba) in partitions.iter().enumerate() {
+            for (index, (start_lba, sectors)) in partitions.iter().enumerate() {
                 let part =
                     u32::try_from(index).map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))? + 1;
-                views.push((alloc::format!("mmcblk{slot}p{part}"), *start_lba, part));
+                // Never claim blocks the card does not have: a bogus entry
+                // must not turn into an out-of-range transfer.
+                let sectors = (*sectors).min(bus_data.sectors.saturating_sub(*start_lba));
+                if sectors == 0 || *start_lba >= bus_data.sectors {
+                    log::warn!(
+                        "mmcblk: ignoring partition {part} (start LBA {start_lba}, {sectors} \
+                         sectors) outside the card"
+                    );
+                    continue;
+                }
+                views.push((
+                    alloc::format!("mmcblk{slot}p{part}"),
+                    *start_lba,
+                    sectors,
+                    part,
+                ));
             }
         }
 
@@ -178,7 +197,7 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
         let multiblock = Arc::new(core::sync::atomic::AtomicBool::new(
             kbuild_config::MMC_MULTIBLOCK,
         ));
-        for (name, start_lba, minor) in views {
+        for (name, start_lba, sectors, minor) in views {
             let ops = Box::new(MmcBlkOps {
                 card: MmcCardData {
                     kind: bus_data.kind,
@@ -192,6 +211,7 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
                     host: bus_data.host.clone(),
                 },
                 start_lba,
+                blocks: sectors,
                 multiblock: multiblock.clone(),
             });
             let path: String = alloc::format!("mmc/slot{}:{:04x}", bus_data.slot, bus_data.rca);
@@ -205,9 +225,8 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
                 .publish(&BLOCK, disk.clone(), name.clone())
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
             log::info!(
-                "mmcblk: published {name} (minor {minor}, start LBA {start_lba}, {} sectors, \
-                 {}-bit bus)",
-                bus_data.sectors.saturating_sub(start_lba),
+                "mmcblk: published {name} (minor {minor}, start LBA {start_lba}, {sectors} \
+                 sectors, {}-bit bus)",
                 if bus_data.bus_width_4bit { 4 } else { 1 },
             );
             publications.push(publication);
@@ -224,9 +243,14 @@ impl DriverOps<MmcBus> for MmcBlkDriver {
 }
 
 /// Parse the card's partition table (GPT first, legacy MBR fallback) and
-/// return the start LBAs of all used partitions. Empty = no table (the
-/// whole card is one filesystem).
-fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
+/// return each used partition as `(start_lba, sectors)`. Empty = no table
+/// (the whole card is one filesystem).
+///
+/// The size comes from the entry's own bounds — `last_lba` is inclusive in
+/// GPT, the MBR entry carries a sector count. Using the remaining card
+/// capacity instead would make every partition look like it runs to the end
+/// of the card, so a write near its end would land in the next partition.
+fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<(u64, u64)> {
     let mut lba0 = [0u8; 512];
     if read_blocks(host, 0, 1, &mut lba0).is_err() {
         return alloc::vec::Vec::new();
@@ -251,32 +275,37 @@ fn scan_partitions(host: &dyn crate::MmcHost) -> alloc::vec::Vec<u64> {
         if read_blocks(host, entry_lba as u32, 1, &mut entries).is_err() {
             return alloc::vec::Vec::new();
         }
-        let mut starts = alloc::vec::Vec::new();
+        let mut parts = alloc::vec::Vec::new();
         let mut off = 0usize;
-        while off + entry_size <= 512 && starts.len() < 8 {
+        while off + entry_size <= 512 && parts.len() < 8 {
             let entry = &entries[off..off + entry_size];
             if entry[0..16].iter().any(|&b| b != 0) {
-                starts.push(u64::from_le_bytes(
-                    entry[32..40].try_into().unwrap_or([0; 8]),
-                ));
+                let first = u64::from_le_bytes(entry[32..40].try_into().unwrap_or([0; 8]));
+                // The partition ends at `last_lba`, inclusive; the whole
+                // card's capacity is NOT this partition's size.
+                let last = u64::from_le_bytes(entry[40..48].try_into().unwrap_or([0; 8]));
+                if last >= first {
+                    parts.push((first, last - first + 1));
+                }
             }
             off += entry_size;
         }
-        return starts;
+        return parts;
     }
 
     // Legacy MBR: the four primary entries (type/LBA non-zero, skipping
     // the GPT-protective and extended markers).
-    let mut starts = alloc::vec::Vec::new();
+    let mut parts = alloc::vec::Vec::new();
     for entry_index in 0..4usize {
         let base = 446 + entry_index * 16;
         let ptype = lba0[base + 4];
         let lba = u32::from_le_bytes(lba0[base + 8..base + 12].try_into().unwrap_or([0; 4]));
-        if ptype != 0 && lba != 0 && ptype != 0xEE && ptype != 0x05 {
-            starts.push(u64::from(lba));
+        let sectors = u32::from_le_bytes(lba0[base + 12..base + 16].try_into().unwrap_or([0; 4]));
+        if ptype != 0 && lba != 0 && sectors != 0 && ptype != 0xEE && ptype != 0x05 {
+            parts.push((u64::from(lba), u64::from(sectors)));
         }
     }
-    starts
+    parts
 }
 
 fn lba0_integrity_probe(host: &dyn crate::MmcHost) {

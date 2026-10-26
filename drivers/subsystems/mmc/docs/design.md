@@ -77,4 +77,8 @@ that reintroduces interrupts.
 - No runtime re-scan of an empty slot (a follow-up timer task would
   drive it). The block consumer does scan the partition table at probe
   (`mmcblk0pN`, GPT or legacy MBR) and publishes one disk per used
-  partition, falling back to the whole card.
+  partition, falling back to the whole card. Each published view carries
+  the **partition's own** bounds (`last_lba - first_lba + 1`, or the MBR
+  sector count) as its capacity: deriving it from the remaining card size
+  would let a write near a partition's end land in the next one. Entries
+  that start or end outside the card are skipped with a warning.
