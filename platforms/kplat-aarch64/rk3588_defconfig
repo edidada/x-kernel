@@ -62,7 +62,11 @@ SCMI_SHMEM_PADDR=0x10f000
 # KFEAT_VIRTCCA_HUK_KEY is not set
 # KFEAT_VIRTIO_BUS_MMIO is not set
 # KFEAT_VSOCK is not set
-# LOG_LEVEL_DEBUG is not set
+# Bring-up default: `debug!` records are compiled in either way and only
+# filtered at runtime, so booting at debug means the mmc/IDMAC/PCI evidence is
+# on the console without rebuilding. Quiet it live with
+# `echo 2 > /proc/sys/kernel/printk`, raise to trace with `echo 5 >`.
+LOG_LEVEL_DEBUG=y
 # LOG_LEVEL_ERROR is not set
 # LOG_LEVEL_INFO is not set
 # LOG_LEVEL_TRACE is not set

@@ -235,19 +235,29 @@ Disable with `XKMAKE_ARGS='--no-symbolize'`.
 
 ### Changing the log level without rebuilding
 
-Verbosity has three layers, most specific first, all using the same vocabulary
-(`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`, `5`/`trace`):
+The `log` crate here has no compile-time level cap (`log` is a plain `0.4`
+dependency, no `max_level_*` feature), so every level is compiled in and only
+filtered at runtime. Three layers, most specific first, all using the same
+vocabulary (`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
+`5`/`trace`):
 
-1. `/chosen/x-kernel,log-level = "debug";` in the device tree — a board
-   property, so a serial-console session can raise the level by editing the DTB
-   and rebooting (no kernel rebuild, no boot-loader change);
-2. `loglevel=5`, `quiet` or `debug` on the kernel command line
-   (`boot_info` cmdline, otherwise `/chosen/bootargs`);
-3. the `LOG_LEVEL_*` Kconfig choice (build-time default).
+| # | Layer | Scope | Needs |
+| --- | --- | --- | --- |
+| 1 | `echo 5 > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
+| 2 | `/chosen/x-kernel,log-level = "debug";` | boot of that board | editing the DTB |
+| 3 | `loglevel=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 4 | `LOG_LEVEL_*` Kconfig | build default | a rebuild |
 
-Invalid runtime values are reported and ignored. Prefer layer 1 on hardware:
-it keeps the flashed image and the documented behaviour identical while the
-verbosity follows the board.
+Layer 1 is the one to reach for while debugging on hardware: it changes
+verbosity mid-session (`cat /proc/sys/kernel/printk` reports the number) and
+leaves the flashed image alone. It cannot help with **boot-time** output
+(driver probes run before userland and there is no log ring buffer: what the
+console filter drops is gone), which is what layers 2–4 are for. The RK3588
+defconfig therefore boots at `LOG_LEVEL_DEBUG` during bring-up.
+
+Values are validated; an invalid one is reported and ignored rather than
+silently applied. Note the value order is X-Kernel's (higher = more verbose),
+which is *not* Linux `console_loglevel` compatible.
 
 ### Symbolizing logs from real hardware
 
