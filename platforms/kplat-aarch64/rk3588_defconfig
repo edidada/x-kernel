@@ -45,7 +45,11 @@ KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
 # SCMI_HARDWARE_ERROR); the SD controller takes its clocks as board facts.
 # KFEAT_DRIVER_CLK_SCMI is not set
 SCMI_SMC_ID=0x82000010
-MMC_CIU_HZ=0x2FAF080
+# Derived from measurement, not from a datasheet: two 4-bit runs with the
+# divider at 0 and 1 (9.0 vs 5.1 MB/s) solve to a ~25 MHz card clock with a
+# ~13 us per-block card delay, so the CIU input this divider sees is 25 MHz.
+# MMC_CIU_HZ=50MHz made every programmed rate twice what the hardware produced.
+MMC_CIU_HZ=0x17D7840
 # Card-clock ceiling: the divider math rests on MMC_CIU_HZ being the real
 # source rate, which the firmware does not let us read. Measured: throughput
 # scales with the programmed clock (9.0 MB/s at the 50 MHz ceiling, 5.1 MB/s at

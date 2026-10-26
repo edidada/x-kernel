@@ -231,6 +231,30 @@ compare *where* in the sequence Linux performs that transfer before suspecting
 the mode itself. The retry mechanisms added while guessing (`LADDER_REPEATS`,
 the clock ladder) stay only as safety nets, not as the fix.
 
+## 17. Measure the clock, do not trust the board fact
+
+`MMC_CIU_HZ` was a guess from the start (the source rate lives behind EL3), and
+it was wrong by a factor of two: with the divider bypassed the driver believed
+it programmed 50 MHz, while the card was running at ~25 MHz. Three throughput
+measurements derived the truth without any timer:
+
+| setting | measured |
+| --- | --- |
+| 4-bit, divider 0 (`programmed 50000000 Hz`) | 9.0 MB/s |
+| 4-bit, divider 1 | 5.1 MB/s |
+| PIO instead of IDMAC (same clock) | 9.0 MB/s |
+
+Bytes-per-second for a 4-bit bus is `512 / (1024/C + gap)`; the divider-0 and
+divider-1 runs give two equations, which solve to `C ≈ 23.5 MHz` and a ~13 us
+per-block card delay. The PIO run rules out the DMA bounce window as the cause.
+With `MMC_CIU_HZ` corrected to 25 MHz the programmed rates, the 400 kHz init
+divider and any future high-speed request all agree with the hardware.
+
+Two things made this hard to see, and both were logging mistakes of mine:
+`data path ok at ... 50000000 Hz` printed the *ceiling*, and
+`sd: card bus high speed (50000000 Hz)` printed the protocol's *request*. Both
+now print what the divider actually programmed.
+
 ## Diagnostic rules that came out of this
 
 1. **A completed command is not a successful command.** Decode R1; log it when
