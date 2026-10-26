@@ -246,7 +246,7 @@ levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
 | --- | --- | --- | --- |
 | 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
 | 2 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
-| 3 | `loglevel=5`, `loglevel='warn ksyscall=5'`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 3 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
 | 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build default) Kconfig | build default | a rebuild |
 
 Layer 1 is the one to reach for while debugging on hardware: it changes
@@ -259,7 +259,10 @@ described below.
 
 Invalid values are reported and ignored rather than silently applied; the
 value order is X-Kernel's (higher = more verbose) and *not* Linux
-`console_loglevel` compatible.
+`console_loglevel` compatible. On the command line the whole spec has to stay
+inside one whitespace-free word, so use the comma form
+(`loglevel=warn,ksyscall=debug`); a space-separated spec is cut at the first
+word because whitespace separates kernel parameters.
 
 Every layer takes a full spec, so logging can be *retargeted* rather than
 raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console

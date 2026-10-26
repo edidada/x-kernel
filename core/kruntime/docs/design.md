@@ -366,9 +366,11 @@ BootInfo*
     → memspace::init_memory_management
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
-        (日志过滤：优先取 /chosen/x-kernel,log-level，其次启动命令行
-         `loglevel=` / `quiet` / `debug`，再次 Kconfig `LOG_FILTER` 或
-         `LOG_LEVEL_*`；三者共用同一个 filter spec)
+        (Log filtering, first match wins: /chosen/x-kernel,log-level, then the
+         `loglevel=` / `quiet` / `debug` command line, then Kconfig `LOG_FILTER`,
+         then the `LOG_LEVEL_*` choice. Every source takes the same filter spec;
+         on the command line a full spec stays inside one word, e.g.
+         `loglevel=warn,ksyscall=debug`.)
     → prepare_interrupts
     → init_scheduler
     → init_interrupt (softirq runner, timer/IPI/PMU handlers,

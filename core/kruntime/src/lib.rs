@@ -203,8 +203,10 @@ const fn configured_log_level() -> &'static str {
 /// 3. `LOG_FILTER` (and, when it is empty, the `LOG_LEVEL_*` choice).
 ///
 /// Every source takes the same filter spec: an optional default level plus
-/// `target=level` overrides, e.g. `warn ksyscall=debug`. Invalid input is
-/// reported and ignored rather than applied.
+/// `target=level` overrides, e.g. `warn ksyscall=debug`. Whitespace separates
+/// kernel command-line parameters, so a full spec stays inside one word there:
+/// `loglevel=warn,ksyscall=debug` (the comma form works in every source).
+/// Invalid input is reported and ignored rather than applied.
 fn resolve_boot_log_filter() -> &'static str {
     if let Some(spec) = khal::firmware::dt_log_level() {
         if klogger::set_filter_spec(spec).is_ok() {

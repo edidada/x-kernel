@@ -11,12 +11,16 @@ config LOG_FILTER
 
       Levels are 0..=5 or off/error/warn/info/debug/trace; a target is matched
       by prefix against the record's module path, longest match wins, and a
-      bare level sets the default for everything else. Empty means "use the
-      LOG_LEVEL_* choice alone".
+      bare level sets the default for everything else. Tokens may be separated
+      by spaces or commas. Empty means "use the LOG_LEVEL_* choice alone".
 
       At runtime the same spec is written to /proc/sys/kernel/printk (a bare
       level still works there), so bring-up sessions can retarget logging
       live: `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk`.
+
+      On the kernel command line the spec must be a single word, because
+      whitespace separates kernel parameters: use the comma form there,
+      `loglevel=warn,ksyscall=debug`.
 
 choice
     prompt "Build Type"
