@@ -512,6 +512,22 @@ config MMC_IDMAC
       provide that, or when the engine fails a transfer, the slot latches back
       to PIO instead of failing I/O.
 
+config MMC_CLOCK_LADDER
+    bool "MMC clock ladder on detection failure"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      The CIU input rate is a board fact this driver cannot read
+      (MMC_CIU_HZ), so every programmed card clock is only as good as that
+      assumption. With this enabled, a slot whose card detection fails
+      retries with a halved clock ceiling, down to 4 MHz, and logs which
+      ceiling worked instead of leaving the board unable to boot.
+
+      It costs one extra detection attempt per failure and it tells you the
+      real rate: if detection only works at X, then MMC_MAX_CARD_HZ should be
+      set to X (and MMC_CIU_HZ to twice that). Turn it off once the board's
+      numbers are known.
+
 config MMC_MAX_CARD_HZ
     hex "MMC card clock ceiling (Hz)"
     depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP

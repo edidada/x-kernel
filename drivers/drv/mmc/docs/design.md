@@ -145,6 +145,12 @@ The data bus width is capped the same way: `MmcHost::max_bus_width`
 ceiling a slot with dead wide lines fails every data phase with
 `RINTSTS.SBE` while commands stay perfectly healthy.
 
+Because the source rate is unreadable, a failed detection walks the ceiling
+down (`MMC_CLOCK_LADDER`, halving to 4 MHz) and logs the ceiling that worked
+instead of leaving the board unbootable — one boot then *measures* what the
+divider math had assumed. Once a rate is known, pin `MMC_MAX_CARD_HZ` and turn
+the ladder off.
+
 UHS-I is out of scope, so the sample/drive phase clocks
 (`SCLK_SDMMC_DRV/SAMPLE`) are untouched. That is a deliberate gap with a
 known cost: Linux programs the drive phase (90°) and the sample phase on

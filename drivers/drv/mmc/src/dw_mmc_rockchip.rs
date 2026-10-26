@@ -84,61 +84,71 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
             regs.region().base
         );
 
-        // One coherent descriptor page + one bounce window for the internal
-        // DMA engine; both must stay addressable by 32-bit descriptors, so the
-        // ring/window pair is only installed when the allocation lands below
-        // 4 GiB (otherwise the host falls back to PIO).
-        let idmac = match (
-            dev.res().alloc_coherent(IDMAC_RING_BYTES, IDMAC_RING_BYTES),
-            dev.res().alloc_coherent(IDMAC_WINDOW_BYTES, 4096),
-        ) {
-            (Ok(ring), Ok(window)) => match IdmacBuffers::new(ring, window) {
-                Some(buffers) => Some(buffers),
-                None => {
-                    log::warn!(
-                        "dwmmc-rocks: slot {slot}: IDMAC buffers are not below 4 GiB; using PIO"
-                    );
-                    None
-                }
-            },
-            _ => {
-                log::warn!("dwmmc-rocks: slot {slot}: no coherent memory for IDMAC; using PIO");
-                None
-            }
-        };
+        let base_ceiling = card_clock_ceiling(max_frequency);
+        let mut ceiling = base_ceiling;
+        loop {
+            // Every attempt needs its own mapping and DMA buffers: the host
+            // owns both, and a retry has to start from a fresh controller.
+            let regs = dev.res().iomap(0)?;
+            let idmac = allocate_idmac(dev, slot);
+            let host = Arc::new(
+                DwMmcHost::new(
+                    regs,
+                    ciu_hz,
+                    fifo_depth,
+                    slot,
+                    ceiling,
+                    bus_width_ceiling(),
+                    idmac,
+                )
+                .map_err(host_error)?,
+            );
 
-        let host = Arc::new(
-            DwMmcHost::new(
-                regs,
-                ciu_hz,
-                fifo_depth,
+            // Card detection (Linux mmc_detect_card): no card is a clean
+            // outcome — the slot stays claimed for a future re-scan.
+            let detect = DetectContext {
+                host: host.as_ref(),
                 slot,
-                card_clock_ceiling(max_frequency),
-                bus_width_ceiling(),
-                idmac,
-            )
-            .map_err(host_error)?,
-        );
-
-        // Card detection (Linux mmc_detect_card): no card is a clean
-        // outcome — the slot stays claimed for a future re-scan.
-        let detect = DetectContext {
-            host: host.as_ref(),
-            slot,
-        };
-        match sd::detect_card(&detect, host.clone()) {
-            Ok(card) => {
-                add_card_to_domain(info.id(), &host, card)?;
-            }
-            Err(MmcError::NoCard) => {
-                log::info!("dwmmc-rocks: slot {slot}: no card present");
-            }
-            Err(err) => {
-                log::warn!("dwmmc-rocks: slot {slot}: card detection failed: {err:?}");
+            };
+            match sd::detect_card(&detect, host.clone()) {
+                Ok(card) => {
+                    add_card_to_domain(info.id(), &host, card)?;
+                    if ceiling != base_ceiling {
+                        // The interesting line: detection only worked below
+                        // the configured ceiling, so the CIU input rate the
+                        // divider math assumes is not the rate the firmware
+                        // left. Note it and run at the rate that works.
+                        log::warn!(
+                            "dwmmc-rocks: slot {slot}: detection needed a {ceiling} Hz ceiling \
+                             (configured {base_ceiling} Hz) — the real CIU rate is higher than \
+                             MMC_CIU_HZ assumes; record {ceiling} Hz in MMC_MAX_CARD_HZ"
+                        );
+                    }
+                    return Ok(DwMmcRockchipData { _host: host });
+                }
+                Err(MmcError::NoCard) => {
+                    log::info!("dwmmc-rocks: slot {slot}: no card present");
+                    return Ok(DwMmcRockchipData { _host: host });
+                }
+                Err(err) => {
+                    // The CIU source rate is a board fact this driver cannot
+                    // read, so the divider math rests on an assumption. Rather
+                    // than make the board unbootable, walk the ceiling down and
+                    // report which rate worked (MMC_CLOCK_LADDER).
+                    let next = (ceiling / 2).max(MIN_LADDER_HZ);
+                    if kbuild_config::MMC_CLOCK_LADDER && next < ceiling {
+                        log::warn!(
+                            "dwmmc-rocks: slot {slot}: detection failed at {ceiling} Hz \
+                             ({err:?}); retrying with a {next} Hz ceiling"
+                        );
+                        ceiling = next;
+                        continue;
+                    }
+                    log::warn!("dwmmc-rocks: slot {slot}: card detection failed: {err:?}");
+                    return Ok(DwMmcRockchipData { _host: host });
+                }
             }
         }
-
-        Ok(DwMmcRockchipData { _host: host })
     }
 }
 
@@ -172,6 +182,35 @@ fn add_card_to_domain(
         Err(err) => {
             log::warn!("dwmmc-rocks: card add rejected: {err:?}");
             Err(ProbeError::Fatal(RuntimeError::Invalid))
+        }
+    }
+}
+
+/// Lowest ceiling the clock ladder walks down to. Block I/O at the 400 kHz
+/// identification rate would be unusably slow, so the ladder stops here.
+const MIN_LADDER_HZ: u32 = 4_000_000;
+
+/// One coherent descriptor page plus one bounce window for the internal DMA
+/// engine. Both must stay addressable by 32-bit descriptors, so the pair is
+/// only installed when the allocation lands below 4 GiB (otherwise the slot
+/// runs on FIFO-polled PIO).
+fn allocate_idmac(dev: &mut Device<'_, PlatformBus>, slot: u8) -> Option<IdmacBuffers> {
+    match (
+        dev.res().alloc_coherent(IDMAC_RING_BYTES, IDMAC_RING_BYTES),
+        dev.res().alloc_coherent(IDMAC_WINDOW_BYTES, 4096),
+    ) {
+        (Ok(ring), Ok(window)) => match IdmacBuffers::new(ring, window) {
+            Some(buffers) => Some(buffers),
+            None => {
+                log::warn!(
+                    "dwmmc-rocks: slot {slot}: IDMAC buffers are not below 4 GiB; using PIO"
+                );
+                None
+            }
+        },
+        _ => {
+            log::warn!("dwmmc-rocks: slot {slot}: no coherent memory for IDMAC; using PIO");
+            None
         }
     }
 }
