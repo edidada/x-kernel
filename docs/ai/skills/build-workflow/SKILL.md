@@ -275,13 +275,15 @@ buffer records what *happened*. Read it with the usual tool:
 dmesg                         # everything captured, oldest first
 dmesg | tail -40
 dmesg -r | grep -E '^<(3|4)>' # level filter: 1=error 2=warn 3=info 4=debug 5=trace
-dmesg -c                      # read and clear
+dmesg | sed -E 's/^<[0-9]>//' # drop the level tag when `-r` is unavailable
+dmesg -c > /tmp/boot.log      # read, save, clear
 ```
 
 Lines carry X-Kernel's level number as a `^<N>` prefix. It is the same value
 domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
 inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
 included) strip the prefix by default, hence `-r` above when filtering on it.
+Timestamps in front of every line come from the reader, not from the ring.
 The ceiling of the active spec is also the capture level: with
 `warn ksyscall=debug` the buffer holds debug from every module but stops
 before `trace`; add a `target=trace` rule (at boot, or live through
