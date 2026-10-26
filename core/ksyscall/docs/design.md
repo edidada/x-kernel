@@ -583,10 +583,12 @@ Order of operations and failure handling:
 1. `kprocess::current_cred().is_privileged()` runs first; an unprivileged
    caller gets `OperationNotPermitted` and never touches the ring.
 2. The `SIZE_*` actions return `klogger`'s count and capacity.
-3. The read actions reject `len > isize::MAX` with `InvalidInput` before touching
-   the ring: Linux's `len` is a signed `int`, so a negative length arrives
-   sign-extended in the register and must fail like Linux's `len < 0` rather than
-   be clamped to the buffer size and copied past the caller's declared length.
+3. The read actions decode `len` at its ABI width (`i32`) and reject a negative
+   value with `InvalidInput` before touching the ring: Linux declares the
+   argument as a signed `int`, so a caller's `-1` must fail like Linux's
+   `len < 0` instead of being clamped to the buffer size and copied past the
+   length the caller declared. Truncating to `i32` first normalizes both the
+   sign-extended and the zero-extended register encodings to the same value.
 4. They then rebuild a typed `UserPtr<u8>` and reject a null destination with
    `InvalidInput`.
 5. The kernel read buffer is allocated outside the log lock, sized

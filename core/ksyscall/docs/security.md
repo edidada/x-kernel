@@ -357,10 +357,12 @@ typed `UserPtr<u8>` and reject a null destination as `InvalidInput`; the actual
 copy runs after the log ring's lock is released, and a failing copy returns its
 own error without dropping anything.
 
-`len` is a signed 32-bit ABI argument, so anything above `isize::MAX` is rejected
-with `InvalidInput` before the ring or the destination is touched; clamping it to
-the buffer size would copy up to the whole ring past a length the caller declared
-as negative.
+`len` is a signed 32-bit ABI argument, so it is truncated to `i32` and a negative
+value is rejected with `InvalidInput` before the ring or the destination is
+touched; clamping it to the buffer size would copy up to the whole ring past a
+length the caller declared as negative. Truncating first means a caller cannot
+smuggle a "huge" length past the check by encoding the same value with a
+zero-extended register.
 
 `READ_CLEAR` drops exactly the window it returned: `logbuf_release(read)` runs
 only after a successful copy and only over the sequence range this call read, so

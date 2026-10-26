@@ -160,13 +160,15 @@ const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
 /// buffer keeps the rest readable, and records logged while the copy was in
 /// flight are not thrown away.
 ///
-/// A negative Linux `int` length arrives sign-extended in the register, so
-/// anything above `isize::MAX` is rejected with `InvalidInput` before the buffer
-/// or the ring is touched, which is what Linux does for `len < 0`.
+/// `len` is decoded at the ABI width: Linux declares it `int`, so the register
+/// is truncated to `i32` and a negative value is rejected with `InvalidInput`
+/// before the buffer or the ring is touched — the same result as Linux's
+/// `len < 0` check, for both the sign-extended and the zero-extended register
+/// encodings a caller can produce.
 ///
 /// `buf` carries user addresses from the raw syscall arguments, so it is
 /// rebuilt as a typed [`UserPtr`] here instead of in the dispatch arm.
-pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: usize) -> KResult<isize> {
+pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isize> {
     if !kprocess::current_cred().is_privileged() {
         return Err(KError::OperationNotPermitted);
     }
@@ -178,9 +180,10 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: usize) -> KResult<i
             Ok(0)
         }
         SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
-            if len > isize::MAX as usize {
+            if len < 0 {
                 return Err(KError::InvalidInput);
             }
+            let len = len as usize;
             let user = UserPtr::<u8>::from(buf as usize);
             if user.is_null() {
                 return Err(KError::InvalidInput);
