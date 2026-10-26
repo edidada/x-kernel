@@ -387,6 +387,24 @@ fn setup_bus(
             power_on: true,
         })?;
     }
+    // Report the *negotiated* mode, not the ceiling the host was configured
+    // with: a host ceiling of 50 MHz means nothing if the card stayed at the
+    // default speed.
+    log::info!(
+        "sd: card bus {} ({} Hz, {}-bit){}",
+        if high_speed {
+            "high speed"
+        } else {
+            "default speed"
+        },
+        data_hz,
+        if bus_width_4bit { 4 } else { 1 },
+        if high_speed {
+            ""
+        } else {
+            " [HS switch not applied]"
+        },
+    );
     Ok((bus_width_4bit, high_speed))
 }
 

@@ -119,15 +119,16 @@ impl DriverOps<PlatformBus> for DwMmcRockchipDriver {
                             // The line worth keeping: the configured pair does
                             // not work on this board, and this one does.
                             log::warn!(
-                                "dwmmc-rocks: slot {slot}: data path only works at {}-bit / \
-                                 {ceiling} Hz (configured {}-bit / {base_ceiling} Hz); pin \
-                                 MMC_4BIT/MMC_MAX_CARD_HZ to these values",
+                                "dwmmc-rocks: slot {slot}: data path only works at {}-bit, \
+                                 ceiling {ceiling} Hz (configured {}-bit, ceiling {base_ceiling} \
+                                 Hz); pin MMC_4BIT/MMC_MAX_CARD_HZ to these values",
                                 width_bits(width),
                                 width_bits(widths[0]),
                             );
                         } else {
                             log::info!(
-                                "dwmmc-rocks: slot {slot}: data path ok at {}-bit / {ceiling} Hz",
+                                "dwmmc-rocks: slot {slot}: data path ok at {}-bit, ceiling \
+                                 {ceiling} Hz",
                                 width_bits(width)
                             );
                         }
