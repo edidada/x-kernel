@@ -515,6 +515,13 @@ impl fmt::Display for LineText<'_> {
     }
 }
 
+/// Writes already formatted text to the console output path.
+///
+/// This is the primitive behind [`kprint!`] and [`kprintln!`]: it serializes
+/// console writes with an IRQ-safe lock, but bypasses the per-target filter and
+/// the kernel log buffer (`kprint!` output is not visible to `dmesg`).
+///
+/// May be called in any execution context.
 pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
     static_lock! {
         static LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
@@ -524,6 +531,12 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
     KernelLogger.write_fmt(args)
 }
 
+/// Installs the global `log` logger and starts at the `warn` default.
+///
+/// Call once from primary-CPU boot after the `kiface_logging_api` providers are
+/// linked; `kruntime` then applies the resolved boot filter spec through
+/// [`set_log_level`]. Records emitted before this call are dropped by the `log`
+/// crate, which is why early boot uses [`kprintln!`] instead of the macros.
 pub fn init_klogger() {
     #[expect(
         clippy::unwrap_used,

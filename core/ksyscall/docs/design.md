@@ -561,3 +561,35 @@ Timerfd creation maps the accepted enum to the backend's `TimerFdClock`, which
 is retained through construction and arming; raw ABI IDs do not enter the backend.
 `ut-tests/time_clock_id.rs` checks ABI identity, negative/unknown rejection before
 user-memory access and operation-specific restrictions.
+
+### 内核日志回读（`syslog`）
+
+`sys_syslog` 是 `klogger` 日志环形缓冲区的适配层：缓冲区、过滤器与等级域
+都归 `klogger` 所有，`ksyscall` 只做参数判定、快照与用户拷贝。
+
+实现的 action 与 Linux 同值：
+
+| action | 名称 | 行为 |
+|--------|------|------|
+| 3 | `READ_ALL` | 返回缓冲区内容，不清空 |
+| 4 | `READ_CLEAR` | 返回内容，拷贝成功后清空 |
+| 5 | `CLEAR` | 清空缓冲区，返回 0 |
+| 9 | `SIZE_UNREAD` | 返回当前已用字节数 |
+| 10 | `SIZE_BUFFER` | 返回缓冲区总容量 |
+
+顺序与失败处理：
+
+1. 先做 `kprocess::current_cred().is_privileged()` 检查，不足返回
+   `OperationNotPermitted`；未授权调用不触碰缓冲区。
+2. `SIZE_*` 直接返回 `klogger` 的计数/容量。
+3. 读类 action 重建 `UserPtr<u8>`，空指针返回 `InvalidInput`。
+4. 在锁外分配内核快照缓冲（长度取 `logbuf_len().min(len)`），调用
+   `logbuf_snapshot` 取尾部数据；**用户拷贝不在持有日志锁时进行**，避免
+   缺页路径长时间关闭中断。
+5. `READ_CLEAR` 只在拷贝成功后清空，`EFAULT` 时保留日志。
+6. 其他 action（包括 Linux 的 `CONSOLE_*` 控制项）返回 `InvalidInput`：
+   控制台等级由 `/proc/sys/kernel/printk` 独占，二者的数值域相反，混用会
+   让用户态误以为写入了别的东西。
+
+返回值是实际拷贝的字节数（`isize`）；`dmesg`、`dmesg -c`、`dmesg -r` 因此
+可以直接工作。

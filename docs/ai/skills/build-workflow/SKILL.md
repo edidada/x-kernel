@@ -238,31 +238,33 @@ Disable with `XKMAKE_ARGS='--no-symbolize'`.
 The `log` crate here has no compile-time level cap (`log` is a plain `0.4`
 dependency, no `max_level_*` feature), so every level is compiled in and only
 filtered at runtime. Four layers, most specific first, all taking the same
-vocabulary (`0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
-`5`/`trace`, optionally with `target=level` overrides):
+spec vocabulary — an optional default level plus `target=level` overrides,
+levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
+`5`/`trace`:
 
 | # | Layer | Scope | Needs |
 | --- | --- | --- | --- |
-| 1 | `echo 'warn ksyscall=debug' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
-| 2 | `/chosen/x-kernel,log-level = "debug";` | boot of that board | editing the DTB |
-| 3 | `loglevel=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
-| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` Kconfig | build default | a rebuild |
+| 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
+| 2 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
+| 3 | `loglevel=5`, `loglevel='warn ksyscall=5'`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build default) Kconfig | build default | a rebuild |
 
-Layer 1 is the one to reach for on hardware: it changes verbosity mid-session
-(`cat /proc/sys/kernel/printk` reports the whole spec) and keeps the flashed
-image and the documented behaviour identical. It cannot help with what the
-serial console **shows during boot** (the node only exists once userland
-runs), which is what layers 2-4 are for.
+Layer 1 is the one to reach for while debugging on hardware: it changes
+verbosity mid-session (`cat /proc/sys/kernel/printk` reports the whole spec)
+and leaves the flashed image and the documented behaviour identical. It cannot
+help with what the **serial console** shows during boot — the node only exists
+once userland runs — which is what layers 2-4 are for. It does not lose the
+boot-time records either: the log ring buffer keeps them for `dmesg`, as
+described below.
 
 Invalid values are reported and ignored rather than silently applied; the
 value order is X-Kernel's (higher = more verbose) and *not* Linux
 `console_loglevel` compatible.
 
-Every layer takes a full spec, so logging can be *retargeted* instead of
+Every layer takes a full spec, so logging can be *retargeted* rather than
 raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console
-while one stack talks. The spec's ceiling is also what the ring buffer
-captures (see below), so a `target=level` rule widens both the console and
-`dmesg` for that target.
+while one stack talks, and the spec's ceiling is also what the ring buffer
+captures, so one rule widens both the console and `dmesg` for that target.
 
 ### `dmesg`: the console filter does not lose records
 

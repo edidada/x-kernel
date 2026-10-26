@@ -189,7 +189,11 @@ the MM mutex. Addresses use a minimum width of 12 hex digits and device numbers
 are rendered as `00:00`. Several status/memory fields and non-cgroup namespace
 identities are placeholders. Mount reporting uses synthetic device identities
 and is not a globally frozen namespace snapshot. `printk` uses X-Kernel log-level
-values, not Linux console-loglevel semantics.
+values, not Linux console-loglevel semantics: it reads and writes the whole
+filter spec of `klogger` (`warn ksyscall=debug`), so a write both changes the
+default level and replaces every per-target override. Writes are
+privilege-gated and validated by `klogger::set_filter_spec`, which applies the
+new spec atomically or not at all.
 
 `/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
 (the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the

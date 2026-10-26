@@ -346,3 +346,21 @@ IDs return InvalidInput before user-memory access. Recognizing an enum does not
 grant support for every syscall: the existing setter, sleep and timerfd subsets
 and their error ordering remain enforced. The timerfd backend accepts only
 `TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.
+
+### 内核日志回读（`syslog`）
+
+Canonical kernel log data leaves the kernel only through `syslog(2)`, and that
+path is privilege-gated: an unprivileged caller gets `OperationNotPermitted`
+before any buffer access, so log contents (kernel addresses, module paths, task
+names) are not an unprivileged information channel. Read actions rebuild a
+typed `UserPtr<u8>` and reject a null destination as `InvalidInput`; the actual
+copy runs after the log ring's lock is released, and a failing copy returns its
+own error without clearing the buffer.
+
+Snapshot size is clamped to `min(requested_len, logbuf_len())`, so the kernel
+allocation is bounded by the ring (64 KiB) and never by the caller's `len`.
+Console-verbosity actions stay unimplemented on purpose: Linux's inverted
+`console_loglevel` numbering would let an unauthorized or confused writer
+change console verbosity through a path that looks like a read. Console
+control remains on `/proc/sys/kernel/printk`, whose write side has its own
+privilege check and spec validation.
