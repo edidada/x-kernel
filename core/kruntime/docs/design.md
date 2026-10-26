@@ -370,8 +370,10 @@ BootInfo*
          first accepted source wins — /chosen/x-kernel,log-level, the
          `loglevel=` / `quiet` / `debug` command line, then Kconfig
          `LOG_FILTER`. Every source takes the same filter spec, and a spec with
-         only `target=level` rules keeps the build level as its default. On the
-         command line a full spec stays inside one word, e.g.
+         only `target=level` rules keeps the build level as its default; a
+         rejected source is reported on the console through `kprintln!`, because
+         the level being installed is what would filter a `warn!`. On the command
+         line a full spec stays inside one word, e.g.
          `loglevel=warn,ksyscall=debug`.)
     → prepare_interrupts
     → init_scheduler

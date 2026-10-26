@@ -198,7 +198,11 @@ line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. The `LOG_LEVEL_*` choic
 installed **first**, before any source is consulted: a source may carry rules
 only, and such a spec keeps the level already in force, so it has to be the build
 level rather than the logger's hard-coded default. Every rejected value is
-reported and the next source is tried, so a typo cannot mute the kernel.
+reported and the next source is tried, so a typo cannot mute the kernel. Those
+reports go out through `kprintln!` (the unfiltered console path) instead of
+`warn!`: the resolver is installing the very level that would filter the warning,
+so an `error`- or `off`-level build would otherwise hide the diagnostic that
+explains why its configured filter was ignored.
 
 Whitespace separates command-line parameters, so a full spec must stay inside one
 word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source.

@@ -194,7 +194,16 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
-/// Resolve the boot-time log filter, in this order:
+/// Resolve the boot-time log filter from the live boot environment.
+fn resolve_boot_log_filter() -> &'static str {
+    resolve_log_filter(
+        khal::firmware::dt_log_level(),
+        khal::cmdline(),
+        kbuild_config::LOG_FILTER,
+    )
+}
+
+/// Resolve the boot-time log filter from explicit sources, in this order:
 ///
 /// 1. `/chosen/x-kernel,log-level` in the device tree — a board property that
 ///    can change verbosity without rebuilding the kernel or touching the boot
@@ -213,20 +222,28 @@ const fn configured_log_level() -> &'static str {
 /// and such a spec keeps the level already in force as its default. Without that
 /// step the default would be the logger's hard-coded value instead of the
 /// `LOG_LEVEL_*` choice, and a rules-only spec would silently change verbosity
-/// for every other module. Invalid input is reported and ignored rather than
-/// applied.
-fn resolve_boot_log_filter() -> &'static str {
+/// for every other module.
+///
+/// A rejected spec is reported with [`kprintln!`] rather than `warn!`: the level
+/// this function is installing is exactly what a `warn!` would be filtered by, so
+/// reporting an `error`/`off` build's rejected filter through the logger would
+/// hide the very diagnostic that explains the silence.
+fn resolve_log_filter(
+    dt_spec: Option<&'static str>,
+    cmdline: Option<&'static str>,
+    log_filter: &'static str,
+) -> &'static str {
     let build_level = apply_build_log_level();
-    if let Some(spec) = khal::firmware::dt_log_level() {
+    if let Some(spec) = dt_spec {
         if klogger::set_filter_spec(spec).is_ok() {
             return spec;
         }
-        warn!(
+        kprintln!(
             "ignoring invalid /chosen/x-kernel,log-level=\"{spec}\"; expected a level 0..=5 or \
              off/error/warn/info/debug/trace, optionally with target=level overrides"
         );
     }
-    if let Some(cmdline) = khal::cmdline() {
+    if let Some(cmdline) = cmdline {
         for token in cmdline.split_ascii_whitespace() {
             if let Some(spec) = token.strip_prefix("loglevel=")
                 && !spec.is_empty()
@@ -234,7 +251,7 @@ fn resolve_boot_log_filter() -> &'static str {
                 if klogger::set_filter_spec(spec).is_ok() {
                     return spec;
                 }
-                warn!("ignoring invalid loglevel={spec} on the kernel command line");
+                kprintln!("ignoring invalid loglevel={spec} on the kernel command line");
                 break;
             }
         }
@@ -250,15 +267,14 @@ fn resolve_boot_log_filter() -> &'static str {
             }
         }
     }
-    let configured = kbuild_config::LOG_FILTER.trim();
+    let configured = log_filter.trim();
     if !configured.is_empty() {
         if klogger::set_filter_spec(configured).is_ok() {
             return configured;
         }
-        // Report a rejected build-time spec like the other sources do: it is
-        // compiled in, so a typo is otherwise invisible and the kernel silently
-        // runs at the `LOG_LEVEL_*` default instead.
-        warn!(
+        // A compiled-in spec cannot be fixed at runtime, so its rejection must
+        // be reported like the other sources'.
+        kprintln!(
             "ignoring invalid LOG_FILTER=\"{configured}\"; expected a level 0..=5 or \
              off/error/warn/info/debug/trace, optionally with target=level overrides"
         );
