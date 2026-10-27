@@ -27,15 +27,21 @@ level from its printk ring:
 
 | Role | Whose | What it decides | Can it change at runtime? |
 |------|-------|-----------------|---------------------------|
-| **Build cap** | `LOG_LEVEL_*` (Kconfig) | the highest level this image can produce; the `log` crate's own filter | no — rebuild to widen |
-| **Capture** | `LOGBUF` | which records are stored for `dmesg`: **everything up to the cap** | no |
-| **Console** | `Filter` | which records are printed: a default level plus per-target overrides | yes, `/proc/sys/kernel/printk` |
+| **Build floor** | `LOG_LEVEL_*` (Kconfig) | the console default and the lowest level the logger runs at; `log`'s filter is never below it | yes, but only upward |
+| **Capture** | `LOGBUF` | which records are stored for `dmesg`: everything up to the effective ceiling | no separate knob |
+| **Console** | `Filter` | which records are printed: a default level plus per-target overrides | yes, `/proc/sys/kernel/printk`, `/proc/sys/kernel/log_filter` |
 
-The cap is what makes the feature affordable: a record above it is dropped by the
-`log` macro for the price of a comparison, so a `warn`/`info` production image
-pays nothing for the `debug!`/`trace!` sites compiled into it. In exchange, the
-ring cannot be *wider* than the build — widening verbosity means rebuilding, which
-is the usual bring-up loop anyway.
+The build level is what makes the feature affordable *by default*: with no spec
+asking for more, a record above it is dropped by the `log` macro for the price of
+a comparison, so a `warn` production image pays nothing for the `debug!`/`trace!`
+sites compiled into it. A runtime request — `loglevel=debug` on the command line,
+a device-tree property, a `log_filter` write — may raise the ceiling and reveal
+them, and only then is the higher-level work paid. It can never go the other way:
+quietening the console does not take the logger below the build level, which is
+what keeps the ring complete.
+
+`log::max_level` is therefore `max(build level, console filter ceiling)`, published
+in the same critical section as the filter it belongs to.
 
 Because capture is independent of the console filter, a quiet console no longer
 implies a quiet ring: `LOG_LEVEL_DEBUG` plus a console default of `warn` (for
@@ -47,7 +53,7 @@ example `quiet` or `loglevel=2` on the command line) prints warnings while
 ```
 util/klogger/
 ├── src/
-│   └── lib.rs        (build cap, filter, ring buffer, macros, level parsing)
+│   └── lib.rs        (build floor, filter, ring buffer, macros, level parsing)
 ├── ut-tests/
 │   └── lib.rs        (guest cases for the spec grammar and the ring semantics)
 ├── docs/
@@ -60,7 +66,7 @@ util/klogger/
 
 ```
 error!/warn!/info!/debug!/trace!
-        │  (log crate: `level <= log::max_level()`, and max_level == build cap)
+        │  (log crate: `level <= log::max_level()` == max(build floor, console ceiling))
         ▼
 KernelLogger::log
         ├── 1. LineBuf assembles "<N>[time cpu:tid target:line] args\n"
@@ -72,7 +78,7 @@ KernelLogger::log
 
 | Component | Responsibility |
 |-----------|----------------|
-| `Filter` | the build cap, the console default level, and up to `MAX_FILTER_RULES` `target=level` overrides; longest-prefix match |
+| `Filter` | the build floor, the console default level, and up to `MAX_FILTER_RULES` `target=level` overrides; longest-prefix match |
 | `FILTER` | the global filter (cap + console filter), guarded by `SpinNoIrq` |
 | `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `read_newest` copies the newest whole records, `clear` drops everything |
 | `LOGBUF` | the global ring, guarded by `SpinNoIrq` |
@@ -92,7 +98,7 @@ KernelLogger::log
 - `set_filter_spec` is callable at runtime, from the
   `/proc/sys/kernel/log_filter` write path. It replaces the console rule set, and
   the default level when the spec carries one, in a single critical section; it
-  never touches the build cap. `set_console_default` is the level-only knob
+  never touches the build floor. `set_console_default` is the level-only knob
   behind `/proc/sys/kernel/printk` and leaves the rule set alone.
 - `init_klogger(build_level)` runs once on the primary CPU during boot and fixes
   the cap.
@@ -106,7 +112,7 @@ replaces the previous default only when the spec has a bare level token, so
 the kernel to a hard-coded level:
 
 ```
-build cap (LOG_LEVEL_*), fixed by init_klogger
+build floor (LOG_LEVEL_*), fixed by init_klogger
     │
     ├── LOGBUF: records everything up to the cap; only `logbuf_clear` removes
     │
@@ -121,8 +127,8 @@ build cap (LOG_LEVEL_*), fixed by init_klogger
 
 ### Handling one record
 
-1. The `log` crate applies `log::max_level()`, which is the build cap. Records
-   above it never reach the logger.
+1. The `log` crate applies `log::max_level()`, i.e. `max(build floor, console
+   ceiling)`. Records above it never reach the logger.
 2. `Log::log` formats `<N>[time cpu:tid target:line] args` into a `LineBuf`.
    `<N>` is X-Kernel's own level number (`1..=5`, error..trace).
 3. The terminating newline is appended by `LineBuf::terminate`, not by
@@ -166,10 +172,10 @@ or commas:
    section. Any invalid token returns `FilterSpecError` and leaves the previous
    spec untouched.
 
-A level above the build cap is *accepted* (the active spec stays readable) but
-cannot produce records; `set_filter_spec` prints a one-line console notice naming
-the requested level and the cap, so a bring-up session is not left wondering why
-its `trace` request stayed silent.
+A level above the build level raises the ceiling: the higher-level sites are
+compiled in, so the request takes effect immediately (that is how
+`make run LOG=debug` reveals `debug!` output on a `warn` image) and the cost of
+those sites is paid from then on.
 
 `filter_spec(buf)` is the inverse: it writes the canonical text of the active
 filter into the caller's buffer and returns the length, or `None` when the buffer
@@ -184,8 +190,9 @@ The public entry points and their directions:
 
 | Entry point | Direction |
 |-------------|-----------|
-| `init_klogger(build_level)` | `kruntime` fixes the build cap from `LOG_LEVEL_*`, once |
-| `build_level_cap()` | reports the cap (diagnostics and specs that ask for more) |
+| `init_klogger(build_level)` | `kruntime` fixes the build level (console default and floor) from `LOG_LEVEL_*`, once |
+| `build_level_floor()` | reports the build level (the console default and the floor) |
+| `effective_ceiling()` | reports `max(build level, console ceiling)`, i.e. what `log` currently admits |
 | `set_filter_spec(spec)` | `kruntime` (boot, from the cmdline/DT/Kconfig sources) and `procfs` (`/proc/sys/kernel/log_filter` write) install a spec's rules, plus its default level when it has one; a rejected spec leaves the previous filter untouched |
 | `set_console_default(level)` | `procfs`'s `/proc/sys/kernel/printk` write: the console level only, keeping the rule set |
 | `set_log_level(spec)` | convenience wrapper that applies a spec and ignores a rejection; used by callers that only have a level string |
@@ -207,7 +214,7 @@ Precedence is decided by `kruntime`; `klogger` only validates and applies:
 in the device tree → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. An explicit
 command-line request therefore overrides the board's default, which is what an
 operator changing an argument expects. Every one of them configures
-the **console** filter; none can exceed the build cap. The `LOG_LEVEL_*` choice is
+the **console** filter; the build level is the floor they start from. The `LOG_LEVEL_*` choice is
 applied first, so a rules-only source inherits it as its default rather than the
 logger's initial value. Every rejected value is reported and the next source is
 tried, so a typo cannot mute the kernel. Those reports go out through `kprintln!`
@@ -226,7 +233,7 @@ word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source
 | filter `FILTER` | `SpinNoIrq<Filter>` | read on the logging hot path; rule lookup is a bounded scan of a fixed array |
 | ring `LOGBUF` | `SpinNoIrq<LogBuf>` | writes and reads are mutually exclusive; one record copies at most 256 bytes |
 | console output | `SpinNoIrq<()>` inside `print_fmt` | keeps multi-CPU output from interleaving |
-| `log` ceiling | set once by `init_klogger` | equal to the build cap, never written again, so filter and ceiling cannot disagree |
+| `log` ceiling | `SpinNoIrq<Filter>` (same lock as the filter) | recomputed as `max(build floor, console ceiling)` whenever the filter changes, in the same critical section, so the two cannot disagree |
 
 `SpinNoIrq` disables interrupts, so the hot path cannot deadlock against an
 interrupt handler on the same lock, but it also means no critical section may
@@ -240,12 +247,13 @@ is taken, and `print_fmt`'s lock is never held together with `LOGBUF`.
 ## Design decisions
 
 - **Capture is not derived from the console filter**: the console decides what is
-  shown, the build cap decides what can be produced, and the ring stores
+  shown, the ceiling (build floor or a raised console request) decides what can be produced, and the ring stores
   everything the latter allows. This is what makes "quiet console, complete log"
   true instead of aspirational.
-- **The cap is immutable at runtime**: widening verbosity is a rebuild. In
-  exchange, a record above the cap costs a comparison, not a formatting pass, and
-  no runtime write can make a production image pay for `trace` sites.
+- **The build level is a floor, not a ceiling**: quietening (or a `quiet` boot)
+  cannot starve the ring, while an explicit request can still widen verbosity
+  without a rebuild — the workflow `make run LOG=debug` relies on. The extra cost
+  of a raised ceiling is paid only when it is asked for.
 - **Spec instead of a single level**: `warn ksyscall=debug` retargets one stack
   and can be changed at runtime without rebuilding.
 - **Reading returns the newest whole records** (Linux's `syslog_print_all`

@@ -10,7 +10,8 @@ use log::{Level, LevelFilter};
 use unittest::{assert_eq, def_test};
 
 use super::{
-    build_level_cap, current_log_level, filter_enabled, filter_spec, level_name, level_number,
+    build_level_floor, current_log_level, effective_ceiling, filter_enabled, filter_spec, level_name,
+    level_number,
     logbuf_clear, logbuf_len, logbuf_read_newest, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
@@ -314,15 +315,42 @@ fn logbuf_read_returns_the_newest_whole_records() {
     saved.restore();
 }
 
-/// The build cap is what the `log` crate gates on, so it must never be `off` and
-/// must match a level the image was built for.
+/// The build level is the logger's floor, so it must never be `off`.
 #[def_test]
-fn build_cap_is_a_level_the_image_can_produce() {
-    let cap = build_level_cap();
+fn build_level_is_a_usable_floor() {
     assert!(
-        cap != log::LevelFilter::Off,
+        build_level_floor() != log::LevelFilter::Off,
         "an unset LOG_LEVEL_* must fall back to a level, not silence the kernel"
     );
+}
+
+/// The console filter may raise the ceiling above the build floor (that is how
+/// `make run LOG=debug` reveals the `debug!` sites of a `warn` image) and may
+/// lower it, but the floor always wins so `quiet` cannot starve the ring.
+#[def_test(serial)]
+fn console_filter_moves_the_ceiling_but_not_below_the_build_floor() {
+    let saved = SavedSpec::take();
+    let floor = build_level_floor();
+
+    // Raising: a level above the floor is admitted.
+    assert_eq!(set_filter_spec("trace"), Ok(()));
+    assert_eq!(effective_ceiling(), log::LevelFilter::Trace);
+
+    // Lowering: the floor keeps the logger where it was.
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    assert_eq!(
+        effective_ceiling(),
+        floor,
+        "quietening the console must not take the logger below the build level"
+    );
+
+    // A rule above the floor raises the ceiling for the whole logger (all
+    // levels up to it are formatted and captured; the console filter still
+    // decides what is printed).
+    assert_eq!(set_filter_spec("off ksyscall=trace"), Ok(()));
+    assert_eq!(effective_ceiling(), log::LevelFilter::Trace);
+
+    saved.restore();
 }
 
 /// A record longer than the line buffer keeps its terminating newline and never

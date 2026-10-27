@@ -367,7 +367,8 @@ BootInfo*
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
         (Log filtering: `init_klogger(configured_log_level())` fixes the build
-         cap — nothing above it is ever recorded or printed. The `LOG_LEVEL_*`
+         level — the console default and the floor of the log filter, which a
+         runtime request may raise but never lower. The `LOG_LEVEL_*`
          level is then installed as the console default, and the first accepted
          source wins — an explicit `loglevel=` / `quiet` / `debug` command line,
          then /chosen/x-kernel,log-level, then Kconfig `LOG_FILTER`. Every source configures

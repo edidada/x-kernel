@@ -24,7 +24,7 @@ therefore that no input it is fed can corrupt its state or its memory.
 | Boundary | Source | Entry point |
 |----------|--------|-------------|
 | Boot metadata | `/chosen/x-kernel,log-level`, `loglevel=`/`quiet`/`debug`, Kconfig `LOG_FILTER` | `set_filter_spec` (via `kruntime`) |
-| Build configuration | Kconfig `LOG_LEVEL_*` | `init_klogger`, fixes the cap |
+| Build configuration | Kconfig `LOG_LEVEL_*` | `init_klogger`, fixes the console default and the logger floor |
 | Privileged user input | `echo 4 > /proc/sys/kernel/printk` (level) | `set_console_default` (via `procfs`) |
 | Privileged user input | `echo 'warn ksyscall=debug' > /proc/sys/kernel/log_filter` (spec) | `set_filter_spec` (via `procfs`) |
 | Privileged read-back | `syslog(2)` / `dmesg` | `logbuf_len`, `logbuf_read_newest`, `logbuf_clear`; **the user copy itself happens in `ksyscall`** |
@@ -62,9 +62,9 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 - The locks are never nested: `Log::log` takes `LOGBUF` briefly, releases it,
   then takes `FILTER` for the console decision, and `print_fmt` takes the console
   lock last. The ordering therefore cannot form a cycle.
-- The `log` crate's ceiling is written once, by `init_klogger`, and equals the
-  build cap for the image's lifetime; `set_filter_spec` never touches it, so the
-  installed filter and the ceiling cannot describe different states.
+- The `log` crate's ceiling is `max(build floor, console ceiling)` and is
+  republished inside the same `FILTER` critical section that changes the filter,
+  so the installed filter and the ceiling cannot describe different states.
 - The `syslog(2)` read path copies into a kernel buffer under `LOGBUF` and does
   the user copy after releasing it, so a faulting destination neither holds the
   lock nor drops records.
@@ -80,7 +80,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 | ID | Threat | Severity | Trigger | Mitigation |
 |----|--------|----------|---------|------------|
 | T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, a privileged write, or the compiled-in `LOG_FILTER` | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; every boot source reports its rejection through the unfiltered `kprintln!` path, `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
-| T-02 | A runtime spec asks for more verbosity than the image can produce | Low | `echo 'trace' > /proc/sys/kernel/printk` on a `warn` build | The build cap is the `log` crate's own filter and is immutable at runtime, so nothing above it is formatted, stored or printed; `set_filter_spec` prints a one-line console notice naming the requested level and the cap |
+| T-02 | A runtime spec raises the ceiling and makes hot-path sites pay | Low | `echo 'trace' > /proc/sys/kernel/log_filter`, or `loglevel=trace` on the command line | Raising is intentional — the sites are compiled in and the operator asked for them — but it is the only way the higher levels cost anything: with no such request the ceiling stays at the build level and those records are dropped by a comparison. The write is privilege-gated on `/proc/sys/kernel/log_filter` |
 | T-03 | A log flood overwrites boot evidence | Medium | More than 64 KiB of records | The ring overwrites the oldest bytes and reads return the newest records, so a full ring keeps the recent past; no rate limit (see Known limitations) |
 | T-04 | Unauthorized reads leak kernel addresses and paths | Medium | An unprivileged `syslog(2)` call | `READ_ALL`/`SIZE_BUFFER` are open to every caller (Linux's default with `dmesg_restrict` off) so `dmesg` works for users; clearing, read-and-clear and the unread count require `euid == 0`, which stands in for `CAP_SYSLOG` until capability sets exist. A `dmesg_restrict` equivalent is not implemented (known limitation) |
 | T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to `/proc/sys/kernel/printk` | `procfs` requires `cred().is_privileged()` on write; the node is owner-write, world-read |
@@ -110,8 +110,8 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
   (unfiltered, so an `error`/`off` console cannot hide the diagnostic) and falls
   through to the next source; `procfs`'s write path returns
   `VfsError::InvalidInput` to the writer.
-- A spec that asks for a level above the build cap is accepted and reported on the
-  console; it simply has no records to act on until the image is rebuilt.
+- A spec that asks for a level above the build level raises the ceiling and takes
+  effect immediately; the cost of the newly admitted sites is paid from then on.
 - `init_klogger` panics if the global logger cannot be installed: that path has
   no error return and no recovery, so it is an explicit, documented exception
   (see the `#[expect]` reason in the code).
@@ -139,8 +139,9 @@ data and never writes the ring to persistent storage.
 - `SYSLOG_ACTION_CONSOLE_*` is not implemented (the level domain is inverted);
   console verbosity is changed only through `/proc/sys/kernel/printk`.
 - The ring is a fixed 64 KiB static buffer with no size configuration.
-- Verbosity cannot be raised above the build cap at runtime: a build that wants
-  `debug`/`trace` available must select it in `LOG_LEVEL_*`.
+- Raising verbosity above the build level is possible at runtime and costs what
+  the higher-level sites cost; there is no way to *lower* the logger below the
+  build level, which is what keeps the ring complete under `quiet`.
 - There is no `dmesg_restrict` equivalent, and privilege is `euid == 0` rather
   than `CAP_SYSLOG`.
 - `READ_ALL`/`READ_CLEAR` return the newest records that fit, so a destination

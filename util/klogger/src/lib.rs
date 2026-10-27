@@ -96,8 +96,12 @@ const EMPTY_RULE: FilterRule = FilterRule {
 };
 
 struct Filter {
-    /// Build-time maximum: nothing above it is recorded or shown.
-    cap: LevelFilter,
+    /// Build-time level (`LOG_LEVEL_*`): the logger's default and its **floor**.
+    ///
+    /// A runtime spec may ask for more — a `loglevel=debug` on a `warn` image
+    /// still reveals the `debug!` sites compiled into it — but it can never take
+    /// the logger below this, so quietening the console cannot starve the ring.
+    floor: LevelFilter,
     /// Level used when no rule matches.
     default: LevelFilter,
     rules: [FilterRule; MAX_FILTER_RULES],
@@ -107,11 +111,25 @@ struct Filter {
 impl Filter {
     const fn new() -> Self {
         Self {
-            cap: LevelFilter::Error,
+            floor: LevelFilter::Error,
             default: LevelFilter::Warn,
             rules: [EMPTY_RULE; MAX_FILTER_RULES],
             count: 0,
         }
+    }
+
+    /// Highest level the console filter asks for: the default or any override.
+    fn console_ceiling(&self) -> LevelFilter {
+        self.rules[..self.count]
+            .iter()
+            .map(|rule| rule.level)
+            .fold(self.default, |acc, level| acc.max(level))
+    }
+
+    /// What `log::max_level` must be: whatever the console filter wants, but
+    /// never below the build floor.
+    fn ceiling(&self) -> LevelFilter {
+        self.floor.max(self.console_ceiling())
     }
 
     /// Level for `target`, longest matching prefix wins.
@@ -126,19 +144,6 @@ impl Filter {
             }
         }
         best.map_or(self.default, |(_, level)| level)
-    }
-
-    /// Highest level this spec asks for, if it exceeds the build cap.
-    ///
-    /// Only production builds report this: the unit tests use specs above their
-    /// build cap on purpose, and a notice per test would only add noise.
-    #[cfg(not(unittest))]
-    fn above_cap(&self) -> Option<LevelFilter> {
-        let highest = self.rules[..self.count]
-            .iter()
-            .map(|rule| rule.level)
-            .fold(self.default, |acc, level| acc.max(level));
-        (highest > self.cap).then_some(highest)
     }
 }
 
@@ -196,26 +201,13 @@ pub fn set_filter_spec(spec: &str) -> Result<(), FilterSpecError> {
     if default.is_none() && next.count == 0 {
         return Err(FilterSpecError);
     }
-    // Publish the rule set and the inherited default in one critical section.
+    // Publish the rule set, the inherited default and the `log` ceiling in one
+    // critical section, so the installed filter and the ceiling cannot disagree.
     let mut filter = FILTER.lock();
     filter.rules = next.rules;
     filter.count = next.count;
     filter.default = default.unwrap_or(filter.default);
-    // A spec may ask for a level this image cannot produce: the build cap is
-    // fixed at compile time, so the request is accepted (it stays readable) but
-    // silently ineffective. Say so — otherwise a bring-up session wonders why
-    // its `trace` request produced nothing.
-    // Unit tests exercise specs above the cap on purpose, so they stay silent.
-    #[cfg(not(unittest))]
-    if let Some(highest) = filter.above_cap() {
-        crate::kprintln!(
-            "log filter asks for {} but this build's cap is {}; rebuild with LOG_LEVEL_{} to \
-             enable it",
-            level_name(highest),
-            level_name(filter.cap),
-            level_name(highest).to_ascii_uppercase(),
-        );
-    }
+    log::set_max_level(filter.ceiling());
     Ok(())
 }
 
@@ -799,13 +791,19 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
     KernelLogger.write_fmt(args)
 }
 
-/// Installs the global `log` logger and fixes the build-time maximum level.
+/// Installs the global `log` logger and fixes the build-time level.
 ///
 /// `build_level` is the compiled-in `LOG_LEVEL_*` choice, parsed here because
-/// this crate owns the level vocabulary. It becomes the **cap**: the `log`
-/// crate's own filter, so a record above it is dropped before the logger runs
-/// and costs a comparison, and no runtime spec can raise it — widening verbosity
-/// means rebuilding.
+/// this crate owns the level vocabulary. It is both the console default and the
+/// **floor** of the `log` crate's filter: a runtime spec (a `loglevel=` on the
+/// command line, a device-tree property, a `/proc/sys/kernel/log_filter` write)
+/// may raise the ceiling above it and reveal the higher-level sites compiled into
+/// the image, but nothing can take the logger below it — that is what keeps a
+/// quiet console from starving the ring.
+///
+/// The cost of a raised ceiling is paid only when it is actually requested: with
+/// no spec asking for more, records above the build level are dropped by the
+/// `log` macros for the price of a comparison.
 ///
 /// A configuration that selects no level (`configured_log_level()` reports
 /// `off`) is mapped to `error` rather than silencing the kernel: the Kconfig
@@ -827,17 +825,24 @@ pub fn init_klogger(build_level: &str) {
                   return or recovery caller"
     )]
     log::set_logger(&KernelLogger).unwrap();
-    FILTER.lock().cap = cap;
-    log::set_max_level(cap);
+    let mut filter = FILTER.lock();
+    filter.floor = cap;
+    filter.default = cap;
+    log::set_max_level(filter.ceiling());
 }
 
-/// The build-time maximum level (`LOG_LEVEL_*`), fixed for this image.
+/// The build-time level (`LOG_LEVEL_*`): the console default and the floor of the
+/// logger's filter.
 ///
-/// A filter spec may ask for a higher level; it is accepted and reported, but no
-/// record above the cap is ever produced, so the request has no effect until the
-/// kernel is rebuilt.
-pub fn build_level_cap() -> LevelFilter {
-    FILTER.lock().cap
+/// A spec may ask for a higher level and get it; it cannot go below this.
+pub fn build_level_floor() -> LevelFilter {
+    FILTER.lock().floor
+}
+
+/// The level the `log` crate currently admits, i.e. `max(build floor, console
+/// ceiling)`. Diagnostics and tests report what is really in force with it.
+pub fn effective_ceiling() -> LevelFilter {
+    log::max_level()
 }
 
 /// Whether a record at `level` from `target` should reach the console.
@@ -869,7 +874,9 @@ pub fn current_log_level() -> LevelFilter {
 /// level: writing it must not silently drop the module filter that
 /// `/proc/sys/kernel/log_filter` owns.
 pub fn set_console_default(level: LevelFilter) {
-    FILTER.lock().default = level;
+    let mut filter = FILTER.lock();
+    filter.default = level;
+    log::set_max_level(filter.ceiling());
 }
 
 /// Sets the console default level at runtime and drops every per-target
@@ -882,6 +889,7 @@ pub fn set_log_level_filter(level: LevelFilter) {
     let mut filter = FILTER.lock();
     filter.default = level;
     filter.count = 0;
+    log::set_max_level(filter.ceiling());
 }
 
 /// Parses a log level from user input, accepting either a level name

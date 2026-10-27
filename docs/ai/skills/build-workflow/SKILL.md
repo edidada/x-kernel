@@ -267,13 +267,12 @@ inside one whitespace-free word, so use the comma form
 (`loglevel=warn,ksyscall=debug`); a space-separated spec is cut at the first
 word because whitespace separates kernel parameters.
 
-`LOG_LEVEL_*` is the **build-time maximum**, not just a console default: it is the
-`log` crate's own filter, so nothing above it is formatted, stored or printed, and
-no runtime write can raise it — widening verbosity is a rebuild. Everything below
-it is captured in the kernel log buffer regardless of the console filter, which is
-why layers 1-3 can quiet the serial console without emptying `dmesg`. A spec that
-asks for a level above the cap is accepted and reported on the console, but has no
-records to act on.
+`LOG_LEVEL_*` is the build-time **default and floor**, not a hard ceiling: the
+logger never runs below it, so layers 1-3 can quiet the serial console without
+emptying `dmesg`; and a spec that asks for *more* raises the ceiling and reveals
+the higher-level sites compiled into the image (this is what `make run LOG=debug`
+does on a `warn` build). The extra cost of those sites is paid only while such a
+request is in force.
 
 Every layer takes a full spec, so logging can be *retargeted* rather than
 raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console
@@ -300,10 +299,10 @@ domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
 inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
 included) strip the prefix by default, hence `-r` above when filtering on it.
 Timestamps in front of every line come from the reader, not from the ring.
-The build cap is the capture level, so a `LOG_LEVEL_DEBUG` image captures every
-`debug` record even while the console prints only warnings (`quiet`,
-`loglevel=2`, or `echo warn > /proc/sys/kernel/printk`); a `trace` build captures
-trace as well. A destination smaller than the ring receives the newest records,
+The effective ceiling (`max(build level, console request)`) is the capture level, so
+a `warn` image run with `LOG=debug` captures and prints every `debug` record, and a
+`LOG_LEVEL_DEBUG` image captures them even while the console prints only warnings
+(`quiet`, `loglevel=2`, or `echo 2 > /proc/sys/kernel/printk`). A destination smaller than the ring receives the newest records,
 never a prefix.
 
 ### Symbolizing logs from real hardware
