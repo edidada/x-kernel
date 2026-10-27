@@ -366,11 +366,13 @@ BootInfo*
     → memspace::init_memory_management
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
-        (Log filtering: the `LOG_LEVEL_*` choice is installed first, then the
-         first accepted source wins — /chosen/x-kernel,log-level, the
-         `loglevel=` / `quiet` / `debug` command line, then Kconfig
-         `LOG_FILTER`. Every source takes the same filter spec, and a spec with
-         only `target=level` rules keeps the build level as its default; a
+        (Log filtering: `init_klogger(configured_log_level())` fixes the build
+         cap — nothing above it is ever recorded or printed. The `LOG_LEVEL_*`
+         level is then installed as the console default, and the first accepted
+         source wins — /chosen/x-kernel,log-level, the `loglevel=` / `quiet` /
+         `debug` command line, then Kconfig `LOG_FILTER`. Every source configures
+         the console only; the ring keeps recording everything up to the cap. A
+         spec with only `target=level` rules keeps the current default, and a
          rejected source is reported on the console through `kprintln!`, because
          the level being installed is what would filter a `warn!`. On the command
          line a full spec stays inside one word, e.g.

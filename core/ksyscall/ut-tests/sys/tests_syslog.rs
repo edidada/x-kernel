@@ -40,8 +40,8 @@ fn size_buffer_reports_the_ring_capacity() {
     );
 }
 
-/// `READ_ALL` copies the oldest unread bytes and leaves them buffered, so a
-/// second read returns the same window until it is released.
+/// `READ_ALL` returns the newest whole records and leaves them buffered, so a
+/// second read returns the same window.
 ///
 /// `user`: the destination must be a real user mapping, so the case runs in the
 /// user-test context that `TestUserBuffer` needs.
@@ -65,8 +65,9 @@ fn read_all_returns_bytes_without_consuming_them() {
 
     let bytes = buffer.read_bytes(read as usize).unwrap();
     if !bytes.is_empty() {
-        // Records are newline-terminated and character-aligned.
-        core::str::from_utf8(&bytes).expect("a whole-record window is valid UTF-8");
+        // The window starts at a record boundary and is character-aligned.
+        let text = core::str::from_utf8(&bytes).expect("a whole-record window is valid UTF-8");
+        assert!(text.starts_with('<'), "window does not start a record: {text:?}");
     }
 
     // The same window is returned again, because nothing was released.
@@ -77,6 +78,40 @@ fn read_all_returns_bytes_without_consuming_them() {
     )
     .expect("a privileged read succeeds");
     assert_eq!(again, read);
+}
+
+/// `READ_CLEAR` consumes the whole unread range, including the records older
+/// than the returned window — Linux advances its clear cursor past everything it
+/// skipped as well, so `dmesg -c` does clear the log.
+///
+/// `user` for the same reason as the read case.
+#[def_test(user)]
+fn read_clear_drops_the_unread_range() {
+    klogger::error!("syslog read-clear marker");
+    assert!(klogger::logbuf_len() > 0);
+
+    let buffer = TestUserBuffer::new(klogger::LOGBUF_SIZE).unwrap();
+    let read = sys_syslog(
+        SYSLOG_ACTION_READ_CLEAR,
+        buffer.as_user_ptr(),
+        buffer.len() as i32,
+    )
+    .expect("a privileged read succeeds");
+    assert!(read > 0);
+    let bytes = buffer.read_bytes(read as usize).unwrap();
+    assert!(
+        core::str::from_utf8(&bytes).is_ok(),
+        "the cleared window is not whole records"
+    );
+
+    // The cleared range does not come back; other contexts may have logged since.
+    let mut probe = [0u8; 4096];
+    let len = klogger::logbuf_read_newest(&mut probe);
+    let text = core::str::from_utf8(&probe[..len]).expect("log text is utf-8");
+    assert!(
+        !text.contains("syslog read-clear marker"),
+        "READ_CLEAR left the record behind: {text}"
+    );
 }
 
 /// `len` is a signed ABI argument: a negative value fails like Linux's

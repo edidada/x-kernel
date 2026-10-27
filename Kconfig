@@ -16,6 +16,11 @@ config LOG_FILTER
       choice) as its default. Tokens may be separated by spaces or commas.
       Empty means "use the LOG_LEVEL_* choice alone".
 
+      The spec configures the console. It cannot raise verbosity above the
+      LOG_LEVEL_* choice, which is the build-time maximum: the kernel log buffer
+      captures everything up to that level, and a rule above it is reported but
+      has no records to act on until the kernel is rebuilt.
+
       At runtime the same spec is written to /proc/sys/kernel/printk (a bare
       level still works there), so bring-up sessions can retarget logging
       live: `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk`.
@@ -38,6 +43,9 @@ config BUILD_TYPE_DEBUG
         A debug build with optimizations disabled and debug information enabled.
 endchoice
 
+# This is the build-time maximum: the logger's global filter is fixed to it and
+# cannot be raised at runtime, so it also bounds what the kernel log buffer can
+# capture. A build that wants `debug`/`trace` available must select it here.
 choice
     prompt "LOG Level"
     default LOG_LEVEL_WARN

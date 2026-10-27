@@ -247,7 +247,7 @@ levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
 | 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
 | 2 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
 | 3 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
-| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build default) Kconfig | build default | a rebuild |
+| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build maximum) Kconfig | build default | a rebuild |
 
 Layer 1 is the one to reach for while debugging on hardware: it changes
 verbosity mid-session (`cat /proc/sys/kernel/printk` reports the whole spec)
@@ -264,6 +264,14 @@ inside one whitespace-free word, so use the comma form
 (`loglevel=warn,ksyscall=debug`); a space-separated spec is cut at the first
 word because whitespace separates kernel parameters.
 
+`LOG_LEVEL_*` is the **build-time maximum**, not just a console default: it is the
+`log` crate's own filter, so nothing above it is formatted, stored or printed, and
+no runtime write can raise it — widening verbosity is a rebuild. Everything below
+it is captured in the kernel log buffer regardless of the console filter, which is
+why layers 1-3 can quiet the serial console without emptying `dmesg`. A spec that
+asks for a level above the cap is accepted and reported on the console, but has no
+records to act on.
+
 Every layer takes a full spec, so logging can be *retargeted* rather than
 raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console
 while one stack talks, and the spec's ceiling is also what the ring buffer
@@ -271,10 +279,10 @@ captures, so one rule widens both the console and `dmesg` for that target.
 
 ### `dmesg`: the console filter does not lose records
 
-The kernel keeps a 64 KiB log ring buffer. Every record that gets past the
-`log` ceiling is stored there **before** the console filter runs, so a quiet
-console and a complete log coexist — the filter decides what is *shown*, the
-buffer records what *happened*. Read it with the usual tool:
+The kernel keeps a 64 KiB log ring buffer. Every record that gets past the build
+cap is stored there **before** the console filter runs, so a quiet console and a
+complete log coexist — the filter decides what is *shown*, the buffer records what
+*happened*. Read it with the usual tool:
 
 ```bash
 dmesg                         # everything captured, oldest first
@@ -289,10 +297,11 @@ domain as `/proc/sys/kernel/printk` (1 = error … 5 = trace), *not* Linux's
 inverted console levels; note that tools which parse `<N>` (busybox `dmesg`
 included) strip the prefix by default, hence `-r` above when filtering on it.
 Timestamps in front of every line come from the reader, not from the ring.
-The ceiling of the active spec is also the capture level: with
-`warn ksyscall=debug` the buffer holds debug from every module but stops
-before `trace`; add a `target=trace` rule (at boot, or live through
-`/proc/sys/kernel/printk`) to capture trace as well.
+The build cap is the capture level, so a `LOG_LEVEL_DEBUG` image captures every
+`debug` record even while the console prints only warnings (`quiet`,
+`loglevel=2`, or `echo warn > /proc/sys/kernel/printk`); a `trace` build captures
+trace as well. A destination smaller than the ring receives the newest records,
+never a prefix.
 
 ### Symbolizing logs from real hardware
 

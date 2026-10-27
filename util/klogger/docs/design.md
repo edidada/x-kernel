@@ -3,12 +3,12 @@
 ## Purpose
 
 `klogger` is the X-Kernel logging core. It implements the `log` crate's `Log`
-trait and routes every `error!`/`warn!`/`info!`/`debug!`/`trace!` record to two
-consumers:
+trait and routes every record to two consumers:
 
-- **the console**, filtered by a runtime per-target filter;
-- **the kernel log ring buffer**, captured according to the `log` ceiling and
-  read back by `syslog(2)` / `dmesg`.
+- **the console**, filtered by a runtime filter (default level plus per-target
+  overrides);
+- **the kernel log ring buffer** (`LOGBUF`), which records everything that
+  reaches the logger and is read back by `syslog(2)` / `dmesg`.
 
 Console output goes through the `kiface_logging_api` providers: `LogSinkIf`
 writes characters and `LogContextIf` supplies the time, CPU and task id.
@@ -17,28 +17,37 @@ writes characters and `LogContextIf` supplies the time, CPU and task id.
 
 ## Background
 
-A single global level cannot serve real bring-up work: `debug` is needed for one
-stack (a rising driver, a filesystem probe) while a global `debug` drowns the
-console in IPI and syscall lines. Lowering the level afterwards then leaves no
-way to read back what happened, because `syslog(2)` was a stub that returned 0.
+A single global level cannot serve real work: `debug` is needed for one stack
+while a global `debug` drowns the console in IPI and syscall lines, and lowering
+the level afterwards used to leave no way to read back what happened (`syslog(2)`
+was a stub returning 0).
 
-This module separates the two questions:
+Three decisions are therefore kept separate, the way Linux separates its console
+level from its printk ring:
 
-- **what is shown**: the runtime filter — a default level plus per-target
-  overrides matched by path prefix;
-- **what happened**: a 64 KiB ring that captures every record that clears the
-  `log` ceiling, regardless of the console decision.
+| Role | Whose | What it decides | Can it change at runtime? |
+|------|-------|-----------------|---------------------------|
+| **Build cap** | `LOG_LEVEL_*` (Kconfig) | the highest level this image can produce; the `log` crate's own filter | no — rebuild to widen |
+| **Capture** | `LOGBUF` | which records are stored for `dmesg`: **everything up to the cap** | no |
+| **Console** | `Filter` | which records are printed: a default level plus per-target overrides | yes, `/proc/sys/kernel/printk` |
 
-Both share one ceiling: `log::max_level` is the filter's ceiling and only serves
-as the cheap pre-check in the `log` macros; the real per-target decision happens
-inside `Log::log`. That is what lets an override sit *above* the default level.
+The cap is what makes the feature affordable: a record above it is dropped by the
+`log` macro for the price of a comparison, so a `warn`/`info` production image
+pays nothing for the `debug!`/`trace!` sites compiled into it. In exchange, the
+ring cannot be *wider* than the build — widening verbosity means rebuilding, which
+is the usual bring-up loop anyway.
+
+Because capture is independent of the console filter, a quiet console no longer
+implies a quiet ring: `LOG_LEVEL_DEBUG` plus a console default of `warn` (for
+example `quiet` or `loglevel=2` on the command line) prints warnings while
+`dmesg` still holds every `debug` record.
 
 ## Scope
 
 ```
 util/klogger/
 ├── src/
-│   └── lib.rs        (filter, ring buffer, macros, level parsing)
+│   └── lib.rs        (build cap, filter, ring buffer, macros, level parsing)
 ├── ut-tests/
 │   └── lib.rs        (guest cases for the spec grammar and the ring semantics)
 ├── docs/
@@ -51,7 +60,7 @@ util/klogger/
 
 ```
 error!/warn!/info!/debug!/trace!
-        │  (log crate: first checks the log::max_level ceiling)
+        │  (log crate: `level <= log::max_level()`, and max_level == build cap)
         ▼
 KernelLogger::log
         ├── 1. LineBuf assembles "<N>[time cpu:tid target:line] args\n"
@@ -63,9 +72,9 @@ KernelLogger::log
 
 | Component | Responsibility |
 |-----------|----------------|
-| `Filter` | default level plus up to `MAX_FILTER_RULES` `target=level` rules; longest-prefix match |
-| `FILTER` | the global filter, guarded by `SpinNoIrq` |
-| `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `read` copies the oldest unread window, `release` drops exactly that window |
+| `Filter` | the build cap, the console default level, and up to `MAX_FILTER_RULES` `target=level` overrides; longest-prefix match |
+| `FILTER` | the global filter (cap + console filter), guarded by `SpinNoIrq` |
+| `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `read_newest` copies the newest whole records, `clear` drops everything |
 | `LOGBUF` | the global ring, guarded by `SpinNoIrq` |
 | `LineBuf` | fixed 256-byte line writer; the last byte is reserved for the terminator and truncation never splits a character |
 | `print_fmt` | serializes console output |
@@ -79,15 +88,13 @@ KernelLogger::log
   sections perform no user-memory access, no sleeping and no allocation;
   `LineBuf` and the ring are fixed-size, so the record path never allocates.
 - User copies for `syslog(2)` happen **outside** `klogger`: `ksyscall` allocates
-  a kernel buffer, calls `logbuf_read`, releases the lock and only then writes to
-  user space. `logbuf_release` runs after that copy succeeded and drops what is
-  still buffered of the window it was given; a window the ring overwrote entirely
-  drops nothing.
+  a kernel buffer, calls `logbuf_read_newest`, and only then writes to user space.
 - `set_filter_spec` is callable at runtime, including from the
-  `/proc/sys/kernel/printk` write path. It replaces the rule set, the default
-  level (only when the spec carries a bare level) and the ceiling in one
-  critical section.
-- `init_klogger` runs once on the primary CPU during boot.
+  `/proc/sys/kernel/printk` write path. It replaces the console rule set, and the
+  default level when the spec carries one, in a single critical section; it never
+  touches the build cap.
+- `init_klogger(build_level)` runs once on the primary CPU during boot and fixes
+  the cap.
 
 ## State machine
 
@@ -98,51 +105,23 @@ replaces the previous default only when the spec has a bare level token, so
 the kernel to a hard-coded level:
 
 ```
-boot default (LOG_LEVEL_* / LOG_FILTER, warn)
-    │ set_filter_spec(dt / loglevel= / quiet / debug / LOG_FILTER)
-    ▼
-{ default, rules[] } ──set_filter_spec(spec), validated──► rules := spec rules
-                     │                                     default := spec level, or kept
-                     └─rejected──► unchanged (no rule keeps a new value)
-
-set_log_level_filter(level) ≡ set the default, drop every override
+build cap (LOG_LEVEL_*), fixed by init_klogger
+    │
+    ├── LOGBUF: records everything up to the cap; only `logbuf_clear` removes
+    │
+    └── console filter { default, rules[] }
+            set_filter_spec(spec) ── validated ──► rules := spec rules
+                                                 default := spec level, or kept
+                                 └─ rejected ──► unchanged
+            set_log_level_filter(level) ≡ set the default, drop every override
 ```
-
-The ring has two states: appending while it has room, and overwriting the oldest
-byte once it is full. Every byte that leaves the buffer — either because a reader
-released it or because the ring overwrote it — advances the buffer's sequence
-position (`unread_from`), which is how a `syslog(2)` reader acknowledges exactly
-the bytes it delivered. `logbuf_clear` drops everything and invalidates every
-outstanding reader position.
-
-### Reading and releasing
-
-`logbuf_read(out)` copies the **oldest unread** bytes, in log order, and returns
-a `LogRead` window whose private `from` field is the sequence position of the
-first copied byte (the byte count is readable through `LogRead::copied()`).
-Reading does not consume: `logbuf_release(read)` drops the still-buffered part of
-that window and nothing else, so a reader that drains in chunks makes progress
-instead of re-reading the same window. A full ring may overwrite the front of the
-window while the bytes are being copied to user space; the release then drops only
-the remaining suffix, which keeps `READ_CLEAR` effective on a busy ring. A window
-that is gone entirely drops nothing: its bytes already left the buffer, and
-dropping a same-sized range instead would discard records the reader never
-received, as would a window whose start does not match the unread position.
-
-This is a deliberate divergence from Linux, whose `syslog_print_all` starts at the
-newest byte that still fits and lets a short destination skip (and, for
-`READ_CLEAR`, discard) the older records. Here a short destination receives the
-*oldest* unread bytes and a read never drops an unread record; a reader that wants
-the whole ring sizes its buffer from `SYSLOG_ACTION_SIZE_BUFFER`, as `dmesg`
-does.
 
 ## Algorithms
 
 ### Handling one record
 
-1. The `log` crate applies `log::max_level()` (the spec's ceiling: the maximum
-   of the default level and every override). Records below it never reach the
-   logger.
+1. The `log` crate applies `log::max_level()`, which is the build cap. Records
+   above it never reach the logger.
 2. `Log::log` formats `<N>[time cpu:tid target:line] args` into a `LineBuf`.
    `<N>` is X-Kernel's own level number (`1..=5`, error..trace).
 3. The terminating newline is appended by `LineBuf::terminate`, not by
@@ -150,12 +129,22 @@ does.
    truncated to 255 bytes and still ends with `\n`. Truncation also stops at a
    character boundary, so the ring never holds a split code point.
 4. The whole line is pushed into `LOGBUF` (overwriting the oldest bytes when
-   full). Both the push and a ring read copy at most two contiguous segments
-   with `copy_from_slice`, so the time spent inside the IRQ-off guard scales with
-   the byte count rather than with a per-byte loop.
+   full). Both the push and a ring read copy at most two contiguous segments with
+   `copy_from_slice`, so the time spent inside the IRQ-off guard scales with the
+   byte count rather than with a per-byte loop.
 5. Only then does `filter_enabled(target, level)` decide whether the record also
    goes to the console. A dropped record still stays in the ring — that is what
-   makes a quiet console and a complete boot log compatible.
+   makes a quiet console and a complete log coexist.
+
+### Reading and clearing the ring
+
+`logbuf_read_newest(out)` copies the **newest** bytes that fit, oldest first, and
+starts at a record boundary (a partial line left by a ring wrap or by the cut is
+dropped). That is the shape Linux's `syslog_print_all` produces: with a
+destination smaller than the ring, older records are skipped rather than
+returning a prefix of the log. Reading never consumes; `logbuf_clear` drops
+everything, and `syslog(2)`'s `READ_CLEAR` calls it after a successful copy —
+Linux's clear cursor likewise ends up past everything it did not return.
 
 ### Parsing a filter spec
 
@@ -169,10 +158,14 @@ or commas:
 2. a token without `=` sets the default level, the last one winning; a spec with
    no such token keeps the level that is already in force;
 3. a spec with neither a rule nor a bare level is invalid;
-4. only after the whole spec validates is it installed, together with the
-   ceiling, in one `FILTER` critical section. Any invalid token returns
-   `FilterSpecError` and leaves the previous spec, and the previous ceiling,
-   untouched.
+4. only after the whole spec validates is it installed in one `FILTER` critical
+   section. Any invalid token returns `FilterSpecError` and leaves the previous
+   spec untouched.
+
+A level above the build cap is *accepted* (the active spec stays readable) but
+cannot produce records; `set_filter_spec` prints a one-line console notice naming
+the requested level and the cap, so a bring-up session is not left wondering why
+its `trace` request stayed silent.
 
 `filter_spec(buf)` is the inverse: it writes the canonical text of the active
 filter into the caller's buffer and returns the length, or `None` when the buffer
@@ -187,26 +180,28 @@ The public entry points and their directions:
 
 | Entry point | Direction |
 |-------------|-----------|
+| `init_klogger(build_level)` | `kruntime` fixes the build cap from `LOG_LEVEL_*`, once |
+| `build_level_cap()` | reports the cap (diagnostics and specs that ask for more) |
 | `set_filter_spec(spec)` | `kruntime` (boot, from the DT/cmdline/Kconfig sources) and `procfs` (`/proc/sys/kernel/printk` write) install a spec's rules, plus its default level when it has one; a rejected spec leaves the previous filter untouched |
 | `set_log_level(spec)` | convenience wrapper that applies a spec and ignores a rejection; used by callers that only have a level string |
-| `set_log_level_filter(level)` | set the default level and drop every override (`procfs` tests and internal resets) |
+| `set_log_level_filter(level)` | set the console default and drop every override (`procfs` tests and internal resets) |
 | `filter_spec(buf)` | `procfs` read side and the boot banner report the active spec |
-| `current_log_level()` | reports the filter's **default** level (not the `log` ceiling, which also includes the overrides) |
-| `logbuf_len` / `logbuf_read` / `logbuf_release` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests; `LogRead` has private fields, so only a window returned by `logbuf_read` can be released |
+| `current_log_level()` | reports the console filter's **default** level |
+| `logbuf_len` / `logbuf_read_newest` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests |
 
 ### Where the boot filter comes from
 
 Precedence is decided by `kruntime`; `klogger` only validates and applies:
 `/chosen/x-kernel,log-level` → `loglevel=` / `quiet` / `debug` on the command
-line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. The `LOG_LEVEL_*` choice is
-installed **first**, before any source is consulted: a source may carry rules
-only, and such a spec keeps the level already in force, so it has to be the build
-level rather than the logger's hard-coded default. Every rejected value is
-reported and the next source is tried, so a typo cannot mute the kernel. Those
-reports go out through `kprintln!` (the unfiltered console path) instead of
-`warn!`: the resolver is installing the very level that would filter the warning,
-so an `error`- or `off`-level build would otherwise hide the diagnostic that
-explains why its configured filter was ignored.
+line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. Every one of them configures
+the **console** filter; none can exceed the build cap. The `LOG_LEVEL_*` choice is
+applied first, so a rules-only source inherits it as its default rather than the
+logger's initial value. Every rejected value is reported and the next source is
+tried, so a typo cannot mute the kernel. Those reports go out through `kprintln!`
+(the unfiltered console path) instead of `warn!`: the resolver is installing the
+very level that would filter the warning, so an `error`- or `off`-level console
+would otherwise hide the diagnostic that explains why its configured filter was
+ignored.
 
 Whitespace separates command-line parameters, so a full spec must stay inside one
 word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source.
@@ -216,9 +211,9 @@ word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source
 | Shared state | Synchronization | Notes |
 |--------------|-----------------|-------|
 | filter `FILTER` | `SpinNoIrq<Filter>` | read on the logging hot path; rule lookup is a bounded scan of a fixed array |
-| ring `LOGBUF` | `SpinNoIrq<LogBuf>` | writes, reads and releases are mutually exclusive; one record copies at most 256 bytes |
+| ring `LOGBUF` | `SpinNoIrq<LogBuf>` | writes and reads are mutually exclusive; one record copies at most 256 bytes |
 | console output | `SpinNoIrq<()>` inside `print_fmt` | keeps multi-CPU output from interleaving |
-| `log` ceiling | atomic in the `log` crate | updated inside the same `FILTER` critical section that installs the spec |
+| `log` ceiling | set once by `init_klogger` | equal to the build cap, never written again, so filter and ceiling cannot disagree |
 
 `SpinNoIrq` disables interrupts, so the hot path cannot deadlock against an
 interrupt handler on the same lock, but it also means no critical section may
@@ -227,15 +222,18 @@ is taken, and `print_fmt`'s lock is never held together with `LOGBUF`.
 
 ## Design decisions
 
-- **Separate display from capture**: the console filter and the capture point are
-  independent, so post-mortem analysis does not require opening the console
-  filter globally.
+- **Capture is not derived from the console filter**: the console decides what is
+  shown, the build cap decides what can be produced, and the ring stores
+  everything the latter allows. This is what makes "quiet console, complete log"
+  true instead of aspirational.
+- **The cap is immutable at runtime**: widening verbosity is a rebuild. In
+  exchange, a record above the cap costs a comparison, not a formatting pass, and
+  no runtime write can make a production image pay for `trace` sites.
 - **Spec instead of a single level**: `warn ksyscall=debug` retargets one stack
   and can be changed at runtime without rebuilding.
-- **`log::max_level` as the ceiling**: the `log` macros cannot distinguish
-  targets, so the ceiling is only the cheap pre-check and the real decision lives
-  in the logger. The cost is that the ceiling must admit the widest override, so
-  a `trace` rule lets every trace record enter `log()` before being dropped.
+- **Reading returns the newest whole records** (Linux's `syslog_print_all`
+  shape): a short destination gets the most recent records, not the oldest ones,
+  and never a partial line.
 - **Fixed ring and fixed line**: the record path must not allocate, and a runaway
   message must not lose its interesting prefix; a record is truncated at 255
   bytes plus its terminator.
@@ -243,16 +241,10 @@ is taken, and `print_fmt`'s lock is never held together with `LOGBUF`.
   `SYSLOG_ACTION_CONSOLE_*` actions are deliberately not implemented because
   `console_loglevel` is the inverted domain and mixing the two would mislead
   callers.
-- **Consuming instead of clearing**: `READ_CLEAR` drops only the window it
-  returned, so a short or zero-length destination keeps the rest readable.
-- **Sequence positions instead of raw indices**: a reader's window is identified
-  by its sequence position, so a release stays correct across the gap in which
-  the bytes are copied to user space and the ring may wrap.
 
 ## Drop / resource release
 
 Nothing needs destructors: the filter and the ring are static storage and the
 installed logger is `&'static`. The closest operation to a release is
-`logbuf_clear`, which resets the indices (and invalidates outstanding reader
-positions) without wiping the bytes; they disappear as later records overwrite
-them.
+`logbuf_clear`, which resets the indices without wiping the bytes; they disappear
+as later records overwrite them.

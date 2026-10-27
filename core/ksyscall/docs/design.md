@@ -572,8 +572,8 @@ Implemented actions, with Linux's numbering:
 
 | action | name | behaviour |
 |--------|------|-----------|
-| 3 | `READ_ALL` | return the oldest unread bytes, keep them buffered |
-| 4 | `READ_CLEAR` | return the oldest unread bytes, drop those returned |
+| 3 | `READ_ALL` | return the newest whole records that fit, keep them buffered |
+| 4 | `READ_CLEAR` | return the newest whole records that fit, then drop the whole unread range |
 | 5 | `CLEAR` | drop the whole buffer, return 0 |
 | 9 | `SIZE_UNREAD` | return the number of buffered bytes |
 | 10 | `SIZE_BUFFER` | return the ring's total capacity |
@@ -598,23 +598,18 @@ Order of operations and failure handling:
 4. They then rebuild a typed `UserPtr<u8>` and reject a null destination with
    `InvalidInput`.
 5. The kernel read buffer is allocated outside the log lock, sized
-   `logbuf_len().min(len)`, and filled by `logbuf_read`, which copies the oldest
-   unread bytes in log order. **The user copy never runs with the log lock
-   held**, so a page fault on the destination cannot keep the ring locked with
-   interrupts off. Starting at the oldest unread byte is a deliberate divergence
-   from Linux, whose `syslog_print_all` starts at the newest byte that fits and
-   skips older records for a short destination; here a read never drops an unread
-   record, and a caller that wants the whole ring sizes it from
-   `SYSLOG_ACTION_SIZE_BUFFER`.
-6. `READ_CLEAR` calls `logbuf_release(read)` after a successful copy. The
-   `LogRead` window carries its sequence position, so the release drops what this
-   call returned that is still buffered: a smaller destination (`len` including
-   `0`) keeps the bytes it could not receive, records logged while the copy was in
-   flight stay in the ring, a copy failure keeps everything, and a window the ring
-   already overwrote in full drops nothing. When the ring is full, a record that
-   arrives during the copy overwrites the front of the window; the release then
-   drops the remaining suffix, which is what keeps `dmesg -c` effective on a busy
-   ring.
+   `logbuf_len().min(len)`, and filled by `logbuf_read_newest`, which copies the
+   newest records that fit, oldest first, starting at a record boundary. That is
+   the shape Linux's `syslog_print_all` produces (it walks back from the newest
+   record until the size fits and starts the copy at a record boundary), so a
+   short destination receives the most recent records and never a partial line.
+   **The user copy never runs with the log lock held**, so a page fault on the
+   destination cannot keep the ring locked with interrupts off.
+6. `READ_CLEAR` calls `logbuf_clear` after a successful copy, which drops the
+   whole unread range. Linux's clear cursor also ends up past everything it did
+   not return (the records older than the window are skipped by the same cursor),
+   so `dmesg -c` clears what it drained and does not re-deliver it. A copy failure
+   keeps everything, because the clear runs only after the copy succeeded.
 7. Every other action, including Linux's `CONSOLE_*` controls, returns
    `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
    value domain is inverted relative to Linux's, and mixing the two would let a

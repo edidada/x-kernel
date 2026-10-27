@@ -95,6 +95,8 @@ const EMPTY_RULE: FilterRule = FilterRule {
 };
 
 struct Filter {
+    /// Build-time maximum: nothing above it is recorded or shown.
+    cap: LevelFilter,
     /// Level used when no rule matches.
     default: LevelFilter,
     rules: [FilterRule; MAX_FILTER_RULES],
@@ -104,6 +106,7 @@ struct Filter {
 impl Filter {
     const fn new() -> Self {
         Self {
+            cap: LevelFilter::Error,
             default: LevelFilter::Warn,
             rules: [EMPTY_RULE; MAX_FILTER_RULES],
             count: 0,
@@ -124,14 +127,17 @@ impl Filter {
         best.map_or(self.default, |(_, level)| level)
     }
 
-    /// Highest level mentioned anywhere: the cheap `log` crate ceiling has to
-    /// admit everything an override could want, the per-target check below
-    /// does the real filtering.
-    fn ceiling(&self) -> LevelFilter {
-        self.rules[..self.count]
+    /// Highest level this spec asks for, if it exceeds the build cap.
+    ///
+    /// Only production builds report this: the unit tests use specs above their
+    /// build cap on purpose, and a notice per test would only add noise.
+    #[cfg(not(unittest))]
+    fn above_cap(&self) -> Option<LevelFilter> {
+        let highest = self.rules[..self.count]
             .iter()
             .map(|rule| rule.level)
-            .fold(self.default, |acc, level| acc.max(level))
+            .fold(self.default, |acc, level| acc.max(level));
+        (highest > self.cap).then_some(highest)
     }
 }
 
@@ -189,16 +195,26 @@ pub fn set_filter_spec(spec: &str) -> Result<(), FilterSpecError> {
     if default.is_none() && next.count == 0 {
         return Err(FilterSpecError);
     }
-    // Publish the filter and the `log` ceiling in one critical section: two
-    // concurrent writers would otherwise be able to leave the installed spec
-    // and the ceiling describing different specs.
+    // Publish the rule set and the inherited default in one critical section.
     let mut filter = FILTER.lock();
     filter.rules = next.rules;
     filter.count = next.count;
     filter.default = default.unwrap_or(filter.default);
-    // The `log` crate filter is the cheap pre-check; per-target rules can ask
-    // for more than the default, so the ceiling admits the widest request.
-    log::set_max_level(filter.ceiling());
+    // A spec may ask for a level this image cannot produce: the build cap is
+    // fixed at compile time, so the request is accepted (it stays readable) but
+    // silently ineffective. Say so — otherwise a bring-up session wonders why
+    // its `trace` request produced nothing.
+    // Unit tests exercise specs above the cap on purpose, so they stay silent.
+    #[cfg(not(unittest))]
+    if let Some(highest) = filter.above_cap() {
+        crate::kprintln!(
+            "log filter asks for {} but this build's cap is {}; rebuild with LOG_LEVEL_{} to \
+             enable it",
+            level_name(highest),
+            level_name(filter.cap),
+            level_name(highest).to_ascii_uppercase(),
+        );
+    }
     Ok(())
 }
 
@@ -303,46 +319,60 @@ impl LogBuf {
         self.len += line.len();
     }
 
-    /// Copies the oldest unread bytes, in log order, and hands back the range
-    /// they occupy.
+    /// Byte at `offset` from the oldest buffered byte.
+    fn at(&self, offset: usize) -> u8 {
+        self.buf[(self.start + offset) % LOGBUF_SIZE]
+    }
+
+    /// Whether the byte at `offset` starts one of our records (`<N>`).
+    fn starts_record_at(&self, offset: usize) -> bool {
+        if self.len - offset < 3 {
+            // Too little left to tell; treat it as a start rather than dropping it.
+            return true;
+        }
+        self.at(offset) == b'<'
+            && self.at(offset + 1).is_ascii_digit()
+            && self.at(offset + 2) == b'>'
+    }
+
+    /// Copies the newest bytes that fit into `out`, oldest first, starting at a
+    /// record boundary.
     ///
-    /// At most two `copy_from_slice` calls (to the end of the ring, then from
-    /// its start), for the same reason as [`LogBuf::push`]: a reader with a
-    /// full-size destination must not spend the whole copy under the IRQ-off
-    /// guard.
-    fn read(&self, out: &mut [u8]) -> LogRead {
-        let take = out.len().min(self.len);
-        let head = take.min(LOGBUF_SIZE - self.start);
-        out[..head].copy_from_slice(&self.buf[self.start..self.start + head]);
+    /// This is the shape Linux's `syslog_print_all` produces: a destination
+    /// smaller than the buffer receives the *newest* records that fit (older ones
+    /// are skipped), not a prefix of the log. A ring wrap or a short destination
+    /// can leave a partial line at the front; it is dropped so the result never
+    /// starts in the middle of a record or of a code point.
+    ///
+    /// At most two `copy_from_slice` calls (from the window start to the end of
+    /// the ring, then from its beginning), so a full-size destination does not
+    /// spend the copy in a per-byte loop under the caller's IRQ-off guard.
+    fn read_newest(&self, out: &mut [u8]) -> usize {
+        let mut take = out.len().min(self.len);
+        if take == 0 {
+            return 0;
+        }
+        let mut skip = self.len - take;
+
+        if !self.starts_record_at(skip) {
+            // Records are at most `LOGBUF_LINE` bytes, so this scan is short.
+            if let Some(trimmed) = (0..take)
+                .find(|offset| self.at(skip + offset) == b'\n')
+                .map(|offset| offset + 1)
+                && trimmed < take
+            {
+                skip += trimmed;
+                take -= trimmed;
+            }
+        }
+
+        let start = (self.start + skip) % LOGBUF_SIZE;
+        let head = take.min(LOGBUF_SIZE - start);
+        out[..head].copy_from_slice(&self.buf[start..start + head]);
         if head < take {
             out[head..take].copy_from_slice(&self.buf[..take - head]);
         }
-        LogRead {
-            copied: take,
-            from: self.unread_from,
-        }
-    }
-
-    /// Drops the part of a previous [`LogBuf::read`] window that is still
-    /// buffered.
-    ///
-    /// A full ring overwrites the oldest bytes as soon as a record arrives, so by
-    /// the time a reader releases its window the ring may already have advanced
-    /// into it. Only the still-buffered suffix is dropped; bytes the ring
-    /// overwrote are gone anyway, and bytes before the window's start belong to
-    /// records the reader never received.
-    fn release(&mut self, read: LogRead) -> usize {
-        let end = read.from + read.copied as u64;
-        if self.unread_from < read.from || self.unread_from >= end {
-            // The whole window is gone (overwritten or already released), or the
-            // window does not start at the unread position at all.
-            return 0;
-        }
-        let drop = ((end - self.unread_from) as usize).min(self.len);
-        self.start = (self.start + drop) % LOGBUF_SIZE;
-        self.len -= drop;
-        self.unread_from += drop as u64;
-        drop
+        take
     }
 
     fn clear(&mut self) {
@@ -361,58 +391,14 @@ pub fn logbuf_len() -> usize {
     LOGBUF.lock().len
 }
 
-/// A window of the kernel log buffer handed out by [`logbuf_read`].
+/// Copies the newest bytes of the kernel log buffer that fit into `out`, oldest
+/// first, and returns how many bytes were written.
 ///
-/// The fields are private on purpose: a window is a capability over the bytes a
-/// reader actually received. A caller outside this crate can obtain one only
-/// from [`logbuf_read`], so it cannot hand [`logbuf_release`] a window larger
-/// than what it was given and drop records it never read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LogRead {
-    /// Bytes copied into the reader's buffer.
-    copied: usize,
-    /// Sequence position of the first copied byte.
-    from: u64,
-}
-
-impl LogRead {
-    /// Returns how many bytes this window copied into the reader's buffer.
-    pub fn copied(self) -> usize {
-        self.copied
-    }
-}
-
-/// Copies the oldest unread bytes of the kernel log buffer into `out`, in log
-/// order, and returns the window that was handed out.
-///
-/// Reading does not consume: a reader that successfully delivered the bytes
-/// calls [`logbuf_release`] with the returned [`LogRead`]. Reads start at the
-/// oldest unread byte, so a reader that drains in chunks makes progress through
-/// the log instead of re-reading the newest tail.
-///
-/// This deliberately differs from Linux, whose `syslog_print_all` starts at the
-/// newest byte that still fits and lets the buffer size decide which older
-/// records are skipped (and, for `READ_CLEAR`, discarded). Here a short
-/// destination receives the *oldest* unread bytes, and an unread record is never
-/// dropped by a read; `SYSLOG_ACTION_SIZE_BUFFER` is what lets a reader take the
-/// whole ring in one call as Linux tools do.
-pub fn logbuf_read(out: &mut [u8]) -> LogRead {
-    LOGBUF.lock().read(out)
-}
-
-/// Drops the part of a previous [`logbuf_read`] window that is still buffered and
-/// reports how many bytes were dropped.
-///
-/// A ring that wrapped while the reader was copying may already have overwritten
-/// the front of the window: only the still-buffered suffix is dropped, so
-/// `READ_CLEAR` still clears what the reader received on a full, busy ring.
-/// Returns `0` when nothing of the window is left — it was fully overwritten or
-/// already released — or when the window does not start at the unread position,
-/// because dropping anything then would discard records the caller never
-/// received. Records logged after the read stay in the buffer, because only the
-/// reader's own window is removed.
-pub fn logbuf_release(read: LogRead) -> usize {
-    LOGBUF.lock().release(read)
+/// The window starts at a record boundary, so callers get whole lines even when
+/// `out` is smaller than the ring. Reading never consumes: only
+/// [`logbuf_clear`] removes records.
+pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
+    LOGBUF.lock().read_newest(out)
 }
 
 /// Drops everything in the kernel log buffer.
@@ -510,9 +496,11 @@ impl Log for KernelLogger {
         }
 
         // Capture first, print second: the buffer is the record of what
-        // happened, the console filter only decides what is shown. The
-        // `<level>` prefix is X-Kernel's own numbering (`1..=5`,
-        // error..trace), so `dmesg | grep '^<4>'` selects one level.
+        // happened, the console filter only decides what is shown. The macros
+        // already dropped everything above the build cap, so every record that
+        // reaches this point is stored — the ring is never narrowed by the
+        // console filter. The `<level>` prefix is X-Kernel's own numbering
+        // (`1..=5`, error..trace), so `dmesg | grep '^<1>'` selects one level.
         let mut line = LineBuf::new();
         let level = level_filter_of(record.level());
         // The trailing newline is part of the record: the console path adds its
@@ -680,13 +668,27 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
     KernelLogger.write_fmt(args)
 }
 
-/// Installs the global `log` logger and starts at the `warn` default.
+/// Installs the global `log` logger and fixes the build-time maximum level.
+///
+/// `build_level` is the compiled-in `LOG_LEVEL_*` choice, parsed here because
+/// this crate owns the level vocabulary. It becomes the **cap**: the `log`
+/// crate's own filter, so a record above it is dropped before the logger runs
+/// and costs a comparison, and no runtime spec can raise it — widening verbosity
+/// means rebuilding.
+///
+/// A configuration that selects no level (`configured_log_level()` reports
+/// `off`) is mapped to `error` rather than silencing the kernel: the Kconfig
+/// choice has no `off` option, so an empty selection is a broken configuration,
+/// and losing only the warnings is a safer fallback than losing everything.
 ///
 /// Call once from primary-CPU boot after the `kiface_logging_api` providers are
 /// linked; `kruntime` then applies the resolved boot filter spec through
 /// [`set_log_level`]. Records emitted before this call are dropped by the `log`
 /// crate, which is why early boot uses [`kprintln!`] instead of the macros.
-pub fn init_klogger() {
+pub fn init_klogger(build_level: &str) {
+    let cap = parse_log_level(build_level)
+        .filter(|level| *level != LevelFilter::Off)
+        .unwrap_or(LevelFilter::Error);
     #[expect(
         clippy::unwrap_used,
         reason = "CG-021-no-panic-on-reachable-failure: failure to install the global logger \
@@ -694,7 +696,17 @@ pub fn init_klogger() {
                   return or recovery caller"
     )]
     log::set_logger(&KernelLogger).unwrap();
-    log::set_max_level(LevelFilter::Warn);
+    FILTER.lock().cap = cap;
+    log::set_max_level(cap);
+}
+
+/// The build-time maximum level (`LOG_LEVEL_*`), fixed for this image.
+///
+/// A filter spec may ask for a higher level; it is accepted and reported, but no
+/// record above the cap is ever produced, so the request has no effect until the
+/// kernel is rebuilt.
+pub fn build_level_cap() -> LevelFilter {
+    FILTER.lock().cap
 }
 
 /// Whether a record at `level` from `target` should reach the console.
@@ -720,15 +732,16 @@ pub fn current_log_level() -> LevelFilter {
     FILTER.lock().default
 }
 
-/// Sets the default level at runtime and drops every per-target override.
+/// Sets the console default level at runtime and drops every per-target
+/// override.
 ///
-/// Takes effect immediately for all subsequent `error!`/`warn!`/`info!`/
-/// `debug!`/`trace!` calls; no rebuild or reboot is required.
+/// Takes effect immediately for the console; the ring keeps recording everything
+/// up to the build cap, and a level above that cap cannot be produced until the
+/// kernel is rebuilt.
 pub fn set_log_level_filter(level: LevelFilter) {
     let mut filter = FILTER.lock();
     filter.default = level;
     filter.count = 0;
-    log::set_max_level(level);
 }
 
 /// Parses a log level from user input, accepting either a level name

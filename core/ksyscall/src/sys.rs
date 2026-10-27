@@ -168,13 +168,14 @@ fn action_needs_privilege(action: i32) -> bool {
 /// `/proc/sys/kernel/printk`, whose value domain is X-Kernel's (higher = more
 /// verbose), so reusing Linux's inverted numbering here would be a trap.
 ///
-/// Both read actions copy forward from the oldest unread byte, the direction
-/// Linux's `syslog_print_all` uses, so a reader that drains in chunks makes
-/// progress through the log instead of re-reading the newest tail. `READ_CLEAR`
-/// then drops exactly the bytes it returned, the way Linux advances its clear
-/// cursor past the records it copied: a caller whose `len` is smaller than the
-/// buffer keeps the rest readable, and records logged while the copy was in
-/// flight are not thrown away.
+/// Both read actions return the **newest** whole records that fit, in log order —
+/// the shape Linux's `syslog_print_all` produces (it walks back from the newest
+/// record until the requested size fits, and starts the copy at a record
+/// boundary). `READ_CLEAR` then advances past everything it returned, which is
+/// also what Linux does with `clear_seq`: records older than the returned window
+/// were skipped by the same cursor, so the whole unread range is consumed. A
+/// caller that wants the entire buffer sizes it from `SIZE_BUFFER`, as `dmesg`
+/// does.
 ///
 /// `len` is decoded at the ABI width: Linux declares it `int`, so the register
 /// is truncated to `i32` and a negative value is rejected with `InvalidInput`
@@ -207,17 +208,18 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isi
             if user.is_null() {
                 return Err(KError::InvalidInput);
             }
-            // Read outside the syscall's user copy: a page fault on the
-            // destination must not happen with the log lock held.
+            // Copy into a kernel buffer outside the user copy: a page fault on
+            // the destination must not happen with the log lock held.
             let mut kbuf = alloc::vec![0u8; klogger::logbuf_len().min(len)];
-            let read = klogger::logbuf_read(&mut kbuf);
-            user.write_vm_slice(&kbuf[..read.copied()])?;
+            let copied = klogger::logbuf_read_newest(&mut kbuf);
+            user.write_vm_slice(&kbuf[..copied])?;
             if action == SYSLOG_ACTION_READ_CLEAR {
-                // Only after a successful copy, and only this reader's window:
-                // an `EFAULT` or a short destination must not lose evidence.
-                klogger::logbuf_release(read);
+                // Only after a successful copy; the whole unread range is
+                // consumed, because the records older than the returned window
+                // were skipped by the same cursor.
+                klogger::logbuf_clear();
             }
-            Ok(read.copied() as isize)
+            Ok(copied as isize)
         }
         _ => Err(KError::InvalidInput),
     }

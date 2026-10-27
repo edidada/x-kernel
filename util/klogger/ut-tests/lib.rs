@@ -10,8 +10,8 @@ use log::{Level, LevelFilter};
 use unittest::{assert_eq, def_test};
 
 use super::{
-    current_log_level, filter_enabled, filter_spec, level_name, level_number, logbuf_clear,
-    logbuf_len, logbuf_read, logbuf_release, parse_log_level, set_filter_spec, set_log_level,
+    build_level_cap, current_log_level, filter_enabled, filter_spec, level_name, level_number,
+    logbuf_clear, logbuf_read_newest, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
 
@@ -193,47 +193,37 @@ fn filter_spec_rejects_bad_input_without_half_applying() {
 }
 
 /// A record the console filter drops still lands in the ring: that is the
-/// "quiet console, complete log" contract `dmesg` depends on.
+/// "quiet console, complete log" contract `dmesg` depends on, and it holds for
+/// every build cap because capture is no longer derived from the console filter.
 ///
-/// `serial`: the ring, the filter and the `log` ceiling are one process-global
-/// resource. The assertions below are scoped to this test's own unique markers
-/// because other kernel threads keep logging concurrently.
+/// `serial`: the ring and the filter are process-global resources. The assertions
+/// below are scoped to this test's own unique markers because other kernel
+/// threads keep logging concurrently.
 #[def_test(serial)]
 fn logbuf_captures_records_the_console_filter_hides() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    // Default `warn`, but the ceiling has to admit `debug` for the override.
-    assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
-    // Reads start at the oldest unread byte, so drop whatever earlier contexts
-    // buffered: the 4 KiB window below must be this test's records.
+    // Console filter `off`: even `error!` is not printed. `error` is at or below
+    // every build cap, so the ring still records it in any configuration.
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    // Drop whatever earlier contexts buffered: the window below must be this
+    // test's records.
     logbuf_clear();
 
-    // `info` sits below the default level, so the console drops it; the ring
-    // keeps it anyway because the ceiling is debug.
-    super::info!("klogger logbuf info marker");
-    super::debug!("klogger logbuf debug marker");
+    super::error!("klogger logbuf captured marker");
 
     let mut buf = [0u8; 4096];
-    assert!(
-        logbuf_len() > 0,
-        "capture did not grow the kernel log buffer"
-    );
-    let len = logbuf_read(&mut buf).copied();
+    let len = logbuf_read_newest(&mut buf);
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
-    let line_with = |needle: &str| -> &str {
-        text.lines()
-            .find(|line| line.contains(needle))
-            .expect("record missing from the kernel log buffer")
-    };
+    let line = text
+        .lines()
+        .find(|line| line.contains("klogger logbuf captured marker"))
+        .expect("the record the console dropped is missing from the ring");
     // Each line carries X-Kernel's own level number, which is what makes
-    // `dmesg | grep '^<4>'` a level filter.
+    // `dmesg | grep '^<1>'` a level filter.
     assert!(
-        line_with("klogger logbuf info marker").starts_with("<3>"),
-        "info record lost its level: {text}"
-    );
-    assert!(
-        line_with("klogger logbuf debug marker").starts_with("<4>"),
-        "debug record lost its level: {text}"
+        line.starts_with("<1>"),
+        "the captured record lost its level: {text}"
     );
     // Records are newline-terminated: without it `dmesg` prints the whole
     // buffer as one run-on line.
@@ -241,7 +231,7 @@ fn logbuf_captures_records_the_console_filter_hides() {
 
     // Clearing drops this test's records; unrelated records may follow.
     logbuf_clear();
-    let len = logbuf_read(&mut buf).copied();
+    let len = logbuf_read_newest(&mut buf);
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     assert!(
         !text.contains("klogger logbuf"),
@@ -253,143 +243,64 @@ fn logbuf_captures_records_the_console_filter_hides() {
     }
 }
 
-/// Reads start at the oldest unread byte and advance with each release, so a
-/// reader that drains in chunks makes progress through the log instead of
-/// re-reading the newest tail.
+/// A read returns the newest whole records that fit, oldest first, starting at a
+/// record boundary — Linux's `syslog_print_all` shape — and never consumes.
 ///
-/// Two properties make this reproducible on a shared ring: the level is pinned
-/// (the ring only captures what clears the `log` ceiling, and the CI unittest
-/// build resolves that ceiling to `off`), and the records are emitted below this
-/// module's console level (ceiling `trace`, default `warn`) so they never go
-/// through the UART.
+/// `serial` because the ring is process-global; the level used is `error`, which
+/// is at or below every build cap, and the records are emitted while the console
+/// filter is `off` so nothing goes through the UART.
 #[def_test(serial)]
-fn logbuf_read_starts_at_the_oldest_unread_byte() {
+fn logbuf_read_returns_the_newest_whole_records() {
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    assert_eq!(set_filter_spec("off"), Ok(()));
     logbuf_clear();
 
-    super::info!("klogger order marker one");
-    super::info!("klogger order marker two");
+    super::error!("klogger order marker one");
+    super::error!("klogger order marker two");
 
     let mut buf = [0u8; 4096];
-    let read = logbuf_read(&mut buf);
-    let text = core::str::from_utf8(&buf[..read.copied()]).expect("log text is utf-8");
+    let len = logbuf_read_newest(&mut buf);
+    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let first = text.find("klogger order marker one").expect("first record");
     let second = text.find("klogger order marker two").expect("second record");
+    assert!(first < second, "records are not in log order: {text}");
+    assert!(text.ends_with('\n'), "window does not end a record: {text:?}");
+
+    // Reading does not consume: the same records come back.
+    let again = logbuf_read_newest(&mut buf);
+    assert!(again >= len, "the second read lost records");
+
+    // A destination smaller than the ring gets the *newest* records, aligned to
+    // a record boundary, never a prefix of the whole buffer.
+    let mut small = [0u8; 96];
+    let small_len = logbuf_read_newest(&mut small);
+    assert!(small_len > 0 && small_len <= small.len());
+    let tail = core::str::from_utf8(&small[..small_len]).expect("log text is utf-8");
     assert!(
-        first < second,
-        "records are not in log order: {text}"
+        tail.starts_with('<'),
+        "the window does not start at a record boundary: {tail:?}"
     );
-
-    // A destination smaller than the buffer returns a full window, and the
-    // sequence position advances by exactly what was released.
-    let mut small = [0u8; 16];
-    let window = logbuf_read(&mut small);
-    assert_eq!(window.copied(), small.len());
-    assert_eq!(logbuf_release(window), small.len());
-    let next = logbuf_read(&mut small);
-    assert_eq!(
-        next.from,
-        window.from + small.len() as u64,
-        "the next read did not advance past the released window"
-    );
-    assert_eq!(logbuf_release(next), small.len());
-
-    // Releasing the same window twice must not drop a second time: the bytes
-    // are already gone.
-    assert_eq!(logbuf_release(next), 0);
-
-    // The records survive a partial release; only the released bytes are gone.
-    let mut rest = [0u8; 4096];
-    let rest_len = logbuf_read(&mut rest).copied();
-    let text = core::str::from_utf8(&rest[..rest_len]).expect("log text is utf-8");
     assert!(
-        text.contains("klogger order marker two"),
-        "a short read destroyed an undelivered record: {text}"
+        tail.contains("klogger order marker two"),
+        "a short destination did not receive the newest record: {tail:?}"
     );
 
+    logbuf_clear();
     if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
         set_log_level(spec);
     }
 }
 
-/// A window that the ring overwrote while the reader was copying is stale:
-/// releasing it drops nothing rather than discarding records the reader never
-/// received.
-#[def_test(serial)]
-fn logbuf_release_ignores_an_overwritten_window() {
-    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
-    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
-    logbuf_clear();
-
-    super::info!("klogger stale marker");
-    let mut small = [0u8; 16];
-    let window = logbuf_read(&mut small);
-    assert_eq!(window.copied(), small.len());
-
-    // `logbuf_clear` is the cheapest way to invalidate the reader's position,
-    // and it reports the same staleness a ring wrap does.
-    logbuf_clear();
-    assert_eq!(logbuf_release(window), 0);
-    super::info!("klogger after stale marker");
-    let mut buf = [0u8; 4096];
-    let len = logbuf_read(&mut buf).copied();
-    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+/// The build cap is what the `log` crate gates on, so it must never be `off` and
+/// must match a level the image was built for.
+#[def_test]
+fn build_cap_is_a_level_the_image_can_produce() {
+    let cap = build_level_cap();
     assert!(
-        text.contains("klogger after stale marker"),
-        "releasing a stale window dropped current records: {text}"
+        cap != log::LevelFilter::Off,
+        "an unset LOG_LEVEL_* must fall back to a level, not silence the kernel"
     );
-
-    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
-        set_log_level(spec);
-    }
-}
-
-/// On a full ring the oldest bytes are overwritten as soon as a record arrives,
-/// so a reader's window can already have lost its front by the time it is
-/// released: the still-buffered part must be dropped, otherwise `READ_CLEAR`
-/// could never clear anything on a busy ring.
-#[def_test(serial)]
-fn logbuf_release_drops_what_is_left_of_a_wrapped_window() {
-    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
-    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
-    logbuf_clear();
-
-    // Fill the ring: one record is far smaller than `LOGBUF_SIZE`, so this needs
-    // many more records than the buffer holds.
-    for _ in 0..1000 {
-        super::info!("klogger filler record for a full ring");
-    }
-    assert_eq!(logbuf_len(), super::LOGBUF_SIZE);
-
-    // Take a window much wider than one record, then let the ring wrap into it.
-    // The window is large enough that the records logged while it is out only
-    // overwrite its front, even with other kernel contexts logging concurrently.
-    let mut window_buf = [0u8; 8192];
-    let window = logbuf_read(&mut window_buf);
-    assert_eq!(window.copied(), window_buf.len());
-    super::info!("klogger record pushed during the copy");
-
-    let dropped = logbuf_release(window);
-    assert!(dropped > 0, "a wrapped window was never cleared");
-    assert!(
-        dropped < window.copied(),
-        "the release counted bytes the ring had already overwritten"
-    );
-    // The next read continues past the window instead of re-delivering it;
-    // `>=` because a concurrent writer may already have pushed it further.
-    let next = logbuf_read(&mut window_buf);
-    assert!(
-        next.from >= window.from + window.copied() as u64,
-        "the release did not advance past the window"
-    );
-
-    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
-        set_log_level(spec);
-    }
 }
 
 /// A record longer than the line buffer keeps its terminating newline and never
@@ -401,18 +312,20 @@ fn logbuf_terminates_truncated_records() {
 
     let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
     let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
-    assert_eq!(set_filter_spec("warn ksyscall=trace"), Ok(()));
+    // `off` keeps the console quiet; `error` is at or below every build cap, so
+    // the ring records these in any configuration.
+    assert_eq!(set_filter_spec("off"), Ok(()));
     logbuf_clear();
 
     // Four times the 256-byte line buffer, so both records are truncated.
     let long = String::from("0123456789abcdef").repeat(16);
-    super::info!("marker-one {long}");
-    super::info!("marker-two {long}");
+    super::error!("marker-one {long}");
+    super::error!("marker-two {long}");
     // Truncation must not split a three-byte code point.
-    super::info!("{}", String::from("\u{5b57}").repeat(120));
+    super::error!("{}", String::from("\u{5b57}").repeat(120));
 
     let mut buf = [0u8; 4096];
-    let len = logbuf_read(&mut buf).copied();
+    let len = logbuf_read_newest(&mut buf);
     let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
     let marker_lines: alloc::vec::Vec<&str> = text
         .lines()

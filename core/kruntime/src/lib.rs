@@ -282,11 +282,13 @@ fn resolve_log_filter(
     build_level
 }
 
-/// Installs the build's log level, which is the default every later source and
-/// every rules-only spec builds on.
+/// Applies the build's log level to the **console** filter, which is the default
+/// every later source and every rules-only spec builds on.
 ///
-/// The `LOG_LEVEL_*` choice only ever yields a valid level, but a rejected spec
-/// must not abort boot: the previous filter stays in place.
+/// This no longer touches what the ring captures: `klogger::init_klogger` fixed
+/// the build cap, and the ring records everything up to it regardless of the
+/// console filter. The `LOG_LEVEL_*` choice only ever yields a valid level, but a
+/// rejected spec must not abort boot: the previous filter stays in place.
 fn apply_build_log_level() -> &'static str {
     let level = configured_log_level();
     let _ = klogger::set_filter_spec(level);
@@ -550,7 +552,7 @@ pub fn rust_main(arg: usize) -> ! {
         ),
     );
 
-    klogger::init_klogger();
+    klogger::init_klogger(configured_log_level());
     klogger::set_log_level(resolve_boot_log_filter());
     info!("Logging is enabled.");
     info!(
