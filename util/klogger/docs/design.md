@@ -89,10 +89,11 @@ KernelLogger::log
   `LineBuf` and the ring are fixed-size, so the record path never allocates.
 - User copies for `syslog(2)` happen **outside** `klogger`: `ksyscall` allocates
   a kernel buffer, calls `logbuf_read_newest`, and only then writes to user space.
-- `set_filter_spec` is callable at runtime, including from the
-  `/proc/sys/kernel/printk` write path. It replaces the console rule set, and the
-  default level when the spec carries one, in a single critical section; it never
-  touches the build cap.
+- `set_filter_spec` is callable at runtime, from the
+  `/proc/sys/kernel/log_filter` write path. It replaces the console rule set, and
+  the default level when the spec carries one, in a single critical section; it
+  never touches the build cap. `set_console_default` is the level-only knob
+  behind `/proc/sys/kernel/printk` and leaves the rule set alone.
 - `init_klogger(build_level)` runs once on the primary CPU during boot and fixes
   the cap.
 
@@ -140,7 +141,10 @@ build cap (LOG_LEVEL_*), fixed by init_klogger
 
 `logbuf_read_newest(out)` copies the **newest** bytes that fit, oldest first, and
 starts at a record boundary (a partial line left by a ring wrap or by the cut is
-dropped). That is the shape Linux's `syslog_print_all` produces: with a
+dropped). The copy runs in 4 KiB passes, each in its own critical section, so a
+full 64 KiB `dmesg` read never holds the ring with interrupts off for the whole
+copy; a ring wrap between passes restarts the read (bounded) instead of returning
+a mixture of two ring states. That is the shape Linux's `syslog_print_all` produces: with a
 destination smaller than the ring, older records are skipped rather than
 returning a prefix of the log. Reading never consumes; `logbuf_clear` drops
 everything, and `syslog(2)`'s `READ_CLEAR` calls it after a successful copy —
@@ -182,18 +186,27 @@ The public entry points and their directions:
 |-------------|-----------|
 | `init_klogger(build_level)` | `kruntime` fixes the build cap from `LOG_LEVEL_*`, once |
 | `build_level_cap()` | reports the cap (diagnostics and specs that ask for more) |
-| `set_filter_spec(spec)` | `kruntime` (boot, from the DT/cmdline/Kconfig sources) and `procfs` (`/proc/sys/kernel/printk` write) install a spec's rules, plus its default level when it has one; a rejected spec leaves the previous filter untouched |
+| `set_filter_spec(spec)` | `kruntime` (boot, from the cmdline/DT/Kconfig sources) and `procfs` (`/proc/sys/kernel/log_filter` write) install a spec's rules, plus its default level when it has one; a rejected spec leaves the previous filter untouched |
+| `set_console_default(level)` | `procfs`'s `/proc/sys/kernel/printk` write: the console level only, keeping the rule set |
 | `set_log_level(spec)` | convenience wrapper that applies a spec and ignores a rejection; used by callers that only have a level string |
 | `set_log_level_filter(level)` | set the console default and drop every override (`procfs` tests and internal resets) |
 | `filter_spec(buf)` | `procfs` read side and the boot banner report the active spec |
 | `current_log_level()` | reports the console filter's **default** level |
 | `logbuf_len` / `logbuf_read_newest` / `logbuf_clear` | `ksyscall`'s `syslog(2)` read path and the unit tests |
 
+The two runtime nodes are deliberately separate, so neither has to carry the
+other's syntax: `/proc/sys/kernel/printk` keeps its historical single-value shape
+(a level number, X-Kernel's domain) and `/proc/sys/kernel/log_filter` carries the
+spec text (`warn ksyscall=debug`). A level write does not disturb the module
+filter, the way Linux's `console_loglevel` leaves dynamic debug alone.
+
 ### Where the boot filter comes from
 
 Precedence is decided by `kruntime`; `klogger` only validates and applies:
-`/chosen/x-kernel,log-level` → `loglevel=` / `quiet` / `debug` on the command
-line → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. Every one of them configures
+`loglevel=` / `quiet` / `debug` on the command line → `/chosen/x-kernel,log-level`
+in the device tree → Kconfig `LOG_FILTER` → Kconfig `LOG_LEVEL_*`. An explicit
+command-line request therefore overrides the board's default, which is what an
+operator changing an argument expects. Every one of them configures
 the **console** filter; none can exceed the build cap. The `LOG_LEVEL_*` choice is
 applied first, so a rules-only source inherits it as its default rather than the
 logger's initial value. Every rejected value is reported and the next source is
@@ -217,7 +230,11 @@ word there: `loglevel=warn,ksyscall=debug`. The comma form works in every source
 
 `SpinNoIrq` disables interrupts, so the hot path cannot deadlock against an
 interrupt handler on the same lock, but it also means no critical section may
-block, allocate, or log again. `LineText` formatting happens before the ring lock
+block, allocate, or log again. Two contexts are excluded from the logger
+entirely, because `SpinNoIrq` cannot protect against them: records raised in NMI
+context are dropped (`LogContextIf::in_nmi`), and a CPU that is already inside
+`log()` drops nested records through a per-CPU guard instead of deadlocking on a
+console sink that logs. `LineText` formatting happens before the ring lock
 is taken, and `print_fmt`'s lock is never held together with `LOGBUF`.
 
 ## Design decisions

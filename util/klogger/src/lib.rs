@@ -10,6 +10,7 @@ extern crate log;
 use core::{
     fmt::{self, Write},
     str::FromStr,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use kspin::{SpinNoIrq, static_lock};
@@ -274,8 +275,12 @@ struct LogBuf {
     len: usize,
     /// Sequence position of the oldest unread byte: advanced whenever bytes
     /// leave the buffer, whether a reader released them or the ring overwrote
-    /// them. A reader proves its window is still current with it.
+    /// them.
     unread_from: u64,
+    /// Bumped whenever the contents shift under a reader (an overwrite or a
+    /// clear). A reader that copies in chunks compares it between chunks and
+    /// restarts when it changed, so a window is never a mix of two ring states.
+    generation: u64,
 }
 
 impl LogBuf {
@@ -285,6 +290,7 @@ impl LogBuf {
             start: 0,
             len: 0,
             unread_from: 0,
+            generation: 0,
         }
     }
 
@@ -308,6 +314,7 @@ impl LogBuf {
             self.start = (self.start + overwrite) % LOGBUF_SIZE;
             self.len -= overwrite;
             self.unread_from += overwrite as u64;
+            self.generation = self.generation.wrapping_add(1);
         }
         let index = (self.start + self.len) % LOGBUF_SIZE;
         let first = line.len().min(LOGBUF_SIZE - index);
@@ -335,22 +342,11 @@ impl LogBuf {
             && self.at(offset + 2) == b'>'
     }
 
-    /// Copies the newest bytes that fit into `out`, oldest first, starting at a
-    /// record boundary.
-    ///
-    /// This is the shape Linux's `syslog_print_all` produces: a destination
-    /// smaller than the buffer receives the *newest* records that fit (older ones
-    /// are skipped), not a prefix of the log. A ring wrap or a short destination
-    /// can leave a partial line at the front; it is dropped so the result never
-    /// starts in the middle of a record or of a code point.
-    ///
-    /// At most two `copy_from_slice` calls (from the window start to the end of
-    /// the ring, then from its beginning), so a full-size destination does not
-    /// spend the copy in a per-byte loop under the caller's IRQ-off guard.
-    fn read_newest(&self, out: &mut [u8]) -> usize {
-        let mut take = out.len().min(self.len);
+    /// The window a read of `size` bytes returns: `(skip, take, generation)`.
+    fn newest_window(&self, size: usize) -> (usize, usize, u64) {
+        let mut take = size.min(self.len);
         if take == 0 {
-            return 0;
+            return (0, 0, self.generation);
         }
         let mut skip = self.len - take;
 
@@ -365,20 +361,40 @@ impl LogBuf {
                 take -= trimmed;
             }
         }
+        (skip, take, self.generation)
+    }
 
-        let start = (self.start + skip) % LOGBUF_SIZE;
-        let head = take.min(LOGBUF_SIZE - start);
-        out[..head].copy_from_slice(&self.buf[start..start + head]);
-        if head < take {
-            out[head..take].copy_from_slice(&self.buf[..take - head]);
+    /// Copies up to `limit` bytes of a window into `out`, starting at `done`.
+    ///
+    /// Keeps each pass over the ring short so the caller's IRQ-off guard is held
+    /// for a bounded time even when `dmesg` asks for the whole 64 KiB ring.
+    fn copy_window_chunk(
+        &self,
+        skip: usize,
+        take: usize,
+        done: usize,
+        out: &mut [u8],
+        limit: usize,
+    ) -> usize {
+        let remaining = take - done;
+        let chunk = remaining.min(limit).min(out.len() - done);
+        if chunk == 0 {
+            return 0;
         }
-        take
+        let begin = (self.start + skip + done) % LOGBUF_SIZE;
+        let head = chunk.min(LOGBUF_SIZE - begin);
+        out[done..done + head].copy_from_slice(&self.buf[begin..begin + head]);
+        if head < chunk {
+            out[done + head..done + chunk].copy_from_slice(&self.buf[..chunk - head]);
+        }
+        chunk
     }
 
     fn clear(&mut self) {
         self.unread_from += self.len as u64;
         self.start = 0;
         self.len = 0;
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -391,14 +407,69 @@ pub fn logbuf_len() -> usize {
     LOGBUF.lock().len
 }
 
+/// Largest slice copied while `LOGBUF` is held.
+///
+/// A `dmesg` read asks for the whole 64 KiB ring; copying that in one pass would
+/// keep interrupts and preemption off for several microseconds and make every
+/// other CPU's `log()` spin on the ring. Chunking bounds it to a few hundred
+/// nanoseconds per pass.
+const READ_CHUNK: usize = 4 * 1024;
+/// How often a read restarts when the ring overwrites its window mid-copy.
+const READ_RETRIES: usize = 3;
+
 /// Copies the newest bytes of the kernel log buffer that fit into `out`, oldest
 /// first, and returns how many bytes were written.
 ///
 /// The window starts at a record boundary, so callers get whole lines even when
 /// `out` is smaller than the ring. Reading never consumes: only
 /// [`logbuf_clear`] removes records.
+///
+/// The copy runs in [`READ_CHUNK`]-sized passes, each in its own critical
+/// section. If the ring wraps onto the window between passes the read restarts
+/// (up to [`READ_RETRIES`] times) rather than returning a mixture of two ring
+/// states; if the writer keeps winning, the bytes copied so far are trimmed to
+/// the last complete record.
 pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
-    LOGBUF.lock().read_newest(out)
+    for _ in 0..READ_RETRIES {
+        let (skip, take, generation) = LOGBUF.lock().newest_window(out.len());
+        if take == 0 {
+            return 0;
+        }
+        let mut done = 0;
+        let mut consistent = true;
+        while done < take {
+            let guard = LOGBUF.lock();
+            if guard.generation != generation {
+                consistent = false;
+                break;
+            }
+            let copied = guard.copy_window_chunk(skip, take, done, out, READ_CHUNK);
+            done += copied;
+            if copied == 0 {
+                break;
+            }
+        }
+        if consistent && done == take {
+            return done;
+        }
+        if !consistent {
+            continue;
+        }
+        // No progress (the buffer shrank underneath): keep what is a whole record.
+        return trim_to_record_end(out, done);
+    }
+    // The ring kept wrapping: return the consistent prefix we managed to copy.
+    trim_to_record_end(out, out.len())
+}
+
+/// Shrinks `len` to just after the last newline, so a truncated read still ends
+/// on a record boundary.
+fn trim_to_record_end(out: &[u8], len: usize) -> usize {
+    let len = len.min(out.len());
+    out[..len]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1)
 }
 
 /// Drops everything in the kernel log buffer.
@@ -454,6 +525,45 @@ impl fmt::Write for LineBuf {
     }
 }
 
+/// Maximum number of CPUs the recursion guard tracks.
+///
+/// The guard only needs to catch a CPU re-entering the logger, which happens
+/// with a console sink that logs or with a fault taken inside the logger. A CPU
+/// id beyond this bound simply skips the guard rather than growing state.
+const MAX_GUARD_CPUS: usize = 64;
+
+/// Per-CPU "this CPU is inside the logger" flags.
+static LOGGING: [AtomicBool; MAX_GUARD_CPUS] = [const { AtomicBool::new(false) }; MAX_GUARD_CPUS];
+
+/// Marks the current CPU as inside the logger for as long as it lives.
+struct RecursionGuard {
+    slot: Option<&'static AtomicBool>,
+}
+
+impl RecursionGuard {
+    /// Returns `None` when this CPU is already inside the logger.
+    fn enter() -> Option<Self> {
+        let slot = kiface_logging_api::LogContextIf::cpu_id()
+            .and_then(|cpu| LOGGING.get(cpu.min(MAX_GUARD_CPUS - 1)));
+        match slot {
+            Some(slot) => slot
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .ok()
+                .map(|_| Self { slot: Some(slot) }),
+            // No CPU identity yet (very early boot): skip the guard.
+            None => Some(Self { slot: None }),
+        }
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot {
+            slot.store(false, Ordering::Release);
+        }
+    }
+}
+
 struct KernelLogger;
 
 impl Write for KernelLogger {
@@ -495,6 +605,19 @@ impl Log for KernelLogger {
             return;
         }
 
+        // Two contexts must never reach the locks: an NMI, which ordinary
+        // interrupt masking cannot exclude, and a nested record from the same
+        // CPU (a console sink that logs, or a fault inside the logger). Both
+        // would deadlock on `SpinNoIrq` instead of reporting anything, so they
+        // are dropped. NMI/panic paths that need output use the platform's
+        // atomic console path instead.
+        if kiface_logging_api::LogContextIf::in_nmi() {
+            return;
+        }
+        let Some(_guard) = RecursionGuard::enter() else {
+            return;
+        };
+
         // Capture first, print second: the buffer is the record of what
         // happened, the console filter only decides what is shown. The macros
         // already dropped everything above the build cap, so every record that
@@ -515,94 +638,102 @@ impl Log for KernelLogger {
         if !filter_enabled(record.target(), record.level()) {
             return;
         }
+        print_record(record);
+    }
+}
 
-        let line = record.line().unwrap_or(0);
-        let path = record.target();
-        let compact = path == "unittest";
-        let color = get_level_color(record.level());
+/// Prints one record to the console, with the per-level colour and the
+/// `[time cpu:tid target:line]` prefix.
+///
+/// Kept out of [`Log::log`] so the record path (guards, ring capture, filter)
+/// stays readable on its own.
+fn print_record(record: &Record) {
+    let line = record.line().unwrap_or(0);
+    let path = record.target();
+    let compact = path == "unittest";
+    let color = get_level_color(record.level());
 
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "std")] {
-                let _ = if compact {
-                    print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{time}] {args}\n",
-                        time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
-                        args = color_fmt!(color, "{}", record.args()),
-                    ))
-                } else {
-                    print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{time} {path}:{line}] {args}\n",
-                        time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
-                        path = path,
-                        line = line,
-                        args = color_fmt!(color, "{}", record.args()),
-                    ))
-                };
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "std")] {
+            let _ = if compact {
+                print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{time}] {args}\n",
+                    time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+                    args = color_fmt!(color, "{}", record.args()),
+                ))
             } else {
-                let cpu_id = kiface_logging_api::LogContextIf::cpu_id();
-                let tid = kiface_logging_api::LogContextIf::task_id();
-                let now = kiface_logging_api::LogContextIf::now();
+                print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{time} {path}:{line}] {args}\n",
+                    time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+                    path = path,
+                    line = line,
+                    args = color_fmt!(color, "{}", record.args()),
+                ))
+            };
+        } else {
+            let cpu_id = kiface_logging_api::LogContextIf::cpu_id();
+            let tid = kiface_logging_api::LogContextIf::task_id();
+            let now = kiface_logging_api::LogContextIf::now();
 
-                // Logging is best effort; reporting its format error via the logger would recurse.
-                let _ = match (compact, cpu_id, tid) {
-                    (true, Some(c), Some(t)) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06} {c}:{t}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        c = c,
-                        t = t,
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                    (true, Some(c), None) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06} {c}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        c = c,
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                    (true, _, _) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                    (false, Some(c), Some(t)) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        c = c,
-                        t = t,
-                        path = path,
-                        line = line,
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                    (false, Some(c), None) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06} {c} {path}:{line}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        c = c,
-                        path = path,
-                        line = line,
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                    (false, _, _) => print_fmt(color_fmt!(
-                        AnsiColor::White,
-                        "[{:>3}.{:06} {path}:{line}] {args}\n",
-                        now.as_secs(),
-                        now.subsec_micros(),
-                        path = path,
-                        line = line,
-                        args = color_fmt!(color, "{}", record.args()),
-                    )),
-                };
-            }
+            // Logging is best effort; reporting its format error via the logger would recurse.
+            let _ = match (compact, cpu_id, tid) {
+                (true, Some(c), Some(t)) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06} {c}:{t}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    c = c,
+                    t = t,
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+                (true, Some(c), None) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06} {c}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    c = c,
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+                (true, _, _) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+                (false, Some(c), Some(t)) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    c = c,
+                    t = t,
+                    path = path,
+                    line = line,
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+                (false, Some(c), None) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06} {c} {path}:{line}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    c = c,
+                    path = path,
+                    line = line,
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+                (false, _, _) => print_fmt(color_fmt!(
+                    AnsiColor::White,
+                    "[{:>3}.{:06} {path}:{line}] {args}\n",
+                    now.as_secs(),
+                    now.subsec_micros(),
+                    path = path,
+                    line = line,
+                    args = color_fmt!(color, "{}", record.args()),
+                )),
+            };
         }
     }
 }
@@ -730,6 +861,15 @@ const fn level_filter_of(level: Level) -> LevelFilter {
 /// applied).
 pub fn current_log_level() -> LevelFilter {
     FILTER.lock().default
+}
+
+/// Sets the console default level at runtime, keeping every per-target override.
+///
+/// This is the knob behind `/proc/sys/kernel/printk`, which only ever carried the
+/// level: writing it must not silently drop the module filter that
+/// `/proc/sys/kernel/log_filter` owns.
+pub fn set_console_default(level: LevelFilter) {
+    FILTER.lock().default = level;
 }
 
 /// Sets the console default level at runtime and drops every per-target

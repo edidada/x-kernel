@@ -244,20 +244,23 @@ levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
 
 | # | Layer | Scope | Needs |
 | --- | --- | --- | --- |
-| 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/printk` | live, until reboot | nothing — the node already exists |
-| 2 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
-| 3 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/log_filter` | live, until reboot | nothing — the node already exists |
+| 2 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 3 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
 | 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build maximum) Kconfig | build default | a rebuild |
 
 Layer 1 is the one to reach for while debugging on hardware: it changes
-verbosity mid-session (`cat /proc/sys/kernel/printk` reports the whole spec)
+verbosity mid-session (`cat /proc/sys/kernel/log_filter` reports the whole spec,
+while `/proc/sys/kernel/printk` reports just the console level)
 and leaves the flashed image and the documented behaviour identical. It cannot
 help with what the **serial console** shows during boot — the node only exists
 once userland runs — which is what layers 2-4 are for. It does not lose the
 boot-time records either: the log ring buffer keeps them for `dmesg`, as
 described below.
 
-Invalid values are reported and ignored rather than silently applied; the
+A command-line request wins over the device-tree default, which wins over
+`LOG_FILTER` and the build level — an operator can always override what the board
+shipped. Invalid values are reported and ignored rather than silently applied; the
 value order is X-Kernel's (higher = more verbose) and *not* Linux
 `console_loglevel` compatible. On the command line the whole spec has to stay
 inside one whitespace-free word, so use the comma form
