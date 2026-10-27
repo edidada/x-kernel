@@ -3427,7 +3427,6 @@ dependencies = [
  "kspin",
  "ksync",
  "ktask",
- "linkme",
  "memaddr",
  "memspace",
  "osvm",

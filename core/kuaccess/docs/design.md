@@ -5,7 +5,7 @@
 `kuaccess` 负责内核侧用户内存访问胶水：
 
 - 将 `osvm` 的通用虚拟内存访问入口接到当前线程地址空间；
-- 处理“内核在访问用户地址时允许页错误回填”的 trap 路径；
+- Resolve user-access faults after returning through architecture exception fixups.
 - 提供少量高频的用户态字符串装载辅助函数；
 - 提供用户态 32-bit 原子 load 与 cmpxchg 原语（供 futex 等路径使用）。
 
@@ -16,7 +16,7 @@
 当前范围包括：
 
 - `src/lib.rs`
-- `ut-tests/copy_tests.rs`（用户复制回归测试）
+- `ut-tests/copy_tests.rs` (copy and atomic fault-resolution regression tests).
 
 ## 架构
 
@@ -35,12 +35,13 @@ syscall / runtime
 ## 调用约束 / 执行上下文
 
 - 必须运行在存在 current task 的上下文中。
-- `access_user_memory()` 要求 current task 可解析为线程。
 - 用户字符串装载会触发用户地址访问，因此允许睡眠/缺页处理。
 - 普通 `osvm` 复制入口要求可睡眠的线程上下文，不自行关闭 IRQ。页错误通过
   exception-table fixup 退出汇编后，在调用任务中完成回填；文件页回填允许等待块 I/O。
-- 原子用户访问的 trap handler 依赖当前线程的 `accessing_user_memory` 标志，
-  只在该窗口内接管页错误。
+- Fault-resolving atomics require the same sleepable process-thread context as
+  copies. `access_user_page()` rejects fault resolution with `NoAccess` when
+  sleeping is forbidden or an exception context is active, before taking the
+  address-space mutex. The `*_nofault` variants never enter MM fault resolution.
 
 ## 算法流程
 
@@ -52,10 +53,10 @@ syscall / runtime
 4. 普通复制不打开 trap 内回填窗口。缺页时通过 exception-table fixup 返回，
    随后在调用任务中调用当前进程的 `MmSpace::handle_page_fault()`。这样不会在
    IRQ 被屏蔽的异常上下文里等待 IRQ 驱动的磁盘完成。
-5. 使用单一进度循环，每轮先尝试复制当前页片段：成功则推进 offset 并重置
-   当前页的缺页次数；失败则最多处理一次缺页，再进入下一轮复制。
-   `Resolved`、`Retry` 和 `CowConflictRetry` 都允许重试复制；
-   unmapped、permission、bus、OOM、no-progress 和 generic failure 返回 `NoAccess`。
+5. `copy_user_pages()` advances only after `access_user_page()` completes the
+   current page fragment. The latter shares fault resolution and its per-page
+   retry budget with atomic accesses. `Resolved`, `Retry` and `CowConflictRetry`
+   permit another access attempt; all other outcomes return `NoAccess`.
 6. `Resolved` 后复制仍失败时继续处理当前页缺页，允许共享文件的
    “未映射 → 只读 PTE → 可写 PTE”分阶段完成。每个用户页最多调用缺页处理
    16 次，`Resolved` 和 retry-class outcome 共用该预算，下一页重新计数。
@@ -66,13 +67,18 @@ syscall / runtime
 
 ### 用户态原子访问
 
-1. 校验 4 字节对齐与用户地址范围。
-2. faultable 形式在 `access_user_memory()` 窗口内调用架构原语，允许 MM 处理
-   可恢复缺页；nofault 形式直接依赖 exception-table fixup 返回失败。
-3. load 使用自然对齐的只读 32-bit load；nofault cmpxchg 的 exclusive/atomic
-   序列在 `IrqSave` 保护下执行。
-4. 成功时返回 observed value 或 `(exchanged, observed)`；fault 映射为
-   `MemError::NoAccess`。
+1. Validate four-byte alignment and the user address range. A naturally aligned
+   word cannot cross a page boundary.
+2. Attempt the architecture primitive with exception-table fault fixups.
+   `*_nofault` returns `NoAccess` immediately on a fault. The resolving form
+   calls `access_user_page()`: resolve in task context and retry the complete
+   operation, with at most 16 fault-resolution attempts.
+3. Load requests read access. Compare-exchange resolves read/write access and
+   keeps its exclusive sequence under a local `IrqSave`, released before MM
+   fault resolution. Each retry compares against the original expected value;
+   it does not resume a store after sleeping or overwrite a competing update.
+4. Return the observed value or `(exchanged, observed)` only after a successful
+   assembly attempt. An unresolved fault returns `MemError::NoAccess`.
 
 这些原语供 futex / robust-list 等路径对用户态 futex word 做无 TOCTOU 的读取
 或更新。只读 load 不要求映射可写，也不会触发 COW。
@@ -85,16 +91,17 @@ syscall / runtime
 
 ## 并发模型
 
-- `Vm` 不使用 `IrqSave`，普通复制的 fault 慢路径与磁盘读取一样要求可睡眠。
-  nofault 原子访问仍保留其局部 `IrqSave` 保护。
-- 不维护全局共享状态；真正的并发控制由线程状态和地址空间锁负责。
+- Copies and atomic fault resolution may sleep. Only the compare-exchange
+  assembly attempt holds `IrqSave`; the guard never spans fault resolution.
+- No per-thread access-window flag or trap callback is needed. The address-space
+  mutex protects MM resolution, while architecture primitives own word atomicity.
 
 ## 设计决策
 
 - 用户字符串装载留在 `kuaccess`，而不是 syscall crate，因为它属于“如何安全访问用户内存”这一职责，不属于某个单独 syscall 族。
 - 只保留字符串级 helper，不在这里扩张为新的通用用户态参数解析层。
-- trap handler 的外部 ABI 仍是 `bool`，但这个 bool 现在只是架构 trap 分发的适配结果；
-  MM 语义来自 `PageFaultOutcome`，避免 `kuaccess` 重新定义缺页分类。
+- `fault_outcome_allows_retry()` consumes MM's `PageFaultOutcome` classification
+  for both copies and atomics without redefining the fault model.
 
 ## 回归验证
 
@@ -103,3 +110,7 @@ syscall / runtime
 只读保护和撤销映射。分阶段写缺页测试跨越多个页面并超过单页恢复预算，验证同一页连续缺页后
 复制结果完整；无进展测试覆盖反复报告成功、反复报告 COW retry 的有界退出，
 以及显式 `NoProgress` 的立即失败。测试不依赖真实磁盘或 IRQ 的时序。
+
+The atomic regression uses that same backing to cover demand loads, complete
+compare-exchange retries across staged write faults, mismatch and read-only
+protection. Nofault and IRQ-masked attempts must not call the backing provider.

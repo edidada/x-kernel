@@ -9,7 +9,7 @@ use unittest_support::TestUserValue;
 
 use super::{
     USER_SPACE_BASE, USER_SPACE_SIZE, atomic_cmpxchg_u32, atomic_load_u32, atomic_u32_eq,
-    check_access, fault_outcome_to_trap_result,
+    check_access, fault_outcome_allows_retry,
 };
 
 #[def_test]
@@ -105,22 +105,22 @@ fn test_check_access_rejects_far_above_user_space() {
 }
 
 #[def_test]
-fn fault_outcome_mapping_keeps_retry_inside_copy_window() {
-    assert!(fault_outcome_to_trap_result(PageFaultOutcome::Resolved));
-    assert!(fault_outcome_to_trap_result(PageFaultOutcome::Retry));
-    assert!(fault_outcome_to_trap_result(
+fn fault_outcomes_allow_retry_after_fixup() {
+    assert!(fault_outcome_allows_retry(PageFaultOutcome::Resolved));
+    assert!(fault_outcome_allows_retry(PageFaultOutcome::Retry));
+    assert!(fault_outcome_allows_retry(
         PageFaultOutcome::CowConflictRetry
     ));
 }
 
 #[def_test]
 fn fault_outcome_mapping_rejects_user_copy_failures() {
-    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::Unmapped));
-    assert!(!fault_outcome_to_trap_result(
+    assert!(!fault_outcome_allows_retry(PageFaultOutcome::Unmapped));
+    assert!(!fault_outcome_allows_retry(
         PageFaultOutcome::AccessDenied
     ));
-    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::BusError));
-    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::OutOfMemory));
-    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::NoProgress));
-    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::Failed));
+    assert!(!fault_outcome_allows_retry(PageFaultOutcome::BusError));
+    assert!(!fault_outcome_allows_retry(PageFaultOutcome::OutOfMemory));
+    assert!(!fault_outcome_allows_retry(PageFaultOutcome::NoProgress));
+    assert!(!fault_outcome_allows_retry(PageFaultOutcome::Failed));
 }

@@ -188,7 +188,6 @@ pub struct Thread {
     /// a group kill; the execing thread orchestrates the sweep and must survive
     /// it. See `exec_de_thread`.
     exec_sweep_target: AtomicBool,
-    accessing_user_memory: AtomicBool,
     pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
     seccomp: super::SeccompContext,
@@ -273,7 +272,6 @@ impl Thread {
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
             exec_sweep_target: AtomicBool::new(false),
-            accessing_user_memory: AtomicBool::new(false),
             restart_block: Mutex::new(RestartSlot::empty()),
             no_new_privileges: AtomicBool::new(no_new_privileges),
             seccomp: super::SeccompContext::new(),
@@ -548,17 +546,6 @@ impl Thread {
     /// Returns whether this thread is a `de_thread` sibling-sweep target.
     pub fn is_exec_sweep_target(&self) -> bool {
         self.exec_sweep_target.load(Ordering::Acquire)
-    }
-
-    /// Returns whether the thread is currently performing a user-memory access.
-    pub fn is_accessing_user_memory(&self) -> bool {
-        self.accessing_user_memory.load(Ordering::Acquire)
-    }
-
-    /// Marks whether the thread is currently performing a user-memory access.
-    pub fn set_accessing_user_memory(&self, accessing: bool) {
-        self.accessing_user_memory
-            .store(accessing, Ordering::Release);
     }
 
     /// Installs a per-thread TEE session context if one is not present yet.

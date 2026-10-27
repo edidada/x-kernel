@@ -2,13 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Demand faults must reach a sleepable backing provider from user copies.
+//! Demand faults must reach a sleepable backing provider from user accesses.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::paging::{PageSize, PageTableMut};
 use ksync::Mutex;
+use ktask::current;
 use memaddr::{PAGE_SIZE_4K, VirtAddrRange};
 use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmRuntimeOps,
@@ -184,6 +185,74 @@ fn user_copies_resolve_sleepable_backing_and_preserve_permissions() {
         osvm::read_vm_bytes(address as *const u8, &mut output),
         Err(MemError::NoAccess)
     );
+}
+
+#[def_test(user)]
+fn user_atomics_resolve_sleepable_backing_and_preserve_permissions() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let load_address = start.as_usize();
+    let exchange_address = load_address + PAGE_SIZE_4K;
+    for behavior in [FaultBehavior::Normal, FaultBehavior::StagedWrite] {
+        let expected_faults = if matches!(behavior, FaultBehavior::StagedWrite) {
+            3
+        } else {
+            2
+        };
+        let backing = Arc::new(SleepableBacking {
+            pages: PrivateBackend::new(start, PageSize::Size4K),
+            faults: AtomicUsize::new(0),
+            behavior,
+        });
+        space
+            .lock()
+            .map(
+                start,
+                PAGE_SIZE_4K * 2,
+                MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE,
+                false,
+                VmRuntimeRef::new_file_shared(backing.clone()),
+            )
+            .unwrap();
+
+        let nofault_load = atomic_load_u32_nofault(load_address);
+        let nofault_exchange = atomic_cmpxchg_u32_nofault(exchange_address, 0, 7);
+        let (masked_load, masked_exchange) = {
+            let _irq = IrqSave::new();
+            (
+                atomic_load_u32(load_address),
+                atomic_cmpxchg_u32(exchange_address, 0, 7),
+            )
+        };
+        let faults_before = backing.faults.load(Ordering::Relaxed);
+        let load = atomic_load_u32(load_address);
+        let exchange = atomic_cmpxchg_u32(exchange_address, 0, 7);
+        let mismatch = atomic_cmpxchg_u32(exchange_address, 0, 9);
+        space
+            .lock()
+            .protect(
+                start,
+                PAGE_SIZE_4K * 2,
+                MappingFlags::USER | MappingFlags::READ,
+            )
+            .unwrap();
+        let protected_exchange = atomic_cmpxchg_u32(exchange_address, 7, 9);
+        let readback = atomic_load_u32(exchange_address);
+        space.lock().unmap(start, PAGE_SIZE_4K * 2).unwrap();
+
+        assert_eq!(nofault_load, Err(MemError::NoAccess));
+        assert_eq!(nofault_exchange, Err(MemError::NoAccess));
+        assert_eq!(masked_load, Err(MemError::NoAccess));
+        assert_eq!(masked_exchange, Err(MemError::NoAccess));
+        assert_eq!(faults_before, 0, "non-sleepable access must not invoke the backend");
+        assert_eq!(load, Ok(0), "load must resolve faults in task context");
+        assert_eq!(exchange, Ok((true, 0)), "retry the whole exchange after a fault");
+        assert_eq!(mismatch, Ok((false, 7)));
+        assert_eq!(protected_exchange, Err(MemError::NoAccess));
+        assert_eq!(readback, Ok(7));
+        assert_eq!(backing.faults.load(Ordering::Relaxed), expected_faults);
+    }
 }
 
 #[def_test(user)]

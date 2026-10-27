@@ -28,9 +28,9 @@ unsafe extern "C" {
     ///
     /// # Safety
     ///
-    /// `addr` must be a 4-byte-aligned address that is currently readable in
-    /// the active address space. `value_out` must point to writable kernel
-    /// memory.
+    /// `addr` must be a validated, 4-byte-aligned user address in the active
+    /// address space. Missing or inaccessible mappings return a fault through
+    /// the exception table. `value_out` must point to writable kernel memory.
     pub fn user_atomic_load_u32(addr: *const u32, value_out: *mut u32) -> usize;
 
     /// Atomically compare-exchanges a 32-bit word at `addr`.
@@ -40,9 +40,9 @@ unsafe extern "C" {
     ///
     /// # Safety
     ///
-    /// `addr` must be a 4-byte-aligned address that is currently accessible in
-    /// the active address space under the user-access window. `old_out` must
-    /// point to writable kernel memory.
+    /// `addr` must be a validated, 4-byte-aligned user address in the active
+    /// address space. Missing or inaccessible mappings return a fault through
+    /// the exception table. `old_out` must point to writable kernel memory.
     ///
     /// # Returns
     ///

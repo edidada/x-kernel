@@ -9,7 +9,7 @@
 
 - 所有 `vm_load_string*()` 调用点。
 - 所有经 `osvm::VirtMemIo` 落到 `Vm` 的读写请求。
-- 访问窗口内触发的页错误处理。
+- User atomic load/compare-exchange and their task-context fault resolution.
 
 ## unsafe 代码清单
 
@@ -20,30 +20,36 @@
   依赖 4 字节对齐与用户地址范围检查；只读取用户字，并通过 exception-table
   fixup 报告 fault。
 - `user_atomic_cmpxchg_u32(...)`：
-  依赖 4 字节对齐检查、用户地址范围检查，以及同一用户访问窗口与 exception-table fixup。
+  Requires four-byte alignment, a validated user range and a writable kernel
+  output slot. Exception fixup returns before any fault resolution or retry.
 
 ## 内存安全不变量
 
 - `check_access()` 只允许访问用户空间有效区间。
 - `atomic_cmpxchg_u32()` / `atomic_load_u32()` / `atomic_u32_eq()` 额外要求地址 4 字节对齐。
-- `handle_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
-- 普通复制不能在禁 IRQ 的异常处理路径等待块设备完成。调用方必须允许睡眠，
-  且不得持有禁止睡眠的锁；不通过放宽块驱动上下文检查规避这一要求。
-- `kuaccess` 必须保留 `MmSpace::handle_page_fault()` 的 typed outcome 分类：
-  只有 `Resolved` 和 retry-class outcome 可以转换为 trap handled；unmapped、
-  permission denied、bus error、OOM、no-progress 和 generic failure 必须转换为
-  user-copy / atomic-user 失败，而不是继续重试。
+- `access_user_page()` resolves faults only for the current process thread,
+  after checking sleepability and rejecting active exception context. Neither
+  copies nor atomics may wait for I/O with IRQs or preemption disabled.
+- Only `Resolved`, `Retry` and `CowConflictRetry` permit another access attempt.
+  Unmapped, permission, bus, OOM, no-progress and generic failures return
+  `NoAccess`. No trap callback retries a faulting instruction inside the exception.
 - 普通复制允许同一页在 resolved 后继续缺页，以完成分阶段映射和写权限准备。
   每页的全部缺页处理调用共用 16 次预算，包括 resolved 和 retry-class outcome；
   显式 `NoProgress` 立即失败，预算耗尽仍不能复制则返回 `NoAccess`。
   不能把部分初始化缓冲区报告为完整成功；读写分别使用 READ/WRITE fault 权限，
   不能绕过只读映射。
 - 字符串 helper 只在成功读取完整字节流后再做 UTF-8 解释。
+- Atomics share the copy path's per-page fault budget. A failed assembly attempt
+  never publishes its output. Compare-exchange retries both the load and the
+  conditional store with the original expected value; it cannot replay a stale
+  unconditional store after MM resolution.
 
 ## 线程安全
 
 - 不持有跨线程共享可变状态。
-- 线程本地的访问窗口标志由当前线程对象维护，不允许跨线程复用。
+- No thread-local access-window flag is retained. Fault resolution obtains the
+  calling thread's address space; the architecture atomic operation owns the
+  word update, independently of the MM lock.
 
 ## 威胁分析
 
@@ -53,16 +59,16 @@
 
 ## 故障模式与影响分析（FMEA）
 
-- current task 不是线程：`access_user_memory()` 直接 panic，暴露调用方上下文错误。
+- Fault resolution without a sleepable process thread returns `NoAccess` before
+  acquiring the MM lock; an already accessible word does not require resolution.
 - 用户地址在访问过程中失效：返回 `MemError::NoAccess` 或等价 `KError`。
-- 页错误被错误线程接管：依赖访问窗口标志避免。
-- typed fault outcome 被错误压扁为 true：可能导致 user-copy 在不可恢复 fault 上反复重试；
-  `fault_outcome_to_trap_result()` 集中维护 outcome 到 trap bool 的唯一映射。
+- An incorrect retry classification could repeat an unrecoverable fault;
+  `fault_outcome_allows_retry()` centralizes that decision for both access paths.
 
 ## 故障管理
 
 - 地址/映射问题走 `Result` 返回。
-- 只有“线程上下文假设被破坏”这类内部不变量错误会 panic。
+- User-fault handling reports context and access failures through `MemResult`.
 
 ## 已知限制
 

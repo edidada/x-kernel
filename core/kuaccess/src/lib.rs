@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Kernel-side user memory access glue for `osvm`.
+//!
+//! Fault-resolving accesses require a sleepable process-thread context, with
+//! no spinlock, IRQ-disable or preemption-disable guard held. Faults return
+//! through exception-table fixups before MM resolution in the calling task.
+//! The `*_nofault` atomics never resolve faults and may run under such guards.
 
 #![no_std]
 #![feature(likely_unlikely)]
@@ -19,56 +24,15 @@ use kerrno::{KError, KResult};
 use khal::{
     asm::{user_atomic_cmpxchg_u32, user_atomic_load_u32, user_copy},
     paging::MappingFlags,
-    trap::{PAGE_FAULT, register_trap_handler},
 };
 use kprocess::AsThread;
 use kspin::IrqSave;
-use ktask::{current, current_may_uninit};
+use ktask::current_may_uninit;
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use memspace::PageFaultOutcome;
 use osvm::{MemError, MemResult, VirtMemIo};
 
-/// Enables scoped access into user memory, allowing page faults to occur inside
-/// kernel.
-pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
-    let curr = current();
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: Fault-resolving user atomics serve futex \
-                  and robust-list operations on the user thread that owns the address space; a \
-                  kernel task has no user address space to access"
-    )]
-    let Some(thread) = curr.try_as_thread() else {
-        panic!("access_user_memory called outside of thread context");
-    };
-
-    thread.set_accessing_user_memory(true);
-    let result = f();
-    thread.set_accessing_user_memory(false);
-    result
-}
-
-#[register_trap_handler(PAGE_FAULT)]
-fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
-    let Some(curr) = current_may_uninit() else {
-        return false;
-    };
-    let Some(thread) = curr.try_as_thread() else {
-        return false;
-    };
-
-    if unlikely(!thread.is_accessing_user_memory()) {
-        return false;
-    }
-
-    let Ok(address_space) = thread.process().address_space() else {
-        return false;
-    };
-    let outcome = address_space.lock().handle_page_fault(vaddr, access_flags);
-    fault_outcome_to_trap_result(outcome)
-}
-
-fn fault_outcome_to_trap_result(outcome: PageFaultOutcome) -> bool {
+fn fault_outcome_allows_retry(outcome: PageFaultOutcome) -> bool {
     matches!(
         outcome,
         PageFaultOutcome::Resolved | PageFaultOutcome::Retry | PageFaultOutcome::CowConflictRetry
@@ -82,6 +46,40 @@ struct Vm;
 // without enabling the access. Leave room for staged faults and transient races.
 const MAX_USER_PAGE_FAULT_ATTEMPTS: usize = 16;
 
+// Each operation touches one validated user page and reports faults through an
+// assembly fixup. Resolve only after it returns, so neither an exception frame
+// nor an operation-local IRQ guard spans a sleepable fault handler.
+fn access_user_page(
+    address: usize,
+    access_flags: MappingFlags,
+    mut access_fn: impl FnMut() -> usize,
+) -> MemResult {
+    for fault_attempts in 0..=MAX_USER_PAGE_FAULT_ATTEMPTS {
+        if access_fn() == 0 {
+            return Ok(());
+        }
+        if fault_attempts == MAX_USER_PAGE_FAULT_ATTEMPTS
+            || !ktask::is_sleepable_context()
+            || khal::context::in_exception_context()
+        {
+            return Err(MemError::NoAccess);
+        }
+        let curr = current_may_uninit().ok_or(MemError::NoAccess)?;
+        let thread = curr.try_as_thread().ok_or(MemError::NoAccess)?;
+        let address_space = thread
+            .process()
+            .address_space()
+            .map_err(|_| MemError::NoAccess)?;
+        let outcome = address_space
+            .lock()
+            .handle_page_fault(VirtAddr::from_usize(address), access_flags);
+        if !fault_outcome_allows_retry(outcome) {
+            return Err(MemError::NoAccess);
+        }
+    }
+    Err(MemError::NoAccess)
+}
+
 // Retry only the current user page after returning through the assembly fixup.
 // File-backed faults can wait for disk I/O here, outside exception context.
 fn copy_user_pages(
@@ -92,36 +90,11 @@ fn copy_user_pages(
 ) -> MemResult {
     check_access(start, len)?;
     let mut offset = 0;
-    let mut fault_attempts = 0;
     while offset < len {
         let address = start + offset;
         let count = (PAGE_SIZE_4K - address % PAGE_SIZE_4K).min(len - offset);
-        if copy_fn(offset, count) == 0 {
-            offset += count;
-            fault_attempts = 0;
-            continue;
-        }
-        if fault_attempts == MAX_USER_PAGE_FAULT_ATTEMPTS {
-            return Err(MemError::NoAccess);
-        }
-        fault_attempts += 1;
-        let curr = current();
-        let thread = curr.try_as_thread().ok_or(MemError::NoAccess)?;
-        let address_space = thread
-            .process()
-            .address_space()
-            .map_err(|_| MemError::NoAccess)?;
-        let outcome = address_space
-            .lock()
-            .handle_page_fault(VirtAddr::from_usize(address), access_flags);
-        // Retry the copy after each recoverable fault. Shared file writes may
-        // first install a read-only PTE, then fault again to enable writing.
-        match outcome {
-            PageFaultOutcome::Resolved
-            | PageFaultOutcome::Retry
-            | PageFaultOutcome::CowConflictRetry => continue,
-            _ => return Err(MemError::NoAccess),
-        }
+        access_user_page(address, access_flags, || copy_fn(offset, count))?;
+        offset += count;
     }
     Ok(())
 }
@@ -173,6 +146,11 @@ pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String
 }
 
 /// Atomically loads a 32-bit word from user memory.
+///
+/// May sleep to resolve a fault in the calling process thread, then retries the
+/// load. Returns [`MemError::InvalidAddr`] for misalignment or
+/// [`MemError::NoAccess`] for an invalid range, unrecoverable fault, exhausted
+/// fault-retry budget, or a fault that cannot be resolved in this context.
 pub fn atomic_load_u32(addr: usize) -> MemResult<u32> {
     atomic_load_u32_inner(addr, true)
 }
@@ -212,16 +190,12 @@ fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
         // a nonzero return.
         unsafe { user_atomic_load_u32(addr as *const u32, core::ptr::addr_of_mut!(observed)) }
     };
-    let failed = if resolve_faults {
-        access_user_memory(operation)
-    } else {
-        operation()
-    };
-    if unlikely(failed != 0) {
-        Err(MemError::NoAccess)
-    } else {
-        Ok(observed)
+    if resolve_faults {
+        access_user_page(addr, MappingFlags::READ, operation)?;
+    } else if operation() != 0 {
+        return Err(MemError::NoAccess);
     }
+    Ok(observed)
 }
 
 /// Atomically compare-exchanges a 32-bit word in user memory.
@@ -229,7 +203,10 @@ fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
 /// Returns `Ok((true, old))` when `*addr == old` and the store of `new`
 /// succeeded. Returns `Ok((false, observed))` when the word differed from
 /// `old` (no store). Returns `Err` on misalignment, out-of-range address, or
-/// page fault that could not be resolved inside the user-access window.
+/// page fault that could not be resolved, including exhausted retries or a
+/// context that cannot sleep. Fault resolution may sleep in the calling process
+/// thread; each retry starts a new compare-exchange with the same `old` and
+/// `new`, so a competing update is observed rather than overwritten.
 ///
 /// This is the primitive futex / robust-list paths need for race-free updates
 /// of userspace futex words.
@@ -260,6 +237,9 @@ fn atomic_cmpxchg_u32_inner(
 
     let mut observed = 0u32;
     let mut operation = || {
+        // Keep the architecture-exclusive sequence local to this CPU. The
+        // guard ends before access_user_page can resolve a fault or sleep.
+        let _irq = IrqSave::new();
         // SAFETY: `check_access` validated the 4-byte user range, `addr` is
         // 4-byte aligned, and `observed` is a live kernel stack slot. The
         // assembly exception table converts a user-memory fault into a nonzero
@@ -273,19 +253,12 @@ fn atomic_cmpxchg_u32_inner(
             )
         }
     };
-    let failed = if resolve_faults {
-        access_user_memory(operation)
-    } else {
-        // The nofault form is used inside non-sleepable ordering sections.
-        // Keep its architecture-exclusive sequence local to this CPU.
-        let _irq = IrqSave::new();
-        operation()
-    };
-    if unlikely(failed != 0) {
-        Err(MemError::NoAccess)
-    } else {
-        Ok((observed == old, observed))
+    if resolve_faults {
+        access_user_page(addr, MappingFlags::READ | MappingFlags::WRITE, operation)?;
+    } else if operation() != 0 {
+        return Err(MemError::NoAccess);
     }
+    Ok((observed == old, observed))
 }
 
 #[extern_trait]
