@@ -54,6 +54,32 @@ does not redirect registration or synthesize HUP. Readiness still uses the
 current caller's pending queues. Files without a captured source retain their
 ordinary `register_poll` path.
 
+Edge-triggered interests recheck readiness after replacing their one-shot
+source registrations. The recheck queues directions that were absent from the
+event just consumed, preserving a read arrival while a write event is being
+rearmed without repeatedly reporting unchanged writability. Source notifications
+during ET rearm enqueue the interest even if the readiness mask is unchanged;
+discarding them could consume a one-shot registration without leaving pending work.
+Each queued source notification is eligible for delivery even when its current
+readiness mask equals the previous event. ET removes the consumed ready entry
+instead of retaining it as LT does; it does not infer edges from mask changes.
+This matches Linux's `ep_send_events` and avoids discarding another arrival
+whose read/write readiness bits happen to be unchanged.
+Registration deferral and callback notification share one atomic state so a wake
+cannot fall between ending deferral and collecting deferred notifications.
+Callbacks become live before the final readiness sample: a notification arriving
+after the sample must enqueue independently rather than be ignored using stale
+readiness bits, including on the bounded registration-restoration attempt.
+Concurrent consumers can drain the original ready batch while an interest is
+requeued. Per-call deduplication retains that fresh entry when no level-triggered
+entry was already kept, preserving its queue-membership flag and future wakes.
+Each interest serializes consume/rearm and MOD with a sleepable operation mutex.
+This keeps generation advancement, registration-owner replacement and readiness
+rechecks in one transaction; an older consumer cannot cancel a newer owner's
+registrations. Source callbacks use only the IRQ-safe enqueue path and never
+take this mutex. Control operations acquire the control mutex first; no ready
+consumer acquires it while holding an interest's operation mutex.
+
 File construction requires allocator and initialized anonymous-inode filesystem.
 `read`/`write` may block through their polling futures unless the file carries
 NONBLOCK. The authoritative nonblocking flag is on `VfsFile`. Epoll control uses
