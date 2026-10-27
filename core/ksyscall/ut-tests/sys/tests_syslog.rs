@@ -4,6 +4,7 @@
 
 //! `syslog(2)`: per-action privilege policy and the read-side contract.
 
+use alloc::vec;
 use unittest::{assert, assert_eq, def_test};
 use unittest_support::TestUserBuffer;
 
@@ -116,6 +117,10 @@ fn read_clear_drops_the_unread_range() {
 
 /// A zero length returns 0 and keeps the ring: nothing was delivered, so nothing
 /// may be consumed (Linux returns before touching the buffer for `len == 0`).
+///
+/// The assertion is "the ring did not shrink" rather than "the length is
+/// unchanged": other kernel threads keep logging, and the ring is allowed to grow
+/// underneath this test.
 #[def_test(user)]
 fn zero_length_keeps_the_ring() {
     klogger::error!("syslog zero-length marker");
@@ -125,22 +130,44 @@ fn zero_length_keeps_the_ring() {
     let buffer = TestUserBuffer::new(64).unwrap();
     for action in [SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR] {
         assert_eq!(sys_syslog(action, buffer.as_user_ptr(), 0), Ok(0));
-        assert_eq!(
-            klogger::logbuf_len(),
-            before,
+        assert!(
+            klogger::logbuf_len() >= before,
             "a zero-length read consumed the ring"
         );
     }
+
+    // The record that was buffered before the zero-length reads is still there.
+    let mut probe = vec![0u8; klogger::LOGBUF_SIZE];
+    let len = klogger::logbuf_read_newest(&mut probe);
+    let text = core::str::from_utf8(&probe[..len]).expect("log text is utf-8");
+    assert!(
+        text.contains("syslog zero-length marker"),
+        "a zero-length read dropped a buffered record"
+    );
 }
 
-/// `len` is a signed ABI argument: a negative value fails like Linux's
-/// `len < 0` instead of being clamped to the ring size.
+/// `len` is Linux's signed `int`: a negative value fails like Linux's `len < 0`
+/// instead of being clamped to the ring size and copied past the declared length.
 #[def_test(user)]
 fn negative_length_is_rejected() {
     let buffer = TestUserBuffer::new(64).unwrap();
     for action in [SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR] {
         assert_eq!(
             sys_syslog(action, buffer.as_user_ptr(), -1),
+            Err(kerrno::KError::InvalidInput)
+        );
+    }
+}
+
+/// A null destination is invalid whatever the length, and is rejected before the
+/// zero-length fast path.
+///
+/// `user` because the syscall asks for the current credential first.
+#[def_test(user)]
+fn null_buffer_is_rejected_even_with_a_zero_length() {
+    for action in [SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR] {
+        assert_eq!(
+            sys_syslog(action, core::ptr::null_mut(), 0),
             Err(kerrno::KError::InvalidInput)
         );
     }

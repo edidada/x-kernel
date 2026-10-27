@@ -205,15 +205,16 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isi
             if len < 0 {
                 return Err(KError::InvalidInput);
             }
+            let user = UserPtr::<u8>::from(buf as usize);
+            if user.is_null() {
+                // A null destination is invalid whatever the length, as in Linux.
+                return Err(KError::InvalidInput);
+            }
             if len == 0 {
                 // Nothing to deliver and nothing to consume.
                 return Ok(0);
             }
             let len = len as usize;
-            let user = UserPtr::<u8>::from(buf as usize);
-            if user.is_null() {
-                return Err(KError::InvalidInput);
-            }
             // Copy into a kernel buffer outside the user copy: a page fault on
             // the destination must not happen with the log lock held.
             let mut kbuf = alloc::vec![0u8; klogger::logbuf_len().min(len)];

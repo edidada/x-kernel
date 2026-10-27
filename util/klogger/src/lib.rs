@@ -38,6 +38,19 @@ macro_rules! color_fmt {
     };
 }
 
+/// Colour wrapper whose terminating SGR reset stays **inside** the line.
+///
+/// `color_fmt!` puts its reset after the text it wraps; when that text ends with
+/// a newline the reset lands at the start of the *next* console line, where it
+/// breaks anything that anchors on a line start — a `grep '^<N>'` over a serial
+/// capture, or the CI's exact match on `=== UNITTEST_STATUS: … ===`. Keeping the
+/// newline outside the wrapper removes that whole class of surprises.
+macro_rules! color_line {
+    ($color_code:expr, $($arg:tt)*) => {
+        format_args!("{}\n", color_fmt!($color_code, $($arg)*))
+    };
+}
+
 #[repr(u8)]
 enum AnsiColor {
     Red    = 31,
@@ -365,10 +378,12 @@ impl LogBuf {
 
     /// The newest whole records that fit in `size` bytes.
     ///
-    /// Returns `(start_offset, length, generation)`; `length == 0` when even the
-    /// newest record does not fit, in which case the caller gets no partial
-    /// record — the same outcome Linux's `syslog_print_all` produces.
-    fn newest_window(&self, size: usize) -> (usize, usize, u64) {
+    /// Returns `(start_offset, length, records, generation)`; `length == 0` when
+    /// even the newest record does not fit, in which case the caller gets no
+    /// partial record — the same outcome Linux's `syslog_print_all` produces.
+    /// `records` is how many records the window covers, which is what lets a
+    /// truncated copy be trimmed back to a record boundary.
+    fn newest_window(&self, size: usize) -> (usize, usize, usize, u64) {
         let mut take = 0;
         let mut oldest = self.records_len;
         while oldest > 0 {
@@ -380,7 +395,30 @@ impl LogBuf {
             take += len;
             oldest -= 1;
         }
-        (self.len - take, take, self.generation)
+        (
+            self.len - take,
+            take,
+            self.records_len - oldest,
+            self.generation,
+        )
+    }
+
+    /// The largest whole-record prefix of `records` records that fits in `bytes`.
+    ///
+    /// `records` counts from the window start, i.e. from
+    /// `records_head + records_len - window_records`.
+    fn whole_records_within(&self, window_records: usize, bytes: usize) -> usize {
+        let first = self.records_len - window_records;
+        let mut total = 0;
+        for offset in 0..window_records {
+            let slot = (self.records_head + first + offset) % LOGBUF_RECORDS;
+            let len = self.records[slot] as usize;
+            if total + len > bytes {
+                break;
+            }
+            total += len;
+        }
+        total
     }
 
     /// Copies up to `limit` bytes of a window into `out`, starting at `done`.
@@ -455,9 +493,8 @@ const READ_RETRIES: usize = 3;
 /// states; if the writer keeps winning, the bytes copied by the **last** attempt
 /// are returned, so the result still comes from one ring state.
 pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
-    let mut last = 0;
     for _ in 0..READ_RETRIES {
-        let (skip, take, generation) = LOGBUF.lock().newest_window(out.len());
+        let (skip, take, records, generation) = LOGBUF.lock().newest_window(out.len());
         if take == 0 {
             return 0;
         }
@@ -478,14 +515,15 @@ pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
         if consistent && done == take {
             return done;
         }
-        // Only this attempt's bytes count; an older attempt's output must not be
-        // concatenated onto the new one.
-        last = done;
         if consistent {
-            break;
+            // The ring stopped accepting progress: return whole records only, so
+            // a chunk boundary never becomes a visible cut inside a record.
+            return LOGBUF.lock().whole_records_within(records, done);
         }
     }
-    last
+    // The writer kept wrapping the window: report "nothing right now" rather than
+    // a window stitched together from two ring states.
+    0
 }
 
 /// Drops everything in the kernel log buffer.
@@ -559,8 +597,13 @@ struct RecursionGuard {
 impl RecursionGuard {
     /// Returns `None` when this CPU is already inside the logger.
     fn enter() -> Option<Self> {
-        let slot = kiface_logging_api::LogContextIf::cpu_id()
-            .and_then(|cpu| LOGGING.get(cpu.min(MAX_GUARD_CPUS - 1)));
+        // The host (`std`) build links no kiface provider, so it must not ask
+        // one: it runs one thread per logger and needs no per-CPU guard.
+        #[cfg(feature = "std")]
+        let cpu = None;
+        #[cfg(not(feature = "std"))]
+        let cpu = kiface_logging_api::LogContextIf::cpu_id();
+        let slot = cpu.and_then(|cpu| LOGGING.get(cpu.min(MAX_GUARD_CPUS - 1)));
         match slot {
             // `Acquire` on success pairs with the `Release` store in `drop`; the
             // failure case only needs the current value, so it stays `Relaxed`.
@@ -679,16 +722,16 @@ fn print_record(record: &Record) {
     cfg_if::cfg_if! {
         if #[cfg(feature = "std")] {
             let _ = if compact {
-                print_fmt(color_fmt!(
+                print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{time}] {args}\n",
+                    "[{time}] {args}",
                     time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
                     args = color_fmt!(color, "{}", record.args()),
                 ))
             } else {
-                print_fmt(color_fmt!(
+                print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{time} {path}:{line}] {args}\n",
+                    "[{time} {path}:{line}] {args}",
                     time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
                     path = path,
                     line = line,
@@ -702,33 +745,33 @@ fn print_record(record: &Record) {
 
             // Logging is best effort; reporting its format error via the logger would recurse.
             let _ = match (compact, cpu_id, tid) {
-                (true, Some(c), Some(t)) => print_fmt(color_fmt!(
+                (true, Some(c), Some(t)) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06} {c}:{t}] {args}\n",
+                    "[{:>3}.{:06} {c}:{t}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     c = c,
                     t = t,
                     args = color_fmt!(color, "{}", record.args()),
                 )),
-                (true, Some(c), None) => print_fmt(color_fmt!(
+                (true, Some(c), None) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06} {c}] {args}\n",
+                    "[{:>3}.{:06} {c}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     c = c,
                     args = color_fmt!(color, "{}", record.args()),
                 )),
-                (true, _, _) => print_fmt(color_fmt!(
+                (true, _, _) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06}] {args}\n",
+                    "[{:>3}.{:06}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     args = color_fmt!(color, "{}", record.args()),
                 )),
-                (false, Some(c), Some(t)) => print_fmt(color_fmt!(
+                (false, Some(c), Some(t)) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}\n",
+                    "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     c = c,
@@ -737,9 +780,9 @@ fn print_record(record: &Record) {
                     line = line,
                     args = color_fmt!(color, "{}", record.args()),
                 )),
-                (false, Some(c), None) => print_fmt(color_fmt!(
+                (false, Some(c), None) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06} {c} {path}:{line}] {args}\n",
+                    "[{:>3}.{:06} {c} {path}:{line}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     c = c,
@@ -747,9 +790,9 @@ fn print_record(record: &Record) {
                     line = line,
                     args = color_fmt!(color, "{}", record.args()),
                 )),
-                (false, _, _) => print_fmt(color_fmt!(
+                (false, _, _) => print_fmt(color_line!(
                     AnsiColor::White,
-                    "[{:>3}.{:06} {path}:{line}] {args}\n",
+                    "[{:>3}.{:06} {path}:{line}] {args}",
                     now.as_secs(),
                     now.subsec_micros(),
                     path = path,

@@ -249,7 +249,9 @@ fn resolve_log_filter(
                     return spec;
                 }
                 kprintln!("ignoring invalid loglevel={spec} on the kernel command line");
-                break;
+                // Keep scanning: a later, valid `loglevel=` on the same command
+                // line still applies.
+                continue;
             }
         }
         for token in cmdline.split_ascii_whitespace() {

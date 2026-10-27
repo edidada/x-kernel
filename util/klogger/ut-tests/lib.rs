@@ -332,12 +332,11 @@ fn logbuf_window_starts_at_a_record_boundary_despite_embedded_newlines() {
     super::error!("first line of a multi-line record");
     super::error!("second line\nthird line of a multi-line record");
 
-    // One snapshot for the whole loop: another context logging between two reads
-    // would move the window, and the property under test is about the window
-    // shape, not about a frozen ring.
-    let full = ring_snapshot();
-
-    // Every destination size either yields whole records or nothing.
+    // Every destination size either yields whole records or nothing. (No
+    // comparison against a snapshot taken earlier: other kernel threads keep
+    // logging, so the ring's tail moves between the two reads; the property under
+    // test is the window *shape*.)
+    let _ = ring_snapshot();
     for size in [1usize, 8, 16, 32, 64, 96, 128, 4096] {
         let mut buf = alloc::vec![0u8; size];
         let len = logbuf_read_newest(&mut buf);
@@ -350,11 +349,11 @@ fn logbuf_window_starts_at_a_record_boundary_despite_embedded_newlines() {
             text.starts_with('<'),
             "a {size}-byte window started mid-record: {text:?}"
         );
-        // Whatever the cut, the window is the tail of the whole-record snapshot:
-        // "the newest records that fit".
+        // A window is whole records: it starts with a record's level tag and
+        // ends with the terminator of the last record it includes.
         assert!(
-            full.ends_with(&buf[..len]),
-            "a {size}-byte window is not the tail of the ring contents"
+            text.ends_with('\n'),
+            "a {size}-byte window ends inside a record: {text:?}"
         );
     }
 

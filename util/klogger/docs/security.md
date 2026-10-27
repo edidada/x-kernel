@@ -27,7 +27,7 @@ therefore that no input it is fed can corrupt its state or its memory.
 | Build configuration | Kconfig `LOG_LEVEL_*` | `init_klogger`, fixes the console default and the logger floor |
 | Privileged user input | `echo 4 > /proc/sys/kernel/printk` (level) | `set_console_default` (via `procfs`) |
 | Privileged user input | `echo 'warn ksyscall=debug' > /proc/sys/kernel/log_filter` (spec) | `set_filter_spec` (via `procfs`) |
-| Privileged read-back | `syslog(2)` / `dmesg` | `logbuf_len`, `logbuf_read_newest`, `logbuf_clear`; **the user copy itself happens in `ksyscall`** |
+| Log read-back | `syslog(2)` / `dmesg` — `READ_ALL`/`SIZE_BUFFER` for any caller, the rest privileged | `logbuf_len`, `logbuf_read_newest`, `logbuf_clear`; **the user copy itself happens in `ksyscall`** |
 | Record body | formatted arguments of any kernel module | `Log::log` |
 | Output channel | `kiface_logging_api::LogSinkIf` / `LogContextIf` providers | `print_fmt` |
 

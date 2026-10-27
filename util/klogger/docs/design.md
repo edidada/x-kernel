@@ -27,7 +27,7 @@ level from its printk ring:
 
 | Role | Whose | What it decides | Can it change at runtime? |
 |------|-------|-----------------|---------------------------|
-| **Build floor** | `LOG_LEVEL_*` (Kconfig) | the console default and the lowest level the logger runs at; `log`'s filter is never below it | yes, but only upward |
+| **Build floor** | `LOG_LEVEL_*` (Kconfig) | the console default and the lowest level the logger runs at; `log`'s filter is never below it | the floor is fixed at boot; a runtime spec may raise the ceiling above it, never below |
 | **Capture** | `LOGBUF` | which records are stored for `dmesg`: everything up to the effective ceiling | no separate knob |
 | **Console** | `Filter` | which records are printed: a default level plus per-target overrides | yes, `/proc/sys/kernel/printk`, `/proc/sys/kernel/log_filter` |
 

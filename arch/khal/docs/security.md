@@ -41,7 +41,9 @@ generic `kirq` API。
    - validation responsibility: this layer deliberately does **not** parse the
      value. `klogger::set_filter_spec` owns the level vocabulary and rejects a
      malformed spec, and `kruntime` then falls through to the command line and
-     the Kconfig default with a `warn!`, so a typo cannot silence the boot log;
+     the Kconfig default after printing the rejection through `kprintln!` (the
+     unfiltered console path, since the level being installed is what would filter
+     a `warn!`), so a typo cannot silence the boot log;
    - failure handling: the accessor returns `Option<&'static str>`, so a missing
      property and a property whose bytes are not valid ASCII/UTF-8 both degrade
      to "no board preference" instead of a partially applied level.

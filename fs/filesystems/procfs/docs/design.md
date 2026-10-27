@@ -188,14 +188,12 @@ Maps retains an O(VMA-count) copied list and clones path strings while holding
 the MM mutex. Addresses use a minimum width of 12 hex digits and device numbers
 are rendered as `00:00`. Several status/memory fields and non-cgroup namespace
 identities are placeholders. Mount reporting uses synthetic device identities
-and is not a globally frozen namespace snapshot. `printk` uses X-Kernel log-level
-values, not Linux console-loglevel semantics: it reads and writes the whole
-filter spec of `klogger` (`warn ksyscall=debug`). A write replaces the per-target
-override set, and the default level too when the spec carries a bare level; a
-spec with only `target=level` rules keeps the current default. Writes are
-privilege-gated and validated by `klogger::set_filter_spec`, which applies the
-new spec atomically or not at all, and the read side returns the canonical text
-of what is in force (or `InvalidInput` if it somehow does not fit).
+and is not a globally frozen namespace snapshot. `printk` keeps its historical
+single-value contract: it reads the console default level as a number in
+X-Kernel's order (`0=off … 5=trace`) and a privileged write of a level name or
+number changes that level, leaving the module filter untouched. The filter spec
+lives in `sys/kernel/log_filter` (see the logging nodes above); the value domain
+is X-Kernel-private and *not* Linux's inverted `console_loglevel`.
 
 `/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
 (the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the
