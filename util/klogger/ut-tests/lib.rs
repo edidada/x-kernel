@@ -10,8 +10,8 @@ use log::{Level, LevelFilter};
 use unittest::{assert_eq, def_test};
 
 use super::{
-    build_level_floor, current_log_level, effective_ceiling, filter_enabled, filter_spec, level_name,
-    level_number,
+    build_floor_from, build_level_floor, current_log_level, effective_ceiling, filter_enabled,
+    filter_spec, level_name, level_number,
     logbuf_clear, logbuf_len, logbuf_read_newest, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
@@ -299,29 +299,110 @@ fn logbuf_read_returns_the_newest_whole_records() {
     // Reading does not consume.
     assert_eq!(logbuf_len(), snapshot.len());
 
-    // A destination smaller than the ring gets the *newest* records, aligned to
-    // a record boundary. No marker assertion here: other contexts may log
-    // between the records and this read, so only the shape is guaranteed.
+    // A destination smaller than the ring gets the *newest* whole records, and
+    // never a fragment: either at least one whole record, starting at a record
+    // boundary, or nothing at all.
     let mut small = [0u8; 96];
     let small_len = logbuf_read_newest(&mut small);
-    assert!(small_len > 0 && small_len <= small.len());
+    assert!(small_len <= small.len());
     let tail = core::str::from_utf8(&small[..small_len]).expect("log text is utf-8");
     assert!(
-        tail.starts_with('<'),
+        small_len == 0 || tail.starts_with('<'),
         "the window does not start at a record boundary: {tail:?}"
     );
+
+    // A destination smaller than the newest record returns nothing rather than
+    // half a record.
+    let mut tiny = [0u8; 4];
+    assert_eq!(logbuf_read_newest(&mut tiny), 0);
 
     logbuf_clear();
     saved.restore();
 }
 
-/// The build level is the logger's floor, so it must never be `off`.
+/// The read window never starts inside a record, even when the record body
+/// itself contains a newline (a message may carry one, and `/dev/log` forwards a
+/// user datagram verbatim), so a line-scanner would cut in the wrong place.
+#[def_test(serial)]
+fn logbuf_window_starts_at_a_record_boundary_despite_embedded_newlines() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    super::error!("first line of a multi-line record");
+    super::error!("second line\nthird line of a multi-line record");
+
+    // One snapshot for the whole loop: another context logging between two reads
+    // would move the window, and the property under test is about the window
+    // shape, not about a frozen ring.
+    let full = ring_snapshot();
+
+    // Every destination size either yields whole records or nothing.
+    for size in [1usize, 8, 16, 32, 64, 96, 128, 4096] {
+        let mut buf = alloc::vec![0u8; size];
+        let len = logbuf_read_newest(&mut buf);
+        assert!(len <= size);
+        if len == 0 {
+            continue;
+        }
+        let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+        assert!(
+            text.starts_with('<'),
+            "a {size}-byte window started mid-record: {text:?}"
+        );
+        // Whatever the cut, the window is the tail of the whole-record snapshot:
+        // "the newest records that fit".
+        assert!(
+            full.ends_with(&buf[..len]),
+            "a {size}-byte window is not the tail of the ring contents"
+        );
+    }
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// A ring that wrapped keeps serving whole records: a record the wrap cut into is
+/// dropped rather than returned in part.
+#[def_test(serial)]
+fn logbuf_serves_whole_records_after_a_wrap() {
+    let saved = SavedSpec::take();
+    assert_eq!(set_filter_spec("off"), Ok(()));
+    logbuf_clear();
+
+    // Wrap the ring several times; records are ~80 bytes, so this is well past
+    // 64 KiB.
+    for index in 0..1200 {
+        super::error!("klogger wrap marker {index}");
+    }
+
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
+    assert!(!text.is_empty());
+    assert!(
+        text.starts_with('<'),
+        "the window after a wrap starts mid-record: {text:?}"
+    );
+    assert!(text.ends_with('\n'), "the snapshot ends mid-record");
+
+    logbuf_clear();
+    saved.restore();
+}
+
+/// The build level is the logger's floor, so it must never be `off`; a
+/// configuration that selects nothing falls back to `error` rather than silence.
 #[def_test]
 fn build_level_is_a_usable_floor() {
     assert!(
         build_level_floor() != log::LevelFilter::Off,
         "an unset LOG_LEVEL_* must fall back to a level, not silence the kernel"
     );
+    // The fallback itself, which this image's configuration never exercises.
+    assert_eq!(build_floor_from("off"), log::LevelFilter::Error);
+    assert_eq!(build_floor_from("nonsense"), log::LevelFilter::Error);
+    assert_eq!(build_floor_from(""), log::LevelFilter::Error);
+    assert_eq!(build_floor_from("debug"), log::LevelFilter::Debug);
+    assert_eq!(build_floor_from("3"), log::LevelFilter::Info);
 }
 
 /// The console filter may raise the ceiling above the build floor (that is how

@@ -605,12 +605,15 @@ Order of operations and failure handling:
    short destination receives the most recent records and never a partial line.
    **The user copy never runs with the log lock held**, so a page fault on the
    destination cannot keep the ring locked with interrupts off.
-6. `READ_CLEAR` calls `logbuf_clear` after a successful copy, which drops the
-   whole unread range. Linux's clear cursor also ends up past everything it did
+6. A zero length returns 0 before the ring is touched: Linux returns ahead of
+   `syslog_print_all` for `len == 0`, and nothing was delivered, so nothing may be
+   consumed.
+7. `READ_CLEAR` calls `logbuf_clear` after a successful copy that delivered at
+   least one byte, which drops the whole unread range. Linux's clear cursor also ends up past everything it did
    not return (the records older than the window are skipped by the same cursor),
    so `dmesg -c` clears what it drained and does not re-deliver it. A copy failure
    keeps everything, because the clear runs only after the copy succeeded.
-7. Every other action, including Linux's `CONSOLE_*` controls, returns
+8. Every other action, including Linux's `CONSOLE_*` controls, returns
    `InvalidInput`: console verbosity belongs to `/proc/sys/kernel/printk`, whose
    value domain is inverted relative to Linux's, and mixing the two would let a
    caller believe it changed something else.

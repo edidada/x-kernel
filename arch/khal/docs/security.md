@@ -49,6 +49,11 @@ generic `kirq` API。
    `khal::firmware` only carries that handoff data; apart from these values the
    module still handles no user pointers, DMA buffers, device MMIO or
    file/network data, and it performs no semantic validation of the log level.
+   The exposure is bounded by the consumer: the string is passed straight to
+   `klogger::set_filter_spec`, which validates the whole spec and keeps the
+   previous filter when it does not parse, so a hostile or truncated property can
+   change verbosity but cannot corrupt kernel state or silence logging
+   permanently.
 
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 

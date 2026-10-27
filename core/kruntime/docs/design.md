@@ -584,6 +584,18 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 ### 日志适配放在 `lib.rs`
 
+Boot log-filter resolution lives here as well, in two layers:
+`resolve_boot_log_filter()` samples the live sources
+(`khal::firmware::dt_log_level()`, `khal::cmdline()`,
+`kbuild_config::LOG_FILTER`) and hands them to
+`resolve_log_filter(dt_spec, cmdline, log_filter)`, which installs the build level
+as the console default and the logger floor (`apply_build_log_level()`) and then
+takes the first accepted spec in the order command line → device tree →
+`LOG_FILTER` → build level. A rejected source is reported through `kprintln!` and
+the resolver falls through to the next one. The parameterized form exists so the
+guest cases can cover that precedence without depending on the live boot
+environment.
+
 `LogSinkIf` and `LogContextIf` 需在 `klogger::init_klogger` 之前通过 `kiface` provider 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
 
 ## 与 QEMU / 真机的边界

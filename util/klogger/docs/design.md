@@ -80,7 +80,7 @@ KernelLogger::log
 |-----------|----------------|
 | `Filter` | the build floor, the console default level, and up to `MAX_FILTER_RULES` `target=level` overrides; longest-prefix match |
 | `FILTER` | the global filter (cap + console filter), guarded by `SpinNoIrq` |
-| `LogBuf` | fixed 64 KiB byte ring; `push` overwrites the oldest bytes, `read_newest` copies the newest whole records, `clear` drops everything |
+| `LogBuf` | fixed 64 KiB byte ring with a record-length index; `push` evicts whole records, `read_newest` returns the newest whole records, `clear` drops everything |
 | `LOGBUF` | the global ring, guarded by `SpinNoIrq` |
 | `LineBuf` | fixed 256-byte line writer; the last byte is reserved for the terminator and truncation never splits a character |
 | `print_fmt` | serializes console output |
@@ -135,8 +135,8 @@ build floor (LOG_LEVEL_*), fixed by init_klogger
    `writeln!`: the writer reserves one byte, so a record that fills the buffer is
    truncated to 255 bytes and still ends with `\n`. Truncation also stops at a
    character boundary, so the ring never holds a split code point.
-4. The whole line is pushed into `LOGBUF` (overwriting the oldest bytes when
-   full). Both the push and a ring read copy at most two contiguous segments with
+4. The whole line is pushed into `LOGBUF` as one record (the oldest records are
+   evicted when the ring is full, so every boundary a reader sees is real). Both the push and a ring read copy at most two contiguous segments with
    `copy_from_slice`, so the time spent inside the IRQ-off guard scales with the
    byte count rather than with a per-byte loop.
 5. Only then does `filter_enabled(target, level)` decide whether the record also
@@ -145,9 +145,13 @@ build floor (LOG_LEVEL_*), fixed by init_klogger
 
 ### Reading and clearing the ring
 
-`logbuf_read_newest(out)` copies the **newest** bytes that fit, oldest first, and
-starts at a record boundary (a partial line left by a ring wrap or by the cut is
-dropped). The copy runs in 4 KiB passes, each in its own critical section, so a
+`logbuf_read_newest(out)` copies the **newest whole records** that fit, oldest
+first. Records are the unit of storage: the ring keeps a small index of record
+lengths (bodies only — no framing bytes in the text `dmesg` prints), so the
+reader picks the window from real boundaries and never has to guess one by
+scanning for a newline, which a message body may legitimately contain. When even
+the newest record does not fit, nothing is returned — the same outcome Linux's
+`syslog_print_all` produces, and never half a record. The copy runs in 4 KiB passes, each in its own critical section, so a
 full 64 KiB `dmesg` read never holds the ring with interrupts off for the whole
 copy; a ring wrap between passes restarts the read (bounded) instead of returning
 a mixture of two ring states. That is the shape Linux's `syslog_print_all` produces: with a

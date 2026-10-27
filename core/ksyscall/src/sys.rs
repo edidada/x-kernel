@@ -171,11 +171,13 @@ fn action_needs_privilege(action: i32) -> bool {
 /// Both read actions return the **newest** whole records that fit, in log order —
 /// the shape Linux's `syslog_print_all` produces (it walks back from the newest
 /// record until the requested size fits, and starts the copy at a record
-/// boundary). `READ_CLEAR` then advances past everything it returned, which is
+/// boundary; if even the newest record does not fit, it returns 0 rather than a
+/// fragment). `READ_CLEAR` then advances past everything it returned, which is
 /// also what Linux does with `clear_seq`: records older than the returned window
 /// were skipped by the same cursor, so the whole unread range is consumed. A
 /// caller that wants the entire buffer sizes it from `SIZE_BUFFER`, as `dmesg`
-/// does.
+/// does. A zero length returns 0 without touching the ring (Linux returns before
+/// `syslog_print_all` for `len == 0`).
 ///
 /// `len` is decoded at the ABI width: Linux declares it `int`, so the register
 /// is truncated to `i32` and a negative value is rejected with `InvalidInput`
@@ -203,6 +205,10 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isi
             if len < 0 {
                 return Err(KError::InvalidInput);
             }
+            if len == 0 {
+                // Nothing to deliver and nothing to consume.
+                return Ok(0);
+            }
             let len = len as usize;
             let user = UserPtr::<u8>::from(buf as usize);
             if user.is_null() {
@@ -213,10 +219,10 @@ pub(crate) fn sys_syslog(action: i32, buf: *mut c_char, len: i32) -> KResult<isi
             let mut kbuf = alloc::vec![0u8; klogger::logbuf_len().min(len)];
             let copied = klogger::logbuf_read_newest(&mut kbuf);
             user.write_vm_slice(&kbuf[..copied])?;
-            if action == SYSLOG_ACTION_READ_CLEAR {
-                // Only after a successful copy; the whole unread range is
-                // consumed, because the records older than the returned window
-                // were skipped by the same cursor.
+            if action == SYSLOG_ACTION_READ_CLEAR && copied > 0 {
+                // Only after a successful copy that delivered something; the
+                // whole unread range is consumed, because the records older than
+                // the returned window were skipped by the same cursor.
                 klogger::logbuf_clear();
             }
             Ok(copied as isize)

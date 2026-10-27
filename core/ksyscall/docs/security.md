@@ -374,8 +374,10 @@ length the caller declared as negative. Truncating first means a caller cannot
 smuggle a "huge" length past the check by encoding the same value with a
 zero-extended register.
 
-`READ_CLEAR` drops the whole unread range after a successful copy
-(`logbuf_clear`), which is what Linux's clear cursor ends up doing: it advances
+`READ_CLEAR` drops the whole unread range after a successful copy that delivered
+at least one byte (`logbuf_clear`) — a zero length or an empty window returns 0
+and keeps the buffer, matching Linux's early return for `len == 0` — which is what
+Linux's clear cursor ends up doing: it advances
 past the records it returned *and* past the older ones a short destination could
 not take, so nothing is re-delivered. A page fault on the destination keeps
 everything, because the clear runs only after the copy succeeded. A caller that

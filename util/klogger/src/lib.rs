@@ -258,6 +258,14 @@ impl FilterSpecWriter<'_> {
 pub const LOGBUF_SIZE: usize = 64 * 1024;
 /// Longest single stored line; longer records are truncated.
 const LOGBUF_LINE: usize = 256;
+/// Number of records the ring tracks.
+///
+/// The ring stores bodies only; their lengths live here, which is what makes a
+/// record boundary exact without putting framing bytes into the text that
+/// `dmesg` prints and without scanning for newlines (a message body may contain
+/// one). The ring keeps at most this many records even when its byte budget
+/// would allow more, so a flood of very short records retains less than 64 KiB.
+const LOGBUF_RECORDS: usize = 1024;
 
 struct LogBuf {
     buf: [u8; LOGBUF_SIZE],
@@ -273,6 +281,10 @@ struct LogBuf {
     /// clear). A reader that copies in chunks compares it between chunks and
     /// restarts when it changed, so a window is never a mix of two ring states.
     generation: u64,
+    /// Body lengths of the buffered records, oldest at `records_head`.
+    records: [u16; LOGBUF_RECORDS],
+    records_head: usize,
+    records_len: usize,
 }
 
 impl LogBuf {
@@ -283,14 +295,42 @@ impl LogBuf {
             len: 0,
             unread_from: 0,
             generation: 0,
+            records: [0; LOGBUF_RECORDS],
+            records_head: 0,
+            records_len: 0,
         }
     }
 
-    /// Appends `line`, overwriting the oldest bytes when the ring is full.
+    /// Drops the oldest record, if any, and reports its length.
+    fn drop_oldest_record(&mut self) -> usize {
+        if self.records_len == 0 {
+            return 0;
+        }
+        let len = self.records[self.records_head] as usize;
+        self.records_head = (self.records_head + 1) % LOGBUF_RECORDS;
+        self.records_len -= 1;
+        len
+    }
+
+    /// Advances the window past `bytes` bytes, dropping the records they belong
+    /// to and marking the ring as shifted for readers mid-copy.
+    fn evict(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.start = (self.start + bytes) % LOGBUF_SIZE;
+        self.len -= bytes;
+        self.unread_from += bytes as u64;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Appends `line` as one record.
     ///
-    /// Both segments are copied with `copy_from_slice`, so the time spent under
-    /// the caller's IRQ-off guard depends on the byte count, not on a per-byte
-    /// loop with a modulo each iteration.
+    /// Records are the unit of storage: a record is evicted as a whole or not at
+    /// all, so every boundary the reader sees is real. The body bytes are copied
+    /// with `copy_from_slice`, so the time spent under the caller's IRQ-off guard
+    /// depends on the byte count, not on a per-byte loop with a modulo each
+    /// iteration.
     fn push(&mut self, line: &[u8]) {
         // A record larger than the ring keeps its newest byte range.
         let line = if line.len() > LOGBUF_SIZE {
@@ -298,62 +338,49 @@ impl LogBuf {
         } else {
             line
         };
-        let free = LOGBUF_SIZE - self.len;
-        if line.len() > free {
-            // The oldest bytes make room, and leaving the unread window makes
-            // any reader cursor over them stale.
-            let overwrite = line.len() - free;
-            self.start = (self.start + overwrite) % LOGBUF_SIZE;
-            self.len -= overwrite;
-            self.unread_from += overwrite as u64;
-            self.generation = self.generation.wrapping_add(1);
+        // Make room by dropping whole records, then (only if the index is empty)
+        // trim bytes so an oversized record still fits.
+        while self.records_len == LOGBUF_RECORDS
+            || LOGBUF_SIZE - self.len < line.len() && self.records_len > 0
+        {
+            let dropped = self.drop_oldest_record();
+            self.evict(dropped);
         }
+        if LOGBUF_SIZE - self.len < line.len() {
+            self.evict(line.len() - (LOGBUF_SIZE - self.len));
+        }
+
         let index = (self.start + self.len) % LOGBUF_SIZE;
-        let first = line.len().min(LOGBUF_SIZE - index);
-        self.buf[index..index + first].copy_from_slice(&line[..first]);
-        if first < line.len() {
-            let rest = line.len() - first;
-            self.buf[..rest].copy_from_slice(&line[first..]);
+        let head = line.len().min(LOGBUF_SIZE - index);
+        self.buf[index..index + head].copy_from_slice(&line[..head]);
+        if head < line.len() {
+            let rest = line.len() - head;
+            self.buf[..rest].copy_from_slice(&line[head..]);
         }
+        let slot = (self.records_head + self.records_len) % LOGBUF_RECORDS;
+        self.records[slot] = line.len() as u16;
+        self.records_len += 1;
         self.len += line.len();
     }
 
-    /// Byte at `offset` from the oldest buffered byte.
-    fn at(&self, offset: usize) -> u8 {
-        self.buf[(self.start + offset) % LOGBUF_SIZE]
-    }
-
-    /// Whether the byte at `offset` starts one of our records (`<N>`).
-    fn starts_record_at(&self, offset: usize) -> bool {
-        if self.len - offset < 3 {
-            // Too little left to tell; treat it as a start rather than dropping it.
-            return true;
-        }
-        self.at(offset) == b'<'
-            && self.at(offset + 1).is_ascii_digit()
-            && self.at(offset + 2) == b'>'
-    }
-
-    /// The window a read of `size` bytes returns: `(skip, take, generation)`.
+    /// The newest whole records that fit in `size` bytes.
+    ///
+    /// Returns `(start_offset, length, generation)`; `length == 0` when even the
+    /// newest record does not fit, in which case the caller gets no partial
+    /// record — the same outcome Linux's `syslog_print_all` produces.
     fn newest_window(&self, size: usize) -> (usize, usize, u64) {
-        let mut take = size.min(self.len);
-        if take == 0 {
-            return (0, 0, self.generation);
-        }
-        let mut skip = self.len - take;
-
-        if !self.starts_record_at(skip) {
-            // Records are at most `LOGBUF_LINE` bytes, so this scan is short.
-            if let Some(trimmed) = (0..take)
-                .find(|offset| self.at(skip + offset) == b'\n')
-                .map(|offset| offset + 1)
-                && trimmed < take
-            {
-                skip += trimmed;
-                take -= trimmed;
+        let mut take = 0;
+        let mut oldest = self.records_len;
+        while oldest > 0 {
+            let slot = (self.records_head + oldest - 1) % LOGBUF_RECORDS;
+            let len = self.records[slot] as usize;
+            if take + len > size {
+                break;
             }
+            take += len;
+            oldest -= 1;
         }
-        (skip, take, self.generation)
+        (self.len - take, take, self.generation)
     }
 
     /// Copies up to `limit` bytes of a window into `out`, starting at `done`.
@@ -386,6 +413,8 @@ impl LogBuf {
         self.unread_from += self.len as u64;
         self.start = 0;
         self.len = 0;
+        self.records_head = 0;
+        self.records_len = 0;
         self.generation = self.generation.wrapping_add(1);
     }
 }
@@ -409,19 +438,24 @@ const READ_CHUNK: usize = 4 * 1024;
 /// How often a read restarts when the ring overwrites its window mid-copy.
 const READ_RETRIES: usize = 3;
 
-/// Copies the newest bytes of the kernel log buffer that fit into `out`, oldest
-/// first, and returns how many bytes were written.
+/// Copies the newest **whole records** that fit into `out`, oldest first, and
+/// returns how many bytes were written.
 ///
-/// The window starts at a record boundary, so callers get whole lines even when
-/// `out` is smaller than the ring. Reading never consumes: only
-/// [`logbuf_clear`] removes records.
+/// The window always starts at a record boundary and contains no partial record
+/// at its start: when even the newest record does not fit, nothing is copied and
+/// the return value is 0 — the same outcome Linux's `syslog_print_all` produces.
+/// The window may end in the middle of a record only when `out` is smaller than
+/// the chosen window, which cannot happen for the records the walk selected.
+///
+/// Reading never consumes: only [`logbuf_clear`] removes records.
 ///
 /// The copy runs in [`READ_CHUNK`]-sized passes, each in its own critical
 /// section. If the ring wraps onto the window between passes the read restarts
 /// (up to [`READ_RETRIES`] times) rather than returning a mixture of two ring
-/// states; if the writer keeps winning, the bytes copied so far are trimmed to
-/// the last complete record.
+/// states; if the writer keeps winning, the bytes copied by the **last** attempt
+/// are returned, so the result still comes from one ring state.
 pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
+    let mut last = 0;
     for _ in 0..READ_RETRIES {
         let (skip, take, generation) = LOGBUF.lock().newest_window(out.len());
         if take == 0 {
@@ -444,24 +478,14 @@ pub fn logbuf_read_newest(out: &mut [u8]) -> usize {
         if consistent && done == take {
             return done;
         }
-        if !consistent {
-            continue;
+        // Only this attempt's bytes count; an older attempt's output must not be
+        // concatenated onto the new one.
+        last = done;
+        if consistent {
+            break;
         }
-        // No progress (the buffer shrank underneath): keep what is a whole record.
-        return trim_to_record_end(out, done);
     }
-    // The ring kept wrapping: return the consistent prefix we managed to copy.
-    trim_to_record_end(out, out.len())
-}
-
-/// Shrinks `len` to just after the last newline, so a truncated read still ends
-/// on a record boundary.
-fn trim_to_record_end(out: &[u8], len: usize) -> usize {
-    let len = len.min(out.len());
-    out[..len]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1)
+    last
 }
 
 /// Drops everything in the kernel log buffer.
@@ -538,6 +562,8 @@ impl RecursionGuard {
         let slot = kiface_logging_api::LogContextIf::cpu_id()
             .and_then(|cpu| LOGGING.get(cpu.min(MAX_GUARD_CPUS - 1)));
         match slot {
+            // `Acquire` on success pairs with the `Release` store in `drop`; the
+            // failure case only needs the current value, so it stays `Relaxed`.
             Some(slot) => slot
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .ok()
@@ -551,6 +577,8 @@ impl RecursionGuard {
 impl Drop for RecursionGuard {
     fn drop(&mut self) {
         if let Some(slot) = self.slot {
+            // `Release` publishes everything this CPU did inside the logger to the
+            // next CPU that claims the slot with an `Acquire` exchange.
             slot.store(false, Ordering::Release);
         }
     }
@@ -603,6 +631,9 @@ impl Log for KernelLogger {
         // would deadlock on `SpinNoIrq` instead of reporting anything, so they
         // are dropped. NMI/panic paths that need output use the platform's
         // atomic console path instead.
+        // The host (`std`) build has no kiface providers linked, so it must not
+        // ask one: there is no NMI there either.
+        #[cfg(not(feature = "std"))]
         if kiface_logging_api::LogContextIf::in_nmi() {
             return;
         }
@@ -815,9 +846,7 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
 /// [`set_log_level`]. Records emitted before this call are dropped by the `log`
 /// crate, which is why early boot uses [`kprintln!`] instead of the macros.
 pub fn init_klogger(build_level: &str) {
-    let cap = parse_log_level(build_level)
-        .filter(|level| *level != LevelFilter::Off)
-        .unwrap_or(LevelFilter::Error);
+    let cap = build_floor_from(build_level);
     #[expect(
         clippy::unwrap_used,
         reason = "CG-021-no-panic-on-reachable-failure: failure to install the global logger \
@@ -829,6 +858,17 @@ pub fn init_klogger(build_level: &str) {
     filter.floor = cap;
     filter.default = cap;
     log::set_max_level(filter.ceiling());
+}
+
+/// Resolves the build level into the logger's floor.
+///
+/// The Kconfig choice has no `off` option, so `off` (or an unparsable value) can
+/// only come from a broken configuration; losing just the warnings is a safer
+/// fallback than silencing the kernel.
+pub fn build_floor_from(build_level: &str) -> LevelFilter {
+    parse_log_level(build_level)
+        .filter(|level| *level != LevelFilter::Off)
+        .unwrap_or(LevelFilter::Error)
 }
 
 /// The build-time level (`LOG_LEVEL_*`): the console default and the floor of the

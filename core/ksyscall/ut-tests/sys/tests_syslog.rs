@@ -114,6 +114,25 @@ fn read_clear_drops_the_unread_range() {
     );
 }
 
+/// A zero length returns 0 and keeps the ring: nothing was delivered, so nothing
+/// may be consumed (Linux returns before touching the buffer for `len == 0`).
+#[def_test(user)]
+fn zero_length_keeps_the_ring() {
+    klogger::error!("syslog zero-length marker");
+    let before = klogger::logbuf_len();
+    assert!(before > 0);
+
+    let buffer = TestUserBuffer::new(64).unwrap();
+    for action in [SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR] {
+        assert_eq!(sys_syslog(action, buffer.as_user_ptr(), 0), Ok(0));
+        assert_eq!(
+            klogger::logbuf_len(),
+            before,
+            "a zero-length read consumed the ring"
+        );
+    }
+}
+
 /// `len` is a signed ABI argument: a negative value fails like Linux's
 /// `len < 0` instead of being clamped to the ring size.
 #[def_test(user)]

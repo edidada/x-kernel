@@ -35,7 +35,7 @@ count can change immediately after observation and grants no admission guarantee
   inputs. Numeric lookup components are parsed, task-directory membership is
   checked, and unsupported names fail lookup (`src/task_nodes/root.rs`).
 - Writable controls include `comm`, `oom_score_adj`, trace event enables,
-  `sys/kernel/printk`, and optional `sysrq-trigger`. `comm` truncates to 15 bytes
+  `sys/kernel/printk`, `sys/kernel/log_filter`, and optional `sysrq-trigger`. `comm` truncates to 15 bytes
   and validates C-string/UTF-8 conversion; OOM adjustment accepts only parsed
   values in `[-1000, 1000]`. Tracing delegates validation to `ktracing`; SysRq
   accepts the first non-whitespace byte only when it is `t`.
