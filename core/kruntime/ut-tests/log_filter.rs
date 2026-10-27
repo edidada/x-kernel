@@ -55,17 +55,43 @@ fn rules_only_source_keeps_the_build_level() {
     assert!(restore(&saved), "the saved spec failed to re-apply");
 }
 
-/// A source that carries a bare level still replaces the default, and the
-/// device-tree property wins over the build configuration.
+/// Priority: an explicit command-line request beats the board's device-tree
+/// default, which beats the build configuration — an operator must be able to
+/// override a value the firmware shipped.
 #[def_test(serial)]
-fn device_tree_level_overrides_the_build_level() {
+fn command_line_overrides_the_device_tree() {
     let saved = active_spec();
-    let _ = super::resolve_log_filter(Some("info"), None, "warn ksyscall=debug");
+
+    // `loglevel=` on the command line wins over the DT property.
+    let _ = super::resolve_log_filter(Some("info"), Some("loglevel=debug"), "warn drv_uart=1");
+    assert_eq!(
+        current_log_level(),
+        parse_log_level("debug").expect("debug is valid")
+    );
+
+    // The `quiet`/`debug` shorthands count as explicit requests too.
+    let _ = super::resolve_log_filter(Some("info"), Some("quiet"), "");
+    assert_eq!(
+        current_log_level(),
+        parse_log_level("warn").expect("warn is valid")
+    );
+    let _ = super::resolve_log_filter(Some("warn"), Some("debug"), "");
+    assert_eq!(
+        current_log_level(),
+        parse_log_level("debug").expect("debug is valid")
+    );
+
+    // With no command-line request the DT property is next.
+    let _ = super::resolve_log_filter(Some("info"), None, "warn");
     assert_eq!(
         current_log_level(),
         parse_log_level("info").expect("info is valid")
     );
     assert_eq!(active_spec(), "info");
+
+    // Then the build configuration, then the build level.
+    let _ = super::resolve_log_filter(None, None, "error drv_uart=debug");
+    assert_eq!(active_spec(), "error drv_uart=debug");
 
     assert!(restore(&saved), "the saved spec failed to re-apply");
 }

@@ -148,6 +148,12 @@ impl kiface_logging_api::LogContextIf {
         }
     }
 
+    fn in_nmi() -> bool {
+        // `kirq` tracks effective NMI nesting per CPU for RCU watching, which is
+        // exactly the condition under which the logger must not take its locks.
+        kirq::context::is_in_nmi()
+    }
+
     fn task_id() -> Option<u64> {
         if is_init_ok() {
             ktask::current_may_uninit().map(|curr| curr.owner_key())
@@ -205,11 +211,11 @@ fn resolve_boot_log_filter() -> &'static str {
 
 /// Resolve the boot-time log filter from explicit sources, in this order:
 ///
-/// 1. `/chosen/x-kernel,log-level` in the device tree — a board property that
-///    can change verbosity without rebuilding the kernel or touching the boot
-///    loader's command line;
-/// 2. `loglevel=` on the kernel command line (with `quiet`/`debug` as
-///    shorthand for `loglevel=2`/`loglevel=4`);
+/// 1. an explicit command-line request — `loglevel=` first, then the `quiet`
+///    (`loglevel=2`) and `debug` (`loglevel=4`) shorthands. An operator's boot
+///    arguments must be able to override what the board baked in;
+/// 2. `/chosen/x-kernel,log-level` in the device tree — the board's default,
+///    changeable without rebuilding the kernel or touching the boot loader;
 /// 3. `LOG_FILTER` (and, when it is empty, the `LOG_LEVEL_*` choice).
 ///
 /// Every source takes the same filter spec: an optional default level plus
@@ -234,15 +240,6 @@ fn resolve_log_filter(
     log_filter: &'static str,
 ) -> &'static str {
     let build_level = apply_build_log_level();
-    if let Some(spec) = dt_spec {
-        if klogger::set_filter_spec(spec).is_ok() {
-            return spec;
-        }
-        kprintln!(
-            "ignoring invalid /chosen/x-kernel,log-level=\"{spec}\"; expected a level 0..=5 or \
-             off/error/warn/info/debug/trace, optionally with target=level overrides"
-        );
-    }
     if let Some(cmdline) = cmdline {
         for token in cmdline.split_ascii_whitespace() {
             if let Some(spec) = token.strip_prefix("loglevel=")
@@ -266,6 +263,15 @@ fn resolve_log_filter(
                 return level;
             }
         }
+    }
+    if let Some(spec) = dt_spec {
+        if klogger::set_filter_spec(spec).is_ok() {
+            return spec;
+        }
+        kprintln!(
+            "ignoring invalid /chosen/x-kernel,log-level=\"{spec}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace, optionally with target=level overrides"
+        );
     }
     let configured = log_filter.trim();
     if !configured.is_empty() {

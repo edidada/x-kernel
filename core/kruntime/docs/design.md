@@ -369,8 +369,8 @@ BootInfo*
         (Log filtering: `init_klogger(configured_log_level())` fixes the build
          cap — nothing above it is ever recorded or printed. The `LOG_LEVEL_*`
          level is then installed as the console default, and the first accepted
-         source wins — /chosen/x-kernel,log-level, the `loglevel=` / `quiet` /
-         `debug` command line, then Kconfig `LOG_FILTER`. Every source configures
+         source wins — an explicit `loglevel=` / `quiet` / `debug` command line,
+         then /chosen/x-kernel,log-level, then Kconfig `LOG_FILTER`. Every source configures
          the console only; the ring keeps recording everything up to the cap. A
          spec with only `target=level` rules keeps the current default, and a
          rejected source is reported on the console through `kprintln!`, because
