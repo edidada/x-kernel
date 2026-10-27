@@ -196,7 +196,11 @@ const fn configured_log_level() -> &'static str {
     } else if kbuild_config::LOG_LEVEL_TRACE {
         "trace"
     } else {
-        "off"
+        // The Kconfig choice has no `off` option, so "no level selected" is a
+        // broken configuration rather than a request for silence. Report `error`
+        // so the console default, the logger floor and the boot banner all agree
+        // on the same conservative level instead of leaving the console mute.
+        "error"
     }
 }
 

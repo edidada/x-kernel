@@ -103,7 +103,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 | F-04 | The filter lock waits on the logging hot path | Logging from inside a `FILTER` critical section | Interrupts stay off while spinning | Potential hang | 1 | Critical sections only touch fixed-size data; the one console notice is printed with the lock released |
 | F-05 | The console provider is not ready | `LogSinkIf` not linked, or before `init_klogger` | Records only reach the ring once logging is up | No serial output, `dmesg` still works | 4 | The `log` macros are no-ops without a logger; `kruntime` links the provider early |
 | F-06 | A record exceeds the line budget | A very long formatted message | Truncated to 255 bytes plus `\n` | The tail of the message is lost | 4 | Truncation preserves the prefix, the level tag and the terminator; the console still prints the full text |
-| F-07 | A configuration selects no log level | Kconfig choice left empty | `configured_log_level()` reports `off` | None | 4 | `init_klogger` floors the cap at `error` instead of silencing the kernel, because the choice has no `off` option and an empty selection is a broken configuration |
+| F-07 | A configuration selects no log level | Kconfig choice left empty | `configured_log_level()` reports `error` | None | 4 | The choice has no `off` option, so an empty selection is a broken configuration: it resolves to `error` at the source, which makes the console default, the logger floor and the boot banner agree instead of leaving the console mute |
 
 ## Failure handling
 

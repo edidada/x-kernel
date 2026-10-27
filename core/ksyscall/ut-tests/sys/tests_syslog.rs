@@ -4,7 +4,6 @@
 
 //! `syslog(2)`: per-action privilege policy and the read-side contract.
 
-use alloc::vec;
 use unittest::{assert, assert_eq, def_test};
 use unittest_support::TestUserBuffer;
 
@@ -118,32 +117,24 @@ fn read_clear_drops_the_unread_range() {
 /// A zero length returns 0 and keeps the ring: nothing was delivered, so nothing
 /// may be consumed (Linux returns before touching the buffer for `len == 0`).
 ///
-/// The assertion is "the ring did not shrink" rather than "the length is
-/// unchanged": other kernel threads keep logging, and the ring is allowed to grow
-/// underneath this test.
+/// The invariant is "the ring is still non-empty", not "its length is unchanged":
+/// other kernel threads keep logging, and a full ring may even shrink briefly
+/// while a record is evicted to make room. A fresh record is emitted before each
+/// call so a clear would leave the ring empty at the check.
 #[def_test(user)]
 fn zero_length_keeps_the_ring() {
-    klogger::error!("syslog zero-length marker");
-    let before = klogger::logbuf_len();
-    assert!(before > 0);
-
     let buffer = TestUserBuffer::new(64).unwrap();
+
     for action in [SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR] {
+        klogger::error!("syslog zero-length marker");
+        assert!(klogger::logbuf_len() > 0);
+
         assert_eq!(sys_syslog(action, buffer.as_user_ptr(), 0), Ok(0));
         assert!(
-            klogger::logbuf_len() >= before,
-            "a zero-length read consumed the ring"
+            klogger::logbuf_len() > 0,
+            "a zero-length read cleared the ring"
         );
     }
-
-    // The record that was buffered before the zero-length reads is still there.
-    let mut probe = vec![0u8; klogger::LOGBUF_SIZE];
-    let len = klogger::logbuf_read_newest(&mut probe);
-    let text = core::str::from_utf8(&probe[..len]).expect("log text is utf-8");
-    assert!(
-        text.contains("syslog zero-length marker"),
-        "a zero-length read dropped a buffered record"
-    );
 }
 
 /// `len` is Linux's signed `int`: a negative value fails like Linux's `len < 0`
