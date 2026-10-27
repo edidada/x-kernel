@@ -42,6 +42,7 @@ struct TestFile {
     ready_events: AtomicUsize,
     events_on_register: AtomicUsize,
     wake_on_register: AtomicBool,
+    remaining_register_wakes: AtomicUsize,
     on_register: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     on_poll: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     poll_set: PollSet,
@@ -56,6 +57,7 @@ impl TestFile {
             ready_events: AtomicUsize::new(0),
             events_on_register: AtomicUsize::new(0),
             wake_on_register: AtomicBool::new(false),
+            remaining_register_wakes: AtomicUsize::new(0),
             on_register: Mutex::new(None),
             on_poll: Mutex::new(None),
             poll_set: PollSet::new(),
@@ -122,6 +124,15 @@ impl Pollable for TestFile {
                     Ordering::AcqRel,
                 );
                 if self.wake_on_register.swap(false, Ordering::AcqRel) {
+                    self.poll_set.wake();
+                }
+                if self
+                    .remaining_register_wakes
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
                     self.poll_set.wake();
                 }
             }
@@ -614,7 +625,7 @@ fn test_epoll_poll_events_deduplicates_edge_synchronous_rewake() {
 }
 
 #[def_test]
-fn test_epoll_poll_events_drops_empty_synchronous_rewake() {
+fn test_epoll_poll_events_keeps_empty_synchronous_rewake_pending() {
     let epoll = Epoll::new();
     let file = test_file(TestFileKind::EmptyRewake);
     let key = EntryKey::new(3, &file);
@@ -637,46 +648,111 @@ fn test_epoll_poll_events_drops_empty_synchronous_rewake() {
 
     let mut out = [k_epoll_event::default(); 1];
     assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
-    assert_eq!(epoll.poll().bits(), IoEvents::empty().bits());
+    // The wake consumed the one-shot waiter, so another check must remain
+    // pending even though this sample cannot return a user-visible event.
+    assert!(epoll.poll().contains(IoEvents::IN));
 }
 
 #[def_test]
 fn test_epoll_edge_delivers_each_queued_notification() {
-    for (kind, ready) in [(TestFileKind::Hup, IoEvents::HUP), (TestFileKind::Ready, IoEvents::IN)] {
-    let epoll = Epoll::new();
-    let file = test_file(kind);
-    let key = EntryKey::new(3, &file);
-    let interest = Arc::new(EpollInterest::new(
-        key,
-        EpollEvent {
-            events: IoEvents::IN,
-            user_data: 7,
-        },
-        EpollFlags::EDGE_TRIGGER,
-        None,
-    ));
-    interest.in_ready_queue.store(true, Ordering::Release);
-    epoll
-        .inner
-        .ready_queue
-        .lock()
-        .push_back(Arc::downgrade(&interest));
+    for (kind, ready) in [
+        (TestFileKind::Hup, IoEvents::HUP),
+        (TestFileKind::Ready, IoEvents::IN),
+    ] {
+        let epoll = Epoll::new();
+        let file = test_file(kind);
+        let key = EntryKey::new(3, &file);
+        let interest = Arc::new(EpollInterest::new(
+            key,
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+            None,
+        ));
+        interest.in_ready_queue.store(true, Ordering::Release);
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
 
+        let mut out = [k_epoll_event::default(); 1];
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], ready.bits(), 7);
+
+        // A second queued notification can have the same sampled readiness mask.
+        assert!(interest.try_mark_in_queue());
+        epoll
+            .inner
+            .ready_queue
+            .lock()
+            .push_back(Arc::downgrade(&interest));
+
+        assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+        assert_epoll_event(&out[0], ready.bits(), 7);
+    }
+}
+
+#[def_test]
+fn test_epoll_edge_preserves_notification_during_consume() {
+    let epoll = Epoll::new();
+    let file = test_file(TestFileKind::ReadyDuringRegister);
+    let state = test_file_state(&file);
+    state
+        .ready_events
+        .store(IoEvents::IN.bits() as usize, Ordering::Release);
+    let event = EpollEvent {
+        events: IoEvents::IN,
+        user_data: 7,
+    };
+    epoll
+        .add(3, file.clone(), event, EpollFlags::EDGE_TRIGGER)
+        .unwrap();
+    // MOD can install live registrations while a ready entry is pending.
+    epoll
+        .modify(3, file.clone(), event, EpollFlags::EDGE_TRIGGER)
+        .unwrap();
+    *state.on_poll.lock() = Some(Box::new({
+        let state = state.clone();
+        move || {
+            state.poll_set.wake();
+        }
+    }));
     let mut out = [k_epoll_event::default(); 1];
     assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
-    assert_epoll_event(&out[0], ready.bits(), 7);
-
-    // A second queued notification can have the same sampled readiness mask.
-    assert!(interest.try_mark_in_queue());
-    epoll
-        .inner
-        .ready_queue
-        .lock()
-        .push_back(Arc::downgrade(&interest));
-
+    assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
     assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
-    assert_epoll_event(&out[0], ready.bits(), 7);
-    }
+    assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
+    assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+}
+
+#[def_test]
+fn test_epoll_spurious_registration_wakes_preserve_future_readiness() {
+    let epoll = Epoll::new();
+    let file = test_file(TestFileKind::ReadyDuringRegister);
+    let state = test_file_state(&file);
+    state.remaining_register_wakes.store(3, Ordering::Release);
+    epoll
+        .add(
+            3,
+            file.clone(),
+            EpollEvent {
+                events: IoEvents::IN,
+                user_data: 7,
+            },
+            EpollFlags::EDGE_TRIGGER,
+        )
+        .unwrap();
+    let mut out = [k_epoll_event::default(); 1];
+    assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
+    state
+        .ready_events
+        .store(IoEvents::IN.bits() as usize, Ordering::Release);
+    state.poll_set.wake();
+    assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
+    assert_epoll_event(&out[0], IoEvents::IN.bits(), 7);
 }
 
 #[def_test]
@@ -740,8 +816,8 @@ fn test_epoll_edge_rearm_preserves_readiness_and_notifications() {
 
             let mut out = [k_epoll_event::default(); 1];
             assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
-            assert_epoll_event(&out[0], delivered.bits(), 7);
-            if delivered.bits() != arriving.bits() || notify {
+            assert_epoll_event(&out[0], (delivered | arriving).bits(), 7);
+            if notify {
                 assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
                 assert_epoll_event(&out[0], (delivered | arriving).bits(), 7);
             }
@@ -804,9 +880,6 @@ fn test_epoll_concurrent_consumer_preserves_requeued_interest() {
     state
         .ready_events
         .store(IoEvents::OUT.bits() as usize, Ordering::Release);
-    state
-        .events_on_register
-        .store(IoEvents::IN.bits() as usize, Ordering::Release);
     for (fd, file, data) in [
         (3, first.clone(), 7),
         (4, second.clone(), 8),
@@ -826,6 +899,7 @@ fn test_epoll_concurrent_consumer_preserves_requeued_interest() {
     }
     *state.on_register.lock() = Some(Box::new({
         let epoll = epoll.clone();
+        let state = state.clone();
         move || {
             // A second waiter drains the remaining original entries before the
             // first waiter's rearm publishes a new read event.
@@ -833,6 +907,15 @@ fn test_epoll_concurrent_consumer_preserves_requeued_interest() {
             assert_eq!(epoll.poll_events(&mut out).unwrap(), 2);
             assert_epoll_event(&out[0], IoEvents::OUT.bits(), 8);
             assert_epoll_event(&out[1], IoEvents::OUT.bits(), 9);
+            *state.on_poll.lock() = Some(Box::new({
+                let state = state.clone();
+                move || {
+                    state
+                        .ready_events
+                        .fetch_or(IoEvents::IN.bits() as usize, Ordering::AcqRel);
+                    state.poll_set.wake();
+                }
+            }));
         }
     }));
 
@@ -887,8 +970,7 @@ fn test_epoll_modify_cannot_be_overwritten_by_inflight_rearm() {
         let epoll = epoll.clone();
         move || {
             let mut out = [k_epoll_event::default(); 1];
-            assert_eq!(epoll.poll_events(&mut out).unwrap(), 1);
-            assert_epoll_event(&out[0], IoEvents::OUT.bits(), 7);
+            assert_eq!(epoll.poll_events(&mut out), Err(KError::WouldBlock));
         }
     });
     gate.waiters
@@ -913,7 +995,10 @@ fn test_epoll_modify_cannot_be_overwritten_by_inflight_rearm() {
     });
     // Release the suspended rearm only after MOD has blocked behind it or
     // completed. No scheduler delay or fixed retry count determines the order.
-    while !matches!(modifier.state(), ktask::TaskState::Blocked | ktask::TaskState::Exited) {
+    while !matches!(
+        modifier.state(),
+        ktask::TaskState::Blocked | ktask::TaskState::Exited
+    ) {
         ktask::yield_now();
     }
     gate.is_released.store(true, Ordering::Release);
@@ -946,15 +1031,7 @@ fn test_epoll_rearm_limits_stale_registered_wakers() {
     ));
 
     for _ in 0..70 {
-        epoll
-            .register_waker_only(
-                &interest,
-                IoEvents::empty(),
-                false,
-                interest.registered_events(),
-                false,
-            )
-            .unwrap();
+        epoll.register_waker(&interest, &file).unwrap();
     }
 
     assert!(epoll.inner.ready_queue.lock().len() <= 1);

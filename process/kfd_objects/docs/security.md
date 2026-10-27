@@ -134,8 +134,9 @@ They use explicit source readiness and injected errors, not timing thresholds.
 - Preserve read-driven periodic rearm and poll-before-IRQ notification.
 - Keep epoll MOD identity, queue deduplication and generation checks together.
 - Treat each queued source notification as an edge; do not suppress it by comparing with previously reported readiness bits. Separate arrivals can leave identical masks.
-- Epoll edge rearm rechecks readiness for newly ready directions after source registration. Unchanged levels alone must not repeat events; notifications during registration must remain pending even when readiness bits are unchanged.
-- Concurrent epoll consumers must preserve freshly requeued entries during per-call deduplication. Never drop the only entry while leaving its queue-membership flag set. Deferral completion and callback notification use one atomic state to avoid losing wakes at registration completion.
+- Clear the consumed epoll queue entry before registering sources and sampling readiness. Preserve callbacks during both operations; never clear their new entry after the sample. ET must not repeat unchanged levels without a notification.
+- A source notification consumes its one-shot waiter even when readiness is empty. Keep a queued check pending instead of discarding the notification after bounded registration retries.
+- Concurrent epoll consumers must preserve freshly requeued entries during per-call deduplication. Never drop the only entry while leaving its queue-membership flag set.
 - Keep each interest's consume/rearm and MOD serialized through its operation mutex; generation changes and registration-owner replacement must not overtake one another. IRQ-reachable source callbacks must never acquire the operation mutex.
 - Drop registration owners outside their mutex; verify callback lock context.
 - Keep IRQ-reachable epoll wake paths on IRQ-safe state and avoid task-only locks.

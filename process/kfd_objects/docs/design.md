@@ -54,22 +54,25 @@ does not redirect registration or synthesize HUP. Readiness still uses the
 current caller's pending queues. Files without a captured source retain their
 ordinary `register_poll` path.
 
-Edge-triggered interests recheck readiness after replacing their one-shot
-source registrations. The recheck queues directions that were absent from the
-event just consumed, preserving a read arrival while a write event is being
-rearmed without repeatedly reporting unchanged writability. Source notifications
-during ET rearm enqueue the interest even if the readiness mask is unchanged;
-discarding them could consume a one-shot registration without leaving pending work.
-Each queued source notification is eligible for delivery even when its current
-readiness mask equals the previous event. ET removes the consumed ready entry
-instead of retaining it as LT does; it does not infer edges from mask changes.
-This matches Linux's `ep_send_events` and avoids discarding another arrival
-whose read/write readiness bits happen to be unchanged.
-Registration deferral and callback notification share one atomic state so a wake
-cannot fall between ending deferral and collecting deferred notifications.
-Callbacks become live before the final readiness sample: a notification arriving
-after the sample must enqueue independently rather than be ignored using stale
-readiness bits, including on the bounded registration-restoration attempt.
+Ready consumption clears only the popped entry's queue bit, installs the new
+one-shot source registrations, and then samples readiness. Replacing the waker
+generation before that sample is safe because the sample covers earlier state
+changes. Callbacks from the new registration immediately queue the interest,
+including callbacks during registration or the readiness sample. Consumption
+never clears that new entry. This order closes both the check/register gap and
+the window where a callback could be merged into an entry being consumed.
+
+An enabled interest with no pending check retains its source registrations. If
+a notification drains a one-shot waiter while readiness is empty, its queued
+check must remain pending; a bounded restoration retry cannot establish this
+invariant. Such notifications do not themselves produce user-visible events:
+consumption still polls the file. Each call processes a bounded ready batch.
+
+ET does not retain the consumed level. Each queued source notification remains
+eligible for delivery even when its current readiness mask equals the previous
+event. LT retains a ready entry, coalescing it with any entry already queued by
+a callback. ONESHOT delivery invalidates the registration generation and drops
+its source guards until MOD enables the interest again.
 Concurrent consumers can drain the original ready batch while an interest is
 requeued. Per-call deduplication retains that fresh entry when no level-triggered
 entry was already kept, preserving its queue-membership flag and future wakes.
