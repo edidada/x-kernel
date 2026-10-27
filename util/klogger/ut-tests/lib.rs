@@ -11,9 +11,41 @@ use unittest::{assert_eq, def_test};
 
 use super::{
     build_level_cap, current_log_level, filter_enabled, filter_spec, level_name, level_number,
-    logbuf_clear, logbuf_read_newest, parse_log_level, set_filter_spec, set_log_level,
+    logbuf_clear, logbuf_len, logbuf_read_newest, parse_log_level, set_filter_spec, set_log_level,
     set_log_level_filter,
 };
+
+/// The canonical spec of the active filter, so a test restores the **whole**
+/// state it found — default level *and* rule set. Restoring only the default
+/// level with `set_log_level_filter` drops every per-target rule, which silently
+/// leaks state into the tests that run after it.
+struct SavedSpec {
+    buf: [u8; super::MAX_FILTER_SPEC],
+    len: usize,
+}
+
+impl SavedSpec {
+    fn take() -> Self {
+        let mut buf = [0u8; super::MAX_FILTER_SPEC];
+        let len = filter_spec(&mut buf).unwrap_or(0);
+        Self { buf, len }
+    }
+
+    fn restore(&self) {
+        if let Ok(spec) = core::str::from_utf8(&self.buf[..self.len]) {
+            set_log_level(spec);
+        }
+    }
+}
+
+/// Whole-ring snapshot, for assertions that must not depend on how much other
+/// kernel threads logged in the meantime.
+fn ring_snapshot() -> alloc::vec::Vec<u8> {
+    let mut buf = alloc::vec![0u8; super::LOGBUF_SIZE];
+    let len = logbuf_read_newest(&mut buf);
+    buf.truncate(len);
+    buf
+}
 
 #[def_test]
 fn parse_accepts_level_names_case_insensitively() {
@@ -79,7 +111,7 @@ fn level_name_matches_acceptable_input() {
 /// test that asserts on them must not share them with a parallel one.
 #[def_test(serial)]
 fn set_log_level_takes_effect_immediately() {
-    let previous = current_log_level();
+    let saved = SavedSpec::take();
     set_log_level("3");
     assert_eq!(current_log_level(), LevelFilter::Info);
     set_log_level_filter(LevelFilter::Debug);
@@ -87,12 +119,12 @@ fn set_log_level_takes_effect_immediately() {
     // Invalid input must not silence the whole kernel by accident.
     set_log_level("invalid");
     assert_eq!(current_log_level(), LevelFilter::Debug);
-    set_log_level_filter(previous);
+    saved.restore();
 }
 
 #[def_test(serial)]
 fn filter_spec_reports_the_canonical_text() {
-    let previous = current_log_level();
+    let saved = SavedSpec::take();
     assert_eq!(set_filter_spec("warn drv_uart=debug"), Ok(()));
     // The default stays visible to anything that reports "the level".
     assert_eq!(current_log_level(), LevelFilter::Warn);
@@ -109,14 +141,14 @@ fn filter_spec_reports_the_canonical_text() {
         Ok("warn drv_uart=trace drv_uart::dw_uart=error")
     );
 
-    set_log_level_filter(previous);
+    saved.restore();
 }
 
 /// The console decision itself: the longest matching prefix wins, and a target
 /// without a rule falls back to the default level.
 #[def_test(serial)]
 fn filter_rules_match_the_longest_prefix() {
-    let previous = current_log_level();
+    let saved = SavedSpec::take();
     assert_eq!(
         set_filter_spec("error drv_uart=debug drv_uart::dw_uart=trace"),
         Ok(())
@@ -141,7 +173,7 @@ fn filter_rules_match_the_longest_prefix() {
     assert!(filter_enabled("drv_uart_extra", Level::Debug));
     assert!(!filter_enabled("drv_uart_extra", Level::Trace));
 
-    set_log_level_filter(previous);
+    saved.restore();
 }
 
 /// A spec without a bare level keeps the default in force and replaces only the
@@ -149,7 +181,7 @@ fn filter_rules_match_the_longest_prefix() {
 /// a hard-coded `warn`.
 #[def_test(serial)]
 fn filter_spec_without_a_level_keeps_the_current_default() {
-    let previous = current_log_level();
+    let saved = SavedSpec::take();
     set_log_level_filter(LevelFilter::Debug);
 
     assert_eq!(set_filter_spec("ksyscall=trace"), Ok(()));
@@ -170,12 +202,12 @@ fn filter_spec_without_a_level_keeps_the_current_default() {
     assert_eq!(current_log_level(), LevelFilter::Warn);
     assert!(!filter_enabled("ksyscall", Level::Trace));
 
-    set_log_level_filter(previous);
+    saved.restore();
 }
 
 #[def_test(serial)]
 fn filter_spec_rejects_bad_input_without_half_applying() {
-    let previous = current_log_level();
+    let saved = SavedSpec::take();
     assert_eq!(set_filter_spec("info subsys_uart=debug"), Ok(()));
     // A bad token anywhere must leave the previous spec intact.
     assert_eq!(set_filter_spec("debug drv_uart=nonsense").is_err(), true);
@@ -189,7 +221,7 @@ fn filter_spec_rejects_bad_input_without_half_applying() {
         core::str::from_utf8(&buf[..len]),
         Ok("info subsys_uart=debug")
     );
-    set_log_level_filter(previous);
+    saved.restore();
 }
 
 /// A record the console filter drops still lands in the ring: that is the
@@ -201,8 +233,7 @@ fn filter_spec_rejects_bad_input_without_half_applying() {
 /// threads keep logging concurrently.
 #[def_test(serial)]
 fn logbuf_captures_records_the_console_filter_hides() {
-    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
-    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    let saved = SavedSpec::take();
     // Console filter `off`: even `error!` is not printed. `error` is at or below
     // every build cap, so the ring still records it in any configuration.
     assert_eq!(set_filter_spec("off"), Ok(()));
@@ -212,9 +243,10 @@ fn logbuf_captures_records_the_console_filter_hides() {
 
     super::error!("klogger logbuf captured marker");
 
-    let mut buf = [0u8; 4096];
-    let len = logbuf_read_newest(&mut buf);
-    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    // Search the whole ring: a fixed window could be filled by other kernel
+    // threads between the record and the read.
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
     let line = text
         .lines()
         .find(|line| line.contains("klogger logbuf captured marker"))
@@ -225,22 +257,19 @@ fn logbuf_captures_records_the_console_filter_hides() {
         line.starts_with("<1>"),
         "the captured record lost its level: {text}"
     );
-    // Records are newline-terminated: without it `dmesg` prints the whole
-    // buffer as one run-on line.
+    // A whole-ring snapshot ends on a record boundary.
     assert!(text.ends_with('\n'), "record without newline: {text:?}");
 
     // Clearing drops this test's records; unrelated records may follow.
     logbuf_clear();
-    let len = logbuf_read_newest(&mut buf);
-    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
     assert!(
         !text.contains("klogger logbuf"),
         "clear left stale records: {text}"
     );
 
-    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
-        set_log_level(spec);
-    }
+    saved.restore();
 }
 
 /// A read returns the newest whole records that fit, oldest first, starting at a
@@ -251,28 +280,27 @@ fn logbuf_captures_records_the_console_filter_hides() {
 /// filter is `off` so nothing goes through the UART.
 #[def_test(serial)]
 fn logbuf_read_returns_the_newest_whole_records() {
-    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
-    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    let saved = SavedSpec::take();
     assert_eq!(set_filter_spec("off"), Ok(()));
     logbuf_clear();
 
     super::error!("klogger order marker one");
     super::error!("klogger order marker two");
 
-    let mut buf = [0u8; 4096];
-    let len = logbuf_read_newest(&mut buf);
-    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    // Whole-ring window: independent of how much other contexts logged.
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
     let first = text.find("klogger order marker one").expect("first record");
     let second = text.find("klogger order marker two").expect("second record");
     assert!(first < second, "records are not in log order: {text}");
-    assert!(text.ends_with('\n'), "window does not end a record: {text:?}");
+    assert!(text.ends_with('\n'), "snapshot does not end a record: {text:?}");
 
-    // Reading does not consume: the same records come back.
-    let again = logbuf_read_newest(&mut buf);
-    assert!(again >= len, "the second read lost records");
+    // Reading does not consume.
+    assert_eq!(logbuf_len(), snapshot.len());
 
     // A destination smaller than the ring gets the *newest* records, aligned to
-    // a record boundary, never a prefix of the whole buffer.
+    // a record boundary. No marker assertion here: other contexts may log
+    // between the records and this read, so only the shape is guaranteed.
     let mut small = [0u8; 96];
     let small_len = logbuf_read_newest(&mut small);
     assert!(small_len > 0 && small_len <= small.len());
@@ -281,15 +309,9 @@ fn logbuf_read_returns_the_newest_whole_records() {
         tail.starts_with('<'),
         "the window does not start at a record boundary: {tail:?}"
     );
-    assert!(
-        tail.contains("klogger order marker two"),
-        "a short destination did not receive the newest record: {tail:?}"
-    );
 
     logbuf_clear();
-    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
-        set_log_level(spec);
-    }
+    saved.restore();
 }
 
 /// The build cap is what the `log` crate gates on, so it must never be `off` and
@@ -310,8 +332,7 @@ fn build_cap_is_a_level_the_image_can_produce() {
 fn logbuf_terminates_truncated_records() {
     use alloc::string::String;
 
-    let mut previous_buf = [0u8; super::MAX_FILTER_SPEC];
-    let previous_len = filter_spec(&mut previous_buf).unwrap_or(0);
+    let saved = SavedSpec::take();
     // `off` keeps the console quiet; `error` is at or below every build cap, so
     // the ring records these in any configuration.
     assert_eq!(set_filter_spec("off"), Ok(()));
@@ -324,9 +345,8 @@ fn logbuf_terminates_truncated_records() {
     // Truncation must not split a three-byte code point.
     super::error!("{}", String::from("\u{5b57}").repeat(120));
 
-    let mut buf = [0u8; 4096];
-    let len = logbuf_read_newest(&mut buf);
-    let text = core::str::from_utf8(&buf[..len]).expect("log text is utf-8");
+    let snapshot = ring_snapshot();
+    let text = core::str::from_utf8(&snapshot).expect("log text is utf-8");
     let marker_lines: alloc::vec::Vec<&str> = text
         .lines()
         .filter(|line| line.contains("marker-one") || line.contains("marker-two"))
@@ -337,7 +357,5 @@ fn logbuf_terminates_truncated_records() {
     }
     assert!(text.ends_with('\n'), "record without terminator: {text:?}");
 
-    if let Ok(spec) = core::str::from_utf8(&previous_buf[..previous_len]) {
-        set_log_level(spec);
-    }
+    saved.restore();
 }
