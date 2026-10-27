@@ -36,6 +36,12 @@ static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("fixed-clock"))
 /// controllers live for the kernel's lifetime (matching `of_clk_add_hw_provider`).
 struct FixedClockLookup {
     provider_id: ProviderId,
+    /// The output's name (`clock-output-names`, or the phandle-derived
+    /// fallback). Cross-provider parent resolution resolves branch parents
+    /// by NAME against the global registry, so a fixed input must answer
+    /// its name here — `xin24m` is a fixed-clock output and the CRU table
+    /// lists it as a parent.
+    name: &'static str,
     core: Arc<ClkCore>,
 }
 
@@ -49,9 +55,7 @@ impl ClkLookup for FixedClockLookup {
     }
 
     fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
-        // `#clock-cells = <0>` nodes have no SoC output names.
-        let _ = name;
-        None
+        (name == self.name).then(|| self.core.clone())
     }
 }
 
@@ -88,6 +92,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
         // SAFETY-of-model note: leak is intentional, see `FixedClockLookup`.
         let lookup: &'static FixedClockLookup = Box::leak(Box::new(FixedClockLookup {
             provider_id: phandle,
+            name,
             core: core.clone(),
         }));
         // Publish LAST: registration wakes consumers parked on this phandle

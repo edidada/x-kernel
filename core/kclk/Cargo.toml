@@ -15,6 +15,7 @@ categories.workspace = true
 default = []
 
 [dependencies]
+log.workspace = true
 kspin = { workspace = true }
 ksync = { workspace = true }
 bitflags = { workspace = true }

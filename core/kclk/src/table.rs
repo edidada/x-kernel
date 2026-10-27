@@ -521,8 +521,16 @@ pub fn register_table(
                         // the global clock lookup at registration time). This
                         // is what lets a second controller (e.g. the RK3588
                         // PMU CRU) hang its outputs off main-CRU parents.
-                        None => crate::provider::clk_get_core_by_name(pname)
-                            .map_err(|_| ClkError::InvalidParent)?,
+                        None => crate::provider::clk_get_core_by_name(pname).map_err(|_| {
+                            // Bring-up diagnostic: name the culprit — an
+                            // InvalidParent with no name is undebuggable on
+                            // hardware.
+                            log::warn!(
+                                "kclk: parent `{pname}` not in this batch and not registered \
+                                 globally"
+                            );
+                            ClkError::InvalidParent
+                        })?,
                     },
                     ParentRef::External(pid, idx) => crate::provider::clk_get_by_index(*pid, *idx)
                         .map_err(|_| ClkError::InvalidParent)?

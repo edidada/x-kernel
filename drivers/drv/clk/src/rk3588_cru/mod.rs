@@ -21,10 +21,10 @@
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 
 use driver_base::{
-    AliasMatch, Device, DriverOps, FirmwareNodeInfo, IoMap, OfMatch, PlatformBus, PlatformId,
-    ProbeError, RuntimeError,
+    AliasMatch, DepSource, Device, DriverOps, FirmwareNodeInfo, IoMap, OfMatch, PlatformBus,
+    PlatformId, ProbeError, RuntimeError,
 };
-use kclk::{ClkBranch, ClkIndex, ClkRegAccess, ClkTable, MmioClkReg, MuxFlags};
+use kclk::{ClkBranch, ClkError, ClkIndex, ClkRegAccess, ClkTable, MmioClkReg, MuxFlags};
 
 mod data;
 mod ops;
@@ -172,7 +172,7 @@ impl DriverOps<PlatformBus> for Rk3588CruDriver {
         let reg: Arc<dyn ClkRegAccess> = unsafe { Arc::new(MmioClkReg::new(vaddr)) };
 
         register_placeholders();
-        register_tree(phandle, reg, firmware)?;
+        register_tree(phandle, reg, firmware, dev)?;
 
         log::info!("clk-rk3588: provider 0x{phandle:x} ready; {}", summarize());
         Ok(Rk3588CruData { _reg: regs })
@@ -218,6 +218,7 @@ fn register_tree(
     phandle: u32,
     reg: Arc<dyn ClkRegAccess>,
     firmware: &FirmwareNodeInfo,
+    dev: &mut Device<'_, PlatformBus>,
 ) -> Result<(), ProbeError> {
     let table: &'static ClkTable = Box::leak(Box::new(ClkTable::new(phandle)));
 
@@ -308,9 +309,27 @@ fn register_tree(
     let armclks = ops::ArmClk::build_all(reg.clone(), &mut branches, internal_index);
 
     if let Err(err) = kclk::register_table(table, reg, &branches) {
-        log::error!("clk-rk3588: clock tree registration failed: {err:?}");
-        return Err(ProbeError::Fatal(RuntimeError::Io));
+        match err {
+            // A parent name we cannot resolve yet means some input provider
+            // (fixed-clock, SCMI, ...) has not probed: retry, exactly like
+            // Linux's -EPROBE_DEFER. register_table rolls the batch back, so
+            // a retry starts clean. The kclk fallback names the culprit.
+            ClkError::InvalidParent => {
+                log::info!("clk-rk3588: parent not resolvable yet; deferring probe");
+                return Err(ProbeError::Deferred(DepSource::clk(u64::from(phandle))));
+            }
+            err => {
+                log::error!("clk-rk3588: clock tree registration failed: {err:?}");
+                return Err(ProbeError::Fatal(RuntimeError::Io));
+            }
+        }
     }
+
+    // Publish LAST (`of_clk_add_hw_provider` analogue): registration wakes
+    // consumers parked on this phandle and cannot be undone by a later Err.
+    dev.env()
+        .provide::<driver_host::ClkProvider>(phandle, table)
+        .map_err(|_| ProbeError::Fatal(RuntimeError::AlreadyExists))?;
 
     // Post-registration wiring that needs live nodes (public handle API).
     ops::ArmClk::post_register(&armclks);

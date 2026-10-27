@@ -63,7 +63,7 @@ use crate::{
     devres::services::{
         ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError,
     },
-    error::{DepSource, ProbeError, RuntimeError},
+    error::{DepKind, DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
 };
 

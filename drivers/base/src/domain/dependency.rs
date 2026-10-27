@@ -139,6 +139,15 @@ impl DeviceDomain {
         }
     }
 
+    /// The recorded generation for `dep` (or the fallback when never woken).
+    fn generation_for(dep_generations: &[(DepSource, u64)], dep: DepSource, fallback: u64) -> u64 {
+        dep_generations
+            .iter()
+            .find(|(d, _)| *d == dep)
+            .map(|(_, g)| *g)
+            .unwrap_or(fallback)
+    }
+
     pub fn wake(&self, dep: DepSource) -> usize {
         let woken = {
             let mut inner = self.inner.lock();
@@ -159,13 +168,44 @@ impl DeviceDomain {
                     1
                 }
             };
+            // Clock providers resolve their inputs through the GLOBAL PNAME
+            // space (Linux CCF resolves branch parents by name across
+            // controllers), so a probe that resolved a parent by name cannot
+            // name that parent's phandle as its dependency. A Clk
+            // publication therefore also retries every other Clk-kind
+            // waiter: each re-probe either now proceeds or re-parks, so the
+            // imprecision costs one probe attempt per publication — never a
+            // wrong binding, and never a missed one.
+            if dep.kind == DepKind::Clk {
+                let related: Vec<DepSource> = inner
+                    .sched
+                    .dep_generations
+                    .iter()
+                    .filter(|(d, _)| d.kind == DepKind::Clk && *d != dep)
+                    .map(|(d, _)| *d)
+                    .collect();
+                for r in related {
+                    if let Some((_, g)) = inner
+                        .sched
+                        .dep_generations
+                        .iter_mut()
+                        .find(|(d, _)| *d == r)
+                    {
+                        *g += 1;
+                    }
+                }
+            }
             let deferred = core::mem::take(&mut inner.sched.deferred);
             let mut woken = 0usize;
             for (id, waiting) in deferred {
-                if waiting != dep {
+                let matched =
+                    waiting == dep || (dep.kind == DepKind::Clk && waiting.kind == DepKind::Clk);
+                if !matched {
                     inner.sched.deferred.push((id, waiting));
                     continue;
                 }
+                // Look the generation up before taking the entry borrow.
+                let seen = Self::generation_for(&inner.sched.dep_generations, waiting, generation);
                 if let Some(entry) = inner.devices.get_mut(&id) {
                     // Only a parked (Deferred) device may be woken: a device
                     // flipped to `Removing` by a concurrent remove_device —
@@ -177,7 +217,7 @@ impl DeviceDomain {
                         continue;
                     }
                     entry.lifecycle.state = DeviceState::Pending;
-                    Self::record_dep_generation(entry, dep, generation);
+                    Self::record_dep_generation(entry, waiting, seen);
                 }
                 inner.sched.pending.push(id);
                 woken += 1;

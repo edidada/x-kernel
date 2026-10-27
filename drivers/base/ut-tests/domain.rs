@@ -362,7 +362,7 @@ fn probe_binds_data_and_remove_quiesces() {
 }
 
 #[def_test(serial)]
-fn deferred_probe_wakes_exactly_on_dependency() {
+fn deferred_probe_wakes_on_dependency_and_clk_class_publications() {
     PROBES.store(0, Ordering::Relaxed);
     let (domain, services) = fresh_domain();
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
@@ -371,14 +371,22 @@ fn deferred_probe_wakes_exactly_on_dependency() {
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
     assert_eq!(PROBES.load(Ordering::Relaxed), 1);
 
-    // An unrelated dependency must not wake the device.
-    assert_eq!(domain.wake(DepSource::clk(0x99)), 0);
+    // A non-Clk dependency is exact: it must not wake the device.
+    assert_eq!(domain.wake(DepSource::new(DepKind::Other, 0x99)), 0);
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 1);
+
+    // Clk providers resolve inputs through the global PNAME space (Linux CCF
+    // resolves branch parents by name), so a Clk publication retries every
+    // Clk waiter: this re-probe cannot resolve yet and parks again.
+    assert_eq!(domain.wake(DepSource::clk(0x99)), 1);
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 
     services.publish_clk(0x42);
     assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
-    assert_eq!(PROBES.load(Ordering::Relaxed), 2);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 3);
 }
 
 #[def_test(serial)]
