@@ -16,7 +16,9 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+#[cfg(feature = "fs9p")]
+use alloc::boxed::Box;
+use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
 use driver_base::Publication;
@@ -435,12 +437,9 @@ impl BootVfs {
     }
 }
 
-#[expect(
-    clippy::panic,
-    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the root block device cannot be \
-              mounted (a non-probe mount error, or every registered filesystem rejects it); root \
-              mounting has no error return or recovery"
-)]
+// The sole panic site in this fn carries its own `#[expect(clippy::panic)]`
+// with the CG-021 rationale; a fn-level expect would sit unfulfilled whenever
+// cfg trims make no other panic appear here (e.g. fs9p off).
 fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
 

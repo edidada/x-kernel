@@ -202,7 +202,8 @@ fn resolve_boot_log_filter() -> &'static str {
                 _ => None,
             };
             if let Some(level) = shorthand {
-                klogger::set_filter_spec(level).ok();
+                // Best-effort: the shorthand never errors for a valid level.
+                let _ = klogger::set_filter_spec(level);
                 return level;
             }
         }
@@ -212,7 +213,9 @@ fn resolve_boot_log_filter() -> &'static str {
         return configured;
     }
     let level = configured_log_level();
-    klogger::set_filter_spec(level).ok();
+    // Best-effort: the level comes from our own table, so a failure is a
+    // klogger-side regression, not a boot-blocking error.
+    let _ = klogger::set_filter_spec(level);
     level
 }
 
