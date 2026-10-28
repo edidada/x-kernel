@@ -23,6 +23,7 @@ driver_host = { workspace = true }
 karch = { workspace = true }
 kbuild_config = { workspace = true }
 kclk = { workspace = true }
+kreset = { workspace = true }
 khal = { workspace = true }
 kspin = { workspace = true }
 ktime_types = { workspace = true }

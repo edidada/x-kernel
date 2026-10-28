@@ -37,6 +37,7 @@
 extern crate alloc;
 
 mod clk;
+mod reset;
 
 pub mod provider;
 #[cfg(feature = "virtio-hal")]
@@ -55,6 +56,7 @@ use driver_base::{
 };
 use kirq::{IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler};
 use provider::XKernelResourceProvider;
+pub use reset::{ResetProvider, ResetRegistry};
 
 static GLOBAL_HOST: kspin::SpinNoPreempt<Option<Arc<Host>>> = kspin::SpinNoPreempt::new(None);
 
@@ -89,6 +91,7 @@ pub struct Host {
     /// the HAL's. Both sides therefore share this single static.
     provider: &'static XKernelResourceProvider,
     clks: ClkRegistry,
+    resets: ResetRegistry,
     extensions: ExtensionRegistry,
 }
 
@@ -124,6 +127,9 @@ impl Host {
     /// Build the runtime with a wake hook that re-probes the given domain
     /// when a clock provider registers.
     pub fn new(wake: impl Fn(driver_base::DepSource) + Send + Sync + 'static) -> Arc<Self> {
+        // Shared between the clk and reset registries: either family's
+        // publication wakes the domain.
+        let wake = alloc::sync::Arc::new(wake);
         let extensions = ExtensionRegistry::new();
         #[cfg(feature = "virtio-hal")]
         extensions.register(alloc::boxed::Box::leak(alloc::boxed::Box::new(
@@ -131,7 +137,11 @@ impl Host {
         )));
         Arc::new(Self {
             provider: &RESOURCE_PROVIDER,
-            clks: ClkRegistry::new(wake),
+            clks: ClkRegistry::new({
+                let wake = wake.clone();
+                move |dep| wake(dep)
+            }),
+            resets: ResetRegistry::new(move |dep| wake(dep)),
             extensions,
         })
     }
@@ -320,6 +330,16 @@ impl driver_base::ProviderServices for Host {
                 }
                 self.clks.register_provider(lookup)
             }
+            driver_base::DepKind::Reset => {
+                let key = registration.key();
+                let lookup = registration
+                    .lookup::<ResetProvider>()
+                    .ok_or(RuntimeError::Invalid)?;
+                if u64::from(lookup.provider_id()) != key {
+                    return Err(RuntimeError::Invalid);
+                }
+                self.resets.register_provider(lookup)
+            }
             _ => Err(RuntimeError::Unsupported),
         }
     }
@@ -332,6 +352,16 @@ impl ClockConsumerServices for Host {
         spec: driver_base::ClkSpec,
     ) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
+    }
+}
+
+impl driver_base::ResetConsumerServices for Host {
+    fn reset_get(
+        &self,
+        _device: driver_base::DeviceId,
+        spec: driver_base::ResetSpec,
+    ) -> Result<driver_base::ResetHandle, ServiceError> {
+        self.resets.get(spec)
     }
 }
 

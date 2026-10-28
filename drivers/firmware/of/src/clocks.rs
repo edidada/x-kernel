@@ -153,3 +153,93 @@ fn clock_cells_for_phandle(phandle: u32) -> Option<u32> {
         .find(|n| n.property_u32("phandle") == Some(phandle))?;
     controller.property_u32("#clock-cells")
 }
+
+/// One resolved `resets` entry: the controller phandle plus the
+/// controller-local line index.
+///
+/// The mirror of [`ClockSpec`] for `resets = <&cru N>` /
+/// `reset-names = "pcie"`. Reset specifiers are always
+/// `(phandle, index)` — `#reset-cells` is 1 for every in-tree Rockchip
+/// controller, and the generic path rejects other shapes rather than
+/// guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetSpec {
+    /// The controller's DT phandle.
+    pub provider: u32,
+    /// The controller-local reset-line index.
+    pub index: u32,
+    /// Consumer-local name at the same position in `reset-names`.
+    pub connection_name: Option<&'static str>,
+}
+
+/// Extract the reset specifiers from a device node's `resets` property.
+///
+/// Mirror of [`device_clock_specs`]: walk `<&phandle specifier>` cells,
+/// `#reset-cells` decides the specifier width (default 1).
+pub fn device_reset_specs(node: FdtNode<'static, 'static>) -> Vec<ResetSpec> {
+    let mut specs = Vec::new();
+
+    let Some(prop) = node.property("resets") else {
+        return specs;
+    };
+    let raw = prop.value;
+    if raw.len() < 4 {
+        return specs;
+    }
+
+    let cells: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes(c.try_into().unwrap_or([0; 4])))
+        .collect();
+
+    let names = device_reset_names(node);
+    let mut idx = 0usize;
+    let mut spec_index = 0usize;
+    while idx < cells.len() {
+        let phandle = cells[idx];
+        idx += 1;
+
+        let ncells = reset_cells_for_phandle(phandle).unwrap_or(1) as usize;
+        if ncells == 1 && idx < cells.len() {
+            specs.push(ResetSpec {
+                provider: phandle,
+                index: cells[idx],
+                connection_name: names.get(spec_index).copied(),
+            });
+            idx += 1;
+            spec_index += 1;
+        } else {
+            // Unsupported cell count or truncated entry: skip the rest
+            // rather than emitting a wrong spec.
+            break;
+        }
+    }
+
+    specs
+}
+
+/// Parse the consumer-local `reset-names` list in declaration order.
+fn device_reset_names(node: FdtNode<'static, 'static>) -> Vec<&'static str> {
+    let Some(prop) = node.property("reset-names") else {
+        return Vec::new();
+    };
+    let Ok(raw) = core::str::from_utf8(prop.value) else {
+        return Vec::new();
+    };
+    raw.split('\0').filter(|name| !name.is_empty()).collect()
+}
+
+/// Resolve a `reset-names` entry to its [`ResetSpec`].
+pub fn device_reset_spec_by_name(node: FdtNode<'static, 'static>, name: &str) -> Option<ResetSpec> {
+    let index = device_reset_names(node).iter().position(|n| *n == name)?;
+    device_reset_specs(node).into_iter().nth(index)
+}
+
+/// Read the controller node referenced by `phandle`'s `#reset-cells`.
+fn reset_cells_for_phandle(phandle: u32) -> Option<u32> {
+    let fdt = fdt()?;
+    let controller = fdt
+        .all_nodes()
+        .find(|n| n.property_u32("phandle") == Some(phandle))?;
+    controller.property_u32("#reset-cells")
+}

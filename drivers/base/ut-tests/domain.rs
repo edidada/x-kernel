@@ -65,6 +65,8 @@ type WakeHook = Arc<dyn Fn(DepSource) + Send + Sync>;
 
 struct MockServices {
     clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
+    /// Registered reset lines per provider phandle (reset test support).
+    reset_ops: SpinNoPreempt<BTreeMap<u64, Arc<dyn crate::devres::host_api::ResetOps>>>,
     mapped: AtomicUsize,
     /// Test injection: fired on the clk Deferred path (mid-probe),
     /// simulating a provider registering between the dependency check
@@ -117,6 +119,7 @@ impl MockServices {
         Arc::new(Self {
             mid_check_hook: SpinNoPreempt::new(None),
             clk_providers: SpinNoPreempt::new(BTreeMap::new()),
+            reset_ops: SpinNoPreempt::new(BTreeMap::new()),
             mapped: AtomicUsize::new(0),
             providers: SpinNoPreempt::new(alloc::vec::Vec::new()),
             wake: SpinNoPreempt::new(None),
@@ -127,6 +130,35 @@ impl MockServices {
         self.clk_providers
             .lock()
             .insert(phandle, Arc::new(FixedClk { rate: 24_000_000 }));
+    }
+
+    /// Install one mock reset line under the provider phandle (a whole
+    /// provider with a single line at any index — enough for the domain
+    /// tests, which acquire one line per device).
+    fn publish_reset(&self, phandle: u64) {
+        self.reset_ops
+            .lock()
+            .insert(phandle, Arc::new(MockResetLine::default()));
+    }
+}
+
+/// A fixed-state reset line fake: starts deasserted, records the level.
+#[derive(Default)]
+struct MockResetLine {
+    asserted: SpinNoPreempt<bool>,
+}
+
+impl crate::devres::host_api::ResetOps for MockResetLine {
+    fn assert(&self) {
+        *self.asserted.lock() = true;
+    }
+
+    fn deassert(&self) {
+        *self.asserted.lock() = false;
+    }
+
+    fn status(&self) -> bool {
+        *self.asserted.lock()
     }
 }
 
@@ -219,6 +251,30 @@ impl ClockConsumerServices for MockServices {
                     hook();
                 }
                 Err(ServiceError::Deferred(DepSource::clk(spec.provider)))
+            }
+        }
+    }
+}
+
+impl crate::ResetConsumerServices for MockServices {
+    fn reset_get(
+        &self,
+        _: crate::device::DeviceId,
+        spec: crate::ResetSpec,
+    ) -> Result<crate::ResetHandle, ServiceError> {
+        // Same shape as clk_get: registry-first, mid-check hook second,
+        // deferral naming the provider phandle.
+        let existing = self.reset_ops.lock().get(&spec.provider).cloned();
+        match existing {
+            Some(ops) => Ok(crate::ResetHandle::new(ops, None)),
+            None => {
+                if let Some(hook) = self.mid_check_hook.lock().clone() {
+                    hook();
+                }
+                Err(ServiceError::Deferred(DepSource::new(
+                    DepKind::Reset,
+                    spec.provider,
+                )))
             }
         }
     }
@@ -339,6 +395,66 @@ fn fresh_domain() -> (DeviceDomain, Arc<MockServices>) {
     let services = MockServices::new();
     domain.set_services(services.clone());
     (domain, services)
+}
+
+/// A second consumer that ALSO acquires a reset line by name — the
+/// reset-family counterpart of [`TestSer`].
+struct TestSerRst;
+
+static RST_IDS: &[crate::PlatformId] =
+    &[crate::PlatformId::Of(OfMatch::compatible("test,serial"))];
+
+struct SerRstData {
+    _reset: crate::ResetHandle,
+    _guard: crate::DeassertedGuard,
+}
+
+impl DriverOps<PlatformBus> for TestSerRst {
+    type Data = SerRstData;
+
+    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<SerRstData, ProbeError> {
+        PROBES.fetch_add(1, Ordering::Relaxed);
+        let reset = dev.res().reset("pcie")?;
+        // The guard owns the deasserted state for the binding's lifetime.
+        let guard = reset.deasserted();
+        assert!(!reset.status(), "deasserted by the guard");
+        Ok(SerRstData { _reset: reset, _guard: guard })
+    }
+}
+
+#[def_test(serial)]
+fn reset_consumer_defers_until_provider_publishes() {
+    PROBES.store(0, Ordering::Relaxed);
+    let (domain, services) = fresh_domain();
+    domain.register_driver(DriverDesc::new("test-serial-rst", RST_IDS, TestSerRst));
+
+    // A descriptor whose resources carry BOTH a clk and a named reset:
+    // the reset is the missing provider, so probe defers on it.
+    let mut resources = test_resources();
+    resources.push_named(
+        "pcie",
+        crate::ResourceKind::Reset(crate::ResetSpec::by_phandle_index(0x02, 0x210)),
+    );
+    let desc = DeviceDescriptor::new(
+        PlatformBus::ID,
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(9, &["test,serial"])),
+    )
+    .with_resources(resources);
+
+    let id = domain.add_device(desc).expect("add device");
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 1);
+
+    // The reset controller publishes (the CRU-probe analogue) and the
+    // wake re-probes exactly the parked consumer: this time the line
+    // resolves, the guard deasserts, and the device activates.
+    // The registry publication fires the host wake; the mock only records
+    // the ops, so the test drives the wake itself (the clk-class tests do
+    // the same).
+    services.publish_reset(0x02);
+    assert_eq!(domain.wake(crate::DepSource::reset(0x02)), 1);
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 }
 
 #[def_test(serial)]

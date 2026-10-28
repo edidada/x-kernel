@@ -112,8 +112,12 @@ pub use class::{
 pub use desc::DeviceDescriptor;
 pub use device::{Device, DeviceId};
 pub use devres::{
-    ClkHandle, CoherentMem, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn, ReleaseHook,
-    services::{ClockConsumerServices, DeviceResourceServices, DeviceServices, ServiceError},
+    ClkHandle, CoherentMem, DeassertedGuard, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn,
+    ReleaseHook, ResetHandle,
+    services::{
+        ClockConsumerServices, DeviceResourceServices, DeviceServices, ResetConsumerServices,
+        ServiceError,
+    },
 };
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
@@ -126,5 +130,5 @@ pub use firmware::{FirmwareNodeInfo, FirmwareProp};
 pub use provider::{ProviderClass, ProviderRegistration, ProviderServices};
 pub use resource::{
     ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
-    ResourceEntry, ResourceKind, ResourceMap, Virq,
+    ResetSpec, ResourceEntry, ResourceKind, ResourceMap, Virq,
 };

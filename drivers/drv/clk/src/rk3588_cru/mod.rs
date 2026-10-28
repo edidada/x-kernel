@@ -25,9 +25,11 @@ use driver_base::{
     PlatformId, ProbeError, RuntimeError,
 };
 use kclk::{ClkBranch, ClkError, ClkIndex, ClkRegAccess, ClkTable, MmioClkReg, MuxFlags};
+use kreset::{ProviderId as ResetProviderId, ResetIndex, ResetLine, ResetLookup};
 
 mod data;
 mod ops;
+mod reset_data;
 
 /// One register field (offset/shift/mask) of a custom clock node.
 #[derive(Debug, Clone, Copy)]
@@ -308,6 +310,10 @@ fn register_tree(
     // -- armclks ------------------------------------------------------------
     let armclks = ops::ArmClk::build_all(reg.clone(), &mut branches, internal_index);
 
+    // The reset table shares this window; keep a handle before `reg` moves
+    // into `register_table`.
+    let reset_reg = reg.clone();
+
     if let Err(err) = kclk::register_table(table, reg, &branches) {
         match err {
             // A parent name we cannot resolve yet means some input provider
@@ -330,6 +336,8 @@ fn register_tree(
     dev.env()
         .provide::<driver_host::ClkProvider>(phandle, table)
         .map_err(|_| ProbeError::Fatal(RuntimeError::AlreadyExists))?;
+
+    publish_resets(phandle, reset_reg, dev)?;
 
     // Post-registration wiring that needs live nodes (public handle API).
     ops::ArmClk::post_register(&armclks);
@@ -408,4 +416,68 @@ fn summarize() -> alloc::string::String {
         }
     }
     out
+}
+
+/// The CRU's reset-line lookup: `resets = <&cru N>` specifiers resolve to
+/// pre-computed `(word_offset, bit)` positions inside the same window the
+/// clocks use (see `reset_data.rs` for the join behind the table).
+struct CruResetLookup {
+    provider_id: ResetProviderId,
+    reg: Arc<dyn ClkRegAccess>,
+}
+
+/// `ClkRegAccess` and `kreset::ResetRegAccess` are read/write pairs over
+/// the same window; the shim lets one mapped window back both providers.
+struct WindowShim(Arc<dyn ClkRegAccess>);
+
+impl kreset::ResetRegAccess for WindowShim {
+    fn reg_read(&self, offset: usize) -> u32 {
+        self.0.reg_read(offset)
+    }
+
+    fn reg_write(&self, offset: usize, value: u32) {
+        self.0.reg_write(offset, value);
+    }
+}
+
+impl CruResetLookup {
+    fn new(provider_id: u32, reg: Arc<dyn ClkRegAccess>) -> Self {
+        Self { provider_id, reg }
+    }
+}
+
+impl ResetLookup for CruResetLookup {
+    fn provider_id(&self) -> ResetProviderId {
+        self.provider_id
+    }
+
+    fn get_by_index(&self, index: ResetIndex) -> Option<Arc<ResetLine>> {
+        let row = reset_data::RESET_ROWS
+            .iter()
+            .find(|row| row.dts_id == index)?;
+        // SAFETY: `reg` is the CRU window mapped in probe (boot-static,
+        // like the clock nodes sharing it); every row's word offset was
+        // generated from the pinned reference LUT and lands inside the
+        // window's 0x5C000 span.
+        let shim: Arc<dyn kreset::ResetRegAccess> = Arc::new(WindowShim(self.reg.clone()));
+        let line = ResetLine::new(shim, row.word_offset, row.bit)?;
+        Some(Arc::new(line))
+    }
+}
+
+/// Publish the CRU's reset lines (`#reset-cells = <1>` on the same node;
+/// the BSP dts ids decode into the same window — see reset_data.rs). The
+/// `of_reset_controller_register` analogue: publication LAST, waking
+/// parked consumers and irrevocable.
+fn publish_resets(
+    phandle: u32,
+    reset_reg: Arc<dyn ClkRegAccess>,
+    dev: &mut Device<'_, PlatformBus>,
+) -> Result<(), ProbeError> {
+    let reset_lookup: &'static CruResetLookup =
+        Box::leak(Box::new(CruResetLookup::new(phandle, reset_reg)));
+    dev.env()
+        .provide::<driver_host::ResetProvider>(phandle, reset_lookup)
+        .map_err(|_| ProbeError::Fatal(RuntimeError::AlreadyExists))?;
+    Ok(())
 }

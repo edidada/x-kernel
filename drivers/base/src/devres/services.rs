@@ -98,6 +98,18 @@ pub trait ClockConsumerServices: Send + Sync {
     ) -> Result<ClkHandle, ServiceError>;
 }
 
+/// Reset acquisition — like clocks, a provider may not have registered
+/// yet, so the error vocabulary carries deferral.
+pub trait ResetConsumerServices: Send + Sync {
+    /// Acquire a reset line (`reset_control_get`); may report that the
+    /// provider has not registered yet.
+    fn reset_get(
+        &self,
+        device: crate::device::DeviceId,
+        spec: crate::resource::ResetSpec,
+    ) -> Result<super::ResetHandle, ServiceError>;
+}
+
 /// The aggregate a [`Device`](crate::Device) holds: every mandatory
 /// capability, provider publication, plus the host's extension table.
 ///
@@ -108,6 +120,7 @@ pub trait ClockConsumerServices: Send + Sync {
 pub trait DeviceServices:
     DeviceResourceServices
     + ClockConsumerServices
+    + ResetConsumerServices
     + crate::provider::ProviderServices
     + crate::extension::ExtensionServices
     + Send

@@ -1,0 +1,18 @@
+[package]
+name = "kreset"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "reset-line core: lines, provider lookup, registry (the kclk pattern, reset semantics)"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["reset", "driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+kspin = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

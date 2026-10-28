@@ -89,6 +89,8 @@ pub struct FirmwareDevice {
     /// (provider phandle, controller-local index) pair. Converted to
     /// clocks through `first_clk()` like MMIO and IRQ.
     pub clock_specs: Vec<of::ClockSpec>,
+    /// `resets = <&cru N>` specifiers, declaration order (mirror of clock_specs).
+    pub reset_specs: Vec<of::ResetSpec>,
     /// The node's full property set, firmware order, typed — the quirk
     /// snapshot (`of_property_read_*` surface) the device model carries.
     pub props: Vec<(&'static str, &'static [u8])>,
@@ -279,6 +281,7 @@ pub fn for_each_compatible(
             clock_cells: node.property_u32("#clock-cells"),
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
+            reset_specs: of::device_reset_specs(node),
             props: of::node_properties(node),
             dma: of::device_dma_facts(node),
         });

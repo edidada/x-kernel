@@ -405,6 +405,19 @@ pub enum DmaDirection {
 /// The `kclk` subsystem (the common clock framework core, ported from the `clk/tail` branch
 /// acceptance) implements this for real hardware clocks; tests implement it
 /// with fixed-rate fakes.
+/// Provider-side reset-line operations behind a [`crate::ResetHandle`].
+///
+/// The reset core (kreset) implements this over its registered lines; the
+/// host bridges consumer specifiers to it with deferral semantics.
+pub trait ResetOps: Send + Sync {
+    /// Assert the line (hold the IP in reset).
+    fn assert(&self);
+    /// Deassert the line (release the IP out of reset).
+    fn deassert(&self);
+    /// Sample the line: `true` when asserted.
+    fn status(&self) -> bool;
+}
+
 pub trait ClkOps: Send + Sync {
     fn name(&self) -> &str;
 

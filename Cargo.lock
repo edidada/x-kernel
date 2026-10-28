@@ -1218,6 +1218,7 @@ dependencies = [
  "kclk",
  "kdma",
  "kirq",
+ "kreset",
  "kspin",
  "log",
  "memaddr",
@@ -1291,6 +1292,7 @@ dependencies = [
  "kbuild_config",
  "kclk",
  "khal",
+ "kreset",
  "kspin",
  "ktime_types",
  "log",
@@ -2889,6 +2891,14 @@ version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
  "kiface",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "kreset"
+version = "0.3.0-dev"
+dependencies = [
  "kspin",
  "unittest",
 ]

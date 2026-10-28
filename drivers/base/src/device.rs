@@ -10,7 +10,9 @@ use core::marker::PhantomData;
 
 use crate::{
     bus::Bus,
-    devres::{ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction, services::DeviceServices},
+    devres::{
+        ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction, ResetHandle, services::DeviceServices,
+    },
     error::{DepSource, ProbeError, RuntimeError},
     extension::ExtensionService,
     firmware::{FirmwareNodeInfo, FirmwareProp},
@@ -389,6 +391,33 @@ impl<B: Bus> Resources<'_, B> {
         self.services
             .alloc_coherent(self.id, self.dma, len, align)
             .map_err(ProbeError::Fatal)
+    }
+
+    /// `reset_control_get(dev, id)`: resolves a `reset-names` entry and
+    /// acquires the line; returns [`ProbeError::Deferred`] while the reset
+    /// controller has not published yet.
+    pub fn reset(&self, name: &str) -> Result<ResetHandle, ProbeError> {
+        let spec = self
+            .map
+            .reset_by_name(name)
+            .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+        self.reset_spec(spec)
+    }
+
+    /// [`Self::reset`] on the n-th `resets` entry (declaration order).
+    pub fn reset_at(&self, index: usize) -> Result<ResetHandle, ProbeError> {
+        let spec = self
+            .map
+            .reset_at(index)
+            .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+        self.reset_spec(spec)
+    }
+
+    /// [`Self::reset`] on an explicit spec.
+    pub fn reset_spec(&self, spec: crate::resource::ResetSpec) -> Result<ResetHandle, ProbeError> {
+        self.services
+            .reset_get(self.id, spec)
+            .map_err(ProbeError::from)
     }
 
     /// `clk_get(dev, id)`: resolves a `clock-names` entry and acquires the

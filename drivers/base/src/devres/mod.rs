@@ -23,6 +23,7 @@ pub mod dma;
 pub mod host_api;
 pub mod iomap;
 pub mod irq;
+pub mod reset;
 pub mod services;
 
 /// Deferred resource release hook carried by every guard.
@@ -32,4 +33,5 @@ pub use clk::{ClkHandle, EnabledClock};
 pub use dma::CoherentMem;
 pub use iomap::IoMap;
 pub use irq::{DevIrq, IrqAction, IrqHandlerFn};
+pub use reset::{DeassertedGuard, ResetHandle};
 pub use services::{DeviceResourceServices, ServiceError};

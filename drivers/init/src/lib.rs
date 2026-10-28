@@ -240,6 +240,7 @@ fn enumerate_firmware_nodes_direct() {
             clock_cells: node.property_u32("#clock-cells"),
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
+            reset_specs: of::device_reset_specs(node),
             props: of::node_properties(node),
             dma: of::device_dma_facts(node),
         };
@@ -310,6 +311,16 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
     for spec in &dev.clock_specs {
         let entry_kind = ResourceKind::Clk(driver_base::ClkSpec::by_phandle_index(
             spec.provider as u64,
+            spec.index,
+        ));
+        match spec.connection_name {
+            Some(name) => resources.push_named(name, entry_kind),
+            None => resources.push_kind(entry_kind),
+        }
+    }
+    for spec in &dev.reset_specs {
+        let entry_kind = ResourceKind::Reset(driver_base::ResetSpec::by_phandle_index(
+            u64::from(spec.provider),
             spec.index,
         ));
         match spec.connection_name {

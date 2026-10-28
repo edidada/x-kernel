@@ -227,6 +227,26 @@ impl ClkSpec {
     }
 }
 
+/// A reset line described by firmware (`resets = <&phandle idx>`).
+///
+/// Same shape as [`ClkSpec`]: the phandle selects the reset controller,
+/// the specifier cell is provider-local. Reset specifiers are EXACTLY
+/// phandle-addressed (unlike clock parent names), so provider acquisition
+/// can defer and wake precisely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetSpec {
+    /// Provider identifier (DT phandle of the reset controller).
+    pub provider: u64,
+    /// Line index within the provider (`reset-specifier` cell).
+    pub index: u32,
+}
+
+impl ResetSpec {
+    pub const fn by_phandle_index(provider: u64, index: u32) -> Self {
+        Self { provider, index }
+    }
+}
+
 /// The kind of a resource entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -234,6 +254,7 @@ pub enum ResourceKind {
     IoPort(IoPortRange),
     Irq(IrqSpec),
     Clk(ClkSpec),
+    Reset(ResetSpec),
 }
 
 /// One firmware-described resource, optionally named.
@@ -353,6 +374,27 @@ impl ResourceMap {
             .iter()
             .filter_map(|entry| match entry.kind {
                 ResourceKind::Clk(spec) => Some(spec),
+                _ => None,
+            })
+            .nth(index)
+    }
+
+    /// Reset line by `reset-names` entry (`reset_control_get(dev, id)`).
+    pub fn reset_by_name(&self, name: &str) -> Option<ResetSpec> {
+        self.entries
+            .iter()
+            .find_map(|entry| match (&entry.name, entry.kind) {
+                (Some(entry_name), ResourceKind::Reset(spec)) if entry_name == name => Some(spec),
+                _ => None,
+            })
+    }
+
+    /// n-th reset line, in `resets = <...>` declaration order.
+    pub fn reset_at(&self, index: usize) -> Option<ResetSpec> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                ResourceKind::Reset(spec) => Some(spec),
                 _ => None,
             })
             .nth(index)

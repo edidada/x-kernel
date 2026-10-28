@@ -10,6 +10,7 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "core/kreset",
     "drivers/base",
     "drivers/host",
     "drivers/init",
@@ -124,6 +125,7 @@ kpoll = { path = "task/kpoll" }
 krcu = { path = "sync/krcu" }
 krcu-core = { path = "sync/krcu/crates/krcu-core" }
 kspin = { path = "task/kspin" }
+kreset = { path = "core/kreset" }
 ksync = { path = "task/ksync" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
 kworkqueue_ng = { path = "task/kworkng/crates/kworkqueue_ng" }
