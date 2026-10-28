@@ -11,7 +11,7 @@ is written for people. English only.
 | `id` | `CG-<nnn>-<descriptive>`; equals the filename without `.md`. |
 | `level` | `MUST` or `SHOULD`. |
 | `paths` | Glob patterns the rule applies to, e.g. `["**/*.rs"]`. |
-| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`). |
+| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint`, `xkmake` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`; for `xkmake`, the check names registered with `xkmake hygiene check`, see [Repository checks](#repository-checks-xkmake)). |
 | `triggers` | Optional list of case-sensitive ECMAScript regular expressions matched against added/modified diff lines in files matched by `paths`; read by xreview (formerly x-review-ng), ignored by lint backends. |
 
 ## Body
@@ -30,9 +30,15 @@ belong to the tool's own README.
   judgment; CG-017 separately covers Send/Sync arguments.
 - [pending.md](pending.md): Dylint candidates; landing a lint removes its row.
   Rustc/Clippy candidates stay in [lints.md](lints.md).
+- [exceptions.toml](exceptions.toml): accepted findings of repository
+  checks; see [Repository checks](#repository-checks-xkmake).
 
 ## Suppressing a check
 
+Rust lints are suppressed with attributes in code, as described here;
+findings of repository checks are registered in
+[exceptions.toml](exceptions.toml) instead
+(see [Repository checks](#repository-checks-xkmake)).
 Use the narrowest scope and start every reason with the full rule id:
 
 ```rust
@@ -101,6 +107,51 @@ allowance produced `static_mut_option`. The Clippy tool-lint expectation was
 `unfulfilled_lint_expectations` suppression is needed. The same pair is also
 checked through the configured kernel's `make clippy` during this migration.
 
+## Repository checks (xkmake)
+
+Rules over manifests, Kconfig or file layout rather than compiled Rust run
+in `xkmake hygiene check`. `make check_hygiene` runs every registered check
+and needs no `.config`; `--rule <id>` and `--check <name>` (each
+repeatable) narrow a run, and `make check_test_layout` runs CG-051 alone.
+Check names are the `lint` names under the rule's `xkmake` backend.
+A unit test fails when the xkmake registry and the `CG-*.md` frontmatter
+disagree in either direction, so a check and its rule file change together.
+
+Findings print as text, or as JSON with `--format json`; each names its
+rule, check, file and subject. `--report` adds advisory items that never
+fail. The exit status is 0 without violations, 1 with violations, and 2
+when a check cannot run, for example when `cargo metadata` fails. `deps`,
+`header`, `lints` and `host-tests` stay separate `xkmake hygiene` commands
+without a CG rule.
+
+CI runs `make check_hygiene` once, in its own Jenkins stage
+`Check: Repository hygiene`; the other stages set `SKIP_HYGIENE=1`. Locally,
+`make clippy`, `make dylint` and `make dylint_test` still run it first, and
+the pre-commit hook runs `check_hygiene`.
+
+### Registering an exception
+
+A finding the rule's **Exceptions** permits is registered in
+[exceptions.toml](exceptions.toml):
+
+```toml
+[[exception]]
+rule = "CG-051-test-source-layout"
+check = "src-test-file"
+subject = "drivers/kdemo/src/tests.rs"
+reason = "CG-051-test-source-layout: <Exceptions case>: <why it holds>"
+```
+
+`rule` and `check` must name a registered check, and `subject` must equal
+the subject the finding reports. The reason follows the attribute reasons
+above: after the full rule id, it names the case of the rule's
+**Exceptions** that permits the finding and why it holds, or, for a
+violation awaiting repair, `TODO(cg): <planned repair>`. The check rejects
+a reason that is empty after the rule id or after `TODO(cg): `. An
+exception that no longer matches a finding is stale and fails the check, so
+fixing a violation removes its entry. `--rule` and `--check` runs judge
+the entries of the checks they run.
+
 ## Rules
 
 | Rule | Level | Backend | Lints |
@@ -155,6 +206,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-048-direct-owner-conversion](CG-048-direct-owner-conversion.md) | SHOULD | ai | — |
 | [CG-049-no-std-box-in-kernel-tests](CG-049-no-std-box-in-kernel-tests.md) | MUST | dylint | `std_box_in_kernel_tests` |
 | [CG-050-scheduler-lock-order](CG-050-scheduler-lock-order.md) | MUST | ai | — |
+| [CG-051-test-source-layout](CG-051-test-source-layout.md) | MUST | xkmake | `src-test-file`, `inline-test-module`, `src-test-function`, `legacy-host-tests-dir`, `ut-tests-host-attr`, `tests-guest-marker`, `test-expect-attr` |
 
 ### Candidates not yet ruled
 
@@ -180,10 +232,13 @@ First choose the backend. Rustc/Clippy checks inherit `[workspace.lints]` in
 root `Cargo.toml`; parameters live in root `clippy.toml`. Validate through
 `make clippy` after preparing a platform defconfig, as described in
 `docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates are listed in
-[pending.md](pending.md); landing one removes its row. AI checks describe judgments the
-lint backends cannot prove. xreview loads only `CG-*.md` and selects rules
-with an `ai` check; files with only rustc/Clippy checks have no `triggers` and
-are ignored by AI review.
+[pending.md](pending.md); landing one removes its row. Checks over manifests,
+Kconfig or file layout rather than compiled Rust are registered with
+`xkmake hygiene check` and list their check names under the `xkmake`
+backend; see [Repository checks](#repository-checks-xkmake). AI checks
+describe judgments the other backends cannot prove. xreview loads only
+`CG-*.md` and selects rules with an `ai` check; files without one have no
+`triggers` and are ignored by AI review.
 
 For a Dylint rule:
 
@@ -191,6 +246,15 @@ For a Dylint rule:
 2. In `tools/lints/src/lib.rs`, add `mod <lint>;` and register its lint and pass in `register_lints`.
 3. Add `docs/code-guidelines/CG-<nnn>-<descriptive>.md` and its row in the table above.
 4. Clean up the rule's existing violations (the backlog) in the same commit.
+
+For an xkmake rule:
+
+1. Implement the check in `xtask/xkmake/src/hygiene/` and add it to the
+   registry, with tests for each check name.
+2. Add the rule file with those names under `backend: xkmake`, and its row
+   in the table above.
+3. Fix existing violations or register them in
+   [exceptions.toml](exceptions.toml) in the same commit.
 
 ## Relationship to existing guidance
 

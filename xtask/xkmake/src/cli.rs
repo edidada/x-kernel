@@ -50,10 +50,40 @@ pub(crate) enum HygieneCommand {
     Header(HygieneFixArgs),
     /// Check that root workspace members inherit `[workspace.lints]`.
     Lints,
-    /// Check kernel crate test source layout.
+    /// Run the repository rule checks of docs/code-guidelines (backend xkmake).
+    Check(HygieneCheckArgs),
+    /// Check kernel crate test source layout (CG-051); alias of
+    /// `check --rule CG-051-test-source-layout`.
     TestLayout,
     /// Check that Cargo integration tests compile in a bare host Cargo build.
     HostTests,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HygieneCheckArgs {
+    /// Rule to run, by full id or `CG-NNN` prefix; repeatable. Defaults to
+    /// every registered rule.
+    #[arg(long = "rule", value_name = "ID")]
+    pub(crate) rules: Vec<String>,
+
+    /// Check of the selected rules to run; repeatable. Defaults to all.
+    #[arg(long = "check", value_name = "NAME")]
+    pub(crate) checks: Vec<String>,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    pub(crate) format: ReportFormat,
+
+    /// Also run and print report-only checks; they do not affect the exit
+    /// status.
+    #[arg(long)]
+    pub(crate) report: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ReportFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Args)]

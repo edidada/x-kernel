@@ -359,6 +359,7 @@ make teefs
 make disk_img
 make ramdisk_img
 make install-tools
+make check_hygiene
 make check_deps
 make check_header
 make check_lints
@@ -380,27 +381,26 @@ command.
 three-line header. XKMake passes tracked and non-ignored untracked Rust source
 files to licensure; deleted worktree paths and non-Rust files are not checked.
 
-`make check_test_layout` checks source layout without a platform `.config`.
-The pre-commit hook delegates it to Clippy for configured Rust commits, and
-runs it directly for manifest-only changes, deletions, or when Clippy is skipped.
-Each path checks layout once. Check failures, including toolchain/setup failures,
-block the commit rather than silently passing. `make clippy`, `make dylint`, and `make dylint_test` also run
-it before their other checks; Jenkins already invokes `make clippy`, so layout
-violations block CI through that existing entry point. Hooks inspect the working
-tree, not an isolated index snapshot; CI checks the committed tree. `SKIP_ALL=1`
-bypasses local hook checks only, not CI. `make check_host_tests` remains manual.
-`make check_hooks` runs the hook dispatch regression suite without building a
-kernel; `make check_lints` depends on it, so the existing lint/CI paths run it too.
+`make check_hygiene` runs the code-guideline repository checks
+(`xkmake hygiene check`) without a platform `.config`: currently CG-051
+test source layout. `make check_test_layout` runs that rule alone. What
+each check accepts is in its rule file; filters, output, exit status and
+`docs/code-guidelines/exceptions.toml` are described in
+`docs/code-guidelines/README.md` ("Repository checks (xkmake)").
 
-An `include!` call
-alone is not evidence of test code: production modules also include generated
-configuration and bindings. Recognized test-module markers are still checked
-when their module body uses `include!`. The checker does not expand macros or
-resolve dynamically generated include contents; passing it does not prove
-that such contents contain no misplaced tests. Host/guest test attributes are
-recognized from Rust tokens, excluding comments and string literals. The inline
-module checks remain textual; neither mechanism expands macros or evaluates
-cfg conditions, and neither is a complete Rust semantic analysis.
+`make clippy`, `make dylint`, and `make dylint_test` run `check_hygiene`
+before their other checks unless `SKIP_HYGIENE=1`. Jenkins runs it once in
+the `Check: Repository hygiene` stage and sets `SKIP_HYGIENE=1` elsewhere.
+The pre-commit hook delegates `check_hygiene` to Clippy for
+configured Rust commits, and runs them directly for manifest-only changes,
+deletions, or when Clippy is skipped. Check failures, including
+toolchain/setup failures, block the commit rather than silently passing.
+Hooks inspect the working tree, not an isolated index snapshot; CI checks
+the committed tree. `SKIP_ALL=1` bypasses local hook checks only, not CI.
+`make check_host_tests` compiles each crate's `tests/*.rs` with host Cargo
+and remains manual. `make check_hooks` runs the hook dispatch regression
+suite without building a kernel; `make check_lints` depends on it, so the
+existing lint/CI paths run it too.
 
 `make check_lints` runs `xkmake hygiene lints`. Every root workspace member,
 including implicit path-dependency members, must declare

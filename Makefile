@@ -15,6 +15,13 @@
 #                           into this directory (see tools/lints/README.md)
 #     - FACTS_DEPS          With FACTS_OUT, export dependency crates too (y/n)
 #
+# * Repository checks — `make check_hygiene`, `make clippy`, `make dylint`:
+#     - HYGIENE_ARGS        Extra `xkmake hygiene check` flags, e.g.
+#                           `--report`, `--format json`, `--check <name>`
+#     - SKIP_HYGIENE=1      clippy/dylint/dylint_test skip the rule checks
+#                           (CI runs them once in a separate stage); the
+#                           deps/header/lints prerequisites still run
+#
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
@@ -194,7 +201,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_hygiene check_test_layout check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -243,16 +250,19 @@ disasm:
 symbolize:
 	@$(XKMAKE) symbolize $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS) $(if $(strip $(LOG)),--log $(LOG))
 
+# Checks run before clippy/dylint. SKIP_HYGIENE=1 drops only the rule checks.
+LINT_PREREQUISITES = $(if $(filter 1,$(SKIP_HYGIENE)),,check_hygiene) check_deps check_header check_lints
+
 clippy:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(MAKE) --no-print-directory $(LINT_PREREQUISITES)
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(MAKE) --no-print-directory $(LINT_PREREQUISITES)
 	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(if $(strip $(FACTS_OUT)),--facts-out "$(FACTS_OUT)" $(if $(filter y,$(FACTS_DEPS)),--facts-deps)) $(XKMAKE_ARGS)
 
 dylint_test:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(MAKE) --no-print-directory $(LINT_PREREQUISITES)
 	@$(XKMAKE) dylint --self-test $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 doc:
@@ -401,8 +411,15 @@ check_hooks:
 	@bash .githooks/tests/pre-commit.sh
 	@bash .githooks/tests/pre-push.sh
 
+# Repository rule checks of docs/code-guidelines (backend xkmake), with
+# exceptions from docs/code-guidelines/exceptions.toml. HYGIENE_ARGS passes
+# extra flags, e.g. HYGIENE_ARGS=--report or HYGIENE_ARGS="--format json".
+check_hygiene:
+	@$(XKMAKE) hygiene check $(HYGIENE_ARGS)
+
+# Single-rule alias of check_hygiene.
 check_test_layout:
-	@$(XKMAKE) hygiene test-layout
+	@$(XKMAKE) hygiene check --rule CG-051-test-source-layout $(HYGIENE_ARGS)
 
 check_host_tests:
 	@$(XKMAKE) hygiene host-tests

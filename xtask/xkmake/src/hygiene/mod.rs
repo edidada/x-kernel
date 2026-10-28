@@ -3,6 +3,16 @@
 // See LICENSES for license details.
 
 //! Repository hygiene orchestration.
+//!
+//! Rule checks (`hygiene check`) share discovery, exceptions and output
+//! through [`registry`], [`exceptions`] and [`report`]. The tool-backed
+//! commands below (`deps`, `header`, `lints`, `host-tests`) have no CG rule and
+//! stay atomic.
+
+mod exceptions;
+mod registry;
+mod report;
+mod test_layout;
 
 use std::{
     collections::HashSet,
@@ -13,6 +23,11 @@ use std::{
 
 use serde::Deserialize;
 
+pub(crate) use self::{
+    registry::{CheckRequest, Context, RuleCheck, run_rule_checks},
+    report::Finding,
+    test_layout::RULE_ID as TEST_LAYOUT_RULE,
+};
 use crate::{
     cli::HygieneFixArgs,
     context::workspace_root,
@@ -138,35 +153,6 @@ pub(crate) fn check_lint_inheritance() -> Result<()> {
         "workspace members must inherit the root lint levels; add `[lints] workspace = true` \
          to:\n  {}",
         missing.join("\n  ")
-    )))
-}
-
-/// Fails when kernel crate test sources are outside the agreed layout.
-pub(crate) fn check_test_layout() -> Result<()> {
-    let root = workspace_root()?;
-    let mut violations = Vec::new();
-    for manifest_path in workspace_member_manifests(&root)? {
-        let Some(crate_root) = manifest_path.parent() else {
-            continue;
-        };
-        let crate_name = crate_root
-            .strip_prefix(&root)
-            .unwrap_or(crate_root)
-            .display()
-            .to_string();
-        for source_path in tracked_rust_files_under(&root, crate_root)? {
-            let relative_path = source_path.strip_prefix(crate_root).unwrap_or(&source_path);
-            let content = fs::read_to_string(&source_path).with_path(&source_path)?;
-            collect_test_layout_violations(&crate_name, relative_path, &content, &mut violations);
-        }
-    }
-    if violations.is_empty() {
-        return Ok(());
-    }
-    violations.sort();
-    Err(Error::Message(format!(
-        "test source layout violations:\n  {}",
-        violations.join("\n  ")
     )))
 }
 
@@ -367,273 +353,6 @@ fn required_feature_test_targets(
         .collect())
 }
 
-fn collect_test_layout_violations(
-    crate_name: &str,
-    relative_path: &Path,
-    content: &str,
-    violations: &mut Vec<String>,
-) {
-    let path = relative_path.to_string_lossy().replace('\\', "/");
-    if path.starts_with("host-tests/") {
-        violations.push(format!(
-            "{crate_name}/{path}: host tests must live in <crate>/tests/"
-        ));
-    }
-    if path.starts_with("src/") && is_src_test_file(relative_path) {
-        violations.push(format!(
-            "{crate_name}/{path}: guest unit tests must live in <crate>/ut-tests/"
-        ));
-    }
-    if path.starts_with("src/") && has_inline_test_module(content) {
-        violations.push(format!(
-            "{crate_name}/{path}: use unittest::path_mod_test! with files under ut-tests/"
-        ));
-    }
-    if path.starts_with("src/")
-        && !is_src_test_file(relative_path)
-        && has_test_attribute(content, &["test", "def_test"])
-    {
-        violations.push(format!(
-            "{crate_name}/{path}: test functions must live in tests/ (host) or ut-tests/ (guest)"
-        ));
-    }
-    if path.starts_with("ut-tests/") && has_host_test_attr(content) {
-        violations.push(format!(
-            "{crate_name}/{path}: ut-tests must use #[def_test], not #[test]"
-        ));
-    }
-    if path.starts_with("tests/") && has_guest_test_marker(content) {
-        violations.push(format!(
-            "{crate_name}/{path}: Cargo tests must use #[test], not unittest #[def_test]"
-        ));
-    }
-    if (path.starts_with("ut-tests/") || path.starts_with("tests/"))
-        && has_handwritten_panic_expect_attr(content)
-    {
-        violations.push(format!(
-            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic #[expect]; \
-             rely on the test harness lint policy"
-        ));
-    }
-}
-
-fn is_src_test_file(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    file_name == "tests.rs" || file_name.starts_with("test_") || file_name.ends_with("_tests.rs")
-}
-
-fn has_inline_test_module(content: &str) -> bool {
-    let compact: String = content.chars().filter(|ch| !ch.is_whitespace()).collect();
-    [
-        "#[cfg(test)]",
-        "#[cfg(unittest)]",
-        "#[unittest::mod_test]",
-        "#[mod_test]",
-    ]
-    .iter()
-    .any(|marker| {
-        compact.match_indices(marker).any(|(offset, _)| {
-            let item = &compact[offset + marker.len()..];
-            let has_visibility = item.starts_with("pub");
-            let item = if let Some(visible) = item.strip_prefix("pub(") {
-                visible.split_once(')').map_or("", |(_, rest)| rest)
-            } else {
-                item.strip_prefix("pub").unwrap_or(item)
-            };
-            item.starts_with("mod")
-                && (!has_visibility
-                    || marker.contains("mod_test")
-                    || item.find('{').is_some_and(|body| {
-                        item.find(';').is_none_or(|declaration| body < declaration)
-                    }))
-        })
-    })
-}
-
-fn has_host_test_attr(content: &str) -> bool {
-    has_test_attribute(content, &["test"])
-}
-
-fn has_guest_test_marker(content: &str) -> bool {
-    has_test_attribute(content, &["def_test"])
-}
-
-fn has_test_attribute(content: &str, names: &[&str]) -> bool {
-    use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
-
-    // An attribute identifier must occur literally even inside cfg_attr. This
-    // only rejects impossible matches; tokens still decide all candidates.
-    if !names.iter().any(|name| content.contains(name)) {
-        return false;
-    }
-
-    fn matches_meta(meta: &syn::Meta, names: &[&str]) -> bool {
-        if meta
-            .path()
-            .segments
-            .last()
-            .is_some_and(|part| names.iter().any(|name| part.ident == *name))
-        {
-            return true;
-        }
-        let syn::Meta::List(list) = meta else {
-            return false;
-        };
-        if !list.path.is_ident("cfg_attr") {
-            return false;
-        }
-        list.parse_args_with(
-            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-        )
-        .is_ok_and(|args| args.iter().skip(1).any(|attr| matches_meta(attr, names)))
-    }
-
-    fn matches_attribute(group: &Group, names: &[&str]) -> bool {
-        group.delimiter() == Delimiter::Bracket
-            && syn::parse2::<syn::Meta>(group.stream()).is_ok_and(|meta| matches_meta(&meta, names))
-    }
-
-    fn contains_attribute(tokens: TokenStream, names: &[&str]) -> bool {
-        let mut tokens = tokens.into_iter().peekable();
-        while let Some(token) = tokens.next() {
-            if matches!(&token, TokenTree::Punct(punct) if punct.as_char() == '#') {
-                if matches!(tokens.peek(), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
-                {
-                    tokens.next();
-                }
-                if let Some(TokenTree::Group(group)) = tokens.peek()
-                    && matches_attribute(group, names)
-                {
-                    return true;
-                }
-            }
-            if let TokenTree::Group(group) = token
-                && contains_attribute(group.stream(), names)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    // Tokenization excludes comment/string contents without trying to evaluate
-    // platform cfgs. Keep malformed source conservative until rustc diagnoses it.
-    content.parse().map_or_else(
-        |_| {
-            names
-                .iter()
-                .any(|name| content.contains(&format!("#[{name}")))
-        },
-        |tokens| contains_attribute(tokens, names),
-    )
-}
-
-#[cfg(test)]
-mod test_attribute_tokens {
-    use super::{
-        collect_test_layout_violations, has_guest_test_marker, has_host_test_attr, has_test_attribute,
-    };
-
-    #[test]
-    fn combined_scan_matches_individual_attribute_queries() {
-        for source in [
-            "fn ordinary() {}",
-            "fn latest_value() {} // test is not an attribute",
-            "#[test] fn host() {}",
-            "#[unittest::def_test] fn guest() {}",
-            "#[cfg_attr(any(), cfg_attr(all(), unittest::def_test))] fn guest() {}",
-            "#[test] fn host() {} #[unittest::def_test] fn guest() {}",
-            "#[cfg_attr(test, inline)] fn ordinary() {}",
-            "const DOC: &str = r#\"#[test] #[def_test]\"#;",
-            "/* #[test] */ fn ordinary() {}",
-            "#[test] fn unfinished( {",
-        ] {
-            assert_eq!(
-                has_test_attribute(source, &["test", "def_test"]),
-                has_host_test_attr(source) || has_guest_test_marker(source),
-                "{source}",
-            );
-        }
-    }
-
-    #[test]
-    fn top_level_test_functions_cannot_hide_in_production_sources() {
-        for source in [
-            "#[unittest::def_test(user)] fn example() {}",
-            "#[cfg(any())] #[test] fn example() {}",
-        ] {
-            let mut violations = Vec::new();
-            collect_test_layout_violations(
-                "demo",
-                "src/ordinary.rs".as_ref(),
-                source,
-                &mut violations,
-            );
-            assert_eq!(violations.len(), 1, "{source}");
-        }
-        let mut violations = Vec::new();
-        collect_test_layout_violations(
-            "demo",
-            "src/ordinary.rs".as_ref(),
-            "//! #[def_test] example\nfn ordinary() {}",
-            &mut violations,
-        );
-        assert!(violations.is_empty());
-    }
-
-    #[test]
-    fn comments_and_strings_do_not_register_tests() {
-        for source in [
-            "//! In-crate `#[def_test]` cases exercise transitions.",
-            "/* outer /* #[test] */ #[unittest::def_test] */",
-            "const DOC: &str = r###\"#[test] #[def_test]\"###;",
-            "#[doc = \"#[test] unittest::def_test\"] fn ordinary() {}",
-        ] {
-            assert!(!has_guest_test_marker(source), "{source}");
-            assert!(!has_host_test_attr(source), "{source}");
-        }
-    }
-
-    #[test]
-    fn attributes_survive_spacing_comments_and_disabled_cfgs() {
-        for source in [
-            "#[def_test] fn example() {}",
-            "# [ unittest /* separator */ :: def_test (user, serial) ] fn example() {}",
-            "#[cfg(any())] mod hidden { #[unittest::def_test] fn example() {} }",
-            "macro_rules! cases { () => { #[def_test] fn example() {} }; }",
-            "#[cfg_attr(any(), unittest::def_test(user))] fn example() {}",
-            "#[cfg_attr(any(), cfg_attr(all(), unittest::def_test))] fn example() {}",
-        ] {
-            assert!(has_guest_test_marker(source), "{source}");
-        }
-        assert!(has_host_test_attr(
-            "# /* comment */ [ test ] fn example() {}"
-        ));
-        assert!(!has_host_test_attr("#[test_case] fn example() {}"));
-        assert!(!has_guest_test_marker("#[def_test_helper] fn example() {}"));
-        assert!(has_host_test_attr(
-            "#[cfg_attr(test, test)] fn example() {}"
-        ));
-        assert!(!has_guest_test_marker(
-            "#[cfg_attr(any(), doc = \"#[def_test]\")] fn ordinary() {}"
-        ));
-    }
-}
-
-fn has_handwritten_panic_expect_attr(content: &str) -> bool {
-    content.lines().any(|line| {
-        let code = line
-            .split_once("//")
-            .map_or(line, |(code, _comment)| code)
-            .trim();
-        (code.starts_with("#[expect(") || code.starts_with("#![expect("))
-            && ["unwrap_used", "expect_used", "panic"]
-                .iter()
-                .any(|lint| code.contains(&format!("clippy::{lint}")))
-    })
-}
 
 fn check_cargo_shear_ignores(root: &Path) -> Result<()> {
     let mut violations = Vec::new();
@@ -1006,11 +725,10 @@ mod tests {
     use std::io;
 
     use super::{
-        cargo_install_list_has_version, collect_cargo_shear_ignore_violations,
-        collect_test_layout_violations, has_cargo_integration_tests, has_inline_test_module,
-        has_handwritten_panic_expect_attr, ignored_entry_has_reason,
-        inherits_workspace_lints, is_src_test_file, reported_version, required_feature_test_targets,
-        tool_spawn_error, unexpected_tool_version, RequiredFeatureTestTarget,
+        RequiredFeatureTestTarget, cargo_install_list_has_version,
+        collect_cargo_shear_ignore_violations, has_cargo_integration_tests,
+        ignored_entry_has_reason, inherits_workspace_lints, reported_version,
+        required_feature_test_targets, tool_spawn_error, unexpected_tool_version,
     };
 
     #[test]
@@ -1030,150 +748,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn recognizes_src_test_file_names() {
-        assert!(is_src_test_file("src/copy_tests.rs".as_ref()));
-        assert!(is_src_test_file("src/tests.rs".as_ref()));
-        assert!(is_src_test_file("src/foo/test_copy.rs".as_ref()));
-        assert!(!is_src_test_file("src/contest.rs".as_ref()));
-    }
-
-    #[test]
-    fn recognizes_inline_test_modules_without_layout_sensitive_paths() {
-        assert!(has_inline_test_module("#[cfg(unittest)]\nmod copy_tests;"));
-        assert!(has_inline_test_module("#[cfg(test)] mod tests { }"));
-        assert!(has_inline_test_module("#[mod_test]\nmod tests { }"));
-        assert!(has_inline_test_module(
-            "#[mod_test] mod tests { include!(\"../ut-tests/lib.rs\"); }"
-        ));
-        assert!(!has_inline_test_module(
-            "unittest::path_mod_test!(tests, \"../ut-tests/lib.rs\");"
-        ));
-    }
-
-    #[test]
-    fn production_includes_are_not_test_layout_evidence() {
-        for source in [
-            include_str!("../../../../util/kbuild_config/src/lib.rs"),
-            r#"include!("generated_constants.rs");"#,
-            r#"include!(concat!(env!("OUT_DIR"), "/bindings.rs"));"#,
-            r#"// include!("example.rs") includes ordinary Rust code."#,
-            r##"const EXAMPLE: &str = r#"include!("example.rs");"#;"##,
-            "#[cfg(unittest)] pub mod ahci;",
-        ] {
-            let mut violations = Vec::new();
-            collect_test_layout_violations("demo", "src/lib.rs".as_ref(), source, &mut violations);
-            assert!(violations.is_empty(), "{source}: {violations:?}");
-        }
-    }
-
-    #[test]
-    fn test_module_includes_remain_layout_violations() {
-        for attribute in [
-            "#[cfg(test)]",
-            "#[cfg(unittest)]",
-            "#[mod_test]",
-            "#[unittest::mod_test]",
-        ] {
-            for visibility in ["", "pub ", "pub(crate) ", "pub(super) ", "pub(in crate::task) "] {
-                for include in [
-                    r#"include!("../ut-tests/cases.rs");"#,
-                    r#"include!(env!("TEST_CASES"));"#,
-                ] {
-                    let source = format!("{attribute}\n{visibility}mod tests {{\n{include}\n}}");
-                    let mut violations = Vec::new();
-                    collect_test_layout_violations(
-                        "demo",
-                        "src/lib.rs".as_ref(),
-                        &source,
-                        &mut violations,
-                    );
-                    assert_eq!(violations.len(), 1, "{source}: {violations:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn reports_guest_tests_left_under_src() {
-        let mut violations = Vec::new();
-        collect_test_layout_violations(
-            "core/kuaccess",
-            "src/copy_tests.rs".as_ref(),
-            "use unittest::def_test;\n#[def_test]\nfn copies() {}",
-            &mut violations,
-        );
-
-        assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("guest unit tests must live in <crate>/ut-tests/"));
-    }
-
-    #[test]
-    fn reports_wrong_macro_for_each_test_directory() {
-        let mut violations = Vec::new();
-        collect_test_layout_violations(
-            "core/demo",
-            "ut-tests/host_style.rs".as_ref(),
-            "#[test]\nfn host_style() {}",
-            &mut violations,
-        );
-        collect_test_layout_violations(
-            "core/demo",
-            "tests/guest_style.rs".as_ref(),
-            "use unittest::def_test;\n#[def_test]\nfn guest_style() {}",
-            &mut violations,
-        );
-
-        assert_eq!(violations.len(), 2);
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("ut-tests must use #[def_test]"))
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("Cargo tests must use #[test]"))
-        );
-    }
-
-    #[test]
-    fn reports_handwritten_panic_expect_attrs_in_test_sources() {
-        assert!(has_handwritten_panic_expect_attr(
-            "#[expect(clippy::expect_used, reason = \"test scenario: setup\")]\nfn helper() {}"
-        ));
-        assert!(has_handwritten_panic_expect_attr(
-            "#![expect(clippy::panic, reason = \"test scenario: setup\")]\nfn helper() {}"
-        ));
-        assert!(!has_handwritten_panic_expect_attr(
-            "#[allow(clippy::unwrap_used, reason = \"test scenario: setup\")]\nfn helper() {}"
-        ));
-        assert!(!has_handwritten_panic_expect_attr(
-            "// #[expect(clippy::expect_used, reason = \"old text\")]\nfn helper() {}"
-        ));
-        assert!(!has_handwritten_panic_expect_attr(
-            "#[expect(\n    clippy::expect_used,\n    reason = \"test scenario: setup\"\n)]\nfn helper() {}"
-        ));
-
-        let mut violations = Vec::new();
-        collect_test_layout_violations(
-            "drivers/integration/kdriver",
-            "ut-tests/block_irq_unittest.rs".as_ref(),
-            "#[expect(clippy::expect_used, reason = \"test scenario: setup\")]\nfn helper() {}",
-            &mut violations,
-        );
-        collect_test_layout_violations(
-            "util/kerrno",
-            "tests/kerrno_host.rs".as_ref(),
-            "#![expect(clippy::panic, reason = \"test scenario: setup\")]\nfn helper() {}",
-            &mut violations,
-        );
-
-        assert_eq!(violations.len(), 2);
-        assert!(violations.iter().all(|violation| {
-            violation.contains("test code must not hand-write unwrap/expect/panic #[expect]")
-        }));
-    }
 
     #[test]
     fn recognizes_only_root_cargo_integration_tests() {

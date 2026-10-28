@@ -143,6 +143,7 @@ pipeline {
 def sourceStageName() { return 'Source: Checkout & PR Base' }
 def setupStageName() { return 'Setup: Rustfmt toolchain' }
 def rustfmtStageName() { return 'Check: Rustfmt' }
+def repositoryHygieneStageName() { return 'Check: Repository hygiene' }
 def prepareSourceStashStageName() { return 'Prepare: Source snapshot stash' }
 def preparePostMetaStashStageName() { return 'Prepare: Post meta stash' }
 
@@ -451,7 +452,14 @@ def ciSequentialStages() {
 }
 
 def ciBuildStages() {
+    // Repository rule checks run once here; the clippy/dylint stages below set
+    // SKIP_HYGIENE=1 instead of repeating them as Makefile prerequisites.
     def stages = [[
+        name: repositoryHygieneStageName(),
+        failure: '仓库规则检查（make check_hygiene）发现违规，日志中的 error[<rule>/<check>] 指明规则',
+        type: 'hygiene',
+        arch: 'x86_64',
+    ], [
         name: 'Build Check: aarch64-crosvm-virt',
         failure: 'clippy 或 build 失败',
         type: 'build',
@@ -843,6 +851,9 @@ def ciArchLegBranches() {
 
 def runCiWorkload(Map spec) {
     switch (spec.type) {
+        case 'hygiene':
+            runRepositoryHygiene(spec.name)
+            break
         case 'build':
             runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
             break
@@ -937,12 +948,27 @@ cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
     }
 }
 
+def runRepositoryHygiene(String stageName) {
+    initStageLog(stageName)
+    // Leg toolchain and the persistent cargo home are ready after the arch
+    // setup stage.
+    withCleanSourceWorkspace('repository-hygiene') {
+        withEnv(['TARGET_DIR=/xkernel-target/repository-hygiene']) {
+            sh label: 'Check repository hygiene', script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+make check_hygiene
+"""
+        }
+    }
+}
+
 def runClippyAndBuild(String platform, String defconfigPath) {
     def stageName = "Build Check: ${platform}"
     initStageLog(stageName)
     def buildTargetDir = "/xkernel-target/build-${platform}"
     withCleanSourceWorkspace("clippy-build-${platform}") {
-        withEnv(["TARGET_DIR=${buildTargetDir}"]) {
+        withEnv(["TARGET_DIR=${buildTargetDir}", 'SKIP_HYGIENE=1']) {
             sh label: "Clippy and build ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
@@ -998,6 +1024,7 @@ make dylint
         withCleanSourceWorkspace("dylint-${platform}") {
             withEnv([
                 "TARGET_DIR=${dylintTargetDir}",
+                'SKIP_HYGIENE=1',
                 'XKERNEL_FACTS=1',
                 'XKERNEL_FACTS_DEPS=1',
                 "_CI_FACTS_DIR=${factsDir}",
@@ -1054,7 +1081,7 @@ def runBuildArtifact(String arch) {
         (arch == 'aarch64' ? 'make check_gic' : '')
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
-        withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
+        withEnv(["TARGET_DIR=${runtimeTargetDir}", 'SKIP_HYGIENE=1']) {
             sh label: "Clippy and build ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}

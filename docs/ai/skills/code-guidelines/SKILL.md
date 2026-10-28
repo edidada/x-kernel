@@ -83,6 +83,9 @@ When writing or editing Rust kernel code:
    and logging quality.
 5. If the change alters public behavior or module contracts,
    update rustdoc and any crate-local docs that describe that behavior.
+6. If the change adds or moves tests,
+   run `make check_hygiene` for the repository checks
+   (test layout in CG-051).
 
 ## Review Workflow
 
@@ -90,8 +93,8 @@ When reviewing Rust kernel code:
 
 1. Read the applicable CG files and their backend coverage from
    `docs/code-guidelines/README.md` and `lints.md`. For xreview, only
-   rules with an `ai` check enter AI review; rustc/Clippy-only files have
-   no triggers. Check whether names reflect the real semantics and units.
+   rules with an `ai` check enter AI review; files with only rustc, Clippy,
+   Dylint or xkmake checks have no triggers. Check whether names reflect the real semantics and units.
 2. Check whether comments explain intent rather than paraphrasing code.
 3. If the patch touches `unsafe`, load `unsafety.md`
    and review against its scenario catalog,

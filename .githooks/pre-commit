@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # x-kernel shared pre-commit hook.
 #
-# Runs test layout checks, the project formatter and clippy so commits which fail
+# Runs the repository rule checks (`make check_hygiene`), the project formatter and clippy so commits which fail
 # CI on `make fmt` / `make clippy` are caught locally first. The formatter
 # auto-fixes and re-stages the staged Rust files; clippy only gates.
 #
 # Escape hatches (set for a single commit):
 #   SKIP_FMT=1     git commit ...   # skip `make fmt`
 #   SKIP_CLIPPY=1  git commit ...   # skip `make clippy`
-#   SKIP_ALL=1     git commit ...   # skip all checks, including test layout
+#   SKIP_ALL=1     git commit ...   # skip all checks, including repository rules
 #
 # This hook is enabled automatically by the Makefile on any
 # `make ...` invocation; no manual setup is required after clone or pull.
@@ -24,11 +24,12 @@ if [ "${SKIP_ALL:-0}" = "1" ]; then
 fi
 
 mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
-# Clippy already checks layout. Standalone checks cover manifest-only changes,
-# deletions, and commits where the configured Clippy path cannot run.
+# Clippy already runs the repository rule checks. The standalone run covers
+# manifest-only changes, deletions, and commits where the configured Clippy
+# path cannot run.
 if [ "${#STAGED_RS[@]}" -eq 0 ] || [ "${SKIP_CLIPPY:-0}" = "1" ] || [ ! -f .config ]; then
-	if ! make check_test_layout; then
-		echo "pre-commit: layout check could not pass. See the diagnostics above for source or toolchain/setup errors." >&2
+	if ! make check_hygiene; then
+		echo "pre-commit: repository rule checks (make check_hygiene) could not pass. See the diagnostics above for source or toolchain/setup errors." >&2
 		echo "    Repair the failure; SKIP_ALL=1 explicitly bypasses local checks only, not CI." >&2
 		exit 1
 	fi

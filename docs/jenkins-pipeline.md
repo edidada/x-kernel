@@ -14,6 +14,14 @@
 `xkernel-amd64-01` 与 `xkernel-arm64-01` 按节点名调度，同样必须满足身份、设备和 volume 契约。
 节点名与标签以 `Jenkinsfile` 里的 `nativeGuestAgentLabels()`、`floatingGuestAgentLabel()` 为准。
 
+## 仓库检查
+
+x86_64 leg 的 `Check: Repository hygiene` 阶段在 `Setup: x86_64 toolchains`
+之后执行一次 `make check_hygiene`（代码规范中 `xkmake` 后端的规则，见
+`docs/code-guidelines/README.md`）。其余调用 `make clippy`/`make dylint` 的阶段
+设置 `SKIP_HYGIENE=1`，不再重复运行；`check_deps`、`check_header`、`check_lints`
+仍随这些阶段运行。
+
 ## Vendored APIC/UART 回归
 
 普通 x86_64 `Build Artifact` 阶段在 `make defconfig` 后、`make clippy`

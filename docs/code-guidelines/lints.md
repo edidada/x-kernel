@@ -28,11 +28,15 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 
 ## 测试代码
 
+测试文件的位置（`src/` 外的 `ut-tests/`、`tests/`）和 `#[def_test]`/`#[test]` 的分工见
+[CG-051-test-source-layout](CG-051-test-source-layout.md)，由 `make check_hygiene` 检查；
+本节只记录测试代码的 lint 政策。
+
 - `#[def_test]` / `#[mod_test]`（`util/macros`）豁免 `unwrap_used`、`expect_used`、`panic`、`too_many_lines`，
-  `#[mod_test]` 另豁免 `missing_docs`。测试代码不手写 `allow`/`expect`；内联测试模块用 `#[mod_test]`。
-- 文件模块（`mod name;`）不能用属性宏（E0658）：写成 `unittest::path_mod_test!(tests, "../ut-tests/tests.rs");`，
-  由宏统一添加 `cfg(unittest)` 和测试 lint 豁免。只有必须 `include!` 的特殊场景才写成
-  `#[mod_test] mod tests { include!("tests.rs"); }`；被 include 的文件不重复声明 cfg 或模块文档。
+  `#[mod_test]` 另豁免 `missing_docs`。测试代码不手写 `allow`/`expect`（CG-051 的 `test-expect-attr`）；
+  `ut-tests/` 文件内的嵌套测试模块用 `#[mod_test]`。
+- 文件模块（`mod name;`）不能用属性宏（E0658）：在 `src/` 中写成
+  `unittest::path_mod_test!(tests, "../ut-tests/tests.rs");`，由宏统一添加 `cfg(unittest)` 和测试 lint 豁免。
 - host 侧 `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
 - 被无 allocator 引导程序复用的 crate（如 `klazy`），必须在 `path_mod_test!` 调用外保留
   `#[cfg(unittest)]`：宏内部的 cfg 只删除展开后的测试模块，不能阻止宏解析引用带 `alloc`

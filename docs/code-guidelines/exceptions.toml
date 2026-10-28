@@ -1,0 +1,12 @@
+# Accepted findings of the xkmake repository rule checks
+# (`make check_hygiene`, `xkmake hygiene check`).
+#
+# Each entry suppresses the error findings with the same rule, check and
+# subject. `rule` and `check` must name a registered check (the
+# `backend: xkmake` lint list of docs/code-guidelines/<rule>.md); `subject` is
+# the finding's subject, which never contains a line number. `reason` follows
+# the lint attribute reasons of README.md: the full rule id, then either the
+# case of the rule's **Exceptions** that permits the finding and why it holds,
+# or `TODO(cg): <planned repair>` for a violation awaiting repair; neither
+# part may be empty. An entry that no longer matches a finding fails a full
+# run; remove it with the fix.

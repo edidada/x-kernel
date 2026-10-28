@@ -106,7 +106,18 @@ fn run() -> Result<()> {
             HygieneCommand::Deps(args) => hygiene::check_dependencies(&args),
             HygieneCommand::Header(args) => hygiene::check_headers(&args),
             HygieneCommand::Lints => hygiene::check_lint_inheritance(),
-            HygieneCommand::TestLayout => hygiene::check_test_layout(),
+            HygieneCommand::Check(args) => hygiene::run_rule_checks(&hygiene::CheckRequest {
+                rules: args.rules,
+                checks: args.checks,
+                format: args.format,
+                report: args.report,
+            }),
+            HygieneCommand::TestLayout => hygiene::run_rule_checks(&hygiene::CheckRequest {
+                rules: vec![hygiene::TEST_LAYOUT_RULE.to_string()],
+                checks: Vec::new(),
+                format: cli::ReportFormat::Text,
+                report: false,
+            }),
             HygieneCommand::HostTests => hygiene::check_host_tests(),
         },
     }

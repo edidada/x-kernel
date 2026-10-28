@@ -16,7 +16,11 @@ src/
 ├── linker.rs     kernel linker script rendering and stable writing
 ├── coverage.rs   unittest coverage extraction and report generation
 ├── doc.rs        workspace rustdoc orchestration
-├── hygiene/mod.rs repository hygiene tool orchestration
+├── hygiene/      repository hygiene: tool checks (mod.rs) and the rule check framework
+│   ├── registry.rs    RuleCheck, rule registry, shared Context, entry point
+│   ├── exceptions.rs  docs/code-guidelines/exceptions.toml
+│   ├── report.rs      Finding, text/JSON output
+│   └── test_layout.rs CG-051 test source layout
 ├── dylint.rs     Dylint lint library build and kernel scan
 ├── facts.rs      packing of the code facts exported by the Dylint scan
 ├── image_metadata.rs  ELF finalize for embedded build info and Build ID
@@ -204,6 +208,70 @@ artifacts are deleted before generation starts, and the failure of any step make
    `false` are listed all at once and the check fails. There is no registered exemption list.
 3. `make clippy`, `make dylint` and `make dylint_test` run
    this check before the Cargo checks, so the CI clippy stage rejects any crate that does not inherit `[workspace.lints]`.
+
+### Hygiene Check (rule check framework)
+
+`make check_hygiene` (`xkmake hygiene check`) runs every rule check with
+`backend: xkmake` in `docs/code-guidelines/`: rules that look at non-Rust
+inputs or file layout and can be decided mechanically. `deps`, `header`,
+`lints` and `host-tests` depend on external tools or a build and have no CG
+rule, so they stay atomic commands outside the framework.
+
+1. Registry: `RULES` in `hygiene/registry.rs` lists every `RuleCheck`
+   statically (`rule()` is the full rule id, `checks()` equals the `lint`
+   list of the rule file's `backend: xkmake` check, `report_checks()` are
+   report items that run only with `--report`, and `run(&Context)` returns
+   findings). A unit test parses the `docs/code-guidelines/CG-*.md`
+   frontmatter and requires the registry and the xkmake lint lists of the
+   rule files to agree in both directions.
+2. `Context` provides shared inputs lazily, computing them only when a check
+   asks: the workspace model from `cargo metadata --no-deps` and one
+   `git ls-files --cached --others --exclude-standard` (a directory walk
+   outside a Git tree). `wants(rule, check)` lets a rule skip checks that
+   were not selected.
+3. Selection: `--rule` (full id or `CG-NNN` prefix) and `--check` may both
+   repeat; an unknown name exits 2 as an environment error. `--report` also
+   runs the report items.
+4. Exceptions: all are registered as `[[exception]]` entries (`rule`,
+   `check`, `subject`, `reason`) in `docs/code-guidelines/exceptions.toml`
+   and match error findings exactly on `(rule, check, subject)`. `rule` and
+   `check` must be registered (only checks in `checks()` are allowed);
+   `reason` must start with `<rule-id>:` followed either by the case in the
+   rule's **Exceptions** that allows it and why it holds, or by
+   `TODO(cg): <planned fix>`, neither empty (Exceptions names are not
+   matched mechanically). Duplicate entries are errors; once a
+   `(rule, check)` is selected, entries that match nothing are stale and are
+   errors. Entry problems are reported as `<rule>/exception` findings at the
+   line of the exceptions file.
+5. Output: a finding carries `rule`, `check`, `severity` (error/report),
+   `file`, `line`, `subject` and `message`. The text format is
+   `error[<rule>/<check>]: <subject>`; `--format json` prints an array of
+   findings. `subject` contains no line number, so it can be copied into an
+   exception. Exit codes: 0 passed, 1 unexempted violations, 2 the check
+   could not run (cargo, git or exceptions file parse failure).
+6. Entry points: `check_test_layout` is an alias filtered by `--rule`;
+   `HYGIENE_ARGS` passes extra arguments. `make clippy`/`dylint`/`dylint_test`
+   run `check_hygiene` first, and `SKIP_HYGIENE=1` skips only that item
+   (`check_deps`, `check_header` and `check_lints` still run). CI runs it once
+   in the separate stage `Check: Repository hygiene` and sets
+   `SKIP_HYGIENE=1` in the other stages; pre-commit runs
+   `make check_hygiene` for commits that do not go through clippy.
+
+### Hygiene Test Layout (CG-051)
+
+`hygiene/test_layout.rs` checks every tracked `.rs` file under a workspace
+member by its path inside the crate: `src-test-file` (`tests.rs`, `test_*`
+or `*_tests.rs` under `src/`), `inline-test-module` (an inline `mod` under a
+test cfg or `mod_test` in `src/`), `src-test-function` (`#[test]`/`#[def_test]`
+in `src/`), `legacy-host-tests-dir` (`host-tests/`), `ut-tests-host-attr`
+(`#[test]` in `ut-tests/`), `tests-guest-marker` (`#[def_test]` in `tests/`)
+and `test-expect-attr` (hand-written `#[expect]` for unwrap/expect/panic in
+test code). Attributes are matched after lexing with `proc-macro2` (comments
+and strings ignored, nested `cfg_attr` included); a source file that cannot
+be lexed falls back to text matching. The subject of a file-level check is
+the repository-relative path; for an attribute-level check it is
+`<path>:<function or module name>`, falling back to the path when no name is
+available (inner attributes, unlexable files).
 
 The x86_64 bundle carries both `kernel.bzimg` and `kernel.uefi.img`. LinuxBoot is used by default,
 and `--boot uefi` uses OVMF. The OVMF VARS template is copied to

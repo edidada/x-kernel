@@ -35,12 +35,19 @@ pub(crate) enum Error {
 
     #[error("failed to serialize bundle manifest: {0}")]
     Manifest(#[from] toml::ser::Error),
+
+    /// A check could not run, as opposed to finding violations.
+    #[error("{0}")]
+    Environment(Box<Error>),
 }
 
 impl Error {
     pub(crate) fn exit_code(&self) -> i32 {
         match self {
             Self::CommandFailed { status, .. } => status.code().unwrap_or(1),
+            // Hygiene checks exit 1 for findings; 2 lets hooks and CI tell a
+            // broken toolchain or tree apart from a rule violation.
+            Self::Environment(_) => 2,
             _ => 1,
         }
     }
