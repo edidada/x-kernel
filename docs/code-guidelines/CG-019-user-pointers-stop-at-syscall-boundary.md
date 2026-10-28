@@ -4,12 +4,12 @@ level: MUST
 paths: ["posix/**", "core/ksyscall/**", "process/**", "core/kuaccess/**"]
 checks:
   - backend: ai
-triggers:
-  - "UserPtr"
-  - "UserConstPtr"
-  - "from_raw_parts"
-  - "copy_from_user"
-  - "copy_to_user"
+    triggers:
+      - "UserPtr"
+      - "UserConstPtr"
+      - "from_raw_parts"
+      - "copy_from_user"
+      - "copy_to_user"
 ---
 
 # CG-019-user-pointers-stop-at-syscall-boundary: Keep user access at the boundary

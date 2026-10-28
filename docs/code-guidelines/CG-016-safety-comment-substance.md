@@ -6,10 +6,10 @@ checks:
   - backend: clippy
     lint: [undocumented_unsafe_blocks]
   - backend: ai
-triggers:
-  - "unsafe \\{"
-  - "unsafe fn"
-  - "unsafe impl"
+    triggers:
+      - "unsafe \\{"
+      - "unsafe fn"
+      - "unsafe impl"
 ---
 
 # CG-016-safety-comment-substance: State the concrete safety argument

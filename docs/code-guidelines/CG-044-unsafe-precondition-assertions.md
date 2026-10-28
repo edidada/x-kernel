@@ -4,8 +4,8 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\bunsafe\s+fn\s+[A-Za-z0-9_]+'
+    triggers:
+      - '\bunsafe\s+fn\s+[A-Za-z0-9_]+'
 ---
 
 # CG-044-unsafe-precondition-assertions: Assert cheap deterministic unsafe preconditions

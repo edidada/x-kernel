@@ -4,9 +4,9 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\b(?:linux_raw_sys|abi)::'
-  - '#\s*\[repr\s*\(\s*(?:C|packed)\b'
+    triggers:
+      - '\b(?:linux_raw_sys|abi)::'
+      - '#\s*\[repr\s*\(\s*(?:C|packed)\b'
 ---
 
 # CG-042-abi-carrier-semantic-conversion: Convert ABI carriers into kernel semantic values

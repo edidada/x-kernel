@@ -4,8 +4,8 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\b(?:WorkHandle|DelayedWorkHandle)\b'
+    triggers:
+      - '\b(?:WorkHandle|DelayedWorkHandle)\b'
 ---
 
 # CG-038-prepare-reusable-work-handles: Prepare reusable work handles before IRQ submission

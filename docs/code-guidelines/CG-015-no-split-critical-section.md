@@ -4,10 +4,10 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "\\.lock\\(\\)"
-  - "\\.read\\(\\)"
-  - "\\.write\\(\\)"
+    triggers:
+      - "\\.lock\\(\\)"
+      - "\\.read\\(\\)"
+      - "\\.write\\(\\)"
 ---
 
 # CG-015-no-split-critical-section: Preserve atomic critical sections

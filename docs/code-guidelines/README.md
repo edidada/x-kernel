@@ -11,8 +11,8 @@ is written for people. English only.
 | `id` | `CG-<nnn>-<descriptive>`; equals the filename without `.md`. |
 | `level` | `MUST` or `SHOULD`. |
 | `paths` | Glob patterns the rule applies to, e.g. `["**/*.rs"]`. |
-| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint`, `xkmake` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`; for `xkmake`, the check names registered with `xkmake hygiene check`, see [Repository checks](#repository-checks-xkmake)). |
-| `triggers` | Optional list of case-sensitive ECMAScript regular expressions matched against added/modified diff lines in files matched by `paths`; read by xreview (formerly x-review-ng), ignored by lint backends. |
+| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint`, `xkmake` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`; for `xkmake`, the check names registered with `xkmake hygiene check`, see [Repository checks](#repository-checks-xkmake)). The `ai` check has no `lint`; it may carry `triggers`. |
+| `checks[ai].triggers` | Optional, inside the `- backend: ai` item only. Case-sensitive regular expressions, valid in both ECMAScript and Python `re`, matched against added diff lines in files matched by `paths`. xreview opens a rule session only for lines they match outside test code; without `triggers` it reviews every changed hunk of those files. Entries may also be trigger groups (xreview's `name`, `patterns`, `paths`, `exclude`, `lines`). Lint backends ignore them. |
 
 ## Body
 
@@ -237,8 +237,8 @@ Kconfig or file layout rather than compiled Rust are registered with
 `xkmake hygiene check` and list their check names under the `xkmake`
 backend; see [Repository checks](#repository-checks-xkmake). AI checks
 describe judgments the other backends cannot prove. xreview loads only
-`CG-*.md` and selects rules with an `ai` check; files without one have no
-`triggers` and are ignored by AI review.
+`CG-*.md` and selects rules with an `ai` check; `triggers` belong to that
+check, so files without one have none and are ignored by AI review.
 
 For a Dylint rule:
 

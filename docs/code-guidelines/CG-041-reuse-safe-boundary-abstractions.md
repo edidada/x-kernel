@@ -4,10 +4,10 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\b(?:read_volatile|write_volatile|from_raw_parts(?:_mut)?|copy_nonoverlapping)\s*\('
-  - '\bUnsafeCell\b'
-  - '\bunsafe\s+extern\s*"'
+    triggers:
+      - '\b(?:read_volatile|write_volatile|from_raw_parts(?:_mut)?|copy_nonoverlapping)\s*\('
+      - '\bUnsafeCell\b'
+      - '\bunsafe\s+extern\s*"'
 ---
 
 # CG-041-reuse-safe-boundary-abstractions: Use the existing safe boundary abstraction

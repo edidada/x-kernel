@@ -4,9 +4,9 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\bOrdering::(?:Relaxed|Acquire|Release|AcqRel|SeqCst)\b'
-  - '\b(?:compare_exchange(?:_weak)?|fence)\s*\('
+    triggers:
+      - '\bOrdering::(?:Relaxed|Acquire|Release|AcqRel|SeqCst)\b'
+      - '\b(?:compare_exchange(?:_weak)?|fence)\s*\('
 ---
 
 # CG-046-atomic-ordering-rationale: Explain nontrivial atomic memory ordering

@@ -4,8 +4,8 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\b(?:LockClassStats|record_acquisitions|record_contentions)\b'
+    triggers:
+      - '\b(?:LockClassStats|record_acquisitions|record_contentions)\b'
 ---
 
 # CG-040-lock-stat-accounting: Record successful takes and actual lock contention

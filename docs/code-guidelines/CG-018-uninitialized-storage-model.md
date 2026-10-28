@@ -6,10 +6,10 @@ checks:
   - backend: clippy
     lint: [disallowed_methods]
   - backend: ai
-triggers:
-  - "mem::zeroed"
-  - "assume_init"
-  - "MaybeUninit"
+    triggers:
+      - "mem::zeroed"
+      - "assume_init"
+      - "MaybeUninit"
 ---
 
 # CG-018-uninitialized-storage-model: Model initialization state explicitly

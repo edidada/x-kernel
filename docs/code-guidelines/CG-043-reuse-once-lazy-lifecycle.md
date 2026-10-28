@@ -4,10 +4,10 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\bstatic\s+mut\b'
-  - '\bAtomicPtr\b'
-  - '\b(?:Once|Lazy|LazyInit)::new\s*\('
+    triggers:
+      - '\bstatic\s+mut\b'
+      - '\bAtomicPtr\b'
+      - '\b(?:Once|Lazy|LazyInit)::new\s*\('
 ---
 
 # CG-043-reuse-once-lazy-lifecycle: Reuse the once/lazy initialization lifecycle

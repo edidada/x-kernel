@@ -4,12 +4,12 @@ level: MUST
 paths: ["task/ktask/src/**/*.rs", "task/kspin/src/**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "SpinNoIrq"
-  - "SpinNoPreempt"
-  - "static_lock!"
-  - "blocked_resched"
-  - "park_task"
+    triggers:
+      - "SpinNoIrq"
+      - "SpinNoPreempt"
+      - "static_lock!"
+      - "blocked_resched"
+      - "park_task"
 ---
 
 # CG-050-scheduler-lock-order: Keep scheduler lock nesting acyclic

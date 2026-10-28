@@ -4,9 +4,9 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\b(?:size|len|length|offset|capacity)\s*:\s*(?:u|i)(?:8|16|32|64|128|size)\b'
-  - '\blet(?:\s+mut)?\s+(?:size|len|length|offset|capacity)\s*[:=]'
+    triggers:
+      - '\b(?:size|len|length|offset|capacity)\s*:\s*(?:u|i)(?:8|16|32|64|128|size)\b'
+      - '\blet(?:\s+mut)?\s+(?:size|len|length|offset|capacity)\s*[:=]'
 ---
 
 # CG-045-non-time-integer-units: Make non-time integer units explicit

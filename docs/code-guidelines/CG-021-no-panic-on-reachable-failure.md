@@ -6,12 +6,12 @@ checks:
   - backend: clippy
     lint: [panic, unwrap_used, expect_used]
   - backend: ai
-triggers:
-  - "\\.unwrap\\(\\)"
-  - "\\.expect\\("
-  - "panic!"
-  - "unreachable!"
-  - "debug_assert!"
+    triggers:
+      - "\\.unwrap\\(\\)"
+      - "\\.expect\\("
+      - "panic!"
+      - "unreachable!"
+      - "debug_assert!"
 ---
 
 # CG-021-no-panic-on-reachable-failure: Handle legitimate failures without panicking

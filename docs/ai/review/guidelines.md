@@ -19,8 +19,8 @@
 
 已迁移的规则以 `docs/code-guidelines/CG-*.md` 为准，迁移后其正文已从
 skill 主题文件中删除，只读主题文件会漏审这些规则。对每个带 `ai` check 的
-CG 文件：先用 `paths` 判断变更文件是否适用（`triggers` 可辅助定位相关的新增
-或修改行），再按 **Rule** 判断是否违反、按 **Scope** 确定范围、按
+CG 文件：先用 `paths` 判断变更文件是否适用（`ai` check 下的 `triggers` 可辅助定位相关的
+新增或修改行），再按 **Rule** 判断是否违反、按 **Scope** 确定范围、按
 **Exceptions** 排除合规例外。只有 `rustc`、`clippy` 或 `dylint` check 的
 CG 文件由 lint 执行，不重复审查；同时带 lint 与 `ai` check 的文件只审查
 lint 覆盖不到的判断部分。

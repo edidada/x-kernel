@@ -4,11 +4,11 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "warn!"
-  - "debug!"
-  - "trace!"
-  - "error!"
+    triggers:
+      - "warn!"
+      - "debug!"
+      - "trace!"
+      - "error!"
 ---
 
 # CG-022-log-level-matches-event: Match logging levels to severity and frequency

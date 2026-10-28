@@ -4,8 +4,8 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "unsafe impl"
+    triggers:
+      - "unsafe impl"
 ---
 
 # CG-017-unsafe-impl-send-sync-argument: Explain the concurrency model

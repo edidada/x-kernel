@@ -4,10 +4,10 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\bcurrent_(?:process|execution|fs|files)\b'
-  - '\bfn\s+(?:current|with_current)_[A-Za-z0-9_]+\s*[(<]'
-  - '\bfn\s+(?:irq|interrupt|softirq)(?:_[A-Za-z0-9_]+)?\s*[(<]|\bfn\s+[A-Za-z0-9_]+_(?:irq|interrupt|softirq)(?:_handler)?\s*[(<]'
+    triggers:
+      - '\bcurrent_(?:process|execution|fs|files)\b'
+      - '\bfn\s+(?:current|with_current)_[A-Za-z0-9_]+\s*[(<]'
+      - '\bfn\s+(?:irq|interrupt|softirq)(?:_[A-Za-z0-9_]+)?\s*[(<]|\bfn\s+[A-Za-z0-9_]+_(?:irq|interrupt|softirq)(?:_handler)?\s*[(<]'
 ---
 
 # CG-039-execution-context-contract: State the execution-context contract

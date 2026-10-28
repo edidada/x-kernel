@@ -4,8 +4,8 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\bSpinRaw\b'
+    triggers:
+      - '\bSpinRaw\b'
 ---
 
 # CG-037-spin-raw-context-precondition: Establish the SpinRaw context precondition

@@ -4,8 +4,8 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "SpinNoIrq"
+    triggers:
+      - "SpinNoIrq"
 ---
 
 # CG-014-spin-noirq-needs-irq-contender: Justify IRQ masking by access context

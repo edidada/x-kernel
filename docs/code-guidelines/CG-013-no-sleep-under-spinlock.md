@@ -4,13 +4,13 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "SpinNoIrq"
-  - "SpinNoPreempt"
-  - "SpinRaw"
-  - "irq_save"
-  - "preempt_disable"
-  - "lock_irqsave"
+    triggers:
+      - "SpinNoIrq"
+      - "SpinNoPreempt"
+      - "SpinRaw"
+      - "irq_save"
+      - "preempt_disable"
+      - "lock_irqsave"
 ---
 
 # CG-013-no-sleep-under-spinlock: Keep sleepable work outside spinlock scopes

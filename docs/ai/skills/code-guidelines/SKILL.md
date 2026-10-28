@@ -93,8 +93,8 @@ When reviewing Rust kernel code:
 
 1. Read the applicable CG files and their backend coverage from
    `docs/code-guidelines/README.md` and `lints.md`. For xreview, only
-   rules with an `ai` check enter AI review; files with only rustc, Clippy,
-   Dylint or xkmake checks have no triggers. Check whether names reflect the real semantics and units.
+   rules with an `ai` check enter AI review, and `triggers` sit inside that
+   check; files with only rustc, Clippy, Dylint or xkmake checks have none. Check whether names reflect the real semantics and units.
 2. Check whether comments explain intent rather than paraphrasing code.
 3. If the patch touches `unsafe`, load `unsafety.md`
    and review against its scenario catalog,

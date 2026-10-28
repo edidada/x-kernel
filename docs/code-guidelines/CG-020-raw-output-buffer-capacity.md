@@ -4,12 +4,12 @@ level: MUST
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - "write_unaligned"
-  - "copy_nonoverlapping"
-  - "write_bytes"
-  - "\\.add\\("
-  - "\\.offset\\("
+    triggers:
+      - "write_unaligned"
+      - "copy_nonoverlapping"
+      - "write_bytes"
+      - "\\.add\\("
+      - "\\.offset\\("
 ---
 
 # CG-020-raw-output-buffer-capacity: Prove capacity before raw writes

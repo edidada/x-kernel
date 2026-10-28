@@ -4,10 +4,10 @@ level: SHOULD
 paths: ["**/*.rs"]
 checks:
   - backend: ai
-triggers:
-  - '\binto_boxed_(?:slice|str)\b'
-  - '\b(?:Box|KBox)\s*::\s*into_inner\b'
-  - '\b(?:Box|KBox|Arc|Rc|KArc)\s*::\s*new(?:_nowait|_with_flags)?\s*\(\s*\*'
+    triggers:
+      - '\binto_boxed_(?:slice|str)\b'
+      - '\b(?:Box|KBox)\s*::\s*into_inner\b'
+      - '\b(?:Box|KBox|Arc|Rc|KArc)\s*::\s*new(?:_nowait|_with_flags)?\s*\(\s*\*'
 ---
 
 # CG-048-direct-owner-conversion: Avoid temporary owners used only for conversion
