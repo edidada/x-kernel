@@ -91,6 +91,8 @@ pub struct FirmwareDevice {
     pub clock_specs: Vec<of::ClockSpec>,
     /// `resets = <&cru N>` specifiers, declaration order (mirror of clock_specs).
     pub reset_specs: Vec<of::ResetSpec>,
+    /// `phys = <&phy ...>` specifiers, declaration order.
+    pub phy_specs: Vec<of::PhySpec>,
     /// The node's full property set, firmware order, typed — the quirk
     /// snapshot (`of_property_read_*` surface) the device model carries.
     pub props: Vec<(&'static str, &'static [u8])>,
@@ -282,6 +284,7 @@ pub fn for_each_compatible(
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
             reset_specs: of::device_reset_specs(node),
+            phy_specs: of::device_phy_specs(node),
             props: of::node_properties(node),
             dma: of::device_dma_facts(node),
         });

@@ -30,6 +30,11 @@ KFEAT_CHAR=y
 # RK3588 CRU clock controller: registers the SoC clock tree so consumers
 # (console UART, eMMC, PCIe, USB, ...) resolve their DT clocks to real rates.
 KFEAT_DRIVER_CLK_RK3588_CRU=y
+# RK3588 phy providers: the `phys = <&...>` consumers (EHCI/OHCI, DWC3,
+# PCIe RCs) resolve through the kphy registry.
+KFEAT_DRIVER_PHY_USB2PHY=y
+KFEAT_DRIVER_PHY_COMBPHY=y
+KFEAT_DRIVER_PHY_PCIE3PHY=y
 # RK3588 UART2 is a DesignWare APB UART (16550-compatible) -> ns16550-mmio.
 KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_DRIVER_CONSOLE_PL011 is not set

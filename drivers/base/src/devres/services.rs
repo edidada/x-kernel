@@ -110,6 +110,18 @@ pub trait ResetConsumerServices: Send + Sync {
     ) -> Result<super::ResetHandle, ServiceError>;
 }
 
+/// Phy acquisition — a provider may not have registered yet, so the
+/// error vocabulary carries deferral.
+pub trait PhyConsumerServices: Send + Sync {
+    /// Acquire a phy input (`phy_get`); may report that the provider has
+    /// not registered yet.
+    fn phy_get(
+        &self,
+        device: crate::device::DeviceId,
+        spec: crate::resource::PhySpec,
+    ) -> Result<super::PhyHandle, ServiceError>;
+}
+
 /// The aggregate a [`Device`](crate::Device) holds: every mandatory
 /// capability, provider publication, plus the host's extension table.
 ///
@@ -121,6 +133,7 @@ pub trait DeviceServices:
     DeviceResourceServices
     + ClockConsumerServices
     + ResetConsumerServices
+    + PhyConsumerServices
     + crate::provider::ProviderServices
     + crate::extension::ExtensionServices
     + Send

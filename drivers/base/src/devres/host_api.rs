@@ -405,6 +405,19 @@ pub enum DmaDirection {
 /// The `kclk` subsystem (the common clock framework core, ported from the `clk/tail` branch
 /// acceptance) implements this for real hardware clocks; tests implement it
 /// with fixed-rate fakes.
+/// Provider-side phy operations behind a [`crate::PhyHandle`].
+///
+/// All five are COUNTED consumer-side operations: the phy core (kphy)
+/// runs the hardware sequences exactly on the refcount edges, so these
+/// map one-to-one onto Linux `phy_init/exit/power_on/power_off/set_mode`.
+pub trait PhyOps: Send + Sync {
+    fn init(&self) -> Result<(), RuntimeError>;
+    fn exit(&self) -> Result<(), RuntimeError>;
+    fn power_on(&self) -> Result<(), RuntimeError>;
+    fn power_off(&self);
+    fn set_mode(&self, mode: u32) -> Result<(), RuntimeError>;
+}
+
 /// Provider-side reset-line operations behind a [`crate::ResetHandle`].
 ///
 /// The reset core (kreset) implements this over its registered lines; the

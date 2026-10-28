@@ -243,3 +243,98 @@ fn reset_cells_for_phandle(phandle: u32) -> Option<u32> {
         .find(|n| n.property_u32("phandle") == Some(phandle))?;
     controller.property_u32("#reset-cells")
 }
+
+/// One resolved `phys` entry: the phy phandle plus the VERBATIM specifier
+/// cells (up to two — every current RK3588 phy uses `#phy-cells` 0 or 1;
+/// their meaning is provider-local, e.g. the naneng-combphy's mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhySpec {
+    /// The phy node's DT phandle.
+    pub provider: u32,
+    /// Raw specifier cells (provider-interpreted).
+    pub cells: [u32; 2],
+    /// How many cells this entry carries (0 or 1).
+    pub ncells: u8,
+    /// Consumer-local name at the same position in `phy-names`.
+    pub connection_name: Option<&'static str>,
+}
+
+/// Extract the phy specifiers from a device node's `phys` property.
+///
+/// Walk `<&phandle specifier...>` cells; `#phy-cells` decides the width
+/// (0 and 1 supported — a wider specifier would need provider knowledge
+/// the generic walker must not guess, so it skips the rest).
+pub fn device_phy_specs(node: FdtNode<'static, 'static>) -> Vec<PhySpec> {
+    let mut specs = Vec::new();
+
+    let Some(prop) = node.property("phys") else {
+        return specs;
+    };
+    let raw = prop.value;
+    if raw.len() < 4 {
+        return specs;
+    }
+
+    let cells: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes(c.try_into().unwrap_or([0; 4])))
+        .collect();
+
+    let names = device_phy_names(node);
+    let mut idx = 0usize;
+    let mut spec_index = 0usize;
+    while idx < cells.len() {
+        let phandle = cells[idx];
+        idx += 1;
+
+        let ncells = phy_cells_for_phandle(phandle).unwrap_or(1) as usize;
+        if ncells == 0 {
+            specs.push(PhySpec {
+                provider: phandle,
+                cells: [0; 2],
+                ncells: 0,
+                connection_name: names.get(spec_index).copied(),
+            });
+            spec_index += 1;
+        } else if ncells == 1 && idx < cells.len() {
+            specs.push(PhySpec {
+                provider: phandle,
+                cells: [cells[idx], 0],
+                ncells: 1,
+                connection_name: names.get(spec_index).copied(),
+            });
+            idx += 1;
+            spec_index += 1;
+        } else {
+            break;
+        }
+    }
+
+    specs
+}
+
+/// Parse the consumer-local `phy-names` list in declaration order.
+fn device_phy_names(node: FdtNode<'static, 'static>) -> Vec<&'static str> {
+    let Some(prop) = node.property("phy-names") else {
+        return Vec::new();
+    };
+    let Ok(raw) = core::str::from_utf8(prop.value) else {
+        return Vec::new();
+    };
+    raw.split('\0').filter(|name| !name.is_empty()).collect()
+}
+
+/// Resolve a `phy-names` entry to its [`PhySpec`].
+pub fn device_phy_spec_by_name(node: FdtNode<'static, 'static>, name: &str) -> Option<PhySpec> {
+    let index = device_phy_names(node).iter().position(|n| *n == name)?;
+    device_phy_specs(node).into_iter().nth(index)
+}
+
+/// Read the phy node referenced by `phandle`'s `#phy-cells`.
+fn phy_cells_for_phandle(phandle: u32) -> Option<u32> {
+    let fdt = fdt()?;
+    let controller = fdt
+        .all_nodes()
+        .find(|n| n.property_u32("phandle") == Some(phandle))?;
+    controller.property_u32("#phy-cells")
+}

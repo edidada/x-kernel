@@ -86,6 +86,12 @@ fn level3_drivers() {
     drv_clk::scmi_clock::register();
     #[cfg(feature = "rk3588-cru")]
     drv_clk::rk3588_cru::register();
+    #[cfg(feature = "rk3588-usb2phy")]
+    drv_phy::usb2phy::register();
+    #[cfg(feature = "rk3588-combphy")]
+    drv_phy::combphy::register();
+    #[cfg(feature = "rk3588-pcie3phy")]
+    drv_phy::pcie3phy::register();
     #[cfg(feature = "mmc-block")]
     subsys_mmc::blk::register();
     #[cfg(feature = "mmc-dwmmc-rockchip")]
@@ -241,6 +247,7 @@ fn enumerate_firmware_nodes_direct() {
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
             reset_specs: of::device_reset_specs(node),
+            phy_specs: of::device_phy_specs(node),
             props: of::node_properties(node),
             dma: of::device_dma_facts(node),
         };
@@ -322,6 +329,17 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         let entry_kind = ResourceKind::Reset(driver_base::ResetSpec::by_phandle_index(
             u64::from(spec.provider),
             spec.index,
+        ));
+        match spec.connection_name {
+            Some(name) => resources.push_named(name, entry_kind),
+            None => resources.push_kind(entry_kind),
+        }
+    }
+    for spec in &dev.phy_specs {
+        let entry_kind = ResourceKind::Phy(driver_base::PhySpec::by_phandle_cells(
+            u64::from(spec.provider),
+            spec.cells,
+            spec.ncells,
         ));
         match spec.connection_name {
             Some(name) => resources.push_named(name, entry_kind),

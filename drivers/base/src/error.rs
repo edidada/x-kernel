@@ -43,6 +43,11 @@ impl DepSource {
         Self::new(DepKind::Reset, controller_phandle)
     }
 
+    /// A phy provider parked on by its DT phandle.
+    pub const fn phy(provider_phandle: u64) -> Self {
+        Self::new(DepKind::Phy, provider_phandle)
+    }
+
     pub const fn device(id: u64) -> Self {
         Self::new(DepKind::Device, id)
     }
@@ -56,6 +61,8 @@ pub enum DepKind {
     Clk,
     /// A reset controller (`reset_control_get` target).
     Reset,
+    /// A PHY provider (`phy_get` target).
+    Phy,
     /// Another device being bound first.
     Device,
     /// Anything else; matched by `id` only.
@@ -67,6 +74,7 @@ impl DepKind {
         match self {
             Self::Clk => "clk",
             Self::Reset => "reset",
+            Self::Phy => "phy",
             Self::Device => "device",
             Self::Other => "other",
         }

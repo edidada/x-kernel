@@ -23,6 +23,7 @@ pub mod dma;
 pub mod host_api;
 pub mod iomap;
 pub mod irq;
+pub mod phy;
 pub mod reset;
 pub mod services;
 
@@ -33,5 +34,6 @@ pub use clk::{ClkHandle, EnabledClock};
 pub use dma::CoherentMem;
 pub use iomap::IoMap;
 pub use irq::{DevIrq, IrqAction, IrqHandlerFn};
+pub use phy::{PhyHandle, PoweredPhy};
 pub use reset::{DeassertedGuard, ResetHandle};
 pub use services::{DeviceResourceServices, ServiceError};

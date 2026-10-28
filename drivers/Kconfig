@@ -348,6 +348,34 @@ config KFEAT_DRIVER_VIRTIO_MMIO
       Claims DT "virtio,mmio" nodes and dispatches to the per-family
       driver-core virtio drivers by probing the transport header.
 
+config KFEAT_DRIVER_PHY_USB2PHY
+    bool "RK3588 USB2 PHY provider (inno-usb2)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the usb2phy-grf port PHY (480m clock, suspend bit, CRU
+      reset pair) through the kphy registry so `phys = <&usb2phy ...>`
+      consumers resolve. Translation of the pinned inno-usb2 reference
+      (host-path subset; OTG/BC11 recorded as gaps).
+
+config KFEAT_DRIVER_PHY_COMBPHY
+    bool "RK3588 naneng combo PHY provider"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the naneng pipe PHY (PCIe2/USB3 modes; the mode binds
+      from the DT specifier) so `phys = <&combphy ...>` consumers
+      resolve. Translation of the pinned naneng-combphy reference.
+
+config KFEAT_DRIVER_PHY_PCIE3PHY
+    bool "RK3588 PCIe3 PHY provider (snps pcie3)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the shared pcie3 pipe PHY (aggregation/bifurcation mode,
+      SRAM init polls) so pcie3x4/pcie3x2 consumers resolve; the kphy
+      refcount runs the init sequence once for both.
+
 config KFEAT_DRIVER_CLK_RK3588_CRU
     bool "RK3588 CRU clock controller"
     depends on KFEAT_CHAR

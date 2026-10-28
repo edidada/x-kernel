@@ -67,6 +67,8 @@ struct MockServices {
     clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
     /// Registered reset lines per provider phandle (reset test support).
     reset_ops: SpinNoPreempt<BTreeMap<u64, Arc<dyn crate::devres::host_api::ResetOps>>>,
+    /// Registered phy instances per provider phandle (phy test support).
+    phy_ops: SpinNoPreempt<BTreeMap<u64, Arc<dyn crate::devres::host_api::PhyOps>>>,
     mapped: AtomicUsize,
     /// Test injection: fired on the clk Deferred path (mid-probe),
     /// simulating a provider registering between the dependency check
@@ -120,6 +122,7 @@ impl MockServices {
             mid_check_hook: SpinNoPreempt::new(None),
             clk_providers: SpinNoPreempt::new(BTreeMap::new()),
             reset_ops: SpinNoPreempt::new(BTreeMap::new()),
+            phy_ops: SpinNoPreempt::new(BTreeMap::new()),
             mapped: AtomicUsize::new(0),
             providers: SpinNoPreempt::new(alloc::vec::Vec::new()),
             wake: SpinNoPreempt::new(None),
@@ -140,6 +143,12 @@ impl MockServices {
             .lock()
             .insert(phandle, Arc::new(MockResetLine::default()));
     }
+
+    fn publish_phy(&self, phandle: u64) {
+        self.phy_ops
+            .lock()
+            .insert(phandle, Arc::new(MockPhy));
+    }
 }
 
 /// A fixed-state reset line fake: starts deasserted, records the level.
@@ -159,6 +168,30 @@ impl crate::devres::host_api::ResetOps for MockResetLine {
 
     fn status(&self) -> bool {
         *self.asserted.lock()
+    }
+}
+
+/// A no-state phy fake: every counted op succeeds.
+#[derive(Default)]
+struct MockPhy;
+
+impl crate::devres::host_api::PhyOps for MockPhy {
+    fn init(&self) -> Result<(), crate::RuntimeError> {
+        Ok(())
+    }
+
+    fn exit(&self) -> Result<(), crate::RuntimeError> {
+        Ok(())
+    }
+
+    fn power_on(&self) -> Result<(), crate::RuntimeError> {
+        Ok(())
+    }
+
+    fn power_off(&self) {}
+
+    fn set_mode(&self, _mode: u32) -> Result<(), crate::RuntimeError> {
+        Ok(())
     }
 }
 
@@ -273,6 +306,30 @@ impl crate::ResetConsumerServices for MockServices {
                 }
                 Err(ServiceError::Deferred(DepSource::new(
                     DepKind::Reset,
+                    spec.provider,
+                )))
+            }
+        }
+    }
+}
+
+impl crate::PhyConsumerServices for MockServices {
+    fn phy_get(
+        &self,
+        _: crate::device::DeviceId,
+        spec: crate::PhySpec,
+    ) -> Result<crate::PhyHandle, ServiceError> {
+        // Same shape as clk_get: registry-first, mid-check hook second,
+        // deferral naming the provider phandle.
+        let existing = self.phy_ops.lock().get(&spec.provider).cloned();
+        match existing {
+            Some(ops) => Ok(crate::PhyHandle::new(ops, None)),
+            None => {
+                if let Some(hook) = self.mid_check_hook.lock().clone() {
+                    hook();
+                }
+                Err(ServiceError::Deferred(DepSource::new(
+                    DepKind::Phy,
                     spec.provider,
                 )))
             }
@@ -453,6 +510,60 @@ fn reset_consumer_defers_until_provider_publishes() {
     // the same).
     services.publish_reset(0x02);
     assert_eq!(domain.wake(crate::DepSource::reset(0x02)), 1);
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 2);
+}
+
+/// A third consumer that acquires a phy by name — the phy-family
+/// counterpart of the reset consumer.
+struct TestSerPhy;
+
+static PHY_IDS: &[crate::PlatformId] =
+    &[crate::PlatformId::Of(OfMatch::compatible("test,serial"))];
+
+struct SerPhyData {
+    _phy: crate::PhyHandle,
+    _guard: crate::PoweredPhy,
+}
+
+impl DriverOps<PlatformBus> for TestSerPhy {
+    type Data = SerPhyData;
+
+    fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<SerPhyData, ProbeError> {
+        PROBES.fetch_add(1, Ordering::Relaxed);
+        let phy = dev.res().phy("pcie-phy")?;
+        let guard = phy.init_powered()?;
+        Ok(SerPhyData { _phy: phy, _guard: guard })
+    }
+}
+
+#[def_test(serial)]
+fn phy_consumer_defers_until_provider_publishes() {
+    PROBES.store(0, Ordering::Relaxed);
+    let (domain, services) = fresh_domain();
+    domain.register_driver(DriverDesc::new("test-serial-phy", PHY_IDS, TestSerPhy));
+
+    let mut resources = test_resources();
+    resources.push_named(
+        "pcie-phy",
+        crate::ResourceKind::Phy(crate::PhySpec::by_phandle_cells(
+            0x02,
+            [2, 0],
+            1,
+        )),
+    );
+    let desc = DeviceDescriptor::new(
+        PlatformBus::ID,
+        alloc::boxed::Box::new(PlatformBusData::firmware_node(11, &["test,serial"])),
+    )
+    .with_resources(resources);
+
+    let id = domain.add_device(desc).expect("add device");
+    assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+    assert_eq!(PROBES.load(Ordering::Relaxed), 1);
+
+    services.publish_phy(0x02);
+    assert_eq!(domain.wake(DepSource::phy(0x02)), 1);
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
     assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 }

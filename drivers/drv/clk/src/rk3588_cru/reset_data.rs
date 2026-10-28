@@ -26,7 +26,7 @@ pub(crate) struct ResetRow {
     pub bit: u8,
 }
 
-pub(crate) static RESET_ROWS: [ResetRow; 639] = [
+pub(crate) const RESET_ROWS: [ResetRow; 639] = [
     // SRST_A_SECURE_NS_BIU
     ResetRow {
         dts_id: 0xa,

@@ -61,6 +61,15 @@ DRV_HOST_ALLOW=(
     # (Linux clk-pll.c uses udelay); probe/initcall context cannot sleep.
     # khal::time::busy_wait is the kernel's udelay equivalent.
     "drivers/drv/clk khal"
+    # E-05 (phy): same µs-scale timed polls (combphy ready poll, pcie3phy
+    # SRAM init, inno-usb2 reset pulse) — hardware timed waits in probe.
+    "drivers/drv/phy khal"
+    # E-02 (phy): a phy provider driver's job IS registering into the phy
+    # subsystem (of_phy_provider_register analogue); registration goes
+    # through dev.env().provide::<PhyProvider>, so only the class
+    # descriptor names the host, same as drv/clk's ClkProvider.
+    "drivers/drv/phy driver_host"
+    "drivers/drv/phy kphy"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a
     # service; hwrng has exactly one consumer today.

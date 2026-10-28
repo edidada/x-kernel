@@ -1218,6 +1218,7 @@ dependencies = [
  "kclk",
  "kdma",
  "kirq",
+ "kphy",
  "kreset",
  "kspin",
  "log",
@@ -1237,6 +1238,7 @@ dependencies = [
  "drv-block",
  "drv-clk",
  "drv-mmc",
+ "drv-phy",
  "drv-rtc",
  "drv-serial",
  "drv-virtio",
@@ -1308,6 +1310,20 @@ dependencies = [
  "log",
  "subsys-mmc",
  "unittest",
+]
+
+[[package]]
+name = "drv-phy"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "driver-host",
+ "khal",
+ "kphy",
+ "kspin",
+ "ktime_types",
+ "log",
+ "of",
 ]
 
 [[package]]
@@ -2437,6 +2453,7 @@ dependencies = [
  "drv-block",
  "drv-clk",
  "drv-mmc",
+ "drv-phy",
  "drv-rtc",
  "drv-serial",
  "drv-virtio",
@@ -2682,6 +2699,15 @@ dependencies = [
  "ksync",
  "kvfs",
  "linux-raw-sys",
+ "unittest",
+]
+
+[[package]]
+name = "kphy"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "log",
  "unittest",
 ]
 

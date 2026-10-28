@@ -247,6 +247,31 @@ impl ResetSpec {
     }
 }
 
+/// A PHY input described by firmware (`phys = <&phandle cells...>`).
+///
+/// The specifier cells are captured VERBATIM (up to two; every current
+/// RK3588 phy uses 0 or 1) — their meaning is provider-local (the
+/// naneng-combphy's single cell is the mode, bound at acquire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhySpec {
+    /// Provider identifier (DT phandle of the phy node).
+    pub provider: u64,
+    /// Raw specifier cells (provider-interpreted).
+    pub cells: [u32; 2],
+    /// How many of `cells` the provider's `#phy-cells` asked for.
+    pub ncells: u8,
+}
+
+impl PhySpec {
+    pub const fn by_phandle_cells(provider: u64, cells: [u32; 2], ncells: u8) -> Self {
+        Self {
+            provider,
+            cells,
+            ncells,
+        }
+    }
+}
+
 /// The kind of a resource entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -255,6 +280,7 @@ pub enum ResourceKind {
     Irq(IrqSpec),
     Clk(ClkSpec),
     Reset(ResetSpec),
+    Phy(PhySpec),
 }
 
 /// One firmware-described resource, optionally named.
@@ -395,6 +421,27 @@ impl ResourceMap {
             .iter()
             .filter_map(|entry| match entry.kind {
                 ResourceKind::Reset(spec) => Some(spec),
+                _ => None,
+            })
+            .nth(index)
+    }
+
+    /// PHY input by `phy-names` entry (`phy_get(dev, name)`).
+    pub fn phy_by_name(&self, name: &str) -> Option<PhySpec> {
+        self.entries
+            .iter()
+            .find_map(|entry| match (&entry.name, entry.kind) {
+                (Some(entry_name), ResourceKind::Phy(spec)) if entry_name == name => Some(spec),
+                _ => None,
+            })
+    }
+
+    /// n-th PHY input, in `phys = <...>` declaration order.
+    pub fn phy_at(&self, index: usize) -> Option<PhySpec> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                ResourceKind::Phy(spec) => Some(spec),
                 _ => None,
             })
             .nth(index)

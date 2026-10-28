@@ -316,7 +316,23 @@ pub fn cpu_node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
 
 /// The first `reg` address of a node, honoring the parent's
 /// `#address-cells` width.
-fn node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
+/// The first `reg` address of the node's PARENT, decoded from the
+/// parent property block the node carries.
+///
+/// Rockchip phy/port nodes live inside `syscon` GRF parents: their own
+/// `reg` is an offset into the parent's window, and this is how the
+/// driver resolves the window base without a parent-node walk.
+pub fn parent_reg_base(node: FdtNode<'_, '_>) -> Option<u64> {
+    let address_cells = node.parent_property_u32("#address-cells").unwrap_or(1) as usize;
+    let raw = node.parent_property("reg")?.value;
+    match address_cells {
+        2 if raw.len() >= 8 => Some(u64::from_be_bytes(raw[0..8].try_into().ok()?)),
+        1 if raw.len() >= 4 => Some(u64::from(u32::from_be_bytes(raw[0..4].try_into().ok()?))),
+        _ => None,
+    }
+}
+
+pub fn node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
     let address_cells = node.parent_property_u32("#address-cells").unwrap_or(1) as usize;
     match address_cells {
         1 => property_u32_cells::<1>(node, "reg").and_then(|cells| parse_cells_u64(&cells)),
@@ -416,7 +432,10 @@ fn parse_interrupt_by_controller(
     }
 }
 
-fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
+/// The node carrying `phandle = <id>`, for drivers that resolve
+/// provider windows through a property-stored phandle (the Rockchip
+/// `rockchip,*-grf` pattern: resolve the GRF node, then map its `reg`).
+pub fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
     find_node_by_phandle_in(fdt()?, phandle)
 }
 
@@ -1130,7 +1149,7 @@ mod unittest_tests {
 }
 
 pub use clocks::{
-    ClockSpec, ResetSpec, clock_output_name, device_clock_index_by_name, device_clock_names,
-    device_clock_spec_by_name, device_clock_specs, device_fixed_clock_hz,
-    device_reset_spec_by_name, device_reset_specs,
+    ClockSpec, PhySpec, ResetSpec, clock_output_name, device_clock_index_by_name,
+    device_clock_names, device_clock_spec_by_name, device_clock_specs, device_fixed_clock_hz,
+    device_phy_spec_by_name, device_phy_specs, device_reset_spec_by_name, device_reset_specs,
 };

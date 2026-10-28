@@ -1,0 +1,19 @@
+[package]
+name = "kphy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "PHY core: shared instances with framework-owned refcounts, provider registry"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["phy", "driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+log.workspace = true
+kspin = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true

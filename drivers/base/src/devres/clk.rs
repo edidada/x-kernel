@@ -47,6 +47,19 @@ impl ClkHandle {
         })
     }
 
+    /// `clk_prepare` then `clk_enable` without the ownership token — the
+    /// remove-time balancing pair ([`Self::disable_unprepare`]).
+    pub fn enable(&self) -> Result<(), RuntimeError> {
+        self.ops.prepare()?;
+        self.ops.enable()
+    }
+
+    /// `clk_disable` then `clk_unprepare` (balances [`Self::enable`]).
+    pub fn disable_unprepare(&self) {
+        self.ops.disable();
+        self.ops.unprepare();
+    }
+
     pub fn ops(&self) -> &dyn ClkOps {
         self.ops.as_ref()
     }

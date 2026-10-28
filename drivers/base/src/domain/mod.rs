@@ -61,8 +61,8 @@ use crate::{
     desc::DeviceDescriptor,
     device::{Device, DeviceId},
     devres::services::{
-        ClockConsumerServices, DeviceResourceServices, DeviceServices, ResetConsumerServices,
-        ServiceError,
+        ClockConsumerServices, DeviceResourceServices, DeviceServices, PhyConsumerServices,
+        ResetConsumerServices, ServiceError,
     },
     error::{DepKind, DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
@@ -427,6 +427,16 @@ impl ResetConsumerServices for NoServices {
         _: crate::device::DeviceId,
         _: crate::resource::ResetSpec,
     ) -> Result<crate::devres::ResetHandle, ServiceError> {
+        Err(ServiceError::Fatal(RuntimeError::Unsupported))
+    }
+}
+
+impl PhyConsumerServices for NoServices {
+    fn phy_get(
+        &self,
+        _: crate::device::DeviceId,
+        _: crate::resource::PhySpec,
+    ) -> Result<crate::devres::PhyHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
 }

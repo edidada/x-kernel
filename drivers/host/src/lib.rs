@@ -37,6 +37,7 @@
 extern crate alloc;
 
 mod clk;
+mod phy;
 mod reset;
 
 pub mod provider;
@@ -55,6 +56,7 @@ use driver_base::{
     devres::host_api::{DmaAllocation, DmaOp, DmaSpec, IrqOp, IrqResource, MmioMapping, MmioOp},
 };
 use kirq::{IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler};
+pub use phy::{PhyProvider, PhyRegistry};
 use provider::XKernelResourceProvider;
 pub use reset::{ResetProvider, ResetRegistry};
 
@@ -92,6 +94,7 @@ pub struct Host {
     provider: &'static XKernelResourceProvider,
     clks: ClkRegistry,
     resets: ResetRegistry,
+    phys: PhyRegistry,
     extensions: ExtensionRegistry,
 }
 
@@ -141,7 +144,11 @@ impl Host {
                 let wake = wake.clone();
                 move |dep| wake(dep)
             }),
-            resets: ResetRegistry::new(move |dep| wake(dep)),
+            resets: ResetRegistry::new({
+                let wake = wake.clone();
+                move |dep| wake(dep)
+            }),
+            phys: PhyRegistry::new(move |dep| wake(dep)),
             extensions,
         })
     }
@@ -340,6 +347,16 @@ impl driver_base::ProviderServices for Host {
                 }
                 self.resets.register_provider(lookup)
             }
+            driver_base::DepKind::Phy => {
+                let key = registration.key();
+                let lookup = registration
+                    .lookup::<PhyProvider>()
+                    .ok_or(RuntimeError::Invalid)?;
+                if u64::from(lookup.provider_id()) != key {
+                    return Err(RuntimeError::Invalid);
+                }
+                self.phys.register_provider(lookup)
+            }
             _ => Err(RuntimeError::Unsupported),
         }
     }
@@ -362,6 +379,16 @@ impl driver_base::ResetConsumerServices for Host {
         spec: driver_base::ResetSpec,
     ) -> Result<driver_base::ResetHandle, ServiceError> {
         self.resets.get(spec)
+    }
+}
+
+impl driver_base::PhyConsumerServices for Host {
+    fn phy_get(
+        &self,
+        _device: driver_base::DeviceId,
+        spec: driver_base::PhySpec,
+    ) -> Result<driver_base::PhyHandle, ServiceError> {
+        self.phys.get(spec)
     }
 }
 

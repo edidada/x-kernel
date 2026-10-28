@@ -28,6 +28,9 @@ ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
 fixed-clock = ["dep:drv-clk"]
 fixed-factor = ["dep:drv-clk", "drv-clk/fixed-factor"]
 rk3588-cru = ["dep:drv-clk"]
+rk3588-usb2phy = ["dep:drv-phy"]
+rk3588-combphy = ["dep:drv-phy"]
+rk3588-pcie3phy = ["dep:drv-phy"]
 # RTC class + one backend per feature: the class carries the boot wall-clock
 # service, each feature compiles exactly one concrete clock in.
 rtc = ["dep:subsys_rtc"]
@@ -59,6 +62,7 @@ drv-mmc = { workspace = true, optional = true }
 drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
+drv-phy = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
 drv-rtc = { workspace = true, optional = true }
 

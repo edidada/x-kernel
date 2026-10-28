@@ -17,6 +17,7 @@ memspace = { workspace = true }
 kdma = { workspace = true }
 kclk.workspace = true
 kreset.workspace = true
+kphy.workspace = true
 pci.workspace = true
 virtio_devices = { workspace = true, optional = true }
 memaddr.workspace = true

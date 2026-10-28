@@ -11,7 +11,8 @@ use core::marker::PhantomData;
 use crate::{
     bus::Bus,
     devres::{
-        ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction, ResetHandle, services::DeviceServices,
+        ClkHandle, CoherentMem, DevIrq, IoMap, IrqAction, PhyHandle, ResetHandle,
+        services::DeviceServices,
     },
     error::{DepSource, ProbeError, RuntimeError},
     extension::ExtensionService,
@@ -391,6 +392,43 @@ impl<B: Bus> Resources<'_, B> {
         self.services
             .alloc_coherent(self.id, self.dma, len, align)
             .map_err(ProbeError::Fatal)
+    }
+
+    /// n-th clock input, in `clocks = <...>` declaration order (for
+    /// nodes whose clocks carry no `clock-names`).
+    pub fn clk_at(&self, index: usize) -> Result<ClkHandle, ProbeError> {
+        let spec = self
+            .map
+            .clk_at(index)
+            .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+        self.clk_spec(spec)
+    }
+
+    /// `phy_get(dev, name)`: resolves a `phy-names` entry and acquires
+    /// the phy; returns [`ProbeError::Deferred`] while the provider has
+    /// not published.
+    pub fn phy(&self, name: &str) -> Result<PhyHandle, ProbeError> {
+        let spec = self
+            .map
+            .phy_by_name(name)
+            .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+        self.phy_spec(spec)
+    }
+
+    /// [`Self::phy`] on the n-th `phys` entry (declaration order).
+    pub fn phy_at(&self, index: usize) -> Result<PhyHandle, ProbeError> {
+        let spec = self
+            .map
+            .phy_at(index)
+            .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+        self.phy_spec(spec)
+    }
+
+    /// [`Self::phy`] on an explicit spec.
+    pub fn phy_spec(&self, spec: crate::resource::PhySpec) -> Result<PhyHandle, ProbeError> {
+        self.services
+            .phy_get(self.id, spec)
+            .map_err(ProbeError::from)
     }
 
     /// `reset_control_get(dev, id)`: resolves a `reset-names` entry and
