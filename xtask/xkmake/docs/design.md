@@ -19,7 +19,9 @@ src/
 ├── hygiene/      repository hygiene: tool checks (mod.rs) and the rule check framework
 │   ├── registry.rs    RuleCheck, rule registry, shared Context, entry point
 │   ├── exceptions.rs  docs/code-guidelines/exceptions.toml
+│   ├── lint_opt_outs.rs CG-024 registration of inner lint opt-outs
 │   ├── report.rs      Finding, text/JSON output
+│   ├── rule_files.rs  CG-*.md frontmatter (id and lint lists per backend)
 │   └── test_layout.rs CG-051 test source layout
 ├── features/     CG-047 Kconfig/kfeat feature ownership checks and --base diff
 ├── dylint.rs     Dylint lint library build and kernel scan
@@ -214,7 +216,7 @@ artifacts are deleted before generation starts, and the failure of any step make
 
 `make check_hygiene` (`xkmake hygiene check`) runs every rule check with
 `backend: xkmake` in `docs/code-guidelines/`: rules that look at non-Rust
-inputs or file layout and can be decided mechanically. `deps`, `header`,
+inputs, file layout or source attributes and can be decided mechanically. `deps`, `header`,
 `lints` and `host-tests` depend on external tools or a build and have no CG
 rule, so they stay atomic commands outside the framework.
 
@@ -261,6 +263,26 @@ rule, so they stay atomic commands outside the framework.
    in the separate stage `Check: Repository hygiene` and sets
    `SKIP_HYGIENE=1` in the other stages; pre-commit runs
    `make check_hygiene` for commits that do not go through clippy.
+
+### Hygiene Lint Opt-outs (CG-024)
+
+`hygiene/lint_opt_outs.rs` scans the same files as CG-051 (tracked `.rs`
+files under workspace member directories) and, after lexing with
+`proc-macro2`, finds every inner attribute `#![allow(..)]`/`#![expect(..)]`,
+including the inner `cfg_attr` form and inner attributes inside modules and
+functions. Only rule lints count: `rule_files.rs` reads the `lint` lists of
+the `rustc`/`clippy`/`dylint` checks in the `docs/code-guidelines/CG-*.md`
+frontmatter (clippy lints get the `clippy::` prefix, matching the attribute
+spelling); lints no rule owns, such as `missing_docs` or `dead_code`, are
+ignored. Each "file x disabled rule lint" pair is one `inner-opt-out`
+finding whose subject is `<path>:<full lint name in the attribute>`; its
+message names the rule that owns the lint and the attribute's reason. These
+findings must be registered in `exceptions.toml`, so the prose lists of
+crate-level opt-outs that used to live in the rule files are now checked by
+the framework in both directions: a new unregistered opt-out is an error,
+and an entry left behind after an opt-out is removed is stale and an error.
+Lint groups (such as `clippy::all` or `warnings`) are not expanded; a file
+that cannot be lexed is rejected by rustc itself and produces no finding.
 
 ### Hygiene Test Layout (CG-051)
 

@@ -19,6 +19,7 @@ use std::{
 
 use super::{
     exceptions,
+    lint_opt_outs::LintOptOuts,
     report::{self, Finding, Severity},
     test_layout::TestSourceLayout,
 };
@@ -53,7 +54,7 @@ pub(crate) trait RuleCheck: Sync {
 }
 
 /// Every registered rule check, in rule id order.
-pub(crate) static RULES: &[&dyn RuleCheck] = &[&FeatureOwnership, &TestSourceLayout];
+pub(crate) static RULES: &[&dyn RuleCheck] = &[&LintOptOuts, &FeatureOwnership, &TestSourceLayout];
 
 /// Looks up a registered rule by its full id.
 pub(crate) fn find_rule(id: &str) -> Option<&'static dyn RuleCheck> {
@@ -147,6 +148,31 @@ impl Context {
         }
         let files = list_files(&self.root)?;
         Ok(self.files.get_or_init(|| files))
+    }
+
+    /// Rust files under a root workspace member directory, from
+    /// [`Self::files`].
+    pub(crate) fn member_rust_files(&self) -> Result<Vec<&str>> {
+        let workspace = self.workspace()?;
+        let directories: Vec<String> = workspace
+            .packages
+            .values()
+            .map(|package| workspace.relative(package.directory()))
+            .collect();
+        Ok(self
+            .files()?
+            .iter()
+            .map(String::as_str)
+            .filter(|file| {
+                file.ends_with(".rs")
+                    && directories.iter().any(|directory| {
+                        directory.is_empty()
+                            || file
+                                .strip_prefix(directory.as_str())
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    })
+            })
+            .collect())
     }
 
     /// Parsed Kconfig tree.
@@ -344,78 +370,25 @@ fn walk_files(root: &Path, path: &Path, files: &mut Vec<String>) -> Result<()> {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
-        fs,
         path::Path,
     };
 
     use super::RULES;
-
-    /// `id` and `backend: xkmake` lint names of one rule file's frontmatter.
-    fn xkmake_lints(text: &str) -> Option<(String, Vec<String>)> {
-        let frontmatter = text.strip_prefix("---\n")?.split("\n---").next()?;
-        let mut id = None;
-        let mut lints = Vec::new();
-        let mut is_xkmake = false;
-        let mut pending: Option<String> = None;
-        for line in frontmatter.lines() {
-            let trimmed = line.trim();
-            if let Some(list) = pending.as_mut() {
-                list.push_str(trimmed);
-            } else if let Some(value) = trimmed.strip_prefix("id:") {
-                id = Some(value.trim().to_string());
-            } else if let Some(backend) = trimmed.strip_prefix("- backend:") {
-                is_xkmake = backend.trim() == "xkmake";
-            } else if let Some(list) = trimmed.strip_prefix("lint:")
-                && is_xkmake
-            {
-                pending = Some(list.trim().to_string());
-            }
-            if let Some(list) = pending.take_if(|list| list.ends_with(']')) {
-                let inner = list.trim_start_matches('[').trim_end_matches(']');
-                lints.extend(
-                    inner
-                        .split(',')
-                        .map(|name| name.trim().trim_matches(['"', '\'']).to_string())
-                        .filter(|name| !name.is_empty()),
-                );
-            }
-        }
-        Some((id?, lints))
-    }
-
-    #[test]
-    fn frontmatter_parser_reads_only_xkmake_lists() {
-        let text = "---\nid: CG-1-x\nchecks:\n  - backend: clippy\n    lint: [panic]\n  - \
-                    backend: xkmake\n    lint: [a, \"b\",\n      c]\n  - backend: ai\n---\n# \
-                    body\n";
-        assert_eq!(
-            xkmake_lints(text),
-            Some((
-                "CG-1-x".to_string(),
-                vec!["a".into(), "b".into(), "c".into()]
-            ))
-        );
-    }
+    use crate::hygiene::rule_files;
 
     #[test]
     fn registry_matches_rule_file_xkmake_lints() {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/code-guidelines");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut documented: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for entry in fs::read_dir(&directory).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if !(name.starts_with("CG-") && name.ends_with(".md")) {
-                continue;
-            }
-            let text = fs::read_to_string(&path).unwrap();
-            let (id, lints) =
-                xkmake_lints(&text).unwrap_or_else(|| panic!("{name}: no frontmatter id"));
+        for (name, rule) in rule_files::load(&root).unwrap() {
             assert!(
-                name.starts_with(&id),
-                "{name}: id `{id}` does not match the file name"
+                name.starts_with(&rule.id),
+                "{name}: id `{}` does not match the file name",
+                rule.id
             );
+            let lints = rule.lints("xkmake");
             if !lints.is_empty() {
-                documented.insert(id, lints.into_iter().collect());
+                documented.insert(rule.id, lints.into_iter().collect());
             }
         }
         let mut registered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

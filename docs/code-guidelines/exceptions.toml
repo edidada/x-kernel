@@ -12,6 +12,198 @@
 # run; remove it with the fix.
 
 [[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "arch/kcpu/src/lib.rs:clippy::panic"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 15 legacy trap-path panics (unhandled exceptions, kernel faults, invalid page-fault codes, LoongArch unaligned emulation) across four architectures need a recovery-policy review rather than per-site judgement."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "arch/khal/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 18 legacy diagnostic sites in khal need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "core/ksyscall/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 69 legacy diagnostic sites in ksyscall need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "drivers/devices/virtio/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 14 legacy diagnostic sites in virtio need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "drivers/devices/virtio/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 11 legacy diagnostic sites in virtio need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "drivers/firmware/acpi/src/lib.rs:clippy::panic"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 8 legacy panics on boot-critical firmware corruption in the RSDP and the SDT/MADT fixed headers need one parser failure contract rather than per-site judgement; MADT entry framing already reports typed errors."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "fs/filesystems/kext4/src/lib.rs:clippy::allow_attributes"
+reason = "CG-024-lint-exceptions: case (b): 52 legacy outer allowances, above the rule's threshold of twenty semantically diverse sites, need individual contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "fs/filesystems/kext4/src/lib.rs:clippy::allow_attributes_without_reason"
+reason = "CG-024-lint-exceptions: case (b): 52 legacy allowances without a reason across ext4 disk structures and filesystem operations need individual review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "fs/filesystems/kext4/src/lib.rs:clippy::too_many_lines"
+reason = "CG-024-lint-exceptions: CG-028-focused-functions: case (b): 9 legacy allocation, writeback and on-disk decode functions over the line limit need per-function split review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "fs/filesystems/kext4/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 133 legacy diagnostic sites in kext4 need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "fs/kvfs/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 24 legacy diagnostic sites in kvfs need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "mm/alloc-engine/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 10 legacy diagnostic sites in alloc-engine need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "mm/kalloc/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 15 legacy diagnostic sites in kalloc need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "mm/memspace/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 12 legacy diagnostic sites in memspace need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "net/knet/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 20 legacy diagnostic sites in knet need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "posix/process/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 11 legacy diagnostic sites in posix-process need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "process/kprocess/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 31 legacy diagnostic sites in kprocess need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "process/ksignal/build.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (a): this host build script intentionally fails the build when Cargo does not supply CARGO_CFG_TARGET_ARCH."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "task/ktask/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 11 legacy diagnostic sites in ktask need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "task/kworkng/crates/kworkerpool_ng/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 12 legacy diagnostic sites in kworkerpool_ng need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "task/kworkng/crates/kworkerpool_ng/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 19 legacy diagnostic sites in kworkerpool_ng need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "sync/krcu/crates/krcu-core/src/lib.rs:unitless_time_integer"
+reason = "CG-024-lint-exceptions: CG-011-time-unit-names: case (a): `period` names an RCU grace-period sequence number, not a time quantity."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "task/kworkng/crates/kworkqueue_ng/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 32 legacy diagnostic sites in kworkqueue_ng need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "task/kworkng/crates/kworkqueue_ng/src/lib.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): 30 legacy diagnostic sites in kworkqueue_ng need individual failure-contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "tee/tee_kernel/src/lib.rs:clippy::allow_attributes"
+reason = "CG-024-lint-exceptions: case (b): 21 legacy outer allowances, above the rule's threshold of twenty semantically diverse sites, need individual contract review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "tee/tee_kernel/src/lib.rs:clippy::allow_attributes_without_reason"
+reason = "CG-024-lint-exceptions: case (b): 22 legacy allowances without a reason across TEE crypto, storage and protocol code need individual review."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "tee/tee_kernel/src/tee/arch/x86_64/hygon_csv_bindings.rs:clippy::upper_case_acronyms"
+reason = "CG-024-lint-exceptions: CG-032-camel-case-types: hardware ABI spelling: the module is rust-bindgen output for the Hygon CSV guest ABI and keeps its C type names, such as CCEL and TCG_DIGEST."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "tee/tee_kernel/src/tee/control_protocol.rs:clippy::upper_case_acronyms"
+reason = "CG-024-lint-exceptions: CG-032-camel-case-types: published name matched by an external consumer: the control-plane wire mirror keeps the teec-protocol type names, such as TEE_Parameters and TEE_ParamType, that the manager-side mirror matches by name and order."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "util/backtrace/build.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (a): missing Cargo environment or unwritable symbol output must terminate this host build script."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "util/kbuild_config/build.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (a): missing generated build configuration must terminate this host build script."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "util/kbuild_config/build.rs:clippy::unwrap_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (a): this host build script intentionally fails the build when the Cargo environment or repository layout is unavailable."
+
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "util/unittest_support/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (a): the crate only constructs kernel test fixtures; fixture and cleanup failures must fail the test."
+
+[[exception]]
 rule = "CG-047-kconfig-feature-ownership"
 check = "feature-map"
 subject = "dma"

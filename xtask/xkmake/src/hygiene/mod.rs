@@ -10,8 +10,10 @@
 //! stay atomic.
 
 mod exceptions;
+mod lint_opt_outs;
 mod registry;
 mod report;
+mod rule_files;
 mod test_layout;
 
 use std::{

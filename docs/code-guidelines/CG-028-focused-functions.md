@@ -15,7 +15,7 @@ checks:
 - **How to check**:
   1. Run the backend with the configured platform and review each diagnostic.
   2. The lint counts lines; review must judge single responsibility. Split legacy functions in separate changes and review lock, transaction and cleanup ordering.
-- **Exceptions**: Per function only: linear dispatch or registration tables, with one match or independent registrations, each branch roughly ten lines or fewer and no shared mutable state; explain `linear ... table` after the rule id. Also test scenarios and `TODO(cg): legacy` reasons stating how to split. Registered case (b) library root: `kext4`. Use the syntax in [README.md](README.md#suppressing-a-check).
+- **Exceptions**: Per function only: linear dispatch or registration tables, with one match or independent registrations, each branch roughly ten lines or fewer and no shared mutable state; explain `linear ... table` after the rule id. Also test scenarios and `TODO(cg): legacy` reasons stating how to split. Case (b) crate opt-outs are registered in [exceptions.toml](exceptions.toml) under `CG-024-lint-exceptions`/`inner-opt-out`. Use the syntax in [README.md](README.md#suppressing-a-check).
 - **Counter-example**:
 
 ```rust,ignore

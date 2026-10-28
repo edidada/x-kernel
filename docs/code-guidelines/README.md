@@ -87,15 +87,32 @@ Keep `#![allow(<lint>, reason = "<rule-id>: case (a)/(b): <specific reason>")]`
 at each actually linted target root. Case (a) means the rule does not apply
 (e.g. intentional host build failure or a pure test crate). Case (b) means
 at least ten legacy sites in the union of Jenkins configurations, unless the
-rule sets a stricter threshold. Register the targets in the rule file. This
-is not a quota for new code: new code in case (b) targets still follows the
-rule. Do not exempt targets that are never linted. Inner allowances do not
-need the outer `allow_attributes` wrapper.
+rule sets a stricter threshold. This is not a quota for new code: new code
+in case (b) targets still follows the rule. Do not exempt targets that are
+never linted. Inner allowances do not need the outer `allow_attributes`
+wrapper.
 
 A transitional crate-root expectation still requires an issue:
 `#![expect(<lint>, reason = "<rule-id>: TODO(cg): legacy cleanup, tracked in <issue>")]`.
 The fatal-boot policy stays per site; do not change boot interfaces or disable
 boot crates merely to remove those expectations.
+
+Register every inner opt-out of a rule lint, at a target root or in a
+module, in [exceptions.toml](exceptions.toml) with the CG-024 check
+`inner-opt-out` (see [Registering an exception](#registering-an-exception)):
+
+```toml
+[[exception]]
+rule = "CG-024-lint-exceptions"
+check = "inner-opt-out"
+subject = "mm/kalloc/src/lib.rs:clippy::expect_used"
+reason = "CG-024-lint-exceptions: CG-021-no-panic-on-reachable-failure: case (b): <specific reason>"
+```
+
+The subject is the file and the lint as the attribute writes it; the reason
+wraps the attribute's reason as for outer allowances, or uses `TODO(cg): `
+for a transitional expectation. A rule lint is one a rule file lists under
+`rustc`, `clippy` or `dylint`; opt-outs of other lints are not registered.
 
 ### Verification
 
@@ -109,8 +126,8 @@ checked through the configured kernel's `make clippy` during this migration.
 
 ## Repository checks (xkmake)
 
-Rules over manifests, Kconfig or file layout rather than compiled Rust run
-in `xkmake hygiene check`. `make check_hygiene` runs every registered check
+Rules over manifests, Kconfig, file layout or source attributes rather
+than compiled Rust run in `xkmake hygiene check`. `make check_hygiene` runs every registered check
 and needs no `.config`; `--rule <id>`, `--check <name>` and
 `--defconfig <path>` (each repeatable) narrow a run, and
 `make check_features` and `make check_test_layout` run CG-047 and CG-051
@@ -182,7 +199,7 @@ checks they run.
 | [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy, ai | `clippy::panic`, `clippy::unwrap_used`, `clippy::expect_used` |
 | [CG-022-log-level-matches-event](CG-022-log-level-matches-event.md) | SHOULD | ai | — |
 | [CG-023-unfinished-implementations](CG-023-unfinished-implementations.md) | MUST | clippy | `clippy::todo`, `clippy::unimplemented` |
-| [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy | `clippy::allow_attributes`, `clippy::allow_attributes_without_reason` |
+| [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy, xkmake | `clippy::allow_attributes`, `clippy::allow_attributes_without_reason`, `inner-opt-out` |
 | [CG-025-minimal-unsafe-scope](CG-025-minimal-unsafe-scope.md) | MUST | clippy, rustc | `clippy::multiple_unsafe_ops_per_block`, `unsafe_op_in_unsafe_fn` |
 | [CG-026-unsafe-api-safety-docs](CG-026-unsafe-api-safety-docs.md) | MUST | clippy | `clippy::missing_safety_doc` |
 | [CG-027-narrow-visibility](CG-027-narrow-visibility.md) | SHOULD | rustc | `unreachable_pub` |

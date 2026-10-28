@@ -64,7 +64,7 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 
 ## 已启用 lint
 
-规则原文、人工判断与已登记 opt-out 见 CG 文件；此表只记录后端政策和规则指针。
+规则原文与人工判断见 CG 文件，已登记的内层 opt-out 见 exceptions.toml（CG-024 `inner-opt-out`）；此表只记录后端政策和规则指针。
 MUST/SHOULD 是规则要求；下列等级以 Cargo.toml 为准，make clippy 将 warn 提升为错误。
 
 | lint | 等级与参数 | 规则文件 | 覆盖 |

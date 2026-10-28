@@ -39,9 +39,7 @@ checks:
   4. For a legitimate failure, check that the code handles or propagates it
      instead of panicking or relying on debug-only runtime validation.
 - **Exceptions**: Per-site: a proven internal invariant; `Fatal boot: ` with its failure condition, no recovery and no error-return channel; shared test macros or `test scenario: ` helper reasons. `panic` additionally permits `TODO(cg): ` when legitimate failure cannot be reported by the current interface; state the planned interface or lifecycle repair. Do not disable boot crates or change boot interfaces for lint cleanup.
-  - Registered `panic` case (b) library roots: `acpi`, `kcpu`.
-  - Registered `unwrap_used` case (a): `kbuild_config` and `ksignal` build.rs only; case (b) library roots: `alloc-engine`, `kworkerpool_ng`, `virtio`, `kworkqueue_ng`, `kext4`, `ksyscall`.
-  - Registered `expect_used` case (a): `kbuild_config` and `backtrace` build.rs, `unittest_support` library; case (b) library roots: `kalloc`, `khal`, `ktask`, `kworkerpool_ng`, `memspace`, `virtio`, `kworkqueue_ng`, `kvfs`, `kprocess`, `knet`, `posix-process`.
+  - Crate-level `panic`, `unwrap_used` and `expect_used` opt-outs, case (a) or (b), are registered in [exceptions.toml](exceptions.toml) under `CG-024-lint-exceptions`/`inner-opt-out`; `make check_hygiene` fails on an unregistered or stale one.
   - Case (b) threshold is ten diagnosed sites across platform configurations; only src/lib.rs is exempt. `kernel-boot` and `fs_boot` stay enabled. Use the syntax in [README.md](README.md#suppressing-a-check).
   - `debug_assert!` may check correctness invariants; it must not replace runtime validation.
 - **Counter-example**:

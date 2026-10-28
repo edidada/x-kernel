@@ -83,9 +83,11 @@ When writing or editing Rust kernel code:
    and logging quality.
 5. If the change alters public behavior or module contracts,
    update rustdoc and any crate-local docs that describe that behavior.
-6. If the change adds tests or touches manifests or Kconfig,
-   run `make check_hygiene` for the repository checks
-   (test layout in CG-051, feature ownership in CG-047).
+6. If the change adds tests or an inner `#![allow]`/`#![expect]`, or
+   touches manifests or Kconfig, run `make check_hygiene` for the
+   repository checks
+   (registered inner lint opt-outs in CG-024, feature ownership in CG-047,
+   test layout in CG-051).
 
 ## Review Workflow
 
