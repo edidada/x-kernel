@@ -7,6 +7,7 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    task::Waker,
 };
 
 use hashbrown::HashMap;
@@ -50,7 +51,8 @@ pub struct TcpSocket {
     general: GeneralOptions,
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
-    poll_rx_closed: Arc<PollSet>,
+    poll_rx: Arc<PollSet>,
+    poll_tx: Arc<PollSet>,
     /// TCP_KEEPIDLE in seconds (Linux default: tcp_keepalive_time).
     /// TCP_KEEPINTVL/TCP_KEEPCNT are rejected with ENOPROTOOPT: the
     /// transport models a single keep-alive interval with no probe-count
@@ -72,7 +74,8 @@ impl TcpSocket {
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            poll_rx_closed: Arc::new(PollSet::new()),
+            poll_rx: Arc::new(PollSet::new()),
+            poll_tx: Arc::new(PollSet::new()),
             keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
         }
     }
@@ -94,7 +97,8 @@ impl TcpSocket {
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            poll_rx_closed: Arc::new(PollSet::new()),
+            poll_rx: Arc::new(PollSet::new()),
+            poll_tx: Arc::new(PollSet::new()),
             keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
@@ -164,7 +168,7 @@ impl TcpSocket {
     ) -> KResult {
         if how.has_read() {
             self.rx_closed.store(true, Ordering::Release);
-            self.poll_rx_closed.wake();
+            self.poll_rx.wake();
         }
 
         // stream
@@ -590,6 +594,9 @@ impl SocketOps for TcpSocket {
 
                 Ok(())
             })?;
+            // Existing interests must switch from stream to accept sources.
+            self.poll_rx.wake();
+            self.poll_tx.wake();
         } else {
             // ignore simultaneous `listen`s.
         }
@@ -732,21 +739,30 @@ impl Pollable for TcpSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            context.register(&self.poll_rx)?;
+        }
         if events.contains(IoEvents::OUT) {
-            let source_waker = self.general.register_tx_waker(context)?;
-            self.with_smol_socket(|socket| socket.register_send_waker(&source_waker));
-        } else if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
-            self.general.register_rx_waker(context)?;
+            context.register(&self.poll_tx)?;
         }
-        if self.is_listening()
-            && events.contains(IoEvents::IN)
-            && let Ok(endpoint) = self.bound_endpoint()
-        {
-            let sockets = SOCKET_SET.inner.lock();
-            LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
-        }
-        if events.contains(IoEvents::RDHUP) {
-            context.register(&self.poll_rx_closed)?;
+        if self.is_listening() {
+            if events.contains(IoEvents::IN)
+                && let Ok(endpoint) = self.bound_endpoint()
+            {
+                let sockets = SOCKET_SET.inner.lock();
+                LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
+            }
+        } else {
+            // smoltcp has one waker slot per direction. Aggregate all waiters
+            // for this socket without subscribing them to unrelated traffic.
+            self.with_smol_socket(|socket| {
+                if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+                    socket.register_recv_waker(&Waker::from(self.poll_rx.clone()));
+                }
+                if events.contains(IoEvents::OUT) {
+                    socket.register_send_waker(&Waker::from(self.poll_tx.clone()));
+                }
+            });
         }
         Ok(())
     }

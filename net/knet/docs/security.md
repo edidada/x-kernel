@@ -516,6 +516,9 @@ IPv4 reassembly queues publish their earliest deadline through a separate atomic
 
 Sockets and Router must publish newly generated TX work through `notify(PollReason::Tx)`.
 After TCP consumes data from a receive buffer whose free space is below the maximum window-scaling quantum, it must publish zero-window recovery work through `notify(PollReason::RxWindow)`.
+
+TCP readiness waiters use socket-local read/write sources and listener accept sources, so unrelated traffic cannot repeatedly drive an empty epoll wait. smoltcp retains only the aggregated source wakers, not the `TcpSocket` owner. Registration precedes the caller's readiness recheck; callbacks only wake poll sources and must not reenter the socket-set mutex. Global RX and timer notifications remain responsible for scheduling protocol progress.
+
 An increase in available data-TX slots must wake the queue's capacity waiters after releasing the Router lock, even when a later stage defers the round. Capacity wakeups require an actual increase in available slots. Senders must recheck readiness after registration to close the check/register race.
 
 ### 22. TCP Close Lifecycle
