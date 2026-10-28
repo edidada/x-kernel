@@ -46,7 +46,23 @@ booti ${loadaddr} - ${fdtcontroladdr}
 | gpll/cpll 速率错 | PLL recalc 的 m/p/s/k 位段 | `ldp check-layout --port rk3588-cru`（rk3588-pll-con0/1/2/6 已锚定参考）|
 | 系统卡死在 `assigned rate`（改频中） | 同值短路失效 / PLL lock 超时恢复路径 | 找 `lock timeout` 与 `restoring old params` 日志 |
 
-## 5. 已知边界（如实标注）
+## 5. 实测结果（2026-10-27，Orange Pi 5 Plus 真机，P6 通过）
+
+镜像：`xkernel_aarch64-rk3588.bin` @ commit 6ac016691（含 fixed-clock 按名应答、
+CRU ClkProvider 门发布、Clk 类级 Deferred 唤醒三项修复）。
+
+- CRU 全树注册：`provider 0x2 ready; gpll=1188000000Hz cpll=1500000000Hz
+  npll=850000000Hz ppll=1100000000Hz aclk_top_root=594000000Hz
+  pclk_top_root=100000000Hz sclk_uart2=24000000Hz` —— cpll=1.5G 与 DT
+  assigned-clock-rates 一致（同值短路生效）。
+- **消费端闭环**：dwmmc 从 CRU 解析 ciu=25MHz → SD 卡识别 → 4-bit 50MHz 高速
+  → mmcblk0p1/p2 发布 → ext4 根文件系统挂载 → 用户态启动（Welcome to Kylin X!）。
+- 4/19 assigned rate `NotSupported`（非阻塞，Linux 同样容忍）：
+  HCLK_CENTER_ROOT(400M)、CLK_GPU(200M)、CLK_HDMIRX_AUD(99M)、
+  PCLK_PMU0_ROOT(100M) —— 均为 mux 型复合钟，set_rate 需 parent 传播；
+  后续如需精确设置再立 parent-propagation 增量。
+
+## 6. 已知边界（如实标注）
 
 - SCMI 相位钟（sdmmc ciu-drive/sample 706/707）解析 NotFound：SCMI provider 未移植。
 - 复位（resets = <&cru …>）与重启 notifier 未移植：无 reset 框架/重启钩子。
