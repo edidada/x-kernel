@@ -10,6 +10,7 @@ checks:
       - '^(?!\s*//).*(?:\.unwrap\(\)|\.expect\(|panic!)'
       - '^(?!\s*//).*(?:unreachable!|debug_assert!)'
       - 'clippy::(?:panic|unwrap_used|expect_used)\b'
+    verify: full
 ---
 
 # CG-021-no-panic-on-reachable-failure: Handle legitimate failures without panicking
@@ -43,6 +44,11 @@ checks:
   2. Inspect each panic-capable operation and the helpers it invokes.
   3. Trace whether valid control flow, external input, or a failed operation
      can reach the panic; identify any invariant that rules it out.
+     Reachability starts at the entry points production code can call, with
+     their stated preconditions. A test that builds internal state directly
+     and calls an inner method proves only that the inner method can fail.
+     When a comment states the invariant, read the definitions of the fields
+     it relies on and every write to them before judging it unproven.
   4. For a legitimate failure, check that the code handles or propagates it
      instead of panicking or relying on debug-only runtime validation.
 - **Exceptions**: Per-site: a proven internal invariant; `Fatal boot: ` with its failure condition, no recovery and no error-return channel; shared test macros or `test scenario: ` helper reasons. `panic` additionally permits `TODO(cg): ` when legitimate failure cannot be reported by the current interface; state the planned interface or lifecycle repair. Do not disable boot crates or change boot interfaces for lint cleanup.

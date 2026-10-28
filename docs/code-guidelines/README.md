@@ -11,8 +11,9 @@ is written for people. English only.
 | `id` | `CG-<nnn>-<descriptive>`; equals the filename without `.md`. |
 | `level` | `MUST` or `SHOULD`. |
 | `paths` | Glob patterns the rule applies to, e.g. `["**/*.rs"]`. |
-| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint`, `xkmake` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`; for `xkmake`, the check names registered with `xkmake hygiene check`, see [Repository checks](#repository-checks-xkmake)). The `ai` check has no `lint`; it may carry `triggers`. |
+| `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint`, `xkmake` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`; for `xkmake`, the check names registered with `xkmake hygiene check`, see [Repository checks](#repository-checks-xkmake)). The `ai` check has no `lint`; it may carry `triggers` and `verify`. |
 | `checks[ai].triggers` | Optional, inside the `- backend: ai` item only. Case-sensitive regular expressions, valid in both ECMAScript and Python `re`, matched against added diff lines in files matched by `paths`. xreview opens a rule session only for lines they match outside test code; without `triggers` it reviews every changed hunk of those files. Entries may also be trigger groups (xreview's `name`, `patterns`, `paths`, `exclude`, `lines`). Lint backends ignore them. |
+| `checks[ai].verify` | Optional, inside the `- backend: ai` item only: `none` (default) or `full`. With `full`, xreview does not report a violation introduced by the change directly; it sends it to the same independent verification as other candidate findings first. Use `full` for rules whose judgement depends on tracing reachability or invariants beyond the diff. |
 
 ## Body
 
@@ -88,7 +89,9 @@ at each actually linted target root. Case (a) means the rule does not apply
 (e.g. intentional host build failure or a pure test crate). Case (b) means
 at least ten legacy sites in the union of Jenkins configurations, unless the
 rule sets a stricter threshold. This is not a quota for new code: new code
-in case (b) targets still follows the rule. Do not exempt targets that are
+in case (b) targets still follows the rule. A legacy site whose message or
+arguments change, while the operation and what can make it fail stay the
+same, is not new code. Do not exempt targets that are
 never linted. Inner allowances do not need the outer `allow_attributes`
 wrapper.
 
