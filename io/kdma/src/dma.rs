@@ -8,7 +8,7 @@ use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult};
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, page_allocator};
 use khal::mem::v2p;
 use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
@@ -78,12 +78,13 @@ impl DmaAllocator {
     #[track_caller]
     fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_dma_pages(
+        let paddr = page_allocator().alloc_dma_pages(
             num_pages,
             PAGE_SIZE_4K.max(layout.align()),
             UsageKind::Dma,
         )?;
-        let vaddr = va!(vaddr_raw);
+        let vaddr = khal::mem::p2v(paddr);
+        let vaddr_raw = vaddr.as_usize();
         self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DmaInfo {
@@ -144,7 +145,7 @@ impl DmaAllocator {
         // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
         let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
 
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        page_allocator().dealloc_dma_pages(v2p(vaddr), num_pages, UsageKind::Dma);
     }
 
     /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.

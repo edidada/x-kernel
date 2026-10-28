@@ -30,8 +30,8 @@ impl SeqIterator for MeminfoIter {
     type Item = String;
 
     fn rewind(&mut self) {
-        let allocator = kalloc::global_allocator();
-        let usages = allocator.usages();
+        let allocator = kalloc::page_allocator();
+        let usages = kalloc::usages();
         let used_pages = allocator.used_pages();
         let free_pages = allocator.available_pages();
         let total_pages = used_pages + free_pages;
@@ -103,10 +103,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
     root.add(
         "meminfo2",
-        SimpleFile::new_regular(fs.clone(), || {
-            let allocator = kalloc::global_allocator();
-            Ok(format!("{:?}\n", allocator.usages()))
-        }),
+        SimpleFile::new_regular(fs.clone(), || Ok(format!("{:?}\n", kalloc::usages()))),
     );
 }
 

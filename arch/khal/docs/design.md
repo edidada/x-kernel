@@ -127,3 +127,9 @@ guest 测试位于 crate 根目录 `ut-tests/`，由原所属源码模块通过
 CPU 身份测试依赖已初始化的平台 CPU 环境，不是独立 host 测试。
 所有挂载外显式保留 `#[cfg(unittest)]`，使非 UT 构建无需解析该 runtime 宏；
 这不改变 Cargo 依赖图，也不代替 boot helper 清除内核 UT 编译标志。
+
+## 页表后备页适配
+
+PagingHandlerImpl 直接调用独立物理页服务，alloc_frame 返回 PA，dealloc_frame
+以相同 PA 归还。页表库访问 PTE 内容时才调用独立 p2v hook；页分配本身不创建映射。
+本阶段保持既有 raw 页表所有权和 TLB 退役契约，不加入页引用管理。

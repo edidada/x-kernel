@@ -382,3 +382,7 @@ and holds a `kmutex` guard directly; `ktask` supplies the shared mutex's schedul
 operations. The runtime lifecycle test validates actual task waits with a
 test-owned in-flight operation, without enabling a hardware source or pretending
 to exercise controller completion. Startup ordering remains runtime's duty.
+
+页库存与堆的启动顺序为：先发布页元数据，按 PA 交接剩余 RAM 并建立物理页服务，
+最后通过 init_heap 取得堆后备页。物理页服务注册不创建直映，沿用启动已验证的永久
+可写映射；注册或堆初始化失败均在 kruntime 的致命启动边界处理。

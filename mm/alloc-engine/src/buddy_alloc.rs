@@ -4,7 +4,7 @@
 
 //! Buddy page allocator.
 //!
-//! Manages contiguous physical memory regions using the binary buddy algorithm.
+//! Manages caller-supplied mapped memory regions using the binary buddy algorithm.
 //! Free chunks carry intrusive links; an allocator-owned bitmap certifies free
 //! chunk heads before their headers are read. Coalescing probes one buddy per
 //! order and unlinks it directly, independent of free-list length.

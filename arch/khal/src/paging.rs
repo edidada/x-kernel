@@ -4,7 +4,7 @@
 
 //! Page table manipulation.
 
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, page_allocator};
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use page_table::PagingHandler;
 #[doc(no_inline)]
@@ -12,7 +12,7 @@ pub use page_table::{
     PageSize, PagingFlags as MappingFlags, PtError as PagingError, PtResult as PagingResult,
 };
 
-use crate::mem::{p2v, v2p};
+use crate::mem::p2v;
 
 /// Implementation of [`PagingHandler`], to provide physical memory manipulation
 /// to the [page_table] crate.
@@ -24,14 +24,13 @@ impl PagingHandler for PagingHandlerImpl {
             kalloc::is_page_allocator_ready(),
             "page-table allocation requested before page allocator initialization"
         );
-        global_allocator()
+        page_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageTable)
-            .map(|vaddr| v2p(vaddr.into()))
             .ok()
     }
 
     fn dealloc_frame(paddr: PhysAddr) {
-        global_allocator().dealloc_pages(p2v(paddr).as_usize(), 1, UsageKind::PageTable);
+        page_allocator().dealloc_pages(paddr, 1, UsageKind::PageTable);
     }
 
     #[inline]

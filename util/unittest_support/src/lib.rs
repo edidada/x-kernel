@@ -136,8 +136,9 @@ impl TestUserBuffer {
             .map_err(|_| KError::BadState)?;
         let mapped_size = len.max(1).next_multiple_of(PAGE_SIZE_4K);
         let num_pages = mapped_size / PAGE_SIZE_4K;
-        let kernel_va = kalloc::global_allocator()
+        let kernel_va = kalloc::page_allocator()
             .alloc_pages(num_pages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
+            .map(|pa| khal::mem::p2v(pa).as_usize())
             .map_err(|_| KError::NoMemory)?;
 
         // SAFETY: `kernel_va` names a freshly allocated kernel mapping of
@@ -156,8 +157,8 @@ impl TestUserBuffer {
                 MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             )
             .map_err(|_| {
-                kalloc::global_allocator().dealloc_pages(
-                    kernel_va,
+                kalloc::page_allocator().dealloc_pages(
+                    v2p(VirtAddr::from_usize(kernel_va)),
                     num_pages,
                     kalloc::UsageKind::VirtMem,
                 );
@@ -337,8 +338,8 @@ impl Drop for TestUserBuffer {
             .lock()
             .unmap(VirtAddr::from_usize(self.user_addr), self.mapped_size)
             .expect("test buffer mapping must remain owned until teardown");
-        kalloc::global_allocator().dealloc_pages(
-            self.kernel_va,
+        kalloc::page_allocator().dealloc_pages(
+            v2p(VirtAddr::from_usize(self.kernel_va)),
             self.num_pages,
             kalloc::UsageKind::VirtMem,
         );

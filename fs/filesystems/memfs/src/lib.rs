@@ -18,7 +18,7 @@ use core::{borrow::Borrow, cmp::Ordering, ops::ControlFlow};
 
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
-use kalloc::global_allocator;
+use kalloc::page_allocator;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
@@ -82,7 +82,7 @@ static TMPFS_CONTEXT_OPERATIONS: FsContextOperations =
     FsContextOperations::with_reconfigure(tmpfs_get_tree, tmpfs_reconfigure);
 
 fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
-    let total_pages = global_allocator().total_pages();
+    let total_pages = page_allocator().total_pages();
     context.set_operations(&TMPFS_CONTEXT_OPERATIONS);
     context.set_private(shmem::parse_tmpfs_context_options(
         context.data(),

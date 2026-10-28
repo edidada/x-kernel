@@ -97,3 +97,6 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 - trap handler 是否在调用 `kirq` 前创建 `NoPreempt`。
 - `khal::irq` 是否没有重新导出 generic `kirq` API。
 - x86 APIC helper 是否仍未回流到 `khal::irq`。
+
+页表后备页的申请/归还采用物理页服务的 PA 协议，内容访问单独使用直映。这个接口
+调整不证明页表已退出硬件使用；调用方仍须先完成所需的切换和 TLB 退役再释放。

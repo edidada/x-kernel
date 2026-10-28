@@ -10,9 +10,10 @@ instrumentation and does not measure remote CPUs, failed attempts or live usage.
 
 ## 定位
 
-`kalloc` 是 x-kernel 的内核全局内存分配层。它接收启动阶段交付的空闲内存区域，
-向上提供 Rust 全局堆、连续页、DMA32 页和 RAII 页对象，并负责把这些请求路由到
-byte allocator、全局 page buddy 以及相应的 per-CPU cache。
+`kalloc` 对外提供两个独立服务：`page_allocator()` 管系统物理页库存，
+`global_allocator()` 管内核对象堆。页服务接收启动交付的物理 RAM 范围，以 PhysAddr
+收发连续页和 DMA32 页；堆从页服务取得后备页，并向对象使用者返回可访问指针。
+`GlobalPage` 保留已有的 VA 内容访问接口，其内部在物理页服务边界显式转换。
 
 主要使用者包括：
 
@@ -51,13 +52,15 @@ PCP/slab 模块不再自行读取 raw per-CPU base，也不向调用者返回 ca
 mm/kalloc/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
+│   ├── lib.rs          # 对象堆、后备页供给、统计和 GlobalAlloc
+│   ├── pages.rs        # 独立物理页服务、初始化、容量和 PCP/buddy 路由
 │   ├── page.rs         # GlobalPage RAII 封装
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
 ├── ut-tests/
 │   ├── lib.rs
+│   ├── pages.rs        # 物理页身份、后备页与对象记账
 │   ├── pcp.rs
 │   ├── slab_cache.rs
 │   └── tracking.rs
@@ -96,78 +99,58 @@ mm/kalloc/
 ## 架构
 
 ```text
-                       Rust alloc / kernel callers
-                                      |
-                                      v
-                              GlobalAllocator
-                                      |
-              +-----------------------+-----------------------+
-              |                                               |
-              | byte / Rust heap                              | page APIs
-              v                                               v
-   slab per-CPU object cache                         per-CPU page set (PCP)
-       (slab feature only)                              1 / 2 / 3 / 4 pages
-              |                                               |
-              | miss/full                                     | miss/full
-              v                                               v
- SpinNoIrq<DefaultByteAllocator>                 SpinNoIrq<BuddyPageAllocator>
-              |                                               ^
-              | heap growth                                   |
-              +-----------------------------------------------+
-
-Other paths:
-  large Rust allocation ---------------------------> page allocator
-  DMA32 / alloc_pages_at --------------------------> page allocator directly
-  GlobalPage --------------------------------------> page APIs + Drop
-  tracking ----------------------------------------> wraps Rust GlobalAlloc path
+对象使用者                    页表 / 页缓存 / DMA / 其他页使用者
+    |                                      |
+    v                                      |
+global_allocator()：对象堆                  |
+    |                                      |
+    +-- slab object cache / byte allocator  |
+    |                                      |
+    +-- 后备页、超大对象 ------+             |
+                             v             v
+                      page_allocator()：物理页服务
+                             |
+                      PCP / page buddy
 ```
+
+物理页服务拥有独立的 `palloc` 和 `ready`；对象堆只拥有 `balloc` 和 `heap_ready`。
+公开页分配、定址分配、DMA 分配和归还均以 PhysAddr 为边界，不提供 VA 页分配兼容方法。
+内容使用者在要读写页时调用映射能力；对 PA 做算术转换不会新建映射。
+
+页 buddy 和 PCP 当前仍保存直映 VA，转换只发生在物理服务内部。这一实现约束不传播到
+公开页接口。slab 配置下 `SlabHeap` 另有一个内部 buddy，用于分割已经划给堆的内存，
+并不拥有系统空闲页库存；两个实例复用算法但不共享 free list。
 
 启用 `tracking` 时，递归标记是 per-CPU `AtomicBool`。一个 RAII guard 在读取标记前
 禁用抢占和 IRQ，并在析构时清除同一 CPU 的标记。该 guard 会跨 backtrace、tracking
 锁以及被包装的 allocation callback；这是诊断 feature 为保证递归和迁移语义付出的
 延迟成本，不属于正常关闭 tracking 时的热路径。
 
-`GlobalAllocator` 的主要状态为：
+各服务分别拥有自己的状态；分类计数为共享诊断服务：
 
-| 状态 | 保护方式 | 含义 |
-|------|----------|------|
-| `balloc` | `SpinNoIrq` | 当前配置的中央 byte allocator |
-| `palloc` | `SpinNoIrq` | 4 KiB page buddy |
-| `heap_ready` | `AtomicBool` | byte allocator 是否已获得首个 heap region |
-| `page_ready` | `AtomicBool` | page allocator 是否已获得至少一个 region |
-| per-CPU usage counters | 每 CPU、每 `UsageKind` 两个累计 atomic | caller-live 诊断计数 |
+| 所属 | 状态 | 保护方式 | 含义 |
+|------|------|----------|------|
+| 对象堆 | `balloc` | `SpinNoIrq` | 中央 byte allocator |
+| 对象堆 | `heap_ready` | `AtomicBool` | 是否已有初始后备内存 |
+| 物理页服务 | `palloc` | `SpinNoIrq` | 系统 page buddy |
+| 物理页服务 | `ready` | `AtomicBool` | 是否已注册可分配 RAM |
+| 分类统计 | per-CPU counters | 每分类 allocation/free 累计 atomic | `kalloc::usages()` 汇总 |
 
 ## 初始化状态
 
-allocator 只有单向状态转换，不支持 runtime teardown：
+页服务的 `Empty -> PageReady` 与对象堆的 `Empty -> HeapReady` 独立发布，均不支持
+runtime teardown。页库存可以在没有对象堆时使用；堆初始化依赖已经可用的页库存。
 
-```text
-Empty
-  |
-  | init_page_allocator()，或 global_init() 的第一阶段
-  v
-PageReady
-  |
-  | bootstrap_heap_if_needed()、首次 byte allocation，
-  | 或 global_init() 的第二阶段
-  v
-HeapReady
+`kruntime` 在主 CPU per-CPU storage 和直映准备完成后：
 
-PageReady / HeapReady -- add_memory() --> 保持当前状态并扩展 palloc
-```
+1. 初始化并发布 !1111 引入的物理页元数据目录，扣除其后备页；
+2. 将剩余非空 RAM 范围按 PA 升序交给 `page_allocator().add_memory()`；
+3. 通过 `init_heap()` 从页服务取得初始 32 KiB 后备内存；
+4. AP 在进入普通内核代码前安装各自的 per-CPU register。
 
-实际启动路径由 `kruntime` 按以下顺序执行：
-
-1. 初始化主 CPU 的 per-CPU storage；
-2. 初始化内存映射并枚举带 `FREE` 标记的 region；
-3. 第一段 region 通过 `global_init()` 初始化 page allocator，并从中取得至少
-   `MIN_HEAP_SIZE`（32 KiB）作为首个 byte heap；
-4. 后续 region 通过 `global_add_memory()` 加入 page allocator；
-5. AP 在进入普通内核代码前安装各自的 per-CPU register。
-
-`init_page_allocator()` 支持只发布 page allocator、稍后再惰性建立 byte heap 的路径。
-`page_ready` 和 `heap_ready` 使用 Release/Acquire 发布状态；内存区域的加入和 allocator
-metadata mutation 仍由对应锁串行化。初始化调用本身依赖启动流程串行执行。
+`ready`、`heap_ready` 使用 Release/Acquire 发布就绪状态。注册物理 RAM 仍依赖串行
+启动所有权；page lock 保护 buddy metadata，heap lock 保护对象堆，不能据此允许任意
+并发初始化或重复交付同一 RAM。
 
 ## 核心算法流程
 
@@ -182,7 +165,7 @@ metadata mutation 仍由对应锁串行化。初始化调用本身依赖启动�
 2. slab 配置下，如果 `SizeClass::from_layout()` 接受该 layout，则先访问当前 CPU
    的 slab object cache。
 3. 其他小请求进入受 `balloc` 保护的 `DefaultByteAllocator`。
-4. 中央 byte allocator 无法满足请求时，从 `palloc` 取得新 region，加入 byte heap
+4. 中央 byte allocator 无法满足请求时，通过独立页服务取得新 region，加入 byte heap
    后重试。
 
 byte heap 首次建立至少使用 32 KiB。后续增长请求参考当前 heap 总量和本次 layout，
@@ -200,13 +183,18 @@ allocator。
 - `num_pages` 为 1–4 且 `align_pow2 <= 4096`：先访问当前 CPU 的 PCP；
 - PCP miss：获取 `palloc` 锁并批量 refill；
 - 页数更大或要求特殊对齐：直接访问全局 page buddy；
-- 成功后按 `UsageKind` 更新诊断统计，`RustHeap` 由上层 heap 路径单独处理。
+- 成功后返回 PhysAddr，所有分类统一按页数记分配用量；失败不记账。
+
+堆扩容走私有无记账的 `alloc_from_inventory()`，只有对象交付才记 RustHeap；超大对象
+直接使用公开页分配，按整页计一次用量，堆层不再重复记账。这使物理页服务不需要根据
+RustHeap 分类推断是否正在为堆准备后备内存。UsageKind 仍只用于统计。
 
 `dealloc_pages()` 对 1–4 页 block 优先执行 PCP push；cache 满时批量 drain；更大的
 block 直接归还 buddy。特殊对齐取得的小 block 在 free 后也可以作为普通同页数 block
 进入 PCP，因为其地址至少满足普通页对齐。
 
-`alloc_pages_at()` 需要指定起始虚拟地址，因此绕过 PCP，直接调用 buddy 的定址接口。
+`alloc_pages_at()` 接收起始物理地址，绕过 PCP，在服务内部转换后调用 buddy 定址接口。
+`alloc_dma_pages()` 在 PA 上检查 DMA32 范围，最终归还也接收原 PA；页属性和设备同步仍归 kdma。
 
 ### 页级 PCP
 
@@ -311,7 +299,7 @@ slab object 会使这些中央视图与 caller-live usage 存在预期差异。
 
 tracking 只用于诊断，不改变 allocator ownership。它引入全局 tracking lock、backtrace
 采集和 map 操作，因此启用后的性能不能代表普通 allocation 路径。直接调用
-`GlobalAllocator` page/byte API 的路径不经过这个 wrapper，不会自动加入 tracking map。
+直接页服务和对象堆的显式 API 不经过这个 wrapper，不会自动加入 tracking map。
 
 ### C ABI symbols
 
@@ -329,7 +317,7 @@ C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内
 
 ## 调用约束 / 执行上下文
 
-- **初始化前提**：page API 必须在 `page_ready` 后使用；byte/Rust heap allocation
+- **初始化前提**：page API 必须在页服务 `ready` 后使用；byte/Rust heap allocation
   还要求已有 page region，使其能够建立或扩展 byte heap。
 - **per-CPU 前提**：PCP、slab cache 和 tracking recursion guard 都要求当前 CPU 的
   per-CPU storage 已安装。主 CPU 和 AP 的正式运行路径满足这一顺序。
@@ -339,8 +327,8 @@ C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内
 - **中断上下文**：per-CPU hit 可以在普通 IRQ 约束下完成；miss/full 可能获取中央锁
   并扩展 heap。接口没有 task/softirq/hardirq allocation policy，也不保证短延迟。
 - **NMI**：不支持在 NMI 中 allocation/free。关闭普通 local IRQ 不能排除 NMI 重入。
-- **早期启动**：`global_init()` 可在调度器建立前使用，但传入 region 必须已经位于可用
-  kernel virtual mapping 中，且主 CPU per-CPU storage 已初始化。
+- **早期启动**：页服务接收可信的物理 RAM 范围，要求对应永久直映有效且可写；
+  注册不会创建映射或初始化堆。`init_heap()` 单独完成对象堆初始化。
 
 ## 并发模型
 
@@ -350,7 +338,7 @@ C 组件（mbedtls 等）链接；TEE 加密栈已改为纯 Rust 实现，树内
 | 全局 page buddy | `SpinNoIrq` | page slow path、DMA 和定址请求串行化 |
 | 当前 CPU PCP | local IRQ off + current-CPU access | 不允许 remote mutation |
 | 当前 CPU slab cache | local IRQ off + current-CPU access | cache hit 不取 `balloc` 锁 |
-| `page_ready` / `heap_ready` | Acquire/Release atomics | 发布初始化状态；初始化流程仍要求串行 |
+| 页服务 `ready` / 堆 `heap_ready` | Acquire/Release atomics | 发布初始化状态；初始化流程仍要求串行 |
 | 各类 usage | current-CPU cumulative atomics；free Release / snapshot Acquire | 支持跨 CPU free，只提供诊断值 |
 | tracking state | `SpinNoIrq` + per-CPU recursion guard | 仅 `tracking` feature |
 
@@ -394,3 +382,10 @@ usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取�
 - PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
   pressure flush。
 - 直接 page API 的 caller 必须显式成对 deallocate；`GlobalPage` 通过 `Drop` 自动完成。
+
+## 当前边界与后续迁移
+
+本阶段保留 byte allocator 算法、堆内部 buddy、全局库存的直映后备和现有回收政策。
+未加入页引用、NUMA、内存热插拔、按 slab 回收后备页或独立 vmalloc 区域。物理页 PA
+只是 raw 所有权协议的地址表示，不等于 PageRef，也不证明任意 PA 可安全释放。
+现有 GlobalPage 的内容 VA 接口和 raw 生命周期保留；后续引用持有迁移可从页服务接入。

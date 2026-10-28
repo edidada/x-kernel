@@ -4,8 +4,8 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use axalloc::{UsageKind, global_allocator};
 use driver_base::{DeviceKind, DriverError};
+use kalloc::{UsageKind, page_allocator};
 use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject};
 use khal::mem::PAGE_SIZE_4K;
 
@@ -24,17 +24,17 @@ impl net::fxmac::KernelFunc for FXmacKernelFunc {
     }
 
     fn dma_alloc_coherent(pages: usize) -> (usize, usize) {
-        let Ok(vaddr) = global_allocator().alloc_pages(pages, PAGE_SIZE_4K, UsageKind::Dma) else {
+        let Ok(paddr) = page_allocator().alloc_pages(pages, PAGE_SIZE_4K, UsageKind::Dma) else {
             log::error!("failed to alloc pages");
             return (0, 0);
         };
-        let paddr = khal::mem::v2p((vaddr).into());
+        let vaddr = khal::mem::p2v(paddr).as_usize();
         log::debug!("alloc pages @ vaddr={:#x}, paddr={:#x}", vaddr, paddr);
         (vaddr, paddr.as_usize())
     }
 
     fn dma_free_coherent(vaddr: usize, pages: usize) {
-        global_allocator().dealloc_pages(vaddr, pages, UsageKind::Dma);
+        page_allocator().dealloc_pages(khal::mem::v2p(vaddr.into()), pages, UsageKind::Dma);
     }
 
     fn dma_request_irq(_irq: usize, _handler: fn()) {

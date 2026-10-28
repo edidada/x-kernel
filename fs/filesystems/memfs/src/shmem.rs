@@ -7,7 +7,7 @@
 use alloc::{string::String, sync::Arc};
 
 #[cfg(unittest)]
-use kalloc::global_allocator;
+use kalloc::page_allocator;
 use kcred::Cred;
 use ksync::{Mutex, static_lock};
 use kvfs::{
@@ -48,7 +48,7 @@ bitflags::bitflags! {
 /// selecting unlimited. This is a per-superblock quota, not a reservation.
 #[cfg(unittest)]
 pub(crate) fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    let page_limit = default_tmpfs_page_limit(global_allocator().total_pages());
+    let page_limit = default_tmpfs_page_limit(page_allocator().total_pages());
     new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, superblock_flags, page_limit)
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn new_tmpfs_with_type_and_page_limit(
         superblock_flags,
         TmpfsMountOptions {
             page_limit,
-            inode_limit: default_tmpfs_page_limit(global_allocator().total_pages()).min(MAX_INODES),
+            inode_limit: default_tmpfs_page_limit(page_allocator().total_pages()).min(MAX_INODES),
             root_mode: default_tmpfs_root_mode(),
             root_uid: 0,
             root_gid: 0,

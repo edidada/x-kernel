@@ -75,7 +75,7 @@ ixgbe = ["net"]
 # platform driver is enabled. Code uses cfg(feature = "any_firmware_driver")
 # instead of repeating the full any(ahci, bcm2835-sdhci, sdmmc, fxmac) list.
 any_firmware_driver = []
-fxmac = ["any_firmware_driver", "net"]
+fxmac = ["any_firmware_driver", "net", "dep:kalloc"]
 ahci = ["any_firmware_driver", "block"]
 bcm2835-sdhci = ["any_firmware_driver", "block"]
 sdmmc = ["any_firmware_driver", "block"]

@@ -413,8 +413,8 @@ init (PID 1, 全新 spawn 的用户任务):
 原地规范化并扣除后备区，只返回 PageMetaTable；映射回调仅将实际后备区 PA
 转换为稳定可写 VA，不在每个物理范围上保存映射信息。
 
-runtime 串行发布统一 PFN 查询服务，再按 PA 升序以首个非空剩余区间调用既有 global_init，
-用 global_add_memory 依次交接后续非空区间。buddy 按注册顺序选区间，低地址优先可避免
+runtime 串行发布统一 PFN 查询服务，再按 PA 升序将所有非空剩余区间交给独立
+page_allocator().add_memory。全部注册后以 init_heap 单独引导对象堆，页库存不依赖堆初始化。buddy 按注册顺序选区间，低地址优先可避免
 DMA32 分配先命中高于 4 GiB 的区间后直接失败。VA 转换在这两个实际使用位置完成。
 输入容器容量属于 runtime/HAL 接线，不作为 page-meta 的公共 region 抽象。
 256 是规范化前输入条目数；当前后端接受最多 64 个合并后的不连续段，现有 buddy

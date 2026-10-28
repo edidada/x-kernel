@@ -3,7 +3,7 @@
 ## Test Probe Boundary
 
 The audit scope includes guest fixtures in `ut-tests/lib.rs`, `ut-tests/pcp.rs`,
-`ut-tests/slab_cache.rs`, and `ut-tests/tracking.rs`, mounted in their original
+`ut-tests/slab_cache.rs`, `ut-tests/pages.rs`, and `ut-tests/tracking.rs`, mounted in their original
 modules under `cfg(unittest)`. The slab and tracking feature gates are unchanged;
 test extraction does not change allocation ownership or unsafe invariants.
 
@@ -15,8 +15,8 @@ and remote allocation are outside the contract. No production API is added.
 
 ## 概述
 
-`kalloc` 位于内核内存 ownership 的基础层。它把未经类型化的虚拟地址 region 转换为
-Rust heap object、连续页和 DMA32 页，并通过 raw pointer、地址算术、底层 allocator
+`kalloc` 位于内核内存 ownership 的基础层。独立物理页服务接收 PhysAddr RAM 范围，
+对象堆从该服务取得后备页并交付对象指针，两者分别拥有状态与初始化，并通过 raw pointer、地址算术、底层 allocator
 contract 和 per-CPU mutable state 维护这些资源。这里的不变量一旦破坏，影响通常不是
 局部 allocation 失败，而是 freelist 损坏、页重复分配、越界 DMA 或内核未定义行为。
 
@@ -44,8 +44,8 @@ boot memory map / kernel callers / C components / DMA users
 
 `kalloc` 信任以下条件：
 
-1. 启动流程传入的 `[va, va + size)` 已映射、可写、独占，包含至少一个完整 4 KiB 页，
-   且不同 region 不重叠；`va` 按页对齐，`p2v` / `v2p` 对这些地址有效。
+1. 启动流程传入的 `[pa, pa + size)` 是独占 RAM，其内核永久直映已建立且可写，包含至少一个完整 4 KiB 页，
+   且不同 region 不重叠；`pa` 按页对齐，`p2v` / `v2p` 对这些地址有效。
 2. deallocation caller 使用原 allocation 的起始地址、layout 或页数，只释放一次，并
    保持相同的 `UsageKind`。
 3. `alloc-engine` 返回的地址满足请求的大小、对齐、非空性和唯一 ownership，并接受
@@ -62,7 +62,7 @@ boot memory map / kernel callers / C components / DMA users
 
 | 边界 | 输入 | 当前处理 | 剩余风险 |
 |------|------|----------|----------|
-| 启动内存 | `kruntime` 从 firmware/boot memory 描述中筛选的 free region，经 `p2v` 传入 | 底层 buddy 拒绝未页对齐、过小、超出 region 数上限或与既有 region 重叠的输入；首个 region 建立 page/byte allocator | 无法验证地址是否真实映射、可写、属于 free RAM 或与 allocator 外部 owner 冲突；端点算术仍依赖可信范围 |
+| 启动内存 | `kruntime` 从 firmware/boot memory 描述中筛选的 free region，以 PhysAddr 传入 | 底层 buddy 拒绝未页对齐、过小、超出 region 数上限或与既有 region 重叠的输入；注册只建立页库存，init_heap 单独建立对象堆 | 无法验证地址是否真实映射、可写、属于 free RAM 或与 allocator 外部 owner 冲突；端点算术仍依赖可信范围 |
 | Rust 内核 caller | `Layout`、raw allocation pointer、页数、alignment、固定地址、`UsageKind` | allocation 返回 `Result`；部分大小计算和汇总 usage subtraction 使用 checked arithmetic | safe 外观的部分 deallocation API 仍依赖 caller contract，错误参数可能导致 UB |
 | DMA / 设备 | 连续页数量、alignment、虚实地址转换结果 | allocation 后检查整个物理区间低于 4 GiB，不满足则归还 | 没有 DMA32 zone；错误 `v2p`、区间溢出或设备越权仍可导致错误 DMA |
 | Tracking/观测 | enable/disable、generation range、visitor | feature-gated、全局锁和递归 guard | backtrace/地址可能泄露内核布局；visitor 重入 tracking API 可能死锁或 panic |
@@ -79,7 +79,7 @@ payload。用户 workload 可以间接驱动 allocation 压力；可选 tracking
 
 主要操作：
 
-- 把 page allocator 返回的非零整数地址构造成 `NonNull<u8>`；
+- 将物理页服务返回的 PA 转为有效直映 VA，再构造成 `NonNull<u8>`；
 - 实现 `GlobalAlloc::alloc` / `dealloc` 的 raw pointer ABI；
 - 将 allocation failure 转交 `handle_alloc_error()`。
 
@@ -190,7 +190,7 @@ tracking 数据不可用于正常运行时延迟基线。
 锁嵌套。普通 IRQ 通过 `SpinNoIrq` 或显式 `IrqSave` 排除；NMI 不在支持范围。
 
 allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完成状态，不把多个
-并发 `global_init()` / `add_memory()` 调用变成安全的 region 初始化协议。
+并发 `init_heap()` / 页服务 `add_memory()` 调用变成安全的 region 初始化协议。
 
 ## 威胁分析
 
@@ -225,12 +225,11 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 
 ## 故障管理
 
-- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_pages,alloc_pages_at,add_memory}` 使用
-  `AllocResult` 报告 `NoMemory`、`InvalidInput` 等错误。
+- 对象堆 `GlobalAllocator::alloc` 和物理页服务的分配、注册接口使用 `AllocResult` 报告 `NoMemory`、`InvalidInput` 等错误。
 - Rust `GlobalAlloc::alloc` 不能把普通失败静默传给大多数 Rust allocation；它记录
   layout 和中央 heap 状态后调用 `handle_alloc_error()`。
-- `global_init()`、`init_page_allocator()` 和部分内部不变量使用 assert/expect，启动或
-  allocator metadata 错误按 fail-fast 处理；内核不尝试在此类错误后继续运行。
+- 页注册与 init_heap 返回普通错误；kruntime 在启动边界按致命失败处理。
+  allocator 内部不变量仍可 assert/expect，发生 metadata 损坏后不尝试继续运行。
 - PCP 和 slab refill 接受 partial progress，避免因为未达到 batch 目标而丢弃已经取得的
   block/object。
 - DMA32 检查失败会先把不合格 allocation 归还 buddy，再返回错误。
@@ -312,3 +311,19 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - [ ] tracking visitor 是否在持锁期间调用，是否存在递归 state lock 或敏感地址泄露？
 - [ ] 新增统计是否明确计量单位和层次，且没有被用作 allocator correctness/reclaim 条件？
 - [ ] 新增 cache 或 allocator 状态是否同步更新初始化、CPU hotplug、reclaim 和关机策略？
+
+## 物理页服务与对象堆的所有权边界
+
+`src/pages.rs` 的 PhysicalPageAllocator 独立拥有系统 page buddy 和 ready；它只在
+内部把 PA 转为现有 buddy/PCP 所需的直映 VA。公开分配和归还不会创建映射，要求
+启动交付的 RAM 在库存生命周期内始终可通过直映访问。无映射或伪造 PA 不受支持。
+
+对象堆扩容通过私有无记账入口取得独占后备页，随后由 byte allocator 管理内容。
+普通对象统计发生在对象交付/释放；超大对象由页服务按整页记账。统计分类不用于
+选择库存或判断真实页类型。对象堆不持有物理页服务的锁跨越对象构造，页服务也不会
+反向调用对象分配器。既有 heap -> page lock 顺序保留。
+
+物理地址接口依然采用 raw ownership；页数、分类、原始 PA 和最后硬件使用结束由
+调用方保证。!1111 的描述符目录不充当 allocation registry 或 double-free 检测器。
+测试覆盖无堆字段的页实例交接、PCP 物理地址复用、无记账后备分配及对象大小路径的
+单次计费，避免把物理地址类型误当成所有权证明。

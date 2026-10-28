@@ -5,8 +5,8 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::ptr::NonNull;
 
-use kalloc::{GlobalAllocator, GlobalPage, UsageKind};
-use memaddr::{PAGE_SIZE_4K as PAGE, PhysAddr, PhysAddrRange};
+use kalloc::{PhysicalPageAllocator, GlobalPage, UsageKind};
+use memaddr::{PAGE_SIZE_4K as PAGE, PhysAddrRange};
 use unittest::def_test;
 
 #[def_test]
@@ -27,22 +27,22 @@ fn prepared_inventory_works_with_existing_allocator_interfaces() {
         })
     }
     .unwrap();
-    let allocator = Box::new(GlobalAllocator::new());
+    let allocator = Box::new(PhysicalPageAllocator::new());
     let first = free.as_slice()[0];
-    allocator.init_page_allocator(khal::mem::p2v(first.start).as_usize(), first.size());
+    allocator.add_memory(first.start, first.size()).unwrap();
     for r in &free.as_slice()[1..] {
         if !r.is_empty() {
             allocator
-                .add_memory(khal::mem::p2v(r.start).as_usize(), r.size())
+                .add_memory(r.start, r.size())
                 .unwrap();
         }
     }
     // Exercise inventory handoff using eight-page blocks: this fixture owns
-    // a private allocator, while the PCP caches belong to the global allocator.
+    // a private inventory, while PCP caches belong to the system page service.
     const BLOCK_PAGES: usize = 8;
     let mut allocated = Vec::new();
     while let Ok(addr) = allocator.alloc_pages(BLOCK_PAGES, PAGE, UsageKind::Global) {
-        let paddr = PhysAddr::from_usize(pa.as_usize() + (addr - va.as_usize()));
+        let paddr = addr;
         for pfn in paddr.as_usize() / PAGE..paddr.as_usize() / PAGE + BLOCK_PAGES {
             assert!(!table.lookup(pfn).unwrap().is_permanent());
         }

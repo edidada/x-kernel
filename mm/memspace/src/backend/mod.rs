@@ -5,10 +5,10 @@
 //! Memory mapping backends.
 use alloc::boxed::Box;
 
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, page_allocator};
 use kerrno::{KError, KResult};
 use khal::{
-    mem::{p2v, v2p},
+    mem::p2v,
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
 use memaddr::{DynPageIter, MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
@@ -31,27 +31,24 @@ pub fn divide_page(size: usize, pgsize: PageSize) -> usize {
 pub fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
     let pgsize = size as usize;
     let num_pages = pgsize / PAGE_SIZE_4K;
-    let vaddr = VirtAddr::from(
-        global_allocator()
-            .alloc_pages(num_pages, pgsize, UsageKind::VirtMem)
-            .map_err(|_| KError::NoMemory)?,
-    );
+    let paddr = page_allocator()
+        .alloc_pages(num_pages, pgsize, UsageKind::VirtMem)
+        .map_err(|_| KError::NoMemory)?;
     if zeroed {
+        let vaddr = p2v(paddr);
         // SAFETY: `vaddr` names a freshly allocated virtual region of `pgsize`
         // bytes, so zero-filling that range is valid.
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
     }
-    let paddr = v2p(vaddr);
 
     Ok(paddr)
 }
 
 #[doc(hidden)]
 pub fn dealloc_frame(frame: PhysAddr, align: PageSize) {
-    let vaddr = p2v(frame);
     let page_size: usize = align.into();
     let num_pages = page_size / PAGE_SIZE_4K;
-    global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
+    page_allocator().dealloc_pages(frame, num_pages, UsageKind::VirtMem);
 }
 
 #[doc(hidden)]

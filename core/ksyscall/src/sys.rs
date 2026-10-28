@@ -123,7 +123,7 @@ pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
 
-    let alloc = kalloc::global_allocator();
+    let alloc = kalloc::page_allocator();
     let avail = alloc.available_pages();
     let total_pages = alloc.used_pages() + avail;
     kinfo.totalram = total_pages.saturating_mul(mem::PAGE_SIZE_4K) as _;

@@ -116,14 +116,14 @@ fn test_shootdown_clears_stale_tlb() {
         let remote_cpu = LogicalCpuId::new(if my_cpu == LogicalCpuId::new(0) { 1 } else { 0 });
 
         // Allocate two physical pages with different magic values.
-        let v1 = kalloc::global_allocator()
+        let p1 = kalloc::page_allocator()
             .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
             .expect("alloc page 1");
-        let v2 = kalloc::global_allocator()
+        let p2 = kalloc::page_allocator()
             .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
             .expect("alloc page 2");
-        let p1 = khal::mem::v2p(VirtAddr::from(v1));
-        let p2 = khal::mem::v2p(VirtAddr::from(v2));
+        let v1 = khal::mem::p2v(p1).as_usize();
+        let v2 = khal::mem::p2v(p2).as_usize();
 
         const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
         const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
@@ -209,8 +209,8 @@ fn test_shootdown_clears_stale_tlb() {
                 .unmap(test_vaddr)
                 .expect("test mapping must remain installed until cleanup");
         }
-        kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
-        kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+        kalloc::page_allocator().dealloc_pages(p1, 1, kalloc::UsageKind::PageTable);
+        kalloc::page_allocator().dealloc_pages(p2, 1, kalloc::UsageKind::PageTable);
     }
 }
 
@@ -245,14 +245,14 @@ fn test_kernel_pt_miss_remote_without_mask() {
         task.reset_on_cpu_mask(my_cpu);
 
         // Allocate two physical pages with different magic values.
-        let v1 = kalloc::global_allocator()
+        let p1 = kalloc::page_allocator()
             .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
             .expect("alloc page 1");
-        let v2 = kalloc::global_allocator()
+        let p2 = kalloc::page_allocator()
             .alloc_pages(1, memaddr::PAGE_SIZE_4K, kalloc::UsageKind::PageTable)
             .expect("alloc page 2");
-        let p1 = khal::mem::v2p(VirtAddr::from(v1));
-        let p2 = khal::mem::v2p(VirtAddr::from(v2));
+        let v1 = khal::mem::p2v(p1).as_usize();
+        let v2 = khal::mem::p2v(p2).as_usize();
 
         const MAGIC_A: u64 = 0xDEAD_BEEF_CAFE_BABE;
         const MAGIC_B: u64 = 0xCAFE_BABE_DEAD_BEEF;
@@ -363,7 +363,7 @@ fn test_kernel_pt_miss_remote_without_mask() {
                 .unmap(test_vaddr)
                 .expect("test mapping must remain installed until cleanup");
         }
-        kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
-        kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
+        kalloc::page_allocator().dealloc_pages(p1, 1, kalloc::UsageKind::PageTable);
+        kalloc::page_allocator().dealloc_pages(p2, 1, kalloc::UsageKind::PageTable);
     }
 }

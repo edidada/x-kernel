@@ -21,9 +21,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use alloc_engine::{
-    AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
-};
+use alloc_engine::{AllocResult, BaseAllocator, ByteAllocator};
 use kaddr_layout::v2p;
 use kcpu_slot::{CpuId, CpuPin, cpu_slot_cell};
 use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
@@ -46,6 +44,8 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
 }
 
 mod page;
+mod pages;
+pub use pages::{PhysicalPageAllocator, is_page_allocator_ready, page_allocator};
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
@@ -286,23 +286,15 @@ impl fmt::Debug for Usages {
     }
 }
 
-/// The global allocator used by x-kernel.
+/// Kernel object heap backed by the independent physical-page service.
 ///
-/// It combines a [`ByteAllocator`] and a [`PageAllocator`] into a simple
-/// two-level allocator: firstly tries allocate from the byte allocator, if
-/// there is no memory, asks the page allocator for more memory and adds it to
-/// the byte allocator.
-///
-/// The configured byte allocator serves sub-page requests, while
-/// [`BuddyPageAllocator`] provides backing pages and direct large allocations.
-/// Slab builds add a per-CPU object cache in front of the byte allocator.
+/// Owns byte allocation and heap readiness. The selected byte allocator serves
+/// objects; large requests use the page service directly. Slab configurations add
+/// a per-CPU object cache. System page inventory belongs to page_allocator().
 pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
     /// Whether the byte allocator already owns a bootstrap heap region.
     heap_ready: AtomicBool,
-    /// Whether the page allocator has at least one usable memory region.
-    page_ready: AtomicBool,
-    palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
 }
 
 impl Default for GlobalAllocator {
@@ -317,8 +309,6 @@ impl GlobalAllocator {
         Self {
             balloc: SpinNoIrq::new(DefaultByteAllocator::new()),
             heap_ready: AtomicBool::new(false),
-            page_ready: AtomicBool::new(false),
-            palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
         }
     }
 
@@ -333,45 +323,6 @@ impl GlobalAllocator {
                 "TLSF"
             }
         }
-    }
-
-    /// Initializes the allocator with the given region.
-    ///
-    /// This is the legacy "initialize both page allocator and byte allocator"
-    /// entry used by paths that already have a stable runtime memory region.
-    pub fn init(&self, va: usize, size: usize) {
-        assert!(size > MIN_HEAP_SIZE);
-        self.init_or_extend_page_allocator(va, size)
-            .expect("failed to initialize page allocator");
-        self.bootstrap_heap_if_needed()
-            .expect("failed to initialize heap memory");
-    }
-
-    /// Initialize or extend only the backing page allocator.
-    ///
-    /// The byte allocator is bootstrapped lazily when memory is later added or
-    /// a byte allocation needs it. `va..va + size` must be a mapped, writable,
-    /// exclusive region that does not overlap an existing allocator region.
-    pub fn init_page_allocator(&self, va: usize, size: usize) {
-        self.init_or_extend_page_allocator(va, size)
-            .expect("failed to initialize page allocator");
-    }
-
-    /// Return whether the backing page allocator has a usable memory region.
-    pub fn is_page_allocator_ready(&self) -> bool {
-        self.page_ready.load(Ordering::Acquire)
-    }
-
-    /// Add the given region to the allocator.
-    ///
-    /// By default new memory first becomes available to the page allocator.
-    pub fn add_memory(&self, va: usize, size: usize) -> AllocResult {
-        self.init_or_extend_page_allocator(va, size)?;
-
-        if !self.heap_ready.load(Ordering::Acquire) {
-            self.bootstrap_heap_if_needed()?;
-        }
-        Ok(())
     }
 
     /// Allocate arbitrary number of bytes. Returns the left bound of the
@@ -393,12 +344,12 @@ impl GlobalAllocator {
         #[cfg(feature = "slab")]
         if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
             let object = self.alloc_from_percpu_slab(size_class)?;
-            self.record_usage_alloc(UsageKind::RustHeap, layout.size());
+            record_usage_alloc(UsageKind::RustHeap, layout.size());
             return Ok(object);
         }
 
         let object = self.alloc_from_byte_allocator(layout)?;
-        self.record_usage_alloc(UsageKind::RustHeap, layout.size());
+        record_usage_alloc(UsageKind::RustHeap, layout.size());
         Ok(object)
     }
 
@@ -472,11 +423,9 @@ impl GlobalAllocator {
             if !heap_ready {
                 req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
             }
-            let heap_addr = match self.alloc_pages(
-                req_size / PAGE_SIZE_4K,
-                PAGE_SIZE_4K,
-                UsageKind::RustHeap,
-            ) {
+            let heap_paddr = match page_allocator()
+                .alloc_from_inventory(req_size / PAGE_SIZE_4K, PAGE_SIZE_4K)
+            {
                 Ok(addr) => addr,
                 Err(err) => {
                     req_size /= 2;
@@ -486,6 +435,7 @@ impl GlobalAllocator {
                     continue;
                 }
             };
+            let heap_addr = kaddr_layout::p2v(heap_paddr.as_usize());
             debug!(
                 "expand heap memory: [{:#x}, {:#x})",
                 heap_addr,
@@ -505,7 +455,7 @@ impl GlobalAllocator {
     fn large_alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         let pages = layout.size().div_ceil(PAGE_SIZE_4K);
         let align = layout.align().max(PAGE_SIZE_4K);
-        let addr = self
+        let paddr = page_allocator()
             .alloc_pages(pages, align, UsageKind::RustHeap)
             .inspect_err(|e| {
                 error!(
@@ -515,8 +465,7 @@ impl GlobalAllocator {
                     e
                 );
             })?;
-        // alloc_pages skips usages for RustHeap; track it here.
-        self.record_usage_alloc(UsageKind::RustHeap, pages_to_bytes(pages));
+        let addr = kaddr_layout::p2v(paddr.as_usize());
         // SAFETY: `addr` is non-null and properly aligned.
         Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
     }
@@ -533,9 +482,13 @@ impl GlobalAllocator {
         if layout.size() > LARGE_ALLOC_THRESHOLD_BYTES {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
             // dealloc_pages handles usages tracking internally.
-            self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
+            page_allocator().dealloc_pages(
+                kernel_virt_to_phys(ptr.as_ptr() as usize).into(),
+                pages,
+                UsageKind::RustHeap,
+            );
         } else {
-            self.record_usage_dealloc(UsageKind::RustHeap, layout.size());
+            record_usage_dealloc(UsageKind::RustHeap, layout.size());
 
             #[cfg(feature = "slab")]
             if let Some(size_class) = alloc_engine::SizeClass::from_layout(layout) {
@@ -559,187 +512,13 @@ impl GlobalAllocator {
         }
     }
 
-    /// Allocates contiguous pages.
-    ///
-    /// It allocates `num_pages` pages from the page allocator.
-    ///
-    /// `align_pow2` must be a power of 2, and the returned region bound will be
-    /// aligned to it.
-    ///
-    /// 1–4 page allocations with standard alignment are served from the
-    /// per-CPU page cache to reduce global lock contention.
-    pub fn alloc_pages(
-        &self,
-        num_pages: usize,
-        align_pow2: usize,
-        kind: UsageKind,
-    ) -> AllocResult<usize> {
-        debug_assert!(
-            self.page_ready.load(Ordering::Acquire),
-            "page allocator is not initialized"
-        );
-
-        // Fast path: 1–4 pages with standard alignment -> PCP cache.
-        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) && align_pow2 <= PAGE_SIZE_4K {
-            let mut local_owner = AllocLocalOwner::acquire();
-            if let Some(addr) = pcp::try_alloc(&mut local_owner, num_pages) {
-                drop(local_owner);
-                if !matches!(kind, UsageKind::RustHeap) {
-                    self.record_usage_alloc(kind, pages_to_bytes(num_pages));
-                }
-                return Ok(addr);
-            }
-            drop(local_owner);
-
-            // Cache miss: batch-fill from the global allocator.
-            //
-            // Acquire the owner before `palloc`: it stores the pre-lock IRQ
-            // state, so nesting it inside the `SpinNoIrq` guard would restore
-            // "IRQs disabled" when it drops after `palloc` already re-enabled
-            // them, leaking an IRQ-off window back to the caller.
-            let mut local_owner = AllocLocalOwner::acquire();
-            let mut palloc = self.palloc.lock();
-            let result = pcp::fill_cache(&mut local_owner, num_pages, &mut palloc);
-            drop(palloc);
-            if result.is_ok() && !matches!(kind, UsageKind::RustHeap) {
-                self.record_usage_alloc(kind, pages_to_bytes(num_pages));
-            }
-            return result;
-        }
-
-        // Slow path: multi-page or special alignment.
-        let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
-        if !matches!(kind, UsageKind::RustHeap) {
-            self.record_usage_alloc(kind, pages_to_bytes(num_pages));
-        }
-        Ok(addr)
-    }
-
-    /// Allocates contiguous DMA pages.
-    ///
-    /// DMA allocations must come from physical memory below 4 GiB.
-    /// The page allocator only knows virtual addresses, so the
-    /// DMA32 filtering happens here using `v2p` translation.
-    pub fn alloc_dma_pages(
-        &self,
-        num_pages: usize,
-        align_pow2: usize,
-        kind: UsageKind,
-    ) -> AllocResult<usize> {
-        debug_assert!(
-            self.page_ready.load(Ordering::Acquire),
-            "page allocator is not initialized"
-        );
-        const DMA32_LIMIT: usize = 0x1_0000_0000;
-
-        let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
-
-        let phys = kernel_virt_to_phys(addr);
-        let size = pages_to_bytes(num_pages);
-        if phys + size > DMA32_LIMIT {
-            self.palloc.lock().deallocate_pages(addr, num_pages);
-            return Err(AllocError::NoMemory);
-        }
-
-        if !matches!(kind, UsageKind::RustHeap) {
-            self.record_usage_alloc(kind, size);
-        }
-        Ok(addr)
-    }
-
-    /// Allocates contiguous pages starting from the given address.
-    ///
-    /// It allocates `num_pages` pages from the page allocator starting from the
-    /// given address.
-    ///
-    /// `align_pow2` must be a power of 2, and the returned region bound will be
-    /// aligned to it.
-    pub fn alloc_pages_at(
-        &self,
-        va: usize,
-        num_pages: usize,
-        align_pow2: usize,
-        kind: UsageKind,
-    ) -> AllocResult<usize> {
-        let addr = self
-            .palloc
-            .lock()
-            .allocate_pages_at(va, num_pages, align_pow2)?;
-        if kind != UsageKind::RustHeap {
-            self.record_usage_alloc(kind, pages_to_bytes(num_pages));
-        }
-        Ok(addr)
-    }
-
-    /// Gives back the allocated pages starts from `va` to the page allocator.
-    ///
-    /// The pages should be allocated by [`alloc_pages`], and `align_pow2`
-    /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
-    /// behavior is undefined.
-    ///
-    /// 1–4 page deallocations are cached per-CPU to reduce global lock
-    /// contention.
-    ///
-    /// [`alloc_pages`]: GlobalAllocator::alloc_pages
-    pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
-
-        // Fast path: 1–4 pages -> try to cache them per-CPU.
-        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
-            let mut local_owner = AllocLocalOwner::acquire();
-            if pcp::try_free(&mut local_owner, num_pages, va) {
-                return;
-            }
-            drop(local_owner);
-
-            // Cache full: bulk-drain to the global allocator. Acquire the owner
-            // before `palloc` for the same IRQ-state nesting reason as
-            // `alloc_pages`.
-            let mut local_owner = AllocLocalOwner::acquire();
-            let mut palloc = self.palloc.lock();
-            pcp::drain_cache(&mut local_owner, num_pages, &mut palloc, va);
-            return;
-        }
-
-        // Slow path: multi-page.
-        self.palloc.lock().deallocate_pages(va, num_pages);
-    }
-
-    /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
-    pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
-        self.palloc.lock().deallocate_pages(va, num_pages);
-    }
-
-    /// Add diagnostic usage without placing allocation paths behind a usage lock.
-    fn record_usage_alloc(&self, kind: UsageKind, size_bytes: usize) {
-        with_current_usage_counters(|counters| counters.alloc(kind, size_bytes));
-    }
-
-    /// Record freed bytes for aggregate diagnostic accounting.
-    fn record_usage_dealloc(&self, kind: UsageKind, size_bytes: usize) {
-        with_current_usage_counters(|counters| counters.dealloc(kind, size_bytes));
-    }
-
-    fn init_or_extend_page_allocator(&self, va: usize, size: usize) -> AllocResult {
-        if self.page_ready.load(Ordering::Acquire) {
-            self.palloc.lock().add_region(va, size)?;
-        } else {
-            self.palloc.lock().init_region(va, size);
-            self.page_ready.store(true, Ordering::Release);
-        }
-        Ok(())
-    }
-
     fn bootstrap_heap_if_needed(&self) -> AllocResult {
         if self.heap_ready.load(Ordering::Acquire) {
             return Ok(());
         }
-        let heap_addr = self.alloc_pages(
-            MIN_HEAP_SIZE / PAGE_SIZE_4K,
-            PAGE_SIZE_4K,
-            UsageKind::RustHeap,
-        )?;
+        let paddr =
+            page_allocator().alloc_from_inventory(MIN_HEAP_SIZE / PAGE_SIZE_4K, PAGE_SIZE_4K)?;
+        let heap_addr = kaddr_layout::p2v(paddr.as_usize());
         self.balloc.lock().init_region(heap_addr, MIN_HEAP_SIZE);
         self.heap_ready.store(true, Ordering::Release);
         Ok(())
@@ -756,37 +535,28 @@ impl GlobalAllocator {
     pub fn available_bytes(&self) -> usize {
         self.balloc.lock().available_bytes()
     }
+}
 
-    /// Returns the total number of allocatable pages managed by the page allocator.
-    ///
-    /// The total excludes allocator metadata such as the buddy free-head bitmap.
-    pub fn total_pages(&self) -> usize {
-        self.palloc.lock().total_pages()
-    }
+fn record_usage_alloc(kind: UsageKind, size_bytes: usize) {
+    with_current_usage_counters(|counters| counters.alloc(kind, size_bytes));
+}
 
-    /// Returns the number of allocated pages in the page allocator.
-    pub fn used_pages(&self) -> usize {
-        self.palloc.lock().used_pages()
-    }
+fn record_usage_dealloc(kind: UsageKind, size_bytes: usize) {
+    with_current_usage_counters(|counters| counters.dealloc(kind, size_bytes));
+}
 
-    /// Returns the number of available pages in the page allocator.
-    pub fn available_pages(&self) -> usize {
-        self.palloc.lock().available_pages()
-    }
-
-    /// Returns caller-live usage aggregated from all per-CPU counters.
-    ///
-    /// The snapshot is not linearized against concurrent allocation and free;
-    /// it may temporarily overstate or understate usage, but it is never used
-    /// for allocator ownership or reclaim decisions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if cumulative accounting overflows or total recorded frees
-    /// exceed total recorded allocations for any [`UsageKind`].
-    pub fn usages(&self) -> Usages {
-        usage_snapshot()
-    }
+/// Returns caller-live usage aggregated from all per-CPU counters.
+///
+/// The snapshot is not linearized against concurrent allocation and free;
+/// it may temporarily overstate or understate usage, but it is never used
+/// for allocator ownership or reclaim decisions.
+///
+/// # Panics
+///
+/// Panics if cumulative accounting overflows or total recorded frees
+/// exceed total recorded allocations for any [`UsageKind`].
+pub fn usages() -> Usages {
+    usage_snapshot()
 }
 
 // SAFETY: `GlobalAllocator` routes all allocations through its internal locked
@@ -883,46 +653,20 @@ where
 #[cfg_attr(all(target_os = "none", not(test)), global_allocator)]
 static GLOBAL_ALLOCATOR: GlobalAllocator = GlobalAllocator::new();
 
-/// Returns the reference to the global allocator.
+/// Returns the shared kernel object heap. Page users call page_allocator().
 pub fn global_allocator() -> &'static GlobalAllocator {
     &GLOBAL_ALLOCATOR
 }
 
-/// Initializes the global allocator with the given memory region.
+/// Initializes the kernel object heap after boot has registered physical RAM.
 ///
-/// Note that the memory region bounds are just numbers, and the allocator
-/// does not actually access the region. Users should ensure that the region
-/// is valid and not being used by others, so that the allocated memory is also
-/// valid.
+/// Call once during serialized boot before ordinary heap users run. This does
+/// not initialize or own page inventory.
 ///
-/// The first call bootstraps the allocator, and later calls extend it.
-pub fn global_init(va: usize, size: usize) {
-    debug!(
-        "initialize global allocator at: [{:#x}, {:#x})",
-        va,
-        va + size
-    );
-    GLOBAL_ALLOCATOR.init(va, size);
-}
-
-/// Add the given memory region to the global allocator.
-///
-/// Users should ensure that the region is valid and not being used by others,
-/// so that the allocated memory is also valid.
-///
-/// It's similar to [`global_init`], but can be called multiple times.
-pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
-    debug!(
-        "add a memory region to global allocator: [{:#x}, {:#x})",
-        va,
-        va + size
-    );
-    GLOBAL_ALLOCATOR.add_memory(va, size)
-}
-
-/// Return whether the global backing page allocator is ready for requests.
-pub fn is_page_allocator_ready() -> bool {
-    GLOBAL_ALLOCATOR.is_page_allocator_ready()
+/// # Errors
+/// Returns a page allocation error if initial backing cannot be obtained.
+pub fn init_heap() -> AllocResult {
+    GLOBAL_ALLOCATOR.bootstrap_heap_if_needed()
 }
 
 unittest::path_mod_test!(pub mod tests_kalloc, "../ut-tests/lib.rs");

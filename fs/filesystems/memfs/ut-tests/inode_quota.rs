@@ -71,7 +71,7 @@ fn openrc_run_mount_accounts_root_and_accepts_800k_inodes() {
     assert_eq!(root.metadata().mode.permission().bits(), 0o755);
     assert_eq!(
         stat.blocks,
-        (global_allocator().total_pages() as u64 * 20).div_ceil(100)
+        (page_allocator().total_pages() as u64 * 20).div_ceil(100)
     );
     let file = open_file(&root, "openrc-state").unwrap();
     assert_eq!(fs.stat().unwrap().free_file_count, 819198);

@@ -63,7 +63,7 @@ const DRAIN_BUF: usize = C1 + 1; // C1 = 12 is the largest COUNT
 
 /// Per-CPU cache for a single page order.
 ///
-/// Each cached entry holds the start address (physical) of a contiguous
+/// Each cached entry holds the direct-map virtual start address of a contiguous
 /// block of `NR_PAGES` pages.  At most `COUNT` entries are stored.
 ///
 /// This is analogous to Linux's `struct per_cpu_pages`.

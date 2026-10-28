@@ -165,3 +165,8 @@ internal forwardings, each with `# Safety` sections and matching
 - `dma-trace` feature: coherent allocations record their call site and
   detect duplicate or mismatched frees at runtime, which is the cheapest
   way to debug DMA leaks without a full MMU tracer.
+
+Coherent backing comes from kalloc's independent physical-page service as a PA.
+The DMA layer obtains its CPU direct-map VA before changing mapping attributes or
+accessing contents, and converts the owned CPU address back to the original PA on
+release. Device synchronization and platform share/unshare remain DMA duties.

@@ -97,7 +97,7 @@ fn tmpfs_unlimited_page_quota_preserves_default_inode_capacity() {
     assert_eq!(stat.blocks, 0);
     assert_eq!(stat.blocks_free, 0);
     assert_eq!(stat.blocks_available, 0);
-    let inode_limit = (global_allocator().total_pages() / 2).min(quota::MAX_INODES) as u64;
+    let inode_limit = (page_allocator().total_pages() / 2).min(quota::MAX_INODES) as u64;
     assert_eq!(stat.file_count, inode_limit);
     assert_eq!(stat.free_file_count, inode_limit.saturating_sub(2));
     assert_eq!(file.write(b"page"), Ok(4));

@@ -6,7 +6,7 @@
 use kerrno::KResult;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
-use crate::{UsageKind, global_allocator};
+use crate::{UsageKind, page_allocator};
 
 /// A RAII wrapper for contiguous 4K-sized pages.
 ///
@@ -22,8 +22,9 @@ impl GlobalPage {
     ///
     /// # Safety
     ///
-    /// `start_va` must have been returned by a prior `alloc_pages` with the
-    /// same `num_pages`, and no other `GlobalPage` currently owns it.
+    /// `start_va` must be the direct-map address of a live raw page allocation
+    /// from the system page service with this `num_pages` and UsageKind::Global.
+    /// No other owner may access or release that allocation after this transfer.
     pub unsafe fn from_raw(start_va: VirtAddr, num_pages: usize) -> Self {
         Self {
             start_va,
@@ -108,8 +109,9 @@ impl GlobalPage {
 
     /// Internal function to allocate pages.
     fn alloc_pages(num_pages: usize) -> KResult<Self> {
-        let va = global_allocator()
+        let va = page_allocator()
             .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Global)
+            .map(|pa| kaddr_layout::p2v(pa.as_usize()))
             .map_err(|e| match e {
                 alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
                 _ => kerrno::KError::InvalidInput,
@@ -122,8 +124,9 @@ impl GlobalPage {
 
     /// Internal function to allocate pages with specific alignment.
     fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> KResult<Self> {
-        let va = global_allocator()
+        let va = page_allocator()
             .alloc_pages(num_pages, align_pow2, UsageKind::Global)
+            .map(|pa| kaddr_layout::p2v(pa.as_usize()))
             .map_err(|e| match e {
                 alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
                 _ => kerrno::KError::InvalidInput,
@@ -137,6 +140,10 @@ impl GlobalPage {
 
 impl Drop for GlobalPage {
     fn drop(&mut self) {
-        global_allocator().dealloc_pages(self.start_va.into(), self.num_pages, UsageKind::Global);
+        page_allocator().dealloc_pages(
+            kaddr_layout::v2p(self.start_va.as_usize()).into(),
+            self.num_pages,
+            UsageKind::Global,
+        );
     }
 }

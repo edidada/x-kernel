@@ -746,13 +746,17 @@ fn init_allocator() {
         .position(|r| !r.is_empty())
         .expect("page metadata consumed all free RAM");
     let region = free[first];
-    kalloc::global_init(p2v(region.start).as_usize(), region.size());
+    kalloc::page_allocator()
+        .add_memory(region.start, region.size())
+        .expect("failed to initialize page inventory");
     for (index, region) in free.iter().enumerate() {
         if index != first && !region.is_empty() {
-            kalloc::global_add_memory(p2v(region.start).as_usize(), region.size())
+            kalloc::page_allocator()
+                .add_memory(region.start, region.size())
                 .expect("failed to add remaining free RAM to allocator");
         }
     }
+    kalloc::init_heap().expect("failed to initialize kernel heap");
     kernel_boot::bootln!(
         "[boot] page metadata: covered_pages={}, metadata_pages={}, free inventory pages={}",
         covered_pages,
@@ -763,14 +767,15 @@ fn init_allocator() {
 
 fn finish_allocator_init() {
     let allocator = kalloc::global_allocator();
+    let pages = kalloc::page_allocator();
     info!(
         "Allocator state: heap used={:#x}, heap avail={:#x}, pages used={}, pages avail={}, \
          usages={:?}",
         allocator.used_bytes(),
         allocator.available_bytes(),
-        allocator.used_pages(),
-        allocator.available_pages(),
-        allocator.usages()
+        pages.used_pages(),
+        pages.available_pages(),
+        kalloc::usages()
     );
 }
 

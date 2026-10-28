@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 use core::{fmt, mem::MaybeUninit};
 
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{UsageKind, page_allocator};
 use kerrno::{KError, KResult};
 use khal::{
     mem::{PhysAddr, VirtAddr, v2p},
@@ -184,8 +184,9 @@ struct FolioState {
 impl Folio {
     /// Allocates a zeroed, non-uptodate page not yet associated with a mapping.
     pub fn new_zeroed(index: PageIndex) -> KResult<Self> {
-        let addr = global_allocator()
+        let addr = page_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
+            .map(|paddr| khal::mem::p2v(paddr).as_usize())
             .map_err(|_| KError::NoMemory)?;
         let addr = VirtAddr::from(addr);
         // SAFETY: the allocator returned one exclusively owned writable page.
@@ -259,7 +260,7 @@ impl Drop for Folio {
         }
         let charge = state.charge.take();
         drop(state);
-        global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
+        page_allocator().dealloc_pages(khal::mem::v2p(self.addr), 1, UsageKind::PageCache);
         // Capacity becomes available only after the physical allocation is
         // gone. The provider callback holds neither the folio nor index lock.
         drop(charge);

@@ -18,7 +18,6 @@ pub fn alloc_vmid() -> u32 {
 ///
 /// Dropping this handle returns the reserved pages to the host allocator.
 pub struct GuestRamReservation {
-    start_va: usize,
     npages: usize,
     hpa_base: u64,
 }
@@ -26,12 +25,12 @@ pub struct GuestRamReservation {
 impl Drop for GuestRamReservation {
     fn drop(&mut self) {
         log::info!(
-            "[kvmm] releasing guest RAM reservation VA {:#x} ({} pages)",
-            self.start_va,
+            "[kvmm] releasing guest RAM reservation PA {:#x} ({} pages)",
+            self.hpa_base,
             self.npages,
         );
-        kalloc::global_allocator().dealloc_pages(
-            self.start_va,
+        kalloc::page_allocator().dealloc_pages(
+            khal::mem::PhysAddr::from_usize(self.hpa_base as usize),
             self.npages,
             kalloc::UsageKind::VirtMem,
         );
@@ -52,8 +51,9 @@ impl GuestRamReservation {
 pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> Option<GuestRamReservation> {
     let npages = (mem_size as usize) / PAGE_SIZE_4K;
 
-    match kalloc::global_allocator().alloc_pages(npages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
-        Ok(addr) => {
+    match kalloc::page_allocator().alloc_pages(npages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
+        Ok(paddr) => {
+            let addr = kaddr_layout::p2v(paddr.as_usize());
             let size = npages * PAGE_SIZE_4K;
             // SAFETY: `addr` points to `npages` pages just allocated from the
             // host page allocator, so the full reservation is valid to zero.
@@ -64,13 +64,12 @@ pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> Option<GuestRamReserva
                 "[kvmm] reserved guest RAM GPA {:#x}+{:#x} backed by HPA {:#x} ({} pages)",
                 mem_base,
                 mem_size,
-                kaddr_layout::v2p(addr),
+                paddr.as_usize(),
                 npages,
             );
             Some(GuestRamReservation {
-                start_va: addr,
                 npages,
-                hpa_base: kaddr_layout::v2p(addr) as u64,
+                hpa_base: paddr.as_usize() as u64,
             })
         }
         Err(err) => {

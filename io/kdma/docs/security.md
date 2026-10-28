@@ -137,3 +137,8 @@ each with `# Safety` sections and `SAFETY:` comments:
 - Attribute updates remain page-granular and paired with platform hooks.
 - The `active_mappings` map remains the only place bus addresses are
   handed out for temporary mappings.
+
+Physical-page service allocation returns a PA and does not establish DMA or CPU
+access permissions. This layer obtains the existing direct-map VA and retains
+its original coherent mapping/device-retirement obligations before returning
+that PA with the matching count and category.
