@@ -5,11 +5,9 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - "write_unaligned"
-      - "copy_nonoverlapping"
-      - "write_bytes"
-      - "\\.add\\("
-      - "\\.offset\\("
+      - '^(?!\s*//).*(?:write_unaligned|copy_nonoverlapping|write_bytes)'
+      - '^(?!\s*//).*\.add\((?![&"])'
+      - '^(?!\s*//).*\.offset\('
 ---
 
 # CG-020-raw-output-buffer-capacity: Prove capacity before raw writes
@@ -20,6 +18,10 @@ checks:
 - **Scope**: Raw-pointer serialization and structured output into fixed-capacity
   buffers in Rust code, including bootloader buffers. A later final length
   field or the fact that a page was allocated does not prove earlier writes fit.
+  No lint checks capacity or offset overflow; AI review starts from added
+  code lines with raw writes or pointer offsets. Comment lines and `.add(`
+  calls taking a reference or string literal, which are collection methods
+  rather than pointer arithmetic, are not triggers.
   Not this rule: [CG-018](CG-018-uninitialized-storage-model.md) owns
   constructing valid initialized values,
   the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) and

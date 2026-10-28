@@ -8,9 +8,8 @@ checks:
       - "SpinNoIrq"
       - "SpinNoPreempt"
       - "SpinRaw"
-      - "irq_save"
-      - "preempt_disable"
-      - "lock_irqsave"
+      - '\b(?:NoPreemptIrqSave|IrqSave|NoPreempt)\b'
+      - '\bdisable_local_irq\b'
 ---
 
 # CG-013-no-sleep-under-spinlock: Keep sleepable work outside spinlock scopes
@@ -22,6 +21,11 @@ checks:
 - **Scope**: All Rust paths with these guards live, including calls through
   helpers and callbacks; blocking primitives include `ksync::Mutex`, `RwLock`,
   `Semaphore`, and `WaitQueue`.
+  No lint checks this rule. The `ktask` sleep entry points assert a
+  sleepable context at run time, which catches only those entry points on
+  executed paths. AI review starts from added spin lock types, `kspin`
+  guards (`NoPreemptIrqSave`, `IrqSave`, `NoPreempt`) and
+  `disable_local_irq` calls, and judges the work done while they are live.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
   the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
   the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own lock registration and runtime

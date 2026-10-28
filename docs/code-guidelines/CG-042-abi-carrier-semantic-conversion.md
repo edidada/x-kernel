@@ -16,6 +16,8 @@ checks:
   instead of passing raw ABI wrappers deeper when a semantic value can be formed.
 - **Scope**: External value layout, flags and encoding carriers at kernel
   boundaries and the first subsystem helper that consumes them.
+  No lint checks this rule; AI review starts from added lines that name
+  `linux_raw_sys` or `abi` items or declare `repr(C)`/`repr(packed)` types.
   Not this rule: [CG-019](CG-019-user-pointers-stop-at-syscall-boundary.md)
   owns user addresses and syscall access placement; the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md))
   and the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) own user-copy layout and

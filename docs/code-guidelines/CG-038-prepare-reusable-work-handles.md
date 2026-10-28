@@ -15,6 +15,8 @@ checks:
   reuse it for allocation-free submissions from non-sleepable contexts.
 - **Scope**: Owned work-handle construction, storage and submission from hardirq,
   softirq, timer or other non-sleepable paths.
+  No lint checks this rule; AI judges each added `WorkHandle` or
+  `DelayedWorkHandle` use.
   Not this rule: [CG-013](CG-013-no-sleep-under-spinlock.md) owns sleepable
   work under spinlock, IRQ-disable or preempt-disable guards. This rule owns
   preparation and reuse of handles before non-sleepable submission; producer

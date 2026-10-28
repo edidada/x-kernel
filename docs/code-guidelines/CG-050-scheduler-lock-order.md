@@ -24,6 +24,12 @@ checks:
   `completion.rs`, `freezer.rs`) and any `kspin` primitive they use. Wakers may
   be called from IRQ context on a remote CPU, so a blocking acquisition inside
   these paths can deadlock two CPUs that hold each other's lock.
+  No lint or runtime check verifies lock order; the Dylint lints of
+  [CG-002](CG-002-static-mutex-registration.md) and
+  [CG-003](CG-003-runtime-lock-tracking.md) check only registration and
+  tracking. AI review starts from added spin lock types, `static_lock!`,
+  `blocked_resched` and `park_task` lines in these paths and judges the
+  nesting.
 - **Why**: `RunQueue::blocked_resched` runs with the run-queue lock held and
   IRQs disabled. It reaches cgroup bandwidth accounting, which uses process-wide
   `static_lock!` registries. Holding those locks across a scheduling point

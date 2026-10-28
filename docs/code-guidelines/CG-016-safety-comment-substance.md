@@ -9,7 +9,8 @@ checks:
     triggers:
       - "unsafe \\{"
       - "unsafe fn"
-      - "unsafe impl"
+      - '\bunsafe\s+impl\b(?!(?:<.*>)?\s+(?:core::marker::)?(?:Send|Sync)\b)'
+      - '\bundocumented_unsafe_blocks\b|\bCG-016-safety-comment-substance\b'
 ---
 
 # CG-016-safety-comment-substance: State the concrete safety argument
@@ -19,11 +20,22 @@ checks:
   all concrete invariants it relies on, and who or which check, guard, ownership
   rule, or state transition establishes each invariant.
 - **Scope**: The substance of `SAFETY:` comments and safety documentation for
-  unsafe blocks, functions, and impls in Rust code. Clippy checks comment presence and placement; AI checks their substance. Relevant invariants include pointer
-  validity, lifetime and allocation, alignment and bounds, initialization,
-  aliasing, synchronization and execution context, pinning, immovability and
-  publication ordering, and FFI ABI, ownership, callback lifetime and unwind
-  assumptions. Arguments consisting only of
+  unsafe blocks, functions, and impls in Rust code.
+  `clippy::undocumented_unsafe_blocks` (deny) requires a preceding
+  `// SAFETY:` comment on each unsafe block and unsafe impl, and
+  `clippy::missing_safety_doc` ([CG-026](CG-026-unsafe-api-safety-docs.md))
+  a `# Safety` section on each unsafe function, but only in code that CI
+  `make clippy` compiles (see [lints.md](lints.md)); neither checks substance.
+  Code CI does not lint has no presence check either: loongarch64-only code,
+  `cfg(not(unittest))` code, features and crates outside the CI defconfigs
+  (including `KFEAT_LOCK_STAT`, which CI checks only with Dylint), `vendor/`
+  crates, doc examples, and the generated-code allowance below.
+  AI judges substance everywhere, and `// SAFETY:` presence only in that
+  unlinted code. Relevant invariants include pointer validity, lifetime and
+  allocation, alignment and bounds, initialization, aliasing, synchronization
+  and execution context, pinning, immovability and publication ordering, and
+  FFI ABI, ownership, callback lifetime and unwind assumptions. Arguments
+  consisting only of
   "pointer is valid", "caller guarantees safety", "safe because checked above",
   "FFI call", or "this is safe by construction" violate this rule.
   Not this rule: unsafe-attribute ABI/linker justifications belong to

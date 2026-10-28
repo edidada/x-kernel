@@ -1,7 +1,7 @@
 ---
 id: CG-019-user-pointers-stop-at-syscall-boundary
 level: MUST
-paths: ["posix/**", "core/ksyscall/**", "process/**", "core/kuaccess/**"]
+paths: ["posix/**/*.rs", "core/ksyscall/**/*.rs", "process/**/*.rs", "core/kuaccess/**/*.rs"]
 checks:
   - backend: ai
     triggers:
@@ -24,6 +24,9 @@ checks:
   existing wrappers for bulk buffers. Direct dereference and ad hoc
   `from_raw_parts` over user addresses in syscall logic violate this rule;
   the checked access implementations themselves own the raw access boundary.
+  No lint checks this rule; AI review starts from added Rust lines that name
+  a user-pointer type or a raw copy primitive and judges where access and
+  validation happen and what deeper logic receives.
   Not this rule: the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) owns validity,
   layout and initialized-byte obligations of `UserRead`/`UserWrite` types,
   and the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) owns whether a typed copy

@@ -14,6 +14,8 @@ checks:
   IRQ-like contexts access the same state, or when the caller must be valid
   in interrupt context.
 - **Scope**: Selection of `SpinNoIrq` for shared state in all Rust code.
+  No lint checks this rule; AI judges each added `SpinNoIrq` declaration or
+  construction against the access contexts of the protected state.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
   the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
   the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own registration and runtime

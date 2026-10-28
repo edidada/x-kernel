@@ -5,7 +5,7 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - "unsafe impl"
+      - '\bunsafe\s+impl\b(?:<.*>)?\s+(?:core::marker::)?(?:Send|Sync)\b'
 ---
 
 # CG-017-unsafe-impl-send-sync-argument: Explain the concurrency model
@@ -15,6 +15,10 @@ checks:
   model that makes transfer or shared access sound.
 - **Scope**: Unsafe implementations of `Send` and `Sync` in Rust code,
   including generic implementations; restating the trait name is insufficient.
+  No backend checks the argument: `clippy::undocumented_unsafe_blocks`
+  ([CG-016](CG-016-safety-comment-substance.md)) only requires a
+  `// SAFETY:` comment on the impl in code CI lints. AI reviews each added
+  `unsafe impl` of `Send` or `Sync`; other unsafe impls belong to CG-016.
   Not this rule: [CG-016](CG-016-safety-comment-substance.md) owns
   safety-argument substance for other unsafe operations and impls; report a
   missing or incomplete Send/Sync concurrency argument here once, even if

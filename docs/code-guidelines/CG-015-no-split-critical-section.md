@@ -17,6 +17,8 @@ checks:
 - **Scope**: Rust code whose checks, reads, or updates depend on an invariant
   remaining true while a lock is released and reacquired, including read-to-write
   lock transitions.
+  No lint checks this rule; AI judges each added `lock()`, `read()` or
+  `write()` acquisition together with the other acquisitions in its function.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
   the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
   the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own registration and runtime

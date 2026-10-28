@@ -7,11 +7,9 @@ checks:
     lint: [panic, unwrap_used, expect_used]
   - backend: ai
     triggers:
-      - "\\.unwrap\\(\\)"
-      - "\\.expect\\("
-      - "panic!"
-      - "unreachable!"
-      - "debug_assert!"
+      - '^(?!\s*//).*(?:\.unwrap\(\)|\.expect\(|panic!)'
+      - '^(?!\s*//).*(?:unreachable!|debug_assert!)'
+      - 'clippy::(?:panic|unwrap_used|expect_used)\b'
 ---
 
 # CG-021-no-panic-on-reachable-failure: Handle legitimate failures without panicking
@@ -22,6 +20,15 @@ checks:
   normal control flow. Determine reachability from inputs and established
   invariants; an operation proven infallible does not have a legitimate failure
   path. Runtime validation must not be downgraded to `debug_assert!`. The three Clippy lints run at warn; `make clippy` promotes warnings to errors.
+  CI therefore rejects an unsuppressed `.unwrap()`, `.expect()` or `panic!`
+  outside test code in every crate that a Jenkins Clippy configuration builds.
+  Clippy does not see code outside those builds (LoongArch64, `vendor/`,
+  `xtask/`, `tools/`, crates such as `virt/kvmm` that no CI defconfig links,
+  code behind features no CI configuration selects, such as `lock_stat`),
+  and the crate-level allowances below switch a lint off for the whole crate.
+  AI review judges every `clippy::panic`/`unwrap_used`/`expect_used`
+  suppression against **Exceptions**, `unreachable!` and `debug_assert!`,
+  panic sites in that unlinted code, and whether each failure is reachable.
   Not this rule: the Dylint lint `untyped_error_result` ([CG-010](CG-010-typed-error-result.md)) owns unit/string
   `Result` error types, and
   [CG-036](CG-036-ordinary-error-propagation.md) owns ordinary `?`

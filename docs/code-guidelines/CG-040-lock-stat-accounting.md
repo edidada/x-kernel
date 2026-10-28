@@ -5,7 +5,7 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - '\b(?:LockClassStats|record_acquisitions|record_contentions)\b'
+      - '\b(?:LockClassStats|record_(?:[a-z]+_)?(?:acquisitions?|contentions?)|record_blocking)\b'
 ---
 
 # CG-040-lock-stat-accounting: Record successful takes and actual lock contention
@@ -17,6 +17,12 @@ checks:
   rather than counting every failed poll.
 - **Scope**: Local acquisition-success and blocking/slow branches of instrumented
   lock implementations.
+  No lint checks branch accounting. Lock-stat code compiles only with
+  `KFEAT_LOCK_STAT=y`, which CI builds only in the AArch64 Dylint stage, so
+  Clippy never lints it. AI judges each added record call, including the
+  per-lock wrappers (`record_read_acquisitions`, `record_blocking` and
+  similar), or `LockClassStats` use against the acquisition and contention
+  branches.
   Not this rule: the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) owns runtime
   constructor tracking and [CG-001](CG-001-static-spinlock-registration.md)/
   the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) own static registration.

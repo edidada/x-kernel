@@ -5,9 +5,8 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - '\bstatic\s+mut\b'
+      - '^\s*(?:pub(?:\([^)]*\))?\s+)?static\s+mut\b'
       - '\bAtomicPtr\b'
-      - '\b(?:Once|Lazy|LazyInit)::new\s*\('
 ---
 
 # CG-043-reuse-once-lazy-lifecycle: Reuse the once/lazy initialization lifecycle
@@ -17,6 +16,9 @@ checks:
   initialization state machine needs a documented lifecycle mismatch.
 - **Scope**: Changed global initialization and its reads, including bespoke
   static-mut or atomic-pointer once-state machines outside foundational crates.
+  No lint checks lifecycle reuse; AI review starts from added `static mut`
+  declarations and `AtomicPtr` lines. Constructing `klazy::Once`, `Lazy` or
+  `LazyInit` already reuses the lifecycle and is not a trigger.
   Not this rule: the Dylint lint `static_mut_option` ([CG-004](CG-004-static-mut-option.md)) owns the prohibited
   Option<T> static-mut form; the non-Option declaration candidate is in
   [pending.md](pending.md). [CG-017](CG-017-unsafe-impl-send-sync-argument.md)

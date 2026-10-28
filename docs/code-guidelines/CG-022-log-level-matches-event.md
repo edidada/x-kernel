@@ -8,7 +8,7 @@ checks:
       - "warn!"
       - "debug!"
       - "trace!"
-      - "error!"
+      - "\\berror!"
 ---
 
 # CG-022-log-level-matches-event: Match logging levels to severity and frequency
@@ -23,6 +23,8 @@ checks:
   details, and infrequent internal observations too noisy for routine operation.
   `trace!` is only for very frequent or highly detailed diagnostics such as
   per-packet, per-event, per-iteration, or tight-loop instrumentation.
+  No lint can judge severity or frequency; AI review starts from added
+  `warn!`, `debug!`, `trace!` and `error!` calls (not `compile_error!`).
   Not this rule: [CG-021](CG-021-no-panic-on-reachable-failure.md) owns
   panic/release-validation behavior and the Dylint lint `untyped_error_result` ([CG-010](CG-010-typed-error-result.md))
   owns unit/string `Result` errors; this rule owns a log event's severity, frequency

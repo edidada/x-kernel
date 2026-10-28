@@ -15,6 +15,9 @@ checks:
   unavailable, instead of leaving all checking implicit.
 - **Scope**: Unsafe-function preconditions such as arithmetic bounds, alignment
   or local state that can be checked without violating another precondition.
+  No lint checks this rule: `unsafe_op_in_unsafe_fn` and
+  `clippy::missing_safety_doc` require unsafe blocks and a `# Safety`
+  section, not assertions. AI judges each added unsafe function.
   Not this rule: [CG-026](CG-026-unsafe-api-safety-docs.md) owns the caller's
   documented Safety contract and [CG-016](CG-016-safety-comment-substance.md)
   owns safety-argument substance. [CG-021](CG-021-no-panic-on-reachable-failure.md)

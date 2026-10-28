@@ -7,7 +7,7 @@ checks:
     triggers:
       - '\bcurrent_(?:process|execution|fs|files)\b'
       - '\bfn\s+(?:current|with_current)_[A-Za-z0-9_]+\s*[(<]'
-      - '\bfn\s+(?:irq|interrupt|softirq)(?:_[A-Za-z0-9_]+)?\s*[(<]|\bfn\s+[A-Za-z0-9_]+_(?:irq|interrupt|softirq)(?:_handler)?\s*[(<]'
+      - '\bfn\s+(?:irq_[A-Za-z0-9_]+|(?:interrupt|softirq)(?:_[A-Za-z0-9_]+)?)\s*[(<]|\bfn\s+(?!(?:try_)?new_)[A-Za-z0-9_]+_(?:irq|interrupt|softirq)(?:_handler)?\s*[(<]'
 ---
 
 # CG-039-execution-context-contract: State the execution-context contract
@@ -18,8 +18,10 @@ checks:
   caller-held lock families are permitted. Names must not hide those assumptions.
 - **Scope**: Context-dependent APIs and current-context helpers, including IRQ
   and softirq entry contracts. An adequate enclosing trait or module contract
-  suffices. Initial triggers cover the measured current-resource and handler
-  names, not every possible context-dependent API.
+  suffices. No lint checks this rule. Initial triggers cover the measured
+  current-resource and handler names, not every possible context-dependent
+  API; IRQ-number getters (`fn irq`) and `new_*`/`try_new_*` constructors
+  such as `try_new_irq` are not handler names.
   Not this rule: [CG-013](CG-013-no-sleep-under-spinlock.md) owns actual
   sleepable work under exclusion guards and [CG-014](CG-014-spin-noirq-needs-irq-contender.md)
   owns IRQ-contender lock selection. This rule owns the stated contract;

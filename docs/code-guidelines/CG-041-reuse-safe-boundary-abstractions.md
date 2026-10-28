@@ -19,6 +19,8 @@ checks:
   export raw obligations to unrelated callers.
 - **Scope**: Raw-pointer, user-memory, MMIO/PIO, refcounting, pinning,
   synchronization and FFI boundaries, plus reused raw output formats.
+  No lint checks helper reuse; AI review starts from added volatile access,
+  raw slice construction, raw copies, `UnsafeCell` and `unsafe extern` lines.
   Not this rule: [CG-025](CG-025-minimal-unsafe-scope.md) owns minimal unsafe
   block scope; [CG-019](CG-019-user-pointers-stop-at-syscall-boundary.md) owns
   user-access placement at syscall frontends and the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md))/

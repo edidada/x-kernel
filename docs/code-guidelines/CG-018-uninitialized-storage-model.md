@@ -10,6 +10,7 @@ checks:
       - "mem::zeroed"
       - "assume_init"
       - "MaybeUninit"
+      - '\bdisallowed_methods\b|\bCG-018-uninitialized-storage-model\b'
 ---
 
 # CG-018-uninitialized-storage-model: Model initialization state explicitly
@@ -22,6 +23,13 @@ checks:
   Rust code. Partially initialized arrays need an initialized-count invariant;
   whole-array `assume_init` requires proof for every element. `mem::zeroed()`
   and `assume_init()` cannot supply arbitrary `T` without a type-validity proof.
+  `clippy::disallowed_methods` rejects `core::mem::zeroed` in code CI
+  `make clippy` compiles unless an allowance cites this rule; it does not see
+  `MaybeUninit` state, `assume_init`, or code CI does not lint (see
+  [lints.md](lints.md) and [CG-016](CG-016-safety-comment-substance.md)).
+  AI judges initialization-state proofs, `MaybeUninit` and `assume_init` use,
+  each `disallowed_methods` allowance and its reason, and `mem::zeroed` in
+  unlinted code.
   Not this rule: the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) owns
   `UserRead`/`UserWrite` layout and initialized-byte contracts and
   the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) owns the matching contract at

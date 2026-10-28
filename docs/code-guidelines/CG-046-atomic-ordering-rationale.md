@@ -5,7 +5,7 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - '\bOrdering::(?:Relaxed|Acquire|Release|AcqRel|SeqCst)\b'
+      - '\b(?:Atomic)?Ordering::(?:Acquire|Release|AcqRel|SeqCst)\b'
       - '\b(?:compare_exchange(?:_weak)?|fence)\s*\('
 ---
 
@@ -16,6 +16,11 @@ checks:
   and the relationship in comments or applicable surrounding documentation.
 - **Scope**: Nontrivial atomic orderings, compare-exchange operations and
   fences. An adequate type or module argument may cover individual operations.
+  No lint checks this rule. A `Relaxed` operation orders nothing by itself:
+  it is an independent counter or flag, or it relies on a fence or stronger
+  operation whose rationale this rule reviews. AI review therefore starts
+  from `Acquire`, `Release`, `AcqRel` and `SeqCst` orderings,
+  compare-exchange operations and fences.
   Not this rule: [CG-017](CG-017-unsafe-impl-send-sync-argument.md) owns the
   Send/Sync concurrency argument and [CG-016](CG-016-safety-comment-substance.md)
   owns concrete proof for unsafe operations. This rule owns ordering rationale;

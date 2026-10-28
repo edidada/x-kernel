@@ -5,7 +5,7 @@ paths: ["**/*.rs"]
 checks:
   - backend: ai
     triggers:
-      - '\b(?:size|len|length|offset|capacity)\s*:\s*(?:u|i)(?:8|16|32|64|128|size)\b'
+      - '^(?!.*\bfn\s+sys_\w+\s*\().*\b(?:size|len|length|offset|capacity)\s*:\s*(?:u|i)(?:8|16|32|64|128|size)\b'
       - '\blet(?:\s+mut)?\s+(?:size|len|length|offset|capacity)\s*[:=]'
 ---
 
@@ -16,7 +16,9 @@ checks:
   supplies them.
 - **Scope**: Integer sizes, lengths, offsets and capacities with ambiguous
   non-time units. Initial triggers cover only the measured bare size/len/length/
-  offset/capacity declarations and bindings.
+  offset/capacity declarations and bindings; single-line `sys_*` signatures
+  are skipped because their parameter names follow the ABI. No lint checks
+  units; AI review judges each triggered quantity.
   Not this rule: the Dylint lint `unitless_time_integer` ([CG-011](CG-011-time-unit-names.md)) owns integer time-unit
   suffixes. Descriptive semantic names and names that reveal scans or side
   effects remain deferred guidance in

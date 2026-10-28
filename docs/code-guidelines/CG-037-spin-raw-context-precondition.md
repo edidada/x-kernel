@@ -14,6 +14,7 @@ checks:
   disabled for the whole critical section and explicitly document that precondition.
 - **Scope**: Acquisition and use of `SpinRaw`, including the immediate caller's
   context token or guard. An enforced enclosing contract may supply the proof.
+  No lint checks this rule; AI judges each added `SpinRaw` use.
   Not this rule: [CG-014](CG-014-spin-noirq-needs-irq-contender.md) owns
   whether `SpinNoIrq` has an IRQ contender; [CG-013](CG-013-no-sleep-under-spinlock.md)
   owns sleepable work under live guards. This rule owns the prior exclusion
