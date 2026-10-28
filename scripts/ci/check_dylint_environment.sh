@@ -9,9 +9,9 @@ source "$(dirname "$0")/cargo_tool_receipts.sh"
 # The CI image provides the Dylint tools, the lint toolchain and a driver
 # prebuilt for that toolchain. Installing any of them here would make every
 # node build its own driver, so a mismatch means the pins changed without a
-# new image. The pins live in xtask/xkmake/src/hygiene.rs (DYLINT_VERSION) and
+# new image. The pins live in xtask/xkmake/src/hygiene/mod.rs (DYLINT_VERSION) and
 # tools/lints/rust-toolchain.toml.
-DYLINT_VERSION="$(sed -n 's/^\(pub(crate) \)\{0,1\}const DYLINT_VERSION: &str = "\(.*\)";$/\2/p' xtask/xkmake/src/hygiene.rs)"
+DYLINT_VERSION="$(sed -n 's/^\(pub(crate) \)\{0,1\}const DYLINT_VERSION: &str = "\(.*\)";$/\2/p' xtask/xkmake/src/hygiene/mod.rs)"
 eval "$(
 python3 <<'PY_LINT_TOOLCHAIN'
 import shlex
@@ -38,7 +38,7 @@ dylint_image_error() {
     exit 1
 }
 
-[ -n "${DYLINT_VERSION}" ] || dylint_image_error "cannot read DYLINT_VERSION from xtask/xkmake/src/hygiene.rs"
+[ -n "${DYLINT_VERSION}" ] || dylint_image_error "cannot read DYLINT_VERSION from xtask/xkmake/src/hygiene/mod.rs"
 
 # cargo-dylint needs its subcommand to report a version; dylint-link forwards
 # its arguments to the linker, so only its installation receipt is checked.

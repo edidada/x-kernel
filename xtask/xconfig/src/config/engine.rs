@@ -341,16 +341,14 @@ impl ConfigEngine {
                 .unwrap_or(false);
 
             if is_selected_from_config {
-                for sibling in siblings {
-                    if sibling != name {
-                        let sibling_from_config = self
-                            .symbols
-                            .get_symbol(sibling)
-                            .map(|s| s.from_config)
-                            .unwrap_or(false);
-                        if !sibling_from_config {
-                            self.symbols.set_value(sibling, "n".to_string());
-                        }
+                for sibling in siblings.iter().filter(|sibling| *sibling != name) {
+                    let sibling_from_config = self
+                        .symbols
+                        .get_symbol(sibling)
+                        .map(|s| s.from_config)
+                        .unwrap_or(false);
+                    if !sibling_from_config {
+                        self.symbols.set_value(sibling, "n".to_string());
                     }
                 }
             }

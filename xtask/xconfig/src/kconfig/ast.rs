@@ -83,6 +83,11 @@ impl SymbolType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "ShellExpr names the Kconfig `$(...)` construct; renaming the public variant would \
+              churn every parser consumer"
+)]
 pub enum Expr {
     Symbol(String),
     Const(String),

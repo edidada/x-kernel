@@ -33,7 +33,7 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 - the matching QEMU system emulator for `make run`;
 - `cargo-shear 1.13.2` and `licensure 0.8.1` for repository hygiene checks;
 - for `make dylint`: `cargo-dylint` and `dylint-link` at `DYLINT_VERSION` in
-  `xtask/xkmake/src/hygiene.rs`, and the lint toolchain with the components
+  `xtask/xkmake/src/hygiene/mod.rs`, and the lint toolchain with the components
   listed in `tools/lints/rust-toolchain.toml` plus the kernel target of each
   platform you scan (`aarch64-unknown-none-softfloat`, `x86_64-unknown-none`);
   see `tools/lints/README.md`;

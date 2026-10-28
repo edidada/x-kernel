@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn production_includes_are_not_test_layout_evidence() {
         for source in [
-            include_str!("../../../util/kbuild_config/src/lib.rs"),
+            include_str!("../../../../util/kbuild_config/src/lib.rs"),
             r#"include!("generated_constants.rs");"#,
             r#"include!(concat!(env!("OUT_DIR"), "/bindings.rs"));"#,
             r#"// include!("example.rs") includes ordinary Rust code."#,

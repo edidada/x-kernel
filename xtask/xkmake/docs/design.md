@@ -16,7 +16,7 @@ src/
 ├── linker.rs     kernel linker script rendering and stable writing
 ├── coverage.rs   unittest coverage extraction and report generation
 ├── doc.rs        workspace rustdoc orchestration
-├── hygiene.rs    repository hygiene tool orchestration
+├── hygiene/mod.rs repository hygiene tool orchestration
 ├── dylint.rs     Dylint lint library build and kernel scan
 ├── facts.rs      packing of the code facts exported by the Dylint scan
 ├── image_metadata.rs  ELF finalize for embedded build info and Build ID

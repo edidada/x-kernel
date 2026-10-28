@@ -8,7 +8,7 @@ rule in `docs/code-guidelines/`. The crate builds one cdylib that
 
 The lint toolchain and its components are pinned in `rust-toolchain.toml`
 here; `cargo-dylint` and `dylint-link` are pinned by `DYLINT_VERSION` in
-`xtask/xkmake/src/hygiene.rs`. Install the toolchain with the kernel target
+`xtask/xkmake/src/hygiene/mod.rs`. Install the toolchain with the kernel target
 of each platform you scan, then the tools:
 
 ```bash
