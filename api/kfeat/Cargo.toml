@@ -16,6 +16,19 @@ description = "Top-level feature selection for x-kernel"
 # on `feature = "smp"`, so removing the edge would silently drop that code.
 ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "karch", "kbpf", "kipi", "kirq", "knet", "kplat", "krcu", "kspin", "ksync", "ktask", "ktimer_core", "ktracing", "memspace", "fs_boot", "page_table", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kvmm", "kvmm-api", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
 
+# CG-047 feature ownership, checked by `make check_hygiene` (alias
+# `make check_features`). Accepted violations are registered in
+# docs/code-guidelines/exceptions.toml, not here.
+#
+# Internal features have no KFEAT_* symbol; each must be reachable from a
+# Kconfig-mapped feature or from `entry/unittest`:
+# - smp, fp-simd, dev_log: selected by the `platform_kplat_*` features
+#   (MACHINE_<ARCH>_*); smp is not selected for LoongArch.
+# - ipi: selected by smp.
+# - kernel-tests: selected by `entry/unittest` (`make UNITTEST=y`).
+[package.metadata.kfeat]
+internal = ["smp", "ipi", "fp-simd", "dev_log", "kernel-tests"]
+
 [features]
 default = []
 

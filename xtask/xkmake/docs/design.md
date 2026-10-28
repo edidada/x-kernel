@@ -21,6 +21,7 @@ src/
 │   ├── exceptions.rs  docs/code-guidelines/exceptions.toml
 │   ├── report.rs      Finding, text/JSON output
 │   └── test_layout.rs CG-051 test source layout
+├── features/     CG-047 Kconfig/kfeat feature ownership checks and --base diff
 ├── dylint.rs     Dylint lint library build and kernel scan
 ├── facts.rs      packing of the code facts exported by the Dylint scan
 ├── image_metadata.rs  ELF finalize for embedded build info and Build ID
@@ -220,17 +221,19 @@ rule, so they stay atomic commands outside the framework.
 1. Registry: `RULES` in `hygiene/registry.rs` lists every `RuleCheck`
    statically (`rule()` is the full rule id, `checks()` equals the `lint`
    list of the rule file's `backend: xkmake` check, `report_checks()` are
-   report items that run only with `--report`, and `run(&Context)` returns
-   findings). A unit test parses the `docs/code-guidelines/CG-*.md`
+   report items that run only with `--report`, `run(&Context)` returns
+   findings, and `annotate` computes costly diagnostics only for findings
+   that remain after exceptions). A unit test parses the `docs/code-guidelines/CG-*.md`
    frontmatter and requires the registry and the xkmake lint lists of the
    rule files to agree in both directions.
 2. `Context` provides shared inputs lazily, computing them only when a check
    asks: the workspace model from `cargo metadata --no-deps` and one
    `git ls-files --cached --others --exclude-standard` (a directory walk
-   outside a Git tree). `wants(rule, check)` lets a rule skip checks that
-   were not selected.
-3. Selection: `--rule` (full id or `CG-NNN` prefix) and `--check` may both
-   repeat; an unknown name exits 2 as an environment error. `--report` also
+   outside a Git tree), the Kconfig AST, and the feature resolution of each
+   defconfig. `wants(rule, check)` lets a rule skip checks that were not
+   selected.
+3. Selection: `--rule` (full id or `CG-NNN` prefix), `--check` and
+   `--defconfig` may all repeat; an unknown name exits 2 as an environment error. `--report` also
    runs the report items.
 4. Exceptions: all are registered as `[[exception]]` entries (`rule`,
    `check`, `subject`, `reason`) in `docs/code-guidelines/exceptions.toml`
@@ -240,16 +243,18 @@ rule, so they stay atomic commands outside the framework.
    rule's **Exceptions** that allows it and why it holds, or by
    `TODO(cg): <planned fix>`, neither empty (Exceptions names are not
    matched mechanically). Duplicate entries are errors; once a
-   `(rule, check)` is selected, entries that match nothing are stale and are
-   errors. Entry problems are reported as `<rule>/exception` findings at the
+   `(rule, check)` is selected and not narrowed by `--defconfig`, entries
+   that match nothing are stale and are errors. Entry problems are reported as `<rule>/exception` findings at the
    line of the exceptions file.
-5. Output: a finding carries `rule`, `check`, `severity` (error/report),
-   `file`, `line`, `subject` and `message`. The text format is
-   `error[<rule>/<check>]: <subject>`; `--format json` prints an array of
-   findings. `subject` contains no line number, so it can be copied into an
+5. Output: a finding carries `rule`, `check`, `severity`
+   (error/report/diff), `file`, `line`, `subject` and `message`, plus the
+   optional `owners`, `path` and `defconfig`. The text format is
+   `error[<rule>/<check>]: <subject>`, with the same finding on several
+   defconfigs folded into one; `--format json` prints an array of findings. `subject` contains no line number, so it can be copied into an
    exception. Exit codes: 0 passed, 1 unexempted violations, 2 the check
-   could not run (cargo, git or exceptions file parse failure).
-6. Entry points: `check_test_layout` is an alias filtered by `--rule`;
+   could not run (cargo, Kconfig, git or exceptions file parse failure).
+6. Entry points: `check_test_layout` and `check_features` are aliases
+   filtered by `--rule`;
    `HYGIENE_ARGS` passes extra arguments. `make clippy`/`dylint`/`dylint_test`
    run `check_hygiene` first, and `SKIP_HYGIENE=1` skips only that item
    (`check_deps`, `check_header` and `check_lints` still run). CI runs it once
@@ -272,6 +277,54 @@ be lexed falls back to text matching. The subject of a file-level check is
 the repository-relative path; for an attribute-level check it is
 `<path>:<function or module name>`, falling back to the path when no name is
 available (inner attributes, unlexable files).
+
+### Hygiene Features (CG-047)
+
+The mechanically decidable part of CG-047 runs as a `RuleCheck`;
+`make check_features` is `hygiene check --rule CG-047-kconfig-feature-ownership`.
+
+1. Model: `cargo metadata --no-deps` gives the root workspace members, their
+   dependency declarations after merging `workspace = true`, and
+   `[package.metadata]`; each member's own `[features]` table separates
+   explicit features from the implicit features Cargo generates for optional
+   dependencies. The target of every `crate/feat` and `crate?/feat` in
+   `api/kfeat/Cargo.toml` is a "capability feature", owned by the kfeat
+   feature that lists it; `dep:crate` and strong `crate/feat` give the owner
+   of an optional dependency.
+2. Kconfig: the AST comes from `xconfig::kconfig::Parser`. A symbol's
+   effective dependency is the conjunction of its own `depends on` and the
+   conditions of enclosing `menu`/`if`/`choice` blocks; "A implies B" means
+   B is a positive conjunct of A's effective dependency, or A selects B
+   unconditionally, closed transitively. Disjunctions, negations,
+   conditional selects and `imply` do not count, so the conclusion is
+   conservative. The mapping between kfeat features and symbols reuses
+   `xconfig::build_config::cargo_feature_for_symbol`, the same as the build.
+3. Resolution: each defconfig is evaluated by `resolve_kernel_config`
+   (read-only, `.config` is not written), then one
+   `cargo tree --locked -e normal,no-proc-macro -f '{p}|{f}' --prefix none`
+   runs with the same `kfeat/*` list as `xkmake build` and is read as a
+   stream. In the deduplicated output, each package's `{f}` is already the
+   merged feature set; `--no-dedupe` is forbidden (its output grows
+   exponentially with the graph).
+4. Checks: `feature-map` (F1), `kconfig-implication` (F2),
+   `capability-bypass` (F3, with the enabling path from
+   `cargo tree -e features -i`), `peer-forwarding` (F4) and `build-args`
+   (F5); `--report` also prints `linked-without-owner` (R1) and
+   `unused-feature` (R2), which do not affect the exit code.
+5. Configuration and exceptions: `[package.metadata.kfeat]` has only
+   `internal`, listing the kfeat features that have no KFEAT symbol but are
+   reachable from a mapped feature or from `entry/unittest`. It is
+   configuration, not an exception, and any other key (including the old
+   `exceptions`) is rejected. Accepted violations are registered in
+   `docs/code-guidelines/exceptions.toml` (see Hygiene Check).
+6. `xkmake hygiene features --base <rev>` (F6,
+   `make check_features FEATURES_ARGS="--base <rev>"`) is the CG-047 diff
+   mode: it exports the baseline with `git archive` to
+   `target/xkmake/features-base-<pid>`, computes the enabled
+   `(crate, feature)` set of each defconfig, the manifest feature graph and
+   the KFEAT relations for both the baseline and the current tree, prints
+   only additions and removals (diff findings that do not affect the exit
+   code), and deletes the export directory afterwards.
 
 The x86_64 bundle carries both `kernel.bzimg` and `kernel.uefi.img`. LinuxBoot is used by default,
 and `--boot uefi` uses OVMF. The OVMF VARS template is copied to
@@ -406,6 +459,9 @@ directory are taken in as `dep` crates too; the manifest records
 - `.config` remains the sole source of truth for the kernel product configuration.
 - QEMU arguments are passed item by item with `Vec<OsString>` semantics, without shell evaluation.
 - `xkmake` depends only on the `xconfig::build_config` facade, not on the CLI implementation modules.
+  The exception is the CG-047 rule check (`features/`): F2 needs the Kconfig
+  structure, so it uses the `xconfig::kconfig` parser and AST types
+  read-only instead of copying the Kconfig semantics.
 - Without a `.config`, no default platform is guessed.
 - The bundle is the canonical artifact location; the `xkernel_<platform>.*` files in the repository root are compatibility copies refreshed from the valid
   bundle and do not take part in bundle validity checks.

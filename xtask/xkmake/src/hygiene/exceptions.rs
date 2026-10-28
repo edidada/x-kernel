@@ -7,10 +7,10 @@
 //!
 //! ```toml
 //! [[exception]]
-//! rule = "CG-051-test-source-layout"
-//! check = "src-test-file"
-//! subject = "drivers/kdemo/src/tests.rs"
-//! reason = "CG-051-test-source-layout: TODO(cg): ..."
+//! rule = "CG-047-kconfig-feature-ownership"
+//! check = "capability-bypass"
+//! subject = "kdma -> alloc-engine/tlsf"
+//! reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: ..."
 //! ```
 //!
 //! An entry suppresses the error findings with the same `(rule, check,
@@ -213,9 +213,10 @@ fn reason_problem(reason: &str, rule: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exception, Finding, Scope, Severity, apply, parse, reason_problem};
+    use super::{Exception, Scope, apply, parse, reason_problem};
+    use crate::hygiene::{Finding, Severity};
 
-    const RULE: &str = "CG-051-test-source-layout";
+    const RULE: &str = "CG-047-kconfig-feature-ownership";
 
     fn entry(check: &str, subject: &str, reason: &str) -> Exception {
         Exception {
@@ -283,24 +284,22 @@ mod tests {
     #[test]
     fn suppresses_errors_and_reports_bad_or_stale_entries() {
         let reason = format!("{RULE}: TODO(cg): legacy");
-        let finding = Finding::new(RULE, "src-test-file", "a.rs", Some(1), "dma", "m");
-        let report = Finding {
-            severity: Severity::Report,
-            ..Finding::new(RULE, "src-test-file", "a.rs", None, "net", "m")
-        };
+        let finding = Finding::new(RULE, "feature-map", "Kconfig", Some(1), "dma", "m");
+        let report = Finding::new(RULE, "feature-map", "Kconfig", None, "net", "m")
+            .with_severity(Severity::Report);
         let exceptions = vec![
-            entry("src-test-file", "dma", &reason),
-            entry("src-test-file", "gone", &reason),
-            entry("src-test-file", "net", &reason),
-            entry("unknown-check", "x", &reason),
-            entry("test-expect-attr", "y", "no rule id"),
-            entry("test-expect-attr", "z", &format!("{RULE}-extra: x")),
-            entry("test-expect-attr", "e", &format!("{RULE}: ")),
-            entry("test-expect-attr", "t", &format!("{RULE}: TODO(cg):  ")),
-            entry("src-test-file", "dma", &reason),
+            entry("feature-map", "dma", &reason),
+            entry("feature-map", "gone", &reason),
+            entry("feature-map", "net", &reason),
+            entry("unused-feature", "x", &reason),
+            entry("build-args", "y", "no rule id"),
+            entry("build-args", "z", &format!("{RULE}-extra: x")),
+            entry("build-args", "e", &format!("{RULE}: ")),
+            entry("build-args", "t", &format!("{RULE}: TODO(cg):  ")),
+            entry("feature-map", "dma", &reason),
             Exception {
                 rule: "CG-999-unknown".into(),
-                ..entry("src-test-file", "w", "CG-999-unknown: x")
+                ..entry("feature-map", "w", "CG-999-unknown: x")
             },
         ];
         let complete = Scope {
@@ -318,15 +317,15 @@ mod tests {
         assert_eq!(
             problems(&applied.kept),
             [
-                (RULE, "src-test-file: dma".to_string()),
-                (RULE, "src-test-file: gone".to_string()),
-                (RULE, "src-test-file: net".to_string()),
-                (RULE, "test-expect-attr: e".to_string()),
-                (RULE, "test-expect-attr: t".to_string()),
-                (RULE, "test-expect-attr: y".to_string()),
-                (RULE, "test-expect-attr: z".to_string()),
-                (RULE, "unknown-check: x".to_string()),
-                ("exceptions", "src-test-file: w".to_string()),
+                (RULE, "build-args: e".to_string()),
+                (RULE, "build-args: t".to_string()),
+                (RULE, "build-args: y".to_string()),
+                (RULE, "build-args: z".to_string()),
+                (RULE, "feature-map: dma".to_string()),
+                (RULE, "feature-map: gone".to_string()),
+                (RULE, "feature-map: net".to_string()),
+                (RULE, "unused-feature: x".to_string()),
+                ("exceptions", "feature-map: w".to_string()),
             ]
         );
 

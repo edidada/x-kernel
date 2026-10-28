@@ -382,8 +382,9 @@ three-line header. XKMake passes tracked and non-ignored untracked Rust source
 files to licensure; deleted worktree paths and non-Rust files are not checked.
 
 `make check_hygiene` runs the code-guideline repository checks
-(`xkmake hygiene check`) without a platform `.config`: currently CG-051
-test source layout. `make check_test_layout` runs that rule alone. What
+(`xkmake hygiene check`) without a platform `.config`: currently CG-047
+Kconfig/kfeat feature ownership and CG-051 test source layout.
+`make check_features` and `make check_test_layout` run one rule each. What
 each check accepts is in its rule file; filters, output, exit status and
 `docs/code-guidelines/exceptions.toml` are described in
 `docs/code-guidelines/README.md` ("Repository checks (xkmake)").

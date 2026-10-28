@@ -10,7 +10,7 @@
 
 use std::{
     cell::OnceCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -21,17 +21,17 @@ use super::{
     exceptions,
     report::{self, Finding, Severity},
     test_layout::TestSourceLayout,
-    workspace_member_manifests,
 };
 use crate::{
     cli::ReportFormat,
     context::workspace_root,
     error::{Error, IoResultExt, Result},
+    features::{FeatureOwnership, KconfigModel, Resolution, Workspace},
 };
 
 /// One rule of `docs/code-guidelines/` checked mechanically by xkmake.
 pub(crate) trait RuleCheck: Sync {
-    /// Full rule id, e.g. `CG-051-test-source-layout`.
+    /// Full rule id, e.g. `CG-047-kconfig-feature-ownership`.
     fn rule(&self) -> &'static str;
 
     /// Check names; equal to the rule file's `backend: xkmake` lint list.
@@ -45,10 +45,15 @@ pub(crate) trait RuleCheck: Sync {
 
     /// Findings of the selected checks (see [`Context::wants`]).
     fn run(&self, context: &Context) -> Result<Vec<Finding>>;
+
+    /// Adds costly diagnostics to findings that survived the exceptions.
+    fn annotate(&self, _context: &Context, _findings: &mut [Finding]) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Every registered rule check, in rule id order.
-pub(crate) static RULES: &[&dyn RuleCheck] = &[&TestSourceLayout];
+pub(crate) static RULES: &[&dyn RuleCheck] = &[&FeatureOwnership, &TestSourceLayout];
 
 /// Looks up a registered rule by its full id.
 pub(crate) fn find_rule(id: &str) -> Option<&'static dyn RuleCheck> {
@@ -62,27 +67,47 @@ pub(crate) struct CheckRequest {
     pub(crate) rules: Vec<String>,
     /// Check names; empty selects every check of the selected rules.
     pub(crate) checks: Vec<String>,
+    /// Defconfigs to resolve; empty means every `platforms/**/*defconfig`.
+    pub(crate) defconfigs: Vec<PathBuf>,
     pub(crate) format: ReportFormat,
     /// Also run and print report-only checks.
     pub(crate) report: bool,
+    /// Kernel application crate whose feature graph is resolved.
+    pub(crate) app: PathBuf,
 }
 
 /// Inputs shared by rule checks, each computed on first use.
 pub(crate) struct Context {
     root: PathBuf,
+    app: PathBuf,
+    defconfigs: Vec<PathBuf>,
     /// Selected `(rule, check)` pairs, report-only checks included.
     selected: BTreeSet<(&'static str, &'static str)>,
     workspace: OnceCell<Workspace>,
     files: OnceCell<Vec<String>>,
+    kconfig: OnceCell<KconfigModel>,
+    resolutions: OnceCell<Vec<Resolution>>,
 }
 
 impl Context {
-    fn new(root: PathBuf, selected: BTreeSet<(&'static str, &'static str)>) -> Self {
+    fn new(
+        root: PathBuf,
+        request: &CheckRequest,
+        selected: BTreeSet<(&'static str, &'static str)>,
+    ) -> Self {
         Self {
+            defconfigs: request
+                .defconfigs
+                .iter()
+                .map(|path| root.join(path))
+                .collect(),
             root,
+            app: request.app.clone(),
             selected,
             workspace: OnceCell::new(),
             files: OnceCell::new(),
+            kconfig: OnceCell::new(),
+            resolutions: OnceCell::new(),
         }
     }
 
@@ -91,9 +116,19 @@ impl Context {
         &self.root
     }
 
+    /// Kernel application crate, relative to the root.
+    pub(crate) fn app(&self) -> &Path {
+        &self.app
+    }
+
     /// Whether `check` of `rule` runs; report-only checks need `--report`.
     pub(crate) fn wants(&self, rule: &str, check: &str) -> bool {
         self.selected.contains(&(rule, check))
+    }
+
+    /// Whether every platform defconfig is resolved.
+    pub(crate) fn has_all_defconfigs(&self) -> bool {
+        self.defconfigs.is_empty()
     }
 
     /// Root workspace members from `cargo metadata --no-deps`.
@@ -113,44 +148,24 @@ impl Context {
         let files = list_files(&self.root)?;
         Ok(self.files.get_or_init(|| files))
     }
-}
 
-/// Root workspace members, including implicit path members.
-pub(crate) struct Workspace {
-    root: PathBuf,
-    /// Members keyed by manifest path.
-    pub(crate) packages: BTreeMap<PathBuf, Package>,
-}
-
-/// One root workspace member.
-pub(crate) struct Package {
-    manifest_path: PathBuf,
-}
-
-impl Workspace {
-    fn load(root: &Path) -> Result<Self> {
-        let packages = workspace_member_manifests(root)?
-            .into_iter()
-            .map(|manifest_path| (manifest_path.clone(), Package { manifest_path }))
-            .collect();
-        Ok(Self {
-            root: root.to_path_buf(),
-            packages,
-        })
+    /// Parsed Kconfig tree.
+    pub(crate) fn kconfig(&self) -> Result<&KconfigModel> {
+        if let Some(kconfig) = self.kconfig.get() {
+            return Ok(kconfig);
+        }
+        let kconfig = KconfigModel::load(&self.root)?;
+        Ok(self.kconfig.get_or_init(|| kconfig))
     }
 
-    /// Path relative to the workspace root, with `/` separators.
-    pub(crate) fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/")
-    }
-}
-
-impl Package {
-    pub(crate) fn directory(&self) -> &Path {
-        self.manifest_path.parent().unwrap_or(Path::new("."))
+    /// Cargo feature resolution of each selected defconfig.
+    pub(crate) fn resolutions(&self) -> Result<&[Resolution]> {
+        if let Some(resolutions) = self.resolutions.get() {
+            return Ok(resolutions);
+        }
+        let resolutions =
+            crate::features::resolve_defconfigs(&self.root, &self.app, &self.defconfigs)?;
+        Ok(self.resolutions.get_or_init(|| resolutions))
     }
 }
 
@@ -222,7 +237,7 @@ pub(crate) fn run_rule_checks(request: &CheckRequest) -> Result<()> {
     let root = workspace_root().map_err(environment)?;
     let selected = select(request).map_err(environment)?;
     let exceptions = exceptions::load(&root).map_err(environment)?;
-    let context = Context::new(root, selected);
+    let context = Context::new(root, request, selected);
 
     let rules: Vec<&dyn RuleCheck> = RULES
         .iter()
@@ -234,21 +249,26 @@ pub(crate) fn run_rule_checks(request: &CheckRequest) -> Result<()> {
         let found = rule
             .run(&context)
             .map_err(|error| environment(Error::Message(format!("{}: {error}", rule.rule()))))?;
-        findings.extend(
-            found
-                .into_iter()
-                .filter(|finding| context.wants(finding.rule, finding.check)),
-        );
+        findings.extend(found.into_iter().filter(|finding| {
+            finding.severity == Severity::Diff || context.wants(finding.rule, finding.check)
+        }));
     }
     let applied = exceptions::apply(
         findings,
         &exceptions,
         &exceptions::Scope {
             is_rule_selected: &|rule| rules.iter().any(|selected| selected.rule() == rule),
-            is_complete: &|rule, check| context.wants(rule, check),
+            is_complete: &|rule, check| context.wants(rule, check) && context.has_all_defconfigs(),
         },
     );
-    let findings = applied.kept;
+    let mut findings = applied.kept;
+    for rule in &rules {
+        let start = findings.partition_point(|finding| finding.rule < rule.rule());
+        let end = findings.partition_point(|finding| finding.rule <= rule.rule());
+        rule.annotate(&context, &mut findings[start..end])
+            .map_err(|error| environment(Error::Message(format!("{}: {error}", rule.rule()))))?;
+    }
+
     report::print_findings(&findings, request.format, request.report)?;
     let errors = report::count(&findings, Severity::Error);
     eprintln!(

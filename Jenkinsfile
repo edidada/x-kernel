@@ -951,7 +951,8 @@ cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
 def runRepositoryHygiene(String stageName) {
     initStageLog(stageName)
     // Leg toolchain and the persistent cargo home are ready after the arch
-    // setup stage.
+    // setup stage; the check resolves every platform defconfig with
+    // `cargo tree --locked`, which reuses the committed Cargo.lock.
     withCleanSourceWorkspace('repository-hygiene') {
         withEnv(['TARGET_DIR=/xkernel-target/repository-hygiene']) {
             sh label: 'Check repository hygiene', script: """#!/bin/bash

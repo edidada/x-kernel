@@ -25,7 +25,7 @@ use serde::Deserialize;
 
 pub(crate) use self::{
     registry::{CheckRequest, Context, RuleCheck, run_rule_checks},
-    report::Finding,
+    report::{Finding, Severity, print_findings},
     test_layout::RULE_ID as TEST_LAYOUT_RULE,
 };
 use crate::{

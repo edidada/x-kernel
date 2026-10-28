@@ -4,6 +4,8 @@
 
 //! Findings of repository rule checks and their text/JSON output.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::{
@@ -19,6 +21,8 @@ pub(crate) enum Severity {
     Error,
     /// Informational, printed only with `--report`.
     Report,
+    /// One line of a `--base` difference.
+    Diff,
 }
 
 impl Severity {
@@ -26,6 +30,7 @@ impl Severity {
         match self {
             Self::Error => "error",
             Self::Report => "report",
+            Self::Diff => "diff",
         }
     }
 }
@@ -36,7 +41,7 @@ impl Severity {
 /// therefore never contains a line number.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub(crate) struct Finding {
-    /// Full rule id, e.g. `CG-051-test-source-layout`.
+    /// Full rule id, e.g. `CG-047-kconfig-feature-ownership`.
     pub(crate) rule: &'static str,
     /// Check name from the rule file's `backend: xkmake` lint list.
     pub(crate) check: &'static str,
@@ -47,6 +52,12 @@ pub(crate) struct Finding {
     pub(crate) line: Option<usize>,
     pub(crate) subject: String,
     pub(crate) message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) owners: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) defconfig: Option<String>,
 }
 
 impl Finding {
@@ -67,7 +78,25 @@ impl Finding {
             line,
             subject: subject.into(),
             message: message.into(),
+            owners: Vec::new(),
+            path: Vec::new(),
+            defconfig: None,
         }
+    }
+
+    pub(crate) fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
+    }
+
+    pub(crate) fn with_owners<'a>(mut self, owners: impl IntoIterator<Item = &'a String>) -> Self {
+        self.owners = owners.into_iter().cloned().collect();
+        self
+    }
+
+    pub(crate) fn with_defconfig(mut self, defconfig: impl Into<String>) -> Self {
+        self.defconfig = Some(defconfig.into());
+        self
     }
 }
 
@@ -103,9 +132,40 @@ pub(crate) fn print_findings(
     Ok(())
 }
 
-/// Prints findings in a rustc-like layout.
+/// Prints findings, folding identical per-defconfig findings into one entry.
 fn print_text(findings: &[&Finding]) {
+    type GroupKey<'a> = (
+        &'static str,
+        &'static str,
+        Severity,
+        &'a str,
+        &'a str,
+        Option<usize>,
+        &'a str,
+    );
+    let mut grouped: BTreeMap<GroupKey<'_>, (Vec<&str>, &Finding)> = BTreeMap::new();
     for finding in findings {
+        // Diff lines are already one fact each; keep them on one line.
+        if finding.severity == Severity::Diff {
+            println!(
+                "diff: {}    [{}: {}]",
+                finding.subject, finding.file, finding.message
+            );
+            continue;
+        }
+        let key = (
+            finding.rule,
+            finding.check,
+            finding.severity,
+            finding.subject.as_str(),
+            finding.file.as_str(),
+            finding.line,
+            finding.message.as_str(),
+        );
+        let entry = grouped.entry(key).or_insert_with(|| (Vec::new(), finding));
+        entry.0.extend(finding.defconfig.as_deref());
+    }
+    for (defconfigs, finding) in grouped.values() {
         println!(
             "{}[{}/{}]: {}",
             finding.severity.label(),
@@ -118,5 +178,14 @@ fn print_text(findings: &[&Finding]) {
             None => println!("  --> {}", finding.file),
         }
         println!("  = {}", finding.message);
+        if !finding.owners.is_empty() {
+            println!("  = kfeat owners: {}", finding.owners.join(", "));
+        }
+        if !defconfigs.is_empty() {
+            println!("  = defconfigs: {}", defconfigs.join(", "));
+        }
+        for line in &finding.path {
+            println!("  | {line}");
+        }
     }
 }

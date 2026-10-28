@@ -13,6 +13,7 @@ mod dwarf_embed;
 mod dylint;
 mod error;
 mod facts;
+mod features;
 mod hygiene;
 mod image_metadata;
 mod linker;
@@ -109,16 +110,21 @@ fn run() -> Result<()> {
             HygieneCommand::Check(args) => hygiene::run_rule_checks(&hygiene::CheckRequest {
                 rules: args.rules,
                 checks: args.checks,
+                defconfigs: args.defconfigs,
                 format: args.format,
                 report: args.report,
+                app: args.app,
             }),
             HygieneCommand::TestLayout => hygiene::run_rule_checks(&hygiene::CheckRequest {
                 rules: vec![hygiene::TEST_LAYOUT_RULE.to_string()],
                 checks: Vec::new(),
+                defconfigs: Vec::new(),
                 format: cli::ReportFormat::Text,
                 report: false,
+                app: "entry".into(),
             }),
             HygieneCommand::HostTests => hygiene::check_host_tests(),
+            HygieneCommand::Features(args) => features::run(&args),
         },
     }
 }

@@ -10,3 +10,111 @@
 # or `TODO(cg): <planned repair>` for a violation awaiting repair; neither
 # part may be empty. An entry that no longer matches a finding fails a full
 # run; remove it with the fix.
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "dma"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DMA symbol, an `internal` kfeat entry or removal; the feature is empty and nothing in the repository references it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "dma-trace"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DMA_TRACE symbol or an `internal` kfeat entry; only `entry/dma-trace` selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "driver_ahci"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DRIVER_AHCI symbol or an `internal` kfeat entry; kdriver has the driver but no defconfig or manifest selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "driver_bcm2835_sdhci"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DRIVER_BCM2835_SDHCI symbol or an `internal` kfeat entry; kdriver has the driver but no defconfig or manifest selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "driver_fxmac"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DRIVER_FXMAC symbol or an `internal` kfeat entry; kdriver has the driver but no defconfig or manifest selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "driver_ixgbe"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DRIVER_IXGBE symbol or an `internal` kfeat entry; kdriver has the driver but no defconfig or manifest selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "driver_sdmmc"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_DRIVER_SDMMC symbol or an `internal` kfeat entry; kdriver has the driver but no defconfig or manifest selects it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "memtrack"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_MEMTRACK symbol or an `internal` kfeat entry; it assembles kalloc/tracking and devfs/memtrack."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "feature-map"
+subject = "tracepoint"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a KFEAT_TRACEPOINT symbol or an `internal` kfeat entry; it assembles ktracing/tracepoint."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "capability-bypass"
+subject = "kdma -> alloc-engine/tlsf"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: kdma's bounce pool always uses alloc-engine's TlsfByteAllocator, independent of the KFEAT_ALLOC_* byte-allocator choice, so every defconfig enables alloc-engine/tlsf without kfeat/alloc_tlsf."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "entry/dma-trace -> kfeat/dma-trace"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: a Kconfig symbol or the entry crate; the debug switch is selected through entry instead of Kconfig."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "fs_boot/dev-log -> devfs/dev-log"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: kfeat/dev_log or fs_boot's default features; fs_boot enables devfs/dev-log by default although kfeat/dev_log owns it."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "kdma -> alloc-engine/tlsf"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: kdma's bounce pool always uses alloc-engine's TlsfByteAllocator (see the capability-bypass entry)."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "posix-net/vsock -> knet/vsock"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: wiring inside the kfeat/vsock assembly; the chain is reached only from kfeat/vsock (ksyscall/vsock -> posix-net/vsock)."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "posix-process/tipc -> kprocess/tipc"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: wiring inside the kfeat/tipc assembly; the chain is reached only from kfeat/tipc (ksyscall/tipc -> posix-process/tipc)."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "tipc -> kprocess/tipc"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: kfeat/tipc or the tipc crate's dependency declaration; both enable kprocess/tipc."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "tipc/default -> linux_sysno/tipc"
+reason = "CG-047-kconfig-feature-ownership: TODO(cg): decide ownership: kfeat/tipc or the tipc crate's default features; both enable linux_sysno/tipc."
+
+[[exception]]
+rule = "CG-047-kconfig-feature-ownership"
+check = "peer-forwarding"
+subject = "watchdog/nmi -> khal/nmi"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: wiring inside the kfeat/watchdog_hardlockup assembly; the chain is reached only from it (kruntime/watchdog_hardlockup -> watchdog/nmi), and KFEAT_WATCHDOG_HARDLOCKUP implies KFEAT_NMI."

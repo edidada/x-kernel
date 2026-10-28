@@ -201,7 +201,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_hygiene check_test_layout check_host_tests fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_hygiene check_test_layout check_features check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -417,9 +417,15 @@ check_hooks:
 check_hygiene:
 	@$(XKMAKE) hygiene check $(HYGIENE_ARGS)
 
-# Single-rule alias of check_hygiene.
+# Single-rule aliases of check_hygiene.
 check_test_layout:
 	@$(XKMAKE) hygiene check --rule CG-051-test-source-layout $(HYGIENE_ARGS)
+
+# CG-047 over every platform defconfig. FEATURES_ARGS passes extra flags, e.g.
+# FEATURES_ARGS=--report; FEATURES_ARGS="--base origin/main" prints the
+# feature difference against a revision instead (`hygiene features --base`).
+check_features:
+	@$(XKMAKE) hygiene $(if $(filter --base%,$(FEATURES_ARGS)),features,check --rule CG-047-kconfig-feature-ownership) $(HYGIENE_ARGS) $(FEATURES_ARGS)
 
 check_host_tests:
 	@$(XKMAKE) hygiene host-tests

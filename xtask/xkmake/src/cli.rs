@@ -57,6 +57,9 @@ pub(crate) enum HygieneCommand {
     TestLayout,
     /// Check that Cargo integration tests compile in a bare host Cargo build.
     HostTests,
+    /// Check Kconfig/kfeat feature ownership (CG-047); without `--base`, alias
+    /// of `check --rule CG-047-kconfig-feature-ownership`.
+    Features(HygieneFeaturesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -70,6 +73,10 @@ pub(crate) struct HygieneCheckArgs {
     #[arg(long = "check", value_name = "NAME")]
     pub(crate) checks: Vec<String>,
 
+    /// Defconfig to resolve; repeatable. Defaults to `platforms/**/*defconfig`.
+    #[arg(long = "defconfig", value_name = "PATH")]
+    pub(crate) defconfigs: Vec<PathBuf>,
+
     /// Output format.
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     pub(crate) format: ReportFormat,
@@ -78,6 +85,35 @@ pub(crate) struct HygieneCheckArgs {
     /// status.
     #[arg(long)]
     pub(crate) report: bool,
+
+    /// Kernel application crate whose feature graph is resolved.
+    #[arg(long, default_value = "entry")]
+    pub(crate) app: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HygieneFeaturesArgs {
+    /// Defconfig to resolve; repeatable. Defaults to `platforms/**/*defconfig`.
+    #[arg(long = "defconfig", value_name = "PATH")]
+    pub(crate) defconfigs: Vec<PathBuf>,
+
+    /// Print the resolved-feature and feature-graph difference against this
+    /// Git revision instead of running the checks.
+    #[arg(long, value_name = "REV")]
+    pub(crate) base: Option<String>,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    pub(crate) format: ReportFormat,
+
+    /// Also print report-only findings (linked crates without an owner,
+    /// unused features); they do not affect the exit status.
+    #[arg(long)]
+    pub(crate) report: bool,
+
+    /// Kernel application crate whose feature graph is resolved.
+    #[arg(long, default_value = "entry")]
+    pub(crate) app: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

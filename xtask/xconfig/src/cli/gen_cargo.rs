@@ -506,8 +506,6 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
 /// `ARCH_<ARCH>=y` to the arch HAL crate feature `platform_kplat_<arch>`,
 /// skipping build-time-only keys.
 fn extract_kfeat_features(config: &HashMap<String, String>) -> Vec<String> {
-    const SKIP_KEYS: &[&str] = &["KFEAT_FS", "KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
-
     let mut features: Vec<String> = Vec::new();
 
     for (key, value) in config {
@@ -525,7 +523,7 @@ fn extract_kfeat_features(config: &HashMap<String, String>) -> Vec<String> {
             {
                 continue;
             }
-            if SKIP_KEYS.contains(&key.as_str()) {
+            if crate::build_config::CARGO_FEATURE_SKIP_KEYS.contains(&key.as_str()) {
                 continue;
             }
             features.push(name.to_lowercase());

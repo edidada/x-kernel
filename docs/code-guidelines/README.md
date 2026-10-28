@@ -111,18 +111,20 @@ checked through the configured kernel's `make clippy` during this migration.
 
 Rules over manifests, Kconfig or file layout rather than compiled Rust run
 in `xkmake hygiene check`. `make check_hygiene` runs every registered check
-and needs no `.config`; `--rule <id>` and `--check <name>` (each
-repeatable) narrow a run, and `make check_test_layout` runs CG-051 alone.
-Check names are the `lint` names under the rule's `xkmake` backend.
+and needs no `.config`; `--rule <id>`, `--check <name>` and
+`--defconfig <path>` (each repeatable) narrow a run, and
+`make check_features` and `make check_test_layout` run CG-047 and CG-051
+alone. Check names are the `lint` names under the rule's `xkmake` backend.
 A unit test fails when the xkmake registry and the `CG-*.md` frontmatter
 disagree in either direction, so a check and its rule file change together.
 
 Findings print as text, or as JSON with `--format json`; each names its
 rule, check, file and subject. `--report` adds advisory items that never
 fail. The exit status is 0 without violations, 1 with violations, and 2
-when a check cannot run, for example when `cargo metadata` fails. `deps`,
-`header`, `lints` and `host-tests` stay separate `xkmake hygiene` commands
-without a CG rule.
+when a check cannot run, for example when `cargo metadata` or Kconfig
+parsing fails. `xkmake hygiene features --base <rev>` remains the CG-047
+diff mode. `deps`, `header`, `lints` and `host-tests` stay separate
+`xkmake hygiene` commands without a CG rule.
 
 CI runs `make check_hygiene` once, in its own Jenkins stage
 `Check: Repository hygiene`; the other stages set `SKIP_HYGIENE=1`. Locally,
@@ -136,10 +138,10 @@ A finding the rule's **Exceptions** permits is registered in
 
 ```toml
 [[exception]]
-rule = "CG-051-test-source-layout"
-check = "src-test-file"
-subject = "drivers/kdemo/src/tests.rs"
-reason = "CG-051-test-source-layout: <Exceptions case>: <why it holds>"
+rule = "CG-047-kconfig-feature-ownership"
+check = "capability-bypass"
+subject = "kdma -> alloc-engine/tlsf"
+reason = "CG-047-kconfig-feature-ownership: crate-local implementation feature: <why the edge is local>"
 ```
 
 `rule` and `check` must name a registered check, and `subject` must equal
@@ -149,8 +151,9 @@ above: after the full rule id, it names the case of the rule's
 violation awaiting repair, `TODO(cg): <planned repair>`. The check rejects
 a reason that is empty after the rule id or after `TODO(cg): `. An
 exception that no longer matches a finding is stale and fails the check, so
-fixing a violation removes its entry. `--rule` and `--check` runs judge
-the entries of the checks they run.
+fixing a violation removes its entry. A run limited with `--defconfig` does
+not judge staleness; `--rule` and `--check` runs judge the entries of the
+checks they run.
 
 ## Rules
 
@@ -202,7 +205,7 @@ the entries of the checks they run.
 | [CG-044-unsafe-precondition-assertions](CG-044-unsafe-precondition-assertions.md) | SHOULD | ai | — |
 | [CG-045-non-time-integer-units](CG-045-non-time-integer-units.md) | SHOULD | ai | — |
 | [CG-046-atomic-ordering-rationale](CG-046-atomic-ordering-rationale.md) | SHOULD | ai | — |
-| [CG-047-kconfig-feature-ownership](CG-047-kconfig-feature-ownership.md) | MUST | ai | — |
+| [CG-047-kconfig-feature-ownership](CG-047-kconfig-feature-ownership.md) | MUST | xkmake, ai | `feature-map`, `kconfig-implication`, `capability-bypass`, `peer-forwarding`, `build-args` |
 | [CG-048-direct-owner-conversion](CG-048-direct-owner-conversion.md) | SHOULD | ai | — |
 | [CG-049-no-std-box-in-kernel-tests](CG-049-no-std-box-in-kernel-tests.md) | MUST | dylint | `std_box_in_kernel_tests` |
 | [CG-050-scheduler-lock-order](CG-050-scheduler-lock-order.md) | MUST | ai | — |

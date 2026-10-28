@@ -25,8 +25,8 @@ fi
 
 mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
 # Clippy already runs the repository rule checks. The standalone run covers
-# manifest-only changes, deletions, and commits where the configured Clippy
-# path cannot run.
+# manifest/Kconfig-only changes, deletions, and commits where the configured
+# Clippy path cannot run.
 if [ "${#STAGED_RS[@]}" -eq 0 ] || [ "${SKIP_CLIPPY:-0}" = "1" ] || [ ! -f .config ]; then
 	if ! make check_hygiene; then
 		echo "pre-commit: repository rule checks (make check_hygiene) could not pass. See the diagnostics above for source or toolchain/setup errors." >&2

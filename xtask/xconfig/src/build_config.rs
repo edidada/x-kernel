@@ -340,41 +340,52 @@ fn enabled(values: &BTreeMap<String, String>, name: &str) -> bool {
     matches!(values.get(name).map(String::as_str), Some("y" | "m"))
 }
 
-fn extract_cargo_features(values: &BTreeMap<String, String>) -> Vec<String> {
-    const SKIP_KEYS: &[&str] = &["KFEAT_FS", "KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
+/// `KFEAT_*` symbols that only gate Kconfig dependencies or select a build
+/// transport; they never become `kfeat` Cargo features.
+pub const CARGO_FEATURE_SKIP_KEYS: &[&str] =
+    &["KFEAT_FS", "KFEAT_VIRTIO_BUS_PCI", "KFEAT_VIRTIO_BUS_MMIO"];
 
+/// Returns the `kfeat` Cargo feature that an enabled Kconfig symbol selects.
+///
+/// This is the single mapping used for kernel builds: `KFEAT_<NAME>` maps to
+/// `<name>`, `PLATFORM_<NAME>` to `platform_<name>`, and
+/// `MACHINE_<ARCH>_<BOARD>` to the HAL feature `platform_kplat_<arch>`.
+/// Symbols in [`CARGO_FEATURE_SKIP_KEYS`] and all other symbols map to none.
+pub fn cargo_feature_for_symbol(name: &str) -> Option<String> {
+    if CARGO_FEATURE_SKIP_KEYS.contains(&name) {
+        return None;
+    }
+    name.strip_prefix("KFEAT_")
+        .map(|feature| feature.to_ascii_lowercase())
+        .or_else(|| {
+            name.strip_prefix("PLATFORM_")
+                .map(|platform| format!("platform_{}", platform.to_ascii_lowercase()))
+        })
+        .or_else(|| {
+            // main's MACHINE-based config: MACHINE_<ARCH>_<BOARD>=y
+            // (e.g. MACHINE_AARCH64_QEMU) maps to the HAL-crate
+            // feature platform_kplat_<arch>.  X86_64 contains an
+            // underscore, so match by explicit arch prefix.
+            const ARCHES: [(&str, &str); 4] = [
+                ("AARCH64_", "aarch64"),
+                ("RISCV64_", "riscv64"),
+                ("X86_64_", "x86_64"),
+                ("LOONGARCH64_", "loongarch64"),
+            ];
+            name.strip_prefix("MACHINE_").and_then(|machine| {
+                ARCHES
+                    .iter()
+                    .find(|(prefix, _)| machine.starts_with(prefix))
+                    .map(|(_, arch)| format!("platform_kplat_{arch}"))
+            })
+        })
+}
+
+fn extract_cargo_features(values: &BTreeMap<String, String>) -> Vec<String> {
     let mut features = values
         .iter()
         .filter(|(_, value)| value.as_str() == "y")
-        .filter_map(|(name, _)| {
-            if SKIP_KEYS.contains(&name.as_str()) {
-                return None;
-            }
-            name.strip_prefix("KFEAT_")
-                .map(|feature| feature.to_ascii_lowercase())
-                .or_else(|| {
-                    name.strip_prefix("PLATFORM_")
-                        .map(|platform| format!("platform_{}", platform.to_ascii_lowercase()))
-                })
-                .or_else(|| {
-                    // main's MACHINE-based config: MACHINE_<ARCH>_<BOARD>=y
-                    // (e.g. MACHINE_AARCH64_QEMU) maps to the HAL-crate
-                    // feature platform_kplat_<arch>.  X86_64 contains an
-                    // underscore, so match by explicit arch prefix.
-                    const ARCHES: [(&str, &str); 4] = [
-                        ("AARCH64_", "aarch64"),
-                        ("RISCV64_", "riscv64"),
-                        ("X86_64_", "x86_64"),
-                        ("LOONGARCH64_", "loongarch64"),
-                    ];
-                    name.strip_prefix("MACHINE_").and_then(|machine| {
-                        ARCHES
-                            .iter()
-                            .find(|(prefix, _)| machine.starts_with(prefix))
-                            .map(|(_, arch)| format!("platform_kplat_{}", arch))
-                    })
-                })
-        })
+        .filter_map(|(name, _)| cargo_feature_for_symbol(name))
         .collect::<Vec<_>>();
     features.sort();
     features.dedup();
