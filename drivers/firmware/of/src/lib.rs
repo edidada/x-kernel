@@ -323,11 +323,17 @@ pub fn cpu_node_reg(node: FdtNode<'_, '_>) -> Option<u64> {
 /// `reg` is an offset into the parent's window, and this is how the
 /// driver resolves the window base without a parent-node walk.
 pub fn parent_reg_base(node: FdtNode<'_, '_>) -> Option<u64> {
-    let address_cells = node.parent_property_u32("#address-cells").unwrap_or(1) as usize;
     let raw = node.parent_property("reg")?.value;
-    match address_cells {
-        2 if raw.len() >= 8 => Some(u64::from_be_bytes(raw[0..8].try_into().ok()?)),
-        1 if raw.len() >= 4 => Some(u64::from(u32::from_be_bytes(raw[0..4].try_into().ok()?))),
+    // The parent's own #address-cells is NOT visible from the child (the
+    // property block rides one level up only — this node's parent block
+    // carries the GRANDPARENT's cells for ITS reg, not for ours). Infer
+    // the address width from the reg length instead, assuming
+    // #address-cells == #size-cells (the universal shape: 16 bytes = 2+2,
+    // 8 bytes = 1+1).
+    let addr_width = raw.len() / 2;
+    match addr_width {
+        8 if raw.len() >= 8 => Some(u64::from_be_bytes(raw[0..8].try_into().ok()?)),
+        4 if raw.len() >= 4 => Some(u64::from(u32::from_be_bytes(raw[0..4].try_into().ok()?))),
         _ => None,
     }
 }

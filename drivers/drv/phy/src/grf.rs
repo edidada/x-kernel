@@ -36,10 +36,15 @@ impl Grf {
         // Bind the view: `node()` borrows the firmware snapshot.
         let fw = dev.fw();
         let firmware = fw.node().ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
+        // A one-cell phandle decodes as FirmwareProp::U32 — u32_list only
+        // serves multi-cell payloads.
         let phandle = firmware
             .prop(prop)
-            .and_then(|p| p.u32_list())
-            .and_then(|cells| cells.first().copied())
+            .and_then(|p| {
+                p.u32_list()
+                    .and_then(|cells| cells.first().copied())
+                    .or_else(|| p.as_u32())
+            })
             .ok_or_else(|| {
                 log::error!("grf: property `{prop}` missing on {}", dev.info().path());
                 ProbeError::Fatal(RuntimeError::Invalid)

@@ -212,14 +212,17 @@ impl DriverOps<PlatformBus> for Pcie3PhyDriver {
             .ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
         let pcie30_phymode = firmware
             .prop("rockchip,pcie30-phymode")
-            .and_then(|p| p.u32_list())
-            .and_then(|cells| cells.first().copied())
+            .and_then(|p| {
+                p.u32_list()
+                    .and_then(|cells| cells.first().copied())
+                    .or_else(|| p.as_u32())
+            })
             .unwrap_or(0);
         // `rockchip,rx-common-refclk-mode`: default enabled per lane
         // (hardware reset value) when the property is absent.
         let rx_cmn = firmware
             .prop("rockchip,rx-common-refclk-mode")
-            .and_then(|p| p.u32_list());
+            .and_then(|p| p.u32_list().or_else(|| p.as_u32().map(|v| alloc::vec![v])));
 
         let has_pipe_grf = firmware.prop("rockchip,pipe-grf").is_some();
         let phy_grf = Grf::by_property(dev, "rockchip,phy-grf")?;
