@@ -52,9 +52,6 @@ fn block_of(reg_base: u64) -> Option<Block> {
 /// 480m clock and the CRU reset pair.
 struct Usb2Phy {
     grf: IoMap,
-    /// The block base inside the grf window (the node's own `reg` value):
-    /// every tuning/`phy_sus` offset in the reference is block-relative.
-    block_base: usize,
     block: Block,
     clk480m: ClkHandle,
     resets: [ResetHandle; 2],
@@ -83,7 +80,6 @@ impl Usb2Phy {
     /// reference (plain packed values — the inno rk3588 GRF bank is NOT
     /// hiword-conventioned).
     fn tuning(&self) {
-        let base = self.block_base;
         // utmi_termselect = 1'b1 (FS terminations),
         // utmi_xcvrselect = 2'b01 (FS transceiver);
         // USB3 blocks add utmi_opmode = 2'b01 (no-driving).
@@ -93,15 +89,15 @@ impl Usb2Phy {
         };
 
         // Deassert SIDDQ to power on the analog block: GENMASK(29,29).
-        self.grf.write32(base + 0x0008, 1 << 29);
+        self.grf.write32(0x0008, 1 << 29);
         // Do reset after exit IDDQ mode.
         self.reset_pulse();
         // Suspend configuration: GENMASK(20,16) | suspend_cfg.
-        self.grf.write32(base + 0x000c, (0x1f << 16) | suspend_cfg);
+        self.grf.write32(0x000c, (0x1f << 16) | suspend_cfg);
         // HS DC Voltage Level Adjustment 4'b1001: +5.89%.
-        self.grf.write32(base + 0x0004, (0xf << 24) | 0x0900);
+        self.grf.write32(0x0004, (0xf << 24) | 0x0900);
         // HS Transmitter Pre-Emphasis Current Control 2'b10: 2x.
-        self.grf.write32(base + 0x0008, (0x3 << 19) | 0x0010);
+        self.grf.write32(0x0008, (0x3 << 19) | 0x0010);
     }
 
     /// `phy_sus` suspend-bit write (hiword convention): `false` = power
@@ -110,7 +106,7 @@ impl Usb2Phy {
         let mask = 1u32 << self.phy_sus_bit;
         let tmp: u32 = if suspended { 1 } else { 0 };
         self.grf.write32(
-            self.block_base + self.phy_sus_offset,
+            self.phy_sus_offset,
             (tmp << self.phy_sus_bit) | (mask << 16),
         );
     }
@@ -214,7 +210,6 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
 
         let phy = Usb2Phy {
             grf,
-            block_base: block_base as usize,
             block,
             clk480m,
             resets,
