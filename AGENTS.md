@@ -34,15 +34,20 @@ Current shared skills:
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
 - `docs/ai/skills/pr-ci-review/SKILL.md`:
-  Gitee PR lifecycle: creating/updating PRs, tracking the latest Jenkins CI
-  status and diagnosing failures, and reading the latest review opinions from
-  the Gitee PR comment area.
+  Gitee PR lifecycle, Jenkins CI status, and AI review via xreview (status,
+  requesting a review, responding to findings).
 
 The complete skill index is `docs/ai/skills/README.md`.
 
-The project's own automatic code review rules are located in `docs/ai/review/`.
+## Pull Request Review
 
-Before starting the analysis, the review agent must read the rule file corresponding to the current stage from the PR source branch that has been checkouted.
+After opening or pushing to a PR, read
+`https://review.x-kernel.com:57482/r/prs/<n>/agent.md` (generic: `/r/agent.md`)
+and follow it: check the status, fix or respond to every blocking item, and
+request a new round after pushing. Send `X-Xreview-Client` on POST calls.
+xreview's rules live in `docs/code-guidelines/CG-*.md` (rules with an `ai`
+check) and `docs/ai/review/` (stage prompts); changes to those directories take
+effect for the PR that changes them.
 
 ## Project Overview
 

@@ -1,6 +1,6 @@
 ---
 name: pr-ci-review
-description: Use when creating a Gitee Pull Request for X-Kernel, checking the latest CI status of a PR (Jenkins x-kernel-ci-test), or reading and answering the latest code-review opinions for a PR. AI review results come from xreview (its PR comment, review page and agent API); human opinions from the Gitee PR comment area.
+description: Use when creating or updating a Gitee Pull Request for X-Kernel, checking the latest CI status of a PR (Jenkins x-kernel-ci-test), checking a PR's xreview AI review, or when asked to request an AI review or respond to an AI finding. AI review state comes from xreview's status API; human opinions and CI reports from the Gitee PR comment area.
 ---
 
 # PR CI and Review Tracking
@@ -10,47 +10,44 @@ Use this skill when an AI agent needs to:
 - create or update a Pull Request against `openkylin/x-kernel`;
 - find the latest Jenkins CI build for a given PR number;
 - check whether the CI build is still running, what stage it is on, or why it failed;
-- read the latest review opinions for a PR (xreview's AI review and human
-  comments), request an AI review, or answer an AI finding.
+- check a PR's AI review (xreview), request an AI review, or respond to an
+  AI finding;
+- read human review opinions and CI reports from the Gitee PR comment area.
 
 ## Key Context
 
 - Code repository: `https://gitee.com/openkylin/x-kernel` (Gitee, PR-based workflow)
 - CI job: Jenkins `x-kernel-ci-test` at `https://jenkins.openkylin.top/job/x-kernel-ci-test/`
-- AI review: xreview at `https://review.x-kernel.com`, triggered by the Gitee
-  webhook on every push. It posts one comment per PR as user `x-cibot` (first
-  line `<!-- xreview:summary arm=pipe -->`) and edits that comment in place as
-  rounds finish; there are no inline comments. Each PR has a review page at
-  `https://review.x-kernel.com/r/prs/<n>` and agent instructions at
-  `https://review.x-kernel.com/r/prs/<n>/agent.md` (generic version:
-  `https://review.x-kernel.com/r/agent.md`). The agent instructions are the
-  source of truth for the review API; read them instead of copying calls from
-  here.
-- Comments by `x-cibot` with the older markers `<!-- x-review:summary -->` /
-  `<!-- x-review:review -->` (headings `## AI Re-review` /
-  `## AI Code Review Summary`) come from the retired Jenkins `ai-review` job;
-  treat them as history, not as the current verdict.
+- AI review: xreview at `https://review.x-kernel.com:57482` (the port is part
+  of the URL; the bare host returns 403), triggered by the Gitee webhook on
+  every push. Each PR has a review page at
+  `https://review.x-kernel.com:57482/r/prs/<n>` and agent instructions at
+  `https://review.x-kernel.com:57482/r/prs/<n>/agent.md` (generic version:
+  `https://review.x-kernel.com:57482/r/agent.md`). agent.md is the source of
+  truth for the review API; read it instead of copying calls from here.
+- xreview posts one comment per PR as user `x-cibot` and edits it in place;
+  its HTML markers start with `<!-- xreview:` (`summary`, `status`, `hint`).
+  There are no inline comments.
+- Older `x-cibot` comments marked `<!-- x-review:summary -->` /
+  `<!-- x-review:review -->` are history from the retired `ai-review` job.
 - CI status is also posted back to the PR as comments by user `openkylin-cibot`
   with an HTML comment marker `<!-- x-kernel-ci -->`.
 
 ## Core Rules
 
-### Rule 1: Review opinions are read from the Gitee PR comment area
+### Rule 1: AI review state comes from xreview's status call
 
-Review opinions (AI summary and human comments) live in the PR comment list
-on Gitee (`pulls/<n>/comments`). Read them from there:
+The verdict, the blocking items and their ids come from xreview's status call
+(section D). The `x-cibot` comment is only a summary that points to the review
+page and agent.md. Human opinions and CI reports come from the Gitee PR
+comment area (`pulls/<n>/comments`).
 
-- the xreview comment by `x-cibot` (first line
-  `<!-- xreview:summary arm=pipe -->`): status table, the latest round's
-  verdict, and links to the review page and agent instructions;
-- CI status comments by `openkylin-cibot` (marker `<!-- x-kernel-ci -->`);
-- human comments and commands by any other user (e.g. `rerun`).
-
-### Rule 2: Anonymous read access is enough for status and opinions
+### Rule 2: Anonymous access is enough for status, opinions and xreview calls
 
 Both the Jenkins API and the Gitee API v5 are readable without credentials
 for this project (state-changing actions need a Jenkins account, see below).
-The xreview review page, `agent.md` and its status call are public too.
+All xreview calls, POSTs included, are unauthenticated, but every POST must
+carry the header `X-Xreview-Client: <name>[/<version>]`.
 
 ### Rule 3: Control actions require Jenkins auth; never do them passively
 
@@ -97,9 +94,8 @@ numbers. The list is ordered newest first, so take the first match for "latest".
    # from inside the repo (repo is auto-detected from git remote),
    # head branch = the branch you pushed, base = main
    ge pr create --title "fix(sub): meaningful summary" \
-     --body "Describe what changed, why, and expected behavior so the AI
-review's Description dimension can pass; reference related issues with
-'Fixes #IJSXXX' if any." \
+     --body "Describe what changed, why, and the expected behavior;
+reference related issues with 'Fixes #IJSXXX' if any." \
      --head fix/your-topic --base main
 
    # body from a file is better for longer descriptions:
@@ -128,11 +124,12 @@ review's Description dimension can pass; reference related issues with
    - Jenkins `x-kernel-ci-test` (build pipeline);
    - an xreview round on the head commit (posts or updates the xreview comment).
      Large PRs above the approval threshold wait for a maintainer; the author
-     (or the author's agent) can start a round from the review page or with the
-     review call in `agent.md`.
+     (or the author's agent) can start a round from the review page or with
+     `POST /api/v1/prs/<n>/review` (section D).
 
 5. Update the PR (new commits / `--amend`) pushes again; CI re-runs and
-   xreview reviews the new head (a follow-up round against the previous one).
+   xreview reviews the new head (a follow-up round against the previous one);
+   then work through section D.
 
 ### B. Get the latest CI status for a PR
 
@@ -189,15 +186,31 @@ for h in hits: print(h['number'], h.get('result') or 'RUNNING', h['url'])
 4. Determine flake vs regression by comparing the same stage/case in the
    previous successful builds still inside the 31-build window.
 
-### D. Read the latest review opinions
+### D. Handle the AI review and read review opinions
 
-For the AI review, use xreview's status call (see
-`https://review.x-kernel.com/r/prs/<n>/agent.md`): it returns the state, the
-latest round's verdict and every item with its id. The same page explains how
-to answer a finding (false positive, won't fix, withdraw) and how to request a
-new round; send the client header it describes on every call.
+Follow `https://review.x-kernel.com:57482/r/prs/<n>/agent.md`. In short:
 
-For human opinions and CI reports, read the PR comment area:
+1. GET the status: state, the latest round's verdict, and every item with its
+   `item_id`.
+2. For each blocking item, either fix it and push, or POST a response:
+   `false_positive` with `file:line` evidence, `wont_fix` (still blocks the
+   merge), or `recheck` for items of kind `inconclusive`.
+3. After pushing fixes, POST a review request for the new head.
+4. Re-read the status and check each response's `state`.
+
+```bash
+PR=759
+XR="https://review.x-kernel.com:57482/api/v1/prs/$PR"
+H='X-Xreview-Client: <agent>/<version>'
+J='Content-Type: application/json'
+curl -s "$XR/status"
+curl -s -X POST "$XR/items/<item>/response" -H "$H" -H "$J" \
+  -d '{"kind": "false_positive", "reason": "why, with file:line evidence"}'
+curl -s -X POST "$XR/review" -H "$H" -H "$J" -d '{"note": "pushed fixes"}'
+curl -s -X POST "$XR/recheck" -H "$H" -H "$J" -d '{}'  # all inconclusive items
+```
+
+For human opinions and CI reports, list the PR comments:
 
 ```bash
 PR=759
@@ -211,19 +224,16 @@ for c in json.load(sys.stdin):
 "
 ```
 
-Classify each comment:
+Classify each comment by user and marker prefix:
 
-- `x-cibot` + `<!-- xreview:summary arm=pipe -->`: the xreview comment
-  (status table with the reviewed commit, verdict 可合并 / 需修改 / 需复核,
-  stale marker when the PR has newer commits). Prefer the status call for
-  details.
-- `x-cibot` + `<!-- x-review:summary -->` / `<!-- x-review:review -->`: the
-  retired Jenkins `ai-review` job; history only.
+- `x-cibot` + `<!-- xreview:`: the xreview summary (verdict 可合并 / 需修改 /
+  需复核, stale marker when the PR has newer commits); a pointer only.
+- `x-cibot` + `<!-- x-review:`: the retired Jenkins `ai-review` job; history only.
 - `openkylin-cibot` + `<!-- x-kernel-ci -->`: CI result report posted to PR.
 - any other user (e.g. a `rerun` command by a maintainer): human opinion/command.
 
-The newest relevant comment is the authoritative "latest review opinion";
-do not blindly take the newest commit's status without checking human remarks.
+The status call is authoritative for the AI review; human comments can
+override it, so check them before reporting a verdict.
 
 ## Prerequisites
 
@@ -253,5 +263,5 @@ At minimum, report:
 - for failures: the failing stage, failing case, and the key error line from
   the per-case or host-companion log;
 - the latest review opinion: xreview's verdict for the current head (from the
-  status call or the xreview comment) and any human comments, citing the
-  Gitee comment id for human comments.
+  status call) and any human comments, citing their Gitee comment ids;
+- the xreview item ids handled and the response or recheck sent for each.

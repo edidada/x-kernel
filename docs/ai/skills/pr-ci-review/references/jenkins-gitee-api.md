@@ -49,7 +49,7 @@ dumping it wholesale — guess paths from the stage log instead.
 ### CI job list (view `xkernel`)
 
 `GET /view/xkernel/api/json?tree=jobs[name,url]` → jobs including
-`x-kernel-ci-test`, `ai-review`, `daily-test`, `x-kernel-longevity`, etc.
+`x-kernel-ci-test`, `ai-review` (retired), `daily-test`, `x-kernel-longevity`, etc.
 
 ## Jenkins: state-changing (needs auth + CSRF crumb)
 
@@ -86,17 +86,16 @@ curl -sk -u "$U:$T" -H "Jenkins-Crumb: $CRUMB" -X POST \
 | Endpoint | Purpose |
 |---|---|
 | `GET /repos/openkylin/x-kernel/pulls/<n>` | PR meta: `title`, `state`, `head.sha`, `head.ref`, `base.ref`, `html_url`, `diff_url`, `patch_url` |
-| `GET /repos/openkylin/x-kernel/pulls/<n>/comments?per_page=100&sort=id&order=desc` | **PR comments — the review source of truth** (see below) |
+| `GET /repos/openkylin/x-kernel/pulls/<n>/comments?per_page=100&sort=id&order=desc` | PR comments: human opinions and CI reports (see below); AI review state comes from the xreview status API |
 | `GET /repos/openkylin/x-kernel/pulls/<n>/commits` | commits in the PR; `statuses_url` is null here |
 
 Comment classification (verified across PRs #751/#755/#757/#727/#759):
 
-- AI verdict: user `x-cibot`, first line `<!-- xreview:summary arm=pipe -->`,
-  one comment per PR edited in place by xreview (status table with the
-  reviewed commit, the latest round's verdict, links to the review page and
-  `agent.md`). Item-level details come from xreview's status call, described
-  in `https://review.x-kernel.com/r/prs/<n>/agent.md`.
-- Retired AI verdicts: user `x-cibot`, HTML marker `<!-- x-review: -->`,
+- AI review summary: user `x-cibot`, markers starting with `<!-- xreview:`,
+  one comment per PR edited in place by xreview, linking to the review page
+  and `agent.md`. Review state and items come from xreview's status call,
+  described in `https://review.x-kernel.com:57482/r/prs/<n>/agent.md`.
+- Retired AI verdicts: user `x-cibot`, marker prefix `<!-- x-review:`,
   headings `## AI Re-review` / `## AI Code Review Summary`, from the former
   Jenkins `ai-review` job; history only.
 - CI report: user `openkylin-cibot`, HTML marker `<!-- x-kernel-ci -->`,
@@ -125,6 +124,9 @@ curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/954/wfapi/describe"
 # 3. failing stage artifacts
 curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/954/artifact/.ci/stage-logs/Runtime_Test_kplat-x86_64.log" | grep -n "FAILED"
 
-# 4. review opinions (read from the Gitee comment area)
+# 4. AI review state (xreview status call; other calls are in agent.md)
+curl -s "https://review.x-kernel.com:57482/api/v1/prs/759/status"
+
+# 5. human opinions and CI reports (Gitee comment area)
 curl -sk "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls/759/comments?per_page=100&sort=id&order=desc"
 ```
