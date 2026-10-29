@@ -21,7 +21,7 @@
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 
 use crate::{
     device::LoopbackDevice,
@@ -31,11 +31,13 @@ use crate::{
     service::Service,
 };
 
+static_lock! {
 /// Stacks of the non-initial network namespaces, keyed by namespace id.
 ///
 /// The initial namespace's stack is the global `SERVICE` singleton and never
 /// enters this map.
 static NAMESPACE_STACKS: Mutex<BTreeMap<u64, Arc<Service>>> = Mutex::new(BTreeMap::new());
+}
 
 /// Drops the stack of a destroyed network namespace.
 ///

@@ -64,7 +64,7 @@ ksyscall::handle_syscall
     ├─ vfs adapter  ───────────> posix-fs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> khal time sources / kprocess CPU-time state / kfd_objects::TimerFd
-    ├─ task adapter ───────────> kprocess / posix-process / kcred
+    ├─ task adapter ───────────> kprocess / posix-process / kcred / knet
     ├─ io_mpx adapter ─────────> kfd_objects::Epoll
     ├─ sync adapter ───────────> kfutex / kprocess
     └─ misc adapter ───────────> posix-mm / posix-net / ...

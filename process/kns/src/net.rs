@@ -12,12 +12,15 @@
 //! layer; per-namespace data-plane routing is the follow-up layer.
 
 use kcred::NamespaceId;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
 
+static_lock! {
 /// Drop notification hook, installed by the network-stack owner (`knet`) so a
 /// destroyed namespace can release its protocol-stack resources.
 static NET_NAMESPACE_DROP_HOOK: Mutex<Option<fn(u64)>> = Mutex::new(None);
+}
 
+static_lock! {
 /// The id of the initial (boot) network namespace, recorded by
 /// [`NetNamespace::new_initial`] when the boot `NsProxy` is constructed.
 ///
@@ -25,6 +28,7 @@ static NET_NAMESPACE_DROP_HOOK: Mutex<Option<fn(u64)>> = Mutex::new(None);
 /// the initial network namespace's id is whatever the counter holds at
 /// boot-time construction — not a fixed constant.
 static INITIAL_NET_ID: Mutex<Option<u64>> = Mutex::new(None);
+}
 
 /// Installs the drop notification hook for network namespaces.
 pub fn set_net_namespace_drop_hook(hook: fn(u64)) {
