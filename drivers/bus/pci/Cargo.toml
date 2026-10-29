@@ -13,6 +13,7 @@ categories.workspace = true
 
 [features]
 pci-non-ecam = []
+dw-host = ["dep:ktime_types"]
 
 [dependencies]
 kerrno.workspace = true
@@ -21,6 +22,7 @@ kbuild_config = { workspace = true }
 log.workspace = true
 memspace.workspace = true
 khal = { workspace = true }
+ktime_types = { workspace = true, optional = true }
 driver_base = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }

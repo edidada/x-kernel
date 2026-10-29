@@ -35,6 +35,11 @@ pub mod msix;
 
 pub mod discover;
 
+/// RK3588 DesignWare root-complex host (platform driver on the same bus
+/// layer; gated behind `dw-host`, the tree is host-side by role).
+#[cfg(feature = "dw-host")]
+pub mod dw_host;
+
 use driver_base::{Bus, BusDeviceData, BusId, MatchScore};
 
 /// The PCI bus type in the driver-core device model — the single authority

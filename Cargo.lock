@@ -3897,6 +3897,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kspin",
+ "ktime_types",
  "kvirtiodrivers",
  "lazyinit",
  "log",

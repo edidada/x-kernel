@@ -348,6 +348,14 @@ config KFEAT_DRIVER_VIRTIO_MMIO
       Claims DT "virtio,mmio" nodes and dispatches to the per-family
       driver-core virtio drivers by probing the transport header.
 
+config KFEAT_PCI_DW_HOST
+    bool "RK3588 DesignWare PCIe root-complex host"
+    default n
+    help
+      The DesignWare RC host driver: DBI + iATU config access (no ECAM),
+      link training, bus-0/1 enumeration. Pairs with the combphy and
+      pcie3 phy providers; INTx/BAR windows land with the next slice.
+
 config KFEAT_DRIVER_PHY_USB2PHY
     bool "RK3588 USB2 PHY provider (inno-usb2)"
     depends on KFEAT_CHAR

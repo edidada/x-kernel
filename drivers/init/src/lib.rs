@@ -92,6 +92,8 @@ fn level3_drivers() {
     drv_phy::combphy::register();
     #[cfg(feature = "rk3588-pcie3phy")]
     drv_phy::pcie3phy::register();
+    #[cfg(feature = "pci-dw-host")]
+    pci::dw_host::register();
     #[cfg(feature = "mmc-block")]
     subsys_mmc::blk::register();
     #[cfg(feature = "mmc-dwmmc-rockchip")]

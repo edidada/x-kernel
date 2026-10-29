@@ -31,6 +31,8 @@ rk3588-cru = ["dep:drv-clk"]
 rk3588-usb2phy = ["dep:drv-phy"]
 rk3588-combphy = ["dep:drv-phy"]
 rk3588-pcie3phy = ["dep:drv-phy"]
+pci-dw-host = ["pci/dw-host"]
+# khal/ktime_types optional activation rides the pci crate feature.
 # RTC class + one backend per feature: the class carries the boot wall-clock
 # service, each feature compiles exactly one concrete clock in.
 rtc = ["dep:subsys_rtc"]
