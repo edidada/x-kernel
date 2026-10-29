@@ -93,5 +93,7 @@ T-01).
 - Preserve private, initialized filesystem context for NEWNS.
 - Keep UTS bounds, one-allocation borrowing, and byte semantics aligned.
 - Preserve the single initial cgroup hierarchy reference.
-- Ensure `setns` rejects Net/User/Cgroup swaps rather than switching references.
+- Ensure `setns` rejects User/Cgroup swaps rather than switching references;
+  a Net swap is supported and materializes the target namespace's protocol
+  stack (see T-01 for its data-plane residual risk).
 - Define owner, locks, authorization, and cleanup when adding namespace state.
