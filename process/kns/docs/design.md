@@ -212,11 +212,13 @@ while any fd or bundle references it.
 Non-goals and increments (explicitly out of scope, recorded because they echo
 the tgoskits gaps):
 
-- **NEWNET/NEWUSER/NEWCGROUP/NEWTIME isolation**: the object types exist and
-  NsFd/procfs expose them, but switching net/user/cgroup references without
-  isolating the underlying interface/credential/cgroup tables is rejected.
-  User namespaces additionally need `uid_map`/`gid_map` chown and mount
-  permission downgrade semantics.
+- **NEWUSER/NEWCGROUP/NEWTIME isolation**: the object types exist and
+  NsFd/procfs expose them, but switching user/cgroup references without
+  isolating the underlying credential/cgroup tables is rejected. User
+  namespaces additionally need `uid_map`/`gid_map` chown and mount permission
+  downgrade semantics. Net is no longer in this group: its identity and
+  lifecycle are implemented (see the net namespace lifecycle section), while
+  net *data-plane* routing stays global in knet as the documented follow-up.
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check covers published threads of the caller; cross-process `CLONE_FS`
   sharing is not counted (no `fs->users` counter yet).

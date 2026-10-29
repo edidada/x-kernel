@@ -455,9 +455,11 @@ impl NsProxy {
     ///
     /// # Errors
     ///
-    /// Returns [`UnshareError::Unsupported`] for `User`, `Cgroup`, and `Net`
+    /// Returns [`UnshareError::Unsupported`] for `User` and `Cgroup`
     /// namespaces, whose underlying tables are not isolated yet; switching
-    /// only the namespace reference would create pseudo-isolation.
+    /// only the namespace reference would create pseudo-isolation. A `Net`
+    /// slot swaps in the target `NetNamespace`; the syscall path materializes
+    /// its protocol stack via `knet::netns::ensure_stack`.
     pub fn with_namespace(&self, replacement: &NsFd) -> Result<Arc<Self>, UnshareError> {
         if matches!(replacement, NsFd::User(_) | NsFd::Cgroup(_)) {
             return Err(UnshareError::Unsupported);
