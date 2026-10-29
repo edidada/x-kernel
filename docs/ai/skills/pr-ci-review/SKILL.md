@@ -32,6 +32,9 @@ Use this skill when an AI agent needs to:
   `<!-- x-review:review -->` are history from the retired `ai-review` job.
 - CI status is also posted back to the PR as comments by user `openkylin-cibot`
   with an HTML comment marker `<!-- x-kernel-ci -->`.
+- Jenkins and Gitee endpoints and curl snippets live only in
+  [references/jenkins-gitee-api.md](references/jenkins-gitee-api.md)
+  ("the reference"); the workflows below name the section to use.
 
 ## Core Rules
 
@@ -40,7 +43,7 @@ Use this skill when an AI agent needs to:
 The verdict, the blocking items and their ids come from xreview's status call
 (section D). The `x-cibot` comment is only a summary that points to the review
 page and agent.md. Human opinions and CI reports come from the Gitee PR
-comment area (`pulls/<n>/comments`).
+comment area.
 
 ### Rule 2: Anonymous access is enough for status, opinions and xreview calls
 
@@ -53,8 +56,9 @@ carry the header `X-Xreview-Client: <name>[/<version>]`.
 
 Stop / terminate / re-trigger / replay endpoints all return `403` (CSRF gate)
 or `401` (auth) anonymously. They need a signed-in Jenkins user with Build
-permission plus a CSRF crumb. Do not probe control endpoints speculatively with
-real credentials; only act when the user explicitly asks.
+permission plus a CSRF crumb (reference: "Jenkins: state-changing"). Do not
+probe control endpoints speculatively with real credentials; only act when the
+user explicitly asks.
 
 ### Rule 4: Jenkins keeps only the most recent 31 builds
 
@@ -73,21 +77,17 @@ numbers. The list is ordered newest first, so take the first match for "latest".
 
 ### A. Create or update a PR
 
-1. Fetch latest `main` and create a topic branch:
+1. Branch from the latest `main`, make the change, and push to Gitee (needs
+   a Gitee account with an SSH key or push credentials):
 
    ```bash
    git fetch origin
    git checkout -b fix/your-topic origin/main
-   ```
-
-2. Make the change, then push to Gitee:
-
-   ```bash
    git add -A && git commit -m "fix(sub): meaningful summary"
    git push -u origin fix/your-topic
    ```
 
-3. Open the PR with the `ge` CLI (Gitee v5 API wrapped; already authenticated
+2. Open the PR with the `ge` CLI (Gitee v5 API wrapped; already authenticated
    in this environment as user `luodeb`):
 
    ```bash
@@ -106,85 +106,40 @@ reference related issues with 'Fixes #IJSXXX' if any." \
    ge pr create --fill --head fix/your-topic --base main
    ```
 
-   Equivalent raw Gitee v5 API call (same data the CLI sends):
-
-   ```bash
-   curl -sk -X POST "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls" \
-     -d "access_token=$GITEE_TOKEN" \
-     -d "title=fix(sub): meaningful summary" \
-     -d "head=fix/your-topic" \
-     -d "base=main" \
-     -d "body=..."
-   ```
-
    Verify creation with `ge pr view --repo openkylin/x-kernel` or the
-   pull's `number` in the API response.
+   pull's `number` in the response. The raw API call behind `ge pr create`
+   is in the reference ("Gitee API v5: create a PR").
 
-4. After the PR is open, the Gitee webhook automatically triggers:
+3. After the PR is open, the Gitee webhook automatically triggers:
    - Jenkins `x-kernel-ci-test` (build pipeline);
    - an xreview round on the head commit (posts or updates the xreview comment).
      Large PRs above the approval threshold wait for a maintainer; the author
      (or the author's agent) can start a round from the review page or with
-     `POST /api/v1/prs/<n>/review` (section D).
+     the review call in section D.
 
-5. Update the PR (new commits / `--amend`) pushes again; CI re-runs and
+4. Update the PR (new commits / `--amend`) pushes again; CI re-runs and
    xreview reviews the new head (a follow-up round against the previous one);
    then work through section D.
 
 ### B. Get the latest CI status for a PR
 
-```bash
-PR=759
-BASE="https://jenkins.openkylin.top/job/x-kernel-ci-test"
-
-# 1. List builds of this PR (newest first); take the first one:
-curl -sk "$BASE/api/json?tree=builds%5Bnumber,result,url,actions%5Bcauses%5BshortDescription%5D%5D%5D" |
-  python3 -c "
-import json,sys
-pr='$PR'
-hits=[b for b in json.load(sys.stdin)['builds']
-      for a in b.get('actions',[]) if a.get('_class')=='hudson.model.CauseAction'
-      for c in a.get('causes',[]) if '#%s'%pr in c.get('shortDescription','')]
-for h in hits: print(h['number'], h.get('result') or 'RUNNING', h['url'])
-"
-
-# 2. Build overview of the latest build (result == null while running):
-#    GET $BASE/<n>/api/json?tree=number,building,result,duration,estimatedDuration,url
-
-# 3. Stage-level progress (running stage shows IN_PROGRESS):
-#    GET $BASE/<n>/wfapi/describe
-
-# 4. Full console log:
-#    GET $BASE/<n>/consoleText
-```
+1. Map the PR number to its builds and take the first (newest) one
+   (reference: "Map a PR number to its builds").
+2. Read the build overview (`result` is `null` while running), the stage
+   progress (the running stage is `IN_PROGRESS`) and, only when needed, the
+   multi-MB console log (reference: "Job / build lookup").
 
 ### C. Diagnose why a CI build failed
 
-1. Read the stage statuses from `wfapi/describe`; find the stage with
-   `FAILED` (later stages may be `ABORTED` as a cascade).
-2. Grep the console (`consoleText`) for the failing case:
-   `grep -B3 -A3 "FAILED\|timed out"`.
-3. Use the published artifacts for per-case precision
-   (`artifact/.ci/` is open to anonymous GET):
+Follow the reference's "Failure analysis":
 
-   ```bash
-   BASE="https://jenkins.openkylin.top/job/x-kernel-ci-test"
-   BU=945
-   # per-stage logs:
-   #   $BASE/$BU/artifact/.ci/stage-logs/<Stage_Name>.log
-   # per-test-case logs (get path from the stage log or artifacts tree):
-   #   $BASE/$BU/artifact/.ci/work/runtime-<arch>/test-harness/logs/ci/<ts>/cases/<case>.log
-   # host-companion logs:
-   #   $BASE/$BU/artifact/.ci/work/runtime-<arch>/test-harness/logs/ci/<ts>/artifacts/<case>/host-ca.log
-   # enumerate artifacts:
-   #   $BASE/$BU/api/json?tree=artifacts[relativePath]
-   ```
-
-   Artifact tree is large (tens of thousands of entries); prefer URL-guessing
-   from the stage log's `Log:` lines instead of loading the whole tree.
-
-4. Determine flake vs regression by comparing the same stage/case in the
-   previous successful builds still inside the 31-build window.
+1. Find the `FAILED` stage; later `ABORTED` stages are a cascade.
+2. Grep the console log for the failing case.
+3. Read the failing stage log, then the per-case and host-companion logs
+   (reference: "Artifacts"); guess artifact paths from the stage log rather
+   than loading the whole artifact tree.
+4. Decide flake vs regression against earlier successful builds in the
+   31-build window.
 
 ### D. Handle the AI review and read review opinions
 
@@ -210,49 +165,11 @@ curl -s -X POST "$XR/review" -H "$H" -H "$J" -d '{"note": "pushed fixes"}'
 curl -s -X POST "$XR/recheck" -H "$H" -H "$J" -d '{}'  # all inconclusive items
 ```
 
-For human opinions and CI reports, list the PR comments:
-
-```bash
-PR=759
-# Anonymous, no token needed. Newest page ordered by id desc.
-curl -sk "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls/$PR/comments?per_page=100&sort=id&order=desc" |
-  python3 -c "
-import json,sys
-for c in json.load(sys.stdin):
-    print('-', c['id'], c['user']['login'], (c.get('created_at') or '')[:19])
-    print('  ', (c.get('body') or '').replace(chr(10),' ')[:140])
-"
-```
-
-Classify each comment by user and marker prefix:
-
-- `x-cibot` + `<!-- xreview:`: the xreview summary (verdict 可合并 / 需修改 /
-  需复核, stale marker when the PR has newer commits); a pointer only.
-- `x-cibot` + `<!-- x-review:`: the retired Jenkins `ai-review` job; history only.
-- `openkylin-cibot` + `<!-- x-kernel-ci -->`: CI result report posted to PR.
-- any other user (e.g. a `rerun` command by a maintainer): human opinion/command.
+For human opinions and CI reports, list and classify the PR comments
+(reference: "Gitee API v5: PRs and comments").
 
 The status call is authoritative for the AI review; human comments can
 override it, so check them before reporting a verdict.
-
-## Prerequisites
-
-- For creating/updating PRs: a Gitee account with SSH key or push credentials.
-- For Jenkins control actions (stop/rerun): a Jenkins user with Build
-  permission. Get the CSRF crumb first, then POST:
-
-  ```bash
-  CRUMB=$(curl -sk -u "$USER:$TOKEN" "https://jenkins.openkylin.top/crumbIssuer/api/json" \
-    | python3 -c "import json,sys;print(json.load(sys.stdin)['crumb'])")
-  # stop build <n>:  POST /job/x-kernel-ci-test/<n>/stop
-  # terminate       POST /job/x-kernel-ci-test/<n>/terminate
-  # re-trigger with same parameters:
-  #   POST /job/x-kernel-ci-test/buildWithParameters
-  #   (params: PROJECT_REPO, DEFAULT_BRANCH, LIBUTEE_REPO, TEST_HARNESS_REPO,
-  #    TEST_HARNESS_BRANCH, ENABLE_DOC_CHECK)
-  ```
-
-  Detailed endpoint reference: [references/jenkins-gitee-api.md](references/jenkins-gitee-api.md).
 
 ## Validation Expectations
 
