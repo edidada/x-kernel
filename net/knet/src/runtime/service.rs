@@ -12,7 +12,7 @@ use core::{
     task::Waker,
 };
 
-use kerrno::{KError, KResult, LinuxError};
+use kerrno::{KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
@@ -27,13 +27,14 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{
-        LINK_FLAG_UP, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
+        LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
         NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
     },
     ip::{self, IpAddress, Ipv4Address},
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::Ipv4AddrSnapshot,
+        output::Ipv4SendRequest,
         router::Rule,
     },
     poller::{PollBudget, PollProgress},
@@ -45,7 +46,6 @@ use crate::{
     },
 };
 
-const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
 const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
@@ -690,52 +690,16 @@ impl Service {
             NetDeviceId::from_optional_ifindex(oif)?,
         )?;
         let dst_addr = &IpAddress::Ipv4(route.destination);
-        if router.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
-            return Err(KError::from(LinuxError::EACCES));
-        }
-        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        let source_addr = IpAddress::Ipv4(route.source.ok_or(LinuxError::ENETUNREACH)?);
-        // Limited broadcast can fan out or bypass routing with a bound device.
-        let route = if dst_addr.is_broadcast() {
-            None
-        } else {
-            Some(router.resolve_output_route(dst_addr, oif)?)
-        };
-        let (route_mtu, is_loopback) = if let Some(route) = &route {
-            (
-                Some(route.mtu),
-                route.link_kind == LinkKind::Loopback,
-            )
-        } else {
-            (
-                router.route_mtu(dst_addr),
-                router.is_loopback_destination(dst_addr),
-            )
-        };
-
-        if !is_loopback {
-            if !router.can_enqueue_tx_packet() {
-                return Err(KError::WouldBlock);
-            }
-
-            let packet_count = output_ipv4_packet_count(packet_len, route_mtu)?;
-            if !router.can_enqueue_tx_packets(packet_count) {
-                return Err(KError::WouldBlock);
-            }
-        }
-
-        prepare(
-            packet.as_deref_mut().ok_or(KError::InvalidInput)?,
-            source_addr,
-            *dst_addr,
-            route_mtu,
-        )?;
-        let packet = packet.take().ok_or(KError::InvalidInput)?;
-        if is_loopback {
-            router.transmit_ipv4_now(packet, route_mtu, route.as_ref(), monotonic_time())
-        } else {
-            router.queue_ipv4_packet(packet, oif, route_mtu)
-        }
+        router.prepare_and_send_ipv4_packet(
+            Ipv4SendRequest {
+                bound_src: route.source.map(IpAddress::Ipv4),
+                dst_addr: *dst_addr,
+                oif,
+                allow_broadcast,
+                packet,
+            },
+            |packet, source, mtu| prepare(packet, source, *dst_addr, mtu),
+        )
     }
 
     pub(crate) fn register_rx_waker(
@@ -1457,32 +1421,6 @@ fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
     if let Some(capacity_poll) = capacity_poll {
         capacity_poll.wake();
     }
-}
-
-fn output_ipv4_packet_count(packet_len: usize, mtu: Option<usize>) -> KResult<usize> {
-    if packet_len > u16::MAX as usize {
-        return Err(LinuxError::EMSGSIZE.into());
-    }
-
-    let Some(mtu) = mtu else {
-        return Ok(1);
-    };
-    if packet_len <= mtu {
-        return Ok(1);
-    }
-
-    let payload_len = packet_len
-        .checked_sub(IPV4_HEADER_LEN)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    let max_fragment_payload_len = mtu
-        .checked_sub(IPV4_HEADER_LEN)
-        .map(|len| len / 8 * 8)
-        .filter(|len| *len > 0)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    Ok(payload_len
-        .checked_add(max_fragment_payload_len - 1)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
-        / max_fragment_payload_len)
 }
 
 fn ipv4_snapshots_for_device(router: &Router, dev: NetDeviceId) -> Vec<Ipv4AddrSnapshot> {

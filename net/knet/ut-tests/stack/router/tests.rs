@@ -713,11 +713,11 @@ fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
         )
         .unwrap();
 
-    assert!(router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::BROADCAST)));
+    assert!(output::requires_broadcast(&router.devices, &IpAddress::Ipv4(Ipv4Address::BROADCAST)));
     assert!(
-        router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255)))
+        output::requires_broadcast(&router.devices, &IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255)))
     );
-    assert!(!router.ipv4_dest_requires_broadcast(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 8))));
+    assert!(!output::requires_broadcast(&router.devices, &IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 8))));
 }
 
 #[def_test]
@@ -1036,7 +1036,7 @@ fn output_route_uses_selected_device_and_validates_binding() {
 fn output_preflight_preserves_retry_and_uses_one_mtu_for_fragmentation() {
     let source = Ipv4Address::new(192, 0, 2, 7);
     let dst = Ipv4Address::new(192, 0, 2, 8);
-    for capacity in [2, 3] {
+    for capacity in [0, 2, 3] {
         let (mut router, _) = output_test_router();
         router.data_tx_queue = DataTxQueue::with_capacity(capacity);
         let service = crate::runtime::service::Service::new(router);
@@ -1054,11 +1054,11 @@ fn output_preflight_preserves_retry_and_uses_one_mtu_for_fragmentation() {
                 Ok(())
             },
         );
-        if capacity == 2 {
+        if capacity < 3 {
             assert_eq!(result, Err(KError::WouldBlock));
             assert_eq!(prepared, None);
             assert!(packet.is_some());
-            assert!(service.can_send_ip_packet());
+            assert_eq!(service.can_send_ip_packet(), capacity > 0);
         } else {
             assert_eq!(result, Ok(()));
             assert_eq!(prepared, Some((source.into(), Some(100))));
@@ -1076,12 +1076,58 @@ fn output_preflight_preserves_retry_and_uses_one_mtu_for_fragmentation() {
         Err(LinuxError::EMSGSIZE.into())
     );
     assert_eq!(router.available_tx_packet_slots(), available);
+    let packet = ipv4::build_ipv4_packet(source, dst, ipv4::PROTOCOL_UDP, 64, &[0; 200]).unwrap();
+    router.queue_ipv4_packet(packet, 0, Some(100)).unwrap();
+    for offset in [0, 80, 160] {
+        let fragment = router.data_tx_queue.pop_front().unwrap();
+        let header = ipv4::Ipv4Header::parse_header_only(fragment.network_packet().unwrap()).unwrap();
+        assert_eq!(header.identification(), 2);
+        assert_eq!(header.fragment_offset(), offset);
+        assert!(header.total_len() <= 100);
+    }
+}
+
+#[def_test]
+fn output_preparation_error_retains_buffer_and_queue_capacity() {
+    let (mut router, dev) = output_test_router();
+    let source = Ipv4Address::new(192, 0, 2, 7);
+    let dst = Ipv4Address::new(192, 0, 2, 8);
+    let original = ipv4::build_ipv4_packet(source, dst, ipv4::PROTOCOL_UDP, 64, &[0; 200]).unwrap();
+    let mut packet = Some(original.clone());
+    let available = router.available_tx_packet_slots();
+    for result in [Err(KError::Io), Ok(())] {
+        let mut prepared = None;
+        assert_eq!(
+            router.prepare_and_send_ipv4_packet(
+                Ipv4SendRequest {
+                    bound_src: None,
+                    dst_addr: dst.into(),
+                    oif: dev.ifindex(),
+                    allow_broadcast: false,
+                    packet: &mut packet,
+                },
+                |_, selected_source, mtu| {
+                    prepared = Some((selected_source, mtu));
+                    result
+                },
+            ),
+            result
+        );
+        assert_eq!(prepared, Some((source.into(), Some(100))));
+        if result.is_err() {
+            assert_eq!(packet.as_ref(), Some(&original));
+            assert_eq!(router.available_tx_packet_slots(), available);
+        } else {
+            assert!(packet.is_none());
+            assert_eq!(router.available_tx_packet_slots(), available - 3);
+        }
+    }
 }
 
 #[def_test]
 fn limited_broadcast_with_bound_device_preserves_no_route_output() {
     let (mut router, dev) = output_test_router();
-    let addr = router.first_ipv4_addr_for_device(dev.ifindex()).unwrap();
+    let addr = router.first_ipv4_entry(dev).unwrap().addr;
     router.remove_ipv4_addr(dev, addr);
     assert!(
         router

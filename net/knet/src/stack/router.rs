@@ -12,6 +12,8 @@ use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
+#[cfg(unittest)]
+use crate::network::output::OutputRoute;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
@@ -24,8 +26,8 @@ use crate::{
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
-        ipv4::{self, Ipv4Header},
-        output::{self, OutputRoute},
+        ipv4,
+        output::{self, Ipv4Output, Ipv4SendRequest},
         router::{
             ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TYPE_BROADCAST,
             ROUTE_TYPE_LOCAL, ROUTE_TYPE_MULTICAST, ROUTE_TYPE_UNICAST, RouteTable, Rule,
@@ -81,7 +83,7 @@ pub(crate) struct Router {
     control_tx_queue: VecDeque<PacketBuf>,
     data_tx_queue: DataTxQueue,
     next_rx_device: usize,
-    next_ipv4_identification: u16,
+    ipv4_output: Ipv4Output,
     /// Data-plane neighbor transitions waiting to be published after the
     /// Router lock is released.
     neighbor_events: Vec<NeighborEvent>,
@@ -106,7 +108,7 @@ impl Router {
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
             data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
-            next_ipv4_identification: 1,
+            ipv4_output: Ipv4Output::new(),
             neighbor_events: Vec::new(),
             devices: DeviceRegistry::new(smoltcp::config::IFACE_MAX_ADDR_COUNT),
             table: RouteTable::new(),
@@ -125,6 +127,7 @@ impl Router {
         )
     }
 
+    #[cfg(unittest)]
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
         let rule = self.table.lookup(dst)?;
         self.devices
@@ -144,25 +147,10 @@ impl Router {
     /// the selected device is administratively down, or when `oif` disagrees
     /// with the looked-up output device.
     pub(crate) fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
-        if dst.is_broadcast() && oif > 0 {
-            let device = self
-                .devices
-                .get_by_id(NetDeviceId::new(oif).ok_or(LinuxError::ENETUNREACH)?)
-                .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-            if !device.is_link_up() {
-                return Err(LinuxError::ENETUNREACH.into());
-            }
-            return Ok(self
-                .first_ipv4_addr_for_device(oif)
-                .map(|cidr| IpAddress::Ipv4(cidr.address()))
-                .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED)));
-        }
-        // Unbound limited broadcast still needs a route so the later
-        // dispatch flood has a source address.
-
-        Ok(self.resolve_output_route(dst, oif)?.source)
+        output::output_source_address(&self.table, &self.devices, dst, oif)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn resolve_output_route(&self, dst: &IpAddress, oif: i32) -> KResult<OutputRoute> {
         output::resolve_output_route(&self.table, &self.devices, dst, oif)
     }
@@ -441,64 +429,30 @@ impl Router {
         self.data_tx_queue.capacity_poll()
     }
 
-    pub(crate) fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
-        self.data_tx_queue.can_push(packet_count)
+    /// Supplies the resources for one IPv4 output transaction under this guard.
+    pub(crate) fn prepare_and_send_ipv4_packet(
+        &mut self,
+        request: Ipv4SendRequest<'_>,
+        prepare_fn: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
+    ) -> KResult {
+        self.ipv4_output.prepare_and_send(
+            &self.table,
+            &mut self.devices,
+            &mut self.data_tx_queue,
+            request,
+            prepare_fn,
+        )
     }
 
+    #[cfg(unittest)]
     pub(crate) fn queue_ipv4_packet(
         &mut self,
         packet: Vec<u8>,
         oif: i32,
         mtu: Option<usize>,
     ) -> KResult {
-        let packets =
-            output::fragment_ipv4_packet(packet, mtu, &mut self.next_ipv4_identification)?;
-        self.data_tx_queue
-            .try_extend(
-                packets.into_iter().map(|packet| {
-                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
-                }),
-            )
-            .map_err(|_| KError::WouldBlock)
-    }
-
-    /// Returns whether `dst` is routed through a loopback device.
-    pub(crate) fn is_loopback_destination(&self, dst: &IpAddress) -> bool {
-        self.table.lookup(dst).is_some_and(|rule| {
-            self.devices
-                .get_by_id(rule.dev)
-                .is_some_and(|device| device.link_kind() == LinkKind::Loopback)
-        })
-    }
-
-    /// Transmits an IPv4 packet through the current route without waiting for
-    /// the poller TX queue.
-    ///
-    /// A supplied route must describe this packet and have been resolved under
-    /// the current Router guard. `None` retains limited-broadcast dispatch.
-    ///
-    /// Loopback xmit raises `NetRx` and drains it on `local_bh_enable`, matching
-    /// Linux `dev_queue_xmit` → `loopback_xmit` → `__netif_rx`.
-    /// A full shared `NetRx` queue drops the packet and still returns `Ok`,
-    /// matching `loopback_xmit` returning `NETDEV_TX_OK` after `__netif_rx`
-    /// reports `NET_RX_DROP`.
-    pub(crate) fn transmit_ipv4_now(
-        &mut self,
-        packet: Vec<u8>,
-        mtu: Option<usize>,
-        route: Option<&OutputRoute>,
-        timestamp: MonotonicInstant,
-    ) -> KResult {
-        let packets =
-            output::fragment_ipv4_packet(packet, mtu, &mut self.next_ipv4_identification)?;
-        for packet in packets {
-            let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
-            // RX-ready hint for the poller, not send success. This path is
-            // not the poller; a dropped loopback packet is still a successful
-            // xmit, as documented above.
-            let _poll_next = self.dispatch_ipv4_packet(buf, timestamp, route);
-        }
-        Ok(())
+        self.ipv4_output
+            .queue_packet(&mut self.data_tx_queue, packet, oif, mtu)
     }
 
     pub(crate) fn add_device(
@@ -630,18 +584,6 @@ impl Router {
             .collect()
     }
 
-    /// Returns whether `address` is an IPv4 limited or directed broadcast.
-    pub(crate) fn ipv4_dest_requires_broadcast(&self, address: &IpAddress) -> bool {
-        let IpAddress::Ipv4(address) = *address else {
-            return false;
-        };
-        address.is_broadcast()
-            || self
-                .devices
-                .iter_ipv4_addrs()
-                .any(|(_, entry)| entry.addr.is_directed_broadcast(address))
-    }
-
     /// Returns the primary IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
@@ -660,11 +602,6 @@ impl Router {
         self.first_ipv4_entry(dev)
             .map(|entry| entry.addr)
             .ok_or(LinuxError::EADDRNOTAVAIL)
-    }
-
-    fn first_ipv4_addr_for_device(&self, ifindex: i32) -> Option<Ipv4Cidr> {
-        let dev = NetDeviceId::new(ifindex)?;
-        self.first_ipv4_entry(dev).map(|entry| entry.addr)
     }
 
     /// Selects the address used by legacy interface queries and updates.
@@ -1135,7 +1072,12 @@ impl Router {
             };
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
-                    poll_next |= self.dispatch_ipv4_packet(packet, timestamp, None);
+                    poll_next |= Ipv4Output::dispatch_packet(
+                        &self.table,
+                        &mut self.devices,
+                        packet,
+                        timestamp,
+                    );
                 }
                 Some(6) => {
                     let (src_addr, dst_addr, is_multicast) = {
@@ -1183,95 +1125,6 @@ impl Router {
         }
         self.collect_neighbor_events();
         (work_done, poll_next || self.has_queued_tx_packets())
-    }
-
-    /// Dispatches one IPv4 packet onto the selected device.
-    ///
-    /// Returns whether the send made RX ready, which [`Self::dispatch_budgeted`]
-    /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
-    /// `false`.
-    fn dispatch_ipv4_packet(
-        &mut self,
-        mut packet: PacketBuf,
-        timestamp: MonotonicInstant,
-        route: Option<&OutputRoute>,
-    ) -> bool {
-        if crate::ipv4::prepare_output_packet(&mut packet).is_err() {
-            return false;
-        }
-        let header =
-            Ipv4Header::parse_header_only(packet.network_packet().expect("finalized IPv4 packet"))
-                .expect("finalized IPv4 header");
-
-        let ipv4_src_addr = header.src_addr();
-        let src_addr = IpAddress::Ipv4(ipv4_src_addr);
-        let dst_addr = IpAddress::Ipv4(header.dst_addr());
-        if header.dst_addr().is_broadcast() {
-            if !self.is_valid_ipv4_broadcast_source(header.src_addr()) {
-                warn!("Dropping IPv4 broadcast packet with source {}", src_addr);
-                return false;
-            }
-
-            let bound_if = packet.ifindex();
-            let mut devices = self.devices.iter_mut_with_ids();
-            let Some((last_id, last_device)) = devices.next_back() else {
-                return false;
-            };
-
-            let mut poll_next = false;
-            for (id, dev) in devices {
-                let ifindex = id.ifindex();
-                if bound_if != 0 && bound_if != ifindex {
-                    continue;
-                }
-                poll_next |=
-                    dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
-            }
-            let last_ifindex = last_id.ifindex();
-            if bound_if == 0 || bound_if == last_ifindex {
-                poll_next |=
-                    last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
-            }
-            return poll_next;
-        }
-
-        // Queued output resolves again; synchronous output can reuse a decision
-        // made under the same Router guard.
-        let (dev_id, next_hop) = if let Some(route) = route {
-            (route.dev, route.next_hop)
-        } else {
-            let Some(rule) = self.table.lookup(&dst_addr) else {
-                warn!("No route found for destination: {}", dst_addr);
-                return false;
-            };
-            (rule.dev, rule.via.unwrap_or(dst_addr))
-        };
-        let bound_if = packet.ifindex();
-        if bound_if != 0 && bound_if != dev_id.ifindex() {
-            warn!(
-                "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
-                dev_id.ifindex()
-            );
-            return false;
-        }
-        if !self.is_local_ipv4_source(ipv4_src_addr) {
-            warn!("Dropping IPv4 packet with non-local source {}", src_addr);
-            return false;
-        }
-
-        let dev = self
-            .devices
-            .get_mut_by_id(dev_id)
-            .expect("route device must be registered");
-        dev.send_ip_packet(dev_id.ifindex(), next_hop, src_addr, packet, timestamp)
-    }
-
-    fn is_local_ipv4_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
-        self.has_ipv4_address(src_addr)
-    }
-
-    fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
-        src_addr.is_unspecified() || self.is_local_ipv4_source(src_addr)
     }
 
     pub(crate) fn queue_control_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {

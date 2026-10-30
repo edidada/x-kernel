@@ -330,7 +330,8 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
 | DeviceRegistry | Owns registered interfaces and address configuration, validates mutations, and synchronizes device address projections and aggregate MTU. |
-| Router | Owns routing and device state and dispatches RX/TX queues; delegates output resolution and fragmentation to `network/output.rs`. |
+| Router | Owns routing and device state and schedules RX/TX queues; lends routes, devices, and the data queue to `Ipv4Output` under its mutex. |
+| Ipv4Output | Owns IPv4 send preparation, capacity preflight, fragmentation identification, and device dispatch, including limited-broadcast fan-out and immediate loopback submission. |
 | StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -1345,7 +1346,7 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 
 ### TX Routing
 
-UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+`Service` submits each UDP send request to `Ipv4Output` through Router. The output path checks broadcast permission, selects the source and MTU, checks capacity, invokes UDP packet construction, and fragments and submits the result under one Router guard. TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
 
 TCP connection setup and UDP connect/send resolve IPv4 endpoints through the
 same output lookup used by route queries. Its result carries the effective
@@ -1400,7 +1401,7 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 `EthernetDevice` currently accepts IPv4 output only. It checks link state, source, and MTU, then sends limited and directed broadcasts to the Ethernet broadcast address. Other next hops use the ARP cache: a valid entry permits immediate transmission; an unresolved or expired entry triggers an ARP request when needed and retains the packet in bounded `pending_tx`. A full pending queue drops the packet. IPv6 remains available in the smoltcp and loopback paths, while the Ethernet adapter drops IPv6 output.
 
-Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/runtime/service.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
+Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Ipv4Output`](../src/network/output.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
 ### Unix Stream Control Data Delivery
 
@@ -1590,7 +1591,7 @@ RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms so
 
 TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP registers socket-local read/write wakers with smoltcp, while raw sockets use the shared protocol source for send notifications. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
-Output preparation resolves one `OutputRoute` from `RouteTable` and `DeviceRegistry` in `network/output.rs`. It contains the default source, output device, next hop, device MTU, and link kind. In-stack UDP reuses that MTU for queue-capacity preflight, header construction, and fragmentation. Fragmentation accepts an explicit MTU and the caller-owned identification sequence without accessing routing state. The Router guard spans resolution through submission: synchronous loopback output reuses the decision, while queued packets retain the socket's interface constraint and resolve the route again at dispatch. Limited broadcast keeps its separate bound-device or multi-device path, including its existing route-based optional MTU.
+Output preparation resolves one `OutputRoute` from `RouteTable` and `DeviceRegistry` in `network/output.rs`. It contains the default source, output device, next hop, device MTU, and link kind. In-stack UDP reuses that MTU for queue-capacity preflight, header construction, and fragmentation. `Ipv4Output` owns the fragmentation identification sequence; fragmentation uses the selected MTU without accessing routing state. Its send request borrows the original buffer so capacity rejection does not consume or modify it, and preparation errors retain it for the caller. Successful preparation transfers buffer ownership to fragmentation and submission. The Router guard spans resolution through submission: synchronous loopback output reuses the decision, while queued packets retain the socket's interface constraint and resolve the route again at dispatch. Limited broadcast keeps its separate bound-device or multi-device path, including its existing route-based optional MTU.
 
 ### Socket File I/O
 
