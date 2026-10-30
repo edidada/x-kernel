@@ -148,6 +148,7 @@ impl Router {
     /// with the looked-up output device.
     pub(crate) fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
         output::output_source_address(&self.table, &self.devices, dst, oif, None)
+            .map(IpAddress::Ipv4)
     }
 
     #[cfg(unittest)]

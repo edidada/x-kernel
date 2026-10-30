@@ -104,13 +104,13 @@ pub(crate) struct PreparedIpv4Send<'a> {
     tx_queue: &'a mut DataTxQueue,
     options: Ipv4SendOptions,
     packet: Ipv4PacketBuilder,
-    preparation: OutputPreparation,
+    decision: Ipv4SendDecision,
 }
 
 impl PreparedIpv4Send<'_> {
     /// Returns the final source address for the transport pseudo-header.
     pub(crate) fn source_addr(&self) -> Ipv4Address {
-        self.preparation.source
+        self.decision.source
     }
 
     /// Returns the destination address for the transport pseudo-header.
@@ -132,7 +132,7 @@ impl PreparedIpv4Send<'_> {
         let dont_fragment = self
             .options
             .fragmentation
-            .should_set_dont_fragment(self.packet.packet.len(), self.preparation.mtu);
+            .should_set_dont_fragment(self.packet.packet.len(), self.decision.mtu);
         // RFC 6864 §4.3 requires distinct IDs even when only a downstream
         // router might fragment the datagram. Atomic datagrams can use zero.
         let identification = if dont_fragment {
@@ -142,7 +142,7 @@ impl PreparedIpv4Send<'_> {
         };
         ipv4::write_ipv4_packet_header(
             &mut self.packet.packet,
-            self.preparation.source,
+            self.decision.source,
             self.options.dst_addr,
             self.options.protocol,
             self.options.ttl,
@@ -150,17 +150,17 @@ impl PreparedIpv4Send<'_> {
             dont_fragment,
         )
         .ok_or(LinuxError::EMSGSIZE)?;
-        match self.preparation.submission {
+        match self.decision.submission {
             SubmissionTarget::Queued => Ipv4Output::queue_packet(
                 self.tx_queue,
                 self.packet.packet,
                 self.options.oif,
-                self.preparation.mtu,
+                self.decision.mtu,
             ),
             SubmissionTarget::Immediate(target) => Ipv4Output::transmit_now(
                 self.devices,
                 self.packet.packet,
-                self.preparation.mtu,
+                self.decision.mtu,
                 target,
             ),
         }
@@ -173,11 +173,11 @@ pub(crate) struct Ipv4DispatchOutcome {
     pub(crate) has_rx_work: bool,
 }
 
-/// A single-route output decision, consumed under one configuration guard.
+/// An IPv4 route decision, consumed under one configuration guard.
 pub(crate) struct OutputRoute {
-    pub(crate) source: IpAddress,
+    pub(crate) source: Ipv4Address,
     pub(crate) dev: NetDeviceId,
-    pub(crate) next_hop: IpAddress,
+    pub(crate) next_hop: Ipv4Address,
     pub(crate) mtu: usize,
     pub(crate) link_kind: LinkKind,
 }
@@ -185,7 +185,7 @@ pub(crate) struct OutputRoute {
 enum OutputTarget {
     Routed {
         dev: NetDeviceId,
-        next_hop: IpAddress,
+        next_hop: Ipv4Address,
     },
     LimitedBroadcast,
 }
@@ -195,7 +195,8 @@ enum SubmissionTarget {
     Immediate(OutputTarget),
 }
 
-struct OutputPreparation {
+/// Source and submission strategy resolved under one configuration guard.
+struct Ipv4SendDecision {
     source: Ipv4Address,
     mtu: Option<usize>,
     submission: SubmissionTarget,
@@ -238,9 +239,9 @@ impl Ipv4Output {
         options: Ipv4SendOptions,
         packet: Ipv4PacketBuilder,
     ) -> Result<PreparedIpv4Send<'a>, (KError, Ipv4PacketBuilder)> {
-        let preparation =
+        let decision =
             match Self::prepare_output(routes, devices, tx_queue, options, packet.packet.len()) {
-                Ok(preparation) => preparation,
+                Ok(decision) => decision,
                 Err(error) => return Err((error, packet)),
             };
         Ok(PreparedIpv4Send {
@@ -250,7 +251,7 @@ impl Ipv4Output {
             tx_queue,
             options,
             packet,
-            preparation,
+            decision,
         })
     }
 
@@ -275,9 +276,12 @@ impl Ipv4Output {
                 warn!("No route found for destination: {}", dst_addr);
                 return Ipv4DispatchOutcome::default();
             };
+            let IpAddress::Ipv4(next_hop) = rule.via.unwrap_or(dst_addr) else {
+                return Ipv4DispatchOutcome::default();
+            };
             OutputTarget::Routed {
                 dev: rule.dev,
-                next_hop: rule.via.unwrap_or(dst_addr),
+                next_hop,
             }
         };
         Self::dispatch_to(devices, packet, source, destination, timestamp, &target)
@@ -289,7 +293,7 @@ impl Ipv4Output {
         tx_queue: &DataTxQueue,
         options: Ipv4SendOptions,
         packet_len: usize,
-    ) -> KResult<OutputPreparation> {
+    ) -> KResult<Ipv4SendDecision> {
         let dst_addr = IpAddress::Ipv4(options.dst_addr);
         if requires_broadcast(devices, &dst_addr) && !options.allow_broadcast {
             return Err(LinuxError::EACCES.into());
@@ -327,10 +331,7 @@ impl Ipv4Output {
             }
             SubmissionTarget::Queued
         };
-        let IpAddress::Ipv4(source) = source else {
-            return Err(LinuxError::EAFNOSUPPORT.into());
-        };
-        Ok(OutputPreparation {
+        Ok(Ipv4SendDecision {
             source,
             mtu,
             submission,
@@ -437,7 +438,7 @@ impl Ipv4Output {
         Ipv4DispatchOutcome {
             has_rx_work: dev.send_ip_packet(
                 dev_id.ifindex(),
-                next_hop,
+                next_hop.into(),
                 src_addr,
                 packet,
                 timestamp,
@@ -483,6 +484,7 @@ impl Ipv4Output {
 /// the result in the same critical section.
 /// An explicit `bound_src` must be local, may belong to another device, and
 /// takes precedence over preferred or automatically selected source addresses.
+/// Returns `EAFNOSUPPORT` if a resolved route has non-IPv4 addresses.
 pub(crate) fn resolve_output_route(
     routes: &RouteTable,
     devices: &DeviceRegistry,
@@ -520,6 +522,9 @@ pub(crate) fn resolve_output_route(
             .map(IpAddress::Ipv4)
             .ok_or(LinuxError::ENETUNREACH)?,
     };
+    let (IpAddress::Ipv4(source), IpAddress::Ipv4(next_hop)) = (source, next_hop) else {
+        return Err(LinuxError::EAFNOSUPPORT.into());
+    };
     Ok(OutputRoute {
         source,
         dev: rule.dev,
@@ -540,7 +545,7 @@ pub(crate) fn output_source_address(
     dst: &IpAddress,
     oif: i32,
     bound_src: Option<Ipv4Address>,
-) -> KResult<IpAddress> {
+) -> KResult<Ipv4Address> {
     if dst.is_broadcast() && oif > 0 {
         let device_id = NetDeviceId::new(oif).ok_or(LinuxError::ENETUNREACH)?;
         let device = devices
@@ -553,14 +558,13 @@ pub(crate) fn output_source_address(
             if !has_local_source(devices, source) {
                 return Err(LinuxError::ENETUNREACH.into());
             }
-            return Ok(source.into());
+            return Ok(source);
         }
         return Ok(devices
             .ipv4(device_id)
             .and_then(|addrs| addrs.as_slice().first())
             .map(|entry| entry.addr.address())
-            .unwrap_or(Ipv4Address::UNSPECIFIED)
-            .into());
+            .unwrap_or(Ipv4Address::UNSPECIFIED));
     }
     Ok(resolve_output_route(routes, devices, dst, oif, bound_src)?.source)
 }

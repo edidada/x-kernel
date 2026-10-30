@@ -1593,6 +1593,10 @@ TCP sends fill the smoltcp buffer and notify the poller, which advances the prot
 
 `Ipv4Output` separates preparation, submission, and queued dispatch. Preparation resolves the explicit or default source, output device, next hop, MTU, and link kind from `RouteTable` and `DeviceRegistry`. A `PreparedIpv4Send` owns the builder and borrows the output state, routes, devices, and data queue. These borrows prevent configuration changes or competing capacity consumption until the transaction is submitted or dropped. The runtime guard only provides synchronization and Router only lends its resources; neither implements IPv4 output policy.
 
+`OutputRoute` narrows the route table's generic source and next-hop addresses to `Ipv4Address` at resolution.
+`OutputTarget` retains an IPv4 next hop or selects limited-broadcast fan-out; `SubmissionTarget` selects queued or immediate submission.
+`Ipv4SendDecision` combines the final source, optional MTU, and submission strategy for the prepared transaction.
+
 An explicit source must still be configured on a local device when preparation runs.
 It can belong to a different device from the output route and bypasses automatic source selection, including when the output device has no eligible default source.
 Without an explicit source, an unavailable default source returns `ENETUNREACH`; limited broadcasts bound to an unaddressed device retain the `0.0.0.0` exception.

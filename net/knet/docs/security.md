@@ -736,6 +736,7 @@ When the queue is full, the PCB queue lock must be released before the current d
 ### 18. IPv4 Output Boundary
 
 `Ipv4Output` owns IPv4 output preparation, header and DF construction, datagram identification, and dispatch. User data is read into an `Ipv4PacketBuilder` before acquiring Router. The builder exposes only transport bytes, so UDP cannot overwrite IPv4 fields or resize the packet. Preparation returns a `PreparedIpv4Send` owning this buffer and borrowing routes, devices, output state, and the data queue under the Router mutex. For routed in-stack UDP, capacity preflight, header construction, and fragmentation share one selected MTU. The resource borrows prevent route/device changes or competing capacity consumption before submission.
+Route resolution validates the address family before constructing `OutputRoute`; its source and next hop, and the routed `OutputTarget` next hop, are IPv4 types.
 
 Preparation rejects explicit non-local or removed source addresses with `ENETUNREACH` and returns the original builder without consuming queue capacity.
 Explicit sources are checked against all local IPv4 addresses, preserving cross-device source use, and do not require automatic source selection to succeed.

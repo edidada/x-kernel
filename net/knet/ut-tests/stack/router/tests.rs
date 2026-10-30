@@ -1045,8 +1045,8 @@ fn output_route_uses_selected_device_and_validates_binding() {
         .unwrap();
     let route = router.resolve_output_route(&dst, dev.ifindex()).unwrap();
     assert_eq!(route.dev, dev);
-    assert_eq!(route.source, source);
-    assert_eq!(route.next_hop, gateway);
+    assert_eq!(IpAddress::Ipv4(route.source), source);
+    assert_eq!(IpAddress::Ipv4(route.next_hop), gateway);
     assert_eq!(route.mtu, 100);
     assert_eq!(route.link_kind, LinkKind::Ethernet);
     assert_eq!(router.devices.effective_mtu(), 68);
