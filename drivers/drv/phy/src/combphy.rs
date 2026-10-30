@@ -238,6 +238,7 @@ impl PhyHwOps for CombPhy {
     /// (USB3 additionally polls the pipe-phy ready bit).
     fn hw_init(&self) -> Result<(), PhyError> {
         let mode = self.mode.lock().expect("mode bound at acquire");
+        log::info!("combphy: hw_init id {} mode {mode:#x}", self.id);
         self.refclk.prepare_enable().map_err(|_| PhyError::Io)?;
         self.configure(mode)?;
         for rst in &self.resets {
@@ -246,6 +247,7 @@ impl PhyHwOps for CombPhy {
         if mode == PHY_TYPE_USB3 {
             self.wait_usb3_ready();
         }
+        log::info!("combphy: hw_init id {} done", self.id);
         Ok(())
     }
 

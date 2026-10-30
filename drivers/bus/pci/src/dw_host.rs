@@ -503,6 +503,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             "pcie-cfg",
         )?;
 
+        log::info!("pcie-dw: resources acquired, configuring RC");
         let pcie = Arc::new(DwPcie {
             apb,
             dbi,
@@ -513,8 +514,11 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             num_lanes,
         });
 
+        log::info!("pcie-dw: setup_rc (dbi writes)");
         pcie.setup_rc();
+        log::info!("pcie-dw: setup_rc done, programming iATU");
         pcie.iatu_setup(&windows);
+        log::info!("pcie-dw: iATU programmed, enabling LTSSM");
 
         // LTSSM enable: the reference's post-setup write.
         pcie.apb.write32(
@@ -524,6 +528,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         );
 
         // `dw_pcie_wait_for_link`: up to ~1s for LTSSM to reach L0.
+        log::info!("pcie-dw: polling for link up");
         for _ in 0..100 {
             if pcie.link_up() {
                 break;
