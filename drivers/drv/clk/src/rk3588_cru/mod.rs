@@ -213,6 +213,26 @@ fn register_placeholders() {
     kclk::register_provider(table);
 }
 
+/// CLK_IS_CRITICAL semantics (Linux `__clk_register`): critical clocks
+/// are enabled at registration and stay on — the SoC's root gates
+/// (aclk/hclk/pclk_top_root, *_center_root, ...) are CLK_IS_CRITICAL,
+/// and every consumer gate hangs off them.
+fn enable_critical_clocks(phandle: u32, branches: &[kclk::ClkBranch]) {
+    for branch in branches {
+        if !branch.flags().contains(kclk::ClkFlags::IS_CRITICAL) {
+            continue;
+        }
+        if let Ok(clk) = kclk::clk_get_by_index(phandle, branch.index())
+            && let Err(err) = clk.prepare_enable()
+        {
+            log::warn!(
+                "clk-rk3588: critical clock {} prepare_enable: {err:?}",
+                branch.name()
+            );
+        }
+    }
+}
+
 /// Register the whole CRU clock tree: PLLs (+ mode muxes), armclks, the
 /// generated branch table, fractional branches, then apply the
 /// firmware-directed initial rates.
@@ -339,23 +359,7 @@ fn register_tree(
 
     publish_resets(phandle, reset_reg, dev)?;
 
-    // CLK_IS_CRITICAL semantics (Linux __clk_register): critical clocks
-    // are enabled at registration and stay on — the SoC's root gates
-    // (aclk/hclk/pclk_top_root, *_center_root, ...) are CLK_IS_CRITICAL,
-    // and every consumer gate hangs off them.
-    for (idx, branch) in branches.iter().enumerate() {
-        if !branch.flags().contains(kclk::ClkFlags::IS_CRITICAL) {
-            continue;
-        }
-        if let Ok(clk) = kclk::clk_get_by_index(phandle, branch.index()) {
-            if let Err(err) = clk.prepare_enable() {
-                log::warn!(
-                    "clk-rk3588: critical clock {} prepare_enable: {err:?}",
-                    branch.name()
-                );
-            }
-        }
-    }
+    enable_critical_clocks(phandle, &branches);
 
     // Post-registration wiring that needs live nodes (public handle API).
     ops::ArmClk::post_register(&armclks);

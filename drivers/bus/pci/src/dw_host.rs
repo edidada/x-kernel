@@ -480,7 +480,24 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             let clk = dev.res().clk(name)?;
             clk.enable()?;
         }
-        log::info!("pcie-dw: clocks on, probing dbi");
+        log::info!("pcie-dw: clocks on, configuring client (APB)");
+        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode. The APB
+        // sequence comes BEFORE the first DBI access in the BSP flow (the
+        // client mode gates the DBI slice's responsiveness).
+        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
+        apb.write32(
+            PCIE_CLIENT_HOT_RESET_CTRL,
+            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
+        );
+        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
+        // to assert the connecting CLOCK_GEN OE (without it the link can
+        // never train), then mode RC (LTSSM still off — the enable write
+        // comes after the setup).
+        const PCIE_CLIENT_POWER: usize = 0x2c;
+        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
+        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
+
+        log::info!("pcie-dw: client configured, probing dbi");
         // The BSP's first DBI access lands here (dbi_ro_wr_en): read the
         // vendor id first so a wedged DBI names itself in the log.
         let vendor_word = dbi.read32(0x00);
@@ -489,19 +506,6 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             vendor_word & 0xffff,
             vendor_word >> 16
         );
-
-        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode.
-        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
-        apb.write32(
-            PCIE_CLIENT_HOT_RESET_CTRL,
-            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
-        );
-        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
-        // to assert the connecting CLOCK_GEN OE, then mode RC (LTSSM
-        // still off — the enable write comes after the setup).
-        const PCIE_CLIENT_POWER: usize = 0x2c;
-        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
-        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(
