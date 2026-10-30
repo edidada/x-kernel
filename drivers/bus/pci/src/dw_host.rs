@@ -498,6 +498,13 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
 
         log::info!("pcie-dw: client configured, probing dbi");
+        // Diagnostics: the client LTSSM status (proven responsive) and the
+        // fe190000+0 word — mainline treats THIS window as the DBI, the BSP
+        // as the client regs; the vendor id appearing here disambiguates.
+        let ltssm = apb.read32(PCIE_CLIENT_LTSSM_STATUS);
+        log::info!("pcie-dw: client ltssm status {ltssm:#010x}");
+        let apb_word = apb.read32(0x00);
+        log::info!("pcie-dw: fe190000+0 word {apb_word:#010x}");
         // The BSP's first DBI access lands here (dbi_ro_wr_en): read the
         // vendor id first so a wedged DBI names itself in the log.
         let vendor_word = dbi.read32(0x00);
