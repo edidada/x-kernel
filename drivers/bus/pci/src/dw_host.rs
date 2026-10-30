@@ -470,20 +470,17 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // then the first DBI access.
         let phy = dev.res().phy("pcie-phy")?;
         let powered = phy.init_powered()?;
+        log::info!("pcie-dw: phy powered, deasserting resets");
         for rst in &resets {
             rst.deassert();
         }
-        let clks: [driver_base::ClkHandle; 6] = [
-            dev.res().clk("aclk_mst")?,
-            dev.res().clk("aclk_slv")?,
-            dev.res().clk("aclk_dbi")?,
-            dev.res().clk("pclk")?,
-            dev.res().clk("aux")?,
-            dev.res().clk("pipe")?,
-        ];
-        for clk in &clks {
+        log::info!("pcie-dw: resets deasserted, enabling clocks");
+        for name in ["aclk_mst", "aclk_slv", "aclk_dbi", "pclk", "aux", "pipe"] {
+            log::info!("pcie-dw: enabling clock {name}");
+            let clk = dev.res().clk(name)?;
             clk.enable()?;
         }
+        log::info!("pcie-dw: clocks on, probing dbi");
         // The BSP's first DBI access lands here (dbi_ro_wr_en): read the
         // vendor id first so a wedged DBI names itself in the log.
         let vendor_word = dbi.read32(0x00);
