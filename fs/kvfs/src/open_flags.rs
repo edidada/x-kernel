@@ -73,11 +73,45 @@ fn is_create_like_open(flags: OpenFlags) -> bool {
     flags.contains(OpenFlags::CREATE)
 }
 
+/// `RESOLVE_NO_XDEV` (`uapi/linux/openat2.h`).
+pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
+/// `RESOLVE_NO_MAGICLINKS` (`uapi/linux/openat2.h`).
+pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+/// `RESOLVE_NO_SYMLINKS` (`uapi/linux/openat2.h`).
+pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+/// `RESOLVE_BENEATH` (`uapi/linux/openat2.h`).
+pub const RESOLVE_BENEATH: u64 = 0x08;
+/// `RESOLVE_IN_ROOT` (`uapi/linux/openat2.h`).
+pub const RESOLVE_IN_ROOT: u64 = 0x10;
+/// `RESOLVE_CACHED` (`uapi/linux/openat2.h`).
+pub(crate) const RESOLVE_CACHED: u64 = 0x20;
+/// Every resolve bit this kernel understands (`openat2` `VALID_RESOLVE_FLAGS`).
+const VALID_RESOLVE_FLAGS: u64 = RESOLVE_NO_XDEV
+    | RESOLVE_NO_MAGICLINKS
+    | RESOLVE_NO_SYMLINKS
+    | RESOLVE_BENEATH
+    | RESOLVE_IN_ROOT
+    | RESOLVE_CACHED;
+
+/// The `flags`/`mode`/`resolve` triple of `openat2(2)`'s `struct open_how`,
+/// split out so the syscall layer does not need to know the internal layout.
+#[derive(Clone, Copy, Debug)]
+pub struct Openat2How {
+    /// `open_how.flags` (`O_*` bits).
+    pub flags: u64,
+    /// `open_how.mode` (creation permission bits).
+    pub mode: u64,
+    /// `open_how.resolve` (`RESOLVE_*` bits).
+    pub resolve: u64,
+}
+
 /// Raw open arguments after legacy syscall cleanup.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OpenHow {
     pub(crate) flags: u64,
     pub(crate) mode: NodePermission,
+    /// `openat2` resolve bits; always zero for legacy `open`/`openat`.
+    pub(crate) resolve: u64,
 }
 
 impl OpenHow {
@@ -86,6 +120,7 @@ impl OpenHow {
         let mut how = Self {
             flags: u64::from(flags & VALID_OPEN_FLAGS),
             mode,
+            resolve: 0,
         };
         if OpenFlags::from_bits_retain(how.flags as u32).contains(OpenFlags::PATH) {
             how.flags &= u64::from(O_PATH_FLAGS.bits());
@@ -94,6 +129,35 @@ impl OpenHow {
             how.mode = NodePermission::empty();
         }
         how
+    }
+
+    /// Validates raw `openat2(2)` arguments (`fs/open.c build_open_flags()`).
+    ///
+    /// `flags`, `mode` and `resolve` come straight from `struct open_how`.
+    /// Unknown flag or resolve bits are `EINVAL`, a non-zero `mode` without
+    /// `O_CREAT` is `EINVAL`, and the two subtree constraints
+    /// (`RESOLVE_BENEATH` and `RESOLVE_IN_ROOT`) are mutually exclusive.
+    pub(crate) fn from_openat2(flags: u64, mode: u64, resolve: u64) -> VfsResult<Self> {
+        let flags_u32 = u32::try_from(flags).map_err(|_| VfsError::InvalidInput)?;
+        if flags_u32 & !VALID_OPEN_FLAGS != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        let mode_permission = u16::try_from(mode).map_err(|_| VfsError::InvalidInput)?;
+        let mode_permission = NodePermission::from_bits_truncate(mode_permission);
+        if !is_create_like_open(OpenFlags::from_bits_retain(flags_u32)) && mode != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        if resolve & !VALID_RESOLVE_FLAGS != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        if resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(Self {
+            flags: flags & u64::from(VALID_OPEN_FLAGS),
+            mode: mode_permission,
+            resolve,
+        })
     }
 
     /// Converts raw open arguments into normalized parameters for namei.
@@ -154,6 +218,24 @@ impl OpenHow {
         }
         if !flags.contains(OpenFlags::NO_FOLLOW) {
             lookup_flags |= LookupFlags::FOLLOW_FINAL;
+        }
+        // `openat2(2)` resolve constraints. `RESOLVE_IN_ROOT` needs no lookup
+        // bit: the syscall layer passes the directory as the walk root, and
+        // `Nameidata` already rebases absolute pathnames and stops ".." at the
+        // root. `RESOLVE_CACHED` is a performance hint ("answer from cache or
+        // fail with EAGAIN"); answering without the hint is semantically
+        // correct, so it is accepted and ignored.
+        if self.resolve & RESOLVE_NO_XDEV != 0 {
+            lookup_flags |= LookupFlags::NO_XDEV;
+        }
+        if self.resolve & RESOLVE_NO_MAGICLINKS != 0 {
+            lookup_flags |= LookupFlags::NO_MAGIC_LINKS;
+        }
+        if self.resolve & RESOLVE_NO_SYMLINKS != 0 {
+            lookup_flags |= LookupFlags::NO_SYMLINKS;
+        }
+        if self.resolve & RESOLVE_BENEATH != 0 {
+            lookup_flags |= LookupFlags::BENEATH;
         }
 
         Ok(OpenParams {

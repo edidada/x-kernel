@@ -27,3 +27,57 @@ fn exclusive_create_sets_intent_and_disables_final_symlink_following() {
     assert!(!flags.lookup_flags().follows_final());
     assert!(flags.flags.contains(OpenFlags::NO_FOLLOW));
 }
+
+#[def_test]
+fn openat2_rejects_unknown_open_flag_bits() {
+    // Bit 63 is outside every `O_*` value this kernel accepts.
+    assert!(OpenHow::from_openat2(1 << 63, 0, 0).is_err());
+}
+
+#[def_test]
+fn openat2_rejects_non_zero_mode_without_create() {
+    assert!(OpenHow::from_openat2(u64::from(O_RDONLY), 0o644, 0).is_err());
+    assert!(OpenHow::from_openat2(u64::from(O_CREAT | O_RDWR), 0o644, 0).is_ok());
+}
+
+#[def_test]
+fn openat2_rejects_unknown_resolve_bits() {
+    // Bit 63 is outside VALID_RESOLVE_FLAGS (`uapi/linux/openat2.h`).
+    assert!(OpenHow::from_openat2(u64::from(O_RDONLY), 0, 1 << 63).is_err());
+}
+
+#[def_test]
+fn openat2_rejects_beneath_with_in_root() {
+    let both = RESOLVE_BENEATH | RESOLVE_IN_ROOT;
+    assert!(OpenHow::from_openat2(u64::from(O_RDONLY), 0, both).is_err());
+}
+
+#[def_test]
+fn openat2_translates_resolve_bits_to_lookup_constraints() {
+    let params = OpenHow::from_openat2(
+        u64::from(O_RDONLY),
+        0,
+        RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH,
+    )
+    .unwrap()
+    .into_open_params()
+    .unwrap();
+    let lookup = params.lookup_flags();
+
+    assert!(lookup.contains(LookupFlags::NO_XDEV));
+    assert!(lookup.contains(LookupFlags::NO_MAGIC_LINKS));
+    assert!(lookup.contains(LookupFlags::NO_SYMLINKS));
+    assert!(lookup.contains(LookupFlags::BENEATH));
+}
+
+#[def_test]
+fn legacy_open_never_requests_resolve_constraints() {
+    let lookup = OpenHow::from_legacy(O_RDONLY, NodePermission::empty())
+        .into_open_params()
+        .unwrap()
+        .lookup_flags();
+
+    assert!(!lookup.contains(LookupFlags::NO_XDEV));
+    assert!(!lookup.contains(LookupFlags::NO_SYMLINKS));
+    assert!(!lookup.contains(LookupFlags::BENEATH));
+}

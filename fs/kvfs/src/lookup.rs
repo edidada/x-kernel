@@ -47,6 +47,12 @@ bitflags::bitflags! {
         const NO_XDEV = 1 << 3;
         /// Require the final path component to be a directory.
         const DIRECTORY = 1 << 4;
+        /// Reject any symlink during the walk (`openat2` `RESOLVE_NO_SYMLINKS`).
+        const NO_SYMLINKS = 1 << 5;
+        /// Reject an absolute pathname and keep the walk in the caller's
+        /// subtree (`openat2` `RESOLVE_BENEATH`). ".." already stops at the
+        /// walk root, so this flag only adds the absolute-path rejection.
+        const BENEATH = 1 << 6;
     }
 }
 

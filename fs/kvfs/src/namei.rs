@@ -254,6 +254,23 @@ impl<'a> Nameidata<'a> {
         }
     }
 
+    /// Resolves the topmost mount over `path`, honouring `RESOLVE_NO_XDEV`.
+    ///
+    /// Linux pairs the check with the mount traversal itself
+    /// (`LOOKUP_NO_XDEV` in `walk_component`); KVFS performs the traversal
+    /// lazily in `resolve_final_mount`, so the constraint is applied at the
+    /// same points.
+    fn resolve_final_mount_checked(&self, path: Path) -> VfsResult<Path> {
+        let source_mount = path.mount().clone();
+        let resolved = path.resolve_final_mount();
+        if self.flags.contains(LookupFlags::NO_XDEV)
+            && !Arc::ptr_eq(resolved.mount(), &source_mount)
+        {
+            return Err(VfsError::CrossesDevices);
+        }
+        Ok(resolved)
+    }
+
     fn step_into(
         &mut self,
         containing_dir: &Path,
@@ -274,6 +291,11 @@ impl<'a> Nameidata<'a> {
         if d_is_symlink(next.dentry())
             && (component == WalkComponent::More || self.flags.follows_final())
         {
+            // `openat2(RESOLVE_NO_SYMLINKS)`: Linux reports ELOOP for any
+            // symlink the walk would follow, including intermediate ones.
+            if self.flags.contains(LookupFlags::NO_SYMLINKS) {
+                return Err(VfsError::FilesystemLoop);
+            }
             return self.follow_symlink(containing_dir, next, cred);
         }
         Ok(next)
@@ -290,18 +312,28 @@ impl<'a> Nameidata<'a> {
         qstr
     }
 
-    fn handle_dots(&mut self, last_type: LastType) {
+    fn handle_dots(&mut self, last_type: LastType) -> VfsResult<()> {
         match last_type {
             LastType::Root => self.set_path(self.root.clone()),
             LastType::Dot => {}
             LastType::Dotdot => {
-                if !self.path.ptr_eq(&self.root) {
+                if self.path.ptr_eq(&self.root) {
+                    // `openat2(RESOLVE_BENEATH)`: the walk may not leave the
+                    // directory the pathname was anchored at, so a ".." that
+                    // would cross above it is EXDEV (Linux `LOOKUP_BENEATH`).
+                    // `RESOLVE_IN_ROOT` keeps the same walk root but clamps
+                    // ".." there instead of failing.
+                    if self.flags.contains(LookupFlags::BENEATH) {
+                        return Err(VfsError::CrossesDevices);
+                    }
+                } else {
                     let parent = self.path.parent().unwrap_or_else(|| self.root.clone());
                     self.set_path(parent);
                 }
             }
             LastType::Norm => {}
         }
+        Ok(())
     }
 
     fn lookup_fast(&self, name: &str) -> Option<VfsResult<Path>> {
@@ -336,8 +368,8 @@ impl<'a> Nameidata<'a> {
         let next = match self.lookup_fast(name) {
             Some(dentry) => dentry?,
             None => self.lookup_slow(name)?,
-        }
-        .resolve_final_mount();
+        };
+        let next = self.resolve_final_mount_checked(next)?;
         let next = self.step_into(&containing_dir, next, component, cred)?;
         self.set_path(next);
         Ok(())
@@ -401,12 +433,20 @@ impl<'a> Nameidata<'a> {
         self.last_type = last_type;
         self.hash_name(name);
         if walk_component == WalkComponent::More {
-            self.handle_dots(last_type);
+            self.handle_dots(last_type)?;
         }
         Ok(())
     }
 
     fn link_path_walk(&mut self, base: &Path, cred: &Cred) -> VfsResult<Path> {
+        // `openat2(RESOLVE_BENEATH)`: an absolute pathname cannot be
+        // constrained to the caller's subtree, so Linux answers EXDEV before
+        // walking. `RESOLVE_IN_ROOT` instead rebases absolute paths at the walk
+        // root, which `Nameidata::new` already does when the caller passes the
+        // directory fd as both root and base.
+        if self.flags.contains(LookupFlags::BENEATH) && self.name.as_pathname().is_absolute() {
+            return Err(VfsError::CrossesDevices);
+        }
         if self.pathname.is_empty() {
             if self.flags.contains(LookupFlags::EMPTY_PATH) {
                 return Ok(base.clone());
@@ -453,7 +493,7 @@ impl<'a> Nameidata<'a> {
         }
         match self.last_type {
             LastType::Root | LastType::Dot | LastType::Dotdot => {
-                self.handle_dots(self.last_type);
+                self.handle_dots(self.last_type)?;
             }
             LastType::Norm => {
                 let name = self
@@ -747,7 +787,7 @@ impl<'a> Nameidata<'a> {
         cred: &Cred,
     ) -> VfsResult<Option<PathBuf>> {
         if self.last_type != LastType::Norm {
-            self.handle_dots(self.last_type);
+            self.handle_dots(self.last_type)?;
             return Ok(None);
         }
 
@@ -758,12 +798,13 @@ impl<'a> Nameidata<'a> {
         };
 
         if file.was_created() {
-            self.set_path(path.resolve_final_mount());
+            let resolved = path.resolve_final_mount();
+            self.set_path(resolved);
             return Ok(None);
         }
 
         let containing_dir = self.path.clone();
-        let path = path.resolve_final_mount();
+        let path = self.resolve_final_mount_checked(path)?;
         if d_is_symlink(path.dentry())
             && flags.lookup_flags().follows_final()
             // Magic links (e.g. `/proc/self/exe`, `/proc/self/fd/N`) are also
@@ -884,6 +925,23 @@ impl Filename {
         cred: Arc<Cred>,
     ) -> VfsResult<Arc<VfsFile>> {
         let flags = OpenHow::from_legacy(flags, mode).into_open_params()?;
+        Nameidata::path_openat(root, base, self, &flags, umask, cred)
+    }
+
+    /// Opens this filename from raw `openat2(2)` `struct open_how` fields.
+    ///
+    /// `root`/`base` follow the caller's `RESOLVE_IN_ROOT` decision: an
+    /// `in_root` caller passes the directory fd's path as both, which rebases
+    /// absolute pathnames and stops ".." at that directory.
+    pub fn open_with_openat2_at(
+        &self,
+        root: &Path,
+        base: &Path,
+        how: crate::Openat2How,
+        umask: NodePermission,
+        cred: Arc<Cred>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        let flags = OpenHow::from_openat2(how.flags, how.mode, how.resolve)?.into_open_params()?;
         Nameidata::path_openat(root, base, self, &flags, umask, cred)
     }
 
