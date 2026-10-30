@@ -106,20 +106,22 @@ struct PcieWindow {
     io: bool,
 }
 
-/// Parse the node's `ranges` (child 3 / parent 3 / size 2 cells — the
-/// PCIe `#address-cells = <3>` shape). Windows in DT order.
+/// Parse the node's `ranges` for the rk3588 shape: child 3 cells
+/// (`#address-cells = <3>` on the PCI node), parent 2 cells (the /soc
+/// `#address-cells`), size 2 cells — 7 cells per window.
 fn parse_ranges(cells: &[u32]) -> Vec<PcieWindow> {
+    const STRIDE: usize = 7; // child 3 + parent 2 + size 2
     let mut out = Vec::new();
     let mut i = 0usize;
-    while i + 8 <= cells.len() {
+    while i + STRIDE <= cells.len() {
         let flags = cells[i] >> 24;
         out.push(PcieWindow {
             pci_base: (u64::from(cells[i + 1]) << 32) | u64::from(cells[i + 2]),
-            cpu_base: (u64::from(cells[i + 4]) << 32) | u64::from(cells[i + 5]),
-            size: (u64::from(cells[i + 6]) << 32) | u64::from(cells[i + 7]),
+            cpu_base: (u64::from(cells[i + 3]) << 32) | u64::from(cells[i + 4]),
+            size: (u64::from(cells[i + 5]) << 32) | u64::from(cells[i + 6]),
             io: flags & 0x1 != 0,
         });
-        i += 8;
+        i += STRIDE;
     }
     out
 }
@@ -389,6 +391,53 @@ fn scan_and_log(root: &PciRoot<DwCam>, cam: &DwCam) {
     }
 }
 
+/// Firmware facts for one root port: lane/speed config, the outbound
+/// window count, the parsed `ranges` and the CFG window.
+fn parse_facts(
+    dev: &mut Device<'_, PlatformBus>,
+) -> Result<(u32, u32, usize, Vec<PcieWindow>, u64), ProbeError> {
+    let fw = dev.fw();
+    let firmware = fw.node().ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
+    let num_lanes = firmware
+        .prop("num-lanes")
+        .and_then(|p| p.as_u32())
+        .unwrap_or(1);
+    let max_speed = firmware
+        .prop("max-link-speed")
+        .and_then(|p| p.as_u32())
+        .unwrap_or(0);
+    let num_ob_windows = firmware
+        .prop("num-ob-windows")
+        .and_then(|p| p.as_u32())
+        .map(|v| v as usize)
+        .unwrap_or(8);
+    let windows = firmware
+        .prop("ranges")
+        .and_then(|p| p.u32_list())
+        .map(|cells| parse_ranges(&cells))
+        .unwrap_or_default();
+    for win in &windows {
+        log::info!(
+            "pcie-dw: range cpu {:#x}+{:#x} -> pci {:#x}{}",
+            win.cpu_base,
+            win.size,
+            win.pci_base,
+            if win.io { " (io)" } else { "" }
+        );
+    }
+    // The config window: the first (IO/CFG) range — the mainline
+    // "config" reg is that window's CPU base.
+    let cfg = windows
+        .iter()
+        .find(|w| w.io)
+        .ok_or_else(|| {
+            log::error!("pcie-dw: no IO/CFG window in ranges");
+            ProbeError::Fatal(RuntimeError::NotFound)
+        })?
+        .cpu_base;
+    Ok((num_lanes, max_speed, num_ob_windows, windows, cfg))
+}
+
 /// `static const struct of_device_id rockchip_pcie_of_match[]` (RC).
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("rockchip,rk3588-pcie"))];
 
@@ -408,32 +457,12 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         let resets: [ResetHandle; 2] = [dev.res().reset_at(0)?, dev.res().reset_at(1)?];
 
         // Bind the view: `node()` borrows the firmware snapshot.
-        let fw = dev.fw();
-        let firmware = fw.node().ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
-        let num_lanes = firmware
-            .prop("num-lanes")
-            .and_then(|p| p.as_u32())
-            .unwrap_or(1);
-        let max_speed = firmware
-            .prop("max-link-speed")
-            .and_then(|p| p.as_u32())
-            .unwrap_or(0);
-        let num_ob_windows = firmware
-            .prop("num-ob-windows")
-            .and_then(|p| p.as_u32())
-            .map(|v| v as usize)
-            .unwrap_or(8);
-        let windows = firmware
-            .prop("ranges")
-            .and_then(|p| p.u32_list())
-            .map(|cells| parse_ranges(&cells))
-            .unwrap_or_default();
-        // The config window: the first (IO/CFG) range — the mainline
-        // "config" reg is that window's CPU base.
-        let cfg = windows.iter().find(|w| w.io).ok_or_else(|| {
-            log::error!("pcie-dw: no IO/CFG window in ranges");
-            ProbeError::Fatal(RuntimeError::NotFound)
-        })?;
+        let (num_lanes, max_speed, num_ob_windows, windows, cfg_base) = parse_facts(dev)?;
+        let cfg_size = windows
+            .iter()
+            .find(|w| w.io)
+            .map(|w| w.size)
+            .unwrap_or(0x10_0000);
 
         // `rockchip_pcie_probe` order is load-bearing: reset assert
         // BEFORE the phy init; deassert after; clocks last.
@@ -470,7 +499,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(
-            driver_base::MmioRegion::new(cfg.cpu_base as usize, cfg.size as usize),
+            driver_base::MmioRegion::new(cfg_base as usize, cfg_size as usize),
             "pcie-cfg",
         )?;
 
@@ -478,7 +507,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             apb,
             dbi,
             cfg_win,
-            cfg_base: cfg.cpu_base,
+            cfg_base,
             num_ob_windows: num_ob_windows.max(2),
             max_speed,
             num_lanes,
