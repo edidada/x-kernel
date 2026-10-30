@@ -464,11 +464,10 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             .map(|w| w.size)
             .unwrap_or(0x10_0000);
 
-        // `rockchip_pcie_probe` order is load-bearing: reset assert
-        // BEFORE the phy init; deassert after; clocks last.
-        for rst in &resets {
-            rst.assert();
-        }
+        // BSP-aligned order (rk_pcie_really_probe): phy init+power first,
+        // then the reset pair DEASSERTED ONLY (the BSP never asserts at
+        // probe — the power-on default is the reset state), then clocks,
+        // then the first DBI access.
         let phy = dev.res().phy("pcie-phy")?;
         let powered = phy.init_powered()?;
         for rst in &resets {
@@ -485,17 +484,27 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         for clk in &clks {
             clk.enable()?;
         }
+        // The BSP's first DBI access lands here (dbi_ro_wr_en): read the
+        // vendor id first so a wedged DBI names itself in the log.
+        let vendor_word = dbi.read32(0x00);
+        log::info!(
+            "pcie-dw: dbi alive, vendor {:#06x} device {:#06x}",
+            vendor_word & 0xffff,
+            vendor_word >> 16
+        );
 
-        // `rockchip_pcie_configure_rc`: LTSSM enable control mode + mode
-        // RC. The APB writes are hiword (mask in the upper half).
+        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode.
+        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
         apb.write32(
             PCIE_CLIENT_HOT_RESET_CTRL,
-            wm16(PCIE_LTSSM_ENABLE_ENHANCE, PCIE_LTSSM_ENABLE_ENHANCE),
+            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
         );
-        apb.write32(
-            PCIE_CLIENT_GENERAL_CON,
-            wm16(PCIE_CLIENT_MODE_MASK, PCIE_CLIENT_MODE_RC),
-        );
+        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
+        // to assert the connecting CLOCK_GEN OE, then mode RC (LTSSM
+        // still off — the enable write comes after the setup).
+        const PCIE_CLIENT_POWER: usize = 0x2c;
+        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
+        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(
@@ -521,6 +530,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         log::info!("pcie-dw: iATU programmed, enabling LTSSM");
 
         // LTSSM enable: the reference's post-setup write.
+        // LTSSM enable (after setup; the reference's post-setup write).
         pcie.apb.write32(
             PCIE_CLIENT_GENERAL_CON,
             wm16(PCIE_CLIENT_MODE_MASK, PCIE_CLIENT_MODE_RC)
