@@ -109,6 +109,21 @@ pub(crate) enum ParentList {
     Refs(&'static [ParentRef]),
 }
 impl ClkBranch {
+    /// The provider-relative DT index (loop diagnostics / critical walk).
+    pub const fn index(&self) -> ClkIndex {
+        self.index
+    }
+
+    /// The globally-unique clock name.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The policy flags (the critical walk filters on IS_CRITICAL).
+    pub const fn flags(&self) -> ClkFlags {
+        self.flags
+    }
+
     /// Build an entry from its raw parts.
     pub const fn new(
         index: ClkIndex,
