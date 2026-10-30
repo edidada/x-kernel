@@ -147,12 +147,12 @@ impl Router {
     /// the selected device is administratively down, or when `oif` disagrees
     /// with the looked-up output device.
     pub(crate) fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
-        output::output_source_address(&self.table, &self.devices, dst, oif)
+        output::output_source_address(&self.table, &self.devices, dst, oif, None)
     }
 
     #[cfg(unittest)]
     pub(crate) fn resolve_output_route(&self, dst: &IpAddress, oif: i32) -> KResult<OutputRoute> {
-        output::resolve_output_route(&self.table, &self.devices, dst, oif)
+        output::resolve_output_route(&self.table, &self.devices, dst, oif, None)
     }
 
     /// Resolves the effective IPv4 destination, source, and output route.

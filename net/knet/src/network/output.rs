@@ -50,6 +50,7 @@ impl Ipv4FragmentationPolicy {
 /// Socket-selected constraints and IPv4 header fields for one send attempt.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ipv4SendOptions {
+    /// Explicit local source; absence requests automatic source selection.
     pub(crate) bound_src: Option<Ipv4Address>,
     pub(crate) dst_addr: Ipv4Address,
     /// Stable interface index; zero leaves device selection to routing.
@@ -224,8 +225,9 @@ impl Ipv4Output {
     /// Selects addresses and checks capacity without modifying the datagram.
     ///
     /// On error, returns the original builder. Returns `EACCES` for a forbidden
-    /// broadcast, `ENETUNREACH` for an invalid route or binding, `WouldBlock` for
-    /// insufficient queue capacity, and `EMSGSIZE` for an unusable fragment MTU.
+    /// broadcast, `ENETUNREACH` for an invalid route, binding, or source,
+    /// `WouldBlock` for insufficient queue capacity, and `EMSGSIZE` for an
+    /// unusable fragment MTU.
     /// The returned transaction exclusively borrows all resources through
     /// submission, so neither its route nor its capacity can become stale.
     pub(crate) fn prepare<'a>(
@@ -299,13 +301,14 @@ impl Ipv4Output {
                 .lookup(&dst_addr)
                 .and_then(|rule| devices.get_by_id(rule.dev));
             (
-                output_source_address(routes, devices, &dst_addr, options.oif)?,
+                output_source_address(routes, devices, &dst_addr, options.oif, options.bound_src)?,
                 device.map(|device| device.mtu().min(usize::from(u16::MAX))),
                 device.map(|device| device.link_kind()),
                 OutputTarget::LimitedBroadcast,
             )
         } else {
-            let route = resolve_output_route(routes, devices, &dst_addr, options.oif)?;
+            let route =
+                resolve_output_route(routes, devices, &dst_addr, options.oif, options.bound_src)?;
             (
                 route.source,
                 Some(route.mtu),
@@ -328,7 +331,7 @@ impl Ipv4Output {
             return Err(LinuxError::EAFNOSUPPORT.into());
         };
         Ok(OutputPreparation {
-            source: options.bound_src.unwrap_or(source),
+            source,
             mtu,
             submission,
         })
@@ -478,11 +481,14 @@ impl Ipv4Output {
 /// for a missing route, absent or down device, mismatched binding, or unavailable
 /// source address. The caller must serialize configuration access and use of
 /// the result in the same critical section.
+/// An explicit `bound_src` must be local, may belong to another device, and
+/// takes precedence over preferred or automatically selected source addresses.
 pub(crate) fn resolve_output_route(
     routes: &RouteTable,
     devices: &DeviceRegistry,
     dst: &IpAddress,
     oif: i32,
+    bound_src: Option<Ipv4Address>,
 ) -> KResult<OutputRoute> {
     // FIB ownership can differ from the actual output device for local routes.
     let oif = NetDeviceId::new(oif).filter(|id| id.ifindex() > 0);
@@ -497,8 +503,16 @@ pub(crate) fn resolve_output_route(
     if !device.is_link_up() {
         return Err(LinuxError::ENETUNREACH.into());
     }
+    if bound_src.is_some_and(|source| !has_local_source(devices, source)) {
+        return Err(LinuxError::ENETUNREACH.into());
+    }
     let next_hop = rule.via.unwrap_or(*dst);
-    let source = match rule.preferred_source() {
+    // Linux 6.8 ip_route_output_key_hash_rcu validates an explicit source
+    // globally; fib_select_path selects a default only when no source was given.
+    let source = match bound_src
+        .map(IpAddress::Ipv4)
+        .or_else(|| rule.preferred_source())
+    {
         Some(source) => source,
         None => devices
             .ipv4(rule.dev)
@@ -515,12 +529,17 @@ pub(crate) fn resolve_output_route(
     })
 }
 
-/// Selects the default output source, including bound route-less broadcasts.
+/// Selects a local output source, including bound route-less broadcasts.
+///
+/// An explicit source is validated without requiring a default source. With no
+/// explicit source, bound limited broadcasts may use `0.0.0.0` on an
+/// unaddressed device.
 pub(crate) fn output_source_address(
     routes: &RouteTable,
     devices: &DeviceRegistry,
     dst: &IpAddress,
     oif: i32,
+    bound_src: Option<Ipv4Address>,
 ) -> KResult<IpAddress> {
     if dst.is_broadcast() && oif > 0 {
         let device_id = NetDeviceId::new(oif).ok_or(LinuxError::ENETUNREACH)?;
@@ -530,6 +549,12 @@ pub(crate) fn output_source_address(
         if !device.is_link_up() {
             return Err(LinuxError::ENETUNREACH.into());
         }
+        if let Some(source) = bound_src {
+            if !has_local_source(devices, source) {
+                return Err(LinuxError::ENETUNREACH.into());
+            }
+            return Ok(source.into());
+        }
         return Ok(devices
             .ipv4(device_id)
             .and_then(|addrs| addrs.as_slice().first())
@@ -537,7 +562,7 @@ pub(crate) fn output_source_address(
             .unwrap_or(Ipv4Address::UNSPECIFIED)
             .into());
     }
-    Ok(resolve_output_route(routes, devices, dst, oif)?.source)
+    Ok(resolve_output_route(routes, devices, dst, oif, bound_src)?.source)
 }
 
 /// Returns whether a destination requires the socket's broadcast permission.

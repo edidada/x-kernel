@@ -737,6 +737,11 @@ When the queue is full, the PCB queue lock must be released before the current d
 
 `Ipv4Output` owns IPv4 output preparation, header and DF construction, datagram identification, and dispatch. User data is read into an `Ipv4PacketBuilder` before acquiring Router. The builder exposes only transport bytes, so UDP cannot overwrite IPv4 fields or resize the packet. Preparation returns a `PreparedIpv4Send` owning this buffer and borrowing routes, devices, output state, and the data queue under the Router mutex. For routed in-stack UDP, capacity preflight, header construction, and fragmentation share one selected MTU. The resource borrows prevent route/device changes or competing capacity consumption before submission.
 
+Preparation rejects explicit non-local or removed source addresses with `ENETUNREACH` and returns the original builder without consuming queue capacity.
+Explicit sources are checked against all local IPv4 addresses, preserving cross-device source use, and do not require automatic source selection to succeed.
+Limited broadcasts on an unaddressed bound device may use `0.0.0.0` only when the caller leaves the source unspecified.
+Queued dispatch retains its source-ownership check to handle configuration changes after submission.
+
 Preparation errors return the unchanged builder for retry. Dropping an unsubmitted transaction discards only its buffer and does not occupy queue slots or advance datagram identification. Submission consumes the transaction and writes the IPv4 header before fragmentation; a terminal fragmentation error discards the buffer without partially enqueuing the group. The decision cannot outlive the runtime guard. Waits and poller notifications/assistance occur after releasing it. Queued packets resolve again and validate their source and socket interface constraint at dispatch; the dispatch outcome reports RX work independently of transmit success. Limited broadcast retains its separate output target and optional route MTU.
 Every submitted in-stack datagram with DF clear receives an identification before any fragmentation decision, so packets fragmented downstream do not all reuse identification zero.
 All fragments of one datagram share that identification; atomic datagrams use zero without advancing the sequence.
