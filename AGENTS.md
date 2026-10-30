@@ -148,6 +148,22 @@ cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
+**RECURRING TRAP (bit us 3+ times — never repeat):** after a board
+deploy (`scripts/deploy-rk3588.sh --build` seeds the rk3588 defconfig),
+`.config` stays on the BOARD machine. `make unittest` then boots QEMU
+with board console addresses and hangs SILENTLY — no output, no error.
+The `unittest` target now has a `config-guard-qemu` prerequisite that
+fails fast, but check `.config` first whenever a QEMU run looks stuck:
+
+```bash
+grep MACHINE_AARCH64_QEMU .config   # must be =y for any make run/unittest
+cp platforms/kplat-aarch64/qemu_defconfig .config && make defconfig  # restore
+```
+
+Board builds (deploy) and QEMU tests alternate constantly in the
+rk3588 bring-up; switching `.config` is part of both flows, not an
+afterthought.
+
 Common commands:
 
 ```bash

@@ -245,8 +245,23 @@ doc_check_missing:
 	@$(XKMAKE) doc --target-dir "$(TARGET_DIR)" --check-missing $(XKMAKE_ARGS)
 
 # Kernel unit tests: build the unittest entry and run it under QEMU.
-unittest:
+#
+# GUARD: the suite boots QEMU (virt machine), so .config must be the QEMU
+# platform. A board defconfig (e.g. rk3588) in .config makes the run hang
+# silently in QEMU — this bit us repeatedly; the guard fails fast instead.
+unittest: config-guard-qemu
 	@$(MAKE) --no-print-directory run UNITTEST=y
+
+# Fails when .config is a board (non-QEMU) machine config: the unit-test
+# suite boots the QEMU virt machine, and board console addresses do not
+# exist there — the run would hang with no output to debug.
+config-guard-qemu:
+	@grep -q "MACHINE_AARCH64_QEMU=y" .config || { \
+		echo "error: .config is not the QEMU machine config — the unittest suite"; \
+		echo "       boots QEMU and would hang on a board defconfig."; \
+		echo "       Fix: cp platforms/kplat-aarch64/qemu_defconfig .config && make defconfig"; \
+		exit 1; \
+	}
 
 unittest_no_fail_fast: unittest
 
