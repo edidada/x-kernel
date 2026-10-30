@@ -451,8 +451,7 @@ impl Router {
         oif: i32,
         mtu: Option<usize>,
     ) -> KResult {
-        self.ipv4_output
-            .queue_packet(&mut self.data_tx_queue, packet, oif, mtu)
+        Ipv4Output::queue_packet(&mut self.data_tx_queue, packet, oif, mtu)
     }
 
     pub(crate) fn add_device(

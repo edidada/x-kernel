@@ -331,7 +331,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
 | DeviceRegistry | Owns registered interfaces and address configuration, validates mutations, and synchronizes device address projections and aggregate MTU. |
 | Router | Owns routing and device state and schedules RX/TX queues; lends routes, devices, and the data queue to `Ipv4Output` under its mutex. |
-| Ipv4Output | Owns IPv4 send transactions, IPv4 header and DF construction, capacity preflight, fragmentation identification, and queued device dispatch, including limited-broadcast fan-out and immediate loopback submission. |
+| Ipv4Output | Owns IPv4 send transactions, IPv4 header and DF construction, capacity preflight, datagram identification, and queued device dispatch, including limited-broadcast fan-out and immediate loopback submission. |
 | StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -1594,6 +1594,10 @@ TCP sends fill the smoltcp buffer and notify the poller, which advances the prot
 `Ipv4Output` separates preparation, submission, and queued dispatch. Preparation resolves the default source, output device, next hop, MTU, and link kind from `RouteTable` and `DeviceRegistry`. A `PreparedIpv4Send` owns the builder and borrows the output state, routes, devices, and data queue. These borrows prevent configuration changes or competing capacity consumption until the transaction is submitted or dropped. The runtime guard only provides synchronization and Router only lends its resources; neither implements IPv4 output policy.
 
 `Ipv4PacketBuilder` reserves the IPv4 header and exposes only transport bytes. Preparation errors return the unchanged builder for retry. After UDP fills its header and checksum, `submit` consumes the transaction, applies the IPv4 fragmentation policy, writes the IP header, and fragments before atomically queuing the packet group. Dropping an unsubmitted transaction releases its buffer and borrows without occupying queue slots or advancing the identification sequence. Submission consumes the buffer even on terminal fragmentation errors. An unfragmented queued datagram retains its original byte allocation.
+
+Submission assigns an identification to every datagram with DF clear, including datagrams that fit the selected MTU or have no selected MTU.
+This covers downstream fragmentation as required by RFC 6864 §4.3; all locally generated fragments retain the datagram's assigned identification.
+Atomic datagrams use identification zero and do not consume the sequence, including oversized DF datagrams rejected at submission.
 
 The Router guard spans resolution through submission: synchronous loopback output reuses an explicit selected target, while queued packets retain the socket's interface constraint and resolve the route again in `dispatch_queued`. Limited broadcast uses a distinct target with its existing bound-device or multi-device path and route-based optional MTU. The dispatch outcome reports resulting RX work, not device transmit success. The data queue still stores individual `PacketBuf` packets/fragments and retains the smoltcp byte-buffer normalization boundary.
 

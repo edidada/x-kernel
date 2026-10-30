@@ -31,6 +31,7 @@ const IPV4_FRAGMENT_OFFSET_UNIT: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Ipv4HeaderFragment {
+    identification: u16,
     dont_fragment: bool,
     more_fragments: bool,
     offset_units: u16,
@@ -38,11 +39,13 @@ struct Ipv4HeaderFragment {
 
 impl Ipv4HeaderFragment {
     const DONT_FRAGMENT: Self = Self {
+        identification: 0,
         dont_fragment: true,
         more_fragments: false,
         offset_units: 0,
     };
     const NONE: Self = Self {
+        identification: 0,
         dont_fragment: false,
         more_fragments: false,
         offset_units: 0,
@@ -260,7 +263,7 @@ pub(crate) fn build_ipv4_packet(
 ) -> Option<Vec<u8>> {
     let total_len = IPV4_MIN_HEADER_LEN.checked_add(payload.len())?;
     let mut packet = vec![0u8; total_len];
-    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, false)?;
+    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, 0, false)?;
     packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
     Some(packet)
 }
@@ -275,7 +278,7 @@ pub(crate) fn build_ipv4_packet_dont_fragment(
 ) -> Option<Vec<u8>> {
     let total_len = IPV4_MIN_HEADER_LEN.checked_add(payload.len())?;
     let mut packet = vec![0u8; total_len];
-    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, true)?;
+    write_ipv4_packet_header(&mut packet, src_addr, dst_addr, protocol, ttl, 0, true)?;
     packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(payload);
     Some(packet)
 }
@@ -378,21 +381,23 @@ fn is_icmpv4_error_type(icmp_type: u8) -> bool {
     matches!(icmp_type, 1..=7 | 9..=12) || icmp_type > ICMPV4_EXPLICIT_POLICY_MAX_TYPE
 }
 
-/// Writes an IPv4 header into a complete preallocated packet.
+/// Writes an IPv4 header with the caller-assigned datagram identification.
 pub(crate) fn write_ipv4_packet_header(
     packet: &mut [u8],
     src_addr: Ipv4Address,
     dst_addr: Ipv4Address,
     protocol: u8,
     ttl: u8,
+    identification: u16,
     dont_fragment: bool,
 ) -> Option<()> {
     let payload_len = packet.len().checked_sub(IPV4_MIN_HEADER_LEN)?;
-    let fragment = if dont_fragment {
+    let mut fragment = if dont_fragment {
         Ipv4HeaderFragment::DONT_FRAGMENT
     } else {
         Ipv4HeaderFragment::NONE
     };
+    fragment.identification = identification;
     write_ipv4_header(
         packet.get_mut(..IPV4_MIN_HEADER_LEN)?,
         src_addr,
@@ -427,6 +432,7 @@ fn write_ipv4_header(
         dst_addr.octets(),
     )
     .ok()?;
+    ether_header.identification = fragment.identification;
     ether_header.dont_fragment = fragment.dont_fragment;
     ether_header.more_fragments = fragment.more_fragments;
     ether_header.fragment_offset = fragment_offset;

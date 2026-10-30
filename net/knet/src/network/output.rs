@@ -94,7 +94,7 @@ impl Ipv4PacketBuilder {
 ///
 /// The transport uses the selected addresses for its checksum, then consumes
 /// this value with `submit`. Dropping it only releases the packet and borrows;
-/// it does not occupy queue slots or advance the fragmentation sequence.
+/// it does not occupy queue slots or advance the identification sequence.
 #[must_use = "fill the transport header and submit the prepared IPv4 send"]
 pub(crate) struct PreparedIpv4Send<'a> {
     output: &'a mut Ipv4Output,
@@ -132,23 +132,31 @@ impl PreparedIpv4Send<'_> {
             .options
             .fragmentation
             .should_set_dont_fragment(self.packet.packet.len(), self.preparation.mtu);
+        // RFC 6864 §4.3 requires distinct IDs even when only a downstream
+        // router might fragment the datagram. Atomic datagrams can use zero.
+        let identification = if dont_fragment {
+            0
+        } else {
+            self.output.allocate_identification()
+        };
         ipv4::write_ipv4_packet_header(
             &mut self.packet.packet,
             self.preparation.source,
             self.options.dst_addr,
             self.options.protocol,
             self.options.ttl,
+            identification,
             dont_fragment,
         )
         .ok_or(LinuxError::EMSGSIZE)?;
         match self.preparation.submission {
-            SubmissionTarget::Queued => self.output.queue_packet(
+            SubmissionTarget::Queued => Ipv4Output::queue_packet(
                 self.tx_queue,
                 self.packet.packet,
                 self.options.oif,
                 self.preparation.mtu,
             ),
-            SubmissionTarget::Immediate(target) => self.output.transmit_now(
+            SubmissionTarget::Immediate(target) => Ipv4Output::transmit_now(
                 self.devices,
                 self.packet.packet,
                 self.preparation.mtu,
@@ -192,7 +200,7 @@ struct OutputPreparation {
     submission: SubmissionTarget,
 }
 
-/// Owns IPv4 output rules and the identification sequence for fragmentation.
+/// Owns IPv4 output rules and the identification sequence for non-atomic sends.
 ///
 /// Resources are borrowed from the enclosing Router guard. Output never locks
 /// Router itself and never retains a routing decision beyond its transaction.
@@ -205,6 +213,12 @@ impl Ipv4Output {
         Self {
             next_identification: 1,
         }
+    }
+
+    fn allocate_identification(&mut self) -> u16 {
+        let identification = self.next_identification;
+        self.next_identification = self.next_identification.wrapping_add(1).max(1);
+        identification
     }
 
     /// Selects addresses and checks capacity without modifying the datagram.
@@ -322,13 +336,12 @@ impl Ipv4Output {
 
     /// Fragments before atomically enqueuing the complete group of packets.
     pub(crate) fn queue_packet(
-        &mut self,
         tx_queue: &mut DataTxQueue,
         packet: Vec<u8>,
         oif: i32,
         mtu: Option<usize>,
     ) -> KResult {
-        let packets = self.fragment(packet, mtu)?;
+        let packets = Self::fragment(packet, mtu)?;
         tx_queue
             .try_extend(
                 packets.into_iter().map(|packet| {
@@ -338,21 +351,19 @@ impl Ipv4Output {
             .map_err(|_| KError::WouldBlock)
     }
 
-    /// The sequence advances for oversized packets, including DF rejection.
-    fn fragment(&mut self, packet: Vec<u8>, mtu: Option<usize>) -> KResult<Vec<Vec<u8>>> {
+    fn fragment(packet: Vec<u8>, mtu: Option<usize>) -> KResult<Vec<Vec<u8>>> {
         if packet.len() > usize::from(u16::MAX) {
             return Err(KError::InvalidInput);
         }
-        Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
+        let header = Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
         let Some(mtu) = mtu else {
             return Ok(vec![packet]);
         };
         if packet.len() <= mtu {
             return Ok(vec![packet]);
         }
-        let identification = self.next_identification;
-        self.next_identification = self.next_identification.wrapping_add(1).max(1);
-        ipv4::fragment_output_packet(&packet, mtu, identification).map_err(|err| match err {
+        ipv4::fragment_output_packet(&packet, mtu, header.identification()).map_err(|err| match err
+        {
             ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
             ipv4::Ipv4FragmentError::DontFragment | ipv4::Ipv4FragmentError::MtuTooSmall => {
                 LinuxError::EMSGSIZE.into()
@@ -361,14 +372,13 @@ impl Ipv4Output {
     }
 
     fn transmit_now(
-        &mut self,
         devices: &mut DeviceRegistry,
         packet: Vec<u8>,
         mtu: Option<usize>,
         target: OutputTarget,
     ) -> KResult {
         let timestamp = monotonic_time();
-        for packet in self.fragment(packet, mtu)? {
+        for packet in Self::fragment(packet, mtu)? {
             // Immediate loopback submission historically carries no queue binding.
             let mut packet = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
             let Some((source, destination)) = Self::normalize_packet(&mut packet) else {

@@ -1168,8 +1168,43 @@ fn abandoned_output_does_not_occupy_capacity_or_advance_identification() {
     for offset in [0, 80, 160] {
         let fragment = router.data_tx_queue.pop_front().unwrap();
         let header = ipv4::Ipv4Header::parse_input(fragment.network_packet().unwrap()).unwrap();
-        assert_eq!(header.identification(), 2);
+        assert_eq!(header.identification(), 1);
         assert_eq!(header.fragment_offset(), offset);
+    }
+}
+
+#[def_test]
+fn fragmentable_output_identifies_datagrams_before_downstream_fragmentation() {
+    let (mut router, _) = output_test_router();
+    let options = output_options(Ipv4Address::new(192, 0, 2, 8));
+    let mut identifications = Vec::new();
+    for transport_len in [16, 200, 16] {
+        router
+            .prepare_ipv4_send(options, Ipv4PacketBuilder::new(transport_len).unwrap())
+            .unwrap()
+            .submit()
+            .unwrap();
+        let first = router.data_tx_queue.pop_front().unwrap();
+        let bytes = first.network_packet().unwrap();
+        let header = ipv4::Ipv4Header::parse_input(bytes).unwrap();
+        let identification = header.identification();
+        assert!(!identifications.contains(&identification));
+        identifications.push(identification);
+        if transport_len == 16 {
+            assert!(!header.is_fragmented());
+            let fragments = ipv4::fragment_output_packet(bytes, 28, identification).unwrap();
+            assert_eq!(fragments.len(), 2);
+            for fragment in fragments {
+                let header = ipv4::Ipv4Header::parse_input(&fragment).unwrap();
+                assert_eq!(header.identification(), identification);
+            }
+        } else {
+            while let Some(fragment) = router.data_tx_queue.pop_front() {
+                let header =
+                    ipv4::Ipv4Header::parse_input(fragment.network_packet().unwrap()).unwrap();
+                assert_eq!(header.identification(), identification);
+            }
+        }
     }
 }
 
@@ -1248,6 +1283,7 @@ fn limited_broadcast_with_bound_device_preserves_no_route_output() {
         assert_eq!(header.dst_addr(), Ipv4Address::BROADCAST);
         assert_eq!(header.total_len(), 220);
         assert_eq!(header.dont_fragment(), policy != Allow);
+        assert_eq!(header.identification() == 0, policy != Allow);
     }
 }
 
