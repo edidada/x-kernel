@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! IPv4 output preparation, fragmentation, and device dispatch.
+//! IPv4 send preparation, submission, and queued device dispatch.
 //!
-//! `Ipv4Output` owns the fragmentation identification sequence and the complete
-//! send transaction. Routing, devices, and queue capacity are borrowed from one
-//! exclusive owner for preparation and submission. Output decisions must be
-//! consumed within that transaction. Queued packets resolve routing again when
-//! dispatched.
+//! Preparation borrows routing, devices, and queue capacity for the lifetime of
+//! one send. The transport fills only its own bytes using the selected addresses;
+//! submission consumes that transaction and completes IPv4 encapsulation and
+//! fragmentation. Queued packets resolve routing again at dispatch.
 
 use alloc::{vec, vec::Vec};
 
@@ -29,22 +28,144 @@ use crate::{
 
 const IPV4_HEADER_LEN: usize = 20;
 
-/// One stack-generated datagram and its socket-selected output constraints.
-pub(crate) struct Ipv4SendRequest<'a> {
-    pub(crate) bound_src: Option<IpAddress>,
-    pub(crate) dst_addr: IpAddress,
+/// IPv4 fragmentation behavior selected by the socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Ipv4FragmentationPolicy {
+    Allow,
+    Forbid,
+    /// Set DF only when the datagram fits the MTU, or no MTU is available.
+    PreferDontFragment,
+}
+
+impl Ipv4FragmentationPolicy {
+    fn should_set_dont_fragment(self, packet_len: usize, mtu: Option<usize>) -> bool {
+        match self {
+            Self::Allow => false,
+            Self::Forbid => true,
+            Self::PreferDontFragment => mtu.is_none_or(|mtu| packet_len <= mtu),
+        }
+    }
+}
+
+/// Socket-selected constraints and IPv4 header fields for one send attempt.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ipv4SendOptions {
+    pub(crate) bound_src: Option<Ipv4Address>,
+    pub(crate) dst_addr: Ipv4Address,
     /// Stable interface index; zero leaves device selection to routing.
     pub(crate) oif: i32,
     pub(crate) allow_broadcast: bool,
-    pub(crate) packet: &'a mut Option<Vec<u8>>,
+    pub(crate) protocol: u8,
+    pub(crate) ttl: u8,
+    pub(crate) fragmentation: Ipv4FragmentationPolicy,
 }
 
-/// A single-route output decision, valid within the current output transaction.
+/// Owned datagram storage with an IPv4 header reserved for output submission.
 ///
-/// Queued packets retain their socket's interface constraint and resolve again
-/// at dispatch. Limited-broadcast fan-out is handled separately.
+/// Transport code can fill its own header and payload, but cannot change the
+/// packet length or write IPv4 fields. Preparation failure returns this builder
+/// unchanged, so a retry neither copies nor rereads the user's payload.
+#[derive(Debug)]
+pub(crate) struct Ipv4PacketBuilder {
+    packet: Vec<u8>,
+}
+
+impl Ipv4PacketBuilder {
+    /// Allocates space for an IPv4 datagram with `transport_len` bytes after IP.
+    ///
+    /// Returns `EMSGSIZE` when the complete datagram cannot fit an IPv4 length.
+    pub(crate) fn new(transport_len: usize) -> KResult<Self> {
+        let packet_len = transport_len
+            .checked_add(IPV4_HEADER_LEN)
+            .filter(|len| *len <= usize::from(u16::MAX))
+            .ok_or(LinuxError::EMSGSIZE)?;
+        Ok(Self {
+            packet: vec![0; packet_len],
+        })
+    }
+
+    /// Borrows the fixed-length transport header and payload region.
+    pub(crate) fn transport_mut(&mut self) -> &mut [u8] {
+        &mut self.packet[IPV4_HEADER_LEN..]
+    }
+}
+
+/// A send whose configuration and queue capacity stay exclusively borrowed.
+///
+/// The transport uses the selected addresses for its checksum, then consumes
+/// this value with `submit`. Dropping it only releases the packet and borrows;
+/// it does not occupy queue slots or advance the fragmentation sequence.
+#[must_use = "fill the transport header and submit the prepared IPv4 send"]
+pub(crate) struct PreparedIpv4Send<'a> {
+    output: &'a mut Ipv4Output,
+    _routes: &'a RouteTable,
+    devices: &'a mut DeviceRegistry,
+    tx_queue: &'a mut DataTxQueue,
+    options: Ipv4SendOptions,
+    packet: Ipv4PacketBuilder,
+    preparation: OutputPreparation,
+}
+
+impl PreparedIpv4Send<'_> {
+    /// Returns the final source address for the transport pseudo-header.
+    pub(crate) fn source_addr(&self) -> Ipv4Address {
+        self.preparation.source
+    }
+
+    /// Returns the destination address for the transport pseudo-header.
+    pub(crate) fn destination_addr(&self) -> Ipv4Address {
+        self.options.dst_addr
+    }
+
+    /// Borrows transport bytes while keeping the selected addresses immutable.
+    pub(crate) fn transport_mut(&mut self) -> &mut [u8] {
+        self.packet.transport_mut()
+    }
+
+    /// Completes IPv4 encapsulation and consumes the datagram for submission.
+    ///
+    /// Capacity remains available under this transaction's exclusive borrow.
+    /// Returns `EMSGSIZE` for a DF datagram exceeding the MTU or an MTU too small
+    /// to fragment. Successful loopback submission can still drop on RX overflow.
+    pub(crate) fn submit(mut self) -> KResult {
+        let dont_fragment = self
+            .options
+            .fragmentation
+            .should_set_dont_fragment(self.packet.packet.len(), self.preparation.mtu);
+        ipv4::write_ipv4_packet_header(
+            &mut self.packet.packet,
+            self.preparation.source,
+            self.options.dst_addr,
+            self.options.protocol,
+            self.options.ttl,
+            dont_fragment,
+        )
+        .ok_or(LinuxError::EMSGSIZE)?;
+        match self.preparation.submission {
+            SubmissionTarget::Queued => self.output.queue_packet(
+                self.tx_queue,
+                self.packet.packet,
+                self.options.oif,
+                self.preparation.mtu,
+            ),
+            SubmissionTarget::Immediate(target) => self.output.transmit_now(
+                self.devices,
+                self.packet.packet,
+                self.preparation.mtu,
+                target,
+            ),
+        }
+    }
+}
+
+/// RX work produced by dispatch, independent of device transmit success.
+#[derive(Default)]
+pub(crate) struct Ipv4DispatchOutcome {
+    pub(crate) has_rx_work: bool,
+}
+
+/// A single-route output decision, consumed under one configuration guard.
 pub(crate) struct OutputRoute {
-    /// Default source; an explicitly bound socket source takes precedence.
     pub(crate) source: IpAddress,
     pub(crate) dev: NetDeviceId,
     pub(crate) next_hop: IpAddress,
@@ -52,10 +173,29 @@ pub(crate) struct OutputRoute {
     pub(crate) link_kind: LinkKind,
 }
 
-/// Owns IPv4 output policy and the identification sequence for fragmentation.
+enum OutputTarget {
+    Routed {
+        dev: NetDeviceId,
+        next_hop: IpAddress,
+    },
+    LimitedBroadcast,
+}
+
+enum SubmissionTarget {
+    Queued,
+    Immediate(OutputTarget),
+}
+
+struct OutputPreparation {
+    source: Ipv4Address,
+    mtu: Option<usize>,
+    submission: SubmissionTarget,
+}
+
+/// Owns IPv4 output rules and the identification sequence for fragmentation.
 ///
-/// The enclosing Router mutex serializes the sequence together with route,
-/// device, and queue access. The output path never acquires that mutex itself.
+/// Resources are borrowed from the enclosing Router guard. Output never locks
+/// Router itself and never retains a routing decision beyond its transaction.
 pub(crate) struct Ipv4Output {
     next_identification: u16,
 }
@@ -67,84 +207,120 @@ impl Ipv4Output {
         }
     }
 
-    /// Prepares and submits a datagram using one consistent configuration view.
+    /// Selects addresses and checks capacity without modifying the datagram.
     ///
-    /// The caller must retain exclusive configuration and queue access throughout
-    /// this call. `prepare_fn` must build a packet with a 20-byte IPv4 header for
-    /// the requested destination without changing its length. Capacity rejection
-    /// leaves the original buffer untouched and does not call `prepare_fn`;
-    /// a preparation error also retains the buffer. After successful preparation,
-    /// fragmentation consumes it.
-    /// Loopback bypasses the data queue and completes device submission here.
+    /// On error, returns the original builder. Returns `EACCES` for a forbidden
+    /// broadcast, `ENETUNREACH` for an invalid route or binding, `WouldBlock` for
+    /// insufficient queue capacity, and `EMSGSIZE` for an unusable fragment MTU.
+    /// The returned transaction exclusively borrows all resources through
+    /// submission, so neither its route nor its capacity can become stale.
+    pub(crate) fn prepare<'a>(
+        &'a mut self,
+        routes: &'a RouteTable,
+        devices: &'a mut DeviceRegistry,
+        tx_queue: &'a mut DataTxQueue,
+        options: Ipv4SendOptions,
+        packet: Ipv4PacketBuilder,
+    ) -> Result<PreparedIpv4Send<'a>, (KError, Ipv4PacketBuilder)> {
+        let preparation =
+            match Self::prepare_output(routes, devices, tx_queue, options, packet.packet.len()) {
+                Ok(preparation) => preparation,
+                Err(error) => return Err((error, packet)),
+            };
+        Ok(PreparedIpv4Send {
+            output: self,
+            _routes: routes,
+            devices,
+            tx_queue,
+            options,
+            packet,
+            preparation,
+        })
+    }
+
+    /// Dispatches an already queued packet using the current routing state.
     ///
-    /// # Errors
-    /// Returns `EACCES` for a forbidden broadcast, `ENETUNREACH` for an invalid
-    /// output route or binding, `WouldBlock` for insufficient queue capacity,
-    /// and `EMSGSIZE` when fragmentation cannot fit the MTU. Packet validation
-    /// and `prepare_fn` errors propagate to the caller.
-    pub(crate) fn prepare_and_send(
-        &mut self,
+    /// Normalizes the byte-buffer boundary shared with smoltcp before checking
+    /// the packet's source ownership and interface binding.
+    pub(crate) fn dispatch_queued(
         routes: &RouteTable,
         devices: &mut DeviceRegistry,
-        tx_queue: &mut DataTxQueue,
-        request: Ipv4SendRequest<'_>,
-        prepare_fn: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
-    ) -> KResult {
-        let Ipv4SendRequest {
-            bound_src,
-            dst_addr,
-            oif,
-            allow_broadcast,
-            packet,
-        } = request;
-        if requires_broadcast(devices, &dst_addr) && !allow_broadcast {
+        mut packet: PacketBuf,
+        timestamp: MonotonicInstant,
+    ) -> Ipv4DispatchOutcome {
+        let Some((source, destination)) = Self::normalize_packet(&mut packet) else {
+            return Ipv4DispatchOutcome::default();
+        };
+        let target = if destination.is_broadcast() {
+            OutputTarget::LimitedBroadcast
+        } else {
+            let dst_addr = IpAddress::Ipv4(destination);
+            let Some(rule) = routes.lookup(&dst_addr) else {
+                warn!("No route found for destination: {}", dst_addr);
+                return Ipv4DispatchOutcome::default();
+            };
+            OutputTarget::Routed {
+                dev: rule.dev,
+                next_hop: rule.via.unwrap_or(dst_addr),
+            }
+        };
+        Self::dispatch_to(devices, packet, source, destination, timestamp, &target)
+    }
+
+    fn prepare_output(
+        routes: &RouteTable,
+        devices: &DeviceRegistry,
+        tx_queue: &DataTxQueue,
+        options: Ipv4SendOptions,
+        packet_len: usize,
+    ) -> KResult<OutputPreparation> {
+        let dst_addr = IpAddress::Ipv4(options.dst_addr);
+        if requires_broadcast(devices, &dst_addr) && !options.allow_broadcast {
             return Err(LinuxError::EACCES.into());
         }
-        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        // Limited broadcasts can bypass route lookup or fan out across devices.
-        let route = if dst_addr.is_broadcast() {
-            None
-        } else {
-            Some(resolve_output_route(routes, devices, &dst_addr, oif)?)
-        };
-        let (source, mtu, is_loopback) = if let Some(route) = &route {
-            (
-                route.source,
-                Some(route.mtu),
-                route.link_kind == LinkKind::Loopback,
-            )
-        } else {
+        let (source, mtu, link_kind, target) = if options.dst_addr.is_broadcast() {
+            // Bound broadcasts work without a route. Preserve the optional MTU
+            // and loopback policy supplied by a route when one exists.
             let device = routes
                 .lookup(&dst_addr)
                 .and_then(|rule| devices.get_by_id(rule.dev));
             (
-                output_source_address(routes, devices, &dst_addr, oif)?,
-                device.map(|device| device.mtu().min(u16::MAX as usize)),
-                device.is_some_and(|device| device.link_kind() == LinkKind::Loopback),
+                output_source_address(routes, devices, &dst_addr, options.oif)?,
+                device.map(|device| device.mtu().min(usize::from(u16::MAX))),
+                device.map(|device| device.link_kind()),
+                OutputTarget::LimitedBroadcast,
+            )
+        } else {
+            let route = resolve_output_route(routes, devices, &dst_addr, options.oif)?;
+            (
+                route.source,
+                Some(route.mtu),
+                Some(route.link_kind),
+                OutputTarget::Routed {
+                    dev: route.dev,
+                    next_hop: route.next_hop,
+                },
             )
         };
-        if !is_loopback
-            && (tx_queue.is_full() || !tx_queue.can_push(output_packet_count(packet_len, mtu)?))
-        {
-            return Err(KError::WouldBlock);
-        }
-        prepare_fn(
-            packet.as_deref_mut().ok_or(KError::InvalidInput)?,
-            bound_src.unwrap_or(source),
-            mtu,
-        )?;
-        let packet = packet.take().ok_or(KError::InvalidInput)?;
-        if is_loopback {
-            self.transmit_now(routes, devices, packet, mtu, route.as_ref())
+        let submission = if link_kind == Some(LinkKind::Loopback) {
+            SubmissionTarget::Immediate(target)
         } else {
-            self.queue_packet(tx_queue, packet, oif, mtu)
-        }
+            if tx_queue.is_full() || !tx_queue.can_push(output_packet_count(packet_len, mtu)?) {
+                return Err(KError::WouldBlock);
+            }
+            SubmissionTarget::Queued
+        };
+        let IpAddress::Ipv4(source) = source else {
+            return Err(LinuxError::EAFNOSUPPORT.into());
+        };
+        Ok(OutputPreparation {
+            source: options.bound_src.unwrap_or(source),
+            mtu,
+            submission,
+        })
     }
 
-    /// Fragments and atomically enqueues a complete datagram into the data queue.
-    ///
-    /// Consumes the buffer even on error. Callers requiring capacity retries use
-    /// `prepare_and_send`, which checks capacity before taking the buffer.
+    /// Fragments before atomically enqueuing the complete group of packets.
     pub(crate) fn queue_packet(
         &mut self,
         tx_queue: &mut DataTxQueue,
@@ -162,25 +338,12 @@ impl Ipv4Output {
             .map_err(|_| KError::WouldBlock)
     }
 
-    /// Dispatches queued output through current routing and source ownership.
-    ///
-    /// Returns an RX-readiness hint, including loopback delivery; it does not
-    /// report transmit success. Limited broadcasts obey the packet's binding.
-    pub(crate) fn dispatch_packet(
-        routes: &RouteTable,
-        devices: &mut DeviceRegistry,
-        packet: PacketBuf,
-        timestamp: MonotonicInstant,
-    ) -> bool {
-        Self::dispatch_resolved_packet(routes, devices, packet, timestamp, None)
-    }
-
     /// The sequence advances for oversized packets, including DF rejection.
     fn fragment(&mut self, packet: Vec<u8>, mtu: Option<usize>) -> KResult<Vec<Vec<u8>>> {
         if packet.len() > usize::from(u16::MAX) {
             return Err(KError::InvalidInput);
         }
-        ipv4::Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
+        Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
         let Some(mtu) = mtu else {
             return Ok(vec![packet]);
         };
@@ -197,61 +360,51 @@ impl Ipv4Output {
         })
     }
 
-    /// Loopback RX overflow remains a successful submission with a dropped packet.
     fn transmit_now(
         &mut self,
-        routes: &RouteTable,
         devices: &mut DeviceRegistry,
         packet: Vec<u8>,
         mtu: Option<usize>,
-        route: Option<&OutputRoute>,
+        target: OutputTarget,
     ) -> KResult {
         let timestamp = monotonic_time();
         for packet in self.fragment(packet, mtu)? {
-            let packet = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
-            let _poll_next =
-                Self::dispatch_resolved_packet(routes, devices, packet, timestamp, route);
+            // Immediate loopback submission historically carries no queue binding.
+            let mut packet = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            let Some((source, destination)) = Self::normalize_packet(&mut packet) else {
+                continue;
+            };
+            let _outcome =
+                Self::dispatch_to(devices, packet, source, destination, timestamp, &target);
         }
         Ok(())
     }
 
-    fn dispatch_resolved_packet(
-        routes: &RouteTable,
+    fn normalize_packet(packet: &mut PacketBuf) -> Option<(Ipv4Address, Ipv4Address)> {
+        ipv4::prepare_output_packet(packet).ok()?;
+        let header = Ipv4Header::parse_header_only(packet.network_packet()?).ok()?;
+        Some((header.src_addr(), header.dst_addr()))
+    }
+
+    fn dispatch_to(
         devices: &mut DeviceRegistry,
-        mut packet: PacketBuf,
+        packet: PacketBuf,
+        source: Ipv4Address,
+        destination: Ipv4Address,
         timestamp: MonotonicInstant,
-        route: Option<&OutputRoute>,
-    ) -> bool {
-        if crate::ipv4::prepare_output_packet(&mut packet).is_err() {
-            return false;
-        }
-        let header =
-            Ipv4Header::parse_header_only(packet.network_packet().expect("finalized IPv4 packet"))
-                .expect("finalized IPv4 header");
-
-        let ipv4_src_addr = header.src_addr();
-        let src_addr = IpAddress::Ipv4(ipv4_src_addr);
-        let dst_addr = IpAddress::Ipv4(header.dst_addr());
-        if header.dst_addr().is_broadcast() {
-            if !(header.src_addr().is_unspecified() || has_local_source(devices, header.src_addr()))
-            {
-                warn!("Dropping IPv4 broadcast packet with source {}", src_addr);
-                return false;
+        target: &OutputTarget,
+    ) -> Ipv4DispatchOutcome {
+        let src_addr = IpAddress::Ipv4(source);
+        let dst_addr = IpAddress::Ipv4(destination);
+        let (dev_id, next_hop) = match *target {
+            OutputTarget::LimitedBroadcast => {
+                if !(source.is_unspecified() || has_local_source(devices, source)) {
+                    warn!("Dropping IPv4 broadcast packet with source {}", src_addr);
+                    return Ipv4DispatchOutcome::default();
+                }
+                return Self::dispatch_broadcast(devices, packet, src_addr, dst_addr, timestamp);
             }
-
-            return Self::dispatch_broadcast(devices, packet, src_addr, dst_addr, timestamp);
-        }
-
-        // Queued output resolves again; synchronous output can reuse a decision
-        // made under the same Router guard.
-        let (dev_id, next_hop) = if let Some(route) = route {
-            (route.dev, route.next_hop)
-        } else {
-            let Some(rule) = routes.lookup(&dst_addr) else {
-                warn!("No route found for destination: {}", dst_addr);
-                return false;
-            };
-            (rule.dev, rule.via.unwrap_or(dst_addr))
+            OutputTarget::Routed { dev, next_hop } => (dev, next_hop),
         };
         let bound_if = packet.ifindex();
         if bound_if != 0 && bound_if != dev_id.ifindex() {
@@ -259,17 +412,24 @@ impl Ipv4Output {
                 "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
                 dev_id.ifindex()
             );
-            return false;
+            return Ipv4DispatchOutcome::default();
         }
-        if !has_local_source(devices, ipv4_src_addr) {
+        if !has_local_source(devices, source) {
             warn!("Dropping IPv4 packet with non-local source {}", src_addr);
-            return false;
+            return Ipv4DispatchOutcome::default();
         }
-
-        let dev = devices
-            .get_mut_by_id(dev_id)
-            .expect("route device must be registered");
-        dev.send_ip_packet(dev_id.ifindex(), next_hop, src_addr, packet, timestamp)
+        let Some(dev) = devices.get_mut_by_id(dev_id) else {
+            return Ipv4DispatchOutcome::default();
+        };
+        Ipv4DispatchOutcome {
+            has_rx_work: dev.send_ip_packet(
+                dev_id.ifindex(),
+                next_hop,
+                src_addr,
+                packet,
+                timestamp,
+            ),
+        }
     }
 
     fn dispatch_broadcast(
@@ -278,27 +438,27 @@ impl Ipv4Output {
         src_addr: IpAddress,
         dst_addr: IpAddress,
         timestamp: MonotonicInstant,
-    ) -> bool {
+    ) -> Ipv4DispatchOutcome {
         let bound_if = packet.ifindex();
         let mut devices = devices.iter_mut_with_ids();
         let Some((last_id, last_device)) = devices.next_back() else {
-            return false;
+            return Ipv4DispatchOutcome::default();
         };
-
-        let mut poll_next = false;
+        let mut has_rx_work = false;
         for (id, dev) in devices {
             let ifindex = id.ifindex();
             if bound_if != 0 && bound_if != ifindex {
                 continue;
             }
-            poll_next |= dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
+            has_rx_work |=
+                dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
         }
         let last_ifindex = last_id.ifindex();
         if bound_if == 0 || bound_if == last_ifindex {
-            poll_next |=
+            has_rx_work |=
                 last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
         }
-        poll_next
+        Ipv4DispatchOutcome { has_rx_work }
     }
 }
 

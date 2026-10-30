@@ -12,10 +12,10 @@ use core::{
     task::Waker,
 };
 
-use kerrno::{KResult, LinuxError};
+use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
-use ksync::Mutex;
+use ksync::{Mutex, MutexGuard};
 use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
     iface::{Interface, PollIngressSingleResult, PollResult, SocketSet},
@@ -34,7 +34,7 @@ use crate::{
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::Ipv4AddrSnapshot,
-        output::Ipv4SendRequest,
+        output::{Ipv4PacketBuilder, Ipv4SendOptions, PreparedIpv4Send},
         router::Rule,
     },
     poller::{PollBudget, PollProgress},
@@ -92,6 +92,28 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
 }
 
 struct NetworkTimer;
+
+/// Task-context access to IPv4 output under the Router mutex.
+///
+/// Lock acquisition can sleep and requires no process-specific resources.
+/// Callers must hold no spinlock or IRQ/preemption exclusion guard. Drop this
+/// access before waiting for capacity, notifying waiters, or assisting polling.
+pub(crate) struct Ipv4OutputGuard<'a> {
+    router: MutexGuard<'a, Router>,
+}
+
+impl Ipv4OutputGuard<'_> {
+    /// Prepares a send while keeping configuration and capacity borrowed.
+    ///
+    /// Returns the original builder with the error when preparation fails.
+    pub(crate) fn prepare(
+        &mut self,
+        options: Ipv4SendOptions,
+        packet: Ipv4PacketBuilder,
+    ) -> Result<PreparedIpv4Send<'_>, (KError, Ipv4PacketBuilder)> {
+        self.router.prepare_ipv4_send(options, packet)
+    }
+}
 
 #[cfg(unittest)]
 static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -662,44 +684,13 @@ impl Service {
         self.router.lock().can_enqueue_tx_packet()
     }
 
-    /// Prepares and submits one datagram under the Router guard.
+    /// Acquires task-context output access through preparation and submission.
     ///
-    /// `prepare` must construct a packet for `dst_addr` without changing its length.
-    /// Queue-capacity rejection leaves the buffer available for a later retry.
-    pub(crate) fn prepare_and_send_ipv4_packet(
-        &self,
-        bound_src: Option<IpAddress>,
-        dst_addr: &IpAddress,
-        oif: i32,
-        allow_broadcast: bool,
-        packet: &mut Option<Vec<u8>>,
-        prepare: impl FnOnce(&mut [u8], IpAddress, IpAddress, Option<usize>) -> KResult,
-    ) -> KResult {
-        let mut router = self.router.lock();
-        let IpAddress::Ipv4(destination) = *dst_addr else {
-            return Err(LinuxError::EAFNOSUPPORT.into());
-        };
-        let source = match bound_src {
-            Some(IpAddress::Ipv4(source)) => Some(source),
-            Some(_) => return Err(LinuxError::EAFNOSUPPORT.into()),
-            None => None,
-        };
-        let route = router.lookup_ipv4_output(
-            destination,
-            source,
-            NetDeviceId::from_optional_ifindex(oif)?,
-        )?;
-        let dst_addr = &IpAddress::Ipv4(route.destination);
-        router.prepare_and_send_ipv4_packet(
-            Ipv4SendRequest {
-                bound_src: route.source.map(IpAddress::Ipv4),
-                dst_addr: *dst_addr,
-                oif,
-                allow_broadcast,
-                packet,
-            },
-            |packet, source, mtu| prepare(packet, source, *dst_addr, mtu),
-        )
+    /// See [`Ipv4OutputGuard`] for execution-context and release requirements.
+    pub(crate) fn ipv4_output(&self) -> Ipv4OutputGuard<'_> {
+        Ipv4OutputGuard {
+            router: self.router.lock(),
+        }
     }
 
     pub(crate) fn register_rx_waker(

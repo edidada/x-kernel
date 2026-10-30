@@ -130,59 +130,91 @@ fn error_msg_trunc_returns_original_payload_len() {
 }
 
 #[def_test]
-fn udp_datagram_is_written_into_preallocated_ipv4_packet() {
+fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
+
+    use crate::{
+        device::{DeviceRegistry, LoopbackDevice},
+        network::{
+            interface_address::Ipv4AddrEntry,
+            output::Ipv4Output,
+            router::{ROUTE_SCOPE_HOST, RouteTable},
+        },
+        runtime::tx_queue::DataTxQueue,
+    };
+
     let socket = UdpSocket::new();
     let src_addr = Ipv4Address::new(192, 0, 2, 1);
-    let dst_addr = Ipv4Address::new(192, 0, 2, 2);
-    let local_endpoint: IpEndpoint = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234).into();
-    let remote_endpoint: IpEndpoint = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 4321).into();
-    socket.state().set_local_endpoint(Some(local_endpoint));
-    let mut packet = vec![0u8; IPV4_HEADER_LEN + UDP_HEADER_LEN + 4];
-    packet[IPV4_HEADER_LEN + UDP_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);
-
+    let dst_addr = Ipv4Address::BROADCAST;
     socket
-        .write_datagram(
-            &mut packet,
-            remote_endpoint,
-            IpAddress::Ipv4(src_addr),
-            false,
+        .state()
+        .set_local_endpoint(Some(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1234).into()));
+    let mut devices = DeviceRegistry::new(4);
+    let dev = devices.register(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
+    // Keep routing empty to exercise bound broadcast source selection without an MTU.
+    let _change = devices
+        .add_ipv4_addr(
+            dev,
+            Ipv4AddrEntry {
+                addr: crate::ip::Ipv4Cidr::new(src_addr, 24).unwrap(),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            },
         )
         .unwrap();
+    let routes = RouteTable::new();
+    let mut queue = DataTxQueue::with_capacity(1);
+    let mut output = Ipv4Output::new();
+    let mut builder = Ipv4PacketBuilder::new(UDP_HEADER_LEN + 4).unwrap();
+    builder.transport_mut()[UDP_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);
+    let allocation = builder.transport_mut().as_ptr();
+    let options = Ipv4SendOptions {
+        bound_src: None,
+        dst_addr,
+        oif: dev.ifindex(),
+        allow_broadcast: true,
+        protocol: ipv4::PROTOCOL_UDP,
+        ttl: 37,
+        fragmentation: Ipv4FragmentationPolicy::PreferDontFragment,
+    };
+    let mut send = output
+        .prepare(&routes, &mut devices, &mut queue, options, builder)
+        .unwrap();
+    let source = send.source_addr();
+    let destination = send.destination_addr();
+    assert_eq!(source, src_addr);
+    assert_eq!(destination, dst_addr);
+    socket
+        .write_datagram(send.transport_mut(), source, destination, 4321)
+        .unwrap();
+    send.submit().unwrap();
 
-    let header = ipv4::Ipv4Header::parse_input(&packet).unwrap();
-    let udp_packet = &packet[header.header_len()..];
-    assert_eq!(header.total_len(), packet.len());
+    let packet = queue.pop_front().unwrap();
+    let bytes = packet.network_packet().unwrap();
+    let header = ipv4::Ipv4Header::parse_input(bytes).unwrap();
+    let udp_packet = &bytes[header.header_len()..];
+    assert_eq!(udp_packet.as_ptr(), allocation);
+    assert_eq!(header.src_addr(), src_addr);
+    assert_eq!(header.dst_addr(), dst_addr);
+    assert_eq!(header.total_len(), bytes.len());
+    assert_eq!(header.protocol(), ipv4::PROTOCOL_UDP);
+    assert_eq!(header.bytes()[8], 37);
+    assert!(header.dont_fragment());
     assert!(has_valid_udp_checksum(src_addr, dst_addr, udp_packet));
+    assert_eq!(&udp_packet[..4], &[4, 210, 16, 225]);
     assert_eq!(&udp_packet[UDP_HEADER_LEN..], &[1, 2, 3, 4]);
 }
 
 #[def_test]
-fn mtu_discovery_selects_df_like_linux_ipv4_output() {
-    assert!(!should_set_dont_fragment(
-        IP_PMTUDISC_DONT,
-        1500,
-        Some(1500)
-    ));
-    assert!(should_set_dont_fragment(IP_PMTUDISC_WANT, 1500, Some(1500)));
-    assert!(!should_set_dont_fragment(
-        IP_PMTUDISC_WANT,
-        1501,
-        Some(1500)
-    ));
-    assert!(should_set_dont_fragment(IP_PMTUDISC_DO, 1501, Some(1500)));
-    assert!(should_set_dont_fragment(
-        IP_PMTUDISC_PROBE,
-        1501,
-        Some(1500)
-    ));
-    assert!(!should_set_dont_fragment(
-        IP_PMTUDISC_INTERFACE,
-        1500,
-        Some(1500)
-    ));
-    assert!(!should_set_dont_fragment(
-        IP_PMTUDISC_OMIT,
-        1500,
-        Some(1500)
-    ));
+fn mtu_discovery_maps_socket_options_to_ipv4_fragmentation_policy() {
+    use Ipv4FragmentationPolicy::{Allow, Forbid, PreferDontFragment};
+    for (option, expected) in [
+        (IP_PMTUDISC_DONT, Allow),
+        (IP_PMTUDISC_WANT, PreferDontFragment),
+        (IP_PMTUDISC_DO, Forbid),
+        (IP_PMTUDISC_PROBE, Forbid),
+        (IP_PMTUDISC_INTERFACE, Allow),
+        (IP_PMTUDISC_OMIT, Allow),
+    ] {
+        assert_eq!(fragmentation_policy(option), expected);
+    }
 }

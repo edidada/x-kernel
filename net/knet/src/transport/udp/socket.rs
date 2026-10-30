@@ -10,7 +10,7 @@ use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 use super::{
-    IPV4_HEADER_LEN, UDP_HEADER_LEN, UDP_MAX_PAYLOAD_LEN,
+    UDP_HEADER_LEN, UDP_MAX_PAYLOAD_LEN,
     output::{ipv4_pair, write_udp_header},
     pcb::{RecvMode, UdpDatagram, UdpPcb},
     registry,
@@ -22,6 +22,7 @@ use crate::{
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
+    network::output::{Ipv4FragmentationPolicy, Ipv4PacketBuilder, Ipv4SendOptions},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, network_poller},
     udp_err::QueuedUdpError,
@@ -184,41 +185,45 @@ impl UdpSocket {
         if payload_len > UDP_MAX_PAYLOAD_LEN {
             return Err(LinuxError::EMSGSIZE.into());
         }
-        let packet_len = IPV4_HEADER_LEN + UDP_HEADER_LEN + payload_len;
-        let mut packet = Some(vec![0u8; packet_len]);
-        src.read_exact(
-            packet
-                .as_mut()
-                .and_then(|packet| packet.get_mut(IPV4_HEADER_LEN + UDP_HEADER_LEN..))
-                .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
-        )?;
+        let mut builder = Ipv4PacketBuilder::new(UDP_HEADER_LEN + payload_len)?;
+        src.read_exact(&mut builder.transport_mut()[UDP_HEADER_LEN..])?;
+        let mut packet = Some(builder);
         self.state()
             .send_poller_with_nonblocking(self, flags.nonblocking(), || {
-                let bound_source_addr = self
+                let local_addr = self
                     .state()
                     .local_endpoint()
-                    .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                SERVICE.prepare_and_send_ipv4_packet(
-                    bound_source_addr,
-                    &remote_endpoint.addr,
-                    self.state().bound_dev_if(),
+                    .map_or(Ipv4Address::UNSPECIFIED.into(), |local| local.addr);
+                let (local_addr, dst_addr) = ipv4_pair(local_addr, remote_endpoint.addr)?;
+                let options = Ipv4SendOptions {
+                    bound_src: (!local_addr.is_unspecified()).then_some(local_addr),
+                    dst_addr,
+                    oif: self.state().bound_dev_if(),
                     allow_broadcast,
-                    &mut packet,
-                    |packet, source_addr, destination, route_mtu| {
-                        let mtu_discovery = *self.pcb.mtu_discovery.read();
-                        let dont_fragment =
-                            should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
-                        self.write_datagram(
-                            packet,
-                            IpEndpoint {
-                                addr: destination,
-                                ..remote_endpoint
-                            },
-                            source_addr,
-                            dont_fragment,
-                        )
-                    },
-                )?;
+                    protocol: ipv4::PROTOCOL_UDP,
+                    ttl: *self.pcb.ttl.read(),
+                    fragmentation: fragmentation_policy(*self.pcb.mtu_discovery.read()),
+                };
+                {
+                    let mut output = SERVICE.ipv4_output();
+                    let mut send =
+                        match output.prepare(options, packet.take().ok_or(KError::InvalidInput)?) {
+                            Ok(send) => send,
+                            Err((error, builder)) => {
+                                packet = Some(builder);
+                                return Err(error);
+                            }
+                        };
+                    let source = send.source_addr();
+                    let destination = send.destination_addr();
+                    self.write_datagram(
+                        send.transport_mut(),
+                        source,
+                        destination,
+                        remote_endpoint.port,
+                    )?;
+                    send.submit()?;
+                }
                 network_poller().notify(PollReason::Tx);
                 network_poller().assist_once();
                 Ok(payload_len)
@@ -227,35 +232,21 @@ impl UdpSocket {
 
     fn write_datagram(
         &self,
-        packet: &mut [u8],
-        remote_endpoint: IpEndpoint,
-        source_addr: IpAddress,
-        dont_fragment: bool,
+        udp_packet: &mut [u8],
+        source_addr: Ipv4Address,
+        destination_addr: Ipv4Address,
+        destination_port: u16,
     ) -> KResult {
         let local = self
             .state()
             .local_endpoint()
             .ok_or(KError::from(LinuxError::EDESTADDRREQ))?;
-        let source_port = local.port;
-        let ttl = *self.pcb.ttl.read();
-        let (src_addr, dst_addr) = ipv4_pair(source_addr, remote_endpoint.addr)?;
         write_udp_header(
-            packet
-                .get_mut(IPV4_HEADER_LEN..)
-                .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
-            src_addr,
-            dst_addr,
-            source_port,
-            remote_endpoint.port,
-        )
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-        ipv4::write_ipv4_packet_header(
-            packet,
-            src_addr,
-            dst_addr,
-            ipv4::PROTOCOL_UDP,
-            ttl,
-            dont_fragment,
+            udp_packet,
+            source_addr,
+            destination_addr,
+            local.port,
+            destination_port,
         )
         .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))
     }
@@ -534,12 +525,14 @@ fn validate_remote_endpoint(endpoint: IpEndpoint) -> KResult {
     Ok(())
 }
 
-fn should_set_dont_fragment(mtu_discovery: u8, packet_len: usize, path_mtu: Option<usize>) -> bool {
+fn fragmentation_policy(mtu_discovery: u8) -> Ipv4FragmentationPolicy {
     match mtu_discovery {
-        IP_PMTUDISC_DO | IP_PMTUDISC_PROBE => true,
-        IP_PMTUDISC_WANT => path_mtu.is_none_or(|mtu| packet_len <= mtu),
-        IP_PMTUDISC_DONT | IP_PMTUDISC_INTERFACE | IP_PMTUDISC_OMIT => false,
-        _ => false,
+        IP_PMTUDISC_DO | IP_PMTUDISC_PROBE => Ipv4FragmentationPolicy::Forbid,
+        IP_PMTUDISC_WANT => Ipv4FragmentationPolicy::PreferDontFragment,
+        IP_PMTUDISC_DONT | IP_PMTUDISC_INTERFACE | IP_PMTUDISC_OMIT => {
+            Ipv4FragmentationPolicy::Allow
+        }
+        _ => Ipv4FragmentationPolicy::Allow,
     }
 }
 

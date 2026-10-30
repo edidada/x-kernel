@@ -27,7 +27,7 @@ use crate::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
         ipv4,
-        output::{self, Ipv4Output, Ipv4SendRequest},
+        output::{self, Ipv4Output, Ipv4PacketBuilder, Ipv4SendOptions, PreparedIpv4Send},
         router::{
             ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TYPE_BROADCAST,
             ROUTE_TYPE_LOCAL, ROUTE_TYPE_MULTICAST, ROUTE_TYPE_UNICAST, RouteTable, Rule,
@@ -430,17 +430,17 @@ impl Router {
     }
 
     /// Supplies the resources for one IPv4 output transaction under this guard.
-    pub(crate) fn prepare_and_send_ipv4_packet(
+    pub(crate) fn prepare_ipv4_send(
         &mut self,
-        request: Ipv4SendRequest<'_>,
-        prepare_fn: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
-    ) -> KResult {
-        self.ipv4_output.prepare_and_send(
+        options: Ipv4SendOptions,
+        packet: Ipv4PacketBuilder,
+    ) -> Result<PreparedIpv4Send<'_>, (KError, Ipv4PacketBuilder)> {
+        self.ipv4_output.prepare(
             &self.table,
             &mut self.devices,
             &mut self.data_tx_queue,
-            request,
-            prepare_fn,
+            options,
+            packet,
         )
     }
 
@@ -1072,12 +1072,13 @@ impl Router {
             };
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
-                    poll_next |= Ipv4Output::dispatch_packet(
+                    poll_next |= Ipv4Output::dispatch_queued(
                         &self.table,
                         &mut self.devices,
                         packet,
                         timestamp,
-                    );
+                    )
+                    .has_rx_work;
                 }
                 Some(6) => {
                     let (src_addr, dst_addr, is_multicast) = {
