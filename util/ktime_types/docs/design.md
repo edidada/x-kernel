@@ -1,4 +1,4 @@
-# ktime - 设计文档
+# ktime_types - 设计文档
 
 ## 定位
 
@@ -14,6 +14,7 @@ realtime 的关联。
 - `src/system_time.rs`：带符号的 Unix 墙钟时间。
 - `src/frequency.rs`：以 Hz 为规范存储单位的 `Frequency` 频率类型。
 - `src/units.rs`：秒、毫秒、微秒和纳秒之间的固定单位换算常量。
+- `src/timestamp.rs`: `TimestampLimits`, the timestamp granularity and inclusive seconds range a storage or protocol format can represent.
 - `src/lib.rs`：稳定的 crate 根公开重导出，不承载具体类型实现。
 
 ## 架构

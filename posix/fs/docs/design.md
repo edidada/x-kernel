@@ -40,12 +40,16 @@ posix/fs/
 │   ├── fd_ops.rs       # close/dup/close_range/fcntl/flock
 │   ├── dir.rs          # chdir/chroot/mkdir/getdents64/getcwd
 │   ├── namei.rs        # link/unlink/symlink/readlink/rename
+│   ├── notify.rs       # directory-entry notification hook for inotify
 │   ├── metadata.rs     # chown/chmod/utime/utimensat
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
 │   ├── ioctl.rs        # ioctl dispatch、file attributes 与 FIEMAP ABI handling
-│   └── sync.rs         # sync/syncfs
+│   ├── quota.rs        # quotactl/quotactl_fd (with quota/xfs.rs)
+│   ├── sync.rs         # sync/syncfs
+│   ├── file.rs         # stdio fd installation (add_stdio)
+│   └── watch.rs        # watch target resolution (resolve_watch_target)
 └── docs/
     ├── design.md
     └── security.md
@@ -67,7 +71,7 @@ core/ksyscall
 │                                                          │
 │  Process context                                         │
 │   ├─ kprocess::current_user_process()                     │
-│   ├─ kprocess::current_resources()                        │
+│   ├─ kprocess::current_files()                            │
 │   └─ fs_context::FsStruct { root, pwd, umask, in_exec }    │
 │                                                          │
 │  Internal object dispatch                                │
@@ -162,7 +166,7 @@ Closed fd
 ```
 
 `posix-fs` 不直接保存 fd 表，
-而是通过 `kprocess::current_resources()` 操作当前进程资源。
+而是通过 `kprocess::current_files()` 操作当前进程资源。
 ### 路径解析
 
 ```text
@@ -521,10 +525,8 @@ type 并使用 KVFS registry，对应 Linux `get_fs_type()` 后进入 filesystem
 type；通用 syscall/VFS 不解释 UTF-8、逗号或 filesystem option。具体文件系统决定该页是文本
 还是 binary representation，解析未知或未实现的选项时必须按自身兼容策略明确失败或记录为
 真正的 compatibility no-op。filesystem-specific remount reconfigure 仍未建模。
-move、recursive bind 和 shared/slave/unbindable propagation flags 在任何 operation
-dispatch 前返回 `InvalidInput`；
-因此 `MS_BIND|MS_MOVE`、`MS_REMOUNT|MS_SHARED` 和普通新挂载携带 `MS_REC` 都不会执行部分请求，
-`sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
+`MS_MOVE`, `MS_SHARED` and `MS_UNBINDABLE` return `InvalidInput` before any operation dispatch, and an ordinary new mount carrying `MS_REC` also returns `InvalidInput`; `MS_PRIVATE`/`MS_SLAVE` are accepted, and `MS_BIND|MS_REC` is accepted only when the source subtree has no mounts. Therefore `MS_BIND|MS_MOVE` and `MS_REMOUNT|MS_SHARED` never execute a partial request.
+`sys_umount2` returns `InvalidInput` for `MNT_FORCE`, `MNT_EXPIRE` and `UMOUNT_NOFOLLOW`; `MNT_DETACH` is supported.
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
 `mount` privilege is decided at the syscall boundary from the credential
@@ -568,7 +570,7 @@ existing paths.
 
 ```text
 sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
-  -> current_resources().get_file()
+  -> current_files().get_file()
   -> kvfs::VfsFile::shmem_seal_bits() / add_shmem_seals()
   -> inode-scoped ShmemObjectState
 ```
@@ -637,7 +639,7 @@ KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
 3. 文件锁提供本地 advisory 语义，不实现 lease 或网络文件系统锁协议。
 4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语
    服务，否则要求同一超级块。
-5. `mount` 尚不支持 move、recursive bind、shared/slave/unbindable propagation，以及
+5. `mount` 尚不支持 move、带挂载子树的 recursive bind、shared/unbindable propagation，以及
    只读策略之外的文件系统专用
    reconfigure。普通新挂载已转交一页 opaque mount data，但具体文本或二进制格式及选项仍由
    各 filesystem type 选择性实现；nodev 与 device-backed 类型均经 registry/FsContext 创建。

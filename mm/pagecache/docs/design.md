@@ -7,8 +7,7 @@ Linux `address_space::i_pages` 一侧的实现细节。它不是 file object，�
 `struct address_space`。
 
 `MappingPages` 不拥有 inode、可见文件长度、VM object identity、`i_mmap` views 或
-mmap invalidation 生命周期。当前只有 `kvfs` 直接依赖本 crate；MM 和 open-file
-runtime 不能直接引用它。
+mmap invalidation 生命周期。Direct dependents currently include `kvfs` and the filesystem crates `memfs`, `kext4` and `v9fs`. MM and the open-file runtime must not reference this crate directly.
 
 ## 范围
 
@@ -36,7 +35,7 @@ runtime 不能直接引用它。
 - `invalidate.rs`: byte-range invalidation of clean resident folios, reporting
   dirty residue as busy;
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
-- `tests/`: resident storage, truncate, invalidate, and writeback tests.
+- `ut-tests/`: resident storage, truncate, invalidate, and writeback tests.
 
 ## 架构
 
@@ -220,7 +219,7 @@ error recording, background scheduling, and fsync semantics.
   truncate 不将其部分内容标脏；`readahead_folios` 使用固定容量 FolioBatch 保留并锁定缺页段，
   回调返回后保持页锁，取得索引锁复核身份并摘除未消费后缀，再释放页锁；
   等待者醒来后重新查找 resident，不初始化已摘除的旧预留页；
-- `filemap_add_folio` 仍用于移交完整 Folio，冲突时原样归还所有权；
+- `filemap_add_folio` is available only in unittest builds for handing over a complete Folio; on conflict it returns ownership unchanged;
 - `writeback_until` 为保持候选在单页同步 I/O 期间稳定，会持有 folio lock 调用
   backend callback；该 callback 不得重入同一个 `MappingPages`；
 - `write_cache_pages` 在锁内完成状态过渡和数据复制，释放 folio lock 后才调用 batch

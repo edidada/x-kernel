@@ -39,7 +39,7 @@ byte allocator 锁的竞争，但不取代中央 allocator，也不提供完整 
 hotplug 或 NMI 支持。
 
 PCP 和 slab cache 的可变访问统一经 crate-private `AllocLocalOwner`。owner 持有
-`IrqSave`，把“固定在当前 CPU 且禁止本地 IRQ 重入”的条件贯穿一次同步 cache 操作；
+`NoPreemptIrqSave`，把“固定在当前 CPU 且禁止本地 IRQ 重入”的条件贯穿一次同步 cache 操作；
 PCP/slab 模块不再自行读取 raw per-CPU base，也不向调用者返回 cache 引用。owner
 只建立执行上下文排他性，具体 object/page provenance 仍由相应 allocation API 负责。
 
@@ -154,7 +154,7 @@ PageReady
   v
 HeapReady
 
-PageReady / HeapReady -- add_memory() --> 保持当前状态并扩展 palloc
+PageReady / HeapReady -- add_memory() --> extends palloc; from PageReady it also bootstraps the byte heap (-> HeapReady)
 ```
 
 实际启动路径由 `kruntime` 按以下顺序执行：

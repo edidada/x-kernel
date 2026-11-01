@@ -23,7 +23,8 @@ util/klazy/
 ├── src/
 │   ├── lib.rs
 │   ├── once.rs
-│   └── lazy.rs
+│   ├── lazy.rs
+│   └── lazy_static.rs
 └── Cargo.toml
 ```
 

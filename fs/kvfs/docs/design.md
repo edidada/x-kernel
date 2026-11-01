@@ -891,7 +891,7 @@ root 仍挂在其自身 parent mountpoint（读栈可能早于取锁），不满
 树。`mount_edge_detach` 是共享的单边摘除原语（恢复 covers/删除 child 索引 + 清空
 location），供 pivot 与后续 MS_MOVE 复用。
 
-`MntNamespace::make_mount_private()`/`make_mount_slave()` 记录一次性传播属性。KVFS 尚无
+`MntNamespace::make_mount_private()` and `make_mount_slave()` only validate that the target is a registered mount root and record no propagation state. KVFS 尚无
 共享传播组，因此 slave 与 private 行为等价：没有共享 master 时 slave 不接收任何传播事件。
 两者各自校验调用（`MS_PRIVATE`/`MS_SLAVE` 可带 `MS_REC`/`MS_SILENT`，其余组合返回
 `EINVAL`），防止把非法 flags 静默吃掉。递归 bind（`MS_BIND | MS_REC`）仅在源子树挂载数为

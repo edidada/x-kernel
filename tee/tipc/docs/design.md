@@ -162,7 +162,7 @@ Disconnecting
 ```
 
 client endpoint 可以先于目标 port 创建。
-当 port 已发布或稍后发布时，`attach_client` 才分配双方接收队列并创建 server endpoint。
+当 port 已发布或稍后发布时，`port_attach_client` 才分配双方接收队列并创建 server endpoint。
 
 ### Message slot 状态
 
@@ -329,7 +329,7 @@ poll_one()
 - **client 可等待未发布 port**：`WAIT_FOR_PORT` 通过保存 weak client endpoint 实现，若 client 在 port 发布前关闭，发布时会跳过 stale weak。
 - **固定槽消息队列**：保留 Trusty message boundary 和 back-pressure 语义，队列满时返回 `WouldBlock` 并在释放 slot 后通知发送方。
 - **handle set 禁止嵌套**：第一阶段避免循环检测复杂度；后续如需对齐 Trusty，可扩展为非循环嵌套。
-- **memref 暂为元数据 handle**：`sys_memref_create` 验证页对齐的地址范围被当前进程 VMA 覆盖，并具有请求的 READ/WRITE 用户权限；handle 当前保存通过校验的地址、长度和权限位，不建立跨地址空间映射。
+- **memref 暂为元数据 handle**：`sys_tipc_memref_create` 验证页对齐的地址范围被当前进程 VMA 覆盖，并具有请求的 READ/WRITE 用户权限；handle 当前保存通过校验的地址、长度和权限位，不建立跨地址空间映射。
 - **memref mmap 语义先校验后接入**：`MemRef::validate_mmap` 按 Trusty 规则校验 offset、size 和请求权限是否落在 memref 能力内；实际 VMM 对象绑定和目标地址空间映射仍待接入。
 
 ## 内核调用方
@@ -350,7 +350,7 @@ bridge v1 只转发消息字节。
 ## Drop / 资源释放
 
 - `IpcPort::drop` 调用 `close`，从 registry 移除自身并关闭 pending channel。
-- `IpcChan::drop` 调用 `close`，进入 `Disconnecting`，关闭本端接收队列，通知对端 HUP/ERROR。
+- `IpcChan::drop` calls `close`, which moves the channel to `Disconnecting`, also marks the peer `Disconnecting`, and notifies both endpoints; `poll` then reports HUP. `close` does not clear the receive queue.
 - `HandleTable::uctx_handle_remove` 会先从所有 handle set 移除目标 id，再调用目标 handle 的 `close`。
 - `IpcMsgQueue::put` 清空 slot 数据和 attached handles，释放对 transferred handles 的强引用。
 - `MemRef::close` 当前只唤醒等待者；实际 VMM 资源解绑尚未实现。

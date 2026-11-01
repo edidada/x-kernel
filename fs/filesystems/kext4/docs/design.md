@@ -141,7 +141,7 @@ KVFS syscall / PageCache
 fs/filesystems/kext4
     |-- Ext4SuperOperations (static KVFS s_op, no mount identity)
     |-- Ext4AddressSpaceOperations (static KVFS a_ops, no inode identity)
-    |-- RwLock<Ext4SbInfo> (the sole ext4 s_fs_info object)
+    |-- Ext4Mount { RwLock<Ext4SbInfo> } (the sole ext4 s_fs_info object)
     |-- layout / feature negotiation / device
     |-- HTree hash_unsigned mount policy
     |-- metadata buffer / checksum validation
@@ -299,7 +299,7 @@ bitmap 更新"的语义。多组扫描入口（`allocate_blocks_for_write()` /
 并发超预留窗口，也不依赖 bridge 挂载级写锁的外部串行化；临界区有界（仅读计数
 并做一次加法），与 Linux 直接原子累加 percpu 计数的近似记账相比保持精确语义。
 
-锁序固定为 bridge 挂载级锁 → allocator 锁 → delalloc 锁 / prealloc map 叶锁 → metadata-buffer /
+锁序固定为 `Ext4Mount` 挂载级锁 → allocator 锁 → delalloc 锁 / prealloc map 叶锁 → metadata-buffer /
 journal 内部锁，禁止反向等待。delalloc 总量锁与 per-inode prealloc map 叶锁都是 allocator 锁之下的
 独立叶锁，彼此不嵌套：前者只保护 mount-wide 计数，后者只保护单个文件的逻辑区间表，`update` 闭包在
 allocator 临界区内取放该叶锁且不取得任何其他锁；group 侧 discard 需要锁 foreign owner 的 map 时按
@@ -1209,7 +1209,7 @@ run down the normal allocation path.
 write guard 串行化；只读调用以及 delalloc reservation 可共享 read guard，后者再使用独立
 reservation mutex。KVFS inode cache mutex 只保护 `New/Live/Freeing` identity state；每个 cache
 slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，因此一个 inode 的状态变化不会
-唤醒其它 inode 的 `iget`。ext4 private state 使用独立 sleepable mutex，普通 metadata 读取或
+唤醒其它 inode 的 `iget`。ext4 private state 使用 per-inode `RwLock<Ext4InodeState>`，普通 metadata 读取或
 mutation 不进入另一张 inode cache。
 核心内部的 metadata buffer
 和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。

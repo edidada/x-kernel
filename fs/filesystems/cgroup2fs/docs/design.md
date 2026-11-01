@@ -127,6 +127,4 @@ negative lookup 隐藏新可见文件；每次 lookup 仍复用 registry 中的 
 
 ## Drop / 资源释放
 
-registry 持有 stable inode 和 cgroup 节点直到 superblock 释放。tombstone 防止旧 fd
-identity 被同名重建复用；membership、controller charge 和 hierarchy 生命周期仍由
-`kcgroup` 管理。
+The registry holds the stable inode and cgroup node of each live cgroup; `rmdir` drops the entry via `remove_node`, and remaining entries are released with the superblock. Old fds keep their inode alive through their own `Arc`. Membership, controller charge and hierarchy lifetime remain managed by `kcgroup`.

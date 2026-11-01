@@ -52,7 +52,7 @@ Use host-target Cargo settings without kernel `--cfg unittest`.
 **静态锁** — 使用 `static_lock!`：
 
 ```rust
-use ksync::{Mutex, static_lock};
+use ksync::{RwLock, static_lock};
 
 static_lock! {
     static TASK_TABLE: RwLock<TaskTable> = RwLock::new(TaskTable::new());
@@ -69,7 +69,7 @@ static_lock! {
 
 - 构造函数带 `#[track_caller]`；
 - 首次调用时通过 `class_for_init_site` 在运行时注册表按调用点去重；
-- 与静态路径一样按 `file:line` 聚合。
+- Runtime classes are deduplicated by call site (`file`, `line`, `column`, and lock kind); the displayed label is `file:line`, so distinct classes may share a label.
 
 **未追踪锁** — 指向 `NOOP_CLASS`：
 

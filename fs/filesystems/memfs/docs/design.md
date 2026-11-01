@@ -122,7 +122,7 @@ than a memfs-backed pseudo sysfs.
 ### tmpfs mount entry
 
 The public VFS mount path enters `tmpfs_get_tree` in `src/lib.rs`. That entry
-parses the tmpfs context options, resolves the page limit and root metadata,
+reads the tmpfs context options parsed by `init_tmpfs_context`, resolves the page limit and root metadata,
 and passes the selected `FileSystemType`, VFS-wide `SuperBlockFlags`, and
 mount options to `shmem::new_tmpfs_with_type_and_mount_options`, which
 constructs the private `MemoryFs` superblock. After the factory returns, VFS
@@ -198,8 +198,8 @@ FIFO 和设备 inode 在 VFS open 时安装专用 operation table，不继承该
 
 ### memfd 与 exec
 
-`create_memfd_file()` 用模式 `0o777` 创建匿名 memfd 文件（对齐 Linux
-`shmem_file_setup` 配合 umask）。可执行位对 `fexecve(memfd)` /
+`create_memfd_file()` creates the anonymous memfd file with the fixed mode `0o777`, which is not subject to umask (matching Linux memfd creation through `shmem_file_setup`).
+可执行位对 `fexecve(memfd)` /
 `execveat(dirfd, "", AT_EMPTY_PATH)` 是必需的：runc/crun 把自身镜像拷入 memfd 并
 重新 exec（CVE-2019-5736 自克隆加固），exec 的 `MAY_EXEC` 检查需要通过。memfd
 exec 的显示路径为调用方提供的 `/proc/self/fd/<n>`，`/proc/self/exe` 跟随同一

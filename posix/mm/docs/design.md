@@ -30,7 +30,7 @@ sys_mmap(raw args)
   -> MmapRequest::from_raw()
   -> MmapRequest { flags, map_type, page_size, permissions, offset }
   -> MmSpace::mmap_resolve_addr()
-  -> filemap::mmap_*_file() or MmSpace::map()
+  -> filemap::mmap_*_file() + MmSpace::map_runtime_vma() or MmSpace::map_with_max_flags()
 
 sys_mprotect(raw args)
   -> MprotectRequest::from_raw()
@@ -93,7 +93,7 @@ sys_mmap(file-backed)
   -> FileMmapRequest
   -> filemap::{mmap_shared_file, mmap_private_file}
   -> VmArea + VmRuntimeRef
-  -> MmSpace::map()
+  -> MmSpace::map_runtime_vma()
 ```
 
 这样 syscall adapter 只表达 Linux ABI，file-backed first-fault policy、

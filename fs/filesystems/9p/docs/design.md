@@ -99,8 +99,7 @@ translate automatic updates into server-side current-time requests.
 ### open、I/O 和生命周期
 
 每次 VFS open 都从 inode 的 unopened fid 执行 zero-name walk，得到独立 fid，按 Linux
-`v9fs_open_to_dotl_flags()` 规则选择 access mode/status flags 后执行 `TLOPEN`。opened fid 作为
-typed private data 放入 `VfsFile`；read、write、readdir 和 fsync 始终从该对象取 fid。
+`v9fs_open_to_dotl_flags()` 规则选择 access mode/status flags 后执行 `TLOPEN`。opened fid 作为 typed private data 放入 `VfsFile`；普通文件的 read、write、readdir 和 fsync 始终从该对象取 fid；symlink 读取经 `read_link()` 使用 inode 的 unopened fid。
 write 根据服务端确认的写入字节数更新 inode size，使用 KVFS 的
 `grow_size_after_backing_write()` 保持 backing write 与本地大小发布的职责一致。
 

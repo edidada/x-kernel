@@ -32,7 +32,7 @@ static FileSystemType / s_op / s_d_op
                  v
 Once<AnonInodeFs> { hidden Mount, singleton VfsInode }
                  |
-                 +-- get_file(name, fops, private, flags, cred)
+                 +-- get_file(name, fops, private, mode, flags, cred)
                            |
                            v
                  per-call Dentry + VfsFile
