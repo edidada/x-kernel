@@ -70,8 +70,7 @@
 ## 故障管理
 
 - 访客可控失败一律通过 `VirtioResult` 与状态码返回，不 panic。
-- 唯一的 panic 点在 `RamDiskBackend::new`：容量必须是 512 的整数倍，属调用方
-  配置错误（受信任输入），非访客可控。
+- The only panic point is `RamDiskBackend::new`: the capacity must be a positive multiple of 512 bytes. A violation is a caller configuration error (trusted input), not guest-controllable.
 - 后端 `read`/`write` 长度不匹配返回 `BackendError`，请求以 IOERR 完成。
 
 ## 隐私分析
