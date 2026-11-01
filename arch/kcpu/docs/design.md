@@ -136,7 +136,7 @@ arch/kcpu/
 │   │   ├── ctx.rs                    # ExceptionContext（含 orig_rax）、ContextSwitchFrame、TaskContext
 │   │   ├── excp.rs / excp.S          # trap 入口、IRQ/PageFault 分发、syscall_entry
 │   │   ├── instrs.rs / copy_user.S   # user_copy + 异常表条目
-│   │   ├── userspace.rs              # UserContext、EnterUserFrame、UserRestorableContext、enter_user、syscall MSR 初始化、syscall_restart_error
+│   │   ├── userspace.rs              # UserContext、UserRestorableContext、enter_user、syscall MSR 初始化、syscall_restart_error
 │   │   ├── boot.rs                   # init_trap()
 │   │   ├── gdt.rs                    # GDT/TSS per-CPU 初始化
 │   │   └── idt.rs                    # IDT 初始化
@@ -210,7 +210,7 @@ guest 测试通过 `unittest::path_mod_test!` 挂载到原父模块，文件位�
               │   kcpu 统一 API                │
               │   ExceptionContext / TrapFrame  │
               │   UserContext / TaskContext     │
-              │   init_trap() / user_copy()     │
+              │   init_trap() / user copy       │
               └───────┬───────────────────────┘
                       │ cfg_if 分发
         ┌─────────────┼─────────────────┐
@@ -271,7 +271,8 @@ ExceptionContext  (每架构定义，完整寄存器 trap frame)
       └── 被 trap handler 和 UserContext 使用
 
 UserContext       (每架构定义，包装 ExceptionContext + 用户态专用字段)
-      │           x86_64:      { tf: TrapFrame, fs_base, gs_base }
+      │           x86_64:      { kernel_rsp, tf: TrapFrame, fs_base, gs_base }
+      │                          - kernel_rsp 紧邻 tf，是 enter_user 汇编的私有帧
       │                          - syscall_restart_error() 查询重启错误码
       │           aarch64:     { tf: ExceptionContext, sp, tpidr, saved_syscall_arg0 }
       │           riscv:       UserContext(ExceptionContext)     -- newtype
@@ -280,17 +281,11 @@ UserContext       (每架构定义，包装 ExceptionContext + 用户态专用�
       └── Deref/DerefMut → ExceptionContext
           (通过 impl_user_context_deref! 宏)
 
-EnterUserFrame    (x86_64 私有 trap-return 汇编帧)
-      │           { kernel_rsp, tf: TrapFrame }
-      │           - kernel_rsp 为 enter_user 返回 Rust 调用者所需的内核栈指针
-      │           - tf 作为临时 trap stack，TSS.rsp0 指向其末尾
-      │           - 不进入 UserContext，也不进入用户可见 signal frame
-
 UserRestorableContext
       │           x86_64 用于 fork/clone 继承段基址及完整 x87/SSE/YMM 快照，
       │           始终保存在内核；信号使用 Linux ABI 的独立 fpregs 区域。
       │           其他架构携带 ABI `mcontext_t` 未覆盖的窄状态并用于信号帧。
-      │           不包含 EnterUserFrame 私有字段或 syscall restart scratch。
+      │           不包含 UserContext::kernel_rsp 私有字段或 syscall restart scratch。
 
 TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换)
                   x86_64:      { kstack_top, rsp, cr3, ext_state? }
@@ -321,7 +316,7 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 - **trap handler**（如 `x86_trap_handler`）：运行在中断关闭上下文中，
   不可睡眠或阻塞。由汇编入口直接调用，调用时栈上已保存完整 trap frame。
 - **riscv64 `gp` 不变量**：`gp`（x3）是每 CPU 的 percpu 基址，启动时由
-  `init_percpu_reg` 设置一次，S-mode trap 期间恒定，故**不**由
+  `kcpu_slot` 架构层的 `set_current_base` 设置一次，S-mode trap 期间恒定，故**不**由
   `PUSH_POP_GENERAL_REGS` 保存/恢复——绝不放入可迁移的每任务 trapframe。
   U-mode 用户 `gp` 经 slot-3（`UserContext.regs.gp`）中转：`.Lexit_user`
   入口保存，`.Ltrap_return` 仅在返回 U-mode（SPP==0）时恢复；S-mode 返回
@@ -447,8 +442,7 @@ syscall 可被信号中断并需要重启。`orig_rax` 字段保存入口时的�
 
 ## 并发模型
 
-- **per-CPU 数据**：`ACTIVE_EXCEPTION_CONTEXT_PTR`、x86_64 的 `TSS` 和 `GDT`
-  均通过 `kcpu_slot` 的 `cpu_slot_cell!` 定义，每个 CPU 有独立副本，无需锁保护。
+- **Per-CPU data**: `ACTIVE_EXCEPTION_CONTEXT_PTR`, and the x86_64 `TSS` and `GDT`, are defined through `kcpu_slot`. `GDT` uses `cpu_slot_cell!`, while `TSS` is a hand-written `.cpu_slot.template` symbol wrapped by `CpuSlot::from_offset_fn`. Each CPU has its own copy, so no lock is needed.
 - **`ExceptionContextGuard`**：安装 trapframe 时保存原始 per-CPU slot 地址，
   并用 `AtomicUsize::swap` 记录前一个值。Drop 时不重新计算当前 CPU，而是对
   原始 slot 和当前 CPU slot 做 `compare_exchange(ptr, prev)` 恢复。这样即使
@@ -468,8 +462,7 @@ syscall 可被信号中断并需要重启。`orig_rax` 字段保存入口时的�
   编译期注册，运行时不可变，无需同步。
 - **IRQ 关闭保护**：`switch_to()` 要求调用者已经关闭本地 IRQ；`run()` 自行关闭。
   普通 IRQ 排除不等于 NMI 排除，任务指针发布仍须保证 NMI 借用期间对象存活。
-- **naked 函数**：所有 `context_switch`、FP 保存/恢复和 LoongArch64 非对齐
-  辅助函数使用 `#[unsafe(naked)]` + `naked_asm!`，完全控制函数序言/尾声。
+- **Naked functions**: every `context_switch` and the AArch64/RISC-V/LoongArch64 FP save/restore helpers use `#[unsafe(naked)]` + `naked_asm!` for full prologue/epilogue control; x86_64 FP state uses the `_fxsave64`/`_fxrstor64` intrinsics, and the LoongArch64 unaligned helpers are `global_asm!` routines from `unaligned.S`.
 
 ## 设计决策
 
@@ -493,15 +486,16 @@ Rust 不支持继承。`impl_user_context_deref!` 宏为 `UserContext` 实现
 - riscv 和 loongarch64 的 `ExceptionContext` 已包含完整状态，
   `UserContext` 使用 newtype 包装即可。
 
-x86_64 的 `UserContext::run()` 会临时构造 `EnterUserFrame` 并传给汇编
-`enter_user`。这样 `UserContext` 保持为用户寄存器语义状态，而 TSS.rsp0、
-kernel stack restore slot、trap frame stack alignment 等汇编私有不变量集中在
-`EnterUserFrame` 内。
+x86_64 的 `UserContext::run()` 把 `&mut UserContext` 直接传给汇编 `enter_user`：
+`kernel_rsp` 紧邻 `tf`，汇编把 `&kernel_rsp` 当作私有帧，保存 Rust 调用者的内核栈指针，
+并原地使用 `tf` 作为临时 trap stack（TSS.rsp0 指向 `tf` 末尾），避免在用户态窗口前后
+拷贝整个 trap frame。因此 `kernel_rsp` 与 `tf` 的相对偏移
+（`KERNEL_RSP_TO_TRAPFRAME_OFFSET`）是 `UserContext` 的布局不变量。
 
 信号处理不直接把完整 `UserContext` 放入用户栈。`UContext/MContext` 承载
 用户 ABI 寄存器状态，`UserRestorableContext` 补充 ABI 上下文未覆盖的状态
 （非 x86 架构的补充状态；x86_64 使用独立 Linux fpregs 区域），避免 x86_64
-`EnterUserFrame.kernel_rsp` 等内核私有字段泄露到 signal frame 或被 `sigreturn`
+`UserContext::kernel_rsp` 等内核私有字段泄露到 signal frame 或被 `sigreturn`
 恢复。每个信号帧持有独立的 FP 快照，因此嵌套信号也能逐层恢复被中断的 FP/SIMD
 状态。
 
@@ -527,8 +521,7 @@ LoongArch64 架构对非对齐访问触发异常而非由硬件处理。内核�
   参数（如 exec 的 `envp` 落在 aarch64 `x2`、riscv/loongarch64 `a2`）泄漏到新
   镜像，并清除 syscall restart 状态使新程序不被当作 syscall 入口。
 
-复位只覆盖通用寄存器；`cs/ss/rflags`、`spsr`、`sepc/era/elr`、`sp`、TLS 等框架
-字段由 `set_ip`/`set_sp`/`set_tls` 调用方重建。
+The reset covers the general-purpose registers and syscall restart state (and, on x86_64, also `gs_base`); frame fields such as `cs/ss/rflags`, `spsr`, `sepc/era/elr`, `sp` and TLS are re-established by the caller via `set_ip`/`set_sp`/`set_tls`.
 
 ### 为什么 RISC-V FP 状态使用 lazy save/restore
 
@@ -538,9 +531,8 @@ RISC-V 的 `sstatus.FS` 字段跟踪 FP 状态（Off/Initial/Clean/Dirty）。
 
 ## 析构与资源释放
 
-本 crate 的类型主要为寄存器快照和上下文容器，不持有需要显式释放的资源。
-唯一的 RAII 守卫是 `ExceptionContextGuard`，在 `Drop` 时尝试恢复安装时记录的
-per-CPU 活跃 trapframe 指针为前一个值。调度器在当前 CPU 切离安装该指针的任务前
+The types in this crate are mainly register snapshots and context containers, and hold no resources that need explicit release. The RAII guards are `ExceptionContextGuard`, whose `Drop` tries to restore the recorded per-CPU active trapframe pointer to its previous value, plus the feature-gated AArch64 `NmiExceptionGuard` (restores the entry PMR on drop) and `HardwareNmiExitGuard` (re-sets ALLINT on drop).
+调度器在当前 CPU 切离安装该指针的任务前
 会挂起并清空本 CPU slot，任务被切回后恢复到新的当前 CPU，避免旧 CPU stale 标记
 和恢复后 trap handler 后半段缺失异常上下文标记。
 

@@ -81,7 +81,7 @@ without these features require no fixed endpoint. The scheduler and timer
 features each require their own provider, including non-SMP configurations that
 explicitly enable them. The BH feature calls kirq directly and needs no new provider.
 
-`PendingWord` stores ENABLED, RESCHEDULE, TIMER_REPROGRAM, BOTTOM_HALF and
+`PendingWord` stores ENABLED, RESCHEDULE, TIMER_REPROGRAM, BOTTOM_HALF, RCU and
 HIGHPRI_BOTTOM_HALF bits in one
 `AtomicUsize`. Its private `NotificationFlags` bitflags type represents snapshots
 and request masks; integer conversion stays at the atomic access boundary.
@@ -291,7 +291,7 @@ inactive
 
 ### `ipi_handler`
 
-1. 先调用 `tlb::handle_shootdown()`。
+1. With the `smp` feature, call `stop::handle_stop_request()` and then `tlb::handle_shootdown()`; then call `notification::handle_pending()` for fixed notifications.
 2. 再循环消费本 CPU 队列中的普通 IPI 回调。
 
 这个顺序是刻意设计的：TLB shootdown 属于页表一致性协议，优先级高于普通跨核回调。

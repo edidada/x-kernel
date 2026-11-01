@@ -16,7 +16,7 @@ kseccomp                 ->  纯解释器 run(SockFilter[], SeccompData) -> u32
                           ->  SeccompFilter 校验（长度/指令编码/跳转范围）
                           ->  SeccompFilter::strict_allowlist() 生成 strict 白名单
 kprocess::Thread         ->  持有 SeccompContext（mode + filter chain）
-dispatch_irq_syscall     ->  syscall 入口先 evaluate_seccomp 再分发
+handle_syscall           ->  syscall 入口先 evaluate_seccomp 再分发
 ```
 
 ## 架构

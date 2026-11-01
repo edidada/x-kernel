@@ -88,7 +88,7 @@ ktime does not depend on rtc-driver; PM supplies its prepared provider value.
 
 通用层仅接收经过确认、尚未计入 MONOTONIC 的睡眠时间；调用者负责正式
 suspend/resume 事务、底层时钟冻结及基准恢复、来源选择和恰好一次结算。
-本 PR 不接入 RTC 观测、ARM64 fixup、PM 生产调用方或宿主协议。
+This generic layer does not wire ARM64 fixups, a production PM caller or a host protocol; RTC-based estimation is provided separately by `rtc.rs`.
 
 BOOTTIME / 绝对 REALTIME 等待与定时器保留原始域截止时间，转换到单调时钟
 只是当前硬件定时器的编程快照；时钟变化后必须重算。

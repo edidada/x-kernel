@@ -31,8 +31,7 @@ unsafe 边界的现状、目标能力模型和分阶段收敛方案见
   关闭抢占；调度器/中断层负责创建 guard。`kspin` guard 经 `kspin::CurrentCpuIf`
   （由 `kplat` 提供）取得当前逻辑 CPU——这些是 `kspin`/`kplat` 之间的上层契约，
   `kcpu_slot` 只定义 `CpuPin`/`CpuLocalGuard` trait，自身不依赖 `kspin`/`kplat`。
-- `CpuLocalGuard` capability trait：要求不迁移且本地 IRQ 不重入，当前唯一实现是
-  `kspin::NoPreemptIrqSave`。安全访问器 `CpuSlot::get`、`CpuSlotCell::get`、
+- `CpuLocalGuard` capability trait: requires no migration and no local IRQ reentrancy; it is implemented by `kspin::NoPreemptIrqSave` and by `BootCpuToken` during exclusive CPU bring-up. 安全访问器 `CpuSlot::get`、`CpuSlotCell::get`、
   `read`/`write`、`current_shared`/`shared_current` 等只对它或 `T: Sync` 开放；
   通用可变引用只保留显式 unsafe 的 `get_mut_unchecked`。`CpuLocalGuard` 只证明
   执行上下文互斥，不能证明不同嵌套 guard 之间的对象唯一借用。
@@ -85,7 +84,7 @@ per-CPU base。
 `NoPreemptIrqSave` 实现 `CpuLocalGuard`，普通共享与按值 slot 访问已提供 guard 约束的
 安全方法；通用可变引用只保留 `*_unchecked` unsafe 边界。
 
-平台标识与调度器状态迁移已完成：`current_task_ptr`、BSP 标记、`KPCB_ID`
+平台标识与调度器状态迁移已完成：`current_task_ptr`、BSP 标记、`KCPU_ID`
 （当前 CPU 身份，是一切 guard `current_cpu()` 的来源）以及 ktask/kirq/kalloc 等
 调用点都已落在寄存器寻址的静态 slot 或 `kplat` 托管的动态槽上，旧 `percpu`
 依赖、`.percpu` 区域与 `non-zero-vma` feature 均已删除。

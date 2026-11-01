@@ -192,8 +192,9 @@ their original source modules using `unittest::path_mod_test!`:
 | `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
 | `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 4 |
 | `src/time/epoch.rs` | `ut-tests/time_epoch.rs` | `tests` | 7 |
+| `src/firmware/devices.rs` | `ut-tests/firmware_devices.rs` | `firmware_devices_unittest` | 4 |
 
-These 24 cases require `cfg(unittest)` without additional feature, architecture
+These 28 cases require `cfg(unittest)` without additional feature, architecture
 or user gates. The huge-leaf lifetime case runs serially and compares allocation
 usage before unmap and after synchronous retirement, with no independent owner
 masking early release. `inactive_table_destruction_releases_its_live_data_hold`

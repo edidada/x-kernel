@@ -1021,7 +1021,7 @@ arch/kirq/src/
     └── softirq.rs      # fixed-vector softirq pending bits and bounded runner
 ```
 
-`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`, `device_res`,
+`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`, `driver_os_api`,
 any firmware parser, or any controller driver. Its only firmware-facing
 dependency is the allocation-free `fwnode` vocabulary crate, which names a node
 and its raw binding cells but owns neither parsing nor policy. It uses
@@ -1031,8 +1031,8 @@ online-CPU membership or shutdown guarantee. Architecture trap registration and 
 trap adapters remain in `khal::irq`; x86 APIC MSI vector allocation is an
 irqchip/backend detail reached through `kirq::MsiBackendIf`, not through
 `khal`. `IPI_IRQ` stays at Kconfig call sites such as `kipi`, not in `kirq`.
-Driver devres integration is owned by `kdriver::resource`, which translates
-`device_res` IRQ resources into `kirq` descriptors and handlers.
+Driver IRQ integration is owned by the `driver_os_api_xkernel` provider crate, which translates
+`driver_os_api` IRQ resources into `kirq` descriptors and handlers.
 
 ## 架构
 
@@ -1415,7 +1415,7 @@ mapping; conflicting trigger/controller/domain metadata returns
 single-action API：它只允许空 line 上安装一个非 shared action，第二次 regular
 registration 继续返回 `false` 并记录 warning。`register_shared()` /
 `try_register_shared()` 会安装带 `IrqActionToken` 的 shared action；同一 line 上的
-shared action 由 `kirq` 在 dispatch 中统一 fanout，`kdriver::resource` 只保存
+shared action 由 `kirq` 在 dispatch 中统一 fanout，`driver_os_api_xkernel` 只保存
 devres token 与 `IrqActionToken` 的适配关系。shared action 当前只支持默认
 auto-enable 路径，不暴露 disabled shared registration API。后续 shared action
 注册如果补齐了更具体的 descriptor metadata，`kirq` 会在不改变当前 enable/depth
@@ -1483,14 +1483,14 @@ future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch
 - 同一 `virq` 不能同时作为两条不同 `(domain, hwirq)` mapping 的目标；显式 `virq`
   插入 mapping 前必须检查反向一致性。
 
-`kdriver::resource` 是 devres IRQ vocabulary 到 `kirq` 的边界 adapter。无
+`driver_os_api_xkernel` provider 是 devres IRQ vocabulary 到 `kirq` 的边界 adapter。无
 `hwirq/domain/controller` metadata 的 `IrqResource` 必须转换成
 `IrqSpec::PlainVirq`；带硬件 routing metadata 的 resource 才转换成
 `IrqSpec::Desc`。这样 device resource 的 plain IRQ handle 不会误入 descriptor
 merge/mapping 分支。
 
 devres IRQ request 通过 `kirq::try_register_shared()` 安装 shared action，并把返回的
-`IrqActionToken` 包装成 `device_res::IrqHandlerToken`。release 时，`kdriver` 使用
+`IrqActionToken` 包装成 `driver_os_api::IrqHandlerToken`。release 时，`driver_os_api_xkernel` provider 使用
 `kirq::free_irq_action()` 删除单个 action；只有最后一个 action 离开时，
 KIRQ masks only for last-action removal. Every successful shared removal drains ordinary
 execution before returning the owner, without disposing of the descriptor. Shared IRQ
@@ -1610,7 +1610,7 @@ submits prepared kworkng work after releasing the port lock. TTY parses input,
 echoes, delivers signals, and wakes readable waiters in normal-worker context.
 Networking similarly owns its receive processing and socket readiness.
 
-`kdriver::resource` and devres manage IRQ resource lifetime, not upper-layer
+`driver_os_api_xkernel` and devres manage IRQ resource lifetime, not upper-layer
 waiter registration. Descriptor-local ordinary execution completion remains part of
 `synchronize_irq()` and `free_irq()`; it is not an event subscription. Hardirq
 lifecycle hooks and deferred-executor handoff are unchanged.
@@ -1651,9 +1651,7 @@ handle_irq()
 `kirq::context` 在每 CPU state 中维护 hardirq、serving-softirq 和 BH-disabled depth。
 public 查询 API 会使用 `NoPreemptIrqSave` 保护当前 CPU slot 读取，避免普通任务查询
 被本地 IRQ 打断时和 hardirq guard 并发读写同一 per-CPU slot。
-hardirq guard 和 softirq runner 的 IRQ-tail hot path 已经由调用方建立本地 IRQ
-masked + 当前 CPU pinned 上下文，因此使用 `*_irqoff` crate-local helper 直接读写
-per-CPU slot，不重复保存和恢复 IRQ state。
+The hardirq guard and softirq runner IRQ-tail hot paths run with local IRQs already masked and the CPU pinned by the caller, and use `*_irqoff` crate-local helpers. These helpers still create a nested `NoPreemptIrqSave` (or `IrqSave` for snapshots), a near-free nested save/restore on already-masked paths.
 
 上下文诊断语义：
 
@@ -1714,7 +1712,7 @@ handler，也没有 NAPI poll budget/repoll 状态机。
 
 `ksoftirqd/N` 的调度让出由 `ktask` provider 负责：daemon 每次实际运行 softirq 后
 主动回到调度点，避免持续 pending workload 下长时间占用同一 CPU。当前 direct
-drain 在每批 action 完成且仍有 pending 时，通过 `SoftirqDaemonIf::needs_resched()`
+drain 在每批 action 完成且仍有 pending 时，通过 `kiface_task_api::TaskPreemptionIf::needs_resched()`
 查询当前任务的调度请求；请求存在或 restart limit 命中时保留 pending 并唤醒 daemon。
 查询不消费请求、不直接调度；任务尚未初始化或未启用 preempt 时返回 false。
 该检查不能打断单个 action，也没有引入 Linux 的 2ms 时间预算。
@@ -2380,10 +2378,7 @@ graph and default unit tests.
 - `IRQ_LIFECYCLE_HOOKS` 使用 `SpinNoIrq`，只在 active bit 为真时于 entry 短暂复制
   函数指针。无 hook 的 IRQ hot path 通过 atomic active bit 跳过全局锁；hook 本体
   不在该锁内执行。
-- `IRQ_CONTEXT_STATE` 是 per-CPU 普通整数状态；所有读写都通过 `NoPreemptIrqSave`
-  或明确的 IRQ-off 调用约束保护。public 查询使用 `NoPreemptIrqSave`；hardirq 和
-  softirq IRQ-tail hot path 使用 `*_irqoff` helper 复用调用方已经建立的
-  local-IRQ-masked + CPU-pinned 上下文，避免重复保存/恢复 IRQ state。
+- `IRQ_CONTEXT_STATE` is per-CPU state accessed through `NoPreemptIrqSave` (or `IrqSave` for snapshots). Public queries and the hardirq/softirq IRQ-tail `*_irqoff` helpers all create this guard; on paths where the caller already masked local IRQs and pinned the CPU, the nested save/restore is near-free.
 - `SOFTIRQ_PENDING` 是 per-CPU atomic bit mask。`raise_softirq*()` 用
   `fetch_or(Release)` 发布 pending bit，runner 用 `swap(0, Acquire)` 获取 batch，
   避免 handler 运行期间重新 raise 的 bit 被清 pending 覆盖。
@@ -2431,9 +2426,9 @@ to HAL trap-entry details.
 
 ### 为什么 devres 只适配到 `kirq`
 
-`device_res` 是驱动框架的 OS-neutral resource model。它描述驱动需要的 IRQ 资源，
-但不拥有内核中断处理语义。x-kernel 的 devres provider 位于 `kdriver::resource`，
-负责把 `device_res` 的 trigger/controller/domain/event/handler 转换为 `kirq`
+`driver_os_api` 是驱动框架的 OS-neutral resource model。它描述驱动需要的 IRQ 资源，
+但不拥有内核中断处理语义。x-kernel 的 provider 位于 `driver_os_api_xkernel`（`drivers/adapters/xkernel/provider`），
+负责把 `driver_os_api` 的 trigger/controller/domain/event/handler 转换为 `kirq`
 类型。这样驱动框架获得内核 IRQ 能力，同时 `kirq` 不反向依赖驱动框架。
 
 ### 为什么 lifecycle hook 和 deferred executor 都采用单 owner
