@@ -480,8 +480,8 @@ kirq
 - NMI handler 满足更严格的 pseudo-NMI 执行约束；
 - lifecycle hook 和 deferred executor 都只由一个明确 owner 安装；当前 deferred
   executor owner 是 softirq。
-- `device_res` / devres 是驱动框架适配层，不能成为 `kirq` 的依赖。驱动资源到
-  kernel IRQ core 的转换由 `kdriver::resource` 负责。
+- `driver_os_api` / devres 是驱动框架适配层，不能成为 `kirq` 的依赖。驱动资源到
+  kernel IRQ core 的转换由 `driver_os_api_xkernel` provider 负责。
 - `kbuild_config::NR_CPUS` bounds CPU-local control, NMI publication and
   participant storage. Configured capacity is not proof of CPU readiness,
   online membership or completed source shutdown.
@@ -572,23 +572,15 @@ does not establish action-reader quiescence or hardware shutdown.
   radix nodes. It requires exclusion of same-key borrowed readers and writers;
   it is not used to prove the production retirement protocol. The runtime
   paired-index reuse test instead exercises actual withdrawal and RCU callbacks.
-`arch/kirq/src/bottom_half/context.rs` 使用 `kcpu_slot` 的
-`CpuSlotCell<SpinNoIrq<IrqContextState>>`：
 
-- `current_state_snapshot()` 在 `NoPreemptIrqSave` pin 下取当前 CPU 的 slot，并经
-  `SpinNoIrq` 共享读取 context snapshot；
-- `with_current_state_irqoff()` 在同一 pin 下经 `SpinNoIrq` 更新当前 CPU 的
-  context depth。
+`arch/kirq/src/bottom_half/context.rs` uses `kcpu_slot` cells. Its unsafe items are the `SpinNoIrq::new` constructor in the `IRQ_CONTEXT_STATE` slot template and `NmiContextGuard::enter`: CPU slots must be initialized, and the caller must stay on this CPU with ordinary IRQs excluded until the guard is dropped; nested entries must unwind first.
 
-对象排他性由 `SpinNoIrq` 建立；`NoPreemptIrqSave` 只负责固定 CPU 并屏蔽本地 IRQ
-重入。hardirq guard 和 softirq IRQ-tail hot path 使用 crate-local `*_irqoff`
-helper，调用方必须已经建立 local-IRQ-masked + CPU-pinned 上下文。因此普通任务查询
-不会与本地 hardirq guard 并发读写同一个 per-CPU slot，IRQ-tail hardirq/softirq
-也不会重复保存/恢复 IRQ state。
+- `current_state_snapshot()` contains no unsafe code. It uses `IrqSave` plus a `NoPreempt` that is released without a scheduling check, and reads the context snapshot through `SpinNoIrq`.
+- `with_current_state_irqoff()` contains no unsafe code. It updates the current CPU's context depth through `SpinNoIrq`.
 
-`arch/kirq/src/bottom_half/softirq.rs` 使用 `SOFTIRQ_PENDING.current_ref_raw()` 访问当前 CPU 的
-per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mask 自身是
-`AtomicUsize`，用于处理 IRQ/softirq 之间的 pending bit 发布和获取。
+Object exclusivity comes from `SpinNoIrq`; `NoPreemptIrqSave` only pins the CPU and masks local IRQ reentrancy. The hardirq guard and softirq IRQ-tail hot paths use crate-local `*_irqoff` helpers and expect the caller to have already masked local IRQs and pinned the CPU. The helpers still create a nested `NoPreemptIrqSave` (or `IrqSave` for snapshots); on already-masked paths this nested save/restore is near-free. Ordinary task queries therefore cannot read or write the same per-CPU slot concurrently with the local hardirq guard.
+
+`arch/kirq/src/bottom_half/softirq.rs` accesses the per-CPU atomic pending mask `SOFTIRQ_PENDING` through safe accessors such as `with_current_irq_disabled` and `current(&guard)`; it has no unsafe pending-mask access. The mask is an `AtomicUsize` used to publish and acquire pending bits between IRQ and softirq.
 
 其它相关 unsafe 边界位于模块外：
 
@@ -700,7 +692,7 @@ the CPU-local NMI owner protocol, or the generic `krcu-list` contracts.
   prepare capacity before exclusion, publish initialized Lines under their lock,
   and submit withdrawn ownership only after restoring task context.
 - MSI allocation 必须只向调用者暴露 virq 和 `MsiMessage`；backend-local vector、
-  APIC id 和 affinity 选择不能泄露到 `device_res` 或 generic driver。
+  APIC id 和 affinity 选择不能泄露到 `driver_os_api` 或 generic driver。
 - NMI dispatch 不得依赖 `IRQ_STATE`，否则 pseudo-NMI 可能打断 normal IRQ 持锁路径并
   自锁。
 - lifecycle exit hook 必须与本次 enter 捕获的 hook 配对，不能在处理中途因全局 hook
@@ -935,7 +927,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-16e | 驱动按 family 接纳其他实例的 domain | 单例 GIC/PLIC 后端接受任意同族 domain，却通过 `desc.hwirq` 操作已初始化控制器 | 第二个实例的中断被配置到第一个控制器寄存器 | `is_gic_domain()`/`current_plic_domain()` 只接受当前实例持有的 domain id；family 相等不等于实例归属 |
 | T-16f | 借用索引视图被当作持有计数的对象 | 每次修改临时构造 `LineIndex::shared()`，成功删除执行 `count -= 1` | 溢出检查下 panic；release 下计数回绕 | 借用视图无状态无计数；仅测试私有 registry 的 `Storage::Private` 持有计数；全局索引 MSI 分配—释放有回归测试 |
 | T-17 | Missing MSI mapping becomes a raw logical IRQ | No `(MSI_DOMAIN, vector)` entry | Wrong handler selected | MSI dispatch uses the strict Domain Line index; a miss never falls back to the raw vector |
-| T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `try_resolve_and_publish()` 在改状态前返回 `UnknownDomain` |
+| T-18 | 未注册 domain 被映射成功 | 控制面接受未知 `IrqDomainId` | 驱动拿到永远不可达的 virq | `validate_resolution_domain()`（经 `resolve_prepared_locked()`）在改状态前返回 `UnknownDomain` |
 | T-19 | BH-disabled 被误判为普通 task context | diagnostics 只区分 hardirq/softirq/task | sleepable future callback 可能在 BH-disabled 区间运行 | `InterruptContextLevel::BhDisabled` 和 docs 明确其 non-sleepable 语义 |
 | T-20 | context misuse 日志风暴 | underflow 或 hardirq 中反复 local_bh_disable | 日志淹没真实故障，拉长 IRQ 处理时间 | warning 计数保留，日志只输出初始样本和 2 的幂次样本 |
 | T-21 | poll/future IRQ wake 被当作 future IRQ thread target | 后续 threaded IRQ 直接复用 poll/future wake bridge | 缺少 thread lifecycle、dev-id teardown、oneshot mask 和 scheduler ownership，导致悬空唤醒或错误 teardown | 文档明确 poll/future IRQ wake 只是临时 waiter notification；threaded IRQ、softirq 和 workerqueue 必须在 `kirq` 内形成独立所有权 |
@@ -1471,7 +1463,7 @@ Neither synthetic fixtures nor this documentation establish physical delivery.
 run under the original Line lock with IRQ/preemption exclusion and must not
 sleep, allocate, reenter KIRQ or wait for remote handler completion. The lock
 order remains registry -> Line -> controller registers/allocation -> local APIC.
-`runtime/dispatch.rs::run_edge` retains admission across all coalesced action
+`runtime/dispatch.rs::handle_edge_irq` retains admission across all coalesced action
 iterations; it never reuses an acknowledged claim or clears a concurrent owner's
 running state. Disabled/tearing-down/failed-configuration Lines retain pending
 without executing handlers. A failed retrigger retains pending without silently

@@ -17,19 +17,14 @@ pointed-object lifetime guarantee; those remain the payload owner's duty.
 
 1. 模板 LMA 来自与 linker script 同一镜像，`begin_cpu_init` 的目标区域对该 CPU
    唯一、可写，并覆盖 `template_size()` 字节；
-2. 安装 base register 后，CPU 不在访问期间迁移；安全访问器要求 `CpuLocalGuard`
-   （当前为 `kspin::NoPreemptIrqSave`），它同时排除迁移与本地 IRQ 重入；
+2. After the base register is installed, the CPU must not migrate during access. Safe accessors require a `CpuLocalGuard` (currently `kspin::NoPreemptIrqSave`, plus `BootCpuToken` during exclusive CPU bring-up of an unpublished area), which excludes both migration and local IRQ reentrancy;
    `*_unchecked` 入口只要求 `CpuPin`，IRQ 重入排除由调用者建立；
-3. 别名规则：安全共享和按值访问不能与 unsafe 可变访问重叠；通用可变引用只通过
-   `*_mut_unchecked` 暴露，由调用者证明对象唯一借用。跨 CPU 访问不能伪装成本地
-   独占访问；`CpuSlot::get_at` 与 `DynamicCpuSlot::get_remote` 只在 `T: Sync` 下
-   开放，未持锁远端写不在基础 API 中提供；
+3. Aliasing rules: safe shared and by-value access must not overlap unsafe mutable access. Generic mutable references are exposed through `*_mut_unchecked`, where the caller must prove the object is uniquely borrowed, and through the public unsafe `CpuSlotCell::current_shared_mut`, which returns `&'static mut T` without a pin and requires the caller to be the single execution context on this CPU and not alias the value. Cross-CPU access must not be disguised as local exclusive access; `CpuSlot::at` and `DynamicCpuSlot::get_remote` are available only for `T: Sync`, and unlocked remote writes are not provided by the base API;
 4. 链接脚本中的 section 符号和 crate 编译产物来自同一内核镜像，不能由不受信任
    的模块伪造；
 5. `CpuSlotChunk::from_raw_parts` 的 backing memory 在所有动态 handle drop 前保持
    有效；`DynamicCpuSlot` 不允许脱离 chunk 生命周期；
-6. 静态宏只接受 sealed `StaticSlotValue`；需要构造/析构的类型不得放入模板 section，
-   必须使用动态 slot 的逐 CPU initializer。
+6. The static macros `cpu_slot!`/`cpu_slot_cell!` accept only types implementing the public `unsafe trait StaticSlotValue`, while `cpu_slot_cell_with_template!` certifies the exact initializer at the call site. Types that need construction or destruction must not be placed in the template section and must use the per-CPU initializer of a dynamic slot.
 
 架构 base register 是内核特权状态。它只能由平台架构初始化路径安装，不能通过
 普通安全 API 任意改写；错误设置会导致任意 slot 访问越界。x86 使用 GS-relative

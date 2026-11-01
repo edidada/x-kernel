@@ -292,15 +292,9 @@ publish，承诺 static 元数据借用的生命周期。
 - 每个从核只获得一个独立槽位的 one-past-end 栈顶地址，模块不暴露内部数组引用。
 - `SCHED_READY_CPUS` 握手确保主核在启动下一个 AP 前，当前 AP 已进入 runtime 并注册其 run queue，因而主核进入 `init_drivers` 时跨核 spawn 不会命中未注册 RQ。
 
-### per-CPU timer deadline（`src/lib.rs`）
+### Timer handler (`src/lib.rs`)
 
-`init_interrupt()` 内的 `NEXT_DEADLINE.read_current_raw()` / `write_current_raw()` 访问当前 CPU 的 per-CPU slot。
-
-不变量：
-
-- timer IRQ handler 在当前 CPU 上运行，且 IRQ/preemption 语义保证访问期间不会迁移到其他 CPU。
-- 每个 CPU 只读写自己的 `NEXT_DEADLINE` slot；跨 CPU 不共享该变量。
-- `khal::time::arm_timer(deadline)` 使用根据当前单调时间计算的 deadline，避免因 handler 延迟导致立即重复触发。
+The timer IRQ handler registered in `init_interrupt()` contains no raw per-CPU access. It only calls `ktask::on_timer_fire()`, which owns timer re-arming.
 
 ### kernel-mode unit test raw memory access（`src/mp.rs`，`#[cfg(all(feature = "smp", unittest))]`）
 
@@ -348,7 +342,6 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `SCHED_READY_CPUS` 握手；每 AP 独立槽 |
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
 | T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
-| T-07 | per-CPU timer deadline raw access 在可迁移上下文运行 | 中 | handler 被改为普通线程调用或抢占语义变化 | unsafe 注释要求 IRQ/preemption 禁止迁移；审计 raw percpu 调用点 |
 | T-09 | panic handler 在损坏栈上再次失败 | 中 | 栈溢出、页表损坏、backtrace 范围错误 | panic 后只做诊断并关机，不尝试恢复 |
 | T-10 | 启动日志泄露物理地址和设备映射 | 低 | 开启启动日志 | 限于内核日志；不处理用户数据，但部署时需按日志策略限制可见性 |
 
@@ -405,7 +398,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - [ ] 新增 early/late kernel thread 时，确认它是否应为 PID-less `Internal`，不能抢先消耗 PID 1。
 - [ ] 修改 `SystemInitEntry` provider 时，确认它 spawn 并激活 PID 1 后返回。
 - [ ] 新增 `register_init` 回调时，确认它不依赖用户态 init、避免长时间阻塞，并接受 panic 会中止启动。
-- [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable，raw per-CPU 访问仍只发生在不可迁移上下文。
+- [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable。
 - [ ] 不在 runtime 重新引入 DMA 页表适配层；相关校验和锁由 `memspace` 的 MM API provider 负责。
 - [ ] 修改启动日志时，评估是否新增物理地址、设备映射或任务身份泄露。
 

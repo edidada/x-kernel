@@ -80,7 +80,7 @@ LoongArch idle 返回修正仅在普通 IRQ 分支、保存的 PRMD.PPLV 为内�
 内核上层（调度器/信号/syscall/驱动）
    │
    │ safe API: init_trap(), UserContext::run(),
-   │           TaskContext::switch_to(), user_copy()
+   │           unsafe API: TaskContext::switch_to(), user_copy()
    │
    v
 ┌──────────────────────────────────────────────────┐
@@ -256,23 +256,7 @@ MXCSR 仍按本项目原有兼容策略与启动时可信 mask 相与（硬件�
 
 ### 6. `ExtendedState::default`（`x86_64/xstate.rs`）
 
-```rust
-FxStateBlock {
-    fpu_ctrl: 0x037f,
-    sse_mxcsr: 0x1f80,
-    st_space: [0; 16],
-    xmm_space: [0; 32],
-    _padding: [0; 12],
-    // ...
-}
-```
-
-**不变量**：`FxStateBlock` 的所有字段均为 `u16`/`u32`/`u64` 数组，
-全零是有效表示。
-
-**为何安全**：`FxStateBlock` 现在通过显式字段初始化构造，避免了对
-“整块零初始化后再补写关键字段”的 `unsafe` 假设。其布局仍由
-`repr(C, align(16))` 和 `static_assertions` 保证满足 FXSAVE/FXRSTOR 要求。
+`ExtendedState::default` is a safe `const fn` that builds the state from `FxStateBlock::initial()` and zeroed XSAVE header and YMM fields; it contains no `unsafe` operation. Every field is explicitly initialized, so no all-zero validity assumption is needed. The layout is guaranteed by `repr(C, align(64))` with compile-time size and offset assertions on `ExtendedState`, and by `repr(C, align(16))` with a 512-byte size assertion on `FxStateBlock`, matching what XSAVE/FXSAVE expect.
 
 ### 7. `switch_to` 页表切换（各架构 ctx.rs）
 
@@ -321,7 +305,7 @@ GDT 描述符。
 
 ```rust
 let entries = unsafe {
-    core::slice::from_raw_parts(_ex_table_start.as_ptr(), count)
+    core::slice::from_raw_parts(start, len)
 };
 ```
 
@@ -440,10 +424,10 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |
 | T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
 | T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
-| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；x86_64 信号帧只导出 Linux ABI 状态，恢复时重置 `orig_rax`；x86_64 `EnterUserFrame.kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
+| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；x86_64 信号帧只导出 Linux ABI 状态，恢复时重置 `orig_rax`；x86_64 `UserContext::kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
 | T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
-| T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` 的 SPSR.I / 入口 PMR 判断错误，或机制 readiness 标志（`pmr::is_ready` / `allint_active`）错误 | NMI handler 在错误上下文约束下执行（如普通 IRQ 按 NMI 规则），或 Superpriority NMI 被当普通 IRQ 丢失优先级 | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
-| T-14 | x86_64 恶意 FP 信号帧使 XRSTOR 触发内核异常 | 高 | 用户修改 MXCSR/header/长度/指针 | 内核异常或数据泄露 | checked copy、最大长度限制、feature/header/magic 校验、可信 MXCSR mask、64 字节对齐的私有存储；无效帧投递 SIGSEGV |
+| T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` misjudges SPSR.I / entry PMR, or the readiness flags (`pmr::is_ready` / `allint_active`) are wrong; impact: an NMI handler runs under wrong context constraints (e.g. a normal IRQ treated under NMI rules), or a Superpriority NMI is treated as a normal IRQ and loses its priority | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
+| T-14 | x86_64 恶意 FP 信号帧使 XRSTOR 触发内核异常 | 高 | The user tampers with `MXCSR`, the XSAVE header, the frame length or pointers; impact: a kernel exception or a data leak | checked copy、最大长度限制、feature/header/magic 校验、可信 MXCSR mask、64 字节对齐的私有存储；无效帧投递 SIGSEGV |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -457,7 +441,7 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | F-06 | FP 状态跨任务泄漏 | `fp-simd` 未启用但任务使用 FP 指令 | FP 寄存器包含前一个任务数据 | 信息泄漏 | 2 | 未启用 `fp-simd` 时不保存/恢复；依赖内核配置禁用用户态 FP |
 | F-07 | `ExceptionContextGuard` 提前 drop | trap handler 中 guard 被 shadow 或手动 drop | `active_exception_context()` 返回错误指针 | NMI 看门狗获取过期快照 | 2 | guard 声明为 handler 第一个局部变量，生命周期覆盖整个函数 |
 | F-13 | `ExceptionContextGuard` 迟到 drop 写错 CPU slot | trap handler 中阻塞并迁移，Drop 时重新计算当前 CPU | 原 CPU长期保持 stale active-exception 标记，或迁移后当前 CPU 标记未恢复 | `check_preempt_pending()` 一直跳过抢占，或 trap handler 后半段错误允许抢占 | 1 | guard 保存原始 slot 并 CAS 恢复；context switch 挂起/恢复当前 CPU slot |
-| F-08 | `emulate_unaligned` 内部 `.unwrap()` panic | 非对齐指令解码成功但实际访问故障（页不存在） | 当前 CPU trap handler panic | 系统崩溃 | 1 | `_unaligned_read`/`_unaligned_write` 汇编辅助函数含异常表条目，通常能安全恢复；若异常表未覆盖则 panic |
+| F-08 | `emulate_unaligned` access failure | The unaligned instruction decodes successfully but the actual access faults (page not present) | `unaligned_read`/`unaligned_write` see -1 from the assembly helper and `emulate_unaligned` returns `Err(UnalignedError)` via `?` | The caller (e.g. the trap handler) decides how to handle the error; in kernel mode it may panic | 1 | The `_unaligned_read`/`_unaligned_write` assembly helpers have exception table entries and return an error on failure instead of panicking inside the function |
 | F-09 | trap handler 内 panic 触发 double fault | panic 过程中再次触发异常 | panic unwind 路径访问无效内存 | 系统不可恢复 | 1 | panic handler 应最小化操作；x86_64 #DF 有独立栈（TSS IST） |
 | F-10 | `init_trap` 重复调用导致 IDT/向量表重置 | boot 代码逻辑错误 | 中断配置被覆盖 | 后续中断处理异常 | 1 | 前置条件约束（仅调用一次）；无运行时防护 |
 | F-11 | `syscall_restart_error` 误判导致 syscall 不必要重启 | 返回值恰好等于 ERESTART 常量但非 syscall 上下文 | 用户态 syscall 被意外重启 | 用户进程行为异常 | 3 | `is_from_syscall()` 前置检查过滤非 syscall 上下文；重启常量为负值，正常返回值不会匹配 |

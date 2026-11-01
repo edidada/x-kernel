@@ -213,7 +213,7 @@ allocates or sleeps.
 
 防护：
 
-- helper 获取 `NoPreemptIrqSave`，通过按值 `read`/`write` 完成一次访问，不生成引用；
+- The helpers use `load_current()` / `store_current()` as single by-value scalar accesses on the current CPU, without a guard and without creating references;
 - helper 只暴露“当前 CPU 读/写”接口，不提供跨 CPU 写路径。
 
 ### 3. 平台 `notify_cpu()` 中的内联汇编屏障
@@ -290,7 +290,7 @@ allocates or sleeps.
 |------|----------|----------|----------|-----------|
 | F-01 | 目标 CPU IPI 队列未初始化 | `run_on_cpu` / 广播失败 | 相关跨核操作无法执行 | 返回 `KipiError::TargetCpuNotReady` |
 | F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
-| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
+| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
 | F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
 | F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
 | F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
@@ -298,8 +298,7 @@ allocates or sleeps.
 ## 故障管理
 
 - 通用 IPI 投递路径以 `Result` 返回错误，而不是静默失败；
-- TLB shootdown 的主要失败模式不是 `Result`，而是“目标 CPU 不 ack”，因此采用
-  自旋等待 + 超时 warning 的诊断模型；
+- The main TLB shootdown failure mode is a target CPU that does not ack. The initiator spins with a bounded wait: it warns at 1 s, re-sends the IPI every 1 s, escalates at 10 s, and after 30 s logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack;
 - 同 CPU 嵌套 TLB 请求不直接 panic，而是设置 `needs_retry_full_flush` 并在当前请求结束后补发；
 - 对平台 IPI 顺序语义的要求被写入接口契约，避免隐式依赖散落在调用点。
 

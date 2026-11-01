@@ -44,7 +44,7 @@ seccomp 是客户机内用户代码对内核施加的自愿约束沙箱：**信�
 | 除零 / 移位崩溃 | ALU 除零/取模零在安装期即 `EINVAL`，运行期仍以 deny 兜底；移位按 `wrapping_*` 语义 |
 | 超大 `sock_fprog.len` 或超长链拖垮内核 | `SeccompFilter::new` 与 ksyscall 双重 `BPF_MAXINSNS`；链总长受 Linux `MAX_INSNS_PER_PATH` 约束 |
 | 用非法程序把内核变成"必然杀进程"的放大器 | 安装期校验先行拒绝，调用方可在安装点看到 `EINVAL` |
-| syscall 入口不作为（漏评估） | `dispatch_irq_syscall` 在分发前统一 `evaluate_seccomp`，单点入口 |
+| syscall 入口不作为（漏评估） | `handle_syscall` 在分发前统一 `evaluate_seccomp`，单点入口 |
 | strict 白名单生成错（放行错误 syscall） | `SeccompFilter::strict_allowlist` 由单元测试固定"只放行四个号、其余 kill"的语义；号来源是 `linux_sysno::Sysno` |
 
 ## 审计要点
