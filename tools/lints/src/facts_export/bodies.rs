@@ -20,7 +20,7 @@ use rustc_span::{Span, source_map::Spanned, sym};
 
 use super::{
     Exporter,
-    flow::{Flow, Origin},
+    flow::{Captured, Flow, Origin},
     json,
     json::Record,
 };
@@ -180,7 +180,7 @@ impl<'tcx> Exporter<'tcx> {
             root_key: (root != def.to_def_id()).then(|| self.key(root)),
             root: root.expect_local(),
             typing_env: TypingEnv::post_analysis(tcx, def.to_def_id()),
-            flow: Flow::new(tcx, body),
+            flow: Flow::new(tcx, body, def),
         };
         self.refs_seen.clear();
         for block in body.basic_blocks.iter() {
@@ -349,7 +349,7 @@ impl<'tcx> Exporter<'tcx> {
             }
         }
         for (origin, field, span) in stores {
-            if let Origin::Fn(target) | Origin::Closure(target) = origin {
+            if let Some(target) = origin.value() {
                 self.fn_ref(caller, target, span, RefContext::Field(field));
             }
         }
@@ -476,8 +476,7 @@ impl<'tcx> Exporter<'tcx> {
         if !is_fn_trait_call {
             let passed_to = callee.resolved.or(callee.def).map(|def| self.key(def));
             for (index, arg) in args.iter().enumerate() {
-                if let Origin::Fn(target) | Origin::Closure(target) = caller.flow.operand(&arg.node)
-                {
+                if let Some(target) = caller.flow.operand(&arg.node).value() {
                     let context = RefContext::Arg {
                         callee: passed_to.clone(),
                         index,
@@ -562,6 +561,18 @@ impl<'tcx> Exporter<'tcx> {
             Some(Origin::Fn(target) | Origin::Closure(target)) => {
                 self.bump("calls_via_value");
                 record.str("via_value", &self.key(target))
+            }
+            Some(Origin::Captured { name, source }) => {
+                self.bump("calls_via_capture");
+                record = record.str("via_capture", name.as_str());
+                match source {
+                    Captured::Param { owner, index } => record
+                        .str("via_outer", &self.key(owner))
+                        .num("via_outer_param", index as u64),
+                    Captured::Field(field) => record.str("via_field", &self.key(field)),
+                    Captured::Value(target) => record.str("via_value", &self.key(target)),
+                    Captured::Unknown => record,
+                }
             }
             Some(Origin::Unknown) | None => record,
         };

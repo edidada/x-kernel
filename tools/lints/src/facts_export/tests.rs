@@ -129,8 +129,21 @@ fn modes(holder: &mut Holder, mode: Mode) -> u32 {
     }
 }
 
+fn run_with(vector: u32, dispatch: impl FnOnce(u32) -> u32) -> u32 {
+    let call = || dispatch(vector);
+    call()
+}
+
+fn run_local() -> u32 {
+    let local: fn() -> u32 = helper;
+    let call = move || local();
+    call()
+}
+
 fn main() {
     caller();
+    run_with(1, |x| x);
+    run_local();
 }
 "#;
 
@@ -308,6 +321,15 @@ fn ui() {
             .is_some_and(|t| t.ends_with("::helper"))
     );
     assert_eq!(passed(true).0.get("arg"), Some(&serde_json::json!(0)));
+
+    // A function value captured by a closure is traced to the enclosing fn.
+    let captured = call_to("::run_with::{closure#0}", Some("call_once"));
+    assert_eq!(captured.str("via_capture"), Some("dispatch"));
+    assert!(captured.str("via_outer").is_some_and(|o| o.ends_with("::run_with")));
+    assert_eq!(captured.0.get("via_outer_param"), Some(&serde_json::json!(1)));
+    let local = call_to("::run_local::{closure#0}", None);
+    assert_eq!(local.str("via_capture"), Some("local"));
+    assert!(local.str("via_value").is_some_and(|v| v.ends_with("::helper")));
 
     let coroutine_call = find(&|r| {
         r.str("t") == Some("call")

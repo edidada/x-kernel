@@ -105,7 +105,7 @@ version they do not know. Each line is one JSON object; `t` is its kind.
 | --- | --- |
 | `crate` | first line: `schema`, `crate`, `crate_id`, `stem`, `package`, `version`, `kind` (`workspace`), `target`, `toolchain`, `rustc`, `crate_types`, `opt_level`, `cfg` (features, `unittest`, `test`, `debug_assertions`) |
 | `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root`; structs and unions add `fields`, enums `variants` (`name`, `key`, `line`, `fields`); statics and consts add `ty`, `ty_adts` |
-| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined`, and for fn-pointer and `Fn*` calls `via_param`, `via_field` or `via_value` |
+| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined`, and for fn-pointer and `Fn*` calls `via_param`, `via_field`, `via_value` or, in a closure, `via_capture` (+ `via_outer`, `via_outer_param`) |
 | `ref` | a function or closure used as a value: `caller`, `caller_root`, place, `target`, `closure`, `callee_file`, `callee_line` (where `target` is defined), and where it goes: `passed_to` + `arg` (argument of a call) or `field` (stored into a field) |
 | `use` | a use of a static, const, enum variant, field or struct: `caller`, `caller_root`, place, `kind` (`static`, `const`, `variant`, `field`, `struct`), `target`, `access` (`read`, `mut`, `construct`, `match`, `ref`), `target_file`, `target_line` |
 | `site` | an `unsafe` block: `kind`, `owner`, place |
@@ -136,9 +136,15 @@ version they do not know. Each line is one JSON object; `t` is its kind.
 - *Fn values.* For a call through a fn pointer or a generic `Fn*` bound,
   `via_param` is the caller's parameter (0-based) the callee value comes
   from, `via_field` the field it is read from, `via_value` the function or
-  closure itself when the body names it. The candidates of a `via_param`
-  call in `g` are the `ref` records with `passed_to` = `g` and that `arg`
-  (for a method, `arg` counts the receiver); those of a `via_field` call are
+  closure itself when the body names it. In a closure, a value read from the
+  captured environment gives `via_capture` (the variable's name) and where
+  that variable comes from in the enclosing body: `via_outer` +
+  `via_outer_param` (a parameter of the enclosing fn), `via_field` (a
+  precisely captured field) or `via_value` (a captured function or closure,
+  or a `let` initialised with one). The candidates of a `via_param`
+  call in `g`, or of a `via_outer` = `g` call with `via_outer_param` as the
+  index, are the `ref` records with `passed_to` = `g` and that `arg` (for a
+  method, `arg` counts the receiver); those of a `via_field` call are
   the `ref` records with that `field`. Values are followed through locals
   assigned once, references and casts.
 - *Paths* are repository-relative, for dependency crates too (`xkmake` passes

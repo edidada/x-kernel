@@ -3,17 +3,24 @@
 // See LICENSES for license details.
 
 //! Where a value in a MIR body comes from, following locals that are
-//! assigned once: links function values to the calls, parameters and fields
-//! they flow through, which narrows fn-pointer and generic `Fn*` calls.
+//! assigned once: links function values to the calls, parameters, fields and
+//! closure captures they flow through, which narrows fn-pointer and generic
+//! `Fn*` calls.
 
 use std::collections::HashMap;
 
 use rustc_abi::FIRST_VARIANT;
-use rustc_hir::def_id::DefId;
+use rustc_hir::{
+    Node,
+    def::DefKind,
+    def_id::{DefId, LocalDefId},
+};
 use rustc_middle::{
+    hir::place::ProjectionKind,
     mir::{self, AggregateKind, Local, Operand, PlaceRef, PlaceTy, ProjectionElem, Rvalue},
     ty::{self, TyCtxt},
 };
+use rustc_span::Symbol;
 
 /// Longest chain of single assignments followed.
 const MAX_DEPTH: usize = 8;
@@ -29,20 +36,60 @@ pub(super) enum Origin {
     Fn(DefId),
     /// This closure.
     Closure(DefId),
+    /// A variable the closure body captured, and where that variable comes
+    /// from in the enclosing body.
+    Captured {
+        name: Symbol,
+        source: Captured,
+    },
     Unknown,
+}
+
+/// Source of a captured variable in the body enclosing a closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Captured {
+    /// Parameter `index` (0-based) of the enclosing fn `owner`.
+    Param {
+        owner: DefId,
+        index: usize,
+    },
+    /// A field read by a precise capture (`self.handler`).
+    Field(DefId),
+    /// A function item or closure: the captured value itself, or the
+    /// initialiser of the captured `let` binding.
+    Value(DefId),
+    Unknown,
+}
+
+impl Origin {
+    /// The function or closure this value is known to be.
+    pub(super) fn value(self) -> Option<DefId> {
+        match self {
+            Self::Fn(def)
+            | Self::Closure(def)
+            | Self::Captured {
+                source: Captured::Value(def),
+                ..
+            } => Some(def),
+            _ => None,
+        }
+    }
 }
 
 /// Single-assignment view of one body.
 pub(super) struct Flow<'b, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'b mir::Body<'tcx>,
+    /// The body's owner when it is a closure: its first local is the
+    /// captured environment.
+    closure: Option<LocalDefId>,
     /// The rvalue of locals assigned exactly once by a statement; `None` for
     /// locals assigned more than once or written by a call.
     assigned: HashMap<Local, Option<&'b Rvalue<'tcx>>>,
 }
 
 impl<'b, 'tcx> Flow<'b, 'tcx> {
-    pub(super) fn new(tcx: TyCtxt<'tcx>, body: &'b mir::Body<'tcx>) -> Self {
+    pub(super) fn new(tcx: TyCtxt<'tcx>, body: &'b mir::Body<'tcx>, def: LocalDefId) -> Self {
         let mut assigned: HashMap<Local, Option<&'b Rvalue<'tcx>>> = HashMap::new();
         for block in body.basic_blocks.iter() {
             for stmt in &block.statements {
@@ -65,9 +112,11 @@ impl<'b, 'tcx> Flow<'b, 'tcx> {
                 assigned.insert(destination.local, None);
             }
         }
+        let closure = tcx.is_closure_like(def.to_def_id()).then_some(def);
         Self {
             tcx,
             body,
+            closure,
             assigned,
         }
     }
@@ -91,6 +140,9 @@ impl<'b, 'tcx> Flow<'b, 'tcx> {
     fn place_at(&self, place: PlaceRef<'tcx>, depth: usize) -> Origin {
         if depth > MAX_DEPTH {
             return Origin::Unknown;
+        }
+        if let Some(index) = self.capture_index(place) {
+            return self.captured(index);
         }
         if let Some(field) = self.field_of(place) {
             return Origin::Field(field);
@@ -122,6 +174,94 @@ impl<'b, 'tcx> Flow<'b, 'tcx> {
             },
             _ => Origin::Unknown,
         }
+    }
+
+    /// The capture that `place` reads: `(*_1).i` or `_1.i` in a closure body,
+    /// possibly dereferenced further (a by-reference capture).
+    fn capture_index(&self, place: PlaceRef<'tcx>) -> Option<usize> {
+        self.closure?;
+        if place.local.as_usize() != 1 {
+            return None;
+        }
+        let mut elems = place
+            .projection
+            .iter()
+            .skip_while(|elem| matches!(elem, ProjectionElem::Deref));
+        let ProjectionElem::Field(index, _) = elems.next()? else {
+            return None;
+        };
+        let env = self.body.local_decls[place.local].ty.peel_refs();
+        if !matches!(
+            env.kind(),
+            ty::Closure(..) | ty::CoroutineClosure(..) | ty::Coroutine(..)
+        ) {
+            return None;
+        }
+        elems
+            .all(|elem| matches!(elem, ProjectionElem::Deref))
+            .then_some(index.as_usize())
+    }
+
+    /// Resolves capture `index` of this closure in the enclosing body, from
+    /// the capture analysis and the enclosing body's HIR.
+    fn captured(&self, index: usize) -> Origin {
+        let tcx = self.tcx;
+        let Some(closure) = self.closure else {
+            return Origin::Unknown;
+        };
+        let Some(capture) = tcx.closure_captures(closure).get(index) else {
+            return Origin::Unknown;
+        };
+        let name = capture.to_symbol();
+        let place = &capture.place;
+        let source = if let Some(last) = place.projections.last() {
+            match last.kind {
+                ProjectionKind::Field(field, variant) => {
+                    match place
+                        .ty_before_projection(place.projections.len() - 1)
+                        .kind()
+                    {
+                        ty::Adt(adt, _) => Captured::Field(adt.variant(variant).fields[field].did),
+                        _ => Captured::Unknown,
+                    }
+                }
+                _ => Captured::Unknown,
+            }
+        } else {
+            match place.ty().kind() {
+                ty::FnDef(def, _) | ty::Closure(def, _) => Captured::Value(*def),
+                _ => self.enclosing_binding(closure, capture.get_root_variable()),
+            }
+        };
+        Origin::Captured { name, source }
+    }
+
+    /// Where the variable `var` of the body enclosing `closure` comes from:
+    /// a parameter of an enclosing fn, or a `let` initialised with a function
+    /// item or closure.
+    fn enclosing_binding(&self, closure: LocalDefId, var: rustc_hir::HirId) -> Captured {
+        let tcx = self.tcx;
+        let owner = tcx.local_parent(closure);
+        // Closure parameters are numbered after the captured environment in
+        // MIR, so only fn parameters map onto `passed_to` / `arg`.
+        if matches!(tcx.def_kind(owner), DefKind::Fn | DefKind::AssocFn)
+            && let Some(body) = tcx.hir_maybe_body_owned_by(owner)
+            && let Some(index) = body.params.iter().position(|param| param.pat.hir_id == var)
+        {
+            return Captured::Param {
+                owner: owner.to_def_id(),
+                index,
+            };
+        }
+        if let Node::LetStmt(local) = tcx.parent_hir_node(var)
+            && let Some(init) = local.init
+        {
+            let ty = tcx.typeck(owner).expr_ty(init);
+            if let ty::FnDef(def, _) | ty::Closure(def, _) = ty.kind() {
+                return Captured::Value(*def);
+            }
+        }
+        Captured::Unknown
     }
 
     /// The ADT field that `place` ends in, if its last field projection is
