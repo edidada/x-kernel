@@ -19,7 +19,7 @@ core/ksyscall / tipc::syscall / kernel TIPC users
 tipc-handle / ktask / kspin / alloc
 ```
 
-- `tipc::syscall` 负责 Trusty syscall ABI 的用户指针访问、ABI record 拷贝、syscall 编号分发和 errno 映射。
+- `tipc::syscall` handles user pointer access, ABI record copying and syscall number dispatch for the Trusty syscall ABI. Errno mapping is provided by `tipc::error::kerror_to_tipc_errno`, called from core/ksyscall.
 - 内核直接调用者负责在进入 core API 前提供已验证的 Rust 值。
 - 本 crate 负责维护 TIPC 对象生命周期、连接状态、消息队列边界、handle 所有权和事件通知不变量。
 - service path、UUID、队列大小、消息内容、attached handles 和 memref 元数据都应视为来自不可信或半可信调用方。
@@ -33,7 +33,7 @@ tipc-handle / ktask / kspin / alloc
 | port queue sizing | service 创建者 | `num_recv_bufs`、`recv_buf_size` | 非零，分别不超过 `IPC_CHAN_MAX_BUFS` 和 `IPC_CHAN_MAX_BUF_SIZE` |
 | connect flags | client | `IpcConnectFlags` | 只能包含 `WAIT_FOR_PORT` 和 `ASYNC` |
 | port access flags | service 创建者 | `IpcPortFlags` | 只能包含 `ALLOW_TA_CONNECT` 和 `ALLOW_NS_CONNECT` |
-| message bytes | channel 发送方 | `&[u8]` / user iovecs | core 发送路径拒绝超过队列 slot 的 slice；syscall iovec 入口按 peer receive slot 截断拷贝 |
+| message bytes | channel 发送方 | `&[u8]` / user iovecs | The core send path rejects slices larger than the queue slot; the syscall iovec entry rejects the message with `OutOfRange` when the total iovec length exceeds the peer receive slot. |
 | attached handles | channel 发送方 | `Arc<dyn Handle>` 切片 | 数量不能超过 `IPC_MAX_MSG_HANDLES`，且 handle 必须 `is_sendable()` |
 | memref metadata | syscall adapter 或内核调用者 | address、size、protection bits | size 非零，address/size 页对齐，地址范围不能溢出，权限位必须在 mask 内，至少包含一个权限位，拒绝 exec 和 write-only；syscall 创建时要求当前进程 VMA 覆盖该范围并具备请求的 READ/WRITE 用户权限 |
 
@@ -60,7 +60,7 @@ tipc-handle / ktask / kspin / alloc
 5. **read slot 才能读取**：`ipc_read_msg` 和 `ipc_read_msg_handles` 只接受 `Read` 状态的 slot id。
 6. **attached handles 使用强引用**：消息队列保存 `Arc<dyn Handle>`，直到接收方 `put` slot 才释放。
 7. **handle table 关闭先脱离 handle set**：`tipc-handle::HandleTable::uctx_handle_remove` 在关闭目标 handle 前移除同 table 内 handle set 的 stale registration。
-8. **memref 不解引用地址**：`sys_memref_create` 先验证调用方地址范围在当前进程地址空间内可访问；`MemRef` 只保存通过校验的地址范围和权限位，不直接访问该地址。
+8. **memref 不解引用地址**：`sys_tipc_memref_create` 先验证调用方地址范围在当前进程地址空间内可访问；`MemRef` 只保存通过校验的地址范围和权限位，不直接访问该地址。
 
 ## 线程安全
 
@@ -90,7 +90,7 @@ tipc-handle / ktask / kspin / alloc
 | T-06 | 队列满导致发送方忙等 | 中 | 接收方不 `put` slot | 返回 `WouldBlock`，释放 slot 后通知 `SEND_UNBLOCKED` |
 | T-07 | handle set 持有已关闭 handle id | 中 | handle 关闭但仍注册在 handle set | `HandleTable::uctx_handle_remove` 调用 `detach_from_handle_sets` |
 | T-08 | handle set 循环导致 poll 递归或死循环 | 高 | handle set 嵌套注册 | 当前直接拒绝注册 `HandleSet` |
-| T-09 | memref 元数据表示越界、非页对齐或未映射地址范围 | 中 | `addr + size` 溢出、范围不满足 Trusty memref 页粒度、或 syscall 调用方试图引用未覆盖/权限不足的 VMA | `MemRef::create` 使用 `checked_add` 并要求 address/size 页对齐；`sys_memref_create` 使用当前进程地址空间校验 VMA 覆盖和 READ/WRITE 权限 |
+| T-09 | memref 元数据表示越界、非页对齐或未映射地址范围 | 中 | `addr + size` 溢出、范围不满足 Trusty memref 页粒度、或 syscall 调用方试图引用未覆盖/权限不足的 VMA | `MemRef::create` 使用 `checked_add` 并要求 address/size 页对齐；`sys_tipc_memref_create` 使用当前进程地址空间校验 VMA 覆盖和 READ/WRITE 权限 |
 | T-10 | 不可发送 handle 被跨 channel 传递 | 中 | 发送方附带 handle set 等对象 | `IpcMsgQueue::push` 检查 `is_sendable()` |
 | T-11 | close/drop 重入导致状态不一致 | 中 | 多路径重复关闭 port/channel | `close` 设计为幂等，状态切换后通知等待者 |
 | T-12 | vsock-TIPC bridge 把 object capability 透传给 host | 高 | TIPC message 附带 handle 或 memref | bridge v1 只转发 bytes，发现 attached handles 时关闭连接 |
@@ -126,8 +126,7 @@ tipc-handle / ktask / kspin / alloc
 
 - 参数错误使用 `KResult` 返回 `InvalidInput`、`OutOfRange`、`NameTooLong` 等 typed error。
 - 队列暂不可用使用 `WouldBlock`，由调用方结合 poll/wait 处理。
-- poll source 注册失败映射为 `NoMemory` 并终止当前 wait，避免在没有 wakeup
-  registration 的情况下进入 `Pending`。
+- A poll source registration failure terminates the current wait, so it never enters `Pending` without a wakeup registration. `map_register_error` maps `NoMemory` and `IdExhausted` to `NoMemory`, and `InvalidState` to `InvalidInput`.
 - 对端关闭或 peer weak upgrade 失败返回 `NotConnected`。
 - stale registry entry 不 panic，publish/connect 路径会忽略或清理。
 - close/drop 路径唤醒等待者，使 poll/wait 能观察 ERROR/HUP。

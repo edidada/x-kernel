@@ -53,7 +53,7 @@ wrapper 生命周期，并通过 `UnsafeCell` 提供 guard-bound borrow。`from_
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | 损坏 FAT 元数据导致越界或 panic | 高 | 外部介质字段畸形 | `axfatfs` 解析错误经 `into_vfs_err` 返回；`fill_super` 不使用 `expect` |
+| T-01 | 损坏 FAT 元数据导致越界或 panic | 高 | 外部介质字段畸形 | `axfatfs` parse errors are returned through `into_vfs_err`; `fill_super` does not `expect` format or I/O results, and its `expect` on `s_bdev` relies on `get_tree_bdev` installing the block device before calling it |
 | T-02 | handle 在错误 owner/lock 下访问 | 高 | wrapper 与 mount state 混用 | `FsRef` 保存 owner pointer，每次 borrow 校验 matching mutex guard |
 | T-03 | root 与普通 mount 行为漂移 | 中 | 另建 root provider 或 callback | 自有 `register_init` 回调注册唯一静态 `FILE_SYSTEM_TYPE`，随后经 KVFS registry、`get_tree_bdev` 和 `fill_super` 分派 |
 | T-04 | 同一 FAT 设备建立两套 mutable mount state | 高 | 每次 mount 都直接调用 `fill_super` | KVFS 在调用 FAT 前按 `(s_type, dev_t)` reservation；已有 live superblock 直接复用，RO/RW 不一致返回 `EBUSY` |

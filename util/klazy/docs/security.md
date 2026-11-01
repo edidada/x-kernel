@@ -18,7 +18,7 @@
 │  Once<T> / Lazy<T, F>           │
 │                                  │
 │  ┌── unsafe 边界 ──────────────┐ │
-│  │ AtomicStatus::new_unchecked │ │
+│  │ extract_value_unchecked     │ │
 │  │ get_value_unchecked         │ │
 │  │ as_mut_ptr                  │ │
 │  │ MaybeUninit write/read      │ │
@@ -169,7 +169,7 @@ unsafe impl<T, F: Send> Sync for Lazy<T, F> where Once<T>: Sync {}
 ### 9. `Once::Drop`（`util/klazy/src/once.rs:559`）
 
 ```rust
-core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
+self.storage.get_mut().assume_init_drop();
 ```
 
 **不变量**：仅在状态为 `Ready` 时调用。独占 `&mut self` 保证无并发访问。
@@ -207,7 +207,7 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | 对未初始化 `Once` 调用 `get_unchecked()` 返回未初始化内存引用 | 高 | 调用者在未确认 `is_completed()` 前直接调用 `get_unchecked()` | debug 构建中 `debug_assert` 检测；release 构建依赖调用者正确使用 |
-| T-02 | 通过 `as_mut_ptr()` 获取指针后，在初始化前 read | 高 | 调用者未遵守 `as_mut_ptr()` 文档约束 | 文档标注 `# Safety`，调用者承担证明责任；无运行时检查 |
+| T-02 | Reading through a pointer obtained from `as_mut_ptr()` before initialization | 高 | The caller does not follow the documented constraint of `as_mut_ptr()` | The method docs state that accessing the pointer before initialization is UB; callers bear the burden of proof; no runtime check |
 | T-03 | 初始化闭包中 panic 导致 `PanicGuard` 将状态标记为 `Failed`，后续所有调用永久 panic | 中 | 闭包包含可能 panic 的代码（如越界访问、除零） | `try_call_once` 提供不 panic 的替代路径，错误时 reset 为 `Uninitialized` 可重试 |
 | T-04 | 自旋等待无超时，初始化线程被抢占时自旋线程浪费 CPU | 低 | 初始化闭包执行时间过长，或调度器延迟高 | 仅用于快速初始化场景；文档约束不建议在热路径使用 |
 | T-05 | `AtomicU8` 在目标架构上非 lock-free，内部可能使用全局锁 | 低 | 在不支持 native `AtomicU8` 的架构上运行 | 当前所有支持目标（x86_64/aarch64/riscv64/loongarch64）均为 lock-free |
@@ -222,7 +222,7 @@ core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
 | F-03 | 多线程竞争 `call_once`，CAS 失败的线程自旋等待 | 正常并发场景 | 自旋线程 CPU 占用 | 短暂 CPU 浪费，无功能影响 | 4 | `spin_loop` 提示 CPU pause；初始化完成后立即返回 |
 | F-04 | `Once` 被 `mem::forget` 泄漏，内部 `T` 不被 drop | 外部代码误用 | `T` 占用的资源不释放 | 内存或资源泄漏 | 3 | Rust 生态已知问题，不构成内存安全问题 |
 | F-05 | `try_call_once` 错误路径重置为 `Uninitialized` 后，另一线程立即 CAS 成功 | 错误恢复后立即重试 | 初始化可能被重复尝试 | 无功能影响（CAS 保证单次执行） | 4 | 正常行为，设计如此 |
-| F-06 | `AtomicStatus` 存入非法 `u8` 值导致 `transmute` 产生无效 `Status` | unsafe 代码被外部修改破坏 | 状态机逻辑异常 | 可能导致 UB 或 panic | 1 | `AtomicStatus` 封装阻止直接写入；`Status` 为 `#[repr(u8)]`，编译器验证判别值范围 |
+| F-06 | An invalid `u8` stored in `AtomicStatus` makes `Status::from_raw` hit `unreachable!` (panic) | Unsafe code corrupted by external modification | State machine logic fails | Panic instead of an invalid `Status` (no `transmute` is used) | 1 | The `AtomicStatus` wrapper prevents direct writes; `Status::from_raw` decodes via an explicit match |
 
 ## Panic 安全性
 

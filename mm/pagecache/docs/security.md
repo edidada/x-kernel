@@ -20,8 +20,7 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 2. `Folio::data()` allows only the exclusive owner of an unpublished page to
    borrow its data. Published pages are accessed through `FolioGuard::data()` or
    `FolioRead::data()` under the stable page object's own lock.
-3. `PinnedFolio::copy_to_uninit()`：锁住 pin 持有的同一稳定页对象后复制完整初始化页。
-   缓存摘除或替换不改变其分配或锁，允许继续复制原页；目标范围由独占切片限定。
+3. `PinnedFolio::copy_to_uninit()`: locks the same stable page object held by the pin and copies the full initialized page. Cache detachment or replacement does not change its allocation or lock, so the original page can still be copied; the destination is bounded by an exclusive reference to a fixed single-page array, `&mut [MaybeUninit<u8>; PAGE_SIZE_4K]`.
 
 ## 内存安全不变量
 

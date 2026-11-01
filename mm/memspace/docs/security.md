@@ -64,7 +64,7 @@ backends construct no post-populate hooks.
   - 依赖页表查询得到的物理地址可通过 direct map 转成有效内核地址。
   - 依赖调用方保证目标用户地址范围已通过 VMA/permission 检查。
 
-`src/vma.rs`、`src/fault.rs` 和当前 backend metadata 代码不引入新的 `unsafe`。
+`src/vma.rs` and `src/fault.rs` introduce no `unsafe`; `src/backend/mod.rs` (`alloc_frame` zero-fills frames via `write_bytes`) and `src/backend/private.rs` (`copy_private_page` via `copy_nonoverlapping`) contain `unsafe` blocks.
 
 ## 内存安全不变量
 
@@ -153,13 +153,13 @@ backends construct no post-populate hooks.
    - 防护：释放 detached frame 前显式完成 `PageTableMut::finish()`。
 
 7. 调度切换时过早把当前 CPU 从旧 mm 的目标集合移除。
-   - 防护：切入路径先把 CPU 发布到新 mm，待硬件页表切换完成后再从旧 mm 清除。
+   - Mitigation: the switch path publishes the CPU to the new mm before activating its root; old-mm CPU bits are retained conservatively rather than cleared at each switch.
 
-7. relocation source retirement误用 ordinary unmap。
+8. Relocation source retirement misuses ordinary unmap.
    - 防护：successful move uses metadata-only retirement after destination
      install and PTE transfer.
 
-8. mm object observer 阻止退出清理或重新激活已 teardown 的地址空间。
+9. An mm object observer blocks exit cleanup or reactivates a torn-down address space.
    - 防护：只有 `MmUserHandle` 增加 active user 计数；`MmPin` 只 pin 对象，且
      upgrade 与最后一个 release 通过单原子状态互斥。
 

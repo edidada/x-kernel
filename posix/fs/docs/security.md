@@ -63,7 +63,7 @@ kfd resources / kvfs / device and pipe implementations
 
 | 位置 | 调用路径 | 用途 | 不变量 / 安全理由 |
 |------|----------|------|-------------------|
-| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
+| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> iterate_dir sink -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | The record length is computed and `remaining_space >= len` is checked before writing; `entry_ptr` lies within the allocated range of the `Vec`; the record length is rounded up to `align_of::<linux_dirent64>()`, but the byte buffer does not guarantee struct alignment at arbitrary offsets, so the header is written with `write_unaligned`; the name copy length comes from `name.as_bytes().len()`; a trailing NUL is written; after writing, `offset` only advances within the checked range. |
 | `ioctl.rs::FiemapHeader` 的 `UserRead`/`UserWrite` 实现 | `sys_ioctl(FS_IOC_FIEMAP)` | 复制 Linux FIEMAP header | `repr(C)` 结构仅含整数，末尾显式 `reserved` 覆盖 ABI 对齐且任意 bit pattern 有效；每个字节都属于已初始化字段 |
 | `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
 | `ioctl.rs::Fsxattr` 的 `UserRead`/`UserWrite` 实现 | 文件属性 ioctl | 复制文件属性 ABI | `repr(C)` 的整数和显式字节数组覆盖全部字段；输出时保留字段清零 |
@@ -265,7 +265,7 @@ argument error rather than a later `EFAULT`/`EBADF`:
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 路径读取失败 | 用户指针无效或字符串不可访问 | syscall 返回地址错误相关 `KError` | 当前操作失败 | 3 | `load_string` 失败直接传播 |
-| F-02 | fd 类型不匹配 | 对目录执行文件写、对非 pipe 执行 pipe 操作 | 返回 `BadFileDescriptor`、`InvalidInput` 或底层错误 | 应用收到 Linux errno 等价错误 | 3 | 使用 `get_file_like_as` / downcast 校验 |
+| F-02 | fd 类型不匹配 | 对目录执行文件写、对非 pipe 执行 pipe 操作 | 返回 `BadFileDescriptor`、`InvalidInput` 或底层错误 | 应用收到 Linux errno 等价错误 | 3 | Use `get_file` followed by object type checks (for example `is_dir`) and downcast validation |
 | F-03 | 用户输出缓冲区太小 | `getdents64` 一条记录也放不下，`getcwd` size 不足 | 返回 `InvalidInput` 或 `OutOfRange` | 调用方可扩大缓冲区重试 | 4 | 写入前计算长度 |
 | F-04 | 设备 open 失败 | 设备 file operations 拒绝 open 或初始化失败 | open 返回错误 | 终端相关程序无法打开目标设备 | 3 | 错误传播；设备语义由对应设备实现维护 |
 | F-05 | `fallocate` 后端写零返回 0 | 底层文件系统无法前进写入 | 返回 `WriteZero` | 操作失败但文件不应继续无限循环 | 2 | `write_zeros_range` 检测 0 字节写 |
@@ -316,7 +316,7 @@ argument error rather than a later `EFAULT`/`EBADF`:
    LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
 3. 文件锁是 advisory 锁；不阻止未参与加锁的读写，不实现 lease 或网络锁协议。
-4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
+4. `copy_file_range` regular-file type, same-inode overlap and cross-superblock admission checks are performed by the KVFS transfer layer; there is no zero-copy path.
 5. `mount` 支持已注册 nodev filesystem、已接入 `get_tree_bdev()` 的 block-backed type、
    非递归 bind、普通只读 remount、bind remount，以及普通新挂载的一页 opaque mount data
    转交；支持对 mount root 幂等执行 `MS_PRIVATE[|MS_REC]` 和 `MS_SLAVE[|MS_REC]`（无共享

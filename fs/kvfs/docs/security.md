@@ -349,7 +349,7 @@ is validated by the VFS in two phases — pre-hook against the caller's
 proposed flags (gating hook execution) and post-hook against the
 data-adjusted final flags (gating publication, covering data-level
 `ro`/`rw` adjustments).
-canonical device 的只读状态。显式 filesystem
+显式 filesystem
 sync 和全局 Weak registry sync snapshot
 也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。
 `get_tree_bdev` 在调用 filesystem fill-super 前拒绝对 canonical read-only block device 的
@@ -378,8 +378,8 @@ boundaries. Writeback callbacks must not upgrade to invalidate exclusive protect
 
 所有 namespace lock 都是 sleepable lock。mount tree 操作先取 mount-namespace registry
 mutex；其后全局顺序为 superblock topology、父目录、子目录、非目录 inode，最后才是
-dentry cache/location。cross-directory 由 parent dentry
-identity 决定，父目录锁按 ancestor-first 顺序；互不为祖先时先锁 source parent。目录
+dentry cache/location。Cross-directory ordering is decided by parent dentry identity: parent locks are taken ancestor-first, and unrelated parents are ordered by `Dentry::namespace_lock_key()` (ancestor inode pointer chain, then pointer value).
+目录
 inode 依赖单 alias 不变量，非目录 alias 对应的 inode lock 按 identity 去重并按指针值排序。
 mount topology lock 始终在相关 inode namespace lock 之后获取。
 
@@ -535,7 +535,7 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
 - `FsContext` 能承载 binary mountdata bytes，但不负责具体 representation 的解析或
   filesystem-specific remount parsing。
 
-### Buffered read 与预读发布
+### Mount propagation limits
 
 - mount 传播只覆盖 `MS_PRIVATE`/`MS_SLAVE`（无共享传播组，二者行为等价）与非递归
   bind；`MS_SHARED`/`MS_UNBINDABLE` 及递归 bind 挂载子树的复制仍返回 `EINVAL`，

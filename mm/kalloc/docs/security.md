@@ -102,7 +102,7 @@ per-CPU guard 保护 metadata 并发，但不能修复 caller 伪造的 pointer�
 - object size/alignment 足以容纳 link；编译期断言验证 link 不超过最小 8 字节 class；
 - list mutation 期间 local IRQ 保持关闭，远程 CPU 不修改本 CPU list。
 
-crate-private `AllocLocalOwner` 持有 `IrqSave` 并作为所有 PCP/slab cache 操作的必需
+crate-private `AllocLocalOwner` 持有 `NoPreemptIrqSave` 并作为所有 PCP/slab cache 操作的必需
 参数。cache 模块只在 owner 的可变借用范围内构造临时引用，不把引用返回给调用者；
 因此 raw per-CPU 可变访问集中在两个 owner-backed helper。该协议不支持 NMI 进入
 allocator，NMI 路径必须使用预分配存储。
@@ -140,12 +140,9 @@ adapters may omit count only under their explicit length-one allocation contract
 
 位置：`src/lib.rs` 中 `with_current_usage_counters()` 和 `usage_snapshot()`。
 
-主要操作：通过 `current_ref_raw()` / `remote_ref_raw()` 取得 per-CPU usage slot 的共享
-引用，并从 allocation/free 热路径或跨 CPU 汇总路径访问其中的 atomic counters。
+Main operations: obtain a shared reference to the per-CPU usage slot through `kcpu_slot::area()` and `PERCPU_USAGE_COUNTERS.shared_at()`, and access its atomic counters from the allocation/free hot paths or the cross-CPU aggregation path.
 
-依赖不变量：主 CPU 在 allocator 启用前已经初始化全部 per-CPU area；current-CPU
-引用解析期间由 `NoPreempt` 固定执行 CPU；remote index 小于 `percpu_area_num()`；所有
-并发访问只通过 atomic 字段和共享引用完成，且 runtime 不并发重置 per-CPU area。
+Relied-on invariants: while the current-CPU area is resolved, `NoPreempt` pins the executing CPU; an unpublished area is skipped (early-boot accounting is dropped, and `usage_snapshot()` skips it) rather than assumed initialized; `usage_snapshot()` iterates CPU indexes below `kbuild_config::NR_CPUS`; areas are published monotonically and never unpublished; all concurrent access goes through atomic fields and shared references, and the runtime does not concurrently reset per-CPU areas.
 
 ## 内存安全不变量
 

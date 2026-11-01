@@ -159,7 +159,7 @@ injection remains private; raw ownership recovery has its separate unsafe contra
 ## FMEA
 
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- | --- | --- | --- |
 | F-01 | 分配失败 | 内存不足 | 输入值释放，无 owner 返回 | 调用方决定传播或重试 | 3 | 错误返回；局部失败注入验证析构 |
 | F-02 | VFS 上下文初始化失败 | 内存不足 | 无上下文发布、无锁安装 | 当前 lock/flock 返回 ENOMEM | 3 | Once 重置，可重试；成功后复用 |
 | F-03 | 值构造或析构自身失败 | T 的外部逻辑 | 不由 KBox 转换成 KError | 仍可能内核 panic | 2 | 明确失败保证仅覆盖对象存储申请，不承诺完整 OOM 安全 |
