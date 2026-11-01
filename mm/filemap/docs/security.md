@@ -56,7 +56,7 @@ to `posix/mm`.
 
 - `FileSharedRuntime` and `FilePrivateRuntime` live as VMA runtime references.
 - Both file runtimes keep an `Arc<VfsFile>` and reach the source only through
-  `VfsFile::mapping()`; neither runtime keeps a direct page-cache reference.
+  `VfsFile::mapping()`; `FilePrivateRuntime` additionally retains `MappedFolio` pins in `file_pages` for mapped read-only file pages.
 - `SharedFileSourceAdapter` keeps an `AddressSpaceViewGuard`; dropping the
   runtime unregisters the object view. The guard weakly references the owning
   `AddressSpace` and is not a second content owner.
@@ -92,7 +92,7 @@ to `posix/mm`.
 - Advanced Linux behavior such as DAX, THP, readahead, reclaim, swap, memcg,
   and NUMA is out of scope.
 
-## 文件缓存引用与匿名页隔离
+## File Cache References and Anonymous Page Isolation
 
 - 文件 pin 永不授予用户写权限，mprotect 升级也必须再次缺页并执行 COW。
 - 页缓存分配寿命由 filemap 持有的 pin 保证；匿名帧释放器不接收文件页。
