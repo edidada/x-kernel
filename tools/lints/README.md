@@ -141,7 +141,9 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   (for a method, `arg` counts the receiver); those of a `via_field` call are
   the `ref` records with that `field`. Values are followed through locals
   assigned once, references and casts.
-- *Paths* are repository-relative. Dependencies are written as
+- *Paths* are repository-relative, for dependency crates too (`xkmake` passes
+  the repository root in `XKERNEL_FACTS_ROOT`, since Cargo compiles registry
+  and git crates from their own directories). Dependencies are written as
   `crates/<name>-<version>/…` (crates.io), `git/<checkout>/<rev>/…` (git) and
   `rust/library/<crate>/…` (standard library).
 - *MIR* is taken after drop elaboration and before optimisation, so no call

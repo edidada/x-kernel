@@ -255,6 +255,13 @@ records are described in `tools/lints/README.md`.
    totals), and `status.json` last: `ready`, `partial` or `failed`, with
    reason `build` or `exporter`.
 
+During an export the scan process also gets
+`XKERNEL_FACTS_ROOT=<repository root>`: Cargo compiles crates.io and git
+dependencies in their own package directories and passes relative paths, so
+the exporter uses this root to write paths as repository-relative or as
+`crates/<name>-<version>/…`. The variable is not registered as an
+environment dependency and does not affect the cache.
+
 Without `--facts-out` the run leaves `XKERNEL_FACTS` unchanged: a caller
 that pins it to `1` (the whole CI dylint stage) keeps Cargo's cache in later
 scans and only writes extra facts files.

@@ -19,7 +19,7 @@ use crate::{
     context::{BuildContext, workspace_root},
     error::{Error, IoResultExt, Result},
     facts::{
-        DEPS_ENV, FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG,
+        DEPS_ENV, FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, ROOT_ENV,
         SCAN_RUSTFLAGS, WRAPPER_TARGET_ENV,
     },
     hygiene::{DYLINT_VERSION, ensure_dylint_tools},
@@ -239,6 +239,11 @@ fn build_and_scan(
         scan.env(FACTS_ENV, "1");
     }
     let exporting = args.facts_out.is_some() || env_is_one(FACTS_ENV);
+    if exporting {
+        // Dependencies are compiled from their own package directories;
+        // the exporter writes paths under the repository relative to it.
+        scan.env(ROOT_ENV, &context.workspace_root);
+    }
     if exporting && facts_deps(args) && !context.dry_run {
         // Cargo fingerprints the wrapper, so a caller that exports
         // dependencies keeps doing so for every scan of a target directory.

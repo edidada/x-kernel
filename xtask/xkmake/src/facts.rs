@@ -59,6 +59,9 @@ pub(crate) const FACTS_ENV: &str = "XKERNEL_FACTS";
 /// Exports dependency crates too when `1`; like [`FACTS_ENV`], keep it fixed
 /// for every scan that shares a target directory.
 pub(crate) const DEPS_ENV: &str = "XKERNEL_FACTS_DEPS";
+/// Repository root for the exporter, which writes paths under it relative
+/// to it (dependencies compile in their own package directories).
+pub(crate) const ROOT_ENV: &str = "XKERNEL_FACTS_ROOT";
 /// Kernel target triple; set for Cargo when `xkmake` is its rustc wrapper.
 pub(crate) const WRAPPER_TARGET_ENV: &str = "XKMAKE_FACTS_WRAPPER_TARGET";
 /// Read by the exporter: marks a crate as a dependency.

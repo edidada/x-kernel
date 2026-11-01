@@ -60,6 +60,10 @@ use self::json::Record;
 pub(crate) const SCHEMA: &str = "xkernel-facts/0.3";
 /// Enables the export when set to `1`.
 pub(crate) const ENABLE_ENV: &str = "XKERNEL_FACTS";
+/// Repository root, set by `xkmake` for every scan; source paths under it
+/// are written relative to it. Without it the working directory is used.
+/// Not tracked: it only shapes how paths are written.
+const ROOT_ENV: &str = "XKERNEL_FACTS_ROOT";
 /// Set to `dep` by `xkmake`'s rustc wrapper for dependency crates, which
 /// reach the driver only in a dependency scan (`--facts-deps`).
 const KIND_ENV: &str = "XKERNEL_FACTS_KIND";
@@ -120,8 +124,11 @@ impl<'tcx> LateLintPass<'tcx> for FactsExport {
             .and_then(|name| name.strip_suffix('.'))
             .unwrap_or_default()
             .to_owned();
-        let root = std::env::current_dir().unwrap_or_default();
-        let mut exporter = Exporter::new(tcx, root);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        // Cargo runs rustc in the workspace root for workspace members but in
+        // the package directory for registry and git dependencies.
+        let root = std::env::var_os(ROOT_ENV).map_or_else(|| cwd.clone(), PathBuf::from);
+        let mut exporter = Exporter::new(tcx, cwd, root);
         exporter.header(&stem);
         exporter.items();
         exporter.bodies();
@@ -169,6 +176,8 @@ struct Place {
 
 struct Exporter<'tcx> {
     tcx: TyCtxt<'tcx>,
+    /// rustc's working directory, against which relative paths resolve.
+    cwd: PathBuf,
     root: PathBuf,
     buf: String,
     counts: HashMap<&'static str, u64>,
@@ -180,9 +189,10 @@ struct Exporter<'tcx> {
 }
 
 impl<'tcx> Exporter<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, root: PathBuf) -> Self {
+    fn new(tcx: TyCtxt<'tcx>, cwd: PathBuf, root: PathBuf) -> Self {
         Self {
             tcx,
+            cwd,
             root,
             buf: String::with_capacity(1 << 20),
             counts: HashMap::new(),
@@ -269,7 +279,7 @@ impl<'tcx> Exporter<'tcx> {
     fn file_of(&self, name: &FileName) -> String {
         match name {
             FileName::Real(real) => match real.local_path() {
-                Some(path) => paths::display(path, &self.root),
+                Some(path) => paths::display(path, &self.cwd, &self.root),
                 None => paths::display_str(&name.prefer_local_unconditionally().to_string()),
             },
             other => paths::display_str(&other.prefer_local_unconditionally().to_string()),
