@@ -17,6 +17,8 @@ src/
 ├── coverage.rs   unittest 覆盖率提取与报告生成
 ├── doc.rs        workspace rustdoc 编排
 ├── hygiene.rs    仓库卫生工具编排
+├── dylint.rs     Dylint lint 库构建与内核扫描
+├── facts.rs      Dylint 扫描导出的代码事实打包
 ├── image_metadata.rs  内嵌构建信息与 Build ID 的 ELF finalize
 ├── qemu.rs       平台启动策略
 ├── x86.rs        LinuxBoot/UEFI 启动介质
@@ -222,6 +224,31 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
 target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
 
+### Dylint Facts
+
+`make dylint FACTS_OUT=<dir>`（`xkmake dylint --facts-out <dir>`）在普通
+Dylint 扫描的同时导出代码事实并打包，格式与记录说明见
+`tools/lints/README.md`。
+
+1. 扫描开始前清空 `<dir>/crates` 与旧 manifest，写入 `status.json`
+   （`running`）；lint 库构建失败等扫描未开始的错误写为 `failed`/`build`。
+2. 扫描进程设 `XKERNEL_FACTS=1`，并给 Cargo 加
+   `--message-format=json-render-diagnostics`：诊断照常渲染到 stderr，
+   JSON 消息写到 `<target>/dylint/facts-messages.jsonl`。扫描失败时这个文件
+   也保留，用来打包失败前已检查的 crate。
+3. 以 `cargo metadata --no-deps` 的 `workspace_members` 为准，从
+   `compiler-artifact` 消息（含 `fresh` 的单元）取每个单元的元数据路径，
+   推出 lint 写在旁边的 `<stem>.facts.jsonl`；构建脚本跳过。
+4. 逐个校验 header（schema、stem）与末行 `counts`，zstd 压缩后写入
+   `crates/`，记下 sha256 与记录数；缺失或无效的列入 `missing`。
+5. 写 `manifest.json`（commit、merge base、target、平台、profile、`.config`
+   的 sha256、feature、扫描 rustflags、toolchain、rustc 版本、导出器源码
+   摘要与 Dylint 版本、crate 列表与合计），最后写 `status.json`：
+   `ready`、`partial` 或 `failed`，原因为 `build` 或 `exporter`。
+
+没有 `--facts-out` 时不改动 `XKERNEL_FACTS`：外部把它固定为 `1` 的调用方
+（CI 的整个 dylint 阶段）在后续扫描里保留 Cargo 缓存，只多写事实文件。
+
 ## 设计决策
 
 - Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。
@@ -252,6 +279,10 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
   解析逻辑，也不把其大型依赖树链接进 XKMake。
 - Rust 源文件 header 由固定版本的外部 licensure 按仓库配置检查和修复；
   XKMake 只负责确定文件集合、分批调用和传播失败状态。
+- 代码事实由 lint 库在 rustc 内导出，XKMake 只负责选出本次构建的单元、
+  校验、压缩和写 manifest；选单元依靠 Cargo 的 JSON 消息而不是扫描目录，
+  因此同一 target 目录里其他配置留下的事实文件不会混入。导出开关是固定值
+  `1` 的环境变量，避免开关值变化让 Cargo 重查全部 crate。
 - guest IP 和 gateway 当前属于构建输入，因为现有网络栈通过
   `option_env!` 编译它们；后续应迁移为内核命令行参数。
 
