@@ -14,17 +14,17 @@ that source owner through `PmuInterruptIf`. These task-context operations own
 global PMU retirement/republication in the platform provider, not HAL. The local
 NMI operation and terminal stop remain separate APIs with different lifetimes.
 
-## 定位
+## Positioning
 
-`khal::irq` 是 IRQ trap-entry adapter。通用 IRQ core
-位于 `kirq`；外部调用方不应再通过 `khal::irq::*` 使用 generic IRQ API。
+`khal::irq` is the IRQ trap-entry adapter. The generic IRQ core
+lives in `kirq`; external callers should no longer use the generic IRQ API through `khal::irq::*`.
 
-本模块现在只拥有 trap-entry 相关职责：
+This module now owns only trap-entry responsibilities:
 
-- 注册 `IRQ` / `NMI` trap handler；
-- 在进入 `kirq` 前建立 `NoPreempt` 执行约束。
+- registering the `IRQ` / `NMI` trap handlers;
+- establishing the `NoPreempt` execution constraint before entering `kirq`.
 
-## 范围
+## Scope
 
 ```text
 arch/khal/src/
@@ -40,7 +40,7 @@ hooks and `IntrManagerIf` belong to `arch/kirq`. `khal::nmi` is a
 mechanism-neutral facade; mechanism details belong to `kplat::nm_irq` and its
 platform implementations.
 
-## 架构
+## Architecture
 
 ```text
 kcpu trap dispatch
@@ -52,9 +52,9 @@ kcpu trap dispatch
             `-- kirq::{handle_irq, handle_nmi}
 ```
 
-普通 IRQ API 调用路径应直接进入 `kirq`，不经过 `khal::irq` facade。
+Ordinary IRQ API call paths should go directly into `kirq`, not through the `khal::irq` facade.
 
-NMI 机制 facade：
+NMI mechanism facade:
 
 ```text
 watchdog / perf 消费者
@@ -145,7 +145,7 @@ exists. Early console and PMU discovery use allocation-free
 - `khal::nmi::mode()`：返回 `NmiMode::{Pseudo, Hardware, None}`，供消费者
   （如 watchdog）判断是否启用依赖 NMI 的功能。
 
-## 并发模型
+## Concurrency model
 
 `khal::irq` adapter 只有短生命周期的 `NoPreempt` guard，不持有全局 IRQ state。
 IRQ shared-state locking, NMI RCU ownership and lifecycle hooks are maintained
@@ -160,24 +160,24 @@ scheduler checkpoint under the entry IRQ mask, not an ordinary preempt-enable
 operation. Outer guards still exclude scheduling. The marker resumes on the
 interrupted task's stack; dedicated NMI dispatch never invokes this checkpoint.
 
-## 设计决策
+## Design decisions
 
-### 为什么保留 `khal::irq`
+### Why `khal::irq` is kept
 
-trap handler registration 依赖 `kcpu::excp::register_trap_handler`，并且进入
-`kirq` 前需要由 HAL adapter 建立 `NoPreempt` 执行约束。因此 `khal::irq`
-继续存在，但不再承载 generic IRQ API 或 x86 MSI-X vector helper。
+Trap handler registration depends on `kcpu::excp::register_trap_handler`, and the HAL adapter must establish the `NoPreempt`
+execution constraint before entering `kirq`. Therefore `khal::irq`
+remains, but no longer carries the generic IRQ API or the x86 MSI-X vector helper.
 
-### 为什么 x86 MSI-X helper 不在 `khal::irq`
+### Why the x86 MSI-X helper is not in `khal::irq`
 
 MSI-X vector allocation、APIC destination selection 和 MSI message composition
-属于 IRQ core/backend 边界。当前由 `kirq::MsiBackendIf` 定义 backend contract，
-由 `drivers/platform/x86-apic` 实现；`khal::irq` 不再暴露 APIC id 或裸 CPU vector。
+belong to the IRQ core/backend boundary. Currently `kirq::MsiBackendIf` defines the backend contract,
+implemented by `arch/x86-apic`; `khal::irq` no longer exposes APIC ids or raw CPU vectors.
 
-### 为什么 `IPI_IRQ` 不进入 `kirq`
+### Why `IPI_IRQ` does not enter `kirq`
 
-`IPI_IRQ` 来自 Kconfig 生成常量。`kirq` 必须保持不依赖 `kbuild_config`，所以
-IPI 调用方直接使用 `kbuild_config::IPI_IRQ` 并调用 `kirq::notify_cpu()`。
+`IPI_IRQ` is a constant generated from Kconfig. `kirq` must stay independent of `kbuild_config`, so
+IPI callers use `kbuild_config::IPI_IRQ` directly and call `kirq::notify_cpu()`.
 
 ## Crate-level guest test layout
 
