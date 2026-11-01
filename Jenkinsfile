@@ -973,14 +973,16 @@ make olddefconfig
 grep -qx 'KFEAT_LOCK_STAT=y' .config
 make dylint
 """ : ''
-    // XKERNEL_FACTS stays 1 for every scan of the stage: rustc tracks it, so
-    // switching it between scans would re-check the workspace crates. Only the
-    // first scan packs the facts. A failure before that scan still leaves a
-    // status for xreview.
+    // XKERNEL_FACTS and XKERNEL_FACTS_DEPS stay 1 for every scan of the stage:
+    // rustc tracks the first and Cargo fingerprints the rustc wrapper the
+    // second installs, so switching them between scans would re-check the
+    // crates. Only the first scan packs the facts, dependencies included. A
+    // failure before that scan still leaves a status for xreview.
     withCleanSourceWorkspace("dylint-${platform}") {
         withEnv([
             "TARGET_DIR=${dylintTargetDir}",
             'XKERNEL_FACTS=1',
+            'XKERNEL_FACTS_DEPS=1',
             "_CI_FACTS_DIR=${factsDir}",
             "_CI_FACTS_BASE_REF=${factsBaseRef}",
         ]) {

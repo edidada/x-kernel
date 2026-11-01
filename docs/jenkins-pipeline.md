@@ -175,8 +175,9 @@ aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STA
 两个 Dylint 分支的第一次普通配置扫描同时导出代码事实，供 xreview 的代码索引
 使用（格式见 `tools/lints/README.md`）：该次扫描使用
 `make dylint FACTS_OUT=<leg 根目录>/artifacts/facts/<platform>`，并传入本次构建的
-commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`，
-后续 unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
+commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`
+与 `XKERNEL_FACTS_DEPS=1`（同时导出为内核 target 构建的依赖 crate），后续
+unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
 `artifacts/facts/` 随 leg 输出 stash，并在 Post 阶段无论构建成败都归档，
 Jenkins 制品地址为 `artifact/artifacts/facts/<platform>/`（`status.json`、
 `manifest.json`、`crates/`）。`status.json` 区分 `ready`、`partial`、`failed`
