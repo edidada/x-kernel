@@ -152,7 +152,7 @@ Unset ──QUEUE_SEL/QUEUE_NUM/QUEUE_DESC|AVAIL|USED──> Programmed ──QU
 ### 队列数据路径
 
 1. 设备实现从 available ring 弹出 head 描述符索引。
-2. 遍历描述符链（`VIRQ_DESC_F_NEXT` / `VIRQ_DESC_F_INDIRECT`），构造
+2. 遍历描述符链（`VIRTQ_DESC_F_NEXT` / `VIRTQ_DESC_F_INDIRECT`），构造
    `DescriptorChain`。
 3. 按设备语义读写描述符缓冲。
 4. 通过 `complete_with_memory` 把 head 与写入长度写入 used ring 并推进 used idx。

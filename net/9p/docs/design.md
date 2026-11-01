@@ -65,7 +65,7 @@ attach / complete walk
           v
       unopened ──TLOPEN──► opened
           │                   │
-          ├──TREMOVE──► consumed
+          ├──TREMOVE (from unopened or opened)──► consumed
           └──── final Arc drop ┴──► TCLUNK ──► released
 ```
 

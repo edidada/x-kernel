@@ -94,8 +94,7 @@ IRQ/preempt guard 运行环境；每例独立构造设备和缓冲区，正常�
   轮询路径；当前 `VirtioBlkDevice` 会用 `deferred_pending` 位防御性记录。
 - **访客内存通过 `GuestDma` 注入**：`GuestPhysAddr` 先换算为设备内偏移，再交给
   `DmaGuestMemory` 读写；不依赖宿主直接映射假设。
-- **中断注入由 `IrqSender` 完成**：目标 vCPU 与 IRQ 号由调用方在构造时决定
-  （默认 slot 1：base `0x0a00_1000`、IRQ 49）。
+- Interrupt injection is done by `IrqSender`: the IRQ number is fixed in `bus.rs` (slot 1: base `0x0a00_1000`, IRQ 49), and the target vCPU is the `vcpu_id` of the vCPU that performed the MMIO write (plain `write` uses vCPU 0).
 - **不睡眠、不依赖调度器**：可在启动期构造并注册。
 
 ## 状态机
