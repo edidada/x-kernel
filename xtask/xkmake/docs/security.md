@@ -79,6 +79,12 @@ exporter source digest (`exporter.source_sha256`), and consumers decide to
 trust only the digest of a trusted tree (the target branch). Facts are a
 review aid only, never a gate.
 
+`--facts-deps` 让 Cargo 以 `RUSTC_WRAPPER` 调用 XKMake 自身。包装器只在
+`XKMAKE_FACTS_WRAPPER_TARGET` 存在时启用，用 `exec` 以结构化参数调用 Cargo
+给出的 rustc 或 Dylint 的 `RUSTC_WORKSPACE_WRAPPER`，不经 shell；对依赖只
+追加 `--force-warn facts_export`，不改动其他参数，依赖的其他 lint 仍被
+`--cap-lints allow` 压住。
+
 `symbolize` 只调用 `llvm-addr2line`/`addr2line`（`--tool` 可显式指定），
 以结构化参数传递 ELF 与地址；日志内容仅被读取用于提取地址，工具不执行
 日志中的任何内容。`kernel.debug.elf` 未构建时工具明确报错，不会回退到

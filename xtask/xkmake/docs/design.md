@@ -259,6 +259,16 @@ Without `--facts-out` the run leaves `XKERNEL_FACTS` unchanged: a caller
 that pins it to `1` (the whole CI dylint stage) keeps Cargo's cache in later
 scans and only writes extra facts files.
 
+`--facts-deps`（或 `XKERNEL_FACTS_DEPS=1`）同时导出依赖 crate：扫描时把
+XKMake 自己设为 Cargo 的 `RUSTC_WRAPPER`（`XKMAKE_FACTS_WRAPPER_TARGET`
+给出内核 target）。`main` 在解析命令行之前识别这个环境变量，以包装器身份
+运行：workspace 成员（第一个参数是 Dylint 的 `RUSTC_WORKSPACE_WRAPPER`）
+和 host crate 原样 `exec`；为内核 target 编译的依赖改由 Dylint driver 编译，
+追加 `--force-warn facts_export` 并设 `XKERNEL_FACTS_KIND=dep`。Cargo 给依赖
+加的 `--cap-lints allow` 照旧压住其他 lint，只有导出 lint 被强制打开。
+打包时，路径落在内核 target 目录下的非成员单元也作为 `dep` crate 收入，
+manifest 写 `deps: true`，crate 条目带依赖的 feature。
+
 ## 设计决策
 
 - Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。

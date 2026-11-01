@@ -19,7 +19,8 @@ use crate::{
     context::{BuildContext, workspace_root},
     error::{Error, IoResultExt, Result},
     facts::{
-        FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, SCAN_RUSTFLAGS,
+        DEPS_ENV, FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG,
+        SCAN_RUSTFLAGS, WRAPPER_TARGET_ENV,
     },
     hygiene::{DYLINT_VERSION, ensure_dylint_tools},
     process::Process,
@@ -70,6 +71,7 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
                 commit: args.facts_commit.clone(),
                 base: args.facts_base.clone(),
             },
+            facts_deps(args),
         )?),
         None => None,
     };
@@ -123,6 +125,15 @@ fn probe_tools(
         Ok(host)
     })?;
     Ok((toolchain, host))
+}
+
+/// Dependency crates are exported: `--facts-deps` or `XKERNEL_FACTS_DEPS=1`.
+fn facts_deps(args: &DylintArgs) -> bool {
+    args.facts_deps || env_is_one(DEPS_ENV)
+}
+
+fn env_is_one(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "1")
 }
 
 /// Failure of a Dylint run: before the kernel scan started, or of the scan.
@@ -226,6 +237,19 @@ fn build_and_scan(
         // Without `--facts-out` the variable passes through unchanged, so a
         // caller that keeps it at `1` for every scan keeps Cargo's cache.
         scan.env(FACTS_ENV, "1");
+    }
+    let exporting = args.facts_out.is_some() || env_is_one(FACTS_ENV);
+    if exporting && facts_deps(args) && !context.dry_run {
+        // Cargo fingerprints the wrapper, so a caller that exports
+        // dependencies keeps doing so for every scan of a target directory.
+        let wrapper = std::env::current_exe().map_err(|source| {
+            ScanError::Setup(Error::Io {
+                path: PathBuf::from("xkmake"),
+                source,
+            })
+        })?;
+        scan.env("RUSTC_WRAPPER", wrapper)
+            .env(WRAPPER_TARGET_ENV, context.config.target());
     }
     match facts {
         Some(facts) => scan.run_with_stdout(facts.messages_path()),

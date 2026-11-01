@@ -71,6 +71,13 @@ crates/<stem>.jsonl.zst  one zstd-compressed JSON-lines file per crate
   are never picked up.
 - **Scope.** Workspace members, in the configuration of the scan: the
   selected `.config`, its Cargo features and `--cfg unittest`.
+- **Dependencies.** `FACTS_DEPS=y` (`--facts-deps`, or
+  `XKERNEL_FACTS_DEPS=1` for every scan of a target directory) also exports
+  the crates.io, git and vendored dependencies built for the kernel target,
+  with `kind: dep`, their version and features. Cargo then runs `xkmake` as
+  its rustc wrapper, which sends those crates through the Dylint driver with
+  only the export lint enabled; host crates (build scripts, proc macros) are
+  not exported. Turning it on or off rebuilds the dependencies once.
 - **Status.** `ready`: every unit has facts. `partial` with reason `build`:
   the scan failed (build error or a lint error) and the units checked
   before it stopped are packed. `partial` with reason `exporter`: the scan
