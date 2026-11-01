@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! `facts_export`: writes a per-crate code-facts file (items, MIR call edges,
-//! functions used as values, trait impls, kiface symbols, atomic and unsafe
-//! sites) for the review code index.
+//! `facts_export`: writes a per-crate code-facts file (items with field
+//! types, MIR call edges, functions used as values, uses of statics, consts,
+//! variants and fields, trait impls, kiface symbols, atomic and unsafe sites)
+//! for the review code index.
 //!
 //! The pass emits no diagnostics and does nothing unless the environment
 //! variable [`ENABLE_ENV`] is `1`. Then each crate the driver checks writes
@@ -27,16 +28,22 @@
 //! optimised MIR with the inlined calls recovered from its inlined source
 //! scopes.
 //!
+//! Dependency crates go through the driver only in a dependency scan
+//! (`xkmake dylint --facts-deps`), where `xkmake` wraps rustc and marks them
+//! with `XKERNEL_FACTS_KIND=dep`.
+//!
 //! The record format is described in `tools/lints/README.md`; its version
 //! is [`SCHEMA`].
 
 mod bodies;
+mod flow;
 mod items;
 mod json;
 mod paths;
+mod uses;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write as _,
     path::{Path, PathBuf},
@@ -50,9 +57,12 @@ use rustc_span::{ExpnKind, FileName, Span, Symbol};
 use self::json::Record;
 
 /// Version of the facts record format.
-pub(crate) const SCHEMA: &str = "xkernel-facts/0.2";
+pub(crate) const SCHEMA: &str = "xkernel-facts/0.3";
 /// Enables the export when set to `1`.
 pub(crate) const ENABLE_ENV: &str = "XKERNEL_FACTS";
+/// Set to `dep` by `xkmake`'s rustc wrapper for dependency crates, which
+/// reach the driver only in a dependency scan (`--facts-deps`).
+const KIND_ENV: &str = "XKERNEL_FACTS_KIND";
 /// Extension of a crate's facts file, after its stem.
 const FILE_EXTENSION: &str = "facts.jsonl";
 
@@ -165,6 +175,8 @@ struct Exporter<'tcx> {
     /// User-written `unsafe` blocks by typeck root (call-site spans), for
     /// the `in_unsafe` flag of calls.
     unsafe_blocks: HashMap<LocalDefId, Vec<Span>>,
+    /// `ref` records of the current body, by (target, line).
+    refs_seen: HashSet<(DefId, u64)>,
 }
 
 impl<'tcx> Exporter<'tcx> {
@@ -175,6 +187,7 @@ impl<'tcx> Exporter<'tcx> {
             buf: String::with_capacity(1 << 20),
             counts: HashMap::new(),
             unsafe_blocks: HashMap::new(),
+            refs_seen: HashSet::new(),
         }
     }
 
@@ -206,6 +219,10 @@ impl<'tcx> Exporter<'tcx> {
         // Cargo passes the package identity to every rustc it runs.
         let package = std::env::var("CARGO_PKG_NAME").ok();
         let version = std::env::var("CARGO_PKG_VERSION").ok();
+        let kind = match std::env::var(KIND_ENV).as_deref() {
+            Ok("dep") => "dep",
+            _ => "workspace",
+        };
         let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
         let types: Vec<String> = tcx.crate_types().iter().map(|t| format!("{t:?}")).collect();
         Record::new(&mut self.buf, "crate")
@@ -218,7 +235,7 @@ impl<'tcx> Exporter<'tcx> {
             .str("stem", stem)
             .opt("package", package.as_deref())
             .opt("version", version.as_deref())
-            .str("kind", "workspace")
+            .str("kind", kind)
             .str("target", &target)
             .str("toolchain", &toolchain)
             .str(
@@ -316,6 +333,17 @@ impl<'tcx> Exporter<'tcx> {
 
     /// Writes where `def_id` is defined, as `callee_file` / `callee_line`.
     fn def_place<'a>(&self, record: Record<'a>, def_id: DefId) -> Record<'a> {
+        self.def_place_as(record, def_id, "callee_file", "callee_line")
+    }
+
+    /// Writes where `def_id` is defined under the given keys.
+    fn def_place_as<'a>(
+        &self,
+        record: Record<'a>,
+        def_id: DefId,
+        file_key: &str,
+        line_key: &str,
+    ) -> Record<'a> {
         let sm = self.tcx.sess.source_map();
         let span = self.tcx.def_span(def_id).source_callsite();
         if span.is_dummy() {
@@ -323,8 +351,8 @@ impl<'tcx> Exporter<'tcx> {
         }
         let lo = sm.lookup_char_pos(span.lo());
         record
-            .str("callee_file", &self.file_of(&lo.file.name))
-            .num("callee_line", lo.line as u64)
+            .str(file_key, &self.file_of(&lo.file.name))
+            .num(line_key, lo.line as u64)
     }
 
     /// Key of a definition: `crate::path::{impl#N}::name`.

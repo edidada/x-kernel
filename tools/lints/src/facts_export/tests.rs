@@ -94,6 +94,41 @@ fn caller() -> u32 {
     total + raw + closure(1)
 }
 
+pub struct Holder {
+    pub square: Square,
+    count: u32,
+}
+
+pub enum Mode {
+    Idle,
+    Busy(u32),
+}
+
+const LIMIT: u32 = 3;
+
+pub struct Ops {
+    pub handler: fn() -> u32,
+}
+
+static OPS: Ops = Ops { handler: helper };
+
+fn run_ops(ops: &Ops) -> u32 {
+    (ops.handler)()
+}
+
+fn with<F: Fn() -> u32>(f: F) -> u32 {
+    f()
+}
+
+fn modes(holder: &mut Holder, mode: Mode) -> u32 {
+    holder.count += LIMIT;
+    let next = Mode::Busy(holder.square.0);
+    match mode {
+        Mode::Idle => with(helper) + run_ops(&OPS),
+        Mode::Busy(n) => n + with(|| 1),
+    }
+}
+
 fn main() {
     caller();
 }
@@ -192,6 +227,88 @@ fn ui() {
     })
     .expect("derived Clone impl");
     assert_eq!(clone_impl.str("defined_by"), Some("#[derive(Clone)]"));
+
+    // Field types answer "who holds a `Square`".
+    let holder = find(&|r| r.str("t") == Some("item") && r.str("name") == Some("Holder"))
+        .expect("Holder item");
+    let fields = holder
+        .0
+        .get("fields")
+        .and_then(Value::as_array)
+        .expect("fields");
+    assert_eq!(fields[0]["name"], "square");
+    assert_eq!(
+        fields[0]["adts"],
+        serde_json::json!(["facts_export::Square"])
+    );
+    let mode =
+        find(&|r| r.str("t") == Some("item") && r.str("name") == Some("Mode")).expect("Mode item");
+    let variants = mode
+        .0
+        .get("variants")
+        .and_then(Value::as_array)
+        .expect("variants");
+    assert_eq!(variants[1]["name"], "Busy");
+    assert_eq!(variants[1]["fields"][0]["ty"], "u32");
+
+    // Uses of statics, consts, variants and fields.
+    let use_of = |caller: &str, kind: &str, target: &str, access: &str| {
+        find(&|r| {
+            r.str("t") == Some("use")
+                && r.str("caller").is_some_and(|c| c.ends_with(caller))
+                && r.str("kind") == Some(kind)
+                && r.str("target").is_some_and(|t| t.ends_with(target))
+                && r.str("access") == Some(access)
+        })
+        .unwrap_or_else(|| panic!("no {kind} use of {target} ({access}) in {caller}:\n{text}"))
+    };
+    use_of("::caller", "static", "::COUNTER", "ref");
+    use_of("::modes", "const", "::LIMIT", "read");
+    use_of("::modes", "field", "::Holder::count", "mut");
+    use_of("::modes", "field", "::Holder::square", "read");
+    use_of("::modes", "variant", "::Mode::Busy", "construct");
+    use_of("::modes", "variant", "::Mode::Idle", "match");
+
+    // Fn-pointer and generic `Fn*` calls name where the callee value comes
+    // from; `ref` records name where function values go.
+    assert_eq!(
+        call_to("::apply", None).0.get("via_param"),
+        Some(&serde_json::json!(0))
+    );
+    let through_field = call_to("::run_ops", None);
+    assert!(
+        through_field
+            .str("via_field")
+            .is_some_and(|f| f.ends_with("::Ops::handler"))
+    );
+    let generic = call_to("::with", Some("call"));
+    assert_eq!(generic.0.get("via_param"), Some(&serde_json::json!(0)));
+    let stored = find(&|r| {
+        r.str("t") == Some("ref")
+            && r.str("field")
+                .is_some_and(|f| f.ends_with("::Ops::handler"))
+    })
+    .expect("fn stored into Ops::handler");
+    assert!(
+        stored
+            .str("target")
+            .is_some_and(|t| t.ends_with("::helper"))
+    );
+    let passed = |closure: bool| {
+        find(&|r| {
+            r.str("t") == Some("ref")
+                && r.str("passed_to").is_some_and(|c| c.ends_with("::with"))
+                && r.flag("closure") == closure
+        })
+        .unwrap_or_else(|| panic!("no ref passed to with (closure: {closure}):\n{text}"))
+    };
+    assert!(
+        passed(false)
+            .str("target")
+            .is_some_and(|t| t.ends_with("::helper"))
+    );
+    assert_eq!(passed(true).0.get("arg"), Some(&serde_json::json!(0)));
+
     let coroutine_call = find(&|r| {
         r.str("t") == Some("call")
             && r.str("caller_root").is_some_and(|c| c.ends_with("::ready"))

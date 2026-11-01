@@ -42,7 +42,7 @@ use crate::{
 
 /// Version of the manifest and of the per-crate records it lists. Must match
 /// `SCHEMA` in `tools/lints/src/facts_export/mod.rs`.
-pub(crate) const FACTS_SCHEMA: &str = "xkernel-facts/0.2";
+pub(crate) const FACTS_SCHEMA: &str = "xkernel-facts/0.3";
 /// Version of `status.json`.
 const STATUS_SCHEMA: &str = "xkernel-facts-status/1";
 /// Switches the exporter on. Its value is always `1`: rustc records it as an

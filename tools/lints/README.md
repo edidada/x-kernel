@@ -39,9 +39,10 @@ driver prebuilt for the pinned toolchain.
 ## Code facts export
 
 `src/facts_export/` is a pass that reports nothing. It exports what the
-compiler knows about the scanned code (items, call edges, functions used as
-values, trait impls, link symbols, atomic orderings, `unsafe` blocks) for
-the review code index, which otherwise works from names only.
+compiler knows about the scanned code (items with field types, call edges,
+functions used as values, uses of statics, consts, variants and fields,
+trait impls, link symbols, atomic orderings, `unsafe` blocks) for the review
+code index, which otherwise works from names only.
 
 ```bash
 make dylint FACTS_OUT=target/facts/kplat-aarch64
@@ -68,10 +69,8 @@ crates/<stem>.jsonl.zst  one zstd-compressed JSON-lines file per crate
   the units from Cargo's `compiler-artifact` messages, which list fresh
   units too, so files of other configurations in the same target directory
   are never picked up.
-- **Scope.** Workspace members only (the Dylint driver does not check
-  dependencies or the vendored crates reached through `[patch]`), in the
-  configuration of the scan: the selected `.config`, its Cargo features and
-  `--cfg unittest`.
+- **Scope.** Workspace members, in the configuration of the scan: the
+  selected `.config`, its Cargo features and `--cfg unittest`.
 - **Status.** `ready`: every unit has facts. `partial` with reason `build`:
   the scan failed (build error or a lint error) and the units checked
   before it stopped are packed. `partial` with reason `exporter`: the scan
@@ -98,9 +97,10 @@ version they do not know. Each line is one JSON object; `t` is its kind.
 | `t` | Content |
 | --- | --- |
 | `crate` | first line: `schema`, `crate`, `crate_id`, `stem`, `package`, `version`, `kind` (`workspace`), `target`, `toolchain`, `rustc`, `crate_types`, `opt_level`, `cfg` (features, `unittest`, `test`, `debug_assertions`) |
-| `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root` |
-| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined` |
-| `ref` | a function used as a value: `caller`, `caller_root`, place, `target`, `callee_file`, `callee_line` |
+| `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root`; structs and unions add `fields`, enums `variants` (`name`, `key`, `line`, `fields`); statics and consts add `ty`, `ty_adts` |
+| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined`, and for fn-pointer and `Fn*` calls `via_param`, `via_field` or `via_value` |
+| `ref` | a function or closure used as a value: `caller`, `caller_root`, place, `target`, `closure`, `callee_file`, `callee_line` (where `target` is defined), and where it goes: `passed_to` + `arg` (argument of a call) or `field` (stored into a field) |
+| `use` | a use of a static, const, enum variant, field or struct: `caller`, `caller_root`, place, `kind` (`static`, `const`, `variant`, `field`, `struct`), `target`, `access` (`read`, `mut`, `construct`, `match`, `ref`), `target_file`, `target_line` |
 | `site` | an `unsafe` block: `kind`, `owner`, place |
 | `counts` | last line: totals by kind, `export_us`, `bytes` |
 
@@ -118,6 +118,22 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   `fmt_rt_calls_skipped`, not written. `recv` is the receiver type of a
   `dyn` call or of an `Fn*` trait call on a fn pointer; a call through a
   plain fn pointer has no receiver.
+- *Fields* (`fields` of an item) are `name`, `key`, `ty` (the declared type),
+  `adts` (keys of the ADTs and `dyn` traits it mentions, outermost first) and
+  `line`, so "who holds a `T`" is a key lookup.
+- *Uses* come from MIR: place projections (field reads and writes, variant
+  downcasts), constants (statics by address, named consts), aggregates
+  (constructions) and switches on a discriminant (`match` on a variant).
+  Items of `core`, `alloc` and `std` are not recorded. One record per
+  target, kind, access and line.
+- *Fn values.* For a call through a fn pointer or a generic `Fn*` bound,
+  `via_param` is the caller's parameter (0-based) the callee value comes
+  from, `via_field` the field it is read from, `via_value` the function or
+  closure itself when the body names it. The candidates of a `via_param`
+  call in `g` are the `ref` records with `passed_to` = `g` and that `arg`
+  (for a method, `arg` counts the receiver); those of a `via_field` call are
+  the `ref` records with that `field`. Values are followed through locals
+  assigned once, references and casts.
 - *Paths* are repository-relative. Dependencies are written as
   `crates/<name>-<version>/…` (crates.io), `git/<checkout>/<rev>/…` (git) and
   `rust/library/<crate>/…` (standard library).
