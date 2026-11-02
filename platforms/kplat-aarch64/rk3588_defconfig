@@ -72,7 +72,8 @@ MMC_IDMAC=y
 MMC_MULTIBLOCK=y
 # MMC_BOOT_IO_PROBE is not set
 SCMI_SHMEM_PADDR=0x10f000
-# KFEAT_NET is not set
+KFEAT_NET=y
+KFEAT_DRIVER_NET_RTL8125=y
 # KFEAT_TA_VERIFY_WITH_ROOT is not set
 # KFEAT_TEE is not set
 # KFEAT_TEE_TA_SIGN is not set
@@ -87,8 +88,10 @@ LOG_FILTER="warn drv_mmc=debug subsys_mmc=debug fs_boot=debug"
 # LOG_LEVEL_ERROR is not set
 # LOG_LEVEL_INFO is not set
 # LOG_LEVEL_TRACE is not set
-# No generic ECAM PCI host on RK3588 (its PCIe needs the rockchip,rk3588-pcie
-# driver, not yet ported). PCI_ECAM_BASE=0 makes the PCI subsystem skip
+# No generic ECAM PCI host on RK3588: its PCIe is the rockchip,rk3588-pcie
+# driver (KFEAT_PCI_DW_HOST), which publishes its own DBI+iATU access backend
+# and its BAR window. PCI_ECAM_BASE=0 keeps the flat-ECAM path from claiming a
+# window that does not exist.
 # gracefully instead of mapping a bogus ECAM window.
 PCI_BUS_END=0x0
 PCI_ECAM_BASE=0x0

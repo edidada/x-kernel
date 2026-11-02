@@ -94,6 +94,8 @@ fn level3_drivers() {
     drv_phy::pcie3phy::register();
     #[cfg(feature = "pci-dw-host")]
     pci::dw_host::register();
+    #[cfg(feature = "net-rtl8125")]
+    drv_net::rtl8125::register();
     #[cfg(feature = "mmc-block")]
     subsys_mmc::blk::register();
     #[cfg(feature = "mmc-dwmmc-rockchip")]
@@ -142,7 +144,8 @@ fn level4_enumeration() {
         feature = "virtio-gpu",
         feature = "virtio-input",
         feature = "virtio-vsock",
-        feature = "virtio-9p"
+        feature = "virtio-9p",
+        feature = "net-rtl8125"
     ))]
     pci_discover();
 }

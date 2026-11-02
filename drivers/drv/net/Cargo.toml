@@ -1,0 +1,26 @@
+[package]
+name = "drv-net"
+description = "driver-core network interface drivers: Realtek r8169 family (RTL8125)"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "net", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+rk3588-rtl8125 = []
+
+[dependencies]
+driver_base = { workspace = true }
+# The PCI bus type and its id-table row live with the bus, the same way
+# `drv-virtio` binds PCI functions (Linux keeps `pci_bus_type` in drivers/pci).
+pci = { workspace = true }
+log.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

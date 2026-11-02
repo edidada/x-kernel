@@ -128,6 +128,7 @@ krcu-core = { path = "sync/krcu/crates/krcu-core" }
 kspin = { path = "task/kspin" }
 kreset = { path = "core/kreset" }
 kphy = { path = "core/kphy" }
+drv-net = { path = "drivers/drv/net" }
 drv-phy = { path = "drivers/drv/phy" }
 ksync = { path = "task/ksync" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }

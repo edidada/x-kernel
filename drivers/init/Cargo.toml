@@ -32,6 +32,7 @@ rk3588-usb2phy = ["dep:drv-phy"]
 rk3588-combphy = ["dep:drv-phy"]
 rk3588-pcie3phy = ["dep:drv-phy"]
 pci-dw-host = ["pci/dw-host"]
+net-rtl8125 = ["dep:drv-net", "drv-net/rk3588-rtl8125"]
 # khal/ktime_types optional activation rides the pci crate feature.
 # RTC class + one backend per feature: the class carries the boot wall-clock
 # service, each feature compiles exactly one concrete clock in.
@@ -65,6 +66,7 @@ drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-phy = { workspace = true, optional = true }
+drv-net = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
 drv-rtc = { workspace = true, optional = true }
 

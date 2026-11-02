@@ -356,6 +356,17 @@ config KFEAT_PCI_DW_HOST
       link training, bus-0/1 enumeration. Pairs with the combphy and
       pcie3 phy providers; INTx/BAR windows land with the next slice.
 
+config KFEAT_DRIVER_NET_RTL8125
+    bool "Realtek RTL8125 PCIe NIC"
+    depends on KFEAT_NET
+    default n
+    help
+      RTL8125 2.5GbE on the enumerated PCIe root complex. Binds through
+      the PCI bus id table, identifies the MAC version from TxConfig the
+      way r8169 does, and reads the station address. Probe stage only: the
+      descriptor rings, PHY bring-up and net-class publication land in the
+      next slice, so no queue is advertised yet.
+
 config KFEAT_DRIVER_PHY_USB2PHY
     bool "RK3588 USB2 PHY provider (inno-usb2)"
     depends on KFEAT_CHAR

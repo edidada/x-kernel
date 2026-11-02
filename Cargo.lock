@@ -1238,6 +1238,7 @@ dependencies = [
  "drv-block",
  "drv-clk",
  "drv-mmc",
+ "drv-net",
  "drv-phy",
  "drv-rtc",
  "drv-serial",
@@ -1309,6 +1310,16 @@ dependencies = [
  "kspin",
  "log",
  "subsys-mmc",
+ "unittest",
+]
+
+[[package]]
+name = "drv-net"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "log",
+ "pci",
  "unittest",
 ]
 
@@ -2453,6 +2464,7 @@ dependencies = [
  "drv-block",
  "drv-clk",
  "drv-mmc",
+ "drv-net",
  "drv-phy",
  "drv-rtc",
  "drv-serial",

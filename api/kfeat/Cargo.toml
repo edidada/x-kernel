@@ -142,6 +142,8 @@ driver_phy_combphy = ["dep:drv-phy", "drv-phy/rk3588-combphy", "driver-init/rk35
 driver_phy_pcie3phy = ["dep:drv-phy", "drv-phy/rk3588-pcie3phy", "driver-init/rk3588-pcie3phy"]
 # RK3588 PCIe root complex (DesignWare host): config space via DBI+iATU.
 pci_dw_host = ["pci/dw-host", "driver-init/pci-dw-host"]
+# Realtek RTL8125 PCIe NIC: binds through the PCI bus, publishes to `net`.
+driver_net_rtl8125 = ["net", "dep:drv-net", "driver-init/net-rtl8125"]
 driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-init/ramdisk-static"]
 driver_console_pl011 = ["dep:boot_console", "boot_console/pl011"]
 driver_console_ns16550_mmio = ["dep:boot_console", "boot_console/ns16550-mmio"]
@@ -232,6 +234,7 @@ drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-phy = { workspace = true, optional = true }
+drv-net = { workspace = true, optional = true }
 pci = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
 drv-rtc = { workspace = true, optional = true }
