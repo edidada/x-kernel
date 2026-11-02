@@ -300,22 +300,58 @@ combphy: clock 2 ... enabled false -> true
 `configure_rc_mode()` **之前**，所以 `0x00/0x180/0x300` 全为 0，而 Linux 那些
 值是它自己配好之后读的（`0x4c / 0x12 / 0x130014`）。不构成证据。
 
+### 已排除：映射层没问题（同一 iomap 路径读 >4 GiB DRAM 成功）
+
+```
+pcie-dw: hi-ram 0x100000000 = 0x00000001    ← 同一 iomap 路径，>4 GiB，读成功
+pcie-dw: reading own dbi 0xa41000000        ← 紧接着读 DBI
+panicked: DataAbortCurrentEL (external abort)
+```
+
+DRAM（`0x1_0000_0000`）用**完全相同**的 `iomap_region` 路径能读，DBI 不能 ⇒
+不是我们内核的 >4 GiB 映射/PTE 问题。同时 4 KiB 小映射
+（`probe_dbi_page`）也没有读成功，排除"4 MiB 大映射被拆页搞坏"。
+
+另：把 `GENERAL_CON` 精确写成 Linux 的 `0x4c`（含此前未知的 bit3）后
+`ltssm 0x00030011` 仍是 L0，DBI 依旧中止 —— bit3 也不是那个开关。
+
+### 失败模式分两类（这一轮的意外收获）
+
+| 对象 | CPU 读 DBI 的表现 |
+|---|---|
+| 我们控制器（已初始化、链路 L0） | **同步外部中止 (DECERR)** = 地址没被路由 |
+| 未初始化的控制器 `0xa40400000`（pcie3x2） | **CPU 直接挂死**（控制台只剩回车）|
+
+后者是在**原生 Linux 板上**测出来的：`dd if=/dev/mem` 读一个从未被驱动碰过的
+控制器 DBI，整机卡住（`panic_on_oops=0` 也没用，因为不是 oops 而是总线事务
+永不完结）。结论：**DBI 窗口对未初始化控制器完全不可用**，Windows 的可用性
+依赖控制器自己初始化过；两种失败模式（DECERR / stall）分别对应"没路由"和
+"路由了但目标不响应"。
+
+> 代价说明：这次读取把参考板挂住了，且继电器只控我们这块板，**需要人工断电
+> 重启那台原生 Linux 板**。以后在参考板上做同类探测要先确认可断电。
+
 ### 下一步（按优先级）
+
 
 1. **高位 PCIe 段的 CPU 解码**（唯一剩余阻塞）。已排除：链路状态、时钟、
    复位、PD_PCIE、DT 解析、PHP_GRF、gate 掩码 `0x440` 邻居、
    `pcie-apb` 客户端配置。剩下最值得做的两件事：
 
-   - **在参考板上做"驱动解绑"判别**：`echo fe190000.pcie >
-     /sys/bus/platform/drivers/rk-pcie/unbind` 之后再用 `/dev/mem` 读
-     `0xa41000000`。
-     * 若仍能读出 `0x35881d87` → 该窗口的地址解码与驱动状态无关，问题在我们
-       的**访问路径**（映射/属性），要继续在 memspace 侧找。
-     * 若变成中止/无响应 → 解码确实依赖驱动初始化，那就说明我们漏了某一步
-       （这份驱动里还有 `rk_pcie_*` 的额外初始化）。这是**一次就能分叉**的
-       判别实验，优先做。
+   已知：解码**依赖控制器被初始化过**（上一节实测），而我们已经复刻了
+   Linux 的时钟/复位/PHY/PD/客户端模式/GRF，全部寄存器读数一致。所以缺的很
+   可能是**复位线本身**而不是使能位——待查清单：
+
+   - **核对板上 DTB 的 `resets` 属性**（参考板 `/proc/device-tree/pcie@fe190000/resets`）。
+     我们只核对了 `reg`/`clocks`/`phys`，**没有**核对 reset id。若板上用的是
+     `SRST_P_PCIEn` 的另一条线（而不是我们表里的 `SRST_PCIE4_POWER_UP` +
+     `SRST_P_PCIE4`），DBI 从设备就会一直处于软复位 → 表现正是"窗口没路由"。
+     **这是当前最优先的一项，一次串口读取即可判定。**
    - dump `SYS_GRF`（0xfd58c000）与 PMU 的 NOC 相关寄存器，找"高位 PCIe 段
-     force-enable"位（PHP_GRF 已排空，只剩这一处可能）。
+     force-enable"位。
+   - 顺带确认 `aclk_pcie_root`（0x880 bit6）与 `aclk_mmu_pcie` 在运行——它们
+     是 Linux 侧 `power-domain@34` 的 consumer，我们靠 `CLK_IS_CRITICAL` 兜住，
+     值得显式确认一次。
 
 2. 无论如何都值得同时验证的一件小事：把 DBI 的映射从 4 MiB 降到 4 KiB
    （`probe_dbi_page` 已就绪）再读一次，排除"大映射被拆页/块映射搞坏"这种

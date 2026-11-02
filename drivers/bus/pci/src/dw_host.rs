@@ -579,9 +579,14 @@ fn configure_rc_mode(apb: &IoMap) {
     // CLKREQ# so the board's clock generator keeps running.
     const PCIE_CLIENT_POWER: usize = 0x2c;
     apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
-    // Write-mask 0x00f7 (bits 0..2 and 4..7), value 0x44: bits[2:0] =
-    // 0b100 (RC mode + LTSSM enable), bit 6 = the BSP's RC-mode bit.
-    apb.write32(PCIE_CLIENT_GENERAL_CON, 0x00f7_0044);
+    // Match the value a working Linux leaves here exactly: 0x4c =
+    // bits 2, 3, 6. Bits[2:0] = 0b100 is the reference's RC-mode /
+    // LTSSM-enable field and bit 6 is the older BSP spelling of the same
+    // switch. Bit 3 is undocumented in the reference (it only defines the
+    // mode field), yet every working kernel has it set -- and until it is
+    // set the whole 0xa PCIe DBI window stays undecoded (external abort on
+    // every access). Write-mask 0x00ff covers bits 0..7.
+    apb.write32(PCIE_CLIENT_GENERAL_CON, 0x00ff_004c);
     khal::time::busy_wait(ktime_types::TimeSpan::from_millis(1));
 }
 
@@ -668,6 +673,22 @@ fn watch_ltssm(apb: &IoMap) {
     }
 }
 
+/// Fork the remaining hypothesis with one safe read: map a >4 GiB DRAM page
+/// through the *same* iomap path the DBI uses and read it. DRAM is always
+/// backed, so:
+///   - a value comes back  -> our >4 GiB mapping path is fine, and the DBI's
+///     external abort means the hardware is not decoding that window;
+///   - it aborts too       -> the mapping path itself is broken above 4 GiB.
+fn probe_high_pa_ram(dev: &mut Device<'_, PlatformBus>) {
+    match dev.res().iomap_region(
+        driver_base::MmioRegion::new(0x1_0000_0000_usize, 0x1000),
+        "hi-ram-diag",
+    ) {
+        Ok(map) => log::info!("pcie-dw: hi-ram 0x100000000 = {:#010x}", map.read32(0x00)),
+        Err(err) => log::warn!("pcie-dw: hi-ram iomap failed: {err:?}"),
+    }
+}
+
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
@@ -730,6 +751,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             apb.read32(PCIE_CLIENT_GENERAL_CON)
         );
         watch_ltssm(&apb);
+        probe_high_pa_ram(dev);
         log::info!("pcie-dw: reading own dbi {:#x}", dbi_region.base);
         probe_dbi_page(dev, dbi_region)?;
         let vendor_word = dbi.read32(0x00);
