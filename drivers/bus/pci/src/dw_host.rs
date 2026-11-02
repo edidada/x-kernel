@@ -553,7 +553,10 @@ fn log_bring_up_state(
     ] {
         log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
     }
-    for off in [0x180usize, 0x2c, 0x300] {
+    for off in (0..0x40).step_by(4) {
+        log::info!("pcie-dw: apb {off:#04x} = {:#010x}", apb_map.read32(off));
+    }
+    for off in [0x180usize, 0x300] {
         log::info!("pcie-dw: apb {off:#04x} = {:#010x}", apb_map.read32(off));
     }
     Ok(())
@@ -638,7 +641,7 @@ fn log_phy_state(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
         driver_base::MmioRegion::new(0xfd5b_0000_usize, 0x1000),
         "php-grf-diag",
     )?;
-    for off in (0..0x60).step_by(4) {
+    for off in (0..0x120).step_by(4) {
         log::info!("pcie-dw: phpgrf {off:#04x} = {:#010x}", phpgrf.read32(off));
     }
     Ok(())
