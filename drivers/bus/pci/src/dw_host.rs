@@ -481,13 +481,102 @@ fn enable_pcie_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), Pro
     Err(ProbeError::Fatal(RuntimeError::Io))
 }
 
+/// Bring-up diagnostics: the parsed window bases (a mis-strided `reg`
+/// decode shows up here before it hangs the bus) and the rk3588 PMU
+/// bus-idle/ack/status dwords for the NOC segment that fronts the high
+/// DBI window.
+fn log_bring_up_state(
+    dev: &mut Device<'_, PlatformBus>,
+    apb: driver_base::MmioRegion,
+    dbi: driver_base::MmioRegion,
+    apb_map: &IoMap,
+) -> Result<(), ProbeError> {
+    let pmu = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfd8d_8000_usize, 0x400),
+        "pcie-pmu-diag",
+    )?;
+    log::info!(
+        "pcie-dw: windows apb {:#x}+{:#x} dbi {:#x}+{:#x}",
+        apb.base,
+        apb.size,
+        dbi.base,
+        dbi.size
+    );
+    for (name, off) in [
+        ("BUS_IDLE_REQ", 0x10c),
+        ("BUS_IDLE_ACK", 0x118),
+        ("BUS_IDLE_ST", 0x120),
+        ("PWR_CON", 0x150),
+        ("PWR_STATUS", 0x180),
+        ("REPAIR_STATUS", 0x290),
+    ] {
+        log::info!("pcie-dw: pmu {name} @ {off:#x} = {:#010x}", pmu.read32(off));
+    }
+
+    // The clock source chain behind aclk_dbi: `aclk_php_root` is a
+    // composite (mux bit 13 / divider 12:8 of 0x440, gate 0x880 bit 7)
+    // fed from gpll/cpll. A dead PLL or a zero divider stalls every AXI
+    // transaction into the controller while the pclk-side client block
+    // keeps answering — exactly the observed split.
+    let cru = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfd7c_0000_usize, 0x1000),
+        "pcie-cru-diag",
+    )?;
+    log::info!(
+        "pcie-dw: cru 0x440 (aclk_php_root mux/div) = {:#010x}",
+        cru.read32(0x440)
+    );
+    log::info!(
+        "pcie-dw: cru 0x880 (php gate) = {:#010x}",
+        cru.read32(0x880)
+    );
+    for (name, off) in [
+        ("CPLL_CON0", 0x1a0),
+        ("CPLL_CON1", 0x1a4),
+        ("GPLL_CON0", 0x1c0),
+        ("GPLL_CON1", 0x1c4),
+        ("SOFTRST_CON33", 0xa84),
+        ("SOFTRST_CON34", 0xa88),
+    ] {
+        log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
+    }
+    let _ = apb_map;
+    Ok(())
+}
+
+/// `rockchip_pcie_configure_rc`, in the reference's ORDER: the client must
+/// enter RC mode BEFORE the first DBI access. With the mode field still 0
+/// the controller's DBI slave never answers — a read at 0xa41000000
+/// stalls the bus instead of faulting (measured against a stock Linux on
+/// the same board, which reads 0x35881d87 there). Bits[2:0] are the
+/// reference's mode/LTSSM-enable field; bit 6 is the older BSP encoding of
+/// the same switch, so set both.
+fn configure_rc_mode(apb: &IoMap) {
+    let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
+    apb.write32(
+        PCIE_CLIENT_HOT_RESET_CTRL,
+        val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
+    );
+    // `rockchip_pcie_configure_l1ss` with no `supports-clkreq`: assert
+    // CLKREQ# so the board's clock generator keeps running.
+    const PCIE_CLIENT_POWER: usize = 0x2c;
+    apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
+    // Write-mask 0x00f7 (bits 0..2 and 4..7), value 0x44: bits[2:0] =
+    // 0b100 (RC mode + LTSSM enable), bit 6 = the BSP's RC-mode bit.
+    apb.write32(PCIE_CLIENT_GENERAL_CON, 0x00f7_0044);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_millis(1));
+}
+
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
     fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<DwHostData, ProbeError> {
         // `rockchip_pcie_resource_get`: the two windows + the reset pair.
-        let apb = dev.res().iomap_named("pcie-apb")?;
-        let dbi = dev.res().iomap_named("pcie-dbi")?;
+        let apb_region = dev.res().mmio_by_name("pcie-apb")?;
+        let dbi_region = dev.res().mmio_by_name("pcie-dbi")?;
+        let apb = dev.res().iomap_region(apb_region, "pcie-apb")?;
+        let dbi = dev.res().iomap_region(dbi_region, "pcie-dbi")?;
+
         let resets: [ResetHandle; 2] = [dev.res().reset_at(0)?, dev.res().reset_at(1)?];
 
         // Bind the view: `node()` borrows the firmware snapshot.
@@ -504,16 +593,26 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // then the first DBI access.
         let phy = dev.res().phy("pcie-phy")?;
         let powered = phy.init_powered()?;
-        log::info!("pcie-dw: phy powered, deasserting resets");
+        // A real reset PULSE (assert, 1us, deassert) — not just a deassert.
+        // The DWC core's slave port latches its state out of reset; leaving
+        // it in the firmware's half-initialised state makes every DBI
+        // access stall (no DECERR, no completion). Both the reference
+        // driver and the vendor BSP pulse the pair here.
+        log::info!("pcie-dw: phy powered, pulsing the reset pair");
+        for rst in &resets {
+            rst.assert();
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
         for rst in &resets {
             rst.deassert();
         }
-        log::info!("pcie-dw: resets deasserted, enabling clocks");
+        log::info!("pcie-dw: resets released, enabling clocks");
         for name in ["aclk_mst", "aclk_slv", "aclk_dbi", "pclk", "aux", "pipe"] {
             log::info!("pcie-dw: enabling clock {name}");
             let clk = dev.res().clk(name)?;
             clk.enable()?;
         }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_millis(1));
         enable_pcie_power_domain(dev)?;
 
         // Gate read-back: the CRU window (0xfd7c0000, 1MB) holds every
@@ -535,29 +634,19 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
         }
 
-        // The BSP's first DBI access (dbi_ro_wr_en) comes right after the
-        // clocks, BEFORE any client-mode APB writes. The CLIENT_POWER write
-        // (CLKREQ pull-down) parks the controller if done before the DBI
-        // is proven to respond — matching the BSP is the safe order.
+        log_bring_up_state(dev, apb_region, dbi_region, &apb)?;
+
+        configure_rc_mode(&apb);
+        log::info!(
+            "pcie-dw: client in RC mode, reading own dbi {:#x}",
+            dbi_region.base
+        );
         let vendor_word = dbi.read32(0x00);
         log::info!(
             "pcie-dw: dbi alive, vendor {:#06x} device {:#06x}",
             vendor_word & 0xffff,
             vendor_word >> 16
         );
-
-        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode.
-        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
-        apb.write32(
-            PCIE_CLIENT_HOT_RESET_CTRL,
-            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
-        );
-        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
-        // to assert the connecting CLOCK_GEN OE, then mode RC (LTSSM
-        // still off — the enable write comes after the setup).
-        const PCIE_CLIENT_POWER: usize = 0x2c;
-        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
-        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(

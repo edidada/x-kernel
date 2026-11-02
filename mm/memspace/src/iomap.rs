@@ -142,13 +142,17 @@ pub fn iomap_device(
         .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
         .ok_or(IoMapError::NoMemory)?;
 
+    // EXPERIMENT: regions above 4 GiB (the rk3588 PCIe DBI windows) are
+    // mapped Normal-NC instead of Device-nGnRE. The Device access type
+    // stalls the rk3588 NOC path to those windows; Normal-NC is what the
+    // working tgoskits rk3588 PCIe bring-up effectively uses.
+    let attr = if start.as_usize() >= 0x1_0000_0000 {
+        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED
+    } else {
+        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE
+    };
     kernel_aspace
-        .map_linear(
-            mapped_start,
-            start,
-            span,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
-        )
+        .map_linear(mapped_start, start, span, attr)
         .map_err(|_| IoMapError::MappingFailed)?;
     // TLB shootdown is already handled by `PageTableMut::finish()`:
     // `map_linear` → `Backend::map` → `pgtbl.modify()` creates a
