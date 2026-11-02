@@ -415,8 +415,52 @@ combphy 没有实现它，而且**实测 combphy 寄存器 `0x2c`(0x02 vs Linux 
 3. 参考板是可断电的（这次事故后已确认 `panic_on_oops=0` 也拦不住总线 stall），
    所以任何"再读一个可疑地址"的实验都要先确认能断电。
 
+### 结论翻转：我们这块板的高位 DBI 段**没有被解码**
+
+U-Boot 侧实测（打断 autoboot，`U-Boot 2025.04`，mainline `pcie_dw_rockchip`）：
+
+```
+=> pci enum
+pcie_dw_rockchip pcie@fe150000: PCIe-4 Link Fail
+pcie_dw_rockchip pcie@fe170000: PCIe-5 Link Fail
+=> pci
+00.00.00 0x1d87 0x3588  Bridge      ← 枚举成功：2 个 RC + 2 个 RTL8125
+01.00.00 0x10ec 0x8125  Ethernet
+02.00.00 0x1d87 0x3588  Bridge
+03.00.00 0x10ec 0x8125  Ethernet
+
+=> md 0xfe190000 4
+fe190000: 0000004c 00000000 00000000 00000000   ← APB 窗口：正确（GENERAL_CON=0x4c）
+=> md 0xa4100000 4
+a4100000: 7fbffddb fff8ffaf f7ffdfff 7ffdd7ed   ← DBI 窗口：浮空数据
+（同样的地址再读一次，值又不一样：fffffddb fff8ffab f7ffdfff 7ffdf7ec）
+```
+
+**判读**：
+
+1. 32 位窗口（APB `0xfe190000`、config `0xf4000000`）都正常 → U-Boot 的
+   `pci enum` / 枚举成功正是走 `config` 窗口，**它从未证明 `0xa41000000` 可读**。
+2. 高位 DBI 窗口读回**每次都不一样的浮空值** → 该地址在**我们这块板**上没有
+   被任何从设备解码。这与我们内核的 DECERR（`DFSC=0x10`）是同一件事的两种表现。
+3. 参考板同一地址能读出 `0x35881d87` → **两块同型号板子在"高位 PCIe 段是否
+   解码"这一层就不同**。
+4. 先前的"U-Boot 能读 DBI 所以硬件没问题"因此**作废**；反过来，这解释了我们
+   为什么把 CRU/PHP_GRF/PMU/复位/客户端模式全部对齐也修不好——问题不在驱动。
+
+高位 PCIe 段（`0x9_0000_0000`–`0xa_ffff_ffff`）的解码在 rk3588 上属于**安全/
+地址映射配置**（ATF 或 U-Boot 早期初始化），内核侧改寄存器改不动它。
+
 ### 下一步（按优先级）
 
+
+0. **先在两块板上做同一个 U-Boot 对照**（最省事、最能定性）：
+   在参考板的 U-Boot 提示符下执行 `md 0xa4100000 4`。
+   * 若它读出 `35881d87` → 差异在 **bootloader/ATF**（谁把高位段打开），
+     需要对比两块板的 U-Boot/ATF 版本与 PCIe 相关初始化。
+   * 若它同样是浮空值 → 说明参考板能读是**它的内核**做了什么（而 U-Boot 不做），
+     那就回到驱动侧继续找。
+   顺带把两块板的 `version`（U-Boot）与 ATF 版本（`strings` BL31 或
+   `cat /sys/class/...`）记下来对比。
 
 1. **高位 PCIe 段的 CPU 解码**（唯一剩余阻塞）。已排除：链路状态、时钟、
    复位、PD_PCIE、DT 解析、PHP_GRF、gate 掩码 `0x440` 邻居、
