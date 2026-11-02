@@ -171,6 +171,11 @@ aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STA
 并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
 `static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
 不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。
+lint 库只在该构建输出目录的 `tools/lints` 下构建一次，构建时不带内核配置的
+rustflags，因此三次扫描不会因为配置不同而重新链接 lint 库、进而重查全部 crate；
+`make dylint_test` 也使用这个目录，不随每次清空的 workspace 冷编译。三次扫描之间
+仍要重查的，是依赖 `kbuild_config` 的 workspace crate：它包含生成的
+`kbuild/<platform>/config.rs`，三种配置共用这个文件，锁统计配置下内容不同。
 
 两个 Dylint 分支的第一次普通配置扫描同时导出代码事实，供 xreview 的代码索引
 使用（格式见 `tools/lints/README.md`）：该次扫描使用

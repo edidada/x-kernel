@@ -224,6 +224,33 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
 target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
 
+### Dylint
+
+1. `make dylint` builds the lint library (`tools/lints`) with its pinned
+   toolchain into `<target>/tools/lints`, then runs `cargo dylint
+   --lib-path` on the kernel with the configuration's features, target,
+   rustflags and environment; Dylint loads the prebuilt library and does
+   not build it. `make dylint_test` runs the library's tests in the same
+   target directory.
+2. The library build runs with an empty `CARGO_ENCODED_RUSTFLAGS` and
+   `CARGO_TARGET_DIR` set to that directory. Cargo in `tools/lints` still
+   reads the repository `.cargo/config.toml` and the generated
+   `.xconfig.toml` it includes, whose `[build] rustflags` change with the
+   configuration (`--cfg k_plat_name=...`, `--cfg unittest`). The library
+   uses none of them, but Dylint records it as a file dependency of every
+   crate it checks, so relinking it for another configuration would
+   re-check every crate. With the rustflags pinned, the library is rebuilt
+   only when its sources, `Cargo.lock` or the toolchain change.
+   `CARGO_TARGET_DIR` also reaches the library build that `dylint_testing`
+   runs from the tests, which otherwise lands in `tools/lints/target`.
+3. The cfgs the lints see (`k_plat_name`, `unittest`) belong to the
+   kernel crates and still come from the configuration. Scans of different
+   configurations share `<target>/dylint`; Cargo keeps separate artifacts
+   for different rustflags. A crate is still re-checked when an input it
+   shares between configurations changes, such as the generated
+   `<target>/kbuild/<platform>/config.rs` that `kbuild_config` includes
+   (it differs when, for example, lock statistics are on).
+
 ### Dylint Facts
 
 `make dylint FACTS_OUT=<dir>` (`xkmake dylint --facts-out <dir>`) exports

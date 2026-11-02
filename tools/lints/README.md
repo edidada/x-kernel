@@ -32,6 +32,15 @@ A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
 kernel target to the toolchain before scanning another configuration.
 
+`xkmake` builds this library once into `<target>/tools/lints` and passes
+it to `cargo dylint --lib-path`. The build ignores the rustflags of the
+kernel configuration (the generated `.cargo/.xconfig.toml`), so switching
+configurations, for example to `UNITTEST=y`, does not relink it; Dylint
+records the library as a file dependency of every checked crate, and a
+relink would re-check them all. It is rebuilt when its sources,
+`Cargo.lock` or the toolchain change. `make dylint_test` uses the same
+target directory.
+
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a
 driver prebuilt for the pinned toolchain.

@@ -174,6 +174,7 @@ fn build_and_scan(
         .arg("--target-dir")
         .arg(&lint_target_dir);
     sanitize_env(&mut lint);
+    pin_lint_build_env(&mut lint, &lint_target_dir);
     set_host_tools(&mut lint, host);
     if let Some(path) = &driver_path {
         lint.env("DYLINT_DRIVER_PATH", path);
@@ -395,6 +396,27 @@ fn sanitize_env(process: &mut Process) {
     for name in SANITIZED_ENV {
         process.env_remove(name);
     }
+}
+
+/// Builds the lint library in the same environment for every kernel
+/// configuration.
+///
+/// Cargo running in `tools/lints` still reads the repository's
+/// `.cargo/config.toml`, which includes the generated `.xconfig.toml` and
+/// its `[build] rustflags` (`--cfg k_plat_name=...`, `--cfg unittest`). The
+/// library is a host tool that uses none of them, but a different set
+/// would relink it, and Dylint records the library as a file dependency of
+/// every crate it checks, so every scan would re-check every crate. An
+/// empty `CARGO_ENCODED_RUSTFLAGS` takes precedence over all configured
+/// rustflags; the kernel crates still get theirs from the scan.
+///
+/// `CARGO_TARGET_DIR` also reaches the library build that `dylint_testing`
+/// runs inside `make dylint_test`, so that build lands in the same target
+/// directory instead of `tools/lints/target`.
+fn pin_lint_build_env(process: &mut Process, target_dir: &Path) {
+    process
+        .env("CARGO_ENCODED_RUSTFLAGS", "")
+        .env("CARGO_TARGET_DIR", target_dir);
 }
 
 fn set_host_tools(process: &mut Process, host: &str) {
