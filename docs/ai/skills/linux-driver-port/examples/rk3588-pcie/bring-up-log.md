@@ -377,6 +377,44 @@ combphy 没有实现它，而且**实测 combphy 寄存器 `0x2c`(0x02 vs Linux 
 写的。链路能训练说明 LTSSM 不依赖它，但它是否影响 DBI 从设备可就不好说了，
 **这是当前最具体的可验证缺口**。
 
+### 权威源码已确认（`Joshua-Riek/linux-rockchip`，noble = 6.1.75）
+
+板的 DTB 是三段 `reg`，只有这棵树对得上，之前那份 orange-pi/5.10 是两段。
+本地：`/workspace/linux-jr`（`--sparse`，分支 `noble`）。
+
+**逐项核对结果：源码层面我们与 Linux 已经等价。**
+
+| 项 | 权威源码 | 我们 |
+|---|---|---|
+| `reg` / `reg-names` | `pcie-apb` + `pcie-dbi`(0xa41000000) + `config`(0xf4000000) | 一致（解析出 `dbi 0xa41000000+0x400000`）|
+| `resets` | `SRST_PCIE4_POWER_UP`, `SRST_P_PCIE4` | 一致 |
+| `ranges` | IO 0xf4100000 / MEM 0xf4200000 / prefetch 0xa00000000 | 一致 |
+| `phys` | `<&combphy0_ps PHY_TYPE_PCIE>` | 一致 |
+| `power-domains` / `assigned-clocks` | **均无** | 不涉及 |
+| PHY 步骤 | `phy_set_mode_ext` → `phy_init` → `phy_power_on`（**这棵树没有 `phy_calibrate`**）| 一致 |
+| 复位 | `reset_control_deassert`（此前 phy_init）| 一致（我们多了 assert 脉冲，非关键）|
+| 时钟 | `clk_bulk_prepare_enable` × 6 | 一致 |
+| 首次 DBI 访问 | `dw_pcie_dbi_ro_wr_en()` | 同位置 |
+
+> 注：`phy_calibrate()` 只存在于 `orange-pi-6.1-rk35xx` 分支，Joshua-Riek 6.1.75
+> 没有 → 上一轮记的"calibration 缺口"对本板**不成立**，已作废。
+
+### 剩下的唯一解释方向：内核之外
+
+源码等价、寄存器等价（CRU/PHP_GRF/PMU/复位字/`GENERAL_CON` 全部实测一致）、
+链路 L0，而 DBI 仍 DECERR。剩下的差异只能在**内核之前或内核之外**：
+
+1. **启动路径不同**。参考板从 SD/eMMC 启动，我们的板子是 U-Boot `tftpboot`
+   网络启动。如果 SD 那条 boot 流程里 U-Boot 对 PCIe 做过初始化（例如为了
+   NVMe/网络启动而打开了 PCIe 的 NOC/DBI 通路），tftpboot 路径就不会做。
+   **验证方法：让我们的板子也走 SD 启动跑同一个 tftpboot 内核**，或反过来在
+   参考板上 tftpboot —— 这一步能直接把"bootloader 差异"证伪或坐实。
+2. **安全寄存器（SMC）**。rk3588 有 `rockchip_sip`（SMC）接口，部分 NOC/DBI
+   配置在安全侧，只能由 ATF 打开。Linux 自身在该分支里没有 PCIe 的 SMC 调用，
+   但 bootloader 可能有。
+3. 参考板是可断电的（这次事故后已确认 `panic_on_oops=0` 也拦不住总线 stall），
+   所以任何"再读一个可疑地址"的实验都要先确认能断电。
+
 ### 下一步（按优先级）
 
 
