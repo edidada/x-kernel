@@ -123,10 +123,11 @@ nGnRE 都能通，当前是 nGnRnE）。
 
 ### 3.2b unittest 的 klogger 存量 flake（不是本分支引入）
 
-`util/klogger/ut-tests/lib.rs` 里的 `logbuf_captures_records_the_console_filter_hides`
-与 `logbuf_snapshot_returns_the_newest_bytes` 会改**全局**日志过滤器和缓冲区，
-并行跑必然互相踩：实测每次挂的断言还不一样（`line 149/150/183`）。父提交上
-同样挂，确认存量。看到 `make unittest` 只挂 klogger 这两条就别查本分支。
+`util/klogger/ut-tests/lib.rs` 的 `logbuf_*`、`set_log_level_takes_effect_immediately`、
+`filter_spec_*` 以及 `procfs` 的 `printk_node_reads_and_writes_runtime_log_level`
+都会改**全局**日志级别/缓冲区，并行跑必然互相踩：实测每次挂的具体条目都不一样
+（`line 83/121/149/150/183` 都出现过）。父提交上同样挂，确认存量。看到
+`make unittest` 只挂这几条就别查本分支。
 
 ### 3.3 用寄存器事实代替注释
 
@@ -200,21 +201,41 @@ RTL8125 的 BAR0 偏移 0 是 `IDR0..IDR3`（MAC 前 4 字节），读到
 `0x126fd566`（非 0、非全 f）才算 BAR 活着。这条检查门控在单一已知设备、
 一次一个 32 位读，等真驱动接管后删除。
 
-## 4. 下一步（本次工作的续点）
+## 4. RTL8125 驱动：probe 阶段已闭环
 
-**BAR 闭环完成。** 下一站：RTL8125 驱动（`subsystems/net` 侧绑定）。
+`drivers/drv/net`（新 crate）里的 `rtl8125` 驱动已通过 PCI 总线绑定成功：
 
-1. **RTL8125 驱动**：这是真正的工作量所在。寄存器表在
-   `/workspace/linux-jr/drivers/net/ethernet/realtek/r8169_main.c`
-   （`rtl8125` 走 r8169 的 `RTL_GIGA_MAC_VER_*` 分支）。最小里程碑：
-   读 MAC（已验证可读）→ 复位/初始化 → 起 DMA 环 → 收发一帧。
-2. **多 host**：现在 `PUBLISHED_CAM` 是**单槽**（后探测的覆盖前面的），所以
-   两块 RTL8125（fe180000 与 fe190000 各一块）只有一块会被枚举。参考板
-   lspci 是 `0003:31.0` + `0004:41.0` 两块。要两块都进域，得把发布改成
-   按 host/segment 的列表，`discover` 遍历。
-3. **INTx / MSI**：目前只做了 `pci_legacy_irq` 的固件查询，MSI-X 没接
-   （`msix.rs` 有骨架）。网卡收包必须有中断或轮询兜底。
-4. `fe150000`/`fe160000`（探活失败）留待后续：需要 pcie3phy 时钟路径。
+```
+rtl8125: RTL8125B xid 0x641 MAC [66, d5, 6f, 12, 66, 9e] BAR0 0xf3200000+0x10000
+         cmd 0x00 intr 0x0000 rxcfg 0x0c02e60e
+driver-core: 494 firmware descriptor(s), 35 active      # 之前 34
+```
+
+关键点（写进 crate 的 design.md/security.md 了）：
+
+| 点 | 原因 |
+|---|---|
+| 型号来自 `TxConfig`，不是 PCI id | `10ec:8125` 覆盖 8125A/B/BP/CP/D，后续每条序列都按 MAC version 分支 |
+| 先判 `~0` 再算 xid | BAR 未解码读回全 1，`(u32::MAX>>20)&0xfcf` 是个**看着合法**的 id |
+| 站地址为 0/全 f 则 probe 失败 | 它是消费者唯一会用的值，垃圾地址比不绑定更危险 |
+| **不发布到 `net` 类** | 能出现在系统里但服务不了队列的 NIC，会让网络栈把包投进没人取的队列 |
+| probe 纯读、无写 | 重复 probe 安全；复位/PHY 等下一阶段 |
+
+### 4.1 下一站（数据通路，按顺序）
+
+1. **复位 + PHY**：`ChipCmd |= CmdReset` → 等清零 → 解锁 `Cfg9346` → 使能
+   RX/TX。8125B 走 `RTL_GIGA_MAC_VER_63` 分支，时序与 8125A 不同。
+2. **描述符环**：TX/RX 各 256，全 coherent DMA（`kdma`），**先轮询**。
+3. **发布 `net` 类**：实现 `subsys_net::NetDevice` 并 `dev.publish(&NET, …)`。
+4. **中断**：`kirq` + devres IRQ 守卫替换轮询。
+5. **多 host**：`PUBLISHED_CAM` 仍是单槽，板上**第二块** 8125（另一控制器，
+   `0004:41.0`）还不会进域。
+
+## 4.2 U-Boot 每次启动都会枚举 PCI（影响 BAR 语义）
+
+串口里 `pcie_dw_rockchip pcie@fe150000: PCIe-4 Link Fail` 是 **U-Boot** 打的
+（在我们内核启动之前）。它按自己的地址空间写 BAR，所以内核看到的 BAR 可能
+非 0 却不可用。`configure_device` 已把"落在本 host 窗口外"判为未分配。
 
 ## 5. USB 相关（尚未动工，只有前期结论）
 
