@@ -541,7 +541,24 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         }
         enable_pcie_power_domain(dev)?;
 
-        probe_high_dbi_windows(dev);
+        // Gate read-back: the CRU window (0xfd7c0000, 1MB) holds every
+        // CLKGATE_CON word. Log the pcie-domain gate words after the
+        // enables so a stuck gate names itself (SET_TO_DISABLE gates read
+        // 0 when the clock is ON).
+        let cru = dev.res().iomap_region(
+            driver_base::MmioRegion::new(0xfd7c_0000 as usize, 0x0010_0000),
+            "pcie-cru-diag",
+        )?;
+        for (name, off) in [
+            ("CLKGATE_CON(32) php/center", 0x800 + 32 * 4),
+            ("CLKGATE_CON(33) pcie aclk/dbi", 0x800 + 33 * 4),
+            ("CLKGATE_CON(34) pcie pclk/slv", 0x800 + 34 * 4),
+            ("CLKGATE_CON(35) pcie aux", 0x800 + 35 * 4),
+            ("CLKGATE_CON(38) pipe", 0x800 + 38 * 4),
+            ("CLKSEL_CON(165) center mux", 0x400 + 165 * 4),
+        ] {
+            log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
+        }
 
         log::info!("pcie-dw: probing own dbi (0xa41000000)");
 
