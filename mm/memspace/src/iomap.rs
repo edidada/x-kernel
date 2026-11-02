@@ -142,18 +142,38 @@ pub fn iomap_device(
         .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
         .ok_or(IoMapError::NoMemory)?;
 
-    // EXPERIMENT: regions above 4 GiB (the rk3588 PCIe DBI windows) are
-    // mapped Normal-NC instead of Device-nGnRE. The Device access type
-    // stalls the rk3588 NOC path to those windows; Normal-NC is what the
-    // working tgoskits rk3588 PCIe bring-up effectively uses.
-    let attr = if start.as_usize() >= 0x1_0000_0000 {
-        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::UNCACHED
-    } else {
-        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE
-    };
+    // Every MMIO window gets the Device attribute. The temporary
+    // ">4 GiB -> UNCACHED" experiment that lived here leaked into later
+    // builds and silently made the PCIe DBI window Normal-NC while the MAIR
+    // Device encoding was being varied -- so those attribute comparisons
+    // never actually applied to the window under test. Keep it uniform.
+    let attr = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE;
     kernel_aspace
         .map_linear(mapped_start, start, span, attr)
         .map_err(|_| IoMapError::MappingFailed)?;
+
+    // Bring-up diagnostic: read the descriptor we just installed back out of
+    // the kernel page table. Everything about the failing rk3588 PCIe DBI
+    // access (address, attribute, granule) has so far only been *assumed*
+    // from the mapping request; this prints what the hardware will actually
+    // walk.
+    if start.as_usize() >= 0x1_0000_0000 {
+        let asked = mapped_start;
+        match kernel_aspace.page_table().query_entry(asked) {
+            Ok(pte) => log::info!(
+                "iomap: pte VA {:#x}: paddr {:#x} (asked {:#x}) {:?} {:?}",
+                mapped_start,
+                pte.paddr().as_usize(),
+                start.as_usize(),
+                pte.flags(),
+                pte.page_size()
+            ),
+            Err(err) => log::warn!(
+                "iomap: pte query for VA {:#x} failed: {err:?}",
+                mapped_start
+            ),
+        }
+    }
     // TLB shootdown is already handled by `PageTableMut::finish()`:
     // `map_linear` → `Backend::map` → `pgtbl.modify()` creates a
     // `PageTableMut`, whose `Drop` calls `finish()` →
