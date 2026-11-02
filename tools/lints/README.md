@@ -39,7 +39,8 @@ configurations, for example to `UNITTEST=y`, does not relink it; Dylint
 records the library as a file dependency of every checked crate, and a
 relink would re-check them all. It is rebuilt when its sources,
 `Cargo.lock` or the toolchain change. `make dylint_test` uses the same
-target directory.
+target directory. It needs no `.config` and does not touch the kernel
+configuration, so it can run while a scan of another configuration does.
 
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a

@@ -233,8 +233,13 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
    toolchain into `<target>/tools/lints`, then runs `cargo dylint
    --lib-path` on the kernel with the configuration's features, target,
    rustflags and environment; Dylint loads the prebuilt library and does
-   not build it. `make dylint_test` runs the library's tests in the same
-   target directory.
+   not build it. `make dylint_test` (`xkmake dylint --self-test`) runs
+   the library's tests in the same target directory. The tests need no
+   kernel configuration, so the self-test neither reads nor rewrites
+   `.config`, `.cargo/.xconfig.toml` or the other generated files, and
+   does not require a `.config` at all. It builds in the debug profile,
+   while the scan loads the release library, so CI runs it alongside the
+   scans of other configurations in the same tree and target directory.
 2. The library build runs with an empty `CARGO_ENCODED_RUSTFLAGS` and
    `CARGO_TARGET_DIR` set to that directory. Cargo in `tools/lints` still
    reads the repository `.cargo/config.toml` and the generated

@@ -64,7 +64,8 @@ pinned version constants. Cargo installs these executables under
 repository Dylint lints (see `docs/code-guidelines/`). Lints only see code
 that the configuration compiles; CI scans the aarch64 and x86_64
 `qemu_defconfig` configurations. `make dylint_test`
-runs the lint's UI tests.
+runs the lint's UI tests; it does not read or rewrite `.config`, so it needs
+no platform configuration and can run while another `make` changes it.
 `make dylint` and `make dylint_test` accept `HYGIENE=n` to skip the
 repository hygiene checks they otherwise run first (test layout, dependencies,
 headers, lint inheritance, hook self-tests); use it only where `make clippy`

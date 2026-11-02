@@ -52,6 +52,9 @@ struct Toolchain {
 }
 
 pub(crate) fn run(args: &DylintArgs) -> Result<()> {
+    if args.self_test {
+        return self_test(args);
+    }
     let facts_out = args
         .facts_out
         .as_deref()
@@ -76,7 +79,7 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
         None => None,
     };
     let lint_dir = context.workspace_root.join(LINT_DIR);
-    let (toolchain, host) = match probe_tools(args, &context, &lint_dir) {
+    let (toolchain, host) = match probe_tools(&context, &lint_dir) {
         Ok(tools) => tools,
         Err(error) => {
             if let Some(facts) = &facts {
@@ -88,7 +91,7 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
             return Err(error);
         }
     };
-    let result = build_and_scan(args, &context, &lint_dir, &toolchain, &host, facts.as_ref());
+    let result = build_and_scan(args, &context, &toolchain, &host, facts.as_ref());
     let Some(facts) = facts else {
         return result.map_err(ScanError::into_inner);
     };
@@ -107,21 +110,40 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
     result.map_err(ScanError::into_inner)
 }
 
-/// Reads the pinned lint toolchain and checks the tools the run needs;
+/// Runs the lint library's tests.
+///
+/// The tests need no kernel configuration, so the self-test neither reads
+/// nor rewrites `.config` and the files generated from it. It can therefore
+/// run next to a scan of the same tree that switches the configuration.
+fn self_test(args: &DylintArgs) -> Result<()> {
+    let workspace = &args.build.workspace;
+    let workspace_root = workspace_root()?;
+    let lint_dir = workspace_root.join(LINT_DIR);
+    let toolchain = read_toolchain(&lint_dir.join("rust-toolchain.toml"))?;
+    let host = probe_host(workspace.dry_run, || {
+        let host = rustc_host(&toolchain)?;
+        ensure_dylint_tools()?;
+        ensure_rustc_dev(&toolchain)?;
+        Ok(host)
+    })?;
+    let lint = LintBuild::new(
+        &workspace_root,
+        &workspace_root.join(&workspace.target_dir),
+        workspace.dry_run,
+        workspace.verbosity,
+    )?;
+    lint.run(&toolchain, &host, LintAction::Test)
+}
+
+/// Reads the pinned lint toolchain and checks the tools the scan needs;
 /// returns the toolchain and the host triple.
-fn probe_tools(
-    args: &DylintArgs,
-    context: &BuildContext,
-    lint_dir: &Path,
-) -> Result<(String, String)> {
+fn probe_tools(context: &BuildContext, lint_dir: &Path) -> Result<(String, String)> {
     let toolchain = read_toolchain(&lint_dir.join("rust-toolchain.toml"))?;
     let host = probe_host(context.dry_run, || {
         let host = rustc_host(&toolchain)?;
         ensure_dylint_tools()?;
         ensure_rustc_dev(&toolchain)?;
-        if !args.self_test {
-            ensure_target(&toolchain, context.config.target())?;
-        }
+        ensure_target(&toolchain, context.config.target())?;
         Ok(host)
     })?;
     Ok((toolchain, host))
@@ -153,39 +175,22 @@ impl ScanError {
 fn build_and_scan(
     args: &DylintArgs,
     context: &BuildContext,
-    lint_dir: &Path,
     toolchain: &str,
     host: &str,
     facts: Option<&FactsRun>,
 ) -> std::result::Result<(), ScanError> {
-    let driver_path = prepare_driver_path(context).map_err(ScanError::Setup)?;
-    let lint_manifest = lint_dir.join("Cargo.toml");
-    let lint_target_dir = context.target_dir.join("tools/lints");
-    let mut lint = Process::new("cargo", context.dry_run, context.verbosity);
-    lint.current_dir(lint_dir)
-        .arg(format!("+{toolchain}"))
-        .arg(if args.self_test { "test" } else { "build" })
-        .arg("--locked");
-    if !args.self_test {
-        lint.arg("--release");
-    }
-    lint.arg("--manifest-path")
-        .arg(&lint_manifest)
-        .arg("--target-dir")
-        .arg(&lint_target_dir);
-    sanitize_env(&mut lint);
-    pin_lint_build_env(&mut lint, &lint_target_dir);
-    set_host_tools(&mut lint, host);
-    if let Some(path) = &driver_path {
-        lint.env("DYLINT_DRIVER_PATH", path);
-    }
-    lint.run().map_err(ScanError::Setup)?;
+    let lint = LintBuild::new(
+        &context.workspace_root,
+        &context.target_dir,
+        context.dry_run,
+        context.verbosity,
+    )
+    .map_err(ScanError::Setup)?;
+    lint.run(toolchain, host, LintAction::Build)
+        .map_err(ScanError::Setup)?;
+    let driver_path = lint.driver_path;
 
-    if args.self_test {
-        return Ok(());
-    }
-
-    let library = lint_library_path(&lint_target_dir, toolchain, host);
+    let library = lint_library_path(&lint.target_dir, toolchain, host);
     if !context.dry_run && !library.is_file() {
         return Err(ScanError::Setup(Error::Message(format!(
             "Dylint library not found at {}; ensure dylint-link {DYLINT_VERSION} is installed \
@@ -264,6 +269,69 @@ fn build_and_scan(
     .map_err(ScanError::Scan)
 }
 
+/// What the lint library build or test runs.
+#[derive(Clone, Copy)]
+enum LintAction {
+    /// Release build of the library that the scan loads.
+    Build,
+    /// The library's tests, including the UI tests `make dylint_test` runs.
+    Test,
+}
+
+/// Cargo invocation on the lint library. It needs the workspace paths only,
+/// never the kernel configuration.
+struct LintBuild {
+    lint_dir: PathBuf,
+    target_dir: PathBuf,
+    driver_path: Option<PathBuf>,
+    dry_run: bool,
+    verbosity: u8,
+}
+
+impl LintBuild {
+    /// `workspace_target_dir` is the kernel's target directory; the library
+    /// is built under its `tools/lints`.
+    fn new(
+        workspace_root: &Path,
+        workspace_target_dir: &Path,
+        dry_run: bool,
+        verbosity: u8,
+    ) -> Result<Self> {
+        Ok(Self {
+            lint_dir: workspace_root.join(LINT_DIR),
+            target_dir: workspace_target_dir.join("tools/lints"),
+            driver_path: prepare_driver_path(workspace_root, dry_run)?,
+            dry_run,
+            verbosity,
+        })
+    }
+
+    fn run(&self, toolchain: &str, host: &str, action: LintAction) -> Result<()> {
+        let mut lint = Process::new("cargo", self.dry_run, self.verbosity);
+        lint.current_dir(&self.lint_dir)
+            .arg(format!("+{toolchain}"))
+            .arg(match action {
+                LintAction::Build => "build",
+                LintAction::Test => "test",
+            })
+            .arg("--locked");
+        if matches!(action, LintAction::Build) {
+            lint.arg("--release");
+        }
+        lint.arg("--manifest-path")
+            .arg(self.lint_dir.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&self.target_dir);
+        sanitize_env(&mut lint);
+        pin_lint_build_env(&mut lint, &self.target_dir);
+        set_host_tools(&mut lint, host);
+        if let Some(path) = &self.driver_path {
+            lint.env("DYLINT_DRIVER_PATH", path);
+        }
+        lint.run()
+    }
+}
+
 /// Runs the host-triple and tool probes, which spawn `rustc`, `rustup` and
 /// `cargo-dylint`, only for a real run: `--dry-run` prints commands without
 /// executing anything, so it uses a placeholder host instead.
@@ -279,12 +347,12 @@ fn probe_host(is_dry_run: bool, probe: impl FnOnce() -> Result<String>) -> Resul
 ///
 /// Dylint requires an overridden driver directory to exist before it runs,
 /// for both the kernel scan and the lint self-test.
-fn prepare_driver_path(context: &BuildContext) -> Result<Option<PathBuf>> {
+fn prepare_driver_path(workspace_root: &Path, dry_run: bool) -> Result<Option<PathBuf>> {
     let Some(raw) = std::env::var_os("DYLINT_DRIVER_PATH") else {
         return Ok(None);
     };
-    let path = context.workspace_root.join(raw);
-    if !context.dry_run {
+    let path = workspace_root.join(raw);
+    if !dry_run {
         fs::create_dir_all(&path).with_path(&path)?;
     }
     Ok(Some(path))
