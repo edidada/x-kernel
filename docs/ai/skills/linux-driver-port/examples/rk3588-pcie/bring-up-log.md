@@ -129,13 +129,35 @@ nGnRE 都能通，当前是 nGnRnE）。
 - 映射建立后立刻 dump PTE（`page_table().query_entry(va)`）可一行否掉"地址
   算错/属性给错/被拆大页"。当前 `iomap` 对 >4 GiB 的映射会自动打印 PTE。
 
+## 3.4 BAR：已进描述符，但地址是 U-Boot 分配的、**不可用**
+
+`pci::registered` 现在打 info 级，实测：
+
+```
+pci: registered 00:01.0 (10ec:8125 class 02:00)
+  mmio [(0x40100000, 0x10000), (0x40110000, 0x4000)]  io [(0xf3101000, 0x100)]
+```
+
+- 设备确实进了设备域，BAR 资源也在描述符里（class `02:00` = Ethernet）。
+- **但 BAR0/BAR2 落在 `0x40100000` 一带（DRAM 空间），不在 DT 声明的 MEM 窗口
+  （`0xf4200000+14M` 与 `0xa0000000 000+1G`）内**。这是 U-Boot 每次启动自己做
+  PCI 枚举时按它自己的地址空间分配的（串口日志里能看到 U-Boot 的
+  `pcie_dw_rockchip ... Link Fail`）。
+- 我们这边 `configure_pci_device_if_needed()` 只在"BAR 为 0（未分配）"时才分配，
+  于是直接沿用了这套无效地址，只置了 IO/MEM/BusMaster 命令位。
+
+**结论：PCIe 里程碑要往下走，必须强制重分配 BAR。** 做法（下一步）：
+1. 判定"BAR 不在本 host 声明的 MEM 窗口内"也算未分配（比只判 0 更正确）；
+2. 对这类 BAR，先向其 BAR 寄存器写 0（清掉 U-Boot 的残留），
+   再让 `PciRangeAllocator` 从 DT 的 MEM 段分配；
+3. 分配后回读校验，把结果打进 `pci: registered` 那行日志。
+
 ## 4. 下一步（本次工作的续点）
 
 **目标：给 RTL8125 分 BAR 并把设备接上 net 类。**
 
-1. 确认 `discover_root` 里 `device_setup::configure_pci_device_if_needed()` 是否
-   真的给 bus1 dev0 分配了 BAR（日志在 debug 级，需要临时调到 info 或用
-   `log::info!` 打一条）；
+1. **强制重分配 BAR**（见 3.4）：BAR 非 0 但在本 host 的 MEM 窗口之外 → 视为
+   未分配，清零后由 DT 的 MEM 段分配并提供给描述符；
 2. BAR 窗口来自 `ranges` 的 MEM/prefetch 段（`0xf4200000+14M`、
    `0xa0000000 000+1G`），确认 `pci_bar_allocation_range` 解析到它们；
 3. 设备描述符进域后，`net` 子系统侧还需一个 8125 驱动（**尚未开始**，工作量

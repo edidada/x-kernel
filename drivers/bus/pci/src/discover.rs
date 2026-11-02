@@ -98,6 +98,8 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
             }
 
             let mut resources = ResourceMap::new();
+            let mut mmio_bars: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+            let mut io_bars: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
 
             // Collect BAR resources.
             let mut bar_idx = 0u8;
@@ -109,12 +111,14 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
                 let advance = if bar.takes_two_entries() { 2 } else { 1 };
                 match bar {
                     crate::BarInfo::Memory { address, size, .. } if size > 0 && address != 0 => {
+                        mmio_bars.push((address, size));
                         resources.push_kind(ResourceKind::Mmio(MmioRegion::new(
                             address as usize,
                             size as usize,
                         )));
                     }
                     crate::BarInfo::IO { address, size } if size > 0 && address > 0 => {
+                        io_bars.push((u64::from(address), u64::from(size)));
                         resources.push_kind(ResourceKind::IoPort(driver_base::IoPortRange {
                             base: (address & 0xffff) as u16,
                             size: (size & 0xffff) as u16,
@@ -156,12 +160,20 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
                 Ok(added) => log::debug!("pci: registered {added:?}"),
                 Err(err) => log::warn!("pci: device registration rejected: {err:?}"),
             }
-            log::debug!(
-                "pci: registered {bdf} ({:04x}:{:04x} class {:02x}:{:02x})",
+            // info, not debug: this line is the enumeration evidence (BDF,
+            // ids and the BAR resources the descriptor carries).
+            log::info!(
+                "pci: registered {:02x}:{:02x}.{} ({:04x}:{:04x} class {:02x}:{:02x}) mmio {:?} \
+                 io {:?}",
+                segment,
+                bdf.bus,
+                bdf.function,
                 info.vendor_id,
                 info.device_id,
                 info.class,
-                info.subclass
+                info.subclass,
+                mmio_bars,
+                io_bars
             );
         }
     }
