@@ -178,7 +178,9 @@ aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STA
 commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`
 与 `XKERNEL_FACTS_DEPS=1`（同时导出为内核 target 构建的依赖 crate），后续
 unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
-`artifacts/facts/` 随 leg 输出 stash，并在 Post 阶段无论构建成败都归档，
+每个 Dylint 阶段结束时（无论成败）立即归档该平台的 `artifacts/facts/<platform>/`，
+归档失败只记日志、不影响阶段结果，因此事实在构建其余部分运行期间即可下载。
+`artifacts/facts/` 仍随 leg 输出 stash，并在 Post 阶段无论构建成败再归档一次作为兜底，
 Jenkins 制品地址为 `artifact/artifacts/facts/<platform>/`（`status.json`、
 `manifest.json`、`crates/`）。`status.json` 区分 `ready`、`partial`、`failed`
 与原因；事实扫描之前阶段已失败时，脚本的退出钩子写入 `failed`/`build`；
