@@ -481,6 +481,31 @@ fn enable_pcie_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), Pro
     Err(ProbeError::Fatal(RuntimeError::Io))
 }
 
+/// Bring-up bisect: probe the per-controller DBI alias windows. All reads
+/// are passive (vendor id); any that hang name the dead slice of the
+/// 36-bit dbi region.
+fn probe_high_dbi_windows(dev: &mut Device<'_, PlatformBus>) {
+    log::info!("pcie-dw: probing the high dbi windows");
+    for (name, base) in [
+        ("2x1l0 dbi", 0x000a_4080_0000u64),
+        ("2x1l1 dbi", 0x000a_40c0_0000),
+        ("3x4 dbi", 0x0009_c000_0000),
+        ("3x2 dbi", 0x000a_4140_0000),
+    ] {
+        log::info!("pcie-dw: probing {name}");
+        let win = dev.res().iomap_region(
+            driver_base::MmioRegion::new(base as usize, 0x1000),
+            "pcie-dbi-probe",
+        );
+        let Ok(win) = win else {
+            log::info!("pcie-dw: {name} map failed");
+            continue;
+        };
+        let word = win.read32(0x00);
+        log::info!("pcie-dw: {name} -> {word:#010x}");
+    }
+}
+
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
@@ -516,7 +541,10 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         }
         enable_pcie_power_domain(dev)?;
 
-        log::info!("pcie-dw: clocks on, configuring client (APB)");
+        probe_high_dbi_windows(dev);
+
+        log::info!("pcie-dw: probing own dbi (0xa41000000)");
+
         // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode. The APB
         // sequence comes BEFORE the first DBI access in the BSP flow (the
         // client mode gates the DBI slice's responsiveness).
