@@ -715,17 +715,15 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // then the first DBI access.
         let phy = dev.res().phy("pcie-phy")?;
         let powered = phy.init_powered()?;
-        // A real reset PULSE (assert, 1us, deassert) — not just a deassert.
-        // The DWC core's slave port latches its state out of reset; leaving
-        // it in the firmware's half-initialised state makes every DBI
-        // access stall (no DECERR, no completion). Both the reference
-        // driver and the vendor BSP pulse the pair here.
-        log::info!("pcie-dw: phy powered, pulsing the reset pair");
+        // Deassert only -- exactly what both reference drivers do
+        // (`reset_control_deassert` on the array, no assert first). An
+        // earlier version pulsed the pair (assert -> 1us -> deassert) and the
+        // DBI window's response got *worse*: it went from "routed but never
+        // completing" (stall) to "not decoded at all" (DECERR). Same board,
+        // same address, so the window's decode is influenced by this
+        // sequence -- match the reference and keep the pulse out.
+        log::info!("pcie-dw: phy powered, releasing resets");
         log_phy_state(dev)?;
-        for rst in &resets {
-            rst.assert();
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
         for rst in &resets {
             rst.deassert();
         }
