@@ -1,0 +1,127 @@
+capability: mm_user_load_vec_osvm
+title: Load a counted or zero-terminated array from user memory into a Vec (osvm::load_vec / load_vec_until_null)
+family: mm.user_access
+summary: >-
+  Heap-allocating helpers that copy count elements, or elements up to the first all-zero element
+  (NUL-terminated strings, argv-like arrays), from a user pointer into a new Vec, with a fixed 128 KiB
+  scan limit for the terminated form.
+source: {kind: workspace, crate: osvm, path: process/osvm}
+symbols:
+  - {fqn: osvm::load_vec, kind: fn, path: process/osvm/src/heap.rs, role: primary}
+  - {fqn: osvm::load_vec_until_null, kind: fn, path: process/osvm/src/heap.rs, role: primary}
+  - {fqn: osvm::load_vec_unsafe, kind: fn, path: process/osvm/src/heap.rs, role: operation}
+operations:
+- name: load_counted
+  symbols:
+  - osvm::load_vec
+  effect: copy exactly count elements of an AnyBitPattern type into a Vec
+  evidence:
+  - path: process/osvm/src/heap.rs
+    item: osvm::heap::load_vec
+    quote: 'pub fn load_vec<T: AnyBitPattern>(p: *const T, count: usize) -> MemResult<Vec<T>> {'
+- name: load_until_null
+  symbols:
+  - osvm::load_vec_until_null
+  effect: 'scan up to the next 32-byte address boundary per read (not 32 elements), looking for an all-zero
+    element; the generic scan is not total for all Pod types: size_of::<T>() > 32 can yield a zero-element
+    read and no progress'
+  evidence:
+  - path: process/osvm/src/heap.rs
+    item: osvm::heap::load_vec_until_null
+    quote: let n = (limit - base) / elem_sz;
+  - path: process/osvm/src/heap.rs
+    item: osvm::heap::load_vec_until_null
+    quote: if res.len() >= LIMIT / elem_sz {
+usage_protocol:
+  - step: call with the user pointer and a count (load_vec) or without one (load_vec_until_null); convert bytes to String with String::from_utf8 if text (kuaccess::vm_load_string does this)
+    evidence: [{path: process/osvm/src/heap.rs, item: osvm::heap::load_vec_until_null, quote: "NUL-terminated user arrays such as environment or path strings."}]
+contract:
+  no_std:
+    value: 'yes (crate #![no_std]); these helpers exist only under the `alloc` feature (default on)'
+    evidence:
+    - path: process/osvm/src/lib.rs
+      quote: '#![no_std]'
+    - path: process/osvm/src/lib.rs
+      item: osvm::heap
+      quote: '#[cfg(feature = "alloc")]'
+  allocation:
+    value: allocates a Vec (with_capacity(count) up front for load_vec; grows by reserve for the terminated
+      form)
+    evidence:
+    - path: process/osvm/src/heap.rs
+      item: osvm::heap::load_vec_unsafe
+      quote: let mut v = Vec::with_capacity(count);
+    - path: process/osvm/src/heap.rs
+      item: osvm::heap::load_vec_until_null
+      quote: res.reserve(n);
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: returns an owned Vec<T>; no reference into user memory is kept
+    evidence:
+    - path: process/osvm/src/heap.rs
+      item: osvm::heap::load_vec_until_null
+      quote: 'pub fn load_vec_until_null<T: Pod>(p: *const T) -> MemResult<Vec<T>> {'
+  errors_bounds:
+    value: 'load_vec reports alignment/provider errors but reserves unchecked count first (caller must
+      bound it). The terminated scanner has a nominal 128 KiB bound, checked after each batch; it is not
+      valid for all Pod types: T=[u8;64] yields n=0 and no progress, and ZSTs can divide by zero. Do not
+      infer guaranteed termination or an exact-read limit from the docstring.'
+    evidence:
+    - path: process/osvm/src/heap.rs
+      item: osvm::heap::load_vec_until_null
+      quote: let n = (limit - base) / elem_sz;
+    - path: process/osvm/src/heap.rs
+      item: osvm::heap::load_vec_unsafe
+      quote: let mut v = Vec::with_capacity(count);
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - bytemuck
+  used_by:
+  - kuaccess
+  allowed_layers: unknown
+  evidence:
+  - path: core/kuaccess/src/lib.rs
+    item: kuaccess::vm_load_string
+    quote: let bytes = osvm::load_vec_until_null(ptr as *const u8)?;
+  - path: core/kuaccess/src/lib.rs
+    item: kuaccess::vm_load_string_with_len
+    quote: let bytes = osvm::load_vec(ptr as *const u8, len)?;
+  - path: process/osvm/Cargo.toml
+    quote: "bytemuck = { version = \"1.24\", features = [\n    \"align_offset\",\n    \"const_zeroed\"\
+      ,\n    \"zeroable_maybe_uninit\",\n] }"
+  - path: core/kuaccess/Cargo.toml
+    quote: osvm.workspace = true
+aliases:
+  en: [strncpy_from_user, strnlen_user, copy user string, read C string from user, load argv, load path from user, getname, read user array, user NUL-terminated array]
+  zh: [读取用户字符串, 用户态字符串拷贝, 读取以零结尾的数组, 加载用户态数组, 用户路径读取]
+identifiers: [strncpy_from_user, strnlen_user, getname, read_cstr, cstr_from_user, PATH_MAX, NAME_MAX, "position(|b| *b == 0)", NameTooLong, ENAMETOOLONG, until_null]
+exclusions:
+- the terminated scan limit is a fixed 128 KiB (NameTooLong); a syscall needing a smaller per-argument
+  cap (PATH_MAX) must check the returned length itself
+- load_vec trusts count for the up-front reservation, so validate count against a limit before calling
+  (do not pass an unchecked user length)
+- for a UTF-8 string use kuaccess::vm_load_string, which also maps invalid UTF-8 to an error (see mm_user_string_load_kuaccess)
+- Suppress generic load_vec_until_null<T> replacement suggestions until the owner fixes or restricts the
+  scanner. load_vec<T> is a separate counted operation; byte-string use still needs a caller resource
+  bound.
+counter_examples: []
+notes: 'needs-owner: the generic terminated scanner needs a supported-type/progress invariant or implementation
+  fix. Example T=[u8;64] (Pod), aligned non-null pointer: the next-boundary span is at most 32 bytes,
+  so n=0 forever if empty reads succeed. For T=() and nonzero base, n divides by zero. No x-kernel source
+  was changed in this review.'
+status: needs-owner
+open_questions:
+- field: contract.errors_bounds
+  question: "For a Pod element larger than the remaining window (for example [u8; 64]) the per-step element count can be 0, so the scan makes no progress, and a zero-sized element divides by zero. Should the generic scanner be fixed, or its element types restricted?"
+  evidence:
+  - path: process/osvm/src/heap.rs
+    item: osvm::heap::load_vec_until_null
+    quote: "let n = (limit - base) / elem_sz;"

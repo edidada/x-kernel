@@ -1,0 +1,138 @@
+capability: rcu_callback_krcu
+title: Deferred RCU callback with intrusive node (krcu::PreparedCallback, call_rcu style)
+family: sync.rcu
+summary: >-
+  Asynchronous post-grace-period callback. A CallbackNode is embedded in caller-owned storage,
+  adopted by an unsafe PreparedCallback::new, and submitted without allocating; the callback runs
+  later in non-sleepable softirq context after a grace period. drain_callbacks waits for already
+  accepted callbacks (rcu_barrier style). preflight_callback_submission checks admission before a
+  destructive update.
+source: {kind: workspace, crate: krcu, path: sync/krcu}
+symbols:
+- fqn: krcu::PreparedCallback
+  kind: struct
+  path: sync/krcu/src/callback.rs
+  role: primary
+- fqn: krcu::PreparedCallback::new
+  kind: fn
+  path: sync/krcu/src/callback.rs
+  role: constructor
+- fqn: krcu::PreparedCallback::submit
+  kind: fn
+  path: sync/krcu/src/callback.rs
+  role: operation
+- fqn: krcu::preflight_callback_submission
+  kind: fn
+  path: sync/krcu/src/callback.rs
+  role: operation
+- fqn: krcu::drain_callbacks
+  kind: fn
+  path: sync/krcu/src/drain.rs
+  role: operation
+- fqn: krcu::CallbackNode
+  kind: struct
+  path: sync/krcu/crates/krcu-core/src/callback.rs
+  role: helper
+operations:
+  - name: submit
+    symbols: [krcu::PreparedCallback::submit]
+    effect: consumes the submission right; the node's callback runs after a grace period in softirq context; on rejection the handle is returned unchanged
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "pub unsafe fn submit(self) -> Result<(), (KError, Self)>"}
+      - {path: sync/krcu/src/lib.rs, quote: "the callback executes later"}
+  - name: drain_callbacks
+    symbols: [krcu::drain_callbacks]
+    effect: waits for callbacks accepted before the call to return (not merely for a grace period)
+    evidence: [{path: sync/krcu/src/drain.rs, item: krcu::drain::drain_callbacks, quote: "Waits for callbacks accepted before this call to return, not merely for a GP."}]
+  - name: preflight_callback_submission
+    symbols: [krcu::preflight_callback_submission]
+    effect: checks task context and service readiness before a destructive update; transfers no ownership
+    evidence: [{path: sync/krcu/src/lib.rs, quote: "[`preflight_callback_submission`] checks task context and permanent service"}]
+usage_protocol:
+- step: Embed a stable CallbackNode in retained storage with correct layout/provenance recovery for callback
+    and cancellation; withdraw all publication routes, adopt the sole submission right with unsafe PreparedCallback::new,
+    then submit. A zero-offset repr(C) header is one layout strategy, not an API requirement.
+  evidence:
+  - path: sync/krcu/src/callback.rs
+    item: krcu::callback::PreparedCallback::submit
+    quote: Withdraw all publication routes to the retired data before submission.
+  - path: sync/krcu/src/callback.rs
+    item: krcu::callback::PreparedCallback::new
+    quote: pub unsafe fn new(
+  - path: sync/krcu/src/callback.rs
+    item: krcu::callback::PreparedCallback::new
+    quote: Both cancellation and invocation must use this exact node layout/provenance.
+- step: 'teardown: stop producers and reposts first, then drain_callbacks; downstream work needs its own
+    completion protocol'
+  evidence:
+  - path: sync/krcu/src/drain.rs
+    item: krcu::drain::drain_callbacks
+    quote: Teardown must stop producers and reposts first.
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: sync/krcu/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "PreparedCallback::new and submit do not allocate (node is embedded in caller storage); drain_callbacks completion waiting does not allocate but its shared drain record Arc follows fatal OOM policy"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::new, quote: "Adopts one already-prepared node; this does not allocate or submit it."}
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "this operation does not allocate or wait for the grace period."}
+      - {path: sync/krcu/src/drain.rs, item: krcu::drain::drain_callbacks, quote: "drain record's Arc allocation still follows fatal kernel OOM policy."}
+  blocking:
+    value: "submit does not wait; the callback and its destruction must not block or unwind (softirq context); drain_callbacks sleeps and needs sleepable task context"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "The node's callback and destruction must not block or unwind and must be"}
+      - {path: sync/krcu/src/drain.rs, item: krcu::drain::drain_callbacks, quote: "Returns `InvalidInput` outside sleepable watched task context (including a"}
+  irq_nmi:
+    value: "submit supported from task, hardirq and softirq context after initialization; rejected in NMI; preflight and drain are task-context only"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "Returns `InvalidInput` in NMI or unwatched execution, or `BadState` when"}
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "Task, hardirq and softirq submissions are supported after initialization;"}
+  ownership_lifetime:
+    value: "PreparedCallback owns the right to submit one node or release its resources; dropping an unsubmitted handle calls only the cancel function, never the callback; no Clone; node must stay at a stable address until invocation or cancellation"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback, quote: "Owns the right to submit one node or release its unsubmitted resources."}
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::new, quote: "initialized, unqueued node at a stable address."}
+  errors_bounds:
+    value: "submit returns Err((KError, handle)): InvalidInput in NMI/unwatched, BadState when service unavailable; handle returned for retry; rejection is not permission to reclaim retired data"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "The returned handle still owns cancellation and may be retried."}
+  concurrency:
+    value: "accepted callbacks may run before submit returns; callers own serialization and withdrawal; no scheduler or RCU bookkeeping lock may be held at submission"
+    evidence:
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "Success does not imply the callback is still pending: it can finish"}
+      - {path: sync/krcu/src/callback.rs, item: krcu::callback::PreparedCallback::submit, quote: "Hold no scheduler or RCU bookkeeping lock:"}
+layers:
+  depends_on:
+  - krcu-core
+  - kspin
+  - kerrno
+  - kcompletion
+  - kiface-task-api
+  used_by:
+  - krcu-list
+  allowed_layers: unknown
+  evidence:
+  - path: util/krcu-list/Cargo.toml
+    quote: krcu.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: krcu-core.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kiface-task-api.workspace = true
+aliases:
+  en: [call_rcu, rcu_barrier, deferred free after grace period, rcu callback, retire callback, delayed reclamation, kfree_rcu]
+  zh: [call_rcu, 宽限期回调, 延迟释放, 异步回收, rcu_barrier]
+identifiers: [call_rcu, CallbackNode, invoke_fn, cancel_fn, retire, grace_period, drain, rcu_head, kfree_rcu]
+exclusions:
+  - "callback runs in non-sleepable softirq context: the destructor chain must not block, allocate-and-wait or unwind; for sleepable destruction use Rcu::replace_sync (rcu_owned_krcu) or kfinalize/kworkng deferred drop"
+  - "drain_callbacks waits for accepted callbacks only; it is not a substitute for withdrawing data and waiting for readers (synchronize_rcu)"
+  - "unsafe API with strict storage and provenance obligations; for plain Box replacement prefer krcu::Rcu"
+counter_examples: []
+notes: CallbackNode is publicly re-exported by krcu (`pub use krcu_core::CallbackNode;` in sync/krcu/src/lib.rs); its definition is in krcu-core.
+  Use the facade path krcu::CallbackNode.

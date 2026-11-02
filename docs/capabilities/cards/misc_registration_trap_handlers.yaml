@@ -1,0 +1,84 @@
+capability: misc_registration_trap_handlers
+title: Distributed-slice trap handler registration (kcpu::excp IRQ / NMI / PAGE_FAULT with #[register_trap_handler])
+family: misc.registration
+summary: >-
+  linkme distributed slices that collect handler functions from any crate: IRQ and NMI take
+  fn(usize) -> bool, PAGE_FAULT takes fn(VirtAddr, PageFaultFlags) -> bool. A crate registers with
+  #[register_trap_handler(IRQ)] etc.; the arch trap code iterates the slice and calls the first
+  entry (a second entry only warns).
+source: {kind: workspace, crate: kcpu, path: arch/kcpu}
+symbols:
+  - {fqn: kcpu::excp::IRQ, kind: static, path: arch/kcpu/src/excp.rs, role: primary}
+  - {fqn: kcpu::excp::NMI, kind: static, path: arch/kcpu/src/excp.rs, role: primary}
+  - {fqn: kcpu::excp::PAGE_FAULT, kind: static, path: arch/kcpu/src/excp.rs, role: primary}
+operations:
+  - name: register_handler
+    symbols: [kcpu::excp::PAGE_FAULT]
+    effect: "annotate a fn with #[register_trap_handler(PAGE_FAULT)]; return true when the fault was handled"
+    evidence:
+      - {path: arch/kcpu/src/excp.rs, item: kcpu::excp::PAGE_FAULT, quote: "pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];"}
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::handle_page_fault, quote: "#[register_trap_handler(PAGE_FAULT)]"}
+  - name: dispatch
+    symbols: [kcpu::excp::IRQ]
+    effect: "handle_trap! uses the first registered handler and warns if there are several or none"
+    evidence:
+      - {path: arch/kcpu/src/excp.rs, item: kcpu::excp::handle_trap, quote: 'warn!("Multiple handlers for trap {} are not currently supported", stringify!($trap));'}
+contract:
+  no_std: {value: unknown, evidence: []}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi:
+    value: NMI handlers must use the lock-free NMI dispatch path
+    evidence: [{path: arch/kcpu/src/excp.rs, item: kcpu::excp::NMI, quote: "normal IRQs are masked by PMR).  Handlers must use the lock‑free"}]
+  ownership_lifetime:
+    value: static slices populated at link time via linkme
+    evidence: [{path: arch/kcpu/src/excp.rs, quote: "distributed_slice as def_trap_handler, distributed_slice as register_trap_handler,"}]
+  errors_bounds:
+    value: only the first registered handler is used; with none, handle_trap! warns and returns false
+    evidence: [{path: arch/kcpu/src/excp.rs, item: kcpu::excp::handle_trap, quote: 'warn!("No registered handler for trap {}", stringify!($trap));'}]
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - linkme
+  - memaddr
+  - page_table
+  used_by:
+  - khal
+  allowed_layers: unknown
+  evidence:
+  - path: arch/khal/src/trap.rs
+    quote: pub use kcpu::excp::{IRQ, PAGE_FAULT, PageFaultFlags, register_trap_handler};
+  - path: arch/kcpu/Cargo.toml
+    quote: linkme = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: "page_table = { workspace = true } kcpu_slot"
+  - path: arch/khal/Cargo.toml
+    quote: kcpu = { workspace = true }
+aliases:
+  en:
+  - register page fault handler
+  - handler table
+  - trap handler registry
+  - distributed slice
+  - linkme registry
+  - exception hook
+  - architecture trap hook
+  zh:
+  - 中断处理函数注册
+  - 缺页处理注册
+  - 异常处理钩子
+  - 分布式切片注册
+  - 处理函数表
+identifiers: [linkme, distributed_slice, register_trap_handler, def_trap_handler, request_irq, irq_handler, handlers, "static HANDLERS", PAGE_FAULT, IRQ, NMI, fn_table]
+exclusions:
+  - only one handler per trap is supported; use a dedicated dispatcher when several consumers must share a trap
+counter_examples:
+- path: util/kiface/src/lib.rs
+  why: kiface defines a single provider with link-time checks. These trap slices also dispatch only one
+    handler, with a runtime warning for duplicates; linkme collection alone does not imply supported one-to-many
+    trap dispatch.
+  evidence:
+  - path: util/kiface/src/lib.rs
+    quote: '`kiface` models a single-implementation interface boundary. An interface is'

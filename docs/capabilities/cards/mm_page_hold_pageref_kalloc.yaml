@@ -1,0 +1,83 @@
+capability: mm_page_hold_pageref_kalloc
+title: Reference-counted hold on one physical page (kalloc PageRef)
+family: mm.allocator
+summary: >-
+  One owned lifetime hold on a single 4 KiB physical page tracked in the global page metadata
+  table. Clone adds a hold, the final Drop returns the page to the global allocator's inventory.
+  Grants no content access or mapping rights.
+source: {kind: workspace, crate: kalloc, path: mm/kalloc}
+symbols:
+  - {fqn: kalloc::PageRef, kind: struct, path: mm/kalloc/src/page.rs, role: primary}
+  - {fqn: kalloc::alloc_page_ref, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::alloc_zeroed_page_ref, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::PageRef::try_clone_ref, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+  - {fqn: kalloc::PageRef::phys_addr, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+  - {fqn: kalloc::PageRef::into_raw, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+  - {fqn: kalloc::PageRef::from_raw, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+operations:
+  - name: allocate
+    symbols: [kalloc::alloc_page_ref, kalloc::alloc_zeroed_page_ref]
+    effect: allocate one page (optionally zeroed) with a single hold; the UsageKind is charged once until the last hold ends
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::alloc_page_ref, quote: "The category is charged once until the last hold ends."}
+  - name: add_hold
+    symbols: [kalloc::PageRef::try_clone_ref]
+    effect: increments the hold count; ReferenceOverflow when the limit would be exceeded
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::PageRef::try_clone_ref, quote: "Returns ReferenceOverflow if another hold would exceed the count limit."}
+usage_protocol:
+  - step: alloc_page_ref(kind)?; share by try_clone_ref; drop each hold; into_raw / from_raw transfer a hold across a raw physical-address boundary
+    evidence: [{path: mm/kalloc/src/page.rs, item: kalloc::page::PageRef::into_raw, quote: "Transfers this hold to a raw PA owner without changing the count."}]
+contract:
+  no_std:
+    value: "yes"
+    evidence: [{path: mm/kalloc/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: takes one page from the global page inventory; adds no control block on clone
+    evidence: [{path: mm/kalloc/src/page.rs, item: kalloc::page::alloc_page_ref, quote: "Clone does not add a"}]
+  blocking:
+    value: final release does not sleep
+    evidence: [{path: mm/kalloc/src/page.rs, item: kalloc::page::PageRef, quote: "IRQ context, never NMI, and does not sleep."}]
+  irq_nmi:
+    value: final release may run in ordinary or IRQ context, never NMI
+    evidence: [{path: mm/kalloc/src/page.rs, item: kalloc::page::PageRef, quote: "IRQ context, never NMI, and does not sleep."}]
+  ownership_lifetime:
+    value: each PageRef is one hold; grants no exclusive content access, kernel mapping or PTE authority; holders keep ownership through any translation / device retirement
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::PageRef, quote: "page to kalloc's global inventory. This grants no exclusive content access,"}
+  errors_bounds:
+    value: alloc_page_ref returns NotInitialized, NoMemory or InvalidInput (AllocError); try_clone_ref returns PageMetaError
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::alloc_page_ref, quote: "Returns NotInitialized before allocator or metadata setup"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - page-meta
+  - memaddr
+  - kaddr_layout
+  - kerrno
+  - alloc-engine
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+  - path: mm/kalloc/Cargo.toml
+    quote: page-meta.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kerrno.workspace = true
+aliases:
+  en: [page refcount, page reference, get_page, put_page, folio ref, struct page refcount, shared page, page hold, frame refcount]
+  zh: [页引用计数, 页持有, 页引用, 共享页, 物理页引用]
+identifiers: [refcount, page_count, get_page, put_page, clone_reference, release_reference, PageMeta, pfn]
+exclusions:
+  - one base page only; use GlobalPage for contiguous multi-page RAII ownership without sharing
+  - a PageRef does not map the page or grant content access
+counter_examples: []
+notes: ""

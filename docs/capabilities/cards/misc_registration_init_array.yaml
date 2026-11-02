@@ -1,0 +1,88 @@
+capability: misc_registration_init_array
+title: Link-time early-init registration (#[macros::register_init] into .init_array)
+family: misc.registration
+summary: >-
+  An attribute that places a no-argument, no-return function into the .init_array section so that
+  kruntime's init_cb() runs it during startup, without editing a central init list.
+source: {kind: workspace, crate: macros, path: util/macros}
+symbols:
+  - {fqn: macros::register_init, kind: fn, path: util/macros/src/lib.rs, role: primary}
+  - {fqn: kruntime::init_setup::init_cb, kind: fn, path: core/kruntime/src/init_setup.rs, role: helper}
+operations:
+  - name: register
+    symbols: [macros::register_init]
+    effect: expands to an extern "C" fn plus a static in link_section .init_array; rejects arguments or a return value
+    evidence:
+      - {path: util/macros/src/lib.rs, item: macros::register_init, quote: "Registers a function in the kernel runtime init array."}
+      - {path: util/macros/src/lib.rs, item: macros::register_init, quote: '#[unsafe(link_section = ".init_array")]'}
+  - name: run_all
+    symbols: [kruntime::init_setup::init_cb]
+    effect: iterate the __init_array_start..__init_array_end range and call each entry
+    evidence:
+      - {path: core/kruntime/src/init_setup.rs, item: kruntime::init_setup::init_cb, quote: "for init_fn in init_fns {"}
+usage_protocol:
+  - step: "annotate `fn name() { ... }` with #[macros::register_init]; kruntime calls it at the init_array stage"
+    evidence:
+      - {path: fs/filesystems/bpffs/src/lib.rs, item: bpffs::init_bpf_fs, quote: "#[macros::register_init]"}
+contract:
+  no_std: {value: unknown, evidence: []}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: each registered function becomes a static function pointer in .init_array; the caller of init_cb must ensure the section is not disturbed
+    evidence: [{path: core/kruntime/src/init_setup.rs, item: kruntime::init_setup::init_cb, quote: "/// Caller should ensure that the `.init_array` section will not be disturbed by other sections."}]
+  errors_bounds:
+    value: compile error if used with arguments, a return value, or on a non-function
+    evidence:
+      - {path: util/macros/src/lib.rs, item: macros::register_init, quote: "// Init functions should not have any return value."}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - proc-macro2
+  - quote
+  - syn
+  used_by:
+  - fs_boot
+  - bpffs
+  - devfs
+  - devpts
+  - kext4
+  - fat
+  - cgroup2fs
+  allowed_layers: unknown
+  evidence:
+  - path: fs/filesystems/bpffs/Cargo.toml
+    quote: macros.workspace = true
+  - path: fs/boot/src/lib.rs
+    item: fs_boot::init_host_9p_fs
+    quote: '#[macros::register_init]'
+  - path: util/macros/Cargo.toml
+    quote: proc-macro2 = "1.0"
+  - path: util/macros/Cargo.toml
+    quote: quote = "1.0"
+  - path: util/macros/Cargo.toml
+    quote: syn = { version = "2.0", features = ["full"] }
+  - path: fs/boot/Cargo.toml
+    quote: macros = { workspace = true, optional = true }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: macros.workspace = true
+  - path: fs/filesystems/devpts/Cargo.toml
+    quote: macros.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: macros.workspace = true
+  - path: fs/filesystems/fat/Cargo.toml
+    quote: macros.workspace = true
+  - path: fs/filesystems/cgroup2fs/Cargo.toml
+    quote: macros.workspace = true
+aliases:
+  en: [initcall, module_init, __initcall, constructor, ctor, init array, early init registration, subsystem init hook, register filesystem at boot]
+  zh: [初始化函数注册, 构造函数, 初始化数组, 子系统初始化钩子, 启动时注册]
+identifiers: [initcall, module_init, "__attribute__((constructor))", ctor, ".init_array", link_section, init_fn, INIT_FNS, register_fs, "static INIT"]
+exclusions:
+  - the macro does not specify an order between entries; code with initialization dependencies needs explicit calls in kruntime
+  - functions run once in the early init stage; they cannot return errors
+counter_examples: []
+notes: >-
+  kruntime::init_setup::init_cb is listed as a helper symbol and lives in the kruntime crate, hence the
+  checker's first-segment warning.

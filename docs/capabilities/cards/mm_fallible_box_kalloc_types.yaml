@@ -1,0 +1,155 @@
+capability: mm_fallible_box_kalloc_types
+title: Fallible heap box that returns NoMemory instead of aborting (kalloc-types KBox)
+family: mm.fallible_alloc
+summary: >-
+  KBox<T> is an exclusively owned heap value whose constructors return KResult<Self> with
+  KError::NoMemory on allocation failure instead of going through the fatal GlobalAlloc OOM path.
+  new() requires sleepable task context, new_nowait() uses AllocFlags::NOWAIT, new_with_flags takes
+  an explicit AllocFlags policy.
+source: {kind: workspace, crate: kalloc-types, path: mm/kalloc-types}
+symbols:
+  - {fqn: kalloc_types::KBox, kind: struct, path: mm/kalloc-types/src/kbox.rs, role: primary}
+  - {fqn: kalloc_types::KBox::new, kind: fn, path: mm/kalloc-types/src/kbox.rs, role: constructor}
+  - {fqn: kalloc_types::KBox::new_nowait, kind: fn, path: mm/kalloc-types/src/kbox.rs, role: constructor}
+  - {fqn: kalloc_types::KBox::new_with_flags, kind: fn, path: mm/kalloc-types/src/kbox.rs, role: constructor}
+  - {fqn: kalloc_types::KBox::into_inner, kind: fn, path: mm/kalloc-types/src/kbox.rs, role: operation}
+operations:
+  - name: fallible_new
+    symbols: [kalloc_types::KBox::new, kalloc_types::KBox::new_nowait, kalloc_types::KBox::new_with_flags]
+    effect: allocate and move a value in; KError::NoMemory on failure, dropping the value; new_with_flags also returns KError::InvalidInput for unknown flag bits; zero-sized values need no allocation
+    evidence:
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new, quote: "Returns [`KError::NoMemory`] if storage cannot be allocated, dropping"}
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_with_flags, quote: "[`KError::InvalidInput`] for unknown flag bits (including for ZSTs)."}
+usage_protocol:
+  - step: pick the constructor by context (new needs sleepable task context; new_nowait for non-sleeping paths) and propagate the KResult
+    evidence: [{path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new, quote: "Requires sleepable task context, with no"}]
+contract:
+  no_std:
+    value: "yes"
+    evidence: [{path: mm/kalloc-types/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: allocates one block from the kalloc global allocator (none for zero-sized values); failure returns KError::NoMemory
+    evidence:
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_with_allocator, quote: "NonNull::dangling()"}
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::allocate, quote: ".map_err(|_| KError::NoMemory)"}
+  blocking:
+    value: new() requires a context that permits sleeping; new_nowait() storage allocation does not sleep or enter reclaim; the current backend never performs sleeping reclaim
+    evidence:
+      - {path: mm/kalloc-types/src/lib.rs, quote: "success. The current backend never performs sleeping reclaim."}
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_nowait, quote: "The storage allocation does not sleep or enter reclaim IO/filesystem"}
+  irq_nmi:
+    value: new_nowait is not a blanket interrupt-safety guarantee (caller must satisfy allocator reentrancy and lock-order requirements); NMI safety is not promised
+    evidence:
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_nowait, quote: "NMI safety is not promised."}
+  ownership_lifetime:
+    value: exclusive owner; Drop destroys the value and releases storage; no pinning, no implicit cloning
+    evidence:
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox, quote: "This type does not provide pinning or implicit cloning."}
+  errors_bounds:
+    value: KError::NoMemory when storage cannot be allocated; KError::InvalidInput for unknown flag bits (new_with_flags); the supplied value is dropped on failure
+    evidence:
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_with_flags, quote: "The supplied value is dropped on failure; no partial owner is returned."}
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new_with_flags, quote: "[`KError::InvalidInput`] for unknown flag bits (including for ZSTs)."}
+      - {path: mm/kalloc-types/src/kbox.rs, item: kalloc_types::kbox::KBox::new, quote: "Returns [`KError::NoMemory`] if storage cannot be allocated, dropping"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kalloc
+  - kerrno
+  - bitflags
+  used_by:
+  - kvfs
+  - memspace
+  - ktask
+  - kprocess
+  - ksignal
+  - kipi
+  - entropy
+  - ktty
+  - inputdev
+  - tee_kernel
+  - procfs
+  - memfs
+  - devfs
+  - sysfs
+  - kext4
+  - fat
+  - v9fs
+  - devpts
+  - cgroup2fs
+  - kfd_objects
+  - posix-process
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc-types/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: mm/kalloc-types/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: mm/kalloc-types/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: kalloc-types = { workspace = true, optional = true }
+  - path: io/ktty/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: io/inputdev/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: tee/tee_kernel/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/procfs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/sysfs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/fat/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/9p/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/devpts/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: fs/filesystems/cgroup2fs/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kalloc-types.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: kalloc-types.workspace = true
+aliases:
+  en:
+  - try_box
+  - fallible box
+  - Box::try_new
+  - try_new
+  - kmalloc GFP_NOWAIT
+  - allocation failure handling
+  - fallible allocation
+  zh:
+  - 可失败分配
+  - 分配失败返回错误
+  - 失败可恢复的 Box
+  - 非阻塞分配
+  - 不 panic 的分配
+identifiers: [try_new, try_reserve, NoMemory, AllocFlags, GFP, NOWAIT, handle_alloc_error]
+exclusions:
+  - only Sized values can be constructed; no slice / str construction and no raw ownership conversion
+  - Vec / String have no fallible equivalent in this crate; use Vec::try_reserve from alloc where needed
+  - do not route through GlobalAlloc; the module docs say its kernel OOM path is fatal
+counter_examples: []
+notes: ""

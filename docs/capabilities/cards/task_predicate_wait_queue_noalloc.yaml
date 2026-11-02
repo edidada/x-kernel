@@ -1,0 +1,127 @@
+capability: task_predicate_wait_queue_noalloc
+title: Allocation-free predicate broadcast wait queue (kcompletion::WaitQueue)
+family: sync.wait_queue
+summary: >-
+  Wait queue of pinned stack waiters with no stored tokens. wait_until enrols the waiter before
+  evaluating the caller's predicate on every iteration, so wakes between check and park are not lost;
+  notify_all wakes every registered waiter. ktask wraps it as CompletionWait::wait_until.
+source: {kind: workspace, crate: kcompletion, path: sync/kcompletion}
+symbols:
+  - {fqn: kcompletion::WaitQueue, kind: struct, path: sync/kcompletion/src/completion.rs, role: primary}
+  - {fqn: kcompletion::WaitQueue::new, kind: fn, path: sync/kcompletion/src/completion.rs, role: constructor}
+  - {fqn: kcompletion::WaitQueue::notify_all, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::WaitQueue::wait_until, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: ktask::completion::CompletionWait::wait_until, kind: fn, path: task/ktask/src/completion.rs, role: operation}
+operations:
+  - name: wait_until
+    symbols: [kcompletion::WaitQueue::wait_until, ktask::completion::CompletionWait::wait_until]
+    effect: each iteration unregisters, re-enrols, evaluates ready, parks if false
+    evidence:
+      - {path: sync/kcompletion/src/completion.rs, item: kcompletion::completion::WaitQueue::wait_until, quote: "Registers before checking `ready`, then parks until it becomes true."}
+      - {path: sync/kcompletion/src/completion.rs, item: kcompletion::completion::WaitQueue::wait_until, quote: "enrolls"}
+  - name: notify_all
+    symbols: [kcompletion::WaitQueue::notify_all]
+    effect: removes and notifies all registered waiters
+    evidence: [{path: sync/kcompletion/src/completion.rs, item: kcompletion::completion::WaitQueue::notify_all, quote: "Removes and notifies all registered waiters, returning the count."}]
+usage_protocol:
+  - step: "publish the predicate change first, then notify_all after releasing conflicting locks"
+    evidence: [{path: task/ktask/src/completion.rs, item: ktask::completion::CompletionWait::wait_until, quote: "Producers must publish predicate"}]
+  - step: "wait through ktask::completion::CompletionWait::prepare() then .wait_until(&queue, ready) in sleepable context"
+    evidence: [{path: task/ktask/src/completion.rs, item: ktask::completion::CompletionWait::wait_until, quote: "Waits until `ready` returns true, with allocation-free registration."}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: sync/kcompletion/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: registration is allocation-free (stack nodes)
+    evidence:
+    - path: task/ktask/src/completion.rs
+      item: ktask::completion::CompletionWait::wait_until
+      quote: with allocation-free registration.
+  blocking:
+    value: parks via host closure; predicate must not sleep or recursively wait
+    evidence:
+    - path: task/ktask/src/completion.rs
+      item: ktask::completion::CompletionWait::wait_until
+      quote: The predicate must not sleep or
+  irq_nmi:
+    value: notify_all is documented IRQ-safe and allocation-free; waiting requires sleepable task context;
+      NMI not stated
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::WaitQueue::notify_all
+      quote: IRQ-safe and allocation-free.
+  ownership_lifetime:
+    value: 'unsafe wait_until: caller keeps stack, queue and wake storage alive until registration cleanup,
+      including nonunwinding task exit'
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::WaitQueue::wait_until
+      quote: Call only in validated sleepable context
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::WaitQueue::wait_until
+      quote: alive until private registration cleanup finishes
+  errors_bounds:
+    value: no error return from the core; ktask::CompletionWait::prepare returns KError::InvalidInput
+      outside sleepable context
+    evidence:
+    - path: task/ktask/src/completion.rs
+      item: ktask::completion::CompletionWait::prepare
+      quote: Returns [`KError::InvalidInput`] unless a non-idle current task exists
+  concurrency:
+    value: callbacks run under the queue lock; predicate runs outside the lock and rechecks after spurious
+      wakes
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::WaitQueue::notify_all
+      quote: Callbacks run under the queue lock
+layers:
+  depends_on:
+  - kspin
+  used_by:
+  - kdriver
+  - kiface-task-wait-api
+  - kirq
+  - krcu
+  - kruntime
+  - ktask
+  - ktracing
+  - kworkerpool_ng
+  - kworkqueue_ng
+  allowed_layers: unknown
+  evidence:
+  - path: sync/kcompletion/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kcompletion = { workspace = true, optional = true }
+  - path: util/kiface/crates/task-wait-api/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: kcompletion = { workspace = true }
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+aliases:
+  en: [wait queue, waitqueue, wait_event, wake_up_all, condition wait, predicate wait, broadcast wait, no-alloc wait queue]
+  zh: [等待队列, 条件等待, 广播唤醒, 无分配等待队列]
+identifiers: [ready, predicate, notify_all, register, enrol, park, waiters]
+exclusions:
+  - "broadcast only (no wake-one); use ktask::WaitQueue when you need notify_one or timeouts"
+  - "no timeout or signal handling"
+counter_examples:
+  - path: task/ktask/src/wait_queue.rs
+    item: ktask::wait_queue::WaitQueue
+    why: ktask::WaitQueue has the same name but allocates through event_listener, supports notify_one, and has timeout waits; the two are not interchangeable
+    evidence: [{path: task/ktask/src/wait_queue.rs, quote: "Blocking wait queue built on event listeners and timers."}]
+notes: ""

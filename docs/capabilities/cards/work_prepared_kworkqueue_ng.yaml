@@ -1,0 +1,136 @@
+capability: work_prepared_kworkqueue_ng
+title: Borrowed prepared Work and bottom-half (non-sleeping) work queues (kworkqueue_ng::Work / kworkng::DefaultQueue)
+family: task.work
+summary: Lower-level, unsafe-publication layer under the owned handles. A caller-owned, pinned kworkqueue_ng::Work
+  is built inline without preparation allocation; DelayedWork additionally prepares an allocated timer
+  and submitted to DefaultQueue::Normal (sleepable worker), BottomHalf or HighBottomHalf (non-sleeping
+  softirq callbacks). The caller must keep storage and captures alive, stop producers and cancel_sync
+  before freeing. Use it for BH callbacks or intrusive/embedded work; otherwise prefer WorkHandle.
+source: {kind: workspace, crate: kworkqueue_ng, path: task/kworkng/crates/kworkqueue_ng}
+symbols:
+  - {fqn: kworkqueue_ng::Work, kind: type, path: task/kworkng/crates/kworkqueue_ng/src/lib.rs, role: primary}
+  - {fqn: kworkqueue_ng::DelayedWork, kind: struct, path: task/kworkng/crates/kworkqueue_ng/src/work/delayed.rs, role: primary}
+  - {fqn: kworkqueue_ng::QueueConfig, kind: struct, path: task/kworkng/crates/kworkqueue_ng/src/queue/config.rs, role: helper}
+  - {fqn: kworkqueue_ng::QueueConfig::new, kind: fn, path: task/kworkng/crates/kworkqueue_ng/src/queue/config.rs, role: constructor}
+  - {fqn: kworkqueue_ng::DelayedWork::cancel_sync, kind: fn, path: task/kworkng/crates/kworkqueue_ng/src/work/delayed.rs, role: operation}
+operations:
+  - name: with_callback
+    symbols: [kworkqueue_ng::Work]
+    effect: Work::with_callback binds one callback and captures without allocating, publishing an address or invoking the callback; storage must be stable (pinned) before admission
+    evidence:
+      - {path: task/kworkng/crates/kworkqueue_ng/src/work.rs, item: kworkqueue_ng::work::Work::with_callback, quote: "Construction does not allocate, publish an address or invoke the callback."}
+  - name: cancel_sync
+    symbols: [kworkqueue_ng::DelayedWork::cancel_sync]
+    effect: synchronous cancel and drain required before freeing borrowed storage
+    evidence:
+      - {path: task/kworkng/crates/kworkqueue_ng/src/lib.rs, item: kworkqueue_ng::Work, quote: "object, not its owner: stop and join producers, then successfully cancel_sync"}
+usage_protocol:
+  - step: "pin the Work, publish with an unsafe queue_work on a DefaultQueue (producer holds the safety obligation), later cancel_sync in sleepable context before the storage or captures are released"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "Use this lower-level path only when the owner can guarantee pinning, retained"}
+      - {path: task/kworkng/src/defaults.rs, item: kworkng::defaults::DefaultQueue::queue_work, quote: "/// # Safety"}
+contract:
+  no_std:
+    value: yes (#![no_std])
+    evidence:
+    - path: task/kworkng/crates/kworkqueue_ng/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: ordinary Work construction does not allocate. DelayedWork::new prepares one timer allocation
+      plus inline Work; queue/handle creation may allocate. Prepared ordinary submission does not allocate.
+    evidence:
+    - path: task/kworkng/crates/kworkqueue_ng/src/work.rs
+      item: kworkqueue_ng::work::Work::with_callback
+      quote: Construction does not allocate
+    - path: task/kworkng/crates/kworkqueue_ng/src/work/delayed.rs
+      item: kworkqueue_ng::work::delayed::DelayedWork::new
+      quote: Prepares one timer allocation and inline Work
+    - path: task/kworkng/src/defaults.rs
+      item: kworkng::defaults::DefaultQueue::queue_work
+      quote: Submits prepared work without allocation
+  blocking:
+    value: submission never sleeps or runs inline; BottomHalf / HighBottomHalf callbacks must not sleep;
+      Normal callbacks run in sleepable worker tasks; flush / cancel_sync need sleepable context
+    evidence:
+    - path: task/kworkng/src/defaults.rs
+      item: kworkng::defaults::DefaultQueue
+      quote: /// Non-sleeping callbacks executed by the normal BH service.
+    - path: task/kworkng/src/lib.rs
+      quote: tasks, never inline. BH callbacks must not sleep.
+  irq_nmi:
+    value: queue_work valid in task, BH and hard IRQ context, not NMI
+    evidence:
+    - path: task/kworkng/src/defaults.rs
+      item: kworkng::defaults::DefaultQueue::queue_work
+      quote: explicitly. Valid in task/BH/hard IRQ context, not NMI.
+  ownership_lifetime:
+    value: 'queues borrow the Work object, not its owner: caller retains pinned storage and captures until
+      producers are joined and cancel_sync succeeds; Pin is not ownership; Drop does not wait'
+    evidence:
+    - path: task/kworkng/crates/kworkqueue_ng/src/lib.rs
+      item: kworkqueue_ng::Work
+      quote: Create with Work::with_callback, then pin before submission. Queues borrow the
+    - path: task/kworkng/src/defaults.rs
+      item: kworkng::defaults::DefaultQueue::queue_work
+      quote: are joined and cancel_sync succeeds. Pin is not ownership. The callback
+  errors_bounds:
+    value: 'DefaultQueue calls return ServiceError: NotReady before kernel init, Admission(SubmitError),
+      Delayed(ArmError)'
+    evidence:
+    - path: task/kworkng/src/defaults.rs
+      item: kworkng::defaults::ServiceError
+      quote: pub enum ServiceError {
+  concurrency:
+    value: per-CPU admission and routing; a pending occurrence rejects another ordinary submission; Work
+      state is protected by SpinNoIrq
+    evidence:
+    - path: task/kworkng/crates/kworkqueue_ng/src/work.rs
+      item: kworkqueue_ng::work::Work
+      quote: 'pub(crate) state: SpinNoIrq<WorkState<T>>,'
+    - path: task/kworkng/src/lib.rs
+      quote: queues use current-CPU policy. A pending occurrence rejects another ordinary
+layers:
+  depends_on:
+  - kworkerpool_ng
+  - kspin
+  - ksync
+  - kcompletion
+  - ktask
+  - kcpu_id_map
+  - ktime_types
+  - khal
+  - kirq
+  used_by:
+  - kworkng
+  allowed_layers: unknown
+  evidence:
+  - path: task/kworkng/Cargo.toml
+    quote: kworkqueue_ng.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kworkerpool_ng.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ksync.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: khal.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kirq.workspace = true
+aliases:
+  en: [tasklet, softirq work, bottom half work, BH work, work_struct embedded, queue_work on BH, non-sleeping deferred callback, intrusive work item, workqueue core]
+  zh: [下半部工作, tasklet, 软中断工作, 不睡眠回调, 嵌入式工作项, 工作队列内核]
+identifiers: [tasklet_struct, tasklet_schedule, work_struct, softirq, bottom_half, BottomHalf, queue_work, DefaultQueue, pending_node]
+exclusions:
+  - "unsafe publication: the caller owns pinning, capture lifetime and the final cancel_sync drain; for ownership-safe usage use WorkHandle (work_handle_kworkng)"
+  - "BH callbacks cannot sleep; sleepable callbacks must go to DefaultQueue::Normal or an owned handle"
+  - "not usable before kernel initialization publishes the default services (ServiceError::NotReady)"
+counter_examples: []
+notes: "DefaultQueue itself lives in the kworkng facade (enum DefaultQueue in task/kworkng/src/defaults.rs)."

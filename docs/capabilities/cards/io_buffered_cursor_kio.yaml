@@ -1,0 +1,83 @@
+capability: io_buffered_cursor_kio
+title: Buffered and in-memory adapters over kio Read / Write (BufReader, BufWriter, LineWriter, Cursor)
+family: io.buffer
+summary: no_std ports of std::io::BufReader, BufWriter, LineWriter and Cursor. BufReader / BufWriter add
+  a buffer (heap Vec with the alloc feature, fixed heapless buffer otherwise); LineWriter flushes on newlines;
+  Cursor provides Read/Seek for AsRef<[u8]> buffers; Write additionally requires a supported writable
+  backing type.
+source: {kind: workspace, crate: kio, path: io/kio}
+symbols:
+  - {fqn: kio::BufReader, kind: struct, path: io/kio/src/buffered/bufreader/mod.rs, role: primary}
+  - {fqn: kio::BufWriter, kind: struct, path: io/kio/src/buffered/bufwriter/mod.rs, role: primary}
+  - {fqn: kio::LineWriter, kind: struct, path: io/kio/src/buffered/linewriter/mod.rs, role: primary}
+  - {fqn: kio::Cursor, kind: struct, path: io/kio/src/utils/cursor.rs, role: primary}
+operations:
+  - name: buffered_read
+    symbols: [kio::BufReader]
+    effect: adds read buffering and lookahead; dropping discards unread buffered bytes
+    evidence:
+      - {path: io/kio/src/buffered/bufreader/mod.rs, item: kio::buffered::bufreader::BufReader, quote: "Adds read buffering and lookahead to an underlying reader."}
+  - name: buffered_write
+    symbols: [kio::BufWriter]
+    effect: buffers output; flush() is needed to observe delivery errors; Drop flush ignores errors
+    evidence:
+      - {path: io/kio/src/buffered/bufwriter/mod.rs, item: kio::buffered::bufwriter::BufWriter, quote: "Successful writes may only append to memory. Call [`Write::flush`] to"}
+  - name: line_write
+    symbols: [kio::LineWriter]
+    effect: send completed newline-terminated lines to the inner writer
+    evidence:
+      - {path: io/kio/src/buffered/linewriter/mod.rs, item: kio::buffered::linewriter::LineWriter, quote: "Buffers output and sends completed newline-terminated lines to the inner writer."}
+  - name: in_memory
+    symbols: [kio::Cursor]
+    effect: wrap an in-memory buffer so it implements Read / Write / Seek
+    evidence:
+      - {path: io/kio/src/utils/cursor.rs, item: kio::utils::cursor::Cursor, quote: "A `Cursor` wraps an in-memory buffer and provides it with a"}
+usage_protocol:
+  - step: BufReader::with_capacity(cap, inner) / BufWriter::new(inner); call flush() before dropping when errors matter
+    evidence: [{path: io/kio/src/buffered/bufwriter/mod.rs, item: kio::buffered::bufwriter::BufWriter::new, quote: "pub fn new(inner: W) -> BufWriter<W> {"}]
+contract:
+  no_std:
+    value: "yes (kio is #![no_std])"
+    evidence: [{path: io/kio/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: with the alloc feature the buffer is a heap Vec; without it BufWriter uses a fixed-capacity heapless Vec of DEFAULT_BUF_SIZE
+    evidence:
+      - {path: io/kio/src/buffered/bufwriter/mod.rs, item: kio::buffered::bufwriter::Buffer, quote: "type Buffer = alloc::vec::Vec<u8>;"}
+      - {path: io/kio/src/buffered/bufwriter/mod.rs, item: kio::buffered::bufwriter::Buffer, quote: "type Buffer = heapless::Vec<u8, DEFAULT_BUF_SIZE, u16>;"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the adapter owns the inner reader/writer; direct access to the inner object can invalidate position accounting
+    evidence: [{path: io/kio/src/buffered/bufreader/mod.rs, item: kio::buffered::bufreader::BufReader, quote: "through inner accessors can invalidate the adapter's position accounting."}]
+  errors_bounds:
+    value: BufReader::with_capacity panics when capacity exceeds DEFAULT_BUF_SIZE without alloc; errors are kerrno KError
+    evidence: [{path: io/kio/src/buffered/bufreader/mod.rs, item: kio::buffered::bufreader::BufReader::with_capacity, quote: "Without `alloc`, panics if `capacity` exceeds [`DEFAULT_BUF_SIZE`]."}]
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - kerrno
+  - heapless
+  - memchr
+  used_by:
+  - knet
+  - posix-fs
+  allowed_layers: unknown
+  evidence:
+  - path: net/knet/Cargo.toml
+    quote: kio = { workspace = true, features = ["alloc"] }
+  - path: posix/fs/Cargo.toml
+    quote: kio.workspace = true
+  - path: io/kio/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: io/kio/Cargo.toml
+    quote: heapless = "0.9"
+  - path: io/kio/Cargo.toml
+    quote: memchr = { version = "2", default-features = false }
+aliases:
+  en: [BufReader, BufWriter, LineWriter, Cursor, buffered IO, line buffering, in-memory reader, byte cursor, read buffer wrapper, write buffer wrapper]
+  zh: [带缓冲的读写, 行缓冲写入, 内存游标, 读缓冲, 写缓冲]
+identifiers: [BufReader, BufWriter, LineWriter, Cursor, buf, pos, cap, filled, flush_buf, "buf.len() == buf.capacity()", fill_buf, consume, read_until]
+exclusions:
+  - a BufReader / BufWriter buffer is per adapter instance, not a shared cache across readers
+  - an unflushed BufWriter drop swallows errors; do not rely on Drop for durability
+counter_examples: []

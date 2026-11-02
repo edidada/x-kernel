@@ -1,0 +1,98 @@
+capability: mm_alloc_slab_byte_engine
+title: Size-class slab byte allocator (alloc-engine SlabByteAllocator)
+family: mm.slab
+summary: >-
+  Byte-granularity allocator implementing ByteAllocator with nine fixed slab size classes (8 to
+  2048 bytes) backed by an internal buddy allocator; allocations above 2048 bytes go straight to
+  the buddy part. It is the default kernel heap algorithm when kalloc is built with the slab
+  feature.
+source: {kind: workspace, crate: alloc-engine, path: mm/alloc-engine}
+symbols:
+  - {fqn: alloc_engine::SlabByteAllocator, kind: struct, path: mm/alloc-engine/src/slab.rs, role: primary}
+  - {fqn: alloc_engine::SlabByteAllocator::new, kind: fn, path: mm/alloc-engine/src/slab.rs, role: constructor}
+  - {fqn: alloc_engine::ByteAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+  - {fqn: alloc_engine::SlabHeap, kind: struct, path: mm/alloc-engine/src/slab_heap.rs, role: helper}
+  - {fqn: alloc_engine::SIZE_CLASS_COUNT, kind: const, path: mm/alloc-engine/src/slab_trait.rs, role: helper}
+operations:
+  - name: allocate_deallocate
+    symbols: [alloc_engine::ByteAllocator]
+    effect: allocate(layout) / deallocate(ptr, layout); a failure is reported as AllocError::NoMemory
+    evidence:
+      - {path: mm/alloc-engine/src/slab.rs, item: alloc_engine::slab::SlabByteAllocator::allocate, quote: ".map_err(|_| AllocError::NoMemory)"}
+  - name: size_classes
+    symbols: [alloc_engine::SIZE_CLASS_COUNT]
+    effect: nine classes 8..2048
+    evidence:
+      - {path: mm/alloc-engine/src/slab_trait.rs, item: alloc_engine::slab_trait::CLASS_SIZES, quote: "[8, 16, 32, 64, 128, 256, 512, 1024, 2048]"}
+usage_protocol:
+  - step: SlabByteAllocator::new() is const; the heap exists only after init_region (methods unwrap the Option)
+    evidence: [{path: mm/alloc-engine/src/slab.rs, item: alloc_engine::slab::SlabByteAllocator::inner_mut, quote: "self.heap.as_mut().unwrap()"}]
+  - step: enable via the `slab` feature (kalloc/slab or kfeat alloc_slab) rather than constructing a second heap
+    evidence: [{path: api/kfeat/Cargo.toml, quote: "alloc_slab = [\"alloc\", \"alloc-engine/slab\", \"kalloc/slab\"]"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: manages backing regions/pools supplied by the caller; the backing storage remains exclusively
+      reserved to this allocator while managed. No broader allocation/reentrancy guarantee is established
+      here.
+    evidence:
+    - path: mm/alloc-engine/src/slab_heap.rs
+      quote: "------------------------------------------------------------------ Creates"
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the heap's backing region must remain valid and unused by others for the life of the heap
+    evidence:
+    - path: mm/alloc-engine/src/slab_heap.rs
+      item: alloc_engine::slab_heap::SlabHeap::new
+      quote: anything else, and remains accessible for the lifetime of the heap.
+  errors_bounds:
+    value: allocate returns AllocError::NoMemory; init_region panics when the initial region is misaligned
+      or too small
+    evidence:
+    - path: mm/alloc-engine/src/slab_heap.rs
+      item: alloc_engine::slab_heap::SlabHeap::new
+      quote: BaseAllocator::init_region \
+  concurrency:
+    value: not internally synchronized; methods take &mut self (kalloc wraps it in SpinNoIrq)
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      item: alloc_engine::ByteAllocator::allocate
+      quote: 'fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>>;'
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator
+      quote: 'balloc: SpinNoIrq<DefaultByteAllocator>,'
+layers:
+  depends_on:
+  - intrusive-collections
+  used_by:
+  - kalloc
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: slab = ["alloc-engine/slab"]
+  - path: mm/alloc-engine/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+aliases:
+  en: [slab allocator, kmalloc, size class allocator, kernel heap, byte allocator, small object allocator, malloc]
+  zh: [slab 分配器, 内核堆, 字节分配器, 小对象分配, 大小类分配]
+identifiers: [slab, size_class, freelist, partial, full, kmalloc, heap, grow, SLAB_MAX_SIZE]
+exclusions:
+  - not an object cache for one fixed type; there is no constructor / destructor or typed-cache API
+  - not thread-safe by itself; use kalloc::GlobalAllocator or add a lock
+  - TLSF (TlsfByteAllocator) and buddy (BuddyByteAllocator) are alternatives with different fragmentation characteristics, selected at build time
+counter_examples: []
+notes: >-
+  The slab.rs module doc says it wraps `slab_allocator::Heap`, but the code uses the in-tree SlabHeap
+  (slab_heap.rs); trust the code. kalloc additionally places a per-CPU object cache (slab_cache.rs,
+  not public) in front of it in slab builds.

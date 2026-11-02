@@ -1,0 +1,144 @@
+capability: mutex_wrapper_lock_api
+title: Generic Mutex / RwLock / guard types over a user-supplied raw lock (lock_api)
+family: sync.mutex
+summary: >-
+  lock_api supplies the data-owning Mutex<R, T>, RwLock<R, T> and RAII guards; the caller implements
+  only the raw protocol (RawMutex::lock / try_lock / unlock, RawRwLock) and a GuardMarker (GuardSend or
+  GuardNoSend). The kernel's blocking Mutex and RwLock are lock_api wrappers over an in-tree raw
+  lock, and ktracing builds its tracing lock the same way. Use it when a new lock flavour needs the
+  standard guard API without re-writing guards and data cells.
+source: {kind: dependency, crate: lock_api, version: 0.4.14}
+symbols:
+  - {fqn: lock_api::RawMutex, kind: trait, path: src/mutex.rs, role: primary}
+  - {fqn: lock_api::Mutex, kind: struct, path: src/mutex.rs, role: primary}
+  - {fqn: lock_api::Mutex::const_new, kind: fn, path: src/mutex.rs, role: constructor}
+  - {fqn: lock_api::Mutex::lock, kind: fn, path: src/mutex.rs, role: operation}
+  - {fqn: lock_api::Mutex::try_lock, kind: fn, path: src/mutex.rs, role: operation}
+  - {fqn: lock_api::MutexGuard, kind: struct, path: src/mutex.rs, role: helper}
+  - {fqn: lock_api::RawRwLock, kind: trait, path: src/rwlock.rs, role: primary}
+  - {fqn: lock_api::RwLock, kind: struct, path: src/rwlock.rs, role: primary}
+  - {fqn: lock_api::RwLock::const_new, kind: fn, path: src/rwlock.rs, role: constructor}
+  - {fqn: lock_api::GuardSend, kind: struct, path: src/lib.rs, role: helper}
+  - {fqn: lock_api::GuardNoSend, kind: struct, path: src/lib.rs, role: helper}
+operations:
+- name: implement_raw_lock
+  symbols:
+  - lock_api::RawMutex
+  - lock_api::GuardSend
+  - lock_api::GuardNoSend
+  effect: provide INIT, GuardMarker, lock, try_lock and unsafe unlock; implementations must really be
+    exclusive
+  evidence:
+  - path: lock_api-0.4.14/src/mutex.rs
+    item: lock_api::mutex::RawMutex
+    quote: 'exclusive: a lock can''t be acquired while the mutex is already locked.'
+  - path: lock_api-0.4.14/src/mutex.rs
+    item: lock_api::mutex::RawMutex
+    quote: pub unsafe trait RawMutex {
+- name: wrap
+  symbols:
+  - lock_api::Mutex
+  - lock_api::Mutex::const_new
+  - lock_api::RwLock::const_new
+  effect: build a data-owning lock from a raw lock value in const context
+  evidence:
+  - path: lock_api-0.4.14/src/mutex.rs
+    item: lock_api::mutex::Mutex::const_new
+    quote: 'pub const fn const_new(raw_mutex: R, val: T) -> Mutex<R, T> {'
+- name: lock
+  symbols:
+  - lock_api::Mutex::lock
+  - lock_api::Mutex::try_lock
+  effect: try_lock returns Option<guard>; recursive lock is unsupported and depends on the raw implementation
+    (it may deadlock or panic, as kmutex does); there is no standardized recursive-lock error
+  evidence:
+  - path: lock_api-0.4.14/src/mutex.rs
+    item: lock_api::mutex::Mutex::lock
+    quote: result in a deadlock.
+usage_protocol:
+  - step: "implement RawMutex (or RawRwLock) for the lock state, choose GuardSend or GuardNoSend, then expose lock_api::Mutex<YourRaw, T> through a thin newtype or alias (as kmutex does) so call sites keep using guards"
+    evidence:
+      - {path: sync/kmutex/src/mutex.rs, quote: "unsafe impl lock_api::RawMutex for RawMutex {"}
+      - {path: sync/kmutex/src/mutex.rs, item: kmutex::mutex::Mutex, quote: "pub struct Mutex<T>(lock_api::Mutex<RawMutex, T>);"}
+contract:
+  no_std:
+    value: 'yes: #![no_std]; the workspace dependency sets default-features = false (alloc is touched
+      only by the arc_lock feature)'
+    evidence:
+    - path: lock_api-0.4.14/src/lib.rs
+      quote: '#![no_std]'
+    - path: Cargo.toml
+      quote: lock_api = { version = "0.4", default-features = false }
+  allocation:
+    value: the lock and guard types hold the data inline; the alloc crate is used only with the arc_lock
+      feature
+    evidence:
+    - path: lock_api-0.4.14/src/lib.rs
+      quote: '#[cfg(feature = "arc_lock")]'
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::Mutex
+      quote: 'data: UnsafeCell<T>,'
+  blocking:
+    value: whether lock blocks, spins or disables interrupts is decided by the RawMutex implementation;
+      the trait documents lock as blocking the current thread
+    evidence:
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::RawMutex::lock
+      quote: Acquires this mutex, blocking the current thread until it is able to do so.
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the lock owns the data in an UnsafeCell and hands out RAII guards; GuardMarker selects whether
+      a guard is Send
+    evidence:
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::RawMutex::GuardMarker
+      quote: Marker type which determines whether a lock guard should be `Send`.
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::Mutex
+      quote: 'data: UnsafeCell<T>,'
+  errors_bounds:
+    value: try_lock returns Option<guard>; recursive lock is unsupported and depends on the raw implementation
+      (it may deadlock or panic, as kmutex does); there is no standardized recursive-lock error
+    evidence:
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::Mutex::try_lock
+      quote: pub fn try_lock(&self) -> Option<MutexGuard<'_, R, T>> {
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::Mutex::lock
+      quote: result in a deadlock.
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::Mutex
+      quote: Blocking acquisition requires sleepable context and panics on recursion.
+  concurrency:
+    value: RawMutex is an unsafe trait whose implementations must guarantee exclusion; unlock may only
+      be paired with a held lock
+    evidence:
+    - path: lock_api-0.4.14/src/mutex.rs
+      item: lock_api::mutex::RawMutex
+      quote: 'exclusive: a lock can''t be acquired while the mutex is already locked.'
+layers:
+  depends_on: []
+  used_by: [kmutex, ksync, ktracing]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'lock_api = { version = "0.4", default-features = false }'}
+    - {path: sync/kmutex/Cargo.toml, quote: "lock_api.workspace = true"}
+    - {path: task/ksync/Cargo.toml, quote: "lock_api.workspace = true"}
+    - {path: core/ktracing/Cargo.toml, quote: "lock_api = { workspace = true }"}
+aliases:
+  en: [lock_api, raw mutex, raw rwlock, mutex wrapper, generic mutex, guard type, RAII lock guard, lock abstraction, custom lock, build a mutex from a spinlock]
+  zh: [锁抽象, 通用互斥锁封装, 原始锁, 锁守卫, 自定义锁, 基于原始锁构造互斥锁]
+identifiers: [RawMutex, RawRwLock, GuardSend, GuardNoSend, GuardMarker, const_new, lock_api::Mutex, MutexGuard, INIT]
+exclusions:
+  - "this is a wrapper crate, not a lock algorithm: it provides no waiting policy; wait/wake or spinning must come from the RawMutex implementation (see blocking_mutex and the spin_lock_* cards)"
+  - "the kernel's spinlocks (kspin) have their own guard types and do not go through lock_api, so do not wrap SpinNoIrq in lock_api::Mutex to get an IRQ-disabling lock"
+  - "ReentrantMutex support exists in lock_api but needs a thread-id provider; kernel tasks do not currently use it"
+counter_examples:
+  - path: sync/kmutex/src/mutex.rs
+    item: kmutex::mutex::Mutex
+    why: "kmutex::Mutex is the in-tree sleeping mutex that already is a lock_api::Mutex<RawMutex, T> newtype; a new sleeping lock should reuse it rather than add another RawMutex"
+    evidence: [{path: sync/kmutex/src/mutex.rs, item: kmutex::mutex::Mutex, quote: "pub struct Mutex<T>(lock_api::Mutex<RawMutex, T>);"}]
+notes: >-
+  The statement that kspin does not use lock_api rests on its Cargo.toml: lock_api appears only in kmutex, ksync and ktracing at the pin.

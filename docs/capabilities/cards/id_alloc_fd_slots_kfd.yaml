@@ -1,0 +1,117 @@
+capability: id_alloc_fd_slots_kfd
+title: Lowest-free-id slot table with occupancy bitmap (kfd FileSlots, crate-private)
+family: id.allocator
+summary: An internal find-lowest-free-index table. FileSlots<T> stores up to FILE_LIMIT values in numbered
+  slots with a u64-word occupancy bitmap and a free-slot lower bound; add / alloc(minimum, end) assign
+  the lowest free id (O(words), skipping full words), add_at claims a fixed id, remove frees it. It is
+  pub(crate) inside kfd and sized by krlimit::FILE_LIMIT, so it is a pattern to reuse or extract, not
+  a dependency other crates can take today.
+source: {kind: workspace, crate: kfd, path: process/kfd}
+symbols:
+  - {fqn: kfd::fd_slots::FileSlots, kind: struct, path: process/kfd/src/fd_slots.rs, role: primary}
+  - {fqn: kfd::fd_slots::FileSlots::new, kind: fn, path: process/kfd/src/fd_slots.rs, role: constructor}
+  - {fqn: kfd::fd_slots::FileSlots::add, kind: fn, path: process/kfd/src/fd_slots.rs, role: operation}
+  - {fqn: kfd::fd_slots::FileSlots::alloc, kind: fn, path: process/kfd/src/fd_slots.rs, role: operation}
+  - {fqn: kfd::fd_slots::FileSlots::add_at, kind: fn, path: process/kfd/src/fd_slots.rs, role: operation}
+  - {fqn: kfd::fd_slots::FileSlots::remove, kind: fn, path: process/kfd/src/fd_slots.rs, role: operation}
+  - {fqn: kfd::fd_slots::OccupiedIds, kind: struct, path: process/kfd/src/fd_slots.rs, role: helper}
+operations:
+  - name: alloc
+    symbols: [kfd::fd_slots::FileSlots::add, kfd::fd_slots::FileSlots::alloc]
+    effect: assigns the value the lowest free id in [minimum, end) and returns it; returns the value back in Err when no id is free
+    evidence:
+      - {path: process/kfd/src/fd_slots.rs, item: kfd::fd_slots::FileSlots::add, quote: "/// Assigns `value` the lowest free id."}
+      - {path: process/kfd/src/fd_slots.rs, item: kfd::fd_slots::FileSlots::alloc, quote: "/// Assigns `value` the lowest free id in `[minimum, end)`."}
+  - name: remove
+    symbols: [kfd::fd_slots::FileSlots::remove]
+    effect: frees the id, lowers the free bound, returns the stored value
+    evidence:
+      - {path: process/kfd/src/fd_slots.rs, item: kfd::fd_slots::FileSlots::remove, quote: "/// Removes and returns the value in `id` if it is assigned."}
+contract:
+  no_std:
+    value: 'yes (kfd is #![no_std])'
+    evidence:
+    - path: process/kfd/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: the table stores its fixed-capacity slots and occupancy bitmap inline; this does not constrain
+      allocation by T or its destructor. It is not a public standalone pool.
+    evidence:
+    - path: process/kfd/src/fd_slots.rs
+      item: kfd::fd_slots::FileSlots
+      quote: 'slots: [MaybeUninit<T>; CAPACITY],'
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the table owns stored values; a set bit means the slot holds an initialized value; Drop drops
+      the live values; remove moves the value out
+    evidence:
+    - path: process/kfd/src/fd_slots.rs
+      quote: A set bit means the slot already holds an initialized value.
+    - path: process/kfd/src/fd_slots.rs
+      quote: impl<T> Drop for FileSlots<T> {
+  errors_bounds:
+    value: fixed capacity krlimit::FILE_LIMIT; add / alloc / add_at return Err(value) when full, out of
+      range or the id is taken; the exclusive end is clipped to CAPACITY
+    evidence:
+    - path: process/kfd/src/fd_slots.rs
+      item: kfd::fd_slots::CAPACITY
+      quote: 'const CAPACITY: usize = krlimit::FILE_LIMIT;'
+    - path: process/kfd/src/fd_slots.rs
+      item: kfd::fd_slots::FileSlots::add_at
+      quote: Returns the unassigned value when `id` is out of range or already taken.
+  concurrency:
+    value: no internal synchronization (&mut self for mutation); the caller serializes access (the fd
+      table wraps it)
+    evidence:
+    - path: process/kfd/src/fd_slots.rs
+      item: kfd::fd_slots::FileSlots::alloc
+      quote: 'pub(crate) fn alloc(&mut self, minimum: usize, end: usize, value: T) -> Result<usize, T>
+        {'
+layers:
+  depends_on:
+  - krlimit
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+  - path: process/kfd/src/fd_table.rs
+    quote: use crate::{FdSnapshot, FileDescriptor, fd_slots::FileSlots};
+  - path: process/kfd/Cargo.toml
+    quote: krlimit.workspace = true
+aliases:
+  en: [ida, idr, id allocator, find first zero bit, lowest free index, fd allocator, alloc_fd, free slot bitmap, handle table, descriptor table, slot allocator, bitmap id pool]
+  zh: [ID 分配器, 最小空闲编号, 文件描述符分配, 位图分配, 句柄表, 空闲槽位查找]
+identifiers: [trailing_ones, trailing_zeros, find_first_zero, find_next_zero_bit, occupied, bitmap, next_free, alloc_fd, get_unused_fd, ida_alloc, idr_alloc, free_ids]
+exclusions:
+- 'pub(crate) inside kfd and sized by krlimit::FILE_LIMIT (1024): not a general ID allocator; other crates
+  cannot depend on it without extracting it'
+- it stores values and always returns the LOWEST free id (POSIX fd semantics); for monotonically increasing
+  never-reused ids use counters (pid, timer ids)
+- no internal locking; no blocking when full
+- 'Visibility is pub(crate) and the fd_slots module is private. Treat as an internal pattern only: suppress
+  replacement suggestions outside kfd until the owner approves extraction or a public API.'
+counter_examples:
+  - path: io/ktty/src/tty/pty_pair.rs
+    why: "PtyNumber::reserve is a one-word (u32) bitmap trailing_ones lowest-free pool with PTY_CAPACITY; same idea but tiny, ad hoc and with an RAII number guard; not interchangeable with FileSlots (no value storage)"
+    evidence: [{path: io/ktty/src/tty/pty_pair.rs, item: ktty::tty::pty_pair::PtyNumber::reserve, quote: "let number = registry.allocated.trailing_ones();"}]
+  - path: process/kidentity/src/lib.rs
+    item: kidentity::PidNamespace::allocate_nr
+    why: "PID numbers come from a monotonically increasing atomic counter that never reuses numbers while a handle is alive; it is not a find-free-index pool"
+    evidence: [{path: process/kidentity/src/lib.rs, item: kidentity::PidNamespace::allocate_nr, quote: ".fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {"}]
+notes: >-
+  Related ad-hoc allocators in the workspace (not carded): kdevice DeviceNodeRegistry::allocate_index
+  (linear find over a BTreeSet), ktimer allocate_posix_timer_id (wrapping counter + map probe),
+  memspace aarch64_asid find_free_asid, 9p alloc_fid. The mm/alloc-engine IdAllocator trait has no
+  implementor at the pin.
+status: needs-owner
+open_questions:
+- field: symbols
+  question: "FileSlots is pub(crate) and fd_slots is private to kfd. Should kfd extract or publish an ID-slot interface for other crates, or should suggestions stay limited to kfd?"
+  evidence:
+  - path: process/kfd/src/fd_slots.rs
+    item: kfd::fd_slots::FileSlots
+    quote: "pub(crate) struct FileSlots<T>"

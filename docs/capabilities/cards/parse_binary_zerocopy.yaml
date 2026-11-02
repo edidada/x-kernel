@@ -1,0 +1,126 @@
+capability: parse_binary_zerocopy
+title: Zero-copy byte-slice to struct views and struct-to-bytes (zerocopy FromBytes / IntoBytes)
+family: parse.binary
+summary: >-
+  zerocopy's derive-checked marker traits (FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned) let
+  a #[repr(C)] struct be viewed from a byte slice (ref_from_bytes, read_from_bytes, *_from_prefix) or
+  exposed as bytes (as_bytes), with size and alignment checked and no hand-written unsafe cast.
+  zerocopy::byteorder provides endian-typed integers such as network_endian::U16. Used for wire
+  headers, event records, ELF auxv entries and virtio structures.
+source: {kind: dependency, crate: zerocopy, version: 0.8.63}
+symbols:
+  - {fqn: zerocopy::transmute, kind: macro, path: src/macros.rs, role: primary}
+  - {fqn: zerocopy::transmute_ref, kind: macro, path: src/macros.rs, role: operation}
+  - {fqn: zerocopy::error::SizeError, kind: struct, path: src/error.rs, role: helper}
+  - {fqn: zerocopy::error::AlignmentError, kind: struct, path: src/error.rs, role: helper}
+  - {fqn: zerocopy::error::ConvertError, kind: enum, path: src/error.rs, role: helper}
+operations:
+  - name: view_as_ref
+    symbols: []
+    effect: borrow a byte slice as &Self; Err if the length is not a valid size or the slice is misaligned (infallible alignment for Unaligned types)
+    evidence:
+      - {path: zerocopy-0.8.63/src/lib.rs, item: zerocopy::FromBytes::ref_from_bytes, quote: "returns `Err`. If [`Self: Unaligned`][self-unaligned], you can"}
+  - name: read_copy
+    symbols: []
+    effect: copy a Self out of a byte slice of exactly size_of::<Self>() bytes
+    evidence:
+      - {path: zerocopy-0.8.63/src/lib.rs, item: zerocopy::FromBytes::read_from_bytes, quote: "If `source.len() != size_of::<Self>()`, `read_from_bytes` returns `Err`."}
+  - name: as_bytes
+    symbols: []
+    effect: view a value as its bytes
+    evidence:
+      - {path: zerocopy-0.8.63/src/lib.rs, item: zerocopy::IntoBytes::as_bytes, quote: "fn as_bytes(&self) -> &[u8]"}
+usage_protocol:
+  - step: "derive the marker traits (#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]) on a #[repr(C)] struct and use the *_from_bytes / as_bytes methods; the derive rejects layouts that are unsound (padding, invalid bit patterns). Use zerocopy::byteorder types for non-native-endian fields"
+    evidence:
+      - {path: zerocopy-0.8.63/src/lib.rs, item: zerocopy::IntoBytes, quote: "If `T: IntoBytes`, then unsafe code may assume that it is sound to treat any"}
+contract:
+  no_std:
+    value: yes by default; std is a cargo feature. The workspace dependencies do not enable std (derive;
+      devfs and kernel_elf_parser use derive only, kvirtiodrivers also alloc)
+    evidence:
+    - path: zerocopy-0.8.63/src/lib.rs
+      quote: '#![cfg_attr(not(any(test, kani, feature = "std")), no_std)]'
+    - path: Cargo.toml
+      quote: zerocopy = { version = "0.8", features = ["derive"] }
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: ref_from_bytes borrows from the source slice; read_from_bytes copies
+    evidence:
+    - path: zerocopy-0.8.63/src/lib.rs
+      item: zerocopy::FromBytes::ref_from_bytes
+      quote: 'fn ref_from_bytes(source: &[u8]) -> Result<&Self, CastError<&[u8], Self>>'
+    - path: zerocopy-0.8.63/src/lib.rs
+      item: zerocopy::FromBytes::read_from_bytes
+      quote: 'fn read_from_bytes(source: &[u8]) -> Result<Self, SizeError<&[u8], Self>>'
+  errors_bounds:
+    value: ref_from_bytes returns size/alignment errors for supported layouts; it also has a compile-time
+      rejection for unsupported zero-sized DST tails. Do not promise an unconditional no-panic/no-restriction
+      API for all FromBytes layouts.
+    evidence:
+    - path: zerocopy-0.8.63/src/lib.rs
+      item: zerocopy::FromBytes::ref_from_bytes
+      quote: static_assert_dst_is_not_zst!(Self);
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by:
+  - knet
+  - devfs
+  - kernel-elf-parser
+  - kfd_objects
+  - virtio
+  - kvirtiodrivers
+  - tee_kernel
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: zerocopy = { version = "0.8", features = ["derive"] }
+  - path: net/knet/Cargo.toml
+    quote: zerocopy = { workspace = true }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: zerocopy = { version = "0.8.26", features = ["derive"] }
+  - path: boot/kernel_elf_parser/Cargo.toml
+    quote: zerocopy = { version = "0.8.26", features = ["derive"] }
+  - path: process/kfd_objects/Cargo.toml
+    quote: zerocopy.workspace = true
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: zerocopy = { workspace = true }
+  - path: vendor/kvirtiodrivers/Cargo.toml
+    quote: zerocopy = { version = "0.8.40", features = ["derive"] }
+  - path: tee/tee_kernel/Cargo.toml
+    quote: zerocopy = { version = "0.8.26", features = ["derive"] }
+aliases:
+  en: [zerocopy, zero copy, parse struct from bytes, bytes to struct, struct to bytes, cast bytes, transmute bytes, wire header parsing, pod cast, from_bytes, as_bytes, packed struct view]
+  zh: [零拷贝, 字节转结构体, 结构体转字节, 从字节解析, 报文头解析, 类型转换而不用 transmute]
+identifiers: [FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned, ref_from_bytes, read_from_bytes, as_bytes, from_prefix, transmute, network_endian, byteorder]
+exclusions:
+  - "not a stream parser: it views a buffer that already holds a whole structure; for variable-length or delimiter-based text formats see the text parsers"
+  - "bytemuck is the other Pod-style crate in the workspace (parse_binary_bytemuck); the two are not interchangeable at API boundaries because their marker traits differ"
+  - "not for copying user memory: use the uaccess helpers (mm_user_copy_osvm) to bring user data into the kernel first, then parse"
+counter_examples: []
+notes: The traits themselves (FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned in src/lib.rs, about
+  300 KB) are not listed as symbols because the dependency indexer skips files over 256 KiB; the operations
+  below cite their lib.rs lines directly. Several workspace crates declare zerocopy with their own version
+  requirement instead of the workspace entry; Cargo.lock at the pin has a single zerocopy entry, 0.8.63.
+  The listed transmute macros do not identify the advertised FromBytes/IntoBytes entry points. Catalogue/index
+  owner must resolve macro/large-file indexing before this card can drive symbol-level replacement suggestions;
+  evidence-only operations are not resolved symbols.
+status: needs-owner
+open_questions:
+- field: symbols
+  question: "The advertised FromBytes / IntoBytes methods (for example ref_from_bytes) are not listed as operation symbols, and transmute is not one of those entry points. Which trait methods should the card name?"
+  evidence:
+  - path: zerocopy-0.8.63/src/lib.rs
+    item: zerocopy::FromBytes::ref_from_bytes
+    quote: "fn ref_from_bytes(source: &[u8])"

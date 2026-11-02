@@ -1,0 +1,241 @@
+capability: counting_semaphore
+title: Blocking counting semaphore (ksync::Semaphore)
+family: sync.semaphore
+summary: >-
+  Atomic permit counter plus an event-listener. acquire() CAS-decrements the count, or registers a
+  listener, rechecks the count, and blocks with ktask::future::block_on. release() increments and
+  wakes one additional waiter. SemaphoreGuard releases on drop.
+source: {kind: workspace, crate: ksync, path: task/ksync}
+symbols:
+  - {fqn: ksync::Semaphore, kind: struct, path: task/ksync/src/semaphore.rs, role: primary}
+  - {fqn: ksync::Semaphore::new, kind: fn, path: task/ksync/src/semaphore.rs, role: constructor}
+  - {fqn: ksync::Semaphore::acquire, kind: fn, path: task/ksync/src/semaphore.rs, role: operation}
+  - {fqn: ksync::Semaphore::try_acquire, kind: fn, path: task/ksync/src/semaphore.rs, role: operation}
+  - {fqn: ksync::Semaphore::release, kind: fn, path: task/ksync/src/semaphore.rs, role: operation}
+  - {fqn: ksync::Semaphore::acquire_guard, kind: fn, path: task/ksync/src/semaphore.rs, role: operation}
+  - {fqn: ksync::SemaphoreGuard, kind: struct, path: task/ksync/src/semaphore.rs, role: helper}
+operations:
+  - name: acquire
+    symbols: [ksync::Semaphore::acquire]
+    effect: blocks until a permit is available; listener registered before the final count recheck
+    evidence: [{path: task/ksync/src/semaphore.rs, item: ksync::semaphore::Semaphore::acquire, quote: "listener!(self.event => listener);"}]
+  - name: release
+    symbols: [ksync::Semaphore::release]
+    effect: adds a permit and wakes one previously unnotified waiter
+    evidence: [{path: task/ksync/src/semaphore.rs, item: ksync::semaphore::Semaphore::release, quote: "self.event.notify_additional(1);"}]
+usage_protocol:
+  - step: "static SEM: Semaphore = Semaphore::new(n); let _guard = SEM.acquire_guard();"
+    evidence: [{path: task/ksync/src/lib.rs, quote: "static SEM: Semaphore = Semaphore::new(3);"}]
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: task/ksync/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: acquire blocks the calling task (event-listener + ktask::future::block_on)
+    evidence:
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::acquire
+      quote: Acquires a permit, blocking until one is available.
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: SemaphoreGuard releases its permit on drop; release() does not cap the count at the initial
+      permits
+    evidence:
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::release
+      quote: allows releasing more permits than the semaphore was
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::SemaphoreGuard::drop
+      quote: self.sem.release();
+  errors_bounds:
+    value: try_acquire returns bool after a bounded retry loop (10 CAS attempts); no error type
+    evidence:
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::try_acquire
+      quote: 'const MAX_RETRIES: usize = 10;'
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::try_acquire
+      quote: pub fn try_acquire(&self) -> bool {
+  concurrency:
+    value: permit acquisition uses an atomic CAS loop; release increments the count with Release ordering
+      and notifies one additional listener; no FIFO permit reservation guarantee is established
+    evidence:
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::acquire
+      quote: compare_exchange_weak(
+    - path: task/ksync/src/semaphore.rs
+      item: ksync::semaphore::Semaphore::release
+      quote: self.count.fetch_add(1, Ordering::Release);
+layers:
+  depends_on:
+  - ktask
+  - kmutex
+  - kspin
+  used_by:
+  - anon
+  - block
+  - bpffs
+  - cgroup2fs
+  - devfs
+  - devpts
+  - drmdevice
+  - entropy
+  - fat
+  - filemap
+  - fs_context
+  - inputdev
+  - kcgroup
+  - kdriver
+  - kexec
+  - kext4
+  - kfd
+  - kfd_objects
+  - kfeat
+  - knet
+  - kns
+  - kprocess
+  - kresources
+  - ktimer
+  - ktty
+  - kuaccess
+  - kvfs
+  - kvmm
+  - kvmm-api
+  - kworkqueue_ng
+  - memfs
+  - memspace
+  - net
+  - p9
+  - pagecache
+  - posix-ipc
+  - posix-process
+  - sysfs
+  - tee_kernel
+  - tee_task_iface
+  - unittest_support
+  - vdev-core
+  - vdev-uart16550
+  - vdev-virtio-blk
+  allowed_layers: unknown
+  evidence:
+  - path: task/ksync/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: kspin.workspace = true
+  - path: mm/anon/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: drivers/contracts/block/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: fs/filesystems/bpffs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/cgroup2fs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/devpts/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/drmdevice/Cargo.toml
+    quote: ksync.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/fat/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/filemap/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: process/fs_context/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/inputdev/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kcgroup/Cargo.toml
+    quote: ksync.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: process/kexec/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kfd/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: ksync.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: net/knet/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: process/kns/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kresources/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: ksync.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: virt/kvmm/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/kvmm-api/Cargo.toml
+    quote: ksync.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: drivers/contracts/net/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: net/9p/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/pagecache/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: posix/ipc/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: posix/process/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/sysfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: tee/tee_kernel/Cargo.toml
+    quote: ksync.workspace = true
+  - path: tee/tee_task_iface/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: util/unittest_support/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/core/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/uart16550/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/virtio-blk/Cargo.toml
+    quote: ksync.workspace = true
+aliases:
+  en:
+  - semaphore
+  - counting semaphore
+  - sema
+  - down
+  - up
+  - resource counter
+  - permit pool
+  zh:
+  - 信号量
+  - 计数信号量
+  - 许可计数
+identifiers: [permits, count, acquire, release, available_permits, AtomicUsize]
+exclusions:
+  - "not for IRQ or other non-sleeping contexts"
+  - "not interruptible by signals: acquire has no error path"
+  - "use kcompletion::Completion for one-shot done/wait handshakes instead of a semaphore initialised to 0"
+counter_examples: []
+notes: ""

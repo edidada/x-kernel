@@ -1,0 +1,78 @@
+capability: mm_alloc_buddy_byte_engine
+title: Buddy-system byte allocator (alloc-engine BuddyByteAllocator)
+family: mm.allocator
+summary: >-
+  Byte-granularity ByteAllocator that wraps buddy_system_allocator::Heap<32>. It is one of the
+  three build-time choices for the kalloc heap (feature buddy). Methods take &mut self.
+source: {kind: workspace, crate: alloc-engine, path: mm/alloc-engine}
+symbols:
+  - {fqn: alloc_engine::BuddyByteAllocator, kind: struct, path: mm/alloc-engine/src/buddy.rs, role: primary}
+  - {fqn: alloc_engine::BuddyByteAllocator::new, kind: fn, path: mm/alloc-engine/src/buddy.rs, role: constructor}
+  - {fqn: alloc_engine::ByteAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+operations:
+  - name: allocate_deallocate
+    symbols: [alloc_engine::ByteAllocator]
+    effect: delegates to Heap::alloc / dealloc; allocation failure becomes AllocError::NoMemory
+    evidence:
+      - {path: mm/alloc-engine/src/buddy.rs, item: alloc_engine::buddy::BuddyByteAllocator::allocate, quote: "self.inner.alloc(layout).map_err(|_| AllocError::NoMemory)"}
+usage_protocol:
+  - step: enable via the `buddy` feature (kalloc/buddy); init_region / add_region hand it exclusive regions
+    evidence: [{path: mm/kalloc/Cargo.toml, quote: "buddy = [\"alloc-engine/buddy\"]"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: manages backing regions/pools supplied by the caller; the backing storage remains exclusively
+      reserved to this allocator while managed. No broader allocation/reentrancy guarantee is established
+      here.
+    evidence:
+    - path: mm/alloc-engine/src/buddy.rs
+      quote: impl BaseAllocator for BuddyByteAllocator {
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the heap takes exclusive use of each region for as long as it manages it
+    evidence:
+    - path: mm/alloc-engine/src/buddy.rs
+      item: alloc_engine::buddy::BuddyByteAllocator::init_region
+      quote: heap for as long as the heap manages it.
+  errors_bounds:
+    value: allocate returns AllocError::NoMemory on failure; add_region always returns Ok
+    evidence:
+    - path: mm/alloc-engine/src/buddy.rs
+      item: alloc_engine::buddy::BuddyByteAllocator::allocate
+      quote: map_err(|_| AllocError::NoMemory)
+  concurrency:
+    value: not internally synchronized; methods take &mut self
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      item: alloc_engine::ByteAllocator::allocate
+      quote: 'fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>>;'
+layers:
+  depends_on:
+  - buddy_system_allocator
+  used_by:
+  - kalloc
+  allowed_layers: unknown
+  evidence:
+  - path: mm/alloc-engine/Cargo.toml
+    quote: buddy_system_allocator = { version = "0.10", default-features = false, optional = true }
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+aliases:
+  en: [buddy heap, buddy system allocator, byte allocator, kernel heap, buddy_system_allocator]
+  zh: [伙伴堆, 伙伴系统字节分配器, 内核堆]
+identifiers: [buddy, order, Heap, heap, stats_alloc_actual]
+exclusions:
+  - for page-granularity allocation use BuddyPageAllocator (mm_alloc_buddy_page_engine), not this
+  - requires the `buddy` cargo feature; not thread-safe by itself
+counter_examples: []
+notes: >-
+  Only one default byte allocator is compiled into kalloc (slab, buddy or tlsf feature).

@@ -1,0 +1,167 @@
+capability: mm_address_space_memspace
+title: Process / kernel virtual address space with VMAs (memspace::MmSpace map / unmap / protect / read / write / find_free_area)
+family: mm.page_table
+summary: >-
+  MmSpace (alias AddrSpace) is a virtual address space: a page table plus a VMA set. It maps linear
+  or runtime-backed regions, unmaps, mprotects, finds free areas, reads/writes bytes through the
+  space, handles page faults, clones for fork, and exposes futex backing resolution.
+source: {kind: workspace, crate: memspace, path: mm/memspace}
+symbols:
+- fqn: memspace::MmSpace
+  kind: struct
+  path: mm/memspace/src/aspace.rs
+  role: primary
+- fqn: memspace::AddrSpace
+  kind: type
+  path: mm/memspace/src/aspace.rs
+  role: reexport
+- fqn: memspace::MmSpace::map_linear
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::map
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::unmap
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::protect
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::read
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::write
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+- fqn: memspace::MmSpace::find_free_area
+  kind: fn
+  path: mm/memspace/src/aspace.rs
+  role: operation
+operations:
+- name: map_linear
+  symbols:
+  - memspace::MmSpace::map_linear
+  effect: add a linear vaddr-to-paddr mapping (paddr 4K aligned) backed by a linear runtime
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::map_linear
+    quote: Add a new linear mapping.
+- name: unmap
+  symbols:
+  - memspace::MmSpace::unmap
+  effect: remove mappings in a range; error if out of the space or unaligned
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::unmap
+    quote: Removes mappings within the specified virtual address range.
+- name: protect
+  symbols:
+  - memspace::MmSpace::protect
+  effect: change permissions of a range
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::protect
+    quote: Updates mapping within the specified virtual address range.
+- name: read_write
+  symbols:
+  - memspace::MmSpace::read
+  - memspace::MmSpace::write
+  effect: copy bytes from/to an address in this space (via the physical pages) into a kernel buffer
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::read
+    quote: To read data from the address space.
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::write
+    quote: To write data to the address space.
+- name: find_free_area
+  symbols:
+  - memspace::MmSpace::find_free_area
+  effect: search from a hint for a free range of a size and alignment within a limit
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::find_free_area
+    quote: Finds a free area that can accommodate the given size.
+usage_protocol:
+- step: Create MmSpace::new_empty_user(base, size) or new_empty_kernel(base, size), then map/unmap/protect.
+    The kernel instance is held in a global SpinNoIrq<MmSpace>; user-space owners provide their own synchronization.
+  evidence:
+  - path: mm/memspace/src/aspace.rs
+    item: memspace::aspace::MmSpace::new_empty_user
+    quote: 'pub fn new_empty_user(base: VirtAddr, size: usize) -> KResult<Self> {'
+  - path: mm/memspace/src/lib.rs
+    item: memspace::KERNEL_ASPACE
+    quote: 'static KERNEL_ASPACE: LazyInit<SpinNoIrq<MmSpace>> = LazyInit::new();'
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: mm/memspace/src/lib.rs, quote: "#![no_std]"}]
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: MmSpace owns its VMA set and page table; user spaces are shared as Arc<Mutex<MmSpace>>
+    evidence:
+      - {path: mm/memspace/src/aspace.rs, item: memspace::aspace::MmSpace, quote: "pub struct MmSpace {"}
+      - {path: mm/memspace/src/aspace.rs, item: memspace::aspace::MmSpace::try_clone, quote: "pub fn try_clone(&mut self) -> KResult<Arc<Mutex<Self>>> {"}
+  errors_bounds:
+    value: KResult errors for out-of-range or unaligned regions
+    evidence: [{path: mm/memspace/src/aspace.rs, item: memspace::aspace::MmSpace::unmap, quote: "Returns an error if the address range is out of the address space or not"}]
+  concurrency:
+    value: methods take &mut self / &self; callers serialise through the Mutex around the shared space
+    evidence: [{path: mm/memspace/src/aspace.rs, item: memspace::aspace::MmSpace::acquire_user, quote: "pub fn acquire_user(address_space: Arc<Mutex<Self>>) -> Option<MmUserHandle> {"}]
+layers:
+  depends_on:
+  - page_table
+  - kalloc
+  - khal
+  - vmobj
+  - kerrno
+  used_by:
+  - kuaccess
+  - kexec
+  - kprocess
+  - kfutex
+  - posix-mm
+  - ksyscall
+  - filemap
+  allowed_layers: unknown
+  evidence:
+  - path: core/kuaccess/Cargo.toml
+    quote: memspace.workspace = true
+  - path: process/kexec/Cargo.toml
+    quote: memspace.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: memspace.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: page_table = { workspace = true, features = ["copy-from"]}
+  - path: mm/memspace/Cargo.toml
+    quote: kalloc = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: khal = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: vmobj = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: process/kfutex/Cargo.toml
+    quote: memspace.workspace = true
+  - path: posix/mm/Cargo.toml
+    quote: memspace = { workspace = true }
+  - path: core/ksyscall/Cargo.toml
+    quote: memspace.workspace = true
+  - path: mm/filemap/Cargo.toml
+    quote: memspace = { workspace = true }
+aliases:
+  en: [address space, mm_struct, vm space, aspace, mmap, munmap, mprotect, vma list, find_vma, get_unmapped_area, map region, virtual memory manager]
+  zh: [地址空间, 虚拟内存管理, 内存映射, 映射区域, vma 管理, 查找空闲区域]
+identifiers: [mm_struct, vm_area_struct, find_vma, mmap, munmap, mprotect, get_unmapped_area, vma, VmArea, aspace, "BTreeMap<VirtAddr", map_region]
+exclusions:
+  - "not a page-table primitive - for raw PTE operations use page_table::PageTableMut (mm_page_table_pagetable64)"
+  - 'not for user pointer access from syscalls - use osvm / kuaccess helpers (mm_user_copy_osvm); MmSpace::read / write go through the space and need the space handle'
+counter_examples: []

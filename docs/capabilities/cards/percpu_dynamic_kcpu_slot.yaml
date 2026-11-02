@@ -1,0 +1,112 @@
+capability: percpu_dynamic_kcpu_slot
+title: Dynamically initialized per-CPU objects from caller-owned memory (kcpu_slot::CpuSlotChunk / DynamicCpuSlot)
+family: cpu.percpu
+summary: >-
+  Per-CPU storage for values that cannot be bitwise template-copied (owning, droppable or
+  self-referential types). A CpuSlotChunk is carved from caller-owned backing memory
+  (cpu_count * area_stride bytes); alloc runs an initializer once per CPU with that CPU's id and
+  returns a DynamicCpuSlot handle. get(guard) reads the current CPU's value under a CpuLocalGuard;
+  get_remote needs T: Sync. Dropping the handle drops every CPU's value.
+source: {kind: workspace, crate: kcpu_slot, path: arch/kcpu_slot}
+symbols:
+  - {fqn: kcpu_slot::CpuSlotChunk, kind: struct, path: arch/kcpu_slot/src/dynamic.rs, role: primary}
+  - {fqn: kcpu_slot::CpuSlotChunk::from_raw_parts, kind: fn, path: arch/kcpu_slot/src/dynamic.rs, role: constructor}
+  - {fqn: kcpu_slot::CpuSlotChunk::alloc, kind: fn, path: arch/kcpu_slot/src/dynamic.rs, role: operation}
+  - {fqn: kcpu_slot::DynamicCpuSlot, kind: struct, path: arch/kcpu_slot/src/dynamic.rs, role: primary}
+  - {fqn: kcpu_slot::DynamicCpuSlot::get, kind: fn, path: arch/kcpu_slot/src/dynamic.rs, role: operation}
+  - {fqn: kcpu_slot::DynamicCpuSlot::get_remote, kind: fn, path: arch/kcpu_slot/src/dynamic.rs, role: operation}
+  - {fqn: kcpu_slot::SlotInitError, kind: enum, path: arch/kcpu_slot/src/dynamic.rs, role: helper}
+operations:
+  - name: alloc
+    symbols: [kcpu_slot::CpuSlotChunk::alloc]
+    effect: reserves one slot per CPU in the chunk and runs init(cpu_id) for every CPU; on a failed initializer the values already created are dropped but the reservation is not reclaimed
+    evidence:
+      - {path: arch/kcpu_slot/src/dynamic.rs, item: kcpu_slot::dynamic::CpuSlotChunk::alloc, quote: "The initializer runs once per CPU. If it fails, values already created"}
+  - name: get
+    symbols: [kcpu_slot::DynamicCpuSlot::get, kcpu_slot::DynamicCpuSlot::get_remote]
+    effect: shared access to the pinned CPU's value under a CpuLocalGuard, or to a remote CPU's value when T is Sync; None for a CPU outside the chunk
+    evidence:
+      - {path: arch/kcpu_slot/src/dynamic.rs, item: kcpu_slot::dynamic::DynamicCpuSlot::get, quote: "Returns `None` when the guard reports a CPU outside the chunk."}
+      - {path: arch/kcpu_slot/src/dynamic.rs, item: kcpu_slot::dynamic::DynamicCpuSlot::get_remote, quote: "Reads a remote CPU's value when sharing `T` is safe."}
+contract:
+  no_std:
+    value: yes (#![no_std])
+    evidence:
+    - path: arch/kcpu_slot/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: slot reservation carves caller-owned backing memory with a non-concurrent bump cursor and never
+      reclaims reservations; the user initializer and payload destructor have separate allocation/context
+      behavior.
+    evidence:
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::CpuSlotChunk
+      quote: Allocation metadata uses a non-concurrent bump cursor
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::CpuSlotChunk::alloc
+      quote: The initializer runs once per CPU.
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: safe accessor requires a CpuLocalGuard (excludes local IRQ reentry); NMI not discussed
+    evidence:
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::DynamicCpuSlot::get
+      quote: /// Shares the pinned CPU's initialized value through a guard that excludes
+  ownership_lifetime:
+    value: the handle owns every CPU's value and drops them all in Drop; the chunk must outlive handles
+      (borrowed); initializer failure leaves the reservation consumed
+    evidence:
+    - path: arch/kcpu_slot/src/dynamic.rs
+      quote: 'impl<T: ''static> Drop for DynamicCpuSlot<''_, T> {'
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::CpuSlotChunk
+      quote: Allocation metadata uses a non-concurrent bump cursor, so a chunk is not
+  errors_bounds:
+    value: 'alloc returns SlotInitError: NoSpace (chunk exhausted), Misaligned (backing or stride not
+      area-aligned), Init(E) (initializer failed)'
+    evidence:
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::SlotInitError
+      quote: pub enum SlotInitError<E> {
+  concurrency:
+    value: 'a chunk is not Sync (allocation is single-threaded); handles are Send + Sync for T: Send;
+      each thread observes only its own CPU''s value; get_remote additionally requires T: Sync and the
+      caller must prevent racing access'
+    evidence:
+    - path: arch/kcpu_slot/src/dynamic.rs
+      quote: 'unsafe impl<T: Send + ''static> Sync for DynamicCpuSlot<''_, T> {}'
+    - path: arch/kcpu_slot/src/dynamic.rs
+      item: kcpu_slot::dynamic::DynamicCpuSlot::get_remote
+      quote: The caller must ensure this does not race with another access to the
+layers:
+  depends_on:
+  - kiface-cpu-api
+  - kaddr_layout
+  - kbuild_config
+  - kcpu_id_map
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kiface-cpu-api.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+aliases:
+  en: [dynamic percpu, alloc_percpu, per-CPU allocation, free_percpu, per-CPU object with constructor, per-CPU Vec, per-CPU Box]
+  zh: [动态 per-CPU, 每核动态分配, alloc_percpu, 每 CPU 对象构造]
+identifiers: [alloc_percpu, free_percpu, per_cpu_ptr, for_each_possible_cpu, Vec<T> per cpu, Box per cpu]
+exclusions:
+  - "caller must provide the backing memory chunk (cpu_count * area_stride, area-aligned); no allocator integration"
+  - "reservation is never reclaimed, even after the handle is dropped or the initializer fails: size the arena accordingly"
+  - "no mutable access without the unsafe get_mut_unchecked; use interior mutability or a lock inside T"
+  - "for bitwise-copyable boot-time data use the static slots (percpu_static_kcpu_slot)"
+counter_examples: []
+notes: >-
+  At the pin no crate outside kcpu_slot uses CpuSlotChunk or DynamicCpuSlot (grep of the whole
+  workspace), so layers.used_by is empty.

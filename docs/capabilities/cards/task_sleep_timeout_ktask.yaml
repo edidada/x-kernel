@@ -1,0 +1,134 @@
+capability: task_sleep_timeout_ktask
+title: Async task sleep, deadline wait and timeout combinator (ktask::future::sleep / timeout)
+family: task.timer
+summary: >-
+  Task-context timing helpers built on the ktask timer. sleep / sleep_until(MonotonicInstant) wait
+  for a duration or monotonic deadline (also sleep_until_boottime / sleep_until_realtime for other
+  clock domains); each wait owns a prepared timer in a TimerFuture, so dropping a pending wait
+  cancels it. timeout / timeout_at race any future against a deadline and return Err(Elapsed)
+  (maps to KError::TimedOut). They are futures: run them under ktask::future::block_on or from an
+  async syscall.
+source: {kind: workspace, crate: ktask, path: task/ktask}
+symbols:
+  - {fqn: ktask::future::sleep, kind: fn, path: task/ktask/src/future/time.rs, role: primary}
+  - {fqn: ktask::future::sleep_until, kind: fn, path: task/ktask/src/future/time.rs, role: primary}
+  - {fqn: ktask::future::sleep_until_boottime, kind: fn, path: task/ktask/src/future/time.rs, role: operation}
+  - {fqn: ktask::future::sleep_until_realtime, kind: fn, path: task/ktask/src/future/time.rs, role: operation}
+  - {fqn: ktask::future::timeout, kind: fn, path: task/ktask/src/future/time.rs, role: primary}
+  - {fqn: ktask::future::timeout_at, kind: fn, path: task/ktask/src/future/time.rs, role: operation}
+  - {fqn: ktask::future::TimerFuture, kind: struct, path: task/ktask/src/future/time.rs, role: helper}
+  - {fqn: ktask::future::Elapsed, kind: struct, path: task/ktask/src/future/time.rs, role: helper}
+operations:
+- name: sleep
+  symbols:
+  - ktask::future::sleep
+  - ktask::future::sleep_until
+  effect: completes after a duration / at a monotonic deadline; a past deadline returns immediately; deadlines
+    beyond the u64-ns horizon stay pending
+  evidence:
+  - path: task/ktask/src/future/time.rs
+    item: ktask::future::time::sleep
+    quote: /// Waits until duration has elapsed.
+  - path: task/ktask/src/future/time.rs
+    item: ktask::future::time::sleep_until
+    quote: if deadline <= monotonic_time() {
+- name: timeout
+  symbols:
+  - ktask::future::timeout
+  - ktask::future::timeout_at
+  effect: select_biased between the wrapped future and sleep_until(deadline); Err(Elapsed) when the deadline
+    wins; None duration means no deadline
+  evidence:
+  - path: task/ktask/src/future/time.rs
+    item: ktask::future::time::timeout
+    quote: /// Requires a `Future` to complete before the specified duration has elapsed.
+  - path: task/ktask/src/future/time.rs
+    item: ktask::future::time::timeout_at
+    quote: select_biased!
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: task/ktask/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: "a future deadline prepares one owned timer allocation on the first poll; allocation failure follows the kernel allocator policy"
+    evidence: [{path: task/ktask/src/future/time.rs, item: ktask::future::time::sleep_until, quote: "A future deadline prepares one owned allocation on the first poll. The"}]
+  blocking:
+    value: "async: they yield to the executor (sleeping task until the timer fires); wake comes from a hard-IRQ timer handler"
+    evidence:
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::sleep_until, quote: "executor's waker must support hard-IRQ wake without sleeping or unwinding."}
+  irq_nmi:
+    value: "the executor's waker must support hard-IRQ wake; polling is task-context; sleep_until_boottime states poll in task context"
+    evidence:
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::sleep_until, quote: "executor's waker must support hard-IRQ wake without sleeping or unwinding."}
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::sleep_until_boottime, quote: "Poll in task context."}
+  ownership_lifetime:
+    value: "the TimerFuture owns its prepared timer; dropping a pending wait synchronously cancels delivery and must not happen from its own wake callback or while blocking the callback's CPU"
+    evidence:
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::TimerFuture, quote: "Dropping it synchronously cancels delivery. Do not drop it from its own"}
+  errors_bounds:
+    value: "sleep panics if adding the duration overflows the monotonic representation; timeout returns Err(Elapsed) which converts to KError::TimedOut; boottime/realtime variants return clock registration or timer start errors"
+    evidence:
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::sleep, quote: "/// Panics if adding duration overflows the monotonic time representation."}
+      - {path: task/ktask/src/future/time.rs, item: ktask::future::time::Elapsed, quote: "pub struct Elapsed(());"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - ktimer-core
+  - kspin
+  - khal
+  - kpoll
+  - kerrno
+  - ktime_types
+  used_by:
+  - ksyscall
+  - kfd_objects
+  - knet
+  - ktty
+  - ktimer
+  - ksync
+  - kruntime
+  - tipc
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktask/Cargo.toml
+    quote: ktimer_core = { workspace = true, features = ["preempt"] }
+  - path: process/ktimer/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kspin = { workspace = true, features = ["preempt"] }
+  - path: task/ktask/Cargo.toml
+    quote: khal.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: ktask.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: tee/tipc/Cargo.toml
+    quote: ktask.workspace = true
+aliases:
+  en: [sleep, msleep, usleep, schedule_timeout, tokio::time::sleep, timeout, tokio::time::timeout, wait with timeout, deadline wait, nanosleep, hrtimer sleep, wait_event_timeout]
+  zh: [睡眠, 休眠, 延时等待, 超时, 带超时等待, 定时等待, 纳秒睡眠]
+identifiers: [sleep, msleep, usleep, schedule_timeout, nanosleep, timeout, timed_out, deadline, wait_timeout, TimedOut, Elapsed, select_biased]
+exclusions:
+  - "async only: a spin-delay or busy loop on the monotonic clock is the wrong pattern in task context, but these cannot be used in IRQ/softirq/atomic context"
+  - "do not drop a pending sleep future from its own wake callback or under a lock the timer callback needs"
+  - "for a sleeping wait with a condition use ktask::WaitQueue::wait_timeout_until (task_wait_queue); for raw callback timers use timer_core_ktimer_core"
+counter_examples: []
+notes: >-
+  Whether TimerFuture is built directly on ktimer_core::Timer is not certain from this card:
+  ktask::Timer (crate::Timer) wraps it; only the Cargo dependency edge is cited.

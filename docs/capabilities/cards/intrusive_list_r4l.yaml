@@ -1,0 +1,98 @@
+capability: intrusive_list_r4l
+title: Intrusive list with O(1) arbitrary removal over Box/Arc elements (linked_list_r4l::List)
+family: container.list
+summary: >-
+  linked_list_r4l::List<G> is an intrusive doubly-linked list ported from Rust-for-Linux. Elements
+  embed a Links<T> field, expose it through the GetLinks trait, and are wrapped in Box or Arc; the list
+  takes ownership while linked. Offers push_back / push_front / pop_front, unsafe remove of a given
+  entry and cursors. Links tracks membership with an atomic flag so double insertion is rejected.
+source: {kind: dependency, crate: linked_list_r4l, version: 0.3.0}
+symbols:
+  - {fqn: linked_list_r4l::List, kind: struct, path: src/linked_list.rs, role: primary}
+  - {fqn: linked_list_r4l::List::new, kind: fn, path: src/linked_list.rs, role: constructor}
+  - {fqn: linked_list_r4l::List::push_back, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: linked_list_r4l::List::pop_front, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: linked_list_r4l::List::remove, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: linked_list_r4l::GetLinks, kind: trait, path: src/raw_list.rs, role: helper}
+  - {fqn: linked_list_r4l::Links, kind: struct, path: src/raw_list.rs, role: helper}
+operations:
+- name: push_back
+  symbols:
+  - linked_list_r4l::List::push_back
+  effect: link a wrapped (Box/Arc) element at the tail
+  evidence:
+  - path: linked_list_r4l-0.3.0/src/linked_list.rs
+    item: linked_list_r4l::linked_list::List
+    quote: ownership is transferred to the list while the element is
+  - path: linked_list_r4l-0.3.0/src/linked_list.rs
+    item: linked_list_r4l::linked_list::List::push_back
+    quote: It is dropped if it's already on this (or another) list;
+- name: pop_front
+  symbols:
+  - linked_list_r4l::List::pop_front
+  effect: unlink and return the head element; None when empty
+  evidence:
+  - path: linked_list_r4l-0.3.0/src/linked_list.rs
+    item: linked_list_r4l::linked_list::List::pop_front
+    quote: Returns `None` if the list is empty.
+- name: remove
+  symbols:
+  - linked_list_r4l::List::remove
+  effect: unsafe removal of a specific element in constant time
+  evidence:
+  - path: linked_list_r4l-0.3.0/src/linked_list.rs
+    item: linked_list_r4l::linked_list::List::remove
+    quote: Callers must ensure that `data` is either on this list or in no list.
+  - path: linked_list_r4l-0.3.0/Cargo.toml
+    quote: arbitrary removal in constant time
+usage_protocol:
+  - step: embed Links<Self> in the element (Links::new()), implement GetLinks::get_links for the wrapper type, then use List<Box<T>> / List<Arc<T>>
+    evidence: [{path: linked_list_r4l-0.3.0/src/raw_list.rs, item: linked_list_r4l::raw_list::GetLinks::get_links, quote: "Returns the links to be used when linking an entry within a list."}]
+contract:
+  no_std:
+    value: "yes (#![cfg_attr(not(test), no_std)])"
+    evidence: [{path: linked_list_r4l-0.3.0/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the list owns wrapped (Box/Arc) elements while they are linked; remove is unsafe and requires the entry to be on this list or in none
+    evidence:
+      - {path: linked_list_r4l-0.3.0/src/linked_list.rs, item: linked_list_r4l::linked_list::List, quote: "ownership is transferred to the list while the element is"}
+      - {path: linked_list_r4l-0.3.0/src/linked_list.rs, item: linked_list_r4l::linked_list::List::remove, quote: "Callers must ensure that `data` is either on this list or in no list."}
+  errors_bounds: {value: unknown, evidence: []}
+  concurrency:
+    value: Links is Send/Sync when the entry is; no locking is provided for list mutation (needs external synchronisation)
+    evidence:
+      - {path: linked_list_r4l-0.3.0/src/raw_list.rs, quote: "`Links` can be safely sent to other threads but we restrict it to being `Send` only when"}
+layers:
+  depends_on: []
+  used_by:
+  - kprocess
+  - kdriver
+  - virtio
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: linked_list_r4l = "0.3"
+  - path: process/kprocess/Cargo.toml
+    quote: linked_list_r4l.workspace = true
+  - path: drivers/devices/virtio/src/blk/requests.rs
+    quote: use linked_list_r4l::{GetLinks, Links, List};
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: linked_list_r4l = { workspace = true, optional = true }
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: linked_list_r4l = { workspace = true, optional = true }
+aliases:
+  en: [intrusive list, linked list, list_head, rust for linux list, list with arbitrary removal, request queue list, doubly linked list, pending list]
+  zh: [侵入式链表, 链表, 双向链表, 可任意删除的链表, 请求链表]
+identifiers: [prev, next, links, Links, GetLinks, list_head, push_back, pop_front, remove, inserted]
+exclusions:
+  - "a second intrusive list implementation exists (card intrusive_list_intrusive_collections) with adapters, cursors and RBTree siblings; prefer whichever the surrounding crate already uses"
+  - "no internal locking"
+counter_examples: []
+notes: >-
+  kprocess keeps the children of a process in a List<Arc<ChildRelationSlot>> behind SpinNoIrq (the children field of kprocess::Process); virtio blk and kdriver use it for pending
+  request lists.

@@ -1,0 +1,101 @@
+capability: time_clock_khal
+title: Read the monotonic clock and convert between ticks and TimeSpan (khal::time::monotonic_time / now_ticks / busy_wait)
+family: time.types
+summary: >-
+  The kernel's hardware-clock access layer: now_ticks() reads the counter, ticks_to_span /
+  span_to_ticks / frequency convert, monotonic_time() returns a MonotonicInstant and
+  monotonic_time_nanos() raw nanoseconds, busy_wait / spin_wait spin until a duration or deadline,
+  arm_timer / disarm_timer program the next timer event.
+source: {kind: workspace, crate: khal, path: arch/khal}
+symbols:
+  - {fqn: khal::time::monotonic_time, kind: fn, path: arch/khal/src/time/mod.rs, role: primary}
+  - {fqn: khal::time::monotonic_time_nanos, kind: fn, path: arch/khal/src/time/mod.rs, role: primary}
+  - {fqn: khal::time::now_ticks, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+  - {fqn: khal::time::ticks_to_span, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+  - {fqn: khal::time::span_to_ticks, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+  - {fqn: khal::time::frequency, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+  - {fqn: khal::time::busy_wait, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+  - {fqn: khal::time::arm_timer, kind: fn, path: arch/khal/src/time/mod.rs, role: operation}
+operations:
+  - name: monotonic_now
+    symbols: [khal::time::monotonic_time, khal::time::monotonic_time_nanos]
+    effect: current monotonic time as MonotonicInstant, or raw nanoseconds since the monotonic origin for hardware / scheduler arithmetic
+    evidence:
+      - {path: arch/khal/src/time/mod.rs, item: khal::time::monotonic_time, quote: "MonotonicInstant::from_span_since_origin(ticks_to_span(now_ticks()))"}
+      - {path: arch/khal/src/time/mod.rs, item: khal::time::monotonic_time_nanos, quote: "/// Nanoseconds since the monotonic origin, for hardware / scheduler arithmetic."}
+  - name: ticks_conversion
+    symbols: [khal::time::now_ticks, khal::time::ticks_to_span, khal::time::span_to_ticks, khal::time::frequency]
+    effect: counter ticks to and from TimeSpan using the counter frequency
+    evidence:
+      - {path: arch/khal/src/time/mod.rs, item: khal::time::ticks_to_span, quote: "pub fn ticks_to_span(ticks: TimerTicks) -> TimeSpan {"}
+      - {path: arch/khal/src/time/mod.rs, item: khal::time::span_to_ticks, quote: "pub fn span_to_ticks(span: TimeSpan) -> TimerTicks {"}
+  - name: busy_wait
+    symbols: [khal::time::busy_wait]
+    effect: spin on monotonic_time until the duration / deadline passes
+    evidence:
+      - {path: arch/khal/src/time/mod.rs, item: khal::time::spin_until, quote: "while monotonic_time() < deadline {"}
+contract:
+  no_std:
+    value: unknown
+    evidence: []
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: busy_wait / spin_wait spin (core::hint::spin_loop) rather than sleep
+    evidence:
+    - path: arch/khal/src/time/mod.rs
+      item: khal::time::spin_until
+      quote: core::hint::spin_loop();
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: clock helpers return owned time values; the ClockSourceIf provider is linked through kiface.
+      These functions do not grant ownership of hardware or timer resources.
+    evidence:
+    - path: arch/khal/src/time/mod.rs
+      item: khal::time::now_ticks
+      quote: pub fn now_ticks() -> TimerTicks {
+    - path: arch/khal/src/time/mod.rs
+      item: khal::time::monotonic_time
+      quote: MonotonicInstant::from_span_since_origin(ticks_to_span(now_ticks()))
+  errors_bounds:
+    value: unknown
+    evidence: []
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kiface-time-api
+  - ktime_types
+  - kspin
+  used_by:
+  - ktime
+  - entropy
+  - kruntime
+  allowed_layers: unknown
+  evidence:
+  - path: core/ktime/Cargo.toml
+    quote: khal.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: khal.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: kiface-time-api.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: khal.workspace = true
+aliases:
+  en: [monotonic_time, uptime, current_time_nanos, now_ns, get_ticks, read_cntvct, rdtsc wrapper, ns_to_ticks, ticks_to_ns, sleep_busy, udelay, ndelay, mdelay, delay loop, spin wait]
+  zh: [单调时间, 开机时长, 读取计数器, 滴答数转换, 忙等待, 微秒延时, 读取当前纳秒]
+identifiers: [cntvct, CNTVCT_EL0, rdtsc, rdcycle, mftb, now_ticks, get_time, current_time, uptime, "monotonic_time", udelay, ndelay, mdelay, busy_wait, delay_us, ticks_to_nanos, nanos_to_ticks, cntfrq]
+exclusions:
+  - monotonic_time excludes injected sleep time; for time including suspend use ktime::boottime, and for wall-clock use ktime::realtime (time_realtime_ktime)
+  - busy_wait burns the CPU; for blocking waits use a timer or wait queue
+counter_examples: []
+notes: >-
+  Many items in this file carry no doc comments; contract fields are therefore mostly unknown.

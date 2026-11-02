@@ -1,0 +1,185 @@
+capability: task_block_on_ktask
+title: Block the current task on a future, with prepared parking and signal interruption (ktask::future::block_on / PreparedTaskWait / interruptible)
+family: task.poll
+summary: >-
+  The sync-over-async bridge of the kernel. block_on(fut) polls a future on the current task with a
+  task-bound Waker and parks the task (park_task) between polls; interruptible(fut) wraps a future so
+  a signal (interrupt_task) completes it with Err(Interrupted); PreparedTaskWait::prepare allocates
+  one reusable Waker up front so a later park() neither allocates nor registers anything. Wakeups are
+  hints: callers recheck their predicate.
+source: {kind: workspace, crate: ktask, path: task/ktask}
+symbols:
+  - {fqn: ktask::future::block_on, kind: fn, path: task/ktask/src/future/mod.rs, role: primary}
+  - {fqn: ktask::future::PreparedTaskWait, kind: struct, path: task/ktask/src/future/mod.rs, role: primary}
+  - {fqn: ktask::future::PreparedTaskWait::prepare, kind: fn, path: task/ktask/src/future/mod.rs, role: constructor}
+  - {fqn: ktask::future::PreparedTaskWait::waker, kind: fn, path: task/ktask/src/future/mod.rs, role: operation}
+  - {fqn: ktask::future::PreparedTaskWait::park, kind: fn, path: task/ktask/src/future/mod.rs, role: operation}
+  - {fqn: ktask::future::interruptible, kind: fn, path: task/ktask/src/future/mod.rs, role: operation}
+  - {fqn: ktask::future::Interrupted, kind: struct, path: task/ktask/src/future/mod.rs, role: helper}
+operations:
+- name: block_on
+  symbols:
+  - ktask::future::block_on
+  effect: poll the future with a task waker and park the current task while it is Pending until woken;
+    does not handle interruption by itself
+  evidence:
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::block_on
+    quote: Blocks the current task until the given future is resolved.
+- name: prepared_wait
+  symbols:
+  - ktask::future::PreparedTaskWait::prepare
+  - ktask::future::PreparedTaskWait::park
+  - ktask::future::PreparedTaskWait::waker
+  effect: prepare validates a sleepable context and allocates one reusable waker; waker() clones it without
+    allocating; park() parks until a wake hint (may return spuriously)
+  evidence:
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::PreparedTaskWait::prepare
+    quote: Call with IRQs enabled and without any lock that forbids sleeping.
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::PreparedTaskWait::park
+    quote: May return spuriously. No wait registration, waker allocation or signal
+- name: interruptible
+  symbols:
+  - ktask::future::interruptible
+  effect: polls the wrapped future first and returns its value whenever ready (operation progress beats
+    signal delivery; a pending interrupt stays pending); only after the future reports Pending does a
+    task interrupt (signal) complete the wait with Err(Interrupted), as does a poll registration failure
+  evidence:
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::interruptible
+    quote: /// Makes a future interruptible.
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::interruptible
+    quote: Operation progress has priority over signal delivery. The wrapped future is
+  - path: task/ktask/src/future/mod.rs
+    item: ktask::future::interruptible
+    quote: curr.poll_interrupt(&mut context)
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: task/ktask/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: PreparedTaskWait::prepare allocates one reusable waker following the kernel's infallible Arc
+      OOM policy; park() performs no waker allocation; block_on allocation behaviour is not documented
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::prepare
+      quote: The allocation follows the kernel's infallible Arc OOM policy.
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::park
+      quote: No wait registration, waker allocation or signal
+  blocking:
+    value: parks (sleeps) the current task; park() asserts a sleepable context and that the preparing
+      task is the caller
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::park
+      quote: Panics if called by another task or outside sleepable context. The
+  irq_nmi:
+    value: the Waker may be notified from IRQ context; the parking side must be a sleepable task context
+      (prepare rejects masked IRQs, interrupt-like context, disabled preemption and RCU read sections)
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait
+      quote: the independently owned [`Waker`] may be notified from IRQ context. Wakeups
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::prepare
+      quote: Returns [`KError::InvalidInput`] before allocation if no non-idle task
+  ownership_lifetime:
+    value: PreparedTaskWait is neither Send nor Sync (task-bound); the waker holds only a weak task reference
+      and may outlive the handle
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait
+      quote: This handle is neither Send nor Sync. Only the preparing task may park;
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::waker
+      quote: It holds only a weak task reference and may outlive this handle.
+  errors_bounds:
+    value: prepare returns KError::InvalidInput for no task, masked IRQs, interrupt-like context, disabled
+      preemption or an RCU read section; Interrupted converts to KError::Interrupted (signal) or NoMemory
+      / InvalidInput (poll registration failures)
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait::prepare
+      quote: pub fn prepare() -> KResult<Self> {
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::Interrupted
+      quote: pub struct Interrupted(InterruptCause);
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::KError::from
+      quote: InterruptCause::Registration(PollRegisterError::InvalidState) => KError::InvalidInput,
+  concurrency:
+    value: 'wake hints, not completion results: spurious returns happen, callers must recheck their own
+      predicate and keep their wake source registered while needed'
+    evidence:
+    - path: task/ktask/src/future/mod.rs
+      item: ktask::future::PreparedTaskWait
+      quote: 'are hints, not completion results: callers must recheck their predicate.'
+layers:
+  depends_on:
+  - kpoll
+  - kspin
+  - kerrno
+  - khal
+  used_by:
+  - ksyscall
+  - kfd_objects
+  - knet
+  - ktty
+  - ktimer
+  - ksync
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktask/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: process/ktimer/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kspin = { workspace = true, features = ["preempt"] }
+  - path: task/ktask/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: khal.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: ktask.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: ktask.workspace = true
+aliases:
+  en:
+  - block_on
+  - futures::executor::block_on
+  - wait for future
+  - sync over async
+  - park thread
+  - thread::park
+  - wait_event interruptible
+  - wait_event_interruptible
+  - interruptible sleep
+  - signal-interruptible wait
+  - schedule()
+  zh:
+  - 同步等待 future
+  - 阻塞等待
+  - 休眠等待
+  - 可被信号打断的等待
+  - 任务挂起
+  - 停放任务
+identifiers: [block_on, park, unpark, schedule, set_current_state, TASK_INTERRUPTIBLE, wait_event_interruptible, signal_pending, Waker, wake_up_process, thread::park]
+exclusions:
+  - "block_on parks the current task: sleepable task context only; not for IRQ/softirq or while holding spinlocks"
+  - "block_on alone does not observe signals; wrap with interruptible() for signal-interruptible syscalls"
+  - "wakeups are hints: a hand-rolled park/unpark flag loop must still recheck the condition; for condition waits prefer ktask::WaitQueue::wait_until"
+  - "use PreparedTaskWait when the wake source must be registered before parking without allocation in the park path"
+counter_examples: []
+notes: "2026-11-01 rebase onto main 549d05ff0（!1128/!1210）：interruptible 现先 poll 内层 future，仅在 Pending 后才消费中断（进度优先于信号）；已改 interruptible 的 effect 并补引文；Interrupted::is_signal 已更名 is_task_interrupt（卡片未引用）；prepare/park 的可睡眠判定改由 ktask::is_sleepable_context 统一，另拒绝 RCU 读区间，已补入 irq_nmi/errors_bounds。"

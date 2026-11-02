@@ -1,0 +1,102 @@
+capability: mm_alloc_buddy_page_engine
+title: Binary-buddy page allocator over caller-provided regions (alloc-engine BuddyPageAllocator)
+family: mm.allocator
+summary: >-
+  Page-granularity allocator implementing the PageAllocator trait with the binary buddy algorithm
+  over up to 64 caller-registered regions. Free blocks are tracked with intrusive links and a
+  bitmap kept in the managed storage; it hands out contiguous page runs by count and alignment and
+  can allocate at a requested base address. Methods take &mut self, so a caller needs its own lock.
+source: {kind: workspace, crate: alloc-engine, path: mm/alloc-engine}
+symbols:
+  - {fqn: alloc_engine::BuddyPageAllocator, kind: struct, path: mm/alloc-engine/src/buddy_page.rs, role: primary}
+  - {fqn: alloc_engine::BuddyPageAllocator::new, kind: fn, path: mm/alloc-engine/src/buddy_page.rs, role: constructor}
+  - {fqn: alloc_engine::PageAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+  - {fqn: alloc_engine::BaseAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+  - {fqn: alloc_engine::BuddyAllocator, kind: struct, path: mm/alloc-engine/src/buddy_alloc.rs, role: helper}
+operations:
+  - name: register_memory
+    symbols: [alloc_engine::BaseAllocator]
+    effect: init_region resets and registers the first region; add_region adds another one (errors InvalidInput for a null / unaligned base or size below one page, NoMemory past 64 regions)
+    evidence:
+      - {path: mm/alloc-engine/src/buddy_alloc.rs, item: alloc_engine::buddy_alloc::BuddyAllocator::add_region, quote: "return Err(AllocError::NoMemory);"}
+      - {path: mm/alloc-engine/src/buddy_alloc.rs, item: alloc_engine::buddy_alloc::MAX_REGIONS, quote: "Up to 64 separate memory regions can be registered."}
+  - name: allocate_pages
+    symbols: [alloc_engine::PageAllocator]
+    effect: allocate contiguous pages by count and power-of-two alignment (allocate_pages) or at a given base (allocate_pages_at); deallocate_pages returns them
+    evidence:
+      - {path: mm/alloc-engine/src/lib.rs, item: alloc_engine::PageAllocator::allocate_pages, quote: "Allocate contiguous memory pages with given count and alignment."}
+      - {path: mm/alloc-engine/src/buddy_alloc.rs, item: alloc_engine::buddy_alloc::BuddyAllocator::allocate_pages, quote: "pub fn allocate_pages(&mut self, count: usize, align_pow2: usize) -> AllocResult<usize> {"}
+usage_protocol:
+  - step: construct with BuddyPageAllocator::<4096>::new() (const), then init_region / add_region with an exclusively owned, page-aligned region
+    evidence: [{path: mm/alloc-engine/src/buddy_alloc.rs, item: alloc_engine::buddy_alloc::BuddyAllocator::add_region, quote: "Add exclusively owned, page-aligned writable storage to the allocator."}]
+  - step: wrap in a lock when shared; kalloc keeps it in a SpinNoIrq
+    evidence: [{path: mm/kalloc/src/lib.rs, item: kalloc::GlobalAllocator, quote: "palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: manages backing regions/pools supplied by the caller; the backing storage remains exclusively
+      reserved to this allocator while managed. No broader allocation/reentrancy guarantee is established
+      here.
+    evidence:
+    - path: mm/alloc-engine/src/buddy_alloc.rs
+      item: alloc_engine::buddy_alloc::BuddyAllocator::add_region
+      quote: Add exclusively owned, page-aligned writable storage to the allocator.
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the allocator takes exclusive use of each registered region; storage must stay valid until
+      reset and must not overlap live allocations or another allocator
+    evidence:
+    - path: mm/alloc-engine/src/buddy_alloc.rs
+      item: alloc_engine::buddy_alloc::BuddyAllocator::add_region
+      quote: Storage must remain valid until reset and must not overlap
+  errors_bounds:
+    value: AllocResult errors (InvalidInput, NoMemory, ...); BaseAllocator::init_region panics (expect)
+      when initialization fails; count == 0 is InvalidInput
+    evidence:
+    - path: mm/alloc-engine/src/buddy_page.rs
+      item: alloc_engine::buddy_page::BuddyPageAllocator::init_region
+      quote: .expect("buddy allocator init failed");
+    - path: mm/alloc-engine/src/buddy_alloc.rs
+      item: alloc_engine::buddy_alloc::BuddyAllocator::allocate_pages
+      quote: "{ return Err(AllocError::InvalidInput); } let align"
+  concurrency:
+    value: not internally synchronized; all mutating methods take &mut self
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      item: alloc_engine::PageAllocator::allocate_pages
+      quote: 'fn allocate_pages(&mut self, num_pages: usize, align_pow2: usize) -> AllocResult<usize>;'
+layers:
+  depends_on:
+  - intrusive-collections
+  - kerrno
+  used_by:
+  - kalloc
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+  - path: mm/alloc-engine/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: mm/alloc-engine/Cargo.toml
+    quote: kerrno = { workspace = true, optional = true }
+aliases:
+  en: [buddy allocator, page allocator, physical page allocator, alloc_pages, free_pages, buddy system, frame allocator, contiguous page allocation, order allocation]
+  zh: [伙伴系统, 伙伴分配器, 页分配器, 物理页分配, 连续页分配, 帧分配器]
+identifiers: [order, buddy, free_list, split, merge, coalesce, MAX_ORDER, alloc_pages, free_area, page_flags]
+exclusions:
+  - page granularity only; sub-page objects need a byte allocator (SlabByteAllocator, TlsfByteAllocator) or the slab cache
+  - not thread-safe by itself; most callers should use kalloc::GlobalAllocator::alloc_pages which adds locking, per-CPU caches and usage accounting
+  - at most 64 regions can be registered
+counter_examples: []
+notes: >-
+  The slab byte allocator embeds a private BuddyAllocator (SlabHeap) rather than using this adapter.
+  PAGE_SIZE is a const generic; kalloc instantiates it with PAGE_SIZE_4K.

@@ -1,0 +1,182 @@
+capability: poll_set_kpoll
+title: IRQ-safe poll wake source with owned one-shot waiter registrations (kpoll::PollSet)
+family: task.poll
+summary: >-
+  Readiness notification for poll/epoll/select-style waits. A PollSet is a broadcast source of
+  one-shot waker registrations; each logical wait owns a PollRegistrations and uses a PollContext to
+  register with one or more sources (RAII: timeout, interruption or drop unregisters). wake() detaches
+  all waiters under a SpinNoIrq lock and invokes wakers after releasing it, so it is callable from IRQ
+  context. The Pollable trait is the poll()+register() contract; the caller supplies the readiness
+  predicate and must recheck it after registering.
+source: {kind: workspace, crate: kpoll, path: task/kpoll}
+symbols:
+  - {fqn: kpoll::PollSet, kind: struct, path: task/kpoll/src/source.rs, role: primary}
+  - {fqn: kpoll::PollSet::new, kind: fn, path: task/kpoll/src/source.rs, role: constructor}
+  - {fqn: kpoll::PollSet::register, kind: fn, path: task/kpoll/src/source.rs, role: operation}
+  - {fqn: kpoll::PollSet::wake, kind: fn, path: task/kpoll/src/source.rs, role: operation}
+  - {fqn: kpoll::WeakPollSet, kind: struct, path: task/kpoll/src/source.rs, role: helper}
+  - {fqn: kpoll::PollRegistrations, kind: struct, path: task/kpoll/src/registration.rs, role: helper}
+  - {fqn: kpoll::PollContext, kind: struct, path: task/kpoll/src/registration.rs, role: helper}
+  - {fqn: kpoll::PollRegistration, kind: struct, path: task/kpoll/src/registration.rs, role: helper}
+  - {fqn: kpoll::PollRegisterError, kind: enum, path: task/kpoll/src/registration.rs, role: helper}
+  - {fqn: kpoll::Pollable, kind: trait, path: task/kpoll/src/lib.rs, role: helper}
+operations:
+  - name: wake
+    symbols: [kpoll::PollSet::wake]
+    effect: detaches every registered waiter and wakes it after dropping the lock; returns the count; a registration cancelled concurrently may still get one late wake
+    evidence:
+      - {path: task/kpoll/src/source.rs, item: kpoll::source::PollSet::wake, quote: "A registration concurrently cancelled after this method detaches its"}
+      - {path: task/kpoll/src/source.rs, item: kpoll::source::PollSet::wake, quote: "Single lock: detach the slot table. Wakers are invoked after"}
+  - name: register
+    symbols: [kpoll::PollSet::register]
+    effect: stores a cloned Waker and returns a PollRegistration guard that unregisters on drop
+    evidence:
+      - {path: task/kpoll/src/source.rs, item: kpoll::source::PollSet::register, quote: "pub fn register(&self, waker: &Waker) -> Result<PollRegistration, PollRegisterError>"}
+  - name: pollable
+    symbols: [kpoll::Pollable]
+    effect: implementors report poll() -> IoEvents and register their PollSets via the context; caller rechecks readiness after register
+    evidence:
+      - {path: task/kpoll/src/lib.rs, item: kpoll::Pollable::register, quote: "Callers must retain the owning [`PollRegistrations`] across"}
+usage_protocol:
+  - step: "keep a PollRegistrations alive across Poll::Pending, register through PollContext, then recheck the readiness predicate to close the check/register race"
+    evidence:
+      - {path: task/kpoll/src/lib.rs, item: kpoll::Pollable::register, quote: "`core::task::Poll::Pending` and perform a readiness recheck after this"}
+  - step: "the producer publishes the state change, then calls PollSet::wake (IRQ context allowed)"
+    evidence:
+      - {path: task/kpoll/src/source.rs, item: kpoll::source::PollSet, quote: "`wake` may be called from IRQ context and"}
+contract:
+  no_std:
+    value: yes (#![no_std], uses alloc)
+    evidence:
+    - path: task/kpoll/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: register may allocate (the waiter table grows through try_reserve, returning NoMemory); wake
+      path does not allocate; PollSet::new allocates an Arc; PollRegistrations::new does not allocate
+    evidence:
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::State::register
+      quote: .try_reserve(1)
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::wake
+      quote: dropping `SpinNoIrq`, and no wake-path allocation is needed.
+    - path: task/kpoll/src/registration.rs
+      item: kpoll::registration::PollRegistrations::new
+      quote: Creates an empty registration owner without allocating.
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::new
+      quote: 'inner: Arc::new(PollSetInner::new()),'
+  blocking:
+    value: the notification machinery does not itself provide a sleeping wait; wake invokes user-provided
+      Wakers outside the source lock, whose callback context/nonblocking behavior must be supplied by
+      the integration. Register may allocate.
+    evidence:
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::register
+      quote: '`Waker::clone` may run arbitrary'
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::wake
+      quote: Wakers are invoked after
+  irq_nmi:
+    value: 'PollSet is an IRQ-safe broadcast source: wake may be called from IRQ context; NMI usage not
+      stated'
+    evidence:
+    - path: task/kpoll/src/lib.rs
+      quote: '[`PollSet`] is an IRQ-safe broadcast source.'
+  ownership_lifetime:
+    value: each logical wait owns a PollRegistrations; dropping a PollRegistration guard unregisters its
+      waiter; guards hold only a Weak source reference so they cannot keep a device or file alive; wake
+      removes the registrations (one-shot)
+    evidence:
+    - path: task/kpoll/src/registration.rs
+      item: kpoll::registration::PollRegistration
+      quote: Dropping the guard unregisters the waiter if the source has not already
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet
+      quote: Registrations are removed by [`Self::wake`] or when their owning
+  errors_bounds:
+    value: 'PollRegisterError: NoMemory, IdExhausted (non-reusable 64-bit registration id space), InvalidState'
+    evidence:
+    - path: task/kpoll/src/registration.rs
+      item: kpoll::registration::PollRegisterError
+      quote: pub enum PollRegisterError {
+    - path: task/kpoll/src/registration.rs
+      item: kpoll::registration::PollRegisterError
+      quote: The source exhausted its non-reusable registration identity space.
+  concurrency:
+    value: waiter table behind a SpinNoIrq lock; waker clone and invocation happen outside the lock; late
+      wakes are possible so waiters must recheck readiness
+    evidence:
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::register
+      quote: '// Clone before taking `SpinNoIrq`: `Waker::clone` may run arbitrary'
+layers:
+  depends_on:
+  - kspin
+  - smallvec
+  - bitflags
+  - linux-raw-sys
+  used_by:
+  - ktask
+  - kvfs
+  - knet
+  - ktty
+  - pipefs
+  - devfs
+  - ksignal
+  - kprocess
+  - kfd
+  - kfd_objects
+  - ksyscall
+  - ktime
+  - entropy
+  allowed_layers: unknown
+  evidence:
+  - path: task/kpoll/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: fs/kvfs/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: task/kpoll/Cargo.toml
+    quote: smallvec = { workspace = true }
+  - path: task/kpoll/Cargo.toml
+    quote: bitflags = { version = "2.10", default-features = false }
+  - path: task/kpoll/Cargo.toml
+    quote: "linux-raw-sys = { version = \"0.11\", default-features = false, features = [\n    \"no_std\"\
+      ,\n    \"general\",\n] }"
+  - path: fs/filesystems/pipefs/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: process/kfd/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: kpoll.workspace = true
+aliases:
+  en: [poll wait queue, poll_wait, wait queue head for poll, epoll wakeup source, select/poll notification, readiness notification, waker list, waker registry, broadcast waker set, wake all wakers, poll_table]
+  zh: [轮询等待队列, poll 唤醒源, 就绪通知, 唤醒器列表, 广播唤醒, epoll 唤醒, select 等待]
+identifiers: [Waker, wakers, waker_list, wake_all, poll_wait, PollEvents, POLLIN, EPOLLIN, register_waker, notify, readiness, Vec<Waker>]
+exclusions:
+  - "notification only: no predicate and no blocking wait; the caller recheck loop is mandatory (late wakes, check/register race)"
+  - "wake is broadcast and one-shot: registrations are consumed; a woken waiter must re-register on the next round"
+  - "for sleeping with a condition on ktask use ktask::WaitQueue (task_wait_queue); for one-shot done/wait tokens use kcompletion (completion_tokens); for generation-counted broadcast of state changes use PollEvent (poll_event_kpoll)"
+  - "register can fail with NoMemory/IdExhausted; do not unwrap in IRQ paths"
+counter_examples: []
+notes: >-
+  PollSet's waiter table is an internal slot free list with generation-style ids; it is not exposed
+  and must not be mistaken for a reusable slot pool.

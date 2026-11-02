@@ -1,0 +1,93 @@
+capability: mm_page_owner_global_page_kalloc
+title: RAII owner of contiguous 4 KiB pages (kalloc GlobalPage)
+family: mm.allocator
+summary: >-
+  Owns a run of 4 KiB pages allocated from the global allocator and returns them on Drop. Offers
+  zeroed or aligned allocation, fill / zero, byte-slice views and physical-address translation via
+  a caller-supplied closure.
+source: {kind: workspace, crate: kalloc, path: mm/kalloc}
+symbols:
+  - {fqn: kalloc::GlobalPage, kind: struct, path: mm/kalloc/src/page.rs, role: primary}
+  - {fqn: kalloc::GlobalPage::alloc, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::GlobalPage::alloc_zero, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::GlobalPage::alloc_contiguous, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::GlobalPage::from_raw, kind: fn, path: mm/kalloc/src/page.rs, role: constructor}
+  - {fqn: kalloc::GlobalPage::as_slice_mut, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+  - {fqn: kalloc::GlobalPage::start_va, kind: fn, path: mm/kalloc/src/page.rs, role: operation}
+operations:
+  - name: allocate
+    symbols: [kalloc::GlobalPage::alloc, kalloc::GlobalPage::alloc_zero, kalloc::GlobalPage::alloc_contiguous]
+    effect: allocate one page, one zeroed page, or N contiguous pages with alignment; NoMemory maps to KError::NoMemory, other errors to InvalidInput
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::GlobalPage::alloc_pages, quote: "alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,"}
+  - name: release
+    symbols: [kalloc::GlobalPage]
+    effect: Drop deallocates the pages with UsageKind::Global
+    evidence:
+      - {path: mm/kalloc/src/page.rs, item: kalloc::page::GlobalPage::drop, quote: "global_allocator().dealloc_pages(self.start_va.into(), self.num_pages, UsageKind::Global);"}
+usage_protocol:
+  - step: GlobalPage::alloc_zero()? then write through as_slice_mut(); drop to free
+    evidence: [{path: mm/kalloc/src/page.rs, item: kalloc::page::GlobalPage::alloc_zero, quote: "Allocates one 4K-sized page and initializes it with zero."}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: allocates pages from the kalloc global page allocator
+    evidence:
+    - path: mm/kalloc/src/page.rs
+      item: kalloc::page::GlobalPage::alloc_pages
+      quote: .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Global)
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: exclusive owner of a page run. Unsafe from_raw must receive sole ownership of a compatible
+      live raw allocation with the same count; because Drop deallocates as UsageKind::Global, it is not
+      an adoption API for arbitrary accounting categories.
+    evidence:
+    - path: mm/kalloc/src/page.rs
+      item: kalloc::page::GlobalPage::from_raw
+      quote: no other `GlobalPage` currently owns it.
+    - path: mm/kalloc/src/page.rs
+      item: kalloc::page::GlobalPage::drop
+      quote: global_allocator().dealloc_pages(self.start_va.into(), self.num_pages, UsageKind::Global);
+  errors_bounds:
+    value: KResult; NoMemory for exhaustion, InvalidInput otherwise
+    evidence:
+    - path: mm/kalloc/src/page.rs
+      item: kalloc::page::GlobalPage::alloc_pages
+      quote: _ => kerrno::KError::InvalidInput,
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - memaddr
+  - kerrno
+  - page-meta
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+  - path: mm/kalloc/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: page-meta.workspace = true
+aliases:
+  en: [owned page, page guard, page frame owner, zeroed page, alloc_page, get_zeroed_page, contiguous pages RAII, frame]
+  zh: [页所有者, 页面守卫, 零页, 连续页, 物理页 RAII, 页帧]
+identifiers: [alloc_pages, dealloc_pages, Drop, start_va, num_pages, zero, fill, page frame]
+exclusions:
+  - not reference-counted or shareable; for shared pages with metadata use PageRef (mm_page_hold_pageref_kalloc)
+  - always charged to UsageKind::Global
+counter_examples: []
+notes: ""

@@ -1,0 +1,95 @@
+capability: time_scale_int_ratio
+title: Precomputed integer ratio for scaling counters to time units (int_ratio::Ratio)
+family: time.types
+summary: >-
+  Ratio::new(numerator, denominator) precomputes a multiply-and-shift form so mul_trunc / mul_round
+  scale a u64 (counter ticks, nanoseconds) without a 128-bit division per call. inverse() gives the
+  reverse conversion. The timer drivers use two Ratios to convert between the architectural counter and
+  nanoseconds.
+source: {kind: dependency, crate: int_ratio, version: 0.1.2}
+symbols:
+  - {fqn: int_ratio::Ratio, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: int_ratio::Ratio::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: int_ratio::Ratio::zero, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: int_ratio::Ratio::inverse, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: int_ratio::Ratio::mul_trunc, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: int_ratio::Ratio::mul_round, kind: fn, path: src/lib.rs, role: operation}
+operations:
+  - name: new
+    symbols: [int_ratio::Ratio::new]
+    effect: build a ratio of two u32; panics when the denominator is zero and the numerator is not
+    evidence:
+      - {path: int_ratio-0.1.2/src/lib.rs, item: int_ratio::Ratio::new, quote: "Panics if `denominator` is zero and `numerator` is not zero."}
+  - name: scale
+    symbols: [int_ratio::Ratio::mul_trunc, int_ratio::Ratio::mul_round]
+    effect: multiply a u64 by the ratio, truncating or rounding to nearest, using a precomputed multiplier and shift
+    evidence:
+      - {path: int_ratio-0.1.2/src/lib.rs, item: int_ratio::Ratio::mul_trunc, quote: "((value as u128 * self.mult as u128) >> self.shift) as u64"}
+  - name: inverse
+    symbols: [int_ratio::Ratio::inverse, int_ratio::Ratio::zero]
+    effect: reciprocal ratio; the zero ratio 0/0 inverts to itself instead of panicking
+    evidence:
+      - {path: int_ratio-0.1.2/src/lib.rs, item: int_ratio::Ratio::inverse, quote: "Self::new(self.denominator, self.numerator)"}
+usage_protocol:
+  - step: "build the Ratio once at timer initialisation from the counter frequency (for example Ratio::new(NANOS_PER_SEC, frequency_hz)) and keep it in a static Once; scale with mul_trunc on the hot path"
+    evidence:
+      - {path: drivers/platform/timer/src/arm_generic.rs, item: timer_driver::arm_generic::init, quote: "Ratio::new(ktime_types::NANOS_PER_SEC as u32, frequency.as_hz() as u32)"}
+contract:
+  no_std:
+    value: 'yes outside tests: #![cfg_attr(not(test), no_std)]'
+    evidence:
+    - path: int_ratio-0.1.2/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: Copy value type with four u32 fields
+    evidence:
+    - path: int_ratio-0.1.2/src/lib.rs
+      item: int_ratio::Ratio
+      quote: '#[derive(Clone, Copy)]'
+    - path: int_ratio-0.1.2/src/lib.rs
+      item: int_ratio::Ratio
+      quote: 'numerator: u32,'
+  errors_bounds:
+    value: new panics for denominator 0 with numerator != 0; only u32 numerator and denominator are supported;
+      results are approximations to a fixed binary precision
+    evidence:
+    - path: int_ratio-0.1.2/src/lib.rs
+      item: int_ratio::Ratio::new
+      quote: Panics if `denominator` is zero and `numerator` is not zero.
+    - path: int_ratio-0.1.2/src/lib.rs
+      item: int_ratio::Ratio
+      quote: Currently, it only supports `u32` as the numerator and denominator.
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by:
+  - timer-driver
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: int_ratio = "0.1"
+  - path: drivers/platform/timer/Cargo.toml
+    quote: "int_ratio = { workspace = true } kspin.workspace"
+  - path: drivers/platform/timer/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+aliases:
+  en: [int ratio, fixed point ratio, frequency conversion, ticks to nanoseconds, cycles to ns, mult shift scaling, clocksource mult shift, cyc2ns, scale factor]
+  zh: [整数比例, 定点比例, 频率换算, 计数到纳秒, 乘移位换算, 时钟换算]
+identifiers: [Ratio, mul_trunc, mul_round, inverse, mult, shift, cyc2ns, NANOS_PER_SEC, frequency]
+exclusions:
+  - "numerator and denominator are u32; frequencies above u32::MAX Hz cannot be represented"
+  - "precision is limited by the 32-bit multiplier: for exactness use a u128 mul-div in a cold path"
+  - "this is a scaling helper, not a time type; duration and timestamp types are in ktime_types"
+counter_examples: []
+notes: ""

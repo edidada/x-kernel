@@ -1,0 +1,190 @@
+capability: cpu_id_map_kcpu_id_map
+title: Logical/raw CPU id mapping and NR_CPUS-sized CPU mask (kcpu_id_map)
+family: cpu.mask
+summary: >-
+  Type-safe CPU numbering. LogicalCpuId (dense zero-based index used for arrays, per-CPU slots and
+  masks) and RawCpuId (hardware id: MPIDR affinity, APIC id, hart id) are distinct newtypes;
+  raw_cpu_id / logical_cpu_id convert through a boot-time table built from the device tree or ACPI
+  MADT (init_boot_cpu_id_map), capped at NR_CPUS. nr_cpus returns the present CPU count (1 before
+  initialization); for_each_present_logical_cpu iterates them. KCpuMask = cpumask::CpuMask<NR_CPUS>
+  with KCpuMaskExt helpers taking and returning LogicalCpuId.
+source: {kind: workspace, crate: kcpu_id_map, path: arch/kcpu_id_map}
+symbols:
+  - {fqn: kcpu_id_map::LogicalCpuId, kind: struct, path: arch/kcpu_id_map/src/cpu_id.rs, role: primary}
+  - {fqn: kcpu_id_map::RawCpuId, kind: struct, path: arch/kcpu_id_map/src/cpu_id.rs, role: primary}
+  - {fqn: kcpu_id_map::raw_cpu_id, kind: fn, path: arch/kcpu_id_map/src/lib.rs, role: operation}
+  - {fqn: kcpu_id_map::logical_cpu_id, kind: fn, path: arch/kcpu_id_map/src/lib.rs, role: operation}
+  - {fqn: kcpu_id_map::nr_cpus, kind: fn, path: arch/kcpu_id_map/src/lib.rs, role: operation}
+  - {fqn: kcpu_id_map::for_each_present_logical_cpu, kind: fn, path: arch/kcpu_id_map/src/lib.rs, role: operation}
+  - {fqn: kcpu_id_map::KCpuMask, kind: type, path: arch/kcpu_id_map/src/cpu_id.rs, role: primary}
+  - {fqn: kcpu_id_map::KCpuMaskExt, kind: trait, path: arch/kcpu_id_map/src/cpu_id.rs, role: helper}
+  - {fqn: kcpu_id_map::LogicalCpuIdIter, kind: struct, path: arch/kcpu_id_map/src/cpu_id.rs, role: helper}
+operations:
+  - name: id_conversion
+    symbols: [kcpu_id_map::raw_cpu_id, kcpu_id_map::logical_cpu_id]
+    effect: map a logical CPU id to the hardware id and back via the boot table; None for absent CPUs
+    evidence:
+      - {path: arch/kcpu_id_map/src/lib.rs, item: kcpu_id_map::raw_cpu_id, quote: "pub fn raw_cpu_id(logical_cpu_id: LogicalCpuId) -> Option<RawCpuId> {"}
+  - name: nr_cpus
+    symbols: [kcpu_id_map::nr_cpus, kcpu_id_map::for_each_present_logical_cpu]
+    effect: runtime present CPU count (clamped to NR_CPUS, 1 before initialization) and iteration over present CPUs
+    evidence:
+      - {path: arch/kcpu_id_map/src/lib.rs, item: kcpu_id_map::nr_cpus, quote: "static array bound. Before the CPU id map is initialized it returns 1, since"}
+  - name: mask_helpers
+    symbols: [kcpu_id_map::KCpuMaskExt]
+    effect: set_logical, get_logical, one_shot_logical and iter_logical on KCpuMask using LogicalCpuId
+    evidence:
+      - {path: arch/kcpu_id_map/src/cpu_id.rs, item: kcpu_id_map::cpu_id::KCpuMaskExt::set_logical, quote: "fn set_logical(&mut self, cpu_id: LogicalCpuId, value: bool) -> bool;"}
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: arch/kcpu_id_map/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: the CPU id table stores a fixed [usize; NR_CPUS] array in a static Once; allocation behavior
+      of firmware enumeration is not established
+    evidence:
+    - path: arch/kcpu_id_map/src/cpu_id.rs
+      item: kcpu_id_map::cpu_id::CPU_ID_MAP
+      quote: 'static CPU_ID_MAP: Once<CpuIdMap> = Once::new();'
+    - path: arch/kcpu_id_map/src/cpu_id.rs
+      item: kcpu_id_map::cpu_id::CpuIdMap
+      quote: 'raw_cpu_ids_by_logical: [usize; NR_CPUS],'
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: global read-mostly table published once through klazy::Once; LogicalCpuId and RawCpuId are
+      Copy newtypes
+    evidence:
+    - path: arch/kcpu_id_map/src/cpu_id.rs
+      item: kcpu_id_map::cpu_id::CPU_ID_MAP
+      quote: 'static CPU_ID_MAP: Once<CpuIdMap> = Once::new();'
+    - path: arch/kcpu_id_map/src/cpu_id.rs
+      item: kcpu_id_map::cpu_id::LogicalCpuId
+      quote: '#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]'
+  errors_bounds:
+    value: conversions return Option (None for absent ids); more CPUs than NR_CPUS in the firmware description
+      are truncated with a warning, not a panic; loading twice panics; AArch64 enumeration requires a
+      device tree
+    evidence:
+    - path: arch/kcpu_id_map/src/cpu_id.rs
+      item: kcpu_id_map::cpu_id::load_cpu_id_map
+      quote: CPU id map is already initialized
+    - path: arch/kcpu_id_map/src/arch/aarch64.rs
+      item: kcpu_id_map::arch::aarch64::load_raw_cpu_ids_from_fdt
+      quote: // support (NR_CPUS). Cap to NR_CPUS rather than panicking, so the same
+    - path: arch/kcpu_id_map/src/lib.rs
+      item: kcpu_id_map::logical_cpu_id
+      quote: 'pub fn logical_cpu_id(raw_cpu_id: RawCpuId) -> Option<LogicalCpuId> {'
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kbuild_config
+  - kaddr_layout
+  - klazy
+  - cpumask
+  - of
+  - acpi
+  used_by:
+  - ktask
+  - krcu
+  - kipi
+  - kcpu_slot
+  - kworkng
+  - ktimer-core
+  - page_table
+  - memspace
+  - kplat
+  - kruntime
+  - karch
+  - kcpu
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: klazy.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: kbuild_config = { workspace = true }
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: cpumask = { version = "0.1" }
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: of = { workspace = true }
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: '[target.''cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64"))''.dependencies]'
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: acpi = { workspace = true }
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: '[target.''cfg(target_arch = "x86_64")''.dependencies]'
+  - path: sync/krcu/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: kcpu_id_map = { workspace = true }
+  - path: platforms/kplat/Cargo.toml
+    quote: kcpu_id_map = { workspace = true }
+  - path: core/kruntime/Cargo.toml
+    quote: kcpu_id_map = { workspace = true }
+  - path: arch/karch/Cargo.toml
+    quote: kcpu_id_map = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: kcpu_id_map = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: '[target.''cfg(any(target_arch = "riscv32", target_arch = "riscv64"))''.dependencies]'
+aliases:
+  en:
+  - cpu id
+  - logical cpu
+  - cpu index
+  - cpu number
+  - mpidr to cpu id
+  - hartid
+  - apic id
+  - cpu_possible_mask
+  - cpu topology map
+  - cpu mask
+  zh:
+  - 逻辑 CPU 号
+  - 物理 CPU 号
+  - CPU 编号映射
+  - MPIDR
+  - hartid
+  - CPU 数量
+  - 启动时发现的 CPU
+identifiers:
+- cpu_id
+- logical_cpu
+- cpu_index
+- mpidr
+- MPIDR_EL1
+- hartid
+- apic_id
+- NR_CPUS
+- raw_cpu_id
+exclusions:
+  - "ids are stable after boot only: nothing models CPU hotplug"
+  - "NR_CPUS is a compile-time cap (kbuild_config); extra firmware CPUs are ignored"
+  - "mapping is built from the device tree (AArch64/RISC-V/LoongArch) or ACPI MADT (x86_64); not usable before init_boot_cpu_id_map or the runtime lazy load"
+  - "per-CPU data lives in kcpu_slot (percpu_static_kcpu_slot); this crate only provides ids and masks"
+counter_examples: []
+notes: >-
+  Plain usize indices and u64 bit masks for CPUs elsewhere in the tree are the pattern this crate
+  replaces. cpumask::CpuMask is the underlying dependency (cpu_mask_cpumask).

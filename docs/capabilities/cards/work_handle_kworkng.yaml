@@ -1,0 +1,155 @@
+capability: work_handle_kworkng
+title: Owned deferred work on per-CPU worker tasks (kworkng::WorkHandle / NormalQueue / queue_static_work)
+family: task.work
+summary: >-
+  Linux workqueue-style deferred execution. WorkHandle is a cloneable, safe owner of one prepared
+  callback that runs in a normal (sleepable) worker task; prepare it once in task context, then
+  queue / queue_default it from task, BH or hard IRQ context without allocating or sleeping.
+  flush waits, cancel_pending revokes without waiting, cancel_sync drains, shutdown closes admission
+  permanently. NormalQueue is a private queue (per-CPU allowance, routing policy) with flush and
+  close_and_drain; queue_static_work submits kernel-lifetime Work. A pending occurrence rejects
+  another submission (AlreadyQueued): submission is not an event counter.
+source: {kind: workspace, crate: kworkng, path: task/kworkng}
+symbols:
+  - {fqn: kworkng::WorkHandle, kind: struct, path: task/kworkng/src/work_handle.rs, role: primary}
+  - {fqn: kworkng::WorkHandle::new, kind: fn, path: task/kworkng/src/work_handle.rs, role: constructor}
+  - {fqn: kworkng::WorkHandle::queue, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::WorkHandle::queue_default, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::WorkHandle::cancel_pending, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::WorkHandle::cancel_sync, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::WorkHandle::flush, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::WorkHandle::shutdown, kind: fn, path: task/kworkng/src/work_handle.rs, role: operation}
+  - {fqn: kworkng::NormalQueue, kind: struct, path: task/kworkng/src/normal_queue.rs, role: helper}
+  - {fqn: kworkng::NormalQueue::new, kind: fn, path: task/kworkng/src/normal_queue.rs, role: constructor}
+  - {fqn: kworkng::NormalQueue::close_and_drain, kind: fn, path: task/kworkng/src/normal_queue.rs, role: operation}
+  - {fqn: kworkng::queue_static_work, kind: fn, path: task/kworkng/src/normal_queue.rs, role: operation}
+operations:
+  - name: queue
+    symbols: [kworkng::WorkHandle::queue, kworkng::WorkHandle::queue_default, kworkng::queue_static_work]
+    effect: submit the prepared Work to a normal queue (default per-CPU queue or a NormalQueue) without allocation or sleeping; Err(AlreadyQueued) if an occurrence is pending
+    evidence:
+      - {path: task/kworkng/src/work_handle.rs, item: kworkng::work_handle::WorkHandle::queue, quote: "Submits to a normal queue without allocation or sleeping, including in IRQ."}
+      - {path: task/kworkng/src/lib.rs, quote: "queues use current-CPU policy. A pending occurrence rejects another ordinary"}
+  - name: flush_cancel_shutdown
+    symbols: [kworkng::WorkHandle::flush, kworkng::WorkHandle::cancel_pending, kworkng::WorkHandle::cancel_sync, kworkng::WorkHandle::shutdown]
+    effect: flush waits without canceling or closing; cancel_pending revokes pending work without waiting; cancel_sync cancels and drains but allows later submissions; shutdown permanently closes all clones and drains
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "[`WorkHandle::cancel_pending`] does not wait."}
+      - {path: task/kworkng/src/work_handle.rs, item: kworkng::work_handle::WorkHandle::shutdown, quote: "Permanently closes every clone, then synchronously drains in task context."}
+usage_protocol:
+  - step: "prepare WorkHandle::new in sleepable task context, share clones with producers (IRQ handlers included), flush when the callback must finish, shutdown before dropping the last handle if completion matters"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "Prepare once in task context, then reuse the handle from producers, including"}
+      - {path: task/kworkng/src/lib.rs, quote: "drains. Last handle Drop is asynchronous reclamation, not a completion barrier,"}
+contract:
+  no_std:
+    value: "yes (#![no_std], nightly allocator_api)"
+    evidence: [{path: task/kworkng/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "preparation (WorkHandle::new, NormalQueue::new) is sleepable task context and may allocate; prepared queue/cancel_pending/modify calls neither allocate nor sleep"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "Owned handle/queue preparation | Sleepable task; may allocate"}
+      - {path: task/kworkng/src/lib.rs, quote: "Prepared queue/modify/cancel_pending | Task, BH or hard IRQ; no allocation or sleep"}
+  blocking:
+    value: "queue / cancel_pending do not sleep; flush, cancel_sync, shutdown and close_and_drain need sleepable task context and callback progress; callbacks of owned/static normal work run in worker tasks and may sleep, but must not wait for their own Work"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "flush/cancel_sync/shutdown/close_and_drain | Sleepable task; allow callback progress"}
+      - {path: task/kworkng/src/lib.rs, quote: "Do not synchronously wait on this Work from its callback or hold resources it"}
+  irq_nmi:
+    value: "submission valid in task, BH and hard IRQ context; NMI submission unsupported"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "NMI submission is unsupported. Owned/static normal callbacks run in worker"}
+      - {path: task/kworkng/src/normal_queue.rs, item: kworkng::normal_queue::NormalQueue::queue_static_work, quote: "Valid in task/BH/hard IRQ context, not NMI. Does not allocate or sleep."}
+  ownership_lifetime:
+    value: "WorkHandle clones share one Work identity and shutdown gate; callbacks own their captures (static / Arc, no borrowed stack captures); last handle Drop asynchronously reclaims and may cancel pending work; NormalQueue Drop does not drain"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "IRQ handlers. Clones share one Work identity and shutdown gate, not independent"}
+      - {path: task/kworkng/src/normal_queue.rs, item: kworkng::normal_queue::NormalQueue, quote: "queue or access to its underlying handle is provided. Drop does not drain."}
+  errors_bounds:
+    value: "queue returns Result<LogicalCpuId, SubmitError> (Closed after shutdown, AlreadyQueued, admission/ownership rejection); waits return WaitError; creation returns HandleCreateError for invalid context or unavailable services; per-CPU active allowance is configured by QueueConfig, not a worker count"
+    evidence:
+      - {path: task/kworkng/src/work_handle.rs, item: kworkng::work_handle::WorkHandle::queue, quote: "Returns Closed after handle shutdown or ordinary queue admission rejection."}
+      - {path: task/kworkng/src/lib.rs, quote: "[`QueueConfig`] fixes allowed CPUs, routing and **per-CPU** active allowance,"}
+  concurrency:
+    value: "multi-producer safe submission; a running callback is not interrupted; callback dependency deadlocks remain caller errors; Last handle Drop is not a barrier"
+    evidence:
+      - {path: task/kworkng/src/work_handle.rs, item: kworkng::work_handle::WorkHandle, quote: "cannot invalidate storage; callback dependency deadlocks remain caller errors."}
+layers:
+  depends_on:
+  - kworkqueue_ng
+  - kworkerpool_ng
+  - kirq
+  - kspin
+  - klazy
+  - kfinalize
+  - khal
+  - ktask
+  - kcpu_id_map
+  - ktime_types
+  used_by:
+  - knet
+  - ktty
+  - inputdev
+  - kfd_objects
+  - entropy
+  - kruntime
+  - kfeat
+  - entry
+  allowed_layers: unknown
+  evidence:
+  - path: task/kworkng/Cargo.toml
+    quote: kworkqueue_ng.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: io/inputdev/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kworkerpool_ng.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kirq.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: klazy.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kfinalize.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: khal.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: kworkng = { workspace = true, optional = true }
+  - path: core/kruntime/Cargo.toml
+    quote: kworkng = { workspace = true, features = ["system"] }
+  - path: api/kfeat/Cargo.toml
+    quote: kworkng = { workspace = true, optional = true }
+  - path: entry/Cargo.toml
+    quote: kworkng = { workspace = true, optional = true, features = ["self-wait-check"] }
+aliases:
+  en: [workqueue, work queue, queue_work, schedule_work, INIT_WORK, work_struct, deferred work, bottom half worker, kthread worker, flush_work, cancel_work_sync, background task, deferred callback, thread pool]
+  zh: [工作队列, 延迟工作, 下半部, 工作项, 工作线程, 后台任务, 线程池, 异步回调]
+identifiers: [work_struct, queue_work, schedule_work, flush_work, cancel_work_sync, INIT_WORK, workqueue, worker, kthread, spawn, thread pool, deferred]
+exclusions:
+- 'a pending occurrence rejects another submission: not an event counter; producers needing counted events
+  must keep their own counter and drain it in the callback'
+- owned-handle callbacks run in sleepable worker tasks, never inline and never in BH; for non-sleeping
+  BH callbacks use the borrowed-work path (work_prepared_kworkqueue_ng)
+- prepare in sleepable task context only; not usable before kworkng runtime services (kworkng::runtime::init)
+  are up
+- 'last handle Drop is not a completion barrier: use flush/shutdown before freeing anything the callback
+  touches'
+- time-delayed work is a separate handle (work_delayed_kworkng); for raw timers see timer_core_ktimer_core
+- Normal worker callbacks and BH/softirq callbacks have different sleep/IRQ contracts. Do not recommend
+  an owned normal WorkHandle as a timing/context-equivalent replacement for a tasklet.
+counter_examples: []
+notes: >-
+  The kworkng facade replaces the legacy workqueue (crate docs say it does not replace legacy
+  workqueues by itself). Worker-pool internals are in kworkerpool_ng (worker_pool_kworkerpool_ng).

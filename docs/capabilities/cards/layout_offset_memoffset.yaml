@@ -1,0 +1,70 @@
+capability: layout_offset_memoffset
+title: Field offsets and spans of a struct (memoffset offset_of! / span_of!)
+family: misc.interface
+summary: memoffset::offset_of!(Type, field) returns a field byte offset and span_of! its byte range. On
+  rustc >= 1.77 build.rs selects core::mem::offset_of!, including const support, without unstable_const.
+  Earlier toolchains and span_of! use separate implementation/configuration paths; do not infer current
+  limitations from the stale crate-level const warning.
+source: {kind: dependency, crate: memoffset, version: 0.9.1}
+symbols:
+  - {fqn: memoffset::offset_of, kind: macro, path: src/offset_of.rs, role: primary}
+  - {fqn: memoffset::span_of, kind: macro, path: src/span_of.rs, role: primary}
+operations:
+  - name: offset
+    symbols: [memoffset::offset_of]
+    effect: byte offset of a field within a struct; the value must not be reused across compilations
+    evidence:
+      - {path: memoffset-0.9.1/src/offset_of.rs, item: memoffset::offset_of::offset_of, quote: "As a result, the value should not be retained and used between different compilations."}
+  - name: span
+    symbols: [memoffset::span_of]
+    effect: byte range covering one field or a range of fields
+    evidence:
+      - {path: memoffset-0.9.1/src/span_of.rs, item: memoffset::span_of::span_of, quote: "macro_rules! span_of {"}
+contract:
+  no_std:
+    value: 'yes: #![no_std]'
+    evidence:
+    - path: memoffset-0.9.1/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: unknown
+    evidence: []
+  errors_bounds:
+    value: offset_of! delegates to core::mem::offset_of! when build.rs detects rustc >= 1.77; stable_const
+      is also detected at >= 1.65. The crate-level claim that all const use requires unstable_const is
+      stale; field/layout support depends on the selected implementation.
+    evidence:
+    - path: memoffset-0.9.1/build.rs
+      item: memoffset::build::main
+      quote: println!("cargo:rustc-cfg=stable_offset_of");
+    - path: memoffset-0.9.1/src/offset_of.rs
+      item: memoffset::offset_of::_memoffset__offset_of_impl
+      quote: $crate::__priv::mem::offset_of!($parent, $field)
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [tee_kernel]
+  allowed_layers: unknown
+  evidence:
+    - {path: tee/tee_kernel/Cargo.toml, quote: 'memoffset = { version = "0.9", default-features = false }'}
+aliases:
+  en: [offsetof, offset_of, field offset, struct member offset, span of field, container_of offset, byte offset of field]
+  zh: [字段偏移, 结构体成员偏移, 偏移量计算, 字段字节范围]
+identifiers: [offset_of, span_of, offsetof, container_of, repr(C), packed]
+exclusions:
+  - "does not assert layouts at build time; combine with compile_time_assert_static_assertions for const checks"
+  - "core::mem::offset_of! is the language built-in on current compilers; this crate is what the TEE crate depends on today, so do not add a second offset helper"
+counter_examples: []
+notes: 'Kernel dependency feature settings alone do not determine const support: build.rs emits stable_const
+  and stable_offset_of based on rustc version.'

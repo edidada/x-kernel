@@ -1,0 +1,118 @@
+capability: misc_interface_kiface
+title: Single-implementation cross-crate interface (#[kiface::interface] / #[kiface::provide])
+family: misc.interface
+summary: >-
+  Proc-macro pair that defines a trait-shaped call contract in the owning crate and links exactly one
+  implementation from another crate, with no runtime dispatch or registration: callers invoke
+  InterfaceName::method(...) and the provider exports one link symbol per method. A missing provider
+  fails at final link time. Used to break dependency cycles and for platform hooks.
+source: {kind: workspace, crate: kiface, path: util/kiface}
+symbols:
+  - {fqn: kiface::interface, kind: fn, path: util/kiface/src/lib.rs, role: primary}
+  - {fqn: kiface::provide, kind: fn, path: util/kiface/src/lib.rs, role: primary}
+operations:
+  - name: define
+    symbols: [kiface::interface]
+    effect: generate a facade type whose inherent methods forward to the provider; optional namespace = "name" disambiguates equal method names
+    evidence:
+      - {path: util/kiface/src/lib.rs, item: kiface::interface, quote: "Defines a single-implementation kernel interface."}
+      - {path: util/kiface/src/lib.rs, item: kiface::interface, quote: "- `namespace = \"name\"` (optional): disambiguates the exported symbols so"}
+  - name: provide
+    symbols: [kiface::provide]
+    effect: export one link symbol per method of impl InterfaceName {...}; signatures are type-checked at provider compile time
+    evidence:
+      - {path: util/kiface/src/lib.rs, item: kiface::provide, quote: "symbol per method and removes the impl from the expanded code, so the"}
+      - {path: util/kiface/src/lib.rs, item: kiface::provide, quote: "compile time; a missing or mismatched interface is a compile error,"}
+usage_protocol:
+  - step: "define #[kiface::interface] pub trait X {...} in the contract-owning (API) crate; implement #[kiface::provide] impl X {...} in exactly one crate linked into the image"
+    evidence: [{path: util/kiface/src/lib.rs, quote: "`kiface` models a single-implementation interface boundary. An interface is"}]
+contract:
+  no_std: {value: unknown, evidence: []}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: exactly one provider per interface; API crates contain contracts only, never implementations or global runtime state
+    evidence:
+      - {path: util/kiface/src/lib.rs, quote: "API crates contain contracts and necessary boundary types, never concrete"}
+  errors_bounds:
+    value: "a missing provider is a final-link error; a mismatched signature is a compile error; the `optional` argument is rejected"
+    evidence:
+      - {path: util/kiface/src/lib.rs, item: kiface::interface, quote: "- `optional` (reserved): rejected with a compile error; the optional"}
+      - {path: util/kiface/src/lib.rs, item: kiface::provide, quote: "and a missing provider surfaces at final link time."}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - proc-macro2
+  - quote
+  - syn
+  used_by:
+  - karch
+  - kcpu
+  - khal
+  - kipi
+  - kirq
+  - memspace
+  - page_table
+  - kruntime
+  - timer-driver
+  - console-driver
+  allowed_layers: API crates contain contracts only, must not depend on provider crates or pull unrelated
+    APIs through an umbrella dependency; the rules are in docs/design.md under Interface Ownership and
+    Dependency Rules
+  evidence:
+  - path: util/kiface/src/lib.rs
+    quote: Organize shared contracts by capability-owning domain, not by consumer.
+  - path: arch/khal/Cargo.toml
+    quote: kiface.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: kiface.workspace = true
+  - path: util/kiface/Cargo.toml
+    quote: proc-macro2.workspace = true
+  - path: util/kiface/Cargo.toml
+    quote: quote.workspace = true
+  - path: util/kiface/Cargo.toml
+    quote: syn.workspace = true
+  - path: arch/karch/Cargo.toml
+    quote: kiface = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: kiface.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kiface.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kiface = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: kiface.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kiface.workspace = true
+  - path: drivers/platform/timer/Cargo.toml
+    quote: kiface = { workspace = true }
+  - path: drivers/platform/console/Cargo.toml
+    quote: kiface = { workspace = true }
+aliases:
+  en:
+  - extern trait
+  - link-time interface
+  - hook function
+  - crate_interface
+  - platform hook
+  - dependency inversion
+  - provider
+  - interface crate
+  zh:
+  - 跨 crate 接口
+  - 链接期接口
+  - 单实现接口
+  - 依赖倒置
+  - 平台钩子
+  - 打破循环依赖
+identifiers: [extern_trait, crate_interface, "#[no_mangle]", "extern \"Rust\"", weak, static OPS, "dyn Ops", register_ops, set_hook, "static HOOK", fn_ptr, Provider, Impl]
+exclusions:
+  - exactly one provider; for several implementations selected at runtime use a registry (misc_registration_kclass) or trait objects
+  - the provider crate must be linked into the final image or the link fails; not for optional features
+  - a single-type external trait with state (osvm::VirtMemIo via the extern-trait crate) is a different mechanism; see the counter example
+counter_examples:
+  - path: process/osvm/src/lib.rs
+    item: osvm::VirtMemIo
+    why: osvm declares its provider contract with the extern-trait crate (#[extern_trait(MemImpl)] on an unsafe trait with a constructor) instead of kiface; it is a type-level provider rather than free-function facade
+    evidence: [{path: process/osvm/src/lib.rs, item: osvm::VirtMemIo, quote: "#[extern_trait(MemImpl)]"}]

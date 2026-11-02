@@ -1,0 +1,107 @@
+capability: parse_fdt_of_helpers
+title: Global boot device-tree handle and platform decoders (of::init_device_tree_ptr, find_compatible, read_memory_regions, generic_pci_host_info)
+family: parse.fdt
+summary: >-
+  The of crate holds the boot device tree in a global LazyInit and offers decoded queries on it:
+  chosen bootargs / stdout path, root model and compatible, find_node / find_compatible /
+  resolve_node, enabled CPU nodes and their reg, interrupt descriptor decoding, generic PCI host
+  bridge info and ranges, memory / reserved regions copied into fixed-capacity arrays, syscon
+  poweroff, DICE region.
+source: {kind: workspace, crate: of, path: drivers/platform/of}
+symbols:
+  - {fqn: of::init_device_tree_ptr, kind: fn, path: drivers/platform/of/src/lib.rs, role: constructor}
+  - {fqn: of::fdt, kind: fn, path: drivers/platform/of/src/lib.rs, role: primary}
+  - {fqn: of::find_compatible, kind: fn, path: drivers/platform/of/src/lib.rs, role: primary}
+  - {fqn: of::find_node, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+  - {fqn: of::chosen_bootargs, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+  - {fqn: of::read_memory_regions, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+  - {fqn: of::read_reserved_memory_regions, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+  - {fqn: of::enabled_cpu_nodes, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+  - {fqn: of::generic_pci_host_info, kind: fn, path: drivers/platform/of/src/lib.rs, role: operation}
+operations:
+  - name: init
+    symbols: [of::init_device_tree_ptr]
+    effect: unsafe one-time initialisation of the global DTB handle from a pointer that stays valid for the program lifetime
+    evidence:
+      - {path: drivers/platform/of/src/lib.rs, item: of::init_device_tree_ptr, quote: "`ptr` must point to a valid DTB blob that remains accessible for the rest of"}
+  - name: lookup
+    symbols: [of::find_compatible, of::find_node, of::chosen_bootargs]
+    effect: delegate to the global LinuxFdt; None before initialisation
+    evidence:
+      - {path: drivers/platform/of/src/lib.rs, item: of::fdt, quote: "Returns the global device-tree view initialized at boot; `None` before"}
+  - name: regions
+    symbols: [of::read_memory_regions, of::read_reserved_memory_regions]
+    effect: collect regions into a fixed-capacity array plus count; zeroed array and 0 when the tree is unavailable
+    evidence:
+      - {path: drivers/platform/of/src/lib.rs, item: of::read_memory_regions, quote: "Collects `/memory` regions into a fixed-capacity array; returns the"}
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: drivers/platform/of/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: region readers fill fixed-capacity arrays (const N), not a Vec
+    evidence: [{path: drivers/platform/of/src/lib.rs, item: of::read_memory_regions, quote: "pub fn read_memory_regions<const N: usize>() -> ([crate::MemoryRegion; N], usize) {"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: global static LinuxFdt<'static> in a LazyInit; init takes a pointer valid for the rest of the program
+    evidence: [{path: drivers/platform/of/src/lib.rs, item: of::FDT, quote: "static FDT: LazyInit<LinuxFdt<'static>> = LazyInit::new();"}]
+  errors_bounds:
+    value: init returns FirmwareInitError::BadDeviceTree for an invalid or null blob; queries return Option
+    evidence: [{path: drivers/platform/of/src/lib.rs, item: of::init_device_tree_ptr, quote: "Returns [`FirmwareInitError::BadDeviceTree`] when the blob fails"}]
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - rs_fdtree
+  - lazyinit
+  - memaddr
+  used_by:
+  - kcpu
+  - khal
+  - kernel-boot
+  - kplat-aarch64
+  - kplat-loongarch64
+  - console-driver
+  - irq-driver
+  - timer-driver
+  - rtc-driver
+  allowed_layers: unknown
+  evidence:
+  - path: arch/khal/Cargo.toml
+    quote: of = { workspace = true }
+  - path: boot/kernel-boot/Cargo.toml
+    quote: "} of = { workspace = true } [target.'cfg(target_arch = \"x86_64\")'.dependencies]"
+  - path: platforms/kplat-aarch64/Cargo.toml
+    quote: of = { workspace = true }
+  - path: drivers/platform/of/Cargo.toml
+    quote: rs_fdtree = { workspace = true }
+  - path: drivers/platform/of/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: drivers/platform/of/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: of = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: '[target.''cfg(any(target_arch = "riscv32", target_arch = "riscv64"))''.dependencies]'
+  - path: boot/kernel-boot/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+  - path: platforms/kplat-loongarch64/Cargo.toml
+    quote: of = { workspace = true }
+  - path: drivers/platform/console/Cargo.toml
+    quote: of = { workspace = true }
+  - path: drivers/platform/irq/Cargo.toml
+    quote: of = { workspace = true }
+  - path: drivers/platform/timer/Cargo.toml
+    quote: of = { workspace = true }
+  - path: drivers/platform/timer/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+  - path: drivers/platform/rtc/Cargo.toml
+    quote: of = { workspace = true }
+aliases:
+  en: [of_find_compatible_node, of_property_read_u32, of_get_property, device tree lookup, dtb global, boot args from dtb, cpu nodes from dtb, memory node regions, reserved-memory, interrupt cells decode, pci host from dtb, stdout-path]
+  zh: [设备树查询, 全局设备树, 从设备树读取启动参数, CPU 节点解析, 内存节点, 保留内存, 中断 cells 解码, PCI 主桥解析]
+identifiers: [of_find_compatible_node, of_property_read_u32, of_get_property, compatible, chosen, bootargs, stdout-path, "interrupt-parent", "interrupts", reg, "memory@", reserved-memory, phandle, pci-host-ecam-generic]
+exclusions:
+  - queries the single global tree set by init_device_tree_ptr; a DTB not yet registered globally must be parsed with rs_fdtree::LinuxFdt directly (parse_fdt_rs_fdtree)
+  - region readers return a fixed-capacity array of const N entries plus a count; pick N for the platform's region count
+counter_examples: []

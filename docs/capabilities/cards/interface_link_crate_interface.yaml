@@ -1,0 +1,87 @@
+capability: interface_link_crate_interface
+title: Link-time interface between crates with no dependency (crate_interface)
+family: misc.interface
+summary: >-
+  crate_interface is a proc-macro crate: #[def_interface] on a trait of static methods generates extern
+  "Rust" declarations, #[impl_interface] on an impl generates the exported symbols, and
+  call_interface!(Trait::func, args) calls through them, so a crate can call functions implemented in a
+  crate it does not depend on, provided both are linked into the image. The kernel's own mechanism for
+  this is kiface; crate_interface appears once at the pin, as an impl_interface in
+  kdriver.
+source: {kind: dependency, crate: crate_interface, version: 0.3.0}
+symbols:
+  - {fqn: crate_interface::def_interface, kind: macro, path: src/lib.rs, role: primary}
+  - {fqn: crate_interface::impl_interface, kind: macro, path: src/lib.rs, role: primary}
+  - {fqn: crate_interface::call_interface, kind: macro, path: src/lib.rs, role: operation}
+operations:
+  - name: define
+    symbols: [crate_interface::def_interface]
+    effect: declare the interface trait; trait names must be unique unless given distinct namespaces; only associated functions without generics are allowed
+    evidence:
+      - {path: crate_interface-0.3.0/src/lib.rs, item: crate_interface::def_interface, quote: "that use the attribute cannot have the same name, unless they are assigned"}
+      - {path: crate_interface-0.3.0/src/lib.rs, item: crate_interface::def_interface, quote: "Methods with receivers (`self`, `&self`, `&mut self`) are not"}
+  - name: implement
+    symbols: [crate_interface::impl_interface]
+    effect: export the trait's functions as symbols from the implementing crate
+    evidence:
+      - {path: crate_interface-0.3.0/src/impl_interface.rs, item: crate_interface::impl_interface::impl_interface, quote: 'extern "Rust" #new_sig {'}
+  - name: call
+    symbols: [crate_interface::call_interface]
+    effect: call an interface function by Trait::func path; the defining and implementing crates need only be linked together
+    evidence:
+      - {path: crate_interface-0.3.0/src/lib.rs, item: crate_interface::call_interface, quote: "It is not necessary to call it in the same crate as the implementation, but"}
+usage_protocol:
+  - step: "define with #[def_interface], implement exactly once with #[impl_interface] in a crate linked into the final image, call with call_interface! or the generated caller; with the weak_default feature, methods may carry default bodies that become weak symbols"
+    evidence:
+      - {path: drivers/integration/kdriver/src/driver_registry/net/fxmac.rs, quote: "#[crate_interface::impl_interface]"}
+contract:
+  no_std:
+    value: unknown
+    evidence: []
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: unknown
+    evidence: []
+  errors_bounds:
+    value: receivers and generic interface parameters are rejected by the proc macro; duplicate exported
+      names across linked crates are a link-time symbol collision, not a proc-macro global duplicate check
+    evidence:
+    - path: crate_interface-0.3.0/src/lib.rs
+      item: crate_interface::def_interface
+      quote: Generic parameters are not supported.
+    - path: crate_interface-0.3.0/src/impl_interface.rs
+      item: crate_interface::impl_interface::impl_interface
+      quote: 'extern "Rust" #new_sig {'
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [kdriver]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'crate_interface = { version = "0.3", features = ["weak_default"] }'}
+    - {path: drivers/integration/kdriver/Cargo.toml, quote: "crate_interface.workspace = true"}
+aliases:
+  en: [crate interface, extern interface, link-time interface, callback trait across crates, dependency inversion, extern fn trait, call_interface, hook implemented in another crate]
+  zh: [跨 crate 接口, 链接期接口, 依赖倒置, 外部回调接口, 不依赖的 crate 之间调用]
+identifiers: [def_interface, impl_interface, call_interface, crate_interface, extern "Rust", weak_default]
+exclusions:
+  - "the kernel's own single-implementation interface mechanism is kiface (kiface::interface / kiface::provide, API crates under util/kiface/crates); new kernel interfaces use it (see misc_interface_kiface), not crate_interface"
+  - "static functions only: interfaces carrying state, receivers or generics need a registered trait object instead"
+  - "a missing implementation is a link error, not a runtime error"
+counter_examples:
+  - path: util/kiface/src/lib.rs
+    item: kiface::interface
+    why: "kiface::interface / kiface::provide is the in-tree equivalent with ownership rules for API crates (about 130 uses at the pin versus one crate_interface use), so a new interface that re-implements this pattern should extend kiface"
+    evidence: [{path: util/kiface/src/lib.rs, quote: "`kiface` models a single-implementation interface boundary. An interface is"}]
+notes: >-
+  At the pin the single crate_interface use is an impl_interface block for the FXmac KernelFunc callbacks in kdriver; the weak_default feature is enabled in the workspace entry.

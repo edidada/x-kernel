@@ -1,0 +1,141 @@
+capability: softirq_kirq
+title: Fixed-vector per-CPU softirq (kirq::softirq open_softirq / raise_softirq)
+family: irq.deferred
+summary: >-
+  Linux-style softirq/bottom half. Ten fixed SoftirqVec vectors (High, Timer, NetTx, NetRx, Block,
+  IrqPoll, Tasklet, Sched, Hrtimer, Rcu); a handler (fn()) is registered once per vector at init with
+  open_softirq(s); raise_softirq / raise_softirq_irqoff set a per-CPU pending bit; actions run at IRQ
+  exit, BH-enable or in the ksoftirqd daemon with preemption disabled and local IRQs enabled. Actions
+  must not sleep. The Tasklet and High vectors host kworkng bottom-half work.
+source: {kind: workspace, crate: kirq, path: arch/kirq}
+symbols:
+- fqn: kirq::softirq::SoftirqVec
+  kind: enum
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: primary
+- fqn: kirq::softirq::open_softirq
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: constructor
+- fqn: kirq::softirq::open_softirqs
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: constructor
+- fqn: kirq::softirq::raise_softirq
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: operation
+- fqn: kirq::softirq::raise_softirq_irqoff
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: operation
+- fqn: kirq::softirq::run_pending_softirqs
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: operation
+- fqn: kirq::softirq::init
+  kind: fn
+  path: arch/kirq/src/bottom_half/softirq.rs
+  role: operation
+operations:
+- name: register
+  symbols:
+  - kirq::softirq::open_softirq
+  - kirq::softirq::open_softirqs
+  effect: installs a fixed action for a vector at init time; returns false if the vector is already occupied;
+    no runtime unregistration
+  evidence:
+  - path: arch/kirq/src/bottom_half/softirq.rs
+    item: kirq::bottom_half::softirq::open_softirq
+    quote: /// Registers a fixed softirq action.
+  - path: arch/kirq/src/bottom_half/softirq.rs
+    item: kirq::bottom_half::softirq::open_softirq
+    quote: 'pub fn open_softirq(vec: SoftirqVec, action: SoftirqAction) -> bool {'
+- name: raise
+  symbols:
+  - kirq::softirq::raise_softirq
+  - kirq::softirq::raise_softirq_irqoff
+  effect: sets the current CPU's pending bit for the vector; wakes ksoftirqd when raised from task context
+    on an empty pending mask; the _irqoff form requires IRQs already disabled
+  evidence:
+  - path: arch/kirq/src/bottom_half/softirq.rs
+    item: kirq::bottom_half::softirq::raise_softirq
+    quote: The function pins the current CPU and masks local IRQs while updating the
+usage_protocol:
+  - step: "open_softirq(vec, action) once during init, publish demand to your own source, then raise_softirq(vec) (from IRQ or task context); the action drains the source"
+    evidence:
+      - {path: net/knet/src/device/ethernet.rs, item: knet::device::ethernet::ensure_net_rx_softirq_available, quote: "if kirq::softirq::open_softirq(kirq::softirq::SoftirqVec::NetRx, run_net_rx_softirq) {"}
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: arch/kirq/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: "fixed table of ten optional fn pointers behind a SpinNoIrq plus a per-CPU atomic pending word; actions must not allocate on the hot path"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, quote: "static SOFTIRQ_ACTIONS: SpinNoIrq<[Option<SoftirqAction>; SoftirqVec::COUNT]> ="}
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SoftirqAction, quote: "`__do_softirq()` action-loop contract. Actions must not sleep, allocate on"}
+  blocking:
+    value: "actions must not sleep or depend on process context; raise_softirq does not block (may wake ksoftirqd)"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SoftirqAction, quote: "`__do_softirq()` action-loop contract. Actions must not sleep, allocate on"}
+  irq_nmi:
+    value: "raise_softirq usable from task and hardirq context (pins the CPU and masks IRQs); actions run at IRQ tail / BH enable / ksoftirqd with preemption disabled and IRQs enabled; NMI not stated"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SoftirqAction, quote: "Actions run in IRQ-tail, BH-enable, or `ksoftirqd` drain context with"}
+  ownership_lifetime:
+    value: "actions are plain fn() pointers registered for the kernel lifetime; pending state is per CPU"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SoftirqAction, quote: "pub type SoftirqAction = fn();"}
+  errors_bounds:
+    value: "open_softirq(s) return false without changes when a vector is occupied or a group repeats a vector; ten fixed vectors (SoftirqVec::COUNT); restart limit 10 per run (SOFTIRQ_MAX_RESTART) leaves remaining work Deferred"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SOFTIRQ_MAX_RESTART, quote: "const SOFTIRQ_MAX_RESTART: usize = 10;"}
+      - {path: arch/kirq/src/bottom_half/softirq.rs, item: kirq::bottom_half::softirq::SoftirqRunResult, quote: "Pending work remains due to context, a scheduling request, or the restart limit."}
+  concurrency:
+    value: "per-CPU pending word in a cpu_slot; the action table is guarded by SpinNoIrq; raising only touches the local CPU (cross-CPU kicks go through kipi notify_bottom_half / notify_rcu)"
+    evidence:
+      - {path: arch/kirq/src/bottom_half/softirq.rs, quote: "static SOFTIRQ_PENDING: core::sync::atomic::AtomicUsize ="}
+layers:
+  depends_on:
+  - kcpu_slot
+  - kspin
+  - karch
+  used_by:
+  - kworkng
+  - kworkerpool_ng
+  - kipi
+  - kruntime
+  - knet
+  - kdriver
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kirq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/kworkng/Cargo.toml
+    quote: kirq.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kirq.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: kirq = { workspace = true }
+  - path: arch/kirq/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: arch/kirq/Cargo.toml
+    quote: karch = { workspace = true }
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kirq.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kirq = { workspace = true }
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kirq = { workspace = true, optional = true }
+aliases:
+  en: [softirq, bottom half, BH, tasklet, raise_softirq, open_softirq, NET_RX_SOFTIRQ, ksoftirqd, deferred interrupt work, interrupt tail work, irq tail handler, do_softirq]
+  zh: [软中断, 下半部, 中断下半部, tasklet, 中断尾部处理, ksoftirqd, 延迟中断处理]
+identifiers: [softirq, tasklet, raise_softirq, open_softirq, do_softirq, local_bh_disable, ksoftirqd, bottom_half, NET_RX_SOFTIRQ, tasklet_schedule, pending]
+exclusions:
+  - "fixed ten vectors and init-time registration only: not a dynamic tasklet allocator; per-source dynamic callbacks belong to kworkng BH queues (work_prepared_kworkqueue_ng)"
+  - "actions must not sleep; sleepable deferred work goes to kworkng worker tasks (work_handle_kworkng)"
+  - "raise_softirq only marks the local CPU; to kick another CPU use kipi::notify_bottom_half (ipi_fixed_notification_kipi)"
+  - "NMI-to-IRQ deferral is a separate facility (irq_work_kirq)"
+counter_examples: []
+notes: The defining bottom_half module is private. Users import the public re-export kirq::softirq; symbol
+  paths cite its defining file.

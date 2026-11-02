@@ -1,0 +1,127 @@
+capability: deferred_arc_kfinalize
+title: Arc-like shared owner whose last drop destroys the payload on a worker (kfinalize::DeferredArc)
+family: sync.deferred_drop
+summary: DeferredArc<T> / DeferredWeak<T> use standard Arc counting and hand final payload destruction
+  to prepared normal-worker carriers. Last strong Drop does not sleep or allocate a carrier, but metadata
+  deallocation and queue notification still impose caller-lock constraints. NMI strong/Weak release requires
+  the kernel provider and initialized local irq_work; unsupported delivery is fatal. Construction prepares
+  three allocations; shared finalization is serial and opt-in for a proven destruction-context mismatch.
+source: {kind: workspace, crate: kfinalize, path: util/kfinalize}
+symbols:
+  - {fqn: kfinalize::DeferredArc, kind: struct, path: util/kfinalize/src/lib.rs, role: primary}
+  - {fqn: kfinalize::DeferredWeak, kind: struct, path: util/kfinalize/src/lib.rs, role: primary}
+  - {fqn: kfinalize::CreateError, kind: enum, path: util/kfinalize/src/lib.rs, role: helper}
+  - {fqn: kfinalize::DeferredArc::new, kind: fn, path: util/kfinalize/src/lib.rs, role: constructor}
+  - {fqn: kfinalize::DeferredArc::downgrade, kind: fn, path: util/kfinalize/src/lib.rs, role: operation}
+  - {fqn: kfinalize::DeferredArc::into_raw, kind: fn, path: util/kfinalize/src/lib.rs, role: operation}
+  - {fqn: kfinalize::DeferredArc::from_raw, kind: fn, path: util/kfinalize/src/lib.rs, role: operation}
+  - {fqn: kfinalize::DeferredWeak::upgrade, kind: fn, path: util/kfinalize/src/lib.rs, role: operation}
+operations:
+  - name: new
+    symbols: [kfinalize::DeferredArc::new]
+    effect: prepares identity, payload and carrier allocations; Err returns the error and the unchanged value
+    evidence: [{path: util/kfinalize/src/lib.rs, item: kfinalize::DeferredArc::new, quote: "pub fn new(value: T) -> Result<Self, (CreateError, T)> {"}]
+  - name: clone_drop
+    symbols: [kfinalize::DeferredArc::downgrade, kfinalize::DeferredWeak::upgrade]
+    effect: clone / downgrade / upgrade use standard Arc counting; last strong drop submits the prepared finalization
+    evidence:
+      - {path: util/kfinalize/src/lib.rs, quote: "Clone, downgrade and upgrade use standard Arc counting."}
+  - name: into_raw_from_raw
+    symbols: [kfinalize::DeferredArc::into_raw, kfinalize::DeferredArc::from_raw]
+    effect: transfer one strong count to a raw payload pointer (intrusive adapters) and recover it exactly once
+    evidence: [{path: util/kfinalize/src/lib.rs, item: kfinalize::DeferredArc::into_raw, quote: "Transfers one strong owner to a stable payload pointer without allocation."}]
+usage_protocol:
+  - step: "construct with DeferredArc::new from sleepable task context after the provider is installed; share with clone; last drop (any supported context) defers payload destruction to a worker"
+    evidence:
+      - {path: util/kfinalize/src/lib.rs, quote: "Construction requires a sleepable task and installed provider. Final strong"}
+contract:
+  no_std:
+    value: yes (#![no_std], nightly allocator_api)
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: construction prepares three allocations per object (identity, payload with raw-owner header,
+      carrier); last-strong Drop transfers a prepared obligation without allocating a carrier; metadata
+      frees inline outside NMI
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: The current kernel provider prepares three allocations per object (identity,
+    - path: util/kfinalize/src/lib.rs
+      quote: Last strong Drop
+  blocking:
+    value: last strong Drop does not sleep; payload destruction runs on normal sleepable workers; the
+      shared finalizer is serial so a sleeping destructor delays later objects; construction needs sleepable
+      task context
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: 'The shared finalizer is serial: a sleeping destructor delays later objects.'
+    - path: util/kfinalize/src/lib.rs
+      quote: '[`DeferredArc`] moves final payload destruction to normal sleepable workers.'
+  irq_nmi:
+    value: final strong release may run in task, softirq or hardirq context; NMI release requires the
+      kernel provider and initialized local irq_work and hands off to ordinary IRQ then worker; construction
+      is never allowed in hardirq, softirq or NMI
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: release may run in task, softirq or hardirq context, provided caller-held
+    - path: util/kfinalize/src/lib.rs
+      quote: It never permits hardirq, softirq or NMI construction.
+    - path: util/kfinalize/src/lib.rs
+      quote: Unsupported/unready NMI delivery is a fatal contract violation, never inline destruction.
+  ownership_lifetime:
+    value: shared ownership via standard Arc counts; Weak stops upgrading as soon as the last strong owner
+      is gone, independently of worker progress; dropping an owner is not a completion barrier; no public
+      drain, unwrap or mutable-access API
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: Weak immediately stops upgrading, independently of worker progress.
+    - path: util/kfinalize/src/lib.rs
+      quote: There is no public drain, unwrap or mutable-access API.
+  errors_bounds:
+    value: new returns Err((CreateError, T)) with InvalidContext (not sleepable task) or NotReady (provider
+      not installed); allocation and provider invariant failures follow kernel policy; T must be Send
+      + Sync + 'static
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      item: kfinalize::CreateError
+      quote: pub enum CreateError {
+    - path: util/kfinalize/src/lib.rs
+      item: kfinalize::DeferredArc::new
+      quote: Returns the error and unchanged input on invalid context or unready service.
+    - path: util/kfinalize/src/lib.rs
+      item: kfinalize::CreateError
+      quote: InvalidContext,
+  concurrency:
+    value: 'Send + Sync for T: Send + Sync; counting is Arc''s; only the final Drop transfers exclusive
+      destruction to the prepared provider; destructor must not wait on another finalization on the same
+      executor (even indirectly)'
+    evidence:
+    - path: util/kfinalize/src/lib.rs
+      quote: Identity exclusively owns the payload Box token until its last Arc drops.
+    - path: util/kfinalize/src/lib.rs
+      quote: finalization on that same executor, even indirectly.
+layers:
+  depends_on: [klazy]
+  used_by: [kworkng, ktask, ksched, kruntime]
+  allowed_layers: unknown
+  evidence:
+    - {path: util/kfinalize/Cargo.toml, quote: "klazy.workspace = true"}
+    - {path: task/kworkng/Cargo.toml, quote: "kfinalize.workspace = true"}
+    - {path: task/ktask/Cargo.toml, quote: "kfinalize.workspace = true"}
+    - {path: task/ksched/Cargo.toml, quote: "kfinalize.workspace = true"}
+    - {path: core/kruntime/Cargo.toml, quote: "kfinalize.workspace = true"}
+aliases:
+  en: [deferred drop, deferred free, defer destruction to worker, final put in worker context, kref release in workqueue, Arc with deferred destructor, async drop, release from IRQ context, deferred finalization]
+  zh: [延迟释放, 延迟析构, 最后一次引用释放放到工作线程, 异步释放, 中断上下文释放, 带延迟析构的 Arc]
+identifiers: [Arc, Weak, strong_count, Drop, finalize, finalizer, deferred, queue_work, release, destroy, kref_put]
+exclusions:
+  - "not a general Arc replacement or performance optimization: use plain Arc when the full destructor chain is legal wherever the last owner can drop"
+  - "destruction is asynchronous and serial on a shared worker; dropping an owner is not a completion or shutdown barrier and has no latency bound"
+  - "payload destructor must not form a dependency cycle with the shared worker pool or wait for another object's finalization"
+  - "construction requires sleepable task context and an installed provider; not usable before the kworkng services exist (except the audited unsafe boot constructor)"
+  - "T must be Send + Sync + 'static; no Arc::get_mut / unwrap / try_unwrap equivalents"
+counter_examples: []
+notes: >-
+  Searched for other refcount types: there is no generic kref/refcount_t in the workspace; plain
+  alloc::sync::Arc is the refcount. See the final report for the absent-evidence.

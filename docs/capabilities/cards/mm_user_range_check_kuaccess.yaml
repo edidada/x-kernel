@@ -1,0 +1,118 @@
+capability: mm_user_range_check_kuaccess
+title: User-range validation and scoped user-memory access window (kuaccess::check_access / access_user_memory)
+family: mm.user_access
+summary: >-
+  check_access(start, len) is the cheap range test that a [start, start+len) region lies inside the
+  user address space; access_user_memory(f) marks the current thread as accessing user memory for the
+  duration of a closure so kernel page faults on user addresses are resolved instead of oopsing.
+source: {kind: workspace, crate: kuaccess, path: core/kuaccess}
+symbols:
+  - {fqn: kuaccess::check_access, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+  - {fqn: kuaccess::access_user_memory, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+operations:
+  - name: range_check
+    symbols: [kuaccess::check_access]
+    effect: Ok when start is in the user range and len bytes fit before the end of user space, else NoAccess
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::check_access, quote: "Briefly checks if the given memory region is valid user memory."}
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::check_access, quote: "(USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;"}
+  - name: scoped_window
+    symbols: [kuaccess::access_user_memory]
+    effect: sets the thread flag accessing_user_memory around f(); the page-fault handler consults it
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::access_user_memory, quote: "thread.set_accessing_user_memory(true);"}
+usage_protocol:
+  - step: call check_access before taking a raw user pointer into assembly copy routines; wrap fault-tolerant user access in access_user_memory
+    evidence: [{path: core/kuaccess/src/lib.rs, item: kuaccess::access_user_memory, quote: "Enables scoped access into user memory, allowing page faults to occur inside"}]
+contract:
+  no_std:
+    value: yes (#![no_std])
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: access_user_memory sets the current thread flag true, calls f, then unconditionally sets false
+      on normal return. It does not save/restore a prior true value and has no unwind cleanup guard; check_access
+      only validates numeric bounds.
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::access_user_memory
+      quote: let result = f();
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::access_user_memory
+      quote: thread.set_accessing_user_memory(false);
+  errors_bounds:
+    value: check_access returns Err(MemError::NoAccess) for any start outside user space or len overflowing
+      the user range; access_user_memory panics outside thread context
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::check_access
+      quote: if unlikely(!is_accessible) {
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::access_user_memory
+      quote: panic!("access_user_memory called outside of thread context");
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kaddr_layout
+  - ktask
+  - kprocess
+  used_by:
+  - ksyscall
+  - posix-process
+  - kfutex
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: process/kfutex/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kprocess.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: kuaccess.workspace = true
+aliases:
+  en:
+  - access_ok
+  - user_addr_ok
+  - valid_user_range
+  - is_user_address
+  - range_ok
+  - uaccess_begin
+  - user address check
+  zh:
+  - 用户地址范围检查
+  - 用户地址合法性
+  - 用户态访问窗口
+  - 地址是否属于用户空间
+identifiers: [access_ok, USER_SPACE_BASE, USER_SPACE_SIZE, USER_SPACE_END, is_user_addr, user_range, "start + len", checked_add, TASK_SIZE]
+exclusions:
+- check_access only tests the address range, not whether pages are mapped or permitted; the actual copy
+  still faults and may fail
+- the range test is against the fixed USER_SPACE_BASE..USER_SPACE_END, not a per-process VMA lookup
+- access_user_memory is a thread flag helper, not hardware stac/set_fs and not a nestable or unwind-safe
+  access guard. Prefer osvm checked-copy APIs; direct raw access requires its own fault/provenance protocol.
+counter_examples: []
+status: needs-owner
+open_questions:
+- field: usage_protocol
+  question: "The user-access helper clears the flag on normal return but does not save the previous value and has no unwind guard. Should nesting and early exit be ruled out, or should the helper restore the prior state?"
+  evidence:
+  - path: core/kuaccess/src/lib.rs
+    item: kuaccess::access_user_memory
+    quote: "let result = f();"

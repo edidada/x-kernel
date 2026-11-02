@@ -1,0 +1,90 @@
+capability: misc_backtrace_capture
+title: Frame-pointer stack backtrace capture without allocation (backtrace::Backtrace)
+family: misc.backtrace
+summary: >-
+  Backtrace::capture() walks the frame-pointer chain of the current thread into a fixed 64-frame
+  buffer; capture_trap(fp, ip, ra) starts from a trap context. Output is raw instruction addresses
+  (displayed raw, with a symbol table, or via DWARF depending on features). The capture path is
+  allocation-free so it can run on panic / NMI paths.
+source: {kind: workspace, crate: backtrace, path: util/backtrace}
+symbols:
+  - {fqn: backtrace::Backtrace, kind: struct, path: util/backtrace/src/lib.rs, role: primary}
+  - {fqn: backtrace::init, kind: fn, path: util/backtrace/src/lib.rs, role: constructor}
+  - {fqn: backtrace::unwind_stack, kind: fn, path: util/backtrace/src/lib.rs, role: operation}
+  - {fqn: backtrace::frame::Frame, kind: struct, path: util/backtrace/src/frame.rs, role: helper}
+operations:
+  - name: capture
+    symbols: [backtrace::Backtrace]
+    effect: capture the current thread's frames into a fixed buffer
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::Backtrace::capture, quote: "Capture the current thread's stack backtrace."}
+  - name: capture_trap
+    symbols: [backtrace::Backtrace]
+    effect: capture from a trap / exception context given fp, ip and ra
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::Backtrace::capture_trap, quote: "Capture a backtrace from a trap/exception context."}
+  - name: unwind_stack
+    symbols: [backtrace::unwind_stack]
+    effect: unwind from a frame pointer into a Vec<Frame>; empty if not initialized or on error
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::unwind_stack, quote: "/// Returns an empty vector if not initialized or on error."}
+usage_protocol:
+  - step: call backtrace::init(ip_range, fp_range) once with the valid code and stack ranges, then Backtrace::capture() and print it with Display
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::init, quote: "Initializes the backtrace library."}
+contract:
+  no_std:
+    value: "yes (#![no_std] with extern crate alloc)"
+    evidence: [{path: util/backtrace/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: Backtrace::capture / capture_trap are allocation-free (fixed 64-frame buffer); unwind_stack allocates a Vec
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::MAX_FRAMES, quote: "The capture path is allocation-free (it runs on panic/NMI paths where"}
+      - {path: util/backtrace/src/lib.rs, item: backtrace::unwind_stack, quote: "pub fn unwind_stack(fp: usize) -> Vec<Frame> {"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi:
+    value: the capture path is designed for panic and NMI paths where the allocator lock may be held by the interrupted code
+    evidence: [{path: util/backtrace/src/lib.rs, item: backtrace::capture_into, quote: "panic/NMI paths never touch the heap (the allocator lock may be held by"}]
+  ownership_lifetime:
+    value: Backtrace owns its fixed frame array by value (Clone); frames are raw addresses
+    evidence: [{path: util/backtrace/src/lib.rs, item: backtrace::Inner, quote: "Captured([Frame; MAX_FRAMES], usize),"}]
+  errors_bounds:
+    value: capture returns an empty backtrace (and logs an error) when init() was not called; depth is capped at MAX_FRAMES = 64 and by set_max_depth
+    evidence:
+      - {path: util/backtrace/src/lib.rs, item: backtrace::capture_into, quote: 'log::error!("Backtrace not initialized. Call backtrace::init() first.");'}
+      - {path: util/backtrace/src/lib.rs, item: backtrace::MAX_FRAMES, quote: "`set_max_depth` still caps the walk, but never beyond this bound."}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - klazy
+  - log
+  used_by:
+  - kcpu
+  - ktask
+  - kalloc
+  - kruntime
+  - devfs
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kcpu/Cargo.toml
+    quote: backtrace = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: backtrace = { workspace = true, optional = true }
+  - path: mm/kalloc/Cargo.toml
+    quote: backtrace = { workspace = true, optional = true }
+  - path: util/backtrace/Cargo.toml
+    quote: klazy.workspace= true
+  - path: util/backtrace/Cargo.toml
+    quote: log = { workspace = true }
+  - path: core/kruntime/Cargo.toml
+    quote: backtrace.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: backtrace.workspace = true
+aliases:
+  en: [stack trace, stack unwinding, dump_stack, print backtrace, capture call stack, walk frame pointers, unwind, caller addresses, return address chain, show_stack]
+  zh: [调用栈, 栈回溯, 堆栈展开, 打印调用栈, 帧指针遍历, 获取调用者地址]
+identifiers: [dump_stack, show_stack, backtrace, unwind, frame_pointer, fp, "*(fp + 8)", "*(fp as *const usize)", return_address, "__builtin_return_address", Frame, caller, stack_trace]
+exclusions:
+  - "frame-pointer based - requires the kernel built with frame pointers and init() ranges; it does not use DWARF CFI for the raw capture"
+  - addresses only unless the dwarf or symtab feature is enabled
+counter_examples: []

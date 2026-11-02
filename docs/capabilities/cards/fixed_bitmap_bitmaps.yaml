@@ -1,0 +1,87 @@
+capability: fixed_bitmap_bitmaps
+title: Fixed-size const-generic bitmap with set/get/first-index search (bitmaps::Bitmap)
+family: container.bitmap
+summary: >-
+  Bitmap<SIZE> is a compact bit set of compile-time size (up to 1024 bits) stored in the smallest
+  integer or u128 array that fits. It offers get/set (returns the previous value), count, first/next
+  true index, first false index and invert. Suitable for key-state tables, event-type masks and
+  "slot occupied" maps; first_false_index gives a lowest-free-slot search.
+source: {kind: dependency, crate: bitmaps, version: 3.2.1}
+symbols:
+  - {fqn: bitmaps::Bitmap, kind: struct, path: src/bitmap.rs, role: primary}
+  - {fqn: bitmaps::Bitmap::new, kind: fn, path: src/bitmap.rs, role: constructor}
+  - {fqn: bitmaps::Bitmap::set, kind: fn, path: src/bitmap.rs, role: operation}
+  - {fqn: bitmaps::Bitmap::get, kind: fn, path: src/bitmap.rs, role: operation}
+  - {fqn: bitmaps::Bitmap::first_index, kind: fn, path: src/bitmap.rs, role: operation}
+  - {fqn: bitmaps::Bitmap::next_index, kind: fn, path: src/bitmap.rs, role: operation}
+  - {fqn: bitmaps::Bitmap::first_false_index, kind: fn, path: src/bitmap.rs, role: operation}
+  - {fqn: bitmaps::Bitmap::len, kind: fn, path: src/bitmap.rs, role: operation}
+operations:
+  - name: set
+    symbols: [bitmaps::Bitmap::set]
+    effect: set or clear one bit; returns the previous value
+    evidence: [{path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap::set, quote: "Returns the previous value of the bit."}]
+  - name: first_free
+    symbols: [bitmaps::Bitmap::first_false_index]
+    effect: index of the lowest clear bit, or None when all bits are set
+    evidence: [{path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap::first_false_index, quote: "Find the index of the first `false` bit in the bitmap."}]
+  - name: next_set
+    symbols: [bitmaps::Bitmap::first_index, bitmaps::Bitmap::next_index]
+    effect: iterate over set bits
+    evidence: [{path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap::next_index, quote: "Find the index of the first `true` bit in the bitmap after `index`."}]
+  - name: count
+    symbols: [bitmaps::Bitmap::len]
+    effect: number of true bits
+    evidence: [{path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap::len, quote: "Count the number of `true` bits in the bitmap."}]
+usage_protocol:
+  - step: "Bitmap::<N>::new() then set(i, true) / get(i); indices must be below SIZE"
+    evidence: [{path: bitmaps-3.2.1/src/lib.rs, quote: "let mut bitmap: Bitmap<10> = Bitmap::new();"}]
+contract:
+  no_std:
+    value: "yes when the std feature is off (#![cfg_attr(not(feature = \"std\"), no_std)]; std is a default feature)"
+    evidence:
+      - {path: bitmaps-3.2.1/src/lib.rs, quote: '#![cfg_attr(not(feature = "std"), no_std)]'}
+      - {path: io/inputdev/Cargo.toml, quote: 'bitmaps = { version = "3.2.1", default-features = false }'}
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: plain value type holding the bits inline (integer or u128 array); the query methods take self by value
+    evidence:
+      - {path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap, quote: "A compact array of bits."}
+  errors_bounds:
+    value: size is a const generic, at most 1024 bits; get/set check index < SIZE only with debug_assert (no check in release builds)
+    evidence:
+      - {path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap, quote: "The maximum supported size is currently 1024,"}
+      - {path: bitmaps-3.2.1/src/bitmap.rs, item: bitmaps::bitmap::Bitmap::get, quote: "debug_assert!(index < SIZE);"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by:
+  - devfs
+  - inputdev
+  - page_table
+  allowed_layers: unknown
+  evidence:
+  - path: io/inputdev/Cargo.toml
+    quote: bitmaps = { version = "3.2.1", default-features = false }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: bitmaps = { version = "3.2.1", default-features = false }
+  - path: mm/page_table/Cargo.toml
+    quote: bitmaps = { version = "3.2", default-features = false, optional = true }
+aliases:
+  en: [bitmap, bitset, bit set, bit array, bitmask array, find_first_zero_bit, find_first_bit, test_bit, set_bit, DECLARE_BITMAP]
+  zh: [位图, 位集合, 位数组, 位掩码表, 查找第一个空闲位]
+identifiers: [bitmap, bits, word, mask, BITS_PER_WORD, 1 << , test_bit, set_bit, clear_bit, first_zero, trailing_zeros, "[u64; N]"]
+exclusions:
+  - "compile-time size, maximum 1024 bits; a bitmap sized at runtime needs another structure"
+  - "no atomic operations - concurrent updates need an external lock or atomics"
+  - "this is a bit set, not a typed flag set: for named flag constants use flags_bitflags"
+counter_examples: []
+notes: >-
+  page_table dependency is optional (feature copy-from) and is used in mm/page_table/src/table64.rs to
+  track borrowed entries. devfs/event.rs uses Bitmap for per-device event-type bits and inputdev for key state.

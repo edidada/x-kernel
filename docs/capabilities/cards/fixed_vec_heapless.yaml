@@ -1,0 +1,75 @@
+capability: fixed_vec_heapless
+title: Fixed-capacity inline vector without heap (heapless::Vec)
+family: container.fixed_capacity
+summary: >-
+  heapless::Vec<T, N> is a Vec-like container with compile-time capacity N stored inline (stack, static
+  or struct field). push returns the item back when full; nothing is ever allocated. An optional length
+  type (e.g. u16) shrinks the length field.
+source: {kind: dependency, crate: heapless, version: 0.9.3}
+symbols:
+  - {fqn: heapless::Vec, kind: type, path: src/vec/mod.rs, role: primary}
+  - {fqn: heapless::Vec::new, kind: fn, path: src/vec/mod.rs, role: constructor}
+  - {fqn: heapless::vec::VecInner::push, kind: fn, path: src/vec/mod.rs, role: operation}
+  - {fqn: heapless::vec::VecInner::pop, kind: fn, path: src/vec/mod.rs, role: operation}
+  - {fqn: heapless::vec::VecInner::extend_from_slice, kind: fn, path: src/vec/mod.rs, role: operation}
+operations:
+  - name: construct
+    symbols: [heapless::Vec::new]
+    effect: const constructor, empty vector with capacity N (usable in a static)
+    evidence:
+      - {path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::Vec::new, quote: "static mut X: Vec<u8, 16> = Vec::new();"}
+  - name: push
+    symbols: [heapless::vec::VecInner::push]
+    effect: append; returns the item back (Err(item)) if the vector is full
+    evidence:
+      - {path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::VecInner::push, quote: "Returns back the `item` if the vector is full."}
+  - name: extend_from_slice
+    symbols: [heapless::vec::VecInner::extend_from_slice]
+    effect: append a slice; Err(CapacityError) when it does not fit
+    evidence:
+      - {path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::VecInner::extend_from_slice, quote: "pub fn extend_from_slice(&mut self, other: &[T]) -> Result<(), CapacityError>"}
+usage_protocol:
+  - step: pick a capacity N at compile time; use the LenT parameter (e.g. u16) only when the default usize length is too large
+    evidence: [{path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::Vec, quote: "This should be the smallest unsigned integer type that your capacity fits in"}]
+contract:
+  no_std:
+    value: "yes (#![cfg_attr(not(test), no_std)])"
+    evidence: [{path: heapless-0.9.3/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the vector owns its elements inline; a rejected push hands the item back
+    evidence: [{path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::VecInner::push, quote: "Returns back the `item` if the vector is full."}]
+  errors_bounds:
+    value: capacity fixed at compile time; push returns Err(item), extend_from_slice returns Err(CapacityError) when full
+    evidence:
+      - {path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::Vec, quote: "A fixed capacity [`Vec`]"}
+      - {path: heapless-0.9.3/src/vec/mod.rs, item: heapless::vec::VecInner::extend_from_slice, quote: "&[T]) -> Result<(), CapacityError> where T: Clone, {"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [khal, kio, kplat-aarch64, kruntime]
+  allowed_layers: unknown
+  evidence:
+    - {path: io/kio/Cargo.toml, quote: 'heapless = "0.9"'}
+    - {path: arch/khal/Cargo.toml, quote: 'heapless = "0.9"'}
+    - {path: core/kruntime/Cargo.toml, quote: 'heapless = "0.9"'}
+    - {path: platforms/kplat-aarch64/Cargo.toml, quote: 'heapless = "0.9"'}
+aliases:
+  en: [fixed capacity vec, stack vector, static vec, bounded vec, no-alloc vec, array backed vec, early boot region list]
+  zh: [定长向量, 栈上向量, 无堆向量, 固定容量数组, 启动期内存区域表]
+identifiers: [MAX_REGIONS, len, cap, capacity, push, array, "[T; N]", count, MAX_BOOT_RAM_REGIONS]
+exclusions:
+  - "capacity is fixed at compile time; if the element count is unbounded use alloc::vec::Vec"
+  - "for a fixed vector with spill-to-heap use smallvec (card inline_vec_smallvec); for the arrayvec flavour see fixed_vec_arrayvec"
+counter_examples: []
+notes: >-
+  Workspace crates use only heapless::Vec (early-boot memory region lists in khal/kruntime/kplat-aarch64,
+  small buffer in kio). Other heapless containers (spsc::Queue, deque, binary_heap, index_map, string)
+  exist in the crate but no workspace crate imports them at the pin. heapless::mpmc is covered by card
+  mpmc_queue_heapless.

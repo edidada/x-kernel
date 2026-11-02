@@ -1,0 +1,146 @@
+capability: flags_bitflags
+title: Typed C-style flag sets (bitflags::bitflags! macro and Flags trait)
+family: misc.bits
+summary: >-
+  The bitflags! macro generates a newtype over an integer with named flag constants, set operators
+  (| & - ^ !), contains / intersects / insert / remove / toggle, and checked or truncating conversion
+  from raw bits. It is the workspace-wide way to declare syscall flag words, VM/page permission flags,
+  poll event masks and similar bit sets.
+source: {kind: dependency, crate: bitflags, version: 2.13.2}
+symbols:
+  - {fqn: bitflags::bitflags, kind: macro, path: src/lib.rs, role: primary}
+  - {fqn: bitflags::Flags, kind: trait, path: src/traits.rs, role: operation}
+  - {fqn: bitflags::Bits, kind: trait, path: src/traits.rs, role: helper}
+  - {fqn: bitflags::Flags::from_bits, kind: fn, path: src/traits.rs, role: operation}
+  - {fqn: bitflags::Flags::from_bits_truncate, kind: fn, path: src/traits.rs, role: operation}
+  - {fqn: bitflags::Flags::contains, kind: fn, path: src/traits.rs, role: operation}
+operations:
+  - name: from_bits
+    symbols: [bitflags::Flags::from_bits]
+    effect: checked conversion from raw bits; None when unknown bits are set (generated types also have from_bits_truncate and from_bits_retain)
+    evidence: [{path: bitflags-2.13.2/src/traits.rs, item: bitflags::traits::Flags::from_bits, quote: "This method will return `None` if any unknown bits are set."}]
+  - name: from_bits_truncate
+    symbols: [bitflags::Flags::from_bits_truncate]
+    effect: conversion that clears unknown bits
+    evidence: [{path: bitflags-2.13.2/src/traits.rs, item: bitflags::traits::Flags::from_bits_truncate, quote: "fn from_bits_truncate(bits: Self::Bits) -> Self {"}]
+  - name: contains
+    symbols: [bitflags::Flags::contains]
+    effect: all bits of other are set
+    evidence: [{path: bitflags-2.13.2/src/traits.rs, item: bitflags::traits::Flags::contains, quote: "fn contains(&self, other: Self) -> bool"}]
+usage_protocol:
+- step: 'Declare named bits with bitflags! and choose conversion per ABI: from_bits rejects unknown bits,
+    from_bits_truncate discards them, from_bits_retain preserves them. Do not default to truncating untrusted
+    flags when the ABI requires rejection.'
+  evidence:
+  - path: bitflags-2.13.2/src/traits.rs
+    item: bitflags::traits::Flags::from_bits
+    quote: This method will return `None` if any unknown bits are set.
+contract:
+  no_std:
+    value: "yes unless the std feature is on (#![cfg_attr(not(any(feature = \"std\", test)), no_std)])"
+    evidence: [{path: bitflags-2.13.2/src/lib.rs, quote: '#![cfg_attr(not(any(feature = "std", test)), no_std)]'}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: generated types are plain integer newtypes
+    evidence: [{path: bitflags-2.13.2/src/lib.rs, quote: "Generate types for C-style flags with ergonomic APIs."}]
+  errors_bounds:
+    value: "from_bits returns None for unknown bits; from_bits_truncate drops them; from_bits_retain keeps them"
+    evidence:
+      - {path: bitflags-2.13.2/src/traits.rs, item: bitflags::traits::Flags::from_bits, quote: "This method will return `None` if any unknown bits are set."}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by:
+  - block
+  - khal
+  - kalloc-types
+  - kcred
+  - kext4
+  - kfd_objects
+  - kipi
+  - kirq
+  - knet
+  - kns
+  - kpoll
+  - ksignal
+  - ksyscall
+  - kvfs
+  - kvirtiodrivers
+  - memfs
+  - p9
+  - page_table
+  - posix-fs
+  - posix-ipc
+  - posix-mm
+  - tipc
+  - tipc_handle
+  - virtio
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: bitflags = "2.10"
+  - path: arch/khal/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: process/ksignal/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: drivers/contracts/block/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: mm/kalloc-types/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: process/kcred/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: process/kns/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: task/kpoll/Cargo.toml
+    quote: bitflags = { version = "2.10", default-features = false }
+  - path: core/ksyscall/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: bitflags = "2.10"
+  - path: vendor/kvirtiodrivers/Cargo.toml
+    quote: bitflags = "2.11.0"
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: net/9p/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: bitflags = "2.9"
+  - path: posix/fs/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: posix/ipc/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: posix/mm/Cargo.toml
+    quote: bitflags = { workspace = true }
+  - path: tee/tipc/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: tee/tipc_handle/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: bitflags = { workspace = true }
+aliases:
+  en: [flags, bitflags, bit flags, flag set, bitmask constants, permission flags, open flags, EnumSet of flags, "#define FLAG"]
+  zh: [标志位, 位标志, 标志集合, 位掩码常量, 权限标志]
+identifiers: [FLAGS, bits, const, "1 << ", contains, intersects, from_bits, from_bits_truncate, O_RDONLY, PROT_, MAP_]
+exclusions:
+  - "a typed flag set only; for an index-addressed set of N bits use fixed_bitmap_bitmaps"
+  - "Cargo.lock also holds bitflags 1.3.2 (a different major version) pulled in by other crates; workspace crates use the 2.x line"
+counter_examples: []
+notes: >-
+  About 85 bitflags! invocations across the tree at the pin. Prefer extending an existing flags type over
+  hand-rolled const u32 masks.

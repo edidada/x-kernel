@@ -1,0 +1,111 @@
+capability: timer_posix_manager_ktimer
+title: Process-owned setitimer and POSIX timer state with alarm task (ktimer::ProcessTimerManager)
+family: task.timer
+summary: >-
+  Process-side timer semantics: three setitimer interval timers (ITIMER_REAL / VIRTUAL / PROF) and
+  POSIX timer_create timers with overrun bookkeeping, per-process in ProcessTimerManager. Wall-clock
+  deadlines across clock domains are queued in one global alarm queue served by an async alarm task
+  (spawn_alarm_task) which calls a registered handler with the owner PID; expirations are returned
+  as TimerDelivery values that kprocess turns into signals. Not a generic kernel timer.
+source: {kind: workspace, crate: ktimer, path: process/ktimer}
+symbols:
+  - {fqn: ktimer::ProcessTimerManager, kind: struct, path: process/ktimer/src/manager.rs, role: primary}
+  - {fqn: ktimer::ProcessTimerManager::new, kind: fn, path: process/ktimer/src/manager.rs, role: constructor}
+  - {fqn: ktimer::ProcessTimerManager::set_itimer, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::ProcessTimerManager::create_posix_timer, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::ProcessTimerManager::set_posix_timer, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::ProcessTimerManager::delete_posix_timer, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::ProcessTimerManager::get_posix_timer_overrun, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::ProcessTimerManager::poll_wall_clock, kind: fn, path: process/ktimer/src/manager.rs, role: operation}
+  - {fqn: ktimer::spawn_alarm_task, kind: fn, path: process/ktimer/src/runtime.rs, role: operation}
+  - {fqn: ktimer::register_expired_task_handler, kind: fn, path: process/ktimer/src/runtime.rs, role: operation}
+operations:
+  - name: set_itimer
+    symbols: [ktimer::ProcessTimerManager::set_itimer]
+    effect: sets an interval timer for a type and returns the previous (interval, remaining); ITIMER_REAL is armed in the global alarm queue
+    evidence:
+      - {path: process/ktimer/src/manager.rs, item: ktimer::manager::ProcessTimerManager::set_itimer, quote: "/// Sets an interval timer and returns the previous state."}
+  - name: posix_timers
+    symbols: [ktimer::ProcessTimerManager::create_posix_timer, ktimer::ProcessTimerManager::delete_posix_timer]
+    effect: creates a POSIX timer with an allocated id (wrapping counter probing a BTreeMap, InvalidInput when exhausted) and a clock/notification policy
+    evidence:
+      - {path: process/ktimer/src/manager.rs, item: ktimer::manager::ProcessTimerManager::create_posix_timer, quote: "The kernel timer ID allocated for the new timer."}
+  - name: alarm_task
+    symbols: [ktimer::spawn_alarm_task, ktimer::register_expired_task_handler]
+    effect: one global task waits for the earliest queued deadline across wall-clock domains and calls the registered owner handler with the PID
+    evidence:
+      - {path: process/ktimer/src/runtime.rs, item: ktimer::runtime::spawn_alarm_task, quote: "/// Spawns the global alarm task that waits on the earliest queued"}
+contract:
+  no_std:
+    value: "yes (#![no_std], uses alloc)"
+    evidence: [{path: process/ktimer/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: "per-process manager owns its itimers and a BTreeMap of POSIX timers; the alarm queue is global"
+    evidence:
+      - {path: process/ktimer/src/manager.rs, item: ktimer::manager::ProcessTimerManager, quote: "pub struct ProcessTimerManager {"}
+  errors_bounds:
+    value: "unsupported clock id or exhausted timer-id space returns EINVAL (InvalidInput)"
+    evidence:
+      - {path: process/ktimer/src/manager.rs, item: ktimer::manager::ProcessTimerManager::create_posix_timer, quote: "Returns `EINVAL` (`InvalidInput`) when `clock_id` is not a supported"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - ktask
+  - ktime
+  - ktime_types
+  - ksignal
+  - ksync
+  - khal
+  - klazy
+  - kerrno
+  - event-listener
+  used_by:
+  - kprocess
+  - ksyscall
+  allowed_layers: unknown
+  evidence:
+  - path: process/ktimer/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ktimer.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: ktimer.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ktime.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ksignal.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: khal.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: klazy.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: event-listener = { workspace = true, default-features = false }
+aliases:
+  en: [setitimer, getitimer, alarm, timer_create, timer_settime, timer_delete, timer_getoverrun, POSIX timer, interval timer, ITIMER_REAL, SIGALRM, itimer, per-process timer]
+  zh: [间隔定时器, POSIX 定时器, 进程定时器, 闹钟, 定时信号, 超时信号]
+identifiers: [setitimer, getitimer, alarm, timer_create, timer_settime, ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF, SIGALRM, SIGVTALRM, sigevent, overrun, it_interval, it_value]
+exclusions:
+  - "process/signal-level timer semantics only: for a kernel callback timer use ktimer_core (timer_core_ktimer_core); for delayed callbacks in task context use work_delayed_kworkng"
+  - "expirations are reported as TimerDelivery values for kprocess to turn into signals; syscall ABI decoding lives elsewhere"
+counter_examples: []
+notes: >-
+  Contract fields are mostly unknown: the crate documents semantics but not allocation, blocking or
+  concurrency guarantees. Timer ids are a wrapping counter probe (allocate_posix_timer_id), not a
+  shared ID allocator.

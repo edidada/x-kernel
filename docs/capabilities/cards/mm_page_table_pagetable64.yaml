@@ -1,0 +1,112 @@
+capability: mm_page_table_pagetable64
+title: Multi-arch page table walk / map / unmap / protect with deferred TLB flush (page_table::PageTable64 / PageTableMut)
+family: mm.page_table
+summary: >-
+  Generic 64-bit radix page table (x86_64, AArch64, RISC-V Sv39/Sv48, LoongArch64) with
+  architecture-independent PagingFlags. PageTable64 offers query (walk), PageTableMut (from modify())
+  offers map, remap, protect, unmap, map_region / unmap_region / protect_region and conditional
+  replace_if_same for COW commits, batching TLB flushes until finish() or drop.
+source: {kind: workspace, crate: page_table, path: mm/page_table}
+symbols:
+  - {fqn: page_table::PageTable64, kind: struct, path: mm/page_table/src/table64.rs, role: primary}
+  - {fqn: page_table::PageTableMut, kind: struct, path: mm/page_table/src/table64.rs, role: primary}
+  - {fqn: page_table::PageSize, kind: enum, path: mm/page_table/src/defs.rs, role: helper}
+  - {fqn: page_table::PtError, kind: enum, path: mm/page_table/src/defs.rs, role: helper}
+  - {fqn: page_table::PagingHandler, kind: trait, path: mm/page_table/src/defs.rs, role: helper}
+  - {fqn: page_table::PteSnapshot, kind: struct, path: mm/page_table/src/defs.rs, role: helper}
+operations:
+  - name: query
+    symbols: [page_table::PageTable64]
+    effect: walk the table for a vaddr; Ok((paddr, flags, page_size)) or NotMapped / InvalidAddress
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTable64::query, quote: "pub fn query(&self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {"}
+  - name: map
+    symbols: [page_table::PageTableMut]
+    effect: map one page of 4K/2M/1G; allocates intermediate tables; AlreadyMapped if the leaf is used
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTableMut::map, quote: "Allocates intermediate page table frames as needed (via `H::alloc_frame`)."}
+  - name: unmap
+    symbols: [page_table::PageTableMut]
+    effect: clear the leaf entry and return the previous (paddr, flags, size)
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTableMut::unmap, quote: "pub fn unmap(&mut self, vaddr: M::VirtAddr) -> PtResult<(PhysAddr, PagingFlags, PageSize)> {"}
+  - name: map_region
+    symbols: [page_table::PageTableMut]
+    effect: map a contiguous range choosing the largest page size (1G, 2M, 4K); no rollback on partial failure
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTableMut::map_region, quote: "On partial failure, previously mapped pages within the region are **not**"}
+  - name: replace_if_same
+    symbols: [page_table::PageTableMut, page_table::PteSnapshot]
+    effect: compare-and-replace a leaf PTE against a snapshot (COW commit primitive)
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTableMut::replace_if_same, quote: "This is the page-table commit primitive for COW-style transactions:"}
+usage_protocol:
+  - step: "let mut m = pt.modify(); m.map(..)?; m.finish() - TLB flushes are deferred until finish() or Drop"
+    evidence:
+      - {path: mm/page_table/src/table64.rs, item: page_table::table64::PageTable64::modify, quote: "The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive"}
+contract:
+  no_std:
+    value: "yes (#![cfg_attr(not(test), no_std)])"
+    evidence: [{path: mm/page_table/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: allocates 4K frames for intermediate tables through PagingHandler::alloc_frame
+    evidence: [{path: mm/page_table/src/table64.rs, item: page_table::table64::PageTableMut::map, quote: "Allocates intermediate page table frames as needed (via `H::alloc_frame`)."}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: PageTable64 owns the root frame; PageTableMut borrows it exclusively; frames are released through PagingHandler::dealloc_frame, which consumes one storage ownership
+    evidence:
+      - {path: mm/page_table/src/defs.rs, item: page_table::defs::PagingHandler::dealloc_frame, quote: "Consumes one storage ownership previously returned by alloc_frame."}
+  errors_bounds:
+    value: "PtResult<T> with PtError {NoMemory, NotAligned, NotMapped, AlreadyMapped, MappedToHugePage, InvalidAddress}; address validity checked per call; map_region does not roll back"
+    evidence:
+      - {path: mm/page_table/src/defs.rs, item: page_table::defs::PtError, quote: "pub enum PtError {"}
+  concurrency:
+    value: mutation requires &mut (exclusive); the type is generic over a PagingHandler and the crate optionally does SMP TLB shootdown via the `smp` feature
+    evidence:
+      - {path: mm/page_table/src/lib.rs, quote: "`smp` — enable SMP TLB shootdown via IPI."}
+layers:
+  depends_on:
+  - memaddr
+  - karch
+  - kcpu_id_map
+  - kiface
+  used_by:
+  - memspace
+  - khal
+  - kcpu
+  - kipi
+  - kernel-boot
+  - filemap
+  allowed_layers: unknown
+  evidence:
+  - path: mm/memspace/Cargo.toml
+    quote: page_table = { workspace = true, features = ["copy-from"]}
+  - path: arch/khal/Cargo.toml
+    quote: page_table = { workspace = true }
+  - path: mm/page_table/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: mm/page_table/Cargo.toml
+    quote: karch = { workspace = true }
+  - path: mm/page_table/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: kiface.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: "page_table = { workspace = true } kcpu_slot"
+  - path: arch/kipi/Cargo.toml
+    quote: page_table.workspace = true
+  - path: boot/kernel-boot/Cargo.toml
+    quote: "page_table = { workspace = true } memaddr"
+  - path: boot/kernel-boot/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+  - path: mm/filemap/Cargo.toml
+    quote: page_table = { workspace = true }
+aliases:
+  en: [page table, pgtable, map_page, unmap_page, mmu map, PTE, walk page table, vm_map, paging, map_pages, set_pte, virt_to_phys walk, translate address]
+  zh: [页表, 页表映射, 页表遍历, 建立映射, 取消映射, 修改页表项, 虚拟地址翻译]
+identifiers: [pgd, pud, pmd, pte, PTE, PGD, "vaddr >> 12", "0x1ff", "& 0x1ff", map_page, unmap_page, huge_page, flush_tlb, tlbi, invlpg, satp, ttbr, entry.is_present]
+exclusions:
+  - low-level per-architecture table; for a process address space with VMAs and fault handling use memspace::MmSpace (mm_address_space_memspace), not raw PageTableMut
+  - only the leaf/walk logic - frame allocation and phys-to-virt come from the PagingHandler implementation, so an implementation of that trait is required
+counter_examples: []

@@ -1,0 +1,99 @@
+capability: io_user_iovec_posix_types
+title: Scatter-gather iovec list over user memory with sequential Read/Write (posix_types::io::IoVectorBuf)
+family: io.buffer
+summary: >-
+  IoVectorBuf takes the kernel-owned copy of a user iovec array (at most 1024 segments, total length
+  overflow-checked), then read_with / fill_with walk the segments through a caller closure, or into_io
+  yields IoVectorBufIo, a sequential kio Read / Write with rewind_bytes. Segment addresses stay
+  unvalidated until user-memory I/O.
+source: {kind: workspace, crate: posix-types, path: posix/types}
+symbols:
+- fqn: posix_types::io::IoVectorBuf
+  kind: struct
+  path: posix/types/src/io/vector_buf.rs
+  role: primary
+- fqn: posix_types::io::IoVectorBufIo
+  kind: struct
+  path: posix/types/src/io/vector_buf.rs
+  role: primary
+- fqn: posix_types::io::IoVec
+  kind: struct
+  path: posix/types/src/io/iovec.rs
+  role: helper
+operations:
+- name: from_iovecs
+  symbols:
+  - posix_types::io::IoVectorBuf
+  effect: validate a copied iovec vector - at most 1024 entries, no negative length, no total overflow
+  evidence:
+  - path: posix/types/src/io/vector_buf.rs
+    item: posix_types::io::vector_buf::IoVectorBuf::from_iovecs
+    quote: Returns `InvalidInput` for more than 1024 descriptors, a negative segment
+- name: read_with_fill_with
+  symbols:
+  - posix_types::io::IoVectorBuf
+  effect: call a closure per segment (user pointer, length) and sum the returned counts; short result
+    advances to the next segment, zero stops
+  evidence:
+  - path: posix/types/src/io/vector_buf.rs
+    item: posix_types::io::vector_buf::IoVectorBuf::read_with
+    quote: result advances to the next segment, not the remainder of this segment;
+- name: rewind_bytes
+  symbols:
+  - posix_types::io::IoVectorBufIo
+  effect: move the cursor back; InvalidInput when crossing the start; fields restored on error
+  evidence:
+  - path: posix/types/src/io/vector_buf.rs
+    item: posix_types::io::vector_buf::IoVectorBufIo::rewind_bytes
+    quote: Returns `InvalidInput` if rewinding crosses the start or overflows the
+usage_protocol:
+  - step: copy the user iovec array into kernel memory first, build IoVectorBuf::from_iovecs, then read_with / fill_with using osvm read_vm_mem / write_vm_mem inside the closure
+    evidence:
+      - {path: posix/types/src/io/vector_buf.rs, item: posix_types::io::vector_buf::IoVectorBuf::read_with, quote: "The closure must use `read_vm_mem` or equivalent to access them safely."}
+contract:
+  no_std: {value: unknown, evidence: []}
+  allocation:
+    value: owns a Vec<IoVec> of copied descriptors
+    evidence: [{path: posix/types/src/io/vector_buf.rs, item: posix_types::io::vector_buf::IoVectorBuf, quote: "iovs: Vec<IoVec>,"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: takes ownership of the copied descriptors; the vector is dropped on failure; user segments are accessed only through the closure
+    evidence: [{path: posix/types/src/io/vector_buf.rs, item: posix_types::io::vector_buf::IoVectorBuf::from_iovecs, quote: "Takes ownership of copied descriptors and checks their aggregate length."}]
+  errors_bounds:
+    value: InvalidInput on more than 1024 segments / negative length / total overflow; the first callback error is propagated and earlier side effects are not rolled back
+    evidence: [{path: posix/types/src/io/vector_buf.rs, item: posix_types::io::vector_buf::IoVectorBuf::read_with, quote: "data; previous side effects are not rolled back."}]
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - osvm
+  - kio
+  - kerrno
+  used_by:
+  - ksyscall
+  - posix-fs
+  - posix-net
+  allowed_layers: unknown
+  evidence:
+  - path: posix/fs/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/types/Cargo.toml
+    quote: osvm = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: core/ksyscall/Cargo.toml
+    quote: posix-types.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: posix-types.workspace = true
+  - path: posix/net/Cargo.toml
+    quote: posix-types.workspace = true
+aliases:
+  en: [iovec, readv, writev, sendmsg iov, recvmsg iov, scatter gather, struct iovec array, IoVec list, user iovec copy]
+  zh: [iovec 列表, 分散聚集读写, readv writev, 用户态向量缓冲]
+identifiers: [iovec, iov_base, iov_len, readv, writev, preadv, pwritev, sendmsg, recvmsg, UIO_MAXIOV, "iov.len() > 1024", IoVec]
+exclusions:
+  - this is the user-facing iovec; the kernel-internal byte cursor for file read_iter / write_iter is iov_iter (io_buffer_iov_iter)
+  - the 1024-segment cap is a fixed constant in from_iovecs
+counter_examples: []

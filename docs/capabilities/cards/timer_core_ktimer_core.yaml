@@ -1,0 +1,132 @@
+capability: timer_core_ktimer_core
+title: Per-CPU one-shot hard-IRQ timer core with owned Timer and cancel_sync (ktimer_core::Timer / TimerSet)
+family: task.timer
+summary: Prepared per-CPU timer trees independent of the scheduler. A static TimerSet<N> holds N per-CPU
+  SpinNoIrq timer trees (hardware arbitration and IRQ dispatch); Timer<H, N> owns stable node+handler
+  storage allocated once, and start_on(cpu, deadline) / start_on_if_future arm a one-shot absolute monotonic
+  deadline without allocating. The handler (TimerHandler, hard-IRQ context) may rearm through TimerControl.
+  try_cancel is non-waiting; cancel_sync and Drop wait for in-flight delivery.
+source: {kind: workspace, crate: ktimer-core, path: task/ktimer-core}
+symbols:
+  - {fqn: ktimer_core::TimerSet, kind: struct, path: task/ktimer-core/src/set.rs, role: primary}
+  - {fqn: ktimer_core::TimerSet::new, kind: fn, path: task/ktimer-core/src/set.rs, role: constructor}
+  - {fqn: ktimer_core::Timer, kind: struct, path: task/ktimer-core/src/timer.rs, role: primary}
+  - {fqn: ktimer_core::Timer::new, kind: fn, path: task/ktimer-core/src/timer.rs, role: constructor}
+  - {fqn: ktimer_core::Timer::start_on, kind: fn, path: task/ktimer-core/src/timer.rs, role: operation}
+  - {fqn: ktimer_core::Timer::start_on_if_future, kind: fn, path: task/ktimer-core/src/timer.rs, role: operation}
+  - {fqn: ktimer_core::Timer::try_cancel, kind: fn, path: task/ktimer-core/src/timer.rs, role: operation}
+  - {fqn: ktimer_core::Timer::cancel_sync, kind: fn, path: task/ktimer-core/src/timer.rs, role: operation}
+  - {fqn: ktimer_core::TimerHandler, kind: trait, path: task/ktimer-core/src/index.rs, role: helper}
+  - {fqn: ktimer_core::TimerControl, kind: struct, path: task/ktimer-core/src/control.rs, role: helper}
+  - {fqn: ktimer_core::TimerControl::rearm, kind: fn, path: task/ktimer-core/src/control.rs, role: operation}
+  - {fqn: ktimer_core::CancelResult, kind: enum, path: task/ktimer-core/src/timer.rs, role: helper}
+operations:
+  - name: start_on
+    symbols: [ktimer_core::Timer::start_on, ktimer_core::Timer::start_on_if_future]
+    effect: starts or replaces a one-shot absolute monotonic deadline on a chosen CPU; past deadlines are accepted and dispatched later, never inline; start_on_if_future rejects an elapsed deadline without replacing a pending one
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on, quote: "past deadlines are accepted for later dispatch, never invoked inline."}
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on_if_future, quote: "None means the locked clock check rejected it without changing this timer."}
+  - name: cancel
+    symbols: [ktimer_core::Timer::try_cancel, ktimer_core::Timer::cancel_sync]
+    effect: try_cancel never waits and returns Inactive / Removed / Running; cancel_sync waits for in-flight delivery and removes a pending successor; Drop calls cancel_sync
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::try_cancel, quote: "Takes the owner spinlock but never allocates, sleeps, or waits for delivery."}
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::drop, quote: "self.cancel_sync();"}
+  - name: rearm
+    symbols: [ktimer_core::TimerControl::rearm]
+    effect: from inside the handler install the next one-shot deadline under the owner lock; each setting is one-shot so periodic timers must rearm
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on, quote: "Each setting is one-shot; a callback must explicitly rearm to repeat."}
+contract:
+  no_std:
+    value: "yes (#![no_std], uses alloc)"
+    evidence: [{path: task/ktimer-core/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "Timer::new / new_on allocate the node+handler storage once; start, rearm and cancel do not allocate; TimerSet CPU slots never grow"
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::new, quote: "This preparation may allocate; subsequent start/cancel operations do not."}
+      - {path: task/ktimer-core/src/set.rs, item: ktimer_core::set::TimerSet, quote: "CPU slots never grow, reorder or allocate after construction."}
+  blocking:
+    value: "start / try_cancel / rearm never sleep; cancel_sync and Drop wait for in-flight delivery (must not be called from the timer's own callback or while holding a lock the callback needs); handlers must not sleep"
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer, quote: "Synchronous cancellation/Drop must not run in this timer's callback or while holding a"}
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on, quote: "The handler must not unwind, sleep, enable IRQs or reenter timer dispatch."}
+  irq_nmi:
+    value: "handlers run in hard IRQ context outside timer locks; per-CPU trees are protected by SpinNoIrq; NMI not stated"
+    evidence:
+      - {path: task/ktimer-core/src/index.rs, item: ktimer_core::index::TimerHandler::on_expiration, quote: "/// Handles one expiration in hard IRQ context outside timer locks."}
+      - {path: task/ktimer-core/src/set.rs, item: ktimer_core::set::TimerSet, quote: "cpus: [CacheAligned<SpinNoIrq<CpuTimers>>; N],"}
+  ownership_lifetime:
+    value: "Timer owns node and handler in one stable allocation; the shell may move but the allocation cannot; Drop synchronously cancels before releasing; a node belongs to at most one TimerSet; static TimerSet required"
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer, quote: "Owns stable node and handler storage in one allocation prepared before use."}
+      - {path: task/ktimer-core/src/set.rs, item: ktimer_core::set::TimerSet, quote: "Nodes remain externally owned and may participate in only one set at a time."}
+  errors_bounds:
+    value: "start_on returns KResult<(owner CPU, newly_added)>: InvalidInput if the deadline exceeds u64::MAX ns or cpu is outside the set; N must be > 0; deadlines are absolute monotonic ns"
+    evidence:
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on, quote: "Returns [`kerrno::KError::InvalidInput`] if the deadline exceeds"}
+      - {path: task/ktimer-core/src/set.rs, item: ktimer_core::set::TimerSet::new, quote: 'assert!(N > 0, "timer set requires at least one CPU");'}
+  concurrency:
+    value: "per-CPU spinlocks with owner-CPU routing; callback rearm and external starts serialize under the owner lock and the last successful setting wins; start_on is unsafe: platform glue must pin the CPU and notify the actual owner"
+    evidence:
+      - {path: task/ktimer-core/src/control.rs, item: ktimer_core::control::TimerControl::rearm, quote: "Callback rearm and external starts serialize under the same owner lock;"}
+      - {path: task/ktimer-core/src/timer.rs, item: ktimer_core::timer::Timer::start_on, quote: "Platform glue must select an initialized, serviceable CPU, pin execution"}
+layers:
+  depends_on:
+  - karch
+  - intrusive-collections
+  - kcpu_id_map
+  - kerrno
+  - kspin
+  - ktime_types
+  used_by:
+  - ktask
+  - kfeat
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktimer-core/Cargo.toml
+    quote: karch.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: ktimer_core = { workspace = true, features = ["preempt"] }
+  - path: api/kfeat/Cargo.toml
+    quote: ktimer_core = { workspace = true, optional = true }
+  - path: task/ktimer-core/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: ktime_types.workspace = true
+aliases:
+  en:
+  - timer
+  - hrtimer
+  - timer_list
+  - add_timer
+  - mod_timer
+  - del_timer_sync
+  - one-shot timer
+  - timer callback
+  - deadline timer
+  - timeout timer
+  - timer tree
+  zh:
+  - 定时器
+  - 高精度定时器
+  - 一次性定时器
+  - 超时定时器
+  - 定时器回调
+  - 定时器红黑树
+  - 取消定时器
+identifiers: [hrtimer, timer_list, add_timer, mod_timer, del_timer, timer_setup, BinaryHeap, BTreeMap, deadline, expires, timeout, rearm]
+exclusions:
+  - "handler runs in hard IRQ context and must not sleep; for callbacks that need a sleepable task use kworkng::DelayedWorkHandle (work_delayed_kworkng)"
+  - "one-shot absolute deadlines in monotonic time; periodic behaviour needs explicit rearm; wall-clock/POSIX interval semantics belong to ktimer (timer_posix_manager_ktimer)"
+  - "start_on is unsafe and needs platform placement/notification glue; most kernel code should use higher-level sleep/timeout helpers in ktask"
+  - "requires a static TimerSet<N> with N = CPU slot count; not a timer pool"
+counter_examples: []
+notes: "Whether ktask::future::sleep is built on this core was not checked; ktask depends on ktimer_core."

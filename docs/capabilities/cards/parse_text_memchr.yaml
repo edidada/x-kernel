@@ -1,0 +1,61 @@
+capability: parse_text_memchr
+title: Fast byte and substring search in slices (memchr)
+family: parse.text
+summary: >-
+  memchr(needle, haystack) returns the index of the first byte in a slice; memrchr searches from the end;
+  memchr2/3 look for any of two or three bytes; memmem::Finder searches for a substring. The
+  implementations use vectorised routines where the target supports them. kio uses memchr to find
+  newlines for read_until and line-buffered writing.
+source: {kind: dependency, crate: memchr, version: 2.8.3}
+symbols:
+  - {fqn: memchr::memchr, kind: fn, path: src/memchr.rs, role: primary}
+  - {fqn: memchr::memrchr, kind: fn, path: src/memchr.rs, role: primary}
+  - {fqn: memchr::memchr2, kind: fn, path: src/memchr.rs, role: operation}
+  - {fqn: memchr::memchr_iter, kind: fn, path: src/memchr.rs, role: operation}
+  - {fqn: memchr::memmem::Finder, kind: struct, path: src/memmem/mod.rs, role: operation}
+operations:
+  - name: find_byte
+    symbols: [memchr::memchr, memchr::memrchr]
+    effect: index of the first (or last) occurrence of one byte; None when absent; the returned index is less than haystack.len()
+    evidence:
+      - {path: memchr-2.8.3/src/memchr.rs, item: memchr::memchr::memchr, quote: "`haystack`, or `None` if one is not found. If an index is returned, it is"}
+  - name: find_any_of
+    symbols: [memchr::memchr2, memchr::memchr_iter]
+    effect: first occurrence of either of two bytes, or iteration over all occurrences of one byte
+    evidence:
+      - {path: memchr-2.8.3/src/memchr.rs, item: memchr::memchr::memchr2, quote: "pub fn memchr2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {"}
+contract:
+  no_std:
+    value: "yes: #![no_std]; the kernel dependency sets default-features = false (std and alloc are optional features)"
+    evidence:
+      - {path: memchr-2.8.3/src/lib.rs, quote: "#![no_std]"}
+      - {path: io/kio/Cargo.toml, quote: 'memchr = { version = "2", default-features = false }'}
+      - {path: memchr-2.8.3/Cargo.toml, quote: 'default = ["std"]'}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: functions borrow the haystack for the call and return an index
+    evidence:
+      - {path: memchr-2.8.3/src/memchr.rs, item: memchr::memchr::memchr, quote: "pub fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {"}
+  errors_bounds:
+    value: returns None when the needle is absent; any returned index is in bounds
+    evidence:
+      - {path: memchr-2.8.3/src/memchr.rs, item: memchr::memchr::memchr, quote: "`haystack`, or `None` if one is not found. If an index is returned, it is"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by: [kio]
+  allowed_layers: unknown
+  evidence:
+    - {path: io/kio/Cargo.toml, quote: 'memchr = { version = "2", default-features = false }'}
+aliases:
+  en: [memchr, find byte, find newline, strchr, memrchr, byte search, scan for delimiter, position of byte, substring search, memmem, read_until]
+  zh: [字节查找, 查找换行符, 查找分隔符, 向量化字节搜索, 子串查找]
+identifiers: [memchr, memrchr, memchr2, memchr3, memchr_iter, memmem, Finder, position, read_until, '\n']
+exclusions:
+  - "byte-oriented only: no UTF-8 awareness and no regex; for tokenising text use a parser"
+  - "for a single short comparison in a hot path the plain iterator position(|&b| b == x) is equivalent semantically; replace it with memchr only for scans over large buffers"
+counter_examples: []
+notes: >-
+  Cargo.lock at the pin has memchr 2.8.3 only; the regex, aho-corasick and serde_json users in the lock are host tools.

@@ -1,0 +1,172 @@
+capability: percpu_static_kcpu_slot
+title: Static per-CPU variables via linker templates (kcpu_slot cpu_slot! / CpuSlot / CpuSlotCell)
+family: cpu.percpu
+summary: >-
+  Typed per-CPU storage. cpu_slot! / cpu_slot_cell! declare a bitwise-copyable template in the
+  `.cpu_slot.template` section; boot code (begin_cpu_init) copies one area per CPU and installs the
+  architecture per-CPU base register, so hot-path access is base + offset with no lock. Access is
+  gated by capability guards: CpuLocalGuard (no migration and no local IRQ reentry) for any value,
+  or T: Sync for shared atomics; remote CPUs are read only through a published CpuArea.
+source: {kind: workspace, crate: kcpu_slot, path: arch/kcpu_slot}
+symbols:
+  - {fqn: kcpu_slot::CpuSlot, kind: struct, path: arch/kcpu_slot/src/static_slot.rs, role: primary}
+  - {fqn: kcpu_slot::CpuSlotCell, kind: struct, path: arch/kcpu_slot/src/static_slot.rs, role: primary}
+  - {fqn: kcpu_slot::cpu_slot, kind: macro, path: arch/kcpu_slot/src/macros.rs, role: constructor}
+  - {fqn: kcpu_slot::cpu_slot_cell, kind: macro, path: arch/kcpu_slot/src/macros.rs, role: constructor}
+  - {fqn: kcpu_slot::cpu_slot_cell_with_template, kind: macro, path: arch/kcpu_slot/src/macros.rs, role: constructor}
+  - {fqn: kcpu_slot::CpuSlot::get, kind: fn, path: arch/kcpu_slot/src/static_slot.rs, role: operation}
+  - {fqn: kcpu_slot::CpuSlot::current_shared, kind: fn, path: arch/kcpu_slot/src/static_slot.rs, role: operation}
+  - {fqn: kcpu_slot::CpuSlot::with_current_irq_disabled, kind: fn, path: arch/kcpu_slot/src/static_slot.rs, role: operation}
+  - {fqn: kcpu_slot::CpuSlot::at, kind: fn, path: arch/kcpu_slot/src/static_slot.rs, role: operation}
+  - {fqn: kcpu_slot::StaticSlotValue, kind: trait, path: arch/kcpu_slot/src/static_slot.rs, role: helper}
+  - {fqn: kcpu_slot::CpuLocalGuard, kind: trait, path: arch/kcpu_slot/src/guard.rs, role: helper}
+  - {fqn: kcpu_slot::CpuPin, kind: trait, path: arch/kcpu_slot/src/guard.rs, role: helper}
+  - {fqn: kcpu_slot::begin_cpu_init, kind: fn, path: arch/kcpu_slot/src/layout.rs, role: operation}
+operations:
+  - name: local_access
+    symbols: [kcpu_slot::CpuSlot::get, kcpu_slot::CpuSlot::with_current_irq_disabled, kcpu_slot::CpuSlot::current_shared]
+    effect: "access the current CPU's value under a CpuLocalGuard (any StaticSlotValue), in a short IRQ-masked closure (T: Sync), or without a guard for T: Sync (atomics)"
+    evidence:
+      - {path: arch/kcpu_slot/src/static_slot.rs, item: kcpu_slot::static_slot::CpuSlot::get, quote: "The guard's guarantee makes any [`StaticSlotValue`] — `Sync` or not —"}
+      - {path: arch/kcpu_slot/src/static_slot.rs, item: kcpu_slot::static_slot::CpuSlot::with_current_irq_disabled, quote: "The slot area must already be initialized. The callback must not block,"}
+  - name: remote_read
+    symbols: [kcpu_slot::CpuSlot::at]
+    effect: "shared read of another CPU's value through a checked, published CpuArea (T: Sync); no unconditional remote write API"
+    evidence:
+      - {path: arch/kcpu_slot/src/static_slot.rs, item: kcpu_slot::static_slot::CpuSlot::at, quote: "/// Shares a value in a checked, published CPU area."}
+  - name: boot
+    symbols: [kcpu_slot::begin_cpu_init]
+    effect: copies the template into a CPU's area and installs the base register; BootCpuToken::publish makes the area visible to remote readers
+    evidence:
+      - {path: arch/kcpu_slot/src/guard.rs, item: kcpu_slot::guard::BootCpuToken, quote: "The token exists after the template has been copied and selected in the"}
+usage_protocol:
+  - step: "declare `cpu_slot_cell! { static NAME: T = init; }` (T: StaticSlotValue), take a kspin::NoPreemptIrqSave (a CpuLocalGuard) and read / write through it; use atomics with current_shared for IRQ-safe counters"
+    evidence:
+      - {path: arch/kcpu_slot/docs/design.md, quote: "`CpuLocalGuard` capability trait"}
+contract:
+  no_std:
+    value: yes (#![no_std], uses alloc)
+    evidence:
+    - path: arch/kcpu_slot/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: static slots live in the linker-reserved per-CPU areas and need no allocation at access time;
+      the templates themselves are static
+    evidence:
+    - path: arch/kcpu_slot/src/lib.rs
+      quote: Static templates live in `.cpu_slot.template`; boot code initializes one
+  blocking:
+    value: direct slot lookup is address computation; with_current_irq_disabled requires a callback that
+      does not block, schedule, change the CPU base or enable IRQs. It does not establish that arbitrary
+      payload operations never block.
+    evidence:
+    - path: arch/kcpu_slot/src/static_slot.rs
+      item: kcpu_slot::static_slot::CpuSlot::with_current_irq_disabled
+      quote: The callback must not block,
+  irq_nmi:
+    value: 'CpuLocalGuard excludes local IRQ reentry; with_current_irq_disabled does not exclude NMI (T:
+      Sync required); T: Sync values may be shared with IRQ/NMI contexts'
+    evidence:
+    - path: arch/kcpu_slot/src/static_slot.rs
+      item: kcpu_slot::static_slot::CpuSlot::with_current_irq_disabled
+      quote: 'NMI is not excluded; `T: Sync` remains required.'
+    - path: arch/kcpu_slot/src/static_slot.rs
+      item: kcpu_slot::static_slot::CpuSlot::current
+      quote: Sync` permits concurrent shared access from IRQ/NMI contexts.
+  ownership_lifetime:
+    value: values are bitwise copies of the template, never dropped; types with ownership, drop or self-reference
+      must use DynamicCpuSlot; slots live as long as the kernel
+    evidence:
+    - path: arch/kcpu_slot/src/static_slot.rs
+      item: kcpu_slot::static_slot::StaticSlotValue
+      quote: ownership, drop, reference, or self-reference semantics must use
+  errors_bounds:
+    value: begin_cpu_init returns Result<BootCpuToken, CpuInitError>; unsupported architectures fail to
+      compile; CPU count and area size come from the linker layout
+    evidence:
+    - path: arch/kcpu_slot/src/layout.rs
+      item: kcpu_slot::layout::begin_cpu_init
+      quote: 'pub unsafe fn begin_cpu_init(cpu: CpuId) -> Result<BootCpuToken, CpuInitError> {'
+    - path: arch/kcpu_slot/docs/design.md
+      quote: '`compile_error!` 拒绝'
+  concurrency:
+    value: 'per-CPU exclusion is established by the caller''s guard, not by the slot; CpuSlotCell is Sync
+      only because every accessor is unsafe or requires T: Sync; adjacent CPU areas never share a cache
+      line'
+    evidence:
+    - path: arch/kcpu_slot/src/static_slot.rs
+      quote: '// SAFETY: Sharing `&CpuSlotCell<T>` does not expose a value directly: the'
+    - path: arch/kcpu_slot/docs/design.md
+      quote: '**相邻 CPU area 永不共享一条 cache line**'
+layers:
+  depends_on:
+  - kiface-cpu-api
+  - kaddr_layout
+  - kbuild_config
+  - kcpu_id_map
+  used_by:
+  - kspin
+  - ktask
+  - krcu
+  - kalloc
+  - kirq
+  - kipi
+  - kcpu
+  - karch
+  - kplat
+  - watchdog
+  - kvmm
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kiface-cpu-api.workspace = true
+  - path: task/kspin/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: arch/kcpu_slot/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: arch/karch/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: platforms/kplat/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: io/watchdog/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: virt/kvmm/Cargo.toml
+    quote: "kcpu_slot.workspace = true [target.'cfg(target_arch"
+  - path: virt/kvmm/Cargo.toml
+    quote: '[target.''cfg(target_arch = "x86_64")''.dependencies]'
+aliases:
+  en: [per-cpu variable, percpu, DEFINE_PER_CPU, this_cpu_ptr, per_cpu, this_cpu_read, this_cpu_inc, CPU-local storage, thread_local per core, per-core data, array indexed by cpu id]
+  zh: [每 CPU 变量, 每核变量, CPU 本地存储, percpu, 按 CPU 编号索引的数组, 每核计数器]
+identifiers: [percpu, per_cpu, DEFINE_PER_CPU, this_cpu, cpu_id, current_cpu, NR_CPUS, "[T; NR_CPUS]", "[AtomicUsize; NR_CPUS]", smp_processor_id, TPIDR_EL1, gs_base, CPU_LOCAL]
+exclusions:
+- static templates must be bitwise copyable (StaticSlotValue); Vec, Box, Arc and other owning types need
+  DynamicCpuSlot (percpu_dynamic_kcpu_slot) or a per-CPU array indexed by CPU id behind a lock
+- 'the guard (CpuLocalGuard, today only kspin::NoPreemptIrqSave) provides exclusion, not the slot: a plain
+  NoPreempt does not stop local IRQ reentry'
+- needs boot-time per-CPU area initialization (begin_cpu_init) and the base register; unusable before
+  then and on unsupported architectures
+- 'remote CPU access is shared-read only for T: Sync; there is no remote write API'
+- not a replacement for a plain [AtomicX; NR_CPUS] array when the data must be read cheaply by all CPUs
+  with no area publication or base register (e.g. per-CPU stats scanned remotely)
+- 'Remote access returns a shared &T for T: Sync; interior-mutability operations such as atomic stores
+  remain possible. It supplies neither exclusive remote mutation nor a snapshot of all CPUs.'
+counter_examples: []
+notes: >-
+  khal::percpu only re-exports kplat::cpu init/id helpers (no storage). The pre-kcpu_slot `percpu`
+  crate was removed (design.md).

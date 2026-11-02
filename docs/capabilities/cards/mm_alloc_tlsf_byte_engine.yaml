@@ -1,0 +1,98 @@
+capability: mm_alloc_tlsf_byte_engine
+title: TLSF byte allocator over caller-provided pools (alloc-engine TlsfByteAllocator)
+family: mm.allocator
+summary: >-
+  Byte-granularity ByteAllocator that wraps rlsf::Tlsf with fixed FLLEN 28 and SLLEN 32 and keeps
+  its own pool/used byte counters. kdma uses it for DMA bounce memory; kalloc can select it as the
+  heap with the tlsf feature.
+source: {kind: workspace, crate: alloc-engine, path: mm/alloc-engine}
+symbols:
+  - {fqn: alloc_engine::TlsfByteAllocator, kind: struct, path: mm/alloc-engine/src/tlsf.rs, role: primary}
+  - {fqn: alloc_engine::TlsfByteAllocator::new, kind: fn, path: mm/alloc-engine/src/tlsf.rs, role: constructor}
+  - {fqn: alloc_engine::ByteAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+  - {fqn: alloc_engine::BaseAllocator, kind: trait, path: mm/alloc-engine/src/lib.rs, role: operation}
+operations:
+  - name: add_pool
+    symbols: [alloc_engine::BaseAllocator]
+    effect: init_region / add_region insert a raw memory pool as a free block; add_region returns InvalidInput if TLSF rejects it
+    evidence:
+      - {path: mm/alloc-engine/src/tlsf.rs, item: alloc_engine::tlsf::TlsfByteAllocator::add_region, quote: ".ok_or(AllocError::InvalidInput)?;"}
+  - name: allocate_deallocate
+    symbols: [alloc_engine::ByteAllocator]
+    effect: allocate(layout) returns NoMemory on failure and tracks used bytes; deallocate needs the original layout alignment
+    evidence:
+      - {path: mm/alloc-engine/src/tlsf.rs, item: alloc_engine::tlsf::TlsfByteAllocator::allocate, quote: "self.inner.allocate(layout).ok_or(AllocError::NoMemory)?;"}
+      - {path: mm/alloc-engine/src/tlsf.rs, item: alloc_engine::tlsf::TlsfByteAllocator::deallocate, quote: "unsafe { self.inner.deallocate(ptr, layout.align()) }"}
+usage_protocol:
+  - step: TlsfByteAllocator::new() is const; call init_region with an exclusively owned writable pool
+    evidence: [{path: mm/alloc-engine/src/tlsf.rs, item: alloc_engine::tlsf::TlsfByteAllocator::init_region, quote: "The allocator's region contract transfers exclusive use of"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: manages backing regions/pools supplied by the caller; the backing storage remains exclusively
+      reserved to this allocator while managed. No broader allocation/reentrancy guarantee is established
+      here.
+    evidence:
+    - path: mm/alloc-engine/src/tlsf.rs
+      item: alloc_engine::tlsf::TlsfByteAllocator::init_region
+      quote: 'fn init_region(&mut self, start: usize, size: usize) {'
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the allocator takes exclusive use of each pool for as long as TLSF manages it
+    evidence:
+    - path: mm/alloc-engine/src/tlsf.rs
+      item: alloc_engine::tlsf::TlsfByteAllocator::init_region
+      quote: this live pool to TLSF; it remains allocated while TLSF manages it.
+  errors_bounds:
+    value: allocate returns AllocError::NoMemory; init_region unwraps the TLSF insertion (panics on failure);
+      max pool size 32 * 2^28 per the source comment
+    evidence:
+    - path: mm/alloc-engine/src/tlsf.rs
+      item: alloc_engine::tlsf::TlsfByteAllocator
+      quote: '// max pool size: 32 * 2^28 = 8G'
+    - path: mm/alloc-engine/src/tlsf.rs
+      item: alloc_engine::tlsf::TlsfByteAllocator::init_region
+      quote: .unwrap();
+  concurrency:
+    value: not internally synchronized; methods take &mut self
+    evidence:
+    - path: mm/alloc-engine/src/lib.rs
+      item: alloc_engine::ByteAllocator::allocate
+      quote: 'fn allocate(&mut self, layout: Layout) -> AllocResult<NonNull<u8>>;'
+layers:
+  depends_on:
+  - rlsf
+  used_by:
+  - kalloc
+  - kdma
+  allowed_layers: unknown
+  evidence:
+  - path: io/kdma/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["tlsf"] }
+  - path: mm/kalloc/Cargo.toml
+    quote: tlsf = ["alloc-engine/tlsf"]
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+  - path: mm/alloc-engine/Cargo.toml
+    quote: rlsf = { version = "0.2", optional = true }
+aliases:
+  en: [tlsf, two-level segregated fit, rlsf, real-time allocator, pool allocator, bounce buffer allocator, byte allocator]
+  zh: [TLSF 分配器, 两级分离适配, 池分配器, 字节分配器, 实时分配器]
+identifiers: [tlsf, fl, sl, first_level, second_level, free_block, pool, insert_free_block_ptr]
+exclusions:
+  - requires the `tlsf` cargo feature of alloc-engine
+  - not a typed object cache; no per-type slab semantics
+  - not thread-safe by itself
+counter_examples: []
+notes: >-
+  buddy_system_allocator 0.10.0 and rlsf 0.2.3 are declared only as optional dependencies of
+  alloc-engine and only used through these wrappers at the pin; there is no separate dependency card.

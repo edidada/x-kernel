@@ -1,0 +1,162 @@
+capability: completion_tokens
+title: Linux-style completion with caller-owned stack waiters (kcompletion::Completion)
+family: sync.completion
+summary: >-
+  Completion counter (complete / complete_all / try_wait / reinit) guarded by a SpinNoIrq, with an
+  intrusive FIFO list of pinned stack waiters. Construction and wait registration do not allocate;
+  signalling is non-sleeping and IRQ-safe. The host supplies a SyncWake notifier and a park closure;
+  ktask provides the task-bound wrappers CompletionWait and wait_for_completion.
+source: {kind: workspace, crate: kcompletion, path: sync/kcompletion}
+symbols:
+  - {fqn: kcompletion::Completion, kind: struct, path: sync/kcompletion/src/completion.rs, role: primary}
+  - {fqn: kcompletion::Completion::new, kind: fn, path: sync/kcompletion/src/completion.rs, role: constructor}
+  - {fqn: kcompletion::Completion::complete, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::Completion::complete_all, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::Completion::complete_all_defer_wake, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::Completion::try_wait, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::Completion::reinit, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::Completion::wait_with, kind: fn, path: sync/kcompletion/src/completion.rs, role: operation}
+  - {fqn: kcompletion::SyncWake, kind: trait, path: sync/kcompletion/src/completion.rs, role: helper}
+  - {fqn: kcompletion::DeferredWake, kind: struct, path: sync/kcompletion/src/completion.rs, role: helper}
+  - {fqn: ktask::wait_for_completion, kind: fn, path: task/ktask/src/completion.rs, role: operation}
+  - {fqn: ktask::completion::CompletionWait, kind: struct, path: task/ktask/src/completion.rs, role: helper}
+operations:
+- name: complete
+  symbols:
+  - kcompletion::Completion::complete
+  effect: adds one token and notifies the oldest registered waiter
+  evidence:
+  - path: sync/kcompletion/src/completion.rs
+    item: kcompletion::completion::Completion::complete
+    quote: Adds one token and notifies the oldest registered waiter, if any.
+- name: complete_all
+  symbols:
+  - kcompletion::Completion::complete_all
+  effect: sticky completion until reinit; wakes all registered waiters
+  evidence:
+  - path: sync/kcompletion/src/completion.rs
+    item: kcompletion::completion::Completion::complete_all
+    quote: Publishes sticky completion and notifies all currently registered waiters.
+- name: wait
+  symbols:
+  - ktask::wait_for_completion
+  - kcompletion::Completion::wait_with
+  effect: under the completion lock, first consume a token/sticky completion if available; otherwise link
+    the pinned stack waiter, release the lock, then park using the same notification latch as SyncWake;
+    repeat after spurious wakes
+  evidence:
+  - path: sync/kcompletion/src/completion.rs
+    item: kcompletion::completion::Completion::wait_with
+    quote: It must use the same notification latch
+  - path: sync/kcompletion/src/completion.rs
+    item: kcompletion::completion::Completion::wait_with
+    quote: state.waiters.push_back(entry);
+usage_protocol:
+  - step: "task side: ktask::wait_for_completion(&c)? in sleepable task context (InvalidInput otherwise, even if already signalled)"
+    evidence: [{path: task/ktask/src/completion.rs, item: ktask::completion::wait_for_completion, quote: "Returns [`KError::InvalidInput`] in a non-sleepable context, even when the"}]
+  - step: "producer/IRQ side: c.complete() or c.complete_all() after publishing the state"
+    evidence: [{path: sync/kcompletion/src/completion.rs, item: kcompletion::completion::Completion, quote: "Signaling and queries"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: sync/kcompletion/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: construction and wait registration do not allocate; complete_all_defer_wake clones an existing
+      Arc
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion
+      quote: Construction and wait registration do not allocate.
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion::complete_all_defer_wake
+      quote: Cloning the existing Arc does not allocate
+  blocking:
+    value: waiting parks via the host closure outside the completion lock (no timeout or signal interruption);
+      signalling does not sleep
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion::wait_with
+      quote: No timeout or signal
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion
+      quote: non-sleeping and IRQ-safe once the platform supports [`SpinNoIrq`]
+  irq_nmi:
+    value: complete / complete_all / queries IRQ-safe (spinlock with IRQs disabled); NMI not stated
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion
+      quote: non-sleeping and IRQ-safe once the platform supports [`SpinNoIrq`]
+  ownership_lifetime:
+    value: waiter nodes live on the waiter's stack; caller must keep the stack, completion and wake storage
+      alive until cleanup (unsafe wait_with); DeferredWake dropped without wake() can strand parked waiters
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::DeferredWake
+      quote: Dropping this handle does not notify
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion::wait_with
+      quote: either prevent cleanup from being bypassed or retain all that storage if it is bypassed.
+  errors_bounds:
+    value: wait_with returns unit; ktask::wait_for_completion returns KResult (InvalidInput when not sleepable)
+    evidence:
+    - path: task/ktask/src/completion.rs
+      item: ktask::completion::wait_for_completion
+      quote: 'pub fn wait_for_completion(completion: &Completion) -> KResult<()>'
+  concurrency:
+    value: FIFO notification; token acquisition is not reserved for the notified waiter (a concurrent
+      try_wait may take it); notifications run under the completion lock
+    evidence:
+    - path: sync/kcompletion/src/completion.rs
+      item: kcompletion::completion::Completion
+      quote: Notification order is FIFO; token acquisition is not reserved
+    - path: sync/kcompletion/src/completion.rs
+      quote: Notifications run under the completion
+layers:
+  depends_on:
+  - kspin
+  used_by:
+  - kdriver
+  - kiface-task-wait-api
+  - kirq
+  - krcu
+  - kruntime
+  - ktask
+  - ktracing
+  - kworkerpool_ng
+  - kworkqueue_ng
+  allowed_layers: unknown
+  evidence:
+  - path: sync/kcompletion/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kcompletion = { workspace = true, optional = true }
+  - path: util/kiface/crates/task-wait-api/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: kcompletion = { workspace = true }
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+aliases:
+  en: [completion, complete, wait_for_completion, init_completion, complete_all, reinit_completion, done flag handshake, oneshot signal]
+  zh: [完成量, 完成通知, 等待完成, 一次性信号]
+identifiers: [done, complete, wait_for_completion, COMPLETE_ALL, waiters, park, woke]
+exclusions:
+  - "predicate-style waits that carry no tokens belong to task_predicate_wait_queue_noalloc (kcompletion::WaitQueue)"
+  - "no timeout or signal interruption in wait; use ktask::WaitQueue::wait_timeout or ktask::future::timeout for those"
+  - "ksync::Semaphore is the blocking counting alternative when permits must be returned"
+counter_examples: []
+notes: >-
+  The general SyncWake trait is unsafe to implement (IRQ-safe, nonblocking, allocation-free, no
+  unwinding). Task-bound waiting is in task/ktask/src/completion.rs; krcu uses it for synchronize_rcu.

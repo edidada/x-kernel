@@ -1,0 +1,126 @@
+capability: blocking_mutex
+title: Sleeping task mutex with adaptive spinning (kmutex::Mutex, re-exported as ksync::Mutex)
+family: sync.mutex
+summary: >-
+  lock_api-based mutex that records the owning task key, spins adaptively, then registers an
+  event-listener and sleeps through TaskExecutionIf::block_on until unlock wakes one waiter.
+  Requires sleepable task context; recursion panics; guards cannot move to another task.
+source: {kind: workspace, crate: kmutex, path: sync/kmutex}
+symbols:
+  - {fqn: kmutex::Mutex, kind: struct, path: sync/kmutex/src/mutex.rs, role: primary}
+  - {fqn: kmutex::Mutex::new, kind: fn, path: sync/kmutex/src/mutex.rs, role: constructor}
+  - {fqn: kmutex::MutexGuard, kind: type, path: sync/kmutex/src/mutex.rs, role: helper}
+  - {fqn: kmutex::RawMutex, kind: struct, path: sync/kmutex/src/mutex.rs, role: helper}
+  - {fqn: kmutex::SpinConfig, kind: struct, path: sync/kmutex/src/spin.rs, role: helper}
+operations:
+  - name: lock
+    symbols: [kmutex::Mutex, kmutex::RawMutex]
+    effect: CAS the owner key; adaptive spin; register listener, recheck owner, then sleep until woken
+    evidence:
+      - path: sync/kmutex/src/mutex.rs
+        item: kmutex::mutex::RawMutex::lock
+        quote: listener!(self.event => listener);
+      - path: sync/kmutex/src/mutex.rs
+        item: kmutex::mutex::RawMutex::lock
+        quote: TaskExecutionIf::block_on(core::pin::pin!(listener));
+  - name: unlock
+    symbols: [kmutex::RawMutex]
+    effect: clears the owner key (asserting the caller is the owner) and wakes one listener
+    evidence: [{path: sync/kmutex/src/mutex.rs, item: kmutex::mutex::RawMutex, quote: "wait queue after adaptive spinning. Unlock wakes one listener."}]
+usage_protocol:
+- step: Use the public wrapper and .lock() or .read()/.write() only in sleepable task context. For static
+    initialization use ksync::static_lock! when stats is enabled; new() is const only without stats.
+  evidence:
+  - path: sync/kmutex/src/lib.rs
+    quote: Blocking acquisition requires sleepable task context and is not recursive.
+  - path: sync/kmutex/src/mutex.rs
+    item: kmutex::mutex::Mutex::new
+    quote: '#[cfg(feature = "stats")]'
+  - path: task/ksync/src/lib.rs
+    quote: pub use klockstat::{LOCK_CLASSES, LockClassStats, linkme, static_lock};
+- step: the linked task runtime must provide kiface_task_api::TaskExecutionIf (identity, yield, wait)
+  evidence:
+  - path: sync/kmutex/src/lib.rs
+    quote: The host supplies [`kiface_task_api::TaskExecutionIf`]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: sync/kmutex/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: sleeps after bounded adaptive spinning; requires sleepable task context; recursion panics
+    evidence:
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::Mutex
+      quote: Blocking acquisition requires sleepable context and panics on recursion.
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::RawMutex::lock
+      quote: listener!(self.event => listener);
+  irq_nmi:
+    value: not usable from IRQ or softirq (requires sleepable task context); NMI not stated
+    evidence:
+    - path: sync/kmutex/src/lib.rs
+      quote: Blocking acquisition requires sleepable task context and is not recursive.
+  ownership_lifetime:
+    value: guard is not Send; the owning task may migrate CPUs while holding it; owner key stays valid
+      across blocking and migration
+    evidence:
+    - path: sync/kmutex/src/lib.rs
+      quote: Guards are not Send, but the owning task may migrate
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::RawMutex::lock
+      quote: The owner key remains valid across blocking and CPU migration.
+  errors_bounds:
+    value: lock() has no error return; recursive acquisition panics
+    evidence:
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::Mutex
+      quote: panics on recursion.
+  concurrency:
+    value: atomic owner id; unlock wakes one listener; no starvation-freedom promise stated here
+    evidence:
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::RawMutex::unlock
+      quote: let owner_id = self.owner_id.swap(0, Ordering::Release);
+    - path: sync/kmutex/src/mutex.rs
+      item: kmutex::mutex::RawMutex::unlock
+      quote: self.event.notify(1);
+layers:
+  depends_on:
+  - kiface-task-api
+  used_by:
+  - kirq
+  - krcu
+  - kruntime
+  - ksync
+  - ktask
+  allowed_layers: unknown
+  evidence:
+  - path: sync/kmutex/Cargo.toml
+    quote: kiface-task-api.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kmutex.workspace = true
+aliases:
+  en: [mutex, sleeping lock, blocking lock, sleepable lock, mutex_lock, lock_api mutex, sleep lock]
+  zh: [互斥锁, 睡眠锁, 可睡眠锁, 阻塞锁, 互斥量]
+identifiers: [owner_id, current_owner_key, spin_before_yield, max_spins, Event, listener, GuardNoSend, park]
+exclusions:
+  - "Blocking acquisition requires sleepable task context. Select a spinlock only after checking its IRQ, preemption and NMI contract; SpinNoIrq is not a general NMI-safe replacement."
+  - "does not by itself provide reader-writer sharing (use ksync::RwLock) or counting (use ksync::Semaphore)"
+counter_examples: []
+notes: >-
+  ksync::Mutex is a pure re-export of kmutex::Mutex (task/ksync/src/mutex.rs). ksync::RwLock and
+  ksync::Semaphore are separate implementations in ksync that depend on ktask::future::block_on.
+  A second copy of the spin back-off helper exists in task/ksync/src/util.rs.

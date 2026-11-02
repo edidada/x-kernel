@@ -1,0 +1,158 @@
+capability: rcu_owned_krcu
+title: RCU-protected owning pointer with scoped reads and synchronous replace (krcu::Rcu)
+family: sync.rcu
+summary: >-
+  Kernel RCU publication container. Rcu<T> owns the currently published Box<T>; readers borrow it
+  inside a read scope (with_read / with_interrupt_read) without locks or reference counts, and
+  replace_sync swaps in a new allocation, waits one grace period and returns the old Box. Several
+  old versions may coexist while their readers finish. Not a lock and not an atomic multi-object
+  snapshot.
+source: {kind: workspace, crate: krcu, path: sync/krcu}
+symbols:
+  - {fqn: krcu::Rcu, kind: struct, path: sync/krcu/src/owned.rs, role: primary}
+  - {fqn: krcu::Rcu::new, kind: fn, path: sync/krcu/src/owned.rs, role: constructor}
+  - {fqn: krcu::Rcu::with_read, kind: fn, path: sync/krcu/src/owned.rs, role: operation}
+  - {fqn: krcu::Rcu::read, kind: fn, path: sync/krcu/src/owned.rs, role: operation}
+  - {fqn: krcu::Rcu::replace_sync, kind: fn, path: sync/krcu/src/owned.rs, role: operation}
+  - {fqn: krcu::ReadScope, kind: struct, path: sync/krcu/src/read.rs, role: helper}
+  - {fqn: krcu::with_read, kind: fn, path: sync/krcu/src/read.rs, role: operation}
+  - {fqn: krcu::with_interrupt_read, kind: fn, path: sync/krcu/src/read.rs, role: operation}
+  - {fqn: krcu::synchronize_rcu, kind: fn, path: sync/krcu/src/synchronize.rs, role: operation}
+operations:
+  - name: read
+    symbols: [krcu::Rcu::with_read, krcu::Rcu::read, krcu::with_read, krcu::with_interrupt_read]
+    effect: borrow the published value for the duration of a scope; only owned results may escape; the reader never blocks writers
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::with_read, quote: "Only owned results may escape the closure"}
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::read, quote: "let value = self.value.load(Ordering::Acquire);"}
+  - name: replace_sync
+    symbols: [krcu::Rcu::replace_sync]
+    effect: atomically exchanges the published allocation, waits for a grace period, returns the old Box (or the unused new Box with an error and no exchange)
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "let old = self.value.swap(Box::into_raw(new_value), Ordering::AcqRel);"}
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "Returns the old allocation only after its protected readers have exited."}
+  - name: synchronize_rcu
+    symbols: [krcu::synchronize_rcu]
+    effect: low-level wait for a future grace period for callers that withdrew and retain their own objects; unsafe
+    evidence:
+      - {path: sync/krcu/src/lib.rs, quote: "for unsafe integrations that withdraw and retain their own objects"}
+usage_protocol:
+  - step: "initialize the boot RCU service (init_service) before any wait or read"
+    evidence: [{path: sync/krcu/src/lib.rs, quote: "[`init_service`] is a boot integration operation."}]
+  - step: "read inside with_read / Rcu::with_read in task context, or with_interrupt_read in a watched IRQ/NMI handler; do not voluntarily sleep inside"
+    evidence:
+      - {path: sync/krcu/src/lib.rs, quote: "Initialized hardirq, softirq and NMI handlers use [`with_interrupt_read`]"}
+  - step: "update with replace_sync from sleepable task context holding no lock needed by readers"
+    evidence: [{path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "The caller must hold no lock needed by a reader or the progress service."}]
+contract:
+  no_std:
+    value: "yes (#![no_std], uses alloc)"
+    evidence: [{path: sync/krcu/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "Rcu::new takes an existing Box and does not allocate; reads do not allocate; replace_sync preparation and wait do not allocate, but callback storage still uses the kernel's fatal OOM policy"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::new, quote: "Takes ownership of an initialized allocation without waiting or allocating."}
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "callback storage still follows the kernel's fatal OOM policy"}
+  blocking:
+    value: "read scopes must not voluntarily sleep or yield (preemption and migration allowed); replace_sync and synchronize_rcu sleep until the grace period ends and need sleepable task context outside read scopes"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::with_read, quote: "not voluntarily sleep or yield, though involuntary preemption and"}
+      - {path: sync/krcu/src/lib.rs, quote: "Synchronous waits and drains require sleepable task context outside read"}
+  irq_nmi:
+    value: "readers: with_read panics in IRQ/NMI/BH-disabled context; with_interrupt_read is the entry for initialized hardirq, softirq and NMI handlers. Waiting (replace_sync) is not allowed there"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::with_read, quote: "Panics outside watched task context, including interrupt handlers and"}
+      - {path: sync/krcu/src/read.rs, item: krcu::read::with_interrupt_read, quote: "Panics outside watched hardirq, serving-softirq or NMI context, if current"}
+  ownership_lifetime:
+    value: "Rcu<T> owns the current Box<T>; readers get only scoped shared borrows tied to the scope; dropping the container drops the current value directly with no grace period"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu, quote: "Readers receive only scoped shared"}
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu, quote: "directly in the dropping context, without another grace period."}
+  errors_bounds:
+    value: "replace_sync returns Err((KError, unused Box)) with InvalidInput outside sleepable task context (including inside a read scope) or BadState before service readiness; publication unchanged on error"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "Returns `InvalidInput` outside sleepable task context, including inside"}
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu::replace_sync, quote: "pub fn replace_sync(&self, new_value: Box<T>) -> Result<Box<T>, (KError, Box<T>)>"}
+  concurrency:
+    value: "lock-free readers (Acquire load of an AtomicPtr); concurrent replacements may overlap and each gets its own displaced allocation; not CAS and not a lock for interior mutable state; Sync only for T: Send + Sync"
+    evidence:
+      - {path: sync/krcu/src/owned.rs, item: krcu::owned::Rcu, quote: "Concurrent replacements may"}
+      - {path: sync/krcu/src/owned.rs, quote: "unsafe impl<T: Send + Sync> Sync for Rcu<T> {}"}
+layers:
+  depends_on:
+  - krcu-core
+  - karch
+  - kcpu_id_map
+  - kcpu_slot
+  - kspin
+  - kiface
+  - kerrno
+  - klazy
+  - kmutex
+  - kcompletion
+  - kiface-cpu-api
+  - kiface-irq-context-api
+  - kiface-task-api
+  used_by:
+  - kruntime
+  - kfeat
+  - posix-process
+  - kxarray
+  - krcu-list
+  allowed_layers: unknown
+  evidence:
+  - path: sync/krcu/Cargo.toml
+    quote: krcu-core.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: krcu.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: krcu.workspace = true
+  - path: util/kxarray/Cargo.toml
+    quote: krcu.workspace = true
+  - path: util/krcu-list/Cargo.toml
+    quote: krcu.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: karch.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kiface.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: klazy.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kiface-cpu-api.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kiface-irq-context-api.workspace = true
+  - path: sync/krcu/Cargo.toml
+    quote: kiface-task-api.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: krcu.workspace = true
+aliases:
+  en: [RCU, read-copy-update, rcu_read_lock, rcu_dereference, rcu_assign_pointer, synchronize_rcu, copy-on-write publish, lock-free read-mostly pointer, atomic pointer swap with deferred free, epoch-based reclamation]
+  zh: [读拷贝更新, RCU, 读多写少, 无锁读, 指针发布, 宽限期, 延迟回收, 原子指针替换]
+identifiers: [AtomicPtr, swap, Box::into_raw, Box::from_raw, grace_period, GracePeriod, quiescent, read_scope, rcu_read_lock, synchronize_rcu, reclaim, retire]
+exclusions:
+- 'Rcu is not a lock: it does not serialize writers, protect interior-mutable state, or give an atomic
+  snapshot across two containers; use one Rcu for a snapshot replaced atomically'
+- 'replace_sync sleeps for a grace period: not usable from IRQ/softirq/NMI, with IRQs or preemption disabled,
+  or inside a read scope; use PreparedCallback (rcu_callback_krcu) for asynchronous destruction'
+- read scopes forbid voluntary sleep; data read in a scope that must sleep needs its own reference (e.g.
+  Arc<T> cloned inside the scope)
+- 'replace_sync is an exchange, not compare-and-swap: overlapping successful callers each receive the
+  allocation displaced by their own exchange, which may be the original value or an earlier replacement.
+  It does not serialize a read-modify-write transaction.'
+counter_examples: []
+notes: >-
+  Cross-card: rcu_callback_krcu (call_rcu style), rcu_list_krcu_list (RCU list). The facade crate
+  krcu depends on krcu-core for the algorithm; krcu-core readers do not prove participation in the
+  kernel service (see lib.rs integration boundary).

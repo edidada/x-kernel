@@ -1,0 +1,84 @@
+capability: registration_linkme
+title: Link-time distributed slices that crates register elements into (linkme)
+family: misc.registration
+summary: >-
+  linkme's #[distributed_slice] declares a static slice [T] whose elements are collected by the linker
+  from every crate in the final image; #[distributed_slice(NAME)] on a const static (or a function) adds
+  an element from any crate. This card is about the crate itself: the kernel's trap-handler lists (IRQ,
+  NMI, PAGE_FAULT) and the lock-statistics class list are linkme slices. Check other registration
+  cards for the kernel-side registration conventions built on it.
+source: {kind: dependency, crate: linkme, version: 0.3.37}
+symbols:
+  - {fqn: linkme::DistributedSlice, kind: struct, path: src/distributed_slice.rs, role: primary}
+  - {fqn: linkme::DistributedSlice::static_slice, kind: fn, path: src/distributed_slice.rs, role: operation}
+operations:
+  - name: declare
+    symbols: [linkme::DistributedSlice]
+    effect: "#[distributed_slice] on a static [T] rewrites its type to DistributedSlice<[T]>"
+    evidence:
+      - {path: linkme-0.3.37/src/distributed_slice.rs, item: linkme::distributed_slice::DistributedSlice, quote: "The attribute rewrites the `[T]` type of the static into"}
+  - name: register_element
+    symbols: [linkme::DistributedSlice]
+    effect: "#[distributed_slice(PATH)] on a const-initialised static adds an element from any crate linked into the binary; on a function it adds a pointer to that function"
+    evidence:
+      - {path: linkme-0.3.37/src/distributed_slice.rs, item: linkme::distributed_slice::DistributedSlice, quote: "Elements may be defined in the same crate that declares the distributed"}
+  - name: iterate
+    symbols: [linkme::DistributedSlice::static_slice]
+    effect: view the collected elements as &'static [T]; the DistributedSlice also derefs to the slice
+    evidence:
+      - {path: linkme-0.3.37/src/distributed_slice.rs, item: linkme::distributed_slice::DistributedSlice::static_slice, quote: "pub fn static_slice(self) -> &'static [T] {"}
+contract:
+  no_std:
+    value: "yes: #![no_std]"
+    evidence:
+      - {path: linkme-0.3.37/src/lib.rs, quote: "#![no_std]"}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: elements are statics in the binary (const-initialised) and live for 'static
+    evidence:
+      - {path: linkme-0.3.37/src/distributed_slice.rs, item: linkme::distributed_slice::DistributedSlice::static_slice, quote: "pub fn static_slice(self) -> &'static [T] {"}
+  errors_bounds:
+    value: duplicate declarations with the same name panic at runtime when the slice is read; element initialisers must be const expressions
+    evidence:
+      - {path: linkme-0.3.37/src/distributed_slice.rs, item: linkme::distributed_slice::DistributedSlice::static_slice, quote: "duplicate #[distributed_slice] with name"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by:
+  - kcpu
+  - khal
+  - klockstat
+  - kspin
+  - ksync
+  - kuaccess
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: linkme = "0.3.33"
+  - path: arch/kcpu/Cargo.toml
+    quote: linkme = { workspace = true }
+  - path: arch/khal/Cargo.toml
+    quote: linkme.workspace = true
+  - path: util/klockstat/Cargo.toml
+    quote: linkme.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: linkme.workspace = true
+  - path: arch/kcpu/src/excp.rs
+    quote: distributed_slice as def_trap_handler, distributed_slice as register_trap_handler,
+  - path: task/kspin/Cargo.toml
+    quote: linkme = { workspace = true, optional = true }
+  - path: task/ksync/Cargo.toml
+    quote: linkme = { workspace = true, optional = true }
+aliases:
+  en: [linkme, distributed slice, link time registration, linker section registry, static registry, initcall table, handler table, plugin registry, ctor registration]
+  zh: [分布式切片, 链接期注册, 链接段注册表, 静态注册表, 处理函数表, 初始化调用表]
+identifiers: [distributed_slice, DistributedSlice, linkme, linker_section, def_trap_handler, register_trap_handler, LOCK_CLASSES, initcall]
+exclusions:
+  - "element order across crates is unspecified; do not rely on registration order"
+  - "registration is static: for registrations that happen at runtime (drivers added dynamically, handlers removed) use a runtime registry"
+  - "this card documents the dependency crate; the kernel conventions on top of it (trap handler lists, lock-stat classes) live in the owning crates (kcpu, klockstat)"
+counter_examples: []
+notes: >-
+  Three uses at the pin: kcpu trap handlers (IRQ, NMI, PAGE_FAULT slices), klockstat LOCK_CLASSES, and klockstat-macros emitting elements. ksync and kspin list linkme only for the stats feature or re-export.

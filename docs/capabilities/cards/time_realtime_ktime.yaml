@@ -1,0 +1,139 @@
+capability: time_realtime_ktime
+title: Realtime / boottime clocks and deadline conversion (ktime::realtime / boottime / *_deadline_to_monotonic)
+family: time.types
+summary: >-
+  System timekeeper deriving realtime and boottime from the monotonic clock: realtime(), boottime(),
+  realtime_and_monotonic() (untorn pair), set_realtime_checked (validated wall-clock set),
+  inject_sleeptime, realtime/boottime deadline conversion to the monotonic timer domain, and clock
+  change observers.
+source: {kind: workspace, crate: ktime, path: core/ktime}
+symbols:
+  - {fqn: ktime::realtime, kind: fn, path: core/ktime/src/lib.rs, role: primary}
+  - {fqn: ktime::boottime, kind: fn, path: core/ktime/src/lib.rs, role: primary}
+  - {fqn: ktime::realtime_and_monotonic, kind: fn, path: core/ktime/src/lib.rs, role: operation}
+  - {fqn: ktime::set_realtime_checked, kind: fn, path: core/ktime/src/lib.rs, role: operation}
+  - {fqn: ktime::inject_sleeptime, kind: fn, path: core/ktime/src/lib.rs, role: operation}
+  - {fqn: ktime::realtime_deadline_to_monotonic, kind: fn, path: core/ktime/src/lib.rs, role: operation}
+  - {fqn: ktime::boottime_deadline_to_monotonic, kind: fn, path: core/ktime/src/lib.rs, role: operation}
+operations:
+  - name: read_realtime
+    symbols: [ktime::realtime]
+    effect: current SystemTime; before a persistent clock is sampled it is the Unix epoch plus elapsed monotonic time
+    evidence:
+      - {path: core/ktime/src/lib.rs, item: ktime::realtime, quote: "Before a persistent clock initializes realtime, the result falls back to"}
+  - name: untorn_pair
+    symbols: [ktime::realtime_and_monotonic]
+    effect: realtime and monotonic from one monotonic sample under the read lock; valid in interrupt context
+    evidence:
+      - {path: core/ktime/src/lib.rs, item: ktime::realtime_and_monotonic, quote: "concurrent wall-clock updates cannot tear the pair."}
+  - name: set_wall_clock
+    symbols: [ktime::set_realtime_checked]
+    effect: validate (not before CLOCK_MONOTONIC, below KTIME_SEC_MAX) and apply atomically; syscall layers keep only the privilege check
+    evidence:
+      - {path: core/ktime/src/lib.rs, item: ktime::set_realtime_checked, quote: "Syscall layers keep only the privilege check and map the error to `EINVAL`."}
+  - name: deadline_conversion
+    symbols: [ktime::realtime_deadline_to_monotonic, ktime::boottime_deadline_to_monotonic]
+    effect: convert a realtime / boottime deadline to MonotonicInstant; past deadlines map to now
+    evidence:
+      - {path: core/ktime/src/lib.rs, item: ktime::realtime_deadline_to_monotonic, quote: "Deadlines that have already passed map to the current monotonic instant."}
+contract:
+  no_std:
+    value: 'yes (#![no_std], #![deny(unsafe_code)])'
+    evidence:
+    - path: core/ktime/src/lib.rs
+      quote: '#![no_std]'
+    - path: core/ktime/src/lib.rs
+      quote: '#![deny(unsafe_code)]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: realtime_and_monotonic / boottime / inject_sleeptime do not sleep
+    evidence:
+    - path: core/ktime/src/lib.rs
+      item: ktime::boottime
+      quote: sleep and is valid in interrupt context and during early boot.
+    - path: core/ktime/src/lib.rs
+      item: ktime::inject_sleeptime
+      quote: zero interval is a successful no-op. This does not sleep and is valid in
+  irq_nmi:
+    value: realtime_and_monotonic and boottime are valid in interrupt context and early boot; registered
+      wakers for inject_sleeptime must be IRQ-safe
+    evidence:
+    - path: core/ktime/src/lib.rs
+      item: ktime::realtime_and_monotonic
+      quote: context and is also valid in interrupt context and during early boot.
+    - path: core/ktime/src/lib.rs
+      item: ktime::inject_sleeptime
+      quote: interrupt context; it performs no device reads. Registered wakers must be
+  ownership_lifetime:
+    value: returns owned Copy timestamps that stay valid after later updates
+    evidence:
+    - path: core/ktime/src/lib.rs
+      item: ktime::realtime_and_monotonic
+      quote: remain valid after later updates.
+  errors_bounds:
+    value: set_realtime_checked -> RealtimeOutOfRange; inject_sleeptime -> SleepTimeError {OutOfRange,
+      InvalidMonotonicBaseline, AccountingInProgress}; every error leaves state unchanged
+    evidence:
+    - path: core/ktime/src/lib.rs
+      item: ktime::inject_sleeptime
+      quote: Every error leaves state unchanged.
+  concurrency:
+    value: state behind a SpinRwNoIrq timekeeper lock; reads and writes are consistent under it
+    evidence:
+    - path: core/ktime/src/lib.rs
+      item: ktime::TIMEKEEPER
+      quote: 'static TIMEKEEPER: SpinRwNoIrq<Timekeeper> = SpinRwNoIrq::new(Timekeeper::INITIAL);'
+layers:
+  depends_on:
+  - khal
+  - ktime_types
+  - kspin
+  - kpoll
+  - klazy
+  - kiface-time-api
+  used_by:
+  - ksyscall
+  - kruntime
+  - kpm
+  - devfs
+  - kvfs
+  - posix-fs
+  - posix-ipc
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: ktime.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: ktime.workspace = true
+  - path: posix/ipc/Cargo.toml
+    quote: ktime.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: khal.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: klazy.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: kiface-time-api.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: ktime.workspace = true
+  - path: core/kpm/Cargo.toml
+    quote: ktime.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: ktime.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: ktime.workspace = true
+aliases:
+  en: [wall clock, gettimeofday, clock_gettime REALTIME, current_time, now(), boot time, uptime including sleep, settimeofday, clock_settime, timekeeping, CLOCK_BOOTTIME, deadline conversion, file timestamp now]
+  zh: [系统时间, 墙上时钟, 当前时间, 开机时间, 设置系统时间, 时间校正, 截止时间换算, 文件时间戳]
+identifiers: [gettimeofday, clock_gettime, settimeofday, CLOCK_REALTIME, CLOCK_BOOTTIME, wall_time, current_time, now, UNIX_EPOCH, "realtime_base", timekeeper, xtime, "unix_seconds"]
+exclusions:
+  - realtime() reflects explicit updates and injected sleep; do not use it for intervals (use the monotonic clock, time_clock_khal)
+  - set_realtime_checked only validates range; the caller must do the privilege check
+counter_examples: []

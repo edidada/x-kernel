@@ -1,0 +1,73 @@
+capability: fixed_vec_arrayvec
+title: Fixed-capacity array-backed vector and string (arrayvec::ArrayVec / ArrayString)
+family: container.fixed_capacity
+summary: >-
+  ArrayVec<T, CAP> is a Vec-like container that stores its contents inline in an array and never
+  allocates; push panics when full, try_push returns CapacityError. ArrayString is the string equivalent.
+source: {kind: dependency, crate: arrayvec, version: 0.7.8}
+symbols:
+  - {fqn: arrayvec::ArrayVec, kind: struct, path: src/arrayvec.rs, role: primary}
+  - {fqn: arrayvec::ArrayVec::new, kind: fn, path: src/arrayvec.rs, role: constructor}
+  - {fqn: arrayvec::ArrayVec::new_const, kind: fn, path: src/arrayvec.rs, role: constructor}
+  - {fqn: arrayvec::ArrayVec::push, kind: fn, path: src/arrayvec.rs, role: operation}
+  - {fqn: arrayvec::ArrayVec::try_push, kind: fn, path: src/arrayvec.rs, role: operation}
+  - {fqn: arrayvec::ArrayVec::try_extend_from_slice, kind: fn, path: src/arrayvec.rs, role: operation}
+  - {fqn: arrayvec::CapacityError, kind: struct, path: src/errors.rs, role: helper}
+operations:
+  - name: push
+    symbols: [arrayvec::ArrayVec::push]
+    effect: append; panics if the vector is full
+    evidence: [{path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::push, quote: "***Panics*** if the vector is already full."}]
+  - name: try_push
+    symbols: [arrayvec::ArrayVec::try_push]
+    effect: append; returns CapacityError carrying the element if full
+    evidence: [{path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::try_push, quote: "pub fn try_push(&mut self, element: T) -> Result<(), CapacityError<T>>"}]
+  - name: construct
+    symbols: [arrayvec::ArrayVec::new, arrayvec::ArrayVec::new_const]
+    effect: empty vector, capacity fixed by the CAP generic; new_const is a const fn for statics
+    evidence: [{path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::new_const, quote: "static ARRAY: ArrayVec<u8, 1024> = ArrayVec::new_const();"}]
+usage_protocol:
+  - step: ArrayVec::<T, CAP>::new() then prefer try_push where overflow is possible
+    evidence: [{path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::try_push, quote: "Push `element` to the end of the vector."}]
+contract:
+  no_std:
+    value: "yes when the std feature is disabled (#![cfg_attr(not(feature=\"std\"), no_std)]; std is a default feature)"
+    evidence:
+      - {path: arrayvec-0.7.8/src/lib.rs, quote: '#![cfg_attr(not(feature="std"), no_std)]'}
+      - {path: mm/page_table/Cargo.toml, quote: 'arrayvec = { version = "0.7", default-features = false }'}
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: stores elements inline in the value itself; a failed try_push returns the element in CapacityError
+    evidence:
+      - {path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec, quote: "The vector is a contiguous value (storing the elements inline) that you can store directly on"}
+  errors_bounds:
+    value: capacity is the const generic CAP; push panics when full; try_push / try_insert / try_extend_from_slice return CapacityError
+    evidence:
+      - {path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::push, quote: "***Panics*** if the vector is already full."}
+      - {path: arrayvec-0.7.8/src/arrayvec.rs, item: arrayvec::arrayvec::ArrayVec::try_extend_from_slice, quote: "pub fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), CapacityError>"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [knet, page_table]
+  allowed_layers: unknown
+  evidence:
+    - {path: mm/page_table/Cargo.toml, quote: 'arrayvec = { version = "0.7", default-features = false }'}
+    - {path: net/knet/Cargo.toml, quote: "arrayvec.workspace = true"}
+aliases:
+  en: [array vec, fixed capacity vec, stack vec, bounded vec, no-alloc vec, small fixed list, array string]
+  zh: [定长向量, 栈上向量, 数组向量, 固定容量, 无堆分配]
+identifiers: [len, cap, CAP, MAX, array, MaybeUninit, push, capacity, remaining_capacity]
+exclusions:
+  - "never grows; if the element count is unbounded use alloc Vec or smallvec (inline_vec_smallvec)"
+  - "push panics when full - use try_push in code paths that must not panic"
+  - "heapless::Vec (fixed_vec_heapless) is the near-equivalent whose push returns Err instead of panicking"
+counter_examples: []
+notes: >-
+  page_table uses it for a bounded TLB-flush address list (FLUSH_THRESHOLD) and knet for a jump-frame
+  stack bounded by MAX_CHAINS.

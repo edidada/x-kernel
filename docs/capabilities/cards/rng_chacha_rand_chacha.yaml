@@ -1,0 +1,52 @@
+capability: rng_chacha_rand_chacha
+title: ChaCha20 seedable random generator (rand_chacha::ChaCha20Rng)
+family: misc.random
+summary: >-
+  rand_chacha provides ChaCha8/12/20 generators implementing rand_core's SeedableRng and RngCore from
+  a 32-byte seed. The kernel entropy pool keeps a ChaCha20Rng, reseeds it from architecture RNG, SMCCC
+  TRNG, VirtIO RNG and jitter sources, and serves /dev/random and getrandom from it. The TEE crypto
+  crate uses a separate 0.10 release of the crate.
+source: {kind: dependency, crate: rand_chacha, version: 0.3.1}
+symbols:
+  - {fqn: rand_chacha::ChaChaRng, kind: type, path: src/lib.rs, role: primary}
+  - {fqn: rand_chacha::ChaChaCore, kind: type, path: src/lib.rs, role: helper}
+operations:
+  - name: seed
+    symbols: [rand_chacha::ChaChaRng]
+    effect: construct from a 32-byte seed through SeedableRng::from_seed
+    evidence:
+      - {path: rand_chacha-0.3.1/src/chacha.rs, item: rand_chacha::chacha::chacha_impl, quote: "$ChaChaXRng { type Seed = [u8; 32]; #[inline] fn from_seed(seed: Self::Seed)"}
+contract:
+  no_std:
+    value: "yes unless the std feature is on (default feature set includes std; the workspace entry sets default-features = false)"
+    evidence:
+      - {path: rand_chacha-0.3.1/src/lib.rs, quote: '#![cfg_attr(not(feature = "std"), no_std)]'}
+      - {path: Cargo.toml, quote: 'rand_chacha = { version = "0.3", default-features = false }'}
+      - {path: rand_chacha-0.3.1/Cargo.toml, quote: 'default = ["std"]'}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime: {value: unknown, evidence: []}
+  errors_bounds: {value: unknown, evidence: []}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by: [entropy]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'rand_chacha = { version = "0.3", default-features = false }'}
+    - {path: util/entropy/Cargo.toml, quote: "rand_chacha.workspace = true"}
+    - {path: util/entropy/src/lib.rs, quote: "Hardware entropy is mixed into a ChaCha20 pool before output. Registered"}
+aliases:
+  en: [chacha20, rand_chacha, csprng, random number generator, prng, seedable rng, getrandom, /dev/random, entropy pool]
+  zh: [ChaCha20, 随机数生成器, 伪随机数, 密码学安全随机数, 熵池, 随机数种子]
+identifiers: [ChaCha20Rng, ChaChaRng, SeedableRng, RngCore, from_seed, fill_bytes, getrandom, entropy]
+exclusions:
+  - "a deterministic generator: it is only as good as its seed; seeding and reseeding policy belong to the entropy crate, so request random bytes through entropy::fill_random instead of constructing a new ChaCha20Rng"
+  - "tee_crypto links rand_chacha 0.10.0 and rand_core 0.10 (a separate Cargo.lock entry), whose traits are not interchangeable with the 0.3 line"
+counter_examples:
+  - path: util/entropy/src/lib.rs
+    why: "entropy is the kernel's seeded pool and the owner of the ChaCha20Rng instance; callers needing random bytes use its fill_random, they do not build their own generator"
+    evidence: [{path: util/entropy/src/lib.rs, quote: "Kernel entropy pool used by `/dev/random`, `getrandom(2)`, and TEE RNG paths."}]
+notes: >-
+  Family crypto-adjacent card; rand 0.8 in mm/alloc-engine is a test and bench dependency only and is not a card.

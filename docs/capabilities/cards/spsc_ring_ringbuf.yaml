@@ -1,0 +1,92 @@
+capability: spsc_ring_ringbuf
+title: Lock-free SPSC FIFO ring buffer with producer/consumer split (ringbuf::HeapRb / StaticRb)
+family: container.ring
+summary: >-
+  Single-producer single-consumer FIFO ring buffer from the ringbuf crate. SharedRb can be split into a
+  Producer and a Consumer handle used from different threads or CPUs; HeapRb stores items on the heap,
+  StaticRb in inline storage with const capacity; LocalRb is the non-synchronised single-thread variant.
+source: {kind: dependency, crate: ringbuf, version: 0.4.8}
+symbols:
+  - {fqn: ringbuf::HeapRb, kind: type, path: src/alias.rs, role: primary}
+  - {fqn: ringbuf::StaticRb, kind: type, path: src/alias.rs, role: primary}
+  - {fqn: ringbuf::SharedRb, kind: struct, path: src/rb/shared.rs, role: primary}
+  - {fqn: ringbuf::LocalRb, kind: struct, path: src/rb/local.rs, role: primary}
+  - {fqn: ringbuf::HeapProd, kind: type, path: src/alias.rs, role: helper}
+  - {fqn: ringbuf::HeapCons, kind: type, path: src/alias.rs, role: helper}
+  - {fqn: ringbuf::traits::Split, kind: trait, path: src/traits/split.rs, role: operation}
+  - {fqn: ringbuf::traits::Producer, kind: trait, path: src/traits/producer.rs, role: operation}
+  - {fqn: ringbuf::traits::Consumer, kind: trait, path: src/traits/consumer.rs, role: operation}
+  - {fqn: ringbuf::traits::RingBuffer, kind: trait, path: src/traits/ring_buffer.rs, role: operation}
+operations:
+  - name: split
+    symbols: [ringbuf::traits::Split]
+    effect: turn the ring buffer into a (producer, consumer) pair
+    evidence:
+      - {path: ringbuf-0.4.8/src/traits/split.rs, item: ringbuf::traits::split::Split::split, quote: "fn split(self) -> (Self::Prod, Self::Cons);"}
+  - name: try_push
+    symbols: [ringbuf::traits::Producer]
+    effect: append one item; on a full buffer the item is handed back in Err
+    evidence:
+      - {path: ringbuf-0.4.8/src/traits/producer.rs, item: ringbuf::traits::producer::Producer::try_push, quote: "If buffer is full returns an `Err` containing the item that hasn't been appended."}
+  - name: try_pop
+    symbols: [ringbuf::traits::Consumer]
+    effect: remove the eldest item; None when empty
+    evidence:
+      - {path: ringbuf-0.4.8/src/traits/consumer.rs, item: ringbuf::traits::consumer::Consumer::try_pop, quote: "Returns `None` if the ring buffer is empty."}
+  - name: push_overwrite
+    symbols: [ringbuf::traits::RingBuffer]
+    effect: on the unsplit buffer, overwrite the oldest item when full (the overwritten item is returned)
+    evidence:
+      - {path: ringbuf-0.4.8/src/traits/ring_buffer.rs, item: ringbuf::traits::ring_buffer::RingBuffer::push_overwrite, quote: "Returns overwritten item if overwriting took place."}
+usage_protocol:
+  - step: create HeapRb::new(capacity) or StaticRb::default(), then rb.split() into producer and consumer halves
+    evidence: [{path: ringbuf-0.4.8/src/lib.rs, quote: "After the ring buffer is created it may be splitted into pair of"}]
+contract:
+  no_std:
+    value: "yes (crate is #![no_std]; HeapRb needs the alloc feature)"
+    evidence:
+      - {path: ringbuf-0.4.8/src/lib.rs, quote: "#![no_std]"}
+      - {path: ringbuf-0.4.8/src/alias.rs, item: ringbuf::alias::HeapRb, quote: "pub type HeapRb<T> = SharedRb<Heap<T>>;"}
+  allocation:
+    value: HeapRb allocates its storage once at construction; StaticRb stores contents inline without heap; push/pop do not allocate (storage is fixed-capacity)
+    evidence:
+      - {path: ringbuf-0.4.8/src/lib.rs, quote: "Contents are stored in dynamic memory."}
+      - {path: ringbuf-0.4.8/src/lib.rs, quote: "Contents can be stored in statically-allocated memory."}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the buffer owns the items; try_push gives the item back on a full buffer; HeapProd/HeapCons share the ring through an Arc
+    evidence:
+      - {path: ringbuf-0.4.8/src/traits/producer.rs, item: ringbuf::traits::producer::Producer::try_push, quote: "If buffer is full returns an `Err` containing the item that hasn't been appended."}
+      - {path: ringbuf-0.4.8/src/alias.rs, item: ringbuf::alias::HeapProd, quote: "pub type HeapProd<T> = CachingProd<Arc<HeapRb<T>>>;"}
+  errors_bounds:
+    value: capacity is fixed (NonZeroUsize); try_push returns Err(item) when full and try_pop returns None when empty; StaticRb capacity must be non-zero
+    evidence:
+      - {path: ringbuf-0.4.8/src/alias.rs, item: ringbuf::alias::StaticRb, quote: "*Capacity (`N`) must be greater than zero.*"}
+      - {path: ringbuf-0.4.8/src/traits/observer.rs, item: ringbuf::traits::observer::Observer::capacity, quote: "fn capacity(&self) -> NonZeroUsize;"}
+  concurrency:
+    value: SharedRb is lock-free SPSC (one producer and one consumer); LocalRb is for single-threaded use only
+    evidence:
+      - {path: ringbuf-0.4.8/src/lib.rs, quote: "Lock-free SPSC FIFO ring buffer"}
+      - {path: ringbuf-0.4.8/src/lib.rs, quote: "Only for single-threaded use."}
+layers:
+  depends_on: []
+  used_by: [console-driver, knet, ktty]
+  allowed_layers: unknown
+  evidence:
+    - {path: net/knet/Cargo.toml, quote: 'ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }'}
+    - {path: io/ktty/Cargo.toml, quote: 'ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }'}
+    - {path: drivers/platform/console/Cargo.toml, quote: "ringbuf = { workspace = true }"}
+aliases:
+  en: [ring buffer, circular buffer, spsc queue, fifo, kfifo, byte queue, producer consumer queue, lock-free queue]
+  zh: [环形缓冲区, 循环队列, 单生产者单消费者队列, 无锁队列, 先进先出队列]
+identifiers: [head, tail, read_idx, write_idx, wrap, capacity, ring, fifo, is_full, is_empty, mask, push, pop]
+exclusions:
+  - "single producer and single consumer only; not an MPMC or multi-producer queue (the crate has no MPMC type)"
+  - "fixed capacity; does not grow"
+  - "the crate gives no statement on IRQ/NMI use; do not suggest it for interrupt-context producers without checking"
+  - "not a replacement for a device-defined descriptor ring such as a virtio virtqueue"
+counter_examples: []
+notes: >-
+  Workspace crates enable only the alloc feature (default-features = false). console-driver uses the
+  workspace alias. No std-only API is needed.

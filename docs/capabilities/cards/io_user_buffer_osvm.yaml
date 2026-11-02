@@ -1,0 +1,85 @@
+capability: io_user_buffer_osvm
+title: Streaming Read/Write adapter over a user-space buffer (osvm::VmBytes / VmBytesMut)
+family: io.buffer
+summary: >-
+  VmBytes (read-only) and VmBytesMut (writable) wrap a user pointer + remaining length and implement
+  kio Read / Write plus IoBuf / IoBufMut, advancing the pointer on each call, so socket and file
+  send/recv code can stream directly from/to user memory. rewind_bytes hands consumed bytes back after a
+  partial completion.
+source: {kind: workspace, crate: osvm, path: process/osvm}
+symbols:
+  - {fqn: osvm::VmBytes, kind: struct, path: process/osvm/src/vm_io.rs, role: primary}
+  - {fqn: osvm::VmBytesMut, kind: struct, path: process/osvm/src/vm_io.rs, role: primary}
+operations:
+  - name: read_into_kernel
+    symbols: [osvm::VmBytes]
+    effect: Read::read copies up to buf.len() bytes from the user buffer and advances ptr / shrinks len
+    evidence:
+      - {path: process/osvm/src/vm_io.rs, quote: "impl Read for VmBytes {"}
+  - name: write_to_user
+    symbols: [osvm::VmBytesMut]
+    effect: Write::write copies buf into user memory and advances ptr / shrinks len; flush is a no-op
+    evidence:
+      - {path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytesMut::write, quote: "write_vm_mem(self.ptr, &buf[..len])?;"}
+  - name: rewind
+    symbols: [osvm::VmBytes, osvm::VmBytesMut]
+    effect: move the cursor back by count; EINVAL on overflow, cursor unchanged
+    evidence:
+      - {path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes::rewind_bytes, quote: "Returns `EINVAL` (`KError::InvalidInput`) when rewinding by `count`"}
+usage_protocol:
+  - step: construct with VmBytes::new(ptr, len) from a syscall (buf, len) pair and pass it to the socket/file send or receive operation
+    evidence: [{path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes, quote: "Implements [`Read`] so it can be passed to socket/file send operations."}]
+contract:
+  no_std:
+    value: "yes (osvm is #![no_std])"
+    evidence: [{path: process/osvm/src/lib.rs, quote: "#![no_std]"}]
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: holds a raw user pointer and length only (public fields); the caller keeps the user buffer valid; no reference into user memory is formed
+    evidence:
+      - {path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes, quote: "pub ptr: *const u8,"}
+  errors_bounds:
+    value: errors from read_vm_mem / write_vm_mem propagate through kio::Result (KError); each call transfers min(len, buf.len()) bytes
+    evidence:
+      - {path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes::read, quote: "let len = self.len.min(buf.len());"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - kio
+  - kerrno
+  used_by:
+  - posix-net
+  - posix-fs
+  - ksyscall
+  allowed_layers: unknown
+  evidence:
+  - path: posix/net/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: osvm.workspace = true
+  - path: process/osvm/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: process/osvm/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: core/ksyscall/Cargo.toml
+    quote: osvm.workspace = true
+aliases:
+  en:
+  - user buffer reader
+  - UserBuf
+  - UserSlice
+  - UserReader
+  - UserWriter
+  - copy user buffer stream
+  - sockaddr user buffer
+  zh:
+  - 用户缓冲区读写适配
+  - 用户态缓冲区游标
+  - 收发包用户缓冲
+identifiers: [UserBuf, UserSlice, UserPtr, ptr, len, "self.ptr.wrapping_add", IoBuf, IoBufMut, remaining]
+exclusions:
+  - one contiguous user buffer only; for scatter/gather iovec lists use iov_iter (io_buffer_iov_iter)
+  - unlike the one-shot read_vm_mem the struct is a cursor (consumes len); do not reuse after a transfer without rewind_bytes
+counter_examples: []

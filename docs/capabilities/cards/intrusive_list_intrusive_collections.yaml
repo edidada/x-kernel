@@ -1,0 +1,111 @@
+capability: intrusive_list_intrusive_collections
+title: Intrusive doubly-linked list with caller-owned nodes (intrusive_collections::LinkedList)
+family: container.list
+summary: >-
+  LinkedList<A> links objects through an embedded Link / AtomicLink field and never allocates for list
+  nodes; an Adapter (usually generated with intrusive_adapter!) says how to reach the link and which
+  pointer type (Box, Arc, UnsafeRef, ...) owns the element. O(1) push/pop at both ends and O(1) removal
+  through a cursor. AtomicLink makes the link shareable between threads. Used for work queues, wait lists,
+  RCU callback queues and allocator free lists.
+source: {kind: dependency, crate: intrusive-collections, version: 0.10.2}
+symbols:
+  - {fqn: intrusive_collections::LinkedList, kind: struct, path: src/linked_list.rs, role: primary}
+  - {fqn: intrusive_collections::LinkedList::new, kind: fn, path: src/linked_list.rs, role: constructor}
+  - {fqn: intrusive_collections::LinkedList::push_back, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: intrusive_collections::LinkedList::push_front, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: intrusive_collections::LinkedList::pop_front, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: intrusive_collections::LinkedList::pop_back, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: intrusive_collections::LinkedList::cursor_mut, kind: fn, path: src/linked_list.rs, role: operation}
+  - {fqn: intrusive_collections::linked_list::Link, kind: struct, path: src/linked_list.rs, role: helper}
+  - {fqn: intrusive_collections::linked_list::AtomicLink, kind: struct, path: src/linked_list.rs, role: helper}
+  - {fqn: intrusive_collections::intrusive_adapter, kind: macro, path: src/adapter.rs, role: helper}
+  - {fqn: intrusive_collections::UnsafeRef, kind: struct, path: src/unsafe_ref.rs, role: helper}
+operations:
+  - name: push_back
+    symbols: [intrusive_collections::LinkedList::push_back, intrusive_collections::LinkedList::push_front]
+    effect: link an owned pointer into the list at an end; no allocation
+    evidence: [{path: intrusive-collections-0.10.2/src/linked_list.rs, item: intrusive_collections::linked_list::LinkedList::push_front, quote: "Inserts a new element at the start of the `LinkedList`."}]
+  - name: pop
+    symbols: [intrusive_collections::LinkedList::pop_front, intrusive_collections::LinkedList::pop_back]
+    effect: unlink and return the owned pointer of an end element
+    evidence: [{path: intrusive-collections-0.10.2/src/linked_list.rs, item: intrusive_collections::linked_list::LinkedList::pop_front, quote: "pub fn pop_front(&mut self) -> Option<<A::PointerOps as PointerOps>::Pointer> {"}]
+  - name: cursor_remove
+    symbols: [intrusive_collections::LinkedList::cursor_mut]
+    effect: positioned insert_before / insert_after / remove through a CursorMut
+    evidence: [{path: intrusive-collections-0.10.2/src/linked_list.rs, item: intrusive_collections::linked_list::CursorMut::insert_after, quote: "pub fn insert_after(&mut self, val: <A::PointerOps as PointerOps>::Pointer) {"}]
+usage_protocol:
+  - step: embed a LinkedListLink (or LinkedListAtomicLink for cross-thread use) in the element, declare an adapter with intrusive_adapter!, then LinkedList::new(Adapter::NEW or new())
+    evidence: [{path: intrusive-collections-0.10.2/src/lib.rs, quote: "intrusive collections never allocate memory themselves and"}]
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: intrusive-collections-0.10.2/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: the list itself never allocates for nodes (links live in the elements)
+    evidence: [{path: intrusive-collections-0.10.2/src/lib.rs, quote: "intrusive collections never allocate memory themselves"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: ownership follows the Adapter pointer type; dropping the list converts all linked elements back to owned pointers and drops them; UnsafeRef leaves freeing to the user
+    evidence:
+      - {path: intrusive-collections-0.10.2/src/linked_list.rs, item: intrusive_collections::linked_list::LinkedList, quote: "converted back to owned pointers and dropped."}
+      - {path: intrusive-collections-0.10.2/src/unsafe_ref.rs, item: intrusive_collections::unsafe_ref::UnsafeRef, quote: "the user is responsible for freeing the managed object"}
+  errors_bounds:
+    value: unknown
+    evidence: []
+  concurrency:
+    value: no internal locking; the Link type is not thread-shareable but AtomicLink is "shared between threads" - callers still need external synchronisation for list mutation
+    evidence:
+      - {path: intrusive-collections-0.10.2/src/linked_list.rs, item: intrusive_collections::linked_list::AtomicLink, quote: "This link allows the structure to be shared between threads."}
+layers:
+  depends_on: []
+  used_by:
+  - alloc-engine
+  - kcompletion
+  - krcu-core
+  - kvfs
+  - kworkerpool_ng
+  - kworkng
+  - kworkqueue_ng
+  - ksched
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc",
+      "nightly"] }
+  - path: task/ksched/src/ready_list.rs
+    quote: use intrusive_collections::{Adapter, DefaultLinkOps, LinkedList, LinkedListAtomicLink};
+  - path: sync/kcompletion/src/completion.rs
+    quote: use intrusive_collections::{LinkedList, LinkedListLink, UnsafeRef, intrusive_adapter};
+  - path: mm/alloc-engine/src/buddy_alloc.rs
+    quote: use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
+  - path: mm/alloc-engine/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: sync/kcompletion/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: sync/krcu/crates/krcu-core/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/ksched/Cargo.toml
+    quote: intrusive-collections.workspace = true
+aliases:
+  en: [intrusive list, linked list, list_head, list_add, list_del, doubly linked list, embedded list node, container_of, intrusive linked list, queue of nodes]
+  zh: [侵入式链表, 双向链表, 内嵌链表节点, 链表头, 嵌入式链表]
+identifiers: [prev, next, list_head, ListHead, link, Link, push_back, pop_front, container_of, head, tail, adapter]
+exclusions:
+  - "pointer-ownership and link lifetime rules are unsafe-adjacent: an element must outlive its membership unless the pointer type is owning (Box/Arc)"
+  - "no internal synchronisation; wrap in a lock when shared"
+  - "an element can be in only one list per link field; add a second link field for a second list"
+  - "linked_list_r4l (card intrusive_list_r4l) is the other intrusive list in the tree, with a different Links/GetLinks API"
+counter_examples: []
+notes: >-
+  The workspace builds the crate with default-features = false and features alloc + nightly (const
+  LinkedList::new). SinglyLinkedList and XorLinkedList exist in the crate but no workspace code imports them
+  at the pin (searched for SinglyLinked).

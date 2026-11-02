@@ -1,0 +1,129 @@
+capability: map_hashbrown
+title: no_std hash map and set (hashbrown::HashMap / HashSet)
+family: container.map
+summary: >-
+  hashbrown is the SwissTable port that backs std's HashMap. HashMap<K, V> and HashSet<T> work without
+  std, hash with foldhash by default, and offer entry(), try_reserve (fallible growth) and an
+  allocator type parameter. It is the kernel's general unordered key-to-value map.
+source: {kind: dependency, crate: hashbrown, version: 0.16.1}
+symbols:
+  - {fqn: hashbrown::HashMap, kind: struct, path: src/map.rs, role: primary}
+  - {fqn: hashbrown::HashSet, kind: struct, path: src/set.rs, role: primary}
+  - {fqn: hashbrown::HashMap::with_capacity, kind: fn, path: src/map.rs, role: constructor}
+  - {fqn: hashbrown::HashMap::with_hasher, kind: fn, path: src/map.rs, role: constructor}
+  - {fqn: hashbrown::HashMap::insert, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: hashbrown::HashMap::get, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: hashbrown::HashMap::remove, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: hashbrown::HashMap::entry, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: hashbrown::HashMap::try_reserve, kind: fn, path: src/map.rs, role: operation}
+operations:
+- name: insert
+  symbols:
+  - hashbrown::HashMap::insert
+  effect: insert or replace; returns the previous value
+  evidence:
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::insert
+    quote: 'pub fn insert(&mut self, k: K, v: V) -> Option<V> {'
+- name: lookup
+  symbols:
+  - hashbrown::HashMap::get
+  effect: 'lookup by Q: Hash + Equivalent<K> + ?Sized; borrowed forms work when their equality/hash agree
+    with the stored key'
+  evidence:
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::get
+    quote: 'pub fn get<Q>(&self, k: &Q) -> Option<&V>'
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::get
+    quote: 'Q: Hash + Equivalent<K> + ?Sized,'
+- name: remove
+  symbols:
+  - hashbrown::HashMap::remove
+  effect: remove by key and return the value
+  evidence:
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::remove
+    quote: 'pub fn remove<Q>(&mut self, k: &Q) -> Option<V>'
+- name: entry
+  symbols:
+  - hashbrown::HashMap::entry
+  effect: single-lookup get-or-insert API
+  evidence:
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::entry
+    quote: 'pub fn entry(&mut self, key: K) -> Entry<''_, K, V, S, A> {'
+- name: try_reserve
+  symbols:
+  - hashbrown::HashMap::try_reserve
+  effect: reserve space and report allocation failure as TryReserveError instead of aborting
+  evidence:
+  - path: hashbrown-0.16.1/src/map.rs
+    item: hashbrown::map::HashMap::try_reserve
+    quote: 'pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {'
+usage_protocol:
+  - step: "keys must not be attacker-chosen when the default hasher is used; pass a keyed hasher through with_hasher if untrusted input decides the keys"
+    evidence:
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap, quote: "against attacks such as HashDoS."}
+contract:
+  no_std:
+    value: "yes: #![no_std]; the kernel's workspace dependency leaves default features on (default-hasher = foldhash, allocator-api2, ...), none of which is std"
+    evidence:
+      - {path: hashbrown-0.16.1/src/lib.rs, quote: "#![no_std]"}
+      - {path: Cargo.toml, quote: 'hashbrown = "0.16"'}
+  allocation:
+    value: heap allocated through an Allocator parameter that defaults to Global; try_reserve exposes allocation failure
+    evidence:
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap, quote: "pub struct HashMap<K, V, S = DefaultHashBuilder, A: Allocator = Global> {"}
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap::try_reserve, quote: "pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the map owns keys and values; unordered
+    evidence:
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap, quote: "pub struct HashMap<K, V, S = DefaultHashBuilder, A: Allocator = Global> {"}
+  errors_bounds:
+    value: lookups return Option; try_reserve returns TryReserveError; growth through insert uses the allocator's failure path
+    evidence:
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap::try_reserve, quote: "Result<(), TryReserveError>"}
+  concurrency:
+    value: mutating operations take &mut self
+    evidence:
+      - {path: hashbrown-0.16.1/src/map.rs, item: hashbrown::map::HashMap::insert, quote: "pub fn insert(&mut self, k: K, v: V) -> Option<V> {"}
+layers:
+  depends_on: []
+  used_by: [knet, memfs, kfd_objects, bpffs, tee_task_iface]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'hashbrown = "0.16"'}
+    - {path: net/knet/Cargo.toml, quote: 'hashbrown = "0.16"'}
+    - {path: fs/filesystems/memfs/Cargo.toml, quote: "hashbrown.workspace = true"}
+    - {path: process/kfd_objects/Cargo.toml, quote: "hashbrown.workspace = true"}
+    - {path: fs/filesystems/bpffs/Cargo.toml, quote: "hashbrown.workspace = true"}
+    - {path: tee/tee_task_iface/Cargo.toml, quote: "hashbrown = { workspace = true }"}
+aliases:
+  en: [hash map, hashmap, hash table, dictionary, associative array, unordered map, hash set, HashSet, swiss table, key value lookup]
+  zh: [哈希表, 哈希映射, 散列表, 字典, 无序映射, 哈希集合, 键值查找]
+identifiers: [HashMap, HashSet, entry, or_insert, or_insert_with, contains_key, try_reserve, with_hasher, BuildHasher]
+exclusions:
+  - "iteration order is unspecified; for ordered keys use an ordered map from alloc (BTreeMap)"
+  - "the default hasher does not defend against HashDoS; do not key it on unauthenticated input without a keyed hasher"
+  - "kvfs pins hashbrown 0.15 (a second lock entry); this card is the 0.16 line used by the other crates"
+  - "for a table keyed by small integer ids prefer slot_pool_slab or sparse_index_xarray"
+counter_examples:
+- path: util/kxarray/src/lib.rs
+  item: kxarray::XArray
+  why: XArray supports RCU readers concurrent with internally serialized writers for caller-chosen usize
+    keys. HashMap supports immutable shared reads when its type bounds permit, but ordinary mutation requires
+    exclusive access; it has no equivalent RCU publication/reclamation protocol.
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::new
+    quote: Creates an empty index without allocation or RCU service readiness.
+  - path: util/kxarray/src/lib.rs
+    quote: owns each inserted object
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::read
+    quote: pub fn read<
+notes: >-
+  Cargo.lock at the pin holds hashbrown 0.15.5 (kvfs), 0.16.1 (the rest) and 0.17.1 (indexmap, host tool).

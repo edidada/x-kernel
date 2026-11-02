@@ -1,0 +1,89 @@
+capability: parse_fdt_rs_fdtree
+title: Flattened devicetree (DTB) parser with validated structure (rs_fdtree::LinuxFdt)
+family: parse.fdt
+summary: >-
+  no_std parser for Linux flattened device trees. LinuxFdt::new / from_ptr validate magic, size,
+  reservation block, structure tokens, names and nesting before publishing any view; the tree can then
+  be walked (all_nodes, find_node, find_compatible, resolve_node), memory and reserved regions read,
+  and node properties / reg entries decoded with parent cell widths.
+source: {kind: workspace, crate: rs_fdtree, path: drivers/platform/rs-fdtree}
+symbols:
+  - {fqn: rs_fdtree::LinuxFdt, kind: struct, path: drivers/platform/rs-fdtree/src/lib.rs, role: primary}
+  - {fqn: rs_fdtree::FdtNode, kind: struct, path: drivers/platform/rs-fdtree/src/node.rs, role: primary}
+  - {fqn: rs_fdtree::MemoryRegion, kind: struct, path: drivers/platform/rs-fdtree/src/node.rs, role: helper}
+  - {fqn: rs_fdtree::FdtError, kind: enum, path: drivers/platform/rs-fdtree/src/error.rs, role: helper}
+operations:
+- name: validate
+  symbols:
+  - rs_fdtree::LinuxFdt
+  effect: LinuxFdt::new(&[u8]) / unsafe from_ptr(ptr); BadMagic, BufferTooSmall, ParseError, BadPtr; no
+    tree is published until the whole structure validates
+  evidence:
+  - path: drivers/platform/rs-fdtree/src/lib.rs
+    item: rs_fdtree::LinuxFdt::new
+    quote: Validates a DTB and borrows its immutable bytes.
+  - path: drivers/platform/rs-fdtree/src/lib.rs
+    item: rs_fdtree::LinuxFdt::new
+    quote: names, and nesting beyond 63 nodes (including the root). No tree is published until the entire
+      structure has passed validation.
+- name: find_nodes
+  symbols:
+  - rs_fdtree::LinuxFdt
+  effect: find_node(path), find_compatible(str), resolve_node(path_or_alias), all_nodes() depth-first
+  evidence:
+  - path: drivers/platform/rs-fdtree/src/lib.rs
+    item: rs_fdtree::LinuxFdt::find_compatible
+    quote: /// Finds the first node whose `compatible` list contains the string.
+- name: memory_regions
+  symbols:
+  - rs_fdtree::LinuxFdt
+  effect: memory_regions(), reserved_memory_regions(), mem_reservations() iterators of (address, size)
+  evidence:
+  - path: drivers/platform/rs-fdtree/src/lib.rs
+    item: rs_fdtree::LinuxFdt::memory_regions
+    quote: /// Iterates `/memory` node regions as [`MemoryRegion`]s.
+- name: reg_decode
+  symbols:
+  - rs_fdtree::FdtNode
+  effect: 'reg() decodes address/size pairs using parent #address-cells and #size-cells; unsupported cell
+    widths return None'
+  evidence:
+  - path: drivers/platform/rs-fdtree/src/node.rs
+    item: rs_fdtree::node::FdtNode::reg
+    quote: Returns an iterator over this node's `reg` entries, honoring the
+usage_protocol:
+  - step: validate once with LinuxFdt::new / from_ptr, keep the LinuxFdt (Copy), then query nodes; the blob must stay readable and immutable for the returned lifetime
+    evidence:
+      - {path: drivers/platform/rs-fdtree/src/lib.rs, item: rs_fdtree::LinuxFdt::from_ptr, quote: "`ptr` must point to a readable flattened devicetree blob whose header"}
+contract:
+  no_std:
+    value: "yes (#![no_std]; crate has no dependencies)"
+    evidence:
+      - {path: drivers/platform/rs-fdtree/src/lib.rs, quote: "#![no_std] mod"}
+      - {path: drivers/platform/rs-fdtree/Cargo.toml, quote: "[dependencies]"}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: LinuxFdt borrows the immutable DTB bytes (Copy); the data need not be 4-byte aligned
+    evidence:
+      - {path: drivers/platform/rs-fdtree/src/lib.rs, item: rs_fdtree::LinuxFdt, quote: "pub struct LinuxFdt<'a> {"}
+      - {path: drivers/platform/rs-fdtree/src/lib.rs, item: rs_fdtree::LinuxFdt::new, quote: "Note: this function does ***not*** require that the data be 4-byte"}
+  errors_bounds:
+    value: "Result<_, FdtError>; from_ptr is unsafe and trusts the header-declared size; node nesting limited to 63; reg() returns None if cell widths exceed 2"
+    evidence:
+      - {path: drivers/platform/rs-fdtree/src/lib.rs, item: rs_fdtree::LinuxFdt::from_ptr, quote: "validation errors as [`Self::new`]. Actual readable storage shorter than"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by: [of]
+  allowed_layers: unknown
+  evidence: [{path: drivers/platform/of/Cargo.toml, quote: "rs_fdtree = { workspace = true }"}]
+aliases:
+  en: [device tree parser, DTB parser, FDT parser, libfdt, flattened device tree, fdt_node_offset_by_compatible, of_find_node, dtb reg parsing, memory reserve map, compatible string lookup]
+  zh: [设备树解析, DTB 解析, 扁平设备树, 按 compatible 查找节点, reg 属性解析, 内存保留区]
+identifiers: [fdt, dtb, FDT_MAGIC, "0xd00dfeed", fdt_header, FDT_BEGIN_NODE, FDT_PROP, FDT_END_NODE, compatible, "#address-cells", "#size-cells", reg, memreserve, fdt32_to_cpu, be32]
+exclusions:
+  - read-only parser; it cannot build or modify a DTB
+  - for the global boot device tree handle and platform-specific decoding (PCI host, interrupts, CPU nodes) use the of crate (parse_fdt_of_helpers)
+counter_examples: []

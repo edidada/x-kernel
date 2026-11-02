@@ -1,0 +1,50 @@
+capability: parse_elf_boot_image_kernel_elf_loader
+title: Boot-time kernel ELF image parsing and loading (kernel_elf_loader::KernelElf)
+family: parse.elf
+summary: >-
+  KernelElf::parse validates a 64-bit ELF image (header, program header size, PT_LOAD ranges with
+  overflow checks), reports the covered virtual range and entry, finds symbols, iterates load
+  segments, and load_to copies the image to a physical load address.
+source: {kind: workspace, crate: kernel-elf-loader, path: boot/kernel-elf-loader}
+symbols:
+  - {fqn: kernel_elf_loader::KernelElf, kind: struct, path: boot/kernel-elf-loader/src/lib.rs, role: primary}
+  - {fqn: kernel_elf_loader::LoadSegment, kind: struct, path: boot/kernel-elf-loader/src/lib.rs, role: helper}
+  - {fqn: kernel_elf_loader::LoadSegments, kind: struct, path: boot/kernel-elf-loader/src/lib.rs, role: helper}
+operations:
+  - name: parse
+    symbols: [kernel_elf_loader::KernelElf]
+    effect: validate header and every PT_LOAD segment; errors are &'static str (e.g. "missing PT_LOAD segments")
+    evidence:
+      - {path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf::parse, quote: 'return Err("segment file range out of bounds");'}
+      - {path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf::parse, quote: 'return Err("missing PT_LOAD segments");'}
+  - name: load_to
+    symbols: [kernel_elf_loader::KernelElf]
+    effect: unsafe copy of the image to a physical load address; the target range must be writable RAM not overlapping live data
+    evidence:
+      - {path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf::load_to, quote: "`load_paddr..load_paddr + image_size()` must be writable RAM and must not"}
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: boot/kernel-elf-loader/src/lib.rs, quote: "#![no_std]"}]
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: borrows the image slice for 'a
+    evidence: [{path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf, quote: "pub struct KernelElf<'a> {"}]
+  errors_bounds:
+    value: "Result<_, &'static str> for malformed images; load_to is unsafe with a stated precondition"
+    evidence: [{path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf::load_to, quote: "# Safety"}]
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by: [x86-boot-common]
+  allowed_layers: unknown
+  evidence: [{path: boot/x86-boot-common/Cargo.toml, quote: "kernel_elf_loader = { workspace = true }"}]
+aliases:
+  en: [kernel image loader, boot ELF loader, load kernel ELF, PT_LOAD copy, parse kernel ELF header, bootloader ELF, find kernel symbol]
+  zh: [内核映像加载, 启动期 ELF 加载, 解析内核 ELF, 复制 PT_LOAD 段, 内核符号查找]
+identifiers: [Elf64Header, Elf64Phdr, PT_LOAD, e_phnum, p_offset, p_filesz, p_memsz, image_vaddr_range, load_segments, copy_nonoverlapping, e_entry]
+exclusions:
+  - handles 64-bit ELF kernel images only (Elf64Header); user program loading with auxv and stacks is parse_elf_user_program_kernel_elf_parser
+counter_examples: []

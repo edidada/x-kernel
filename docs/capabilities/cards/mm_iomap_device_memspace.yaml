@@ -1,0 +1,116 @@
+capability: mm_iomap_device_memspace
+title: Map a device MMIO physical range into kernel virtual space with reference counting (memspace::iomap_device / iounmap)
+family: mm.page_table
+summary: >-
+  iomap_device(paddr, size, name) maps the 4K-aligned span of a device region in the dedicated I/O
+  virtual window and returns the virtual address of paddr; repeated calls reuse and refcount the
+  mapping; iounmap releases it. Also keeps a registry of device regions for diagnostics.
+source: {kind: workspace, crate: memspace, path: mm/memspace}
+symbols:
+- fqn: memspace::iomap_device
+  kind: fn
+  path: mm/memspace/src/iomap.rs
+  role: primary
+- fqn: memspace::iounmap
+  kind: fn
+  path: mm/memspace/src/iomap.rs
+  role: primary
+- fqn: memspace::register_device_region
+  kind: fn
+  path: mm/memspace/src/iomap.rs
+  role: operation
+- fqn: memspace::IoMapError
+  kind: enum
+  path: mm/memspace/src/iomap.rs
+  role: helper
+operations:
+- name: map
+  symbols:
+  - memspace::iomap_device
+  effect: map and refcount; InvalidRange for zero size or overflow
+  evidence:
+  - path: mm/memspace/src/iomap.rs
+    item: memspace::iomap::iomap_device
+    quote: Each successful call takes one reference on the underlying mapping. Callers
+  - path: mm/memspace/src/iomap.rs
+    item: memspace::iomap::iomap_device
+    quote: if size == 0 || paddr.checked_add(size).is_none() {
+- name: unmap
+  symbols:
+  - memspace::iounmap
+  effect: drop one reference; teardown at the last reference
+  evidence:
+  - path: mm/memspace/src/iomap.rs
+    item: memspace::iomap::iounmap
+    quote: When the last reference to a runtime mapping is dropped, the virtual mapping
+usage_protocol:
+  - step: map once at driver init, cache the returned virtual base, and reuse it from fast paths such as IRQ handlers
+    evidence: [{path: mm/memspace/src/iomap.rs, item: memspace::iomap::iomap_device, quote: "Drivers are expected to call this during initialization, cache the returned"}]
+contract:
+  no_std:
+    value: "yes (memspace is #![no_std])"
+    evidence: [{path: mm/memspace/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: registry is a Vec behind a SpinNoIrq lock
+    evidence: [{path: mm/memspace/src/iomap.rs, quote: "static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: reference-counted mapping; pair each iomap_device with iounmap; pinned boot regions are never auto-unmapped
+    evidence: [{path: mm/memspace/src/iomap.rs, item: memspace::iomap::RegionRefs, quote: "/// Statically owned region (fixed/boot mapping). Never auto-unmapped."}]
+  errors_bounds:
+    value: "Result<VirtAddr, IoMapError> {InvalidRange, MappingFailed, NoMemory}"
+    evidence: [{path: mm/memspace/src/iomap.rs, item: memspace::iomap::IoMapError, quote: "pub enum IoMapError {"}]
+  concurrency:
+    value: registry guarded by a SpinNoIrq lock
+    evidence: [{path: mm/memspace/src/iomap.rs, item: memspace::iomap::iomap_device, quote: "if let Some(vaddr) = acquire_mapping_locked(&mut DEVICE_REGISTRY.lock(), start, span) {"}]
+layers:
+  depends_on:
+  - kaddr_layout
+  - kplat
+  - kspin
+  - memaddr
+  used_by:
+  - x86-apic
+  - console-driver
+  - irq-driver
+  - rtc-driver
+  allowed_layers: unknown
+  evidence:
+  - path: arch/x86-apic/Cargo.toml
+    quote: memspace = { workspace = true }
+  - path: drivers/platform/console/Cargo.toml
+    quote: memspace = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: kaddr_layout = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: kplat = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: drivers/platform/irq/Cargo.toml
+    quote: memspace = { workspace = true }
+  - path: drivers/platform/rtc/Cargo.toml
+    quote: memspace = { workspace = true }
+aliases:
+  en:
+  - ioremap
+  - iounmap
+  - map_mmio
+  - mmio map
+  - map device registers
+  - ioremap_nocache
+  zh:
+  - 设备寄存器映射
+  - MMIO 映射
+  - ioremap
+  - 映射设备内存
+identifiers: [ioremap, iounmap, mmio_base, phys_to_virt, p2v, "PhysAddr::from", DEVICE, "MappingFlags::DEVICE", IOMAP_VADDR]
+exclusions:
+- the returned address lives in the dedicated I/O window; use p2v only for RAM, which is in the linear
+  map
+- map once and cache the base (the doc says drivers call it during initialization); do not call per access
+- Manual iomap_device/iounmap pairing is not device-managed automatic teardown (devm_ioremap). The owner
+  must release each reference after all device/CPU uses end.
+counter_examples: []

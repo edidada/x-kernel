@@ -1,0 +1,141 @@
+capability: ipi_fixed_notification_kipi
+title: Allocation-free fixed-reason CPU kicks over IPI (kipi::notify_reschedule / notify_bottom_half / notify_rcu)
+family: cpu.ipi
+summary: >-
+  Fixed set of cross-CPU requests carried as bits in a per-CPU atomic pending word (RESCHEDULE,
+  TIMER_REPROGRAM, BOTTOM_HALF, HIGHPRI_BOTTOM_HALF, RCU) plus one shared IPI. A sender sets the bit
+  with one fetch_or and sends the IPI; the receiver's handler takes the bits and calls the scheduler,
+  timer, or raises the matching softirq. Requests coalesce, nothing is allocated or queued, it may
+  be used with IRQs disabled and scheduler locks held, and requests made before
+  enable_fixed_notifications are retained for a boot drain. It carries no closure.
+source: {kind: workspace, crate: kipi, path: arch/kipi}
+symbols:
+- fqn: kipi::notify_reschedule
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: operation
+- fqn: kipi::notify_timer_reprogram
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: operation
+- fqn: kipi::notify_bottom_half
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: operation
+- fqn: kipi::notify_highpri_bottom_half
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: operation
+- fqn: kipi::notify_rcu
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: operation
+- fqn: kipi::enable_fixed_notifications
+  kind: fn
+  path: arch/kipi/src/notification.rs
+  role: constructor
+operations:
+- name: notify
+  symbols:
+  - kipi::notify_reschedule
+  - kipi::notify_bottom_half
+  - kipi::notify_rcu
+  effect: sets the reason bit in the destination CPU's pending word (one fetch_or) and, once notifications
+    are enabled, sends the IPI (also to self); success means accepted, not executed
+  evidence:
+  - path: arch/kipi/src/notification.rs
+    item: kipi::notification::PendingWord::request
+    quote: NotificationFlags::from_bits_retain(self.0.fetch_or(reason.bits(), Ordering::AcqRel))
+  - path: arch/kipi/src/notification.rs
+    item: kipi::notification::notify_reschedule
+    quote: Successful return means accepted, not executed.
+contract:
+  no_std:
+    value: "yes (kipi is cfg_attr no_std unless test)"
+    evidence: [{path: arch/kipi/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: "allocation-free; no closure is queued"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, quote: "Allocation-free CPU notifications and their one-way boot handshake."}
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_rcu, quote: "Does not allocate or sleep."}
+  blocking:
+    value: "never sleeps; may be called with IRQs disabled and scheduler locks held (notify_reschedule); callers must release timer locks before notify_timer_reprogram"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_reschedule, quote: "May be called with IRQs disabled and scheduler locks held; does not sleep."}
+  irq_nmi:
+    value: "bottom-half kicks may run in task, softirq or hardirq context including with IRQs disabled; NMI and CPU hotplug unsupported"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_bottom_half, quote: "May run in task, softirq or hardirq context, including with IRQs disabled."}
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_rcu, quote: "NMI and CPU hotplug are unsupported."}
+  ownership_lifetime:
+    value: "no ownership transfer: only a reason bit is set; the receiving side owns the demand state (source demand must be published before the kick)"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_bottom_half, quote: "Publish source demand and release its locks before calling."}
+  errors_bounds:
+    value: "Result<(), KipiError>: InvalidCpuId for an out-of-range or absent CPU; fixed five reasons only"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::notify_bottom_half, quote: "pub fn notify_bottom_half(cpu_id: LogicalCpuId) -> Result<()> {"}
+      - {path: arch/kipi/src/notification.rs, quote: "const BOTTOM_HALF = 1 << 3;"}
+  concurrency:
+    value: "requests coalesce in a per-CPU AtomicUsize pending word; enable and take use the same word so that either the boot drain sees a request or the sender issues an IPI"
+    evidence:
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::PendingWord::request, quote: "// Publication and observing readiness must share one RMW: either"}
+      - {path: arch/kipi/src/notification.rs, item: kipi::notification::PENDING, quote: "static PENDING: [PendingWord; kbuild_config::NR_CPUS] ="}
+layers:
+  depends_on:
+  - kcpu_id_map
+  - khal
+  - kirq
+  - kbuild_config
+  - bitflags
+  used_by:
+  - ktask
+  - kworkerpool_ng
+  - kruntime
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kipi/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kipi.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kipi = { workspace = true, optional = true }
+  - path: arch/kipi/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: khal.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kirq = { workspace = true }
+  - path: arch/kipi/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: bitflags.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kipi = { workspace = true, optional = true }
+aliases:
+  en:
+  - reschedule IPI
+  - resched_curr remote kick
+  - smp_send_reschedule
+  - kick CPU
+  - wake remote CPU
+  - IPI_RESCHEDULE
+  - RCU kick
+  - cross-CPU doorbell
+  - pending bitmask IPI
+  zh:
+  - 重调度 IPI
+  - 唤醒远端 CPU
+  - 核间通知
+  - 远程唤醒
+  - 核间 doorbell
+identifiers: [IPI_RESCHEDULE, smp_send_reschedule, resched_curr, kick_cpu, reschedule, notify_cpu, pending_bits, AtomicUsize, fetch_or, IPI_IRQ]
+exclusions:
+- only the five fixed reasons; arbitrary work needs ipi_call_function_kipi (closure queue)
+- success means accepted, not executed; repeated requests coalesce, so it is not an event counter
+- the destination must have its service/softirq action installed before demand is published
+- no NMI and no CPU hotplug
+- NMI/IRQ masking and CPU hotplug semantics belong to each request API. The request bits are notifications,
+  not a replacement for a suspend/resume tick-broadcast timer service.
+counter_examples: []
+notes: "notify_reschedule and notify_timer_reprogram exist only with the reschedule / timer-reprogram cargo features."

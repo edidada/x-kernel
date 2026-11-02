@@ -1,0 +1,133 @@
+capability: misc_registration_kclass
+title: Typed runtime device-class registry with publish / enumerate / subscribe (kclass)
+family: misc.registration
+summary: >-
+  Per-class registries (block, net, char, hwrng, display, input, vsock, 9P) behind feature flags.
+  A driver publishes a runtime capability after probe (publish_<class>); subsystems enumerate current
+  devices, find by DeviceId, or subscribe to later availability so they do not depend on probe order.
+  Duplicate DeviceIds are rejected; removal follows the parent device's Removed event.
+source: {kind: workspace, crate: kclass, path: drivers/contracts/kclass}
+symbols:
+- fqn: kclass::ClassDevice
+  kind: struct
+  path: drivers/contracts/kclass/src/generic.rs
+  role: primary
+- fqn: kclass::ClassAvailabilityCallback
+  kind: type
+  path: drivers/contracts/kclass/src/generic.rs
+  role: operation
+operations:
+- name: publish
+  symbols:
+  - kclass::ClassDevice
+  - kclass::ClassDevice
+  effect: add a class device to its typed registry; AlreadyExists for a duplicate id (replacement is remove-then-add)
+  evidence:
+  - path: drivers/contracts/kclass/src/generic.rs
+    item: kclass::generic::ClassRegistry::publish
+    quote: Linux device registration rejects duplicate identities; replacement is
+  - path: drivers/contracts/kclass/src/lib.rs
+    item: kclass::class_registry
+    quote: /// Publish a runtime capability into its typed class registry.
+  - path: drivers/contracts/kclass/src/lib.rs
+    quote: publish_net,
+- name: enumerate_find
+  symbols:
+  - kclass::ClassDevice
+  effect: devices() returns only currently active devices; find(id) finds an active one
+  evidence:
+  - path: drivers/contracts/kclass/src/generic.rs
+    item: kclass::generic::ClassRegistry::devices
+    quote: /// Return currently active devices in this class.
+- name: subscribe_available
+  symbols:
+  - kclass::ClassAvailabilityCallback
+  effect: register a callback for future activations; callbacks are cloned out and invoked outside the
+    registry lock
+  evidence:
+  - path: drivers/contracts/kclass/src/generic.rs
+    item: kclass::generic::ClassRegistry::availability_callbacks
+    quote: /// Snapshot availability callbacks. Callers should invoke them outside locks.
+  - path: drivers/contracts/kclass/src/lib.rs
+    item: kclass::class_registry
+    quote: /// Subscribe to future runtime capabilities for this class.
+usage_protocol:
+  - step: after probe succeeds the driver publishes its runtime object under its parent DeviceObject; consumers call the per-class devices / find / subscribe functions
+    evidence: [{path: drivers/contracts/kclass/src/lib.rs, quote: "Drivers publish runtime capabilities here after probe succeeds so subsystems"}]
+contract:
+  no_std:
+    value: "yes (#![no_std] with extern crate alloc)"
+    evidence: [{path: drivers/contracts/kclass/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: registries hold Vec / Arc of class devices
+    evidence: [{path: drivers/contracts/kclass/src/generic.rs, item: kclass::generic::ClassRegistry, quote: "devices: Vec<ClassDevice<T>>,"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: ClassDevice is a cloneable Arc handle with a live parent device object; with() borrows the runtime immutably, mutation is the driver's job via interior locking
+    evidence:
+      - {path: drivers/contracts/kclass/src/generic.rs, item: kclass::generic::ClassDevice::with, quote: "The runtime object is shared immutably; any mutation is the driver's"}
+  errors_bounds:
+    value: publish returns DriverResult (InvalidInput when the runtime kind does not match the registry kind, AlreadyExists for duplicates); driver_name panics if the parent has no bound driver
+    evidence:
+      - {path: drivers/contracts/kclass/src/lib.rs, item: kclass::class_registry, quote: "if device_kind != $kind {"}
+      - {path: drivers/contracts/kclass/src/generic.rs, item: kclass::generic::ClassDevice::driver_name, quote: "Panics if the parent device has no bound driver; publication"}
+  concurrency:
+    value: each registry is a LazyInit<SpinNoPreempt<ClassRegistry>>
+    evidence: [{path: drivers/contracts/kclass/src/lib.rs, item: kclass::class_registry, quote: "static $registry: LazyInit<SpinNoPreempt<ClassRegistry<$ty>>> = LazyInit::new();"}]
+layers:
+  depends_on:
+  - kdevice
+  - driver_base
+  - kspin
+  - lazyinit
+  used_by:
+  - kdriver
+  - console-driver
+  - devfs
+  - ktty
+  - knet
+  - inputdev
+  - fbdevice
+  - drmdevice
+  - entropy
+  allowed_layers: unknown
+  evidence:
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kclass = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: kclass = { workspace = true, features = ["net"] }
+  - path: util/entropy/Cargo.toml
+    quote: kclass = { workspace = true, features = ["hwrng"], optional = true }
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: kdevice.workspace = true
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: driver_base.workspace = true
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: drivers/platform/console/Cargo.toml
+    quote: kclass = { workspace = true, features = ["char"] }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: kclass = { workspace = true, features = ["display"] }
+  - path: io/ktty/Cargo.toml
+    quote: kclass = { workspace = true, features = ["char"] }
+  - path: io/inputdev/Cargo.toml
+    quote: kclass = { workspace = true, features = ["input"] }
+  - path: io/fbdevice/Cargo.toml
+    quote: kclass = { workspace = true, features = ["display"] }
+  - path: io/drmdevice/Cargo.toml
+    quote: kclass = { workspace = true, features = ["display"] }
+aliases:
+  en: [device registry, register_netdev, register_blkdev, device class, class registry, subscribe device available, hotplug notification, driver registration, global device list, probe order independent, publish device]
+  zh: [设备注册表, 设备类, 设备发布与订阅, 驱动注册, 全局设备列表, 设备可用通知, 与探测顺序无关]
+identifiers: [register_device, DEVICES, "static DEVICES", "Vec<Arc<dyn", register_netdev, register_blkdev, device_list, find_device, get_device, subscribe, callback, notify_available]
+exclusions:
+  - registries are per device class and typed (one feature per class); not a generic key/value registry or an init-order list
+  - consumers get only currently active devices; inactive or removed ones are filtered out
+counter_examples: []
+notes: generic is private and ClassRegistry is internal. Import kclass::ClassDevice / ClassAvailabilityCallback;
+  e.g. net feature exposes kclass::publish_net, net_devices, find_net_device and subscribe_net_available.
+  These are generated by class_registries!/class_registry!; no direct ClassRegistry use is public. Cargo
+  edges below do not establish that every listed crate uses this particular class.

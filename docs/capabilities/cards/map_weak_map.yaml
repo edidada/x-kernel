@@ -1,0 +1,93 @@
+capability: map_weak_map
+title: Ordered map holding weak references that expire silently (weak_map::WeakMap)
+family: container.map
+summary: >-
+  WeakMap<K, V> wraps a BTreeMap whose values are Weak/Rc-Weak handles. insert takes a strong
+  reference and stores a downgraded one; get upgrades on lookup and returns None for an expired
+  entry; expired entries are swept by cleanup(), which runs automatically after enough operations. The
+  kernel uses it for the session-to-process-group registry where the map must not keep objects alive.
+source: {kind: dependency, crate: weak-map, version: 0.1.2}
+symbols:
+  - {fqn: weak_map::WeakMap, kind: struct, path: src/map.rs, role: primary}
+  - {fqn: weak_map::WeakMap::new, kind: fn, path: src/map.rs, role: constructor}
+  - {fqn: weak_map::WeakMap::insert, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: weak_map::WeakMap::get, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: weak_map::WeakMap::cleanup, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: weak_map::WeakMap::len, kind: fn, path: src/map.rs, role: operation}
+  - {fqn: weak_map::StrongRef, kind: trait, path: src/traits.rs, role: helper}
+  - {fqn: weak_map::WeakRef, kind: trait, path: src/traits.rs, role: helper}
+operations:
+  - name: insert
+    symbols: [weak_map::WeakMap::insert]
+    effect: store a downgraded handle under the key; returns the previous value if it is still alive
+    evidence: [{path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::insert, quote: "pub fn insert(&mut self, key: K, value: &V::Strong) -> Option<V::Strong> {"}]
+  - name: get
+    symbols: [weak_map::WeakMap::get]
+    effect: look up and upgrade; None when the key is missing or the value has expired
+    evidence: [{path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::get, quote: "pub fn get<Q>(&self, key: &Q) -> Option<V::Strong>"}]
+  - name: cleanup
+    symbols: [weak_map::WeakMap::cleanup]
+    effect: drop all expired entries; also triggered automatically when the operation counter reaches a threshold
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::cleanup, quote: "automatically when the number of operations reaches a threshold."}
+  - name: len
+    symbols: [weak_map::WeakMap::len, weak_map::WeakMap::new]
+    effect: len counts only live entries and is linear; raw_len includes expired ones; new does not allocate
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::len, quote: "This is a linear operation, as it iterates over all elements in the map."}
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::new, quote: "Does not allocate anything on its own."}
+contract:
+  no_std:
+    value: "yes: #![no_std] (stores Rc/Arc handles from alloc)"
+    evidence:
+      - {path: weak-map-0.1.2/src/lib.rs, quote: "#![no_std]"}
+  allocation:
+    value: new() does not allocate; entries are BTreeMap nodes
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::new, quote: "Does not allocate anything on its own."}
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap, quote: "inner: btree_map::BTreeMap<K, V>,"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the map never keeps a value alive; entries whose strong owners are gone read as absent and are removed lazily
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, quote: "`BTreeMap` with weak references."}
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::cleanup, quote: "automatically when the number of operations reaches a threshold."}
+  errors_bounds:
+    value: lookups return Option; the key type must be Ord; len() and cleanup() are linear in the number of entries
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::len, quote: "This is a linear operation, as it iterates over all elements in the map."}
+  concurrency:
+    value: mutating operations take &mut self; kprocess wraps it in SpinNoIrq
+    evidence:
+      - {path: weak-map-0.1.2/src/map.rs, item: weak_map::map::WeakMap::insert, quote: "pub fn insert(&mut self, key: K, value: &V::Strong) -> Option<V::Strong> {"}
+      - {path: process/kprocess/src/session.rs, item: kprocess::session::Session, quote: "SpinNoIrq<WeakMap<Pid, Weak<ProcessGroup>>>"}
+layers:
+  depends_on: []
+  used_by: [kprocess]
+  allowed_layers: unknown
+  evidence:
+    - {path: process/kprocess/Cargo.toml, quote: "weak-map.workspace = true"}
+    - {path: Cargo.toml, quote: 'weak-map = "0.1.1"'}
+aliases:
+  en:
+  - weak map
+  - weak registry
+  - weak value map
+  - cache of weak references
+  - non-owning registry
+  - Weak<T> map
+  zh:
+  - 弱引用映射
+  - 弱引用表
+  - 弱值映射
+  - 非拥有的注册表
+  - 自动失效的映射
+identifiers: [WeakMap, Weak, upgrade, downgrade, StrongRef, WeakRef, process_groups]
+exclusions:
+  - "ordered by key (BTreeMap): lookups are O(log n); for hashing keys use map_hashbrown with Weak values yourself"
+  - "len() and cleanup() are linear; do not call them on a hot path with a large map"
+  - "expiry is only noticed lazily; entries are removed at cleanup, so memory held by dead keys lingers until then"
+counter_examples: []
+notes: >-
+  Single known user at the pin is the session registry of process groups in kprocess.

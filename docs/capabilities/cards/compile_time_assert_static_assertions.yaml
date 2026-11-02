@@ -1,0 +1,88 @@
+capability: compile_time_assert_static_assertions
+title: Compile-time assertions on constants, sizes and layouts (static_assertions)
+family: misc.interface
+summary: >-
+  const_assert!, const_assert_eq!, assert_eq_size! (and assert_eq_align!, assert_impl_all!, ...) turn a
+  false condition into a build error with zero runtime cost. The kernel uses them to pin hardware
+  layouts, for example the x86_64 FXSAVE block size and the Hygon CSV report layout.
+source: {kind: dependency, crate: static_assertions, version: 1.1.0}
+symbols:
+  - {fqn: static_assertions::const_assert, kind: macro, path: src/const_assert.rs, role: primary}
+  - {fqn: static_assertions::const_assert_eq, kind: macro, path: src/const_assert.rs, role: primary}
+  - {fqn: static_assertions::assert_eq_size, kind: macro, path: src/assert_eq_size.rs, role: operation}
+operations:
+- name: const_assert
+  symbols:
+  - static_assertions::const_assert
+  - static_assertions::const_assert_eq
+  effect: fail compilation when a const expression is false (or two const values differ)
+  evidence:
+  - path: static_assertions-1.1.0/src/const_assert.rs
+    item: static_assertions::const_assert::const_assert
+    quote: 'const _: [(); 0 - !{ const ASSERT: bool = $x; ASSERT } as usize] = [];'
+- name: size_equal
+  symbols:
+  - static_assertions::assert_eq_size
+  effect: fail compilation when types differ in size
+  evidence:
+  - path: static_assertions-1.1.0/src/assert_eq_size.rs
+    item: static_assertions::assert_eq_size::assert_eq_size
+    quote: macro_rules! assert_eq_size {
+  - path: static_assertions-1.1.0/src/assert_eq_size.rs
+    item: static_assertions::assert_eq_size::assert_eq_size
+    quote: $(let _ = $crate::_core::mem::transmute::<$x, $xs>;)+
+usage_protocol:
+  - step: "place the assertion at module level next to the type it constrains, for example const_assert_eq!(core::mem::size_of::<T>(), N) for a hardware or ABI layout"
+    evidence:
+      - {path: arch/kcpu/src/x86_64/ctx.rs, quote: "static_assertions::const_assert_eq!(core::mem::size_of::<FxStateBlock>(), 512);"}
+contract:
+  no_std:
+    value: 'yes: #![no_std]'
+    evidence:
+    - path: static_assertions-1.1.0/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: none at runtime; the assertions expand to const items and never-called closures
+    evidence:
+    - path: static_assertions-1.1.0/src/const_assert.rs
+      item: static_assertions::const_assert::const_assert
+      quote: 'const _: [(); 0 - !{ const ASSERT: bool = $x; ASSERT } as usize] = [];'
+    - path: static_assertions-1.1.0/src/assert_eq_size.rs
+      item: static_assertions::assert_eq_size::assert_eq_size
+      quote: 'const _: fn() = || {'
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: unknown
+    evidence: []
+  errors_bounds:
+    value: a false condition is a compile error, not a runtime error
+    evidence:
+    - path: static_assertions-1.1.0/src/const_assert.rs
+      item: static_assertions::const_assert::const_assert
+      quote: 'const _: [(); 0 - !{ const ASSERT: bool = $x; ASSERT } as usize] = [];'
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [kcpu, tee_kernel]
+  allowed_layers: unknown
+  evidence:
+    - {path: arch/kcpu/Cargo.toml, quote: 'static_assertions = "1.1.0"'}
+    - {path: tee/tee_kernel/Cargo.toml, quote: 'static_assertions = "1.1.0"'}
+aliases:
+  en: [static assert, compile time assert, const assert, size_of assert, layout assertion, assert_eq_size, build-time check, BUILD_BUG_ON, _Static_assert]
+  zh: [静态断言, 编译期断言, 常量断言, 结构体大小断言, 布局断言]
+identifiers: [const_assert, const_assert_eq, assert_eq_size, assert_eq_align, assert_impl_all, size_of, align_of, BUILD_BUG_ON]
+exclusions:
+  - "compile-time only: not a replacement for runtime validation of untrusted input"
+  - "for conditions that only need a const block, the built-in const { assert!(...) } may be used instead; this card covers the crate, not that language feature"
+  - "field offsets and spans are provided by layout_offset_memoffset, not by this crate"
+counter_examples: []
+notes: >-
+  Used at module level in kcpu (x86_64, loongarch64) and in the TEE Hygon CSV report code.

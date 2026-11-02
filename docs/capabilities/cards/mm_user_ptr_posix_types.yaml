@@ -1,0 +1,142 @@
+capability: mm_user_ptr_posix_types
+title: Typed syscall user pointers with copy-in / copy-out helpers (posix_types::UserPtr / UserConstPtr, UserRead / UserWrite)
+family: mm.user_access
+summary: >-
+  UserConstPtr<T> and UserPtr<T> wrap a raw user address by value and provide read_vm, read_uninit,
+  load_vm_vec, load_string / load_string_with_max_len / load_bytes_with_max_len (const) and
+  write_vm / write_vm_slice (mutable) on top of osvm. UserRead / UserWrite are the unsafe marker
+  traits for ABI types that may be copied bit-for-bit, derivable with #[derive(UserRead, UserWrite)].
+source: {kind: workspace, crate: posix-types, path: posix/types}
+symbols:
+  - {fqn: posix_types::ptr::UserPtr, kind: struct, path: posix/types/src/ptr.rs, role: primary}
+  - {fqn: posix_types::ptr::UserConstPtr, kind: struct, path: posix/types/src/ptr.rs, role: primary}
+  - {fqn: posix_types::ptr::UserRead, kind: trait, path: posix/types/src/ptr.rs, role: operation}
+  - {fqn: posix_types::ptr::UserWrite, kind: trait, path: posix/types/src/ptr.rs, role: operation}
+operations:
+  - name: read_value
+    symbols: [posix_types::ptr::UserConstPtr]
+    effect: "copy one ABI value (T: UserRead) from user memory; representation validity only, not an atomic snapshot"
+    evidence:
+      - {path: posix/types/src/ptr.rs, item: posix_types::ptr::UserPtr::read_vm, quote: "Copies one ABI value; `T: UserRead` makes every copied bit pattern valid."}
+  - name: load_vec
+    symbols: [posix_types::ptr::UserPtr]
+    effect: allocate and copy len elements; caller must bound len before the call
+    evidence:
+      - {path: posix/types/src/ptr.rs, item: posix_types::ptr::UserPtr::load_vm_vec, quote: "`len` is an element count. Callers must enforce a resource limit before"}
+  - name: write_value
+    symbols: [posix_types::ptr::UserPtr]
+    effect: copy a UserWrite value or slice to user memory; not transactional, partial effects possible
+    evidence:
+      - {path: posix/types/src/ptr.rs, item: posix_types::ptr::UserPtr::write_vm, quote: "Propagates the `osvm` write error; failed writes may have partial effects."}
+  - name: load_string_bounded
+    symbols: [posix_types::ptr::UserConstPtr]
+    effect: NUL-terminated string with a caller-chosen max length (InvalidInput beyond it, IllegalBytes for bad UTF-8); load_bytes_with_max_len preserves non-UTF-8 bytes
+    evidence:
+      - {path: posix/types/src/ptr.rs, item: posix_types::ptr::UserConstPtr::load_string_with_max_len, quote: "Returns `InvalidInput` if no NUL occurs within the bound, `IllegalBytes`"}
+usage_protocol:
+- step: Use UserConstPtr<T>/UserPtr<T> at syscall boundaries. Derive UserRead/UserWrite only on ABI layouts
+    satisfying their representation/padding contracts, bound vector/string lengths before allocation,
+    then copy and validate field semantics.
+  evidence:
+  - path: core/ksyscall/src/task/sched.rs
+    item: ksyscall::task::sched::SchedParam
+    quote: '#[derive(Clone, Copy, UserRead, UserWrite)]'
+  - path: posix/types/src/ptr.rs
+    item: posix_types::ptr::UserPtr::load_vm_vec
+    quote: Callers must enforce a resource limit before
+contract:
+  no_std:
+    value: unknown
+    evidence: []
+  allocation:
+    value: load_vm_vec / load_string* allocate; read_vm / write_vm copy into caller storage
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserPtr::load_vm_vec
+      quote: Allocates and copies `len` values from the current user address space.
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserConstPtr::load_string_with_max_len
+      quote: load_string_with_max_len
+  blocking:
+    value: copy helpers may fault or block; use in initialized thread context, not early boot or a hardware
+      IRQ
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserPtr
+      quote: Copy helpers require the `osvm` current-address-space provider. They may
+  irq_nmi:
+    value: copy helpers must not be used from a hardware IRQ; cast / is_null / check_non_null perform
+      no memory access
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserPtr
+      quote: fault or block; use them in initialized thread context, not early boot or a
+  ownership_lifetime:
+    value: the pointer is copied by value without validating its target; non-null does not imply mapped,
+      writable, aligned or exclusively owned
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserPtr
+      quote: A mutable user virtual address, copied by value without validating its target.
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserPtr
+      quote: Non-null does not imply mapped, writable, aligned, or exclusively owned.
+  errors_bounds:
+    value: osvm::MemResult for raw copies; KResult for string loads; load_string without a bound enforces
+      no caller bound (prefer the _with_max_len variants for hostile strings)
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserConstPtr::load_string
+      quote: No caller-selected bound is enforced here; prefer the bounded helper for
+  concurrency:
+    value: other threads can modify user memory during or after a copy, so copied fields still need semantic
+      validation; no atomic snapshot
+    evidence:
+    - path: posix/types/src/ptr.rs
+      item: posix_types::ptr::UserConstPtr
+      quote: may fault or block. Other threads can modify user memory during or after a
+layers:
+  depends_on:
+  - osvm
+  - kerrno
+  - kio
+  - macros
+  - bytemuck
+  used_by:
+  - ksyscall
+  - posix-fs
+  - posix-net
+  - ksignal
+  allowed_layers: unknown
+  evidence:
+  - path: posix/types/Cargo.toml
+    quote: osvm = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: macros = { workspace = true }
+  - path: posix/types/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: core/ksyscall/Cargo.toml
+    quote: posix-types.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: posix-types.workspace = true
+  - path: posix/net/Cargo.toml
+    quote: posix-types.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: posix-types.workspace = true
+aliases:
+  en: [UserPtr, user pointer, copy_from_user wrapper, syscall argument pointer, __user pointer, const user pointer, get_user, put_user, copy_to_user, getname, user struct read, user struct write]
+  zh: [用户指针, 系统调用用户指针, 用户态结构体读取, 用户态结构体写入, 用户字符串读取, 用户态拷贝封装]
+identifiers: [UserPtr, UserConstPtr, "*const T as user", "*mut T as user", copy_from_user, copy_to_user, __user, get_user, put_user, read_vm, write_vm, load_string, UserRead, UserWrite, "#[derive(UserRead"]
+exclusions:
+  - UserRead / UserWrite are unsafe markers - only ABI types without invalid bit patterns (read) or implicit padding (write) qualify; types with padding or enums need explicit field modelling
+  - the helpers read the current thread's address space and may block; they are not a replacement for the nofault atomics in mm_user_atomic_word_kuaccess
+  - unbounded load_string / load_vm_vec must not be given an unchecked user length
+counter_examples:
+  - path: process/osvm/src/ptrs.rs
+    item: osvm::ptrs::VirtPtr
+    why: osvm::VirtPtr / VirtMutPtr are the lower-level pointer traits on raw pointers (AnyBitPattern based, no syscall ABI markers); UserPtr is the syscall-layer wrapper and implements VirtPtr
+    evidence: [{path: posix/types/src/ptr.rs, quote: "impl<T> VirtPtr for UserPtr<T> {"}]

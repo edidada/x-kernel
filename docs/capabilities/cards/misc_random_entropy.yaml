@@ -1,0 +1,125 @@
+capability: misc_random_entropy
+title: Kernel random bytes / CRNG (entropy::fill_random, add_entropy, is_ready)
+family: misc.random
+summary: >-
+  Global ChaCha20-based entropy pool seeded from architecture CPU RNG, SMCCC TRNG, VirtIO RNG and
+  software jitter. fill_random fills a byte slice with random bytes; add_entropy mixes extra input
+  (does not mark the pool ready); is_ready / wait_until_ready / ready_poll_set expose the getrandom
+  readiness semantics. Used by getrandom(2), /dev/random and in-kernel consumers needing randomness
+  (ASLR-style offsets, port selection, AT_RANDOM bytes).
+source: {kind: workspace, crate: entropy, path: util/entropy}
+symbols:
+  - {fqn: entropy::fill_random, kind: fn, path: util/entropy/src/lib.rs, role: primary}
+  - {fqn: entropy::add_entropy, kind: fn, path: util/entropy/src/lib.rs, role: operation}
+  - {fqn: entropy::init, kind: fn, path: util/entropy/src/lib.rs, role: constructor}
+  - {fqn: entropy::is_ready, kind: fn, path: util/entropy/src/lib.rs, role: operation}
+  - {fqn: entropy::wait_until_ready, kind: fn, path: util/entropy/src/lib.rs, role: operation}
+  - {fqn: entropy::try_seed_from_hardware, kind: fn, path: util/entropy/src/lib.rs, role: operation}
+  - {fqn: entropy::ready_poll_set, kind: fn, path: util/entropy/src/lib.rs, role: operation}
+operations:
+  - name: fill
+    symbols: [entropy::fill_random]
+    effect: fill buf with random bytes from the pool (no-op for an empty buffer); infallible
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::fill_random, quote: "Fill `buf` with random bytes from the kernel entropy pool."}
+  - name: mix
+    symbols: [entropy::add_entropy]
+    effect: mix caller-supplied bytes into the pool for diversity without crediting readiness
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::add_entropy, quote: "mark the CRNG as initialized"}
+  - name: readiness
+    symbols: [entropy::is_ready, entropy::wait_until_ready, entropy::try_seed_from_hardware, entropy::ready_poll_set]
+    effect: query / block on / poll the false-to-true transition of CRNG readiness (getrandom GRND_NONBLOCK semantics)
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::wait_until_ready, quote: "Block until the ChaCha20 pool has been seeded with quality entropy."}
+usage_protocol:
+  - step: entropy::init() once after driver probe (kruntime does this); then call fill_random(&mut buf) from any context that may take the pool lock
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::init, quote: "Initialize the entropy pool and probe optional hardware sources."}
+      - {path: core/kruntime/src/lib.rs, item: kruntime::late_init_main, quote: "entropy::init();"}
+  - step: for blocking getrandom semantics check is_ready(), call try_seed_from_hardware(), then wait_until_ready()
+    evidence: [{path: core/ksyscall/src/sys.rs, item: ksyscall::sys::sys_getrandom, quote: "if !insecure && !entropy::is_ready() {"}]
+contract:
+  no_std:
+    value: "yes (#![no_std] with extern crate alloc)"
+    evidence:
+      - {path: util/entropy/src/lib.rs, quote: "#![no_std]"}
+      - {path: util/entropy/src/lib.rs, quote: "extern crate alloc;"}
+  allocation: {value: unknown, evidence: []}
+  blocking:
+    value: fill_random takes the global pool Mutex; wait_until_ready blocks the task on a wait queue until the pool is seeded; init with VirtIO RNG requires sleepable task context
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::fill_random, quote: "POOL.lock().output_bytes(buf);"}
+      - {path: util/entropy/src/lib.rs, item: entropy::wait_until_ready, quote: "READY_WQ.wait_until(is_ready);"}
+      - {path: util/entropy/src/lib.rs, item: entropy::init, quote: "With VirtIO RNG enabled, requires sleepable task context with IRQs and"}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: pool is a process-global static behind a lazily initialised Mutex; callers only borrow their output slice
+    evidence: [{path: util/entropy/src/lib.rs, item: entropy::POOL, quote: "static POOL: Lazy<Mutex<EntropyPool>> = Lazy::new(|| Mutex::new(EntropyPool::bootstrap()));"}]
+  errors_bounds:
+    value: fill_random and add_entropy return () and cannot fail; empty input is ignored; before the pool is quality-seeded output derives from a tick-based bootstrap seed (is_ready() false)
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::fill_random, quote: "pub fn fill_random(buf: &mut [u8]) {"}
+      - {path: util/entropy/src/lib.rs, item: entropy::is_ready, quote: "Pure tick bootstrap and userspace [`add_entropy`]"}
+  concurrency:
+    value: serialised by one global Mutex around the ChaCha20 state; hardware reseed is claimed under the lock to avoid duplicate reseeds
+    evidence:
+      - {path: util/entropy/src/lib.rs, item: entropy::maybe_reseed_from_hardware, quote: "// Claim the reseed under the pool lock so concurrent callers do not each"}
+layers:
+  depends_on:
+  - khal
+  - ksync
+  - ktask
+  - kpoll
+  - klazy
+  - rand_chacha
+  used_by:
+  - ksyscall
+  - devfs
+  - knet
+  - kexec
+  - kruntime
+  - tee_kernel
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: entropy.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: entropy.workspace = true
+  - path: process/kexec/Cargo.toml
+    quote: entropy.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: khal.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: ksync.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: klazy.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: rand_chacha.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: entropy.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: entropy.workspace = true
+  - path: tee/tee_kernel/Cargo.toml
+    quote: entropy.workspace = true
+aliases:
+  en: [get_random_bytes, getrandom, random bytes, CSPRNG, PRNG, rand, fill random buffer, random seed, urandom, random u32, random u64, generate nonce, AT_RANDOM bytes]
+  zh: [随机数, 随机字节, 获取随机数, 随机数生成器, 伪随机, 熵池, 生成随机种子]
+identifiers: [get_random_bytes, getrandom, xorshift, splitmix, lcg, next_u32, next_u64, rng, seed, rand_u32, random_u64, RNDR, rdrand, rdseed, ChaCha, "now_ticks() ^", "wrapping_mul(0x"]
+exclusions:
+  - not a deterministic or seedable PRNG; use a local rand_chacha / simple PRNG when reproducible sequences are required (tests, hash seeds)
+  - fill_random takes a ksync::Mutex around the pool (see contract.blocking); the documentation does not state it is usable from IRQ/NMI context, so do not assume it
+  - before is_ready() the output is not backed by quality entropy; security-sensitive callers must check readiness
+counter_examples:
+  - path: util/entropy/src/lib.rs
+    item: entropy::bootstrap_seed
+    why: bootstrap_seed derives a seed from tick counts with a multiply/xor mix; it is private bootstrap logic for the pool, not an interchangeable random source
+    evidence: [{path: util/entropy/src/lib.rs, item: entropy::bootstrap_seed, quote: "let mut state = now_ticks().as_raw() ^ 0x9e37_79b9_7f4a_7c15;"}]
+notes: >-
+  The drivers/contracts hwrng trait is the hardware-source contract feeding this pool, not a general
+  random API. Callers outside util/entropy at the pin include getrandom, /dev/random, UDP port
+  selection and exec (AT_RANDOM).

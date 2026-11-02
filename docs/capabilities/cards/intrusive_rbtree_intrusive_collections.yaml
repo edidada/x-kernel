@@ -1,0 +1,85 @@
+capability: intrusive_rbtree_intrusive_collections
+title: Intrusive red-black tree ordered by key (intrusive_collections::RBTree)
+family: container.tree
+summary: >-
+  RBTree<A> keeps objects ordered by a key through an embedded RBTreeLink / RBTreeAtomicLink; a KeyAdapter
+  provides the key. Supports find, lower_bound / upper_bound, range, ordered cursors and O(log n) insert and
+  remove without allocating tree nodes. Used for timer deadlines, scheduler run queues and a pty-pair index.
+source: {kind: dependency, crate: intrusive-collections, version: 0.10.2}
+symbols:
+  - {fqn: intrusive_collections::RBTree, kind: struct, path: src/rbtree.rs, role: primary}
+  - {fqn: intrusive_collections::RBTree::new, kind: fn, path: src/rbtree.rs, role: constructor}
+  - {fqn: intrusive_collections::RBTree::insert, kind: fn, path: src/rbtree.rs, role: operation}
+  - {fqn: intrusive_collections::RBTree::find, kind: fn, path: src/rbtree.rs, role: operation}
+  - {fqn: intrusive_collections::RBTree::lower_bound, kind: fn, path: src/rbtree.rs, role: operation}
+  - {fqn: intrusive_collections::RBTree::front, kind: fn, path: src/rbtree.rs, role: operation}
+  - {fqn: intrusive_collections::rbtree::Link, kind: struct, path: src/rbtree.rs, role: helper}
+  - {fqn: intrusive_collections::rbtree::AtomicLink, kind: struct, path: src/rbtree.rs, role: helper}
+  - {fqn: intrusive_collections::KeyAdapter, kind: trait, path: src/key_adapter.rs, role: helper}
+operations:
+  - name: insert
+    symbols: [intrusive_collections::RBTree::insert]
+    effect: insert an owned pointer in key order
+    evidence: [{path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::RBTree::insert, quote: "pub fn insert<'a>(&'a mut self, val: <A::PointerOps as PointerOps>::Pointer) -> CursorMut<'a, A>"}]
+  - name: find
+    symbols: [intrusive_collections::RBTree::find]
+    effect: cursor at the element with the given key
+    evidence: [{path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::RBTree::find, quote: "pub fn find<'a, 'b, Q: ?Sized + Ord>(&'a self, key: &Q) -> Cursor<'a, A>"}]
+  - name: lower_bound
+    symbols: [intrusive_collections::RBTree::lower_bound]
+    effect: first element at or after a bound (ordered successor query)
+    evidence: [{path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::RBTree::lower_bound, quote: "pub fn lower_bound<'a, 'b, Q: ?Sized + Ord>(&'a self, bound: Bound<&Q>) -> Cursor<'a, A>"}]
+usage_protocol:
+  - step: embed an RBTreeLink (or RBTreeAtomicLink), declare the adapter, and implement KeyAdapter for the key; keep keys unchanged while linked
+    evidence: [{path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::RBTree, quote: "remain in ascending key order."}]
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: intrusive-collections-0.10.2/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: the tree itself never allocates for nodes (links live in the elements)
+    evidence: [{path: intrusive-collections-0.10.2/src/lib.rs, quote: "intrusive collections never allocate memory themselves"}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: dropping the tree converts linked elements back to owned pointers and drops them; the ordering invariant is the caller's responsibility (memory-safe if violated, results may be wrong)
+    evidence:
+      - {path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::RBTree, quote: "memory safety will not be violated but the `find`,"}
+  errors_bounds:
+    value: unknown
+    evidence: []
+  concurrency:
+    value: no internal locking; AtomicLink only makes the link type shareable between threads
+    evidence:
+      - {path: intrusive-collections-0.10.2/src/rbtree.rs, item: intrusive_collections::rbtree::AtomicLink, quote: "Intrusive link that allows an object to be inserted into a"}
+layers:
+  depends_on: []
+  used_by:
+  - ksched
+  - ktimer-core
+  - ktty
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktimer-core/src/index.rs
+    quote: use intrusive_collections::{KeyAdapter, RBTree, RBTreeAtomicLink, UnsafeRef, intrusive_adapter};
+  - path: task/ksched/src/classes/fair.rs
+    quote: use intrusive_collections::{Adapter, DefaultLinkOps, KeyAdapter, RBTree, RBTreeAtomicLink};
+  - path: io/ktty/src/tty/pty_pair.rs
+    quote: use intrusive_collections::{KeyAdapter, RBTree, RBTreeAtomicLink, intrusive_adapter};
+  - path: task/ksched/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: intrusive-collections.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: intrusive-collections.workspace = true
+aliases:
+  en: [rbtree, red-black tree, rb tree, rb_node, rb_insert, ordered tree, sorted tree, timer tree, run queue tree, ordered set of nodes, btree map]
+  zh: [红黑树, 侵入式红黑树, 有序树, 有序集合, 定时器树]
+identifiers: [rb_node, rb_root, left, right, parent, color, red, black, rotate, deadline, vruntime, key, BTreeMap]
+exclusions:
+  - "keys must not change while the element is linked; the tree does not detect violations"
+  - "ordered map with owned nodes and allocation is alloc::collections::BTreeMap, not this crate"
+  - "not an integer-indexed lookup table: for sparse usize keys see sparse_index_xarray"
+counter_examples: []
+notes: >-
+  Used with the atomic link variant in ksched (fair, deadline classes) and ktimer-core.

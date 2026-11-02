@@ -1,0 +1,138 @@
+capability: error_errno_kerror
+title: Kernel error type with Linux errno conversion (kerrno::KError / KResult / LinuxError)
+family: error.errno
+summary: KError is the common kernel error value (kernel error kinds plus Linux errno), KResult<T> the
+  result alias, LinuxError the re-exported errno enum. Conversions go both ways; KError::into_syscall_return
+  encodes the negated Linux errno for the syscall ABI; k_err! / k_bail! construct warning-logged errors;
+  ensure! returns the supplied expression when its condition fails and only logs if that expression does.
+source: {kind: workspace, crate: kerrno, path: util/kerrno}
+symbols:
+  - {fqn: kerrno::KError, kind: struct, path: util/kerrno/src/lib.rs, role: primary}
+  - {fqn: kerrno::KErrorKind, kind: enum, path: util/kerrno/src/lib.rs, role: primary}
+  - {fqn: kerrno::KResult, kind: type, path: util/kerrno/src/lib.rs, role: primary}
+  - {fqn: kerrno::LinuxResult, kind: type, path: util/kerrno/src/lib.rs, role: helper}
+  - {fqn: kerrno::k_err, kind: macro, path: util/kerrno/src/lib.rs, role: helper}
+  - {fqn: kerrno::k_bail, kind: macro, path: util/kerrno/src/lib.rs, role: helper}
+  - {fqn: kerrno::ensure, kind: macro, path: util/kerrno/src/lib.rs, role: helper}
+  - {fqn: kerrno::k_err_type, kind: macro, path: util/kerrno/src/lib.rs, role: helper}
+operations:
+- name: to_syscall_return
+  symbols:
+  - kerrno::KError
+  effect: negated Linux errno as isize for the syscall return register (encode once at the dispatch boundary)
+  evidence:
+  - path: util/kerrno/src/lib.rs
+    item: kerrno::KError::into_syscall_return
+    quote: -LinuxError::from(self).into_raw() as isize
+- name: decode_untrusted
+  symbols:
+  - kerrno::KError
+  effect: try_from_i32 returns the original value for unknown codes, zero, or i32::MIN instead of panicking
+  evidence:
+  - path: util/kerrno/src/lib.rs
+    item: kerrno::KError::try_from_i32
+    quote: Returns the original `value` for unknown codes, zero, or `i32::MIN`.
+- name: canonicalize
+  symbols:
+  - kerrno::KError
+  effect: map Linux errno variants to the matching kernel kind where one exists
+  evidence:
+  - path: util/kerrno/src/lib.rs
+    item: kerrno::KError::canonicalize
+    quote: pub fn canonicalize(self) -> Self {
+- name: build_and_return
+  symbols:
+  - kerrno::k_err
+  - kerrno::k_bail
+  - kerrno::ensure
+  effect: k_err!(Kind) yields Err(KError) after a warn log; k_bail! returns it; ensure!(cond, expr) returns
+    expr when cond fails
+  evidence:
+  - path: util/kerrno/src/lib.rs
+    item: kerrno::k_err
+    quote: macro_rules! k_err {
+  - path: util/kerrno/src/lib.rs
+    item: kerrno::ensure
+    quote: if !$predicate {
+usage_protocol:
+  - step: propagate KError with ? and let the syscall dispatch layer encode it exactly once via into_syscall_return
+    evidence: [{path: util/kerrno/src/lib.rs, item: kerrno::KError::into_syscall_return, quote: "ordinary kernel"}]
+contract:
+  no_std:
+    value: "yes (#![cfg_attr(not(test), no_std)])"
+    evidence: [{path: util/kerrno/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: no heap allocation for the error value (doc header)
+    evidence: [{path: util/kerrno/src/lib.rs, quote: "Kernel error kinds and Linux errno conversion without heap allocation."}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: KError is a Copy i32 newtype (#[repr(transparent)])
+    evidence: [{path: util/kerrno/src/lib.rs, item: kerrno::KError, quote: "pub struct KError(i32);"}]
+  errors_bounds:
+    value: conversion from kernel kinds to Linux errno is lossy where several kinds share one code; LinuxError::new / From<LinuxError> with zero or negative values can create an invalid carrier that panics on formatting - use positive errno values
+    evidence:
+      - {path: util/kerrno/src/lib.rs, quote: "but conversion is lossy where several kernel kinds share one Linux code."}
+      - {path: util/kerrno/src/lib.rs, item: kerrno::KError, quote: "Zero or negative values created with `LinuxError::new` may create an invalid"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - linux_sysno
+  - strum
+  - log
+  used_by:
+  - khal
+  - kcpu
+  - ksyscall
+  - kuaccess
+  - kruntime
+  - devfs
+  - kalloc
+  - osvm
+  - kio
+  - iov_iter
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: io/iov_iter/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: util/kerrno/Cargo.toml
+    quote: linux_sysno = { workspace = true }
+  - path: util/kerrno/Cargo.toml
+    quote: strum = { workspace = true }
+  - path: util/kerrno/Cargo.toml
+    quote: log = "0.4"
+  - path: arch/khal/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: core/kuaccess/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: process/osvm/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: io/kio/Cargo.toml
+    quote: kerrno.workspace = true
+aliases:
+  en: [errno, Error enum, Result alias, EINVAL, EFAULT, ENOMEM, error code conversion, linux error, syscall return negative errno, ensure macro, bail macro, io::Error]
+  zh: [错误码, errno 转换, 内核错误类型, 系统调用返回错误, 错误枚举, 参数检查宏]
+identifiers: [errno, EINVAL, EFAULT, ENOMEM, ENOENT, EPERM, EAGAIN, "-(errno", "return -", "as isize", Error, ErrorKind, "enum Error", "type Result", "map_err(|_| ", into_syscall_return]
+exclusions:
+  - a crate-local error enum that is only ever converted to errno is fine, but new enums that duplicate Linux errno values should reuse KErrorKind / LinuxError
+  - KError::code() is the internal tagged representation, not a syscall return value (use into_syscall_return)
+  - pure no-log error construction should use KError::from(KErrorKind) rather than k_err! when a warn log is unwanted
+counter_examples:
+  - path: process/osvm/src/lib.rs
+    item: osvm::MemError
+    why: osvm::MemError is a domain error for user-memory access that converts into KError; it keeps a smaller domain-specific set (InvalidAddr / NoAccess / OutOfMemory) and is not replaced by KError directly
+    evidence: [{path: process/osvm/src/lib.rs, quote: "impl From<MemError> for KError {"}]
+  - path: mm/page_table/src/defs.rs
+    item: page_table::defs::PtError
+    why: page_table::PtError is a crate error with an optional kerrno conversion; the conversion is lossy (all but NoMemory become InvalidInput)
+    evidence: [{path: mm/page_table/src/defs.rs, quote: "impl From<PtError> for kerrno::KError {"}]

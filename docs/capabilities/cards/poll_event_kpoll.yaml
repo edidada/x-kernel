@@ -1,0 +1,132 @@
+capability: poll_event_kpoll
+title: Generation-counted broadcast event over PollSet (kpoll::PollEvent)
+family: task.poll
+summary: >-
+  PollEvent pairs an AtomicUsize generation with a PollSet. A waiter records the generation,
+  registers, and rechecks has_changed_since before sleeping, so a notify between the check and the
+  registration is never lost. notify bumps the generation and wakes all waiters; notify_defer_wake
+  returns the PollSet so the wake can happen after an outer lock is released.
+source: {kind: workspace, crate: kpoll, path: task/kpoll}
+symbols:
+  - {fqn: kpoll::PollEvent, kind: struct, path: task/kpoll/src/event.rs, role: primary}
+  - {fqn: kpoll::PollEvent::new, kind: fn, path: task/kpoll/src/event.rs, role: constructor}
+  - {fqn: kpoll::PollEvent::generation, kind: fn, path: task/kpoll/src/event.rs, role: operation}
+  - {fqn: kpoll::PollEvent::has_changed_since, kind: fn, path: task/kpoll/src/event.rs, role: operation}
+  - {fqn: kpoll::PollEvent::notify, kind: fn, path: task/kpoll/src/event.rs, role: operation}
+  - {fqn: kpoll::PollEvent::notify_defer_wake, kind: fn, path: task/kpoll/src/event.rs, role: operation}
+  - {fqn: kpoll::PollEvent::register, kind: fn, path: task/kpoll/src/event.rs, role: operation}
+operations:
+  - name: notify
+    symbols: [kpoll::PollEvent::notify, kpoll::PollEvent::notify_defer_wake]
+    effect: increments the generation (Release) and wakes every registered waiter, returning the diagnostic woken count; the deferred form returns the PollSet to wake after releasing an outer lock
+    evidence:
+      - {path: task/kpoll/src/event.rs, item: kpoll::event::PollEvent::notify_defer_wake, quote: "self.generation.fetch_add(1, Ordering::Release);"}
+      - {path: task/kpoll/src/event.rs, item: kpoll::event::PollEvent::notify_defer_wake, quote: "this method before dropping the outer lock; the returned [`PollSet`] must"}
+  - name: recheck
+    symbols: [kpoll::PollEvent::has_changed_since, kpoll::PollEvent::generation]
+    effect: waiters compare the remembered generation after registering to avoid a lost wakeup
+    evidence:
+      - {path: task/kpoll/src/event.rs, item: kpoll::event::PollEvent, quote: "remember a generation, register on the broadcast source, then recheck the"}
+usage_protocol:
+  - step: "read generation(), evaluate the predicate, register(context), then if has_changed_since(generation) re-evaluate instead of sleeping"
+    evidence:
+      - {path: task/kpoll/src/event.rs, item: kpoll::event::PollEvent::register, quote: "Callers must recheck [`Self::has_changed_since`] after registration."}
+contract:
+  no_std:
+    value: 'yes (kpoll is #![no_std])'
+    evidence:
+    - path: task/kpoll/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: PollEvent::new allocates through PollSet::new (an Arc); notify does not allocate beyond what
+      PollSet::wake does
+    evidence:
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent::new
+      quote: 'waiters: PollSet::new(),'
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::new
+      quote: 'inner: Arc::new(PollSetInner::new()),'
+  blocking:
+    value: the notification machinery does not itself provide a sleeping wait; wake invokes user-provided
+      Wakers outside the source lock, whose callback context/nonblocking behavior must be supplied by
+      the integration. Register may allocate.
+    evidence:
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::register
+      quote: '`Waker::clone` may run arbitrary'
+    - path: task/kpoll/src/source.rs
+      item: kpoll::source::PollSet::wake
+      quote: Wakers are invoked after
+  irq_nmi:
+    value: inherits PollSet's IRQ-safe wake; PollEvent itself documents no context restriction beyond
+      that
+    evidence:
+    - path: task/kpoll/src/lib.rs
+      quote: '[`PollSet`] is an IRQ-safe broadcast source.'
+  ownership_lifetime:
+    value: event owns its generation and its PollSet; notify_defer_wake returns a clone of the PollSet
+    evidence:
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent::notify_defer_wake
+      quote: self.waiters.clone()
+  errors_bounds:
+    value: register returns Result<(), PollRegisterError>; notify returns the usize woken count (diagnostic
+      only)
+    evidence:
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent::register
+      quote: 'pub fn register(&self, context: &mut PollContext<''_>) -> Result<(), PollRegisterError>'
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent::notify
+      quote: '[`PollSet`]. The count is diagnostic and test information; it does not'
+  concurrency:
+    value: lost-wakeup protection via generation counter (Release increment, Acquire load); all waiters
+      wake and recheck their own predicates (thundering herd)
+    evidence:
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent::generation
+      quote: self.generation.load(Ordering::Acquire)
+    - path: task/kpoll/src/event.rs
+      item: kpoll::event::PollEvent
+      quote: Broadcast poll event with generation-based lost-wakeup protection.
+layers:
+  depends_on:
+  - kspin
+  - smallvec
+  used_by:
+  - ktask
+  - kvfs
+  - knet
+  - ktty
+  - ksignal
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktask/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: fs/kvfs/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: task/kpoll/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/kpoll/Cargo.toml
+    quote: smallvec = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: kpoll = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: kpoll.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: kpoll.workspace = true
+aliases:
+  en: [generation counter event, broadcast event, sequence-count wakeup, eventcount, seqcount wait, notify all with recheck, condvar broadcast]
+  zh: [代数计数事件, 事件计数器, 广播事件, 状态变化通知, 防丢唤醒]
+identifiers: [generation, epoch, seq, sequence, notify_all, has_changed, changed_since, AtomicUsize, fetch_add]
+exclusions:
+- all waiters wake on every notify and must re-evaluate their own predicate; not a one-waiter handoff
+- carries no payload or completion token; for done/wait pairs use kcompletion (completion_tokens)
+- A finite usize generation wraps. Equality proves no observed change only if a complete counter wrap
+  cannot occur between sampling and recheck; wake callbacks still require the caller execution-context
+  contract.
+counter_examples: []
+notes: >-
+  Whether PollEvent is used in production code (versus tests) was not inventoried; used_by lists
+  crates depending on kpoll, which is the superset.

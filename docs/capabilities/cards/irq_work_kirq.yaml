@@ -1,0 +1,85 @@
+capability: irq_work_kirq
+title: One-shot NMI-safe handoff to ordinary hardirq (kirq::irq_work::IrqWork)
+family: irq.deferred
+summary: 'irq_work for NMI contexts. A prepared, stable-address IrqWork node is submitted at most once
+  with the unsafe queue(); NMI submission uses atomics plus a certified notification callback; other contexts
+  mask IRQs and pin execution, and the callback later runs in ordinary hardirq context with local IRQs
+  disabled, from handle_irq (bounded by CALLBACK_BUDGET = 64 per invocation). Local CPU only: there is
+  no cancellation, flush, remote submission or CPU-offline protocol. Used by kfinalize/kworkng to hand
+  NMI-time frees to a worker.'
+source: {kind: workspace, crate: kirq, path: arch/kirq}
+symbols:
+  - {fqn: kirq::irq_work::IrqWork, kind: struct, path: arch/kirq/src/irq_work.rs, role: primary}
+  - {fqn: kirq::irq_work::IrqWork::new, kind: fn, path: arch/kirq/src/irq_work.rs, role: constructor}
+  - {fqn: kirq::irq_work::queue, kind: fn, path: arch/kirq/src/irq_work.rs, role: operation}
+  - {fqn: kirq::irq_work::init_current_cpu, kind: fn, path: arch/kirq/src/irq_work.rs, role: operation}
+  - {fqn: kirq::irq_work::handle_irq, kind: fn, path: arch/kirq/src/irq_work.rs, role: operation}
+  - {fqn: kirq::irq_work::QueueError, kind: enum, path: arch/kirq/src/irq_work.rs, role: helper}
+operations:
+  - name: queue
+    symbols: [kirq::irq_work::queue]
+    effect: transfers a prepared one-shot node to this CPU's ordinary-IRQ consumer; callable from task, softirq, hardirq and NMI after init_current_cpu; NotReady / AlreadyQueued errors leave the node unclaimed
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::queue, quote: "Supports task, softirq, hardirq and NMI after local initialization. NMI"}
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::queue, quote: "NotReady does not claim or publish the node."}
+contract:
+  no_std:
+    value: "yes (kirq is cfg_attr no_std unless test)"
+    evidence: [{path: arch/kirq/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: "allocation-free: nodes are prepared before submission and embedded in caller storage"
+    evidence: [{path: arch/kirq/src/irq_work.rs, quote: "One-shot, allocation-free local handoff from NMI to ordinary hard IRQ."}]
+  blocking:
+    value: "callbacks cannot sleep and must never wait for work on this CPU; queue is not wait-free (CAS may retry) and has no latency bound"
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, quote: "Callbacks cannot sleep. Use a normal worker for sleepable finalization."}
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::queue, quote: "this is not a wait-free or bounded-latency interface."}
+  irq_nmi:
+    value: "submission from task, softirq, hardirq and NMI; callback runs in ordinary hardirq context with local IRQs disabled; handle_irq must only be wired to an ordinary-priority interrupt"
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::IrqWork::new, quote: "The callback runs in ordinary hardirq context with local IRQs disabled."}
+  ownership_lifetime:
+    value: "no ownership is hidden in the node; a successful submission transfers callback responsibility; the node is one-shot and cannot be reused after execution; storage must stay live at a stable address through callback handoff"
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::IrqWork, quote: "/// A stable-address node submitted at most once during its lifetime."}
+      - {path: arch/kirq/src/irq_work.rs, quote: "callback responsibility, not a borrow of caller-owned temporary storage."}
+  errors_bounds:
+    value: "QueueError::NotReady (no initialized NMI-safe notification provider on this CPU) or AlreadyQueued; at most CALLBACK_BUDGET = 64 callbacks per ordinary interrupt invocation; no FIFO ordering promised"
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::CALLBACK_BUDGET, quote: "pub const CALLBACK_BUDGET: usize = 64;"}
+      - {path: arch/kirq/src/irq_work.rs, item: kirq::irq_work::QueueError, quote: "pub enum QueueError {"}
+  concurrency:
+    value: "per-CPU lock-free incoming list with a claimed flag serializing producers; local consumer only; no remote submission"
+    evidence:
+      - {path: arch/kirq/src/irq_work.rs, quote: "There is no cancellation, flush, remote submission, or CPU-offline protocol."}
+      - {path: arch/kirq/src/irq_work.rs, quote: "SAFETY: claimed serializes producers."}
+layers:
+  depends_on:
+  - kcpu_slot
+  - kspin
+  used_by:
+  - kworkng
+  - kruntime
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kirq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/kworkng/Cargo.toml
+    quote: kirq.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kirq.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+aliases:
+  en: [irq_work, irq_work_queue, defer from NMI, NMI to IRQ handoff, deferred work from NMI, self-IPI work]
+  zh: [irq_work, NMI 延迟处理, NMI 到中断上下文转交, 中断内延迟回调]
+identifiers: [irq_work, irq_work_queue, irq_work_run, NMI, pseudo-NMI, self_ipi, defer]
+exclusions:
+- local CPU only; no cross-CPU submission (use kipi call-function or fixed notifications)
+- 'one-shot node: cannot be resubmitted after it ran; no cancel or flush'
+- 'callback runs in hardirq context with IRQs off and must not sleep: use it only to hand off to a normal
+  worker (kworkng) for sleepable work'
+- AlreadyQueued does not return ownership of an existing submission or extend its lifetime; every duplicate
+  submitter needs independent external lifetime protection.
+counter_examples: []
+notes: "User of this API at the pin: task/kworkng/src/finalize.rs (irq_work::queue calls in release_identity and in Carrier::submit)."

@@ -1,0 +1,132 @@
+capability: time_types_ktime_types
+title: Semantic time value types (ktime_types::TimeSpan / Instant<C> / SystemTime / Frequency / ClockId)
+family: time.types
+summary: >-
+  Distinct no_std types for durations (TimeSpan, non-negative), points in a clock domain
+  (Instant<Monotonic | Boottime | ProcessCpu | ThreadCpu> with MonotonicInstant etc. aliases), signed Unix
+  wall-clock timestamps (SystemTime), rates (Frequency), clock identities (ClockId), and unit constants
+  (NANOS_PER_SEC ...). Conversions to raw integers and core::time::Duration are explicit, with checked /
+  saturating arithmetic.
+source: {kind: workspace, crate: ktime_types, path: util/ktime_types}
+symbols:
+  - {fqn: ktime_types::TimeSpan, kind: struct, path: util/ktime_types/src/span.rs, role: primary}
+  - {fqn: ktime_types::Instant, kind: struct, path: util/ktime_types/src/instant.rs, role: primary}
+  - {fqn: ktime_types::MonotonicInstant, kind: type, path: util/ktime_types/src/instant.rs, role: primary}
+  - {fqn: ktime_types::SystemTime, kind: struct, path: util/ktime_types/src/system_time.rs, role: primary}
+  - {fqn: ktime_types::Frequency, kind: struct, path: util/ktime_types/src/frequency.rs, role: primary}
+  - {fqn: ktime_types::ClockId, kind: enum, path: util/ktime_types/src/clock_id.rs, role: helper}
+  - {fqn: ktime_types::TimestampLimits, kind: struct, path: util/ktime_types/src/timestamp.rs, role: helper}
+  - {fqn: ktime_types::NANOS_PER_SEC, kind: const, path: util/ktime_types/src/units.rs, role: helper}
+operations:
+  - name: span_conversions
+    symbols: [ktime_types::TimeSpan]
+    effect: from_secs / from_millis / from_micros / from_nanos, as_nanos_u64_saturating for hardware and ABI boundaries, explicit from_core / into_core for core::time::Duration
+    evidence:
+      - {path: util/ktime_types/src/span.rs, item: ktime_types::span::TimeSpan, quote: "`TimeSpan` intentionally requires explicit conversion to and from"}
+      - {path: util/ktime_types/src/span.rs, item: ktime_types::span::TimeSpan::as_nanos_u64_saturating, quote: "Returns total nanoseconds, saturating at `u64::MAX`."}
+  - name: instant_arithmetic
+    symbols: [ktime_types::Instant]
+    effect: checked_add / checked_sub with a TimeSpan, checked_duration_since / saturating_duration_since between instants of the same clock domain
+    evidence:
+      - {path: util/ktime_types/src/instant.rs, item: ktime_types::instant::Instant::checked_add, quote: "Advances this instant, returning `None` on overflow."}
+      - {path: util/ktime_types/src/instant.rs, item: ktime_types::instant::Instant::checked_duration_since, quote: "pub const fn checked_duration_since(self, earlier: Self) -> Option<TimeSpan> {"}
+  - name: wall_clock
+    symbols: [ktime_types::SystemTime]
+    effect: signed Unix timestamp with from_unix_parts / unix_seconds / subsec_nanos / duration_since
+    evidence:
+      - {path: util/ktime_types/src/system_time.rs, item: ktime_types::system_time::SystemTime, quote: "A signed wall-clock timestamp relative to the Unix epoch."}
+  - name: frequency
+    symbols: [ktime_types::Frequency]
+    effect: canonical hertz; checked_from_khz / checked_from_mhz, as_khz_floor / as_mhz_floor round down
+    evidence:
+      - {path: util/ktime_types/src/frequency.rs, item: ktime_types::frequency::Frequency, quote: "A frequency stored canonically as cycles per second (hertz)."}
+usage_protocol:
+  - step: obtain instants from a clock (khal::time::monotonic_time, ktime::realtime) rather than constructing them; convert to raw integers only at hardware / ABI boundaries
+    evidence:
+      - {path: util/ktime_types/src/instant.rs, item: ktime_types::instant::Instant::from_span_since_origin, quote: "boundaries. Ordinary subsystem code should obtain instants from its clock."}
+contract:
+  no_std:
+    value: 'yes (#![no_std], #![deny(unsafe_code)])'
+    evidence:
+    - path: util/ktime_types/src/lib.rs
+      quote: '#![no_std]'
+    - path: util/ktime_types/src/lib.rs
+      quote: '#![deny(unsafe_code)]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: 'owned Copy value types: TimeSpan wraps core Duration; SystemTime stores signed i64 seconds
+      plus u32 nanoseconds. Their representation is not one shared transparent-u64 ABI.'
+    evidence:
+    - path: util/ktime_types/src/span.rs
+      item: ktime_types::span::TimeSpan
+      quote: pub struct TimeSpan(Duration);
+    - path: util/ktime_types/src/system_time.rs
+      item: ktime_types::system_time::SystemTime
+      quote: 'seconds: i64,'
+  errors_bounds:
+    value: arithmetic returns Option (checked_*) or saturates (saturating_*); SystemTime::duration_since
+      returns Result<TimeSpan, SystemTimeError>; TimestampLimits::new panics on invalid granularity /
+      range
+    evidence:
+    - path: util/ktime_types/src/system_time.rs
+      item: ktime_types::system_time::SystemTime::duration_since
+      quote: 'pub const fn duration_since(self, earlier: Self) -> Result<TimeSpan, SystemTimeError> {'
+    - path: util/ktime_types/src/timestamp.rs
+      item: ktime_types::timestamp::TimestampLimits::new
+      quote: Panics if `granularity_ns` is zero or greater than one second, or if
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - unittest
+  used_by:
+  - khal
+  - ktime
+  - kipi
+  - ksyscall
+  - kruntime
+  - devfs
+  - rtc-driver
+  - timer-driver
+  allowed_layers: unknown
+  evidence:
+  - path: arch/khal/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: core/ktime/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: util/ktime_types/Cargo.toml
+    quote: unittest.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: drivers/platform/rtc/Cargo.toml
+    quote: ktime_types = { workspace = true }
+  - path: drivers/platform/timer/Cargo.toml
+    quote: ktime_types = { workspace = true }
+aliases:
+  en: [Duration, Instant, timespec, timeval, nanoseconds since boot, timestamp, deadline, wall clock, ns_to_ticks, ticks_to_ns, time units, NSEC_PER_SEC, HZ, frequency, clock id, CLOCK_MONOTONIC, CLOCK_REALTIME]
+  zh: [时间间隔, 时间点, 单调时钟时间, 墙上时间, 时间戳, 截止时间, 时钟频率, 纳秒换算, 时钟类型]
+identifiers: [Duration, Instant, timespec, timeval, tv_sec, tv_nsec, tv_usec, NSEC_PER_SEC, NANOS_PER_SEC, "1_000_000_000", "1000000000", as_nanos, from_nanos, deadline, CLOCK_MONOTONIC, CLOCK_REALTIME, freq_hz, ticks]
+exclusions:
+  - TimeSpan is non-negative; signed differences need SystemTime::duration_since (Result) or explicit handling, not a TimeSpan
+  - types from different clock domains do not mix (MonotonicInstant vs BoottimeInstant); convert through ktime::*_deadline_to_monotonic
+  - not a clock - these are values only; reading the current time is time_clock_khal / time_realtime_ktime
+counter_examples:
+  - path: util/ktime_types/src/clock_id.rs
+    item: ktime_types::clock_id::ClockId
+    why: ClockId is a semantic identity independent of ABI numbers; raw CLOCK_* parsing belongs to syscall adapters, so it does not replace the Linux clockid_t integer constants at the syscall boundary
+    evidence: [{path: util/ktime_types/src/clock_id.rs, item: ktime_types::clock_id::ClockId, quote: "a clock source nor implies that every variant has a distinct implementation."}]

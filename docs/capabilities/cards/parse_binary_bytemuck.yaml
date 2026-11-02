@@ -1,0 +1,115 @@
+capability: parse_binary_bytemuck
+title: Plain-old-data casts between bytes and structs (bytemuck Pod / AnyBitPattern)
+family: parse.binary
+summary: >-
+  bytemuck's marker traits (Zeroable, Pod, AnyBitPattern, NoUninit; derivable) allow safe reinterpretation
+  of plain-data values: bytes_of(&T) -> &[u8], try_from_bytes / from_bytes (&[u8] -> &T), cast,
+  cast_slice and pod_read_unaligned (copying read that tolerates misalignment). The kernel uses it
+  for POSIX ABI structs, termios / vt structs, DRM structures and for "is this value all zero"
+  checks on user data.
+source: {kind: dependency, crate: bytemuck, version: 1.25.2}
+symbols:
+  - {fqn: bytemuck::Pod, kind: trait, path: src/pod.rs, role: primary}
+  - {fqn: bytemuck::Zeroable, kind: trait, path: src/zeroable.rs, role: primary}
+  - {fqn: bytemuck::AnyBitPattern, kind: trait, path: src/anybitpattern.rs, role: primary}
+  - {fqn: bytemuck::NoUninit, kind: trait, path: src/no_uninit.rs, role: helper}
+  - {fqn: bytemuck::bytes_of, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: bytemuck::from_bytes, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: bytemuck::try_from_bytes, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: bytemuck::pod_read_unaligned, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: bytemuck::cast_slice, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: bytemuck::PodCastError, kind: enum, path: src/lib.rs, role: helper}
+operations:
+  - name: as_bytes
+    symbols: [bytemuck::bytes_of]
+    effect: view a NoUninit value as its bytes
+    evidence: [{path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::bytes_of, quote: "pub fn bytes_of<T: NoUninit>(t: &T) -> &[u8] {"}]
+  - name: try_view
+    symbols: [bytemuck::try_from_bytes, bytemuck::PodCastError]
+    effect: borrow a byte slice as &T; fails when misaligned or the length is not exactly size_of::<T>()
+    evidence:
+      - {path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::try_from_bytes, quote: "If the slice's length isn’t exactly the size of the new type"}
+  - name: view_or_panic
+    symbols: [bytemuck::from_bytes]
+    effect: like try_from_bytes but panics on error
+    evidence: [{path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::from_bytes, quote: "This is like [`try_from_bytes`] but will panic on error."}]
+  - name: read_unaligned
+    symbols: [bytemuck::pod_read_unaligned]
+    effect: copy a T out of a byte slice without requiring alignment
+    evidence: [{path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::pod_read_unaligned, quote: "pub fn pod_read_unaligned<T: AnyBitPattern>(bytes: &[u8]) -> T {"}]
+usage_protocol:
+- step: For byte exposure derive NoUninit/Pod only on representations without uninitialized padding; for
+    input decoding AnyBitPattern permits all bit patterns and may allow padding. Choose try_ casts for
+    untrusted sizes/alignment; pod_read_unaligned copies and still requires the exact size.
+  evidence:
+  - path: bytemuck-1.25.2/src/pod.rs
+    item: bytemuck::pod::Pod
+    quote: padding in the middle, and also no `#[repr(C)] struct Foo(u16, u8)`, which
+  - path: bytemuck-1.25.2/src/anybitpattern.rs
+    item: bytemuck::anybitpattern::AnyBitPattern
+    quote: "padding)"
+contract:
+  no_std:
+    value: "yes: #![no_std]"
+    evidence:
+      - {path: bytemuck-1.25.2/src/lib.rs, quote: "#![no_std]"}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: view functions return borrows of the input; pod_read_unaligned copies
+    evidence:
+      - {path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::try_from_bytes, quote: "pub fn try_from_bytes<T: AnyBitPattern>(s: &[u8]) -> Result<&T, PodCastError> {"}
+  errors_bounds:
+    value: try_from_bytes returns PodCastError on misalignment or wrong length; from_bytes and cast panic instead
+    evidence:
+      - {path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::try_from_bytes, quote: "If the slice's length isn’t exactly the size of the new type"}
+      - {path: bytemuck-1.25.2/src/lib.rs, item: bytemuck::from_bytes, quote: "This is like [`try_from_bytes`] but will panic on error."}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by:
+  - ktty
+  - posix-types
+  - posix-process
+  - posix-net
+  - osvm
+  - drmdevice
+  - tee_raw_sys
+  - tee_kernel
+  - tee_task_iface
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
+  - path: io/ktty/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: posix/types/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: posix/process/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: posix/net/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: io/drmdevice/Cargo.toml
+    quote: bytemuck.workspace = true
+  - path: tee/tee_raw_sys/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: process/osvm/Cargo.toml
+    quote: "bytemuck = { version = \"1.24\", features = [\n    \"align_offset\",\n    \"const_zeroed\"\
+      ,\n    \"zeroable_maybe_uninit\",\n] }"
+  - path: tee/tee_kernel/Cargo.toml
+    quote: bytemuck = { workspace = true, features = ["derive"] }
+  - path: tee/tee_task_iface/Cargo.toml
+    quote: bytemuck = { workspace = true }
+aliases:
+  en: [bytemuck, pod, plain old data, cast bytes, bytes to struct, struct to bytes, reinterpret cast, zeroed, is zero, transmute alternative, abi struct]
+  zh: [纯数据类型, 字节转结构体, 结构体转字节, 重新解释转换, 全零检查, 代替 transmute]
+identifiers: [Pod, Zeroable, AnyBitPattern, NoUninit, bytes_of, from_bytes, try_from_bytes, pod_read_unaligned, cast_slice, zeroed]
+exclusions:
+  - "no byte-order or packed-field support: use zerocopy (parse_binary_zerocopy) with its byteorder types for wire headers with fixed endianness and for Unaligned views"
+  - "the two crates' marker traits are not interchangeable; a type derived for one is not usable with the other's API"
+  - "the workspace enables the unsound_ptr_pod_impl feature, which implements Pod for raw pointers; do not rely on Pod to prove that a type has no pointers"
+  - "does not copy from user memory; bring the bytes into the kernel with the uaccess helpers first"
+counter_examples: []
+notes: >-
+  Cargo.lock at the pin has one bytemuck entry (1.25.2). osvm declares the dependency with its own feature list rather than the workspace entry.

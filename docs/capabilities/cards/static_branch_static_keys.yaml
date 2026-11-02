@@ -1,0 +1,78 @@
+capability: static_branch_static_keys
+title: "Patch-at-runtime static branches (static_keys: static_branch_likely! / unlikely!)"
+family: misc.static_branch
+summary: >-
+  static_keys is the Linux static-key mechanism for Rust: define_static_key_false! / _true! define a key,
+  static_branch_unlikely!(KEY) / static_branch_likely!(KEY) compile to a NOP or JMP at the use site,
+  and GenericStaticKey::enable / disable rewrite the recorded instructions. global_init() must run
+  first to sort the jump-entry table. In the kernel it is initialised by ktracing's trace-point
+  manager, so the key-guarded trace points cost almost nothing when disabled.
+source: {kind: dependency, crate: static-keys, version: 0.8.2}
+symbols:
+  - {fqn: static_keys::define_static_key_false, kind: macro, path: src/lib.rs, role: constructor}
+  - {fqn: static_keys::static_branch_unlikely, kind: macro, path: src/lib.rs, role: primary}
+  - {fqn: static_keys::static_branch_likely, kind: macro, path: src/lib.rs, role: primary}
+  - {fqn: static_keys::GenericStaticKey, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: static_keys::GenericStaticKey::enable, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: static_keys::GenericStaticKey::disable, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: static_keys::global_init, kind: fn, path: src/lib.rs, role: operation}
+operations:
+  - name: init
+    symbols: [static_keys::global_init]
+    effect: initialise the jump-entry table; must run once before any key is used or toggled
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::global_init, quote: "Initialize the static keys data. Always call this method at beginning of application, before using any static key related"}
+  - name: toggle
+    symbols: [static_keys::GenericStaticKey::enable, static_keys::GenericStaticKey::disable]
+    effect: unsafe flip of the key, rewriting the recorded jump instructions in the code region
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::GenericStaticKey::enable, quote: "This method may be UB if called before [`global_init`] or called in parallel. Never call this method when"}
+  - name: branch
+    symbols: [static_keys::static_branch_unlikely, static_keys::static_branch_likely]
+    effect: use in an if condition like the likely/unlikely intrinsics; the branch is a patched NOP or JMP
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::static_branch_unlikely, quote: "Use this in a `if` condition, just like the common [`likely`][core::intrinsics::likely]"}
+usage_protocol:
+  - step: "define_static_key_false!(KEY); call static_keys::global_init() once at startup; test with static_branch_unlikely!(KEY); toggle only with the key's unsafe enable / disable while no other CPU can execute the patched code page"
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::GenericStaticKey::enable, quote: "This method may be UB if called before [`global_init`] or called in parallel. Never call this method when"}
+contract:
+  no_std:
+    value: "yes: #![no_std]"
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, quote: "#![no_std]"}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: keys are statics; jump entries live in the __static_keys linker section
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::JumpEntry, quote: "Entries in the __static_keys section, used for record addresses to modify JMP/NOP."}
+  errors_bounds:
+    value: no error return; enable and disable are unsafe and may be UB if called before global_init or concurrently
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::GenericStaticKey::enable, quote: "This method may be UB if called before [`global_init`] or called in parallel. Never call this method when"}
+  concurrency:
+    value: toggling must not run in parallel with other threads executing the patched code; global_init is idempotent (only the first call takes effect)
+    evidence:
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::global_init, quote: "will take effect."}
+      - {path: static-keys-0.8.2/src/lib.rs, item: static_keys::GenericStaticKey::enable, quote: "This method may be UB if called before [`global_init`] or called in parallel. Never call this method when"}
+layers:
+  depends_on: []
+  used_by: [ktracing]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'static-keys = "0.8"'}
+    - {path: core/ktracing/Cargo.toml, quote: "static-keys = { workspace = true }"}
+    - {path: core/ktracing/src/lib.rs, item: ktracing::trace_point_manager, quote: "static_keys::global_init();"}
+aliases:
+  en: [static key, static branch, jump label, static_branch_unlikely, runtime patched branch, feature flag with zero cost, code patching, tracepoint enable flag, likely unlikely branch]
+  zh: [静态键, 静态分支, 跳转标签, 运行时代码打补丁, 零开销开关, 追踪点开关]
+identifiers: [static_branch_likely, static_branch_unlikely, define_static_key_false, define_static_key_true, StaticFalseKey, global_init, JumpEntry, jump_label]
+exclusions:
+  - "not a general boolean flag: use an AtomicBool for flags that change often; toggling changes the memory protection of the code region"
+  - "toggling is unsafe and requires no concurrent execution of the patched code; do not toggle from hot paths or interrupt context"
+  - "the wrapper that owns initialisation at the pin is ktracing; do not call global_init from other crates"
+counter_examples: []
+notes: >-
+  At the pin only ktracing lists static-keys in its Cargo.toml; no workspace crate defines its own static key.

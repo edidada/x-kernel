@@ -1,0 +1,111 @@
+capability: worker_pool_kworkerpool_ng
+title: Per-CPU bounded worker-task pool and bottom-half executors for pluggable work sources (kworkerpool_ng)
+family: task.work
+summary: >-
+  Execution layer under kworkng. NormalServices::start creates, on every boot CPU, a pool of worker
+  tasks (bounded by `limit`, growth by a manager task, idle retirement keeping one baseline worker)
+  that pull claims from a PartitionWorkSource and run AcquiredExecution; BottomHalfServices run
+  bounded passes from kirq's Tasklet / High softirq vectors with a source-inspection budget. These are
+  integration contracts, not business workqueue APIs: use kworkng handles for submitting work.
+source: {kind: workspace, crate: kworkerpool_ng, path: task/kworkng/crates/kworkerpool_ng}
+symbols:
+  - {fqn: kworkerpool_ng::NormalServices, kind: struct, path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, role: primary}
+  - {fqn: kworkerpool_ng::NormalServices::start, kind: fn, path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, role: constructor}
+  - {fqn: kworkerpool_ng::NormalServices::stop, kind: fn, path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, role: operation}
+  - {fqn: kworkerpool_ng::BottomHalfServices, kind: struct, path: task/kworkng/crates/kworkerpool_ng/src/bottom_half/services.rs, role: primary}
+  - {fqn: kworkerpool_ng::BottomHalfService, kind: struct, path: task/kworkng/crates/kworkerpool_ng/src/bottom_half.rs, role: primary}
+  - {fqn: kworkerpool_ng::PartitionWorkSource, kind: trait, path: task/kworkng/crates/kworkerpool_ng/src/execution.rs, role: helper}
+  - {fqn: kworkerpool_ng::AcquiredExecution, kind: trait, path: task/kworkng/crates/kworkerpool_ng/src/execution.rs, role: helper}
+operations:
+  - name: start_normal
+    symbols: [kworkerpool_ng::NormalServices::start]
+    effect: prepares normal execution on every present boot CPU without publishing it; limit bounds workers per CPU, idle_for is the idle-retirement interval (one baseline worker retained)
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, item: kworkerpool_ng::normal::services::NormalServices::start, quote: "`limit` bounds workers per CPU; `idle_for` is the positive idle-retirement"}
+  - name: stop
+    symbols: [kworkerpool_ng::NormalServices::stop]
+    effect: joins all services in reverse construction order after sources are drained and detached
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, item: kworkerpool_ng::normal::services::NormalServices::stop, quote: "Joins all services in reverse construction order after source teardown."}
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: task/kworkng/crates/kworkerpool_ng/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "source preparation and service start allocate; notification and inspection reuse that storage; worker growth runs in manager task context"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/lib.rs, quote: "matching prepared notification. Source preparation allocates; notification and"}
+  blocking:
+    value: "start/stop need sleepable task context; BH passes are non-sleeping softirq execution with a turn budget; normal workers are tasks"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, item: kworkerpool_ng::normal::services::NormalServices::start, quote: "Requires sleepable task context without locks needed by reclaim, I/O or"}
+      - {path: task/kworkng/crates/kworkerpool_ng/src/bottom_half.rs, quote: "CPU-bound bounded BH execution and retained continuation requests."}
+  irq_nmi:
+    value: "BH passes run in softirq and reject task, BH-disabled task and hardirq context (BottomHalfRunError::InvalidContext); producers publish demand first then call the prepared notification"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/bottom_half.rs, item: kworkerpool_ng::bottom_half::BottomHalfRunError, quote: "/// Task, BH-disabled task or hardirq context cannot execute BH callbacks."}
+  ownership_lifetime:
+    value: "NormalServices owns each CPU's runtime; integration retains it until producers stop, sources drain/detach and stop completes; Drop does not block or stop runtimes"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, item: kworkerpool_ng::normal::services::NormalServices, quote: "stop, sources drain/detach, and stop completes. Drop does not block or stop"}
+  errors_bounds:
+    value: "start fails on invalid context, bad idle interval, empty boot coverage (after joined rollback) or NoMemory for manager entries; worker count per CPU bounded by limit; no CPU hotplug support"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal/services.rs, item: kworkerpool_ng::normal::services::NormalServices::start, quote: "Invalid context or idle interval rejects before service allocation. Empty"}
+      - {path: task/kworkng/crates/kworkerpool_ng/src/bottom_half.rs, item: kworkerpool_ng::bottom_half::BottomHalfService::new, quote: "single-CPU runtime uses only the local softirq path. No hotplug is supported."}
+  concurrency:
+    value: "per-CPU services; lock order dispatch -> workers; the provider must serialize BH passes on the selected CPU and never call run_pass inline from its Waker"
+    evidence:
+      - {path: task/kworkng/crates/kworkerpool_ng/src/normal.rs, item: kworkerpool_ng::normal::NormalService, quote: "Source demand and worker parking use dispatch -> workers lock order."}
+      - {path: task/kworkng/crates/kworkerpool_ng/src/bottom_half.rs, quote: "requests made during a pass, serialize all passes on the selected CPU and"}
+layers:
+  depends_on:
+  - kcompletion
+  - kspin
+  - kcpu_id_map
+  - khal
+  - kirq
+  - kipi
+  - ktime_types
+  - ktask
+  - kbuild_config
+  - intrusive-collections
+  used_by:
+  - kworkng
+  - kworkqueue_ng
+  allowed_layers: unknown
+  evidence:
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kirq.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kworkerpool_ng.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kworkerpool_ng.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kcompletion.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: khal.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kipi.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: intrusive-collections.workspace = true
+aliases:
+  en: [worker pool, thread pool, kworker, kworker pool, workqueue worker, bounded worker pool, executor, cmwq, concurrency managed workqueue, per-CPU worker]
+  zh: [工作线程池, 线程池, 每 CPU 工作线程, 执行器, 并发受控工作队列]
+identifiers: [worker, workers, worker_pool, WorkerPool, max_workers, idle_timeout, spawn, kworker, thread_pool, manager]
+exclusions:
+  - "implementation contracts for integrators, not an API for submitting work: submit through kworkng handles (work_handle_kworkng) or the borrowed path (work_prepared_kworkqueue_ng)"
+  - "requires the PartitionWorkSource abstraction and the ktask/ktimer/kirq runtime; not a generic standalone thread pool"
+  - "no CPU hotplug and no public teardown of the global services"
+counter_examples: []
+notes: "BH execution rides kirq softirq vectors Tasklet and High (see softirq_kirq if present)."

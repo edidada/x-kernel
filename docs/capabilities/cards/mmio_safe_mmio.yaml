@@ -1,0 +1,98 @@
+capability: mmio_safe_mmio
+title: Typed volatile MMIO access through unique/shared pointers (safe_mmio)
+family: io.mmio
+summary: >-
+  safe_mmio models a device register block as a #[repr(C)] struct whose fields are wrapped in
+  ReadOnly / ReadPure / WriteOnly / ReadWrite / ReadPureWrite. UniqueMmioPointer (unique, &mut-based)
+  and SharedMmioPointer give volatile read/write/modify on those fields with the access kind checked at
+  compile time; field! projects a pointer to a field. PhysicalInstance carries a device's physical
+  base address until it is mapped. Used by the virtio transports, not by the register-bitfield drivers
+  (those use tock-registers).
+source: {kind: dependency, crate: safe-mmio, version: 0.3.2}
+symbols:
+  - {fqn: safe_mmio::UniqueMmioPointer, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: safe_mmio::UniqueMmioPointer::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: safe_mmio::UniqueMmioPointer::read, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: safe_mmio::UniqueMmioPointer::write, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: safe_mmio::SharedMmioPointer, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: safe_mmio::PhysicalInstance, kind: struct, path: src/physical.rs, role: helper}
+  - {fqn: safe_mmio::field, kind: macro, path: src/lib.rs, role: helper}
+  - {fqn: safe_mmio::fields::ReadWrite, kind: struct, path: src/fields.rs, role: helper}
+  - {fqn: safe_mmio::fields::WriteOnly, kind: struct, path: src/fields.rs, role: helper}
+  - {fqn: safe_mmio::fields::ReadPureWrite, kind: struct, path: src/fields.rs, role: helper}
+operations:
+  - name: wrap_registers
+    symbols: [safe_mmio::UniqueMmioPointer::new]
+    effect: build a unique pointer from a raw mapped register address (unsafe; caller guarantees validity and uniqueness)
+    evidence: [{path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::new, quote: "pub const unsafe fn new(regs: NonNull<T>) -> Self {"}]
+  - name: read_write
+    symbols: [safe_mmio::UniqueMmioPointer::read, safe_mmio::UniqueMmioPointer::write]
+    effect: volatile read or write of a whole field whose wrapper type permits it
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::read, quote: "Performs an MMIO read of the entire `T`."}
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::write, quote: "Performs an MMIO write of the entire `T`."}
+  - name: field_projection
+    symbols: [safe_mmio::field]
+    effect: get a pointer to one field of a register struct
+    evidence: [{path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::field, quote: "Gets a `UniqueMmioPointer` to a field of a type wrapped in a `UniqueMmioPointer`."}]
+usage_protocol:
+  - step: "describe the block as a #[repr(C)] struct of ReadOnly/ReadPure/WriteOnly/ReadWrite/ReadPureWrite fields, build the pointer once with the unsafe new (valid, aligned, device-mapped, no aliases), then use field!/read/write; reads take &mut self because they may have device side effects"
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::new, quote: "which is mapped as device memory and valid to read and write from any thread with volatile"}
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::read_unsafe, quote: "Note that this takes `&mut self` rather than `&self` because an MMIO read may cause"}
+contract:
+  no_std:
+    value: "yes: #![no_std]; the only optional feature is custom-mmio"
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, quote: "#![no_std]"}
+      - {path: safe-mmio-0.3.2/Cargo.toml, quote: "custom-mmio = []"}
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the unique pointer is guaranteed valid and unique for its lifetime; no other access to the device's MMIO space may happen while it exists
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer, quote: "It is guaranteed to be valid and unique; no other access to the MMIO space of the device may"}
+  errors_bounds:
+    value: no error returns; constructing the pointer is unsafe and the caller guarantees alignment and validity
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::new, quote: "`regs` must be a properly aligned and valid pointer to some MMIO address space of type T,"}
+  concurrency:
+    value: access through UniqueMmioPointer takes &mut self; the safety contract requires that no other aliases access the same MMIO region
+    evidence:
+      - {path: safe-mmio-0.3.2/src/lib.rs, item: safe_mmio::UniqueMmioPointer::new, quote: "operations. There must not be any other aliases which are used to access the same MMIO"}
+layers:
+  depends_on:
+  - zerocopy
+  used_by:
+  - virtio
+  - kvirtiodrivers
+  allowed_layers: unknown
+  evidence:
+  - path: Cargo.toml
+    quote: safe-mmio = "0.3.0"
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: safe-mmio = { workspace = true }
+  - path: vendor/kvirtiodrivers/Cargo.toml
+    quote: safe-mmio = "0.3.0"
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: '[target.''cfg(target_arch = "x86_64")''.dependencies]'
+aliases:
+  en: [mmio, memory-mapped io, register block, volatile read write, device registers, readl writel, ioread, iowrite, mmio pointer]
+  zh: [内存映射 IO, 寄存器块, 易失读写, 设备寄存器, 寄存器访问]
+identifiers: [read_volatile, write_volatile, UniqueMmioPointer, ReadWrite, WriteOnly, ReadOnly, field!, PhysicalInstance, mmio, regs]
+exclusions:
+- not a bitfield/register-definition framework; for typed register bitfields (register_bitfields!, LocalRegisterCopy)
+  see mmio_tock_registers
+- 'does not map memory: it does not translate PhysicalInstance to a virtual address; the caller must map
+  the device first'
+- plain core::ptr::read_volatile / write_volatile on raw addresses in other drivers is the pattern this
+  replaces, but do not rewrite those drivers only for style
+- Volatile MMIO access does not imply inter-CPU atomicity, hardware ordering barriers, endianness conversion,
+  or NMI safety. UniqueMmioPointer and SharedMmioPointer have different alias/access contracts; the unique-pointer
+  lifetime contract cannot be applied to both.
+counter_examples: []
+notes: >-
+  Only the virtio crates use safe-mmio at the pin; pci and aarch64-pmuv3 use tock-registers 0.10 and kcpu uses tock-registers 0.9.

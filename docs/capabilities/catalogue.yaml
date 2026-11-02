@@ -1,0 +1,83 @@
+# Capability catalogue: reusable capabilities of X-Kernel and its locked
+# dependencies, one card per capability in cards/<capability>.yaml.
+# Format, card states and the maintenance flow: README.md.
+# Check: make check_capabilities. Regenerate helpers.md: make capabilities.
+schema: 2
+# Commit the current card set was drafted and verified against. Per-card
+# verification state lives in stamps.json (written by xkmake, not by hand).
+baseline:
+  commit: d1607d768ddb0ff71421db511b41029df11399db
+notice: >-
+  Five cards need an owner decision and are not suggested until their open
+  questions are answered: hash_digest_sha2, id_alloc_fd_slots_kfd,
+  mm_user_load_vec_osvm, mm_user_range_check_kuaccess, parse_binary_zerocopy.
+# Known families; a card outside this list draws a warning.
+families:
+  - container.ring
+  - container.fixed_capacity
+  - container.inline_vec
+  - container.bitmap
+  - container.list
+  - container.tree
+  - container.sparse_index
+  - container.map
+  - container.slot_pool
+  - id.allocator
+  - sync.spinlock
+  - sync.mutex
+  - sync.rwlock
+  - sync.semaphore
+  - sync.wait_queue
+  - sync.completion
+  - sync.event
+  - sync.rcu
+  - sync.once_lazy
+  - sync.refcount
+  - sync.deferred_drop
+  - task.work
+  - task.timer
+  - task.poll
+  - irq.deferred
+  - cpu.percpu
+  - cpu.mask
+  - cpu.ipi
+  - mm.allocator
+  - mm.slab
+  - mm.address
+  - mm.page_table
+  - mm.user_access
+  - mm.dma
+  - mm.fallible_alloc
+  - io.mmio
+  - io.buffer
+  - io.traits
+  - parse.binary
+  - parse.elf
+  - parse.fdt
+  - parse.text
+  - error.errno
+  - time.types
+  - misc.random
+  - misc.registration
+  - misc.bits
+  - misc.interface
+  - misc.static_branch
+  - misc.backtrace
+  - crypto.hash
+# Families inventoried and found to have no reusable implementation.
+absent:
+  - family: state_machine
+    note: >-
+      No general reusable transition engine found at d1607d768 (searched
+      public StateMachine / state_machine / transition abstractions in
+      workspace sources and utility and synchronization crates). RCU
+      callback state and device lifecycle states are domain-specific, not a
+      general engine. A scoped inventory result, not a proof of absence across
+      every macro expansion or transitive crate.
+maintenance:
+  # A stale card not repaired within this many days (commit time) is
+  # reported as suspended and stops being suggested even as a reference.
+  stale_grace_days: 14
+  # Model drafting of card updates. Must stay `disabled`: the step is not
+  # implemented and enabling it spends model quota (see README.md).
+  model_draft: disabled

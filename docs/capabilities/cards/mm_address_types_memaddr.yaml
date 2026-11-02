@@ -1,0 +1,130 @@
+capability: mm_address_types_memaddr
+title: Typed physical / virtual addresses, address ranges and page iterators (memaddr)
+family: mm.address
+summary: >-
+  Newtype wrappers PhysAddr and VirtAddr over usize, the generic AddrRange<A> half-open range with
+  checked and panicking constructors, overlap / containment tests, and PageIter / DynPageIter that
+  step through an aligned range page by page. Address arithmetic comes from the MemoryAddr / AddrOps
+  traits (checked_add, wrapping_add, offset_from ...).
+source: {kind: workspace, crate: memaddr, path: mm/memaddr}
+symbols:
+  - {fqn: memaddr::def_usize_addr, kind: macro, path: mm/memaddr/src/units/addr.rs, role: primary}
+  - {fqn: memaddr::VirtAddr::from_ptr, kind: fn, path: mm/memaddr/src/units/addr.rs, role: operation}
+  - {fqn: memaddr::pa, kind: macro, path: mm/memaddr/src/units/addr.rs, role: constructor}
+  - {fqn: memaddr::va, kind: macro, path: mm/memaddr/src/units/addr.rs, role: constructor}
+  - {fqn: memaddr::MemoryAddr, kind: trait, path: mm/memaddr/src/units/addr.rs, role: operation}
+  - {fqn: memaddr::AddrOps, kind: trait, path: mm/memaddr/src/units/addr.rs, role: operation}
+  - {fqn: memaddr::AddrRange, kind: struct, path: mm/memaddr/src/units/range.rs, role: primary}
+  - {fqn: memaddr::AddrRange::try_new, kind: fn, path: mm/memaddr/src/units/range.rs, role: constructor}
+  - {fqn: memaddr::AddrRange::try_from_start_size, kind: fn, path: mm/memaddr/src/units/range.rs, role: constructor}
+  - {fqn: memaddr::AddrRange::contains, kind: fn, path: mm/memaddr/src/units/range.rs, role: operation}
+  - {fqn: memaddr::AddrRange::overlaps, kind: fn, path: mm/memaddr/src/units/range.rs, role: operation}
+  - {fqn: memaddr::VirtAddrRange, kind: type, path: mm/memaddr/src/units/range.rs, role: helper}
+  - {fqn: memaddr::PhysAddrRange, kind: type, path: mm/memaddr/src/units/range.rs, role: helper}
+  - {fqn: memaddr::PageIter, kind: struct, path: mm/memaddr/src/units/iter.rs, role: operation}
+  - {fqn: memaddr::DynPageIter, kind: struct, path: mm/memaddr/src/units/iter.rs, role: operation}
+operations:
+  - name: checked_construct_range
+    symbols: [memaddr::AddrRange::try_new, memaddr::AddrRange::try_from_start_size]
+    effect: return None for start > end or an overflowing start + size, instead of panicking
+    evidence:
+      - {path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::try_from_start_size, quote: "start.checked_add(size).map(|end| Self { start, end })"}
+  - name: range_queries
+    symbols: [memaddr::AddrRange::contains, memaddr::AddrRange::overlaps]
+    effect: half-open containment of an address and overlap of two ranges
+    evidence:
+      - {path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::contains, quote: "self.start <= addr && addr < self.end"}
+      - {path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::overlaps, quote: "self.start < other.end && other.start < self.end"}
+  - name: iterate_pages
+    symbols: [memaddr::PageIter, memaddr::DynPageIter]
+    effect: iterate page-aligned addresses; constructors return None unless the page size is a power of two and both bounds are aligned
+    evidence:
+      - {path: mm/memaddr/src/units/iter.rs, item: memaddr::units::iter::PageIter::with_bounds, quote: "if PAGE_SIZE.is_power_of_two() && start.is_aligned(PAGE_SIZE) && end.is_aligned(PAGE_SIZE) {"}
+usage_protocol:
+  - step: wrap raw numbers with PhysAddr::from_usize / VirtAddr::from_usize or the pa! / va! macros
+    evidence: [{path: mm/memaddr/src/units/addr.rs, item: memaddr::units::addr::pa, quote: "$crate::PhysAddr::from_usize($addr)"}]
+  - step: build ranges with try_new / try_from_start_size when the bounds are untrusted
+    evidence: [{path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::try_new, quote: "pub fn try_new(start: A, end: A) -> Option<Self> {"}]
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std except under test)"
+    evidence: [{path: mm/memaddr/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: address types are Copy newtypes over usize; holding one confers no ownership or validity of the memory
+    evidence:
+      - {path: mm/memaddr/src/units/addr.rs, item: memaddr::units::addr::def_usize_addr, quote: "pub struct $name(usize);"}
+  errors_bounds:
+    value: AddrRange::new and from_start_size panic on start > end / overflow; try_new, try_from_start_size and the page iterator constructors return None instead
+    evidence:
+      - {path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::new, quote: "panic!(\"invalid `AddrRange`: {}..{}\", start.into(), end.into());"}
+      - {path: mm/memaddr/src/units/range.rs, item: memaddr::units::range::AddrRange::try_new, quote: "pub fn try_new(start: A, end: A) -> Option<Self> {"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - unittest
+  used_by:
+  - kalloc
+  - page_table
+  - memspace
+  - kdma
+  - khal
+  - kcpu
+  - kuaccess
+  - pagecache
+  - filemap
+  - vmobj
+  - kprocess
+  - ktask
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: mm/memspace/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/memaddr/Cargo.toml
+    quote: unittest.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: core/kuaccess/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/pagecache/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: mm/filemap/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: mm/vmobj/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: process/kprocess/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: memaddr = { workspace = true }
+aliases:
+  en: [phys_addr, virt_addr, paddr, vaddr, address newtype, address range, addr range, page iterator, page range, memory range, overlap check, contains range]
+  zh: [物理地址, 虚拟地址, 地址类型, 地址区间, 地址范围, 页迭代器, 范围重叠, 范围包含]
+identifiers: [paddr, vaddr, PhysAddr, VirtAddr, start, end, size, overlaps, contains, start_addr, end_addr, page_iter, step_by, PAGE_SIZE]
+exclusions:
+  - the types do not validate that an address is mapped, user-accessible or in a particular region; use the user-memory capabilities (osvm, kuaccess) for access checks
+  - no VMA or memory-area bookkeeping here; this is only a value type and range arithmetic
+  - alignment-only needs are covered by the free functions in the sibling card mm_align_helpers_memaddr
+counter_examples: []
+notes: >-
+  PhysAddr and VirtAddr are generated by the def_usize_addr! macro, so the struct item is the macro
+  invocation lines (507-508). Address arithmetic helpers (checked_add, wrapping_add, offset_from,
+  sub_addr ...) are default methods of MemoryAddr and AddrOps, blanket-implemented for any
+  Copy + From<usize> + Into<usize> + Ord type.

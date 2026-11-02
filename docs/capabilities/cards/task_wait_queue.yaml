@@ -1,0 +1,212 @@
+capability: task_wait_queue
+title: Task wait queue with condition and timeout waits (ktask::WaitQueue)
+family: sync.wait_queue
+summary: >-
+  Linux wait_queue-style sleeping queue built on event_listener::Event and ktask::future::block_on.
+  wait_until / wait_timeout_until register a listener, then recheck the condition before sleeping,
+  so a notify between the first check and registration is not lost. notify_* wake sleepers and can
+  optionally yield.
+source: {kind: workspace, crate: ktask, path: task/ktask}
+symbols:
+  - {fqn: ktask::WaitQueue, kind: struct, path: task/ktask/src/wait_queue.rs, role: primary}
+  - {fqn: ktask::WaitQueue::new, kind: fn, path: task/ktask/src/wait_queue.rs, role: constructor}
+  - {fqn: ktask::WaitQueue::wait, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::wait_until, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::wait_timeout, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::wait_timeout_until, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::notify_one, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::notify_many, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+  - {fqn: ktask::WaitQueue::notify_all, kind: fn, path: task/ktask/src/wait_queue.rs, role: operation}
+operations:
+  - name: wait_until
+    symbols: [ktask::WaitQueue::wait_until]
+    effect: loop { check condition; register listener; recheck condition; await listener } under block_on
+    evidence: [{path: task/ktask/src/wait_queue.rs, item: ktask::wait_queue::WaitQueue::wait_until, quote: "listener!(self.event => listener);"}]
+  - name: wait_timeout_until
+    symbols: [ktask::WaitQueue::wait_timeout_until]
+    effect: as wait_until with a monotonic deadline; returns true if the deadline passed
+    evidence: [{path: task/ktask/src/wait_queue.rs, item: ktask::wait_queue::WaitQueue::wait_timeout_until, quote: "// ACK may arrive between the first check and listener registration."}]
+  - name: notify
+    symbols: [ktask::WaitQueue::notify_one, ktask::WaitQueue::notify_many, ktask::WaitQueue::notify_all]
+    effect: wakes up to N waiters (FIFO per event-listener); optional yield of the caller
+    evidence: [{path: task/ktask/src/wait_queue.rs, item: ktask::wait_queue::WaitQueue::notify_many, quote: "let n = self.event.notify(count);"}]
+usage_protocol:
+  - step: "producer publishes the state change, then calls notify_one / notify_all"
+    evidence: [{path: task/ktask/src/wait_queue.rs, item: ktask::wait_queue::WaitQueue, quote: "WQ.notify_one(true); // wake up the main task"}]
+  - step: "waiter calls wait_until(|| condition) so the condition is rechecked after listener registration"
+    evidence: [{path: task/ktask/src/wait_queue.rs, item: ktask::wait_queue::WaitQueue::wait_until, quote: "Note that even other tasks notify this task, it will not wake up until"}]
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: task/ktask/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: wait* blocks through block_on. notify_* forwards to Event::notify, which can initialize internal
+      storage/invoke a Waker; with resched=true it additionally yields the current task. This is not a
+      blanket IRQ-safe/nonallocating notification API.
+    evidence:
+    - path: task/ktask/src/wait_queue.rs
+      item: ktask::wait_queue::WaitQueue::notify_many
+      quote: crate::yield_now();
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Event::notify
+      quote: let inner = unsafe { &*self.inner() };
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: queue owns only an event_listener::Event; no waiter storage retained after return
+    evidence:
+    - path: task/ktask/src/wait_queue.rs
+      item: ktask::wait_queue::WaitQueue
+      quote: 'event: Event,'
+  errors_bounds:
+    value: wait_timeout / wait_timeout_until return bool (true means timed out); no error type
+    evidence:
+    - path: task/ktask/src/wait_queue.rs
+      item: ktask::wait_queue::WaitQueue::wait_timeout
+      quote: 'pub fn wait_timeout(&self, dur: TimeSpan) -> bool'
+  concurrency:
+    value: 'lost-wakeup protocol in wait_until: listener registered, then condition rechecked; plain wait()
+      has no condition (a notify before wait() is lost)'
+    evidence:
+    - path: task/ktask/src/wait_queue.rs
+      item: ktask::wait_queue::WaitQueue::wait_until
+      quote: "listener); if condition() { break; }"
+    - path: task/ktask/src/wait_queue.rs
+      item: ktask::wait_queue::WaitQueue::wait
+      quote: listener!(self.event => listener);
+layers:
+  depends_on:
+  - event-listener
+  - khal
+  - ktime_types
+  used_by:
+  - devfs
+  - drmdevice
+  - entropy
+  - entry
+  - kdriver
+  - kext4
+  - kfd_objects
+  - kfeat
+  - kfutex
+  - knet
+  - kpm
+  - kprocess
+  - krcu-list-kernel-tests
+  - kruntime
+  - ksync
+  - ksyscall
+  - ktimer
+  - ktracing
+  - ktty
+  - kuaccess
+  - kvfs
+  - kvmm
+  - kworkerpool_ng
+  - kworkng
+  - kworkqueue_ng
+  - kxarray-kernel-tests
+  - pagecache
+  - posix-process
+  - procfs
+  - tipc
+  - unittest_support
+  - watchdog
+  allowed_layers: unknown
+  evidence:
+  - path: task/ktask/src/api.rs
+    quote: wait_queue::WaitQueue,
+  - path: task/ktask/Cargo.toml
+    quote: event-listener = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: khal.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: ktask.workspace = true
+  - path: io/drmdevice/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: ktask.workspace = true
+  - path: entry/Cargo.toml
+    quote: ktask.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: ktask = { workspace = true, optional = true }
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: ktask.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: ktask = { workspace = true, optional = true }
+  - path: process/kfutex/Cargo.toml
+    quote: ktask.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: core/kpm/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: core/kruntime/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: task/ksync/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: ktask.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: ktask.workspace = true
+  - path: virt/kvmm/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: mm/pagecache/Cargo.toml
+    quote: ktask = { workspace = true }
+  - path: posix/process/Cargo.toml
+    quote: ktask.workspace = true
+  - path: fs/filesystems/procfs/Cargo.toml
+    quote: ktask.workspace = true
+  - path: tee/tipc/Cargo.toml
+    quote: ktask.workspace = true
+  - path: util/unittest_support/Cargo.toml
+    quote: ktask.workspace = true
+  - path: io/watchdog/Cargo.toml
+    quote: ktask = { workspace = true, features = ["watchdog"] }
+aliases:
+  en: [wait queue, waitqueue, wait_event, wait_event_timeout, wake_up, wake_up_all, condvar, condition variable, sleep on condition]
+  zh: [等待队列, 条件等待, 条件变量, 唤醒, 睡眠等待]
+identifiers: [Event, listener, notify, notify_all, wake_up, sleepers, waiters, condition, block_on]
+exclusions:
+- wait* needs a sleepable ktask task. For IRQ producers, separately audit notification allocation/Waker
+  behavior and use resched=false; resched=true yields and cannot be used as an IRQ-safe wake.
+- for one-shot done/wait pairs use kcompletion::Completion; for waits that must not allocate with a predicate
+  use kcompletion::WaitQueue
+- for readiness fan-out to async pollers use kpoll::PollSet
+counter_examples: []
+notes: >-
+  ktask::WaitQueue is not the same type as kcompletion::WaitQueue (task_predicate_wait_queue_noalloc).
+  The usize returned by notify_many is the count from event_listener::Event::notify.

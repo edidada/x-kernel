@@ -1,0 +1,110 @@
+capability: work_delayed_kworkng
+title: Owned delayed work with prepared timer (kworkng::DelayedWorkHandle)
+family: task.work
+summary: >-
+  delayed_work equivalent: cloneable owner of one delayed callback whose timer is prepared once.
+  queue / queue_default arm it after a TimeSpan (zero delay queues without waiting for a tick and
+  never runs inline), modify / modify_default re-time it or queue it if idle, flush expedites the
+  captured work, cancel_sync discards, shutdown closes and drains Work plus timer delivery.
+  Callbacks run in normal worker tasks.
+source: {kind: workspace, crate: kworkng, path: task/kworkng}
+symbols:
+  - {fqn: kworkng::DelayedWorkHandle, kind: struct, path: task/kworkng/src/delayed_work_handle.rs, role: primary}
+  - {fqn: kworkng::DelayedWorkHandle::new, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: constructor}
+  - {fqn: kworkng::DelayedWorkHandle::queue, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::queue_default, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::modify, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::modify_default, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::cancel_pending, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::cancel_sync, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::flush, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+  - {fqn: kworkng::DelayedWorkHandle::shutdown, kind: fn, path: task/kworkng/src/delayed_work_handle.rs, role: operation}
+operations:
+  - name: queue_modify
+    symbols: [kworkng::DelayedWorkHandle::queue_default, kworkng::DelayedWorkHandle::modify_default]
+    effect: queue_default does not replace pending work; modify_default replaces its delay or queues an occurrence when none is pending; a running callback is not interrupted
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "`queue_default` does not replace pending work; `modify_default` replaces its"}
+  - name: flush
+    symbols: [kworkng::DelayedWorkHandle::flush]
+    effect: expedites the captured work and waits; not a wait for the original timer deadline and does not follow later retiming
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "Delayed flush expedites captured work; it is not a wait for the original timer"}
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: task/kworkng/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: "preparation allocates (stable Work, timer and reclamation storage, sleepable context); queue / modify are IRQ-compatible and allocation-free"
+    evidence:
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle::new, quote: "Prepares stable Work, timer and reclamation storage in sleepable context."}
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle::queue, quote: "IRQ-compatible and allocation-free."}
+  blocking:
+    value: "queue/modify/cancel_pending do not sleep; flush, cancel_sync and shutdown need sleepable task context; callbacks run in normal worker tasks"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "flush/cancel_sync/shutdown/close_and_drain | Sleepable task; allow callback progress"}
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle, quote: "Callbacks execute in normal tasks."}
+  irq_nmi:
+    value: "prepared queue/modify valid in task, BH or hard IRQ; NMI unsupported"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "Prepared queue/modify/cancel_pending | Task, BH or hard IRQ; no allocation or sleep"}
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle, quote: "dependency deadlocks remain caller errors. NMI is unsupported."}
+  ownership_lifetime:
+    value: "last handle Drop asynchronously cancels and drains Work and physical timer delivery before destroying captures; shut down each delayed handle before closing a private queue"
+    evidence:
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle, quote: "Last handle Drop asynchronously cancels and"}
+      - {path: task/kworkng/src/lib.rs, quote: "delayed.shutdown().unwrap(); // Drain each delayed handle BEFORE closing its queue."}
+  errors_bounds:
+    value: "queue/modify return Result<LogicalCpuId, ArmError> (Admission(Closed) after shutdown, or queue/timer validation errors); flush returns DelayedFlushError; positive delays use monotonic time"
+    evidence:
+      - {path: task/kworkng/src/delayed_work_handle.rs, item: kworkng::delayed_work_handle::DelayedWorkHandle::queue, quote: "Returns Admission(Closed) after shutdown, or queue/timer validation errors."}
+      - {path: task/kworkng/src/lib.rs, quote: "The handle prepares its timer once. Positive delays use monotonic time; zero"}
+  concurrency:
+    value: "concurrent modification can retire the captured flush obligation without executing it; nonblocking cancellation alone does not prove physical timer delivery has ended"
+    evidence:
+      - {path: task/kworkng/src/lib.rs, quote: "deadline and does not follow later retiming. Concurrent modification can retire"}
+layers:
+  depends_on:
+  - kworkqueue_ng
+  - kworkerpool_ng
+  - ktime_types
+  - ktask
+  used_by:
+  - knet
+  - ktty
+  - inputdev
+  - kfd_objects
+  - entropy
+  allowed_layers: unknown
+  evidence:
+  - path: net/knet/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kworkqueue_ng.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kworkerpool_ng.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: ktask.workspace = true
+  - path: io/inputdev/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kworkng.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: kworkng = { workspace = true, optional = true }
+aliases:
+  en: [delayed_work, schedule_delayed_work, queue_delayed_work, mod_delayed_work, cancel_delayed_work_sync, deferred timer callback, run later in a worker, timeout work, one-shot delayed task]
+  zh: [延迟工作, 延时任务, 定时工作项, 稍后执行, 超时回调, 延时回调]
+identifiers: [delayed_work, schedule_delayed_work, mod_delayed_work, queue_delayed_work, timer_list, mod_timer, add_timer, TimeSpan, delay]
+exclusions:
+  - "callback runs in a worker task after the delay, never in timer/IRQ context; for a raw timer callback in timer context use the ktimer-core card (timer_core_ktimer_core)"
+  - "not a periodic timer: re-arm explicitly (modify / queue) from the callback or elsewhere"
+  - "flush does not wait for the original deadline (it expedites); use cancel_sync to discard"
+  - "prepare only in sleepable task context after kworkng services start"
+counter_examples: []
+notes: >-
+  Same service contract as work_handle_kworkng; this card is separate because the handle also owns a
+  timer and its flush/modify semantics differ.

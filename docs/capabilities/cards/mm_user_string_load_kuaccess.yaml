@@ -1,0 +1,97 @@
+capability: mm_user_string_load_kuaccess
+title: Load a user C string or fixed-length string into a kernel String (kuaccess::vm_load_string)
+family: mm.user_access
+summary: >-
+  Convenience wrappers that read a NUL-terminated string (vm_load_string) or a string of known byte
+  length (vm_load_string_with_len) from user memory and validate it as UTF-8, returning KResult<String>.
+source: {kind: workspace, crate: kuaccess, path: core/kuaccess}
+symbols:
+  - {fqn: kuaccess::vm_load_string, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+  - {fqn: kuaccess::vm_load_string_with_len, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+operations:
+  - name: load_cstr
+    symbols: [kuaccess::vm_load_string]
+    effect: read until NUL (osvm::load_vec_until_null), then String::from_utf8; invalid UTF-8 becomes KError::IllegalBytes
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::vm_load_string, quote: "pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {"}
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::vm_load_string, quote: "String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)"}
+  - name: load_len
+    symbols: [kuaccess::vm_load_string_with_len]
+    effect: read exactly len bytes (osvm::load_vec) and validate UTF-8
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::vm_load_string_with_len, quote: "pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {"}
+usage_protocol:
+  - step: pass the user char pointer straight from the syscall argument
+    evidence: [{path: core/kuaccess/src/lib.rs, item: kuaccess::vm_load_string, quote: "Load a null-terminated string from user virtual memory."}]
+contract:
+  no_std:
+    value: yes (#![no_std] with extern crate alloc)
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      quote: '#![no_std]'
+    - path: core/kuaccess/src/lib.rs
+      quote: extern crate alloc;
+  allocation:
+    value: the loader allocates a Vec of bytes; String::from_utf8 consumes that Vec into the owned String,
+      so these calls do not establish a separate String allocation.
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::vm_load_string
+      quote: String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: returns an owned String; nothing borrows user memory
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::vm_load_string
+      quote: 'pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {'
+  errors_bounds:
+    value: 'KResult: MemError converted to KError (BadAddress / NoMemory / NameTooLong) and IllegalBytes
+      for invalid UTF-8'
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::vm_load_string
+      quote: String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - osvm
+  - kerrno
+  used_by:
+  - ksyscall
+  - posix-process
+  - posix-bpf
+  - kfutex
+  - entry
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: osvm.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: posix/bpf/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: process/kfutex/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: entry/Cargo.toml
+    quote: kuaccess.workspace = true
+aliases:
+  en: [getname, strncpy_from_user, copy path from user, read user string, user cstr, CStr from user pointer, load filename from user]
+  zh: [读取用户字符串, 用户态路径读取, 用户 C 字符串, 加载文件名]
+identifiers: [getname, strncpy_from_user, CStr::from_ptr, c_char, "String::from_utf8", read_cstring, path_from_user, IllegalBytes]
+exclusions:
+  - requires valid UTF-8; non-UTF-8 byte strings (some Linux paths) fail with IllegalBytes - use osvm::load_vec_until_null for raw bytes
+  - the NUL scan limit is 128 KiB, not PATH_MAX
+counter_examples: []
+notes: See mm_user_load_vec_osvm for the underlying loader.

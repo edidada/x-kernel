@@ -1,0 +1,113 @@
+capability: time_process_cpu_kprocess
+title: Per-thread and per-process user / system CPU time accounting (kprocess Process::process_cpu_times, Thread::sample_cpu_time)
+family: time.types
+summary: >-
+  Sampled CPU-time accounting in kprocess: Thread::sample_cpu_time settles the elapsed interval and
+  returns (utime, stime) as TimeSpan; Process::process_cpu_times sums exited-thread time plus every live
+  thread's sample; process_cpu_time returns the total; Process::child_time returns accumulated reaped-child
+  time. The syscall layer (times, getrusage, clock_gettime CPU clocks) builds on these.
+source: {kind: workspace, crate: kprocess, path: process/kprocess}
+symbols:
+  - {fqn: kprocess::Process::process_cpu_times, kind: fn, path: process/kprocess/src/process/runtime_access.rs, role: primary}
+  - {fqn: kprocess::Process::process_cpu_time, kind: fn, path: process/kprocess/src/process/runtime_access.rs, role: operation}
+  - {fqn: kprocess::Process::child_time, kind: fn, path: process/kprocess/src/process/exit.rs, role: operation}
+  - {fqn: kprocess::Process::exited_thread_time, kind: fn, path: process/kprocess/src/process/exit.rs, role: operation}
+operations:
+  - name: process_total
+    symbols: [kprocess::Process::process_cpu_times]
+    effect: exited-thread (utime, stime) plus every live thread's sample, saturating add
+    evidence:
+      - {path: process/kprocess/src/process/runtime_access.rs, item: kprocess::process::runtime_access::Process::process_cpu_times, quote: "/// Returns sampled user and system CPU time."}
+      - {path: process/kprocess/src/process/runtime_access.rs, item: kprocess::process::runtime_access::Process::process_cpu_times, quote: "utime.saturating_add(thread_utime),"}
+  - name: children
+    symbols: [kprocess::Process::child_time]
+    effect: accumulated reaped-children user and kernel time
+    evidence:
+      - {path: process/kprocess/src/process/exit.rs, item: kprocess::process::exit::Process::child_time, quote: "/// Returns accumulated reaped-children user and kernel time."}
+  - name: per_thread_sample
+    symbols: [kprocess::Process::process_cpu_time]
+    effect: process_cpu_time is utime + stime of process_cpu_times; the per-thread primitive is Thread::sample_cpu_time (settles the interval; non-sleeping lock; not from interrupt context)
+    evidence:
+      - {path: process/kprocess/src/process/runtime_access.rs, item: kprocess::process::runtime_access::Process::process_cpu_time, quote: "/// Returns the total sampled CPU time."}
+      - {path: process/kprocess/src/thread/core.rs, item: kprocess::thread::core::Thread::sample_cpu_time, quote: "Must not be called from interrupt context."}
+usage_protocol:
+  - step: "let (utime, stime) = kprocess::current_user_process().process_cpu_times(); convert with PosixClockTicks::from_time_span for ABI values"
+    evidence:
+      - {path: core/ksyscall/src/task/cpu_time.rs, item: ksyscall::task::cpu_time::sys_times, quote: "let process = kprocess::current_user_process();"}
+contract:
+  no_std:
+    value: unknown
+    evidence: []
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: Thread::sample_cpu_time serializes with scheduling and user/kernel transitions under a non-sleeping
+      lock with preemption disabled
+    evidence:
+    - path: process/kprocess/src/thread/core.rs
+      item: kprocess::thread::core::Thread::sample_cpu_time
+      quote: May sample another thread; serializes with scheduling and user/kernel
+  irq_nmi:
+    value: sample_cpu_time and set_cpu_state must not be called from interrupt context
+    evidence:
+    - path: process/kprocess/src/thread/core.rs
+      item: kprocess::thread::core::Thread::sample_cpu_time
+      quote: Must not be called from interrupt context.
+  ownership_lifetime:
+    value: returns owned (TimeSpan, TimeSpan) values
+    evidence:
+    - path: process/kprocess/src/process/runtime_access.rs
+      item: kprocess::process::runtime_access::Process::process_cpu_times
+      quote: pub fn process_cpu_times(&self) -> (TimeSpan, TimeSpan) {
+  errors_bounds:
+    value: infallible; sums use saturating_add
+    evidence:
+    - path: process/kprocess/src/process/runtime_access.rs
+      item: kprocess::process::runtime_access::Process::process_cpu_time
+      quote: utime.saturating_add(stime)
+  concurrency:
+    value: each thread's counters are protected by its own time lock; a process sample is a sum of per-thread
+      samples, not an atomic snapshot of all threads
+    evidence:
+    - path: process/kprocess/src/thread/core.rs
+      item: kprocess::thread::core::Thread::sample_cpu_time
+      quote: self.time.lock().sample(khal::time::monotonic_time())
+    - path: process/kprocess/src/process/runtime_access.rs
+      item: kprocess::process::runtime_access::Process::process_cpu_times
+      quote: self.thread_tasks()
+layers:
+  depends_on:
+  - ktime_types
+  - khal
+  - ktask
+  - ksync
+  used_by:
+  - ksyscall
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/src/task/cpu_time.rs
+    item: ksyscall::task::cpu_time::sys_times
+    quote: let (utime, stime) = process.process_cpu_times();
+  - path: core/ksyscall/src/task/rusage.rs
+    item: ksyscall::task::rusage::self_rusage
+    quote: let (utime, stime) = process.process_cpu_times();
+  - path: process/kprocess/Cargo.toml
+    quote: ktime_types.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: khal.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ktask.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ksync.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kprocess.workspace = true
+aliases:
+  en: [utime, stime, cputime, process CPU time, thread CPU time, rusage, times(), CLOCK_PROCESS_CPUTIME_ID, task_cputime, thread_group_cputime, user time system time, children times]
+  zh: [进程 CPU 时间, 线程 CPU 时间, 用户态时间, 内核态时间, 子进程时间, 资源使用统计]
+identifiers: [utime, stime, cutime, cstime, cputime, rusage, getrusage, times, tms, CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID, task_cputime, sample_cpu_time, process_cpu_times]
+exclusions:
+  - the value is sampled, not a snapshot atomic across threads; for strict POSIX clock semantics see the syscall layer
+  - requires a kprocess Process / Thread; kernel tasks without a user process have no such accounting
+  - a loop summing per-thread utime/stime inline duplicates process_cpu_times; reuse it so exited-thread and settled-interval handling stay consistent
+counter_examples: []

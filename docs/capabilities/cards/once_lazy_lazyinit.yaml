@@ -1,0 +1,128 @@
+capability: once_lazy_lazyinit
+title: Explicitly initialized static cell (lazyinit::LazyInit)
+family: sync.once_lazy
+summary: >-
+  LazyInit<T> is a const-constructible, spin-based, set-once cell for statics that are filled in
+  later at boot (init_once / call_once), then read through Deref. Dereferencing before
+  initialization panics. Unlike klazy::Lazy the value is supplied by the caller at init time rather
+  than by a stored factory closure.
+source: {kind: dependency, crate: lazyinit, version: 0.2.2}
+symbols:
+  - {fqn: lazyinit::LazyInit, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: lazyinit::LazyInit::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: lazyinit::LazyInit::init_once, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: lazyinit::LazyInit::call_once, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: lazyinit::LazyInit::is_inited, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: lazyinit::LazyInit::get, kind: fn, path: src/lib.rs, role: operation}
+operations:
+- name: init_once
+  symbols:
+  - lazyinit::LazyInit::init_once
+  effect: stores a ready value once; panics if already initialized
+  evidence:
+  - path: lazyinit-0.2.2/src/lib.rs
+    item: lazyinit::LazyInit::init_once
+    quote: Panics if the value is already initialized.
+- name: call_once
+  symbols:
+  - lazyinit::LazyInit::call_once
+  effect: runs the initializer only for the successful UNINIT->INITIALIZING contender; an already initialized
+    call returns None immediately; a caller observing INITIALIZING spins until it finishes, then returns
+    None
+  evidence:
+  - path: lazyinit-0.2.2/src/lib.rs
+    item: lazyinit::LazyInit::call_once
+    quote: If the value is already initialized, the function will not be called
+  - path: lazyinit-0.2.2/src/lib.rs
+    item: lazyinit::LazyInit::call_once
+    quote: while self.inited.load(Ordering::Acquire) == INITIALIZING {
+- name: get
+  symbols:
+  - lazyinit::LazyInit::get
+  - lazyinit::LazyInit::is_inited
+  effect: non-panicking Option<&T> access
+  evidence:
+  - path: lazyinit-0.2.2/src/lib.rs
+    item: lazyinit::LazyInit::get
+    quote: Returns [`None`] if the value is not initialized.
+usage_protocol:
+  - step: "declare `static X: LazyInit<T> = LazyInit::new();` and call init_once exactly once during boot, then use X through Deref"
+    evidence: [{path: arch/khal/src/mem/source.rs, item: khal::mem::source::DESCRIBED_RAM_REGIONS, quote: "static DESCRIBED_RAM_REGIONS: LazyInit<[MemRange; MAX_DESCRIBED_RAM_REGIONS]> = LazyInit::new();"}]
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: lazyinit-0.2.2/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: "value stored inline (UnsafeCell<MaybeUninit<T>>); the cell does not allocate"
+    evidence: [{path: lazyinit-0.2.2/src/lib.rs, item: lazyinit::LazyInit, quote: "data: UnsafeCell<MaybeUninit<T>>,"}]
+  blocking:
+    value: "losing racers spin (spin_loop) until the winner finishes; no sleeping"
+    evidence: [{path: lazyinit-0.2.2/src/lib.rs, item: lazyinit::LazyInit::call_once, quote: "while self.inited.load(Ordering::Acquire) == INITIALIZING {"}]
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: "cell owns the value; Deref/DerefMut and get/get_mut hand out references; Drop drops the value if initialized"
+    evidence: [{path: lazyinit-0.2.2/src/lib.rs, quote: "impl<T> Drop for LazyInit<T> {"}]
+  errors_bounds:
+    value: "Deref and DerefMut panic when uninitialized; init_once panics on double init; get/get_mut return Option"
+    evidence:
+      - {path: lazyinit-0.2.2/src/lib.rs, item: lazyinit::LazyInit, quote: "The caller must use the dereference"}
+  concurrency:
+    value: "Sync for T: Send + Sync; state machine UNINIT/INITIALIZING/INITED on an AtomicU8 with compare_exchange; init closure run by exactly one caller"
+    evidence:
+      - {path: lazyinit-0.2.2/src/lib.rs, quote: "unsafe impl<T: Send + Sync> Sync for LazyInit<T> {}"}
+      - {path: lazyinit-0.2.2/src/lib.rs, item: lazyinit::UNINIT, quote: "const UNINIT: u8 = 0;"}
+layers:
+  depends_on: []
+  used_by:
+  - khal
+  - ktask
+  - kprocess
+  - knet
+  - memspace
+  - devfs
+  - kdriver
+  - kdevice
+  - kipi
+  - kidentity
+  allowed_layers: unknown
+  evidence:
+  - path: arch/khal/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: lazyinit = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: lazyinit = { workspace = true }
+  - path: Cargo.toml
+    quote: lazyinit = "0.2"
+  - path: process/kprocess/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: lazyinit = { workspace = true }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: drivers/contracts/kdevice/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: process/kidentity/Cargo.toml
+    quote: lazyinit.workspace = true
+aliases:
+  en: [LazyInit, lazy init, init once, set once global, static OnceCell, late-initialized global, boot-time global, deferred static initialization, MaybeUninit static]
+  zh: [延迟初始化, 先声明后初始化, 启动期全局变量, 一次性赋值全局, 静态变量延后赋值]
+identifiers: [LazyInit, init_once, is_inited, MaybeUninit, UnsafeCell, AtomicU8, INITED, UNINIT, INITIALIZING, static mut]
+exclusions:
+- 'set-once only: no reset or replacement of the value; use klazy::Once for factory-based lazy initialization
+  with poisoning semantics (once_lazy_klazy)'
+- Deref before initialization panics; callers must guarantee boot ordering or use get()
+- init spin-wait only; do not initialize from a path that can be preempted for long or interrupted by
+  code needing the same cell
+- 'call_once has no poison/reset guard around f(): if f unwinds after INITIALIZING is stored, later contenders
+  can spin forever. Do not promise poisoning/retry behavior equivalent to klazy::Once.'
+counter_examples: []
+notes: >-
+  Both klazy and lazyinit are used in the workspace at the pin; klazy::Once is the in-tree
+  implementation, lazyinit the external crate (versions pinned by the root Cargo.toml).

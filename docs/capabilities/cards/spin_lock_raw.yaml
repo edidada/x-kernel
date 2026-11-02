@@ -1,0 +1,254 @@
+capability: spin_lock_raw
+title: Guard-less spin lock for contexts that already disabled IRQs and preemption (kspin::SpinRaw)
+family: sync.spinlock
+summary: >-
+  SpinLock with the NoOp guard: lock() only spins on the flag and does not disable preemption or IRQs.
+  Documented as a lock that must only be used where preemption and IRQs are already disabled.
+source: {kind: workspace, crate: kspin, path: task/kspin}
+symbols:
+  - {fqn: kspin::SpinRaw, kind: type, path: task/kspin/src/lib.rs, role: primary}
+  - {fqn: kspin::SpinRawGuard, kind: type, path: task/kspin/src/lib.rs, role: helper}
+  - {fqn: kspin::SpinLock, kind: struct, path: task/kspin/src/lock.rs, role: helper}
+  - {fqn: kspin::SpinLock::lock, kind: fn, path: task/kspin/src/lock.rs, role: operation}
+  - {fqn: kspin::NoOp, kind: struct, path: task/kspin/src/guard/types.rs, role: helper}
+operations:
+  - name: lock
+    symbols: [kspin::SpinLock::lock]
+    effect: spins on the atomic flag with no context protection
+    evidence: [{path: task/kspin/src/lock.rs, item: kspin::lock::SpinLock, quote: "No special behavior (fastest, least safe)"}]
+usage_protocol:
+  - step: "enter only from code that already holds IRQs and preemption off (for example inside another SpinNoIrq section)"
+    evidence: [{path: task/kspin/src/lib.rs, item: kspin::SpinRaw, quote: "Must only be used in contexts where preemption and IRQs"}]
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: task/kspin/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: spins; may panic or deadlock if already held by the caller
+    evidence: [{path: task/kspin/src/lock.rs, item: kspin::lock::SpinLock::lock, quote: "May panic or deadlock if called while already holding the lock."}]
+  irq_nmi:
+    value: provides no IRQ protection; documented warning that IRQs and preemption must already be disabled
+    evidence: [{path: task/kspin/src/lib.rs, item: kspin::SpinRaw, quote: "Must only be used in contexts where preemption and IRQs"}]
+  ownership_lifetime:
+    value: lock owns the value; RAII guard releases the flag on drop
+    evidence: [{path: task/kspin/src/lock.rs, item: kspin::lock::SpinLockGuard, quote: "RAII guard for spinlock."}]
+  errors_bounds:
+    value: try_lock returns Option; no error type
+    evidence: [{path: task/kspin/src/lock.rs, item: kspin::lock::SpinLock::try_lock, quote: "pub fn try_lock(&self) -> Option<SpinLockGuard<'_, G, T>>"}]
+  concurrency:
+    value: atomic flag only with the smp feature
+    evidence: [{path: task/kspin/src/lock.rs, item: kspin::lock::SpinLock, quote: "Without the `smp` feature, the lock state is optimized away"}]
+layers:
+  depends_on:
+  - kiface
+  - kiface-cpu-api
+  - kiface-task-api
+  - karch
+  - kcpu_slot
+  used_by:
+  - anon
+  - block
+  - console-driver
+  - device-res
+  - entropy
+  - fbdevice
+  - hwrng
+  - irq-driver
+  - kalloc
+  - kclass
+  - kcompletion
+  - kdevice
+  - kdma
+  - kdriver
+  - kfd_objects
+  - kfeat
+  - kfutex
+  - khal
+  - kipi
+  - kirq
+  - klogger
+  - knet
+  - kplat-aarch64
+  - kplat-loongarch64
+  - kplat-x86_64
+  - kpm
+  - kpoll
+  - kprocess
+  - krcu
+  - krcu-core
+  - krcu-list
+  - krcu-list-kernel-tests
+  - kruntime
+  - ksignal
+  - ksync
+  - ksyscall
+  - ktask
+  - ktime
+  - ktimer-core
+  - ktracing
+  - ktty
+  - kuaccess
+  - kvmm
+  - kworkerpool_ng
+  - kworkng
+  - kworkqueue_ng
+  - kxarray
+  - kxarray-kernel-tests
+  - memspace
+  - net
+  - timer-driver
+  - tipc
+  - tipc_handle
+  - vdev-virtio
+  - vdev-virtio-blk
+  - virtio
+  - watchdog
+  - x86-apic
+  allowed_layers: unknown
+  evidence:
+  - path: task/kspin/Cargo.toml
+    quote: karch = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kiface = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kiface-cpu-api.workspace = true
+  - path: task/kspin/Cargo.toml
+    quote: kiface-task-api = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: mm/anon/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/block/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/platform/console/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/device-res/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: util/entropy/Cargo.toml
+    quote: kspin = { workspace = true, optional = true }
+  - path: io/fbdevice/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/hwrng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/platform/irq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: mm/kalloc/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/kcompletion/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/kdevice/Cargo.toml
+    quote: kspin.workspace = true
+  - path: io/kdma/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kspin.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kspin.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: kspin = { workspace = true, optional = true }
+  - path: process/kfutex/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: util/klogger/Cargo.toml
+    quote: kspin.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-aarch64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-loongarch64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-x86_64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: core/kpm/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kpoll/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: process/kprocess/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: sync/krcu/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/krcu/crates/krcu-core/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: core/kruntime/Cargo.toml
+    quote: kspin.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/ksync/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kspin = { workspace = true, features = ["preempt"] }
+  - path: core/ktime/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/kvmm/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: mm/memspace/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/net/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/platform/timer/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/platform/timer/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+  - path: tee/tipc/Cargo.toml
+    quote: kspin.workspace = true
+  - path: tee/tipc_handle/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/vdev/virtio/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/vdev/virtio-blk/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: io/watchdog/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/x86-apic/Cargo.toml
+    quote: kspin = { workspace = true }
+aliases:
+  en: [raw spinlock, raw_spin_lock, bare spinlock, nested spinlock, lock without irq save]
+  zh: [裸自旋锁, 无保护自旋锁, 嵌套自旋锁]
+identifiers: [AtomicBool, compare_exchange, spin_loop, locked]
+exclusions:
+- 'Use only when the documented IRQ/preemption exclusion already holds. A NoOp guard alone provides no
+  NMI safety: an NMI can still deadlock if it interrupts a holder of the same lock.'
+counter_examples: []
+notes: >-
+  This card documents the lowest-protection variant on purpose so a PR that hand-rolls an AtomicBool
+  lock is pointed at the same flag logic; the guard choice is what differs between the spin_lock_* cards.

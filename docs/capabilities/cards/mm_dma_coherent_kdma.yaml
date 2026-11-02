@@ -1,0 +1,116 @@
+capability: mm_dma_coherent_kdma
+title: DMA-coherent memory allocation and bus-address conversion (kdma::allocate_dma_memory / p2b)
+family: mm.dma
+summary: >-
+  Allocates physically contiguous, coherent, device-reachable memory (descriptor rings, shared queues)
+  with the CPU virtual address and the bus address together (DmaInfo), frees it with the same layout,
+  and converts physical addresses to bus addresses (p2b / b2p, linear offset).
+source: {kind: workspace, crate: kdma, path: io/kdma}
+symbols:
+  - {fqn: kdma::allocate_dma_memory, kind: fn, path: io/kdma/src/lib.rs, role: primary}
+  - {fqn: kdma::deallocate_dma_memory, kind: fn, path: io/kdma/src/lib.rs, role: primary}
+  - {fqn: kdma::DmaInfo, kind: struct, path: io/kdma/src/lib.rs, role: primary}
+  - {fqn: kdma::DmaBusAddress, kind: struct, path: io/kdma/src/lib.rs, role: helper}
+  - {fqn: kdma::p2b, kind: fn, path: io/kdma/src/lib.rs, role: operation}
+  - {fqn: kdma::b2p, kind: fn, path: io/kdma/src/lib.rs, role: operation}
+operations:
+  - name: allocate
+    symbols: [kdma::allocate_dma_memory, kdma::DmaInfo]
+    effect: allocate contiguous coherent pages for a Layout; returns cpu_addr + bus_addr or AllocError::NoMemory
+    evidence:
+      - {path: io/kdma/src/lib.rs, item: kdma::allocate_dma_memory, quote: "Allocates **coherent** memory that meets Direct Memory Access (DMA)"}
+      - {path: io/kdma/src/lib.rs, item: kdma::allocate_dma_memory, quote: "Returns `AllocError::NoMemory` when pages cannot be allocated, the"}
+  - name: free
+    symbols: [kdma::deallocate_dma_memory]
+    effect: release exactly once with the same layout
+    evidence:
+      - {path: io/kdma/src/lib.rs, item: kdma::deallocate_dma_memory, quote: "`dma` must come from a prior successful [`allocate_dma_memory`] call, and"}
+  - name: phys_to_bus
+    symbols: [kdma::p2b, kdma::b2p]
+    effect: "baddr = paddr + PHYS_BUS_OFFSET and the inverse"
+    evidence:
+      - {path: io/kdma/src/lib.rs, item: kdma::p2b, quote: "`baddr = paddr + PHYS_BUS_OFFSET`."}
+usage_protocol:
+  - step: "allocate once per ring/queue, program the device with dma.bus_addr, free with deallocate_dma_memory(dma, layout) using the identical Layout"
+    evidence: [{path: io/kdma/src/lib.rs, item: kdma::allocate_dma_memory, quote: "The caller must free the returned allocation exactly once with"}]
+contract:
+  no_std:
+    value: yes (#![no_std] with extern crate alloc)
+    evidence:
+    - path: io/kdma/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: allocates pages through the global allocator
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::allocate_dma_memory
+      quote: This function allocates a block of memory through the global allocator. The
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: unsafe API; the caller owns the DmaInfo and must free exactly once with the same layout, and
+      only expose the bus address to devices allowed to DMA that buffer
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::allocate_dma_memory
+      quote: '[`deallocate_dma_memory`] using the same `layout`, and must only expose the'
+  errors_bounds:
+    value: AllocResult<DmaInfo>; NoMemory when pages cannot be allocated, mapping-attribute update fails,
+      or the platform prepare hook fails
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::allocate_dma_memory
+      quote: Returns `AllocError::NoMemory` when pages cannot be allocated, the
+  concurrency:
+    value: serialised by a global SpinNoIrq lock
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::allocate_dma_memory
+      quote: unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
+layers:
+  depends_on:
+  - kalloc
+  - alloc-engine
+  - khal
+  - kplat
+  - kspin
+  - memaddr
+  - kiface-mm-api
+  used_by:
+  - kdriver
+  allowed_layers: unknown
+  evidence:
+  - path: drivers/adapters/xkernel/device-res/Cargo.toml
+    quote: kdma = { workspace = true }
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kdma = { workspace = true, optional = true }
+  - path: io/kdma/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: io/kdma/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["tlsf"] }
+  - path: io/kdma/Cargo.toml
+    quote: khal = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: kplat = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: kspin.workspace = true
+  - path: io/kdma/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: io/kdma/Cargo.toml
+    quote: kiface-mm-api.workspace = true
+aliases:
+  en: [dma_alloc_coherent, dma_free_coherent, alloc_dma, coherent buffer, dma buffer allocation, descriptor ring allocation, virt_to_bus, phys_to_dma, bus address, DMA region]
+  zh: [DMA 一致性内存分配, DMA 缓冲区分配, 描述符环内存, 总线地址转换, 物理地址转总线地址]
+identifiers: [dma_alloc_coherent, dma_free_coherent, DmaInfo, bus_addr, cpu_addr, PHYS_BUS_OFFSET, virt_to_bus, phys_to_bus, alloc_pages, Layout, "alloc_zeroed", dma_addr]
+exclusions:
+- for temporary mapping of an existing buffer (streaming DMA) use map_dma_buffer / unmap_dma_buffer (mm_dma_streaming_kdma),
+  not a coherent allocation
+- p2b / b2p assume a single linear offset (PHYS_BUS_OFFSET); a device whose bus addresses are not that
+  linear mapping needs its own translation
+- A SpinNoIrq around allocator state does not prove end-to-end IRQ/NMI safety of allocation, mapping updates
+  or platform hooks; context is unknown.
+counter_examples: []

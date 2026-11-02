@@ -1,0 +1,162 @@
+capability: ipi_call_function_kipi
+title: Run a closure on another CPU via IPI (kipi::run_on_cpu / run_on_each_cpu, smp_call_function)
+family: cpu.ipi
+summary: >-
+  Cross-CPU function call. Each CPU owns an IPI event queue (a SpinNoIrq VecDeque stored in a per-CPU
+  slot); run_on_cpu(dest, closure) runs the closure synchronously when dest is the current CPU,
+  otherwise pushes it to the destination queue and raises the shared IPI, so it later runs from that
+  CPU's IPI handler. run_on_each_cpu runs locally at once and queues for all others;
+  run_on_each_cpu_via_ipi makes every CPU, including the caller, run it from IPI context. The call
+  is asynchronous: there is no wait-for-completion.
+source: {kind: workspace, crate: kipi, path: arch/kipi}
+symbols:
+  - {fqn: kipi::run_on_cpu, kind: fn, path: arch/kipi/src/lib.rs, role: primary}
+  - {fqn: kipi::run_on_cpu_prepared, kind: fn, path: arch/kipi/src/lib.rs, role: operation}
+  - {fqn: kipi::run_on_each_cpu, kind: fn, path: arch/kipi/src/lib.rs, role: operation}
+  - {fqn: kipi::run_on_each_cpu_via_ipi, kind: fn, path: arch/kipi/src/lib.rs, role: operation}
+  - {fqn: kipi::init, kind: fn, path: arch/kipi/src/lib.rs, role: constructor}
+  - {fqn: kipi::ipi_handler, kind: fn, path: arch/kipi/src/lib.rs, role: operation}
+  - {fqn: kipi::Callback, kind: struct, path: arch/kipi/src/event.rs, role: helper}
+  - {fqn: kipi::MulticastCallback, kind: struct, path: arch/kipi/src/event.rs, role: helper}
+  - {fqn: kipi::KipiError, kind: enum, path: arch/kipi/src/lib.rs, role: helper}
+operations:
+  - name: run_on_cpu
+    symbols: [kipi::run_on_cpu, kipi::run_on_cpu_prepared]
+    effect: runs the callback inline on the current CPU, otherwise enqueues it on the destination CPU's queue and sends the IPI; the prepared form takes a pre-allocated Callback owner
+    evidence:
+      - {path: arch/kipi/src/lib.rs, item: kipi::run_on_cpu, quote: "If `dest_cpu` is the current CPU, the callback runs synchronously in the"}
+  - name: broadcast
+    symbols: [kipi::run_on_each_cpu, kipi::run_on_each_cpu_via_ipi]
+    effect: run_on_each_cpu runs on the caller immediately and queues for all other CPUs; the _via_ipi form also queues the caller's own copy so all run in IPI context
+    evidence:
+      - {path: arch/kipi/src/lib.rs, item: kipi::run_on_each_cpu, quote: "The current CPU runs the callback immediately; all other CPUs receive it"}
+usage_protocol:
+  - step: "every CPU must call kipi::init() after its CPU slot area is published, before it can receive callbacks"
+    evidence:
+      - {path: arch/kipi/src/lib.rs, item: kipi::init, quote: "This must run on every CPU before that CPU can receive callbacks through"}
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test, uses alloc)'
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: remote run_on_cpu allocates a callback owner with NOWAIT before taking the queue lock (NoMemory
+      on failure, captures dropped in caller context); queue VecDeque growth is infallible; run_on_each_cpu
+      shares an Arc without per-target allocation
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: allocator-reentrant path. Remote owner allocation uses NOWAIT before taking
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: Returns `KipiError::NoMemory` if remote callback-owner allocation fails.
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_each_cpu
+      quote: initial Arc and queue growth remain infallible.
+  blocking:
+    value: the call itself does not wait for execution; remotely executed callback bodies and capture
+      destruction must not sleep, acquire IPI queue locks or wait for queued callbacks
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: particular, remotely executed callback bodies and capture destruction must not
+  irq_nmi:
+    value: sending permitted from task or IRQ context, not NMI and not an allocator-reentrant path; remote
+      callbacks run in the IPI interrupt handler
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: not sleep. Sending is permitted from task or IRQ context, but not NMI or an
+  ownership_lifetime:
+    value: closure must be FnOnce + Send + 'static; the callback owner is queued and consumed on the target
+      CPU; on validation failure it is dropped in the caller's context without invocation
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      quote: All callbacks must be `Send` as they execute on different CPUs.
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: 'pub fn run_on_cpu<F: FnOnce() + Send + ''static>(dest_cpu: LogicalCpuId, callback: F) ->
+        Result<()> {'
+  errors_bounds:
+    value: 'KipiError: InvalidCpuId (outside NR_CPUS or not present), TargetCpuNotReady (destination queue
+      not initialized), NoMemory, QueueFull, CallbackFailed'
+    evidence:
+    - path: arch/kipi/src/lib.rs
+      item: kipi::KipiError
+      quote: pub enum KipiError {
+    - path: arch/kipi/src/lib.rs
+      item: kipi::run_on_cpu
+      quote: Returns `KipiError::InvalidCpuId` if `dest_cpu` is outside the configured
+  concurrency:
+    value: per-CPU FIFO queues serialized by SpinNoIrq; callbacks from one queue run in enqueue order;
+      IPI readiness is published with Release/Acquire per CPU
+    evidence:
+    - path: arch/kipi/src/queue.rs
+      item: kipi::queue::IpiEventQueue
+      quote: /// Uses FIFO ordering (VecDeque) to ensure callbacks are executed
+    - path: arch/kipi/src/lib.rs
+      item: kipi::ipi_queue
+      quote: /// Shares a CPU's IPI queue (current or remote); all queue mutation is
+layers:
+  depends_on:
+  - kcpu_slot
+  - kcpu_id_map
+  - kirq
+  - kspin
+  - khal
+  - karch
+  - lazyinit
+  - page_table
+  - kbuild_config
+  used_by:
+  - ktask
+  - kworkerpool_ng
+  - kruntime
+  - kfeat
+  allowed_layers: unknown
+  evidence:
+  - path: arch/kipi/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kipi = { workspace = true, optional = true }
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kipi.workspace = true
+  - path: core/kruntime/Cargo.toml
+    quote: kipi = { workspace = true, optional = true }
+  - path: arch/kipi/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kcpu_id_map.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kirq = { workspace = true }
+  - path: arch/kipi/Cargo.toml
+    quote: khal.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: karch.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: lazyinit.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: page_table.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: kipi = { workspace = true, optional = true }
+aliases:
+  en: [smp_call_function, smp_call_function_single, on_each_cpu, call_function_single, IPI callback, cross-CPU call, remote function call, inter-processor interrupt, run on another CPU, broadcast to all CPUs, send_ipi, cross call]
+  zh: [跨核调用, 核间中断, 核间函数调用, IPI 回调, 在指定 CPU 上执行, 广播到所有 CPU, 远程调用]
+identifiers: [smp_call_function, on_each_cpu, send_ipi, ipi_send, IPI, send_sgi, SGI, kick, cross_call, IPI_IRQ, ipi_handler, notify_cpu]
+exclusions:
+- No completion barrier is supplied. Use a separately audited completion protocol from sleepable context
+  if needed; never wait while holding resources required by target callbacks. Translation flushes use
+  kipi::tlb.
+- 'callbacks run in IPI interrupt context on remote CPUs: no sleeping, no taking IPI queue locks; sending
+  is forbidden from NMI'
+- requires kipi::init() on the target CPU (TargetCpuNotReady otherwise); the smp feature compiles the
+  SMP-only parts
+- for allocation-free fixed requests (reschedule, BH kick, RCU kick) use the pending-flag transport (ipi_fixed_notification_kipi)
+  instead of queueing a closure
+counter_examples: []
+notes: >-
+  kipi also hosts the TLB shootdown protocol (kipi::tlb) and the CPU stop protocol (kipi::stop);
+  neither is carded here.

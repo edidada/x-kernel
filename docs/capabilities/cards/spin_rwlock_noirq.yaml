@@ -1,0 +1,264 @@
+capability: spin_rwlock_noirq
+title: IRQ-disabling reader-writer spin lock (kspin::SpinRwNoIrq)
+family: sync.rwlock
+summary: >-
+  Reader-writer spin lock whose read and write guards both disable preemption and IRQs. Allows
+  concurrent readers or one writer in short, non-sleeping critical sections.
+source: {kind: workspace, crate: kspin, path: task/kspin}
+symbols:
+  - {fqn: kspin::SpinRwNoIrq, kind: type, path: task/kspin/src/lib.rs, role: primary}
+  - {fqn: kspin::SpinRwNoIrqReadGuard, kind: type, path: task/kspin/src/lib.rs, role: helper}
+  - {fqn: kspin::SpinRwNoIrqWriteGuard, kind: type, path: task/kspin/src/lib.rs, role: helper}
+  - {fqn: kspin::SpinRwLock, kind: struct, path: task/kspin/src/rwlock.rs, role: helper}
+  - {fqn: kspin::SpinRwLock::read, kind: fn, path: task/kspin/src/rwlock.rs, role: operation}
+  - {fqn: kspin::SpinRwLock::write, kind: fn, path: task/kspin/src/rwlock.rs, role: operation}
+  - {fqn: kspin::SpinRwLock::try_read, kind: fn, path: task/kspin/src/rwlock.rs, role: operation}
+  - {fqn: kspin::SpinRwLock::try_write, kind: fn, path: task/kspin/src/rwlock.rs, role: operation}
+operations:
+  - name: read
+    symbols: [kspin::SpinRwLock::read]
+    effect: acquire guard state, then spin while a writer holds the lock, then increment the reader count
+    evidence: [{path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock::read, quote: "Acquires a shared read lock."}]
+  - name: write
+    symbols: [kspin::SpinRwLock::write]
+    effect: exclusive spinning acquisition
+    evidence: [{path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock::write, quote: "pub fn write(&self) -> SpinRwLockWriteGuard<'_, G, T>"}]
+usage_protocol:
+  - step: "use for short, non-sleeping shared/exclusive sections that IRQ handlers may also enter"
+    evidence: [{path: task/kspin/src/lib.rs, item: kspin::SpinRwNoIrq, quote: "Suitable for short process-tree or IRQ-visible critical sections that allow"}]
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: task/kspin/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: spins; cannot sleep
+    evidence: [{path: task/kspin/src/lib.rs, item: kspin::SpinRwNoIrq, quote: "concurrent readers but cannot sleep"}]
+  irq_nmi:
+    value: both reader and writer disable preemption and IRQs; IRQ-visible sections are the stated use; NMI not stated
+    evidence: [{path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock, quote: "disables preemption and IRQs for both"}]
+  ownership_lifetime:
+    value: lock owns the value; RAII read/write guards release on drop
+    evidence: [{path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLockWriteGuard, quote: "RAII write guard for [`SpinRwLock`]."}]
+  errors_bounds:
+    value: try_read / try_write return Option; read panics on reader-count overflow (2^63 - 1 readers)
+    evidence:
+      - {path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock::try_read, quote: "pub fn try_read(&self) -> Option<SpinRwLockReadGuard<'_, G, T>>"}
+      - {path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock::read, quote: "too many spin rwlock readers"}
+  concurrency:
+    value: many readers or one writer; readers spin while a writer holds the lock; no fairness statement
+    evidence: [{path: task/kspin/src/rwlock.rs, item: kspin::rwlock::SpinRwLock, quote: "A spinning reader-writer lock with configurable guard behavior."}]
+layers:
+  depends_on:
+  - kiface
+  - kiface-cpu-api
+  - kiface-task-api
+  - karch
+  - kcpu_slot
+  used_by:
+  - anon
+  - block
+  - console-driver
+  - device-res
+  - entropy
+  - fbdevice
+  - hwrng
+  - irq-driver
+  - kalloc
+  - kclass
+  - kcompletion
+  - kdevice
+  - kdma
+  - kdriver
+  - kfd_objects
+  - kfeat
+  - kfutex
+  - khal
+  - kipi
+  - kirq
+  - klogger
+  - knet
+  - kplat-aarch64
+  - kplat-loongarch64
+  - kplat-x86_64
+  - kpm
+  - kpoll
+  - kprocess
+  - krcu
+  - krcu-core
+  - krcu-list
+  - krcu-list-kernel-tests
+  - kruntime
+  - ksignal
+  - ksync
+  - ksyscall
+  - ktask
+  - ktime
+  - ktimer-core
+  - ktracing
+  - ktty
+  - kuaccess
+  - kvmm
+  - kworkerpool_ng
+  - kworkng
+  - kworkqueue_ng
+  - kxarray
+  - kxarray-kernel-tests
+  - memspace
+  - net
+  - timer-driver
+  - tipc
+  - tipc_handle
+  - vdev-virtio
+  - vdev-virtio-blk
+  - virtio
+  - watchdog
+  - x86-apic
+  allowed_layers: unknown
+  evidence:
+  - path: task/kspin/Cargo.toml
+    quote: karch = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kiface = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kiface-cpu-api.workspace = true
+  - path: task/kspin/Cargo.toml
+    quote: kiface-task-api = { workspace = true }
+  - path: task/kspin/Cargo.toml
+    quote: kcpu_slot = { workspace = true }
+  - path: mm/anon/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/block/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/platform/console/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/device-res/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: util/entropy/Cargo.toml
+    quote: kspin = { workspace = true, optional = true }
+  - path: io/fbdevice/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/hwrng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/platform/irq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: mm/kalloc/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/kclass/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/kcompletion/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/contracts/kdevice/Cargo.toml
+    quote: kspin.workspace = true
+  - path: io/kdma/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kspin.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: kspin.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: kspin = { workspace = true, optional = true }
+  - path: process/kfutex/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/kipi/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/kirq/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: util/klogger/Cargo.toml
+    quote: kspin.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-aarch64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-loongarch64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: platforms/kplat-x86_64/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: core/kpm/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kpoll/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: process/kprocess/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: sync/krcu/Cargo.toml
+    quote: kspin.workspace = true
+  - path: sync/krcu/crates/krcu-core/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: core/kruntime/Cargo.toml
+    quote: kspin.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: task/ksync/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktask/Cargo.toml
+    quote: kspin = { workspace = true, features = ["preempt"] }
+  - path: core/ktime/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/ktimer-core/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: io/ktty/Cargo.toml
+    quote: kspin.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/kvmm/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkerpool_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/kxarray/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+  - path: mm/memspace/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/contracts/net/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: drivers/platform/timer/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/platform/timer/Cargo.toml
+    quote: '[target.''cfg(target_arch = "aarch64")''.dependencies]'
+  - path: tee/tipc/Cargo.toml
+    quote: kspin.workspace = true
+  - path: tee/tipc_handle/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/vdev/virtio/Cargo.toml
+    quote: kspin.workspace = true
+  - path: virt/vdev/virtio-blk/Cargo.toml
+    quote: kspin.workspace = true
+  - path: drivers/devices/virtio/Cargo.toml
+    quote: kspin = { workspace = true }
+  - path: io/watchdog/Cargo.toml
+    quote: kspin.workspace = true
+  - path: arch/x86-apic/Cargo.toml
+    quote: kspin = { workspace = true }
+aliases:
+  en: [rwlock, read_lock_irqsave, write_lock_irqsave, rw spinlock, reader writer spinlock, irq-safe rwlock]
+  zh: [读写自旋锁, 读写锁, 关中断读写锁]
+identifiers: [reader_count, readers, WRITE_LOCKED, READER_MASK, AtomicUsize, rwlock]
+exclusions:
+- no sleeping; for blocking readers/writers use ksync::RwLock (blocking_rwlock)
+- only the NoPreemptIrqSave instantiation has an alias; other guard types are possible through SpinRwLock<G,
+  T> but are not documented
+- NoPreempt guard behavior depends on the preempt feature and host/kernel cfg. IRQ masking does not exclude
+  NMI; do not use as a blanket NMI-safe lock or replace a lock-free NMI protocol.
+counter_examples: []
+notes: ""

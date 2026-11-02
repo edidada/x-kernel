@@ -1,0 +1,123 @@
+capability: io_buffer_iov_iter
+title: Direction-typed byte cursor for file read/write paths (iov_iter::IovIterSource / IovIterDest)
+family: io.buffer
+summary: >-
+  IovIter wraps a kernel slice or a pluggable adapter (IovSource / IovSink) with a transfer budget:
+  IovIterSource supplies bytes to a write_iter, IovIterDest receives bytes from a read_iter.
+  copy_from_iter / copy_to_iter move bytes and shrink the budget, truncate shortens it, revert
+  rewinds. The user-memory access policy stays outside the crate.
+source: {kind: workspace, crate: iov_iter, path: io/iov_iter}
+symbols:
+  - {fqn: iov_iter::IovIter, kind: struct, path: io/iov_iter/src/lib.rs, role: primary}
+  - {fqn: iov_iter::IovIterSource, kind: type, path: io/iov_iter/src/lib.rs, role: primary}
+  - {fqn: iov_iter::IovIterDest, kind: type, path: io/iov_iter/src/lib.rs, role: primary}
+  - {fqn: iov_iter::iov_iter_kvec_source, kind: fn, path: io/iov_iter/src/lib.rs, role: constructor}
+  - {fqn: iov_iter::iov_iter_kvec_dest, kind: fn, path: io/iov_iter/src/lib.rs, role: constructor}
+  - {fqn: iov_iter::iov_iter_source, kind: fn, path: io/iov_iter/src/lib.rs, role: constructor}
+  - {fqn: iov_iter::iov_iter_dest, kind: fn, path: io/iov_iter/src/lib.rs, role: constructor}
+  - {fqn: iov_iter::IovSource, kind: trait, path: io/iov_iter/src/lib.rs, role: operation}
+  - {fqn: iov_iter::IovSink, kind: trait, path: io/iov_iter/src/lib.rs, role: operation}
+operations:
+- name: copy_from_iter
+  symbols:
+  - iov_iter::IovIter
+  effect: copy bytes from a source iterator into dst; limited by dst.len() and the remaining budget; zero-length
+    returns zero without calling an adapter
+  evidence:
+  - path: io/iov_iter/src/lib.rs
+    item: iov_iter::IovIter::copy_from_iter
+    quote: Copies bytes from this iterator into `dst` and advances it.
+- name: truncate
+  symbols:
+  - iov_iter::IovIter
+  effect: shrink the remaining budget (never expands it)
+  evidence:
+  - path: io/iov_iter/src/lib.rs
+    item: iov_iter::IovIter::truncate
+    quote: Shrinks the remaining transfer budget to at most `count` bytes.
+- name: revert
+  symbols:
+  - iov_iter::IovIter
+  effect: rewind the cursor by count and add them back to the budget; InvalidInput on overflow or before
+    the start
+  evidence:
+  - path: io/iov_iter/src/lib.rs
+    item: iov_iter::IovIter::revert
+    quote: Rewinds the cursor by `count` bytes and adds them to the transfer budget.
+- name: copy_to_iter
+  symbols:
+  - iov_iter::IovIterDest
+  effect: copy from a kernel source slice into the destination iterator, constrained by its budget; short
+    adapter copies are allowed and reported counts are trusted
+  evidence:
+  - path: io/iov_iter/src/lib.rs
+    item: iov_iter::IovIter::copy_to_iter
+    quote: Copies bytes from `src` into this iterator and advances it.
+usage_protocol:
+  - step: start with iov_iter_kvec_source / iov_iter_kvec_dest for kernel slices, or wrap a user-memory adapter with iov_iter_source / iov_iter_dest
+    evidence: [{path: io/iov_iter/src/lib.rs, quote: "Start with [`iov_iter_kvec_source`] for a borrowed kernel input slice or"}]
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: io/iov_iter/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: kernel-slice constructors perform no allocation or copying
+    evidence: [{path: io/iov_iter/src/lib.rs, item: iov_iter::iov_iter_kvec_source, quote: "remaining count to `buf.len()`. No allocation or copying occurs."}]
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the iterator borrows its slice or adapter for 'a; dropping it ends the borrow without rewinding, clearing data, or releasing storage
+    evidence: [{path: io/iov_iter/src/lib.rs, item: iov_iter::IovIter, quote: "the iterator to its borrowed slice or adapter. Dropping the iterator ends"}]
+  errors_bounds:
+    value: KResult; KError::InvalidInput for rewind overflow / before start; adapter errors propagate; short copies including zero are permitted
+    evidence:
+      - {path: io/iov_iter/src/lib.rs, item: iov_iter::IovIter::revert, quote: "Returns [`KError::InvalidInput`] if the remaining count would overflow or"}
+      - {path: io/iov_iter/src/lib.rs, item: iov_iter::IovSource::copy_from_iter, quote: "Short copies, including zero, are permitted."}
+  concurrency:
+    value: no internal synchronization; mutation requires exclusive access
+    evidence: [{path: io/iov_iter/src/lib.rs, item: iov_iter::IovIter, quote: "The iterator has no internal synchronization; mutation requires exclusive"}]
+layers:
+  depends_on:
+  - kerrno
+  used_by:
+  - devfs
+  - kext4
+  - memfs
+  - kvfs
+  - knet
+  - posix-fs
+  - kfd_objects
+  allowed_layers: unknown
+  evidence:
+  - path: fs/kvfs/Cargo.toml
+    quote: iov_iter = { workspace = true }
+  - path: net/knet/Cargo.toml
+    quote: iov_iter.workspace = true
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: iov_iter.workspace = true
+  - path: io/iov_iter/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: iov_iter.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: iov_iter.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: iov_iter.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: iov_iter.workspace = true
+aliases:
+  en: [iov_iter, iovec iterator, scatter gather buffer, read_iter, write_iter, copy_to_iter, copy_from_iter, io vector cursor, data source, data sink, buffer cursor with remaining count]
+  zh: [iovec 迭代器, 分散聚集缓冲区, 读写缓冲区游标, 数据源, 数据汇, 剩余字节计数]
+identifiers: [iov_iter, iovec, copy_to_iter, copy_from_iter, read_iter, write_iter, kvec, remaining, count, offset, advance, revert, truncate, readv, writev]
+exclusions:
+- the crate does not itself access user memory; user-space buffers need an IovSource / IovSink adapter
+  (for example one built on osvm)
+- one-shot transfers of a single struct to a user pointer should use osvm::write_vm_mem (mm_user_copy_osvm)
+- plain std-style streaming (Read / Write) between components is io_traits_kio
+- Adapter callbacks may block or allocate according to their own contracts. Error propagation does not
+  roll back adapter data/cursor effects; the wrapper trusts reported copy counts.
+counter_examples:
+  - path: process/osvm/src/vm_io.rs
+    item: osvm::vm_io::VmBytes
+    why: VmBytes is a single-segment user buffer that implements kio::Read; it has no budget / revert / direction typing and is not an iovec
+    evidence: [{path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes, quote: "A read-only buffer in user-space virtual memory."}]

@@ -1,0 +1,97 @@
+capability: mm_align_helpers_memaddr
+title: Power-of-two alignment helpers (align_up / align_down / is_aligned) in memaddr
+family: mm.address
+summary: >-
+  const free functions on usize (and default methods on address types) that round down, round up,
+  take the remainder and test alignment against a power-of-two boundary, plus 4 KiB shortcuts and
+  size constants (KB / MB / GB, PAGE_SIZE_4K / 2M / 1G).
+source: {kind: workspace, crate: memaddr, path: mm/memaddr}
+symbols:
+  - {fqn: memaddr::floor_align, kind: fn, path: mm/memaddr/src/lib.rs, role: primary}
+  - {fqn: memaddr::ceil_align, kind: fn, path: mm/memaddr/src/lib.rs, role: primary}
+  - {fqn: memaddr::align_rem, kind: fn, path: mm/memaddr/src/lib.rs, role: operation}
+  - {fqn: memaddr::aligned_to, kind: fn, path: mm/memaddr/src/lib.rs, role: operation}
+  - {fqn: memaddr::floor_4k, kind: fn, path: mm/memaddr/src/lib.rs, role: operation}
+  - {fqn: memaddr::ceil_4k, kind: fn, path: mm/memaddr/src/lib.rs, role: operation}
+  - {fqn: memaddr::aligned_4k, kind: fn, path: mm/memaddr/src/lib.rs, role: operation}
+  - {fqn: memaddr::PAGE_SIZE_4K, kind: const, path: mm/memaddr/src/lib.rs, role: helper}
+operations:
+  - name: align_down
+    symbols: [memaddr::floor_align]
+    effect: round addr down to a multiple of align (re-exported name of floor_align)
+    evidence:
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::floor_align, quote: "Align down to the nearest multiple of `align`."}
+  - name: align_up
+    symbols: [memaddr::ceil_align]
+    effect: round addr up; panics if the result would overflow usize
+    evidence:
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::ceil_align, quote: "Align up to the nearest multiple of `align`."}
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::ceil_align, quote: "None => panic!(\"aligned address overflow\"),"}
+  - name: is_aligned
+    symbols: [memaddr::aligned_to]
+    effect: test whether addr is a multiple of align
+    evidence:
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::aligned_to, quote: "Returns `true` if `addr` is aligned to `align`."}
+usage_protocol:
+  - step: call the const fns with a power-of-two align; a non-power-of-two align panics
+    evidence: [{path: mm/memaddr/src/lib.rs, item: memaddr::assert_valid_align, quote: "alignment must be a non-zero power of two"}]
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std except under test)"
+    evidence: [{path: mm/memaddr/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: pure functions on usize values; no ownership
+    evidence: [{path: mm/memaddr/src/lib.rs, item: memaddr::floor_align, quote: "pub const fn floor_align(addr: usize, align: usize) -> usize {"}]
+  errors_bounds:
+    value: panics when align is zero / not a power of two, and in align_up when the rounded value overflows usize; no Result variant
+    evidence:
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::assert_valid_align, quote: "alignment must be a non-zero power of two"}
+      - {path: mm/memaddr/src/lib.rs, item: memaddr::ceil_align, quote: "None => panic!(\"aligned address overflow\"),"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - unittest
+  used_by:
+  - kalloc
+  - page_table
+  - memspace
+  - kdma
+  - khal
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/page_table/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: mm/memaddr/Cargo.toml
+    quote: unittest.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: memaddr = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: arch/khal/Cargo.toml
+    quote: memaddr.workspace = true
+aliases:
+  en: [align_up, align_down, round_up, round_down, is_aligned, align_offset, page align, ALIGN_UP, ALIGN_DOWN, roundup, rounddown, next_multiple_of, PAGE_ALIGN, PAGE_SIZE constant]
+  zh: [向上对齐, 向下对齐, 对齐判断, 页对齐, 取整, 对齐辅助]
+identifiers: [align, mask, "!(align - 1)", "& !mask", "(addr + align - 1)", is_power_of_two, PAGE_SIZE, PAGE_MASK, page_offset, round_up]
+exclusions:
+  - align must be a power of two; for arbitrary multiples use usize::next_multiple_of instead
+  - panics on overflow rather than returning an error, so untrusted addresses near usize::MAX need a checked path (e.g. MemoryAddr::checked_add)
+counter_examples: []
+notes: >-
+  align_up / align_down / is_aligned / align_offset (and the _4k variants) are `pub use` aliases of
+  ceil_align / floor_align / aligned_to / align_rem / ceil_4k / floor_4k / aligned_4k / rem_4k
+  (the `pub use` lines of mm/memaddr/src/lib.rs); the symbols point at the definitions. The same operations exist as methods on
+  address types through the MemoryAddr / AddrOps traits (see mm_address_types_memaddr).

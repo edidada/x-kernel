@@ -1,0 +1,143 @@
+capability: mm_user_copy_osvm
+title: Fault-checked copy between kernel buffers and user virtual memory (osvm::read_vm_mem / write_vm_mem and typed VirtPtr)
+family: mm.user_access
+summary: >-
+  Byte-copy helpers that read from and write to a user address supplied by a syscall, returning a
+  MemError (mapped to EFAULT / ENOMEM) instead of dereferencing the pointer. read_vm_mem / write_vm_mem
+  copy typed slices (alignment checked), read_vm_bytes / write_vm_bytes copy raw bytes, and the
+  VirtPtr / VirtMutPtr traits add read_vm() / write_vm() on raw pointers and NonNull. The fault-checked
+  copy itself is supplied through the VirtMemIo provider (implemented by kuaccess).
+source: {kind: workspace, crate: osvm, path: process/osvm}
+symbols:
+  - {fqn: osvm::read_vm_mem, kind: fn, path: process/osvm/src/lib.rs, role: primary}
+  - {fqn: osvm::write_vm_mem, kind: fn, path: process/osvm/src/lib.rs, role: primary}
+  - {fqn: osvm::read_vm_bytes, kind: fn, path: process/osvm/src/lib.rs, role: operation}
+  - {fqn: osvm::write_vm_bytes, kind: fn, path: process/osvm/src/lib.rs, role: operation}
+  - {fqn: osvm::VirtPtr, kind: trait, path: process/osvm/src/ptrs.rs, role: primary}
+  - {fqn: osvm::VirtMutPtr, kind: trait, path: process/osvm/src/ptrs.rs, role: operation}
+  - {fqn: osvm::MemError, kind: enum, path: process/osvm/src/lib.rs, role: helper}
+  - {fqn: osvm::VirtMemIo, kind: trait, path: process/osvm/src/lib.rs, role: helper}
+operations:
+  - name: write_to_user
+    symbols: [osvm::write_vm_mem, osvm::write_vm_bytes, osvm::VirtMutPtr]
+    effect: copy a kernel slice (or one value via write_vm) to a user address; the provider either copies the whole slice or fails
+    evidence:
+      - {path: process/osvm/src/lib.rs, item: osvm::write_vm_mem, quote: "pub fn write_vm_mem<T>(p: *mut T, src: &[T]) -> MemResult {"}
+      - {path: process/osvm/src/lib.rs, item: osvm::VirtMemIo::write_mem, quote: "Partial writes must not be reported as success; the provider either"}
+  - name: read_from_user
+    symbols: [osvm::read_vm_mem, osvm::read_vm_bytes, osvm::VirtPtr]
+    effect: copy user memory into an uninitialized kernel buffer; read_vm() returns a value for AnyBitPattern types
+    evidence:
+      - {path: process/osvm/src/lib.rs, item: osvm::read_vm_mem, quote: "pub fn read_vm_mem<T>(p: *const T, out: &mut [MaybeUninit<T>]) -> MemResult {"}
+      - {path: process/osvm/src/ptrs.rs, item: osvm::ptrs::VirtPtr::read_vm, quote: "fn read_vm(self) -> MemResult<Self::Target>"}
+  - name: null_means_absent
+    symbols: [osvm::VirtPtr]
+    effect: check_non_null returns None for a null user pointer so a NULL optional argument is not an EFAULT
+    evidence:
+      - {path: process/osvm/src/ptrs.rs, item: osvm::ptrs::VirtPtr::check_non_null, quote: "Returns `None` if the pointer is null, otherwise `Some(self)`."}
+usage_protocol:
+  - step: pass the raw user pointer to the helper; never dereference it in kernel code. Typed variants require p aligned for T, byte variants do not
+    evidence:
+      - {path: process/osvm/src/ptrs.rs, item: osvm::ptrs::VirtPtr, quote: "No method in this trait creates a reference into user memory."}
+      - {path: process/osvm/src/lib.rs, item: osvm::read_vm_bytes, quote: "Reads raw bytes from virtual memory without imposing typed alignment."}
+contract:
+  no_std:
+    value: "yes (#![no_std])"
+    evidence: [{path: process/osvm/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: may block the calling task - the kuaccess provider resolves page faults in the calling task and file-backed faults can wait for disk I/O
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, quote: "File-backed faults can wait for disk I/O here, outside exception context."}
+      - {path: core/kuaccess/src/lib.rs, quote: "copies. Missing pages are resolved in the calling task before retrying."}
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: no reference into user memory is ever formed; copies are byte copies into or out of a kernel slice borrowed for the call
+    evidence:
+      - {path: process/osvm/src/lib.rs, item: osvm::VirtMemIo, quote: "Implementations must not create"}
+      - {path: process/osvm/src/ptrs.rs, item: osvm::ptrs::VirtPtr::as_ptr, quote: "The value is only ever used as an address for checked copies, never"}
+  errors_bounds:
+    value: "Err(MemError): InvalidAddr for a misaligned typed pointer, NoAccess when the provider faults or rejects the range, OutOfMemory from the provider; maps to KError::BadAddress / NoMemory; on failure the destination contents are unspecified"
+    evidence:
+      - {path: process/osvm/src/lib.rs, item: osvm::read_vm_mem, quote: "Returns [`MemError::InvalidAddr`] when `p` is misaligned, or the"}
+      - {path: process/osvm/src/lib.rs, item: osvm::KError::from, quote: "MemError::InvalidAddr | MemError::NoAccess => KError::BadAddress,"}
+      - {path: process/osvm/src/lib.rs, item: osvm::VirtMemIo::read_mem, quote: "On success every byte of `out` is initialized; on failure `out`'s"}
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kerrno
+  - kio
+  - bytemuck
+  - extern-trait
+  used_by:
+  - ksyscall
+  - kuaccess
+  - devfs
+  - kvfs
+  - ktty
+  - posix-fs
+  - posix-net
+  - posix-process
+  - posix-ipc
+  - ksignal
+  - tee_kernel
+  allowed_layers: unknown
+  evidence:
+  - path: core/ksyscall/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/fs/Cargo.toml
+    quote: osvm.workspace = true
+  - path: process/ksignal/Cargo.toml
+    quote: osvm = {workspace = true}
+  - path: process/osvm/Cargo.toml
+    quote: kerrno = { workspace = true }
+  - path: process/osvm/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: process/osvm/Cargo.toml
+    quote: "bytemuck = { version = \"1.24\", features = [\n    \"align_offset\",\n    \"const_zeroed\"\
+      ,\n    \"zeroable_maybe_uninit\",\n] }"
+  - path: process/osvm/Cargo.toml
+    quote: extern-trait = "0.3"
+  - path: core/kuaccess/Cargo.toml
+    quote: osvm.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: osvm.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: osvm.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/net/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: osvm.workspace = true
+  - path: posix/ipc/Cargo.toml
+    quote: osvm = { workspace = true }
+  - path: tee/tee_kernel/Cargo.toml
+    quote: osvm.workspace = true
+aliases:
+  en: [copy_to_user, copy_from_user, put_user, get_user, user pointer read, user pointer write, read user memory, write user memory, uaccess, userspace buffer copy, UserPtr, UserBuf]
+  zh: [拷贝到用户态, 从用户态拷贝, 用户内存读写, 用户指针访问, 用户缓冲区拷贝, 用户态地址读取]
+identifiers: [copy_to_user, copy_from_user, put_user, get_user, user_ptr, uptr, "*mut T as user", EFAULT, BadAddress, "ptr::copy_nonoverlapping", "slice::from_raw_parts(user", UserPtr, write_vm, read_vm]
+exclusions:
+- needs a thread with a user address space; the kuaccess provider returns NoAccess when called from a
+  kernel task without one
+- not for copying between kernel buffers - use slice copy_from_slice / copy_within
+- Copies may sleep on page faults; do not call under spinlocks or with IRQs disabled. kuaccess nofault
+  atomics cover only aligned u32 words, not an arbitrary nofault byte-copy replacement.
+- typed variants fail with InvalidAddr on a misaligned pointer; use read_vm_bytes / write_vm_bytes for
+  unaligned data
+counter_examples:
+  - path: process/osvm/src/vm_io.rs
+    item: osvm::vm_io::VmBytes
+    why: VmBytes wraps the same copy primitive as a streaming Read, tracking a cursor; use it for send/recv style APIs, not for one-shot struct copies (see io_user_buffer_osvm)
+    evidence: [{path: process/osvm/src/vm_io.rs, item: osvm::vm_io::VmBytes, quote: "Implements [`Read`] so it can be passed to socket/file send operations."}]
+notes: >-
+  The osvm crate only defines the contract; the architecture glue (range check, exception-table
+  user_copy, page-fault retry) is core/kuaccess (impl VirtMemIo for Vm). A change that adds a second
+  raw copy loop against user addresses duplicates this.

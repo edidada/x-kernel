@@ -1,0 +1,103 @@
+capability: parse_elf_xmas_elf
+title: Borrowed ELF header, program-header and section parser (xmas_elf)
+family: parse.elf
+summary: xmas_elf::ElfFile::new borrows an ELF image and exposes header/program/section views. Some failures
+  return static error strings, but program-header and string-table access also use unchecked file-supplied
+  ranges for slicing and may panic. A successful new() does not validate the complete ELF image.
+source: {kind: dependency, crate: xmas-elf, version: 0.9.1}
+symbols:
+  - {fqn: xmas_elf::ElfFile, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: xmas_elf::ElfFile::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: xmas_elf::ElfFile::program_iter, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: xmas_elf::ElfFile::section_iter, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: xmas_elf::ElfFile::find_section_by_name, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: xmas_elf::header::parse_header, kind: fn, path: src/header.rs, role: constructor}
+  - {fqn: xmas_elf::program::ProgramHeader, kind: enum, path: src/program.rs, role: helper}
+operations:
+  - name: open
+    symbols: [xmas_elf::ElfFile::new, xmas_elf::header::parse_header]
+    effect: parse and validate the ELF header from a byte slice; Err(&'static str) when invalid
+    evidence:
+      - {path: xmas-elf-0.9.1/src/lib.rs, item: xmas_elf::ElfFile::new, quote: "header::parse_header(input).map(|header| ElfFile {input, header})"}
+  - name: program_headers
+    symbols: [xmas_elf::ElfFile::program_iter]
+    effect: iterate the program headers (PT_LOAD, PT_INTERP, ...); each get_type() and get_data() returns Result
+    evidence:
+      - {path: xmas-elf-0.9.1/src/lib.rs, item: xmas_elf::ElfFile::program_iter, quote: "pub fn program_iter(&self) -> impl Iterator<Item = ProgramHeader<'a>> + '_ {"}
+  - name: sections
+    symbols: [xmas_elf::ElfFile::section_iter, xmas_elf::ElfFile::find_section_by_name]
+    effect: iterate section headers or look one up by name
+    evidence:
+      - {path: xmas-elf-0.9.1/src/lib.rs, item: xmas_elf::ElfFile::find_section_by_name, quote: "pub fn find_section_by_name(&self, name: &str) -> Option<SectionHeader<'a>> {"}
+usage_protocol:
+  - step: "ElfFile::new on the whole image slice, validate class / machine / type yourself, then walk program_iter; treat every offset and size from the headers as untrusted and range-check before using them to slice or map"
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeadersBuilder::ph_range, quote: "The range is derived from untrusted ELF fields and is therefore checked"}
+contract:
+  no_std:
+    value: 'yes: #![no_std]; the only optional feature is compression, which adds std and flate2, and
+      the workspace dependency disables default features'
+    evidence:
+    - path: xmas-elf-0.9.1/src/lib.rs
+      quote: '#![no_std]'
+    - path: xmas-elf-0.9.1/Cargo.toml
+      quote: compression = ["flate2"]
+    - path: Cargo.toml
+      quote: xmas-elf = { version = "0.9", default-features = false }
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: ElfFile borrows the input slice for 'a; headers and data are views into it
+    evidence:
+    - path: xmas-elf-0.9.1/src/lib.rs
+      item: xmas_elf::ElfFile
+      quote: 'pub input: &''a [u8],'
+  errors_bounds:
+    value: 'not all malformed input becomes Err: parse_program_header computes start/end from untrusted
+      header fields and slices input[start..end] directly; iterators convert returned errors to None,
+      and slicing/alignment checks can panic. Validate ranges, sizes, alignment, machine/class and ABI
+      before traversal.'
+    evidence:
+    - path: xmas-elf-0.9.1/src/program.rs
+      item: xmas_elf::program::parse_program_header
+      quote: Ok(ProgramHeader::Ph64(read(&input[start..end])))
+    - path: xmas-elf-0.9.1/src/program.rs
+      item: xmas_elf::program::ProgramIter::next
+      quote: result.ok()
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [kernel-elf-parser, kexec, tee_task_iface]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'xmas-elf = { version = "0.9", default-features = false }'}
+    - {path: boot/kernel_elf_parser/Cargo.toml, quote: "xmas-elf.workspace = true"}
+    - {path: process/kexec/Cargo.toml, quote: "xmas-elf.workspace = true"}
+    - {path: tee/tee_task_iface/Cargo.toml, quote: "xmas-elf = { workspace = true, default-features = false }"}
+aliases:
+  en: [elf parser, parse elf, program headers, load segments, PT_LOAD, section headers, elf header, executable loader, elf image, dynamic linker interp]
+  zh: [ELF 解析, 程序头, 加载段, 节头, ELF 头, 可执行文件加载, 解释器]
+identifiers: [ElfFile, program_iter, section_iter, ProgramHeader, PT_LOAD, PT_INTERP, e_phoff, e_entry, parse_header, xmas_elf]
+exclusions:
+- parsing only; mapping segments, building the user stack and auxv are done by kernel_elf_parser and kexec
+  on top of it, not by this crate
+- does not relocate or resolve dynamic symbols
+- host-side tools (goblin in xkmake / tasign) are a separate ELF parser used by build tools, not by kernel
+  code
+- Do not substitute this raw parser for a validating loader on untrusted bytes. ElfFile::new validates
+  the initial header only; later accessors can panic on offsets outside the image or unsuitable alignment.
+counter_examples:
+  - path: boot/kernel_elf_parser/src/info.rs
+    item: kernel_elf_parser::info::ElfHeadersBuilder
+    why: "ElfHeadersBuilder is the kernel-side wrapper that adds checked program-header range computation on top of xmas_elf::header::parse_header; extend that wrapper instead of re-parsing headers elsewhere"
+    evidence: [{path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeadersBuilder::new, quote: "header: xmas_elf::header::parse_header(input)?,"}]
+notes: ""

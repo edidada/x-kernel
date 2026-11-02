@@ -1,0 +1,87 @@
+capability: enum_convert_num_enum
+title: Integer to enum conversion by derive (num_enum TryFromPrimitive / FromPrimitive)
+family: misc.bits
+summary: >-
+  #[derive(num_enum::TryFromPrimitive)] on a #[repr(int)] enum generates TryFrom<int> that returns the
+  variant or a TryFromPrimitiveError carrying the rejected number; FromPrimitive (with a default or
+  catch_all variant) is the infallible form and IntoPrimitive the reverse; UnsafeFromPrimitive is the
+  unchecked transmute. It replaces hand-written match tables that map syscall codes or ABI constants
+  to enums.
+source: {kind: dependency, crate: num_enum, version: 0.7.6}
+symbols:
+  - {fqn: num_enum::TryFromPrimitive, kind: trait, path: src/lib.rs, role: primary}
+  - {fqn: num_enum::FromPrimitive, kind: trait, path: src/lib.rs, role: primary}
+  - {fqn: num_enum::UnsafeFromPrimitive, kind: trait, path: src/lib.rs, role: operation}
+  - {fqn: num_enum::TryFromPrimitiveError, kind: struct, path: src/lib.rs, role: helper}
+operations:
+- name: try_from
+  symbols:
+  - num_enum::TryFromPrimitive
+  - num_enum::TryFromPrimitiveError
+  effect: checked conversion; Err(TryFromPrimitiveError{number}) when no variant has that discriminant
+  evidence:
+  - path: num_enum-0.7.6/src/lib.rs
+    item: num_enum::TryFromPrimitive::try_from_primitive
+    quote: 'fn try_from_primitive(number: Self::Primitive) -> Result<Self, Self::Error>;'
+- name: from_total
+  symbols:
+  - num_enum::FromPrimitive
+  effect: infallible conversion for an exhaustive primitive mapping, including a default or catch_all
+    variant for unmatched values
+  evidence:
+  - path: num_enum-0.7.6/src/lib.rs
+    item: num_enum::FromPrimitive::from_primitive
+    quote: 'fn from_primitive(number: Self::Primitive) -> Self;'
+  - path: num_enum-0.7.6/README.md
+    quote: As this is naturally exhaustive, this is only supported for `FromPrimitive`, not also `TryFromPrimitive`.
+- name: unchecked
+  symbols:
+  - num_enum::UnsafeFromPrimitive
+  effect: unsafe transmute from the primitive; caller guarantees a valid discriminant
+  evidence:
+  - path: num_enum-0.7.6/src/lib.rs
+    item: num_enum::UnsafeFromPrimitive::unchecked_transmute_from
+    quote: '- `number` must represent a valid discriminant of `Self`.'
+usage_protocol:
+  - step: "put #[repr(i32)] (or another integer repr) on the enum, derive TryFromPrimitive, call Enum::try_from(raw) and map the error to the caller's errno (the syscall arch_prctl code table does this)"
+    evidence:
+      - {path: core/ksyscall/src/task/thread.rs, item: ksyscall::task::thread::ArchPrctlCode, quote: "#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]"}
+contract:
+  no_std:
+    value: "yes unless the std feature is on (#![cfg_attr(not(feature = \"std\"), no_std)]); the kernel's dependency entry disables default features"
+    evidence:
+      - {path: num_enum-0.7.6/src/lib.rs, quote: '#![cfg_attr(not(feature = "std"), no_std)]'}
+      - {path: core/ksyscall/Cargo.toml, quote: 'num_enum = { version = "0.7", default-features = false }'}
+  allocation: {value: unknown, evidence: []}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: unknown
+    evidence: []
+  errors_bounds:
+    value: TryFromPrimitive returns TryFromPrimitiveError holding the rejected number; UnsafeFromPrimitive requires a valid discriminant
+    evidence:
+      - {path: num_enum-0.7.6/src/lib.rs, item: num_enum::TryFromPrimitive::try_from_primitive, quote: "fn try_from_primitive(number: Self::Primitive) -> Result<Self, Self::Error>;"}
+      - {path: num_enum-0.7.6/src/lib.rs, item: num_enum::TryFromPrimitiveError, quote: "pub number: Enum::Primitive,"}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on: []
+  used_by: [ksyscall]
+  allowed_layers: unknown
+  evidence:
+    - {path: core/ksyscall/Cargo.toml, quote: 'num_enum = { version = "0.7", default-features = false }'}
+    - {path: core/ksyscall/src/task/thread.rs, item: ksyscall::task::thread::ArchPrctlCode, quote: "#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]"}
+aliases:
+  en: [num_enum, try_from int, int to enum, enum from integer, enum conversion, from_primitive, repr enum parse, command code enum, discriminant lookup]
+  zh: [整数转枚举, 枚举转换, 命令码枚举, 判别值查找, 从原始值转换]
+identifiers: [TryFromPrimitive, FromPrimitive, IntoPrimitive, UnsafeFromPrimitive, try_from_primitive, repr, discriminant, TryFromPrimitiveError]
+exclusions:
+- TryFromPrimitive/IntoPrimitive use integer-repr enum discriminants; FromPrimitive additionally supports
+  a catch_all variant carrying the primitive value. For independent bit sets use flags_bitflags.
+- 'the derive is a proc macro: the generated code and the TryFromPrimitiveError text live in num_enum_derive,
+  which this card does not index'
+- vendor/kvirtiodrivers uses the separate enumn crate (enumn::N) for the same job inside the virtio driver;
+  do not add num_enum there
+counter_examples: []
+notes: >-
+  Only one derive use at the pin: the x86_64 ArchPrctlCode in ksyscall. Most syscall and ioctl code tables are generated from C headers (see the comment on ArchPrctlCode) rather than derived.

@@ -1,0 +1,83 @@
+capability: mm_dma_streaming_kdma
+title: Temporary DMA mapping of an existing buffer through a coherent bounce pool (kdma::map_dma_buffer / unmap_dma_buffer)
+family: mm.dma
+summary: >-
+  Stages an ordinary driver-owned buffer for one device transaction by copying through pooled coherent
+  bounce memory; map returns a DmaInfo bus address, unmap must repeat the address and buffer exactly
+  once and synchronises data back for device-to-driver directions.
+source: {kind: workspace, crate: kdma, path: io/kdma}
+symbols:
+  - {fqn: kdma::map_dma_buffer, kind: fn, path: io/kdma/src/lib.rs, role: primary}
+  - {fqn: kdma::unmap_dma_buffer, kind: fn, path: io/kdma/src/lib.rs, role: primary}
+  - {fqn: kdma::DmaDirection, kind: enum, path: io/kdma/src/lib.rs, role: helper}
+operations:
+  - name: map
+    symbols: [kdma::map_dma_buffer]
+    effect: map buffer for DriverToDevice / DeviceToDriver / Bidirectional; InvalidInput for zero length or an already-mapped bus address, NoMemory when the bounce pool is exhausted
+    evidence:
+      - {path: io/kdma/src/lib.rs, item: kdma::map_dma_buffer, quote: "Returns `AllocError::InvalidInput` for a zero-length buffer or a bus"}
+  - name: unmap
+    symbols: [kdma::unmap_dma_buffer]
+    effect: unmap exactly once, synchronising data back if needed; panics on an inactive address or length mismatch
+    evidence:
+      - {path: io/kdma/src/lib.rs, item: kdma::unmap_dma_buffer, quote: "Panics when `dma_addr` is not an active mapping or when `buffer`'s"}
+usage_protocol:
+  - step: map -> program device with dma.bus_addr -> wait for completion -> unmap with the same address, buffer and direction
+    evidence: [{path: io/kdma/src/lib.rs, item: kdma::unmap_dma_buffer, quote: "The unmap must repeat the exact address, buffer, and length from the"}]
+contract:
+  no_std:
+    value: yes (#![no_std])
+    evidence:
+    - path: io/kdma/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: stages through pooled coherent bounce memory (allocation from the bounce pool)
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::map_dma_buffer
+      quote: The current backend always stages the mapping through pooled coherent bounce
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: unsafe; the buffer must stay live and exclusively owned until unmap, and the device must not
+      use the bus address after unmap
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::map_dma_buffer
+      quote: '`buffer` must remain live and exclusively owned until it is later passed to'
+  errors_bounds:
+    value: 'AllocResult: InvalidInput / NoMemory on map; unmap panics on contract violation'
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::map_dma_buffer
+      quote: Returns `AllocError::InvalidInput` for a zero-length buffer or a bus
+  concurrency:
+    value: serialised by a global SpinNoIrq lock
+    evidence:
+    - path: io/kdma/src/lib.rs
+      item: kdma::map_dma_buffer
+      quote: unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
+layers:
+  depends_on:
+  - kalloc
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+  - path: drivers/adapters/xkernel/device-res/Cargo.toml
+    quote: kdma = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: kalloc.workspace = true
+aliases:
+  en: [dma_map_single, dma_unmap_single, streaming DMA, bounce buffer, map buffer for device, sync for device, dma sync]
+  zh: [流式 DMA 映射, DMA 反弹缓冲, 临时 DMA 映射, 缓冲区映射给设备]
+identifiers: [dma_map_single, dma_unmap_single, bounce, bounce_pool, DmaDirection, sync_for_device, sync_for_cpu, bus_addr, copy_from_slice]
+exclusions:
+- the current backend always stages through the bounce pool (copy), so it is not a zero-copy mapping
+- persistent ring memory belongs in mm_dma_coherent_kdma
+- The global SpinNoIrq only describes serialization; IRQ/NMI safety of bounce-pool allocation and mapping
+  bookkeeping is unknown.
+counter_examples: []

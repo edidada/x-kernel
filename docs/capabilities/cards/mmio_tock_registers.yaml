@@ -1,0 +1,86 @@
+capability: mmio_tock_registers
+title: Typed MMIO registers with bitfield definitions (tock_registers 0.10)
+family: io.mmio
+summary: >-
+  tock-registers describes a device as a #[repr(C)] struct of ReadWrite / ReadOnly / WriteOnly / Aliased
+  register cells and defines their bit layout with register_bitfields!. Access goes through the
+  Readable / Writeable / ReadWriteable traits (get, set, read, write, modify, extract) which compile to
+  volatile accesses; LocalRegisterCopy decodes a value already read. The PCI MSI-X table and the
+  aarch64 PMU system-register wrappers use it.
+source: {kind: dependency, crate: tock-registers, version: 0.10.1}
+symbols:
+  - {fqn: tock_registers::registers::ReadWrite, kind: struct, path: src/registers.rs, role: primary}
+  - {fqn: tock_registers::registers::ReadOnly, kind: struct, path: src/registers.rs, role: primary}
+  - {fqn: tock_registers::registers::WriteOnly, kind: struct, path: src/registers.rs, role: primary}
+  - {fqn: tock_registers::interfaces::Readable, kind: trait, path: src/interfaces.rs, role: operation}
+  - {fqn: tock_registers::interfaces::Writeable, kind: trait, path: src/interfaces.rs, role: operation}
+  - {fqn: tock_registers::interfaces::ReadWriteable, kind: trait, path: src/interfaces.rs, role: operation}
+  - {fqn: tock_registers::register_bitfields, kind: macro, path: src/fields.rs, role: helper}
+  - {fqn: tock_registers::register_structs, kind: macro, path: src/macros.rs, role: helper}
+  - {fqn: tock_registers::LocalRegisterCopy, kind: struct, path: src/local_register.rs, role: helper}
+operations:
+  - name: raw_get_set
+    symbols: [tock_registers::interfaces::Readable, tock_registers::interfaces::Writeable]
+    effect: read or write the whole register value; the cell implementations use read_volatile / write_volatile
+    evidence:
+      - {path: tock-registers-0.10.1/src/registers.rs, item: tock_registers::registers::ReadWrite::get, quote: "unsafe { ::core::ptr::read_volatile(self.value.get()) }"}
+      - {path: tock-registers-0.10.1/src/registers.rs, item: tock_registers::registers::ReadWrite::set, quote: "unsafe { ::core::ptr::write_volatile(self.value.get(), value) }"}
+  - name: field_modify
+    symbols: [tock_registers::interfaces::ReadWriteable]
+    effect: read-modify-write of one or more named bitfields, leaving the others unchanged
+    evidence:
+      - {path: tock-registers-0.10.1/src/interfaces.rs, item: tock_registers::interfaces::ReadWriteable::modify, quote: "fn modify(&self, field: FieldValue<Self::T, Self::R>);"}
+  - name: define_layout
+    symbols: [tock_registers::register_bitfields]
+    effect: declare named bitfields (offset, width, enumerated values) for a register type
+    evidence:
+      - {path: tock-registers-0.10.1/src/fields.rs, item: tock_registers::fields::register_bitfields, quote: "Fields that have discrete options with semantic"}
+usage_protocol:
+  - step: "declare bitfields with register_bitfields!, put typed cells in a #[repr(C)] struct, obtain a reference to the mapped block (the caller owns the unsafe mapping), and use modify/read/write on the fields; use extract() to snapshot a register into a LocalRegisterCopy when several fields are decoded from one read"
+    evidence:
+      - {path: tock-registers-0.10.1/src/interfaces.rs, item: tock_registers::interfaces::Readable::extract, quote: "fn extract(&self) -> LocalRegisterCopy<Self::T, Self::R> {"}
+contract:
+  no_std:
+    value: "yes: #![no_std]; the default register_types feature only adds the cell types"
+    evidence:
+      - {path: tock-registers-0.10.1/src/lib.rs, quote: "#![no_std]"}
+      - {path: tock-registers-0.10.1/Cargo.toml, quote: 'default = ["register_types"]'}
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: register cells have no public constructor; they are obtained by casting a pointer to mapped memory, so the mapping lifetime is the caller's responsibility
+    evidence:
+      - {path: tock-registers-0.10.1/src/registers.rs, item: tock_registers::registers::ReadWrite, quote: "This struct is constructed by casting a pointer to it (or, implicitly, by"}
+  errors_bounds:
+    value: unknown
+    evidence: []
+  concurrency:
+    value: register accessors take &self (interior mutability through UnsafeCell); no locking is provided
+    evidence:
+      - {path: tock-registers-0.10.1/src/registers.rs, item: tock_registers::registers::ReadWrite::set, quote: "fn set(&self, value: T) {"}
+      - {path: tock-registers-0.10.1/src/registers.rs, item: tock_registers::registers::ReadWrite, quote: "value: UnsafeCell<T>,"}
+layers:
+  depends_on: []
+  used_by: [pci, aarch64-pmuv3]
+  allowed_layers: unknown
+  evidence:
+    - {path: Cargo.toml, quote: 'tock-registers = "0.10.1"'}
+    - {path: drivers/platform/pci/Cargo.toml, quote: "tock-registers = { workspace = true }"}
+    - {path: drivers/platform/aarch64-pmuv3/Cargo.toml, quote: 'tock-registers = "0.10.1"'}
+aliases:
+  en: [register bitfields, mmio registers, register struct, bitfield definitions, readl writel, register accessor, modify register, device register map]
+  zh: [寄存器位域, MMIO 寄存器, 寄存器结构体, 位域定义, 寄存器读改写, 设备寄存器表]
+identifiers: [register_bitfields, register_structs, ReadWrite, ReadOnly, WriteOnly, LocalRegisterCopy, Readable, Writeable, ReadWriteable, modify, extract]
+exclusions:
+- this card is the 0.10 line; arch/kcpu depends on tock-registers 0.9 (a different API surface and lock
+  entry) and vendor/arm_pl011 on another entry, so do not mix register types across versions
+- no mapping or address translation; the caller maps the device
+- for virtio-style register blocks where field wrappers and unique pointers are used, see mmio_safe_mmio
+- modify is a volatile read followed by a write, not an atomic read-modify-write or an ordering barrier.
+  Device side-effect/W1C registers and concurrent accesses need their own protocol.
+counter_examples: []
+notes: >-
+  Cargo.lock at the pin has tock-registers 0.8.1, 0.9.0 and 0.10.1.

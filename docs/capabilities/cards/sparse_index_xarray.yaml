@@ -1,0 +1,145 @@
+capability: sparse_index_xarray
+title: RCU-readable sparse usize-indexed owning index (kxarray::XArray)
+family: container.sparse_index
+summary: >-
+  Radix-style sparse map from usize keys to owned Box/Arc values. Readers borrow entries inside an
+  RCU read scope without locks or allocation; writers serialise on an internal spin lock and retire
+  displaced owners through RCU callbacks.
+source: {kind: workspace, crate: kxarray, path: util/kxarray}
+symbols:
+  - {fqn: kxarray::XArray, kind: struct, path: util/kxarray/src/lib.rs, role: primary}
+  - {fqn: kxarray::XArray::new, kind: fn, path: util/kxarray/src/lib.rs, role: constructor}
+  - {fqn: kxarray::XArray::read, kind: fn, path: util/kxarray/src/lib.rs, role: operation}
+  - {fqn: kxarray::XArray::insert, kind: fn, path: util/kxarray/src/lib.rs, role: operation}
+  - {fqn: kxarray::XArray::set, kind: fn, path: util/kxarray/src/lib.rs, role: operation}
+  - {fqn: kxarray::XArray::remove, kind: fn, path: util/kxarray/src/lib.rs, role: operation}
+  - {fqn: kxarray::XArray::get_owned, kind: fn, path: util/kxarray/src/lib.rs, role: operation}
+  - {fqn: kxarray::EntryOwner, kind: trait, path: util/kxarray/src/owner.rs, role: helper}
+operations:
+- name: construct
+  symbols:
+  - kxarray::XArray::new
+  effect: empty index, no allocation
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::new
+    quote: Creates an empty index without allocation or RCU service readiness.
+- name: lookup
+  symbols:
+  - kxarray::XArray::read
+  - kxarray::XArray::get_owned
+  effect: read borrows without incrementing a count; get_owned exists for XArray<Arc<T>> and increments
+    a strong count so the returned Arc may outlive both scope and array
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::read
+    quote: No allocation, writer lock or reference-count increment is performed.
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::get_owned
+    quote: Arc::increment_strong_count(raw)
+- name: insert_if_absent
+  symbols:
+  - kxarray::XArray::insert
+  effect: insert only when the key is free; returns the value back on conflict
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::insert
+    quote: Returns `Err(value)` only when the key is already occupied
+- name: replace
+  symbols:
+  - kxarray::XArray::set
+  effect: insert or replace; the old owner is retired after a grace period
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::set
+    quote: Replacement atomically publishes the new owner and retires only this
+- name: remove
+  symbols:
+  - kxarray::XArray::remove
+  effect: remove an association; returns whether one was removed
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::remove
+    quote: Returns whether this call removed an entry.
+usage_protocol:
+  - step: construct with XArray::new (const, no allocation)
+    evidence: [{path: util/kxarray/src/lib.rs, quote: "= kxarray::XArray::<Box<usize>>::new(); // SAFETY:"}]
+  - step: insert / set / remove from a task context, inside `unsafe` with the adoption contract audited
+    evidence: [{path: util/kxarray/src/lib.rs, quote: "Insertion is an unsafe adoption boundary"}]
+  - step: read inside krcu::with_read; the borrow cannot escape the scope
+    evidence: [{path: util/kxarray/src/lib.rs, quote: "krcu::with_read(|scope| entries.read(scope, 42).copied());"}]
+contract:
+  no_std:
+    value: "yes"
+    evidence: [{path: util/kxarray/src/lib.rs, quote: "#![no_std]"}]
+  allocation:
+    value: allocates on insert / set (infallible kernel OOM policy); read does not allocate
+    evidence:
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray::insert, quote: "Allocation uses the kernel's infallible allocation/OOM policy."}
+      - {path: util/kxarray/src/lib.rs, quote: "Reads allocate nothing"}
+  blocking:
+    value: read scopes must not sleep; set / remove need a sleepable, watched task context
+    evidence:
+      - {path: util/kxarray/src/lib.rs, quote: "Read scopes must not sleep"}
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray::set, quote: "Preflight checks watched, sleepable task context outside read scopes"}
+  irq_nmi:
+    value: writers never from IRQ, softirq or NMI; Drop not from NMI
+    evidence:
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray::insert, quote: "never from IRQ, softirq or NMI."}
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray, quote: "not NMI."}
+  ownership_lifetime:
+    value: the array owns each inserted Box, or one strong count of each Arc; ownership moves only on success
+    evidence:
+      - {path: util/kxarray/src/lib.rs, quote: "owns each inserted object"}
+  errors_bounds:
+    value: insert returns Err(value) when occupied; set / remove return the RCU preflight KError
+    evidence:
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray::insert, quote: "Returns `Err(value)` only when the key is already occupied"}
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray::remove, quote: "pub unsafe fn remove(&self, index: usize) -> Result<bool, KError>"}
+  concurrency:
+    value: lock-free RCU readers; writers serialised by an internal SpinNoPreempt
+    evidence:
+      - {path: util/kxarray/src/lib.rs, item: kxarray::XArray, quote: "writers: SpinNoPreempt<()>,"}
+      - {path: util/kxarray/src/lib.rs, quote: "never take the writer lock"}
+layers:
+  depends_on:
+  - krcu
+  - kerrno
+  - kspin
+  used_by:
+  - kfeat
+  allowed_layers: unknown
+  evidence:
+  - path: util/kxarray/Cargo.toml
+    quote: krcu.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: kxarray = { workspace = true, optional = true }
+  - path: util/kxarray/Cargo.toml
+    quote: krcu.workspace = true
+  - path: util/kxarray/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: util/kxarray/Cargo.toml
+    quote: kspin.workspace = true
+aliases:
+  en:
+  - xarray
+  - radix tree
+  - sparse array
+  - integer-keyed map
+  - id to object map
+  - rcu lookup table
+  zh:
+  - 稀疏数组
+  - 基数树
+  - 整数索引表
+  - 编号到对象的映射
+  - RCU 查找表
+identifiers: [radix, xarray, index, slot, node, height, shift, rcu, retire, lookup, sparse]
+exclusions:
+  - "not an ID allocator — callers choose the key; there is no find-free-index operation"
+  - stored data needs its own mutation protocol; the index only manages ownership of the slot
+  - not for IRQ / NMI writers
+counter_examples: []
+notes: >-
+  No production crate depends on kxarray at the pin; only kfeat's kernel-tests feature does.
+  Reviewers should weigh that before suggesting it as an established replacement.

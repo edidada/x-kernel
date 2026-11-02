@@ -1,0 +1,94 @@
+capability: cpu_mask_cpumask
+title: Fixed-size CPU bitmask (cpumask::CpuMask<SIZE>, Linux cpumask_t style)
+family: cpu.mask
+summary: >-
+  cpumask crate: CpuMask<SIZE> is a Copy bitset of SIZE bits (SIZE up to 1024, backed by the
+  smallest of u8..u128 or an array of u128) with get/set (set returns the previous value), new/full/
+  one_shot/mask constructors, first/last/next/prev set and clear index searches, len/is_empty/
+  is_full, bit operators (& | ^ ! and assign forms) and an iterator over set bits. In x-kernel it is
+  wrapped as kcpu_id_map::KCpuMask = CpuMask<NR_CPUS> (see cpu_id_map_kcpu_id_map).
+source: {kind: dependency, crate: cpumask, version: 0.1.0}
+symbols:
+  - {fqn: cpumask::CpuMask, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: cpumask::CpuMask::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: cpumask::CpuMask::full, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: cpumask::CpuMask::one_shot, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: cpumask::CpuMask::get, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: cpumask::CpuMask::set, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: cpumask::CpuMask::first_index, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: cpumask::CpuMask::len, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: cpumask::CpuMask::is_empty, kind: fn, path: src/lib.rs, role: operation}
+operations:
+  - name: get_set
+    symbols: [cpumask::CpuMask::get, cpumask::CpuMask::set]
+    effect: read or write one bit; set returns the previous value; index range is only debug_assert-ed
+    evidence:
+      - {path: cpumask-0.1.0/src/lib.rs, item: cpumask::CpuMask::set, quote: "/// Returns the previous value of the bit."}
+      - {path: cpumask-0.1.0/src/lib.rs, item: cpumask::CpuMask::set, quote: "debug_assert!(index < SIZE);"}
+  - name: search
+    symbols: [cpumask::CpuMask::first_index, cpumask::CpuMask::len]
+    effect: find the first set bit and count set bits
+    evidence:
+      - {path: cpumask-0.1.0/src/lib.rs, item: cpumask::CpuMask::len, quote: "/// Count the number of `true` bits in the cpumask."}
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: cpumask-0.1.0/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: inline storage only (a primitive integer or [u128; N]), Copy type; no heap
+    evidence:
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask
+      quote: The type used to store the cpumask will be the minimum unsigned integer type
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: CpuMask is a Copy value; get/search/count take it by value, set requires &mut self; iterators
+      borrow the mask.
+    evidence:
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask
+      quote: '#[derive(Clone, Copy, Default, Eq, PartialEq)]'
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask::set
+      quote: 'pub fn set(&mut self, index: usize, value: bool) -> bool {'
+  errors_bounds:
+    value: maximum SIZE 1024; one_shot and from_raw_bits panic on an out-of-range value; get/set/mask
+      only debug_assert the range, so out-of-range indices are not reliably rejected in release builds
+    evidence:
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask
+      quote: sized as appropriately. The maximum supported size is currently 1024,
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask::one_shot
+      quote: /// The value must be less than `SIZE`, panick if the value is too large.
+    - path: cpumask-0.1.0/src/lib.rs
+      item: cpumask::CpuMask::get
+      quote: debug_assert!(index < SIZE);
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: [bitmaps]
+  used_by: [kcpu_id_map]
+  allowed_layers: unknown
+  evidence:
+    - {path: arch/kcpu_id_map/Cargo.toml, quote: 'cpumask = { version = "0.1" }'}
+aliases:
+  en: [cpumask, cpumask_t, cpu_set_t, CPU_SET, cpu affinity mask, set of CPUs, bitmap of CPUs, online mask, cpu_online_mask, cpumask_set_cpu, target CPU set, u64 bitmask of CPUs]
+  zh: [CPU 掩码, CPU 位图, CPU 集合, 亲和性掩码, 目标 CPU 集合]
+identifiers: [cpumask, cpumask_t, cpu_set_t, CPU_SET, CPU_ISSET, affinity, cpu_mask, target_mask, online_mask, "1 << cpu", u64, AtomicU64, bitmap]
+exclusions:
+  - "plain value type (no atomics in its API): concurrent updates (e.g. an online mask touched from several CPUs) need an external atomic or lock"
+  - "SIZE is a const generic bounded by 1024; kernel code should use the NR_CPUS-sized alias kcpu_id_map::KCpuMask with LogicalCpuId helpers instead of raw usize indices (cpu_id_map_kcpu_id_map)"
+  - "hand-rolled `1 << cpu` masks in u64/usize cannot represent more than 64 CPUs; use this type when NR_CPUS can exceed 64"
+counter_examples: []
+notes: 'KCpuMaskExt provides typed ids but does not validate their range: LogicalCpuId::new accepts any
+  usize and get_logical/set_logical delegate to get/set. Callers must enforce cpu_id < NR_CPUS. This value
+  type does not track CPU online state.'

@@ -1,0 +1,103 @@
+capability: slot_pool_slab
+title: Slot pool that hands out reusable usize keys (slab::Slab)
+family: container.slot_pool
+summary: >-
+  Slab<T> is a Vec-backed pre-allocated store: insert(value) picks a vacant slot and returns its usize
+  key, get/get_mut/remove take that key, and freed keys are reused by later inserts. vacant_entry
+  gives the key before the value is built. It is the crate used for handle tables and id-to-object
+  stores in the filesystem and TEE crates.
+source: {kind: dependency, crate: slab, version: 0.4.12}
+symbols:
+  - {fqn: slab::Slab, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: slab::Slab::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: slab::Slab::with_capacity, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: slab::Slab::insert, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::vacant_entry, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::get, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::get_mut, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::try_remove, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::remove, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::Slab::contains, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: slab::VacantEntry, kind: struct, path: src/lib.rs, role: helper}
+operations:
+  - name: insert
+    symbols: [slab::Slab::insert]
+    effect: store a value in a vacant slot and return its usize key
+    evidence: [{path: slab-0.4.12/src/lib.rs, item: slab::Slab::insert, quote: "pub fn insert(&mut self, val: T) -> usize {"}]
+  - name: vacant_entry
+    symbols: [slab::Slab::vacant_entry, slab::VacantEntry]
+    effect: reserve a slot and learn its key before the value is constructed
+    evidence: [{path: slab-0.4.12/src/lib.rs, quote: "Sometimes it is useful to be able to associate the key with the value being"}]
+  - name: lookup
+    symbols: [slab::Slab::get, slab::Slab::get_mut, slab::Slab::contains]
+    effect: Option access by key; None for a vacant or out-of-range key
+    evidence: [{path: slab-0.4.12/src/lib.rs, item: slab::Slab::get, quote: "pub fn get(&self, key: usize) -> Option<&T> {"}]
+  - name: remove
+    symbols: [slab::Slab::try_remove, slab::Slab::remove]
+    effect: take the value out and free the key for reuse; try_remove returns Option, remove panics on an invalid key
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab::try_remove, quote: "pub fn try_remove(&mut self, key: usize) -> Option<T> {"}
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab::remove, quote: 'self.try_remove(key).expect("invalid key")'}
+usage_protocol:
+  - step: "insert returns the key; keep it as the handle. A removed key may be handed out again, so drop every copy of a handle when removing and prefer try_remove where the key is not trusted"
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, quote: "It is important to note that keys may be reused."}
+contract:
+  no_std:
+    value: "yes: #![no_std] unconditionally (std feature only adds extern crate std); the workspace dependency sets default-features = false"
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, quote: "#![no_std]"}
+      - {path: Cargo.toml, quote: 'slab = { version = "0.4.9", default-features = false }'}
+  allocation:
+    value: heap allocated; entries live in a Vec that grows on insert (with_capacity and reserve pre-size it)
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab, quote: "entries: Vec<Entry<T>>,"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the slab owns the stored values; keys are plain usize and are reused after removal
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, quote: "It is important to note that keys may be reused."}
+  errors_bounds:
+    value: get/get_mut/try_remove return None for a vacant or out-of-range key; remove panics with "invalid key"
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab::remove, quote: 'self.try_remove(key).expect("invalid key")'}
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab::get, quote: "pub fn get(&self, key: usize) -> Option<&T> {"}
+  concurrency:
+    value: mutating operations take &mut self; no internal locking is visible in the API
+    evidence:
+      - {path: slab-0.4.12/src/lib.rs, item: slab::Slab::insert, quote: "pub fn insert(&mut self, val: T) -> usize {"}
+layers:
+  depends_on: []
+  used_by: [kvfs, memfs, fat, tee_kernel]
+  allowed_layers: unknown
+  evidence:
+    - {path: fs/kvfs/Cargo.toml, quote: "slab.workspace = true"}
+    - {path: fs/filesystems/memfs/Cargo.toml, quote: "slab = { workspace = true }"}
+    - {path: fs/filesystems/fat/Cargo.toml, quote: "slab.workspace = true"}
+    - {path: tee/tee_kernel/Cargo.toml, quote: "slab = { workspace = true }"}
+aliases:
+  en: [slab, slot map, handle table, id table, object pool, arena with keys, fd table, index allocator with storage, free list of slots]
+  zh: [槽位池, 句柄表, 对象池, 带编号的存储, 空闲槽复用, 编号分配器附带存储]
+identifiers: [Slab, insert, vacant_entry, try_remove, slab, free_list, next_free, handle, HandleTable]
+exclusions:
+  - "keys are not generation-checked: a stale key can name a different value after reuse; do not use it where use-after-free handles must be detected"
+  - "the key is chosen by the slab; for caller-chosen sparse integer keys use sparse_index_xarray"
+  - "unrelated to the kernel slab object allocator (mm.slab); this crate is a keyed container, not a memory allocator"
+  - "the kalloc / alloc-engine feature named slab selects the in-tree slab allocator engine, not this crate"
+counter_examples:
+- path: util/kxarray/src/lib.rs
+  item: kxarray::XArray
+  why: XArray is also an owning usize-indexed store, but keys are chosen by the caller and readers are
+    RCU-safe; Slab chooses the key and is single-writer (&mut self)
+  evidence:
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::new
+    quote: Creates an empty index without allocation or RCU service readiness.
+  - path: util/kxarray/src/lib.rs
+    quote: owns each inserted object
+  - path: util/kxarray/src/lib.rs
+    item: kxarray::XArray::read
+    quote: pub fn read<
+notes: >-
+  Cargo.lock at the pin has one slab version (0.4.12). Direct kernel users are listed in layers.

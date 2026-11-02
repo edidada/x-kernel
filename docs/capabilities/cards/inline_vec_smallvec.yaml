@@ -1,0 +1,100 @@
+capability: inline_vec_smallvec
+title: Vector with inline storage that spills to the heap (smallvec::SmallVec)
+family: container.inline_vec
+summary: >-
+  SmallVec<[T; N]> stores up to N elements inline and moves to a heap allocation only when it grows
+  past N. Useful for lists that are almost always short (poll registrations, resource descriptors,
+  small handle sets) where a Vec allocation per instance is wasteful.
+source: {kind: dependency, crate: smallvec, version: 1.16.3}
+symbols:
+  - {fqn: smallvec::SmallVec, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: smallvec::SmallVec::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: smallvec::SmallVec::new_const, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: smallvec::SmallVec::push, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: smallvec::SmallVec::spilled, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: smallvec::SmallVec::try_reserve, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: smallvec::smallvec, kind: macro, path: src/lib.rs, role: helper}
+operations:
+  - name: construct
+    symbols: [smallvec::SmallVec::new, smallvec::SmallVec::new_const]
+    effect: empty vector; new_const is the const fn variant (needs the const_new feature, arrays only)
+    evidence:
+      - {path: smallvec-1.16.3/src/lib.rs, item: smallvec::SmallVec::new_const, quote: "This is a `const` version of [`SmallVec::new`] that is enabled by the"}
+  - name: push
+    symbols: [smallvec::SmallVec::push]
+    effect: append; may spill to the heap
+    evidence:
+      - {path: smallvec-1.16.3/src/lib.rs, item: smallvec::SmallVec::push, quote: "Append an item to the vector."}
+  - name: spilled
+    symbols: [smallvec::SmallVec::spilled]
+    effect: whether the data now lives in a heap buffer
+    evidence:
+      - {path: smallvec-1.16.3/src/lib.rs, item: smallvec::SmallVec::spilled, quote: "Returns `true` if the data has spilled into a separate heap-allocated"}
+  - name: try_reserve
+    symbols: [smallvec::SmallVec::try_reserve]
+    effect: fallible growth; returns CollectionAllocErr instead of aborting
+    evidence:
+      - {path: smallvec-1.16.3/src/lib.rs, item: smallvec::SmallVec::try_reserve, quote: "pub fn try_reserve(&mut self, additional: usize) -> Result<(), CollectionAllocErr>"}
+usage_protocol:
+  - step: choose an inline capacity N with type SmallVec<[T; N]>; elements beyond N cause a heap allocation
+    evidence: [{path: smallvec-1.16.3/src/lib.rs, quote: "These store a certain number of elements"}]
+contract:
+  no_std:
+    value: yes (#![no_std]; the optional write feature depends on std)
+    evidence:
+    - path: smallvec-1.16.3/src/lib.rs
+      quote: "#![no_std] #![cfg_attr(docsrs,"
+  allocation:
+    value: new() starts with inline storage; growth beyond inline capacity may spill to a heap buffer.
+      Explicit reserve/with_capacity may allocate even with length <= inline capacity; try_reserve is
+      fallible.
+    evidence:
+    - path: smallvec-1.16.3/src/lib.rs
+      quote: fall back to the heap for larger allocations.
+    - path: smallvec-1.16.3/src/lib.rs
+      item: smallvec::SmallVec::try_reserve
+      quote: if cap - len >= additional {
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: owns its elements, inline or in its heap buffer
+    evidence:
+    - path: smallvec-1.16.3/src/lib.rs
+      quote: These store a certain number of elements
+  errors_bounds:
+    value: growth through push/insert panics on capacity overflow; the try_reserve family returns CollectionAllocErr
+    evidence:
+    - path: smallvec-1.16.3/src/lib.rs
+      item: smallvec::infallible
+      quote: panic!("capacity overflow")
+    - path: smallvec-1.16.3/src/lib.rs
+      item: smallvec::SmallVec::try_reserve
+      quote: Result<(), CollectionAllocErr>
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on: []
+  used_by: [device-res, kdriver, kpoll, kvfs, tipc_handle]
+  allowed_layers: unknown
+  evidence:
+    - {path: task/kpoll/Cargo.toml, quote: "smallvec = { workspace = true }"}
+    - {path: fs/kvfs/Cargo.toml, quote: 'smallvec = "1.15"'}
+    - {path: tee/tipc_handle/Cargo.toml, quote: 'smallvec = { version = "1.15", features = ["const_new", "union"] }'}
+    - {path: drivers/contracts/device-res/Cargo.toml, quote: 'smallvec = { version = "1.15", features = ["const_generics", "union"] }'}
+    - {path: drivers/integration/kdriver/Cargo.toml, quote: 'smallvec = { version = "1.15", features = ["const_generics", "union"] }'}
+aliases:
+  en: [small vector, inline vector, small-vec, small buffer optimisation, sbo, vec with inline storage, short list]
+  zh: [小向量, 内联向量, 小缓冲优化, 短列表, 栈上优先的向量]
+identifiers: [INLINE_CAP, inline, spill, spilled, smallvec, SmallVec]
+exclusions:
+  - "allocates once it exceeds the inline capacity; do not use where heap allocation is forbidden - use fixed_vec_arrayvec or fixed_vec_heapless instead"
+  - "workspace root enables features const_generics, const_new and union; crates with their own dependency line may enable different features"
+counter_examples: []
+notes: >-
+  new_const exists only with the const_new feature (kpoll and tipc_handle call it). The macro is
+  smallvec::smallvec! (used in kdriver platform_backend).

@@ -1,0 +1,121 @@
+capability: mm_user_atomic_word_kuaccess
+title: Atomic load / compare-exchange on a 32-bit user word with fault-resolving and nofault forms (kuaccess::atomic_*_u32)
+family: mm.user_access
+summary: >-
+  Exception-table-protected atomic operations on a u32 in user memory for futex and robust-list paths:
+  atomic_load_u32, atomic_u32_eq, atomic_cmpxchg_u32, each with a *_nofault variant that never resolves
+  page faults (safe under a non-sleepable lock), plus fault_in_user_writeable for the slow path.
+source: {kind: workspace, crate: kuaccess, path: core/kuaccess}
+symbols:
+  - {fqn: kuaccess::atomic_load_u32, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+  - {fqn: kuaccess::atomic_load_u32_nofault, kind: fn, path: core/kuaccess/src/lib.rs, role: operation}
+  - {fqn: kuaccess::atomic_u32_eq, kind: fn, path: core/kuaccess/src/lib.rs, role: operation}
+  - {fqn: kuaccess::atomic_u32_eq_nofault, kind: fn, path: core/kuaccess/src/lib.rs, role: operation}
+  - {fqn: kuaccess::atomic_cmpxchg_u32, kind: fn, path: core/kuaccess/src/lib.rs, role: primary}
+  - {fqn: kuaccess::atomic_cmpxchg_u32_nofault, kind: fn, path: core/kuaccess/src/lib.rs, role: operation}
+  - {fqn: kuaccess::fault_in_user_writeable, kind: fn, path: core/kuaccess/src/lib.rs, role: operation}
+operations:
+  - name: cmpxchg
+    symbols: [kuaccess::atomic_cmpxchg_u32]
+    effect: "Ok((true, old)) when the word equalled old and new was stored; Ok((false, observed)) otherwise"
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::atomic_cmpxchg_u32, quote: "Returns `Ok((true, old))` when `*addr == old` and the store of `new`"}
+  - name: nofault_variants
+    symbols: [kuaccess::atomic_load_u32_nofault, kuaccess::atomic_cmpxchg_u32_nofault]
+    effect: report a missing mapping as NoAccess immediately so the caller can drop its lock, fault the page in, and retry
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::atomic_load_u32_nofault, quote: "This is intended for callers that hold a non-sleepable lock. A fault is"}
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::atomic_cmpxchg_u32_nofault, quote: "This operation is safe under a non-sleepable lock because a missing or"}
+  - name: fault_in
+    symbols: [kuaccess::fault_in_user_writeable]
+    effect: one write-fault attempt for a user word without storing; the caller must not hold a non-sleepable lock
+    evidence:
+      - {path: core/kuaccess/src/lib.rs, item: kuaccess::fault_in_user_writeable, quote: "The caller must not hold a non-sleepable lock."}
+usage_protocol:
+  - step: "under a spin lock use the *_nofault form; on NoAccess drop the lock, call fault_in_user_writeable (or the fault-resolving form) and retry the whole operation"
+    evidence: [{path: core/kuaccess/src/lib.rs, item: kuaccess::atomic_load_u32_nofault, quote: "reported as [`MemError::NoAccess`]; the caller must drop its lock, fault the"}]
+contract:
+  no_std:
+    value: yes (#![no_std])
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: fault-resolving forms may sleep in the page-fault handler; the *_nofault forms do not resolve
+      faults and are documented as safe under a non-sleepable lock
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::atomic_cmpxchg_u32_nofault
+      quote: This operation is safe under a non-sleepable lock because a missing or
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::fault_in_user_writeable
+      quote: The caller must not hold a non-sleepable lock.
+    - path: core/kuaccess/src/lib.rs
+      quote: File-backed faults can wait for disk I/O here, outside exception context.
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: operates on a user address (usize), never forms a reference to user memory
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::atomic_load_u32
+      quote: 'pub fn atomic_load_u32(addr: usize) -> MemResult<u32> {'
+  errors_bounds:
+    value: InvalidAddr when addr is not 4-byte aligned; NoAccess when outside user space or the access
+      faults and cannot be resolved; fault_in_user_writeable also returns OutOfMemory
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::atomic_load_u32_inner
+      quote: if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::fault_in_user_writeable
+      quote: '[`MemError::OutOfMemory`] when the fault handler runs out of memory, and'
+  concurrency:
+    value: atomic with respect to other CPUs and user threads on the word (assembly user_atomic_load/cmpxchg);
+      this is the primitive futex and robust-list updates need
+    evidence:
+    - path: core/kuaccess/src/lib.rs
+      item: kuaccess::atomic_cmpxchg_u32
+      quote: This is the primitive futex / robust-list paths need for race-free updates
+layers:
+  depends_on:
+  - khal
+  - ktask
+  - kprocess
+  - memspace
+  - osvm
+  used_by:
+  - kfutex
+  - ksyscall
+  - posix-process
+  allowed_layers: unknown
+  evidence:
+  - path: process/kfutex/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: posix/process/Cargo.toml
+    quote: kuaccess.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: khal.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: ktask.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: kprocess.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: memspace.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: osvm.workspace = true
+aliases:
+  en: [get_user atomic, futex_atomic_cmpxchg_inatomic, cmpxchg_user, futex word load, user futex compare, atomic user access, robust list update, atomic_load user word]
+  zh: [用户态原子操作, 用户字原子比较交换, futex 字读取, 用户内存原子读, 不触发缺页的用户访问]
+identifiers: [futex_atomic_cmpxchg_inatomic, cmpxchg_user, AtomicU32, "user_atomic_cmpxchg_u32", "user_atomic_load_u32", futex_word, FUTEX_WAKE_OP, robust_list, nofault, pagefault_disable]
+exclusions:
+  - only 32-bit words, 4-byte aligned; no u64 or arbitrary-size atomics
+  - a plain AtomicU32 reference to a user address is unsound - user memory must go through these helpers
+  - for ordinary (non-atomic) copies use osvm::read_vm_mem / write_vm_mem (mm_user_copy_osvm)
+counter_examples: []

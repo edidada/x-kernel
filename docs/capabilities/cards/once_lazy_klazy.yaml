@@ -1,0 +1,192 @@
+capability: once_lazy_klazy
+title: Spin-based one-time init cell, lazy value and lazy_static! macro (klazy::Once / Lazy / lazy_static)
+family: sync.once_lazy
+summary: >-
+  no_std one-time initialization for statics. Once<T> runs a closure exactly once (call_once,
+  fallible try_call_once that stays retryable, wait/poll that spin until initialized) and hands out
+  &T; Lazy<T, F> wraps it as a deref-initialized value usable in statics; lazy_static! declares
+  `static ref NAME: T = init` statics that deref to T like the lazy_static crate. Coordination
+  during initialization is a spin-wait; there is no sleeping.
+source: {kind: workspace, crate: klazy, path: util/klazy}
+symbols:
+- fqn: klazy::Once
+  kind: struct
+  path: util/klazy/src/once.rs
+  role: primary
+- fqn: klazy::Once::new
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: constructor
+- fqn: klazy::Once::initialized
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: constructor
+- fqn: klazy::Once::call_once
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: operation
+- fqn: klazy::Once::try_call_once
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: operation
+- fqn: klazy::Once::wait
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: operation
+- fqn: klazy::Once::poll
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: operation
+- fqn: klazy::Once::get
+  kind: fn
+  path: util/klazy/src/once.rs
+  role: operation
+- fqn: klazy::Lazy
+  kind: struct
+  path: util/klazy/src/lazy.rs
+  role: primary
+- fqn: klazy::Lazy::new
+  kind: fn
+  path: util/klazy/src/lazy.rs
+  role: constructor
+- fqn: klazy::Lazy::force
+  kind: fn
+  path: util/klazy/src/lazy.rs
+  role: operation
+- fqn: klazy::lazy_static
+  kind: macro
+  path: util/klazy/src/lazy_static.rs
+  role: helper
+operations:
+  - name: call_once
+    symbols: [klazy::Once::call_once, klazy::Once::try_call_once]
+    effect: runs the closure on the first call, stores its value, returns &T; other callers spin-wait during initialization; try_call_once resets to uninitialized on Err so it can be retried
+    evidence:
+      - {path: util/klazy/src/once.rs, item: klazy::once::Once::call_once, quote: "This method will spin-wait if another thread is currently performing"}
+      - {path: util/klazy/src/once.rs, item: klazy::once::Once, quote: "closure returns `Err`, the cell is reset to `Uninitialized` and can be retried"}
+  - name: wait_poll
+    symbols: [klazy::Once::wait, klazy::Once::poll, klazy::Once::get]
+    effect: get is a non-blocking Option<&T>; poll spins while initializing and returns None if initialization never began; wait spins until a value exists
+    evidence:
+      - {path: util/klazy/src/once.rs, item: klazy::once::Once::poll, quote: "Like [`Once::get`], but will **spin-wait** if the [`Once`] is in the process"}
+  - name: lazy_force
+    symbols: [klazy::Lazy::force, klazy::Lazy::new]
+    effect: Lazy::new is const (static-friendly); first Deref or force runs the factory once
+    evidence:
+      - {path: util/klazy/src/lazy.rs, item: klazy::lazy::Lazy::new, quote: "This is a `const` constructor and can be used to initialize statics."}
+usage_protocol:
+  - step: "declare `static X: klazy::Once<T> = klazy::Once::new()` or `static X: Lazy<T> = Lazy::new(|| ...)` and access through call_once / Deref"
+    evidence:
+      - {path: util/klazy/src/once.rs, item: klazy::once::Once, quote: "static START: klazy::Once = klazy::Once::new();"}
+      - {path: util/klazy/src/lazy.rs, item: klazy::lazy::Lazy, quote: "static HASHMAP: Lazy<HashMap<i32, String>> = Lazy::new(|| {"}
+contract:
+  no_std:
+    value: 'yes (cfg_attr: no_std unless test)'
+    evidence:
+    - path: util/klazy/src/lib.rs
+      quote: '#![cfg_attr(not(test), no_std)]'
+  allocation:
+    value: Once and Lazy store the value inline (MaybeUninit<T>) and do not themselves allocate; the init
+      closure may
+    evidence:
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once
+      quote: 'storage: UnsafeCell<MaybeUninit<T>>,'
+  blocking:
+    value: coordination uses spin-wait without a sleeping wait primitive or timeout; contenders spin while
+      initialization is running. This does not constrain arbitrary work performed by the supplied initializer.
+    evidence:
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once
+      quote: uses spin-wait for coordination during
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once::wait
+      quote: There is no timeout or blocking primitive involved.
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: the cell owns the value for its lifetime and hands out shared references; no way to take the
+      value out of a shared cell; Lazy consumes its factory exactly once
+    evidence:
+    - path: util/klazy/src/lazy.rs
+      item: klazy::lazy::Lazy
+      quote: it is consumed via
+  errors_bounds:
+    value: if the init closure panics the cell is permanently poisoned and later accesses panic; try_call_once
+      returns the closure's Err and stays retryable
+    evidence:
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once
+      quote: If the initialization closure panics, the `Once` is permanently poisoned.
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once::try_call_once
+      quote: 'pub fn try_call_once<F: FnOnce() -> Result<T, E>, E>(&self, f: F) -> Result<&T, E>'
+  concurrency:
+    value: 'Once<T> is Sync for T: Send + Sync; after initialization access is a single atomic load; Lazy<T,
+      F> is Sync when Once<T>: Sync and F: Send'
+    evidence:
+    - path: util/klazy/src/once.rs
+      quote: 'unsafe impl<T: Send + Sync> Sync for Once<T> {}'
+    - path: util/klazy/src/once.rs
+      item: klazy::once::Once
+      quote: After initialization, access is a single atomic load.
+layers:
+  depends_on:
+  - paste
+  used_by:
+  - ktask
+  - krcu
+  - kprocess
+  - kvfs
+  - ktime
+  - knet
+  - ktracing
+  - kfinalize
+  - kworkng
+  - ktimer
+  - kcpu_id_map
+  - kcpu
+  allowed_layers: unknown
+  evidence:
+  - path: util/klazy/Cargo.toml
+    quote: paste = { workspace = true }
+  - path: task/ktask/Cargo.toml
+    quote: klazy = { workspace = true }
+  - path: sync/krcu/Cargo.toml
+    quote: klazy.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: klazy = { workspace = true }
+  - path: core/ktime/Cargo.toml
+    quote: klazy.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: klazy.workspace = true
+  - path: net/knet/Cargo.toml
+    quote: klazy.workspace = true
+  - path: core/ktracing/Cargo.toml
+    quote: klazy = { workspace = true }
+  - path: util/kfinalize/Cargo.toml
+    quote: klazy.workspace = true
+  - path: task/kworkng/Cargo.toml
+    quote: klazy.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: klazy.workspace = true
+  - path: arch/kcpu_id_map/Cargo.toml
+    quote: klazy.workspace = true
+  - path: arch/kcpu/Cargo.toml
+    quote: klazy = { workspace = true }
+  - path: arch/kcpu/Cargo.toml
+    quote: '[target.''cfg(any(target_arch = "riscv32", target_arch = "riscv64"))''.dependencies]'
+aliases:
+  en: [Once, call_once, std::sync::Once, OnceCell, OnceLock, LazyLock, lazy_static, lazy static, once_cell, spin::Once, init once, one-time initialization, global singleton init, static initialization]
+  zh: [一次性初始化, 惰性初始化, 懒加载, 单例初始化, 全局静态初始化, 只初始化一次]
+identifiers: [Once, OnceCell, OnceLock, LazyLock, lazy_static, call_once, INITIALIZED, AtomicBool, compare_exchange, spin_loop, Initializing, MaybeUninit, get_or_init]
+exclusions:
+  - "initialization spins (no sleep): the init closure must not block, sleep, or wait on this same cell; a task preempted inside the closure makes waiters spin"
+  - "a panicking init closure poisons the cell permanently (Once::call_once); use try_call_once for fallible initialization that can be retried"
+  - "Once/Lazy give only shared references after init; there is no take / reset / get_mut-after-share. For boot-time set-once-then-read globals set explicitly (init_once) use the lazyinit card (once_lazy_lazyinit)"
+  - "IRQ/NMI-safety of the spin-wait is not documented in the crate API; do not assume it is usable from NMI"
+counter_examples: []
+notes: >-
+  Crate-level design and security rationale is in util/klazy/docs/design.md and security.md (named
+  by lib.rs). lazy_static! mirrors the upstream lazy_static crate dispatch semantics.

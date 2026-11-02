@@ -1,0 +1,92 @@
+capability: mpmc_queue_heapless
+title: Fixed-capacity MPMC queue (heapless::mpmc::Queue, deprecated constructor) - available but unused
+family: container.ring
+summary: >-
+  heapless::mpmc::Queue<T, N> is a fixed-capacity multiple-producer multiple-consumer queue. Its
+  constructor is marked deprecated upstream because it is not truly lock-free: a preempted enqueue or
+  dequeue can leave the queue in a state where other tasks cannot make progress, and enqueue/dequeue then
+  return an error. No workspace crate uses it at the pin.
+source: {kind: dependency, crate: heapless, version: 0.9.3}
+symbols:
+  - {fqn: heapless::mpmc::Queue, kind: type, path: src/mpmc.rs, role: primary}
+  - {fqn: heapless::mpmc::Queue::new, kind: fn, path: src/mpmc.rs, role: constructor}
+  - {fqn: heapless::mpmc::QueueInner::enqueue, kind: fn, path: src/mpmc.rs, role: operation}
+  - {fqn: heapless::mpmc::QueueInner::dequeue, kind: fn, path: src/mpmc.rs, role: operation}
+operations:
+- name: enqueue
+  symbols:
+  - heapless::mpmc::QueueInner::enqueue
+  effect: enqueue at the tail; Err(item) on full or a transient inability to progress caused by an interrupted
+    operation
+  evidence:
+  - path: heapless-0.9.3/src/mpmc.rs
+    item: heapless::mpmc::QueueInner::enqueue
+    quote: Returns back the `item` if the queue is full.
+  - path: heapless-0.9.3/src/mpmc.rs
+    item: heapless::mpmc::Queue::new
+    quote: will return an error, but will not panic or reach undefined behaviour
+- name: dequeue
+  symbols:
+  - heapless::mpmc::QueueInner::dequeue
+  effect: dequeue at the head; None on empty or a transient inability to progress caused by an interrupted
+    operation
+  evidence:
+  - path: heapless-0.9.3/src/mpmc.rs
+    item: heapless::mpmc::QueueInner::dequeue
+    quote: or `None` if the queue is empty.
+  - path: heapless-0.9.3/src/mpmc.rs
+    item: heapless::mpmc::Queue::new
+    quote: will return an error, but will not panic or reach undefined behaviour
+usage_protocol:
+- step: Use Queue::new only after accepting the upstream deprecation and progress limitation; it is not
+    a lock-free object pool. N must satisfy the constructor checks. enqueue Err(item) and dequeue None
+    can mean transient failure after a preempted operation, so neither proves full/empty in all schedules.
+  evidence:
+  - path: heapless-0.9.3/src/mpmc.rs
+    item: heapless::mpmc::Queue::new
+    quote: you can safely ignore the warnings using `#[expect(deprecated)]`
+contract:
+  no_std:
+    value: "yes (heapless is #![cfg_attr(not(test), no_std)]; the mpmc module needs atomics, see notes)"
+    evidence: [{path: heapless-0.9.3/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: the queue owns the items; a rejected enqueue hands the item back
+    evidence: [{path: heapless-0.9.3/src/mpmc.rs, item: heapless::mpmc::QueueInner::enqueue, quote: "Returns back the `item` if the queue is full."}]
+  errors_bounds:
+    value: fixed capacity; enqueue/dequeue can also fail if another task was preempted mid-operation
+    evidence:
+      - {path: heapless-0.9.3/src/mpmc.rs, item: heapless::mpmc::Queue::new, quote: "will return an error, but will not panic or reach undefined behaviour"}
+  concurrency:
+    value: MPMC, but not truly lock-free - a preempted operation can block progress of others (documented as deprecated)
+    evidence:
+      - {path: heapless-0.9.3/src/mpmc.rs, item: heapless::mpmc::Queue::new, quote: "marked as deprecated due to not being truly lock-free"}
+layers:
+  depends_on: []
+  used_by: []
+  allowed_layers: unknown
+  evidence:
+    - {path: io/kio/Cargo.toml, quote: 'heapless = "0.9"'}
+aliases:
+  en:
+  - mpmc queue
+  - multi producer multi consumer queue
+  - bounded queue
+  - concurrent queue
+  zh:
+  - 多生产者多消费者队列
+  - 并发队列
+  - 有界队列
+identifiers: [enqueue, dequeue, enqueue_pos, dequeue_pos, bounded, mpmc]
+exclusions:
+  - "upstream marks the constructor deprecated: not truly lock-free, unsuitable as an object pool"
+  - "needs target atomics (cfg on target_has_atomic); for one producer and one consumer prefer spsc_ring_ringbuf"
+counter_examples: []
+notes: >-
+  Present in the locked dependency but no workspace crate imports heapless::mpmc at the pin (the workspace
+  uses heapless only for Vec, see fixed_vec_heapless). The module is compiled only under the cfg on
+  `pub mod mpmc;` in heapless-0.9.3/src/lib.rs.

@@ -1,0 +1,215 @@
+capability: blocking_rwlock
+title: Sleeping reader-writer lock with optimistic spinning (ksync::RwLock)
+family: sync.rwlock
+summary: >-
+  lock_api RwLock over an atomic state word (high bit write-locked, low 31 bits reader count) with
+  separate reader and writer event-listeners. Contended acquires spin, then sleep via
+  ktask::future::block_on. The recorded writer is tracked for spinners; readers are not recorded.
+source: {kind: workspace, crate: ksync, path: task/ksync}
+symbols:
+  - {fqn: ksync::RwLock, kind: struct, path: task/ksync/src/rwlock.rs, role: primary}
+  - {fqn: ksync::RwLock::new, kind: fn, path: task/ksync/src/rwlock.rs, role: constructor}
+  - {fqn: ksync::RawRwLock, kind: struct, path: task/ksync/src/rwlock.rs, role: helper}
+  - {fqn: ksync::RwLockReadGuard, kind: type, path: task/ksync/src/rwlock.rs, role: helper}
+  - {fqn: ksync::RwLockWriteGuard, kind: type, path: task/ksync/src/rwlock.rs, role: helper}
+operations:
+  - name: read
+    symbols: [ksync::RwLock]
+    effect: shared acquire; registers a reader listener, rechecks the write bit, then blocks
+    evidence: [{path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock::lock_shared, quote: "listener!(self.reader_event => listener);"}]
+  - name: write
+    symbols: [ksync::RwLock]
+    effect: exclusive acquire; registers a writer listener then blocks
+    evidence: [{path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock::lock_exclusive, quote: "listener!(self.writer_event => listener);"}]
+usage_protocol:
+- step: Use the public wrapper and .lock() or .read()/.write() only in sleepable task context. For static
+    initialization use ksync::static_lock! when stats is enabled; new() is const only without stats.
+  evidence:
+  - path: task/ksync/src/lib.rs
+    quote: 'static CONFIG: RwLock<u32> = RwLock::new(0);'
+  - path: task/ksync/src/rwlock.rs
+    item: ksync::rwlock::RwLock::new
+    quote: '#[cfg(feature = "stats")]'
+  - path: task/ksync/src/lib.rs
+    quote: pub use klockstat::{LOCK_CLASSES, LockClassStats, linkme, static_lock};
+contract:
+  no_std:
+    value: "yes (cfg_attr: no_std unless test)"
+    evidence: [{path: task/ksync/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}]
+  allocation:
+    value: unknown
+    evidence: []
+  blocking:
+    value: sleeps (event-listener + ktask block_on) after bounded spinning; acquiring while this task is the recorded writer panics
+    evidence:
+      - {path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock, quote: "`lock_exclusive` and `lock_shared` panic when this task is the recorded"}
+      - {path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock, quote: "A contended acquire spins before sleeping"}
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: lock owns the value through lock_api guards; guard marker is GuardSend
+    evidence: [{path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock::GuardMarker, quote: "type GuardMarker = lock_api::GuardSend;"}]
+  errors_bounds:
+    value: panics when the reader count would reach MAX_READERS (2^31 - 1)
+    evidence: [{path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock::lock_shared, quote: "panic!(\"too many readers\");"}]
+  concurrency:
+    value: waiting does not reserve the lock; no starvation-freedom promise
+    evidence: [{path: task/ksync/src/rwlock.rs, item: ksync::rwlock::RawRwLock, quote: "Waiting does not reserve the lock"}]
+layers:
+  depends_on:
+  - ktask
+  - kmutex
+  - kspin
+  used_by:
+  - anon
+  - block
+  - bpffs
+  - cgroup2fs
+  - devfs
+  - devpts
+  - drmdevice
+  - entropy
+  - fat
+  - filemap
+  - fs_context
+  - inputdev
+  - kcgroup
+  - kdriver
+  - kexec
+  - kext4
+  - kfd
+  - kfd_objects
+  - kfeat
+  - knet
+  - kns
+  - kprocess
+  - kresources
+  - ktimer
+  - ktty
+  - kuaccess
+  - kvfs
+  - kvmm
+  - kvmm-api
+  - kworkqueue_ng
+  - memfs
+  - memspace
+  - net
+  - p9
+  - pagecache
+  - posix-ipc
+  - posix-process
+  - sysfs
+  - tee_kernel
+  - tee_task_iface
+  - unittest_support
+  - vdev-core
+  - vdev-uart16550
+  - vdev-virtio-blk
+  allowed_layers: unknown
+  evidence:
+  - path: task/ksync/Cargo.toml
+    quote: ktask.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: kmutex.workspace = true
+  - path: task/ksync/Cargo.toml
+    quote: kspin.workspace = true
+  - path: mm/anon/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: drivers/contracts/block/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: fs/filesystems/bpffs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/cgroup2fs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/devpts/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/drmdevice/Cargo.toml
+    quote: ksync.workspace = true
+  - path: util/entropy/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/fat/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/filemap/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: process/fs_context/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/inputdev/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kcgroup/Cargo.toml
+    quote: ksync.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: process/kexec/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/kext4/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kfd/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kfd_objects/Cargo.toml
+    quote: ksync.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: net/knet/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: process/kns/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kprocess/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/kresources/Cargo.toml
+    quote: ksync.workspace = true
+  - path: process/ktimer/Cargo.toml
+    quote: ksync.workspace = true
+  - path: io/ktty/Cargo.toml
+    quote: ksync.workspace = true
+  - path: core/kuaccess/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/kvfs/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: virt/kvmm/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/kvmm-api/Cargo.toml
+    quote: ksync.workspace = true
+  - path: task/kworkng/crates/kworkqueue_ng/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/memspace/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: drivers/contracts/net/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: net/9p/Cargo.toml
+    quote: ksync.workspace = true
+  - path: mm/pagecache/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: posix/ipc/Cargo.toml
+    quote: ksync = { workspace = true }
+  - path: posix/process/Cargo.toml
+    quote: ksync.workspace = true
+  - path: fs/filesystems/sysfs/Cargo.toml
+    quote: ksync.workspace = true
+  - path: tee/tee_kernel/Cargo.toml
+    quote: ksync.workspace = true
+  - path: tee/tee_task_iface/Cargo.toml
+    quote: ksync = { workspace = true, optional = true }
+  - path: util/unittest_support/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/core/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/uart16550/Cargo.toml
+    quote: ksync.workspace = true
+  - path: virt/vdev/virtio-blk/Cargo.toml
+    quote: ksync.workspace = true
+aliases:
+  en: [rwlock, rw_semaphore, rwsem, down_read, down_write, reader writer lock, sleeping rwlock]
+  zh: [读写锁, 读写信号量, 可睡眠读写锁]
+identifiers: [WRITE_LOCKED, MAX_READERS, reader_event, writer_event, lock_shared, lock_exclusive, AtomicU32]
+exclusions:
+  - "not for IRQ or other non-sleeping contexts; use kspin::SpinRwNoIrq there (spin_rwlock_noirq)"
+  - "no lock-upgrade or downgrade operations are documented in this crate"
+counter_examples: []
+notes: >-
+  ksync::Mutex is a re-export of kmutex::Mutex (see blocking_mutex); this card covers the ksync-owned
+  RwLock only. ksync depends on ktask, so crates below ktask cannot use it.

@@ -1,0 +1,114 @@
+capability: event_listener_event
+title: Eventcount-style Event with FIFO listeners and stack-allocated listeners (event_listener::Event)
+family: sync.event
+summary: >-
+  event-listener crate (no_std build, default-features off). Event is a lazily heap-initialised
+  eventcount: listen() or the listener!(event => l) macro registers a listener (FIFO order) as a
+  Future, the caller rechecks its condition, then awaits the listener; notify(n) wakes up to n
+  listeners (additional/relaxed strategies available). Registering before rechecking prevents lost
+  wakeups. Blocking wait() exists only with the std feature; kernel code awaits the listener through
+  its own block_on. Used underneath ktask::WaitQueue, ksync semaphore / rwlock and kmutex.
+source: {kind: dependency, crate: event-listener, version: 5.4.1}
+symbols:
+  - {fqn: event_listener::Event, kind: struct, path: src/lib.rs, role: primary}
+  - {fqn: event_listener::Event::new, kind: fn, path: src/lib.rs, role: constructor}
+  - {fqn: event_listener::Event::listen, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: event_listener::Event::notify, kind: fn, path: src/lib.rs, role: operation}
+  - {fqn: event_listener::EventListener, kind: struct, path: src/lib.rs, role: helper}
+  - {fqn: event_listener::Listener, kind: trait, path: src/lib.rs, role: helper}
+  - {fqn: event_listener::listener, kind: macro, path: src/lib.rs, role: helper}
+operations:
+  - name: listen_then_recheck
+    symbols: [event_listener::Event::listen, event_listener::listener]
+    effect: register a listener (heap-allocated for listen(), stack slot for the listener! macro), then recheck the condition before awaiting it
+    evidence:
+      - {path: event-listener-5.4.1/src/lib.rs, item: event_listener::Event::listen, quote: "// Allocate the listener on the heap and insert it."}
+      - {path: event-listener-5.4.1/src/lib.rs, item: event_listener::listener, quote: "listener!(event => listener); // Check"}
+  - name: notify
+    symbols: [event_listener::Event::notify]
+    effect: wake up to n listeners in FIFO order; returns the number notified; notifications with no listeners are lost
+    evidence:
+      - {path: event-listener-5.4.1/src/lib.rs, item: event_listener::Event, quote: "Listeners are registered and notified in the first-in first-out fashion, ensuring fairness."}
+      - {path: event-listener-5.4.1/src/lib.rs, item: event_listener::Event::notify, quote: "pub fn notify(&self, notify: impl IntoNotification<Tag = T>) -> usize {"}
+usage_protocol:
+  - step: "check condition; listen (register); check condition again; await/wait the listener; loop"
+    evidence:
+      - {path: event-listener-5.4.1/src/lib.rs, quote: "Start listening for events. let"}
+contract:
+  no_std:
+    value: yes with default-features off (cfg_attr no_std unless std); the workspace pins default-features
+      = false
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      quote: '#![cfg_attr(not(feature = "std"), no_std)]'
+    - path: Cargo.toml
+      quote: event-listener = { version = "=5.4.1", default-features = false }
+  allocation:
+    value: Event::new is const and starts with a null inner pointer that is heap-initialized lazily on
+      first use; listen() allocates a pinned heap listener; the listener! macro uses a stack slot to avoid
+      that allocation; on no_std the listener list is a Vec
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Event
+      quote: A pointer to heap-allocated inner state.
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Inner
+      quote: more traditional `Vec` of listeners
+  blocking:
+    value: the blocking Listener::wait / wait_timeout / wait_deadline are compiled only with the std feature
+      (unavailable in the kernel build); listeners are Futures, so waiting means awaiting them from the
+      caller's executor
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Listener::wait
+      quote: '#[cfg(all(feature = "std", not(target_family = "wasm")))]'
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Listener
+      quote: 'pub trait Listener<T = ()>: Future<Output = T> + __sealed::Sealed {'
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: Event owns an Arc-like inner state lazily; listeners keep the inner state alive; a notified
+      listener dropped without being consumed passes the notification to another listener
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Event
+      quote: If a notified listener is dropped without receiving a notification, dropping will notify
+  errors_bounds:
+    value: no error type; notify returns usize count of notified listeners
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      item: event_listener::Event::notify
+      quote: -> usize {
+  concurrency:
+    value: 'Event is Send + Sync for T: Send; FIFO fair listener queue; eventcount design (notify with
+      no listeners is lost, so register before rechecking)'
+    evidence:
+    - path: event-listener-5.4.1/src/lib.rs
+      quote: 'unsafe impl<T: Send> Sync for Event<T> {}'
+    - path: event-listener-5.4.1/src/lib.rs
+      quote: similar to [eventcounts] invented by Dmitry Vyukov.
+layers:
+  depends_on: []
+  used_by: [ktask, ksync, kmutex, ktimer, knet]
+  allowed_layers: unknown
+  evidence:
+    - {path: task/ktask/Cargo.toml, quote: "event-listener = { workspace = true }"}
+    - {path: task/ksync/Cargo.toml, quote: "event-listener.workspace = true"}
+    - {path: sync/kmutex/Cargo.toml, quote: "event-listener.workspace = true"}
+    - {path: process/ktimer/Cargo.toml, quote: "event-listener = { workspace = true, default-features = false }"}
+    - {path: net/knet/Cargo.toml, quote: "event-listener = { workspace = true }"}
+aliases:
+  en: [event, eventcount, notify, listener, condvar, condition variable, waiter list, wake-one, wake-all, async notify, wait_event, Notify, tokio Notify]
+  zh: [事件通知, 事件计数, 条件变量, 监听者, 等待者列表, 唤醒一个, 唤醒全部]
+identifiers: [Event, EventListener, listener!, notify, listen, notify_additional, Notify, Notification, waiters, wakers]
+exclusions:
+  - "a notification with no registered listener is lost; always register the listener before rechecking the condition"
+  - "no condition predicate inside Event: use ktask::WaitQueue::wait_until (task_wait_queue) for sleeping-with-condition on the kernel scheduler"
+  - "the std-only blocking wait is not available in kernel builds; an executor (e.g. ktask::future::block_on) must drive the listener"
+  - "for one-shot completion tokens use kcompletion; for poll/epoll fan-out use kpoll::PollSet"
+counter_examples: []
+notes: >-
+  Registered in the kernel only through wrapper types (ktask::WaitQueue, ksync, kmutex, ktimer);
+  the used_by list is the set of crates depending on event-listener directly.

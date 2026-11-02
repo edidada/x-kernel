@@ -1,0 +1,126 @@
+capability: io_traits_kio
+title: no_std std::io traits - Read / Write / Seek / BufRead with read_exact, write_all, copy (kio)
+family: io.traits
+summary: >-
+  A local no_std copy of std::io: Read, Write, Seek, BufRead traits with provided helpers
+  (read_exact, read_to_end, read_to_string, write_all, write_fmt, seek helpers, read_until / lines),
+  the free copy() between a reader and a writer, Take / Chain adapters, plus IoBuf / IoBufMut
+  remaining-capacity traits. Errors are kerrno::KError.
+source: {kind: workspace, crate: kio, path: io/kio}
+symbols:
+  - {fqn: kio::Read, kind: trait, path: io/kio/src/read/mod.rs, role: primary}
+  - {fqn: kio::Write, kind: trait, path: io/kio/src/write/mod.rs, role: primary}
+  - {fqn: kio::Seek, kind: trait, path: io/kio/src/seek/mod.rs, role: primary}
+  - {fqn: kio::SeekFrom, kind: enum, path: io/kio/src/seek/mod.rs, role: helper}
+  - {fqn: kio::BufRead, kind: trait, path: io/kio/src/read/mod.rs, role: operation}
+  - {fqn: kio::copy, kind: fn, path: io/kio/src/utils/copy.rs, role: operation}
+  - {fqn: kio::IoBuf, kind: trait, path: io/kio/src/iobuf/mod.rs, role: helper}
+  - {fqn: kio::IoBufMut, kind: trait, path: io/kio/src/iobuf/mod.rs, role: helper}
+operations:
+  - name: read_exact
+    symbols: [kio::Read]
+    effect: fill the whole buffer or fail with UnexpectedEof; retries Interrupted
+    evidence:
+      - {path: io/kio/src/read/mod.rs, item: kio::read::Read::read_exact, quote: "Returns [`Error::UnexpectedEof`] before filling `buf`, or forwards a read"}
+  - name: write_all
+    symbols: [kio::Write]
+    effect: loop on short writes and Interrupted; WriteZero if no progress
+    evidence:
+      - {path: io/kio/src/write/mod.rs, item: kio::write::Write::write_all, quote: "Writes all bytes, retrying short writes and [`Error::Interrupted`]."}
+      - {path: io/kio/src/write/mod.rs, item: kio::write::Write::write_all, quote: "Ok(0) => return Err(Error::WriteZero),"}
+  - name: copy
+    symbols: [kio::copy]
+    effect: stream everything from a reader to a writer until EOF using a stack buffer; returns bytes copied; does not flush
+    evidence:
+      - {path: io/kio/src/utils/copy.rs, item: kio::utils::copy::copy, quote: "Copies the entire contents of a reader into a writer."}
+  - name: seek
+    symbols: [kio::Seek]
+    effect: reposition (SeekFrom) plus rewind / stream_position / stream_len / seek_relative helpers
+    evidence:
+      - {path: io/kio/src/seek/mod.rs, item: kio::seek::Seek::seek, quote: "fn seek(&mut self, pos: SeekFrom) -> Result<u64>;"}
+usage_protocol:
+  - step: "implement the required method (read / write+flush / seek / fill_buf+consume); use `use kio::prelude::*` for the traits"
+    evidence:
+      - {path: io/kio/src/read/mod.rs, item: kio::read::Read::read, quote: "fn read(&mut self, buf: &mut [u8]) -> Result<usize>;"}
+      - {path: process/osvm/src/vm_io.rs, quote: "use kio::prelude::*;"}
+contract:
+  no_std:
+    value: yes (#![no_std]); Vec / String helpers need the `alloc` feature
+    evidence:
+    - path: io/kio/src/lib.rs
+      quote: '#![no_std]'
+    - path: io/kio/Cargo.toml
+      quote: alloc = []
+  allocation:
+    value: copy() supplies a DEFAULT_BUF_SIZE stack buffer; Vec/String helpers are gated by alloc. Allocation
+      or sleeping inside the underlying Read/Write implementation is not constrained by these traits.
+    evidence:
+    - path: io/kio/src/utils/copy.rs
+      item: kio::utils::copy::stack_buffer_copy
+      quote: Copies until EOF using a [`DEFAULT_BUF_SIZE`]-byte stack buffer.
+    - path: io/kio/src/lib.rs
+      quote: '#[cfg(feature = "alloc")]'
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: methods take &mut self; by_ref() borrows a reader/writer so adapters need not take ownership
+    evidence:
+    - path: io/kio/src/write/mod.rs
+      item: kio::write::Write::by_ref
+      quote: Borrows this writer so adapters can use it without taking ownership.
+  errors_bounds:
+    value: 'Result is kerrno::KResult (Error = KError): UnexpectedEof, WriteZero, Interrupted handled
+      by helpers; short reads/writes allowed; earlier output is not rolled back'
+    evidence:
+    - path: io/kio/src/lib.rs
+      quote: pub use kerrno::{KError as Error, KErrorKind as ErrorKind, KResult as Result};
+    - path: io/kio/src/write/mod.rs
+      item: kio::write::Write::write_all
+      quote: or forwards any other write error. Earlier output is not rolled back.
+  concurrency:
+    value: unknown
+    evidence: []
+layers:
+  depends_on:
+  - kerrno
+  - heapless
+  - memchr
+  used_by:
+  - knet
+  - posix-fs
+  - posix-net
+  - posix-types
+  - kfd_objects
+  - osvm
+  allowed_layers: unknown
+  evidence:
+  - path: net/knet/Cargo.toml
+    quote: kio = { workspace = true, features = ["alloc"] }
+  - path: posix/fs/Cargo.toml
+    quote: kio.workspace = true
+  - path: process/osvm/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: io/kio/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: io/kio/Cargo.toml
+    quote: heapless = "0.9"
+  - path: io/kio/Cargo.toml
+    quote: memchr = { version = "2", default-features = false }
+  - path: posix/net/Cargo.toml
+    quote: kio.workspace = true
+  - path: posix/types/Cargo.toml
+    quote: kio = { workspace = true }
+  - path: process/kfd_objects/Cargo.toml
+    quote: kio.workspace = true
+aliases:
+  en: [std::io, Read trait, Write trait, Seek trait, read_exact, write_all, io::copy, byte stream trait, reader writer abstraction, BufRead, read_to_end, io::Result]
+  zh: [字节流读写 trait, 读写抽象, 读满缓冲区, 全部写出, 流拷贝, 定位 trait]
+identifiers: ["fn read(&mut self", "fn write(&mut self", "read_exact", "write_all", "read_to_end", "UnexpectedEof", "WriteZero", "Interrupted", "loop { match self.write", "while !buf.is_empty()", io_copy, copy_stream]
+exclusions:
+  - kio traits return KError, so a hand-written read_exact / write_all loop that returns another error type is a different contract; wrap rather than re-implement
+  - not a user-memory interface - for user buffers use osvm::VmBytes / VmBytesMut (io_user_buffer_osvm) or iov_iter (io_buffer_iov_iter)
+counter_examples: []

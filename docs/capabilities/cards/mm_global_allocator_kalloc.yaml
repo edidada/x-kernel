@@ -1,0 +1,182 @@
+capability: mm_global_allocator_kalloc
+title: Kernel global allocator with raw page and DMA-page allocation (kalloc GlobalAllocator)
+family: mm.allocator
+summary: >-
+  The kernel's #[global_allocator]: a two-level allocator with a byte allocator (slab, buddy or
+  TLSF, chosen by cargo feature) for small requests over a buddy page allocator. Besides Rust heap
+  allocation it exposes raw contiguous-page allocation with alignment, DMA32-restricted page
+  allocation, per-UsageKind accounting and memory region registration.
+source: {kind: workspace, crate: kalloc, path: mm/kalloc}
+symbols:
+  - {fqn: kalloc::GlobalAllocator, kind: struct, path: mm/kalloc/src/lib.rs, role: primary}
+  - {fqn: kalloc::global_allocator, kind: fn, path: mm/kalloc/src/lib.rs, role: constructor}
+  - {fqn: kalloc::GlobalAllocator::alloc_pages, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::GlobalAllocator::alloc_dma_pages, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::GlobalAllocator::dealloc_pages, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::GlobalAllocator::dealloc_dma_pages, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::GlobalAllocator::alloc, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::global_init, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::global_add_memory, kind: fn, path: mm/kalloc/src/lib.rs, role: operation}
+  - {fqn: kalloc::GlobalAllocator::usages, kind: fn, path: mm/kalloc/src/lib.rs, role: helper}
+operations:
+  - name: heap_alloc
+    symbols: [kalloc::GlobalAllocator::alloc]
+    effect: sub-threshold requests use the byte allocator; requests over LARGE_ALLOC_THRESHOLD_BYTES go directly to the page allocator
+    evidence:
+      - {path: mm/kalloc/src/lib.rs, item: kalloc::GlobalAllocator::alloc, quote: "Large allocations (over `LARGE_ALLOC_THRESHOLD_BYTES`) bypass the byte allocator"}
+  - name: alloc_pages
+    symbols: [kalloc::GlobalAllocator::alloc_pages, kalloc::GlobalAllocator::dealloc_pages]
+    effect: contiguous 4 KiB pages with power-of-two alignment and a UsageKind; 1-4 page requests use a per-CPU page cache
+    evidence:
+      - {path: mm/kalloc/src/lib.rs, item: kalloc::GlobalAllocator::alloc_pages, quote: "1–4 page allocations with standard alignment are served from the"}
+  - name: alloc_dma_pages
+    symbols: [kalloc::GlobalAllocator::alloc_dma_pages, kalloc::GlobalAllocator::dealloc_dma_pages]
+    effect: contiguous pages whose physical addresses are below 4 GiB
+    evidence:
+      - {path: mm/kalloc/src/lib.rs, item: kalloc::GlobalAllocator::alloc_dma_pages, quote: "DMA allocations must come from physical memory below 4 GiB."}
+  - name: register_memory
+    symbols: [kalloc::global_init, kalloc::global_add_memory]
+    effect: give the allocator memory regions (first call bootstraps, later calls extend)
+    evidence:
+      - {path: mm/kalloc/src/lib.rs, item: kalloc::global_init, quote: "The first call bootstraps the allocator, and later calls extend it."}
+usage_protocol:
+  - step: platform boot calls global_init / global_add_memory with a mapped, exclusive region
+    evidence: [{path: mm/kalloc/src/lib.rs, item: kalloc::global_init, quote: "Users should ensure that the region"}]
+  - step: use alloc::boxed::Box / Vec for heap objects; call global_allocator().alloc_pages for raw page runs and release with the same base, count and UsageKind
+    evidence: [{path: mm/kalloc/src/lib.rs, item: kalloc::GlobalAllocator::dealloc_pages, quote: "pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {"}]
+contract:
+  no_std:
+    value: 'yes'
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: workspace policy requires one byte allocator feature; code rejects no selection and chooses
+      slab before buddy before tlsf if several are enabled. This is the global allocator, not an IRQ/reentrancy
+      guarantee.
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      quote: "{ if #[cfg(feature = \"slab\")] { /// The"
+  blocking:
+    value: unknown
+    evidence: []
+  irq_nmi:
+    value: unknown
+    evidence: []
+  ownership_lifetime:
+    value: dealloc_pages requires base, page count and category to match a live raw allocation with all
+      use ended; ownership is not verified
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator::dealloc_pages
+      quote: The base, page count and category must match a live raw allocation from
+  errors_bounds:
+    value: alloc / alloc_pages return AllocResult (AllocError); init panics when the page allocator or
+      heap cannot be initialised; the GlobalAlloc::alloc path calls handle_alloc_error on OOM
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator::init
+      quote: .expect("failed to initialize page allocator");
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator::alloc
+      quote: alloc::alloc::handle_alloc_error(layout)
+  concurrency:
+    value: byte and page allocators each sit behind a SpinNoIrq; per-CPU caches are accessed with NoPreemptIrqSave
+    evidence:
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator
+      quote: 'balloc: SpinNoIrq<DefaultByteAllocator>,'
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::GlobalAllocator
+      quote: 'palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,'
+    - path: mm/kalloc/src/lib.rs
+      item: kalloc::AllocLocalOwner::acquire
+      quote: 'guard: NoPreemptIrqSave::new(),'
+layers:
+  depends_on:
+  - alloc-engine
+  - kaddr_layout
+  - kerrno
+  - kspin
+  - memaddr
+  - page-meta
+  - kcpu_slot
+  - kbuild_config
+  used_by:
+  - memspace
+  - pagecache
+  - kdma
+  - khal
+  - kruntime
+  - ksyscall
+  - kvmm
+  - fbdevice
+  - drmdevice
+  - procfs
+  - memfs
+  - devfs
+  - kdriver
+  - kalloc-types
+  - kfeat
+  allowed_layers: unknown
+  evidence:
+  - path: mm/kalloc/Cargo.toml
+    quote: alloc-engine = { workspace = true, features = ["buddy-page"] }
+  - path: mm/memspace/Cargo.toml
+    quote: kalloc = { workspace = true }
+  - path: io/kdma/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kaddr_layout.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kspin.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: memaddr.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: page-meta.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kcpu_slot.workspace = true
+  - path: mm/kalloc/Cargo.toml
+    quote: kbuild_config.workspace = true
+  - path: mm/pagecache/Cargo.toml
+    quote: kalloc = { workspace = true }
+  - path: arch/khal/Cargo.toml
+    quote: kalloc = { workspace = true }
+  - path: core/kruntime/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: core/ksyscall/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: virt/kvmm/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: io/fbdevice/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: io/drmdevice/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: fs/filesystems/procfs/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: fs/filesystems/memfs/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: fs/filesystems/devfs/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: drivers/integration/kdriver/Cargo.toml
+    quote: kalloc = { workspace = true, optional = true }
+  - path: mm/kalloc-types/Cargo.toml
+    quote: kalloc.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: kalloc = { workspace = true, optional = true }
+aliases:
+  en: [global allocator, kmalloc, kernel heap, alloc_pages, get_free_pages, __get_free_pages, free_pages, page allocator, dma32 allocation, GFP_DMA32, gfp, heap init]
+  zh: [全局分配器, 内核堆, 页分配, 申请物理页, DMA 页分配, 内存初始化, 分配页面]
+identifiers: [alloc_pages, dealloc_pages, free_pages, align_pow2, num_pages, UsageKind, heap, balloc, palloc, GlobalAlloc]
+exclusions:
+- raw alloc_pages / dealloc_pages are an unchecked ownership protocol; prefer the RAII GlobalPage (mm_page_owner_global_page_kalloc)
+  or the reference-counted PageRef (mm_page_hold_pageref_kalloc) when a page needs an owner
+- for a fallible Box allocation use kalloc_types::KBox (mm_fallible_box_kalloc_types), not Box::new
+- 'DMA with a bus-address contract belongs to kdma: mm_dma_coherent_kdma and mm_dma_streaming_kdma.'
+counter_examples: []
+notes: >-
+  Internal pieces not exported: slab_cache.rs (per-CPU intrusive object cache in front of the slab
+  byte allocator, active only with the slab feature) and pcp.rs (per-CPU page set for 1-4 page
+  requests). They are private modules and not separate capabilities.

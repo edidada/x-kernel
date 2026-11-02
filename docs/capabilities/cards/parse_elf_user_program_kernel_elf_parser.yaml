@@ -1,0 +1,94 @@
+capability: parse_elf_user_program_kernel_elf_parser
+title: User ELF program header parsing and initial user stack / auxv builder (kernel_elf_parser)
+family: parse.elf
+summary: >-
+  Parses an ELF image's headers with overflow-checked program-header table ranges
+  (ElfHeadersBuilder -> ElfHeaders -> ElfParser with entry / phdr / phnum / phent / base) and builds
+  the auxiliary vector (aux_vector) and the Linux-ABI initial user stack frame
+  (app_stack_region: argc, argv, envp, auxv incl. AT_RANDOM / AT_EXECFN, 16-byte alignment).
+source: {kind: workspace, crate: kernel-elf-parser, path: boot/kernel_elf_parser}
+symbols:
+  - {fqn: kernel_elf_parser::ElfHeadersBuilder, kind: struct, path: boot/kernel_elf_parser/src/info.rs, role: primary}
+  - {fqn: kernel_elf_parser::ElfHeaders, kind: struct, path: boot/kernel_elf_parser/src/info.rs, role: primary}
+  - {fqn: kernel_elf_parser::ElfParser, kind: struct, path: boot/kernel_elf_parser/src/info.rs, role: primary}
+  - {fqn: kernel_elf_parser::app_stack_region, kind: fn, path: boot/kernel_elf_parser/src/user_stack.rs, role: primary}
+  - {fqn: kernel_elf_parser::AuxEntry, kind: struct, path: boot/kernel_elf_parser/src/auxv.rs, role: helper}
+  - {fqn: kernel_elf_parser::AuxType, kind: enum, path: boot/kernel_elf_parser/src/auxv.rs, role: helper}
+operations:
+  - name: ph_range_build
+    symbols: [kernel_elf_parser::ElfHeadersBuilder]
+    effect: compute the program-header byte range from untrusted ELF fields with overflow checks, then build ElfHeaders from exactly that range
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeadersBuilder::ph_range, quote: "The range is derived from untrusted ELF fields and is therefore checked"}
+  - name: parser_fields
+    symbols: [kernel_elf_parser::ElfParser]
+    effect: entry point (plus bias for shared objects), phdr address, phnum, phent, base
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfParser::new, quote: "pub fn new(headers: &'a ElfHeaders<'a>, bias: usize) -> Result<Self, &'static str> {"}
+  - name: aux_vector
+    symbols: [kernel_elf_parser::ElfParser]
+    effect: AT_PHDR / PHENT / PHNUM / PAGESZ / ENTRY (plus AT_BASE for an interpreter)
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfParser::aux_vector, quote: "(AuxType::PHDR, self.phdr()),"}
+  - name: build_user_stack
+    symbols: [kernel_elf_parser::app_stack_region]
+    effect: serialize argc / argv / envp / auxv / strings into a byte vector for a stack ending at sp; adds missing AT_RANDOM and AT_EXECFN; error string "user stack overflow" when it does not fit
+    evidence:
+      - {path: boot/kernel_elf_parser/src/user_stack.rs, item: kernel_elf_parser::user_stack::app_stack_region, quote: "/// Generate initial stack frame for user stack"}
+      - {path: boot/kernel_elf_parser/src/user_stack.rs, item: kernel_elf_parser::user_stack::app_stack_region, quote: 'sp.checked_sub(data.len()).ok_or("user stack overflow")'}
+usage_protocol:
+  - step: read the ELF header, ask ph_range(), read those bytes, build() the headers, ElfParser::new(&headers, bias), then aux_vector + app_stack_region with 16 random bytes and the exec path
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeadersBuilder::build, quote: "`ph` must contain exactly the byte range returned by [`Self::ph_range`]."}
+contract:
+  no_std:
+    value: "yes (#![cfg_attr(not(test), no_std)] with extern crate alloc)"
+    evidence:
+      - {path: boot/kernel_elf_parser/src/lib.rs, quote: "#![cfg_attr(not(test), no_std)]"}
+  allocation:
+    value: allocates Vec / VecDeque while building headers and the stack image
+    evidence:
+      - {path: boot/kernel_elf_parser/src/user_stack.rs, quote: "use alloc::{collections::VecDeque, string::String, vec::Vec};"}
+  blocking: {value: unknown, evidence: []}
+  irq_nmi: {value: unknown, evidence: []}
+  ownership_lifetime:
+    value: ElfHeaders borrows the input image; app_stack_region returns an owned Vec<u8> that the caller copies into the new user stack
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeaders, quote: "pub struct ElfHeaders<'a> {"}
+      - {path: boot/kernel_elf_parser/src/user_stack.rs, item: kernel_elf_parser::user_stack::app_stack_region, quote: ") -> Result<Vec<u8>, &'static str> {"}
+  errors_bounds:
+    value: "Result<_, &'static str>; program-header table size / range overflow, wrong entry size or incomplete table, uncovered program-header offset, and user stack overflow are errors"
+    evidence:
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfHeadersBuilder::build, quote: 'return Err("Incomplete program-header table");'}
+      - {path: boot/kernel_elf_parser/src/info.rs, item: kernel_elf_parser::info::ElfParser::new, quote: '.ok_or("program-header table is not covered by a segment")?;'}
+  concurrency: {value: unknown, evidence: []}
+layers:
+  depends_on:
+  - xmas-elf
+  - zerocopy
+  - zero
+  used_by:
+  - kexec
+  allowed_layers: unknown
+  evidence:
+  - path: process/kexec/Cargo.toml
+    quote: kernel-elf-parser = { workspace = true }
+  - path: boot/kernel_elf_parser/Cargo.toml
+    quote: xmas-elf.workspace = true
+  - path: boot/kernel_elf_parser/Cargo.toml
+    quote: zerocopy = { version = "0.8.26", features = ["derive"] }
+  - path: boot/kernel_elf_parser/Cargo.toml
+    quote: zero = "0.1.3"
+aliases:
+  en: [ELF loader, parse ELF header, program headers, PT_LOAD, auxv, auxiliary vector, AT_RANDOM, AT_PHDR, setup user stack, initial stack, argv envp stack layout, execve stack, create_elf_tables, elf load]
+  zh: [ELF 解析, 程序头, 辅助向量, 初始用户栈, 构造用户栈, execve 栈布局, 加载 ELF]
+identifiers: [Elf64_Phdr, PT_LOAD, p_vaddr, p_filesz, p_memsz, e_entry, e_phoff, e_phnum, AT_PHDR, AT_ENTRY, AT_RANDOM, AT_PAGESZ, AT_BASE, auxv, argc, argv, envp, xmas_elf, push_str, stack_top]
+exclusions:
+  - parsing and stack image only; mapping segments into an address space is done by the loader in kexec using MmSpace (mm_address_space_memspace)
+  - the boot-time kernel image loader is parse_elf_boot_image_kernel_elf_loader, which has a different contract
+  - panics on internal invariant failure (assert on 16-byte alignment); callers get Err only for the listed conditions
+counter_examples:
+  - path: boot/kernel-elf-loader/src/lib.rs
+    item: kernel_elf_loader::KernelElf
+    why: KernelElf parses only 64-bit PT_LOAD layout for the kernel image at boot and can copy it to a physical load address; it does not build auxv or user stacks
+    evidence: [{path: boot/kernel-elf-loader/src/lib.rs, item: kernel_elf_loader::KernelElf::parse, quote: "pub fn parse(image: &'a [u8]) -> Result<Self, &'static str> {"}]

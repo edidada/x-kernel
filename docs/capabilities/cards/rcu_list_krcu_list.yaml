@@ -1,0 +1,135 @@
+capability: rcu_list_krcu_list
+title: Append-only forward RCU list with deferred removal (krcu_list::RcuList)
+family: sync.rcu
+summary: >-
+  Singly linked list whose readers iterate under a krcu ReadScope without taking the writer lock.
+  Writers append (push_back, serialized by a SpinNoPreempt writer lock) or remove the first
+  matching entry (remove_first), which unlinks it and schedules destruction after a grace period.
+  Iteration is not a snapshot.
+source: {kind: workspace, crate: krcu-list, path: util/krcu-list}
+symbols:
+  - {fqn: krcu_list::RcuList, kind: struct, path: util/krcu-list/src/lib.rs, role: primary}
+  - {fqn: krcu_list::Entry, kind: struct, path: util/krcu-list/src/lib.rs, role: helper}
+  - {fqn: krcu_list::Entry::new, kind: fn, path: util/krcu-list/src/lib.rs, role: constructor}
+  - {fqn: krcu_list::RcuList::new, kind: fn, path: util/krcu-list/src/lib.rs, role: constructor}
+  - {fqn: krcu_list::RcuList::push_back, kind: fn, path: util/krcu-list/src/lib.rs, role: operation}
+  - {fqn: krcu_list::RcuList::iter, kind: fn, path: util/krcu-list/src/lib.rs, role: operation}
+  - {fqn: krcu_list::RcuList::remove_first, kind: fn, path: util/krcu-list/src/lib.rs, role: operation}
+  - {fqn: krcu_list::Iter, kind: struct, path: util/krcu-list/src/lib.rs, role: helper}
+operations:
+  - name: push_back
+    symbols: [krcu_list::RcuList::push_back]
+    effect: appends a prepared Entry under the writer lock; no allocation and no grace-period wait
+    evidence: [{path: util/krcu-list/src/lib.rs, item: krcu_list::RcuList::push_back, quote: "Appends a prepared entry without allocating or waiting for a grace period."}]
+  - name: iter
+    symbols: [krcu_list::RcuList::iter]
+    effect: forward iterator tied to a ReadScope; allocates nothing, clones nothing
+    evidence: [{path: util/krcu-list/src/lib.rs, item: krcu_list::RcuList::iter, quote: "Reads allocate nothing and do not clone payload owners."}]
+  - name: remove_first
+    symbols: [krcu_list::RcuList::remove_first]
+    effect: unlinks the first entry matching a predicate (under the writer lock) and retires it via an RCU callback; returns Ok(false) for no match
+    evidence:
+      - {path: util/krcu-list/src/lib.rs, item: krcu_list::RcuList::remove_first, quote: "Withdraws the first matching entry and schedules its deferred destruction."}
+usage_protocol:
+  - step: "prepare Entry::new(value) outside writer exclusion, push_back in task context, iterate with an existing krcu ReadScope, remove with remove_first from sleepable task context outside read scopes"
+    evidence:
+      - {path: util/krcu-list/src/lib.rs, quote: "Prepare an [`Entry`] outside writer exclusion, append it with"}
+contract:
+  no_std:
+    value: yes (#![no_std], uses alloc)
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      quote: '#![no_std]'
+  allocation:
+    value: Entry::new allocates once (Box); push_back, iter and RcuList::new do not allocate
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::Entry
+      quote: A uniquely owned, unpublished entry. Preparation allocates once.
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList::new
+      quote: Creates an empty list without allocation or a running RCU service.
+  blocking:
+    value: readers never acquire the writer lock; writers serialize under SpinNoPreempt. remove_first
+      requires sleepable watched task context outside read scopes, but preflight is an admission check,
+      not a grace-period wait. Callback destruction must not block.
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList::remove_first
+      quote: Sleepable watched task context outside read scopes and atomic exclusion
+  irq_nmi:
+    value: mutation (push_back, remove_first) only from task context, never IRQ/softirq/NMI; readers may
+      use task scopes or watched interrupt/NMI scopes
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      quote: Mutation originates in task context. Readers may use task scopes or already
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList::push_back
+      quote: Call from task context, never IRQ, softirq or NMI.
+  ownership_lifetime:
+    value: each published entry owns one allocation; removed entries are owned by their RCU callback;
+      dropping the list frees still-linked entries in the dropping context
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList
+      quote: Each published entry owns one allocation.
+    - path: util/krcu-list/src/lib.rs
+      quote: List destruction releases still-linked entries in the dropping context;
+  errors_bounds:
+    value: 'remove_first returns KResult<bool>: RCU admission errors are returned before the predicate
+      runs or the list changes; payload must be Send + Sync + ''static'
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList::remove_first
+      quote: 'pub unsafe fn remove_first(&self, mut predicate_fn: impl FnMut(&T) -> bool) -> KResult<bool>'
+    - path: util/krcu-list/src/lib.rs
+      item: krcu_list::RcuList::remove_first
+      quote: RCU admission errors are returned before invoking the predicate or changing
+  concurrency:
+    value: traversal concurrent with serialized insertion and removal; iterator is not a snapshot (additions
+      and removals may or may not be observed); no tail-removal or index operations
+    evidence:
+    - path: util/krcu-list/src/lib.rs
+      quote: Forward traversal concurrent with serialized insertion and removal.
+    - path: util/krcu-list/src/lib.rs
+      quote: An iterator is not a
+layers:
+  depends_on:
+  - krcu
+  - kerrno
+  - kspin
+  used_by:
+  - krcu-list-kernel-tests
+  - kfeat
+  allowed_layers: unknown
+  evidence:
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: krcu-list.workspace = true
+  - path: api/kfeat/Cargo.toml
+    quote: krcu-list = { workspace = true, optional = true }
+  - path: util/krcu-list/Cargo.toml
+    quote: krcu.workspace = true
+  - path: util/krcu-list/Cargo.toml
+    quote: kerrno.workspace = true
+  - path: util/krcu-list/Cargo.toml
+    quote: kspin.workspace = true
+  - path: util/krcu-list/crates/kernel-tests/Cargo.toml
+    quote: '[target.''cfg(target_os = "none")''.dependencies]'
+aliases:
+  en: [rcu list, lock-free read list, list_for_each_entry_rcu, list_add_tail_rcu, read-mostly list, RCU-protected linked list, observer list, notifier chain]
+  zh: [RCU 链表, 无锁读链表, 读多写少链表, 回调链表, 通知链]
+identifiers: [AtomicPtr, next, head, tail, push_back, remove_first, list_for_each_entry_rcu, list_add_rcu, hlist]
+exclusions:
+- append and remove-first only; no insertion at arbitrary positions, no removal by handle, no bidirectional
+  iteration
+- removed payload (T) release chain must be nonblocking and valid in RCU callback (softirq) context; T
+  must be Send + Sync + 'static
+- mutation is task-context only; not for lists updated from IRQ handlers
+- for a plain index-keyed lock-free-read map use sparse_index_xarray; for a general intrusive list see
+  intrusive_list_* cards
+- 'remove_first predicate runs under writer exclusion: it must not block, allocate or reenter writers.
+  Post-withdrawal submission rejection is a fatal invariant failure, not a recoverable KResult error.'
+counter_examples: []
+notes: >-
+  At the pin the only dependents are the kernel-tests crate and kfeat (optional, via the
+  kernel-tests feature), so there is no production user of RcuList yet.
