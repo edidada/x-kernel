@@ -426,7 +426,11 @@ impl<'tcx> Exporter<'tcx> {
         if let Some(trait_id) = callee.trait_id {
             record = record.str("trait", &self.key(trait_id));
         }
-        if matches!(callee.kind, "dyn" | "fnptr")
+        // Only a method call has a receiver: the `self` of a `dyn` call, or
+        // the fn pointer an `Fn*` trait call goes through (`FnPtrShim`, which
+        // has a callee). A call through a plain fn pointer (`f(x)`, no
+        // callee) passes only the pointee's parameters.
+        if (callee.kind == "dyn" || (callee.kind == "fnptr" && callee.def.is_some()))
             && let Some(first) = args.first()
         {
             let ty = first.node.ty(caller.body, tcx);

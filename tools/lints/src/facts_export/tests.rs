@@ -67,6 +67,20 @@ fn apply(f: fn() -> u32) -> u32 {
     f()
 }
 
+fn apply_to(f: fn(&Square) -> u32, square: &Square) -> u32 {
+    f(square)
+}
+
+fn describe(n: u32) -> String {
+    format!("{n}")
+}
+
+// Coroutine layout is computed during analysis from optimised MIR, so the
+// exporter falls back to that MIR for the coroutine body.
+async fn ready() -> u32 {
+    helper()
+}
+
 unsafe fn raw() -> u32 {
     1
 }
@@ -138,7 +152,9 @@ fn ui() {
         .unwrap_or_else(|| panic!("no call {caller} -> {callee_name:?}:\n{text}"))
     };
 
-    assert_eq!(call_to("::dyn_area", Some("area")).str("kind"), Some("dyn"));
+    let dyn_call = call_to("::dyn_area", Some("area"));
+    assert_eq!(dyn_call.str("kind"), Some("dyn"));
+    assert_eq!(dyn_call.str("recv"), Some("dyn Shape"));
     let resolved = call_to("::static_area", Some("area"));
     assert_eq!(resolved.str("kind"), Some("trait_static"));
     assert_eq!(resolved.str("resolved_owner"), Some("Square"));
@@ -147,6 +163,10 @@ fn ui() {
         Some("trait_generic")
     );
     assert_eq!(call_to("::apply", None).str("kind"), Some("fnptr"));
+    // The argument of a fn-pointer call is a parameter, not a receiver.
+    let fnptr = call_to("::apply_to", None);
+    assert_eq!(fnptr.str("kind"), Some("fnptr"));
+    assert_eq!(fnptr.str("recv"), None);
     let atomic = call_to("::caller", Some("fetch_add"));
     assert_eq!(
         atomic.0.get("orderings"),
@@ -172,6 +192,23 @@ fn ui() {
     })
     .expect("derived Clone impl");
     assert_eq!(clone_impl.str("defined_by"), Some("#[derive(Clone)]"));
-    // Formatting plumbing is counted, not written.
+    let coroutine_call = find(&|r| {
+        r.str("t") == Some("call")
+            && r.str("caller_root").is_some_and(|c| c.ends_with("::ready"))
+            && r.str("callee_name") == Some("helper")
+    });
+    assert!(
+        coroutine_call.is_some(),
+        "call in the coroutine body:\n{text}"
+    );
+
+    let counts = records.last().and_then(|r| r.0.get("counts")).unwrap();
+    let count = |key: &str| counts.get(key).and_then(Value::as_u64).unwrap_or(0);
+    // `describe` formats an argument: the plumbing is counted, not written.
+    assert!(count("fmt_rt_calls_skipped") > 0, "counts: {counts}");
     assert!(!text.contains("core::fmt::rt::"));
+    // The initializer of `COUNTER` is const-evaluated during analysis, which
+    // consumes its MIR; the coroutine of `ready` has only optimised MIR left.
+    assert!(count("mir_ctfe_const") > 0, "counts: {counts}");
+    assert!(count("mir_optimized_coroutine") > 0, "counts: {counts}");
 }

@@ -222,6 +222,16 @@ struct FactsSummary {
 }
 
 impl FactsRun {
+    /// Removes the artifact of an earlier run from `dir` (status, manifest
+    /// and crate files), so that a run failing before [`Self::begin`] leaves
+    /// no status rather than a stale one. Other files are kept.
+    pub(crate) fn clear(dir: &Path) -> Result<()> {
+        for stale in [CRATES_DIR, MANIFEST_FILE, STATUS_FILE] {
+            remove_if_present(&dir.join(stale))?;
+        }
+        Ok(())
+    }
+
     /// Prepares `dir`: removes the previous artifact and marks it running.
     pub(crate) fn begin(
         context: &BuildContext,
@@ -229,10 +239,8 @@ impl FactsRun {
         identity: FactsIdentity,
     ) -> Result<Self> {
         let dir = context.workspace_root.join(dir);
+        Self::clear(&dir)?;
         let crates = dir.join(CRATES_DIR);
-        for stale in [crates.as_path(), &dir.join(MANIFEST_FILE)] {
-            remove_if_present(stale)?;
-        }
         fs::create_dir_all(&crates).with_path(&crates)?;
         let commit = identity
             .commit
@@ -686,8 +694,8 @@ mod tests {
     use std::{collections::HashSet, path::Path};
 
     use super::{
-        FACTS_SCHEMA, FactsState, FailureReason, artifact_state, exporter_digest, scan_units,
-        summarize, unit_stem,
+        FACTS_SCHEMA, FactsRun, FactsState, FailureReason, artifact_state, exporter_digest,
+        scan_units, summarize, unit_stem,
     };
 
     const MEMBER: &str = "path+file:///w/task/kspin#0.3.0-dev";
@@ -774,6 +782,24 @@ mod tests {
             artifact_state(false, 0, 0),
             (FactsState::Failed, Some(FailureReason::Build))
         );
+    }
+
+    #[test]
+    fn clear_removes_the_previous_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates")).unwrap();
+        std::fs::write(root.join("crates/kspin-aa.jsonl.zst"), "x").unwrap();
+        std::fs::write(root.join("manifest.json"), "{}").unwrap();
+        std::fs::write(root.join("status.json"), "{\"status\":\"ready\"}").unwrap();
+        std::fs::write(root.join("notes.txt"), "kept").unwrap();
+        FactsRun::clear(root).unwrap();
+        for stale in ["crates", "manifest.json", "status.json"] {
+            assert!(!root.join(stale).exists(), "{stale} left behind");
+        }
+        assert!(root.join("notes.txt").is_file());
+        // A first run has nothing to clear.
+        FactsRun::clear(&root.join("absent")).unwrap();
     }
 
     #[test]

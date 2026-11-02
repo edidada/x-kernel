@@ -67,13 +67,17 @@ Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 mani
 `debugfs` 请求中的 guest 与 host 路径会按其命令词法转义；报告命令均以
 结构化参数执行，LCOV 到 Cobertura 的转换在 XKMake 进程内完成。
 
-`dylint --facts-out <dir>` 删除并重写 `<dir>/crates`、`manifest.json` 与
-`status.json`，目录由调用方显式指定（相对路径按仓库根解析）。事实文件由
-扫描进程里的 lint 库写出，XKMake 只读取 Cargo JSON 消息列出的 workspace
-单元旁的文件，并校验 header 的 schema 与 stem、末行合计，不执行其中任何
-内容。导出器是仓库代码，PR 可以修改它从而改变自己的事实；manifest 记录
-导出器源码摘要（`exporter.source_sha256`），由使用方决定只认可信树（目标
-分支）的摘要。事实只作评审辅助，不作放行依据。
+`dylint --facts-out <dir>` deletes and rewrites `<dir>/crates`,
+`manifest.json` and `status.json`; the directory is given explicitly by the
+caller (a relative path is resolved against the repository root). The facts
+files are written by the lint library in the scan process; XKMake only reads
+the files next to the workspace units listed in Cargo's JSON messages and
+validates the header's schema and stem and the final totals, without
+executing any of their content. The exporter is repository code, so a pull
+request can change it and thereby its own facts; the manifest records the
+exporter source digest (`exporter.source_sha256`), and consumers decide to
+trust only the digest of a trusted tree (the target branch). Facts are a
+review aid only, never a gate.
 
 `symbolize` 只调用 `llvm-addr2line`/`addr2line`（`--tool` 可显式指定），
 以结构化参数传递 ELF 与地址；日志内容仅被读取用于提取地址，工具不执行
@@ -119,9 +123,13 @@ Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 mani
   产物时跳过复制；否则标准库优先使用平台 clone/reflink 能力，不支持时
   回退普通复制。
 - 外部命令非零退出立即终止当前流程，不继续消费旧产物。
-- 事实打包先写 crate 文件与 manifest，最后写 `status.json`；manifest 与
-  status 都经同目录临时文件 rename 提交。状态只在打包完成后变为
-  `ready`/`partial`，中断的运行停留在 `running`。
+- Facts packing writes the crate files and the manifest first and
+  `status.json` last; the manifest and the status are both committed by
+  renaming a temporary file in the same directory. The status becomes
+  `ready`/`partial` only after packing completes, and an interrupted run
+  stays at `running`. A run removes the previous artifact before it reads
+  the configuration, so a run that fails early never leaves an earlier
+  `ready` status in place.
 
 ## 已知限制
 

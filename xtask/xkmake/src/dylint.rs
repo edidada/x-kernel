@@ -16,7 +16,7 @@ use xconfig::build_config::BuildProfile;
 use crate::{
     build::{apply_kernel_env, generate_build_configuration, kernel_feature_flags},
     cli::DylintArgs,
-    context::BuildContext,
+    context::{BuildContext, workspace_root},
     error::{Error, IoResultExt, Result},
     facts::{
         FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, SCAN_RUSTFLAGS,
@@ -51,24 +51,19 @@ struct Toolchain {
 }
 
 pub(crate) fn run(args: &DylintArgs) -> Result<()> {
+    let facts_out = args
+        .facts_out
+        .as_deref()
+        .filter(|_| !args.build.workspace.dry_run);
+    // A facts run that fails before `FactsRun::begin` (configuration, tool
+    // probes) must not leave an earlier artifact behind.
+    if let Some(dir) = facts_out {
+        FactsRun::clear(&workspace_root()?.join(dir))?;
+    }
     let context = BuildContext::create(&args.build)?;
-    let lint_dir = context.workspace_root.join(LINT_DIR);
-    let toolchain_path = lint_dir.join("rust-toolchain.toml");
-    let toolchain = read_toolchain(&toolchain_path)?;
-    let host = probe_host(context.dry_run, || {
-        let host = rustc_host(&toolchain)?;
-        ensure_dylint_tools()?;
-        ensure_rustc_dev(&toolchain)?;
-        if !args.self_test {
-            ensure_target(&toolchain, context.config.target())?;
-        }
-        Ok(host)
-    })?;
-
-    // Created before the lint library build, so that every failure of a
-    // facts run leaves a status behind.
-    let facts = match &args.facts_out {
-        Some(dir) if !context.dry_run => Some(FactsRun::begin(
+    // From here on every failure of a facts run leaves a status behind.
+    let facts = match facts_out {
+        Some(dir) => Some(FactsRun::begin(
             &context,
             dir,
             FactsIdentity {
@@ -76,7 +71,20 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
                 base: args.facts_base.clone(),
             },
         )?),
-        _ => None,
+        None => None,
+    };
+    let lint_dir = context.workspace_root.join(LINT_DIR);
+    let (toolchain, host) = match probe_tools(args, &context, &lint_dir) {
+        Ok(tools) => tools,
+        Err(error) => {
+            if let Some(facts) = &facts {
+                facts.fail(
+                    FailureReason::Build,
+                    &format!("scan did not start: {error}"),
+                )?;
+            }
+            return Err(error);
+        }
     };
     let result = build_and_scan(args, &context, &lint_dir, &toolchain, &host, facts.as_ref());
     let Some(facts) = facts else {
@@ -95,6 +103,26 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
         }
     }
     result.map_err(ScanError::into_inner)
+}
+
+/// Reads the pinned lint toolchain and checks the tools the run needs;
+/// returns the toolchain and the host triple.
+fn probe_tools(
+    args: &DylintArgs,
+    context: &BuildContext,
+    lint_dir: &Path,
+) -> Result<(String, String)> {
+    let toolchain = read_toolchain(&lint_dir.join("rust-toolchain.toml"))?;
+    let host = probe_host(context.dry_run, || {
+        let host = rustc_host(&toolchain)?;
+        ensure_dylint_tools()?;
+        ensure_rustc_dev(&toolchain)?;
+        if !args.self_test {
+            ensure_target(&toolchain, context.config.target())?;
+        }
+        Ok(host)
+    })?;
+    Ok((toolchain, host))
 }
 
 /// Failure of a Dylint run: before the kernel scan started, or of the scan.

@@ -115,7 +115,9 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   parameter of the caller), `trait_unresolved`, `dyn`, `fnptr`, `closure`,
   `foreign`, `intrinsic`, `shim`, `drop` (a user `Drop` impl run by a drop).
   Calls into `core::fmt::rt` (formatting plumbing) are counted in
-  `fmt_rt_calls_skipped`, not written.
+  `fmt_rt_calls_skipped`, not written. `recv` is the receiver type of a
+  `dyn` call or of an `Fn*` trait call on a fn pointer; a call through a
+  plain fn pointer has no receiver.
 - *Paths* are repository-relative. Dependencies are written as
   `crates/<name>-<version>/…` (crates.io), `git/<checkout>/<rev>/…` (git) and
   `rust/library/<crate>/…` (standard library).
