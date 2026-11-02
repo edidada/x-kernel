@@ -94,3 +94,20 @@ MAIR 属性（nGnRnE 与 Linux 相同）、ranges/时钟 id 十六进制误读�
 
 **注意**：链路 L0 意味着 PHY/pipe/时钟域全部工作，仅 DBI 寄存器
 访问路径挂——不是电源域问题（repair status 已上电）。
+
+
+### DBI 挂起诊断轮次 4（2026-10-30，MAIR + 双窗口 + 门控读回后）
+
+MAIR Device 从 nGnRnE (0x00) 改为 nGnRE (0x04)（对齐 Linux ioremap）——DBI 仍挂。
+CRU 门控读回：CLKGATE_CON(32/33/34/35/38) 全 0x00000000（所有 pcie 域门开）。
+CLKSEL_CON(165) = 0x00000000（center mux 选 parent 0，正确）。
+LTSSM = L0（链路已训练，槽上设备在位）。PD repair status = 已上电。
+
+**结论**：时钟/复位/phy/电源域/映射/内存属性全部排除。
+剩余假设需要硬件级对比：BSP 内核同板寄存器 dump、JTAG、或
+向 Rockchip/BSP 供应商确认 pcie2x1l2 DBI 窗口（0xa41000000）的
+访问前提（MMU_PCIE bypass？PHP NIC 门控？PERST 时序？）。
+
+**建议路径**：切到 pcie3x4（fe150000，dbi @ 0x9c0000000，pcie30phy
+聚合模式，PD 已证上电）作为下一个 probe 目标——不同控制器/不同
+dbi 切片，可判别是 2x1l2 板级问题还是通用问题。
