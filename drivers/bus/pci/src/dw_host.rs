@@ -133,6 +133,8 @@ struct DwPcie {
     dbi: IoMap,
     cfg_win: IoMap,
     cfg_base: u64,
+    /// Size of the ECAM-shaped config aperture (one bus per MiB).
+    cfg_size: usize,
     num_ob_windows: usize,
     max_speed: u32,
     /// Read from DT, carried for the link-up diagnostics.
@@ -299,6 +301,19 @@ impl DwPcie {
     /// IO windows skipped (no legacy-IO consumer). Index 0 stays reserved
     /// for the CFG window.
     fn iatu_setup(&self, windows: &[PcieWindow]) {
+        // Region 0 is the config aperture, programmed ONCE: ECAM shape means
+        // bus/device/function ride in the address bits, so the ATU only has
+        // to map the whole window at target 0. Reprogramming the target per
+        // access was the pattern that lost the device field.
+        if !self.prog_outbound_atu(
+            0,
+            PCIE_ATU_TYPE_CFG0,
+            self.cfg_base,
+            self.cfg_size as u64,
+            0,
+        ) {
+            log::warn!("pcie-dw: config iATU region rejected");
+        }
         let mut index = 1usize;
         for win in windows {
             if win.io || win.size == 0 || index >= self.num_ob_windows {
@@ -466,11 +481,21 @@ fn scan_and_log(root: &PciRoot<DwCam>, cam: &DwCam) {
     }
 }
 
+/// Firmware facts for one root port, as read from its DT node.
+struct RootFacts {
+    num_lanes: u32,
+    max_speed: u32,
+    num_ob_windows: usize,
+    windows: Vec<PcieWindow>,
+    /// Base of the config aperture (the `config` reg when the DT has one).
+    cfg_base: u64,
+    /// Its size; the ECAM stride is one bus per MiB.
+    cfg_size: usize,
+}
+
 /// Firmware facts for one root port: lane/speed config, the outbound
 /// window count, the parsed `ranges` and the CFG window.
-fn parse_facts(
-    dev: &mut Device<'_, PlatformBus>,
-) -> Result<(u32, u32, usize, Vec<PcieWindow>, u64), ProbeError> {
+fn parse_facts(dev: &mut Device<'_, PlatformBus>) -> Result<RootFacts, ProbeError> {
     let fw = dev.fw();
     let firmware = fw.node().ok_or(ProbeError::Fatal(RuntimeError::Invalid))?;
     let num_lanes = firmware
@@ -502,15 +527,32 @@ fn parse_facts(
     }
     // The config window: the first (IO/CFG) range — the mainline
     // "config" reg is that window's CPU base.
-    let cfg = windows
-        .iter()
-        .find(|w| w.io)
-        .ok_or_else(|| {
-            log::error!("pcie-dw: no IO/CFG window in ranges");
-            ProbeError::Fatal(RuntimeError::NotFound)
-        })?
-        .cpu_base;
-    Ok((num_lanes, max_speed, num_ob_windows, windows, cfg))
+    // The config aperture: the DT's own `config` reg when present (rk3588
+    // gives this controller a dedicated 1 MiB window for it), otherwise the
+    // first IO/CFG range's CPU base. The dedicated window is ECAM-shaped --
+    // bus/device/function live in the address bits -- which is why it is
+    // preferred over stuffing dev/fn into the iATU target per access
+    // (measured: the target honoured the bus and function fields only, so
+    // every device on the bus answered with the same endpoint).
+    let (cfg_base, cfg_size) = match dev.res().mmio_by_name("config") {
+        Ok(region) => (region.base as u64, region.size),
+        Err(_) => {
+            let win = windows.iter().find(|w| w.io).ok_or_else(|| {
+                log::error!("pcie-dw: no config aperture (neither `config` reg nor IO range)");
+                ProbeError::Fatal(RuntimeError::NotFound)
+            })?;
+            (win.cpu_base, win.size as usize)
+        }
+    };
+    log::info!("pcie-dw: config aperture {cfg_base:#x}+{cfg_size:#x}");
+    Ok(RootFacts {
+        num_lanes,
+        max_speed,
+        num_ob_windows,
+        windows,
+        cfg_base,
+        cfg_size,
+    })
 }
 
 /// `static const struct of_device_id rockchip_pcie_of_match[]` (RC).
@@ -777,13 +819,14 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         let resets: [ResetHandle; 2] = [dev.res().reset_at(0)?, dev.res().reset_at(1)?];
 
         // Bind the view: `node()` borrows the firmware snapshot.
-        let (num_lanes, max_speed, num_ob_windows, windows, cfg_base) = parse_facts(dev)?;
-        let cfg_size = windows
-            .iter()
-            .find(|w| w.io)
-            .map(|w| w.size)
-            .unwrap_or(0x10_0000);
-
+        let RootFacts {
+            num_lanes,
+            max_speed,
+            num_ob_windows,
+            windows,
+            cfg_base,
+            cfg_size,
+        } = parse_facts(dev)?;
         // BSP-aligned order (rk_pcie_really_probe): phy init+power first,
         // then the reset pair DEASSERTED ONLY (the BSP never asserts at
         // probe — the power-on default is the reset state), then clocks,
@@ -851,7 +894,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(
-            driver_base::MmioRegion::new(cfg_base as usize, cfg_size as usize),
+            driver_base::MmioRegion::new(cfg_base as usize, cfg_size),
             "pcie-cfg",
         )?;
 
@@ -861,6 +904,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             dbi,
             cfg_win,
             cfg_base,
+            cfg_size,
             num_ob_windows: num_ob_windows.max(2),
             max_speed,
             num_lanes,
