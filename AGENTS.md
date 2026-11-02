@@ -20,6 +20,9 @@ Current shared skills:
   x-kernel Rust: `ldp` CLI gates (lookup/gaps/scan/check-layout/golden/
   requirements), API mapping data, and gap reporting. Reference trees are
   vendored under `docs/ai/skills/linux-driver-port/data/references/`.
+- `docs/ai/skills/linux-driver-port/examples/rk3588-pcie/bring-up-log.md`:
+  **PCIe/USB 移植的当前状态与操作手册**。先读顶部第 0–4 节（自包含交接：
+  设备机/脚本/串口纪律、已验证事实、CFG 寻址结论、下一步）。
 - `docs/ai/skills/test-harness/SKILL.md`:
   external Starry Test Harness workflow for guest regression cases,
   suite registration, execution, and syscall-focused test design constraints.

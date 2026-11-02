@@ -1,13 +1,157 @@
-# RK3588 PCIe Bring-up 日志与踩坑记录
+# RK3588 PCIe / USB 移植 — 现状与交接（压缩前快照）
 
-本文记录 `drivers/bus/pci/src/dw_host.rs`（rk3588 DesignWare RC）真机 bring-up
-的全部过程：已经验证的事实、被证伪的假设、以及每一个坑的**根因与教训**。
+> 本文件顶部章节是**给下一次会话的自包含交接**。后面章节是历史踩坑记录
+> （每条都标注了"假设 → 实测 → 教训"），继续排查前先读第 7 节。
 
-写作目的：这些坑每一个都花掉了 1 轮以上的真机周期（约 6 分钟/轮），其中
-若干是**看起来完全合理但方向完全错的推断**。后人在同一个 SoC 上继续做
-PCIe / USB / 任何高位地址外设时，先读这一页。
+## 0. 一句话现状
+
+**PCIe 已经通了**：链路训练到 L0、DBI 可读写、iATU 配置成功、设备枚举结果与
+同一块板上原生 Linux 的 `lspci` **逐条一致**（RC + RTL8125），两个真实设备已
+注册进设备模型。**USB 尚未开始。**
+
+## 1. 环境与操作手册（每次都要用，别重新摸索）
+
+### 1.1 设备机与自动化
+
+- 设备机：`ssh kylin@172.30.193.53`（BatchMode 免密可用）。
+- **板级闭环**：`scripts/board-run.sh <tag>` = 构建 → 部署到 TFTP 根 →
+  rkt 上下电 → 引导 → 抓控制台 → 取回日志。`SKIP_BUILD=1` 复用已构建镜像。
+  日志在 `/tmp/board-<tag>.log`（本地）与设备机 `~/rkt/logs/<run>-<tag>/`。
+- **TFTP 根**：`/media/kylin/USR-DATA/xh/work/rk3588-adapt/new-framework-test/x-kernel/`
+  （`deploy-rk3588.sh` 推送到这里；内核镜像 `xkernel_aarch64-rk3588.bin`）。
+- rkt 直接用法：`cd ~/rkt && ./rkt power on|off`、`./rkt tftp start`（**TFTP 随
+  启动它的 SSH 会话退出**，报 `UDP 69 没有监听` 就先重启它）、
+  `./rkt console --seconds N`。继电器帧 `AA 01 03 AE` 开 / `AA 01 02 AD` 关。
+- 串口（换板/换线后会变，用前先枚举）：`/dev/ttyUSB0` 或 `ttyUSB2` 是控制台
+  （1_500_000），继电器常见 `ttyUSB1`/`ttyUSB3`（115200）。判断"板子死了"之前
+  先扫一遍所有 `ttyUSB*`。
+- 设备机上的 `eaio_agent`（深信服终端代理）会抢占串口，导致"读就绪但无数据"，
+  重试或让用户停掉它。
+
+### 1.2 两条**必须**遵守的纪律
+
+1. **unittest 必须用 QEMU 配置**：`cp platforms/kplat-aarch64/qemu_defconfig .config
+   && make defconfig`，否则 `make unittest` 会静默挂死（Makefile 现在有
+   `config-guard-qemu` 前置守卫会直接报错）。跑板子前则要 `rk3588_defconfig`。
+2. **设备树是手工维护的产物，不要覆盖**。板上启动用的 DTS 在 TFTP 根同目录的
+   `orangepi-5-plus-m.dts`（仓库里那份 `.dts` 是**反编译 dump，重编不等价**：
+   phandle 会被重编号，`phys = <0x110 2>` 就指不到 combphy，PHY 起不来、链路
+   永远 `link never came up`）。改设备树要改**设备机上的那份 .dts**，编前先备份
+   `.dtb`（`cp -n x.dtb x.dtb.bak-$(date +%H%M)`）。
+
+### 1.3 设备树里 PCIe 需要的 `config` 窗口（已改好）
+
+5 个 PCIe 节点的 `reg`/`reg-names` 各加一段 `config`（1 MiB，基址 = 该节点
+`ranges` 里 `0x800` 那条的 CPU 基址）：
+
+| 节点 | config 基址 |
+|---|---|
+| `pcie@fe150000` | `0xf0000000` |
+| `pcie@fe160000` | `0xf1000000` |
+| `pcie@fe170000` | `0xf2000000` |
+| `pcie@fe180000` | `0xf3000000` |
+| `pcie@fe190000` | `0xf4000000` |
+
+`reg` 顺序必须保持 `pcie-apb`(0) / `pcie-dbi`(1) / `config`(2)，与 `reg-names` 对应。
+
+### 1.4 本地参考资料（都在磁盘上）
+
+- **vendor 6.1 源码（板上跑的就是它）**：`/workspace/linux-jr`
+  （sparse clone，分支 `noble`）。关键文件：
+  `drivers/pci/controller/dwc/pcie-designware-host.c`（config 访问的权威实现）、
+  `pcie-designware.h`（ATU 位段宏）、`arch/arm64/boot/dts/rockchip/rk3588s.dtsi`。
+- **vendor 5.10 源码**：`/workspace/linux-bsp-rk3588`（分支 `orange-pi-6.1-rk35xx`
+  也拉过）。注意 5.10 的 `rk3588s.dtsi` 里 pcie 节点只有两段 `reg`。
+- **mainline**：`/workspace/linux-7.1.8`（pm-domains、phy、combphy 等）。
+- **tgoskits**（另一份能工作的 rk3588 实现）：`/workspace/tgoskits`，
+  `drivers/pci/rk3588-pci/`、`components/axklib/src/mmio.rs`。
+- **ldp harness**：`xtask/ldp/` + `docs/ai/skills/linux-driver-port/`（api-mapping
+  87 条全部锚定 v2 源码、参考树 sparse-vendor）。
+
+## 2. PCIe 已验证的事实（不要重复验证）
+
+| 项 | 结论 |
+|---|---|
+| DBI `0xa41000000` 可读写 | ✅（映射必须是 **Device**，见 3.1） |
+| `setup_rc` / iATU / LTSSM | ✅ 链路 L0，`LTSSM=0x00130011`（与 Linux 相同） |
+| 枚举 | ✅ `bus0 dev0` = RC `1d87:3588`；`bus1 dev0` = RTL8125 `10ec:8125` |
+| 设备描述符进域 | ✅ 493 基线 + 2 = **494** |
+| 复位 | 只 **deassert**，不要 assert 脉冲（脉冲会让 LTSSM 丢 bit20） |
+| PD_PCIE | `PWR_CON(0x150)` bit7=1 才算上电；`repair(0x290)` bit22=1 表示**未**就绪 |
+| `fe150000`/`fe160000` | APB 客户端块整块读 0 → 未上电，驱动**跳过**（不能碰 DBI，一碰就 stall 挂机） |
+
+### 2.1 CFG（config space）寻址 —— 这一节是血泪
+
+`config` 是 1 MiB 的 ECAM 形态孔径，但**必须**用 ATU region 0 覆盖它，且字段
+来源是**分开**的（vendor 头文件自相矛盾，实测得出）：
+
+```rust
+// 每次访问重编 region 0（照抄 dw_pcie_other_conf_map_bus）
+type_  = bdf.bus == 1 ? CFG0 : CFG1;
+busdev = (bus << 24) | (function << 16);          // device 绝不能进 target！
+prog_outbound_atu(0, type_, cfg_base, cfg_size /*整 1 MiB*/, busdev);
+offset = (device << 15) | where;                   // device 走地址
+```
+
+- **device 放 target 的 bit[23:19] 无效**：那是
+  `PCIE_ATU_FUNC_NUM(pf)`(bit20)/`FUNC_NUM_MATCH_EN`(bit19) 的位置，
+  写进去只是打开 function 匹配。
+- **function 放地址无效**：必须走 target `[18:16]`。
+- **aperture 对 device≥1 有别名**（dev1..31 都回 dev0 的头）：用板级事实收口
+  —— 每个控制器下游只有一个 endpoint 在 dev0/fn0（参考板 lspci 已证），
+  驱动里把"下游 device≠0"判为 absent（`is_absent_downstream_device`）。
+- region 大小必须是**整 1 MiB**；用 4 KiB 会把 device 偏移截断。
+
+## 3. 三个反复踩的通用坑（对 USB 同样适用）
+
+### 3.1 临时诊断不许改共享默认值
+
+`memspace::iomap_device` 里曾有一行"`paddr >= 4 GiB` 就用 `UNCACHED`"的实验
+代码没撤，导致 PCIe DBI（全内核唯一 >4 GiB 映射）一直是 **Normal-NC**，
+后续三轮属性对比全部作废。**结论：DBI 必须 `Device`**（MAIR 用 nGnRnE 或
+nGnRE 都能通，当前是 nGnRnE）。
+
+### 3.2 两种总线失败模式（判故障用）
+
+| 现象 | 含义 |
+|---|---|
+| `ESR=0x96000010`（ISS 0x10，DFSC=外部中止） | 总线返回 DECERR：**没东西解码该地址**，或访问属性被拒 |
+| 静默 stall（无 panic、日志停住） | 事务被接收但永不完成：目标在，但没时钟/在复位 |
+
+**存活探针**：某控制器 `pcie-apb` 客户端块若整块读 0，它就没上电，**绝不能
+碰它的 DBI**（会 stall 挂机，`panic_on_oops=0` 也救不了）。
+
+### 3.3 用寄存器事实代替注释
+
+- `PMU 0x290` 的 repair_status 注释写"1=上电"，但工作 Linux 上是 **0**。
+- 状态寄存器**可能跨热重启保留**：早期把残留的 `LTSSM=0x130011` 当成"链路已
+  训练"，白追几轮。判断链路要看**训练过程中的变化**（`0x2 → 0x30011`）。
+- 映射建立后立刻 dump PTE（`page_table().query_entry(va)`）可一行否掉"地址
+  算错/属性给错/被拆大页"。当前 `iomap` 对 >4 GiB 的映射会自动打印 PTE。
+
+## 4. 下一步（本次工作的续点）
+
+**目标：给 RTL8125 分 BAR 并把设备接上 net 类。**
+
+1. 确认 `discover_root` 里 `device_setup::configure_pci_device_if_needed()` 是否
+   真的给 bus1 dev0 分配了 BAR（日志在 debug 级，需要临时调到 info 或用
+   `log::info!` 打一条）；
+2. BAR 窗口来自 `ranges` 的 MEM/prefetch 段（`0xf4200000+14M`、
+   `0xa0000000 000+1G`），确认 `pci_bar_allocation_range` 解析到它们；
+3. 设备描述符进域后，`net` 子系统侧还需一个 8125 驱动（**尚未开始**，工作量
+   不小；可先只验证 BAR 分配 + 命令位 CRUD，把"设备可用"作为里程碑）；
+4. 之后可选：`fe150000`/`fe160000`（探活失败，需查 pcie3phy 时钟路径）、
+   MSI/GIC ITS（当前 INTx 都还没接）、以及**转 USB 栈**。
+
+## 5. USB 相关（尚未动工，只有前期结论）
+
+- `usb2phy` provider 已在真机 probe 通过（grf 窗口 `0xfd5d0000/8000/c000`）。
+- EHCI/OHCI **不依赖**高位 DBI 窗口，不受本轮 PCIe 问题影响。
+- 待做：`subsystems/usb` 类面（hub/地址/描述符）+ EHCI/OHCI HCD（全 coherent DMA）。
 
 ---
+
+# 历史记录（踩坑过程）
 
 ## 1. 当前状态
 
