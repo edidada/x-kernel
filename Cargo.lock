@@ -3374,6 +3374,7 @@ dependencies = [
  "ktime_types",
  "ktimer-core",
  "lazyinit",
+ "linked_list_r4l",
  "log",
  "memaddr",
  "unittest",
