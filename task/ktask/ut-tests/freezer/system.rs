@@ -254,10 +254,16 @@ fn gate_rollback_keeps_deferred_task_alive_without_external_owner() {
         worker_ran.store(true, Ordering::Release);
         worker_queue.notify_all(false);
     });
+    let weak = KtaskRef::downgrade(&task);
     drop(task);
     assert!(!ran.load(Ordering::Acquire));
     drop(gate);
     queue.wait_until(|| ran.load(Ordering::Acquire));
+    // A wake can preempt the worker before permanent exit. Do not leave that
+    // task in the next serial test's infrastructure snapshot.
+    if let Some(task) = weak.upgrade() {
+        assert_eq!(task.try_join().unwrap(), 0);
+    }
 }
 
 #[def_test(serial)]
