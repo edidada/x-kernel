@@ -447,6 +447,40 @@ pub struct DwHostData {}
 /// The platform driver.
 pub struct DwHostDriver;
 
+/// RK3588_PD_PCIE power domain (domain 34, PMU @ 0xfd8d8000): the
+/// controller sits in a power domain the mainline dts declares
+/// (`power-domains = <&power RK3588_PD_PCIE>`; the BSP dts omits it).
+/// No PM framework exists yet — this drives the PD power-on sequence
+/// directly (pm-domains.c semantics: pwr_offset 0x14c, repair status
+/// 0x290 bit 22) and records the PM-framework gap.
+fn enable_pcie_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    log::info!("pcie-dw: enabling the pcie power domain (PD_PCIE)");
+    const PMU_BASE: u64 = 0xfd8d_8000;
+    const PD_PWR_CON: usize = 0x14c; // pwr_offset (rk3588_pmu_info)
+    const PD_REPAIR_STATUS: usize = 0x290; // repair_status_offset
+    const PD_PWR_BIT: u32 = 1 << 7; // domain 34's pwr/status bit
+    const PD_REPAIR_BIT: u32 = 1 << 22; // 1 = powered
+    let pmu = dev.res().iomap_region(
+        driver_base::MmioRegion::new(PMU_BASE as usize, 0x400),
+        "pcie-pmu",
+    )?;
+    if pmu.read32(PD_REPAIR_STATUS) & PD_REPAIR_BIT != 0 {
+        log::info!("pcie-dw: PD_PCIE already on");
+        return Ok(());
+    }
+    // Hiword write: enable bit 7, request it to 0 (power on).
+    pmu.write32(PD_PWR_CON, PD_PWR_BIT << 16);
+    for _ in 0..10_000 {
+        if pmu.read32(PD_REPAIR_STATUS) & PD_REPAIR_BIT != 0 {
+            log::info!("pcie-dw: PD_PCIE powered on");
+            return Ok(());
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
+    }
+    log::error!("pcie-dw: PD_PCIE failed to power up");
+    Err(ProbeError::Fatal(RuntimeError::Io))
+}
+
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
@@ -480,6 +514,8 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             let clk = dev.res().clk(name)?;
             clk.enable()?;
         }
+        enable_pcie_power_domain(dev)?;
+
         log::info!("pcie-dw: clocks on, configuring client (APB)");
         // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode. The APB
         // sequence comes BEFORE the first DBI access in the BSP flow (the
