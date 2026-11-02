@@ -481,31 +481,6 @@ fn enable_pcie_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), Pro
     Err(ProbeError::Fatal(RuntimeError::Io))
 }
 
-/// Bring-up bisect: probe the per-controller DBI alias windows. All reads
-/// are passive (vendor id); any that hang name the dead slice of the
-/// 36-bit dbi region.
-fn probe_high_dbi_windows(dev: &mut Device<'_, PlatformBus>) {
-    log::info!("pcie-dw: probing the high dbi windows");
-    for (name, base) in [
-        ("2x1l0 dbi", 0x000a_4080_0000u64),
-        ("2x1l1 dbi", 0x000a_40c0_0000),
-        ("3x4 dbi", 0x0009_c000_0000),
-        ("3x2 dbi", 0x000a_4140_0000),
-    ] {
-        log::info!("pcie-dw: probing {name}");
-        let win = dev.res().iomap_region(
-            driver_base::MmioRegion::new(base as usize, 0x1000),
-            "pcie-dbi-probe",
-        );
-        let Ok(win) = win else {
-            log::info!("pcie-dw: {name} map failed");
-            continue;
-        };
-        let word = win.read32(0x00);
-        log::info!("pcie-dw: {name} -> {word:#010x}");
-    }
-}
-
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
@@ -546,7 +521,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // enables so a stuck gate names itself (SET_TO_DISABLE gates read
         // 0 when the clock is ON).
         let cru = dev.res().iomap_region(
-            driver_base::MmioRegion::new(0xfd7c_0000 as usize, 0x0010_0000),
+            driver_base::MmioRegion::new(0xfd7c_0000_usize, 0x0010_0000),
             "pcie-cru-diag",
         )?;
         for (name, off) in [
@@ -560,40 +535,29 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
         }
 
-        log::info!("pcie-dw: probing own dbi (0xa41000000)");
-
-        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode. The APB
-        // sequence comes BEFORE the first DBI access in the BSP flow (the
-        // client mode gates the DBI slice's responsiveness).
-        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
-        apb.write32(
-            PCIE_CLIENT_HOT_RESET_CTRL,
-            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
-        );
-        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
-        // to assert the connecting CLOCK_GEN OE (without it the link can
-        // never train), then mode RC (LTSSM still off — the enable write
-        // comes after the setup).
-        const PCIE_CLIENT_POWER: usize = 0x2c;
-        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
-        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
-
-        log::info!("pcie-dw: client configured, probing dbi");
-        // Diagnostics: the client LTSSM status (proven responsive) and the
-        // fe190000+0 word — mainline treats THIS window as the DBI, the BSP
-        // as the client regs; the vendor id appearing here disambiguates.
-        let ltssm = apb.read32(PCIE_CLIENT_LTSSM_STATUS);
-        log::info!("pcie-dw: client ltssm status {ltssm:#010x}");
-        let apb_word = apb.read32(0x00);
-        log::info!("pcie-dw: fe190000+0 word {apb_word:#010x}");
-        // The BSP's first DBI access lands here (dbi_ro_wr_en): read the
-        // vendor id first so a wedged DBI names itself in the log.
+        // The BSP's first DBI access (dbi_ro_wr_en) comes right after the
+        // clocks, BEFORE any client-mode APB writes. The CLIENT_POWER write
+        // (CLKREQ pull-down) parks the controller if done before the DBI
+        // is proven to respond — matching the BSP is the safe order.
         let vendor_word = dbi.read32(0x00);
         log::info!(
             "pcie-dw: dbi alive, vendor {:#06x} device {:#06x}",
             vendor_word & 0xffff,
             vendor_word >> 16
         );
+
+        // `rk_pcie_fast_link_setup`: RMW — LTSSM EN control mode.
+        let val = apb.read32(PCIE_CLIENT_HOT_RESET_CTRL);
+        apb.write32(
+            PCIE_CLIENT_HOT_RESET_CTRL,
+            val | PCIE_LTSSM_ENABLE_ENHANCE | (PCIE_LTSSM_ENABLE_ENHANCE << 16),
+        );
+        // `rk_pcie_set_mode` (RC, no supports-clkreq): pull CLKREQ# down
+        // to assert the connecting CLOCK_GEN OE, then mode RC (LTSSM
+        // still off — the enable write comes after the setup).
+        const PCIE_CLIENT_POWER: usize = 0x2c;
+        apb.write32(PCIE_CLIENT_POWER, 0x3001_1000);
+        apb.write32(PCIE_CLIENT_GENERAL_CON, 0xf000_0040);
 
         // The config window maps the first range's CPU base.
         let cfg_win = dev.res().iomap_region(
