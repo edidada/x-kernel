@@ -22,6 +22,15 @@ arm_pl011 和 uart_16550 的宿主寄存器
 回归测试。该步骤失败会阻止后续构建；只在原生 x86_64 节点执行，其他架构
 不运行此宿主二进制。它补充内核 unittest 的启动状态检查，不替代该检查。
 
+## 能力目录检查（提示性）
+
+`Build Check` 中由 `capabilityCatalogueCheckPlatform()` 指定的一个 leg 在
+`make build` 之后执行 `cargo fetch --locked` 与 `make check_capabilities`，
+复用该 leg 已构建的 xkmake。结果只写入该阶段日志，失败时打印 warning，
+不改变阶段结果、Check Run 或 Gitee 测试状态。为何先不阻塞、何时转为阻塞，
+以及 `main` 上的夜间维护任务（尚未配置），见 `docs/capabilities/README.md`
+的 “CI and nightly upkeep”。
+
 ## Agent 身份与目录
 
 宿主机 Jenkins 用户和 builder 容器统一使用数字身份 `1000:1000`。这是
@@ -200,7 +209,8 @@ ref 构建，并启用 `CI_SKIP`。同一 PR 更新后应取消仍在运行的�
 
 X-Kernel、fork 和 starry-test-harness 均以公开仓库匿名拉取。Gitee Token
 只用于更新 PR 评论、Check Run 与测试状态，不写入 Git remote，也不插入 shell
-命令。
+命令。能力目录夜间任务若要自动推分支、开 PR，需要另行配置具备写权限的
+机器人凭据，不能复用上述 Token；在此之前由维护者手工执行。
 
 同一架构的 Build 与 Run 在该 leg 的同一个 builder 容器内完成，Run 使用
 Build 留在该容器 `/xkernel-target` 里的 boot、链接和 Cargo 中间产物。

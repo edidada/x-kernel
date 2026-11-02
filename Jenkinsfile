@@ -922,6 +922,7 @@ def runClippyAndBuild(String platform, String defconfigPath) {
     def stageName = "Build Check: ${platform}"
     initStageLog(stageName)
     def buildTargetDir = "/xkernel-target/build-${platform}"
+    def capabilityCheck = platform == capabilityCatalogueCheckPlatform() ? capabilityCatalogueAdvisoryScript() : ''
     withCleanSourceWorkspace("clippy-build-${platform}") {
         withEnv(["TARGET_DIR=${buildTargetDir}"]) {
             sh label: "Clippy and build ${platform}", script: """#!/bin/bash
@@ -931,9 +932,28 @@ cp ${defconfigPath} .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
-"""
+${capabilityCheck}"""
         }
     }
+}
+
+/** The Build Check leg that also runs the capability catalogue check, reusing its xkmake build. */
+def capabilityCatalogueCheckPlatform() { return 'aarch64-crosvm-virt' }
+
+/**
+ * Capability catalogue check, advisory: the outcome is logged and never fails the stage
+ * (docs/capabilities/README.md, "CI and nightly upkeep"). Make it blocking only after the
+ * reviewed card set has landed and the advisory period has shown its false-stale rate.
+ */
+def capabilityCatalogueAdvisoryScript() {
+    return '''
+echo "=== Capability catalogue check (advisory, does not fail CI) ==="
+if cargo fetch --locked --quiet && make check_capabilities; then
+    echo "capability catalogue: no card needs attention"
+else
+    echo "warning: capability catalogue check reported problems (advisory); see docs/capabilities/README.md"
+fi
+'''
 }
 
 def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
