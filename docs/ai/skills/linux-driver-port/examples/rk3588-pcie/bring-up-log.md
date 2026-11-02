@@ -121,6 +121,13 @@ nGnRE 都能通，当前是 nGnRnE）。
 **存活探针**：某控制器 `pcie-apb` 客户端块若整块读 0，它就没上电，**绝不能
 碰它的 DBI**（会 stall 挂机，`panic_on_oops=0` 也救不了）。
 
+### 3.2b unittest 的 klogger 存量 flake（不是本分支引入）
+
+`util/klogger/ut-tests/lib.rs` 里的 `logbuf_captures_records_the_console_filter_hides`
+与 `logbuf_snapshot_returns_the_newest_bytes` 会改**全局**日志过滤器和缓冲区，
+并行跑必然互相踩：实测每次挂的断言还不一样（`line 149/150/183`）。父提交上
+同样挂，确认存量。看到 `make unittest` 只挂 klogger 这两条就别查本分支。
+
 ### 3.3 用寄存器事实代替注释
 
 - `PMU 0x290` 的 repair_status 注释写"1=上电"，但工作 Linux 上是 **0**。
@@ -129,41 +136,85 @@ nGnRE 都能通，当前是 nGnRnE）。
 - 映射建立后立刻 dump PTE（`page_table().query_entry(va)`）可一行否掉"地址
   算错/属性给错/被拆大页"。当前 `iomap` 对 >4 GiB 的映射会自动打印 PTE。
 
-## 3.4 BAR：已进描述符，但地址是 U-Boot 分配的、**不可用**
+## 3.4 BAR：已分配、已迁移、**已证明可读**（闭环）
 
-`pci::registered` 现在打 info 级，实测：
+最终态（真机日志）：
 
 ```
-pci: registered 00:01.0 (10ec:8125 class 02:00)
-  mmio [(0x40100000, 0x10000), (0x40110000, 0x4000)]  io [(0xf3101000, 0x100)]
+pcie-dw: range config cpu 0xf4000000+0x100000 -> pci 0xf4000000
+pcie-dw: range io     cpu 0xf4100000+0x100000 -> pci 0xf4100000
+pcie-dw: range mem32  cpu 0xf4200000+0xe00000 -> pci 0xf4200000
+pcie-dw: range mem64  cpu 0xa00000000+0x40000000 -> pci 0xa00000000 (prefetchable)
+PCI BAR allocator from the DW host's DT ranges: cpu_base=0xf3200000 size=0xe00000
+pci: 01:00.0 has BARs outside [0xf3200000, 0xf4000000); reassigning with decode off
+pci: 01:00.0 BAR 2 [0xf3200000, 0xf3210000) (moved off firmware's address)
+pci: 01:00.0 BAR 4 [0xf3210000, 0xf3214000) (moved off firmware's address)
+pci: rtl8125 BAR0 at 0xf3200000 reads 0x126fd566 (MAC bytes), BAR is live
+pci: registered 00:01.0 (10ec:8125 class 02:00) mmio [(0xf3200000,0x10000),(0xf3210000,0x4000)] io [(0xf3101000,0x100)]
 ```
 
-- 设备确实进了设备域，BAR 资源也在描述符里（class `02:00` = Ethernet）。
-- **但 BAR0/BAR2 落在 `0x40100000` 一带（DRAM 空间），不在 DT 声明的 MEM 窗口
-  （`0xf4200000+14M` 与 `0xa0000000 000+1G`）内**。这是 U-Boot 每次启动自己做
-  PCI 枚举时按它自己的地址空间分配的（串口日志里能看到 U-Boot 的
-  `pcie_dw_rockchip ... Link Fail`）。
-- 我们这边 `configure_pci_device_if_needed()` 只在"BAR 为 0（未分配）"时才分配，
-  于是直接沿用了这套无效地址，只置了 IO/MEM/BusMaster 命令位。
+这里有两个**互相独立**的坑，缺一不可：
 
-**结论：PCIe 里程碑要往下走，必须强制重分配 BAR。** 做法（下一步）：
-1. 判定"BAR 不在本 host 声明的 MEM 窗口内"也算未分配（比只判 0 更正确）；
-2. 对这类 BAR，先向其 BAR 寄存器写 0（清掉 U-Boot 的残留），
-   再让 `PciRangeAllocator` 从 DT 的 MEM 段分配；
-3. 分配后回读校验，把结果打进 `pci: registered` 那行日志。
+### 3.4.1 窗口不存在：`pci-host-*-generic` 看不到 DesignWare 节点
+
+`pci_bar_allocation_range()` 原来只问 `fw::pci_bar_range()`，而后者找的是
+`compatible = "pci-host-ecam-generic"` / `"pci-host-cam-generic"`。RK3588 的
+节点是 `rockchip,rk3588-pcie` + `snps,dw-pcie`，**永远找不到** → 返回 `None`
+→ 分配器根本不存在 → 后面所有 BAR 逻辑都是空转（日志里连
+"BAR allocator from ..." 都没有，这是最快的判断依据）。
+
+修法：**控制器自己发布窗口**（它已经解析过 `ranges` 了），和它发布 CAM 访问
+后端是同一个套路；`pci_bar_allocation_range()` 优先用这个窗口。
+
+### 3.4.2 `ranges` 分类必须按 space 位，不能只看单个 bit
+
+Rockchip BSP 的 `ranges` 形状（每段 7 cells）：
+
+| 首 cell | 含义 | space 位 `[25:24]` |
+|---|---|---|
+| `0x00000800` | config 孔径 | 0 |
+| `0x81000000` | IO | 1 |
+| `0x82000000` | memory 32-bit | 2 |
+| `0xc3000000` | memory 64-bit + prefetchable | 3 |
+
+原来的判定是 `flags & 0x1`（IO）和 `flags & 0x2`（64 位），只对 mainline 的
+`0x01/0x02/0x03` 成立。用单 bit 解码时 **config 段被当成 MEM 段**（于是 region 1
+把 region 0 的地址区间又覆盖了一遍），**mem32 段被当成 mem64**。
+
+**教训：`ranges` 的 `phys.hi` 只看 space 位 `[25:24]`（0/1/2/3），其余位是
+类型信息，不同来源写法不同。**
+
+### 3.4.3 "BAR 非 0" ≠ "BAR 已分配"
+
+U-Boot 每次启动都会自己跑 PCI 枚举（串口里 `pcie_dw_rockchip ... Link Fail`
+就是它打的），并按**它自己的地址空间**写 BAR。于是 BAR 寄存器非 0、读回也正确，
+但地址落在 DRAM 区（实测 `0x40100000`），设备根本不可达。
+
+修法：**"BAR 不在本 host 的窗口内" 也判为未分配** → 关解码 → 从窗口重分配 →
+回读校验。
+
+### 3.4.4 验证必须是一次真实的数据读取
+
+写 BAR 再读回只能证明配置空间能写。唯一证据是**读到设备数据**：
+RTL8125 的 BAR0 偏移 0 是 `IDR0..IDR3`（MAC 前 4 字节），读到
+`0x126fd566`（非 0、非全 f）才算 BAR 活着。这条检查门控在单一已知设备、
+一次一个 32 位读，等真驱动接管后删除。
 
 ## 4. 下一步（本次工作的续点）
 
-**目标：给 RTL8125 分 BAR 并把设备接上 net 类。**
+**BAR 闭环完成。** 下一站：RTL8125 驱动（`subsystems/net` 侧绑定）。
 
-1. **强制重分配 BAR**（见 3.4）：BAR 非 0 但在本 host 的 MEM 窗口之外 → 视为
-   未分配，清零后由 DT 的 MEM 段分配并提供给描述符；
-2. BAR 窗口来自 `ranges` 的 MEM/prefetch 段（`0xf4200000+14M`、
-   `0xa0000000 000+1G`），确认 `pci_bar_allocation_range` 解析到它们；
-3. 设备描述符进域后，`net` 子系统侧还需一个 8125 驱动（**尚未开始**，工作量
-   不小；可先只验证 BAR 分配 + 命令位 CRUD，把"设备可用"作为里程碑）；
-4. 之后可选：`fe150000`/`fe160000`（探活失败，需查 pcie3phy 时钟路径）、
-   MSI/GIC ITS（当前 INTx 都还没接）、以及**转 USB 栈**。
+1. **RTL8125 驱动**：这是真正的工作量所在。寄存器表在
+   `/workspace/linux-jr/drivers/net/ethernet/realtek/r8169_main.c`
+   （`rtl8125` 走 r8169 的 `RTL_GIGA_MAC_VER_*` 分支）。最小里程碑：
+   读 MAC（已验证可读）→ 复位/初始化 → 起 DMA 环 → 收发一帧。
+2. **多 host**：现在 `PUBLISHED_CAM` 是**单槽**（后探测的覆盖前面的），所以
+   两块 RTL8125（fe180000 与 fe190000 各一块）只有一块会被枚举。参考板
+   lspci 是 `0003:31.0` + `0004:41.0` 两块。要两块都进域，得把发布改成
+   按 host/segment 的列表，`discover` 遍历。
+3. **INTx / MSI**：目前只做了 `pci_legacy_irq` 的固件查询，MSI-X 没接
+   （`msix.rs` 有骨架）。网卡收包必须有中断或轮询兜底。
+4. `fe150000`/`fe160000`（探活失败）留待后续：需要 pcie3phy 时钟路径。
 
 ## 5. USB 相关（尚未动工，只有前期结论）
 
