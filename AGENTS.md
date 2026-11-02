@@ -112,6 +112,9 @@ Key local rules:
 - Use `?` for ordinary error propagation.
 - Avoid casual atomics and linear scans on hot paths.
 - Use workspace dependencies and existing local helper APIs where available.
+  Before writing a helper, container, lock, parser or allocator, look it up
+  in the capability catalogue `docs/capabilities/helpers.md` (skill
+  `docs/ai/skills/capability-catalogue/SKILL.md`).
 
 ## Change Completeness
 

@@ -120,6 +120,9 @@ Before considering a code change aligned with this skill, verify:
 - modules, visibility, imports, and attributes stay narrowly scoped;
 - error paths use `Result`;
 - logging uses crate-standard prefixes and appropriate severity;
+- no new helper, container, lock or wait protocol re-implements a capability
+  listed in `docs/capabilities/helpers.md`
+  (`docs/ai/skills/capability-catalogue/SKILL.md`) without a stated reason;
 - container choices match their access pattern; queues needing middle
   removal, stable element addresses, or IRQ-safe enqueue are not built
   on growable `Vec` bookkeeping, and linked-list needs use the

@@ -50,6 +50,10 @@ Current skills:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
+- `capability-catalogue/`:
+  look up reusable capabilities (`docs/capabilities/helpers.md`) before
+  writing a helper or data structure; keep capability cards current when
+  cited code changes.
 - `pr-ci-review/`:
   Gitee PR lifecycle, Jenkins CI status, and AI review via xreview (status,
   requesting a review, responding to findings).
