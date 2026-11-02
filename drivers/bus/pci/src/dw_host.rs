@@ -117,6 +117,10 @@ impl PcieWindow {
         self.space >= 2
     }
 
+    fn is_mem64(&self) -> bool {
+        self.space == 3
+    }
+
     fn kind(&self) -> &'static str {
         match self.space {
             0 => "config",
@@ -977,7 +981,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         }
         log::info!("pcie-dw: link up, {} lane(s)", pcie.lanes());
 
-        publish_cam(&pcie);
+        publish_cam(&pcie, bar_window(&windows));
 
         // v1 enumeration evidence: scan bus 0 (the RC itself) and bus 1,
         // logging every responding function's vendor:device.
@@ -1006,12 +1010,28 @@ static CFG_READBACKS: core::sync::atomic::AtomicUsize = core::sync::atomic::Atom
 /// lets the DBI+iATU host share the ECAM pipeline's BAR/INTx/descriptor work.
 /// Hand the access backend to the generic bus layer, keeping the phy/clocks
 /// alive (the mapping outlives this probe).
-fn publish_cam(pcie: &Arc<DwPcie>) {
+/// The range downstream BARs are allocated from.
+///
+/// The 32-bit memory range is preferred: ordinary BARs fit there, and it is the
+/// window the reference kernel uses for this controller too.
+fn bar_window(windows: &[PcieWindow]) -> Option<(u64, u64)> {
+    windows
+        .iter()
+        .filter(|w| w.is_memory() && w.size > 0)
+        .min_by_key(|w| (w.is_mem64(), w.size))
+        .map(|w| (w.cpu_base, w.size))
+}
+
+fn publish_cam(pcie: &Arc<DwPcie>, bar_window: Option<(u64, u64)>) {
     let cam = DwCam {
         hw: pcie.clone(),
         lock: Arc::new(SpinNoIrq::new(())),
     };
     *PUBLISHED_CAM.lock() = Some(cam);
+    if let Some((base, size)) = bar_window {
+        log::info!("pcie-dw: publishing the BAR window {base:#x}+{size:#x}");
+        *PUBLISHED_BAR_WINDOW.lock() = Some((base, size));
+    }
     log::info!("pcie-dw: published the DBI+iATU access backend");
 }
 
@@ -1019,5 +1039,18 @@ static PUBLISHED_CAM: SpinNoIrq<Option<DwCam>> = SpinNoIrq::new(None);
 
 pub(crate) fn take_published_cam() -> Option<DwCam> {
     PUBLISHED_CAM.lock().take()
+}
+
+/// The host's own MMIO window for downstream BARs (from the DT `ranges`).
+///
+/// The generic firmware helper only recognises `pci-host-ecam-generic` /
+/// `pci-host-cam-generic` nodes, so a DesignWare node
+/// (`rockchip,rk3588-pcie`, `snps,dw-pcie`) yields no window at all and every
+/// BAR looks unassignable. The controller has parsed its own `ranges`, so it
+/// publishes the window instead, the same way it publishes the access backend.
+static PUBLISHED_BAR_WINDOW: SpinNoIrq<Option<(u64, u64)>> = SpinNoIrq::new(None);
+
+pub(crate) fn published_bar_window() -> Option<(u64, u64)> {
+    *PUBLISHED_BAR_WINDOW.lock()
 }
 driver_base::declare_driver!(PlatformBus, DwHostDriver, "pcie-dw-host", IDS);

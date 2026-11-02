@@ -49,9 +49,17 @@ pub fn pci_cam_kind() -> crate::Cam {
     }
 }
 
-fn has_unassigned_memory_bar<C: crate::ConfigurationAccess>(
+/// Whether any memory BAR of `bdf` must be assigned before the device is usable.
+///
+/// "Must be assigned" is wider than "reads zero": U-Boot runs its own PCI
+/// enumeration before the kernel starts and programmes BARs in its address map,
+/// which can land in DRAM. A non-zero BAR outside `window` (this host's MMIO
+/// window) is just as unusable, so it is reported here and rewritten by
+/// [`crate::configure_device`].
+fn has_memory_bar_needing_assignment<C: crate::ConfigurationAccess>(
     root: &mut crate::PciRoot<C>,
     bdf: crate::DeviceFunction,
+    window: Option<(u64, u64)>,
 ) -> bool {
     let mut bar_idx = 0u8;
     while bar_idx < 6 {
@@ -64,14 +72,7 @@ fn has_unassigned_memory_bar<C: crate::ConfigurationAccess>(
         };
 
         let advance = if info.takes_two_entries() { 2 } else { 1 };
-        if matches!(
-            info,
-            crate::BarInfo::Memory {
-                address: 0,
-                size,
-                ..
-            } if size > 0
-        ) {
+        if crate::memory_bar_needs_assignment(&info, window) {
             return true;
         }
 
@@ -96,8 +97,10 @@ pub fn configure_pci_device_if_needed<C: crate::ConfigurationAccess>(
     root: &mut crate::PciRoot<C>,
     bdf: crate::DeviceFunction,
 ) -> KResult {
-    let any_unassigned_memory_bar = has_unassigned_memory_bar(root, bdf);
-    if !any_unassigned_memory_bar {
+    let window = pci_bar_allocator()
+        .as_ref()
+        .map(crate::PciRangeAllocator::window);
+    if !has_memory_bar_needing_assignment(root, bdf, window) {
         let mut no_allocator = None;
         return crate::configure_device(root, bdf, &mut no_allocator).map_err(|err| {
             warn!("failed to configure PCI device {:?}: {:?}", bdf, err);
@@ -112,7 +115,7 @@ pub fn configure_pci_device_if_needed<C: crate::ConfigurationAccess>(
     let mut allocator = pci_bar_allocator();
     if allocator.is_none() {
         warn!(
-            "PCI device {:?} has unassigned memory BARs but no allocation range",
+            "PCI device {:?} needs memory BAR assignment but no allocation range is known",
             bdf
         );
         return Err(KError::NoMemory);

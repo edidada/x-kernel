@@ -525,6 +525,17 @@ impl PciHost {
 }
 
 pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
+    // A DesignWare host bridge is not a `pci-host-*-generic` node, so the
+    // generic firmware query cannot see its `ranges`; the controller published
+    // the window it parsed itself. Check that first.
+    #[cfg(feature = "dw-host")]
+    if let Some((base, size)) = crate::dw_host::published_bar_window() {
+        log::info!(
+            "PCI BAR allocator from the DW host's DT ranges: cpu_base={base:#x} size={size:#x}"
+        );
+        return Some((base, size, PciConfigSource::Static));
+    }
+
     if let Some(range) = fw::pci_bar_range() {
         log::info!(
             "PCI BAR allocator from firmware: cpu_base={:#x} size={:#x} prefetchable={}",
@@ -585,9 +596,60 @@ pub fn legacy_interrupt_route<C: ConfigurationAccess>(
 /// aligned chunks suitable for memory-mapped I/O regions. Each allocation must
 /// be power-of-two sized and will be naturally aligned to that size.
 pub struct PciRangeAllocator {
-    _begin_addr: u64,
+    begin_addr: u64,
     end_addr: u64,
     cursor_addr: u64,
+}
+
+/// Whether `info` is a memory BAR that must be (re)assigned before use.
+///
+/// Two cases count as unassigned. The register reads zero (nobody programmed
+/// it). Or it holds an address outside `window`, the host's MMIO window: U-Boot
+/// enumerates PCI on its own address map before the kernel starts, and its BAR
+/// values can point into DRAM, where the device is unreachable. Trusting a
+/// non-zero register is therefore not enough -- it has to be inside the window
+/// the host decodes.
+pub(crate) fn memory_bar_needs_assignment(info: &BarInfo, window: Option<(u64, u64)>) -> bool {
+    let BarInfo::Memory { address, size, .. } = *info else {
+        return false;
+    };
+    if size == 0 {
+        return false;
+    }
+    if address == 0 {
+        return true;
+    }
+    match window {
+        Some((begin, end)) => address < begin || address.saturating_add(size) > end,
+        None => false,
+    }
+}
+
+/// Whether `bdf` has a non-zero memory BAR outside `window`, i.e. one that
+/// firmware left behind and that must be moved.
+fn has_stale_memory_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    window: (u64, u64),
+) -> bool {
+    let mut bar = 0;
+    while bar < 6 {
+        let takes_two = match root.bar_info(bdf, bar) {
+            Ok(Some(info)) => {
+                let stale = matches!(
+                    &info,
+                    BarInfo::Memory { address, .. } if *address != 0
+                ) && memory_bar_needs_assignment(&info, Some(window));
+                if stale {
+                    return true;
+                }
+                info.takes_two_entries()
+            }
+            _ => false,
+        };
+        bar += if takes_two { 2 } else { 1 };
+    }
+    false
 }
 
 /// Assigns unassigned memory BARs from `allocator`, logs the final BAR
@@ -606,87 +668,23 @@ pub fn configure_device<C: ConfigurationAccess>(
     bdf: DeviceFunction,
     allocator: &mut Option<PciRangeAllocator>,
 ) -> Result<(), PciInitError> {
+    let window = allocator.as_ref().map(PciRangeAllocator::window);
+    if let Some(window) = window {
+        stop_decoding_while_moving_bars(root, bdf, window);
+    }
+
     let mut bar = 0;
     while bar < 6 {
-        let info = match root
-            .bar_info(bdf, bar)
-            .map_err(|_| PciInitError::InvalidRange)?
-        {
-            Some(info) => info,
-            None => {
-                bar += 1;
-                continue;
-            }
-        };
-
-        if let BarInfo::Memory {
-            address_type,
-            address,
-            size,
-            ..
-        } = info
-            && size > 0
-            && address == 0
-        {
-            let new_addr = allocator
-                .as_mut()
-                // A function needing assignment with no allocation range is a
-                // per-device configuration failure: propagate it so discovery
-                // can skip this function instead of taking the system down.
-                .ok_or(PciInitError::NoMemory)?
-                .alloc_buf(size as _)
-                .ok_or(PciInitError::NoMemory)?;
-            if address_type == MemoryBarType::Width32 {
-                root.set_bar_32(bdf, bar, new_addr as _);
-            } else if address_type == MemoryBarType::Width64 {
-                root.set_bar_64(bdf, bar, new_addr);
-            }
-        }
-
-        let info = match root
-            .bar_info(bdf, bar)
-            .map_err(|_| PciInitError::InvalidRange)?
-        {
-            Some(info) => info,
-            None => {
-                bar += 1;
-                continue;
-            }
+        let Some(info) = read_bar(root, bdf, bar)? else {
+            bar += 1;
+            continue;
         };
         let takes_two = info.takes_two_entries();
-        match info {
-            BarInfo::IO { address, size } => {
-                if address > 0 && size > 0 {
-                    log::debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
-                }
-            }
-            BarInfo::Memory {
-                address_type,
-                prefetchable,
-                address,
-                size,
-            } => {
-                if address > 0 && size > 0 {
-                    log::debug!(
-                        "  BAR {}: MEM [{:#x}, {:#x}){}{}",
-                        bar,
-                        address,
-                        address + size,
-                        if address_type == MemoryBarType::Width64 {
-                            " 64bit"
-                        } else {
-                            ""
-                        },
-                        if prefetchable { " pref" } else { "" },
-                    );
-                }
-            }
+        if memory_bar_needs_assignment(&info, window) {
+            assign_memory_bar(root, bdf, bar, &info, allocator)?;
         }
-
-        bar += 1;
-        if takes_two {
-            bar += 1;
-        }
+        log_bar(bar, &info);
+        bar += if takes_two { 2 } else { 1 };
     }
 
     let (_status, cmd) = root.get_status_command(bdf);
@@ -695,6 +693,124 @@ pub fn configure_device<C: ConfigurationAccess>(
         cmd | Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
     );
     Ok(())
+}
+
+fn read_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    bar: u8,
+) -> Result<Option<BarInfo>, PciInitError> {
+    root.bar_info(bdf, bar)
+        .map_err(|_| PciInitError::InvalidRange)
+}
+
+/// Stops the device decoding memory/IO if firmware left BARs outside `window`.
+///
+/// The window is what this host decodes; a BAR outside it points somewhere
+/// else entirely (U-Boot's own map, often DRAM), so decoding must be off before
+/// the register changes under the device.
+fn stop_decoding_while_moving_bars<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    window: (u64, u64),
+) {
+    if !has_stale_memory_bar(root, bdf, window) {
+        return;
+    }
+    let (_, command) = root.get_status_command(bdf);
+    root.set_command(bdf, command & !(Command::IO_SPACE | Command::MEMORY_SPACE));
+    log::info!(
+        "pci: {:?} has BARs outside [{:#x}, {:#x}); reassigning with decode off",
+        bdf,
+        window.0,
+        window.1
+    );
+}
+
+/// Allocates an address for `info`'s BAR and writes it into config space.
+///
+/// A function needing assignment with no allocation range is a per-device
+/// configuration failure, propagated so discovery can skip this function
+/// instead of taking the system down.
+fn assign_memory_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    bar: u8,
+    info: &BarInfo,
+    allocator: &mut Option<PciRangeAllocator>,
+) -> Result<(), PciInitError> {
+    let BarInfo::Memory {
+        address_type,
+        address,
+        size,
+        ..
+    } = *info
+    else {
+        return Ok(());
+    };
+    let new_addr = allocator
+        .as_mut()
+        .ok_or(PciInitError::NoMemory)?
+        .alloc_buf(size)
+        .ok_or(PciInitError::NoMemory)?;
+    match address_type {
+        MemoryBarType::Width32 => root.set_bar_32(bdf, bar, new_addr as _),
+        MemoryBarType::Width64 => root.set_bar_64(bdf, bar, new_addr),
+        MemoryBarType::Below1MiB => {
+            // "Map me below 1 MiB" -- no allocator window can honour that, and
+            // no compliant device here asks for it.
+            log::warn!(
+                "pci: {:?} BAR {} wants an address below 1 MiB; leaving it",
+                bdf,
+                bar
+            );
+            return Ok(());
+        }
+    }
+    log::info!(
+        "pci: {:?} BAR {} [{:#x}, {:#x}){}",
+        bdf,
+        bar,
+        new_addr,
+        new_addr + size,
+        if address == 0 {
+            ""
+        } else {
+            " (moved off firmware's address)"
+        }
+    );
+    Ok(())
+}
+
+fn log_bar(bar: u8, info: &BarInfo) {
+    match *info {
+        BarInfo::IO { address, size } => {
+            if address > 0 && size > 0 {
+                log::debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
+            }
+        }
+        BarInfo::Memory {
+            address_type,
+            prefetchable,
+            address,
+            size,
+        } => {
+            if address > 0 && size > 0 {
+                log::debug!(
+                    "  BAR {}: MEM [{:#x}, {:#x}){}{}",
+                    bar,
+                    address,
+                    address + size,
+                    if address_type == MemoryBarType::Width64 {
+                        " 64bit"
+                    } else {
+                        ""
+                    },
+                    if prefetchable { " pref" } else { "" },
+                );
+            }
+        }
+    }
 }
 
 impl PciRangeAllocator {
@@ -706,10 +822,18 @@ impl PciRangeAllocator {
     /// * `length` - The total size in bytes of the allocatable region
     pub const fn new(start: u64, length: u64) -> Self {
         Self {
-            _begin_addr: start,
+            begin_addr: start,
             end_addr: start.saturating_add(length),
             cursor_addr: start,
         }
+    }
+
+    /// The `[begin, end)` physical window this allocator hands out.
+    ///
+    /// This is also the window the host decodes: a BAR outside it is not
+    /// reachable here, whatever firmware programmed into the register.
+    pub const fn window(&self) -> (u64, u64) {
+        (self.begin_addr, self.end_addr)
     }
 
     /// Attempts to allocate an aligned MMIO region of the requested size.
