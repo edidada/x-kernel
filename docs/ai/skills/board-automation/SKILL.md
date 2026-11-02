@@ -26,11 +26,24 @@ build -> deploy to the TFTP root -> power off -> power on -> wait for boot
   bring the TFTP server back, `./rkt console --seconds N` to just listen,
   `./rkt power on|off` for the relay.
 
-### Board-side facts that change per re-cabling
+### Serial topology (get this wrong and you debug the wrong board)
 
-- **Serial ports renumber.** After swapping boards the console moved from
-  `/dev/ttyUSB0` to `/dev/ttyUSB2` and the relay from `/dev/ttyUSB1` to
-  `/dev/ttyUSB3`. Probe before concluding "the board is dead":
+The rig drives **two** boards plus a relay, and the three ports are NOT
+interchangeable:
+
+| port | role | baud |
+|---|---|---|
+| `/dev/ttyUSB0` | **our (x-kernel) board's console** — the one `board-run.sh` captures | 1_500_000 |
+| `/dev/ttyUSB1` | relay / USB power control | 115200, frame `AA 01 03 AE` on, `AA 01 02 AD` off |
+| `/dev/ttyUSB2` | the **reference native-Linux board** (comparison target only) | 1_500_000 |
+
+Consequences worth remembering:
+
+- Capturing `/dev/ttyUSB2` while trying to test a kernel change gives an
+  empty or irrelevant log — it is a *different machine*. One run was wasted
+  this way.
+- The ports can renumber when things are re-cabled; the relay has been seen
+  on `/dev/ttyUSB3`. Enumerate before concluding "the board is dead":
 
   ```bash
   ssh kylin@<host> 'python3 - <<EOF'
@@ -42,8 +55,17 @@ build -> deploy to the TFTP root -> power off -> power on -> wait for boot
   EOF'
   ```
 
-  The rk3588 console answers at **1_500_000** baud; the relay frame is
-  `AA 01 03 AE` (on) / `AA 01 02 AD` (off) at 115200.
+- `console_open ERR ... Could not exclusively lock port /dev/ttyUSB0` is a
+  **transient host-side lock**, not a missing board: a desktop agent (seen:
+  Sangfor `eaio_agent`) grabs the port for a moment. Simply retry the run.
+  Do not "fix" it by switching ports.
+- `rkt --console ...` is a *global* option: it must precede the subcommand
+  (`rkt --console /dev/ttyUSB2 run ...`), and at least one rkt build then
+  crashed with `'Console' object has no attribute '_start_wall'`. Prefer
+  driving the loop through `scripts/board-run.sh` unless you really need the
+  override.
+- The single-board alternative when rkt misbehaves: power-cycle with
+  `rkt power off/on`, then capture with pyserial on `/dev/ttyUSB0` directly.
 - **The TFTP server dies with the SSH session** that started it. If a run
   fails with `UDP 69 没有监听`, restart `rkt tftp start` before anything else.
 - Every `board-run.sh` finishes by powering the board off. Power it back on

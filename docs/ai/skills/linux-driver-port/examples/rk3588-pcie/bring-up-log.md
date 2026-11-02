@@ -234,6 +234,34 @@ combphy: clock 2 ... enabled false -> true
 **pipe 时钟没有源** —— 这与"LTSSM 恒为 0"完全自洽，所以修掉这条级联很可能
 直接让链路训练起来。
 
+### 已修：PD_PCIE 电源域（结论：不是最后一环，但状态已与参考一致）
+
+原先的代码有三处错：偏移写成 `0x14c`（应为 `0x14c + 域偏移 0x4 = 0x150`）、
+把 `repair_status` bit22=1 当成"已上电"直接返回、以及极性判断来自参考注释而非
+实测。按工作内核的读数改正后：
+
+```
+修改前: PWR_CON(0x150)=0x00000011 (bit7=0)  repair(0x290)=0xfff70001 (bit22=1)
+修改后: PWR_CON(0x150)=0x00000091 (bit7=1)  repair(0x290)=0xffb70001 (bit22=0)
+参考  : PWR_CON(0x150)=0x000004c1 (bit7=1)  repair(0x290)=0xfe9f0001 (bit22=0)
+```
+
+域确实上电了，但 **`APB 0x300` 仍为 0、DBI 仍不可达**，所以 PD 不是最后一环
+（记下来，避免以后再花一轮验证这件事）。
+
+### 失败模式的变化（重要）
+
+| 阶段 | DBI 访问 `0xa41000000` 的表现 |
+|---|---|
+| 任何初始化之前 | 同步外部中止（DECERR） |
+| 只使能 refclk | **静默 stall**（接了但不响应） |
+| 使能 refclk+apbclk+phpclk（当前） | **同步外部中止（DECERR）** `ESR=0x96000010 ISS=0x10` |
+
+也就是说：现在的状态回到"这个地址不被解码"，即 PCIe 从设备口完全不在线；
+`general-con = 0x44`，而工作 Linux 是 `0x4c`，差的 bit3 是 `APP_DLY2_DONE`
+（只有 APP 侧 LTSSM 序列跑完才会置位的**状态**位）——两处证据都指向同一个结论：
+**DWC core 的 APP/LTSSM 侧没有真正启动，pipe 时钟仍然不成立。**
+
 ### 下一步（按优先级）
 
 1. **定位撤销者**：在 `ClkHandle::disable` / `disable_locked` 里对
