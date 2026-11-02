@@ -296,8 +296,9 @@ scans and only writes extra facts files.
 `--facts-deps` (or `XKERNEL_FACTS_DEPS=1`) also exports dependency crates:
 the scan sets XKMake itself as Cargo's `RUSTC_WRAPPER`
 (`XKMAKE_FACTS_WRAPPER_TARGET` gives the kernel target). `main` recognizes
-this environment variable before parsing the command line and runs as the
-wrapper: workspace members (whose first argument is Dylint's
+this environment variable before parsing the command line and, when the
+first argument is a compiler (`rustc`, Cargo's `RUSTC` or Dylint's
+driver), runs as the wrapper: workspace members (whose first argument is Dylint's
 `RUSTC_WORKSPACE_WRAPPER`) and host crates are `exec`ed unchanged; a
 dependency compiled for the kernel target is compiled by the Dylint driver
 instead, with `--force-warn facts_export` appended and

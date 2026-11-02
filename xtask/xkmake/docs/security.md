@@ -80,7 +80,10 @@ trust only the digest of a trusted tree (the target branch). Facts are a
 review aid only, never a gate.
 
 `--facts-deps` makes Cargo invoke XKMake itself as `RUSTC_WRAPPER`. The
-wrapper is active only when `XKMAKE_FACTS_WRAPPER_TARGET` is set; it uses
+wrapper is active only when `XKMAKE_FACTS_WRAPPER_TARGET` is set and the
+first argument is a compiler (`rustc`, Cargo's `RUSTC` or the Dylint
+driver), so an `xkmake` started inside the scan, which inherits the
+variable, keeps its normal command line; the wrapper uses
 `exec` with structured arguments, never a shell, to run the rustc given by
 Cargo or Dylint's `RUSTC_WORKSPACE_WRAPPER`. For dependencies it only
 appends `--force-warn facts_export` and leaves the other arguments unchanged,

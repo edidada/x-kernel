@@ -54,7 +54,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{ExpnKind, FileName, Span, Symbol};
 
-use self::json::Record;
+use self::{bodies::RefContext, json::Record};
 
 /// Version of the facts record format.
 pub(crate) const SCHEMA: &str = "xkernel-facts/0.3";
@@ -184,8 +184,11 @@ struct Exporter<'tcx> {
     /// User-written `unsafe` blocks by typeck root (call-site spans), for
     /// the `in_unsafe` flag of calls.
     unsafe_blocks: HashMap<LocalDefId, Vec<Span>>,
-    /// `ref` records of the current body, by (target, line).
-    refs_seen: HashSet<(DefId, u64)>,
+    /// `ref` records of the current body with a destination, by (target,
+    /// line, destination).
+    refs_seen: HashSet<(DefId, u64, RefContext)>,
+    /// (target, line) of every `ref` record of the current body.
+    ref_lines: HashSet<(DefId, u64)>,
 }
 
 impl<'tcx> Exporter<'tcx> {
@@ -198,6 +201,7 @@ impl<'tcx> Exporter<'tcx> {
             counts: HashMap::new(),
             unsafe_blocks: HashMap::new(),
             refs_seen: HashSet::new(),
+            ref_lines: HashSet::new(),
         }
     }
 

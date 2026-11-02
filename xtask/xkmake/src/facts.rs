@@ -627,12 +627,20 @@ fn summarize(data: &[u8], stem: &str) -> std::result::Result<FactsSummary, Strin
 /// the export lint forced to warn: Cargo caps a dependency's lints at
 /// `allow`, which would skip the pass, and `--force-warn` is the one level
 /// the cap does not lower. The other lints stay capped.
+///
+/// Every process the scan starts inherits [`WRAPPER_TARGET_ENV`], so the
+/// variable alone does not make a call a wrapper call: an `xkmake` run from
+/// inside the scan, such as from a build script, gets a subcommand as its
+/// first argument and is left to the normal command line.
 pub(crate) fn rustc_wrapper() -> Option<i32> {
     let target = env::var_os(WRAPPER_TARGET_ENV)?;
     let mut args = env::args_os().skip(1);
     let program = args.next()?;
-    let rest: Vec<OsString> = args.collect();
     let driver = env::var_os("RUSTC_WORKSPACE_WRAPPER");
+    if !is_compiler(&program, driver.as_deref(), env::var_os("RUSTC").as_deref()) {
+        return None;
+    }
+    let rest: Vec<OsString> = args.collect();
     let mut command = match driver {
         Some(driver) if !same_program(&program, &driver) && compiles_for(&rest, &target) => {
             let mut command = Command::new(driver);
@@ -655,6 +663,17 @@ pub(crate) fn rustc_wrapper() -> Option<i32> {
         command.get_program().to_string_lossy()
     );
     Some(101)
+}
+
+/// True when `program`, the first argument of a wrapper call, is the
+/// compiler Cargo hands to the wrapper: `rustc` (or Cargo's `RUSTC`) or the
+/// workspace wrapper `driver`.
+fn is_compiler(program: &OsStr, driver: Option<&OsStr>, rustc: Option<&OsStr>) -> bool {
+    Path::new(program).file_stem() == Some(OsStr::new("rustc"))
+        || [driver, rustc]
+            .into_iter()
+            .flatten()
+            .any(|compiler| same_program(program, compiler))
 }
 
 fn same_program(a: &OsStr, b: &OsStr) -> bool {
@@ -823,7 +842,7 @@ mod tests {
 
     use super::{
         FACTS_SCHEMA, FactsRun, FactsState, FailureReason, artifact_state, compiles_for,
-        exporter_digest, same_program, scan_units, summarize, unit_stem,
+        exporter_digest, is_compiler, same_program, scan_units, summarize, unit_stem,
     };
 
     const MEMBER: &str = "path+file:///w/task/kspin#0.3.0-dev";
@@ -931,6 +950,22 @@ mod tests {
             OsStr::new("/r/bin/rustc"),
             OsStr::new("/d/dylint-driver")
         ));
+    }
+
+    #[test]
+    fn wrapper_runs_only_for_compiler_calls() {
+        let driver = Some(OsStr::new("/d/nightly/dylint-driver"));
+        assert!(is_compiler(OsStr::new("/r/bin/rustc"), driver, None));
+        assert!(is_compiler(OsStr::new("rustc"), None, None));
+        assert!(is_compiler(OsStr::new("/d/nightly/dylint-driver"), driver, None));
+        assert!(is_compiler(
+            OsStr::new("/opt/my-rustc"),
+            None,
+            Some(OsStr::new("/opt/my-rustc"))
+        ));
+        // An xkmake started inside the scan keeps its command line.
+        assert!(!is_compiler(OsStr::new("build"), driver, None));
+        assert!(!is_compiler(OsStr::new("--help"), driver, None));
     }
 
     #[test]

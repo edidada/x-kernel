@@ -140,6 +140,26 @@ fn run_local() -> u32 {
     call()
 }
 
+pub struct Pair {
+    pub read: fn() -> u32,
+    pub write: fn() -> u32,
+}
+
+fn register(first: fn() -> u32, second: fn() -> u32) -> u32 {
+    first() + second()
+}
+
+// The same value goes to two fields and two arguments on one line each.
+fn same_value_twice() -> u32 {
+    let pair = Pair { read: helper, write: helper };
+    register(helper, helper) + (pair.read)() + (pair.write)()
+}
+
+fn closure_param() -> u32 {
+    let call = |handler: fn() -> u32| handler();
+    call(helper)
+}
+
 fn main() {
     caller();
     run_with(1, |x| x);
@@ -321,6 +341,31 @@ fn ui() {
             .is_some_and(|t| t.ends_with("::helper"))
     );
     assert_eq!(passed(true).0.get("arg"), Some(&serde_json::json!(0)));
+
+    // One value stored into two fields, or passed as two arguments, on one
+    // line keeps a record per destination.
+    for field in ["::Pair::read", "::Pair::write"] {
+        let stored = find(&|r| {
+            r.str("t") == Some("ref")
+                && r.str("caller").is_some_and(|c| c.ends_with("::same_value_twice"))
+                && r.str("field").is_some_and(|f| f.ends_with(field))
+        })
+        .unwrap_or_else(|| panic!("no ref stored into {field}:\n{text}"));
+        assert!(stored.str("target").is_some_and(|t| t.ends_with("::helper")));
+    }
+    for arg in 0..2 {
+        find(&|r| {
+            r.str("t") == Some("ref")
+                && r.str("passed_to").is_some_and(|c| c.ends_with("::register"))
+                && r.0.get("arg") == Some(&serde_json::json!(arg))
+        })
+        .unwrap_or_else(|| panic!("no ref passed to register as arg {arg}:\n{text}"));
+    }
+    // A closure's declared parameters are counted after its environment.
+    assert_eq!(
+        call_to("::closure_param::{closure#0}", None).0.get("via_param"),
+        Some(&serde_json::json!(0))
+    );
 
     // A function value captured by a closure is traced to the enclosing fn.
     let captured = call_to("::run_with::{closure#0}", Some("call_once"));

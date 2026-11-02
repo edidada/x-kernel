@@ -52,7 +52,8 @@ struct Callee {
 }
 
 /// How a function value reaches the place a `ref` record describes.
-enum RefContext {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) enum RefContext {
     Plain,
     /// Passed as argument `index` of a call to `callee` (the resolved impl
     /// item for trait calls; absent for fn-pointer calls).
@@ -183,6 +184,7 @@ impl<'tcx> Exporter<'tcx> {
             flow: Flow::new(tcx, body, def),
         };
         self.refs_seen.clear();
+        self.ref_lines.clear();
         for block in body.basic_blocks.iter() {
             let Some(term) = &block.terminator else {
                 continue;
@@ -355,8 +357,9 @@ impl<'tcx> Exporter<'tcx> {
         }
     }
 
-    /// Writes one `ref` record unless the same target was already recorded on
-    /// that line of the body.
+    /// Writes one `ref` record per target, line and destination of the body.
+    /// A plain ref is skipped when that line already has a record for the
+    /// target: every argument or field store of it is also a plain use.
     fn fn_ref(
         &mut self,
         caller: &Caller<'_, 'tcx>,
@@ -365,9 +368,15 @@ impl<'tcx> Exporter<'tcx> {
         context: RefContext,
     ) {
         let place = self.place(span);
-        if !self.refs_seen.insert((target, place.line)) {
+        let line = (target, place.line);
+        let first = match context {
+            RefContext::Plain => !self.ref_lines.contains(&line),
+            _ => self.refs_seen.insert((target, place.line, context.clone())),
+        };
+        if !first {
             return;
         }
+        self.ref_lines.insert(line);
         let closure = self.tcx.is_closure_like(target);
         self.bump(if closure { "closure_refs" } else { "fn_refs" });
         let mut line = String::new();

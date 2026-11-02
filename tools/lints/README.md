@@ -143,8 +143,8 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   Items of `core`, `alloc` and `std` are not recorded. One record per
   target, kind, access and line.
 - *Fn values.* For a call through a fn pointer or a generic `Fn*` bound,
-  `via_param` is the caller's parameter (0-based) the callee value comes
-  from, `via_field` the field it is read from, `via_value` the function or
+  `via_param` is the caller's declared parameter (0-based; in a closure,
+  not counting the captured environment) the callee value comes from, `via_field` the field it is read from, `via_value` the function or
   closure itself when the body names it. In a closure, a value read from the
   captured environment gives `via_capture` (the variable's name) and where
   that variable comes from in the enclosing body: `via_outer` +
@@ -155,7 +155,9 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   index, are the `ref` records with `passed_to` = `g` and that `arg` (for a
   method, `arg` counts the receiver); those of a `via_field` call are
   the `ref` records with that `field`. Values are followed through locals
-  assigned once, references and casts.
+  assigned once, references and casts. A body has one `ref` record per
+  target, line and destination (`passed_to` + `arg`, or `field`), and a
+  plain one only for a line without such a record.
 - *Paths* are repository-relative, for dependency crates too (`xkmake` passes
   the repository root in `XKERNEL_FACTS_ROOT`, since Cargo compiles registry
   and git crates from their own directories). Dependencies are written as

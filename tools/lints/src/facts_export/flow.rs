@@ -156,7 +156,7 @@ impl<'b, 'tcx> Flow<'b, 'tcx> {
         }
         let index = place.local.as_usize();
         if (1..=self.body.arg_count).contains(&index) {
-            return Origin::Param(index - 1);
+            return self.param(index).map_or(Origin::Unknown, Origin::Param);
         }
         let Some(Some(rvalue)) = self.assigned.get(&place.local) else {
             return Origin::Unknown;
@@ -173,6 +173,19 @@ impl<'b, 'tcx> Flow<'b, 'tcx> {
                 _ => Origin::Unknown,
             },
             _ => Origin::Unknown,
+        }
+    }
+
+    /// The declared parameter (0-based) held by argument local `_index`.
+    ///
+    /// In a closure body `_1` is the captured environment and the declared
+    /// parameters start at `_2`; a coroutine's other argument is its resume
+    /// value, not a declared parameter.
+    fn param(&self, index: usize) -> Option<usize> {
+        match self.closure {
+            None => index.checked_sub(1),
+            Some(def) if self.tcx.is_coroutine(def.to_def_id()) => None,
+            Some(_) => index.checked_sub(2),
         }
     }
 
