@@ -266,15 +266,19 @@ Without `--facts-out` the run leaves `XKERNEL_FACTS` unchanged: a caller
 that pins it to `1` (the whole CI dylint stage) keeps Cargo's cache in later
 scans and only writes extra facts files.
 
-`--facts-deps`（或 `XKERNEL_FACTS_DEPS=1`）同时导出依赖 crate：扫描时把
-XKMake 自己设为 Cargo 的 `RUSTC_WRAPPER`（`XKMAKE_FACTS_WRAPPER_TARGET`
-给出内核 target）。`main` 在解析命令行之前识别这个环境变量，以包装器身份
-运行：workspace 成员（第一个参数是 Dylint 的 `RUSTC_WORKSPACE_WRAPPER`）
-和 host crate 原样 `exec`；为内核 target 编译的依赖改由 Dylint driver 编译，
-追加 `--force-warn facts_export` 并设 `XKERNEL_FACTS_KIND=dep`。Cargo 给依赖
-加的 `--cap-lints allow` 照旧压住其他 lint，只有导出 lint 被强制打开。
-打包时，路径落在内核 target 目录下的非成员单元也作为 `dep` crate 收入，
-manifest 写 `deps: true`，crate 条目带依赖的 feature。
+`--facts-deps` (or `XKERNEL_FACTS_DEPS=1`) also exports dependency crates:
+the scan sets XKMake itself as Cargo's `RUSTC_WRAPPER`
+(`XKMAKE_FACTS_WRAPPER_TARGET` gives the kernel target). `main` recognizes
+this environment variable before parsing the command line and runs as the
+wrapper: workspace members (whose first argument is Dylint's
+`RUSTC_WORKSPACE_WRAPPER`) and host crates are `exec`ed unchanged; a
+dependency compiled for the kernel target is compiled by the Dylint driver
+instead, with `--force-warn facts_export` appended and
+`XKERNEL_FACTS_KIND=dep` set. The `--cap-lints allow` that Cargo passes for
+dependencies still silences the other lints; only the export lint is forced
+on. When packing, non-member units whose paths lie under the kernel target
+directory are taken in as `dep` crates too; the manifest records
+`deps: true`, and their crate entries carry the dependency's features.
 
 ## 设计决策
 
