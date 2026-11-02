@@ -93,8 +93,8 @@ const PCIE_ATU_UPPER_BASE: usize = 0x00c;
 const PCIE_ATU_LIMIT: usize = 0x010;
 const PCIE_ATU_LOWER_TARGET: usize = 0x014;
 const PCIE_ATU_UPPER_TARGET: usize = 0x018;
-const PCIE_ATU_TYPE_MEM: u32 = 0x0;
 const PCIE_ATU_TYPE_CFG0: u32 = 0x4;
+const PCIE_ATU_TYPE_MEM: u32 = 0x0;
 
 /// One DT `ranges` window, classified.
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +131,7 @@ struct DwPcie {
     apb: IoMap,
     dbi: IoMap,
     cfg_win: IoMap,
+    /// Base physical address of the ECAM-shaped config aperture.
     cfg_base: u64,
     /// Size of the ECAM-shaped config aperture (one bus per MiB).
     cfg_size: usize,
@@ -300,10 +301,12 @@ impl DwPcie {
     /// IO windows skipped (no legacy-IO consumer). Index 0 stays reserved
     /// for the CFG window.
     fn iatu_setup(&self, windows: &[PcieWindow]) {
-        // Region 0 is the config aperture, programmed ONCE: ECAM shape means
-        // bus/device/function ride in the address bits, so the ATU only has
-        // to map the whole window at target 0. Reprogramming the target per
-        // access was the pattern that lost the device field.
+        // Region 0: the whole config aperture, target 0, programmed ONCE --
+        // the reference driver reads config with `pci_generic_config_read()`
+        // against exactly this kind of pre-programmed CFG0 aperture (it
+        // reprograms the ATU only for IO), so this is the configuration to
+        // match. Leaving region 0 unprogrammed makes every config read return
+        // all-ones.
         if !self.prog_outbound_atu(
             0,
             PCIE_ATU_TYPE_CFG0,
@@ -313,6 +316,13 @@ impl DwPcie {
         ) {
             log::warn!("pcie-dw: config iATU region rejected");
         }
+        // Region 0 is deliberately LEFT ALONE. The DT's `config` aperture is
+        // the SoC's own ECAM window: it decodes bus/device/function straight
+        // from the address -- exactly how the reference driver uses it
+        // (`pci_generic_config_read()`, with the ATU reprogrammed only for
+        // IO). An outbound CFG0 region over that window hijacks the decode and
+        // pins every access to one target; measured both ways round: "device
+        // ok, all functions aliased" and "function ok, all devices aliased".
         let mut index = 1usize;
         for win in windows {
             if win.io || win.size == 0 || index >= self.num_ob_windows {
