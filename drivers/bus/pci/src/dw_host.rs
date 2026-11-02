@@ -363,9 +363,12 @@ impl DwCam {
         // ((bus<<8)|(dev<<3)|fn) parks function in bits 2:0, which the ATU
         // ignores -- measured: every function on a bus served the same
         // endpoint because only the bus/device bits had any effect.
-        let busdev = (u32::from(bdf.bus) << 24)
-            | (u32::from(bdf.device) << 19)
-            | (u32::from(bdf.function) << 16);
+        // This core takes the bus and the function from the CFG0 target but the
+        // device number from the address (measured: putting device in target
+        // bits 23:19 left every device answering as device 0, while the
+        // function field took effect). So: bus + function in the target,
+        // device in the aperture offset.
+        let busdev = (u32::from(bdf.bus) << 24) | (u32::from(bdf.function) << 16);
         let ok = self
             .hw
             .prog_outbound_atu(0, type_, self.hw.cfg_base, 0x1000, u64::from(busdev));
@@ -420,7 +423,9 @@ impl ConfigurationAccess for DwCam {
         if !self.map_bus(bdf) {
             return u32::MAX;
         }
-        let word = self.hw.cfg_win.read32(reg);
+        // Device number rides in the aperture, not in the ATU target.
+        let offset = (usize::from(bdf.device) << 15) | (reg & 0xfff);
+        let word = self.hw.cfg_win.read32(offset);
         // Read-side diagnostic: the target as the core sees it before and
         // after the data access, next to the value returned. If both targets
         // equal the requested bdf yet the data belongs to another function,
@@ -428,7 +433,8 @@ impl ConfigurationAccess for DwCam {
         if CFG_READBACKS.load(core::sync::atomic::Ordering::Relaxed) <= 8 {
             let atu = self.hw.atu_base(0);
             log::info!(
-                "pcie-dw: cfg read {:02x}.{} reg {reg:#05x} -> {word:#010x} (target {:#06x})",
+                "pcie-dw: cfg read {:02x}.{} reg {reg:#05x} at {offset:#07x} -> {word:#010x} \
+                 (target {:#06x})",
                 bdf.device,
                 bdf.function,
                 self.hw.dbi_read(atu + PCIE_ATU_LOWER_TARGET),
@@ -450,7 +456,8 @@ impl ConfigurationAccess for DwCam {
         if !self.map_bus(bdf) {
             return;
         }
-        self.hw.cfg_win.write32(reg, data);
+        let offset = (usize::from(bdf.device) << 15) | (reg & 0xfff);
+        self.hw.cfg_win.write32(offset, data);
     }
 
     unsafe fn unsafe_clone(&self) -> Self {
