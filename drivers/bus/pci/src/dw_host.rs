@@ -94,6 +94,7 @@ const PCIE_ATU_LIMIT: usize = 0x010;
 const PCIE_ATU_LOWER_TARGET: usize = 0x014;
 const PCIE_ATU_UPPER_TARGET: usize = 0x018;
 const PCIE_ATU_TYPE_CFG0: u32 = 0x4;
+const PCIE_ATU_TYPE_CFG1: u32 = 0x5;
 const PCIE_ATU_TYPE_MEM: u32 = 0x0;
 
 /// One DT `ranges` window, classified.
@@ -301,28 +302,11 @@ impl DwPcie {
     /// IO windows skipped (no legacy-IO consumer). Index 0 stays reserved
     /// for the CFG window.
     fn iatu_setup(&self, windows: &[PcieWindow]) {
-        // Region 0: the whole config aperture, target 0, programmed ONCE --
-        // the reference driver reads config with `pci_generic_config_read()`
-        // against exactly this kind of pre-programmed CFG0 aperture (it
-        // reprograms the ATU only for IO), so this is the configuration to
-        // match. Leaving region 0 unprogrammed makes every config read return
-        // all-ones.
-        if !self.prog_outbound_atu(
-            0,
-            PCIE_ATU_TYPE_CFG0,
-            self.cfg_base,
-            self.cfg_size as u64,
-            0,
-        ) {
-            log::warn!("pcie-dw: config iATU region rejected");
-        }
-        // Region 0 is deliberately LEFT ALONE. The DT's `config` aperture is
-        // the SoC's own ECAM window: it decodes bus/device/function straight
-        // from the address -- exactly how the reference driver uses it
-        // (`pci_generic_config_read()`, with the ATU reprogrammed only for
-        // IO). An outbound CFG0 region over that window hijacks the decode and
-        // pins every access to one target; measured both ways round: "device
-        // ok, all functions aliased" and "function ok, all devices aliased".
+        // Region 0 is reprogrammed per config access, exactly like the
+        // reference's dw_pcie_other_conf_map_bus(): bus/device/function in the
+        // target, `where` as the offset, and the WHOLE aperture as the region
+        // size. (An earlier attempt kept the size at 4 KiB, which is the one
+        // combination that was never measured.)
         let mut index = 1usize;
         for win in windows {
             if win.io || win.size == 0 || index >= self.num_ob_windows {
@@ -364,16 +348,36 @@ impl DwCam {
     // The last one is what runs now: only real devices answer, but functions
     // 1..7 of device 0 read device 0's header instead of all-ones.
 
-    /// Region 0 is programmed once over the whole ECAM aperture, so an
-    /// access needs no ATU write -- only its address: bus in bits 20+,
-    /// device in 15+, function in 12+, register in 11:0.
-    fn ecam_offset(&self, bdf: DeviceFunction, reg: usize) -> Option<usize> {
-        let bus_index = usize::from(bdf.bus.checked_sub(1)?);
-        let offset = (bus_index << 20)
-            | (usize::from(bdf.device) << 15)
-            | (usize::from(bdf.function) << 12)
-            | (reg & 0xfff);
-        (offset + 4 <= self.hw.cfg_size).then_some(offset)
+    /// `dw_pcie_other_conf_map_bus()`: point region 0 at `bdf` and return the
+    /// offset to read through the aperture.
+    ///
+    /// Target carries bus/device/function (`PCIE_ATU_BUS/DEV/FUNC`), the
+    /// region spans the whole config aperture, and the offset is just the
+    /// register -- the address does NOT encode dev/fn here.
+    fn point_at(&self, bdf: DeviceFunction) -> Option<usize> {
+        if !self.hw.link_up() {
+            return None;
+        }
+        // Our own bus numbers are RC-relative (1 = the first downstream bus);
+        // the reference uses absolute bus numbers, which the ATU just carries.
+        let type_ = if bdf.bus == 1 {
+            PCIE_ATU_TYPE_CFG0
+        } else {
+            PCIE_ATU_TYPE_CFG1
+        };
+        let busdev = (u32::from(bdf.bus) << 24)
+            | (u32::from(bdf.device) << 19)
+            | (u32::from(bdf.function) << 16);
+        if !self.hw.prog_outbound_atu(
+            0,
+            type_,
+            self.hw.cfg_base,
+            self.hw.cfg_size as u64,
+            u64::from(busdev),
+        ) {
+            return None;
+        }
+        Some(usize::from(bdf.function))
     }
 
     /// Own-conf (0:0:0) reads/writes stay on the DBI, for every offset: the
@@ -404,22 +408,16 @@ impl ConfigurationAccess for DwCam {
             return u32::MAX;
         }
         let _guard = self.lock.lock();
-        if !self.hw.link_up() {
+        if self.point_at(bdf).is_none() {
             return u32::MAX;
         }
-        let Some(offset) = self.ecam_offset(bdf, reg) else {
-            return u32::MAX;
-        };
-        let word = self.hw.cfg_win.read32(offset);
-        // Read-side diagnostic: the target as the core sees it before and
-        // after the data access, next to the value returned. If both targets
-        // equal the requested bdf yet the data belongs to another function,
-        // the access is not being translated by this region at all.
-        if CFG_READBACKS.load(core::sync::atomic::Ordering::Relaxed) <= 8 {
+        let word = self.hw.cfg_win.read32(reg);
+        // Read-side diagnostic: the value next to the ATU target that produced
+        // it, so an aliasing access names itself.
+        if CFG_READBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
             let atu = self.hw.atu_base(0);
             log::info!(
-                "pcie-dw: cfg read {:02x}.{} reg {reg:#05x} at {offset:#07x} -> {word:#010x} \
-                 (target {:#06x})",
+                "pcie-dw: cfg read {:02x}.{} reg {reg:#05x} -> {word:#010x} (target {:#010x})",
                 bdf.device,
                 bdf.function,
                 self.hw.dbi_read(atu + PCIE_ATU_LOWER_TARGET),
@@ -437,13 +435,9 @@ impl ConfigurationAccess for DwCam {
         if self.is_absent_own_bus(bdf) {
             return;
         }
-        if !self.hw.link_up() {
-            return;
+        if self.point_at(bdf).is_some() {
+            self.hw.cfg_win.write32(reg, data);
         }
-        let Some(offset) = self.ecam_offset(bdf, reg) else {
-            return;
-        };
-        self.hw.cfg_win.write32(offset, data);
     }
 
     unsafe fn unsafe_clone(&self) -> Self {
