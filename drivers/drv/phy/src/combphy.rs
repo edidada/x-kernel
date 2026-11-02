@@ -104,6 +104,8 @@ struct CombPhy {
     /// own APB clock (registers read back as 0), so the bulk path needs the
     /// gate write-mask bug fixed first. TODO(gate-hiword-clobber).
     clocks: [ClkHandle; 3],
+    /// Bring-up diagnostic view of the CRU window (see `log_cru`).
+    cru_diag: Option<IoMap>,
     /// `assigned-clock-rates` for the reference clock (100 MHz on the
     /// rk3588 boards). The reference's PHY init branches on the rate it
     /// actually reads, so the rate must be programmed before `hw_init`.
@@ -244,6 +246,26 @@ impl CombPhy {
     }
 }
 
+impl CombPhy {
+    /// Bring-up diagnostic: the CRU gate words that hold the php/pcie gates
+    /// plus `CLKSEL_CON(0x50)` (shared by `aclk_php_root`'s mux/divider and
+    /// `pclk_php_root`'s mux). Printed around each clock enable so a write
+    /// that clobbers a neighbour names itself.
+    fn log_cru(&self, tag: &str) {
+        let Some(cru) = &self.cru_diag else {
+            return;
+        };
+        log::info!(
+            "combphy: cru {tag}: 880={:#010x} 884={:#010x} 888={:#010x} 89c={:#010x} 440={:#010x}",
+            cru.read32(0x880),
+            cru.read32(0x884),
+            cru.read32(0x888),
+            cru.read32(0x89c),
+            cru.read32(0x440),
+        );
+    }
+}
+
 impl PhyHwOps for CombPhy {
     /// `rockchip_combphy_init`: clocks → mode config → resets deassert
     /// (USB3 additionally polls the pipe-phy ready bit).
@@ -256,9 +278,28 @@ impl PhyHwOps for CombPhy {
             log::info!("combphy: refclk {before} -> {after} Hz (target {target})");
         }
         log::info!("combphy: refclk reads {} Hz", self.refclk.get_rate());
-        // TODO(gate-hiword-clobber): enable all three (the reference's
-        // bulk enable) once a gate write stops touching its neighbours.
-        self.clocks[0].prepare_enable().map_err(|_| PhyError::Io)?;
+        // Bulk-enable like the reference. Enabling all three previously made
+        // every combphy register read back as 0, so log the shared CRU words
+        // around each enable to see which neighbour bit moves.
+        self.log_cru("before-clocks");
+        for (index, clk) in self.clocks.iter().enumerate() {
+            let rate = clk.get_rate();
+            clk.prepare_enable().map_err(|_| PhyError::Io)?;
+            // The PHP APB gate (`pclk_php_root`, CLKGATE_CON(32) bit 0) is
+            // enable-then-disable'd again somewhere inside the framework
+            // after our enable lands, which leaves the whole PHP APB domain
+            // gated and every combphy register reading back 0. Re-assert
+            // once and report the state so the rollback stays visible.
+            let first = clk.is_enabled();
+            if !first {
+                let _ = clk.enable();
+            }
+            log::info!(
+                "combphy: clock {index} at {rate} Hz enabled {first} -> {}",
+                clk.is_enabled()
+            );
+            self.log_cru("after-clock");
+        }
         self.configure(mode)?;
         for rst in &self.resets {
             rst.deassert();
@@ -368,6 +409,13 @@ impl DriverOps<PlatformBus> for CombPhyDriver {
             .and_then(|cells| cells.first().copied())
             .map(u64::from);
         let resets = [dev.res().reset_at(0)?, dev.res().reset_at(1)?];
+        let cru_diag = dev
+            .res()
+            .iomap_region(
+                driver_base::MmioRegion::new(0xfd7c_0000_usize, 0x1000),
+                "combphy-cru-diag",
+            )
+            .ok();
 
         // `rockchip_combphy_probe`: assert the phy reset through probe;
         // hw_init re-deasserts with the full sequence.
@@ -382,6 +430,7 @@ impl DriverOps<PlatformBus> for CombPhyDriver {
             phy_grf,
             refclk,
             clocks,
+            cru_diag,
             refclk_target,
             resets,
             mode: SpinNoIrq::new(None),

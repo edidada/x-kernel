@@ -111,3 +111,8 @@ LTSSM = L0（链路已训练，槽上设备在位）。PD repair status = 已上
 **建议路径**：切到 pcie3x4（fe150000，dbi @ 0x9c0000000，pcie30phy
 聚合模式，PD 已证上电）作为下一个 probe 目标——不同控制器/不同
 dbi 切片，可判别是 2x1l2 板级问题还是通用问题。
+
+## 真机 bring-up 记录
+
+踩坑与排查过程（含被证伪的假设、寄存器对照基准、环境坑、当前卡点）见
+[`bring-up-log.md`](./bring-up-log.md)。在继续 port 之前先读它。

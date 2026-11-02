@@ -1,0 +1,221 @@
+# RK3588 PCIe Bring-up 日志与踩坑记录
+
+本文记录 `drivers/bus/pci/src/dw_host.rs`（rk3588 DesignWare RC）真机 bring-up
+的全部过程：已经验证的事实、被证伪的假设、以及每一个坑的**根因与教训**。
+
+写作目的：这些坑每一个都花掉了 1 轮以上的真机周期（约 6 分钟/轮），其中
+若干是**看起来完全合理但方向完全错的推断**。后人在同一个 SoC 上继续做
+PCIe / USB / 任何高位地址外设时，先读这一页。
+
+---
+
+## 1. 当前状态
+
+| 里程碑 | 状态 | 证据 |
+|---|---|---|
+| CRU 时钟树（9 PLL + 648 分支） | ✅ | 真机 SD 卡 ext4 根挂载、启动到用户态 |
+| 复位 provider（639 行表） | ✅ | `SOFTRST_CON33/34` 读回：本控制器两条线已释放 |
+| PHY provider（usb2phy/combphy/pcie3phy） | ✅ probe | combphy id 0 `hw_init` 完成，refclk 100 MHz |
+| RC 时钟 6 路使能 | ✅ | `CLKGATE_CON(32..38)` 读回全 0（未门控） |
+| PD_PCIE 电源域 | ✅（读数存在） | `REPAIR_STATUS(0x290)` bit22 = 1 |
+| client APB 窗口 `fe190000` | ✅ 可读写 | LTSSM/HOT_RESET 等寄存器均可读 |
+| **链路训练（LTSSM=L0）** | ❌ **未达成** | 我方 `APB 0x300 = 0`；工作 Linux `= 0x00130014` |
+| **DBI 窗口 `0xa41000000`** | ❌ **stall** | 读永远不返回，无 panic、无 abort |
+| 设备枚举 / BAR / INTx | ⬜ | 依赖上两项 |
+
+**结论性因果链（已用寄存器对照证明）**：
+
+```
+combphy 只使能了 refclk（未使能 apbclk/phpclk）
+  → PHY 不出 pipe clock
+  → DWC core 的 core_clk 缺失，LTSSM 状态机冻结（读回 0）
+  → core 的 AXI slave（DBI）接了事务但永远不返回 → 总线 stall
+```
+
+`APB 0x04 / 0x10 / 0x14 / 0x30`（厂商驱动日志里 "can't get current limit"
+那组）在我们内核里全为 0、在 Linux 里非 0，是同一个结论的第二份证据：这些
+字只在 PHY 真正起来之后才有值。
+
+---
+
+## 2. 被证伪的假设（重要：不要重复走）
+
+按"曾经多有说服力 → 实测怎么否掉"排序。每条都值得记住，因为**下一个人会
+再次想到它们**。
+
+### 2.1 PTE 的 NS 位（Non-secure PA space）
+
+- **推断**：`Arm64Attr` 只在 `SHARED` flag 下置 NS=1，设备映射 NS=0 =
+  Secure PA space，non-secure EL1 访问高位 DBI 被 TZPC 阻断 → 挂。
+- **动作**：改成无条件 `a |= Self::NS`。
+- **实测**：DBI 仍然 stall，行为毫无变化。改动保留（无条件 NS=1 本身是对的，
+  与 Linux 一致，但没有解决本问题）。
+- **教训**：32 位外设全部正常时，"这是个地址空间/权限问题"的叙事特别顺，
+  但它同时也能解释任何东西 —— 这种"什么都能解释"的假设优先级要放低。
+
+### 2.2 Device 内存属性（nGnRnE / nGnRE / Normal-NC）
+
+- **推断 A**：rk3588 的高位 DBI 段不接受 Device-nGnRnE → 改 nGnRE。
+- **推断 B**：tgoskits（同样 rk3588、能工作）用的是线性映射（Normal 语义）
+  → 全局把 Device MAIR 改成 Normal-NC(0x44)。
+- **实测**：推断 B 让**内核在 "Starting kernel ..." 之后彻底静默**（UART 等
+  早期设备映射语义被一起改掉），已 revert；随后改成"只对 >4 GiB 的 iomap 用
+  UNCACHED"，DBI **仍然 stall**。
+- **教训**：属性不是根因。全局改 MAIR 这种"一把梭"实验代价极高且信息量低，
+  先做单变量、单窗口的最小改动才划算。
+
+### 2.3 CLKREQ# 拉低导致控制器进入低功耗态
+
+- **推断**：`PCIE_CLIENT_POWER = 0x30011000`（拉低 CLKREQ）写在首次 DBI 访问
+  之前，把控制器"停"了；BSP 是先 DBI 再写它。
+- **动作**：把 DBI 读移到 client APB 写之前。
+- **实测**：仍然 stall。且 tgoskits 在首次 DBI 访问**之前**就写 CLIENT_POWER +
+  GENERAL_CTRL，一样能工作 → 顺序本来就不是问题。
+- **教训**：把"顺序"当成根因之前，先找一个同样顺序但能工作的实现来对照。
+
+### 2.4 PMU 总线 idle 请求（BUS_IDLE_REQ）
+
+- **推断**：`PMU_BUS_IDLE_REQ` 把 PCIe 的 NOC 段 hold 在 idle，访问永久 stall。
+- **实测**：我方 `0xfd8d810c = 0`（没有任何 idle 请求），Linux `= 0x17ff`（别的
+  域 idle）。参考内核 `rk3588_pm_domains` 表里 `RK3588_PD_PCIE` 的 `req_mask == 0`
+  → **PCIe 域根本不参与 idle 握手**。
+- **教训**：`pm-domains.c` 的 `DOMAIN_RK3588(...)` 参数顺序必须展开核对
+  （`p_offset, pwr, status, m_offset, m_status, r_status, r_offset, req, idle, ...`），
+  否则会把"另一个域的位"当成目标域的。
+
+### 2.5 复位只 deassert（不 assert）
+
+- **推断**：BSP 5.10 只 deassert，我们照做。
+- **动作**：改成 assert → 1 µs → deassert 的真脉冲（对齐 mainline 与 tgoskits）。
+- **实测**：仍然 stall。脉冲是对的（已保留），但不是根因。
+- **教训**：复位脉冲属于"无论如何都该做对"的正确性修复，不要期待它治病。
+
+### 2.6 `reg` 解析步长 / PTE 地址截断 / VA 冲突
+
+- **推断**：`#address-cells=3` 的节点用错步长 → DBI 基址算成垃圾；或 PTE 只
+  保留 32 位把 `0xa41000000` 截断成 `0x41000000`；或 iomap VA 与线性 RAM 冲突。
+- **实测**：日志直接打印解析结果 —— `dbi 0xa41000000+0x400000` **完全正确**；
+  `PADDR_MASK = 0x0000_ffff_ffff_f000`（bit12–47）不截断；`TCR_EL1::IPS::Bits_48`。
+- **教训**：这些都用**一行日志**就能否掉。先打印事实，再谈假设。
+
+### 2.7 把热重启残留值当成"链路已训练"
+
+- **现象**：早期版本读到 `APB 0x300 = 0x00130011`（bit17:16=3 → link up），于是
+  长期以为"链路 L0 已通，只剩 DBI 不响应"，把排查引向纯 CPU 侧。
+- **真相**：client APB 块在 always-on 域，**寄存器值跨热重启保留**。
+  `0x130011` 是历史残留（和 Linux dmesg 里那句 "Link up, LTSSM is 0x130011"
+  一字不差，正是这个巧合骗过了我）。实测训练中的真实值是 `0x3`。
+- **教训**：**任何"状态寄存器"读数，先问它是否跨复位保留**。判断链路是否真的
+  训练，要看"训练过程中它变化"（`0x3 → 0x130011`），而不是看一个瞬时快照。
+
+---
+
+## 3. 真正有效的排查手法
+
+### 3.1 用两种失败模式区分"没路由"和"没时钟"
+
+同一地址在不同初始化阶段访问，行为不同，这个差异本身就是诊断信号：
+
+| 现象 | ESR / 表现 | 含义 |
+|---|---|---|
+| Synchronous external abort | `ESR=0x96000010`，DFSC=`0x10` | 总线返回 DECERR：**没有东西在解码这个地址**（块未供电/未开时钟） |
+| 静默 stall | 不 panic、不 abort、日志停住 | 事务被接收但**永不完成**：目标可达，但它的 core 时钟没跑 |
+
+实测序列（本控制器）：
+
+```
+初始化之前读 0xa41000000 → external abort（DECERR，和未初始化的兄弟控制器一样）
+时钟+复位+PHY 之后    → stall（路由通了，但从设备不响应）
+未初始化的兄弟 1l1    → external abort
+```
+
+"从 abort 变成 stall" 精确地指出：时钟/复位确实生效了，缺的是**让 core 真正
+跑起来的那个时钟**。
+
+### 3.2 与工作内核逐寄存器对照（本问题的终结手段）
+
+板子上跑一份 BSP Linux，拿到 root（Orange Pi 5 Plus 的 `orangepi` 账户 sudo
+密码就是 `orangepi`），用 `/dev/mem` 读，和我们内核里同样的偏移逐字对比。
+
+参考值（stock Linux 6.1.99，PCIe 工作正常，详见
+`docs/ai/skills/board-automation/SKILL.md`）：
+
+```
+DBI   0xa41000000 = 0x35881d87          ← 我们这里 stall
+APB   0x00 = 0x4c  0x04 = 0x04  0x10 = 0x03  0x14 = 0x122
+      0x18 = 0x7737  0x20 = 0x177f  0x2c = 0x2008  0x30 = 0x04401812
+      0x180 = 0x12   0x300 = 0x00130014     ← 我们这里是 0
+CRU   0x440 = 0x288（aclk_php_root = gpll/3 = 396 MHz，我们一致 ✓）
+      0x884 = 0x739c（aclk_pcie_1l2_dbi 门 = bit1 = 0，已开；我们一致 ✓）
+PMU   0x290 = 0xfe9f0001（bit22 = 0）        我们 0xfff70001（bit22 = 1）
+combphy0 0x2c = 0x43 / 0x30 = 0x88  我们 0x02 / 0x08
+pipe-phy-grf 0x34 = 0x80                      我们 0xc0
+时钟速率 aclk_1l2_dbi/slv 396 MHz、mstr 500 MHz、pclk 150 MHz、aux 24 MHz
+```
+
+**注意 PMU `0x290` 的坑**：mainline 注释写 "1'b1: power on"，但工作正常时该位是
+**0**。`rockchip_do_pmu_set_power_domain()` 里 power-on 写的是
+`pwr_w_mask`（值位为 0），即该位=0 才是上电。**注释和寄存器的语义不要照抄，
+以工作实例的读数为准。**
+
+### 3.3 用 `clk_summary` 拿"应有的时钟速率"
+
+`/sys/kernel/debug/clk/clk_summary`（root）直接给出工作系统里每一路时钟的实际
+频率，是验证我们 CRU 分频/选择是否正确的唯一硬标准。本处理器实测：
+`aclk_pcie_1l2_dbi = 396 MHz` 正好等于 `GPLL(1188)/3`，与我们
+`CLKSEL_CON(0x440)` 的 div 字段=2 吻合 → 时钟树这一层是**对的**，直接把
+排查范围压缩到 PHY 侧。
+
+---
+
+## 4. 环境坑（每轮都要面对的）
+
+1. **换板后串口会重编号**。real board 从 `ttyUSB0/1` 变成 `ttyUSB2`（控制台
+   1_500_000）/ `ttyUSB3`（继电器 115200，帧 `AA 01 03 AE` 开 / `AA 01 02 AD` 关）。
+   判断"板子死了"之前先扫一遍所有 `ttyUSB*`。
+2. **TFTP 服务随启动它的 SSH 会话退出**。报 `UDP 69 没有监听` 时先
+   `rkt tftp start`，别怀疑镜像。
+3. **`board-run.sh` 结束时会把板子断电**。要和板上的原生 Linux 对话，先
+   `rkt power on` 并等 40–50 s 启动。
+4. **unittest 必须用 QEMU 配置**。`.config` 停在 rk3588 时 `make unittest` 会静默
+   挂死；Makefile 的 `config-guard-qemu` 现在会显式报错（曾经被它救过一次）。
+5. **`IoMap::read32` 会校验 4 字节对齐**。诊断代码里写
+   `for off in 0..0x40 { apb.read32(off) }` 会立刻 panic
+   （`MMIO access misaligned`）——看起来像硬件挂了，其实是自己的 bug。
+   正确写法 `(0..0x40).step_by(4)`。
+
+---
+
+## 5. 当前卡点：PHP APB 门被"使能后立刻撤销"
+
+**实测证据（`CLKGATE_CON(32) @ 0x880`）**：
+
+```
+kclk-gate: 0x880 bit 0 enabled=true  write=0x00010000   ← 使能（正确）
+kclk-gate: 0x880 bit 0 enabled=false write=0x00010001   ← 1.4 ms 后又被关掉
+```
+
+`0x880` bit0 = `pclk_php_root`（`SET_TO_DISABLE|HIWORD_MASK`），是整个 PHP 域的
+APB 根时钟。它被关掉 → combphy 寄存器**全部读回 0** → PHY 无法工作。
+`Gate`/`Mux`/`Divider` 三条写路径的 hiword 掩码本身都正确（已逐条核对，
+`0x440` 邻居字段全程未被改动），所以**不是"误清邻居"，而是有人紧接着把门关回去**。
+
+`ClkHandle::prepare_enable()` 的错误分支会调用 `unprepare_locked()`（即 disable），
+但复现时它返回 Ok；`combphy` 里对三路时钟逐个 `is_enabled()` 的结果是
+`clock 0: false -> false`、`clock 1: false -> true`、`clock 2: false -> true`
+（第二次 `enable()` 才真正留下使能状态），说明**第一次的使能在返回前被撤销了**。
+
+临时对策（已入库，带注释）：combphy 使能三路时钟后逐个 `is_enabled()` 校验，
+发现被撤销就再 `enable()` 一次并打印状态。这样 `0x880` 最终为 0（门开），
+但 **LTSSM 仍为 0、DBI 仍 stall**，说明除了 PHP APB 门之外还有别的缺口。
+
+### 下一步（按优先级）
+
+1. **定位撤销者**：在 `ClkHandle::disable` / `disable_locked` 里对
+   `offset == 0x880` 打印时钟名，一轮即可name出调用者（很可能是某个 provider 的
+   `is_enabled`/`prepare` 校验路径，或 handle 的 Drop 语义）。
+2. 修掉撤销后，确认 `combphy 0x2c/0x30` 与 `pipe-phy-grf 0x34` 是否收敛到
+   工作 Linux 的值（`0x43` / `0x88` / `0x80`）。
+3. 若 `APB 0x300` 仍为 0，下一个怀疑对象是 `clk_pcie1l2_pipe`（combphy 的
+   pipe 输出）：它在 Linux `clk_summary` 里 rate 显示为 0（gate-only），需要确认
+   我们这侧的 pipe 门（`CLKGATE_CON(38) @ 0x898`）与其父源是否真的在跑。
