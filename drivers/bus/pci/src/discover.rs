@@ -161,7 +161,6 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
                 Ok(added) => log::debug!("pci: registered {added:?}"),
                 Err(err) => log::warn!("pci: device registration rejected: {err:?}"),
             }
-            log_mmio_bar_readback(info.vendor_id, info.device_id, &mmio_bars);
             // info, not debug: this line is the enumeration evidence (BDF,
             // ids and the BAR resources the descriptor carries).
             log::info!(
@@ -271,36 +270,4 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
     }
     #[cfg(not(target_arch = "x86_64"))]
     None
-}
-
-/// Proves a BAR assignment with a read that returns device data.
-///
-/// Writing a BAR and reading the register back only proves config space works;
-/// the address can be dead on the bus and the readback still looks perfect.
-/// The check is deliberately narrow: one device family we have register
-/// knowledge for, one word, once per boot. It goes away when a real driver owns
-/// the BAR.
-fn log_mmio_bar_readback(vendor: u16, device: u16, bars: &[(u64, u64)]) {
-    /// RTL8125: BAR0 offset 0 is IDR0..IDR3, the first four MAC bytes.
-    const RTL8125: (u16, u16) = (0x10ec, 0x8125);
-    if (vendor, device) != RTL8125 {
-        return;
-    }
-    let Some(&(base, size)) = bars.first() else {
-        return;
-    };
-    let probe_size = core::cmp::min(size as usize, 0x1000);
-    let Ok(va) = crate::iomap_mmio(base as usize, probe_size, "rtl8125-bar0") else {
-        log::warn!("pci: rtl8125 BAR0 at {base:#x} did not map");
-        return;
-    };
-    // SAFETY: `iomap_mmio` returned a device mapping covering at least
-    // `probe_size` bytes, so a 4-byte read at its base is in bounds, and device
-    // MMIO is only ever accessed through volatile reads.
-    let word = unsafe { core::ptr::read_volatile(va.as_ptr().cast::<u32>()) };
-    if word == 0 || word == u32::MAX {
-        log::warn!("pci: rtl8125 BAR0 at {base:#x} reads {word:#010x} -- address looks dead");
-    } else {
-        log::info!("pci: rtl8125 BAR0 at {base:#x} reads {word:#010x} (MAC bytes), BAR is live");
-    }
 }
