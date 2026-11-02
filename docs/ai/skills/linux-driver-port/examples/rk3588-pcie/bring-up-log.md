@@ -500,3 +500,95 @@ a4100000: 7fbffddb fff8ffaf f7ffdfff 7ffdd7ed   ← DBI 窗口：浮空数据
 | PD_PCIE 用 0x150 + 正确极性 | `PWR_CON` bit7=1、repair bit22=0，与参考一致 |
 | 复位 assert→1µs→deassert 脉冲 | 与参考一致（非关键） |
 | **以上合并** | **链路训练成功：0x2 → 0x00030011 (L0)** |
+
+---
+
+## 6. 做 harness 时要固化的教训
+
+这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
+harness 的检查项就能省掉整轮真机周期。
+
+### 6.1 临时诊断不许改共享默认值（本轮最大教训）
+
+**现象**：DBI 窗口无论换 `nGnRE`、`Normal-NC` 还是 `nGnRnE` 都失败，看起来
+"属性无关"，于是被当成"硬件问题"追了很多轮。
+
+**真相**：一次实验往 `memspace::iomap_device` 里加了"`paddr >= 4 GiB` 就用
+`UNCACHED`"，实验结束没撤。`0xa41000000` 是全内核**唯一** >4 GiB 的映射，
+所以它一直是 Normal-NC；后续所有属性对比**对被测窗口根本没生效**。
+撤掉、统一成 `DEVICE` 后立刻通：
+
+```
+pcie-dw: dbi alive, vendor 0x1d87 device 0x3588
+pcie-dw: link up, 1 lane(s)
+pcie-dw: bus 0 dev 00.0 vendor 0x1d87 device 0x3588
+```
+
+**harness 化**：
+
+- 任何"实验性默认值"必须走显式开关（编译期 feature / 运行时参数），禁止直接改
+  共享函数里的分支；
+- CI / harness 加一条 grep 检查：`iomap`/`map_linear` 之类共享路径里不许出现
+  以物理地址阈值切换属性的分支；
+- 每次改属性类实验后，**先 dump 一次 PTE** 确认实验真的作用到了目标窗口，
+  再开始解读结果（否则整轮数据作废）。
+
+### 6.2 MMIO 映射后立刻 dump PTE（新加的常规手段）
+
+在 `iomap_device` 里对目标 VA 调 `page_table().query_entry(va)`，打印
+`paddr / flags / page_size`：
+
+```
+iomap: pte VA 0xffff8000201bd000: paddr 0xa41000000 (asked 0xa41000000) Size4K
+```
+
+一行就能把"地址算错 / 属性给错 / 被拆成大页"三种怀疑一次否掉。建议 harness 把
+它做成 `--verbose` 的默认输出，驱动侧不用各自加。
+
+### 6.3 两种失败模式 + 一个"存活探针"
+
+| 现象 | 含义 |
+|---|---|
+| `ESR=0x96000010`，DFSC `0x10`（synchronous external abort） | 总线返回 DECERR：地址没被解码，**或**访问属性被互连拒绝 |
+| 静默 stall（无 panic、无 abort、日志停住） | 事务被接收但永不完成：目标在，但没时钟/在复位 |
+
+**存活探针**（本轮找到的实用判据）：区间内某个控制器的 `pcie-apb` 客户端块
+若 **整块读回全 0**，说明该控制器没被上电/开时钟，此时**绝不能去碰 DBI**，
+一碰就 stall。fe190000 是活的（`0x18=0x7737`、`0x20=0x177f`），fe150000 全 0
+→ 后者直接跳过，不再挂死整机。
+
+### 6.4 参考板上的 U-Boot 是免费 oracle
+
+打断 autoboot 后：
+
+- `md <pa>` 看到的是 **MMU 关闭**（强序 nGnRnE）时的原始响应，用来判断"这个
+  地址到底有没有从设备"；
+- `pci enum` / `pci` 能确认控制器与设备在位（我们板子枚举出 2×RTL8125）；
+- 注意：**枚举成功不等于 DBI 可读**——`pci` 走的是 32 位 `config` 窗口。
+
+代价提醒：在参考板用 `dd if=/dev/mem` 读未解码地址会**把整机挂住**
+（`panic_on_oops=0` 也救不了总线 stall）。改用 python + `mmap`，失败时是
+SIGBUS（进程死、内核活）。
+
+### 6.5 寄存器语义以工作实例为准，不要抄注释
+
+- `PMU 0x290` 的 repair_status：注释写 "1 = power on"，但工作 Linux 上是 **0**；
+  `PWR_CON(0x150)` bit7 才是 1。照注释写就会像我们一样"以为已上电"，实际没上。
+- `PMU_BUS_IDLE_REQ` 的 `req_mask == 0` 表示该域**不参与** idle 握手，别硬套。
+- 状态寄存器**可能跨热重启保留**：早期把残留的 `0x130011` 当成"链路已训练"，
+  白追了好几轮。判断链路要看**训练过程中的变化**（`0x2 → 0x30011`），
+  而不是某个瞬时快照。
+
+### 6.6 复位：只 deassert，不要脉冲
+
+两份参考驱动（BSP 与 mainline）都是 `reset_control_deassert`，不先 assert。
+我们加了 assert→1µs→deassert 的脉冲后，LTSSM 从 `0x00130011` 变成
+`0x00030011`（丢 bit20），即**脉冲把控制器搞差了**。去掉后与 Linux 逐位一致。
+
+### 6.7 排查顺序建议（给 harness 的默认剧本）
+
+1. 打印 DT 解析结果（`reg`/`clocks`/`resets`/`phys`/`ranges`），与板上 `/proc/device-tree` 对照；
+2. 由参考板 `/dev/mem` 取一份寄存器基线（CRU 门控、PHP_GRF、PMU、APB 客户端）；
+3. 按控制器逐个：phy → 复位 deassert → 时钟 → **APB 存活探针** → PTE dump → DBI 读；
+4. 每步都打一行可机器比对的日志（`key = value`），让 diff 代替人眼；
+5. 任何一步失败就**跳过该控制器**并继续，绝不因为一个没上电的控制器挂住整机。

@@ -743,6 +743,21 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         log_cru_gates(dev)?;
         log_bring_up_state(dev, apb_region, dbi_region, &apb)?;
 
+        // Liveness probe. A controller whose `pcie-apb` client block reads
+        // back as all zeros is not powered/clocked yet (measured: fe190000
+        // has 0x18=0x7737, 0x20=0x177f even before configuration, while
+        // fe150000 reads 0 everywhere), and touching its DBI then stalls the
+        // bus with no panic and no abort -- it killed a whole boot. Skip
+        // such a controller instead of hanging the machine; it can be
+        // brought up separately once its PHY/clock path is validated.
+        if apb.read32(0x18) == 0 && apb.read32(0x20) == 0 {
+            log::warn!(
+                "pcie-dw: {} client block is dead (apb reads 0); skipping this controller",
+                apb_region.base
+            );
+            return Ok(DwHostData {});
+        }
+
         configure_rc_mode(&apb);
         log::info!(
             "pcie-dw: client in RC mode (general-con {:#010x})",
