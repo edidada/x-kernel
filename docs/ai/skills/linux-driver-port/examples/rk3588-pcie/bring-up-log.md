@@ -331,6 +331,52 @@ DRAM（`0x1_0000_0000`）用**完全相同**的 `iomap_region` 路径能读，DB
 > 代价说明：这次读取把参考板挂住了，且继电器只控我们这块板，**需要人工断电
 > 重启那台原生 Linux 板**。以后在参考板上做同类探测要先确认可断电。
 
+### BSP 源码到手（`orange-pi-6.1-rk35xx`，板上跑的就是这版）
+
+本地已稀疏克隆，**后续不用再猜，直接查**：
+
+```
+/workspace/linux-bsp-rk3588                    # --sparse, branch orange-pi-6.1-rk35xx
+  drivers/pci/controller/dwc/pcie-dw-rockchip.c   # 2117 行（mainline 只有 870）
+  drivers/phy/rockchip/                          # combphy
+  drivers/soc/rockchip/                          # pm_domains / grf
+  arch/arm64/boot/dts/rockchip/                  # 172 个 dtsi，含 rk3588s.dtsi
+```
+
+**6.1 BSP 的真实 probe 顺序**（`rk_pcie_really_probe`）：
+
+```
+rk_pcie_resource_get            // pcie-dbi / pcie-apb 两次 devm_ioremap_resource
+rk_pcie_hardware_io_config:     // 4. hardware io settings
+    regulator → clk_bulk_prepare_enable(6 路) → phy_init → phy_power_on
+    → reset_control_deassert → **phy_calibrate()**      ← 见下
+pm_runtime_enable + pm_runtime_get_sync
+rk_pcie_host_config             // 5. 这里才有第一次 DBI 访问（dbi_ro_wr_en）
+rk_pcie_init_irq_and_wq         // 6. 软件侧
+rk_add_pcie_port                // dw_pcie_host_init
+```
+
+核对结论：
+
+- **没有 rk3588 专属的 PMU/syscon 写**。5.10 里那三条 `pmu_grf 0x100=0x01000100` /
+  `0x0=0x0c000000` / `usb_pcie_grf` 都在 `rk1808_pcie_fixup()` 里，被
+  `is_rk1808` 挡住，与 rk3588 无关。
+- `rk_pcie_set_mode()` 与我们一致（`PCIE_CLIENT_POWER=0x30011000`、
+  `GENERAL_CON=0xf00040`）。
+- `PCIE_CLIENT_LTSSM_STATUS` 的位定义补全：**bit16 = SMLH_LINKUP，
+  bit17 = RDLH_LINKUP**。我们的 `0x00030011` 两位都是 1 → 链路确实 up；
+  Linux 的 `0x001300xx` 多一个 bit20（未定义，疑为速率/带宽域）。
+- 官方 5.10 的 `rk3588s.dtsi` 里 pcie 节点是**两段** `reg`（`pcie-apb` +
+  `pcie-dbi`）；而板上实际 DTB 是三段（多 `config`）→ 板上跑的是更新版本，
+  6.1 分支才是权威。
+
+**新发现的缺口：`phy_calibrate()`**。BSP 在 `phy_init` + `phy_power_on` +
+复位释放之后调 `phy_calibrate`，失败就报 `"phy lock failed"` 并回滚。我们的
+combphy 没有实现它，而且**实测 combphy 寄存器 `0x2c`(0x02 vs Linux 0x43)、
+`0x30`(0x08 vs 0x88)、`0x28/0x34` 也不一致**——这三个字很可能就是 calibration
+写的。链路能训练说明 LTSSM 不依赖它，但它是否影响 DBI 从设备可就不好说了，
+**这是当前最具体的可验证缺口**。
+
 ### 下一步（按优先级）
 
 
@@ -338,9 +384,13 @@ DRAM（`0x1_0000_0000`）用**完全相同**的 `iomap_region` 路径能读，DB
    复位、PD_PCIE、DT 解析、PHP_GRF、gate 掩码 `0x440` 邻居、
    `pcie-apb` 客户端配置。剩下最值得做的两件事：
 
-   已知：解码**依赖控制器被初始化过**（上一节实测），而我们已经复刻了
-   Linux 的时钟/复位/PHY/PD/客户端模式/GRF，全部寄存器读数一致。所以缺的很
-   可能是**复位线本身**而不是使能位——待查清单：
+   **优先项已改为：让 combphy 做出 `phy_calibrate()`**，把
+   `combphy 0x28/0x2c/0x30/0x34` 收敛到工作 Linux 的
+   `0x90 / 0x43 / 0x88 / 0x56`（我们现在是 `0x93 / 0x02 / 0x08 / 0x59`）。
+   BSP 源码里直接抄实现（`drivers/phy/rockchip/`），不要猜。
+   已核对过、**不再是**怀疑对象：复位线 id（板上 DTB 的
+   `resets=<&cru 0x211 0x220>` 与 reset-names `pcie periph` 都与我们一致）、
+   时钟、`reg`、`phys`、PHP_GRF、PMU、GENERAL_CON。原待查清单保留如下：
 
    - **核对板上 DTB 的 `resets` 属性**（参考板 `/proc/device-tree/pcie@fe190000/resets`）。
      我们只核对了 `reg`/`clocks`/`phys`，**没有**核对 reset id。若板上用的是
