@@ -23,6 +23,18 @@ use crate::{HeaderType, PciHost, device_setup};
 ///
 /// Bridge devices and functions with unassignable BARs are logged and skipped.
 pub fn discover(domain: &driver_base::DeviceDomain) {
+    // A host whose config space is NOT a flat memory window (rk3588 DBI +
+    // per-access iATU reprogramming) publishes its access backend while
+    // probing; it owns bus numbering relative to the RC (0 = root, 1 = the
+    // first downstream bus), so it is scanned as such.
+    if let Some(cam) = crate::dw_host::take_published_cam() {
+        let segment = fw::pci_host().map_or(0, |host| host.segment);
+        log::info!("PCI: discovering through the published DBI+iATU access backend");
+        let mut root = crate::PciRoot::new(cam);
+        discover_root(domain, &mut root, 0, 1, segment);
+        return;
+    }
+
     let Ok(mut pci) = PciHost::new(device_setup::pci_cam_kind()) else {
         log::warn!("pci: bus access unavailable");
         return;
@@ -32,7 +44,22 @@ pub fn discover(domain: &driver_base::DeviceDomain) {
     let bus_end = pci.bus_end();
     let segment = pci.segment();
     let root = pci.root_mut();
+    discover_root(domain, root, bus_start, bus_end, segment);
+}
 
+/// The backend-agnostic discovery pipeline: enumerate `bus_start..=bus_end`
+/// on `root`, assign BARs, resolve legacy INTx and register descriptors.
+///
+/// Generic over the configuration access so a flat ECAM window
+/// (`MmioCam`) and a reprogram-per-access backend (the rk3588 DBI+iATU
+/// `DwCam`) share one implementation instead of forking the pipeline.
+pub fn discover_root<C: crate::ConfigurationAccess>(
+    domain: &driver_base::DeviceDomain,
+    root: &mut crate::PciRoot<C>,
+    bus_start: u8,
+    bus_end: u8,
+    segment: u16,
+) {
     // The DMA view every function below this host inherits (see
     // `host_dma_view`): firmware-stated facts, strict reading for a
     // firmware-described host that stated nothing, or the static default

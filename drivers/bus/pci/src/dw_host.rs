@@ -308,7 +308,7 @@ impl DwPcie {
 /// iATU window per access (type 0 on bus 1, type 1 deeper) and go
 /// through the config window alias.
 #[derive(Clone)]
-struct DwCam {
+pub(crate) struct DwCam {
     hw: Arc<DwPcie>,
     // Serialize iATU reprogramming vs concurrent config access (single
     // CFG window shared by all functions).
@@ -821,6 +821,8 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         }
         log::info!("pcie-dw: link up, {} lane(s)", pcie.lanes());
 
+        publish_cam(&pcie);
+
         // v1 enumeration evidence: scan bus 0 (the RC itself) and bus 1,
         // logging every responding function's vendor:device.
         let cam = DwCam {
@@ -837,4 +839,26 @@ impl DriverOps<PlatformBus> for DwHostDriver {
     }
 }
 
+/// The published access backend, handed to the generic bus layer.
+///
+/// A driver cannot register descriptors into the device domain itself (it
+/// only holds its own `Device`), so the composition root asks for this when
+/// it runs `pci::discover`. Publishing instead of scanning privately is what
+/// lets the DBI+iATU host share the ECAM pipeline's BAR/INTx/descriptor work.
+/// Hand the access backend to the generic bus layer, keeping the phy/clocks
+/// alive (the mapping outlives this probe).
+fn publish_cam(pcie: &Arc<DwPcie>) {
+    let cam = DwCam {
+        hw: pcie.clone(),
+        lock: Arc::new(SpinNoIrq::new(())),
+    };
+    *PUBLISHED_CAM.lock() = Some(cam);
+    log::info!("pcie-dw: published the DBI+iATU access backend");
+}
+
+static PUBLISHED_CAM: SpinNoIrq<Option<DwCam>> = SpinNoIrq::new(None);
+
+pub(crate) fn take_published_cam() -> Option<DwCam> {
+    PUBLISHED_CAM.lock().take()
+}
 driver_base::declare_driver!(PlatformBus, DwHostDriver, "pcie-dw-host", IDS);
