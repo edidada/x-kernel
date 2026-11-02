@@ -623,6 +623,9 @@ impl ClkCore {
             st.enable_count == 0
         };
         if need_disable {
+            // Temporary bring-up diagnostic: name the clock whose refcount
+            // hit zero so an unexpected hardware disable identifies itself.
+            log::info!("kclk: hw-disable \"{}\" (count 0)", self.name);
             self.ops.disable();
         }
         if let Some(parent) = self.parent_node() {

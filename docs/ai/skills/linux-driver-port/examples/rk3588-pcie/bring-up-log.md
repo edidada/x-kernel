@@ -209,6 +209,31 @@ APB 根时钟。它被关掉 → combphy 寄存器**全部读回 0** → PHY 无
 发现被撤销就再 `enable()` 一次并打印状态。这样 `0x880` 最终为 0（门开），
 但 **LTSSM 仍为 0、DBI 仍 stall**，说明除了 PHP APB 门之外还有别的缺口。
 
+### 级联链（`core/kclk` 里加 `hw-disable "<name>"` 日志后实测）
+
+```
+combphy: cru before-clocks ...            ← 开始使能三路时钟
+kclk: hw-disable "clk_ref_pipe_phy0" (count 0)      kclk: hw-disable "clk_ref_pipe_phy0_pll_src"         |  refclk 及其父链被关
+kclk: hw-disable "ppll"                              |
+kclk: hw-disable "pll_ppll"                         /
+combphy: clock 0 ... enabled false -> false        ← refclk 是纯 mux，is_enabled 恒 false
+kclk: hw-disable "pclk_pcie_combo_pipe_phy0"       ← apbclk 被关
+combphy: clock 1 ... enabled false -> true
+kclk: hw-disable "pclk_php_root"                   ← PHP APB 根门被关
+combphy: clock 2 ... enabled false -> true
+```
+
+规律是**每一路时钟 `prepare_enable()` 之后紧跟着它自己（及父链）被 `disable`**，
+且 `prepare_enable()` 仍返回 Ok。`ClkHwOps` 的默认 `enable/enable/prepare` 全是
+`Ok(())`，所以不是"对 mux 调 enable 报错触发回滚"这一条路；
+`enable_locked()` 里唯一的 `disable_locked` 调用在错误回滚分支（会返回 Err）。
+**这是下一轮要钉死的地方**：在 `kphy` 的 `init_powered()`/`PhyInstance` guard 与
+`ClkHandle` 的 drop/refcount 语义之间，存在一条"使能后立刻释放"的路径。
+
+注意：`ppll` / `pll_ppll` 正是 combphy pipe 输出的源，被关掉就意味着
+**pipe 时钟没有源** —— 这与"LTSSM 恒为 0"完全自洽，所以修掉这条级联很可能
+直接让链路训练起来。
+
 ### 下一步（按优先级）
 
 1. **定位撤销者**：在 `ClkHandle::disable` / `disable_locked` 里对
