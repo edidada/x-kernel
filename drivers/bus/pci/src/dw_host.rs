@@ -365,9 +365,12 @@ impl DwCam {
         } else {
             PCIE_ATU_TYPE_CFG1
         };
-        let busdev = (u32::from(bdf.bus) << 24)
-            | (u32::from(bdf.device) << 19)
-            | (u32::from(bdf.function) << 16);
+        // Bus and function go in the target; the device number does NOT --
+        // bits 23:19 collide with PCIE_ATU_FUNC_NUM(pf)/FUNC_NUM_MATCH_EN in
+        // the vendor header, so writing a device there enables function
+        // matching instead of selecting a device (measured: every device kept
+        // answering as device 0).
+        let busdev = (u32::from(bdf.bus) << 24) | (u32::from(bdf.function) << 16);
         if !self.hw.prog_outbound_atu(
             0,
             type_,
@@ -377,7 +380,9 @@ impl DwCam {
         ) {
             return None;
         }
-        Some(usize::from(bdf.function))
+        // Device number rides in the aperture address (device << 15); that is
+        // the half of the mapping the pure-ECAM probe proved works.
+        Some(usize::from(bdf.device) << 15)
     }
 
     /// Own-conf (0:0:0) reads/writes stay on the DBI, for every offset: the
@@ -395,6 +400,22 @@ impl DwCam {
     fn is_absent_own_bus(&self, bdf: DeviceFunction) -> bool {
         bdf.bus == 0 && !(bdf.device == 0 && bdf.function == 0)
     }
+
+    /// Board fact, measured against the reference Linux on the same board:
+    /// each rk3588 controller's downstream bus carries exactly ONE endpoint,
+    /// at device 0 function 0 (its `lspci` shows `0004:40:00.0` bridge +
+    /// `0004:41:00.0` RTL8125, nothing else).
+    ///
+    /// This filter exists because the config aperture aliases devices above 0
+    /// on this core: the ATU target's device field collides with
+    /// `PCIE_ATU_FUNC_NUM`/`FUNC_NUM_MATCH_EN` (bits 20:19), and driving the
+    /// device from the address only partly works -- reads for dev 1..31 come
+    /// back with the device-0 endpoint's header instead of all-ones. Rather
+    /// than register a busful of phantoms, treat "device != 0 downstream" as
+    /// absent, which is what the hardware actually is.
+    fn is_absent_downstream_device(&self, bdf: DeviceFunction) -> bool {
+        bdf.bus != 0 && bdf.device != 0
+    }
 }
 
 impl ConfigurationAccess for DwCam {
@@ -404,14 +425,14 @@ impl ConfigurationAccess for DwCam {
         if self.is_own(bdf) {
             return self.hw.dbi_read(reg);
         }
-        if self.is_absent_own_bus(bdf) {
+        if self.is_absent_own_bus(bdf) || self.is_absent_downstream_device(bdf) {
             return u32::MAX;
         }
         let _guard = self.lock.lock();
-        if self.point_at(bdf).is_none() {
+        let Some(dev_off) = self.point_at(bdf) else {
             return u32::MAX;
-        }
-        let word = self.hw.cfg_win.read32(reg);
+        };
+        let word = self.hw.cfg_win.read32(dev_off | reg);
         // Read-side diagnostic: the value next to the ATU target that produced
         // it, so an aliasing access names itself.
         if CFG_READBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
@@ -432,11 +453,11 @@ impl ConfigurationAccess for DwCam {
             self.hw.dbi_write(reg, data);
             return;
         }
-        if self.is_absent_own_bus(bdf) {
+        if self.is_absent_own_bus(bdf) || self.is_absent_downstream_device(bdf) {
             return;
         }
-        if self.point_at(bdf).is_some() {
-            self.hw.cfg_win.write32(reg, data);
+        if let Some(dev_off) = self.point_at(bdf) {
+            self.hw.cfg_win.write32(dev_off | reg, data);
         }
     }
 
