@@ -57,3 +57,40 @@
 - v2 `drivers/bus/pci` 现有 `MmioCam`(ECAM,virtio/QEMU)。DW 路径提供第二个 `ConfigurationAccess` 实现:`DwConfigAccess { dbi: IoMap, apb: IoMap, cfg_windows: [iATU idx;2] }`,`PciRoot<DwConfigAccess>` 复用现有枚举。
 - RC 平台驱动 probe 成功后通过扩展服务(或 driver-host ProviderClass)发布 `PciRoot`;组合根在 RC probe 完成后触发 PciBus 枚举(挂在其段号 `linux,pci-domain` 下)。
 - `bus/**` 是宿主侧树(边界文档明确豁免 L0/L1),可直接依赖 khal/kclk。
+
+
+---
+
+## 实测进展（2026-10-30，诊断轮次 3）
+
+**已证实工作**：
+- fe190000（pcie2x1l2）probe 链路走通：6 clocks + 2 resets（req-reset）+
+  combphy（req-phy，mode 绑定 PCIE）+ PD 电源域检查；
+- **LTSSM L0 链路训练成功**：client LTSSM status = 0x00130011
+  （bits 17:16 = 3 = link up；state = 0x11 = L0）——M.2 槽设备在位且
+  训练完成，combphy/pipe/时钟全链路正确；
+- client 寄存器窗口（fe190000）读写正常（GENERAL_CON 读回 0x4c = 
+  mode RC | 状态位）；
+- PD_PCIE repair-status 读回 BIT(22)=1（电源域已上电——U-Boot/硬件
+  默认态）。
+
+**当前卡点**：DBI 窗口（0xa41000000）首次读挂总线（CPU 停止、无 panic）。
+同窗口的任何偏移访问均挂（0x0 读、0x8bc 写）。而 client 窗口、PD 状态
+寄存器（0xfd8d8000+0x290）等 32-bit PA 访问全部正常。
+
+**已排除**：时钟（6 个 enable 成功且父链递归开根门）、复位对、PHY、
+关键根时钟（critical walk）、PD 电源、地址映射（linear map 正确打日志）、
+MAIR 属性（nGnRnE 与 Linux 相同）、ranges/时钟 id 十六进制误读。
+
+**下一轮诊断（二选一假设）**：
+1. 36-bit PA DEVICE 访问路径首次被驱动——PTE/属性正确但 rk3588 总线
+   对高 DBI 别名的访问需要额外使能（NIC 子系统门控/PHP GRF 位）；
+   对照实验：读 fe170000 的 dbi 别名（0xa40800000?）与 fe180000 的
+   （0xa40c00000），若全部挂 → 系统性；若部分响应 → 地址核对问题。
+2. DBI 窗口需要 PERST# 先走一个完整脉冲（BSP 在 resource_get 时把
+   PERST 拉低、phy init 后释放——我们从未动过 PERST，假设固件已释放；
+   若固件实际把 PERST 拉低着，控制器状态机可能停在特殊态）——需要
+   GPIO 框架或板级 EP 支持。
+
+**注意**：链路 L0 意味着 PHY/pipe/时钟域全部工作，仅 DBI 寄存器
+访问路径挂——不是电源域问题（repair status 已上电）。
