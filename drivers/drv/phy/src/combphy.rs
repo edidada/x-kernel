@@ -97,6 +97,17 @@ struct CombPhy {
     pipe_grf: Grf,
     phy_grf: Grf,
     refclk: ClkHandle,
+    /// The DT clocks as a bulk group (`clk_bulk_prepare_enable` in the
+    /// reference enables refclk, apbclk and phpclk together). Only the
+    /// reference clock is enabled today: turning the other two on through
+    /// this CRU provider clobbers the shared gate word and kills the PHY's
+    /// own APB clock (registers read back as 0), so the bulk path needs the
+    /// gate write-mask bug fixed first. TODO(gate-hiword-clobber).
+    clocks: [ClkHandle; 3],
+    /// `assigned-clock-rates` for the reference clock (100 MHz on the
+    /// rk3588 boards). The reference's PHY init branches on the rate it
+    /// actually reads, so the rate must be programmed before `hw_init`.
+    refclk_target: Option<u64>,
     resets: [ResetHandle; 2],
     mode: SpinNoIrq<Option<PhyMode>>,
     instance: SpinNoIrq<Option<Arc<PhyInstance>>>,
@@ -239,7 +250,15 @@ impl PhyHwOps for CombPhy {
     fn hw_init(&self) -> Result<(), PhyError> {
         let mode = self.mode.lock().expect("mode bound at acquire");
         log::info!("combphy: hw_init id {} mode {mode:#x}", self.id);
-        self.refclk.prepare_enable().map_err(|_| PhyError::Io)?;
+        if let Some(target) = self.refclk_target {
+            let before = self.refclk.get_rate();
+            let after = self.refclk.set_rate(target).unwrap_or(before);
+            log::info!("combphy: refclk {before} -> {after} Hz (target {target})");
+        }
+        log::info!("combphy: refclk reads {} Hz", self.refclk.get_rate());
+        // TODO(gate-hiword-clobber): enable all three (the reference's
+        // bulk enable) once a gate write stops touching its neighbours.
+        self.clocks[0].prepare_enable().map_err(|_| PhyError::Io)?;
         self.configure(mode)?;
         for rst in &self.resets {
             rst.deassert();
@@ -256,7 +275,9 @@ impl PhyHwOps for CombPhy {
         for rst in &self.resets {
             rst.assert();
         }
-        self.refclk.disable_unprepare();
+        for clk in self.clocks.iter().rev() {
+            clk.disable_unprepare();
+        }
         Ok(())
     }
 
@@ -330,6 +351,22 @@ impl DriverOps<PlatformBus> for CombPhyDriver {
         let pipe_grf = Grf::by_property(dev, "rockchip,pipe-grf")?;
         let phy_grf = Grf::by_property(dev, "rockchip,pipe-phy-grf")?;
         let refclk = dev.res().clk_at(0)?;
+        let clocks = [
+            dev.res().clk_at(0)?,
+            dev.res().clk_at(1)?,
+            dev.res().clk_at(2)?,
+        ];
+        // The board states the reference clock's rate in
+        // `assigned-clock-rates` (rk3588 combphys: 100 MHz). Nothing in the
+        // clock framework applies it, and the PHY's init branches on the
+        // rate it reads — an unapplied rate leaves the PLL unconfigured,
+        // so the pipe clock never starts (LTSSM stays 0 and the host's DBI
+        // slave, which runs on the pipe-derived core clock, never answers).
+        let refclk_target = firmware
+            .prop("assigned-clock-rates")
+            .and_then(|p| p.u32_list())
+            .and_then(|cells| cells.first().copied())
+            .map(u64::from);
         let resets = [dev.res().reset_at(0)?, dev.res().reset_at(1)?];
 
         // `rockchip_combphy_probe`: assert the phy reset through probe;
@@ -344,6 +381,8 @@ impl DriverOps<PlatformBus> for CombPhyDriver {
             pipe_grf,
             phy_grf,
             refclk,
+            clocks,
+            refclk_target,
             resets,
             mode: SpinNoIrq::new(None),
             instance: SpinNoIrq::new(None),

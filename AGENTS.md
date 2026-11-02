@@ -23,6 +23,10 @@ Current shared skills:
 - `docs/ai/skills/test-harness/SKILL.md`:
   external Starry Test Harness workflow for guest regression cases,
   suite registration, execution, and syscall-focused test design constraints.
+- `docs/ai/skills/board-automation/SKILL.md`:
+  real-board (RK3588) validation loop: `scripts/board-run.sh`, serial/relay
+  renumbering after re-cabling, the unittest-config trap, and the
+  "dump a working kernel and diff registers" technique for hardware hangs.
 - `docs/ai/skills/problem-diagnosis/SKILL.md`:
   first-pass issue classification and localization workflow for build,
   boot, panic, hang, regression, and performance problems.

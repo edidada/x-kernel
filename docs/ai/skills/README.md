@@ -52,6 +52,11 @@ Current skills:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
+- `board-automation/`:
+  real-board (RK3588) validation loop via `scripts/board-run.sh`, the
+  serial/replay pitfalls after re-cabling, the unittest-config trap, and
+  the "dump a working kernel and diff" technique for hang-with-no-panic
+  hardware bugs.
 - `pr-ci-review/`:
   Gitee PR lifecycle: creating/updating PRs, tracking latest Jenkins CI
   status and failure diagnosis, and reading the latest review opinions from

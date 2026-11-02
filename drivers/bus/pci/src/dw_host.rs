@@ -540,7 +540,9 @@ fn log_bring_up_state(
     ] {
         log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
     }
-    let _ = apb_map;
+    for off in [0x180usize, 0x2c, 0x300] {
+        log::info!("pcie-dw: apb {off:#04x} = {:#010x}", apb_map.read32(off));
+    }
     Ok(())
 }
 
@@ -565,6 +567,68 @@ fn configure_rc_mode(apb: &IoMap) {
     // 0b100 (RC mode + LTSSM enable), bit 6 = the BSP's RC-mode bit.
     apb.write32(PCIE_CLIENT_GENERAL_CON, 0x00f7_0044);
     khal::time::busy_wait(ktime_types::TimeSpan::from_millis(1));
+}
+
+/// 4 KiB-only mapping of the same page: separates "the slave never answers"
+/// from "the 4 MiB linear mapping is wrong".
+fn probe_dbi_page(
+    dev: &mut Device<'_, PlatformBus>,
+    region: driver_base::MmioRegion,
+) -> Result<(), ProbeError> {
+    let page = dev.res().iomap_region(
+        driver_base::MmioRegion::new(region.base, 0x1000),
+        "pcie-dbi-page",
+    )?;
+    log::info!("pcie-dw: dbi page word {:#010x}", page.read32(0x00));
+    Ok(())
+}
+
+/// CRU read-back of the PCIe gate words and the `aclk_php_root`
+/// mux/divider: a stuck gate or a stopped parent names itself here before
+/// the DBI probe hangs the bus.
+fn log_cru_gates(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    let cru = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfd7c_0000_usize, 0x0010_0000),
+        "pcie-cru-diag",
+    )?;
+    for (name, off) in [
+        ("CLKGATE_CON(32) php/center", 0x800 + 32 * 4),
+        ("CLKGATE_CON(33) pcie aclk/dbi", 0x800 + 33 * 4),
+        ("CLKGATE_CON(34) pcie pclk/slv", 0x800 + 34 * 4),
+        ("CLKGATE_CON(35) pcie aux", 0x800 + 35 * 4),
+        ("CLKGATE_CON(38) pipe", 0x800 + 38 * 4),
+    ] {
+        log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
+    }
+    Ok(())
+}
+
+/// The combphy and its two GRFs, at the offsets a stock Linux leaves
+/// behind (recorded from `/dev/mem` on the same board with PCIe working).
+/// A diff here names the missing PHY programming directly.
+fn log_phy_state(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    let phy = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfee0_0000_usize, 0x1000),
+        "combphy0-diag",
+    )?;
+    for off in (0..0x40).step_by(4) {
+        log::info!("pcie-dw: combphy {off:#04x} = {:#010x}", phy.read32(off));
+    }
+    let ppgrf = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfd5b_c000_usize, 0x1000),
+        "pipe-phy-grf-diag",
+    )?;
+    for off in (0..0x40).step_by(4) {
+        log::info!("pcie-dw: phygrf {off:#04x} = {:#010x}", ppgrf.read32(off));
+    }
+    let phpgrf = dev.res().iomap_region(
+        driver_base::MmioRegion::new(0xfd5b_0000_usize, 0x1000),
+        "php-grf-diag",
+    )?;
+    for off in (0..0x60).step_by(4) {
+        log::info!("pcie-dw: phpgrf {off:#04x} = {:#010x}", phpgrf.read32(off));
+    }
+    Ok(())
 }
 
 impl DriverOps<PlatformBus> for DwHostDriver {
@@ -599,6 +663,7 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // access stall (no DECERR, no completion). Both the reference
         // driver and the vendor BSP pulse the pair here.
         log::info!("pcie-dw: phy powered, pulsing the reset pair");
+        log_phy_state(dev)?;
         for rst in &resets {
             rst.assert();
         }
@@ -619,28 +684,16 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         // CLKGATE_CON word. Log the pcie-domain gate words after the
         // enables so a stuck gate names itself (SET_TO_DISABLE gates read
         // 0 when the clock is ON).
-        let cru = dev.res().iomap_region(
-            driver_base::MmioRegion::new(0xfd7c_0000_usize, 0x0010_0000),
-            "pcie-cru-diag",
-        )?;
-        for (name, off) in [
-            ("CLKGATE_CON(32) php/center", 0x800 + 32 * 4),
-            ("CLKGATE_CON(33) pcie aclk/dbi", 0x800 + 33 * 4),
-            ("CLKGATE_CON(34) pcie pclk/slv", 0x800 + 34 * 4),
-            ("CLKGATE_CON(35) pcie aux", 0x800 + 35 * 4),
-            ("CLKGATE_CON(38) pipe", 0x800 + 38 * 4),
-            ("CLKSEL_CON(165) center mux", 0x400 + 165 * 4),
-        ] {
-            log::info!("pcie-dw: cru {name} @ {off:#x} = {:#010x}", cru.read32(off));
-        }
-
+        log_cru_gates(dev)?;
         log_bring_up_state(dev, apb_region, dbi_region, &apb)?;
 
         configure_rc_mode(&apb);
         log::info!(
-            "pcie-dw: client in RC mode, reading own dbi {:#x}",
+            "pcie-dw: client in RC mode (general-con {:#010x}), reading own dbi {:#x}",
+            apb.read32(PCIE_CLIENT_GENERAL_CON),
             dbi_region.base
         );
+        probe_dbi_page(dev, dbi_region)?;
         let vendor_word = dbi.read32(0x00);
         log::info!(
             "pcie-dw: dbi alive, vendor {:#06x} device {:#06x}",
