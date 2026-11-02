@@ -79,10 +79,12 @@ impl Arm64MemAttr {
     pub const MAIR_VALUE: u64 = Self::mair_el1_val();
 
     pub const fn mair_el1_val() -> u64 {
-        // Device = nGnRE (0x04), matching Linux ioremap (MT_DEVICE_nGnRE).
-        // nGnRnE (0x00) hangs CPU accesses on some rk3588 NIC-routed
-        // peripherals (e.g. the PCIe DBI windows) that tolerate nGnRE.
-        let device = 0x04;
+        // Device = nGnRnE (0x00) -- strongly ordered, the attribute a CPU
+        // uses with the MMU off (U-Boot reads the rk3588 PCIe DBI at
+        // 0xa41000000 fine that way and gets zeros, while our nGnRE access
+        // got an external abort). The previous "nGnRnE hangs rk3588 NIC
+        // peripherals" note was an unverified guess; measure it.
+        let device = 0x00;
         let normal = 0xff;
         let normal_nc = 0x44;
         (device << (8 * Self::Device as u64))
