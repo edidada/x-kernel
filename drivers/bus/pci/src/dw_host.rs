@@ -95,7 +95,6 @@ const PCIE_ATU_LOWER_TARGET: usize = 0x014;
 const PCIE_ATU_UPPER_TARGET: usize = 0x018;
 const PCIE_ATU_TYPE_MEM: u32 = 0x0;
 const PCIE_ATU_TYPE_CFG0: u32 = 0x4;
-const PCIE_ATU_TYPE_CFG1: u32 = 0x5;
 
 /// One DT `ranges` window, classified.
 #[derive(Debug, Clone, Copy)]
@@ -346,50 +345,25 @@ pub(crate) struct DwCam {
 }
 
 impl DwCam {
-    /// Program the CFG iATU window for `bdf` (link-up last line of
-    /// defense, matching the reference).
-    fn map_bus(&self, bdf: DeviceFunction) -> bool {
-        if !self.hw.link_up() {
-            return false;
-        }
-        let type_ = if bdf.bus == 1 {
-            PCIE_ATU_TYPE_CFG0
-        } else {
-            PCIE_ATU_TYPE_CFG1
-        };
-        // ATU target encoding, NOT the PCI config-address encoding:
-        // mainline's PCIE_ATU_BUS/DEV/FUNC put bus in bits 31:24, device in
-        // 23:19 and function in 18:16. The config-address form
-        // ((bus<<8)|(dev<<3)|fn) parks function in bits 2:0, which the ATU
-        // ignores -- measured: every function on a bus served the same
-        // endpoint because only the bus/device bits had any effect.
-        // This core takes the bus and the function from the CFG0 target but the
-        // device number from the address (measured: putting device in target
-        // bits 23:19 left every device answering as device 0, while the
-        // function field took effect). So: bus + function in the target,
-        // device in the aperture offset.
-        let busdev = (u32::from(bdf.bus) << 24) | (u32::from(bdf.function) << 16);
-        let ok = self
-            .hw
-            .prog_outbound_atu(0, type_, self.hw.cfg_base, 0x1000, u64::from(busdev));
+    // Measurement notes for the CFG0 field mapping on this core (three
+    // configurations tried, none fully correct yet):
+    //   target=bus/dev/fn, offset=reg, 4 KiB region  -> function ok, device aliased
+    //   target=bus/fn,     offset=dev<<15, 4 KiB     -> device clipped by the region
+    //   target=bus/fn,     offset=dev<<15, 1 MiB     -> device aliased again
+    //   target=0 (pure ECAM), offset=bus/dev/fn, 1MiB-> device ok, function aliased
+    // The last one is what runs now: only real devices answer, but functions
+    // 1..7 of device 0 read device 0's header instead of all-ones.
 
-        // Bring-up diagnostic: read the CFG region back. Every devfn on bus 1
-        // reads the same endpoint, so either the writes do not land or the
-        // read goes somewhere else -- the readback tells which.
-        if CFG_READBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-            let atu = self.hw.atu_base(0);
-            log::info!(
-                "pcie-dw: cfg atu {:02x}.{} type {type_:#x} busdev {busdev:#06x} ok {ok}: ctrl1 \
-                 {:#010x} ctrl2 {:#010x} target {:#010x} limit {:#010x}",
-                bdf.device,
-                bdf.function,
-                self.hw.dbi_read(atu + PCIE_ATU_REGION_CTRL1),
-                self.hw.dbi_read(atu + PCIE_ATU_REGION_CTRL2),
-                self.hw.dbi_read(atu + PCIE_ATU_LOWER_TARGET),
-                self.hw.dbi_read(atu + PCIE_ATU_LIMIT),
-            );
-        }
-        ok
+    /// Region 0 is programmed once over the whole ECAM aperture, so an
+    /// access needs no ATU write -- only its address: bus in bits 20+,
+    /// device in 15+, function in 12+, register in 11:0.
+    fn ecam_offset(&self, bdf: DeviceFunction, reg: usize) -> Option<usize> {
+        let bus_index = usize::from(bdf.bus.checked_sub(1)?);
+        let offset = (bus_index << 20)
+            | (usize::from(bdf.device) << 15)
+            | (usize::from(bdf.function) << 12)
+            | (reg & 0xfff);
+        (offset + 4 <= self.hw.cfg_size).then_some(offset)
     }
 
     /// Own-conf (0:0:0) reads/writes stay on the DBI, for every offset: the
@@ -420,11 +394,12 @@ impl ConfigurationAccess for DwCam {
             return u32::MAX;
         }
         let _guard = self.lock.lock();
-        if !self.map_bus(bdf) {
+        if !self.hw.link_up() {
             return u32::MAX;
         }
-        // Device number rides in the aperture, not in the ATU target.
-        let offset = (usize::from(bdf.device) << 15) | (reg & 0xfff);
+        let Some(offset) = self.ecam_offset(bdf, reg) else {
+            return u32::MAX;
+        };
         let word = self.hw.cfg_win.read32(offset);
         // Read-side diagnostic: the target as the core sees it before and
         // after the data access, next to the value returned. If both targets
@@ -452,11 +427,12 @@ impl ConfigurationAccess for DwCam {
         if self.is_absent_own_bus(bdf) {
             return;
         }
-        let _guard = self.lock.lock();
-        if !self.map_bus(bdf) {
+        if !self.hw.link_up() {
             return;
         }
-        let offset = (usize::from(bdf.device) << 15) | (reg & 0xfff);
+        let Some(offset) = self.ecam_offset(bdf, reg) else {
+            return;
+        };
         self.hw.cfg_win.write32(offset, data);
     }
 
