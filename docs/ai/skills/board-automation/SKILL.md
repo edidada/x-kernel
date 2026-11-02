@@ -26,22 +26,64 @@ build -> deploy to the TFTP root -> power off -> power on -> wait for boot
   bring the TFTP server back, `./rkt console --seconds N` to just listen,
   `./rkt power on|off` for the relay.
 
+### 0. Install the stable names first (one-time, per rig)
+
+`/dev/ttyUSB<N>` is assigned in enumeration order, so **manually re-plugging
+one cable renumbers all three ports**. That is not hypothetical: one board
+run captured the native-Linux reference board and produced an empty log
+because the console had moved from `ttyUSB0` to `ttyUSB2`.
+
+The repo pins the three adapters to stable names via udev:
+
+```
+scripts/board-udev/99-xkernel-rk3588.rules   # the rule (versioned)
+scripts/board-udev/install.sh                # install on the rig over ssh
+scripts/board-udev/install.sh --local        # or on this host
+scripts/board-udev/install.sh --patch-rkt    # then aim rkt at the names
+```
+
+| stable name | role | match key |
+|---|---|---|
+| `/dev/ttyXK` | **our (x-kernel) board's console** | FTDI `0403:6001`, serial `A5XK3RJT` |
+| `/dev/ttyREF` | the native-Linux reference board | FTDI `0403:6001`, serial `A54LQ9PF` |
+| `/dev/ttyPWR` | relay / USB power switch | CH340 `1a86:7523` |
+
+Installation needs root on the rig host, so `install.sh` prompts for its
+sudo password — **do not try to guess or automate it**; that account locks
+after a few wrong attempts. `--patch-rkt` needs no root (it only edits
+`~/rkt/profiles/opi5plus.ini`).
+
+Match keys: the two FTDI adapters share vendor:product, so only the factory
+serial distinguishes them; the serials are printed on the FTDI shells and
+`ls -l /dev/serial/by-id/` shows them. Re-plugging an adapter elsewhere
+keeps working; **swapping in a different adapter requires updating the
+serial in the rule**.
+
+After the rule is installed, point rkt at the stable names by editing
+`~/rkt/profiles/opi5plus.ini` (`console.port = /dev/ttyXK`,
+`power.port = /dev/ttyPWR`) — not via `rkt --console`, see below.
+`scripts/board-run.sh` prints an adapter check before each run so a
+renumbered port is visible before the cycle starts.
+
 ### Serial topology (get this wrong and you debug the wrong board)
 
 The rig drives **two** boards plus a relay, and the three ports are NOT
 interchangeable:
 
-| port | role | baud |
-|---|---|---|
-| `/dev/ttyUSB0` | **our (x-kernel) board's console** — the one `board-run.sh` captures | 1_500_000 |
-| `/dev/ttyUSB1` | relay / USB power control | 115200, frame `AA 01 03 AE` on, `AA 01 02 AD` off |
-| `/dev/ttyUSB2` | the **reference native-Linux board** (comparison target only) | 1_500_000 |
+| raw node (today) | stable name | role | baud |
+|---|---|---|---|
+| `/dev/ttyUSB0` | `/dev/ttyXK` | **our (x-kernel) board's console** — the one `board-run.sh` captures | 1_500_000 |
+| `/dev/ttyUSB1` | `/dev/ttyPWR` | relay / USB power control | 115200, frame `AA 01 03 AE` on, `AA 01 02 AD` off |
+| `/dev/ttyUSB2` | `/dev/ttyREF` | the **reference native-Linux board** (comparison only) | 1_500_000 |
+
+The raw node numbers are what they happened to be on the last enumeration;
+treat them as volatile and use the stable names.
 
 Consequences worth remembering:
 
-- Capturing `/dev/ttyUSB2` while trying to test a kernel change gives an
-  empty or irrelevant log — it is a *different machine*. One run was wasted
-  this way.
+- Capturing the reference board while trying to test a kernel change gives
+  an empty or irrelevant log — it is a *different machine*. One run was
+  wasted this way; that is why the stable names above exist.
 - The ports can renumber when things are re-cabled; the relay has been seen
   on `/dev/ttyUSB3`. Enumerate before concluding "the board is dead":
 

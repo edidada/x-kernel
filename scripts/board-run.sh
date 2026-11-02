@@ -32,6 +32,24 @@ else
     "$REPO_ROOT/scripts/deploy-rk3588.sh"
 fi
 
+echo "== serial adapter check"
+# ttyUSB numbering follows enumeration order, so a manually re-plugged cable
+# silently renumbers every port -- one run was lost to capturing the native
+# Linux reference board instead of ours. scripts/board-udev/ pins stable
+# names; this check reports which world we are in without failing the run.
+CONSOLE_PORT=$(ssh -o BatchMode=yes "$RIG" \
+    "grep -A2 '^\[console\]' ~/rkt/profiles/opi5plus.ini | sed -n 's/^port = //p'" || true)
+POWER_PORT=$(ssh -o BatchMode=yes "$RIG" \
+    "grep -A4 '^\[power\]' ~/rkt/profiles/opi5plus.ini | sed -n 's/^port = //p'" || true)
+for port in "$CONSOLE_PORT" "$POWER_PORT"; do
+    [[ -z $port ]] && continue
+    if ssh -o BatchMode=yes "$RIG" "test -e '$port'"; then
+        echo "  ok      $port"
+    else
+        echo "  MISSING $port  (see scripts/board-udev/; renumbered after a re-plug?)"
+    fi
+done
+
 echo "== [2/3] rkt boot cycle (tag: $TAG)"
 # --until-quiet 30: a hanging boot (e.g. the DBI bus stall) ends the cycle
 # after 30s of console silence instead of blocking for the full 240s boot
