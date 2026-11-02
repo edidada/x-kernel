@@ -79,12 +79,10 @@ impl Arm64MemAttr {
     pub const MAIR_VALUE: u64 = Self::mair_el1_val();
 
     pub const fn mair_el1_val() -> u64 {
-        // Device = Normal-NC (0x44), NOT nGnRE (0x04) or nGnRnE (0x00).
-        // The rk3588 high-address DBI windows (0xa4xxxxxxxx) hang with
-        // Device-nGnRnE/nGnRE accesses; the tgoskits rk3588 PCIe driver
-        // maps the same window as Normal-NC and it works. Normal-NC is
-        // safe for all MMIO (volatile access, no caching).
-        let device = 0x44;
+        // Device = nGnRE (0x04), matching Linux ioremap (MT_DEVICE_nGnRE).
+        // nGnRnE (0x00) hangs CPU accesses on some rk3588 NIC-routed
+        // peripherals (e.g. the PCIe DBI windows) that tolerate nGnRE.
+        let device = 0x04;
         let normal = 0xff;
         let normal_nc = 0x44;
         (device << (8 * Self::Device as u64))
