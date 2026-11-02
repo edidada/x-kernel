@@ -343,6 +343,8 @@ make install-tools
 make check_deps
 make check_header
 make check_lints
+make check_capabilities
+make capabilities
 make doc
 make doc_check_missing
 make fmt
@@ -387,6 +389,14 @@ cfg conditions, and neither is a complete Rust semantic analysis.
 including implicit path-dependency members, must declare
 `[lints] workspace = true`; there is no opt-out list. `make clippy`,
 `make dylint`, and `make dylint_test` run it before Cargo.
+
+`make check_capabilities` runs `xkmake capability check`: it validates the
+capability catalogue in `docs/capabilities/` and checks every card against the
+tree; `CAPABILITY_REPORT=<dir>` also writes `report.json` and maintenance
+proposals. `make capabilities` regenerates `docs/capabilities/helpers.md`. Dependency cards need the Cargo registry
+sources (`cargo fetch --locked`). The check is not part of `make clippy`; CI
+runs it as an advisory step. Card format, states and the maintenance flow are
+in `docs/capabilities/README.md`.
 
 `make unittest` means a kernel unit-test build followed by QEMU execution. It
 is equivalent to the former `make run UNITTEST=y` workflow:

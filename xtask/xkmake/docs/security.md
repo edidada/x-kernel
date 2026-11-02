@@ -57,6 +57,16 @@ Header 检查通过 Git 取得已跟踪及未忽略的 Rust 文件，只把仍�
 路径分批传给固定版本的 licensure。检查模式只读；`--fix` 是显式写操作，
 会依据仓库根 `.licensure.yml` 更新源文件开头，并在写入后强制复查。
 
+能力目录检查读取仓库内的卡片 YAML、工作树源码与 `$CARGO_HOME/registry/src`
+下已解压的依赖源码，并以结构化参数调用 `git`（`rev-parse`、`status`、
+`log`、`merge-base`、`diff`）。卡片属于仓库内受审阅的输入，但引用路径
+仍须是相对路径且不含 `..`，依赖引用只在其版本出现在 `Cargo.lock` 时才
+映射到 registry 目录，因此卡片不能让工具读取仓库与依赖源码之外的文件。
+YAML 与 Rust 解析失败只产生 finding 或 unchecked 状态，不中止整个检查。
+默认模式只读；`stamp`、`render` 是显式写操作，只写
+`docs/capabilities/` 下的 `stamps.json` 与 `helpers.md`，从不改写卡片；`--report`
+只写用户指定的目录。该检查不访问网络，也不调用模型。
+
 Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 manifest，
 不运行构建脚本，也不修改文件。
 
@@ -126,5 +136,6 @@ Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 mani
 - 新增 bundle 字段是否进入兼容性判断或 format version？
 - 新增 ELF 后处理是否仍只写 linker 预留范围，并验证 `PT_LOAD` 包含关系？
 - 新增路径是否限制在预期输出目录，或由用户显式指定？
+- 能力卡新增的引用形式是否仍拒绝绝对路径、`..` 和未锁定的依赖版本？
 - 失败路径是否可能留下看似有效的 manifest？
 - 新增运行选项是否在启动 QEMU 前完成组合校验？

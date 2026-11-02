@@ -32,6 +32,45 @@ pub(crate) enum Command {
     Symbolize(SymbolizeArgs),
     /// Run repository hygiene checks.
     Hygiene(HygieneArgs),
+    /// Check and maintain the capability catalogue in `docs/capabilities`.
+    Capability(CapabilityArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CapabilityArgs {
+    #[command(subcommand)]
+    pub(crate) command: CapabilityCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CapabilityCommand {
+    /// Validate the cards and check each one against the source tree.
+    Check(CapabilityCheckArgs),
+    /// Record the reviewed state of cards in `stamps.json`.
+    Stamp(CapabilityStampArgs),
+    /// Regenerate the helper catalogue page from the cards.
+    Render,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CapabilityCheckArgs {
+    /// Write `report.json` and maintenance proposals to this directory.
+    #[arg(long)]
+    pub(crate) report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CapabilityStampArgs {
+    /// Capabilities (card file names) to stamp after review.
+    pub(crate) cards: Vec<String>,
+
+    /// Stamp every card that matches the tree.
+    #[arg(long)]
+    pub(crate) all: bool,
+
+    /// Re-baseline the Cargo.lock package lists used for discovery hints.
+    #[arg(long)]
+    pub(crate) discovery: bool,
 }
 
 #[derive(Debug, Args)]

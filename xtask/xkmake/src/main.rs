@@ -5,6 +5,7 @@
 //! X-Kernel build and run orchestration.
 
 mod build;
+mod capability;
 mod cli;
 mod context;
 mod coverage;
@@ -25,7 +26,7 @@ use clap::Parser;
 use env_logger::{Builder, Env};
 
 use crate::{
-    cli::{Cli, Command, HygieneCommand},
+    cli::{CapabilityCommand, Cli, Command, HygieneCommand},
     error::Result,
 };
 
@@ -103,6 +104,11 @@ fn run() -> Result<()> {
             HygieneCommand::Lints => hygiene::check_lint_inheritance(),
             HygieneCommand::TestLayout => hygiene::check_test_layout(),
             HygieneCommand::HostTests => hygiene::check_host_tests(),
+        },
+        Command::Capability(args) => match args.command {
+            CapabilityCommand::Check(args) => capability::check(&args),
+            CapabilityCommand::Stamp(args) => capability::stamp(&args),
+            CapabilityCommand::Render => capability::render(),
         },
     }
 }

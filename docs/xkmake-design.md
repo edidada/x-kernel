@@ -346,6 +346,8 @@ cargo xkmake run --boot uefi
 cargo xkmake doc --open
 cargo xkmake doc --check-missing
 cargo xkmake run -- --d guest_errors
+cargo xkmake capability check --report out/capabilities
+cargo xkmake capability stamp <capability>
 ```
 
 Important defaults are:

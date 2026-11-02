@@ -38,6 +38,9 @@
 #                           reuses this variable as the panic log file path.)
 #     - XKMAKE_ARGS         Extra flags forwarded to every xkmake invocation
 #
+# * Capability catalogue — `make check_capabilities`:
+#     - CAPABILITY_REPORT   Directory for report.json and maintenance proposals
+#
 # * Test harness — `make ci-test`:
 #     - CI_TEST_DIR         Where to clone the Starry test harness
 #     - CI_TEST_REPO        Harness Git URL
@@ -167,7 +170,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests check_capabilities capabilities fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -379,6 +382,14 @@ check_test_layout:
 
 check_host_tests:
 	@$(XKMAKE) hygiene host-tests
+
+# Capability catalogue (docs/capabilities/README.md). Not part of `clippy`:
+# the check is advisory in CI until the reviewed card set lands.
+check_capabilities:
+	@$(XKMAKE) capability check $(if $(CAPABILITY_REPORT),--report $(CAPABILITY_REPORT))
+
+capabilities:
+	@$(XKMAKE) capability render
 
 # x86-only dependency regression; CI runs this on its native x86_64 leg.
 .PHONY: check_x2apic

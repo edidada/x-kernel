@@ -17,6 +17,7 @@ src/
 ├── coverage.rs   unittest 覆盖率提取与报告生成
 ├── doc.rs        workspace rustdoc 编排
 ├── hygiene.rs    仓库卫生工具编排
+├── capability/   能力目录（docs/capabilities）的检查、stamp 与页面生成
 ├── image_metadata.rs  内嵌构建信息与 Build ID 的 ELF finalize
 ├── qemu.rs       平台启动策略
 ├── x86.rs        LinuxBoot/UEFI 启动介质
@@ -222,6 +223,50 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
 target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
 
+### Capability
+
+`docs/capabilities/` 是可复用能力目录：每张 YAML 卡给出符号、操作、
+契约（每项带 `path` + 所属条目 `item` + 逐字 `quote` 证据，或 `unknown`）
+与排除条件。卡片不写行号。格式、状态和维护流程以该目录的 `README.md`
+为准；本节只记实现。
+
+1. `card`：读 `catalogue.yaml` 与 `cards/*.yaml`（yaml-rust2），逐项做结构
+   检查并收集全部问题；`maintenance.model_draft` 只接受 `disabled`。
+   schema 1 的目录或卡片（`at`、`line`、`review`、`lifecycle`）直接报错，
+   提示按 README 转换。
+2. `source`：引用要么是仓库路径（读工作树），要么是
+   `<crate>-<version>/<path>`，且该版本必须在 `Cargo.lock` 中，源码从
+   `$CARGO_HOME/registry/src/*` 读取。拒绝绝对路径与 `..`。
+3. `items`：用 `syn` 解析文件，索引字面声明的条目（含 impl/trait 关联项、
+   内联 mod、proc-macro 名、syn 不建模的 verbatim 条目），记录条目在文件
+   内的路径（内联 mod、所属类型或 trait、名称）、含属性的起止行，以及三种
+   token 哈希：签名（可见性与接口）、条目（去掉外层属性的全部 token）、
+   形状（条目名置空，用于提示改名）。哈希前去掉各层 doc 属性，因此不受
+   格式、普通注释与文档注释影响。卡片路径按“条目路径是其后缀”解析，取最长
+   匹配；内联 mod 可省略（公开路径常经 re-export 去掉私有 mod）。同一路径的
+   多个声明（cfg 变体、多个 impl 块）视为一个条目，指纹与顺序无关。
+4. `verify`：逐卡分类。有 stamp 时先按 stamp 记录的条目路径在原文件查找，
+   找不到再在同 crate 其他文件中唯一查找，所以挪动的代码仍为 fresh（报告
+   附注说明新位置）。条目指纹与 stamp 不一致、条目消失或在多处出现、引文
+   在条目内（无条目时在整个文件内）缺失或出现多次、无条目引文落在某个具名
+   条目内、依赖版本不在 `Cargo.lock`、从未 stamp 均为 stale；源码不可读或
+   解析失败为 unchecked。行号只在此时计算，写进 `report.json`。
+5. `stamp`：在不带旧 stamp 的条件下复核卡片，只有每个条目都在卡片写的文件
+   中、每条引文都唯一时才写入 stamp（记录当时的 `HEAD`、条目所在文件、
+   条目路径与哈希，不记录文件内容或行号）；`--discovery` 记录
+   `Cargo.lock` 包名基线。schema 不同的旧 `stamps.json` 只保留发现基线。
+6. `--report`：写 `report.json`（消费方契约）与 `proposals/*.md`。
+   stale 卡的起始时间是 stamp 提交之后第一个改动相关文件（变化条目所在
+   文件、引文丢失的文件；依赖卡含 `Cargo.lock`）的提交，按提交时间计算
+   天数，超过宽限期报告为 suspended。提案附上这些文件自 stamp 提交以来的
+   `git diff`。
+7. `render`：只依据卡片生成 `helpers.md`，入口符号链接到文件而非行，
+   代码挪动不会使页面过期。
+
+`check` 在有结构错误、active 或 needs-owner 卡 stale/unchecked 或
+`helpers.md` 过期时返回失败；发现提示不失败。CI 里该检查只作提示（见
+Jenkinsfile `capabilityCatalogueAdvisoryScript`），不属于 `make clippy`。
+
 ## 设计决策
 
 - Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。
@@ -252,6 +297,11 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
   解析逻辑，也不把其大型依赖树链接进 XKMake。
 - Rust 源文件 header 由固定版本的外部 licensure 按仓库配置检查和修复；
   XKMake 只负责确定文件集合、分批调用和传播失败状态。
+- 能力目录检查只用确定性程序（syn token 哈希），不调用模型；模型
+  起草卡片更新是默认关闭且未实现的步骤，开启需要成本审批。
+- 卡片按条目与引文锚定、不写行号，stamp 记录条目指纹而非文件 blob：
+  代码挪动或同文件其他位置的修改都不改卡片，检查也从不改写卡片，
+  只有被引条目本身变化才需要人复核。
 - guest IP 和 gateway 当前属于构建输入，因为现有网络栈通过
   `option_env!` 编译它们；后续应迁移为内核命令行参数。
 
@@ -260,3 +310,7 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
 - AArch64、RISC-V 64、LoongArch64 QEMU virt 使用 raw BIN 直接启动。
 - x86_64 LinuxBoot 和 UEFI 已支持；其他 x86 平台仍需独立启动策略。
 - unittest 已生成 LLVM 覆盖率报告；更丰富的测试结果聚合尚未迁移。
+- 能力目录检查不展开宏、不求值 `cfg`、不做名称解析：只能核对字面声明的
+  条目与引文是否仍在、是否未变，不能判断引文是否支持卡片的结论。
+- 发现提示只覆盖 `Cargo.lock` 中新出现的包与 workspace crate；按调用数
+  发现新公共类型需要精确的代码事实，尚未实现。
