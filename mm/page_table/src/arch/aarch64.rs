@@ -134,9 +134,10 @@ impl From<PagingFlags> for Arm64Attr {
             // the ASID in TTBR0_EL1 and do not leak across context switches.
             a |= Self::AP_EL0 | Self::NG;
         }
-        if f.contains(PagingFlags::SHARED) {
-            a |= Self::NS;
-        }
+        // Always access through the Non-secure PA space: the kernel runs
+        // at non-secure EL1, and NS=0 (Secure PA) blocks accesses to
+        // TZPC-protected regions (e.g. the rk3588 PCIe DBI at 0xa41000000).
+        a |= Self::NS;
         let mem_attr = if f.contains(PagingFlags::DEVICE) {
             Arm64MemAttr::Device
         } else if f.contains(PagingFlags::UNCACHED) {
