@@ -172,17 +172,19 @@ lint 只检查当前配置实际编译的代码，因此两边分别覆盖对应
    输出目录再运行一次 `make dylint`。只有打开锁统计时，`static_lock!` 才展开为
    注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都不打开该选项。
    x86_64 分支没有这两次额外扫描，因此测试依赖图与锁统计的 lint 覆盖目前仅在 aarch64。
-   aarch64 分支在这些扫描之前还执行 `make UNITTEST=y clippy`，检查同一测试依赖图。
 
 有其他配置的扫描时，`make dylint_test` 与这些扫描同时运行：自测不读也不改
 `.config` 及其生成文件，lint 库以 debug profile 构建，扫描使用 release 构建的
 lint 库，二者不争用同一份产物。自测输出写入单独的日志，两者都结束后整段打印；
 任一方失败，该步骤失败，并在末尾用 `ERROR:` 行说明是自测还是扫描失败。
 
-该阶段的 `make dylint` 与 `make dylint_test` 都带 `HYGIENE=n`，跳过仓库卫生检查
-（test layout、cargo-shear、license header、lint 继承与 hook 自测）。这些检查只看
-源码树，与平台和配置无关，每个 Build Check 与 Build Artifact 阶段的 `make clippy`
-都会执行，因此不在 Dylint 阶段重复。
+该阶段所有 `make` 调用都带 `HYGIENE=n`，跳过仓库卫生检查（test layout、
+cargo-shear、license header、lint 继承与 hook 自测）。这些检查只看源码树，
+与平台和配置无关，每个 Build Check 与 Build Artifact 阶段的 `make clippy`
+都会执行，因此不在 Dylint 阶段重复。测试依赖图的 Clippy 检查
+`make UNITTEST=y clippy` 在 `Build Artifact: kplat-aarch64 unittest` 阶段、
+unittest 构建之前执行；该阶段的配置只多了 `prepare_unittest_config.sh` 的
+日志级别调换，以及开启覆盖率时的插桩选项，不影响 Clippy 检查的 crate 与 cfg。
 检查结果与其他并行阶段一起进入 Gitee Check Run。
 
 lint 库只在该构建输出目录的 `tools/lints` 下构建一次，构建时不带内核配置的

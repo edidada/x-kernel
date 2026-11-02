@@ -484,7 +484,8 @@ def ciBuildStages() {
         ]
         stages << [
             name: "Build Artifact: kplat-${arch} unittest",
-            failure: 'unittest build 失败',
+            // The AArch64 stage also runs Clippy on the unittest crate graph.
+            failure: arch == 'aarch64' ? 'unittest clippy 或 build 失败' : 'unittest build 失败',
             type: 'unittest_build',
             arch: arch,
         ]
@@ -964,10 +965,9 @@ def runDylintCheck(String stageName, String platform, String defconfigPath, bool
     // Artifact stage already runs them through `make clippy`.
     //
     // cfg(unittest) alone does not select optional test-only Cargo dependencies.
-    // Keep the normal graph scan and cover the unittest graph on AArch64 too.
-    def unittestScan = platform == 'kplat-aarch64' ? '''make UNITTEST=y clippy
-make HYGIENE=n UNITTEST=y dylint
-''' : ''
+    // Keep the normal graph scan and cover the unittest graph on AArch64 too;
+    // its Clippy check runs in the AArch64 unittest Build Artifact stage.
+    def unittestScan = platform == 'kplat-aarch64' ? 'make HYGIENE=n UNITTEST=y dylint\n' : ''
     // Lock statistics switch static_lock! to its registering proc macro and
     // compile the stats lock paths; no other CI configuration enables them.
     def lockStatScan = lockStat ? """printf 'KFEAT_LOCK_STAT=y\\n' >> .config
@@ -1116,6 +1116,12 @@ def runUnittestBuildArtifact(String arch) {
     def stageName = "Build Artifact: ${platform} unittest"
     initStageLog(stageName)
     def unittestTargetDir = targetDirForUnittest(arch)
+    // Clippy on the unittest crate graph: the unittest Cargo feature selects
+    // optional test-only dependencies that no other Clippy run compiles. The
+    // configuration differs from the plain unittest one only by the log
+    // levels prepare_unittest_config.sh swaps, plus coverage instrumentation
+    // when coverage is on. AArch64 only, as the unittest Dylint scan.
+    def unittestClippy = arch == 'aarch64' ? 'make UNITTEST=y clippy\n' : ''
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
         withEnv(["TARGET_DIR=${unittestTargetDir}", coverageEnableEnv()]) {
@@ -1125,7 +1131,7 @@ ${stageLogTeeLine(stageName)}
 cp platforms/${platform}/qemu_defconfig .config
 scripts/ci/prepare_unittest_config.sh .config
 make defconfig
-stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
+${unittestClippy}stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
 """
             publishKernelArtifact(artifactNameForUnittest(arch), platform)
         }
