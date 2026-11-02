@@ -164,7 +164,7 @@ impl DwPcie {
         self.dbi.write32(aligned, merged);
     }
 
-    fn atu_base(&self, index: usize) -> usize {
+    pub(crate) fn atu_base(&self, index: usize) -> usize {
         DEFAULT_DBI_ATU_OFFSET + (index << 9)
     }
 
@@ -333,8 +333,27 @@ impl DwCam {
         };
         let busdev =
             (u32::from(bdf.bus) << 8) | (u32::from(bdf.device) << 3) | u32::from(bdf.function);
-        self.hw
-            .prog_outbound_atu(0, type_, self.hw.cfg_base, 0x1000, u64::from(busdev))
+        let ok = self
+            .hw
+            .prog_outbound_atu(0, type_, self.hw.cfg_base, 0x1000, u64::from(busdev));
+
+        // Bring-up diagnostic: read the CFG region back. Every devfn on bus 1
+        // reads the same endpoint, so either the writes do not land or the
+        // read goes somewhere else -- the readback tells which.
+        if CFG_READBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            let atu = self.hw.atu_base(0);
+            log::info!(
+                "pcie-dw: cfg atu {:02x}.{} type {type_:#x} busdev {busdev:#06x} ok {ok}: ctrl1 \
+                 {:#010x} ctrl2 {:#010x} target {:#010x} limit {:#010x}",
+                bdf.device,
+                bdf.function,
+                self.hw.dbi_read(atu + PCIE_ATU_REGION_CTRL1),
+                self.hw.dbi_read(atu + PCIE_ATU_REGION_CTRL2),
+                self.hw.dbi_read(atu + PCIE_ATU_LOWER_TARGET),
+                self.hw.dbi_read(atu + PCIE_ATU_LIMIT),
+            );
+        }
+        ok
     }
 
     /// Own-conf (0:0:0) reads/writes stay on the DBI, for every offset: the
@@ -862,6 +881,9 @@ impl DriverOps<PlatformBus> for DwHostDriver {
         Ok(DwHostData {})
     }
 }
+
+/// Counts config-ATU readbacks so the diagnostic stays bounded.
+static CFG_READBACKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// The published access backend, handed to the generic bus layer.
 ///
