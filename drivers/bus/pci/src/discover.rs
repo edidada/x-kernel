@@ -81,6 +81,13 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
 
     for bus_nr in bus_start..=bus_end {
         for (bdf, info) in root.enumerate_bus(bus_nr) {
+            // Presence filter (PCI spec 6.1: a function that does not exist
+            // returns all ones). A backend that instead surfaces its own
+            // default ids would otherwise flood the domain with phantom
+            // devices -- measured: +256 descriptors before this check.
+            if info.vendor_id == 0xffff || info.vendor_id == 0 {
+                continue;
+            }
             if !matches!(info.header_type, HeaderType::Standard) {
                 continue;
             }

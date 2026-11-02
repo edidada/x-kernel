@@ -180,6 +180,10 @@ impl DwPcie {
         if index >= self.num_ob_windows || size == 0 {
             return false;
         }
+        // Disable before reprogramming: rewriting an enabled region's
+        // base/limit/target does not take effect (measured: every devfn read
+        // back the same endpoint because the CFG0 target never switched).
+        self.dbi_write(self.atu_base(index) + PCIE_ATU_REGION_CTRL2, 0);
         let limit = cpu_base + size - 1;
         self.dbi_write(self.atu_base(index) + PCIE_ATU_LOWER_BASE, cpu_base as u32);
         self.dbi_write(
@@ -333,9 +337,20 @@ impl DwCam {
             .prog_outbound_atu(0, type_, self.hw.cfg_base, 0x1000, u64::from(busdev))
     }
 
-    /// Own-conf (0:0:0) and header-critical reads stay on the DBI.
-    fn is_own(&self, bdf: DeviceFunction, offset: u8) -> bool {
-        bdf.bus == 0 && bdf.device == 0 && bdf.function == 0 && offset <= 0xfc
+    /// Own-conf (0:0:0) reads/writes stay on the DBI, for every offset: the
+    /// DBI spans the whole 4 KiB config space, extended capabilities
+    /// included.
+    fn is_own(&self, bdf: DeviceFunction) -> bool {
+        bdf.bus == 0 && bdf.device == 0 && bdf.function == 0
+    }
+
+    /// The RC's own bus carries exactly one function. Anything else there is
+    /// absent and MUST read as all-ones: driving a CFG1 transaction at bus 0
+    /// does not "find nothing", it returns whatever the ATU window happens to
+    /// contain — measured as a bogus `0xd566:0x126f` (Synopsys ids) which
+    /// then registered 256 phantom functions in the device model.
+    fn is_absent_own_bus(&self, bdf: DeviceFunction) -> bool {
+        bdf.bus == 0 && !(bdf.device == 0 && bdf.function == 0)
     }
 }
 
@@ -343,8 +358,11 @@ impl ConfigurationAccess for DwCam {
     // read_word/write_word per the vendored trait.
     fn read_word(&self, bdf: DeviceFunction, register_offset: u8) -> u32 {
         let reg = register_offset as usize;
-        if self.is_own(bdf, register_offset) {
+        if self.is_own(bdf) {
             return self.hw.dbi_read(reg);
+        }
+        if self.is_absent_own_bus(bdf) {
+            return u32::MAX;
         }
         let _guard = self.lock.lock();
         if !self.map_bus(bdf) {
@@ -355,8 +373,11 @@ impl ConfigurationAccess for DwCam {
 
     fn write_word(&mut self, bdf: DeviceFunction, register_offset: u8, data: u32) {
         let reg = register_offset as usize;
-        if self.is_own(bdf, register_offset) {
+        if self.is_own(bdf) {
             self.hw.dbi_write(reg, data);
+            return;
+        }
+        if self.is_absent_own_bus(bdf) {
             return;
         }
         let _guard = self.lock.lock();
@@ -380,6 +401,9 @@ fn scan_and_log(root: &PciRoot<DwCam>, cam: &DwCam) {
     for bus in [0u8, 1u8] {
         for (bdf, _info) in root.enumerate_bus(bus) {
             let word = cam.read_word(bdf, 0x00);
+            if word == u32::MAX {
+                continue;
+            }
             log::info!(
                 "pcie-dw: bus {bus} dev {:02x}.{} vendor {:#06x} device {:#06x}",
                 bdf.device,
