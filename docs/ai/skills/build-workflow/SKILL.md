@@ -64,8 +64,13 @@ pinned version constants. Cargo installs these executables under
 repository Dylint lints (see `docs/code-guidelines/`). Lints only see code
 that the configuration compiles; CI scans the aarch64 and x86_64
 `qemu_defconfig` configurations. `make dylint_test`
-runs the lint's UI tests. The first run builds the Dylint driver and can take
-a few minutes; later runs are incremental. The lint library is built
+runs the lint's UI tests.
+`make dylint` and `make dylint_test` accept `HYGIENE=n` to skip the
+repository hygiene checks they otherwise run first (test layout, dependencies,
+headers, lint inheritance, hook self-tests); use it only where `make clippy`
+already ran or runs them, as CI does. `make clippy` always runs them.
+The first run builds the Dylint driver and can take a few minutes; later runs
+are incremental. The lint library is built
 without the kernel configuration's rustflags, so scanning another
 configuration (`UNITTEST=y`, lock statistics) does not rebuild it or
 re-check every crate. `make dylint FACTS_OUT=<dir>` also
@@ -372,8 +377,8 @@ The pre-commit hook delegates it to Clippy for configured Rust commits, and
 runs it directly for manifest-only changes, deletions, or when Clippy is skipped.
 Each path checks layout once. Check failures, including toolchain/setup failures,
 block the commit rather than silently passing. `make clippy`, `make dylint`, and `make dylint_test` also run
-it before their other checks; Jenkins already invokes `make clippy`, so layout
-violations block CI through that existing entry point. Hooks inspect the working
+it before their other checks (the latter two not with `HYGIENE=n`); Jenkins
+already invokes `make clippy`, so layout violations block CI through that existing entry point. Hooks inspect the working
 tree, not an isolated index snapshot; CI checks the committed tree. `SKIP_ALL=1`
 bypasses local hook checks only, not CI. `make check_host_tests` remains manual.
 `make check_hooks` runs the hook dispatch regression suite without building a
@@ -392,7 +397,8 @@ cfg conditions, and neither is a complete Rust semantic analysis.
 `make check_lints` runs `xkmake hygiene lints`. Every root workspace member,
 including implicit path-dependency members, must declare
 `[lints] workspace = true`; there is no opt-out list. `make clippy`,
-`make dylint`, and `make dylint_test` run it before Cargo.
+`make dylint`, and `make dylint_test` run it before Cargo (the latter two not
+with `HYGIENE=n`).
 
 `make unittest` means a kernel unit-test build followed by QEMU execution. It
 is equivalent to the former `make run UNITTEST=y` workflow:

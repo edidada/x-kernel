@@ -196,6 +196,9 @@ stdin/stderr 保持继承，交互会话不受影响。
    `false` 的成员一次性列出后失败。没有登记豁免名单。
 3. `make clippy`、`make dylint` 和 `make dylint_test` 在 Cargo 检查前执行
    本项，因此 CI 的 clippy 阶段会拦下不继承 `[workspace.lints]` 的 crate。
+   `make dylint` 和 `make dylint_test` 传 `HYGIENE=n` 时跳过全部仓库卫生
+   检查（test layout、依赖、header、本项及 hook 自测）；这些检查只看源码树，
+   已经跑过 `make clippy` 的流程不必重复。`make clippy` 始终执行。
 
 x86_64 bundle 同时携带 `kernel.bzimg` 和 `kernel.uefi.img`。默认使用
 LinuxBoot，`--boot uefi` 使用 OVMF。OVMF VARS 模板在每次运行时复制到

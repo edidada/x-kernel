@@ -14,6 +14,13 @@
 #     - FACTS_OUT           `make dylint` also exports code facts and packs them
 #                           into this directory (see tools/lints/README.md)
 #     - FACTS_DEPS          With FACTS_OUT, export dependency crates too (y/n)
+#     - HYGIENE             `make dylint` and `make dylint_test` first run the
+#                           repository hygiene checks (test layout, unused
+#                           dependencies, license headers, lint inheritance,
+#                           hook self-tests) unless this is `n`. They depend
+#                           on the source tree only, so a job that already
+#                           ran them, or runs `make clippy`, can skip them
+#                           here. `make clippy` always runs them (y/n)
 #
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
@@ -108,6 +115,7 @@ ROOTFS_VARIANT ?= debian-openrc
 
 UNITTEST ?= n
 UNITTEST_CRATE ?=
+HYGIENE ?= y
 NET ?= y
 BLK ?= y
 VSOCK ?= y
@@ -219,16 +227,21 @@ disasm:
 symbolize:
 	@$(XKMAKE) symbolize $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS) $(if $(strip $(LOG)),--log $(LOG))
 
+# Repository hygiene checks run before Cargo. `make clippy` always runs them;
+# `make dylint` and `make dylint_test` skip them with HYGIENE=n.
+HYGIENE_CHECKS := check_test_layout check_deps check_header check_lints
+DYLINT_HYGIENE := $(if $(filter n,$(HYGIENE)),,$(HYGIENE_CHECKS))
+
 clippy:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(MAKE) --no-print-directory $(HYGIENE_CHECKS)
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(if $(DYLINT_HYGIENE),$(MAKE) --no-print-directory $(DYLINT_HYGIENE),:)
 	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(if $(strip $(FACTS_OUT)),--facts-out "$(FACTS_OUT)" $(if $(filter y,$(FACTS_DEPS)),--facts-deps)) $(XKMAKE_ARGS)
 
 dylint_test:
-	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
+	@$(if $(DYLINT_HYGIENE),$(MAKE) --no-print-directory $(DYLINT_HYGIENE),:)
 	@$(XKMAKE) dylint --self-test $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 doc:
