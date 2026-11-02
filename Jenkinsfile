@@ -959,19 +959,21 @@ def runDylintCheck(String stageName, String platform, String defconfigPath, bool
         def remote = isForkPullRequest() ? 'upstream' : 'origin'
         factsBaseRef = "${remote}/${env.giteeTargetBranch ?: env.DEFAULT_BRANCH}"
     }
+    // The Dylint make calls skip the repository hygiene checks (HYGIENE=n):
+    // they only read the source tree, and every Build Check and Build
+    // Artifact stage already runs them through `make clippy`.
+    //
     // cfg(unittest) alone does not select optional test-only Cargo dependencies.
     // Keep the normal graph scan and cover the unittest graph on AArch64 too.
-    def unittestScan = platform == 'kplat-aarch64' ? """
-make UNITTEST=y clippy
-make UNITTEST=y dylint
-""" : ''
+    def unittestScan = platform == 'kplat-aarch64' ? '''make UNITTEST=y clippy
+make HYGIENE=n UNITTEST=y dylint
+''' : ''
     // Lock statistics switch static_lock! to its registering proc macro and
     // compile the stats lock paths; no other CI configuration enables them.
-    def lockStatScan = lockStat ? """
-printf 'KFEAT_LOCK_STAT=y\\n' >> .config
+    def lockStatScan = lockStat ? """printf 'KFEAT_LOCK_STAT=y\\n' >> .config
 make olddefconfig
 grep -qx 'KFEAT_LOCK_STAT=y' .config
-make dylint
+make HYGIENE=n dylint
 """ : ''
     // XKERNEL_FACTS and XKERNEL_FACTS_DEPS stay 1 for every scan of the stage:
     // rustc tracks the first and Cargo fingerprints the rustc wrapper the
@@ -987,7 +989,10 @@ make dylint
                 "_CI_FACTS_DIR=${factsDir}",
                 "_CI_FACTS_BASE_REF=${factsBaseRef}",
             ]) {
-                sh label: "Dylint check ${platform}", script: """#!/bin/bash
+                // The facts scan runs first and its facts are archived at
+                // once, so xreview can fetch them while the rest of the
+                // stage and the build run.
+                sh label: "Dylint facts scan ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 facts_early_failure() {
@@ -1005,26 +1010,80 @@ fi
 scripts/ci/check_dylint_environment.sh
 cp ${defconfigPath} .config
 make defconfig
-make dylint_test
-make dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
+make HYGIENE=n dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
     XKMAKE_ARGS="${factsCommitArg()}\${facts_base:+ --facts-base \${facts_base}}"
-${unittestScan}${lockStatScan}"""
+"""
+                archiveDylintFacts(platform)
+                sh label: "Dylint self-test and scans ${platform}",
+                    script: dylintRemainingScript(stageName, unittestScan + lockStatScan)
             }
         }
     } finally {
-        // Export the facts as soon as the stage ends, on every outcome, so
-        // xreview can fetch them while the rest of the build runs. The files
-        // live under the root workspace; the Post archive stays as a safety
-        // net. An archive failure must never fail the stage.
-        try {
-            dir(rootWorkspace()) {
-                archiveArtifacts artifacts: "${factsArtifactRoot()}/${platform}/**/*",
-                    allowEmptyArchive: true, fingerprint: false
-            }
-        } catch (e) {
-            echo "Early facts archive for ${platform} failed: ${e.message}"
-        }
+        // Archive again on every outcome: the facts scan may have failed
+        // before the early archive, and its status.json still tells xreview
+        // why. The Post archive stays as a safety net.
+        archiveDylintFacts(platform)
     }
+}
+
+/**
+ * Archives the platform's code facts from the root workspace. Re-archiving
+ * is harmless; an archive failure never fails the stage.
+ */
+def archiveDylintFacts(String platform) {
+    try {
+        dir(rootWorkspace()) {
+            archiveArtifacts artifacts: "${factsArtifactRoot()}/${platform}/**/*",
+                allowEmptyArchive: true, fingerprint: false
+        }
+    } catch (e) {
+        echo "Facts archive for ${platform} failed: ${e.message}"
+    }
+}
+
+/**
+ * Script for the rest of a Dylint stage after the facts scan: the lint
+ * library's UI tests (`make dylint_test`) and the given scans of other
+ * configurations. The self-test reads no kernel configuration and builds
+ * in the debug profile while the scans use the release library, so it runs
+ * alongside them. Its output goes to its own log, printed after both
+ * finish; a failure of either fails the step and says which one.
+ */
+def dylintRemainingScript(String stageName, String scans) {
+    if (!scans.trim()) {
+        return """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+make HYGIENE=n dylint_test
+"""
+    }
+    return """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+self_test_log=\$(mktemp)
+trap 'rm -f "\${self_test_log}"' EXIT
+echo "make dylint_test runs alongside the scans below; its log follows them."
+make HYGIENE=n dylint_test > "\${self_test_log}" 2>&1 &
+self_test_pid=\$!
+(
+set -euo pipefail
+${scans})&
+scans_pid=\$!
+scans_status=0
+wait "\${scans_pid}" || scans_status=\$?
+self_test_status=0
+wait "\${self_test_pid}" || self_test_status=\$?
+echo "===== make dylint_test (exit \${self_test_status}) ====="
+cat "\${self_test_log}"
+echo "===== end of make dylint_test ====="
+if [ "\${self_test_status}" -ne 0 ]; then
+    echo "ERROR: make dylint_test failed with exit status \${self_test_status}; see its log above." >&2
+fi
+if [ "\${scans_status}" -ne 0 ]; then
+    echo "ERROR: a Dylint scan of another configuration failed with exit status \${scans_status}; see the scan output above the make dylint_test log." >&2
+fi
+[ "\${self_test_status}" -eq 0 ] && [ "\${scans_status}" -eq 0 ]
+"""
 }
 
 def runBuildArtifact(String arch) {

@@ -160,17 +160,31 @@ Dockerfile 为准。镜像改动预装 toolchain 时，同时递增 Rustup volum
 `Lint Check: dylint kplat-aarch64` 在 aarch64 leg 上运行，
 `Lint Check: dylint kplat-x86_64` 在 x86_64 leg 上运行，两条腿彼此并行。
 lint 只检查当前配置实际编译的代码，因此两边分别覆盖对应架构的专属代码。
-每个检查在该 leg 的独立 workspace 中使用对应平台的 `qemu_defconfig` 执行
-`make defconfig`、`make dylint_test` 和 `make dylint`，并使用独立的
-`/xkernel-target/dylint-<platform>` 构建输出目录。
-aarch64 分支在保留上述普通配置检查的同时，额外依次执行
-`make UNITTEST=y clippy` 和 `make UNITTEST=y dylint`，覆盖 Cargo `unittest`
-feature 选入的测试专用 optional 依赖。仅传 `--cfg unittest` 不会启用这些依赖；
-x86_64 分支没有这两次额外扫描，因此该测试依赖图的 lint 覆盖目前仅在 aarch64。
-aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
-并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
-`static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
-不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。
+每个检查在该 leg 的独立 workspace 中使用对应平台的 `qemu_defconfig`，
+并使用独立的 `/xkernel-target/dylint-<platform>` 构建输出目录，分两个 `sh` 步骤执行：
+
+1. 核对 Dylint 环境，`make defconfig`，然后执行导出代码事实的普通配置扫描
+   `make dylint`（见下文）。该步骤结束后立即归档该平台的事实。
+2. 执行 lint 库的 UI 测试 `make dylint_test`，以及其他配置的扫描。aarch64 分支
+   先执行 `make UNITTEST=y dylint`，覆盖 Cargo `unittest` feature 选入的测试专用
+   optional 依赖（仅传 `--cfg unittest` 不会启用这些依赖），再向 `.config` 追加
+   `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig` 并确认该选项生效后，在同一构建
+   输出目录再运行一次 `make dylint`。只有打开锁统计时，`static_lock!` 才展开为
+   注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都不打开该选项。
+   x86_64 分支没有这两次额外扫描，因此测试依赖图与锁统计的 lint 覆盖目前仅在 aarch64。
+   aarch64 分支在这些扫描之前还执行 `make UNITTEST=y clippy`，检查同一测试依赖图。
+
+有其他配置的扫描时，`make dylint_test` 与这些扫描同时运行：自测不读也不改
+`.config` 及其生成文件，lint 库以 debug profile 构建，扫描使用 release 构建的
+lint 库，二者不争用同一份产物。自测输出写入单独的日志，两者都结束后整段打印；
+任一方失败，该步骤失败，并在末尾用 `ERROR:` 行说明是自测还是扫描失败。
+
+该阶段的 `make dylint` 与 `make dylint_test` 都带 `HYGIENE=n`，跳过仓库卫生检查
+（test layout、cargo-shear、license header、lint 继承与 hook 自测）。这些检查只看
+源码树，与平台和配置无关，每个 Build Check 与 Build Artifact 阶段的 `make clippy`
+都会执行，因此不在 Dylint 阶段重复。
+检查结果与其他并行阶段一起进入 Gitee Check Run。
+
 lint 库只在该构建输出目录的 `tools/lints` 下构建一次，构建时不带内核配置的
 rustflags，因此三次扫描不会因为配置不同而重新链接 lint 库、进而重查全部 crate；
 `make dylint_test` 也使用这个目录，不随每次清空的 workspace 冷编译。三次扫描之间
@@ -183,8 +197,10 @@ rustflags，因此三次扫描不会因为配置不同而重新链接 lint 库�
 commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`
 与 `XKERNEL_FACTS_DEPS=1`（同时导出为内核 target 构建的依赖 crate），后续
 unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
-每个 Dylint 阶段结束时（无论成败）立即归档该平台的 `artifacts/facts/<platform>/`，
-归档失败只记日志、不影响阶段结果，因此事实在构建其余部分运行期间即可下载。
+事实扫描步骤一结束就归档该平台的 `artifacts/facts/<platform>/`，因此事实在阶段
+其余部分和构建其余部分运行期间即可下载；之后 `make dylint_test` 或其他扫描失败，
+阶段仍然失败，但已归档的事实不受影响。阶段结束时（无论成败）再归档一次，覆盖
+事实扫描之前或之中就失败的情况。归档失败只记日志、不影响阶段结果。
 `artifacts/facts/` 仍随 leg 输出 stash，并在 Post 阶段无论构建成败再归档一次作为兜底，
 Jenkins 制品地址为 `artifact/artifacts/facts/<platform>/`（`status.json`、
 `manifest.json`、`crates/`）。`status.json` 区分 `ready`、`partial`、`failed`
