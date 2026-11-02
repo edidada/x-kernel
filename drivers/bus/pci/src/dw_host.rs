@@ -103,7 +103,28 @@ struct PcieWindow {
     pci_base: u64,
     cpu_base: u64,
     size: u64,
-    io: bool,
+    /// PCI address space of the range: 0 = config, 1 = IO, 2 = memory 32-bit,
+    /// 3 = memory 64-bit. This is the `phys.hi` space bits [25:24], the same
+    /// encoding mainline uses (`0x01000000`/`0x02000000`/`0x03000000`) and
+    /// rockchip's BSP writes as `0x81`/`0x82`/`0xc3`, plus a bare `0x800`
+    /// row for the config aperture.
+    space: u8,
+    prefetchable: bool,
+}
+
+impl PcieWindow {
+    fn is_memory(&self) -> bool {
+        self.space >= 2
+    }
+
+    fn kind(&self) -> &'static str {
+        match self.space {
+            0 => "config",
+            1 => "io",
+            3 => "mem64",
+            _ => "mem32",
+        }
+    }
 }
 
 /// Parse the node's `ranges` for the rk3588 shape: child 3 cells
@@ -119,7 +140,8 @@ fn parse_ranges(cells: &[u32]) -> Vec<PcieWindow> {
             pci_base: (u64::from(cells[i + 1]) << 32) | u64::from(cells[i + 2]),
             cpu_base: (u64::from(cells[i + 3]) << 32) | u64::from(cells[i + 4]),
             size: (u64::from(cells[i + 5]) << 32) | u64::from(cells[i + 6]),
-            io: flags & 0x1 != 0,
+            space: (flags & 0x3) as u8,
+            prefetchable: flags & 0x40 != 0,
         });
         i += STRIDE;
     }
@@ -309,7 +331,9 @@ impl DwPcie {
         // combination that was never measured.)
         let mut index = 1usize;
         for win in windows {
-            if win.io || win.size == 0 || index >= self.num_ob_windows {
+            // Only real memory ranges get a MEM window; the config row is
+            // region 0's business and IO has no consumer here.
+            if !win.is_memory() || win.size == 0 || index >= self.num_ob_windows {
                 continue;
             }
             if !self.prog_outbound_atu(
@@ -526,11 +550,16 @@ fn parse_facts(dev: &mut Device<'_, PlatformBus>) -> Result<RootFacts, ProbeErro
         .unwrap_or_default();
     for win in &windows {
         log::info!(
-            "pcie-dw: range cpu {:#x}+{:#x} -> pci {:#x}{}",
+            "pcie-dw: range {} cpu {:#x}+{:#x} -> pci {:#x}{}",
+            win.kind(),
             win.cpu_base,
             win.size,
             win.pci_base,
-            if win.io { " (io)" } else { "" }
+            if win.prefetchable {
+                " (prefetchable)"
+            } else {
+                ""
+            }
         );
     }
     // The config window: the first (IO/CFG) range — the mainline
@@ -545,7 +574,7 @@ fn parse_facts(dev: &mut Device<'_, PlatformBus>) -> Result<RootFacts, ProbeErro
     let (cfg_base, cfg_size) = match dev.res().mmio_by_name("config") {
         Ok(region) => (region.base as u64, region.size),
         Err(_) => {
-            let win = windows.iter().find(|w| w.io).ok_or_else(|| {
+            let win = windows.iter().find(|w| w.space == 1).ok_or_else(|| {
                 log::error!("pcie-dw: no config aperture (neither `config` reg nor IO range)");
                 ProbeError::Fatal(RuntimeError::NotFound)
             })?;
