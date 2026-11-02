@@ -595,6 +595,13 @@ impl ClkCore {
 
         let need_enable = self.state.lock().enable_count == 0;
         if need_enable && let Err(err) = self.ops.enable() {
+            // Temporary bring-up diagnostic: the PCIe/combphy clock tree
+            // shows enables that end up disabled, and this is the only spot
+            // that disables a parent from inside the enable path.
+            log::warn!(
+                "kclk: enable failed for \"{}\" ({err:?}) — rolling back parent",
+                self.name
+            );
             if parent_done && let Some(parent) = self.parent_node() {
                 parent.disable_locked();
             }

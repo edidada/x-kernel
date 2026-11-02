@@ -313,6 +313,7 @@ impl PhyHwOps for CombPhy {
 
     /// `rockchip_combphy_exit`: resets asserted + clocks disabled.
     fn hw_exit(&self) -> Result<(), PhyError> {
+        log::info!("combphy: hw_exit id {} (clocks off)", self.id);
         for rst in &self.resets {
             rst.assert();
         }

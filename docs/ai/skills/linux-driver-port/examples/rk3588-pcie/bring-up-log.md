@@ -19,22 +19,34 @@ PCIe / USB / 任何高位地址外设时，先读这一页。
 | RC 时钟 6 路使能 | ✅ | `CLKGATE_CON(32..38)` 读回全 0（未门控） |
 | PD_PCIE 电源域 | ✅（读数存在） | `REPAIR_STATUS(0x290)` bit22 = 1 |
 | client APB 窗口 `fe190000` | ✅ 可读写 | LTSSM/HOT_RESET 等寄存器均可读 |
-| **链路训练（LTSSM=L0）** | ❌ **未达成** | 我方 `APB 0x300 = 0`；工作 Linux `= 0x00130014` |
+| **链路训练（LTSSM=L0）** | ✅ **已达成** | `ltssm 0x00000002`（Detect）→ `0x00030011`（LINK UP + L0），15 ms |
 | **DBI 窗口 `0xa41000000`** | ❌ **stall** | 读永远不返回，无 panic、无 abort |
 | 设备枚举 / BAR / INTx | ⬜ | 依赖上两项 |
 
-**结论性因果链（已用寄存器对照证明）**：
+**已走通的部分**：PHY → 时钟 → 复位脉冲 → PD_PCIE → 客户端 RC 模式 →
+LTSSM 从 `0x2`（Detect.Quiet）走到 `0x00030011`（bits17:16=3 = LINK UP，
+低 6 位 `0x11` = L0），耗时约 15 ms。**链路是真实训练成功的**。
+
+**尚未走通**：`0xa41000000`（pcie-dbi 窗口）的 CPU 读返回同步外部中止
+（`ESR=0x96000010`，DFSC `0x10` = DECERR），与链路状态无关——**整条 0xa
+高位 PCIe 段都没有被解码**：同板上从未初始化过的兄弟控制器
+（`a40c00000`，pcie2x1l1）行为完全一样。
+
+DT 侧已逐项核对通过（从参考板 `/proc/device-tree/pcie@fe190000/` 直接读）：
 
 ```
-combphy 只使能了 refclk（未使能 apbclk/phpclk）
-  → PHY 不出 pipe clock
-  → DWC core 的 core_clk 缺失，LTSSM 状态机冻结（读回 0）
-  → core 的 AXI slave（DBI）接了事务但永远不返回 → 总线 stall
+reg       = 0xfe190000+0x10000 / 0xa41000000+0x400000 / 0xf4000000+0x100000
+reg-names = pcie-apb pcie-dbi config          ← 三段（我们仓库里的 BSP dts 只有两段）
+clocks    = <2 0x152> <2 0x157> <2 0x14d> <2 0x15d> <2 0x162> <2 0x182>
+clock-names = aclk_mst aclk_slv aclk_dbi pclk aux pipe   ← 与 BSP dts 逐字相同
+phys      = <0x110 2>                          ← combphy0 @fee00000，PHY_TYPE_PCIE
 ```
 
-`APB 0x04 / 0x10 / 0x14 / 0x30`（厂商驱动日志里 "can't get current limit"
-那组）在我们内核里全为 0、在 Linux 里非 0，是同一个结论的第二份证据：这些
-字只在 PHY 真正起来之后才有值。
+即：地址、时钟编号、PHY 引用三者都与板上实际 DTB 一致，不是 DT 解析问题。
+
+!!! 顺便纠正一个早期结论：**"pipe 时钟死了"是错的**——链路既然能从
+Detect 走到 L0，pipe 就必须在跑。（那是把"DBI 不可达"错误归因到时钟链上：
+后来证明 DBI 的 DECERR 与时钟、复位、电源域、链路状态**全都无关**。）
 
 ---
 
@@ -205,9 +217,13 @@ APB 根时钟。它被关掉 → combphy 寄存器**全部读回 0** → PHY 无
 `clock 0: false -> false`、`clock 1: false -> true`、`clock 2: false -> true`
 （第二次 `enable()` 才真正留下使能状态），说明**第一次的使能在返回前被撤销了**。
 
-临时对策（已入库，带注释）：combphy 使能三路时钟后逐个 `is_enabled()` 校验，
-发现被撤销就再 `enable()` 一次并打印状态。这样 `0x880` 最终为 0（门开），
-但 **LTSSM 仍为 0、DBI 仍 stall**，说明除了 PHP APB 门之外还有别的缺口。
+补充实测（`enable failed` 与 `hw_exit` 两条日志都加了之后）：**回滚分支从未
+触发，`hw_exit` 也从未执行**，但计数确实掉到 0 —— 所以撤销来自
+`prepare_locked()` 的父链传播路径，而不是错误回滚。
+
+**这条级联目前不影响结果**：循环结束时 `880/884/888/89c` 全为 0（所有门开），
+PHY 寄存器读得真值，链路也能训练到 L0。临时对策（逐路 `is_enabled()` 校验 +
+必要时再使能一次）保留即可，优先级降到最低。
 
 ### 级联链（`core/kclk` 里加 `hw-disable "<name>"` 日志后实测）
 
@@ -264,11 +280,23 @@ combphy: clock 2 ... enabled false -> true
 
 ### 下一步（按优先级）
 
-1. **定位撤销者**：在 `ClkHandle::disable` / `disable_locked` 里对
-   `offset == 0x880` 打印时钟名，一轮即可name出调用者（很可能是某个 provider 的
-   `is_enabled`/`prepare` 校验路径，或 handle 的 Drop 语义）。
-2. 修掉撤销后，确认 `combphy 0x2c/0x30` 与 `pipe-phy-grf 0x34` 是否收敛到
-   工作 Linux 的值（`0x43` / `0x88` / `0x80`）。
-3. 若 `APB 0x300` 仍为 0，下一个怀疑对象是 `clk_pcie1l2_pipe`（combphy 的
-   pipe 输出）：它在 Linux `clk_summary` 里 rate 显示为 0（gate-only），需要确认
-   我们这侧的 pipe 门（`CLKGATE_CON(38) @ 0x898`）与其父源是否真的在跑。
+1. **高位 PCIe 段的 CPU 解码**（唯一剩余阻塞）。已知与链路/时钟/复位/PD/DT
+   全部无关，且是段级而非控制器级。最值得先做的三件事：
+   - 补 dump `PHP_GRF 0xe0–0x120`：我们只比对过 `0x00–0x5c`（逐字相同），而
+     工作 Linux 在 `0xe8=0x1100`、`0xf8=0x7e8`、`0x104=0x300` 有非零值，这段
+     正是 PCIe lane/NOC 选择区。
+   - 查 SYS_GRF / PMU 里是否有"高位 PCIe 段（NOC）force-enable"位。
+   - 在**参考板上**把 `0xa41000000` 读一次确认 Linux 确实走 CPU 直读而非别的
+     通道（已知能读出 `0x35881d87`，但要确认它没有被内核重映射到其它 PA）。
+2. 上述打通后：`setup_rc` / iATU / `scan_and_log` 才有意义（代码已就绪）。
+3. `PD_PHP`（PWR_CON bit5）在我们和 Linux 里都是 0，暂不作为怀疑对象。
+
+### 里程碑记录（避免重复劳动）
+
+| 修复 | 结果 |
+|---|---|
+| 客户端 RC 模式（general-con bits[2:0]=0b100，在首次 DBI 访问之前） | LTSSM 开始从 0 变化 |
+| combphy 三路时钟（refclk/apbclk/phpclk） | PHY 寄存器恢复可读 |
+| PD_PCIE 用 0x150 + 正确极性 | `PWR_CON` bit7=1、repair bit22=0，与参考一致 |
+| 复位 assert→1µs→deassert 脉冲 | 与参考一致（非关键） |
+| **以上合并** | **链路训练成功：0x2 → 0x00030011 (L0)** |

@@ -644,6 +644,27 @@ fn log_phy_state(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
     Ok(())
 }
 
+/// Watch the LTSSM BEFORE touching the DBI: the DBI read aborts while the
+/// controller's APP side is not running, and that panic used to hide the
+/// only evidence of whether LTSSM ever leaves 0. A trained link reports
+/// 0x00130011 (bits 17:16 = 3); mainline logs 0x3 while it is still
+/// linking, so the *transitions* are the signal, not a single snapshot.
+fn watch_ltssm(apb: &IoMap) {
+    log::info!("pcie-dw: watching ltssm");
+    let mut last = u32::MAX;
+    for _ in 0..40 {
+        let ltssm = apb.read32(PCIE_CLIENT_LTSSM_STATUS);
+        if ltssm != last {
+            log::info!("pcie-dw: ltssm {ltssm:#010x}");
+            last = ltssm;
+        }
+        if (ltssm & PCIE_LINKUP_MASK) >> 16 == PCIE_LINKUP {
+            return;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_millis(5));
+    }
+}
+
 impl DriverOps<PlatformBus> for DwHostDriver {
     type Data = DwHostData;
 
@@ -702,10 +723,11 @@ impl DriverOps<PlatformBus> for DwHostDriver {
 
         configure_rc_mode(&apb);
         log::info!(
-            "pcie-dw: client in RC mode (general-con {:#010x}), reading own dbi {:#x}",
-            apb.read32(PCIE_CLIENT_GENERAL_CON),
-            dbi_region.base
+            "pcie-dw: client in RC mode (general-con {:#010x})",
+            apb.read32(PCIE_CLIENT_GENERAL_CON)
         );
+        watch_ltssm(&apb);
+        log::info!("pcie-dw: reading own dbi {:#x}", dbi_region.base);
         probe_dbi_page(dev, dbi_region)?;
         let vendor_word = dbi.read32(0x00);
         log::info!(
