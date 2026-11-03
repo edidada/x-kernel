@@ -592,6 +592,25 @@ pci: 10ec:8125 max read request raised to 2048B (device control 0x4010)
 
 TX 仍不消费，所以 MRRS 也不是根因。
 
+### 4.1.5 按 tgoskits（同板已验证）对齐，并修掉一个真实的屏障 bug
+
+"tgoskits 是中断驱动所以没有参考价值"这个推断**不成立**：中断只影响"如何得知完成"，
+不影响寄存器/队列配置的正确性。这一轮按它对齐后补了三处：
+
+1. **OCP 行改回 tgoskits 的取值**（它与 vendor 在这几行上有分歧，但它是同板实测能跑的）：
+   `0xe63e` 清 bits 5:4、`0xe052` 置 0x68/清 bit7、`0xd430 = 0x47f`；
+   另外补上它的 `0xe040 |= bits 1:0`（我们照 r8169 只清了 bit12）。
+2. **多播哈希过滤 `MAR0/MAR4 = 0xffffffff`**：复位后这两个寄存器是全 0，
+   即使 accept 位写了多播，多播组仍会被丢掉（IPv6 ND、mDNS 都会受影响）。
+3. **发送路径缺一个写屏障**（真 bug）：我们的顺序是
+   `fence(Release) → 写 OWN → 门铃`，而 tgoskits 是
+   `写描述符 → fence → 写 OWN → **wmb()** → 门铃`。
+   DMA 内存是 Normal-NC（不是 Device），CPU 可以重排，**门铃先到**时 MAC 扫到的是
+   OWN=0 的环，正好报 `TX_DESC_UNAVAILABLE`。已在门铃前补 `barrier_release()`。
+
+补完这三处复测：`intr 0x0081`（RX_OK + DESC_UNAVAIL）、描述符仍不被消费。
+MAK 校验：`make ldp-sequence` 绿（41 步 / 26 anchored / 9 unported）。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，

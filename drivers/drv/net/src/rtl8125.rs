@@ -86,6 +86,10 @@ mod reg {
     pub(super) const MCU: usize = 0xd3;
     /// MAC-side PHY status: bit 1 is the link the *MAC* acts on.
     pub(super) const PHY_STATUS: usize = 0x6c;
+    /// Multicast hash filter (`MAR0`/`MAR4`), written all-ones to accept every
+    /// multicast group the way the verified driver does.
+    pub(super) const MAR0: usize = 0x08;
+    pub(super) const MAR4: usize = 0x0c;
     /// EPHY access window (analog front-end registers, not MDIO).
     pub(super) const EPHYAR: usize = 0x80;
     /// CSI tunnel (chip-internal config space): data and address registers.
@@ -443,6 +447,11 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB);
 
     bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
+    // Accept every multicast group: the hash filter is all-zero after reset,
+    // which would drop multicast traffic (IPv6 ND, mDNS) even though the
+    // accept bit says "multicast".
+    bar0.write32(reg::MAR0, u32::MAX);
+    bar0.write32(reg::MAR4, u32::MAX);
     // ldp:steps start.rx-config, start.tx-config, start.rx-mode
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
@@ -517,9 +526,7 @@ fn hw_start_8125_common(bar0: &IoMap) {
         (0xe860, 0x0000, 0x0080),
         (0xeb58, 0x0001, 0x0000), // legacy 16-byte TX descriptors
         (0xe614, 0x0700, 0x0200), // RTL8125B row
-        // TX queue configuration: the vendor sets bits 5:4 = 0b10 and the
-        // TX queue count (bits 11:10) to log2(rings) = 0 for one queue.
-        (0xe63e, 0x0c30, 0x0020),
+        (0xe63e, 0x0c30, 0x0000),
         (0xc0b4, 0x0000, 0x000c),
         // MCU enable is toggled (`enable_mcu(false)` then `(true)`): the
         // vendor clears bit 0, reconfigures, then sets it again.
@@ -529,11 +536,13 @@ fn hw_start_8125_common(bar0: &IoMap) {
         (0xeb50, 0x03e0, 0x0040),
         (0xe056, 0x00f0, 0x0000),
         (0xe040, 0x1000, 0x0000),
+        // `config_eee_mac` tail in the verified driver: bits 1:0 of 0xe040.
+        (0xe040, 0x0000, 0x0003),
         (0xea1c, 0x0003, 0x0001),
         (0xea1c, 0x0004, 0x0000), // RTL8125B row
         (0xe0c0, 0x4f0f, 0x4403),
-        (0xe052, 0x00c8, 0x0060),
-        (0xd430, 0x0fff, 0x045f),
+        (0xe052, 0x0080, 0x0068),
+        (0xd430, 0x0fff, 0x047f),
         (0xea1c, 0x0004, 0x0000),
         (0xeb54, 0x0001, 0x0000),
     ];
@@ -1315,6 +1324,16 @@ impl NetDevice for Rtl8125Nic {
         );
         state.tx_next = next;
         drop(state);
+
+        // The ownership bit has to be visible to the device *before* the
+        // doorbell reaches it. Descriptor memory is Normal-NC, not Device, so
+        // CPU writes to it may be reordered against the MMIO doorbell write: a
+        // doorbell that lands first makes the MAC scan a ring where every
+        // descriptor still reads as free and report TX_DESC_UNAVAILABLE
+        // (measured: arming the whole ring at once transmits fine, a single
+        // descriptor is ignored). The verified driver has the same barrier
+        // (`wmb()` before `poll_tx`).
+        Self::barrier_release();
 
         // The 8125 doorbell, not the legacy NPQ byte: writing `NPQ` into 0x38
         // on this part does nothing.
