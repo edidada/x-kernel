@@ -193,14 +193,6 @@ note = "MTU 固定 1500，不做 jumbo"
 v2 = "waived"
 
 [[path.step]]
-id = "start.pci-commit"
-src = "r8169_main.c:4118"
-op = "call"
-target = "rtl_pci_commit"
-note = "等于读一次 ChipCmd；program_engine_config 里读回 cmd 已覆盖"
-v2 = "anchored"
-
-[[path.step]]
 id = "start.enable-engines"
 src = "r8169_main.c:4120"
 op = "write"
@@ -232,11 +224,27 @@ note = "accept broadcast|multicast|own；本 port 写在 RX_CONFIG_8125B | RX_AC
 v2 = "anchored"
 
 [[path.step]]
+id = "link.late-init"
+src = "r8125_n.c:18549"
+op = "call"
+target = "rtl8125_open -> rtl8125_up -> hw_config/hw_start"
+note = "probe 时的 init 在链路协商完成前跑，永不生效；首次发送前若链路已 up 则重跑整套序列"
+v2 = "anchored"
+
+[[path.step]]
 id = "link.change-reprogram"
 src = "r8169_main.c:1962"
 op = "call"
 target = "rtl_task -> rtl8169_check_link_status -> rtl_hw_start"
 note = "link 变化后重配 MAC；本 port 在 send 里检查 LINK_CHANGE 并重跑 ring/engine 配置"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.pci-commit"
+src = "r8125_n.c:19164"
+op = "call"
+target = "commit (read ChipCmd)"
+note = "板级已验证驱动把 commit 放在使能引擎并写 RxConfig 之后（try_start_queues）"
 v2 = "anchored"
 
 [[path.step]]
