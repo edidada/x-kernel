@@ -131,8 +131,6 @@ const BMCR_ANRESTART: u16 = 0x0200;
 const BMCR_AUTONEG_MASK: u16 = BMCR_ANENABLE | BMCR_ANRESTART;
 /// `MII_CTRL1000` advertisement for 1000BASE-T full duplex.
 const ADVERTISE_1000FULL: u16 = 0x0200;
-const ADVERTISE_1000_HALF: u16 = 0x0100;
-const ADVERTISE_1000_MASK: u16 = ADVERTISE_1000_HALF | ADVERTISE_1000FULL;
 
 /// `BMSR_LSTATUS`: the PHY currently has a link.
 const BMSR_LSTATUS: u16 = 0x0004;
@@ -1007,22 +1005,45 @@ fn hw_phy_config_8125b(bar0: &IoMap) {
     mii_modify_paged(bar0, 0x0bf8, 0x12, 0xe000, 0xa000);
     mii_modify_paged(bar0, 0x0a5b, 0x12, 1 << 15, 0x0000);
 
-    // Copper advertisement: 1000BASE-T full, then restart autonegotiation.
+    // Copper advertisement: make sure 1000BASE-T full is advertised.
+    //
+    // The reference restarts autonegotiation unconditionally here because it
+    // only ever runs this right after a hardware reset, when the link is down.
+    // This driver runs it against a PHY that has already negotiated, and
+    // restarting autoneg then *bounces the link* -- which the MAC reports as a
+    // link change and which invalidates the configuration programmed a few
+    // lines earlier. Only start a fresh negotiation when the advertisement
+    // actually had to change or the link is down.
     mii_write(bar0, 0x1f, 0x0000);
     let ctrl1000 = mii_read(bar0, MII_CTRL1000).unwrap_or(0);
-    mii_write(
-        bar0,
-        MII_CTRL1000,
-        (ctrl1000 & !ADVERTISE_1000_MASK) | ADVERTISE_1000FULL,
-    );
-    let bmcr = mii_read(bar0, MII_BMCR).unwrap_or(0);
-    mii_write(
-        bar0,
-        MII_BMCR,
-        (bmcr & !BMCR_AUTONEG_MASK) | BMCR_ANENABLE | BMCR_ANRESTART,
-    );
+    // Only touch the advertisement when 1000BASE-T full is actually missing,
+    // and only negotiate when the link is down: rewriting an advertisement the
+    // PHY already has (or restarting autoneg on a live link) bounces the link,
+    // and a link that comes up after the engines were started leaves the MAC
+    // configured for a link that no longer exists.
+    let needs_fix = ctrl1000 & ADVERTISE_1000FULL == 0;
+    if needs_fix {
+        mii_write(bar0, MII_CTRL1000, ctrl1000 | ADVERTISE_1000FULL);
+    }
+    let link_up_before = link_is_up(bar0);
+    // Never restart a negotiation that already succeeded: the advertisement is
+    // only read when a negotiation starts, so rewriting it on a live link
+    // costs nothing, while restarting one takes the link down and back up.
+    let advertisement_changed = needs_fix;
+    if !link_up_before {
+        let bmcr = mii_read(bar0, MII_BMCR).unwrap_or(0);
+        mii_write(
+            bar0,
+            MII_BMCR,
+            (bmcr & !BMCR_AUTONEG_MASK) | BMCR_ANENABLE | BMCR_ANRESTART,
+        );
+        log::info!(
+            "rtl8125: autoneg restarted (advertisement changed {advertisement_changed}, link_up \
+             before {link_up_before})"
+        );
+    }
     log::info!(
-        "rtl8125: phy config applied, bmcr {:#06x} ctrl1000 {:#06x}",
+        "rtl8125: phy config applied, bmcr {:#06x} ctrl1000 {:#06x} (link was up {link_up_before})",
         mii_read(bar0, MII_BMCR).unwrap_or(0),
         mii_read(bar0, MII_CTRL1000).unwrap_or(0),
     );

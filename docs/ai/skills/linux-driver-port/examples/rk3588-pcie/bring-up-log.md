@@ -491,13 +491,37 @@ TX 描述符 opts1/opts2 的**原始字节**与我们写的是否存在我们没
 speed 编码变化），这点值得在下一步一起确认——如果协商结果与我们给 MAC 的配置
 不匹配，TX 也可能停摆。
 
+### 4.1.2h `phy_status` 与"TX 读指针"线索
+
+- **不再无谓打断链路**：`hw_phy_config_8125b` 里的 autoneg 重启现在只在
+  "1000BASE-T full 未广播 **且** 链路 down" 时才做。实测之前是它在**链路已 up 时
+  重启协商**，把链路打断一次（`bmsr 0x7989` → link=0），再恢复。修好之后
+  `phy at start bmsr 0x79ad`（link up、autoneg complete、1000BASE-T）全程稳定。
+  **但 TX 仍不消费**，所以"link bounce"不是根因（修法本身保留，它是对的）。
+- **`phy_status` 编码**：`0x8b`(bit3) / `0x93`(bit4) 两态都出现过；bit0=全双工、
+  bit1=LINK_UP、bit7 常置。结合 `bmsr 0x79ad`（1000BASE-T）看，MAC 侧看到的
+  speed 与 PHY 协商结果并无矛盾，所以这条线索**降级**。
+- **TX 读指针线索（当前最强）**：启动瞬间把**整条环**（256 个）填成 OWN 后踢一次
+  门铃，**256 个全被消费**且 `intr` 只有 `TX_OK`（连 `DESC_UNAVAIL` 都没有）；
+  而 5 秒后 ping 写**单个**描述符到 index 0 就不被消费、也不再报 `DESC_UNAVAIL`。
+  这与"MAC 的取指指针停在 k≠0（空环上它会跳过非 OWN 的描述符），而我们的
+  `tx_next` 从 0 开始"完全一致。
+  实测过但**无效**的修法：使能引擎后重写 `TxDescStartAddr{Low,High}` 复位指针
+  （现象不变）。下一步应当**用驱动自己的状态机**在 t+0 发一帧（而不是旁路
+  `send` 直接 arm），再在 t+5 s 发第二帧，看第二帧是否被消费——这能干净地把
+  "指针不同步"与"引擎停摆"分开，之前的 prime 探针绕过状态机，结果不可解释。
+
 **下一步（按优先级）**：
-1. **MSI-X + 中断驱动**（`start.irq-enable`）：参考实现靠中断服务 TX/RX 完成；
-   本板 INTx 未路由（`interrupt line = 0xff`），所以必须先做 MSI-X
-   （`pci::msix` 有骨架）。这是当前唯一剩下的结构性差异。
-2. 核对 `phy_status` 的 speed 编码（`0x8b` vs `0x93`）与 MAC 侧配置是否一致。
-3. 若能拿到 vendor `r8125` 源码（9.014.01），直接与我们的 `start` 序列做一次
-   逐行 diff —— 这是比继续二分更快的收口方式。
+1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
+   发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，
+   修法是"让硬件与软件的指针始终同步"（例如把环基址写入放到**每次**引擎停止后、
+   或始终保留一个已 arm 的描述符）。
+2. **MSI-X + 中断驱动**（`start.irq-enable`）：参考实现靠中断服务 TX/RX 完成；
+   本板 INTx 未路由（`interrupt line = 0xff`）。
+3. 取 vendor `r8125` 源码的两条路都没走通：BSP 树是 5.10 稀疏克隆
+   （`drivers/net/ethernet/realtek/` 为空），参考板只有二进制 `.ko`。
+   还剩两条：板子上 `apt-get source`（需 deb-src + 网络），或
+   `objdump -d r8125.ko` 反汇编 `rtl8125_hw_start` 之类函数取写序列。
    在 `ChipCmd` 使能**之前**做的最后一段，我们完全没移植。参考板用的是同一个
    驱动路径，而 U-Boot 的 r8169 不发 EPHY 表也能发——但 U-Boot 的发送紧接着初始化，
    恰好落在"能发"的窗口内，所以它不能作为"不需要 EPHY"的证据。
