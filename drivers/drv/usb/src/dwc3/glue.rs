@@ -90,6 +90,8 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             return Err(ProbeError::Fatal(RuntimeError::NotFound));
         }
 
+        log_cru_clocks(dev);
+
         // USB2 PHY only in this stage: High-Speed works through it, and the
         // SuperSpeed PHY is a separate driver that lands later.
         let mut phys = Vec::new();
@@ -118,38 +120,118 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
     }
 }
 
-/// Powers on `RK3588_PD_USB`.
+/// Powers on `RK3588_PD_USB` and switches the ports' 5V on.
 ///
-/// No PM framework exists in this tree yet, so the domain is driven directly,
-/// the same way the PCIe host does it for `RK3588_PD_PCIE` (both live in the
-/// PMU at 0xfd8d8000 and both take a pwr bit in register 0x150). Values come
-/// from pm-domains.c's rk3588 table: domain 31 has `pwr_offset 0x4`,
-/// `pwr_mask BIT(11)`, and the write is the hiword-masked form.
+/// No PM framework exists in this tree yet, so the domain is driven directly out
+/// of pm-domains.c's rk3588 table (domain 31: `pwr_offset 0x4`, `pwr_mask`
+/// `BIT(11)`, in the PMU at 0xfd8d8000).
+///
+/// **The polarity is inverted**: "powered" is the bit CLEAR, and the power-up
+/// write is `pwr_w_mask` alone (`BIT(11) << 16`, low half zero). A working
+/// reference board reads 0x150 as `0x000004c1`, i.e. bit 11 clear. Asserting it
+/// -- which this driver did first -- requests a power-down, and the symptom is
+/// the worst kind: the controller stops answering on the bus, so the first
+/// register access raises a synchronous external abort instead of reporting an
+/// error.
 fn enable_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
     const PMU_BASE: u64 = 0xfd8d_8000;
     const PD_PWR_CON: usize = 0x150;
+    const PD_MEM_PWR: usize = 0x1a4;
+    // The authoritative "is it on" bit: repair_status, where 1 means powered
+    // (pm-domains' rockchip_pmu_domain_is_on reads exactly this when the domain
+    // has a repair_status_mask, which PD_USB does -- BIT(25)).
+    const PD_REPAIR_STATUS: usize = 0x290;
+    const PD_USB_REPAIR_BIT: u32 = 1 << 25;
     const PD_USB_BIT: u32 = 1 << 11;
     let pmu = dev.res().iomap_region(
         driver_base::MmioRegion::new(PMU_BASE as usize, 0x400),
         "usb-pmu",
     )?;
-    if pmu.read32(PD_PWR_CON) & PD_USB_BIT != 0 {
-        info!("dwc3: PD_USB already on ({:#010x})", pmu.read32(PD_PWR_CON));
+    if pmu.read32(PD_PWR_CON) & PD_USB_BIT == 0 {
+        info!(
+            "dwc3: PD_USB already powered ({:#010x} mem {:#010x})",
+            pmu.read32(PD_PWR_CON),
+            pmu.read32(PD_MEM_PWR),
+        );
+    } else {
+        // Hiword write: write-enable bit 11, clear it.
+        pmu.write32(PD_PWR_CON, PD_USB_BIT << 16);
+        for _ in 0..10_000 {
+            if pmu.read32(PD_PWR_CON) & PD_USB_BIT == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
+        }
+        if pmu.read32(PD_PWR_CON) & PD_USB_BIT != 0 {
+            log::error!(
+                "dwc3: PD_USB stayed powered down (pwr_con {:#010x})",
+                pmu.read32(PD_PWR_CON),
+            );
+            return Err(ProbeError::Fatal(RuntimeError::Io));
+        }
+    }
+    let repair = pmu.read32(PD_REPAIR_STATUS);
+    info!(
+        "dwc3: PD_USB state pwr_con {:#010x} mem {:#010x} repair {repair:#010x} (on {})",
+        pmu.read32(PD_PWR_CON),
+        pmu.read32(PD_MEM_PWR),
+        repair & PD_USB_REPAIR_BIT != 0,
+    );
+    enable_vbus(dev)
+}
+
+/// Logs the CRU clock gates the controller depends on.
+///
+/// "clk enable returned Ok" is not evidence that the gate moved: the register is
+/// the evidence. A working reference board reads `CLKGATE_CON26` (ids
+/// 0x1a0-0x1af, which cover the dwc3 bus/suspend/ref gates 0x1a4-0x1a6) as
+/// `0x000001ff`, `CON25` as `0x00000263`, `CON27` as `0x00000005`.
+fn log_cru_clocks(dev: &mut Device<'_, PlatformBus>) {
+    const CRU_BASE: u64 = 0xfd7c_0000;
+    let Ok(cru) = dev.res().iomap_region(
+        driver_base::MmioRegion::new(CRU_BASE as usize, 0x1000),
+        "usb-cru",
+    ) else {
+        return;
+    };
+    info!(
+        "dwc3: cru gates con25 {:#010x} con26 {:#010x} con27 {:#010x}",
+        cru.read32(0x864),
+        cru.read32(0x868),
+        cru.read32(0x86c),
+    );
+}
+
+/// Drives the ports' 5V switch, which the firmware models as the
+/// `vcc5v0-host` fixed regulator (`gpio = <&gpio3 15 0>`, `regulator-boot-on`)
+/// and Linux switches on through the regulator framework. There is no such
+/// framework here, so the line is driven directly -- without it the port has no
+/// VBUS and no device can ever attach, whatever the controller does.
+fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    const GPIO3_BASE: u64 = 0xfec4_0000;
+    const SWPORT_DR: usize = 0x0000;
+    const SWPORT_DDR: usize = 0x0008;
+    const HOST_PORT_BIT: u32 = 1 << 15;
+    let gpio = dev.res().iomap_region(
+        driver_base::MmioRegion::new(GPIO3_BASE as usize, 0x100),
+        "usb-vbus-gpio",
+    )?;
+    let data = gpio.read32(SWPORT_DR);
+    let direction = gpio.read32(SWPORT_DDR);
+    info!("dwc3: vbus gpio3.15 dr {data:#010x} ddr {direction:#010x}");
+    if direction & HOST_PORT_BIT != 0 && data & HOST_PORT_BIT != 0 {
+        info!("dwc3: vbus already enabled");
         return Ok(());
     }
-    pmu.write32(PD_PWR_CON, (PD_USB_BIT << 16) | PD_USB_BIT);
-    for _ in 0..10_000 {
-        if pmu.read32(PD_PWR_CON) & PD_USB_BIT != 0 {
-            info!("dwc3: PD_USB powered on ({:#010x})", pmu.read32(PD_PWR_CON));
-            return Ok(());
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
-    }
-    log::error!(
-        "dwc3: PD_USB did not come up (pwr_con {:#010x})",
-        pmu.read32(PD_PWR_CON),
+    // Direction first: driving a level into an input pin does nothing.
+    gpio.write32(SWPORT_DDR, direction | HOST_PORT_BIT);
+    gpio.write32(SWPORT_DR, data | HOST_PORT_BIT);
+    info!(
+        "dwc3: vbus enabled, dr {:#010x} ddr {:#010x}",
+        gpio.read32(SWPORT_DR),
+        gpio.read32(SWPORT_DDR),
     );
-    Err(ProbeError::Fatal(RuntimeError::Io))
+    Ok(())
 }
 
 /// Acquires the USB2 PHY a `phys` entry of this node points at.

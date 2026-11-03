@@ -38,6 +38,20 @@ pub fn init(
     utmi_wide: bool,
     dis_enblslpm: bool,
 ) -> Result<HwParams, ProbeError> {
+    // The capability word is the liveness check that was measured on a working
+    // board: 0x01100020 = CAPLENGTH 0x20, xHCI 1.1. A dead window reads back as
+    // 0 or all-ones instead of aborting.
+    let capability = regs.read32(0);
+    info!(
+        "dwc3: xhci capability {capability:#010x} (caplen {}, version {}.{})",
+        capability & 0xff,
+        (capability >> 24) & 0xff,
+        (capability >> 16) & 0xff,
+    );
+    if capability == 0 || capability == 0xffff_ffff {
+        log::error!("dwc3: the controller does not answer at offset 0");
+        return Err(ProbeError::Fatal(driver_base::RuntimeError::Io));
+    }
     core_soft_reset(regs);
     let params = HwParams {
         gsnpsid: regs.read32(regs::DWC_USB3_GSNPSID),

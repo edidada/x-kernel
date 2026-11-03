@@ -741,26 +741,44 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
   `GUSB2PHYCFG`）。
 - 绑定 `snps,dwc3`（子节点）；父节点的 `clocks` 用 `parent_property` 读。
 
-### 真机进展（4 次上板，逐次收敛）
+### 真机进展
 
 | 现象 | 根因 | 状态 |
 |---|---|---|
 | 驱动完全不 probe | 绑定父节点，而父节点没有 `reg`（只有 `ranges`） | 改绑 `snps,dwc3` 子节点 ✅ |
-| `device 420 still deferred on phy:426` | DWC3 的 `phys` 引用 **`otg-port` 子节点** 的 phandle，而 usb2phy provider 发布的是外层 `usb2-phy@X` 的 phandle | 驱动侧先做 port→父节点映射（provider 应按 port 发布，已记为后续缺口）✅ |
-| 控制台静默 83 s（无 panic） | `PD_USB` 未开：寄存器窗口首次访问直接挂总线，不产生 abort | 直接写 PMU 0x150 bit11 开域 ✅ |
-| 首次寄存器读 `DataAbort`：`ESR=0x96000010`（DFSC 0x10 = 同步外部 abort，即总线 ERROR 响应） | **仍未解决**：PD 已开、`usb3-otg` 已 deassert（`status=false`）、三个时钟已 enabled（24M/24M/300M），块仍不解码 | 进行中 |
+| `device 420 deferred on phy:426` | DWC3 的 `phys` 引用 **`otg-port` 子节点** phandle，provider 发布的是外层 `usb2-phy@X` | 驱动侧 port→block 映射（provider 按 port 发布是待办）✅ |
+| 控制台静默 83 s（无 panic） | 寄存器窗口访问挂总线（块未上电） | 见下一行 |
+| `DataAbort` `ESR=0x96000010`（同步外部 abort） | **我们把 PD_USB 的极性写反了**：`0x150` bit11 **清零 = 已供电**，power-on 写的是 `pwr_w_mask`（`BIT(11)<<16`，低半全 0）。我们写 `(bit<<16)\|bit` 等于**请求掉电** | 已改成清零并在 `repair_status(0x290)` bit25 上确认 ✅ |
+| 上电后仍无响应（挂起，无 abort） | **CRU 门控没打开**：参考板 `CLKGATE_CON26 = 0x1ff`，我们读回 `0x0`（同一批里 `CON25` 与参考板逐位一致 `0x263`，所以映射/读通路没问题） | **进行中**：`0x1a4/0x1a5/0x1a6`（dwc3 bus/suspend/ref）的 gate 行在我们 rk3588_cru 数据里不存在，`enable()` 静默成功 |
+
+### 参考板工作态真值（`scripts/usb/ref-usb-dump.sh` 采集）
+
+| 寄存器 | 值 | 含义 |
+|---|---|---|
+| PMU `0xfd8d8150` | `0x000004c1` | PD_USB(bit11)=**0 = 已上电**；PD_PCIE(bit7)=1 |
+| PMU `0xfd8d81a4` | `0x00000000` | mem 电源位(bit3) 为 0 |
+| PMU `0xfd8d8290` | `0xfe9f0001` | repair_status：**bit25=1 = PD_USB 已上电**（`rockchip_pmu_domain_is_on` 就看这一位） |
+| CRU `0xfd7c0aa8` | `0x00000000` | usb3otg0(bit4)/usb3otg1(bit7) 复位都已释放 |
+| CRU `0xfd7c0868` | `0x000001ff` | **CLKGATE_CON26**（id 0x1a0–0x1a8 全开）←我们这里是 0 |
+| CRU `0xfd7c0864` | `0x00000263` | CLKGATE_CON25（与我们一致） |
+| CRU `0xfd7c086c` | `0x00000005` | CLKGATE_CON27（我们这里是 0） |
+| GPIO3 `0xfec40000/08` | `0x8800` / `0x9ac0` | **bit15=1 且为输出 = `vcc5v0-host` VBUS 由软件打开** |
+| `0xfc000000`/`0xfc400000` | `0x01100020` | xHCI 能力字：CAPLENGTH 0x20、**HCIVERSION 0x110**（两控制器都在） |
+| `0xfec40000`+0x0c 等 | `0x215` | usb2phy block+0x0c bit11=0 = 未 suspend |
+
+参考板 dmesg 还确认：`xhci-hcd.12.auto: io mem 0xfc400000` —— **usbdrd3_1 在参考板上是真实可用的**，
+其上挂着 Genesys Logic USB2.1/USB3.2 hub（bus 1/2）。
 
 ### 下一步（有明确判据）
 
-1. **PMU 极性存疑**：我们的 0x150 读回 `0x00000811`（bit11 置位即认为"供电"），
-   而 pm-domains.c 的 power-on 写的是 `pwr_w_mask`（= `BIT(11)<<16`，低半部分
-   写 0）。这两种解释相反，必须用参考板实测定案：在**参考板 USB 工作态**下读
-   PMU `0x150` 与 `0x1a4`（USB 域有 `mem_status BIT(3)`，我们的实现完全没碰
-   内存供电位），与我们的值对比。
-2. 若 PMU 值一致仍 abort，则查 `usb3-otg` reset 是否真的是这条线：读 CRU
-   `SOFTRST_CON` 对应位（reset id 0x2a7 → `0xa00 + (0x2a7/16)*4`，bit `0x2a7%16`），
-   并与参考板同寄存器对照。
-3. 块能解码后，`GSNPSID` 应为 `0x5533_xxxx`；xHCI `HCIVERSION` 应 ≥ `0x0100`。
+给 `drivers/drv/clk/src/rk3588_cru/data.rs` 补上 `0x1a4/0x1a5/0x1a6` 的 gate 行
+（RK3588 gate id g → `CLKGATE_CON(0x0800 + (g/16)*4)`，bit `g%16`），重新上板后判据：
+
+- `dwc3: cru gates con26` 应变成 **至少 `0x00000070`**（bits 4,5,6），与参考板 `0x1ff` 同向；
+- 紧接着应出现 `dwc3: xhci capability 0x01100020 (caplen 32, version 1.0)`；
+- 然后 `xhci: version 1.0 ports N …` 与端口表。
+
+若 con26 已置位仍无响应，再对照 `CON25/CON27` 的其余位（参考板 `0x263`/`0x5`）逐个补齐。
 
 ### 当前状态
 
