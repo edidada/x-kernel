@@ -640,6 +640,39 @@ rtl8125: vendor hw_config extras applied, csi 0x70c 0x27ffff00
 都不被消费。这条在今天的代码状态下**仍可复现**（`intr` 里能看到 `TX_OK`），
 所以 TX 通路本身是好的，缺的是"单帧提交为什么不被看见"这一环。
 
+### 4.2 A/B 结论：**不是序列、不是寄存器、也不是时间，而是执行上下文**
+
+在新分支 `xiaohui/rtl8125-tx-ab` 上做了一个最小 A/B：把 tgoskits 的
+`init()` + `try_start_queues()` + `submit_buffer()` **按原顺序**在我们的驱动里重放
+（同一块板、同一颗芯片、同一份 DMA 内存），只发 1 帧，然后记录 OWN 位与中断状态。
+
+同一次启动里跑两次（完全相同的一段代码）：
+
+```
+[19.89] cpu 0:  ab: tgoskits sequence result: own 0  opts1 0x00000000  intr 0x00000084   ← 帧被取走并发送
+[25.31] cpu 6:  ab: tgoskits sequence result: own 1  opts1 0xb000003c  intr 0x00000080   ← 完全不取
+```
+
+| 变量 | 是否成立 |
+|---|---|
+| 参考序列（vendor 93 步 / tgoskits 全套） | **否** —— 同一段代码两种结果 |
+| 寄存器取值（含 TDFNR/MRRS/EPHY/PHY/MAR/OCP 全表） | 否 |
+| 时间（"空闲 1 秒后失效"） | **否** —— 失败点可以是 t+5 s，也可以是 t+0.3 s，取决于调用点 |
+| **执行上下文 / CPU** | **是** —— probe 上下文（CPU 0）成功，任务上下文（CPU 6）失败 |
+
+这说明：**MAC 的取指通路本身是好的**（probe 里能取能发），一旦从任务上下文提交就
+全灭。可能的方向（按可能性）：
+
+1. **DMA 内存的 CPU 侧映射在多核下不一致**：`kdma` 用 `UNCACHED|SHARED` 重映射页，
+   若 `protect()` 只对被调用的那个 CPU 做了 TLB 失效，其他核仍用旧的 **cacheable**
+   映射访问同一物理页 → CPU 6 上写的描述符停在 cache 里，设备读 DRAM 读到 OWN=0。
+   这与"probe 在 CPU 0（做过重映射的那个核）上能工作"完全吻合。
+2. RC/DMA 侧与 CPU 亲和/互连电源域相关（可能性低于 1）。
+
+**下一步**：直接在 `send` 里验证假设 1 —— 例如在提交前后各读一次描述符并对比，
+或在 A/B 里把描述符写到**另一块 DMA 缓冲**并用 `dev.res().alloc_coherent` 的
+CPU 地址做一次 memcpy 往返；若 CPU 6 上读回的是旧值，即确认多核 TLB/属性不一致。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，

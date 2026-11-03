@@ -949,6 +949,14 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             log::info!("pcie-dw: enabling clock {name}");
             let clk = dev.res().clk(name)?;
             clk.enable()?;
+            // The handle is the enable's owner: dropping it releases the clock
+            // again. The host bridge never unbinds, so the enables live for the
+            // boot lifetime -- and they must, because the APB register block
+            // stays reachable with its own clock while the controller's data
+            // path (and everything below it) stops dead. Measured: with the
+            // handles dropped, a downstream NIC could fetch and transmit a
+            // descriptor inside probe and never again afterwards.
+            core::mem::forget(clk);
         }
         khal::time::busy_wait(ktime_types::TimeSpan::from_millis(1));
         enable_pcie_power_domain(dev)?;
