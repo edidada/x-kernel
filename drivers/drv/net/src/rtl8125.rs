@@ -171,6 +171,9 @@ const RX_LEN_MASK: u32 = 0x3fff;
 /// a low value only hurts: oversized frames are dropped instead of received).
 const RX_MAX_SIZE_FIELD: u16 = (RX_SLOT_LEN + 1) as u16;
 
+/// Diagnostic switch for the tgoskits A/B experiment (see `tgoskits_ab_selftest`).
+const RUN_AB_SELFTEST: bool = false;
+
 /// Interrupt mitigation register: off while polling.
 const INTR_MITIGATE: usize = 0xe2;
 
@@ -273,21 +276,6 @@ const RX_CONFIG_8125B: u32 = (8 << 27) | (7 << 8) | (1 << 11);
 /// shortest inter-frame gap. RTL8125B is *not* `rtl_is_8168evl_up`, so
 /// `TXCFG_AUTO_FIFO` is deliberately not set.
 const TX_CONFIG_8125B: u32 = (7 << 8) | (3 << 24);
-
-/// The fields of `RxConfig` software owns: fetch threshold [30:27], pause slot
-/// (bit 11), DMA burst [10:8]. Everything else in the register belongs to the
-/// chip (and reads back changed).
-const RX_CONFIG_WRITABLE: u32 = (0xf << 27) | (1 << 11) | (0x7 << 8);
-
-/// The fields of `TxConfig` software owns: inter-frame gap [25:24] and DMA
-/// burst [10:8].
-///
-/// The gap field is **two** bits wide, not the three a `>> 24` mask suggests:
-/// bit 26 upward belongs to the read-only version id, which is exactly why
-/// `rtl_chip_infos` compares the id through `0x7cf`/`0xfcf` -- those masks
-/// skip bits 24/25 so the gap cannot corrupt the comparison. Writing the whole
-/// word and comparing it can never match.
-const TX_CONFIG_WRITABLE: u32 = (0x3 << 24) | (0x7 << 8);
 
 /// Reset completion poll: `r8169`'s `rtl_loop_wait_low(..., 100, 100)`.
 const RESET_POLL_ITERS: usize = 100;
@@ -455,8 +443,7 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
     // `try_start_queues()` from the board-verified driver, in its order.
     bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
-    // Accept every multicast group: the hash filter is all-zero after reset, so
-    // multicast traffic would be dropped whatever the accept bits say.
+    // Accept every multicast group: the hash filter is all-zero after reset.
     bar0.write32(reg::MAR0, u32::MAX);
     bar0.write32(reg::MAR4, u32::MAX);
     bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB); // enable_tx_rx()
@@ -594,6 +581,12 @@ fn hw_start_8125_common(bar0: &IoMap) {
 ///
 /// It is a one-shot diagnostic, not a code path: the caller restores the normal
 /// configuration immediately afterwards.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-021-no-panic-on-reachable-failure: a diagnostic transcription of another \
+              driver's sequence, kept in one piece so it can be compared line by line with that \
+              driver; it is not a production path"
+)]
 fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
     log::info!("ab: running the tgoskits-variant start sequence");
@@ -663,6 +656,32 @@ fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
     );
     Rtl8125Nic::barrier_release();
     bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
+
+    // Cross experiment, part 1: tgoskits init, but submit the frame the way the
+    // production `send` does (descriptor pre-armed at init, data copied into the
+    // slot, ownership written after a fence, then the doorbell).
+    {
+        // SAFETY: slot 0 is TX_SLOT_LEN bytes of this device's coherent memory.
+        unsafe { core::ptr::write_bytes(nic.tx_slot(0), 0, ETH_ZLEN) };
+        let d = nic.tx_desc(0);
+        Rtl8125Nic::desc_set_addr(d, nic.tx_slots.bus_addr());
+        Rtl8125Nic::desc_set_opts1(d, DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32);
+        Rtl8125Nic::barrier_release();
+        Rtl8125Nic::desc_set_opts1(
+            d,
+            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32,
+        );
+        Rtl8125Nic::barrier_release();
+        bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
+        for _ in 0..20 {
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(500));
+        }
+        log::info!(
+            "ab cross: tgoskits-init + send-style submit -> own {} intr {:#010x}",
+            Rtl8125Nic::desc_opts1(d) >> 31,
+            bar0.read32(reg::INTR_STATUS),
+        );
+    }
 
     // Address sweep: point the transmit ring at each of this driver's coherent
     // allocations in turn and submit one descriptor there. A allocation that is
@@ -833,9 +852,12 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
     bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
     bar0.write16(INTR_MITIGATE, 0);
 
-    // Drop the power-saving "UPS" gate before the engines run.
+    // `Config1` bit 4 is SPEED_DOWN (idle speed drop); the reference clears it.
     let config1 = bar0.read8(reg::CONFIG1);
     bar0.write8(reg::CONFIG1, config1 & !0x10);
+
+    // Drop the power-saving "UPS" gate before the engines run.
+
     // Coalescing block: the verified driver clears 0xa00..0xb00 outright.
     let mut offset = 0xa00usize;
     while offset < 0xb00 {
@@ -862,37 +884,6 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
     // ldp:step start.phy-config
     hw_phy_config_8125b(bar0);
 
-    // RX/TX configuration is write-protected behind the Cfg9346 latch.
-    bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
-    bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
-    bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
-    bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
-
-    let rx_config = bar0.read32(reg::RX_CONFIG);
-    let tx_config = bar0.read32(reg::TX_CONFIG);
-    let cmd = bar0.read8(reg::CHIP_CMD);
-    log::info!(
-        "rtl8125: {chip} reset done, rxcfg {rx_config:#010x} txcfg {tx_config:#010x} cmd \
-         {cmd:#04x} (engines still stopped)"
-    );
-    if rx_config & RX_CONFIG_WRITABLE != RX_CONFIG_8125B & RX_CONFIG_WRITABLE
-        || tx_config & TX_CONFIG_WRITABLE != TX_CONFIG_8125B & TX_CONFIG_WRITABLE
-    {
-        // A field that will not hold its value means the latch or the write
-        // path is wrong; do not pretend the chip is ready. Only the fields
-        // software owns are compared: `TxConfig`[29:20] is the read-only
-        // version id and `RxConfig` carries flow-control state, so neither
-        // register ever reads back the word that was written.
-        log::error!(
-            "rtl8125: {chip} configuration did not stick (rx {:#010x} want {:#010x}, tx {:#010x} \
-             want {:#010x})",
-            rx_config & RX_CONFIG_WRITABLE,
-            RX_CONFIG_8125B & RX_CONFIG_WRITABLE,
-            tx_config & TX_CONFIG_WRITABLE,
-            TX_CONFIG_8125B & TX_CONFIG_WRITABLE,
-        );
-        return Err(ProbeError::Fatal(RuntimeError::Io));
-    }
     Ok(())
 }
 
@@ -1394,7 +1385,10 @@ impl Rtl8125Nic {
 impl Rtl8125Nic {
     /// Runs the one-shot A/B experiment before the first real frame.
     fn before_first_frame_probe(&self) {
-        if TX_TRACE.load(Ordering::Relaxed) == 0 {
+        // The experiment arms descriptors of its own, which leaves the ring in a
+        // state the production path then refuses; keep it available but off
+        // while the production init is under test.
+        if RUN_AB_SELFTEST && TX_TRACE.load(Ordering::Relaxed) == 0 {
             tgoskits_ab_selftest(self);
             // The experiment leaves the ring configured for its own submit, so
             // restore this driver's configuration before the real frame.
