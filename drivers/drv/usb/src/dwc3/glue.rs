@@ -266,6 +266,14 @@ fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
         driver_base::MmioRegion::new(GPIO3_BASE as usize, 0x100),
         "usb-vbus-gpio",
     )?;
+    // The pin has to be *muxed* to GPIO before any level can reach the pad.
+    // RK3588 keeps the IOMUX of banks >= 1 in the bus IOC block, far from the
+    // GPIO registers (Linux: `reg += 0x8000 /* BUS_IOC_BASE */`, and GPIO3 lives
+    // in VCCIO3_5 at +0xa000): for GPIO3_B7 the word is 0xfd5fa064, four bits per
+    // pin, function 0 = GPIO. This driver never programmed it, so a bank that
+    // reads fine could still ignore every level it is handed.
+    mux_pin_to_gpio(dev);
+
     let data = gpio.read32(SWPORT_DR);
     let direction = gpio.read32(SWPORT_DDR);
     info!(
@@ -303,6 +311,33 @@ fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
         core::mem::forget(guard);
     }
     Ok(())
+}
+
+/// Muxes GPIO3_B7 (the VBUS switch) to the GPIO function.
+fn mux_pin_to_gpio(dev: &mut Device<'_, PlatformBus>) {
+    const PINCTRL_BASE: u64 = 0xfd5f_0000;
+    const VCCIO3_5_IOC: usize = 0xa000;
+    const GPIO3_B_MUX: usize = 0x64;
+    const PIN_SHIFT: u32 = 28; // B7 is the top nibble of the word
+    const PIN_MASK: u32 = 0xf << PIN_SHIFT;
+    let Ok(ioc) = dev.res().iomap_region(
+        driver_base::MmioRegion::new(PINCTRL_BASE as usize, 0xd000),
+        "usb-pinctrl",
+    ) else {
+        return;
+    };
+    let offset = VCCIO3_5_IOC + GPIO3_B_MUX;
+    let before = ioc.read32(offset);
+    if before & PIN_MASK != 0 {
+        ioc.write32(offset, before & !PIN_MASK);
+        info!(
+            "dwc3: gpio3_b7 mux {:#010x} -> {:#010x} (function 0 = gpio)",
+            before,
+            ioc.read32(offset),
+        );
+    } else {
+        info!("dwc3: gpio3_b7 mux already GPIO ({before:#010x})");
+    }
 }
 
 /// Takes a DWC3 instance's USB3 port out of reset in the USB GRF.

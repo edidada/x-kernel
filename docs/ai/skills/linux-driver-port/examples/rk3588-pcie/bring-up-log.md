@@ -837,6 +837,30 @@ tgoskits 的 USB2 PHY `power_on()` 是**空函数**，文档也注明"不能描�
 VBUS 稳定状态机"；它整个 RK3588 USB 路径里**没有 VBUS/GPIO 代码** —— 说明它的 boot 链
 （板厂 U-Boot）已经把 5V 打开了。我们这条 TFTP+DICE 启动链没有。
 
+#### 参考板上这一路是谁开的
+
+```
+gpiochip3: GPIOs 96-127, parent: platform/fec40000.gpio, gpio3:
+ gpio-111 (                    |vcc5v0-host         ) out hi   ← Linux（regulator-fixed）
+ gpio-136 (                    |vbus5v0-typec       ) out lo
+```
+
+`gpio-111` = bank3 + pin15，**由 Linux 的 regulator-fixed 驱动拉高** —— 说明这块
+SoC/bank 的写在正常启动链下是允许的，不是硬件写保护。
+
+#### 我们这边已排除的原因（逐条有实测）
+
+| 候选原因 | 实测 | 结论 |
+|---|---|---|
+| PD 电源域 | `repair_status 0xfff70001` bit25=1 | 排除 |
+| `pclk_gpio3` 门控 | CRU `0x844` = `0x0` | 排除 |
+| 引脚复用（IOMUX） | `0xfd5fa064` = `0x00006666`，B7 nibble=0 = GPIO | 排除 |
+| 特权级（内核 vs bootloader） | U-Boot `mw.l` 同样不落地 | 排除 |
+| 引脚是否被别的驱动占用 | 我们板上没有 regulator 框架，无人占用 | 排除 |
+
+在一次 U-Boot 试验里写入 `0x12345678` 读回 `0x00001230`（部分位生效），
+说明写通路并非完全断死，更像是这个寄存器在**我们这个启动链下被部分屏蔽**。
+
 ### 下一步（VBUS，先于枚举）
 
 1. **gpio3 写入为什么被丢（已排除内核与时钟）**：`scripts/usb/uboot-vbus-probe.sh`

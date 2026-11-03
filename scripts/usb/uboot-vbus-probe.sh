@@ -66,11 +66,21 @@ with Console(port, 1500000, "/tmp/usb-vbus-probe") as console:
     print("== stopped at U-Boot")
 
     for cmd in [
-        "md.l 0xfec40000 1",   # DR
-        "md.l 0xfec40008 1",   # DDR
+        "md.l 0xfec40000 1",   # DR_L
+        "md.l 0xfec40008 1",   # DDR_L
         "md.l 0xfec40070 1",   # pad
-        "mw.l 0xfec40008 0x00009800",  # DDR |= bit15 (keep the existing bits)
-        "mw.l 0xfec40000 0x00008800",  # DR  |= bit15
+        # A pattern read-back, not a single pin: if even this does not stick,
+        # the whole bank rejects writes rather than one protected bit.
+        "mw.l 0xfec40000 0x12345678",
+        "md.l 0xfec40000 1",
+        "mw.l 0xfec40008 0x0000ffff",
+        "md.l 0xfec40008 1",
+        # Same test on the neighbouring bank, to tell "this bank" from "all IO":
+        "mw.l 0xfec30000 0x0000abcd",
+        "md.l 0xfec30000 1",
+        # Leave nothing changed: restore the values read at entry (0 here).
+        "mw.l 0xfec40000 0x00000000",
+        "mw.l 0xfec40008 0x00000000",
         "md.l 0xfec40000 1",
         "md.l 0xfec40008 1",
         "md.l 0xfec40070 1",
