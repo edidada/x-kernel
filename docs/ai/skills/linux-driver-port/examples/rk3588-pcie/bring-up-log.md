@@ -728,6 +728,18 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 5 packets transmitted, 4 received, 20% packet loss
 ```
 
+### 当前状态（合并回 `xiaohui/pci-usb-verify` 时）
+
+| 方向 | 状态 | 证据 |
+|---|---|---|
+| **TX** | **稳定可用** | `tx[0] len 42 desc 0xb000002a -> 0x00000000 reclaimed true`，每帧都一样 |
+| **RX** | **不稳定** | 最好的一轮 `5 transmitted / 4 received`、RTT 4.8–21 ms（一次 1005 ms）；后续两轮 `0 received`，`rx[0]` 始终 `0x80000800`（描述符没被消费） |
+
+RX 时好时坏，`rx[0]` 未被消费说明"这一轮 MAC 没往环里写帧"，而 TX 同轮正常 ——
+优先怀疑：RX 环的 arm 时机（`late_init` 之后是否被别的路径重写）、
+`RxConfig` 的 accept 位是否在 `program_engine_config` 之后又被覆盖、
+以及纯轮询模型下 RX 的响应延迟（`set_rx_scheduler` 目前仍是默认的 Unsupported）。
+
 ### 定位过程（关键几步）
 
 1. **交叉实验**：把 tgoskits 的 init 序列 + **我们自己的 `send` 提交写法** 放在一起跑 →
