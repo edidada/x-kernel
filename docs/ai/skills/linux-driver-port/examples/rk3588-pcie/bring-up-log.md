@@ -709,6 +709,35 @@ ab: tgoskits sequence result: intr 0x84 / 0x85      # 含 TX_OK，是真发送
 "扫描成功 vs 生产失败" 的差异还没定位到，已知它**不是** kdma、不是缓存、不是 TLB、
 不是 link 状态机、不是序列、不是寄存器取值。
 
+### 4.2.2 逐寄存器对比：两次提交的上下文**完全相同**
+
+在扫描里"被接受的那次提交"和"生产路径的提交"前后各 dump 一次同样的字段，同一次
+启动、相隔约 50 ms：
+
+```
+ab submit (sweep, accepted):  base 0x203000 desc opts1 0xb000003c opts2 0x0 addr 0x3400000
+                              | cmd 0x0c intr 0x00000084 mask 0 tdfnr 0x10 txcfg 0x67100f00
+send submit (production):     base 0x203000 desc opts1 0xb000003c opts2 0x0 addr 0x3400000
+                              | cmd 0x0c intr 0x00000000 mask 0 tdfnr 0x10 txcfg 0x67100f00
+```
+
+**除 `IntrStatus`（历史值）之外逐字相同** —— 同样的基址、同样的描述符 16 字节、
+同样的命令/掩码/TDFNR/TxConfig，一次被取走、一次被忽略。也就是说**提交动作本身没有
+差异，差异在"之前跑了什么"**。
+
+围绕这两次提交又排除了四种解释（都实测无效）：
+
+| 试验 | 结果 |
+|---|---|
+| 去掉 `dump_registers()`（它读 0x64/0x68 CSI、0x80 EPHYAR、0xb0 OCPDR 等有读副作用的寄存器） | 仍失败 |
+| 关闭 `handle_link_change` | 仍失败 |
+| 每次提交前重写 TX 基址（门铃之前） | 仍失败 |
+| 每次提交前重写 TX 基址（描述符之前，即扫描的顺序） | 仍失败 |
+
+现在唯一已知的差别是**先后关系**：被接受的那次，紧跟在 A/B 自己的
+`CmdReset → init → 重新写基址 → arm → 门铃` 之后；失败的这次，跑在
+`program_engine_config` 之后约 50 ms、中间还经过 publish 与 knet 轮询。
+
 **下一步**：直接在 `send` 里验证假设 1 —— 例如在提交前后各读一次描述符并对比，
 或在 A/B 里把描述符写到**另一块 DMA 缓冲**并用 `dev.res().alloc_coherent` 的
 CPU 地址做一次 memcpy 往返；若 CPU 6 上读回的是旧值，即确认多核 TLB/属性不一致。

@@ -366,7 +366,12 @@ fn start_data_path(nic: &Rtl8125Nic) -> Result<(), ProbeError> {
         log::error!("rtl8125: engines did not start (ChipCmd {cmd:#04x})");
         return Err(ProbeError::Fatal(RuntimeError::Io));
     }
-    dump_registers(bar0);
+    // TEMP (diagnostic): the register dump reads registers with read side
+    // effects (CSI 0x64/0x68, EPHYAR 0x80, OCPDR 0xb0); disabled to test
+    // whether it is what breaks the first transmit.
+    if false {
+        dump_registers(bar0);
+    }
 
     log::info!(
         "rtl8125: phy at start bmcr {:#06x} bmsr {:#06x} phy_status {:#04x}",
@@ -680,6 +685,9 @@ fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
             DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32,
         );
         Rtl8125Nic::barrier_release();
+        if label == "tx_ring" {
+            nic.log_tx_context("ab submit (sweep, accepted)", d);
+        }
         bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
         for _ in 0..20 {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(500));
@@ -1312,6 +1320,37 @@ impl Rtl8125Nic {
         Self::desc_set_opts1(desc, DESC_OWN | ring_end | RX_SLOT_LEN as u32);
     }
 
+    /// Logs the full transmit context around one submission.
+    ///
+    /// The sweep transmits from the same buffer with what looks like the same
+    /// descriptor, so the difference has to be visible in these few words:
+    /// ring base, the descriptor itself, the command/status/mask registers and
+    /// the first bytes of the frame slot.
+    fn log_tx_context(&self, label: &str, desc: *mut u8) {
+        let bar0 = &self.bar0;
+        let opts1 = Self::desc_opts1(desc);
+        // SAFETY: `desc` points at the start of a 16-byte descriptor in this
+        // device's coherent ring.
+        let opts2_field = unsafe { desc.add(4) }.cast::<u32>();
+        // SAFETY: `opts2_field` is the descriptor's own options word.
+        let opts2 = unsafe { core::ptr::read_volatile(opts2_field) };
+        // SAFETY: the address field is at offset 8 of the same descriptor.
+        let addr_field = unsafe { desc.add(8) }.cast::<u64>();
+        // SAFETY: `addr_field` is the descriptor's own address slot.
+        let addr = unsafe { core::ptr::read_volatile(addr_field) };
+        log::info!(
+            "{label}: base {:#010x}:{:#010x} desc opts1 {opts1:#010x} opts2 {opts2:#010x} addr \
+             {addr:#x} | cmd {:#04x} intr {:#010x} mask {:#010x} tdfnr {:#04x} txcfg {:#010x}",
+            bar0.read32(reg::TX_DESC_ADDR_HIGH),
+            bar0.read32(reg::TX_DESC_ADDR_LOW),
+            bar0.read8(reg::CHIP_CMD),
+            bar0.read32(reg::INTR_STATUS),
+            bar0.read32(reg::INTR_MASK),
+            bar0.read8(reg::TDFNR),
+            bar0.read32(reg::TX_CONFIG),
+        );
+    }
+
     /// Publishes a store to the descriptor ring *before* the NIC reads it.
     fn barrier_release() {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -1487,6 +1526,10 @@ impl NetDevice for Rtl8125Nic {
         // descriptor is ignored). The verified driver has the same barrier
         // (`wmb()` before `poll_tx`).
         Self::barrier_release();
+
+        if TX_TRACE.load(Ordering::Relaxed) == 0 {
+            self.log_tx_context("send submit (production)", desc);
+        }
 
         // The 8125 doorbell, not the legacy NPQ byte: writing `NPQ` into 0x38
         // on this part does nothing.
