@@ -1548,6 +1548,8 @@ and separately quiesce their accesses. Workqueue draining is not implemented her
 
 `SystemFrozenTasks` retains the complete `FrozenTasks` guard and publication gate
 through PM recovery. Timeout, cancellation and invalid exemptions release both.
+The frozen-task guard is declared before the publication gate so Rust's field
+drop order enforces thaw-before-admission without an optional guard or custom Drop.
 On successful cleanup it first removes freeze requests and thaws old tasks,
 then detaches the deferred activation list and reopens admission. Deferred tasks
 re-enter normal admission before enqueue, so a subsequent freeze can retain them

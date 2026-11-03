@@ -171,14 +171,10 @@ impl Drop for PublicationGate {
 /// dependency locks, with ordinary task execution safe to resume.
 #[must_use = "retain until PM cleanup has made ordinary execution safe"]
 pub struct SystemFrozenTasks {
-    frozen: Option<FrozenTasks>,
+    // Fields drop in declaration order: thaw existing tasks before reopening
+    // admission and releasing deferred activations. Keep this field first.
+    _frozen: FrozenTasks,
     _gate: PublicationGate,
-}
-
-impl Drop for SystemFrozenTasks {
-    fn drop(&mut self) {
-        drop(self.frozen.take());
-    }
 }
 
 /// Freezes every admitted non-idle task except the coordinator and listed kernel infrastructure.
@@ -232,7 +228,7 @@ pub fn freeze_system_tasks(
     });
     let frozen = freeze_tasks(&tasks, timeout, cancellation)?;
     Ok(SystemFrozenTasks {
-        frozen: Some(frozen),
+        _frozen: frozen,
         _gate: gate,
     })
 }

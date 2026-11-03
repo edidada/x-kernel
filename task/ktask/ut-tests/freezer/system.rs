@@ -166,15 +166,9 @@ fn task_admitted_before_closure_cannot_escape_system_freezing() {
     let guard = freeze_system_tasks(&exemptions, TimeSpan::from_secs(5), &cancellation).unwrap();
     assert!(!ran.load(Ordering::Acquire));
     assert!(!newborn_ran.load(Ordering::Acquire));
-    assert!(
-        guard
-            .frozen
-            .as_ref()
-            .unwrap()
-            .requests
-            .iter()
-            .any(|(target, _)| KtaskRef::ptr_eq(target, &task))
-    );
+    assert!(task.freeze_request.lock().as_ref().is_some_and(|request| {
+        request.is_confirmed.load(Ordering::Acquire)
+    }));
     drop(guard);
     let child = newborn.lock().take().unwrap();
     assert_eq!(child.try_join().unwrap(), 0);
