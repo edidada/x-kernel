@@ -364,12 +364,74 @@ mask）。于是所有 `mask = 0x0000` 的**置位行全部变成空操作** —
 `0xc0ac |= 0x1f80`、`0xc0b4 |= 0x0c`、`0xe860 |= 0x80` 三行。代码里"表抄全了"，
 实际一个都没写进芯片。已修，并把这条写进 skill §6.5（辅助函数语义要逐字转录）。
 
+### 4.1.2b 差分结论：**不是芯片特性**（2026-11-03 补）
+
+参考板插好网线后，vendor `r8125` 驱动在**刚 up、空闲 30 s、空闲 60 s** 三个时间点
+ping 跳板机全部 0% 丢包。所以"空闲后发不出去"不是 8125 的固有行为，
+**是我们的驱动缺少某一步**。
+
+另外把参考板工作态与我们逐项对齐后（都写进驱动里，读回一致）：
+
+```
+rxcfg 0x40c20c0e   txcfg 0x67100f40   cfg2 0x1d   cfg5 0x02
+```
+
+其中 `cfg2/cfg5` 的电源位**刻意保持关闭**：按参考板原值（`0x9d/0x03`，即端点
+自己开启 ASPM/ClkReq）写入后，连 RX 都出现 overflow（`intr 0x0011`），说明
+"照抄工作实例的全部寄存器值"里含**在当前缺 L1 机制时有害**的项——这条也记进
+skill：对拍只能定位差异，不能无脑照抄。
+
+尝试过但**不可用**的取证手段：参考板 `/dev/mem` 读 DRAM 被
+`STRICT_DEVMEM`/权限挡住（`PermissionError`），拿不到它 TX 描述符的原始内容；
+要用这条路得在参考板上编译一个内核模块，暂不做。
+
+### 4.1.2c 逐项 bisect 的结果（2026-11-03 晚）
+
+把参考板的寄存器值一项项抄进驱动并复测，得到两个反向结论：
+
+| 改动 | 结果 |
+|---|---|
+| `TxConfig` 抄参考值 `0x67100f40`（含 bit6） | **倒退**：门铃不再被消费（`txpoll 0x0001`） |
+| `TxConfig` 用计算值（bit6=0，读回 `0x67100f00`） | 门铃恢复被消费（`txpoll 0x0000`），`intr 0x0081` |
+| `RxConfig` 抄参考值 `0x40c20c0e` | 无变化（保留，与参考一致） |
+| `Config2/5` 抄参考值（端点自开 ASPM） | **倒退**：RX 出现 overflow（`intr 0x0011`） |
+| EPHY 表（`e_info_8125b` 六行） | 无变化（保留，参考一致） |
+
+所以"照抄工作实例的寄存器值"不能无脑做：`TxConfig` bit6 与 `Config2/5` 的电源位
+在**对方有配套 L1 机制**时成立，在我们这边会直接让队列停摆。已写进 skill。
+
+### 4.1.2d 当前最强假设：DMA 一致性（缓存）
+
+现在每次都是：门铃被消费、`intr` 里出现 `TX_DESC_UNAVAILABLE`，而我们刚写的
+描述符 OWN 位仍为 1。也就是 **MAC 扫了环，看不到我们写的内容**；而"启动瞬间
+（直接 `arm_whole_tx_ring` 256 个）却能全部消费"。时间相关性 + 读写双向都表现为
+"设备看到的是旧内存"，最像**缓存一致性**问题：
+
+- `kdma` 的 `allocate_dma_memory` 把页重映射成 `READ|WRITE|UNCACHED|SHARED`
+  （`update_flags` → `DmaPageTableIf::protect`）；若该重映射没有真正生效（或
+  TLB 未失效），内存仍是 cacheable；
+- `driver_host` 只在 `dma.coherent == false` 时才做 `flush_cache`/`invalidate_cache`
+  （见 `drivers/host/src/lib.rs`），而我们的 DMA 视图是 "identity 64-bit coherent"，
+  于是**一次 cache 维护都不会发生**；
+- 内核目前**没有**任何 cache 维护原语（`arch/khal`、`arch/kcpu` 里搜不到），
+  所以一旦确实是非一致平台，驱动侧无法自行 flush。
+
 **下一步（按优先级）**：
-1. 让 TX 提交走中断/时钟请求路径：先实现 `start.irq-enable`（`IntrMask` + kirq ISR），
-   观察"每帧前是否有中断"能否维持引擎唤醒。
-2. 补 `start.ephy-init`（8125B 六行 EPHY 表）+ `start.phy-config`，再测时间签名是否消失。
-3. 若仍在，用参考板的 vendor 驱动跑同一探针（它发的第一帧与第 N 帧间隔），确认这是
-   芯片特性还是我们少配了某个"保活"寄存器。
+1. **验证 DMA 一致性假设**：在驱动里对 TX/RX 环的 VA 做一次 PTE dump
+   （`page_table().query_entry(va)`，`iomap` 已有同样的打印），确认属性是
+   `UNCACHED`；若不是，问题在 `kdma::update_flags` 的 `protect`（TLB 未失效）。
+   参考实现里 `rtl8125` 的 ring 也是 `dma_alloc_coherent`，Linux 侧靠平台的
+   `dma-direct` + 非一致时 swiotlb 兜底，所以它能工作。
+2. 补 `start.phy-config`（`rtl8125b_hw_phy_config`）：EPHY 表已做，PHY 调优未做。
+3. 旧的第 1 项（EPHY）已完成，见上表。
+   在 `ChipCmd` 使能**之前**做的最后一段，我们完全没移植。参考板用的是同一个
+   驱动路径，而 U-Boot 的 r8169 不发 EPHY 表也能发——但 U-Boot 的发送紧接着初始化，
+   恰好落在"能发"的窗口内，所以它不能作为"不需要 EPHY"的证据。
+2. `start.irq-enable` 在当前板上做不了 INTx：`pci header` 显示
+   `interrupt line = 0xff`（未路由），中断驱动要先做 **MSI-X**（`pci::msix` 有骨架）。
+   优先级低于 1。
+3. 若要继续用参考板取证，需要在参考板上编译一个读 0xe4010000 描述符的小模块
+   （`/dev/mem` 不可行）。
 
 ### 4.1.3 卡点（旧描述，保留）单帧提交不被消费
 

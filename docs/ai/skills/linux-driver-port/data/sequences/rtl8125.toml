@@ -133,8 +133,8 @@ id = "start.ephy-init"
 src = "r8169_main.c:3446"
 op = "call"
 target = "rtl_ephy_init"
-note = "EPHY 寄存器表（8125B 六行）；U-Boot 驱动不做也能收发，故尚未移植"
-v2 = "unported"
+note = "e_info_8125b 六行，经 EPHYAR(0x80) 读改写"
+v2 = "anchored"
 
 [[path.step]]
 id = "start.hw-start-common"

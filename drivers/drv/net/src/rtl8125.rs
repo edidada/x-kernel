@@ -86,6 +86,8 @@ mod reg {
     pub(super) const MCU: usize = 0xd3;
     /// MAC-side PHY status: bit 1 is the link the *MAC* acts on.
     pub(super) const PHY_STATUS: usize = 0x6c;
+    /// EPHY access window (analog front-end registers, not MDIO).
+    pub(super) const EPHYAR: usize = 0x80;
     /// CSI tunnel (chip-internal config space): data and address registers.
     pub(super) const CSIDR: usize = 0x64;
     pub(super) const CSIAR: usize = 0x68;
@@ -203,6 +205,15 @@ const OCP_SELF_TEST_BITS: u16 = 0x0003;
 /// `MISC` bit 19: receive data-valid gate (must be off).
 const RXDV_GATED_EN: u32 = 1 << 19;
 /// CSI address register: transaction flag, address, and byte enables.
+/// EPHY access flag: set while the transaction is in flight (and, when written,
+/// marks the access as a write).
+const EPHYAR_FLAG: u32 = 0x8000_0000;
+/// EPHY register number sits in bits [20:16].
+const EPHYAR_REG_SHIFT: u32 = 16;
+/// `rtl_loop_wait_*` budget for EPHY transactions.
+const EPHY_POLL_ITERS: usize = 25;
+const EPHY_POLL_STEP_US: u64 = 100;
+
 const CSIAR_FLAG: u32 = 1 << 31;
 const CSIAR_BYTE_ENABLE: u32 = 0x0f << 12;
 /// Chip-internal PCIe control: bit 20 is the "ZRXDC non-compliance" timeout.
@@ -400,6 +411,31 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
+    // Values measured on the reference board's working NIC (vendor `r8125`,
+    // same SoC and chip, link up and idle): adopt them verbatim rather than
+    // re-deriving them from the vendor-neutral r8169 constants.
+    //
+    //   TxConfig 0x67100f40  -- our computed value lacked bit 6
+    //   RxConfig 0x40c20c0e  -- ours lacked bits 23:22 and the burst encoding
+    //   Config2  0x9d        -- bit 7 (clock request) enabled
+    //   Config5  0x03        -- bit 0 (ASPM) enabled
+    const REF_RX_CONFIG: u32 = 0x40c2_0c0e;
+    bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
+    bar0.write32(reg::RX_CONFIG, REF_RX_CONFIG);
+    // Config2/Config5 keep their power-management bits off: the reference
+    // driver runs with them enabled *and* the matching L1 machinery in place,
+    // while this driver does not yet, and enabling them here measurably made
+    // both rings stop fetching descriptors.
+    bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
+    log::info!(
+        "rtl8125: reference register values -> rxcfg {:#010x} txcfg {:#010x} cfg2 {:#04x} cfg5 \
+         {:#04x}",
+        bar0.read32(reg::RX_CONFIG),
+        bar0.read32(reg::TX_CONFIG),
+        bar0.read8(reg::CONFIG2),
+        bar0.read8(reg::CONFIG5),
+    );
+
     log::info!(
         "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x}",
         bar0.read32(reg::RX_CONFIG),
@@ -628,6 +664,9 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
     mac_ocp_write(bar0, OCP_SELF_TEST, probe_reg);
     log::info!("rtl8125: mac ocp self-test {probe_reg:#06x} -> {probe_rb:#06x}");
 
+    // ldp:step start.ephy-init
+    ephy_init_8125b(bar0);
+
     // PCIe power management off before anything else: RTL8125 is known for
     // DMA stalls when the link idles in a low-power state (the reference
     // disables ASPM and clock requests around its start sequence).
@@ -695,7 +734,68 @@ fn disable_pcie_low_power(bar0: &IoMap) {
     );
 }
 
-/// Reads a chip-internal CSI register.
+/// Reads one EPHY register through the `EPHYAR` window.
+///
+/// EPHY is the analog front-end register space, separate from both the MAC OCP
+/// window (0xb0) and the GPHY/MDIO window (0xb8): five-bit register numbers,
+/// 16-bit data, and a self-clearing flag.
+fn ephy_read(bar0: &IoMap, reg_addr: u16) -> u16 {
+    bar0.write32(
+        reg::EPHYAR,
+        (u32::from(reg_addr & 0x1f)) << EPHYAR_REG_SHIFT,
+    );
+    for _ in 0..EPHY_POLL_ITERS {
+        let word = bar0.read32(reg::EPHYAR);
+        if word & EPHYAR_FLAG != 0 {
+            return (word & 0xffff) as u16;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(EPHY_POLL_STEP_US));
+    }
+    0
+}
+
+/// Writes one EPHY register.
+fn ephy_write(bar0: &IoMap, reg_addr: u16, value: u16) {
+    bar0.write32(
+        reg::EPHYAR,
+        EPHYAR_FLAG | u32::from(reg_addr & 0x1f) << EPHYAR_REG_SHIFT | u32::from(value),
+    );
+    for _ in 0..EPHY_POLL_ITERS {
+        if bar0.read32(reg::EPHYAR) & EPHYAR_FLAG == 0 {
+            return;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(EPHY_POLL_STEP_US));
+    }
+}
+
+/// `rtl_hw_start_8125b`'s EPHY table.
+///
+/// The reference runs this before the MAC start sequence, on both the 8125A and
+/// 8125B paths (`rtl_ephy_init`, rows of mask/bits applied to the analog
+/// front-end). It is the last block of the reference's start sequence this
+/// driver had not ported.
+fn ephy_init_8125b(bar0: &IoMap) {
+    /// (register, mask, bits) — from `e_info_8125b[]`.
+    const EPHY_8125B: &[(u16, u16, u16)] = &[
+        (0x0b, 0xffff, 0xa908),
+        (0x1e, 0xffff, 0x20eb),
+        (0x4b, 0xffff, 0xa908),
+        (0x5e, 0xffff, 0x20eb),
+        (0x22, 0x0030, 0x0020),
+        (0x62, 0x0030, 0x0020),
+    ];
+    for (offset, mask, bits) in EPHY_8125B {
+        let current = ephy_read(bar0, *offset);
+        ephy_write(bar0, *offset, (current & !mask) | bits);
+    }
+    log::info!(
+        "rtl8125: ephy table applied, ephy[0x0b] {:#06x} ephy[0x02] {:#06x}",
+        ephy_read(bar0, 0x0b),
+        ephy_read(bar0, 0x02),
+    );
+}
+
+/// Reads a chip-internal CSI register./// Reads a chip-internal CSI register.
 fn csi_read(bar0: &IoMap, addr: u32) -> Option<u32> {
     bar0.write32(reg::CSIAR, (addr & 0xfff) | CSIAR_BYTE_ENABLE);
     for _ in 0..CSI_POLL_ITERS {

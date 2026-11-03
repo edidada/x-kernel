@@ -321,3 +321,13 @@ Notes that cost time to rediscover:
   `/dtb-6.1.99-rockchip-rk3588/rockchip/` (not `/dtb/rockchip/`).
 - it is an Ubuntu Jammy image (`Welcome to Orange Pi 1.2.2 Jammy`); the
   `orangepi` account's password is `orangepi`.
+
+### 5.8 /dev/mem cannot read DRAM on the reference board
+
+Reading a BAR through `sysfs resourceN` works; reading **System RAM** through
+`/dev/mem` returns `PermissionError` on the vendor kernel (`STRICT_DEVMEM` /
+the distro's lockdown). So "dump the working driver's descriptor ring from
+DRAM" is not possible that way -- it needs a small loadable module on that
+board. Reading a *device* window through /dev/mem is what produced the
+SError panic earlier (§5.1 note): always prefer `resourceN`, and skip devices
+whose BAR is unassigned instead of reading physical 0.
