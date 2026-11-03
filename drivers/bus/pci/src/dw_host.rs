@@ -249,6 +249,36 @@ impl DwPcie {
         false
     }
 
+    /// Logs every iATU region that is currently enabled.
+    ///
+    /// The RC is not reset between U-Boot and the kernel, so windows the
+    /// previous stage programmed are still live. An enabled *inbound* window
+    /// translates the endpoint's DMA addresses, which is exactly the sort of
+    /// thing that makes device-initiated traffic vanish while every register
+    /// access still works.
+    fn log_atu_regions(&self) {
+        // Unrolled layout: one 0x200-byte block per region, 8 regions each
+        // direction is the usual DWC maximum.
+        for index in 0..16 {
+            let atu = self.atu_base(index);
+            let ctrl2 = self.dbi_read(atu + PCIE_ATU_REGION_CTRL2);
+            if ctrl2 & PCIE_ATU_ENABLE == 0 {
+                continue;
+            }
+            log::info!(
+                "pcie-dw: iATU region {index} enabled: ctrl1 {:#010x} ctrl2 {:#010x} base \
+                 {:#x}:{:#010x} limit {:#010x} target {:#x}:{:#010x}",
+                self.dbi_read(atu + PCIE_ATU_REGION_CTRL1),
+                ctrl2,
+                self.dbi_read(atu + PCIE_ATU_UPPER_BASE),
+                self.dbi_read(atu + PCIE_ATU_LOWER_BASE),
+                self.dbi_read(atu + PCIE_ATU_LIMIT),
+                self.dbi_read(atu + PCIE_ATU_UPPER_TARGET),
+                self.dbi_read(atu + PCIE_ATU_LOWER_TARGET),
+            );
+        }
+    }
+
     /// `dw_pcie_link_set_max_speed`: LNKCTL2 target speed from the DT
     /// `max-link-speed` (1=2.5GT, 2=5GT, ...; 0 = unchanged).
     fn link_set_max_speed(&self) {
@@ -328,6 +358,9 @@ impl DwPcie {
     /// IO windows skipped (no legacy-IO consumer). Index 0 stays reserved
     /// for the CFG window.
     fn iatu_setup(&self, windows: &[PcieWindow]) {
+        // Read what is already enabled before touching anything: the boot
+        // firmware's windows are still live.
+        self.log_atu_regions();
         // Region 0 is reprogrammed per config access, exactly like the
         // reference's dw_pcie_other_conf_map_bus(): bus/device/function in the
         // target, `where` as the offset, and the WHOLE aperture as the region

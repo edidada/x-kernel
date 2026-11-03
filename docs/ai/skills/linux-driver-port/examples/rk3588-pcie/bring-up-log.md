@@ -292,6 +292,54 @@ rtl8125: tx[0] len 42 desc 0xb000002a -> 0xb000002a reclaimed false cmd 0x0c int
     合并块清零、`0x382=0x221b`、`RSS/Q_NUM=0`、`MISC` 的 RXDV gate、以及
     `0xe00e` 等待），现象不变。
 
+### 4.1.1 这一轮的新事实（RX 通、TX 半通）
+
+**参考板是 vendor `r8125` 驱动**（不是 r8169），插上网线后是可用的工作实例。用它
+做寄存器对拍 + 读 tgoskits 的 `drivers/net/realtek-rtl8125`（同 SoC 同芯片的 Rust
+实现）后，确认并修复了两个真错误：
+
+1. **8125 的中断寄存器偏移不是 816x 那套**：`IntrMask = 0x38`、`IntrStatus = 0x3c`
+   （都是 32 位），不是 `0x3c/0x3e`。之前一直读 `0x3e`，所以**永远看到 0**，
+   "MAC 毫无反应"这个结论是读错寄存器读出来的。
+   修正后立刻看到真实状态：
+
+   ```
+   tx[0] ... intr 0x0081        # RX_OK(bit0) + TX_DESC_UNAVAILABLE(bit7)
+   tx ring probe: 256 of 256 descriptors returned, intr 0x0084
+   ```
+
+   - `RX_OK` 持续置位 → **收包路径是通的**（MAC 在收）。
+   - 把整条 TX 环 256 个描述符全部填成合法帧再踢一次门铃，**256 个全被消费**、
+     `TX_OK` 置位 → **发送也能工作**，环、DMA、门铃、MAC 都不是坏的。
+2. **`rtl_hw_init_8125` 缺失**：mainline 在 `rtl_hw_reset` **之前**要清
+   `MCU(0xd3)` 的 `NOW_IS_OOB`、写 OCP `0xe8de`、并等 `MCU & LINK_LIST_RDY`。
+   已按参考实现补上（本板一直 ready，但不是可省的步骤）。
+
+顺带确认无效、别再做的：`CPlusCmd` 的 bit3/bit4（PCIMulRW / PCI_DAC）在本芯片
+**只读 0**，写了读回不变；`McAfee`… 抱歉，`Config1/2/5` 的"关低功耗"三位在参考板
+上本来就是开着的（我们改它们反而偏离工作实例）；把环从 `0x203000` 搬到
+`0xe8000000` 对现象无影响（所以低地址 DMA 可达，之前那次"参考板改基址就 ping
+不通"的实验有 confound：环内容和地址一起变了，不能作为证据）。
+
+### 4.1.2 当前唯一卡点：单帧提交不被消费
+
+```
+tx[0] len 42 desc 0xb000002a -> 0xb000002a reclaimed false   # OWN 位没被清
+txpoll 0x0000                                                # 门铃被吃了
+intr 0x0085                                                  # RX_OK + TX_OK + DESC_UNAVAIL
+txdesc 0xb000002a 0x0000000e 0xffff7ddf 0xffffff7f .. 0        # 各描述符 opts1
+```
+
+整环 armed 时全部被消费，**单个描述符 armed 时不动**，而且相邻槽位出现
+`0xffff7ddf` / `0xffffff7f` 这类我们还没解码的写回值。下一步应当：
+
+1. 用**同一份 tgoskits 驱动**在同一块板上跑一遍（他们有完整的 TX/RX 队列实现），
+   如果他们也只通 RX，那就是硬件/RC 侧问题；如果 TX 也通，逐步回退我们对齐差异。
+2. 解码 `0xffff7ddf` 这类 TX 写回值（r8169 的 `TxDesc` 状态位表 + `rtl8169_tx_vlan_tag`
+   之外还有 `TxStatus` 位段），确认 MAC 是把这些槽位当作"已发送"还是"错误"。
+3. 检查 `RingEnd` 与**描述符数量**是否必须成 2 的幂且起点对齐（我们的环 4 KiB，
+   `alloc_above` 用 16 MiB 块，首地址 16 MiB 对齐）。
+
 ### 下一步（唯一还没做的决定性实验）
 
 **和 BSP Linux 在寄存器级对拍。** 板子 SD 里有可启动的 BSP Linux
