@@ -70,6 +70,9 @@ DRV_HOST_ALLOW=(
     # descriptor names the host, same as drv/clk's ClkProvider.
     "drivers/drv/phy driver_host"
     "drivers/drv/phy kphy"
+    # E-05 (net): the r8169 reset sequence polls `CmdReset` for up to 10 ms in
+    # probe context (the reference's `rtl_loop_wait_low`), which cannot sleep.
+    "drivers/drv/net khal"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a
     # service; hwrng has exactly one consumer today.

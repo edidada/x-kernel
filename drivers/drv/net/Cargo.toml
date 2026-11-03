@@ -16,6 +16,10 @@ rk3588-rtl8125 = []
 
 [dependencies]
 driver_base = { workspace = true }
+# `busy_wait` is the µs-scale poll the reset sequence needs in probe context
+# (boundaries E-05: the same primitive drv/clk and drv/phy register).
+khal = { workspace = true }
+ktime_types.workspace = true
 # The PCI bus type and its id-table row live with the bus, the same way
 # `drv-virtio` binds PCI functions (Linux keeps `pci_bus_type` in drivers/pci).
 pci = { workspace = true }

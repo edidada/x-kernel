@@ -1318,6 +1318,8 @@ name = "drv-net"
 version = "0.3.0-dev"
 dependencies = [
  "driver-base",
+ "khal",
+ "ktime_types",
  "log",
  "pci",
  "unittest",

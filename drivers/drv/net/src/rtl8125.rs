@@ -8,7 +8,8 @@
 //!
 //! It binds through the driver core (id-table match on `10ec:8125`), maps the
 //! first MMIO BAR, identifies the chip the way `r8169_main.c` does, reads the
-//! station address, and logs the register state it found. Nothing is
+//! station address, then resets the chip and programs its RX/TX configuration.
+//! The engines stay stopped (`CmdRxEnb`/`CmdTxEnb` clear), so nothing is
 //! transmitted, received, or published to the `net` class yet — a NIC that
 //! advertises a queue it cannot service is worse than a NIC that does not
 //! exist.
@@ -38,21 +39,58 @@
 use driver_base::{Device, DriverOps, IoMap, ProbeError, RuntimeError};
 use pci::{PciBus, PciMatch};
 
-/// Register offsets used by the probe (`enum rtl_registers`).
+/// Register offsets used by this stage (`enum rtl_registers`).
 mod reg {
     /// Station address, bytes 0..3 / 4..5 (`MAC0`, `MAC4`).
     pub(super) const MAC0: usize = 0x00;
     pub(super) const MAC4: usize = 0x04;
     /// Command register: reset/rx/tx enable bits.
     pub(super) const CHIP_CMD: usize = 0x37;
+    pub(super) const INTR_MASK: usize = 0x3c;
     pub(super) const INTR_STATUS: usize = 0x3e;
-    /// Carries the chip version id in bits [29:20].
+    /// Carries the chip version id in bits [29:20]; also the TX burst and
+    /// inter-frame-gap configuration.
     pub(super) const TX_CONFIG: usize = 0x40;
     pub(super) const RX_CONFIG: usize = 0x44;
+    /// Configuration write-protect latch (`Cfg9346`).
+    pub(super) const CFG_9346: usize = 0x50;
 }
 
 /// `ChipCmd` bits (`enum rtl_register_content`).
 const CMD_RESET: u8 = 0x10;
+
+/// `Cfg9346` values: the RX/TX configuration registers are write-protected
+/// unless the latch says otherwise.
+const CFG_9346_LOCK: u8 = 0x00;
+const CFG_9346_UNLOCK: u8 = 0xc0;
+
+/// `r8169`'s `rtl_set_rx_config_registers` for `RTL_GIGA_MAC_VER_63`
+/// (RTL8125B and later): fetch default 8, unlimited DMA burst, pause slot on.
+const RX_CONFIG_8125B: u32 = (8 << 27) | (7 << 8) | (1 << 11);
+
+/// `r8169`'s `rtl_set_tx_config_registers`: unlimited DMA burst with the
+/// shortest inter-frame gap. RTL8125B is *not* `rtl_is_8168evl_up`, so
+/// `TXCFG_AUTO_FIFO` is deliberately not set.
+const TX_CONFIG_8125B: u32 = (7 << 8) | (3 << 24);
+
+/// The fields of `RxConfig` software owns: fetch threshold [30:27], pause slot
+/// (bit 11), DMA burst [10:8]. Everything else in the register belongs to the
+/// chip (and reads back changed).
+const RX_CONFIG_WRITABLE: u32 = (0xf << 27) | (1 << 11) | (0x7 << 8);
+
+/// The fields of `TxConfig` software owns: inter-frame gap [25:24] and DMA
+/// burst [10:8].
+///
+/// The gap field is **two** bits wide, not the three a `>> 24` mask suggests:
+/// bit 26 upward belongs to the read-only version id, which is exactly why
+/// `rtl_chip_infos` compares the id through `0x7cf`/`0xfcf` -- those masks
+/// skip bits 24/25 so the gap cannot corrupt the comparison. Writing the whole
+/// word and comparing it can never match.
+const TX_CONFIG_WRITABLE: u32 = (0x3 << 24) | (0x7 << 8);
+
+/// Reset completion poll: `r8169`'s `rtl_loop_wait_low(..., 100, 100)`.
+const RESET_POLL_ITERS: usize = 100;
+const RESET_POLL_STEP_US: u64 = 100;
 
 /// One row of `rtl_chip_infos`: `(mask, val, name)`.
 ///
@@ -104,6 +142,72 @@ impl Rtl8125Data {
     }
 }
 
+/// Puts the chip through `rtl_hw_reset` and programs the RX/TX configuration.
+///
+/// This is the control-plane half of `rtl8169_hw_reset` +
+/// `rtl_set_{rx,tx}_config_registers` for `RTL_GIGA_MAC_VER_63`. It stops
+/// short of anything that starts DMA: `CmdRxEnb`/`CmdTxEnb` stay clear, so
+/// the engines never fetch from a descriptor ring that does not exist yet.
+///
+/// The write path is proven by reading the configuration registers back: they
+/// are plain storage, so a value that survives the round trip means the chip
+/// accepted the write. That is a weaker claim than a working data path, and it
+/// is stated as such -- the register-independence trap from the PCIe bring-up
+/// (§3.4.4 of the bring-up log) is about *addresses*, not about storage.
+fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
+    // Mask everything before resetting: a pending interrupt with no handler
+    // installed is a surprise, not a diagnostic.
+    bar0.write16(reg::INTR_MASK, 0);
+
+    bar0.write8(reg::CHIP_CMD, CMD_RESET);
+    let mut cleared = false;
+    for _ in 0..RESET_POLL_ITERS {
+        if bar0.read8(reg::CHIP_CMD) & CMD_RESET == 0 {
+            cleared = true;
+            break;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(RESET_POLL_STEP_US));
+    }
+    if !cleared {
+        let cmd = bar0.read8(reg::CHIP_CMD);
+        log::error!("rtl8125: {chip} did not finish reset (cmd {cmd:#04x})");
+        return Err(ProbeError::Fatal(RuntimeError::Io));
+    }
+
+    // RX/TX configuration is write-protected behind the Cfg9346 latch.
+    bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
+    bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
+    bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
+    bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
+
+    let rx_config = bar0.read32(reg::RX_CONFIG);
+    let tx_config = bar0.read32(reg::TX_CONFIG);
+    let cmd = bar0.read8(reg::CHIP_CMD);
+    log::info!(
+        "rtl8125: {chip} reset done, rxcfg {rx_config:#010x} txcfg {tx_config:#010x} cmd \
+         {cmd:#04x} (engines still stopped)"
+    );
+    if rx_config & RX_CONFIG_WRITABLE != RX_CONFIG_8125B & RX_CONFIG_WRITABLE
+        || tx_config & TX_CONFIG_WRITABLE != TX_CONFIG_8125B & TX_CONFIG_WRITABLE
+    {
+        // A field that will not hold its value means the latch or the write
+        // path is wrong; do not pretend the chip is ready. Only the fields
+        // software owns are compared: `TxConfig`[29:20] is the read-only
+        // version id and `RxConfig` carries flow-control state, so neither
+        // register ever reads back the word that was written.
+        log::error!(
+            "rtl8125: {chip} configuration did not stick (rx {:#010x} want {:#010x}, tx {:#010x} \
+             want {:#010x})",
+            rx_config & RX_CONFIG_WRITABLE,
+            RX_CONFIG_8125B & RX_CONFIG_WRITABLE,
+            tx_config & TX_CONFIG_WRITABLE,
+            TX_CONFIG_8125B & TX_CONFIG_WRITABLE,
+        );
+        return Err(ProbeError::Fatal(RuntimeError::Io));
+    }
+    Ok(())
+}
+
 impl DriverOps<PciBus> for Rtl8125Driver {
     type Data = Rtl8125Data;
 
@@ -148,21 +252,17 @@ impl DriverOps<PciBus> for Rtl8125Driver {
             (mac4 >> 8) as u8,
         ];
 
-        let chip_cmd = bar0.read8(reg::CHIP_CMD);
-        let intr_status = bar0.read16(reg::INTR_STATUS);
-        let rx_config = bar0.read32(reg::RX_CONFIG);
         log::info!(
-            "rtl8125: {chip} xid {xid:#05x} MAC {mac:02x?} BAR0 {:#x}+{:#x} cmd {chip_cmd:#04x} \
-             intr {intr_status:#06x} rxcfg {rx_config:#010x}",
+            "rtl8125: {chip} xid {xid:#05x} MAC {mac:02x?} BAR0 {:#x}+{:#x} cmd {:#04x} intr \
+             {:#06x} rxcfg {:#010x}",
             region.base,
             region.size,
+            bar0.read8(reg::CHIP_CMD),
+            bar0.read16(reg::INTR_STATUS),
+            bar0.read32(reg::RX_CONFIG),
         );
-        if chip_cmd & CMD_RESET != 0 {
-            // Sticky across a warm boot: a reset left in progress means the
-            // previous owner did not finish. Say so instead of proceeding as
-            // if the chip were usable.
-            log::warn!("rtl8125: {chip} still reports reset in progress (cmd {chip_cmd:#04x})");
-        }
+
+        reset_and_configure(&bar0, chip)?;
 
         Ok(Rtl8125Data {
             _bar0: bar0,
