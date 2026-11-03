@@ -692,6 +692,18 @@ pub fn configure_device<C: ConfigurationAccess>(
         bdf,
         cmd | Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
     );
+    // Bus master has to be on for the function to DMA at all, and a config
+    // write that silently failed would look exactly like "the device never
+    // fetched a descriptor", so the value is read back and logged.
+    let (_status, after) = root.get_status_command(bdf);
+    if !after.contains(Command::BUS_MASTER) {
+        log::warn!(
+            "pci: {bdf:?} bus master did not stick (command {:#06x})",
+            after.bits()
+        );
+    } else {
+        log::info!("pci: {bdf:?} command {:#06x} (bus master on)", after.bits());
+    }
     Ok(())
 }
 

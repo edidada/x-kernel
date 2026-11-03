@@ -15,15 +15,33 @@ driver-base 模型下的**网络接口（NIC）驱动**聚合 crate。一个子�
 | `src/lib.rs` | crate 门面（`#[cfg(feature = "rk3588-rtl8125")] pub mod rtl8125;`） |
 | `src/rtl8125.rs` | `Rtl8125Driver` + `Rtl8125Data` + `IDS` + `register()` |
 
-**当前只到 probe 阶段**：绑定、识别型号、读站地址、记录寄存器快照。
-没有描述符环、没有 PHY bring-up、没有向 `net` 类发布。
+**当前状态**：绑定 → 识别型号 → 读站地址 → 复位 → 配置 → 环 → 发布到 `net`
+类。数据通路**还没打通**：MAC 不取描述符（详见
+`docs/ai/skills/linux-driver-port/examples/rk3588-pcie/bring-up-log.md` §4.1
+里已排除的十条假设）。
 
 ## 为什么分阶段
 
-一个"已经出现在系统里但发不出包"的 NIC 比一个不存在的 NIC 更糟：网络栈会
-选中它、把包排进一个没人服务的队列。所以发布到 `net` 类的时机是**数据通路
-跑通之后**，而不是 probe 成功之后。当前 `Rtl8125Data` 刻意不持有任何
-`Publication`。
+一个"已经出现在系统里但发不出包"的 NIC 比一个不存在的 NIC 更糟。当前实现
+先把 **环、描述符所有权、类契约** 全部落地并在真机上跑起来（`send` 被调用、
+描述符被正确写入、knet 建出 eth0 并 UP），只差 MAC 主动来取描述符这一步；
+这个状态下用户态能看到网卡但 ping 不通，`docs/design.md` 与 bring-up log 都
+明确记录了这一点，不假装能用。
+
+## 数据通路结构
+
+```text
+knet ──NetDevice──► Rtl8125Nic { bar0, rings(CoherentMem), pool, Mutex<RingState> }
+                      send:  拷贝 frame → TX slot → 写 opts1(OWN|FIRST|LAST|len) → TxPoll_8125
+                      recv:  扫 RX 环（OWN 已清）→ 拷贝 slot → NetBuf → 立刻 re-arm 描述符
+                      recycle_tx: 回收 OWN 已清的 TX 描述符
+```
+
+- **双向都是拷贝**：描述符所有权保持"单写者"不变量；代价是每包一次 memcpy，
+  相对总线事务可以忽略。
+- **RX 在 `recv` 里立刻 re-arm**：栈侧回收只把 `NetBuf` 还给 pool，不与 DMA
+  生命周期耦合。
+- 顺序保证用 `fence(Release)`（交所有权前）/`fence(Acquire)`（看 OWN 之后）。
 
 ## 架构
 

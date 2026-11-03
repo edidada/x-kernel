@@ -1319,9 +1319,11 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "khal",
+ "ksync",
  "ktime_types",
  "log",
  "pci",
+ "subsys-net",
  "unittest",
 ]
 

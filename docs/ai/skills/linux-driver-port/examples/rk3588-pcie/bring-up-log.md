@@ -231,6 +231,82 @@ driver-core: 494 firmware descriptor(s), 35 active      # 之前 34
 5. **多 host**：`PUBLISHED_CAM` 仍是单槽，板上**第二块** 8125（另一控制器，
    `0004:41.0`）还不会进域。
 
+## 4.1 数据通路：环和发布都通了，但 MAC 不取描述符（当前卡点）
+
+### 已闭环的部分
+
+```
+rtl8125: RTL8125B phy 001c:c840 bmcr 0x1040 link up          # PHY 活着，链路 up（网线插着）
+rtl8125: rings live, tx 256x2048B @ 0x203000, rx 256x2048B @ 0x204000
+rtl8125: RTL8125B published to the net class as a NIC
+knet:  use NIC 0: "rtl8125"                                  # knet 接手，建了 eth0
+eth0             UP        66:d5:6f:12:66:9e <BROADCAST,MULTICAST,UP,LOWER_UP>
+```
+
+- `subsys_net::NetDevice` 全部实现（`send`/`recv`/`recycle_*`/`alloc_tx_buf`），
+  双向都是**拷贝**模型：描述符所有权保持单写者，比零拷贝简单且不易错。
+- 缓冲：ring 与 slot 都用 `dev.res().alloc_coherent()`（UNCACHED|SHARED），
+  bus 地址 `0x203000/0x204000` 与 slot `0x3400000/0x3480000` 都是有效 DRAM。
+- 用户态能看到网卡并 `ip link set eth0 up`，`LOWER_UP` 说明载波在。
+
+### 卡点：描述符写进去了，MAC 一次都没读
+
+```
+pci: DeviceFunction{bus:1,device:0,function:0} command 0x0007 (bus master on)
+rtl8125: tx[0] len 42 desc 0xb000002a -> 0xb000002a reclaimed false cmd 0x0c intr 0x0000 rx[0] 0x80000800
+3 packets transmitted, 0 received, 100% packet loss
+```
+
+解读（每一条都是实测，不是推断）：
+
+| 观测 | 含义 |
+|---|---|
+| `0xb000002a` 写后**原样不变** | MAC 没有取这个描述符（OWN 位没被清） |
+| `intr 0x0000` | MAC **没有产生任何事件**：没有 TxOK，也没有 TxDescUnavail |
+| `rx[0] 0x80000800` | RX 环也没被动过（活跃 LAN 上会有广播帧）；**收和发同时死** |
+| `cmd 0x0c` | 两个引擎按寄存器看都是使能的 |
+| PCI `command 0x0007` | Bus Master 已置（和 U-Boot 一致），DMA 权限没问题 |
+
+**收与发同时、静默地全死**，指向"MAC 的 DMA/队列引擎没跑起来"，而不是
+描述符格式或某个方向的配置错。
+
+### 已被实测排除的假设（不要重复验证）
+
+1. **doorbell 寄存器错**：8125 用 `TxPoll_8125 (0x90)` 的 16 位写 bit0，
+   不是老的 `TxPoll(0x38)=NPQ`。已改对，现象不变。
+2. **"new TX descriptor format" 没关**：OCP `0xeb58` bit0 读回 **0**（已是
+   legacy 16 字节格式）。而且 MAC-OCP 隧道做过自检：写 `0xea84` 的 bit0/1
+   读回 `0x0003`，所以"读回 0"是真值，不是隧道坏了。
+3. **MAC OCP 隧道不可用**：同上，自检通过。
+4. **`CPlusCmd` 的 `PCIMulRW`(bit3)**：写 0x28 读回 0x2020 —— 该位在本芯片
+   只读 0，不是缺配置。
+5. **PCIe 低功耗（ASPM / ClkReq / L2L3）**：`Config2/3/5` 的三位本来就都是 0。
+6. **DMA 地址翻译**：`PHYS_BUS_OFFSET=0`（恒等），ring/slot 的 bus 地址都有效。
+7. **iATU inbound 窗口未编程**：板上 DT（含 BSP `rk3588s.dtsi`）**没有
+   `dma-ranges`**，Linux 在 host 模式下同样不编 inbound，所以不是这个。
+8. **启动顺序**：已按 Linux 的顺序（先 `ChipCmd` 使能、后写
+   `RxConfig/TxConfig`）跑过，现象不变。
+9. **EPHY 初始化**：U-Boot 的 `eth_rtl8169` 在同一块板上 DHCP 成功，而它
+   不做 EPHY 表，所以 EPHY 不是 DMA 的前提。
+10. **`rtl_hw_start_8125_common` 的整块 OCP 魔法**：已逐条转写（含 0xa00 中断
+    合并块清零、`0x382=0x221b`、`RSS/Q_NUM=0`、`MISC` 的 RXDV gate、以及
+    `0xe00e` 等待），现象不变。
+
+### 下一步（唯一还没做的决定性实验）
+
+**和 BSP Linux 在寄存器级对拍。** 板子 SD 里有可启动的 BSP Linux
+（`Image` + `dtb-6.1.99-rockchip-rk3588/`），手工 `booti` 的完整配方已写进
+`docs/ai/skills/board-automation/SKILL.md` §5.7。登进去后：
+
+```python
+# /dev/mem 读 BAR0，和驱动里同样的偏移逐一对比
+# 重点：0x20/0x24(ring base)、0x3c(IntrMask)、0x37(ChipCmd)、
+#       0x40/0x44(Tx/RxConfig)、0x34、0x7a、0x90、0xe4/0xe8
+```
+
+差异就是缺的那一步。**不要再用"猜一个寄存器试一轮"的方式推进** —— 本轮
+已经用掉 10 个假设，每一个都是"看起来很像"的。
+
 ## 4.2 U-Boot 每次启动都会枚举 PCI（影响 BAR 语义）
 
 串口里 `pcie_dw_rockchip pcie@fe150000: PCIe-4 Link Fail` 是 **U-Boot** 打的

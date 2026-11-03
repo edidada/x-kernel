@@ -56,7 +56,15 @@ echo "== [2/3] rkt boot cycle (tag: $TAG)"
 # timeout; the console log still covers everything up to the stall.
 # --no-preflash: the kernel is built HERE and pushed by step 1; the rig has
 # no rust toolchain, so the runner's remote "make build" preflash must not run.
-ssh -o BatchMode=yes "$RIG" "cd ~/rkt && ./rkt run --tag '$TAG' --until-quiet 30 --no-preflash $*"
+# Each extra argument is shell-quoted individually: `run --cmd 'ip link set
+# eth0 up'` has to arrive on the rig as ONE argument, not as five. Passing
+# `$*` expanded here silently splits it and rkt rejects the leftovers.
+EXTRA=()
+for arg in "$@"; do
+    EXTRA+=("$(printf '%q' "$arg")")
+done
+ssh -o BatchMode=yes "$RIG" \
+    "cd ~/rkt && ./rkt run --tag '$TAG' --until-quiet 30 --no-preflash ${EXTRA[*]}"
 
 echo "== [3/3] fetch the console log"
 run_id=$(ssh -o BatchMode=yes "$RIG" "ls -t ~/rkt/logs/ | grep '$TAG' | head -1")

@@ -18,7 +18,7 @@
 //! | `platform_get_irq_byname` | [`Device::irq_by_name`] |
 //! | `devm_ioremap_resource` | [`Device::iomap`] returning an owned [`IoMap`] guard |
 //! | `devm_request_irq` | [`Device::request_irq`] returning an owned [`DevIrq`] guard |
-//! | `dma_alloc_coherent` / `dmam_alloc_coherent` | [`Device::alloc_coherent`] |
+//! | `dma_alloc_coherent` / `dmam_alloc_coherent` | [`Resources::alloc_coherent`] |
 //! | `clk_get(dev, "apb_pclk")` | [`Device::clk`] |
 //! | `-EPROBE_DEFER` | [`ProbeError::Deferred`] |
 //!

@@ -23,6 +23,8 @@ ktime_types.workspace = true
 # The PCI bus type and its id-table row live with the bus, the same way
 # `drv-virtio` binds PCI functions (Linux keeps `pci_bus_type` in drivers/pci).
 pci = { workspace = true }
+subsys_net = { workspace = true }
+ksync.workspace = true
 log.workspace = true
 unittest.workspace = true
 

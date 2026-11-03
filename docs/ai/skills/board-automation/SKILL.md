@@ -280,3 +280,44 @@ the bug trades a 45 s failure for a 240 s timeout.
 If ports are right, the relay answers, UDP 69 listens, and `console.raw.log`
 still has no bytes, the board really is not talking. Fall back to §3 (compare
 against a working kernel) or §4 (classify the failure mode).
+
+### 5.6 The relay can be pinned by USB id, the console cannot
+
+`/dev/ttyUSB*` order changes on every power cycle because the CH340 sits behind
+a hub that re-enumerates with the board. The relay is the only adapter with a
+**unique** VID:PID (`1a86:7523`), so point the profile at a name that does not
+exist and let rkt's id fallback find it:
+
+```ini
+[power]
+port = /dev/ttyPWR        # never exists; forces the usb_id scan
+usb_id = 1a86:7523
+```
+
+Both FTDI adapters are `0403:6001`, so the console **cannot** be pinned that
+way -- its `port` must be re-checked by `ID_SERIAL_SHORT` each session (5.1).
+
+### 5.7 Booting the board's stock Linux for a register diff
+
+The SD's `/boot.scr` is the *tftp* script (it boots our kernel), so the normal
+bootflow cannot reach the BSP Linux. Boot it by hand from the U-Boot prompt --
+the manual `load`/`booti` path is the only reliable way in:
+
+```
+setenv bootargs console=ttyS2,1500000 root=/dev/mmcblk1p2 rw rootwait
+load mmc 1:1 0x02080000 /Image
+load mmc 1:1 0x0a000000 /dtb-6.1.99-rockchip-rk3588/rockchip/rk3588-orangepi-5-plus.dtb
+booti 0x02080000 - 0x0a000000
+```
+
+Notes that cost time to rediscover:
+
+- the U-Boot environment loads "from nowhere" (empty), so `boot-linux.scr`
+  fails on unset `${scriptaddr}`/`${fdt_addr_r}`; drive `load` manually.
+- send **one** command per `=>` prompt. Long lines sent back-to-back get
+  truncated and the remainder is executed as a command (`booti` arrived as
+  `load`, which prints the load usage text).
+- the DTBs live under
+  `/dtb-6.1.99-rockchip-rk3588/rockchip/` (not `/dtb/rockchip/`).
+- it is an Ubuntu Jammy image (`Welcome to Orange Pi 1.2.2 Jammy`); the
+  `orangepi` account's password is `orangepi`.
