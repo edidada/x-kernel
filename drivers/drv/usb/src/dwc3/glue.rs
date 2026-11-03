@@ -116,6 +116,14 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         );
         info!("dwc3: usb2 phy powered");
 
+        // The USB3 port has to be taken out of "disabled" in the USB GRF before
+        // the controller can see anything on it: PIPE_ENABLE=1, PHY_DISABLE=0,
+        // SUSPEND_ENABLE=0, U3_PORT_DISABLE=0. The reference implementations
+        // (Linux's usbdp-phy/u-boot `udphy_u3_port_disable(port, false)`, and the
+        // tgoskits USB host port) all do this step; without it the port stays
+        // dark and a device plugged into it never shows up as a connection.
+        enable_u3_port(dev, regs.region().base);
+
         let utmi_wide = dev.fw().string("phy_type") == Some("utmi_wide");
         let dis_enblslpm = dev.fw().flag("snps,dis_enblslpm_quirk");
         let _params = crate::dwc3::core::init(dev, &regs, utmi_wide, dis_enblslpm)?;
@@ -295,6 +303,34 @@ fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
         core::mem::forget(guard);
     }
     Ok(())
+}
+
+/// Takes a DWC3 instance's USB3 port out of reset in the USB GRF.
+///
+/// `rockchip,rk3588-usb-grf` (the DT's `rockchip,usbctrl-grf`, syscon at
+/// 0xfd5ac000) holds one `USB3OTGn_CFG` word per controller: 0x1c for port 0
+/// (`usb@fc000000`) and 0x34 for port 1 (`usb@fc400000`). The write is the
+/// Rockchip hiword-mask form with data `0x8800`.
+fn enable_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
+    const USB_GRF: u64 = 0xfd5a_c000;
+    const GRF_WINDOW: usize = 0x4000;
+    let port = if controller_base < 0xfc40_0000 { 0 } else { 1 };
+    let offset = if port == 0 { 0x1c } else { 0x34 };
+    let Ok(grf) = dev.res().iomap_region(
+        driver_base::MmioRegion::new(USB_GRF as usize, GRF_WINDOW),
+        "usb-grf",
+    ) else {
+        return;
+    };
+    let before = grf.read32(offset);
+    // Bits [31:16] are the write-enable mask; [15:0] the data:
+    // bit15 PIPE_ENABLE=1, bit12 PHY_DISABLE=0, bit10 SUSPEND_ENABLE=0,
+    // bit8 U3_PORT_DISABLE=0.
+    grf.write32(offset, 0xffff_8800);
+    info!(
+        "dwc3: usb-grf u3 port {port} cfg {before:#06x} -> {:#06x}",
+        grf.read32(offset),
+    );
 }
 
 /// Reads one CRU word (read-only diagnostic helper).

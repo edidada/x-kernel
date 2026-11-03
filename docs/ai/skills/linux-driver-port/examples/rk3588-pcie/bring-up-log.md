@@ -812,6 +812,31 @@ xhci: port 2 PORTSC 0x2a0 pp true pls 5
 所以 U 盘看不到的唯一原因是 **`vcc5v0-host` 那路 5V 没使能**，而 `vcc5v0-host` 由
 `gpio3.15` 控制，这个 bank 的**寄存器写入被丢弃**（读正常、写无效、重试无效）。
 
+### 从参考实现补上的一步：USB GRF 的 U3 端口使能
+
+tgoskits（同板已验证的 Rust USB 栈）在 `dwc/grf.rs::enable_u3_port()` 里写
+`rockchip,usb-grf`（DT `rockchip,usbctrl-grf`，syscon `0xfd5ac000`）的
+`USB3OTGn_CFG`（port0 @0x1c / port1 @0x34）= `0xFFFF8800`：
+
+- bit15 `PIPE_ENABLE=1`
+- bit12 `PHY_DISABLE=0`
+- bit10 `SUSPEND_ENABLE=0`
+- **bit8 `U3_PORT_DISABLE=0`**
+
+没有这一步，USB3 端口一直是 disable 状态，插什么都不可能被检测到。
+我们的 M1 之前完全没碰 GRF。已补进 `enable_u3_port()`，真机验证写入生效：
+
+```
+dwc3: usb-grf u3 port 0 cfg 0x1100 -> 0x8800
+dwc3: usb-grf u3 port 1 cfg 0x1100 -> 0x8800
+```
+
+（`0x1100` 就是"端口被 disable"的初值：bit8 U3_PORT_DISABLE=1、bit12 PHY_DISABLE=1。）
+
+tgoskits 的 USB2 PHY `power_on()` 是**空函数**，文档也注明"不能描述为已经实现完整供电或
+VBUS 稳定状态机"；它整个 RK3588 USB 路径里**没有 VBUS/GPIO 代码** —— 说明它的 boot 链
+（板厂 U-Boot）已经把 5V 打开了。我们这条 TFTP+DICE 启动链没有。
+
 ### 下一步（VBUS，先于枚举）
 
 1. **gpio3 写入为什么被丢（已排除内核与时钟）**：`scripts/usb/uboot-vbus-probe.sh`
