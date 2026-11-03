@@ -611,6 +611,35 @@ TX 仍不消费，所以 MRRS 也不是根因。
 补完这三处复测：`intr 0x0081`（RX_OK + DESC_UNAVAIL）、描述符仍不被消费。
 MAK 校验：`make ldp-sequence` 绿（41 步 / 26 anchored / 9 unported）。
 
+### 4.1.6 "逐字脚本"这一步做完了，并排除了最后三个假说
+
+按 vendor `hw_config` 补齐了我们缺的项（顺序照抄）：`disable_rx_packet_filter`
+（置引擎前先清全部 accept 位）、`0xC0B6 &= BIT0`、`extend_tally`
+（`OCP 0xea84 |= 0x3`）、`tally_counter_addr_fill`（把 CounterAddr 指向我们的
+slot 区，顺带是个纯设备→内存的 DMA 烟囱）、`disable_double_vlan`
+（`0x1000 = 0`）、`set_l1_l0s_entry_latency`（**CSI 0x70c bits[29:24] = 0x27**，
+与 r8169 的 `0x719` 字节写法不同）：
+
+```
+rtl8125: vendor hw_config extras applied, csi 0x70c 0x27ffff00
+```
+
+同时确认 **`rtl8125_enable_tcam` 就是 `0x382 = 0x221B`（我们早就做了）**，
+`set_rx_crc_drop` 只对 CFG_METHOD_8..16 生效（不是本芯片）。
+
+**又排除了三个假说**（都有实测）：
+
+| 假说 | 实测 | 结论 |
+|---|---|---|
+| MAC 取指指针停在环尾（RingEnd 那个） | 同时 arm index 0 与 index 255，两个都保持 OWN=1 | 排除 |
+| 引擎按 TDFNR=16 成批取，批内不全 owned 就整批放弃 | arm 前 16 个（正好一批）→ 0/16 被消费 | 排除 |
+| MRRS 设 2048 超过 RC 能力导致读被 UR 终止 | 撤掉 MRRS 提升（回到 512）→ 现象不变 | 排除 |
+
+**唯一的正证据仍然只有一条**：启动时把**整环 256 个**都 arm 后踢门铃 →
+256 个全被消费、`TX_OK` 置位；而 arm 1 个、2 个、16 个（无论放 index 0 还是 255）
+都不被消费。这条在今天的代码状态下**仍可复现**（`intr` 里能看到 `TX_OK`），
+所以 TX 通路本身是好的，缺的是"单帧提交为什么不被看见"这一环。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，

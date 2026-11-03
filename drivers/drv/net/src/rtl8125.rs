@@ -108,6 +108,11 @@ mod reg {
     pub(super) const RX_DESC_ADDR_HIGH: usize = 0xe8;
     /// TX descriptor fetch count: how many descriptors one doorbell may pull.
     pub(super) const TDFNR: usize = 0x57;
+    /// Tally-counter dump target (`CounterAddrLow/High`).
+    pub(super) const COUNTER_ADDR_LOW: usize = 0x10;
+    pub(super) const COUNTER_ADDR_HIGH: usize = 0x14;
+    /// Double-VLAN configuration (vendor clears it in `hw_config`).
+    pub(super) const DOUBLE_VLAN_CONFIG: usize = 0x1000;
 
     /// Largest frame the receiver accepts; low values silently drop.
     pub(super) const RX_MAX_SIZE: usize = 0xda;
@@ -407,6 +412,16 @@ fn program_ring_bases(nic: &Rtl8125Nic) {
         reg::RX_DESC_ADDR_LOW,
         (nic.rx_ring.bus_addr() & u64::from(u32::MAX)) as u32,
     );
+    // `rtl8125_tally_counter_addr_fill`: the MAC writes its counters to this
+    // address, which also serves as a pure device->memory DMA smoke test.
+    bar0.write32(
+        reg::COUNTER_ADDR_HIGH,
+        (nic.tx_slots.bus_addr() >> 32) as u32,
+    );
+    bar0.write32(
+        reg::COUNTER_ADDR_LOW,
+        (nic.tx_slots.bus_addr() & u64::from(u32::MAX)) as u32,
+    );
     // ldp:step cfg.desc-addr-fill
     // How many descriptors one transmit doorbell may fetch. The chip comes up
     // with 1, which means a doorbell pulls exactly one descriptor; the vendor
@@ -702,6 +717,8 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
     // DMA stalls when the link idles in a low-power state (the reference
     // disables ASPM and clock requests around its start sequence).
     disable_pcie_low_power(bar0);
+    // ldp:steps cfg.rx-packet-filter-off, cfg.extend-tally, cfg.l1-l0s-latency
+    vendor_hw_config_extra(bar0);
     // The chip's own front-end configuration, in the reference's order.
     hw_start_8125_common(bar0);
     // ldp:step start.exit-l1
@@ -930,7 +947,35 @@ fn mac_ocp_modify(bar0: &IoMap, reg: u16, mask: u16, set: u16) {
     mac_ocp_write(bar0, reg, (value & !mask) | set);
 }
 
-/// Reads one MDIO register through the `GPHY_OCP` tunnel.
+/// The parts of the vendor's `rtl8125_hw_config` this port had not transcribed.
+///
+/// Each item is a direct translation of one call in that function, in the order
+/// the vendor makes them; the ring bases, `TxConfig`, `RxConfig`, queue numbers
+/// and the OCP block are programmed elsewhere in this driver.
+fn vendor_hw_config_extra(bar0: &IoMap) {
+    // `rtl8125_disable_rx_packet_filter`: clear every accept bit before
+    // reconfiguring. The driver writes them back when the engines start.
+    let rx_config = bar0.read32(reg::RX_CONFIG);
+    bar0.write32(reg::RX_CONFIG, rx_config & !RX_ACCEPT_MODE);
+
+    // "keep magic packet only": drop the other wake-on-LAN reasons.
+    mac_ocp_modify(bar0, 0xc0b6, 0x0001, 0x0000);
+    // `rtl8125_enable_extend_tally_couter`.
+    mac_ocp_modify(bar0, 0xea84, 0x0000, 0x0003);
+    // `rtl8125_disable_double_vlan`.
+    bar0.write16(reg::DOUBLE_VLAN_CONFIG, 0);
+    // `_rtl8125_set_l1_l0s_entry_latency(0x27)`: PCI config 0x70c bits [29:24]
+    // (above 0xff, so it is reached through the CSI window).
+    if let Some(value) = csi_read(bar0, 0x70c) {
+        let _ = csi_write(bar0, 0x70c, (value & 0xc0ff_ffff) | (0x27 << 24));
+    }
+    log::info!(
+        "rtl8125: vendor hw_config extras applied, csi 0x70c {:#010x}",
+        csi_read(bar0, 0x70c).unwrap_or(0),
+    );
+}
+
+/// Reads one MDIO register through the `GPHY_OCP` tunnel./// Reads one MDIO register through the `GPHY_OCP` tunnel.
 ///
 /// RTL8125 has no legacy `PHYAR` register: the integrated PHY is reached by
 /// programming an OCP address of `0xa400 + mdio_reg * 2` and waiting for the
