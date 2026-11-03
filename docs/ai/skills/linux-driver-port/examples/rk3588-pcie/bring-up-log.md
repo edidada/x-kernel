@@ -806,6 +806,7 @@ xhci: port 2 PORTSC 0x2a0 pp true pls 5
 | GPIO3 `EXT_PORT` bit15（焊盘电平） | **0** | **1** | **5V 没打开** |
 | GPIO3 `DR`/`DDR` bit15 | 写入 4 次重试均不落地 | `dr bit15=1, ddr bit15=1` | bank 拒写 |
 | CRU `0x844`（`pclk_gpio3`） | `0x0`（本来就开） | — | **不是时钟门控问题** |
+| **U-Boot 里 `mw.l` 写 DR/DDR** | 写后读回仍是 `0`（`EXT_PORT` 仍 `0x0c78388f`） | — | **不是特权级/内核问题**：bootloader 也写不进 |
 | PMU `repair_status` | `0xfff70001` bit25=1 | 同 | 电源域是开的，排除掉电 |
 
 所以 U 盘看不到的唯一原因是 **`vcc5v0-host` 那路 5V 没使能**，而 `vcc5v0-host` 由
@@ -813,9 +814,12 @@ xhci: port 2 PORTSC 0x2a0 pp true pls 5
 
 ### 下一步（VBUS，先于枚举）
 
-1. **判别 gpio3 写入为什么被丢**：读 CRU `0x844` bit2（`pclk_gpio3`，`SET_TO_DISABLE`）
-   enable 前后是否变化；若不变即为同一类"门控没真开"问题。若已清仍不落地，
-   再用 U-Boot 的 `gpio set` 试驱动同一根线（能把 EL1 与 bootloader 隔离）。
+1. **gpio3 写入为什么被丢（已排除内核与时钟）**：`scripts/usb/uboot-vbus-probe.sh`
+   在 U-Boot 提示符下 `md.l`/`mw.l` 直接读写该 bank —— 写入同样不落地、焊盘电平
+   不变。所以这不是内核 bug、也不是 EL1 特权问题，而是**该 bank 的写在两个世界里
+   都被丢弃**（安全域/互连防火墙，或该 bank 需要某个尚未打开的父域）。
+   下一步的判据：对同一 bank 写一个无关寄存器（如 `INT_EN_L`）看是否同样丢失，
+   若只有 DR/DDR 丢则查安全属性；若整块丢则查互连/电源域。
 2. **U-Boot 路线**：若 U-Boot 已把该 GPIO 拉高（很多板子会），内核完全不必碰它，
    可直接进入枚举。
 3. VBUS 有电后，`ccs` 应变 true 且 `psiv=3`(High-Speed)，
