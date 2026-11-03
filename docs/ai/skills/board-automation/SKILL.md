@@ -103,9 +103,9 @@ Consequences worth remembering:
   Do not "fix" it by switching ports.
 - `rkt --console ...` is a *global* option: it must precede the subcommand
   (`rkt --console /dev/ttyUSB2 run ...`), and at least one rkt build then
-  crashed with `'Console' object has no attribute '_start_wall'`. Prefer
-  driving the loop through `scripts/board-run.sh` unless you really need the
-  override.
+  crashed with `'Console' object has no attribute '_start_wall'` — that one is
+  a rig bug with a one-line fix, see §5.4. Prefer driving the loop through
+  `scripts/board-run.sh` unless you really need the override.
 - The single-board alternative when rkt misbehaves: power-cycle with
   `rkt power off/on`, then capture with pyserial on `/dev/ttyUSB0` directly.
 - **The TFTP server dies with the SSH session** that started it. If a run
@@ -203,3 +203,80 @@ pipe-derived core clock.
   points of probe: *before* any clock/reset/PHY work an unowned controller
   aborts, *after* it stalls — that is what proves the remaining gap is the
   clock the core actually needs.
+## 5. When the console is silent: five checks in this order
+
+Everything in this section has the same symptom — **zero console bytes** — and
+that is exactly what a hung or bricked kernel looks like. Run the checks in
+order; only the last one is about the image. (Items 2–4 also appear in §1 as
+one-line warnings; here they have the commands and the root cause.)
+
+### 5.1 Which port, by USB serial — not by ttyUSB number
+
+Numbering follows enumeration order and re-shuffles when a cable is re-plugged
+or the hub re-enumerates. Measured once: rkt's `console` had become the
+**reference board** and its `power` port had become our board's console, so the
+run "powered on" fine (relay frames going into a UART) and then read nothing
+for 240 s. `console.raw.log` was 0 bytes — the tell that no reader was at fault.
+
+```bash
+for d in /dev/ttyUSB*; do printf '%s ' "$d"; \
+  udevadm info -q property -n "$d" | grep ^ID_SERIAL_SHORT=; echo; done
+# A5XK3RJT      = our board's console   (FTDI 0403:6001)
+# A54LQ9PF      = the reference board   (same model, same VID:PID)
+# (no serial)   = CH340 relay           (1a86:7523)
+```
+
+### 5.2 Does the relay actually answer?
+
+Being "on the right port" is not enough — confirm the device is a relay:
+
+```bash
+python3 - <<'PY'
+import serial
+p = serial.Serial("/dev/ttyUSB2", 115200, timeout=0.6)
+p.write(bytes.fromhex("AA0105B0")); print(p.read(16).hex())   # -> aa0100ab
+PY
+```
+
+A UART never answers this frame, so a non-reply proves the port is wrong
+whatever `/dev` name it has.
+
+`scripts/board-udev/install.sh` pins `/dev/ttyXK` (our console), `/dev/ttyPWR`
+(relay) and `/dev/ttyREF` (reference board); `--patch-rkt` rewrites the profile
+to use them. If those names are absent the rig has reverted (udev rules live in
+`/etc/udev/rules.d`, not in the repo) — re-install rather than re-discovering
+numbering.
+
+### 5.3 Is TFTP listening? (it dies with the SSH session that started it)
+
+`board-run.sh` assumes a server is already up. Restart it detached:
+
+```bash
+ssh kylin@rig 'bash -lc "cd ~/rkt && (setsid ./rkt tftp start > ~/tftp.out 2>&1 &); \
+  sleep 4; ss -lun | grep \":69 \""'
+```
+
+### 5.4 The `_start_wall` crash is a rig bug with a one-line fix
+
+```
+boot  ERR  AttributeError: 'Console' object has no attribute '_start_wall'
+```
+
+`rkctl/console.py` sets `_t0` in `Console.__init__` but the silence check in
+`wait_for` reads `_start_wall`, so **any** run with `quiet_warn_s` /
+`--until-quiet` dies while reporting silence — after power-on, before the
+verdict, leaving a one-line `console.log`. Fix it in place (back up first):
+
+```python
+self._t0 = time.time()
+self._start_wall = self._t0   # silence window start (wait_for uses it)
+```
+
+Keep `--until-quiet`: it is what bounds a bus-stall hang. Dropping it to dodge
+the bug trades a 45 s failure for a 240 s timeout.
+
+### 5.5 Only then suspect the image
+
+If ports are right, the relay answers, UDP 69 listens, and `console.raw.log`
+still has no bytes, the board really is not talking. Fall back to §3 (compare
+against a working kernel) or §4 (classify the failure mode).
