@@ -16,6 +16,14 @@
       "pin": "OrangePi 5 Plus BSP dts binding headers",
       "required": false,
       "$comment": "BSP 设备树(本仓库根 orangepi-5-plus-m.dts)用 BSP 编号(SCLK_UART2=187、CCLK_EMMC=314…),与 mainline include/dt-bindings 编号不同;CRU 索引以这棵为准。"
+    },
+    {
+      "id": "realtek-r8125",
+      "path": "/workspace/r8125-vendor-9.018.00",
+      "kind": "vendor-driver",
+      "pin": "Realtek r8125 9.018.00-NAPI (官方 DKMS 源码)",
+      "required": false,
+      "$comment": "板上实际绑定的驱动就是这个（modinfo: r8125 9.014.01-NAPI）。获取方式: https://codeload.github.com/awesometic/realtek-r8125-dkms/tar.gz/refs/heads/master (GitHub 镜像官方 Realtek 源码)。整棵源码不在仓库里(体积)，只记路径与来源；r8169 是 mainline 的通用实现，r8125 才是板上权威源——两者在 TX 描述符格式、RxConfig 表值、hw_config 序列上都有差异。"
     }
   ]
 }

@@ -102,6 +102,9 @@ mod reg {
     pub(super) const TX_DESC_ADDR_HIGH: usize = 0x24;
     pub(super) const RX_DESC_ADDR_LOW: usize = 0xe4;
     pub(super) const RX_DESC_ADDR_HIGH: usize = 0xe8;
+    /// TX descriptor fetch count: how many descriptors one doorbell may pull.
+    pub(super) const TDFNR: usize = 0x57;
+
     /// Largest frame the receiver accepts; low values silently drop.
     pub(super) const RX_MAX_SIZE: usize = 0xda;
     /// Kick the transmit queue. RTL8125 replaced the legacy `TxPoll` byte
@@ -156,6 +159,11 @@ const RX_LEN_MASK: u32 = 0x3fff;
 /// `RxMaxSize` is written as "largest frame + 1" (the reference comments that
 /// a low value only hurts: oversized frames are dropped instead of received).
 const RX_MAX_SIZE_FIELD: u16 = (RX_SLOT_LEN + 1) as u16;
+
+/// Descriptors one transmit doorbell may fetch. The chip comes up with 1; the
+/// vendor's `hw_config` writes 16 (`RTL_W8(tp, TDFNR, 0x10)`), which is what
+/// this board reads back after a reference-driver boot.
+const TX_DESC_FETCH_COUNT: u8 = 0x10;
 
 /// Ring depths. 256 is what the reference driver uses, and a power of two
 /// makes the wrap arithmetic a mask.
@@ -341,8 +349,11 @@ impl Rtl8125Data {
 fn start_data_path(nic: &Rtl8125Nic) -> Result<(), ProbeError> {
     let bar0 = &nic.bar0;
 
-    program_ring_bases(nic);
+    // tgoskits (verified on this board) arms the receive ring first and only
+    // then programs the ring bases, so the MAC never sees a ring it has been
+    // told about but which is still empty.
     arm_receive_ring(nic);
+    program_ring_bases(nic);
     program_engine_config(nic);
 
     let cmd = bar0.read8(reg::CHIP_CMD);
@@ -392,14 +403,21 @@ fn program_ring_bases(nic: &Rtl8125Nic) {
         reg::RX_DESC_ADDR_LOW,
         (nic.rx_ring.bus_addr() & u64::from(u32::MAX)) as u32,
     );
+    // How many descriptors one transmit doorbell may fetch. The chip comes up
+    // with 1, which means a doorbell pulls exactly one descriptor; the vendor
+    // driver sets 16 here. Measured difference: the register reads 0x01 on
+    // this board, 0x10 after the reference's `hw_config`.
+    bar0.write8(reg::TDFNR, TX_DESC_FETCH_COUNT);
     bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
     log::info!(
-        "rtl8125: ring base tx {:#010x}:{:#010x} rx {:#010x}:{:#010x} maxsize {:#06x}",
+        "rtl8125: ring base tx {:#010x}:{:#010x} rx {:#010x}:{:#010x} maxsize {:#06x} tdfnr \
+         {:#04x}",
         bar0.read32(reg::TX_DESC_ADDR_HIGH),
         bar0.read32(reg::TX_DESC_ADDR_LOW),
         bar0.read32(reg::RX_DESC_ADDR_HIGH),
         bar0.read32(reg::RX_DESC_ADDR_LOW),
         bar0.read16(reg::RX_MAX_SIZE),
+        bar0.read8(reg::TDFNR),
     );
 }
 
@@ -428,11 +446,16 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
+    // Acknowledge everything that latched while the engines were being
+    // configured, then leave interrupts masked (there is no handler yet).
+    bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
+    bar0.write32(reg::INTR_MASK, 0);
     log::info!(
-        "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x}",
+        "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x} intr {:#010x}",
         bar0.read32(reg::RX_CONFIG),
         bar0.read32(reg::TX_CONFIG),
         bar0.read8(reg::CHIP_CMD),
+        bar0.read32(reg::INTR_STATUS),
     );
 }
 
@@ -493,8 +516,14 @@ fn hw_start_8125_common(bar0: &IoMap) {
         (0xe860, 0x0000, 0x0080),
         (0xeb58, 0x0001, 0x0000), // legacy 16-byte TX descriptors
         (0xe614, 0x0700, 0x0200), // RTL8125B row
-        (0xe63e, 0x0c30, 0x0000), // RTL8125B row
+        // TX queue configuration: the vendor sets bits 5:4 = 0b10 and the
+        // TX queue count (bits 11:10) to log2(rings) = 0 for one queue.
+        (0xe63e, 0x0c30, 0x0020),
         (0xc0b4, 0x0000, 0x000c),
+        // MCU enable is toggled (`enable_mcu(false)` then `(true)`): the
+        // vendor clears bit 0, reconfigures, then sets it again.
+        (0xc0b4, 0x0001, 0x0000),
+        (0xc0b4, 0x0001, 0x0001),
         (0xeb6a, 0x00ff, 0x0033),
         (0xeb50, 0x03e0, 0x0040),
         (0xe056, 0x00f0, 0x0000),
@@ -502,8 +531,8 @@ fn hw_start_8125_common(bar0: &IoMap) {
         (0xea1c, 0x0003, 0x0001),
         (0xea1c, 0x0004, 0x0000), // RTL8125B row
         (0xe0c0, 0x4f0f, 0x4403),
-        (0xe052, 0x0080, 0x0068),
-        (0xd430, 0x0fff, 0x047f),
+        (0xe052, 0x00c8, 0x0060),
+        (0xd430, 0x0fff, 0x045f),
         (0xea1c, 0x0004, 0x0000),
         (0xeb54, 0x0001, 0x0000),
     ];

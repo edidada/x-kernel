@@ -472,12 +472,29 @@ pub fn extract(file: &Path, function: &str, path_name: &str) -> Result<(), Strin
     let text =
         std::fs::read_to_string(file).map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
     let lines: Vec<&str> = text.lines().collect();
+    // Function signatures are frequently split across lines in kernel C
+    // (`void` on one line, `name(args)` on the next), so accept both forms:
+    // the name opening a line, or the name trailing a type on the same line.
+    let call = format!("{function}(");
     let start = lines
         .iter()
-        .position(|l| {
+        .enumerate()
+        .position(|(i, l)| {
             let t = l.trim_start();
-            (t.contains("void ") || t.contains("int ") || t.contains("static"))
-                && t.contains(&format!("{function}("))
+            let same_line = (t.contains("void ") || t.contains("int ") || t.contains("static"))
+                && t.contains(&call);
+            let name_line = t.starts_with(&call);
+            let typed_above = if name_line && i > 0 {
+                let above = lines[i - 1].trim();
+                above.ends_with("void")
+                    || above.ends_with("int")
+                    || above.ends_with("bool")
+                    || above.ends_with("static")
+                    || above.starts_with("static ")
+            } else {
+                false
+            };
+            same_line || (name_line && typed_above)
         })
         .ok_or_else(|| format!("在 {} 里找不到函数 {function}", file.display()))?;
 

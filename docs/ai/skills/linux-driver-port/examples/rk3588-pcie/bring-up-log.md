@@ -534,13 +534,46 @@ RTL8125）。也就是说：**同一块板、同一颗芯片，有一份能工�
 队列启动挂在 RX-ready + IRQ 路径上），我们是**纯轮询**；本板 INTx 未路由
 （`interrupt line = 0xff`），所以要先有 MSI-X。
 
+### 4.1.3 **拿到 vendor 权威源码了**（网络可用）
+
+这台机器能访问外网，所以不必反汇编：
+
+```bash
+curl -sL -o r8125.tgz \
+  https://codeload.github.com/awesometic/realtek-r8125-dkms/tar.gz/refs/heads/master
+# → Realtek 官方 r8125 9.018.00-NAPI（板上跑的是 9.014.01）
+# 已解到 /workspace/r8125-vendor-9.018.00，并登记进 data/references.json
+```
+
+**这一下把"权威源码"这条门禁真正落地了**：vendor 源码与 mainline r8169 在若干处
+不同，之前按 r8169 抄的都可能是错的。
+
+用 `ldp sequence extract`（顺带修好了它对**跨行函数签名**的处理）抽出
+`rtl8125_hw_config` 的 **93 步**，逐项对照后确认/修正了这些：
+
+| 项 | vendor 的真实做法 | 我们之前 |
+|---|---|---|
+| `TDFNR (0x57)` | **写 0x10**（一次门铃取 16 个 TX 描述符） | 从不写，芯片默认 **0x01** |
+| `0xE63E` bits 5:4 | **置 `0b10`**（TX 队列配置）+ TX 队列数 bits 11:10 = 0 | 按 r8169 把它们**清掉** |
+| `0xE052` | 置 bits 6,5；**清** bits 3,7 | 置了 bit3 |
+| `0xD430` | `0x45F` | `0x47F` |
+| `0xC0B4` bit0 | **先清后置**（MCU 使能 toggle） | 只置 bits 2,3 |
+| `0xEB58` bit0 | **置**（"new tx desc format"） | 按 r8169 **清**（我们用 legacy 格式，保持 0） |
+| `RxConfig` | 来自 `rtl_chip_info[].RCR_Cfg` = `Rx_Fetch_Number_8 \| RxCfg_pause_slot_en \| EnableInnerVlan \| EnableOuterVlan \| (RX_DMA_BURST_256 << shift)` = **`0x40c20c0e`** | 先抄参考板值（对），我上一轮又回退了（错，已说明） |
+
+还发现 vendor 的 **`rtl8125_hw_start`（`ChipCmd = TxEnb\|RxEnb`）是在 link-up 补丁里
+调用的**：`rtl8125_link_on_patch = hw_config(整套重配) → 速率补丁 → hw_start`，
+而我们只在 probe 里使能一次。
+
+补上 TDFNR 与上述 OCP 行后复测：**TX 仍不消费**。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，
    修法是"让硬件与软件的指针始终同步"（例如把环基址写入放到**每次**引擎停止后、
    或始终保留一个已 arm 的描述符）。
-2. **MSI-X + 中断驱动**（`start.irq-enable`）：参考实现靠中断服务 TX/RX 完成；
-   本板 INTx 未路由（`interrupt line = 0xff`）。
+2. **MSI-X + 中断驱动**（`start.irq-enable`）：本板 INTx 未路由
+   （`interrupt line = 0xff`），且内核只有 `MsiBackendIf` 抽象、无 ITS 后端。
 3. 取 vendor `r8125` 源码的两条路都没走通：BSP 树是 5.10 稀疏克隆
    （`drivers/net/ethernet/realtek/` 为空），参考板只有二进制 `.ko`。
    还剩两条：板子上 `apt-get source`（需 deb-src + 网络），或
