@@ -795,9 +795,30 @@ xhci: port 2 PORTSC 0x2a0 pp true pls 5
 `HCSPARAMS1` 的字段顺序也踩过一次：`MaxSlots` 在 bits 7:0、`MaxPorts` 在 bits 31:24，
 搞反会读成"64 端口 1 槽"（实际 2 端口 64 槽），而且 `CONFIG` 写错字段会把整个控制器限成单设备。
 
-### 下一步（M1 枚举）
+### 当前卡点：VBUS 没电（不是控制器问题）
 
-端口已上电但 `ccs=false`（未插设备）。插任意 USB 设备后应看到 `ccs=true` 且 `psiv=3`(High-Speed)，
+真机实测（U 盘一直插在 USB3 口上）：
+
+| 观测 | 我们 | 参考板 | 结论 |
+|---|---|---|---|
+| 两个 DWC3 控制器 | 都起来了（fc000000 / fc400000，各 2 端口） | 同 | 控制器 OK |
+| `PORTSC` | `pp true ccs false` | `ccs true` | **端口看不到设备** |
+| GPIO3 `EXT_PORT` bit15（焊盘电平） | **0** | **1** | **5V 没打开** |
+| GPIO3 `DR`/`DDR` bit15 | 写入 4 次重试均不落地 | `dr bit15=1, ddr bit15=1` | bank 拒写 |
+| CRU `0x844`（`pclk_gpio3`） | `0x0`（本来就开） | — | **不是时钟门控问题** |
+| PMU `repair_status` | `0xfff70001` bit25=1 | 同 | 电源域是开的，排除掉电 |
+
+所以 U 盘看不到的唯一原因是 **`vcc5v0-host` 那路 5V 没使能**，而 `vcc5v0-host` 由
+`gpio3.15` 控制，这个 bank 的**寄存器写入被丢弃**（读正常、写无效、重试无效）。
+
+### 下一步（VBUS，先于枚举）
+
+1. **判别 gpio3 写入为什么被丢**：读 CRU `0x844` bit2（`pclk_gpio3`，`SET_TO_DISABLE`）
+   enable 前后是否变化；若不变即为同一类"门控没真开"问题。若已清仍不落地，
+   再用 U-Boot 的 `gpio set` 试驱动同一根线（能把 EL1 与 bootloader 隔离）。
+2. **U-Boot 路线**：若 U-Boot 已把该 GPIO 拉高（很多板子会），内核完全不必碰它，
+   可直接进入枚举。
+3. VBUS 有电后，`ccs` 应变 true 且 `psiv=3`(High-Speed)，
 然后补 xHCI 侧三条 TRB 路径：`Enable Slot`(8) → `Address Device`(10) → EP0 的
 `Setup`/`Data`/`Status`，判据是 `bus/usb` 的枚举日志打出 `id vvvv:pppp` 与配置树。
 

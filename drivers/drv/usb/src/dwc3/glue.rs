@@ -124,6 +124,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         // offset 0 of the same mapping the core's global registers live above.
         let xhci = crate::xhci::Xhci::init(dev, regs)?;
         xhci.log_ports();
+        log_ehci_ports(dev);
 
         Ok(Dwc3Data {
             _clocks: clocks,
@@ -244,9 +245,14 @@ fn log_cru_clocks(dev: &mut Device<'_, PlatformBus>) {
 /// framework here, so the line is driven directly -- without it the port has no
 /// VBUS and no device can ever attach, whatever the controller does.
 fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
+    // The bank's APB clock is gated at reset (`pclk_gpio3`, table index 129):
+    // writes to a GPIO whose pclk is off are dropped and read back as the old
+    // value, which is exactly what this driver saw before holding the gate open.
+    let gate_guard = enable_cru_clock(dev, PCLK_GPIO3_INDEX);
     const GPIO3_BASE: u64 = 0xfec4_0000;
     const SWPORT_DR: usize = 0x0000;
     const SWPORT_DDR: usize = 0x0008;
+    const EXT_PORT: usize = 0x0070;
     const HOST_PORT_BIT: u32 = 1 << 15;
     let gpio = dev.res().iomap_region(
         driver_base::MmioRegion::new(GPIO3_BASE as usize, 0x100),
@@ -254,20 +260,115 @@ fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
     )?;
     let data = gpio.read32(SWPORT_DR);
     let direction = gpio.read32(SWPORT_DDR);
-    info!("dwc3: vbus gpio3.15 dr {data:#010x} ddr {direction:#010x}");
+    info!(
+        "dwc3: vbus gpio3.15 dr {data:#010x} ddr {direction:#010x} pad {:#010x}",
+        gpio.read32(EXT_PORT),
+    );
     if direction & HOST_PORT_BIT != 0 && data & HOST_PORT_BIT != 0 {
         info!("dwc3: vbus already enabled");
         return Ok(());
     }
-    // Direction first: driving a level into an input pin does nothing.
-    gpio.write32(SWPORT_DDR, direction | HOST_PORT_BIT);
-    gpio.write32(SWPORT_DR, data | HOST_PORT_BIT);
-    info!(
-        "dwc3: vbus enabled, dr {:#010x} ddr {:#010x}",
-        gpio.read32(SWPORT_DR),
-        gpio.read32(SWPORT_DDR),
-    );
+    // Direction first: driving a level into an input pin does nothing. Each
+    // step is verified by read-back and retried: the first attempt after the
+    // bank's pclk comes up was observed to vanish, and a level that silently
+    // never reached the pad is indistinguishable from "no device attached",
+    // which is the worst thing to debug from a console.
+    for attempt in 0..4 {
+        gpio.write32(SWPORT_DDR, direction | HOST_PORT_BIT);
+        gpio.write32(SWPORT_DR, data | HOST_PORT_BIT);
+        let now_dr = gpio.read32(SWPORT_DR);
+        let now_ddr = gpio.read32(SWPORT_DDR);
+        info!(
+            "dwc3: vbus attempt {attempt}: dr {now_dr:#010x} ddr {now_ddr:#010x} pad {:#010x}",
+            gpio.read32(EXT_PORT),
+        );
+        if now_dr & HOST_PORT_BIT != 0 && now_ddr & HOST_PORT_BIT != 0 {
+            info!("dwc3: vbus on after {} attempt(s)", attempt + 1);
+            break;
+        }
+        for _ in 0..100 {
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+    }
+    if let Some(guard) = gate_guard {
+        // The bank has to stay clocked for the level to survive later writes.
+        core::mem::forget(guard);
+    }
     Ok(())
+}
+
+/// Reads one CRU word (read-only diagnostic helper).
+fn cru_word(dev: &mut Device<'_, PlatformBus>, offset: usize) -> u32 {
+    const CRU_BASE: u64 = 0xfd7c_0000;
+    match dev.res().iomap_region(
+        driver_base::MmioRegion::new(CRU_BASE as usize, 0x1000),
+        "usb-cru-word",
+    ) {
+        Ok(cru) => cru.read32(offset),
+        Err(_) => 0,
+    }
+}
+
+/// Table index of `pclk_gpio3` in the CRU branch table.
+const PCLK_GPIO3_INDEX: u32 = 129;
+
+/// Enables a CRU clock by table index, through the same provider the node's
+/// parent lists (so no phandle is hard-coded).
+fn enable_cru_clock(dev: &mut Device<'_, PlatformBus>, index: u32) -> Option<EnabledClock> {
+    let provider = parent_clock_provider(dev)?;
+    let spec = ClkSpec::by_phandle_index(provider, index);
+    let clock = dev.res().clk_spec(spec).ok()?;
+    // The register, not the return value: `CLKGATE_CON17` (0x844) bit 2 is
+    // `pclk_gpio3`, and a gate bit still set means the bank is still gated --
+    // which would explain writes that read back unchanged.
+    let before = cru_word(dev, 0x844);
+    let guard = clock.prepare_enable().ok()?;
+    info!(
+        "dwc3: clock index {index} at {} Hz, con17 {before:#010x} -> {:#010x}",
+        clock.get_rate(),
+        cru_word(dev, 0x844),
+    );
+    Some(guard)
+}
+
+/// The clock provider phandle the controller's parent node lists.
+fn parent_clock_provider(dev: &Device<'_, PlatformBus>) -> Option<u64> {
+    let phandle = {
+        let fw = dev.fw();
+        fw.node()?.phandle?
+    };
+    let node = of::find_node_by_phandle(phandle)?;
+    let raw = node.parent_property("clocks")?.value;
+    let cells: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|cell| u32::from_be_bytes(cell.try_into().unwrap_or([0; 4])))
+        .collect();
+    Some(u64::from(*cells.first()?))
+}
+
+/// Logs both EHCI controllers' root ports.
+///
+/// A device on a USB2 Type-A port is served by EHCI, which this port does not
+/// drive yet; reading its PORTSC tells "the stick is plugged into the wrong
+/// controller" apart from "VBUS is still off".
+fn log_ehci_ports(dev: &mut Device<'_, PlatformBus>) {
+    const EHCI: [(u64, &str); 2] = [(0xfc80_0000, "fc800000"), (0xfc88_0000, "fc880000")];
+    const PORTSC0: usize = 0x44;
+    for (base, name) in EHCI {
+        let Ok(ehci) = dev.res().iomap_region(
+            driver_base::MmioRegion::new(base as usize, 0x1000),
+            "usb-ehci",
+        ) else {
+            continue;
+        };
+        let caplen = ehci.read8(0) as usize;
+        let ports = ehci.read32(0x04) & 0xf;
+        info!(
+            "dwc3: ehci {name} caplen {caplen} ports {ports} portsc0 {:#010x} portsc1 {:#010x}",
+            ehci.read32(PORTSC0),
+            ehci.read32(PORTSC0 + 4),
+        );
+    }
 }
 
 /// Acquires the USB2 PHY a `phys` entry of this node points at.
