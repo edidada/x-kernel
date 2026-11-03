@@ -684,6 +684,31 @@ rtl8125: vendor hw_config extras applied, csi 0x70c 0x27ffff00
 最新代码状态下已经不干净了**，下一步必须先把它重新测扎实（例如重复 5 次、
 每次都记录 `TX_OK` 与回头看 RX 是否收到广播），再谈其它。
 
+### 4.2.1 地址扫描：`kdma` 没问题，但只有 `tx_ring` 的基址真正生效
+
+在 A/B 里做了一次**地址扫描**：把 TX 环基址依次指向本驱动四块不同的 coherent
+分配，每块里 arm 一个描述符再踢门铃：
+
+```
+ab: address sweep tx_ring@0x203000:true  rx_ring@0x204000:false
+                 tx_slots@0x3400000:false  rx_slots@0x3480000:false
+ab: tgoskits sequence result: intr 0x84 / 0x85      # 含 TX_OK，是真发送
+```
+
+两条结论：
+
+1. **`kdma` 的分配是可被设备读的**：`tx_ring@0x203000` 被接受并且真的发出了帧
+   （`TX_OK`）。所以不是 DMA 内存/映射的问题，这条线可以关掉。
+2. **后三块"失败"其实是基址写没生效**：扫描时四次写 `TxDescStartAddr{Low,High}`
+   都**没有先解锁 `Cfg9346`**，于是只有早已生效的 `tx_ring` 基址是真的；arm 在
+   其它缓冲里的描述符自然没人看。**描述符基址寄存器受 `Cfg9346` 写保护** —— 这一点
+   值得记进 skill（我们的 `program_ring_bases` 是在解锁期间写的，所以生产路径没问题）。
+
+顺带确认：把 A/B 的调用点全部移除、只跑纯生产路径 → TX 仍不消费；把
+`handle_link_change`、`dc civac` 分别去掉也都不改变结果。所以
+"扫描成功 vs 生产失败" 的差异还没定位到，已知它**不是** kdma、不是缓存、不是 TLB、
+不是 link 状态机、不是序列、不是寄存器取值。
+
 **下一步**：直接在 `send` 里验证假设 1 —— 例如在提交前后各读一次描述符并对比，
 或在 A/B 里把描述符写到**另一块 DMA 缓冲**并用 `dev.res().alloc_coherent` 的
 CPU 地址做一次 memcpy 往返；若 CPU 6 上读回的是旧值，即确认多核 TLB/属性不一致。
