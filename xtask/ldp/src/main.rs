@@ -28,6 +28,7 @@ mod query;
 mod references;
 mod repo;
 mod requirements;
+mod sequence;
 mod staging;
 mod trace;
 mod validate;
@@ -172,6 +173,14 @@ enum Cmd {
         #[command(subcommand)]
         action: RequirementsAction,
     },
+
+    /// 序列门禁：参考实现的有序副作用序列 vs v2 移植（覆盖/可达/顺序）。
+    ///
+    /// 反例：check-layout 只看位段形状，看不到"少调了一个初始化函数"。
+    Sequence {
+        #[command(subcommand)]
+        action: SequenceAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -218,6 +227,33 @@ enum StagingAction {
         /// 候选 id,如 `gap:clk_set_rate`。
         #[arg(long)]
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SequenceAction {
+    /// 从参考 C 函数抽取有序步骤，打印 TOML 草稿。
+    Extract {
+        /// 参考源码文件。
+        file: PathBuf,
+        /// 函数名，如 rtl_hw_init_8125。
+        #[arg(long)]
+        function: String,
+        /// 归属的命名路径（init / start / stop / link / irq）。
+        #[arg(long, default_value = "init")]
+        path: String,
+    },
+    /// 校验 data/sequences/*.toml 的覆盖/可达/顺序。
+    Check {
+        /// 只查某个 port。
+        #[arg(long)]
+        port: Option<String>,
+        /// unported 也判为失败（默认只告警）。
+        #[arg(long)]
+        strict: bool,
+        /// 列出未移植的步骤。
+        #[arg(long)]
+        list_unported: bool,
     },
 }
 

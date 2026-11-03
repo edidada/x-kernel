@@ -432,6 +432,15 @@ check-crate:
 		-p entry -p $(CRATE) \
 		--features "$$feats$$extra"
 
+# 序列门禁（linux-driver-port skill）:参考实现的有序副作用序列 vs v2 移植。
+# 默认只告警（三个 port 补齐前不阻塞）；SEQUENCE_STRICT=1 时 unported 也算失败。
+SEQUENCE_ARGS = $(if $(PORT),--port $(PORT),) $(if $(SEQUENCE_STRICT),--strict,) --list-unported
+
+ldp-sequence:
+	@env CARGO_BUILD_TARGET=$(HOST_TARGET) RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= \
+		cargo run --quiet --target-dir $(LDP_TARGET_DIR) \
+		--manifest-path xtask/Cargo.toml -p ldp -- sequence check $(SEQUENCE_ARGS)
+
 check_deps:
 	@$(XKMAKE) hygiene deps
 

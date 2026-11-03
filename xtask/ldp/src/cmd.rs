@@ -7,7 +7,8 @@
 use std::process::ExitCode;
 
 use crate::{
-    Cmd, RefAction, RequirementsAction, StagingAction, TraceAction, data, data::BitfieldDefs,
+    Cmd, RefAction, RequirementsAction, SequenceAction, StagingAction, TraceAction, data,
+    data::BitfieldDefs,
     gendoc, golden, layout, query, references, repo, requirements, staging, trace, validate,
 };
 
@@ -247,6 +248,7 @@ pub fn run(cmd: Cmd) -> ExitCode {
         Cmd::Trace { action } => run_trace(action),
         Cmd::Staging { action } => run_staging(action),
         Cmd::Requirements { action } => run_requirements(action),
+        Cmd::Sequence { action } => run_sequence(action),
     }
 }
 
@@ -603,5 +605,36 @@ where
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+fn run_sequence(action: SequenceAction) -> ExitCode {
+    match action {
+        SequenceAction::Extract {
+            file,
+            function,
+            path,
+        } => match crate::sequence::extract(&file, &function, &path) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ldp sequence extract: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        SequenceAction::Check {
+            port,
+            strict,
+            list_unported,
+        } => match crate::sequence::check(port.as_deref(), strict, list_unported) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => {
+                eprintln!("ldp sequence check: 有未满足的序列要求（加 --strict 时为失败）");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("ldp sequence check: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }

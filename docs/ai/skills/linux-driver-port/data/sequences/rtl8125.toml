@@ -1,0 +1,231 @@
+# RTL8125 的参考实现序列（port: rtl8125）。
+#
+# 权威源码：板子上真正在跑的是 vendor `r8125`（modinfo: 9.014.01-NAPI），但它不在
+# 离线树里；mainline r8169 含同一套 8125 分支，用它作为**有序序列**的出处，
+# 并用参考板的运行态寄存器 dump 做交叉验证（见 bring-up log §4.1.1）。
+#
+# 生成方式：`ldp sequence extract <file> --function <fn> --path <name>`，
+# 然后人工归并成"块级步骤"（一个块可以覆盖多行写，写进 note）。
+# 每个步骤要么在 v2 代码里有 `// ldp:step <id>` 锚点，要么显式 waived/unported。
+
+[port]
+name = "rtl8125"
+crate_path = "drivers/drv/net"
+authoritative = "linux-7.1.8:drivers/net/ethernet/realtek/r8169_main.c"
+provenance = """
+board: `modinfo r8125 | head -3` ->
+  filename: /lib/modules/6.1.99-rockchip-rk3588/kernel/drivers/net/ethernet/realtek/r8125/r8125.ko
+  version:  9.014.01-NAPI
+vendor 源码离线不可得，序列取自 mainline r8169（含 8125 分支），
+并用参考板 r8125 运行态的寄存器 dump 交叉验证（bring-up log §4.1.1）。
+"""
+entries = ["reset_and_configure", "start_data_path"]
+
+# ---- init：MAC MCU / link-list 初始化（mainline: rtl_hw_init_8125）----
+[[path]]
+name = "init"
+
+[[path.step]]
+id = "init.rxdv-gate"
+src = "r8169_main.c:5510"
+op = "call"
+target = "rtl_enable_rxdvgate"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.stop-engines"
+src = "r8169_main.c:5512"
+op = "write"
+target = "ChipCmd@8"
+mask = "CmdTxEnb|CmdRxEnb"
+value = "0"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.sleep-1ms"
+src = "r8169_main.c:5513"
+op = "wait"
+target = "msleep(1)"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.mcu-clear-oob"
+src = "r8169_main.c:5514"
+op = "rmw"
+target = "MCU@8"
+mask = "NOW_IS_OOB"
+value = "0"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.ocp-e8de"
+src = "r8169_main.c:5516"
+op = "rmw"
+target = "OCP(0xe8de)"
+mask = "BIT(14)"
+value = "0"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.ll-fifo-wait"
+src = "r8169_main.c:5517"
+op = "poll"
+target = "MCU & LINK_LIST_RDY"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.ocp-c0aa"
+src = "r8169_main.c:5519"
+op = "write"
+target = "OCP(0xc0aa)"
+value = "0x07d0"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.ocp-c0a6"
+src = "r8169_main.c:5520"
+op = "write"
+target = "OCP(0xc0a6)"
+value = "0x0150"
+v2 = "anchored"
+
+[[path.step]]
+id = "init.ocp-c01e"
+src = "r8169_main.c:5521"
+op = "write"
+target = "OCP(0xc01e)"
+value = "0x5555"
+v2 = "anchored"
+
+# ---- start：rtl_hw_start + 8125 专有段（mainline: rtl_hw_start_8125{,b,_common}）----
+[[path]]
+name = "start"
+
+[[path.step]]
+id = "start.intcfg0"
+src = "r8169_main.c:4049"
+op = "write"
+target = "INT_CFG0_8125@8"
+value = "0x00"
+note = "中断合并：0xa00..0xa80 整块清零 + INT_CFG1=0 归入此步"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.aspm-clkreq-off"
+src = "r8169_main.c:1985"
+op = "call"
+target = "rtl_hw_aspm_clkreq_enable(false)"
+note = "参考板实测 cfg2/cfg5 的 ASPM/ClkReq 位是**开着**的，故本 port 不照抄"
+v2 = "waived"
+
+[[path.step]]
+id = "start.ephy-init"
+src = "r8169_main.c:3446"
+op = "call"
+target = "rtl_ephy_init"
+note = "EPHY 寄存器表（8125B 六行）；U-Boot 驱动不做也能收发，故尚未移植"
+v2 = "unported"
+
+[[path.step]]
+id = "start.hw-start-common"
+src = "r8169_main.c:3990"
+op = "call"
+target = "rtl_hw_start_8125_common"
+note = "本 port 在 hw_start_8125_common() 里逐行转写（0x382/RSS/QNUM/OCP 表/MISC）"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.eee-txidle"
+src = "r8169_main.c:4101"
+op = "call"
+target = "rtl_set_eee_txidle_timer"
+note = "EEE 未启用，先不做"
+v2 = "waived"
+
+[[path.step]]
+id = "start.rx-max-size"
+src = "r8169_main.c:4110"
+op = "write"
+target = "RxMaxSize@16"
+value = "buf+1"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.desc-registers"
+src = "r8169_main.c:4111"
+op = "call"
+target = "rtl_set_rx_tx_desc_registers"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.jumbo"
+src = "r8169_main.c:4115"
+op = "call"
+target = "rtl_jumbo_config"
+note = "MTU 固定 1500，不做 jumbo"
+v2 = "waived"
+
+[[path.step]]
+id = "start.pci-commit"
+src = "r8169_main.c:4118"
+op = "call"
+target = "rtl_pci_commit"
+note = "等于读一次 ChipCmd；program_engine_config 里读回 cmd 已覆盖"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.enable-engines"
+src = "r8169_main.c:4120"
+op = "write"
+target = "ChipCmd@8"
+value = "CmdTxEnb|CmdRxEnb"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.rx-config"
+src = "r8169_main.c:4121"
+op = "call"
+target = "rtl_init_rxcfg"
+note = "RX_FETCH_DFLT_8125 | RX_DMA_BURST | RX_PAUSE_SLOT_ON"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.tx-config"
+src = "r8169_main.c:4122"
+op = "call"
+target = "rtl_set_tx_config_registers"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.rx-mode"
+src = "r8169_main.c:4124"
+op = "call"
+target = "rtl_set_rx_mode"
+note = "accept broadcast|multicast|own；本 port 写在 RX_CONFIG_8125B | RX_ACCEPT_MODE"
+v2 = "anchored"
+
+[[path.step]]
+id = "start.irq-enable"
+src = "r8169_main.c:4125"
+op = "call"
+target = "rtl_irq_enable"
+note = "本 port 是轮询模型；中断化是下一步（kirq + ISR）"
+v2 = "unported"
+
+[[path.step]]
+id = "start.tally-counter"
+src = "r8169_main.c:4042"
+op = "rmw"
+target = "OCP(0xea84)"
+mask = "BIT(1)|BIT(0)"
+value = "0x3"
+note = "扩展计数器；当前只用自检写入再还原，未真正启用"
+v2 = "unported"
+
+[[path.step]]
+id = "start.phy-config"
+src = "r8169_main.c:3452"
+op = "call"
+target = "rtl8125b_hw_phy_config"
+note = "PHY 专有调优（EPHY/OCP 表）；链路已能 up，故尚未移植"
+v2 = "unported"

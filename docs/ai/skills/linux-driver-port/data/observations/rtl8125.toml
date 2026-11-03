@@ -1,0 +1,48 @@
+# 可观测事实：代码里碰过的每个寄存器都要有一条能判真假的断言。
+#
+# 存在的理由：读错偏移得到的 0 与"设备真的没动作"不可区分。本 port 曾因为
+# 在 0x3e 读 IntrStatus（8125 在 0x3c）而得出"MAC 毫无反应"，白追十几轮。
+
+[port]
+name = "rtl8125"
+log_marker = "rtl8125: "
+
+[[fact]]
+id = "intr-status-progress"
+reg = "0x3c"
+rule = "changes_across_tx"
+why = """
+RTL8125 的 32 位 IntrStatus 在 0x3c（816x 的 16 位 0x3c/0x3e 布局不适用）。
+一次发送尝试后它必须出现 RX_OK/TX_OK/TX_DESC_UNAVAILABLE 之一；
+恒为 0 说明偏移又写错了。
+"""
+
+[[fact]]
+id = "chip-id"
+reg = "0x40"
+rule = "bits_set:29:20"
+why = "TxConfig[29:20] 是只读芯片版本号，8125B 读到 0x641；乱码说明读错地址。"
+
+[[fact]]
+id = "link-list-ready"
+reg = "0xd3"
+rule = "bit_set_after_init:1"
+why = "MCU.LINK_LIST_RDY(bit1)：描述符链表 FIFO 就绪，是取描述符的前提。"
+
+[[fact]]
+id = "mac-link-up"
+reg = "0x6c"
+rule = "bit_set_after_init:1"
+why = "MAC 侧的链路状态（与 PHY BMSR 不是同一处）；TX 只在 MAC 认为链路 up 时才走。"
+
+[[fact]]
+id = "tx-ring-base"
+reg = "0x20"
+rule = "equals_bus_addr:tx_ring"
+why = "写进去的环基址必须原样读回；不一致说明 latch 或写通路有问题。"
+
+[[fact]]
+id = "rx-accept-mode"
+reg = "0x44"
+rule = "bits_set:3:1"
+why = "accept broadcast/multicast/own 三位在参考实例里是 0x0e；写不进去则收包不可能。"

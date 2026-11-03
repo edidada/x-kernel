@@ -318,7 +318,9 @@ fn start_data_path(nic: &Rtl8125Nic) -> Result<(), ProbeError> {
 fn program_ring_bases(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
     bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
+    // ldp:step start.rx-max-size
     bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
+    // ldp:step start.desc-registers
     // High word first: the reference does it for boards that only latch the
     // low word after it has seen the high one.
     bar0.write32(
@@ -359,17 +361,17 @@ fn arm_receive_ring(nic: &Rtl8125Nic) {
 /// Programs the RX/TX configuration and starts both engines.
 fn program_engine_config(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
-    bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
-    bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
-    bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
-    bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
 
+    // The reference's `rtl_hw_start` tail, in order: commit the pending
+    // configuration writes with a `ChipCmd` read, *then* enable the engines,
+    // and only then program the RX/TX configuration and the receive mode.
+    let _ = bar0.read8(reg::CHIP_CMD); // ldp:step start.pci-commit
     bar0.write32(reg::INTR_MASK, 0xffff_ffff);
+    // ldp:step start.enable-engines
     bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB);
-    // The reference enables the engines before writing the configuration
-    // registers (`rtl_hw_start` ends with `rtl_init_rxcfg` +
-    // `rtl_set_tx_config_registers`), so the same order is used here.
+
     bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
+    // ldp:steps start.rx-config, start.tx-config, start.rx-mode
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
@@ -412,6 +414,7 @@ fn dump_registers(bar0: &IoMap) {
 /// mask, exactly as `r8168_mac_ocp_modify` performs it.
 fn hw_start_8125_common(bar0: &IoMap) {
     // Interrupt coalescing off; the receive path here is polled.
+    // ldp:step start.intcfg0
     bar0.write8(reg::INT_CFG0_8125, 0x00);
     let mut offset = 0xa00usize;
     while offset < 0xa80 {
@@ -425,6 +428,7 @@ fn hw_start_8125_common(bar0: &IoMap) {
     bar0.write32(reg::RSS_CTRL_8125, 0);
     bar0.write16(reg::Q_NUM_CTRL_8125, 0);
 
+    // ldp:step start.hw-start-common
     // (mask, set) rows from the reference. `set` is masked with `mask` before
     // it is OR'd in, so a clear row is "(mask, 0)".
     const OCP_ROWS: &[(u16, u16, u16)] = &[
@@ -560,6 +564,7 @@ fn wait_link_list_ready(bar0: &IoMap) -> bool {
 /// shareable around three MAC-OCP writes.
 fn hw_init_8125(bar0: &IoMap) -> Result<(), ProbeError> {
     // Gate RX data-valid and park the engines for the initialization window.
+    // ldp:steps init.rxdv-gate, init.stop-engines, init.sleep-1ms
     bar0.write32(reg::MISC, bar0.read32(reg::MISC) | RXDV_GATED_EN);
     bar0.write8(
         reg::CHIP_CMD,
@@ -567,10 +572,12 @@ fn hw_init_8125(bar0: &IoMap) -> Result<(), ProbeError> {
     );
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1000));
 
+    // ldp:steps init.mcu-clear-oob, init.ocp-e8de, init.ll-fifo-wait
     bar0.write8(reg::MCU, bar0.read8(reg::MCU) & !MCU_NOW_IS_OOB);
     mac_ocp_modify(bar0, 0xe8de, 1 << 14, 0);
     let ready_before = wait_link_list_ready(bar0);
 
+    // ldp:steps init.ocp-c0aa, init.ocp-c0a6, init.ocp-c01e
     mac_ocp_write(bar0, 0xc0aa, 0x07d0);
     mac_ocp_write(bar0, 0xc0a6, 0x0150);
     mac_ocp_write(bar0, 0xc01e, 0x5555);

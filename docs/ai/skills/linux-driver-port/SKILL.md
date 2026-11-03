@@ -77,6 +77,62 @@ ldp requirements confirm req-clk-framework --status confirmed
 
 5. **遵循项目规范。** 编码风格走 [`code-guidelines`](../code-guidelines/SKILL.md);构建/检查/运行走 [`build-workflow`](../build-workflow/SKILL.md)。
 
+## 铁律 6:**序列与可观测事实**同样要落数据(最贵的漏项在这里)
+
+铁律 1 说"初始化序列原样翻译",但**没有形状的数据不会失败**。实践里最贵的
+bug 不是常量抄错,而是:
+
+- 参考实现调了 `rtl_hw_init_8125` 才 reset,**我们的驱动里一行都没有**;
+- `IntrStatus` 读的是 `0x3e`(816x 布局),8125 在 `0x3c` → 永远读到 0,
+  于是"设备毫无反应"这个假事实支撑了后面十几轮推理。
+
+两者都有同一个根因:**harness 只建模了"数据",没建模"控制流"与"事实"**。
+所以新增两条,执行层是 `ldp sequence`:
+
+### 6.1 序列即数据:`data/sequences/<port>.toml`
+
+- 每个 port 为 `init` / `start` / `stop` / `link` / `irq` 等**命名路径**写一份
+  **有序步骤表**,每步记录:参考 `file:line`、操作(`write`/`rmw`/`poll`/`wait`/`call`)、
+  目标(寄存器/OCP 地址/函数)、mask/value、生效条件。
+- 生成方式不是手写:`ldp sequence extract <src.c> --function <fn> --path init`
+  从参考源码按出现顺序抽草稿,**人只做归并**(把多行写合并成块)与状态填写。
+- v2 侧每步必须三选一:
+  - `anchored`:代码里有 `// ldp:step <id>`(一行可登记多个 id:
+    `// ldp:steps a.b, a.c`)**,且**锚点所在函数能从 `entries` 调用到;
+  - `waived`:明说不做,**必须写理由**(与 E-0x 例外表同规格);
+  - `unported`:还没做,`--list-unported` 会列出来。
+- 门禁 `make ldp-sequence`(默认告警) / `PORT=x SEQUENCE_STRICT=1 make ldp-sequence`
+  (未移植即失败)检查 **覆盖 / 可达 / 顺序**。顺序只在**同一函数内**比较——
+  源码行号是文件布局,不是执行顺序。
+
+### 6.2 每个被触碰的寄存器都必须有**可观测事实**
+
+读错偏移得到的 0 与"设备真的没动作"不可区分,这是最贵的误判来源。规则:
+
+> 代码里读/写的每一个寄存器,都要在 `data/observations/<port>.toml` 里有至少
+> 一条能判真假的事实(恒非零 / 跨某操作变化 / init 后某位为 1 / 等于某值)。
+
+`ldp obs check <board-log>` 用它校验真机日志;事实不成立就当场失败,而不是被
+解释成"设备沉默"。
+
+### 6.3 权威源码要先证明,再动手
+
+`port.authoritative` + `port.provenance` 必填,后者要给出**可复现命令 + 预期输出**。
+典型踩坑:主线上是 `r8169`,而板子实际绑的是 vendor `r8125`,两者初始化序列不同
+(见 `examples/rk3588-pcie/bring-up-log.md` §4.1.1)。上板第一件事:
+
+```bash
+lspci -k | grep -A3 -i ethernet      # 或 dmesg | grep -i <chip> / modinfo <drv>
+```
+
+### 6.4 每轮上板前写"可判别预测"
+
+> 如果 X 是原因 → 日志会出现 Y;否则会出现 Z。
+
+一轮一条,不允许"先改了再看"。**第一轮只观测**(dump 工作实例状态 + 确认寄存器
+偏移),不写假设性改动。这一条比任何工具都省时间:某个 port 的 10 个假设里 9 个
+都是"看起来很像",而 3 个真正解决问题的动作全是观测。
+
 ## 协议/位段常量纪律(铁律 1/2 的延伸——最容易栽的地方)
 
 位段、协议线格式、magic number 是**凭记忆最易记反、出错最隐蔽**的一类:API 写错编译器会报,**位段错了能编过,甚至可能恰好跑通**(全零字段掩盖错误)。纪律:
@@ -101,6 +157,13 @@ knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
 ```
 
 **原则:改数据(改 JSON),不改文档;文档是构建产物。** `schema.md` 解释字段语义。
+
+## 数据目录新增项
+
+| 路径 | 内容 | 门禁 |
+|---|---|---|
+| `data/sequences/<port>.toml` | 参考实现的**有序步骤表**（init/start/stop/...） | `make ldp-sequence`（覆盖/可达/顺序） |
+| `data/observations/<port>.toml` | 每个被触碰寄存器的**可观测事实** | `ldp obs check <log>`（接线中） |
 
 ## 文件地图(progressive disclosure)
 
