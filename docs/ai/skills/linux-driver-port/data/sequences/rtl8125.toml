@@ -332,6 +332,18 @@ note = "与上一行同因：参考板这些电源位是开着的，改了反而
 v2 = "waived"
 
 [[path.step]]
+id = "rx.check-status"
+src = "r8125_n.c:21085"
+op = "call"
+target = "rtl8125_check_rx_desc_error"
+note = """
+收包前按描述符布局判错：type-1 环只有 RxRES(bit21) 是否决位，RxRWT/RxRUNT/RxCRC
+只是统计，而 bit18 在每一个好帧上都置位。差一位就整条接收路径静默丢光。
+我们写在 `recv()` 的完成判定处。
+"""
+v2 = "anchored"
+
+[[path.step]]
 id = "cfg.rx-packet-filter-off"
 src = "r8125_n.c:4682"
 op = "call"

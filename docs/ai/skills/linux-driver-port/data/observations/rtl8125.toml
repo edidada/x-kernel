@@ -46,3 +46,30 @@ id = "rx-accept-mode"
 reg = "0x44"
 rule = "bits_set:3:1"
 why = "accept broadcast/multicast/own 三位在参考实例里是 0x0e；写不进去则收包不可能。"
+
+[fact]
+id = "rx-desc-status-layout"
+reg = "rx descriptor opts1 (coherent ring)"
+rule = "bit_set_on_good_frame:18"
+why = """
+完成状态字不是"错误位集合"，而是带布局的：8125B 硬件支持 type-3/type-4
+描述符环，但参考驱动只在开 RSS 或 PTP 时才切换，默认走 type 1。type 1 里
+判错的唯一依据是 RxRES(bit21)，RxRWT(22)/RxRUNT(20)/RxCRC(19) 只做统计，
+而 bit18 在**每一个好帧**上都置位。
+
+本 port 曾按位集合写掩码 (16|18|19|20)，于是把收到的每一帧都当错误丢掉，
+表现为"0 received + rx[0] 始终 owned"，看起来像 MAC 完全没收包。实测帧头
+（rx[5] opts1 0x3800007b head 01:80:c2:00:00:00 ...）证明硬件收得很好。
+换成 type-4 布局 (22|21|20) 同样错：那三位在 type-1 帧上本来就不出现。
+"""
+
+[fact]
+id = "rx-poll-tick"
+reg = "knet TIMER_SAMPLE_PERIOD (10 ms)"
+rule = "periodic_notify_while_receiving"
+why = """
+轮询模式（无中断路由）的网卡需要一个接收节拍：knet 的 10 ms 定时器原本
+只在协议定时器到期时才唤醒数据面，于是空闲期到达的回包要等到下一次发送
+被唤醒才被取走 —— 实测 ping RTT 出现整 1005 ms 的尖峰且伴随 ~20% 丢包。
+让该定时器每拍都通知数据面后：RTT 4.7 ms 均值、0% 丢包（10/10 连续两轮）。
+"""

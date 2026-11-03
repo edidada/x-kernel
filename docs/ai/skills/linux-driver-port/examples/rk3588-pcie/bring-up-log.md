@@ -728,17 +728,24 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 5 packets transmitted, 4 received, 20% packet loss
 ```
 
-### 当前状态（合并回 `xiaohui/pci-usb-verify` 时）
+### 当前状态
 
 | 方向 | 状态 | 证据 |
 |---|---|---|
-| **TX** | **稳定可用** | `tx[0] len 42 desc 0xb000002a -> 0x00000000 reclaimed true`，每帧都一样 |
-| **RX** | **不稳定** | 最好的一轮 `5 transmitted / 4 received`、RTT 4.8–21 ms（一次 1005 ms）；后续两轮 `0 received`，`rx[0]` 始终 `0x80000800`（描述符没被消费） |
+| **TX** | **可用** | `tx[n] len … reclaimed true`，每帧都被 MAC 消费 |
+| **RX** | **可用** | `10 packets transmitted, 10 received, 0% packet loss`，连续两轮；RTT 均值 4.7–5.7 ms、最小 0.47 ms |
 
-RX 时好时坏，`rx[0]` 未被消费说明"这一轮 MAC 没往环里写帧"，而 TX 同轮正常 ——
-优先怀疑：RX 环的 arm 时机（`late_init` 之后是否被别的路径重写）、
-`RxConfig` 的 accept 位是否在 `program_engine_config` 之后又被覆盖、
-以及纯轮询模型下 RX 的响应延迟（`set_rx_scheduler` 目前仍是默认的 Unsupported）。
+RX 的两个卡点，都不是"硬件没收包"：
+
+1. **完成状态判错** —— 8125B 默认走 type-1 描述符环（只有开 RSS/PTP 才切
+   type-3/4），判错只有 `RxRES(bit21)` 一位；参照位集合写掩码的人会把
+   **每一个好帧**当错误丢掉。表现极具误导性：`0 received` 且 `rx[0]` 始终
+   owned，看上去像 MAC 根本没往环里写。把描述符 `opts1` 与帧头一起打出来
+   就一目了然（`rx[5] opts1 0x3800007b head 01:80:c2:00:00:00 …` 是好帧）。
+2. **轮询模式缺接收节拍** —— 无中断路由时，knet 的 10 ms 定时器原本只在协议
+   定时器到期才唤醒数据面，于是空闲期到达的回包要等下一次发送被唤醒才取走：
+   RTT 出现整 1005 ms 尖峰、伴随约 20% 丢包。让该节拍每拍都通知数据面后
+   归零。
 
 ### 定位过程（关键几步）
 
