@@ -115,6 +115,23 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?,
         );
         info!("dwc3: usb2 phy powered");
+        // The PHY's own state decides whether D+ can be detected at all: `phy_sus`
+        // (bit 11 of the block's +0x0c word) asserted means the analog front end
+        // is off, and then no amount of VBUS will produce a connect. A working
+        // board reads 0x215 here, i.e. not suspended.
+        for (base, name) in [(0xfd5d_0000_u64, "usb3_0"), (0xfd5d_4000, "usb3_1")] {
+            if let Ok(block) = dev.res().iomap_region(
+                driver_base::MmioRegion::new(base as usize, 0x4000),
+                "usb2phy-state",
+            ) {
+                info!(
+                    "dwc3: usb2phy {name} +0x00 {:#06x} +0x0c {:#06x} (bit11 suspended {})",
+                    block.read32(0),
+                    block.read32(0x0c),
+                    block.read32(0x0c) & (1 << 11) != 0,
+                );
+            }
+        }
 
         // The USB3 port has to be taken out of "disabled" in the USB GRF before
         // the controller can see anything on it: PIPE_ENABLE=1, PHY_DISABLE=0,

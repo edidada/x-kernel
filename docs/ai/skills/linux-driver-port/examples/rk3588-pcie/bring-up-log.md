@@ -848,6 +848,20 @@ gpiochip3: GPIOs 96-127, parent: platform/fec40000.gpio, gpio3:
 `gpio-111` = bank3 + pin15，**由 Linux 的 regulator-fixed 驱动拉高** —— 说明这块
 SoC/bank 的写在正常启动链下是允许的，不是硬件写保护。
 
+#### VBUS 已打通，且 SoC 侧与参考板逐位一致
+
+U-Boot 里 `gpio set 111` 能拉起这根线（裸 `mw.l` 不能），之后内核读到
+`dr 0x8800 ddr 0x9800 pad bit15=1`。此时：
+
+| 检查项 | 我们 | 参考板 |
+|---|---|---|
+| `usb2phy usb3_0` `+0x00`/`+0x0c` | `0x7066` / `0x0215`（bit11 未 suspend） | `0x7066` / `0x0215` |
+| DWC3 端口 `PORTSC` | `pp true ccs false`（4 个端口全 false） | `ccs true` |
+| EHCI 端口（已 init 并置 PP） | `portsc 0x1000 pp true ccs false` | — |
+| xHCI / GRF / 门控 | 全部就绪（见上表） | — |
+
+也就是说：**SoC 侧我们能做到的每一项都与参考板一致**，仍然没有任何端口报告连接。
+
 #### 我们这边已排除的原因（逐条有实测）
 
 | 候选原因 | 实测 | 结论 |
@@ -857,6 +871,7 @@ SoC/bank 的写在正常启动链下是允许的，不是硬件写保护。
 | 引脚复用（IOMUX） | `0xfd5fa064` = `0x00006666`，B7 nibble=0 = GPIO | 排除 |
 | 特权级（内核 vs bootloader） | U-Boot `mw.l` 同样不落地 | 排除 |
 | 引脚是否被别的驱动占用 | 我们板上没有 regulator 框架，无人占用 | 排除 |
+| usb2phy `phy_sus` | `+0x0c = 0x215`，bit11=0，与参考板一致 | 排除 |
 
 在一次 U-Boot 试验里写入 `0x12345678` 读回 `0x00001230`（部分位生效），
 说明写通路并非完全断死，更像是这个寄存器在**我们这个启动链下被部分屏蔽**。
