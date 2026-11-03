@@ -428,31 +428,6 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B | RX_ACCEPT_MODE);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
-    // Values measured on the reference board's working NIC (vendor `r8125`,
-    // same SoC and chip, link up and idle): adopt them verbatim rather than
-    // re-deriving them from the vendor-neutral r8169 constants.
-    //
-    //   TxConfig 0x67100f40  -- our computed value lacked bit 6
-    //   RxConfig 0x40c20c0e  -- ours lacked bits 23:22 and the burst encoding
-    //   Config2  0x9d        -- bit 7 (clock request) enabled
-    //   Config5  0x03        -- bit 0 (ASPM) enabled
-    const REF_RX_CONFIG: u32 = 0x40c2_0c0e;
-    bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
-    bar0.write32(reg::RX_CONFIG, REF_RX_CONFIG);
-    // Config2/Config5 keep their power-management bits off: the reference
-    // driver runs with them enabled *and* the matching L1 machinery in place,
-    // while this driver does not yet, and enabling them here measurably made
-    // both rings stop fetching descriptors.
-    bar0.write8(reg::CFG_9346, CFG_9346_LOCK);
-    log::info!(
-        "rtl8125: reference register values -> rxcfg {:#010x} txcfg {:#010x} cfg2 {:#04x} cfg5 \
-         {:#04x}",
-        bar0.read32(reg::RX_CONFIG),
-        bar0.read32(reg::TX_CONFIG),
-        bar0.read8(reg::CONFIG2),
-        bar0.read8(reg::CONFIG5),
-    );
-
     log::info!(
         "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x}",
         bar0.read32(reg::RX_CONFIG),

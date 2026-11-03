@@ -511,6 +511,29 @@ speed 编码变化），这点值得在下一步一起确认——如果协商�
   `send` 直接 arm），再在 t+5 s 发第二帧，看第二帧是否被消费——这能干净地把
   "指针不同步"与"引擎停摆"分开，之前的 prime 探针绕过状态机，结果不可解释。
 
+### 4.1.2i tgoskits 是**同板已验证**的参考（不要丢）
+
+`/workspace/tgoskits` 的 `drivers/net/realtek-rtl8125` **在 OrangePi 5 Plus 上做过
+board bringup**（retrospective 记录的 PR #404），且被 Axvisor 当管理网卡使用
+（`docs/docs/architecture/axvisor/guest-console.md` 明确写了它驱动 OPi5+ 的
+RTL8125）。也就是说：**同一块板、同一颗芯片，有一份能工作的 Rust 实现**。
+
+已经用它补齐/纠正的点：
+
+| 项 | 来源 |
+|---|---|
+| CSI 窗口（`CSIDR 0x64` / `CSIAR 0x68`）+ `CSI_PCIE_CTRL` 的 ZRXDC + L1 进入延迟 | tgoskits |
+| EPHY 表（`e_info_8125b` 六行，走 `EPHYAR 0x80`） | tgoskits / mainline |
+| **中断偏移 `IntrMask 0x38` / `IntrStatus 0x3c`（32 位）** | tgoskits |
+| `CplusCmd` 的 `PCI_DAC`/`PCIMulRW` 语义（本芯片只读 0） | tgoskits |
+| `Config1` bit4 的真实语义 = **SPEED_DOWN**（空闲降速），不是无名低功耗位 | tgoskits |
+| `RxConfig`/`TxConfig` 位段与取值（burst=7 / IFG=3 / fetch=8 / pause_slot） | tgoskits（与我们的推导一致） |
+| **`RxConfig` 应用 `0x40000f00\|accept`，不是参考板 dump 的 `0x40c20c0e`** | tgoskits（本轮据此纠正） |
+
+**它和我们剩下的结构性差异只有一个**：tgoskits **是中断驱动**（注册 IRQ source，
+队列启动挂在 RX-ready + IRQ 路径上），我们是**纯轮询**；本板 INTx 未路由
+（`interrupt line = 0xff`），所以要先有 MSI-X。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，
