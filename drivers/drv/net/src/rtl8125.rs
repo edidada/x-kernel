@@ -443,14 +443,17 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     // Accept every multicast group: the hash filter is all-zero after reset.
     bar0.write32(reg::MAR0, u32::MAX);
     bar0.write32(reg::MAR4, u32::MAX);
+    // ldp:step start.enable-engines
     bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB); // enable_tx_rx()
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
     // program_start(): default RX config, then the accept bits.
+    // ldp:steps start.rx-config, start.tx-config, start.rx-mode
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
     let rx = bar0.read32(reg::RX_CONFIG);
     bar0.write32(reg::RX_CONFIG, (rx | RX_ACCEPT_MODE) & !0x30);
     bar0.write32(reg::INTR_MASK, 0);
+    // ldp:step start.pci-commit
     let _ = bar0.read8(reg::CHIP_CMD); // commit()
     log::info!(
         "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x} intr {:#010x}",
@@ -1280,6 +1283,7 @@ impl Rtl8125Nic {
     /// descriptor's address/options (the ownership bit is written by the caller
     /// after a barrier).
     fn stage_frame(&self, index: usize, desc: *mut u8, frame: &[u8], frame_len: usize) {
+        // ldp:steps tx.pad-to-zlen, tx.vlan-tag
         let tx_len = frame_len.max(ETH_ZLEN);
         Rtl8125Nic::desc_set_addr(
             desc,
@@ -1309,6 +1313,7 @@ impl Rtl8125Nic {
     /// link-up half of the reference's state machine, polled instead of
     /// interrupt-driven.
     fn late_init(&self) {
+        // ldp:step link.late-init
         tgoskits_start(self);
         log::info!("rtl8125: late init done (link settled)");
     }
