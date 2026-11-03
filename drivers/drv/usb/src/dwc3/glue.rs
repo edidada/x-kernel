@@ -79,10 +79,16 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 continue;
             };
             let clock = dev.res().clk_spec(spec)?;
+            let before = clock_gate_word(dev);
             clock
                 .prepare_enable()
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-            info!("dwc3: clock {name} enabled at {} Hz", clock.get_rate());
+            let after = clock_gate_word(dev);
+            info!(
+                "dwc3: clock {name} (id {:#x}) at {} Hz, gates {before:#010x} -> {after:#010x}",
+                spec.index,
+                clock.get_rate(),
+            );
             clocks.push(clock);
         }
         if clocks.is_empty() {
@@ -180,12 +186,31 @@ fn enable_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeErr
     enable_vbus(dev)
 }
 
+/// Reads `CLKGATE_CON42`, the word this SoC keeps the dwc3 gates in.
+///
+/// Bits are `SET_TO_DISABLE`: a SET bit means the clock is gated off. A clock
+/// whose `prepare_enable()` returns Ok without clearing its bit is the reason
+/// this function exists -- the register, not the return value, is the evidence.
+fn clock_gate_word(dev: &mut Device<'_, PlatformBus>) -> u32 {
+    const CRU_BASE: u64 = 0xfd7c_0000;
+    const CLKGATE_CON42: usize = 0x8a8;
+    match dev.res().iomap_region(
+        driver_base::MmioRegion::new(CRU_BASE as usize, 0x1000),
+        "usb-cru-gates",
+    ) {
+        Ok(cru) => cru.read32(CLKGATE_CON42),
+        Err(_) => 0,
+    }
+}
+
 /// Logs the CRU clock gates the controller depends on.
 ///
 /// "clk enable returned Ok" is not evidence that the gate moved: the register is
-/// the evidence. A working reference board reads `CLKGATE_CON26` (ids
-/// 0x1a0-0x1af, which cover the dwc3 bus/suspend/ref gates 0x1a4-0x1a6) as
-/// `0x000001ff`, `CON25` as `0x00000263`, `CON27` as `0x00000005`.
+/// the evidence. The dwc3 gates live in `CLKGATE_CON42` (0x8a8) in the BSP
+/// numbering this board's DT uses -- ids 418..422 are bits 5..9, with
+/// `aclk_usb3otg1` (0x1a4) at bit 7, `suspend_clk_usb3otg1` (0x1a5) at bit 8 and
+/// `ref_clk_usb3otg1` (0x1a6) at bit 9. Reading `CON26` instead compares two
+/// different sets of clocks and says nothing about these.
 fn log_cru_clocks(dev: &mut Device<'_, PlatformBus>) {
     const CRU_BASE: u64 = 0xfd7c_0000;
     let Ok(cru) = dev.res().iomap_region(
@@ -195,10 +220,12 @@ fn log_cru_clocks(dev: &mut Device<'_, PlatformBus>) {
         return;
     };
     info!(
-        "dwc3: cru gates con25 {:#010x} con26 {:#010x} con27 {:#010x}",
+        "dwc3: cru usb gates con42 {:#010x} (0 = running), softrst_con42 {:#010x}, con25 {:#010x} \
+         con26 {:#010x}",
+        cru.read32(0x8a8),
+        cru.read32(0xaa8),
         cru.read32(0x864),
         cru.read32(0x868),
-        cru.read32(0x86c),
     );
 }
 

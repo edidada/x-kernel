@@ -749,7 +749,7 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 | `device 420 deferred on phy:426` | DWC3 的 `phys` 引用 **`otg-port` 子节点** phandle，provider 发布的是外层 `usb2-phy@X` | 驱动侧 port→block 映射（provider 按 port 发布是待办）✅ |
 | 控制台静默 83 s（无 panic） | 寄存器窗口访问挂总线（块未上电） | 见下一行 |
 | `DataAbort` `ESR=0x96000010`（同步外部 abort） | **我们把 PD_USB 的极性写反了**：`0x150` bit11 **清零 = 已供电**，power-on 写的是 `pwr_w_mask`（`BIT(11)<<16`，低半全 0）。我们写 `(bit<<16)\|bit` 等于**请求掉电** | 已改成清零并在 `repair_status(0x290)` bit25 上确认 ✅ |
-| 上电后仍无响应（挂起，无 abort） | **CRU 门控没打开**：参考板 `CLKGATE_CON26 = 0x1ff`，我们读回 `0x0`（同一批里 `CON25` 与参考板逐位一致 `0x263`，所以映射/读通路没问题） | **进行中**：`0x1a4/0x1a5/0x1a6`（dwc3 bus/suspend/ref）的 gate 行在我们 rk3588_cru 数据里不存在，`enable()` 静默成功 |
+| 上电后仍无响应（挂起，无 abort） | 查过门控：**我们的 `enable()` 把 `SET_TO_DISABLE` 位写成 1（=关闭）**，`0x8a8` 从 `0x00` 被推到 `0x75`；参考板同寄存器为 `0x0`（全开）。手工清零后寄存器可写（`0x75→0x05`），但**块仍不响应** | 门控极性是**独立真 bug**（修法在生成表/生成器）；控制器另有卡点，进行中 |
 
 ### 参考板工作态真值（`scripts/usb/ref-usb-dump.sh` 采集）
 

@@ -75,9 +75,12 @@ echo
 echo "== CRU soft-reset / clock gates @ 0xfd7c0000"
 echo "   (gate id g -> 0x0800+(g/16)*4, bit g%16; ~bit = clock running)"
 row "softrst_con42" 0xfd7c0aa8
-row "clkgate_con26 (id 0x1a0-0x1af)" 0xfd7c0868
-row "clkgate_con25 (id 0x190-0x19f)" 0xfd7c0864
-row "clkgate_con27 (id 0x1b0-0x1bf)" 0xfd7c086c
+# The BSP numbering the board DT was built with puts the dwc3 gates in
+# CLKGATE_CON42: id 418/419/420/421/422 -> bits 5..9 (aclk_usb3otg1 at 420/bit 7,
+# suspend/ref for both controllers around it).
+row "clkgate_con42 (usb gates)" 0xfd7c08a8
+row "clkgate_con26 (reference)" 0xfd7c0868
+row "clkgate_con25 (reference)" 0xfd7c0864
 echo
 echo "== VBUS enable gpio (gpio3 pin 15): dr/ddr/ext_port"
 row "gpio3_swport_dr" 0xfec40000
