@@ -73,6 +73,10 @@ DRV_HOST_ALLOW=(
     # E-05 (net): the r8169 reset sequence polls `CmdReset` for up to 10 ms in
     # probe context (the reference's `rtl_loop_wait_low`), which cannot sleep.
     "drivers/drv/net khal"
+    # E-05 (usb): the DWC3 core soft reset polls GCTL.CoreSoftReset and the
+    # xHCI stop/reset bits, both self-clearing within microseconds, in probe
+    # context where sleeping is not available.
+    "drivers/drv/usb khal"
     # E-04: the hwrng completion wait needs a task-context park/wake.
     # subsystems/block::dispatch already wraps the identical primitive as a
     # service; hwrng has exactly one consumer today.

@@ -17,6 +17,7 @@ members = [
     "drivers/init",
     "drivers/devnode",
     "drivers/drv/*",
+    "drivers/bus/*",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -129,6 +130,7 @@ kspin = { path = "task/kspin" }
 kreset = { path = "core/kreset" }
 kphy = { path = "core/kphy" }
 drv-net = { path = "drivers/drv/net" }
+drv-usb = { path = "drivers/drv/usb" }
 drv-phy = { path = "drivers/drv/phy" }
 ksync = { path = "task/ksync" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
@@ -236,6 +238,7 @@ virtio_devices = { path = "drivers/drv/virtio/devices", package = "virtio-device
 aarch64-pmuv3 = { path = "drivers/perf" }
 boot_console = { path = "drivers/boot-console", package = "boot-console" }
 pci = { path = "drivers/bus/pci" }
+usb = { path = "drivers/bus/usb" }
 rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
 acpi = { path = "drivers/firmware/acpi" }
 of = { path = "drivers/firmware/of" }

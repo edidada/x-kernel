@@ -728,6 +728,40 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 5 packets transmitted, 4 received, 20% packet loss
 ```
 
+## USB bring-up（M1：DWC3 + xHCI，High-Speed）
+
+### 已落地
+
+- `drivers/bus/usb`（package `usb`）：描述符线格式、`Hcd` 传输契约、枚举状态机
+  （address 0 先读 8 字节拿 `bMaxPacketSize0` → `SET_ADDRESS` → 全量描述符 →
+  配置 → `SET_CONFIGURATION`）、字符串描述符（UTF-16LE→ASCII）。
+- `drivers/drv/usb`（package `drv-usb`）：`xhci`（capability 解析、halt/HCRST、
+  DCBAA/CRCR/ERST/ERDP、单 interrupter、端口扫描）+ `dwc3`（父节点 clocks、
+  `usb3-otg` reset、USB2 PHY、core 软复位、`GCTL.PrtCapDir=host`、
+  `GUSB2PHYCFG`）。
+- 绑定 `snps,dwc3`（子节点）；父节点的 `clocks` 用 `parent_property` 读。
+
+### 真机进展（4 次上板，逐次收敛）
+
+| 现象 | 根因 | 状态 |
+|---|---|---|
+| 驱动完全不 probe | 绑定父节点，而父节点没有 `reg`（只有 `ranges`） | 改绑 `snps,dwc3` 子节点 ✅ |
+| `device 420 still deferred on phy:426` | DWC3 的 `phys` 引用 **`otg-port` 子节点** 的 phandle，而 usb2phy provider 发布的是外层 `usb2-phy@X` 的 phandle | 驱动侧先做 port→父节点映射（provider 应按 port 发布，已记为后续缺口）✅ |
+| 控制台静默 83 s（无 panic） | `PD_USB` 未开：寄存器窗口首次访问直接挂总线，不产生 abort | 直接写 PMU 0x150 bit11 开域 ✅ |
+| 首次寄存器读 `DataAbort`：`ESR=0x96000010`（DFSC 0x10 = 同步外部 abort，即总线 ERROR 响应） | **仍未解决**：PD 已开、`usb3-otg` 已 deassert（`status=false`）、三个时钟已 enabled（24M/24M/300M），块仍不解码 | 进行中 |
+
+### 下一步（有明确判据）
+
+1. **PMU 极性存疑**：我们的 0x150 读回 `0x00000811`（bit11 置位即认为"供电"），
+   而 pm-domains.c 的 power-on 写的是 `pwr_w_mask`（= `BIT(11)<<16`，低半部分
+   写 0）。这两种解释相反，必须用参考板实测定案：在**参考板 USB 工作态**下读
+   PMU `0x150` 与 `0x1a4`（USB 域有 `mem_status BIT(3)`，我们的实现完全没碰
+   内存供电位），与我们的值对比。
+2. 若 PMU 值一致仍 abort，则查 `usb3-otg` reset 是否真的是这条线：读 CRU
+   `SOFTRST_CON` 对应位（reset id 0x2a7 → `0xa00 + (0x2a7/16)*4`，bit `0x2a7%16`），
+   并与参考板同寄存器对照。
+3. 块能解码后，`GSNPSID` 应为 `0x5533_xxxx`；xHCI `HCIVERSION` 应 ≥ `0x0100`。
+
 ### 当前状态
 
 | 方向 | 状态 | 证据 |

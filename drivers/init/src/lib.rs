@@ -96,6 +96,8 @@ fn level3_drivers() {
     pci::dw_host::register();
     #[cfg(feature = "net-rtl8125")]
     drv_net::rtl8125::register();
+    #[cfg(feature = "usb-dwc3")]
+    drv_usb::register();
     #[cfg(feature = "mmc-block")]
     subsys_mmc::blk::register();
     #[cfg(feature = "mmc-dwmmc-rockchip")]

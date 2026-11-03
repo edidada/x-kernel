@@ -1,0 +1,19 @@
+[package]
+name = "usb"
+description = "USB host bus core: descriptors, transfers, enumeration"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "usb", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+kerrno = { workspace = true }
+log.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+[package]
+name = "drv-usb"
+description = "USB host controller drivers (xHCI, Synopsys DWC3/Rockchip host path)"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "usb", "xhci", "dwc3", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+rk3588-dwc3 = []
+
+[dependencies]
+driver_base = { workspace = true }
+usb = { workspace = true }
+kerrno = { workspace = true }
+# Clock/PHY/reset handles arrive through the device resource services; the
+# crates themselves are not named here (the handles are `driver_base` types).
+# `busy_wait` is the microsecond-scale poll the core soft reset needs in probe
+# context (the same primitive drv/clk and drv/phy register, boundaries E-05).
+khal = { workspace = true }
+ktime_types.workspace = true
+log.workspace = true
+# The DWC3 child node's clocks live on its parent block (`clocks` is a parent
+# property), so the driver walks the firmware tree for the spec.
+of = { workspace = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

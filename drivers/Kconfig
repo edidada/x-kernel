@@ -356,6 +356,15 @@ config KFEAT_PCI_DW_HOST
       link training, bus-0/1 enumeration. Pairs with the combphy and
       pcie3 phy providers; INTx/BAR windows land with the next slice.
 
+config KFEAT_DRIVER_USB_DWC3
+    bool "DWC3 USB controller (Rockchip, host path) with xHCI"
+    default n
+    help
+      Brings up a Rockchip DWC3 USB controller: the glue owns the clocks and
+      the usb3-otg reset, the core selects host mode, and the xHCI block on the
+      same window enumerates the root ports. Translation of dwc3-of-simple +
+      the host half of dwc3/core.c plus xhci.
+
 config KFEAT_DRIVER_NET_RTL8125
     bool "Realtek RTL8125 PCIe NIC"
     depends on KFEAT_NET
