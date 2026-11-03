@@ -669,6 +669,21 @@ rtl8125: vendor hw_config extras applied, csi 0x70c 0x27ffff00
    这与"probe 在 CPU 0（做过重映射的那个核）上能工作"完全吻合。
 2. RC/DMA 侧与 CPU 亲和/互连电源域相关（可能性低于 1）。
 
+**已排除的机制**（都在 A/B 里直接试验过，全部无效）：
+
+| 机制 | 试验 | 结果 |
+|---|---|---|
+| 缓存脏行（写停在 cache 里） | 写 OWN 后对描述符地址发 `dc civac` + `dsb sy` | 无变化 |
+| 每核 TLB 未同步 | 查 `flush_tlb_all_cpus` 实现：aarch64 走 inner-shareable 广播（`vaae1is`/`vmalle1is`），天然覆盖所有核 | 机制不成立 |
+| 我们自己的 link-change 恢复把它搞坏 | 把 A/B 移到 `handle_link_change` **之前** | 仍失败 |
+| 复位运行中的 MAC 需要先停引擎 | A/B 里加 `ChipCmd=0` + 等 FIFO 排空再复位 | 仍失败 |
+
+**注意一个观测质量问题**：加上 `dc civac` 之后，probe 上下文的 A/B 结果从
+`own 0 + intr 0x84(TX_OK)` 变成 `own 0 + opts1 0x1 + intr 0x80(无 TX_OK)` ——
+`opts1=0x1` 不像一次真实发送的写回。也就是说 **"probe 上下文能发"这条正证据在
+最新代码状态下已经不干净了**，下一步必须先把它重新测扎实（例如重复 5 次、
+每次都记录 `TX_OK` 与回头看 RX 是否收到广播），再谈其它。
+
 **下一步**：直接在 `send` 里验证假设 1 —— 例如在提交前后各读一次描述符并对比，
 或在 A/B 里把描述符写到**另一块 DMA 缓冲**并用 `dev.res().alloc_coherent` 的
 CPU 地址做一次 memcpy 往返；若 CPU 6 上读回的是旧值，即确认多核 TLB/属性不一致。

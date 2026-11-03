@@ -663,6 +663,8 @@ fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
         DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | ETH_ZLEN as u32,
     );
     Rtl8125Nic::barrier_release();
+    // SAFETY: the descriptor pointer is inside this device's coherent ring.
+    unsafe { Rtl8125Nic::clean_invalidate_line(nic.tx_desc(index).cast::<u8>()) };
     bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
 
     for _ in 0..20 {
@@ -1286,6 +1288,30 @@ impl Rtl8125Nic {
         Self::desc_set_opts1(desc, DESC_OWN | ring_end | RX_SLOT_LEN as u32);
     }
 
+    /// Cleans and invalidates the cache line holding `addr`.
+    ///
+    /// Diagnostic for the DMA-coherency question: if the coherent allocation is
+    /// not actually mapped non-cacheable, descriptor writes sit in the writing
+    /// CPU's cache and the device reads stale DRAM. `dc civac` pushes the line
+    /// out and drops it locally, which is exactly what `dma_wmb()` + a
+    /// non-coherent platform would do.
+    ///
+    /// # Safety
+    ///
+    /// `addr` must be a valid, aligned address in this kernel's address space;
+    /// the instruction operates on the 64-byte line containing it.
+    unsafe fn clean_invalidate_line(addr: *mut u8) {
+        // SAFETY: the caller guarantees `addr` is valid; `dc civac` only affects
+        // the cache line that contains it.
+        unsafe {
+            core::arch::asm!("dc civac, {}", in(reg) addr, options(nostack, preserves_flags));
+        }
+        // SAFETY: a barrier has no operands and no memory side effects of its own.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+    }
+
     /// Publishes a store to the descriptor ring *before* the NIC reads it.
     fn barrier_release() {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -1323,6 +1349,18 @@ impl Rtl8125Nic {
         program_ring_bases(self);
         arm_receive_ring(self);
         program_engine_config(self);
+    }
+}
+
+impl Rtl8125Nic {
+    /// Runs the one-shot A/B experiment before the first real frame.
+    fn before_first_frame_probe(&self) {
+        if TX_TRACE.load(Ordering::Relaxed) == 0 {
+            tgoskits_ab_selftest(self);
+        }
+        // A pending link change means the MAC configuration is stale; recover
+        // before handing over the frame.
+        self.handle_link_change();
     }
 }
 
@@ -1375,17 +1413,7 @@ impl NetDevice for Rtl8125Nic {
             drop(unsafe { NetBuf::from_handle(tx_buf) });
             return Err(KError::InvalidInput);
         }
-        // A pending link change means the MAC configuration is stale; recover
-        // before handing over this frame.
-        self.handle_link_change();
-
-        // Control experiment: run the verified-driver sequence *now*, i.e. at
-        // first-transmit time rather than at probe time. If it still transmits
-        // the frame here, the sequence is what matters; if it does not, the
-        // variable is time/state and not any register difference.
-        if TX_TRACE.load(Ordering::Relaxed) == 0 {
-            tgoskits_ab_selftest(self);
-        }
+        self.before_first_frame_probe();
 
         let mut state = self.state.lock();
         let index = state.tx_next;
@@ -1456,6 +1484,10 @@ impl NetDevice for Rtl8125Nic {
         // descriptor is ignored). The verified driver has the same barrier
         // (`wmb()` before `poll_tx`).
         Self::barrier_release();
+        // Flush the descriptor line out of this CPU's cache (diagnostic: see
+        // `clean_invalidate_line`).
+        // SAFETY: `desc` points into this device's coherent ring allocation.
+        unsafe { Self::clean_invalidate_line(desc.cast::<u8>()) };
 
         // The 8125 doorbell, not the legacy NPQ byte: writing `NPQ` into 0x38
         // on this part does nothing.
