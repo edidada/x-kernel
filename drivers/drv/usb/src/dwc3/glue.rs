@@ -277,56 +277,56 @@ fn log_cru_clocks(dev: &mut Device<'_, PlatformBus>) {
 fn enable_vbus(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
     // The bank's APB clock is gated at reset (`pclk_gpio3`, table index 129):
     // writes to a GPIO whose pclk is off are dropped and read back as the old
-    // value, which is exactly what this driver saw before holding the gate open.
+    // value.
     let gate_guard = enable_cru_clock(dev, PCLK_GPIO3_INDEX);
     const GPIO3_BASE: u64 = 0xfec4_0000;
-    const SWPORT_DR: usize = 0x0000;
-    const SWPORT_DDR: usize = 0x0008;
-    const EXT_PORT: usize = 0x0070;
-    const HOST_PORT_BIT: u32 = 1 << 15;
+    const SWPORT_DR_L: usize = 0x0000;
+    const SWPORT_DR_H: usize = 0x0004;
+    const SWPORT_DDR_L: usize = 0x0008;
+    const SWPORT_DDR_H: usize = 0x000c;
+    const EXT_PORT_L: usize = 0x0070;
+    const HOST_PORT_BIT: u32 = 15;
     let gpio = dev.res().iomap_region(
         driver_base::MmioRegion::new(GPIO3_BASE as usize, 0x100),
         "usb-vbus-gpio",
     )?;
-    // The pin has to be *muxed* to GPIO before any level can reach the pad.
-    // RK3588 keeps the IOMUX of banks >= 1 in the bus IOC block, far from the
-    // GPIO registers (Linux: `reg += 0x8000 /* BUS_IOC_BASE */`, and GPIO3 lives
-    // in VCCIO3_5 at +0xa000): for GPIO3_B7 the word is 0xfd5fa064, four bits per
-    // pin, function 0 = GPIO. This driver never programmed it, so a bank that
-    // reads fine could still ignore every level it is handed.
+
+    // RK3588 is a "GPIO v2" bank: the data and direction registers are split
+    // into two halves, and a half is written with the affected bits marked in
+    // the HIGH half of the word -- the same convention as the CRU gates.
+    // Writing a plain value leaves the mask at zero and the hardware updates
+    // nothing at all, which is exactly how this driver spent several rounds
+    // believing the bank refused writes: the register read back unchanged
+    // because not one bit had been enabled for writing.
+    let write_bit = |low: usize, high: usize, bit: u32, set: bool| {
+        let mask = 1u32 << bit;
+        let data = if set { mask | (mask << 16) } else { mask << 16 };
+        let offset = if bit < 16 { low } else { high };
+        gpio.write32(offset, data);
+    };
+    let read_bit = |low: usize, high: usize, bit: u32| {
+        let value = gpio.read32(low) | (gpio.read32(high) << 16);
+        value & (1u32 << bit) != 0
+    };
+
+    // The pin must be muxed to GPIO before a level can reach the pad.
     mux_pin_to_gpio(dev);
 
-    let data = gpio.read32(SWPORT_DR);
-    let direction = gpio.read32(SWPORT_DDR);
     info!(
-        "dwc3: vbus gpio3.15 dr {data:#010x} ddr {direction:#010x} pad {:#010x}",
-        gpio.read32(EXT_PORT),
+        "dwc3: vbus gpio3.15 ddr {} dr {} pad {}",
+        read_bit(SWPORT_DDR_L, SWPORT_DDR_H, HOST_PORT_BIT),
+        read_bit(SWPORT_DR_L, SWPORT_DR_H, HOST_PORT_BIT),
+        read_bit(EXT_PORT_L, EXT_PORT_L + 4, HOST_PORT_BIT),
     );
-    if direction & HOST_PORT_BIT != 0 && data & HOST_PORT_BIT != 0 {
-        info!("dwc3: vbus already enabled");
-        return Ok(());
-    }
-    // Direction first: driving a level into an input pin does nothing. Each
-    // step is verified by read-back and retried: the first attempt after the
-    // bank's pclk comes up was observed to vanish, and a level that silently
-    // never reached the pad is indistinguishable from "no device attached",
-    // which is the worst thing to debug from a console.
-    for attempt in 0..4 {
-        gpio.write32(SWPORT_DDR, direction | HOST_PORT_BIT);
-        gpio.write32(SWPORT_DR, data | HOST_PORT_BIT);
-        let now_dr = gpio.read32(SWPORT_DR);
-        let now_ddr = gpio.read32(SWPORT_DDR);
-        info!(
-            "dwc3: vbus attempt {attempt}: dr {now_dr:#010x} ddr {now_ddr:#010x} pad {:#010x}",
-            gpio.read32(EXT_PORT),
-        );
-        if now_dr & HOST_PORT_BIT != 0 && now_ddr & HOST_PORT_BIT != 0 {
-            info!("dwc3: vbus on after {} attempt(s)", attempt + 1);
-            break;
-        }
-        for _ in 0..100 {
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
-        }
+    // Direction first: driving a level into an input pin does nothing.
+    write_bit(SWPORT_DDR_L, SWPORT_DDR_H, HOST_PORT_BIT, true);
+    write_bit(SWPORT_DR_L, SWPORT_DR_H, HOST_PORT_BIT, true);
+    let driven = read_bit(SWPORT_DR_L, SWPORT_DR_H, HOST_PORT_BIT)
+        && read_bit(SWPORT_DDR_L, SWPORT_DDR_H, HOST_PORT_BIT);
+    if driven {
+        info!("dwc3: vbus on (ddr/dr bit15 set)");
+    } else {
+        log::error!("dwc3: vbus switch did not take (gpio3.15 still low)");
     }
     if let Some(guard) = gate_guard {
         // The bank has to stay clocked for the level to survive later writes.

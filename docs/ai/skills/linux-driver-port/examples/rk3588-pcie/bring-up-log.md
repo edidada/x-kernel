@@ -848,7 +848,37 @@ gpiochip3: GPIOs 96-127, parent: platform/fec40000.gpio, gpio3:
 `gpio-111` = bank3 + pin15，**由 Linux 的 regulator-fixed 驱动拉高** —— 说明这块
 SoC/bank 的写在正常启动链下是允许的，不是硬件写保护。
 
-#### VBUS 已打通，且 SoC 侧与参考板逐位一致
+#### 根因：RK3588 的 GPIO 是 write-mask 寄存器（不是 ATF、也不是启动链）
+
+真机现在由**内核自己**上电（没有任何 U-Boot 帮忙）：
+
+```
+dwc3: vbus gpio3.15 ddr false dr false pad false    ← 上电后原样
+dwc3: vbus on (ddr/dr bit15 set)                    ← 内核写入
+dwc3: vbus gpio3.15 ddr true  dr true  pad true     ← 焊盘 bit15=1，5V 通
+```
+
+**为什么之前写不进去**：RK3588 是 "GPIO v2"，DR/DDR 寄存器被拆成低/高两个半字，
+并且写入时**高半是写使能掩码**（与 CRU 门控同一套约定）：
+
+```c
+/* linux drivers/gpio/gpio-rockchip.c, rockchip_gpio_writel_bit, GPIO_TYPE_V2 */
+data = BIT(bit % 16) | BIT(bit % 16 + 16);   /* 掩码 | 数据 */
+writel(data, bit >= 16 ? reg + 0x4 : reg);
+```
+
+我们写的是裸值 `ddr | 0x8000 = 0x9800` → 高半掩码 = **0** → 硬件认为"没有任何位可写"
+→ 寄存器纹丝不动，看上去就像"这个 bank 拒写"。读也要 `readl(reg+4) << 16 | readl(reg)`
+把两个半字拼起来。
+
+**点破它的是 U-Boot 里那次"部分生效"的试验**：`mw.l 0xfec40000 0x12345678` 读回
+`0x00001230`，而 `0x5678 & 0x1234 = 0x1230` —— 恰好是"低半数据 & 高半掩码"。
+
+所以答案很明确：**Linux 也不靠 U-Boot**（它运行时的 `gpio-111 (vcc5v0-host) out hi`
+是 regulator-fixed → gpiolib 自己拉的），差别只在寄存器写法。我们之前那条"ATF/安全域
+写保护"的假设是错的，被这个掩码语义完整解释了。
+
+#### 调查过程中的中间结论（保留下来做对照，已被上一条取代）
 
 U-Boot 里 `gpio set 111` 能拉起这根线（裸 `mw.l` 不能），之后内核读到
 `dr 0x8800 ddr 0x9800 pad bit15=1`。此时：
