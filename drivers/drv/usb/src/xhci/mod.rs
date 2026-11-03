@@ -805,6 +805,29 @@ impl Xhci {
     pub fn enumerate(&mut self, dev: &Device<'_, driver_base::PlatformBus>) -> (usize, usize) {
         let mut found = 0usize;
         let mut ready = 0usize;
+        // VBUS has just been switched on: a device needs time to see it and
+        // pull up, and this port has no connect interrupt to wait on. Poll the
+        // ports for a while so a device that attaches "late" is not reported as
+        // absent -- that is exactly the confusion this port already paid for.
+        for attempt in 0..20 {
+            let connected: usize = (0..self.ports)
+                .filter(|port| {
+                    self.port_status(*port)
+                        .map(|status| status.connected)
+                        .unwrap_or(false)
+                })
+                .count();
+            if connected > 0 || attempt == 19 {
+                if connected > 0 {
+                    log::info!(
+                        "xhci: {connected} port(s) reported a device after {} ms",
+                        attempt * 100
+                    );
+                }
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
+        }
         for port in 0..self.ports {
             match self.port_status(port) {
                 Ok(status) if status.connected => found += 1,

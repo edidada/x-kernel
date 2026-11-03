@@ -132,7 +132,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         // offset 0 of the same mapping the core's global registers live above.
         let mut xhci = crate::xhci::Xhci::init(dev, regs)?;
         xhci.log_ports();
-        log_ehci_ports(dev);
+        probe_ehci_ports(dev);
         // Enumerate what is already attached. The controller runs on its own
         // after this, so a device that appears later needs interrupt delivery,
         // which this port does not have yet.
@@ -422,13 +422,18 @@ fn parent_clock_provider(dev: &Device<'_, PlatformBus>) -> Option<u64> {
     Some(u64::from(*cells.first()?))
 }
 
-/// Logs both EHCI controllers' root ports.
+/// Brings both EHCI controllers' ports up far enough to report a connection.
 ///
-/// A device on a USB2 Type-A port is served by EHCI, which this port does not
-/// drive yet; reading its PORTSC tells "the stick is plugged into the wrong
-/// controller" apart from "VBUS is still off".
-fn log_ehci_ports(dev: &mut Device<'_, PlatformBus>) {
+/// This port does not drive EHCI yet, but the two USB2 Type-A ports belong to
+/// it: reading their `PORTSC` before port power is switched on returns zero and
+/// says nothing, which made "the device is plugged into a USB2 port" and "there
+/// is no device at all" indistinguishable. Setting port power (and running the
+/// controller) turns the question into a readable bit.
+fn probe_ehci_ports(dev: &mut Device<'_, PlatformBus>) {
     const EHCI: [(u64, &str); 2] = [(0xfc80_0000, "fc800000"), (0xfc88_0000, "fc880000")];
+    const USBCMD: usize = 0x00;
+    const USBSTS: usize = 0x04;
+    const CONFIGFLAG: usize = 0x40;
     const PORTSC0: usize = 0x44;
     for (base, name) in EHCI {
         let Ok(ehci) = dev.res().iomap_region(
@@ -438,12 +443,34 @@ fn log_ehci_ports(dev: &mut Device<'_, PlatformBus>) {
             continue;
         };
         let caplen = ehci.read8(0) as usize;
+        // Host controller reset, then run.
+        ehci.write32(caplen + USBCMD, 1 << 1);
+        for _ in 0..10_000 {
+            if ehci.read32(caplen + USBCMD) & (1 << 1) == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        ehci.write32(caplen + CONFIGFLAG, 1);
+        ehci.write32(caplen + USBCMD, 1);
         let ports = ehci.read32(0x04) & 0xf;
-        info!(
-            "dwc3: ehci {name} caplen {caplen} ports {ports} portsc0 {:#010x} portsc1 {:#010x}",
-            ehci.read32(PORTSC0),
-            ehci.read32(PORTSC0 + 4),
-        );
+        let status = ehci.read32(caplen + USBSTS);
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(50_000));
+        for port in 0..ports as usize {
+            let offset = caplen + PORTSC0 + port * 4;
+            let before = ehci.read32(offset);
+            // Port power (bit 12) has to be on before a connect can be seen.
+            ehci.write32(offset, before | (1 << 12));
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(50_000));
+            let after = ehci.read32(offset);
+            info!(
+                "dwc3: ehci {name} port {} portsc {after:#010x} ccs {} pp {} (usbsts \
+                 {status:#010x})",
+                port + 1,
+                after & 1 != 0,
+                after & (1 << 12) != 0,
+            );
+        }
     }
 }
 
