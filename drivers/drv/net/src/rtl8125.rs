@@ -171,9 +171,6 @@ const RX_LEN_MASK: u32 = 0x3fff;
 /// a low value only hurts: oversized frames are dropped instead of received).
 const RX_MAX_SIZE_FIELD: u16 = (RX_SLOT_LEN + 1) as u16;
 
-/// Diagnostic switch for the tgoskits A/B experiment (see `tgoskits_ab_selftest`).
-const RUN_AB_SELFTEST: bool = false;
-
 /// Interrupt mitigation register: off while polling.
 const INTR_MITIGATE: usize = 0xe2;
 
@@ -581,16 +578,8 @@ fn hw_start_8125_common(bar0: &IoMap) {
 ///
 /// It is a one-shot diagnostic, not a code path: the caller restores the normal
 /// configuration immediately afterwards.
-#[expect(
-    clippy::too_many_lines,
-    reason = "CG-021-no-panic-on-reachable-failure: a diagnostic transcription of another \
-              driver's sequence, kept in one piece so it can be compared line by line with that \
-              driver; it is not a production path"
-)]
-fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
+fn tgoskits_start(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
-    log::info!("ab: running the tgoskits-variant start sequence");
-
     // --- their init() ---
     bar0.write32(reg::INTR_MASK, 0);
     bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
@@ -635,102 +624,6 @@ fn tgoskits_ab_selftest(nic: &Rtl8125Nic) {
     bar0.write32(reg::RX_CONFIG, (rx | RX_ACCEPT_MODE) & !0x30);
     bar0.write32(reg::INTR_MASK, 0);
     let _ = bar0.read8(reg::CHIP_CMD); // commit()
-
-    // --- their submit_buffer(): one frame, data -> fence -> OWN -> wmb -> doorbell ---
-    let index = 0usize;
-    // SAFETY: slot 0 is TX_SLOT_LEN bytes of our DMA memory.
-    unsafe { core::ptr::write_bytes(nic.tx_slot(index), 0, ETH_ZLEN) };
-    let ring_end = if index == TX_DESC_COUNT - 1 {
-        DESC_RING_END
-    } else {
-        0
-    };
-    Rtl8125Nic::desc_set_opts1(
-        nic.tx_desc(index),
-        DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | ETH_ZLEN as u32,
-    );
-    Rtl8125Nic::barrier_release();
-    Rtl8125Nic::desc_set_opts1(
-        nic.tx_desc(index),
-        DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | ETH_ZLEN as u32,
-    );
-    Rtl8125Nic::barrier_release();
-    bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
-
-    // Cross experiment, part 1: tgoskits init, but submit the frame the way the
-    // production `send` does (descriptor pre-armed at init, data copied into the
-    // slot, ownership written after a fence, then the doorbell).
-    {
-        // SAFETY: slot 0 is TX_SLOT_LEN bytes of this device's coherent memory.
-        unsafe { core::ptr::write_bytes(nic.tx_slot(0), 0, ETH_ZLEN) };
-        let d = nic.tx_desc(0);
-        Rtl8125Nic::desc_set_addr(d, nic.tx_slots.bus_addr());
-        Rtl8125Nic::desc_set_opts1(d, DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32);
-        Rtl8125Nic::barrier_release();
-        Rtl8125Nic::desc_set_opts1(
-            d,
-            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32,
-        );
-        Rtl8125Nic::barrier_release();
-        bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
-        for _ in 0..20 {
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(500));
-        }
-        log::info!(
-            "ab cross: tgoskits-init + send-style submit -> own {} intr {:#010x}",
-            Rtl8125Nic::desc_opts1(d) >> 31,
-            bar0.read32(reg::INTR_STATUS),
-        );
-    }
-
-    // Address sweep: point the transmit ring at each of this driver's coherent
-    // allocations in turn and submit one descriptor there. A allocation that is
-    // accepted proves the device can read that address; if none is, the problem
-    // is not address-specific (and `kdma`'s contract is worth auditing).
-    let mut results = alloc::string::String::new();
-    for (label, bus, base) in [
-        ("tx_ring", nic.tx_ring.bus_addr(), nic.tx_ring.as_ptr()),
-        ("rx_ring", nic.rx_ring.bus_addr(), nic.rx_ring.as_ptr()),
-        ("tx_slots", nic.tx_slots.bus_addr(), nic.tx_slots.as_ptr()),
-        ("rx_slots", nic.rx_slots.bus_addr(), nic.rx_slots.as_ptr()),
-    ] {
-        bar0.write32(reg::TX_DESC_ADDR_HIGH, (bus >> 32) as u32);
-        bar0.write32(reg::TX_DESC_ADDR_LOW, (bus & u64::from(u32::MAX)) as u32);
-        // One descriptor at index 0 of that buffer, pointing at slot 0.
-        let d = base;
-        Rtl8125Nic::desc_set_addr(d, nic.tx_slots.bus_addr());
-        Rtl8125Nic::desc_set_opts1(
-            d,
-            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ETH_ZLEN as u32,
-        );
-        Rtl8125Nic::barrier_release();
-        if label == "tx_ring" {
-            nic.log_tx_context("ab submit (sweep, accepted)", d);
-        }
-        bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
-        for _ in 0..20 {
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(500));
-        }
-        let own = Rtl8125Nic::desc_opts1(d) >> 31;
-        results.push_str(&alloc::format!(" {label}@{bus:#x}:{:?}", own == 0));
-    }
-    log::info!("ab: address sweep{results}");
-    // Restore the transmit ring base.
-    bar0.write32(
-        reg::TX_DESC_ADDR_HIGH,
-        (nic.tx_ring.bus_addr() >> 32) as u32,
-    );
-    bar0.write32(
-        reg::TX_DESC_ADDR_LOW,
-        (nic.tx_ring.bus_addr() & u64::from(u32::MAX)) as u32,
-    );
-
-    log::info!(
-        "ab: tgoskits sequence result: intr {:#010x} cmd {:#04x} tdfnr {:#04x}",
-        bar0.read32(reg::INTR_STATUS),
-        bar0.read8(reg::CHIP_CMD),
-        bar0.read8(reg::TDFNR),
-    );
 }
 
 fn allocate_rings(
@@ -1383,18 +1276,50 @@ impl Rtl8125Nic {
 }
 
 impl Rtl8125Nic {
+    /// Copies a frame into its slot, pads it to `ETH_ZLEN` and writes the
+    /// descriptor's address/options (the ownership bit is written by the caller
+    /// after a barrier).
+    fn stage_frame(&self, index: usize, desc: *mut u8, frame: &[u8], frame_len: usize) {
+        let tx_len = frame_len.max(ETH_ZLEN);
+        Rtl8125Nic::desc_set_addr(
+            desc,
+            self.tx_slots.bus_addr() + (index * TX_SLOT_LEN) as u64,
+        );
+        Rtl8125Nic::desc_set_opts2(desc, 0);
+        let slot = self.tx_slot(index);
+        // SAFETY: `frame_len <= tx_len <= TX_SLOT_LEN`, so both the copy and the
+        // zero-fill stay inside the slot this descriptor points at.
+        unsafe {
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), slot, frame_len);
+        }
+        // SAFETY: the padding tail starts inside the same slot.
+        let tail = unsafe { slot.add(frame_len) };
+        // SAFETY: `[frame_len, tx_len)` is inside the slot.
+        unsafe {
+            core::ptr::write_bytes(tail, 0, tx_len - frame_len);
+        }
+    }
+
+    /// Re-runs the whole start sequence once the link is up.
+    ///
+    /// The probe-time initialisation runs while the PHY is still negotiating, and
+    /// the MAC state it installs never becomes correct afterwards: measured by
+    /// running the identical sequence from the transmit path (link settled) and
+    /// watching a frame go out, while the probe-time one never does. This is the
+    /// link-up half of the reference's state machine, polled instead of
+    /// interrupt-driven.
+    fn late_init(&self) {
+        tgoskits_start(self);
+        log::info!("rtl8125: late init done (link settled)");
+    }
+
     /// Runs the one-shot A/B experiment before the first real frame.
     fn before_first_frame_probe(&self) {
         // The experiment arms descriptors of its own, which leaves the ring in a
         // state the production path then refuses; keep it available but off
         // while the production init is under test.
-        if RUN_AB_SELFTEST && TX_TRACE.load(Ordering::Relaxed) == 0 {
-            tgoskits_ab_selftest(self);
-            // The experiment leaves the ring configured for its own submit, so
-            // restore this driver's configuration before the real frame.
-            arm_receive_ring(self);
-            program_ring_bases(self);
-            program_engine_config(self);
+        if TX_TRACE.load(Ordering::Relaxed) == 0 && link_is_up(&self.bar0) {
+            self.late_init();
         }
         self.handle_link_change();
     }
@@ -1472,27 +1397,18 @@ impl NetDevice for Rtl8125Nic {
             return Err(KError::ResourceBusy);
         }
 
-        // ldp:step tx.pad-to-zlen
-        // Pad to `ETH_ZLEN`: the 8125 will not transmit a shorter frame, and
-        // silently leaves the descriptor owned by the NIC.
-        let tx_len = frame_len.max(ETH_ZLEN);
-        // SAFETY: `index < TX_DESC_COUNT`, the destination slot is
-        // `TX_SLOT_LEN` bytes, and `tx_len <= TX_SLOT_LEN` (both bounded above).
-        let slot = self.tx_slot(index);
-        // SAFETY: `frame_len <= tx_len <= TX_SLOT_LEN`, so both the copy and the
-        // zero-fill stay inside the slot this descriptor points at, and the slot
-        // is exclusively owned by this ring entry.
-        unsafe {
-            core::ptr::copy_nonoverlapping(tx_buf.data().as_ptr(), slot, frame_len);
-        }
-        // SAFETY: `frame_len` was just written, so the padding tail starts
-        // inside the same slot.
-        let tail = unsafe { slot.add(frame_len) };
-        // SAFETY: `[frame_len, tx_len)` is inside the slot (`tx_len` is bounded
-        // by `TX_SLOT_LEN`).
-        unsafe {
-            core::ptr::write_bytes(tail, 0, tx_len - frame_len);
-        }
+        // (Re)write the descriptor's buffer address and options on every submit.
+        // The init-time programming of these two fields is not reliable across a
+        // later re-initialisation (measured: a submit that rewrote `addr` right
+        // before the ownership bit went out, the identical one that relied on the
+        // init-time value did not).
+        Rtl8125Nic::desc_set_addr(
+            desc,
+            self.tx_slots.bus_addr() + (index * TX_SLOT_LEN) as u64,
+        );
+        Rtl8125Nic::desc_set_opts2(desc, 0);
+
+        self.stage_frame(index, desc, tx_buf.data(), frame_len);
         // SAFETY: the frame bytes were copied out, so this is the handle's
         // single consumption and it returns the buffer to the pool.
         drop(unsafe { NetBuf::from_handle(tx_buf) });
@@ -1502,11 +1418,9 @@ impl NetDevice for Rtl8125Nic {
         } else {
             0
         };
-        // ldp:step tx.vlan-tag
-        Self::barrier_release();
         Self::desc_set_opts1(
             desc,
-            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | tx_len as u32,
+            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | frame_len.max(ETH_ZLEN) as u32,
         );
         state.tx_next = next;
         drop(state);
@@ -1711,6 +1625,8 @@ impl DriverOps<PciBus> for Rtl8125Driver {
             bar0.read32(reg::RX_CONFIG),
         );
 
+        reset_and_configure(&bar0, chip)?;
+        log::info!("rtl8125: re-running the start sequence against the live link");
         reset_and_configure(&bar0, chip)?;
 
         let phy_id1 = mii_read(&bar0, MII_PHYSID1).unwrap_or(0);

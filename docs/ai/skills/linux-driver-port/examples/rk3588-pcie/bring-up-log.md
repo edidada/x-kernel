@@ -640,6 +640,44 @@ rtl8125: vendor hw_config extras applied, csi 0x70c 0x27ffff00
 都不被消费。这条在今天的代码状态下**仍可复现**（`intr` 里能看到 `TX_OK`），
 所以 TX 通路本身是好的，缺的是"单帧提交为什么不被看见"这一环。
 
+## 4.3 收口：**网卡通了**（ping 4/5 通），根因是"probe 时的初始化无效，链路稳定后要重跑一次"
+
+```
+64 bytes from 172.30.193.53: icmp_seq=1 ttl=63 time=20.5 ms
+64 bytes from 172.30.193.53: icmp_seq=2 ttl=63 time=5.39 ms
+64 bytes from 172.30.193.53: icmp_seq=3 ttl=63 time=4.84 ms
+64 bytes from 172.30.193.53: icmp_seq=4 ttl=63 time=1005 ms
+5 packets transmitted, 4 received, 20% packet loss
+```
+
+### 定位过程（关键几步）
+
+1. **交叉实验**：把 tgoskits 的 init 序列 + **我们自己的 `send` 提交写法** 放在一起跑 →
+   `ab cross: own 0 intr 0x84` **成功**。⇒ 提交代码没问题，问题在初始化。
+2. **窗口测量**：同一次 init 之后按 0/1/2/3/4/5 s 依次提交 → **全部成功**。⇒ 不是"init
+   之后多久内有效"的时效问题。
+3. 于是把 init 移到提交之前（`late_init`：链路 up 后在首次发送前**重跑整套启动序列**）
+   → **`tx[0] ... reclaimed true`，帧真的发出去了**。
+
+### 根因（一句话）
+
+**probe 阶段（t≈15 s）跑启动序列时 PHY 还在协商链路**，那次 init 安装的 MAC 状态
+**之后再也不会变正确**（在 probe 里连跑两遍也没用，因为两遍都在链路稳定之前）；
+而链路稳定之后（t≈18 s+）用**同一段序列**重跑一次，立刻就能收发。
+
+这也解释了为什么整个过程的"正证据"都出现在 init 刚跑完的时刻，而"负证据"都出现在
+probe init 之后很久的时刻 —— 两者不是同一份设备状态。
+
+### 现在的实现
+
+`Rtl8125NetDevice::late_init()`：在**首次发送前**若链路已 up，则重跑
+`tgoskits_start()`（复位 + MAC MCU/link-list + CPlusCmd + Rx/Tx 配置 + 合并块 +
+EPHY 表 + 8125 common + PHY 配置 + arm RX + 环基址 + 使能引擎）。这是参考实现
+link-up 状态机的**轮询版**（本板 INTx 未路由，中断版需要 MSI-X）。
+
+剩余问题（下一轮）：**20% 丢包 + 偶发 1 s 延迟**，像是轮询模型的响应延迟/RX 重挂载
+时机，而不是链路问题。
+
 ### 4.2 A/B 结论：**不是序列、不是寄存器、也不是时间，而是执行上下文**
 
 在新分支 `xiaohui/rtl8125-tx-ab` 上做了一个最小 A/B：把 tgoskits 的
