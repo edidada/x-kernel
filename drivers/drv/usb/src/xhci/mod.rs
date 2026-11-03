@@ -181,8 +181,12 @@ impl Xhci {
         let hccparams1 = bar.read32(cap::HCCPARAMS1);
         let db_offset = bar.read32(cap::DBOFF) & !0x3;
         let rt_offset = bar.read32(cap::RTSOFF) & !0x1f;
-        let max_ports = (hcsparams1 & 0xff) as usize;
-        let max_slots = (hcsparams1 >> 8) & 0xff;
+        // HCSPARAMS1: bits 7:0 MaxSlots, 15:8 MaxIntrs, 31:24 MaxPorts. Getting
+        // these two mixed up reads 64 ports and 1 slot on this controller, which
+        // is 2 ports and 64 slots -- and a CONFIG written from the wrong field
+        // limits the whole controller to a single device slot.
+        let max_slots = hcsparams1 & 0xff;
+        let max_ports = (hcsparams1 >> 24) & 0xff;
         let context_size = if hccparams1 & (1 << 2) != 0 {
             CONTEXT_64
         } else {
@@ -247,7 +251,7 @@ impl Xhci {
             operational,
             runtime,
             doorbell,
-            ports: max_ports,
+            ports: max_ports as usize,
             max_slots,
             context_size,
             command,

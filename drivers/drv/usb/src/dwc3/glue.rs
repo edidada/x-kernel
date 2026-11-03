@@ -15,8 +15,8 @@
 use alloc::vec::Vec;
 
 use driver_base::{
-    ClkHandle, ClkSpec, Device, DriverOps, OfMatch, PlatformBus, PlatformId, PoweredPhy,
-    ProbeError, ResetHandle, RuntimeError,
+    ClkHandle, ClkSpec, Device, DriverOps, EnabledClock, OfMatch, PlatformBus, PlatformId,
+    PoweredPhy, ProbeError, ResetHandle, RuntimeError,
 };
 use log::info;
 
@@ -33,6 +33,12 @@ pub struct Dwc3Driver;
 /// handles, so dropping any of them would silently stop the controller.
 pub struct Dwc3Data {
     _clocks: Vec<ClkHandle>,
+    /// One guard per enabled clock: dropping it releases the enable again, so a
+    /// `prepare_enable()` whose result is discarded switches the clock straight
+    /// back off (and, with `SET_TO_DISABLE` gates, leaves the gate bit set --
+    /// which is exactly how this driver spent a bring-up round gating off the
+    /// controller it was trying to start).
+    _clock_guards: Vec<EnabledClock>,
     _reset: ResetHandle,
     _phys: Vec<PoweredPhy>,
     /// The host controller this driver brought up; it owns the register window
@@ -71,6 +77,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         );
 
         let mut clocks = Vec::new();
+        let mut clock_guards = Vec::new();
         for (index, name) in CLOCKS.iter().enumerate() {
             let Some(spec) = parent_clock_spec(dev, index) else {
                 // `suspend` is absent on parts without runtime suspend, and
@@ -80,7 +87,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             };
             let clock = dev.res().clk_spec(spec)?;
             let before = clock_gate_word(dev);
-            clock
+            let guard = clock
                 .prepare_enable()
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
             let after = clock_gate_word(dev);
@@ -90,6 +97,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 clock.get_rate(),
             );
             clocks.push(clock);
+            clock_guards.push(guard);
         }
         if clocks.is_empty() {
             log::error!("dwc3: parent listed no clocks; the controller cannot move data");
@@ -119,6 +127,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
 
         Ok(Dwc3Data {
             _clocks: clocks,
+            _clock_guards: clock_guards,
             _reset: reset,
             _phys: phys,
             _xhci: xhci,

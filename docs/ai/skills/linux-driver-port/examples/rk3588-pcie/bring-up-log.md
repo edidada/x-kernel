@@ -749,7 +749,8 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 | `device 420 deferred on phy:426` | DWC3 的 `phys` 引用 **`otg-port` 子节点** phandle，provider 发布的是外层 `usb2-phy@X` | 驱动侧 port→block 映射（provider 按 port 发布是待办）✅ |
 | 控制台静默 83 s（无 panic） | 寄存器窗口访问挂总线（块未上电） | 见下一行 |
 | `DataAbort` `ESR=0x96000010`（同步外部 abort） | **我们把 PD_USB 的极性写反了**：`0x150` bit11 **清零 = 已供电**，power-on 写的是 `pwr_w_mask`（`BIT(11)<<16`，低半全 0）。我们写 `(bit<<16)\|bit` 等于**请求掉电** | 已改成清零并在 `repair_status(0x290)` bit25 上确认 ✅ |
-| 上电后仍无响应（挂起，无 abort） | 查过门控：**我们的 `enable()` 把 `SET_TO_DISABLE` 位写成 1（=关闭）**，`0x8a8` 从 `0x00` 被推到 `0x75`；参考板同寄存器为 `0x0`（全开）。手工清零后寄存器可写（`0x75→0x05`），但**块仍不响应** | 门控极性是**独立真 bug**（修法在生成表/生成器）；控制器另有卡点，进行中 |
+| 上电后仍无响应 | **`prepare_enable()` 返回的 `EnabledClock` 守卫被 `?;` 丢掉** → 守卫立刻析构 → `kclk: hw-disable "<clk>" (count 0)`，等于"启用后马上关闭"，`0x8a8` 因此被推到 `0x75`（`SET_TO_DISABLE` 位=1 即关）。手工清零不够，**必须持有守卫** | 已修：守卫存进 `Dwc3Data`。`con42` 自动归零 ✅ |
+| —— | 修好后：`xhci capability 0x01100020`、软复位完成、host 模式、xHCI 运行、端口表打印 | **M1 硬件里程碑达成** 🎯 |
 
 ### 参考板工作态真值（`scripts/usb/ref-usb-dump.sh` 采集）
 
@@ -778,7 +779,30 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 - 紧接着应出现 `dwc3: xhci capability 0x01100020 (caplen 32, version 1.0)`；
 - 然后 `xhci: version 1.0 ports N …` 与端口表。
 
-若 con26 已置位仍无响应，再对照 `CON25/CON27` 的其余位（参考板 `0x263`/`0x5`）逐个补齐。
+### M1 硬件里程碑（已达成）
+
+```
+dwc3: xhci capability 0x01100020 (caplen 32, version 1.16)   ← 与参考板逐位一致
+dwc3: soft reset done, GSTS 0x0
+dwc3: host mode selected, GCTL 0x00001001
+xhci: version 1.16 caplen 32 ports 2 slots 64 dboff 0x480 rtsoff 0x440
+xhci: command ring 0x29f8000, event ring 0xbaf000, dcbaa 0x29f9000
+xhci: running, USBSTS 0x00000000
+xhci: port 1 PORTSC 0x280 pp true pls 4
+xhci: port 2 PORTSC 0x2a0 pp true pls 5
+```
+
+`HCSPARAMS1` 的字段顺序也踩过一次：`MaxSlots` 在 bits 7:0、`MaxPorts` 在 bits 31:24，
+搞反会读成"64 端口 1 槽"（实际 2 端口 64 槽），而且 `CONFIG` 写错字段会把整个控制器限成单设备。
+
+### 下一步（M1 枚举）
+
+端口已上电但 `ccs=false`（未插设备）。插任意 USB 设备后应看到 `ccs=true` 且 `psiv=3`(High-Speed)，
+然后补 xHCI 侧三条 TRB 路径：`Enable Slot`(8) → `Address Device`(10) → EP0 的
+`Setup`/`Data`/`Status`，判据是 `bus/usb` 的枚举日志打出 `id vvvv:pppp` 与配置树。
+
+**顺带发现的同类问题**：`clk_ref_pipe_phy*`/`pclk_pcie_combo_pipe_phy*` 也在启动后被 `hw-disable`
+——combphy/pcie3phy 的消费者很可能犯了同样的"丢守卫"错误（PCIe 仍工作，但值得单独排查）。
 
 ### 当前状态
 
