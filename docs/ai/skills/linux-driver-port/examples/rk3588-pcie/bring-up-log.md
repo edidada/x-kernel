@@ -878,6 +878,10 @@ writel(data, bit >= 16 ? reg + 0x4 : reg);
 是 regulator-fixed → gpiolib 自己拉的），差别只在寄存器写法。我们之前那条"ATF/安全域
 写保护"的假设是错的，被这个掩码语义完整解释了。
 
+教训已落到 SKILL §6.9（write-mask 语义）与 `data/observations/rk3588-usb.toml`
+（7 条可观测事实：GPIO 写掩码、VBUS 焊盘、PD_USB 极性、CRU 门控、GRF U3 端口、
+xHCI 能力字、usb2phy suspend）。
+
 #### 调查过程中的中间结论（保留下来做对照，已被上一条取代）
 
 U-Boot 里 `gpio set 111` 能拉起这根线（裸 `mw.l` 不能），之后内核读到
