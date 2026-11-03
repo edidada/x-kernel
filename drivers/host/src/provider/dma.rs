@@ -20,6 +20,11 @@ impl DmaOp for XKernelResourceProvider {
         // owned exclusively by the `DmaCoherent` handle that wraps this
         // allocation until it is freed via `free_coherent`.
         let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
+        log_coherent_pte(
+            info.cpu_addr.as_ptr() as usize,
+            info.bus_addr.as_u64(),
+            spec.len,
+        );
         Ok(DmaAllocation {
             cpu_addr: info.cpu_addr.as_ptr() as usize,
             bus_addr: info.bus_addr.as_u64(),
@@ -101,5 +106,27 @@ fn map_dma_direction(d: DmaDirection) -> kdma::DmaDirection {
         DmaDirection::DriverToDevice => kdma::DmaDirection::DriverToDevice,
         DmaDirection::DeviceToDriver => kdma::DmaDirection::DeviceToDriver,
         DmaDirection::Bidirectional => kdma::DmaDirection::Bidirectional,
+    }
+}
+
+/// Logs the page-table entry backing a coherent allocation, once per mapping.
+///
+/// A driver that hands a descriptor ring to a device has exactly one property
+/// to rely on: the memory it writes is not sitting dirty in a CPU cache. The
+/// DMA allocator asks for `UNCACHED|SHARED`, but that is a *request* -- this
+/// prints what the hardware will actually walk, which is the difference between
+/// "the device ignores our descriptors" and "the allocator's remap did not
+/// take".
+fn log_coherent_pte(cpu_addr: usize, bus_addr: u64, len: usize) {
+    let va = memaddr::VirtAddr::from(cpu_addr);
+    let aspace = memspace::kernel_layout().lock();
+    match aspace.page_table().query_entry(va) {
+        Ok(pte) => log::info!(
+            "dma: coherent {len:#x}B cpu {cpu_addr:#x} bus {bus_addr:#x} pte paddr {:#x} {:?} {:?}",
+            pte.paddr().as_usize(),
+            pte.flags(),
+            pte.page_size()
+        ),
+        Err(err) => log::warn!("dma: coherent {cpu_addr:#x} pte query failed: {err:?}"),
     }
 }

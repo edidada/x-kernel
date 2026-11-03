@@ -342,6 +342,12 @@ fn start_data_path(nic: &Rtl8125Nic) -> Result<(), ProbeError> {
     dump_registers(bar0);
 
     log::info!(
+        "rtl8125: phy at start bmcr {:#06x} bmsr {:#06x} phy_status {:#04x}",
+        mii_read(bar0, MII_BMCR).unwrap_or(0),
+        mii_read(bar0, MII_BMSR).unwrap_or(0),
+        bar0.read8(reg::PHY_STATUS),
+    );
+    log::info!(
         "rtl8125: rings live, tx {TX_DESC_COUNT}x{TX_SLOT_LEN}B @ {:#x}, rx \
          {RX_DESC_COUNT}x{RX_SLOT_LEN}B @ {:#x}",
         nic.tx_ring.bus_addr(),
@@ -1191,6 +1197,16 @@ impl NetDevice for Rtl8125Nic {
                 self.bar0.read32(reg::RX_DESC_ADDR_LOW),
                 self.bar0.read16(reg::TX_POLL_8125),
                 self.bar0.read8(reg::MCU),
+            );
+            let rx_done = (0..RX_DESC_COUNT)
+                .filter(|i| Self::desc_opts1(self.rx_desc(*i)) & DESC_OWN == 0)
+                .count();
+            let tx_done = (0..TX_DESC_COUNT)
+                .filter(|i| Self::desc_opts1(self.tx_desc(*i)) & DESC_OWN == 0)
+                .count();
+            log::info!(
+                "rtl8125: ring consumption tx_done {tx_done}/{TX_DESC_COUNT} rx_done \
+                 {rx_done}/{RX_DESC_COUNT}",
             );
             log::info!(
                 "rtl8125: mac phy_status {:#04x} (link_up {})",

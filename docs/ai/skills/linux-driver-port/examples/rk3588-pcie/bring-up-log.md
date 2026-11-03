@@ -416,14 +416,67 @@ skill：对拍只能定位差异，不能无脑照抄。
 - 内核目前**没有**任何 cache 维护原语（`arch/khal`、`arch/kcpu` 里搜不到），
   所以一旦确实是非一致平台，驱动侧无法自行 flush。
 
+### 4.1.2e DMA 一致性假设**已排除**，问题回到"引擎停住"
+
+`driver_host` 的 DMA provider 现在会在每次 coherent 分配后打印页表实际属性
+（`memspace::kernel_layout().page_table().query_entry()`）：
+
+```
+dma: coherent 0x1000B cpu 0xffff000000203000 bus 0x203000
+      pte paddr 0x203000 READ | WRITE | UNCACHED Size4K      # TX 环
+dma: coherent 0x1000B cpu 0xffff000000204000 bus 0x204000
+      pte paddr 0x204000 READ | WRITE | UNCACHED Size4K      # RX 环
+dma: coherent 0x80000B cpu 0xffff000003400000 bus 0x3400000
+      pte paddr 0x3400000 READ | WRITE | UNCACHED Size4K     # slots
+```
+
+映射是 **UNCACHED 且恒等**（paddr == bus），所以描述符写**确实**到了 DRAM，
+缓存不是原因。
+
+那"MAC 看不到 OWN"就只能是**它没有在读**。加环消费计数后确认：
+
+```
+ring consumption tx_done 255/256 rx_done 0/256
+```
+
+- `tx_done 255` 只是初始化时 255 个 `opts1=0` 的占位（判据 `OWN==0` 也把"从未
+  arm"算成 done —— 这个判据本身要小心）；
+- **`rx_done 0`**：RX 环 256 个 armed 描述符**一个都没被消费**；
+- 也就是说**收发两个引擎都停着**，`intr` 里的 `RX_OK` 是早期残留（我们只 ack 过
+  `0x80`，其它状态位一直挂着）。
+
+**新签名**：初始化后约 1 秒内引擎在跑（`arm_whole_tx_ring` 时 256 个全被消费、
+`TX_OK`），之后**两个引擎都不再取描述符**，而寄存器读写照常、MAC 侧 link 仍报 up。
+参考板同芯片空闲 60 秒仍正常，所以是**我们少了一个让引擎持续运行的配置**，
+最可能在 `start.phy-config`（`rtl8125b_hw_phy_config`）或 **link 状态机**
+（autoneg 完成会改变 speed/duplex，而我们对 MAC 的启动配置是在 autoneg 完成前做的）。
+
+### 4.1.2f 又排除两条：link 状态变化与"引擎卡死需 stop/start"
+
+| 假设 | 实测 | 结论 |
+|---|---|---|
+| MAC 启动配置是在 autoneg 完成前做的，协商完成后失效 | `phy at start` 与 `phy at tx` 完全相同（`bmcr 0x1040 bmsr 0x79ad phy_status 0x8b`，autoneg 完成、1000BASE-T full） | 排除 |
+| 引擎卡在只有 stop/start 能清的状态 | 发送前 `ChipCmd=0` → arm → `ChipCmd=RxEnb\|TxEnb` → 踢门铃，仍不消费 | 排除 |
+
+到这里，**"寄存器配置"这一层能想到的都排掉了**。剩下只有两个结构性差异，都在
+`make ldp-sequence` 的未移植清单里：
+
+1. `start.phy-config`（`rtl8125b_hw_phy_config` + `configure_default_copper_autoneg`）
+   —— 参考板 vendor 驱动做了、我们完全没做；
+2. `start.irq-enable` —— 参考实现是**中断驱动**，我们是纯轮询；本板 INTx 未路由
+   （`interrupt line = 0xff`），要做必须先有 MSI-X。
+
+**取证建议（若继续）**：在参考板上装一个读 `0xe4010000` 描述符的小模块，对比其
+TX 描述符 opts1/opts2 的**原始字节**与我们写的是否存在我们没意识到的差异；
+`/dev/mem` 走不通（`STRICT_DEVMEM`），见 board-automation §5.8。
+
 **下一步（按优先级）**：
-1. **验证 DMA 一致性假设**：在驱动里对 TX/RX 环的 VA 做一次 PTE dump
-   （`page_table().query_entry(va)`，`iomap` 已有同样的打印），确认属性是
-   `UNCACHED`；若不是，问题在 `kdma::update_flags` 的 `protect`（TLB 未失效）。
-   参考实现里 `rtl8125` 的 ring 也是 `dma_alloc_coherent`，Linux 侧靠平台的
-   `dma-direct` + 非一致时 swiotlb 兜底，所以它能工作。
+1. 移植 `start.phy-config`（`hw_phy_config_8125b` 的分页 PHY 写 + 铜口 autoneg
+   广播/重启）：tgoskits 的实现约 15 行，可直接作为参考；这是参考板做了而
+   我们没做的最后一段。
 2. 补 `start.phy-config`（`rtl8125b_hw_phy_config`）：EPHY 表已做，PHY 调优未做。
-3. 旧的第 1 项（EPHY）已完成，见上表。
+3. 若 1 仍不解决，转 MSI-X + 中断驱动（`start.irq-enable`）：参考实现靠中断
+   服务 RX/TX 完成，而我们纯轮询且 INTx 未路由。
    在 `ChipCmd` 使能**之前**做的最后一段，我们完全没移植。参考板用的是同一个
    驱动路径，而 U-Boot 的 r8169 不发 EPHY 表也能发——但 U-Boot 的发送紧接着初始化，
    恰好落在"能发"的窗口内，所以它不能作为"不需要 EPHY"的证据。
