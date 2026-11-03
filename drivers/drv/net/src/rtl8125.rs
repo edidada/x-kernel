@@ -634,6 +634,8 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
     disable_pcie_low_power(bar0);
     // The chip's own front-end configuration, in the reference's order.
     hw_start_8125_common(bar0);
+    // ldp:step start.exit-l1
+    enable_l1_exit_events(bar0);
     log::info!(
         "rtl8125: {chip} tx descriptor format {:#06x} (legacy 16-byte when bit0 is clear)",
         mac_ocp_read(bar0, OCP_TX_DESC_FORMAT),
@@ -718,6 +720,23 @@ fn csi_write(bar0: &IoMap, addr: u32, value: u32) -> bool {
     false
 }
 
+/// Selects which events may pull the chip out of ASPM L1
+/// (`rtl_enable_exit_l1`, the `VER_40...LAST` row: `OCP 0xc0ac |= 0x1f80`).
+///
+/// The bits name the wake sources: 12 rxdv, 11 ltr_msg, **10 txdma_poll**,
+/// 9 xadm, 8 pktavi, 7 txpla. Without `txdma_poll` the transmit queue's own
+/// poll -- the doorbell this driver rings for every frame -- cannot wake the
+/// chip, so registers keep answering while descriptor fetches are dropped once
+/// the link has idled (measured: frames go out immediately after start and are
+/// ignored about a second later).
+fn enable_l1_exit_events(bar0: &IoMap) {
+    mac_ocp_modify(bar0, 0xc0ac, 0x0000, 0x1f80);
+    log::info!(
+        "rtl8125: l1 exit events {:#06x} (txdma_poll included)",
+        mac_ocp_read(bar0, 0xc0ac),
+    );
+}
+
 /// Turns off the chip's low-power link behaviour (`rtl_hw_start_8125_common`
 /// tail plus the reference's CSI writes).
 ///
@@ -764,10 +783,17 @@ fn mac_ocp_write(bar0: &IoMap, reg: u16, data: u16) {
     );
 }
 
-/// `r8168_mac_ocp_modify`: replace the bits in `mask` with `set`.
+/// `r8168_mac_ocp_modify`: clear the bits in `mask`, then OR in `set`.
+///
+/// `set` is deliberately **not** masked with `mask` -- that is exactly how the
+/// reference implements it (`(data & ~mask) | set`), and the difference is
+/// observable: a row written as `(reg, 0x0000, <bits>)` means "OR these bits
+/// in", so masking would turn every such row into a no-op. Three of them
+/// (including the ASPM L1 exit-event set at `0xc0ac`) were silently dropped
+/// before this was noticed.
 fn mac_ocp_modify(bar0: &IoMap, reg: u16, mask: u16, set: u16) {
     let value = mac_ocp_read(bar0, reg);
-    mac_ocp_write(bar0, reg, (value & !mask) | (set & mask));
+    mac_ocp_write(bar0, reg, (value & !mask) | set);
 }
 
 /// Reads one MDIO register through the `GPHY_OCP` tunnel.

@@ -355,6 +355,15 @@ tx[0]   desc 0xb000002a -> 0xb000003c reclaimed false   # 1.3s 后 ping 的帧 �
   做了它们；U-Boot 的 r8169 不做也能发——但 U-Boot 的发送是**紧接着初始化**发生的，
   恰好落在"能发"的时间窗内，所以它不能证明"不做 EPHY 也能长期发"。
 
+补上 `start.exit-l1`（`OCP 0xc0ac |= 0x1f80`：L1 退出事件，含 bit10 `txdma_poll`）
+并复测：`l1 exit events 0x1f82` 已生效，单帧仍不被消费。
+
+**顺带发现一个更严重的移植 bug**：`mac_ocp_modify` 我写成
+`(data & ~mask) | (set & mask)`，而上游是 `(data & ~mask) | set`（`set` 不与
+mask）。于是所有 `mask = 0x0000` 的**置位行全部变成空操作** —— 包括
+`0xc0ac |= 0x1f80`、`0xc0b4 |= 0x0c`、`0xe860 |= 0x80` 三行。代码里"表抄全了"，
+实际一个都没写进芯片。已修，并把这条写进 skill §6.5（辅助函数语义要逐字转录）。
+
 **下一步（按优先级）**：
 1. 让 TX 提交走中断/时钟请求路径：先实现 `start.irq-enable`（`IntrMask` + kirq ISR），
    观察"每帧前是否有中断"能否维持引擎唤醒。

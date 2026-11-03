@@ -145,6 +145,16 @@ note = "本 port 在 hw_start_8125_common() 里逐行转写（0x382/RSS/QNUM/OCP
 v2 = "anchored"
 
 [[path.step]]
+id = "start.exit-l1"
+src = "r8169_main.c:4082"
+op = "rmw"
+target = "OCP(0xc0ac)"
+mask = "0x0000"
+value = "0x1f80"
+note = "L1 退出事件（含 bit10 txdma_poll）；缺它则空闲后 TX DMA 不醒"
+v2 = "anchored"
+
+[[path.step]]
 id = "start.eee-txidle"
 src = "r8169_main.c:4101"
 op = "call"
