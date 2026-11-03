@@ -130,9 +130,14 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
 
         // The host controller takes the window over: the xHCI registers sit at
         // offset 0 of the same mapping the core's global registers live above.
-        let xhci = crate::xhci::Xhci::init(dev, regs)?;
+        let mut xhci = crate::xhci::Xhci::init(dev, regs)?;
         xhci.log_ports();
         log_ehci_ports(dev);
+        // Enumerate what is already attached. The controller runs on its own
+        // after this, so a device that appears later needs interrupt delivery,
+        // which this port does not have yet.
+        let (found, ready) = xhci.enumerate(dev);
+        info!("dwc3: enumeration found {found} device(s), {ready} usable");
 
         Ok(Dwc3Data {
             _clocks: clocks,

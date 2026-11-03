@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Device, slot and endpoint contexts (xHCI 1.1 §6.2).
+//!
+//! A context is a block of `context_size` bytes (32 or 64, `HCCPARAMS1.CSZ`)
+//! holding 8 or 16 dwords. Rather than mirror the whole structure as a `repr(C)`
+//! type — which would have to be duplicated for both sizes — the builders below
+//! write the few dwords enumeration actually uses, named after the fields they
+//! carry.
+
+/// Context index of the slot context inside a device/input context.
+pub const SLOT_CONTEXT: usize = 0;
+/// Context index of endpoint 0 (the control endpoint) — xHCI numbers endpoint
+/// contexts from 1, so the device context entry for EP0 is index 1.
+pub const EP0_CONTEXT: usize = 1;
+
+/// Slot context dword 0: route string, speed and the number of contexts.
+pub fn slot_dword0(speed_id: u8, context_entries: u32) -> u32 {
+    ((speed_id as u32) << 20) | (context_entries << 27)
+}
+
+/// Slot context dword 1: root hub port number is 1-based in xHCI.
+pub fn slot_dword1(root_port_1based: u8) -> u32 {
+    (root_port_1based as u32) << 16
+}
+
+/// Endpoint context dword 1: CErr, endpoint type and max packet size.
+///
+/// `ep_type` is 4 (control) for EP0, 2 (bulk OUT), 6 (bulk IN), 3 (interrupt
+/// OUT) or 7 (interrupt IN) — the values xHCI assigns, not the USB `bmAttributes`
+/// encoding.
+pub fn endpoint_dword1(ep_type: u32, max_packet_size: u16) -> u32 {
+    let cerr = 3 << 1;
+    (cerr) | (ep_type << 3) | ((max_packet_size as u32) << 16)
+}
+
+/// Endpoint context dword 2: transfer ring dequeue pointer, low half.
+///
+/// The low 4 bits are reserved and the DCS (dequeue cycle state) bit tells the
+/// controller which cycle bit the next TRB on that ring carries.
+pub fn endpoint_dword2(ring_addr: u64, dcs: bool) -> u32 {
+    (ring_addr as u32 & !0xf) | u32::from(dcs)
+}
+
+/// Endpoint context dword 4: average TRB length, in bytes.
+pub fn endpoint_dword4(average_trb_len: u32) -> u32 {
+    average_trb_len & 0xffff
+}
+
+/// Input control context: which contexts this command adds (`add`) and which it
+/// drops (`drop`), one bit per context index.
+pub fn input_control_dword1(add_mask: u32) -> u32 {
+    add_mask
+}

@@ -19,6 +19,7 @@
               transfer TRBs that use all of it land next"
 )]
 
+pub mod context;
 pub mod regs;
 
 use alloc::vec::Vec;
@@ -35,6 +36,15 @@ use crate::xhci::regs::{Trb, cap, cmd, op, portsc, sts};
 pub const RING_TRBS: usize = 256;
 /// xHCI 1.1 requires the command ring to be at least 16 TRBs.
 const COMMAND_RING_MIN_TRBS: usize = 16;
+/// Size of one TRB in bytes.
+const TRB_LEN: usize = core::mem::size_of::<Trb>();
+/// Runtime register: Event Ring Dequeue Pointer (interrupter 0).
+const RT_ERDP: usize = 0x18;
+/// Writing this bit to ERDP clears the "event handler busy" state.
+const ERDP_EHB: u32 = 1 << 3;
+/// The controller's scratch buffer for control data stages.
+const BOUNCE_LEN: usize = 4096;
+
 /// Events buffered before the interrupter has to be serviced.
 const EVENT_RING_TRBS: usize = 256;
 /// Contexts are 32 bytes unless `HCCPARAMS1.CSZ` says 64.
@@ -91,6 +101,13 @@ impl Ring {
         address
     }
 
+    /// Reads one TRB without claiming ownership of it (event rings are consumed,
+    /// not produced).
+    fn read(&self, index: usize) -> Trb {
+        // SAFETY: `index < trbs` inside this ring's own allocation.
+        unsafe { core::ptr::read_volatile(self.trb(index)) }
+    }
+
     fn dequeue_address(&self) -> u64 {
         self.mem.bus_addr() + ((self.index % self.trbs) * core::mem::size_of::<Trb>()) as u64
     }
@@ -125,8 +142,24 @@ pub struct Xhci {
     event: Ring,
     erst: CoherentMem,
     device_contexts: CoherentMem,
-    /// Slot id handed to us by `Enable Slot`, one per addressed device.
-    slots: Vec<u8>,
+    /// One device-visible scratch buffer for control data stages.
+    bounce: CoherentMem,
+    /// Event ring consumer position, independent of the producer side.
+    event_dequeue: usize,
+    event_cycle: bool,
+    /// One addressed device slot: its input context (reused for every command)
+    /// and the EP0 transfer ring the slot context points at.
+    slots: Vec<Slot>,
+}
+
+/// One enabled + addressed device slot.
+struct Slot {
+    id: u8,
+    speed: u8,
+    input: CoherentMem,
+    ep0: Ring,
+    /// Device context array entry handed to the controller by `Address Device`.
+    device: CoherentMem,
 }
 
 /// Brings the controller to the post-reset state (§4.2).
@@ -224,6 +257,7 @@ impl Xhci {
                 .alloc_coherent(RING_TRBS * core::mem::size_of::<Trb>(), 64)?,
             RING_TRBS,
         );
+        let bounce = dev.res().alloc_coherent(BOUNCE_LEN, 64)?;
         let device_contexts = dev
             .res()
             .alloc_coherent(max_slots as usize * core::mem::size_of::<u64>(), 64)?;
@@ -258,6 +292,10 @@ impl Xhci {
             event,
             erst,
             device_contexts,
+            bounce,
+            event_dequeue: 0,
+            // The controller publishes the first event with the cycle bit set.
+            event_cycle: true,
             slots: Vec::new(),
         };
         xhci.program_rings()?;
@@ -368,6 +406,343 @@ fn for_each_alloc_zeroed(allocations: &[(*mut u8, usize)]) {
     }
 }
 
+// ---- enumeration: event ring, command ring, control transfers ----
+
+/// How long to wait for the controller to answer a command or a transfer, in
+/// 1 µs steps. A device that is not answering must not wedge the boot.
+const EVENT_POLL_STEPS: usize = 200_000;
+
+/// xHCI speed id for a bus speed (Table 6-70 `PSIV` / slot context `Speed`).
+fn speed_id(speed: Speed) -> u8 {
+    match speed {
+        Speed::Full => 1,
+        Speed::Low => 2,
+        Speed::High => 3,
+        Speed::Super => 4,
+        Speed::SuperPlus => 5,
+        Speed::Unknown => 3,
+    }
+}
+
+impl Xhci {
+    /// Takes the next event off the ring, if the controller published one.
+    ///
+    /// This is the consumer side of the event ring: the cycle bit it compares
+    /// against flips every time the dequeue pointer wraps, so a stale TRB from
+    /// the previous lap can never be mistaken for a new event.
+    fn next_event(&mut self) -> Option<Trb> {
+        let trb = self.event.read(self.event_dequeue);
+        if trb.control & regs::trb::CYCLE != u32::from(self.event_cycle) {
+            return None;
+        }
+        self.event_dequeue += 1;
+        if self.event_dequeue == self.event.trbs {
+            self.event_dequeue = 0;
+            self.event_cycle = !self.event_cycle;
+        }
+        // Hand the consumed slot back to the controller (ERDP, clearing EHB).
+        let dequeue = self.event.mem.bus_addr() + (self.event_dequeue * TRB_LEN) as u64;
+        self.bar
+            .write64(self.runtime + RT_ERDP, dequeue | u64::from(ERDP_EHB));
+        Some(trb)
+    }
+
+    /// Waits for the event that belongs to `trb_type`, returning it after the
+    /// completion code has been checked.
+    fn wait_event(&mut self, trb_type: u32, what: &str) -> Result<Trb, KError> {
+        for _ in 0..EVENT_POLL_STEPS {
+            if let Some(event) = self.next_event() {
+                if event.trb_type() == trb_type {
+                    return Ok(event);
+                }
+                // Anything else (a port status change, a stray transfer event)
+                // is not ours to consume here; the port scan reads PORTSC
+                // directly, so dropping it is safe and cheaper than a queue.
+                log::debug!(
+                    "xhci: dropped event type {} during {what}",
+                    event.trb_type()
+                );
+                continue;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
+        }
+        log::error!("xhci: {what} timed out after {EVENT_POLL_STEPS} us");
+        Err(KError::TimedOut)
+    }
+
+    /// Issues a command on the command ring and returns its completion event.
+    fn command(&mut self, trb: Trb, what: &str) -> Result<Trb, KError> {
+        if self.command.index >= self.command.trbs {
+            // A command ring that wrapped needs a Link TRB in a production
+            // driver; enumeration issues a handful of commands, so the ring is
+            // simply not allowed to wrap before that is implemented.
+            log::error!("xhci: command ring exhausted during {what}");
+            return Err(KError::NoMemory);
+        }
+        self.command.push(trb);
+        // Doorbell 0, target 0 is the command ring.
+        self.bar.write32(self.doorbell, 0);
+        let event = self.wait_event(regs::trb::COMMAND_COMPLETION, what)?;
+        let code = event.completion_code();
+        if code != regs::code::SUCCESS {
+            log::error!("xhci: {what} failed, completion code {code}");
+            return Err(KError::Io);
+        }
+        Ok(event)
+    }
+
+    /// `Enable Slot`: asks the controller for a device slot.
+    fn enable_slot(&mut self) -> Result<u8, KError> {
+        let trb = Trb::new(0, 0, regs::trb::ENABLE_SLOT << regs::trb::TYPE_SHIFT);
+        let event = self.command(trb, "enable slot")?;
+        let slot = event.slot_id();
+        if slot == 0 {
+            log::error!("xhci: enable slot returned slot 0");
+            return Err(KError::Io);
+        }
+        log::info!("xhci: enabled slot {slot}");
+        Ok(slot)
+    }
+
+    /// Allocates the per-slot structures (input context, device context, EP0
+    /// ring) — everything `Address Device` needs.
+    fn allocate_slot(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        slot_id: u8,
+    ) -> Result<Slot, KError> {
+        let context_size = self.context_size;
+        // Input context: 1 control context + 32 device contexts.
+        let input = dev
+            .res()
+            .alloc_coherent(context_size * 33, 64)
+            .map_err(|_| KError::NoMemory)?;
+        let device = dev
+            .res()
+            .alloc_coherent(context_size * 32, 64)
+            .map_err(|_| KError::NoMemory)?;
+        let ep0 = Ring::new(
+            dev.res()
+                .alloc_coherent(RING_TRBS * TRB_LEN, 64)
+                .map_err(|_| KError::NoMemory)?,
+            RING_TRBS,
+        );
+        for allocation in [
+            (input.as_ptr(), context_size * 33),
+            (device.as_ptr(), context_size * 32),
+            (ep0.mem.as_ptr(), RING_TRBS * TRB_LEN),
+        ] {
+            // SAFETY: each pair is the base and length of an allocation made
+            // immediately above and not yet handed to the controller.
+            unsafe { core::ptr::write_bytes(allocation.0, 0, allocation.1) };
+        }
+        // The device context array entry has to point at this slot's context
+        // block before `Address Device` runs.
+        let dcbaa_entry = self.device_contexts.as_ptr().cast::<u64>();
+        let entry = dcbaa_entry.wrapping_add(slot_id as usize);
+        // SAFETY: `slot_id >= 1` and the DCBAA holds `max_slots` entries.
+        unsafe {
+            core::ptr::write_volatile(entry, device.bus_addr());
+        }
+        Ok(Slot {
+            id: slot_id,
+            speed: 0,
+            input,
+            ep0,
+            device,
+        })
+    }
+
+    /// `Address Device`: hands the controller the slot and EP0 contexts, which
+    /// is what gives the device its USB address.
+    fn address_device(
+        &mut self,
+        slot_index: usize,
+        port: usize,
+        speed: Speed,
+        ep0_max_packet: u16,
+    ) -> Result<(), KError> {
+        let context_size = self.context_size;
+        let (input_addr, ep0_ring, dcs) = {
+            let slot = &self.slots[slot_index];
+            (
+                slot.input.bus_addr(),
+                slot.ep0.mem.bus_addr(),
+                slot.ep0.cycle,
+            )
+        };
+        let speed_id = speed_id(speed);
+        // Contexts are written as dwords: the input control context first, then
+        // the slot context at index 0 and EP0 at index 1.
+        let base = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let dwords_per_context = context_size / 4;
+        // The offsets below stay inside the control context and the first two
+        // device contexts of this slot's own input allocation, so every store
+        // is a single volatile write to memory the controller does not hold yet.
+        let write = |offset: usize, value: u32| {
+            let cell = base.wrapping_add(offset);
+            // SAFETY: `cell` is `base + offset` inside the input context
+            // allocation described above.
+            unsafe {
+                core::ptr::write_volatile(cell, value);
+            }
+        };
+        // Add slot(0) and EP0(1).
+        write(
+            1,
+            context::input_control_dword1(
+                (1 << context::SLOT_CONTEXT) | (1 << context::EP0_CONTEXT),
+            ),
+        );
+        let slot_ctx = dwords_per_context * (context::SLOT_CONTEXT + 1);
+        write(slot_ctx, context::slot_dword0(speed_id, 1));
+        write(slot_ctx + 1, context::slot_dword1((port + 1) as u8));
+        let ep0_ctx = dwords_per_context * (context::EP0_CONTEXT + 1);
+        write(ep0_ctx + 1, context::endpoint_dword1(4, ep0_max_packet));
+        write(ep0_ctx + 2, context::endpoint_dword2(ep0_ring, dcs));
+        write(ep0_ctx + 3, (ep0_ring >> 32) as u32);
+        write(ep0_ctx + 4, context::endpoint_dword4(8));
+        let slot_id = u32::from(self.slots[slot_index].id);
+        let trb = Trb::new(
+            input_addr,
+            0,
+            (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
+                | (slot_id << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "address device")?;
+        self.slots[slot_index].speed = speed_id;
+        log::info!(
+            "xhci: slot {slot_id} addressed on port {}, speed {}, ep0 max packet {ep0_max_packet}",
+            port + 1,
+            speed.as_str(),
+        );
+        Ok(())
+    }
+
+    /// One control transfer on a slot's EP0 ring: setup, optional data, status.
+    fn control_transfer_slot(
+        &mut self,
+        slot_index: usize,
+        setup: &usb::SetupPacket,
+        data: &mut [u8],
+    ) -> Result<usize, KError> {
+        let is_in = setup.request_type & 0x80 != 0;
+        let length = data.len().min(setup.length as usize);
+        let slot_id = self.slots[slot_index].id;
+        // The data buffer has to be device-visible: the controller writes into
+        // it (IN) or reads from it (OUT), so it cannot be stack memory.
+        if length > BOUNCE_LEN {
+            return Err(KError::InvalidInput);
+        }
+        if !is_in && length > 0 {
+            // SAFETY: the bounce buffer is BOUNCE_LEN bytes and `length` was
+            // bounds-checked against it; the caller's slice holds `length`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), self.bounce().as_ptr(), length);
+            }
+        }
+
+        // The setup packet travels in the TRB parameter word (IDT).
+        let setup_word = u64::from_le_bytes([
+            setup.request_type,
+            setup.request,
+            (setup.value & 0xff) as u8,
+            (setup.value >> 8) as u8,
+            (setup.index & 0xff) as u8,
+            (setup.index >> 8) as u8,
+            (setup.length & 0xff) as u8,
+            (setup.length >> 8) as u8,
+        ]);
+        let mut control = (regs::trb::SETUP << regs::trb::TYPE_SHIFT) | regs::trb::IDT;
+        if is_in {
+            control |= regs::trb::DIR_IN;
+        }
+        self.slots[slot_index]
+            .ep0
+            .push(Trb::new(setup_word, 8, control));
+        if length > 0 {
+            let mut data_control = regs::trb::DATA << regs::trb::TYPE_SHIFT;
+            if is_in {
+                data_control |= regs::trb::DIR_IN;
+            }
+            // IOC only on the last TRB of the transfer.
+            data_control |= regs::trb::IOC;
+            // SAFETY: as above.
+            let bounce_addr = self.bounce.bus_addr();
+            self.slots[slot_index]
+                .ep0
+                .push(Trb::new(bounce_addr, length as u32, data_control));
+        }
+        // Status stage runs in the opposite direction of the data stage.
+        let mut status_control = regs::trb::STATUS << regs::trb::TYPE_SHIFT;
+        if !is_in {
+            status_control |= regs::trb::DIR_IN;
+        }
+        if length == 0 {
+            status_control |= regs::trb::IOC;
+        }
+        self.slots[slot_index]
+            .ep0
+            .push(Trb::new(0, 0, status_control));
+
+        // Doorbell for this slot, target = EP0's device slot context index (1).
+        self.bar
+            .write32(self.doorbell + 4 * u32::from(slot_id) as usize, 1);
+        let event = self.wait_event(regs::trb::TRANSFER_EVENT, "control transfer")?;
+        let code = event.completion_code();
+        if code != regs::code::SUCCESS && code != regs::code::SHORT_PACKET {
+            log::error!("xhci: control transfer completion code {code}");
+            return Err(KError::Io);
+        }
+        let residual = event.transfer_length() as usize;
+        let transferred = length.saturating_sub(residual.min(length));
+        if is_in && transferred > 0 {
+            // SAFETY: as above, inverted direction; `transferred <= length`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.bounce().as_ptr(),
+                    data.as_mut_ptr(),
+                    transferred,
+                );
+            }
+        }
+        Ok(transferred)
+    }
+
+    /// The device-visible scratch buffer for control data stages.
+    ///
+    /// One buffer is enough because enumeration is sequential; a bulk path will
+    /// want a pool instead of sharing this.
+    fn bounce(&self) -> &CoherentMem {
+        &self.bounce
+    }
+
+    /// Resets a root port and returns the speed the device negotiated.
+    fn reset_port(&mut self, port: usize) -> Result<Speed, KError> {
+        let offset = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
+        let current = self.bar.read32(offset);
+        // PORTSC is write-one-to-clear for the change bits and holds reserved
+        // bits that must be preserved exactly as read.
+        self.bar
+            .write32(offset, (current & portsc::PRESERVE) | portsc::PR);
+        for _ in 0..EVENT_POLL_STEPS {
+            let value = self.bar.read32(offset);
+            if value & portsc::PRC != 0 || (value & portsc::PED != 0 && value & portsc::PR == 0) {
+                // Acknowledge every change bit we caused, then report the speed.
+                self.bar
+                    .write32(offset, (value & portsc::PRESERVE) | portsc::CHANGE_BITS);
+                let speed =
+                    regs::speed_from_psiv((value & portsc::PSIV_MASK) >> portsc::PSIV_SHIFT);
+                log::info!("xhci: port {} reset, speed {}", port + 1, speed.as_str());
+                return Ok(speed);
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        log::error!("xhci: port {} reset timed out", port + 1);
+        Err(KError::TimedOut)
+    }
+}
+
 impl Hcd for Xhci {
     fn port_count(&self) -> usize {
         self.ports
@@ -386,17 +761,24 @@ impl Hcd for Xhci {
         })
     }
 
-    fn port_reset(&mut self, _port: usize) -> KResult<Speed> {
-        Err(KError::Unsupported)
+    fn port_reset(&mut self, port: usize) -> KResult<Speed> {
+        self.reset_port(port)
     }
 
     fn control_transfer(
         &mut self,
-        _address: u8,
-        _setup: &SetupPacket,
-        _data: &mut [u8],
+        address: u8,
+        setup: &SetupPacket,
+        data: &mut [u8],
     ) -> KResult<usize> {
-        Err(KError::Unsupported)
+        // xHCI uses the slot id as the device address, so the address the bus
+        // core passes back is the slot whose EP0 ring we transfer on.
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.id == address)
+            .ok_or(KError::NotFound)?;
+        self.control_transfer_slot(slot_index, setup, data)
     }
 
     fn bulk_transfer(
@@ -411,6 +793,70 @@ impl Hcd for Xhci {
 
     fn name(&self) -> &'static str {
         "xhci"
+    }
+}
+
+impl Xhci {
+    /// Enumerates every port that reports a connection.
+    ///
+    /// Ports are scanned once, after the controller runs: a device that is
+    /// already attached shows up here, and hot-plug is a port status change
+    /// event away once interrupt delivery exists.
+    pub fn enumerate(&mut self, dev: &Device<'_, driver_base::PlatformBus>) -> (usize, usize) {
+        let mut found = 0usize;
+        let mut ready = 0usize;
+        for port in 0..self.ports {
+            match self.port_status(port) {
+                Ok(status) if status.connected => found += 1,
+                _ => continue,
+            }
+            log::info!("xhci: port {} has a device, bringing it up", port + 1);
+            match self.prepare_device(dev, port) {
+                Ok(address) => {
+                    // The bus core owns every request from here: descriptors,
+                    // address assignment, configuration.
+                    match usb::enumerate::enumerate_port(self, port, address) {
+                        Ok(device) => {
+                            log::info!("xhci: {}", device.summary());
+                            ready += 1;
+                        }
+                        Err(err) => {
+                            log::error!("xhci: port {} enumeration failed: {err:?}", port + 1)
+                        }
+                    }
+                }
+                Err(err) => log::error!("xhci: port {} could not be prepared: {err:?}", port + 1),
+            }
+        }
+        (found, ready)
+    }
+
+    /// Brings one port up far enough that the bus core can talk to the device:
+    /// enable a slot, reset the port, address the device.
+    ///
+    /// The device then answers on address `slot` and [`usb::enumerate_port`]
+    /// asks it what it is.
+    pub fn prepare_device(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        port: usize,
+    ) -> Result<u8, KError> {
+        let slot_id = self.enable_slot()?;
+        let slot = self.allocate_slot(dev, slot_id)?;
+        self.slots.push(slot);
+        let slot_index = self.slots.len() - 1;
+        let speed = self.reset_port(port)?;
+        // The control endpoint's packet size follows the speed: high and Super
+        // speed devices always use 64, low speed always 8, full speed is told by
+        // the device descriptor -- which cannot be read before addressing, so
+        // 64 is the safe default for the speeds this port supports.
+        let ep0_max_packet = match speed {
+            Speed::Low => 8,
+            Speed::Full => 8,
+            _ => 64,
+        };
+        self.address_device(slot_index, port, speed, ep0_max_packet)?;
+        Ok(slot_id)
     }
 }
 
