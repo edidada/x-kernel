@@ -81,6 +81,7 @@ const PCI_COMMAND_SERR: u32 = 1 << 8;
 
 const PCI_CAP_PTR: usize = 0x34;
 const PCI_EXP_CAP_ID: u8 = 0x10;
+const PCI_EXP_LNKCTL: usize = 0x10; // + cap base
 const PCI_EXP_LNKCTL2: usize = 0x30; // + cap base
 
 // ---- iATU (unrolled, dbi + DEFAULT_DBI_ATU_OFFSET) -----------------------
@@ -279,6 +280,29 @@ impl DwPcie {
         }
     }
 
+    /// Turns ASPM (L0s/L1) off on the link.
+    ///
+    /// A link that idles in L1 stops forwarding the endpoint's DMA: BAR reads
+    /// still wake it, so software sees a perfectly healthy device that simply
+    /// never fetches a descriptor. The reference disables L1 for these NICs
+    /// (`pci_disable_link_state(pdev, PCIE_LINK_STATE_L1)`), and the same is
+    /// done here by clearing the Link Control ASPM field of the root port.
+    fn disable_aspm(&self) {
+        let Some(cap) = self.pcie_cap_base() else {
+            return;
+        };
+        let lnkctl = cap + PCI_EXP_LNKCTL;
+        let before = self.dbi_read(lnkctl);
+        if before & 0x3 == 0 {
+            return;
+        }
+        self.dbi_write(lnkctl, before & !0x3);
+        log::info!(
+            "pcie-dw: lnkctl {before:#06x} -> {:#06x} (ASPM disabled)",
+            self.dbi_read(lnkctl)
+        );
+    }
+
     /// `dw_pcie_link_set_max_speed`: LNKCTL2 target speed from the DT
     /// `max-link-speed` (1=2.5GT, 2=5GT, ...; 0 = unchanged).
     fn link_set_max_speed(&self) {
@@ -318,6 +342,7 @@ impl DwPcie {
 
         // dw_pcie_setup: max speed + link fields.
         self.link_set_max_speed();
+        self.disable_aspm();
         let val = self.dbi_read(PCIE_PORT_LINK_CONTROL);
         self.dbi_write(
             PCIE_PORT_LINK_CONTROL,

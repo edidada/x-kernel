@@ -19,7 +19,17 @@ board: `modinfo r8125 | head -3` ->
 vendor 源码离线不可得，序列取自 mainline r8169（含 8125 分支），
 并用参考板 r8125 运行态的寄存器 dump 交叉验证（bring-up log §4.1.1）。
 """
-entries = ["reset_and_configure", "start_data_path"]
+# 可达性起点：两条 probe 路径 + 框架通过 trait object 进入的数据面入口
+# （`send`/`recv` 等由 `NetDevice` vtable 调用，静态调用图里看不到）。
+entries = [
+  "reset_and_configure",
+  "start_data_path",
+  "send",
+  "recv",
+  "recycle_tx",
+  "recycle_rx",
+  "alloc_tx_buf",
+]
 
 # ---- init：MAC MCU / link-list 初始化（mainline: rtl_hw_init_8125）----
 [[path]]
@@ -229,3 +239,32 @@ op = "call"
 target = "rtl8125b_hw_phy_config"
 note = "PHY 专有调优（EPHY/OCP 表）；链路已能 up，故尚未移植"
 v2 = "unported"
+
+# ---- tx：发送路径的强制规则（mainline: rtl_quirk_packet_padto）----
+[[path]]
+name = "tx"
+
+[[path.step]]
+id = "tx.pad-to-zlen"
+src = "r8169_main.c:4454"
+op = "call"
+target = "rtl_quirk_packet_padto -> ETH_ZLEN"
+note = "8125(VER_61..LAST) 必须由驱动补齐到 60 字节；芯片不会自己 pad"
+v2 = "anchored"
+
+[[path.step]]
+id = "tx.vlan-tag"
+src = "r8169_main.c:2481"
+op = "write"
+target = "TxDesc.opts2"
+value = "rtl8169_tx_vlan_tag"
+note = "无 VLAN 时为 0；本 port 写 0"
+v2 = "anchored"
+
+[[path.step]]
+id = "tx.csum-offload"
+src = "r8169_main.c:4462"
+op = "call"
+target = "rtl8169_tso_csum_v2"
+note = "校验和/TSO 卸载；本 port 走软件栈，opts2 保持 0"
+v2 = "waived"

@@ -86,6 +86,9 @@ mod reg {
     pub(super) const MCU: usize = 0xd3;
     /// MAC-side PHY status: bit 1 is the link the *MAC* acts on.
     pub(super) const PHY_STATUS: usize = 0x6c;
+    /// CSI tunnel (chip-internal config space): data and address registers.
+    pub(super) const CSIDR: usize = 0x64;
+    pub(super) const CSIAR: usize = 0x68;
     /// `Config2` (clock request), `Config3` (L2/L3 readiness) and `Config5`
     /// (ASPM) -- the PCIe power-management knobs.
     pub(super) const CONFIG2: usize = 0x53;
@@ -123,6 +126,8 @@ const BMSR_LSTATUS: u16 = 0x0004;
 
 /// OCP poll budget, `r8169`'s `rtl_loop_wait_{low,high}(..., 25, 10)`.
 const OCP_POLL_ITERS: usize = 25;
+/// CSI transactions settle immediately on this part; keep a small bound.
+const CSI_POLL_ITERS: usize = 1000;
 const OCP_POLL_STEP_US: u64 = 10;
 
 /// One descriptor: `opts1`, `opts2`, and a 64-bit buffer address.
@@ -145,6 +150,13 @@ const RX_MAX_SIZE_FIELD: u16 = (RX_SLOT_LEN + 1) as u16;
 /// makes the wrap arithmetic a mask.
 const TX_DESC_COUNT: usize = 256;
 const RX_DESC_COUNT: usize = 256;
+/// Minimum frame the RTL8125 accepts on transmit. `r8169`'s
+/// `rtl_quirk_packet_padto` forces every frame up to `ETH_ZLEN` for
+/// `VER_61...LAST` (the 8125 family): the chip does not pad short frames
+/// itself, and a shorter descriptor is simply not transmitted -- measured as
+/// "the descriptor's ownership bit never clears" for a 42-byte ARP request
+/// while 60-byte frames went out normally.
+const ETH_ZLEN: usize = 60;
 /// Per-slot packet buffers. One slot holds one whole Ethernet frame (1518 max
 /// with VLAN), so no fragmentation machinery is needed.
 const TX_SLOT_LEN: usize = 2048;
@@ -161,6 +173,9 @@ const TX_POLL_ITERS: usize = 100;
 const TX_POLL_STEP_US: u64 = 10;
 /// Counts traced transmits so the log stays bounded.
 static TX_TRACE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// `IntrStatus` bit 7: the transmit queue found no owned descriptor.
+const INTR_TX_DESC_UNAVAILABLE: u32 = 0x80;
+
 /// `RxConfig` accept bits: broadcast, multicast, and frames addressed to our
 /// own station address (`rx_mode_bits` in the reference).
 const RX_ACCEPT_MODE: u32 = 0x08 | 0x04 | 0x02;
@@ -187,6 +202,16 @@ const OCP_SELF_TEST_BITS: u16 = 0x0003;
 
 /// `MISC` bit 19: receive data-valid gate (must be off).
 const RXDV_GATED_EN: u32 = 1 << 19;
+/// CSI address register: transaction flag, address, and byte enables.
+const CSIAR_FLAG: u32 = 1 << 31;
+const CSIAR_BYTE_ENABLE: u32 = 0x0f << 12;
+/// Chip-internal PCIe control: bit 20 is the "ZRXDC non-compliance" timeout.
+const CSI_PCIE_CTRL: u32 = 0x070c;
+const CSI_PCIE_ZRXDC_NONCOMPL: u32 = 1 << 20;
+/// Chip-internal L1 entry latency (byte at 0x0719).
+const CSI_L1_ENTRY_LATENCY: u32 = 0x0719;
+const CSI_L1_ENTRY_LATENCY_DEFAULT: u8 = 0x27;
+
 /// `MCU` bit 7: "now is out of band", cleared during MAC initialization.
 const MCU_NOW_IS_OOB: u8 = 1 << 7;
 /// `MCU` bit 1: the MAC's link-list (descriptor) FIFO is ready for sharing.
@@ -469,6 +494,8 @@ fn hw_start_8125_common(bar0: &IoMap) {
     bar0.write16(0x1880, bar0.read16(0x1880) & !0x0030);
     mac_ocp_write(bar0, 0xe098, 0xc302);
 
+    disable_low_power_link(bar0);
+
     // Ungate the receive data-valid path (`rtl_disable_rxdvgate`).
     bar0.write32(reg::MISC, bar0.read32(reg::MISC) & !RXDV_GATED_EN);
     log::info!(
@@ -482,61 +509,17 @@ fn hw_start_8125_common(bar0: &IoMap) {
 ///
 /// One allocation per ring keeps the descriptor table contiguous, which the
 /// device requires: it is handed exactly one base address per ring.
-/// Allocates a coherent buffer whose bus address is above `min_bus`.
-///
-/// The MAC reports `TX_DESC_UNAVAILABLE` while every descriptor it is pointed
-/// at has the ownership bit set: that is the signature of the device reading a
-/// different physical memory than software wrote. Walking the allocations
-/// upwards makes the ring land where the working reference board's DMA does
-/// (its rings are at 0xe4010000), which is the cheapest way to find out whether
-/// the low DRAM band is reachable for device reads at all.
-fn alloc_above(
-    dev: &mut Device<'_, PciBus>,
-    len: usize,
-    align: usize,
-    min_bus: u64,
-    keep: &mut alloc::vec::Vec<CoherentMem>,
-) -> Result<CoherentMem, ProbeError> {
-    const CHUNK: usize = 16 << 20;
-    const MAX_TRIES: usize = 128;
-    let mut best = dev.res().alloc_coherent(CHUNK.max(len), align)?;
-    let mut tries = 0;
-    while best.bus_addr() < min_bus && tries < MAX_TRIES {
-        keep.push(best);
-        best = dev.res().alloc_coherent(CHUNK.max(len), align)?;
-        tries += 1;
-    }
-    log::info!(
-        "rtl8125: dma at {:#x} after {tries} bumps (target {min_bus:#x})",
-        best.bus_addr()
-    );
-    Ok(best)
-}
-
 fn allocate_rings(
     dev: &mut Device<'_, PciBus>,
 ) -> Result<(CoherentMem, CoherentMem, CoherentMem, CoherentMem), ProbeError> {
-    const DMA_FLOOR: u64 = 0xc000_0000;
-    let mut keep = alloc::vec::Vec::new();
-    let tx_ring = alloc_above(
-        dev,
-        TX_DESC_COUNT * DESC_LEN,
-        DESC_LEN,
-        DMA_FLOOR,
-        &mut keep,
-    )?;
-    let rx_ring = alloc_above(
-        dev,
-        RX_DESC_COUNT * DESC_LEN,
-        DESC_LEN,
-        DMA_FLOOR,
-        &mut keep,
-    )?;
-    let tx_slots = alloc_above(dev, TX_DESC_COUNT * TX_SLOT_LEN, 64, DMA_FLOOR, &mut keep)?;
-    let rx_slots = alloc_above(dev, RX_DESC_COUNT * RX_SLOT_LEN, 64, DMA_FLOOR, &mut keep)?;
-    // Kept alive: dropping a bump hands the page back and a later allocation
-    // can land below the floor again.
-    core::mem::forget(keep);
+    let tx_ring = dev
+        .res()
+        .alloc_coherent(TX_DESC_COUNT * DESC_LEN, DESC_LEN)?;
+    let rx_ring = dev
+        .res()
+        .alloc_coherent(RX_DESC_COUNT * DESC_LEN, DESC_LEN)?;
+    let tx_slots = dev.res().alloc_coherent(TX_DESC_COUNT * TX_SLOT_LEN, 64)?;
+    let rx_slots = dev.res().alloc_coherent(RX_DESC_COUNT * RX_SLOT_LEN, 64)?;
     Ok((tx_ring, rx_ring, tx_slots, rx_slots))
 }
 
@@ -710,7 +693,61 @@ fn disable_pcie_low_power(bar0: &IoMap) {
     );
 }
 
-/// Reads a MAC-side OCP register.
+/// Reads a chip-internal CSI register.
+fn csi_read(bar0: &IoMap, addr: u32) -> Option<u32> {
+    bar0.write32(reg::CSIAR, (addr & 0xfff) | CSIAR_BYTE_ENABLE);
+    for _ in 0..CSI_POLL_ITERS {
+        if bar0.read32(reg::CSIAR) & CSIAR_FLAG != 0 {
+            return Some(bar0.read32(reg::CSIDR));
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(OCP_POLL_STEP_US));
+    }
+    None
+}
+
+/// Writes a chip-internal CSI register.
+fn csi_write(bar0: &IoMap, addr: u32, value: u32) -> bool {
+    bar0.write32(reg::CSIDR, value);
+    bar0.write32(reg::CSIAR, CSIAR_FLAG | (addr & 0xfff) | CSIAR_BYTE_ENABLE);
+    for _ in 0..CSI_POLL_ITERS {
+        if bar0.read32(reg::CSIAR) & CSIAR_FLAG == 0 {
+            return true;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(OCP_POLL_STEP_US));
+    }
+    false
+}
+
+/// Turns off the chip's low-power link behaviour (`rtl_hw_start_8125_common`
+/// tail plus the reference's CSI writes).
+///
+/// This is what keeps the endpoint awake: with the L1 entry timer armed, the
+/// chip idles into L1 after about a second and stops fetching descriptors,
+/// while its register block keeps answering -- measured as "the first frames
+/// go out, everything a second later is ignored".
+fn disable_low_power_link(bar0: &IoMap) {
+    // L1.2 trigger and EPHY tx/rx disable timer.
+    mac_ocp_modify(bar0, 0xe092, 0x00ff, 0);
+    mac_ocp_modify(bar0, 0xe094, 0xff00, 0);
+
+    if let Some(value) = csi_read(bar0, CSI_PCIE_CTRL) {
+        let _ = csi_write(bar0, CSI_PCIE_CTRL, value & !CSI_PCIE_ZRXDC_NONCOMPL);
+    }
+    let addr = CSI_L1_ENTRY_LATENCY & !0x3;
+    let shift = (CSI_L1_ENTRY_LATENCY & 0x3) * 8;
+    if let Some(old) = csi_read(bar0, addr) {
+        let mask = 0xffu32 << shift;
+        let new = (old & !mask) | (u32::from(CSI_L1_ENTRY_LATENCY_DEFAULT) << shift);
+        let _ = csi_write(bar0, addr, new);
+    }
+    log::info!(
+        "rtl8125: low-power link off, csi pcie_ctrl {:#010x} l1_lat {:#010x}",
+        csi_read(bar0, CSI_PCIE_CTRL).unwrap_or(0),
+        csi_read(bar0, CSI_L1_ENTRY_LATENCY & !0x3).unwrap_or(0),
+    );
+}
+
+/// Reads a MAC-side OCP register./// Reads a MAC-side OCP register.
 ///
 /// The MAC window is synchronous: program the address and read the data back
 /// from the same register, no flag to poll (`__r8168_mac_ocp_read`).
@@ -942,10 +979,26 @@ impl NetDevice for Rtl8125Nic {
             return Err(KError::ResourceBusy);
         }
 
+        // ldp:step tx.pad-to-zlen
+        // Pad to `ETH_ZLEN`: the 8125 will not transmit a shorter frame, and
+        // silently leaves the descriptor owned by the NIC.
+        let tx_len = frame_len.max(ETH_ZLEN);
         // SAFETY: `index < TX_DESC_COUNT`, the destination slot is
-        // `TX_SLOT_LEN` bytes, and `frame_len <= TX_SLOT_LEN` was checked.
+        // `TX_SLOT_LEN` bytes, and `tx_len <= TX_SLOT_LEN` (both bounded above).
+        let slot = self.tx_slot(index);
+        // SAFETY: `frame_len <= tx_len <= TX_SLOT_LEN`, so both the copy and the
+        // zero-fill stay inside the slot this descriptor points at, and the slot
+        // is exclusively owned by this ring entry.
         unsafe {
-            core::ptr::copy_nonoverlapping(tx_buf.data().as_ptr(), self.tx_slot(index), frame_len);
+            core::ptr::copy_nonoverlapping(tx_buf.data().as_ptr(), slot, frame_len);
+        }
+        // SAFETY: `frame_len` was just written, so the padding tail starts
+        // inside the same slot.
+        let tail = unsafe { slot.add(frame_len) };
+        // SAFETY: `[frame_len, tx_len)` is inside the slot (`tx_len` is bounded
+        // by `TX_SLOT_LEN`).
+        unsafe {
+            core::ptr::write_bytes(tail, 0, tx_len - frame_len);
         }
         // SAFETY: the frame bytes were copied out, so this is the handle's
         // single consumption and it returns the buffer to the pool.
@@ -956,18 +1009,29 @@ impl NetDevice for Rtl8125Nic {
         } else {
             0
         };
+        // ldp:step tx.vlan-tag
         Self::barrier_release();
         Self::desc_set_opts1(
             desc,
-            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | frame_len as u32,
+            DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | tx_len as u32,
         );
         state.tx_next = next;
         drop(state);
 
         // The 8125 doorbell, not the legacy NPQ byte: writing `NPQ` into 0x38
-        // on this part does nothing, and a queued descriptor then sits there
-        // forever (measured: the frame never reached the wire).
+        // on this part does nothing.
         self.bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
+        // A transmit queue that has reported `TX_DESC_UNAVAILABLE` stays
+        // parked: the doorbell alone does not restart it. Acknowledge the
+        // status and re-assert the engine enable, exactly the recovery the
+        // reference performs from its transmit-timeout path.
+        let status = self.bar0.read32(reg::INTR_STATUS);
+        if status & INTR_TX_DESC_UNAVAILABLE != 0 {
+            self.bar0
+                .write32(reg::INTR_STATUS, INTR_TX_DESC_UNAVAILABLE);
+            self.bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB);
+            self.bar0.write16(reg::TX_POLL_8125, TX_POLL_8125_BIT);
+        }
 
         // Bounded transmit evidence: the first few frames report whether the
         // MAC actually consumed the descriptor. A descriptor still owned by
