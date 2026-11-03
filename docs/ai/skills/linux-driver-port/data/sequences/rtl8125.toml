@@ -158,8 +158,8 @@ op = "rmw"
 target = "OCP(0xc0ac)"
 mask = "0x0000"
 value = "0x1f80"
-note = "L1 退出事件（含 bit10 txdma_poll）；缺它则空闲后 TX DMA 不醒"
-v2 = "anchored"
+note = "L1 退出事件；实测对本板 TX 无影响（proven 启动路径不含它），暂不做"
+v2 = "unported"
 
 [[path.step]]
 id = "start.eee-txidle"

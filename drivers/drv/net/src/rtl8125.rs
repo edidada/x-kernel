@@ -72,8 +72,6 @@ mod reg {
     pub(super) const Q_NUM_CTRL_8125: usize = 0x4800;
     /// RSS is multi-queue territory; zero it for one queue.
     pub(super) const RSS_CTRL_8125: usize = 0x4500;
-    /// `Config1`: bit 4 gates the "UPS" (power saving) block.
-    pub(super) const CONFIG1: usize = 0x52;
     /// Transmit/receive arbitration threshold (undocumented, set by the
     /// reference's 8125 start sequence).
     pub(super) const TX_RX_ARB_8125: usize = 0x382;
@@ -92,29 +90,17 @@ mod reg {
     pub(super) const MAR4: usize = 0x0c;
     /// EPHY access window (analog front-end registers, not MDIO).
     pub(super) const EPHYAR: usize = 0x80;
-    /// CSI tunnel (chip-internal config space): data and address registers.
-    pub(super) const CSIDR: usize = 0x64;
-    pub(super) const CSIAR: usize = 0x68;
-    /// `Config2` (clock request), `Config3` (L2/L3 readiness) and `Config5`
-    /// (ASPM) -- the PCIe power-management knobs.
-    pub(super) const CONFIG2: usize = 0x53;
-    pub(super) const CONFIG3: usize = 0x54;
-    pub(super) const CONFIG5: usize = 0x56;
     /// Descriptor ring base addresses (the reference writes the high word
     /// first: some boards only latch the low word after it).
     pub(super) const TX_DESC_ADDR_LOW: usize = 0x20;
     pub(super) const TX_DESC_ADDR_HIGH: usize = 0x24;
     pub(super) const RX_DESC_ADDR_LOW: usize = 0xe4;
     pub(super) const RX_DESC_ADDR_HIGH: usize = 0xe8;
-    /// `CPlusCmd`: PCI behaviour bits (multiple read/write, DAC).
-    pub(super) const CPLUS_CMD: usize = 0xe0;
     /// TX descriptor fetch count: how many descriptors one doorbell may pull.
     pub(super) const TDFNR: usize = 0x57;
     /// Tally-counter dump target (`CounterAddrLow/High`).
     pub(super) const COUNTER_ADDR_LOW: usize = 0x10;
     pub(super) const COUNTER_ADDR_HIGH: usize = 0x14;
-    /// Double-VLAN configuration (vendor clears it in `hw_config`).
-    pub(super) const DOUBLE_VLAN_CONFIG: usize = 0x1000;
 
     /// Largest frame the receiver accepts; low values silently drop.
     pub(super) const RX_MAX_SIZE: usize = 0xda;
@@ -151,8 +137,6 @@ const BMSR_LSTATUS: u16 = 0x0004;
 
 /// OCP poll budget, `r8169`'s `rtl_loop_wait_{low,high}(..., 25, 10)`.
 const OCP_POLL_ITERS: usize = 25;
-/// CSI transactions settle immediately on this part; keep a small bound.
-const CSI_POLL_ITERS: usize = 1000;
 const OCP_POLL_STEP_US: u64 = 10;
 
 /// One descriptor: `opts1`, `opts2`, and a 64-bit buffer address.
@@ -217,20 +201,8 @@ const RX_ACCEPT_MODE: u32 = 0x08 | 0x04 | 0x02;
 
 const OCPDR_WRITE_CMD: u32 = 0x8000_0000;
 
-/// `Config3` bit 1: allow the link to enter L2/L3.
-const CFG3_RDY_TO_L23: u8 = 1 << 1;
-/// `Config2` bit 7: clock request enable.
-const CFG2_CLKREQ_EN: u8 = 1 << 7;
-/// `Config5` bit 0: ASPM enable.
-const CFG5_ASPM_EN: u8 = 1 << 0;
 /// Value the reference writes to `0x382` for RTL8125.
 const TX_RX_ARB_8125_VALUE: u16 = 0x221b;
-
-/// OCP register that selects the transmit descriptor format. The 8125 powers up
-/// with the **new** format; the rings here are the legacy 16-byte layout every
-/// r8169 generation uses, so the bit is cleared in the start sequence
-/// (`rtl_hw_start_8125_common`: "disable new tx descriptor format").
-const OCP_TX_DESC_FORMAT: u16 = 0xeb58;
 
 /// `MISC` bit 19: receive data-valid gate (must be off).
 const RXDV_GATED_EN: u32 = 1 << 19;
@@ -243,9 +215,6 @@ const EPHYAR_REG_SHIFT: u32 = 16;
 /// `rtl_loop_wait_*` budget for EPHY transactions.
 const EPHY_POLL_ITERS: usize = 25;
 const EPHY_POLL_STEP_US: u64 = 100;
-
-const CSIAR_FLAG: u32 = 1 << 31;
-const CSIAR_BYTE_ENABLE: u32 = 0x0f << 12;
 
 /// `MCU` bit 7: "now is out of band", cleared during MAC initialization.
 const MCU_NOW_IS_OOB: u8 = 1 << 7;
@@ -329,50 +298,6 @@ impl Rtl8125Data {
     }
 }
 
-/// Programs the descriptor rings and starts the engines.
-///
-/// Order follows the reference's `rtl_hw_start`: ring base addresses and
-/// `RxMaxSize` first, then the configuration registers (still behind the
-/// `Cfg9346` latch), and only then `CmdRxEnb|CmdTxEnb`. A ring the MAC has not
-/// been told about yet can never be fetched, and a MAC started before the
-/// accept mode is set would drop the frames that arrive first.
-fn start_data_path(nic: &Rtl8125Nic) -> Result<(), ProbeError> {
-    let bar0 = &nic.bar0;
-
-    // tgoskits (verified on this board) arms the receive ring first and only
-    // then programs the ring bases, so the MAC never sees a ring it has been
-    // told about but which is still empty.
-    arm_receive_ring(nic);
-    program_ring_bases(nic);
-    program_engine_config(nic);
-
-    let cmd = bar0.read8(reg::CHIP_CMD);
-    if cmd & (CMD_RX_ENB | CMD_TX_ENB) != CMD_RX_ENB | CMD_TX_ENB {
-        log::error!("rtl8125: engines did not start (ChipCmd {cmd:#04x})");
-        return Err(ProbeError::Fatal(RuntimeError::Io));
-    }
-    // TEMP (diagnostic): the register dump reads registers with read side
-    // effects (CSI 0x64/0x68, EPHYAR 0x80, OCPDR 0xb0); disabled to test
-    // whether it is what breaks the first transmit.
-    if false {
-        dump_registers(bar0);
-    }
-
-    log::info!(
-        "rtl8125: phy at start bmcr {:#06x} bmsr {:#06x} phy_status {:#04x}",
-        mii_read(bar0, MII_BMCR).unwrap_or(0),
-        mii_read(bar0, MII_BMSR).unwrap_or(0),
-        bar0.read8(reg::PHY_STATUS),
-    );
-    log::info!(
-        "rtl8125: rings live, tx {TX_DESC_COUNT}x{TX_SLOT_LEN}B @ {:#x}, rx \
-         {RX_DESC_COUNT}x{RX_SLOT_LEN}B @ {:#x}",
-        nic.tx_ring.bus_addr(),
-        nic.rx_ring.bus_addr(),
-    );
-    Ok(())
-}
-
 /// Programs the descriptor ring base addresses and the receive size limit.
 fn program_ring_bases(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
@@ -444,17 +369,18 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     bar0.write32(reg::MAR0, u32::MAX);
     bar0.write32(reg::MAR4, u32::MAX);
     // ldp:step start.enable-engines
-    bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB); // enable_tx_rx()
+    bar0.write8(reg::CHIP_CMD, CMD_RX_ENB | CMD_TX_ENB);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
-    // program_start(): default RX config, then the accept bits.
+    // Default RX config, then the accept bits.
     // ldp:steps start.rx-config, start.tx-config, start.rx-mode
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
     let rx = bar0.read32(reg::RX_CONFIG);
     bar0.write32(reg::RX_CONFIG, (rx | RX_ACCEPT_MODE) & !0x30);
     bar0.write32(reg::INTR_MASK, 0);
     // ldp:step start.pci-commit
-    let _ = bar0.read8(reg::CHIP_CMD); // commit()
+    // A ChipCmd read commits the pending configuration writes.
+    let _ = bar0.read8(reg::CHIP_CMD);
     log::info!(
         "rtl8125: engines on, rxcfg {:#010x} txcfg {:#010x} cmd {:#04x} intr {:#010x}",
         bar0.read32(reg::RX_CONFIG),
@@ -464,35 +390,6 @@ fn program_engine_config(nic: &Rtl8125Nic) {
     );
 }
 
-/// Logs every non-zero word of the register block, once, at start.
-///
-/// This is the cross-board comparison anchor: the reference board runs the
-/// vendor driver on the same SoC and chip, so a word that differs between the
-/// two dumps is a candidate difference in behaviour.
-fn dump_registers(bar0: &IoMap) {
-    let mut line = alloc::string::String::new();
-    let mut off = 0usize;
-    while off < 0xf4 {
-        let value = bar0.read32(off);
-        if value != 0 {
-            line.push_str(&alloc::format!(" {off:03x}={value:08x}"));
-        }
-        off += 4;
-    }
-    line.push_str(&alloc::format!(" 382={:04x}", bar0.read16(0x382)));
-    line.push_str(&alloc::format!(" 1880={:04x}", bar0.read16(0x1880)));
-    line.push_str(&alloc::format!(" 4500={:08x}", bar0.read32(0x4500)));
-    line.push_str(&alloc::format!(" 4800={:04x}", bar0.read16(0x4800)));
-    log::info!("rtl8125: regdump{line}");
-}
-
-/// The "common" half of the reference's `rtl_hw_start_8125_common`.
-///
-/// Transcribed register by register, including the undocumented MAC-OCP rows:
-/// this is the chip vendor's own analog/front-end configuration, and skipping
-/// it left the MAC enabling cleanly (`ChipCmd` = both engines) while never
-/// fetching a single descriptor. Each row is a read-modify-write with its own
-/// mask, exactly as `r8168_mac_ocp_modify` performs it.
 fn hw_start_8125_common(bar0: &IoMap) {
     // Interrupt coalescing off; the receive path here is polled.
     // ldp:step start.intcfg0
@@ -565,25 +462,20 @@ fn hw_start_8125_common(bar0: &IoMap) {
     );
 }
 
-/// Allocates the coherent rings and the per-descriptor packet slots.
+/// Brings the MAC up: reset, initialize, configure, hand over the rings, start.
 ///
-/// One allocation per ring keeps the descriptor table contiguous, which the
-/// device requires: it is handed exactly one base address per ring.
-/// A/B experiment: runs tgoskits' start sequence verbatim and submits one frame.
-///
-/// `/workspace/tgoskits/drivers/net/realtek-rtl8125` is the same driver for the
-/// same board and chip and it is reported as board-verified, so its *order* of
-/// operations is a reference this port can adopt literally. The whole point of
-/// this function is to answer one question: with tgoskits' sequence on this
-/// hardware, does a single queued descriptor get fetched? Everything here is a
-/// transcription of their `init()` + `try_start_queues()` + `submit_buffer()`,
-/// in their order, using this driver's helpers.
-///
-/// It is a one-shot diagnostic, not a code path: the caller restores the normal
-/// configuration immediately afterwards.
-fn tgoskits_start(nic: &Rtl8125Nic) {
+/// The whole start sequence lives in one function because it has to run as one
+/// unit at two different times: during probe (to read identity and put the
+/// device in a defined state) and again once the link has settled -- see
+/// [`Rtl8125Nic::late_init`], which is the pass that actually makes the device
+/// usable, since the probe-time one runs while the PHY is still negotiating.
+fn bring_up_mac(nic: &Rtl8125Nic) {
     let bar0 = &nic.bar0;
-    // --- their init() ---
+    // Bring the MAC up in the order the reference driver uses when the
+    // interface is opened: mask/ack interrupts, reset, initialize the MAC
+    // MCU/link-list block, program the PCI behaviour and the default RX/TX
+    // configuration, clear the coalescing block, tune EPHY and the PHY, then
+    // hand the rings over and enable the engines.
     bar0.write32(reg::INTR_MASK, 0);
     bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
     bar0.write8(reg::CHIP_CMD, CMD_RESET);
@@ -597,24 +489,30 @@ fn tgoskits_start(nic: &Rtl8125Nic) {
         log::warn!("ab: hw_init failed");
         return;
     }
-    // `configure_cplus(dma_mask)`: multiple read/write + DAC for 64-bit DMA.
+    // CPlusCmd: multiple read/write plus DAC, because the endpoint is given
+    // 64-bit DMA addresses.
     bar0.write16(0xe0, 0x0008 | 0x0010);
-    // `rx_filter.write_default()` then `write_default_tx_config()`.
+    // Default RX/TX configuration (the accept filter is programmed later,
+    // together with the engine start).
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
     bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
     bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
-    bar0.write16(0xe2, 0); // disable_interrupt_mitigation
-    // `hw_start_8125()`: coalescing block through 0xb00, EPHY table, common.
+    bar0.write16(INTR_MITIGATE, 0);
+    // Coalescing block, EPHY table, then the 8125 common start block.
     let mut offset = 0xa00usize;
     while offset < 0xb00 {
         bar0.write32(offset, 0);
         offset += 4;
     }
+    // ldp:step start.ephy-init
     ephy_init_8125b(bar0);
     hw_start_8125_common(bar0);
+    // ldp:step start.phy-config
     hw_phy_config_8125b(bar0);
 
-    // --- their try_start_queues() ---
+    // Hand the rings over and start the engines: receive descriptors first, so
+    // the MAC never sees a ring it has been told about but which is still
+    // empty, then the ring bases, then the engines and the accept filter.
     arm_receive_ring(nic);
     program_ring_bases(nic);
     bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
@@ -698,117 +596,6 @@ fn hw_init_8125(bar0: &IoMap) -> Result<(), ProbeError> {
     Ok(())
 }
 
-/// Puts the chip through `rtl_hw_reset` and programs the RX/TX configuration.
-///
-/// This is the control-plane half of `rtl8169_hw_reset` +
-/// `rtl_set_{rx,tx}_config_registers` for `RTL_GIGA_MAC_VER_63`. It stops
-/// short of anything that starts DMA: `CmdRxEnb`/`CmdTxEnb` stay clear, so
-/// the engines never fetch from a descriptor ring that does not exist yet.
-///
-/// The write path is proven by reading the configuration registers back: they
-/// are plain storage, so a value that survives the round trip means the chip
-/// accepted the write. That is a weaker claim than a working data path, and it
-/// is stated as such -- the register-independence trap from the PCIe bring-up
-/// (§3.4.4 of the bring-up log) is about *addresses*, not about storage.
-fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
-    // Mask everything before resetting: a pending interrupt with no handler
-    // installed is a surprise, not a diagnostic. The pending status is cleared
-    // too -- a stale latched fatal interrupt from the previous stage can leave
-    // the MAC's engines parked even though the command register reads enabled.
-    bar0.write32(reg::INTR_MASK, 0);
-    bar0.write32(reg::INTR_STATUS, 0xffff_ffff);
-    bar0.write8(reg::CHIP_CMD, CMD_RESET);
-    let mut cleared = false;
-    for _ in 0..RESET_POLL_ITERS {
-        if bar0.read8(reg::CHIP_CMD) & CMD_RESET == 0 {
-            cleared = true;
-            break;
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(RESET_POLL_STEP_US));
-    }
-    if !cleared {
-        let cmd = bar0.read8(reg::CHIP_CMD);
-        log::error!("rtl8125: {chip} did not finish reset (cmd {cmd:#04x})");
-        return Err(ProbeError::Fatal(RuntimeError::Io));
-    }
-
-    // MAC MCU / link-list block **after** the reset. `hw_init_8125` programs the
-    // MAC's link-list FIFO through OCP `0xc0aa`/`0xc0a6`/`0xc01e` and waits for
-    // `LINK_LIST_RDY`; a `CmdReset` after that clears it again, and the engines
-    // then run without a descriptor path (measured: with the reset moved ahead
-    // of it, a single queued frame is fetched and transmitted).
-    hw_init_8125(bar0)?;
-
-    // The board-verified driver's pre-configuration block, in its order:
-    // CPlusCmd (multiple read/write + DAC), default RX/TX config, RX max size,
-    // and interrupt mitigation off -- all before the OCP/EPHY block below.
-    bar0.write16(reg::CPLUS_CMD, 0x0008 | 0x0010);
-    bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
-    bar0.write32(reg::TX_CONFIG, TX_CONFIG_8125B);
-    bar0.write16(reg::RX_MAX_SIZE, RX_MAX_SIZE_FIELD);
-    bar0.write16(INTR_MITIGATE, 0);
-
-    // `Config1` bit 4 is SPEED_DOWN (idle speed drop); the reference clears it.
-    let config1 = bar0.read8(reg::CONFIG1);
-    bar0.write8(reg::CONFIG1, config1 & !0x10);
-
-    // Drop the power-saving "UPS" gate before the engines run.
-
-    // Coalescing block: the verified driver clears 0xa00..0xb00 outright.
-    let mut offset = 0xa00usize;
-    while offset < 0xb00 {
-        bar0.write32(offset, 0);
-        offset += 4;
-    }
-    // ldp:step start.ephy-init
-    ephy_init_8125b(bar0);
-
-    // PCIe power management off before anything else: RTL8125 is known for
-    // DMA stalls when the link idles in a low-power state (the reference
-    // disables ASPM and clock requests around its start sequence).
-    disable_pcie_low_power(bar0);
-    // ldp:steps cfg.rx-packet-filter-off, cfg.extend-tally, cfg.l1-l0s-latency
-    vendor_hw_config_extra(bar0);
-    // The chip's own front-end configuration, in the reference's order.
-    hw_start_8125_common(bar0);
-    // ldp:step start.exit-l1
-    enable_l1_exit_events(bar0);
-    log::info!(
-        "rtl8125: {chip} tx descriptor format {:#06x} (legacy 16-byte when bit0 is clear)",
-        mac_ocp_read(bar0, OCP_TX_DESC_FORMAT),
-    );
-    // ldp:step start.phy-config
-    hw_phy_config_8125b(bar0);
-
-    Ok(())
-}
-
-/// Turns off every PCIe low-power entry this chip offers.
-///
-/// RTL8125 is known for DMA stalls caused by ASPM L1 (the reference driver
-/// disables it unconditionally in `rtl8169_init_one` and again around
-/// `rtl_hw_start`). The three bits are independent, so all three go off.
-fn disable_pcie_low_power(bar0: &IoMap) {
-    let config3 = bar0.read8(reg::CONFIG3);
-    bar0.write8(reg::CONFIG3, config3 & !CFG3_RDY_TO_L23);
-    let config2 = bar0.read8(reg::CONFIG2);
-    bar0.write8(reg::CONFIG2, config2 & !CFG2_CLKREQ_EN);
-    let config5 = bar0.read8(reg::CONFIG5);
-    bar0.write8(reg::CONFIG5, config5 & !CFG5_ASPM_EN);
-    log::info!(
-        "rtl8125: pcie low power off, cfg3 {config3:#04x} cfg2 {config2:#04x} cfg5 {config5:#04x} \
-         -> {:#04x}/{:#04x}/{:#04x}",
-        bar0.read8(reg::CONFIG3),
-        bar0.read8(reg::CONFIG2),
-        bar0.read8(reg::CONFIG5),
-    );
-}
-
-/// Reads one EPHY register through the `EPHYAR` window.
-///
-/// EPHY is the analog front-end register space, separate from both the MAC OCP
-/// window (0xb0) and the GPHY/MDIO window (0xb8): five-bit register numbers,
-/// 16-bit data, and a self-clearing flag.
 fn ephy_read(bar0: &IoMap, reg_addr: u16) -> u16 {
     bar0.write32(
         reg::EPHYAR,
@@ -865,48 +652,6 @@ fn ephy_init_8125b(bar0: &IoMap) {
     );
 }
 
-/// Reads a chip-internal CSI register./// Reads a chip-internal CSI register.
-fn csi_read(bar0: &IoMap, addr: u32) -> Option<u32> {
-    bar0.write32(reg::CSIAR, (addr & 0xfff) | CSIAR_BYTE_ENABLE);
-    for _ in 0..CSI_POLL_ITERS {
-        if bar0.read32(reg::CSIAR) & CSIAR_FLAG != 0 {
-            return Some(bar0.read32(reg::CSIDR));
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(OCP_POLL_STEP_US));
-    }
-    None
-}
-
-/// Writes a chip-internal CSI register.
-fn csi_write(bar0: &IoMap, addr: u32, value: u32) -> bool {
-    bar0.write32(reg::CSIDR, value);
-    bar0.write32(reg::CSIAR, CSIAR_FLAG | (addr & 0xfff) | CSIAR_BYTE_ENABLE);
-    for _ in 0..CSI_POLL_ITERS {
-        if bar0.read32(reg::CSIAR) & CSIAR_FLAG == 0 {
-            return true;
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(OCP_POLL_STEP_US));
-    }
-    false
-}
-
-/// Selects which events may pull the chip out of ASPM L1
-/// (`rtl_enable_exit_l1`, the `VER_40...LAST` row: `OCP 0xc0ac |= 0x1f80`).
-///
-/// The bits name the wake sources: 12 rxdv, 11 ltr_msg, **10 txdma_poll**,
-/// 9 xadm, 8 pktavi, 7 txpla. Without `txdma_poll` the transmit queue's own
-/// poll -- the doorbell this driver rings for every frame -- cannot wake the
-/// chip, so registers keep answering while descriptor fetches are dropped once
-/// the link has idled (measured: frames go out immediately after start and are
-/// ignored about a second later).
-fn enable_l1_exit_events(bar0: &IoMap) {
-    mac_ocp_modify(bar0, 0xc0ac, 0x0000, 0x1f80);
-    log::info!(
-        "rtl8125: l1 exit events {:#06x} (txdma_poll included)",
-        mac_ocp_read(bar0, 0xc0ac),
-    );
-}
-
 /// Reads a MAC-side OCP register./// Reads a MAC-side OCP register.
 ///
 /// The MAC window is synchronous: program the address and read the data back
@@ -937,35 +682,7 @@ fn mac_ocp_modify(bar0: &IoMap, reg: u16, mask: u16, set: u16) {
     mac_ocp_write(bar0, reg, (value & !mask) | set);
 }
 
-/// The parts of the vendor's `rtl8125_hw_config` this port had not transcribed.
-///
-/// Each item is a direct translation of one call in that function, in the order
-/// the vendor makes them; the ring bases, `TxConfig`, `RxConfig`, queue numbers
-/// and the OCP block are programmed elsewhere in this driver.
-fn vendor_hw_config_extra(bar0: &IoMap) {
-    // `rtl8125_disable_rx_packet_filter`: clear every accept bit before
-    // reconfiguring. The driver writes them back when the engines start.
-    let rx_config = bar0.read32(reg::RX_CONFIG);
-    bar0.write32(reg::RX_CONFIG, rx_config & !RX_ACCEPT_MODE);
-
-    // "keep magic packet only": drop the other wake-on-LAN reasons.
-    mac_ocp_modify(bar0, 0xc0b6, 0x0001, 0x0000);
-    // `rtl8125_enable_extend_tally_couter`.
-    mac_ocp_modify(bar0, 0xea84, 0x0000, 0x0003);
-    // `rtl8125_disable_double_vlan`.
-    bar0.write16(reg::DOUBLE_VLAN_CONFIG, 0);
-    // `_rtl8125_set_l1_l0s_entry_latency(0x27)`: PCI config 0x70c bits [29:24]
-    // (above 0xff, so it is reached through the CSI window).
-    if let Some(value) = csi_read(bar0, 0x70c) {
-        let _ = csi_write(bar0, 0x70c, (value & 0xc0ff_ffff) | (0x27 << 24));
-    }
-    log::info!(
-        "rtl8125: vendor hw_config extras applied, csi 0x70c {:#010x}",
-        csi_read(bar0, 0x70c).unwrap_or(0),
-    );
-}
-
-/// Reads one MDIO register through the `GPHY_OCP` tunnel./// Reads one MDIO register through the `GPHY_OCP` tunnel.
+/// Reads one MDIO register through the `GPHY_OCP` tunnel.
 ///
 /// RTL8125 has no legacy `PHYAR` register: the integrated PHY is reached by
 /// programming an OCP address of `0xa400 + mdio_reg * 2` and waiting for the
@@ -1314,7 +1031,7 @@ impl Rtl8125Nic {
     /// interrupt-driven.
     fn late_init(&self) {
         // ldp:step link.late-init
-        tgoskits_start(self);
+        bring_up_mac(self);
         log::info!("rtl8125: late init done (link settled)");
     }
 
@@ -1630,10 +1347,6 @@ impl DriverOps<PciBus> for Rtl8125Driver {
             bar0.read32(reg::RX_CONFIG),
         );
 
-        reset_and_configure(&bar0, chip)?;
-        log::info!("rtl8125: re-running the start sequence against the live link");
-        reset_and_configure(&bar0, chip)?;
-
         let phy_id1 = mii_read(&bar0, MII_PHYSID1).unwrap_or(0);
         let phy_id2 = mii_read(&bar0, MII_PHYSID2).unwrap_or(0);
         let bmcr = mii_read(&bar0, MII_BMCR).unwrap_or(0);
@@ -1686,7 +1399,12 @@ impl DriverOps<PciBus> for Rtl8125Driver {
             tx_completed: AtomicU64::new(0),
             rx_frames: AtomicU64::new(0),
         };
-        start_data_path(&nic)?;
+        bring_up_mac(&nic);
+        let (tx_ring_addr, rx_ring_addr) = (nic.tx_ring.bus_addr(), nic.rx_ring.bus_addr());
+        log::info!(
+            "rtl8125: {chip} up, rings tx {TX_DESC_COUNT}x{TX_SLOT_LEN}B @ {tx_ring_addr:#x}, rx \
+             {RX_DESC_COUNT}x{RX_SLOT_LEN}B @ {rx_ring_addr:#x}"
+        );
 
         let publication = dev
             .publish(&subsys_net::NET, Box::new(nic), "rtl8125")
