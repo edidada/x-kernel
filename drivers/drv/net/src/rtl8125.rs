@@ -149,6 +149,16 @@ const DESC_RING_END: u32 = 1 << 30;
 /// Packet boundaries for a one-buffer frame.
 const DESC_FIRST_FRAG: u32 = 1 << 29;
 const DESC_LAST_FRAG: u32 = 1 << 28;
+/// The one receive status bit that vetoes a completion.
+///
+/// The 8125B hardware supports the type-3/type-4 receive descriptor rings, but
+/// the reference driver only switches to them when RSS or PTP is enabled, so the
+/// active layout is type 1, where a frame is bad iff `RxRES` (bit 21) is set.
+/// The per-cause bits (`RxRWT` 22, `RxRUNT` 20, `RxCRC` 19) are only statistics:
+/// bit 18 is set on every good frame here, so a mask that includes it -- or the
+/// type-4 layout's bits 22/21/20 -- silently drops the whole receive path.
+const RX_ERR_MASK: u32 = 1 << 21;
+
 /// Receive length lives in the low 14 bits of `opts1`.
 const RX_LEN_MASK: u32 = 0x3fff;
 /// `RxMaxSize` is written as "largest frame + 1" (the reference comments that
@@ -1190,39 +1200,8 @@ impl NetDevice for Rtl8125Nic {
                 khal::time::busy_wait(ktime_types::TimeSpan::from_micros(TX_POLL_STEP_US));
             }
             log::info!(
-                "rtl8125: tx[{}] len {frame_len} desc {:#010x} -> {:#010x} reclaimed {reclaimed} \
-                 cmd {:#04x} intr {:#06x} rx[0] {:#010x}",
+                "rtl8125: tx[{}] len {frame_len} reclaimed {reclaimed}",
                 index,
-                DESC_OWN | DESC_FIRST_FRAG | DESC_LAST_FRAG | ring_end | frame_len as u32,
-                Self::desc_opts1(desc),
-                self.bar0.read8(reg::CHIP_CMD),
-                self.bar0.read32(reg::INTR_STATUS),
-                Self::desc_opts1(self.rx_desc(0)),
-            );
-            log::info!(
-                "rtl8125: state txring {:#010x}:{:#010x} rxring {:#010x}:{:#010x} txpoll {:#06x} \
-                 mcu {:#04x}",
-                self.bar0.read32(reg::TX_DESC_ADDR_HIGH),
-                self.bar0.read32(reg::TX_DESC_ADDR_LOW),
-                self.bar0.read32(reg::RX_DESC_ADDR_HIGH),
-                self.bar0.read32(reg::RX_DESC_ADDR_LOW),
-                self.bar0.read16(reg::TX_POLL_8125),
-                self.bar0.read8(reg::MCU),
-            );
-            let rx_done = (0..RX_DESC_COUNT)
-                .filter(|i| Self::desc_opts1(self.rx_desc(*i)) & DESC_OWN == 0)
-                .count();
-            let tx_done = (0..TX_DESC_COUNT)
-                .filter(|i| Self::desc_opts1(self.tx_desc(*i)) & DESC_OWN == 0)
-                .count();
-            log::info!(
-                "rtl8125: ring consumption tx_done {tx_done}/{TX_DESC_COUNT} rx_done \
-                 {rx_done}/{RX_DESC_COUNT}",
-            );
-            log::info!(
-                "rtl8125: mac phy_status {:#04x} (link_up {})",
-                self.bar0.read8(reg::PHY_STATUS),
-                self.bar0.read8(reg::PHY_STATUS) & 0x02 != 0,
             );
         }
         Ok(())
@@ -1253,10 +1232,14 @@ impl NetDevice for Rtl8125Nic {
             }
             Self::barrier_acquire();
             let len = (opts1 & RX_LEN_MASK) as usize;
+            // Receive status bits the reference driver checks before handing a
+            // frame up: overflow, runt, CRC error and the "status valid" bit.
+            // ldp:step rx.check-status
+            let has_error = opts1 & RX_ERR_MASK != 0;
             let mut buf = self.pool.alloc_boxed().ok_or(KError::NoMemory)?;
-            if len == 0 || len > RX_SLOT_LEN {
-                // A zero-length or over-long completion is a descriptor error,
-                // not a packet: re-arm and keep looking.
+            if len == 0 || len > RX_SLOT_LEN || has_error {
+                // A zero-length, over-long or error completion is not a packet:
+                // re-arm and keep looking.
                 self.arm_rx(index);
                 index = (index + 1) % RX_DESC_COUNT;
                 continue;

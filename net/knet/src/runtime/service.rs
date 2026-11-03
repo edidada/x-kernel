@@ -725,6 +725,14 @@ impl Service {
         if has_protocol_expired || has_reassembly_expired {
             self.publish_timer_expiration();
         }
+
+        // Poll-mode devices have no receive interrupt, so this tick is the only
+        // thing that can make the device hand a frame up: without it a reply
+        // that arrives while the stack is idle waits for the next transmit (or
+        // for a protocol timer) and a ping round trip turns into a second.
+        // Interrupt-driven devices notify on their own, and an idle round costs
+        // one pass over the device list that finds nothing.
+        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
     }
 
     fn publish_timer_expiration(&self) {
