@@ -470,13 +470,34 @@ ring consumption tx_done 255/256 rx_done 0/256
 TX 描述符 opts1/opts2 的**原始字节**与我们写的是否存在我们没意识到的差异；
 `/dev/mem` 走不通（`STRICT_DEVMEM`），见 board-automation §5.8。
 
+### 4.1.2g PHY 配置与 link 状态机已补，仍不消费
+
+- **`start.phy-config` 已移植**（`hw_phy_config_8125b`：3 条分页行 + 0x0b87 直写块 +
+  10 条 `phy_param` + 2 条分页行 + 铜口 1000BASE-T 广播/重启 autoneg）。
+  生效证据：`phy config applied, bmcr 0x1040 ctrl1000 0x0200`。
+- 重启 autoneg 让链路瞬断，于是第一次发送时 `IntrStatus` 里出现
+  **`LINK_CHANGE`(bit5)** —— 这暴露了我们的另一个真实缺失：**没有 link 状态机**。
+  参考驱动在 link 变化后重配 MAC（`rtl_task → rtl8169_check_link_status →
+  rtl_hw_start`）。已实现 `handle_link_change`：ack 事件 → 读 `phy_status` →
+  重跑 `program_ring_bases` + `arm_receive_ring` + `program_engine_config`。
+  实测触发正常：`link change handled, phy_status 0x93 link_up true -> reprogramming`。
+- 但重配之后**描述符仍不被消费**。
+
+至此参考实现 `start` 路径上"我们没做"的只剩 `start.irq-enable` 与
+`start.tally-counter`（`make ldp-sequence` 会列）。也就是说：
+**寄存器层面的初始化序列基本对齐完了**，剩下的结构性差异是**中断驱动 vs 纯轮询**。
+
+`phy_status` 在 PHY 配置前后发生了变化（`0x8b` → `0x93`，bit3/bit4 不同，疑似
+speed 编码变化），这点值得在下一步一起确认——如果协商结果与我们给 MAC 的配置
+不匹配，TX 也可能停摆。
+
 **下一步（按优先级）**：
-1. 移植 `start.phy-config`（`hw_phy_config_8125b` 的分页 PHY 写 + 铜口 autoneg
-   广播/重启）：tgoskits 的实现约 15 行，可直接作为参考；这是参考板做了而
-   我们没做的最后一段。
-2. 补 `start.phy-config`（`rtl8125b_hw_phy_config`）：EPHY 表已做，PHY 调优未做。
-3. 若 1 仍不解决，转 MSI-X + 中断驱动（`start.irq-enable`）：参考实现靠中断
-   服务 RX/TX 完成，而我们纯轮询且 INTx 未路由。
+1. **MSI-X + 中断驱动**（`start.irq-enable`）：参考实现靠中断服务 TX/RX 完成；
+   本板 INTx 未路由（`interrupt line = 0xff`），所以必须先做 MSI-X
+   （`pci::msix` 有骨架）。这是当前唯一剩下的结构性差异。
+2. 核对 `phy_status` 的 speed 编码（`0x8b` vs `0x93`）与 MAC 侧配置是否一致。
+3. 若能拿到 vendor `r8125` 源码（9.014.01），直接与我们的 `start` 序列做一次
+   逐行 diff —— 这是比继续二分更快的收口方式。
    在 `ChipCmd` 使能**之前**做的最后一段，我们完全没移植。参考板用的是同一个
    驱动路径，而 U-Boot 的 r8169 不发 EPHY 表也能发——但 U-Boot 的发送紧接着初始化，
    恰好落在"能发"的窗口内，所以它不能作为"不需要 EPHY"的证据。

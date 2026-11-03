@@ -225,6 +225,14 @@ note = "accept broadcast|multicast|own；本 port 写在 RX_CONFIG_8125B | RX_AC
 v2 = "anchored"
 
 [[path.step]]
+id = "link.change-reprogram"
+src = "r8169_main.c:1962"
+op = "call"
+target = "rtl_task -> rtl8169_check_link_status -> rtl_hw_start"
+note = "link 变化后重配 MAC；本 port 在 send 里检查 LINK_CHANGE 并重跑 ring/engine 配置"
+v2 = "anchored"
+
+[[path.step]]
 id = "start.irq-enable"
 src = "r8169_main.c:4125"
 op = "call"
@@ -247,8 +255,8 @@ id = "start.phy-config"
 src = "r8169_main.c:3452"
 op = "call"
 target = "rtl8125b_hw_phy_config"
-note = "PHY 专有调优（EPHY/OCP 表）；链路已能 up，故尚未移植"
-v2 = "unported"
+note = "hw_phy_config_8125b：分页 PHY 表 + 参数块 + 铜口 1000BASE-T 广播/重启 autoneg"
+v2 = "anchored"
 
 # ---- tx：发送路径的强制规则（mainline: rtl_quirk_packet_padto）----
 [[path]]

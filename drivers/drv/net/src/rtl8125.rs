@@ -123,6 +123,17 @@ const MII_BMSR: u16 = 0x01;
 const MII_PHYSID1: u16 = 0x02;
 const MII_PHYSID2: u16 = 0x03;
 
+/// Extra MDIO registers used by the PHY bring-up.
+const MII_CTRL1000: u16 = 0x09;
+/// BMCR bits: autoneg enable/restart.
+const BMCR_ANENABLE: u16 = 0x1000;
+const BMCR_ANRESTART: u16 = 0x0200;
+const BMCR_AUTONEG_MASK: u16 = BMCR_ANENABLE | BMCR_ANRESTART;
+/// `MII_CTRL1000` advertisement for 1000BASE-T full duplex.
+const ADVERTISE_1000FULL: u16 = 0x0200;
+const ADVERTISE_1000_HALF: u16 = 0x0100;
+const ADVERTISE_1000_MASK: u16 = ADVERTISE_1000_HALF | ADVERTISE_1000FULL;
+
 /// `BMSR_LSTATUS`: the PHY currently has a link.
 const BMSR_LSTATUS: u16 = 0x0004;
 
@@ -177,6 +188,8 @@ const TX_POLL_STEP_US: u64 = 10;
 static TX_TRACE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// `IntrStatus` bit 7: the transmit queue found no owned descriptor.
 const INTR_TX_DESC_UNAVAILABLE: u32 = 0x80;
+/// `IntrStatus` bit 5: the link state changed (up/down, speed, duplex).
+const INTR_LINK_CHANGE: u32 = 1 << 5;
 
 /// `RxConfig` accept bits: broadcast, multicast, and frames addressed to our
 /// own station address (`rx_mode_bits` in the reference).
@@ -685,6 +698,9 @@ fn reset_and_configure(bar0: &IoMap, chip: &str) -> Result<(), ProbeError> {
         "rtl8125: {chip} tx descriptor format {:#06x} (legacy 16-byte when bit0 is clear)",
         mac_ocp_read(bar0, OCP_TX_DESC_FORMAT),
     );
+    // ldp:step start.phy-config
+    hw_phy_config_8125b(bar0);
+
     // RX/TX configuration is write-protected behind the Cfg9346 latch.
     bar0.write8(reg::CFG_9346, CFG_9346_UNLOCK);
     bar0.write32(reg::RX_CONFIG, RX_CONFIG_8125B);
@@ -920,7 +936,99 @@ fn mii_read(bar0: &IoMap, mdio_reg: u16) -> Option<u16> {
     None
 }
 
-/// Current link state, from the PHY's status register.
+/// Writes one MDIO register through the `GPHY_OCP` tunnel.
+fn mii_write(bar0: &IoMap, mdio_reg: u16, value: u16) {
+    let ocp = OCP_STD_PHY_BASE + u32::from(mdio_reg) * 2;
+    bar0.write32(reg::GPHY_OCP, OCP_FLAG | (ocp << 15) | u32::from(value));
+    for _ in 0..OCP_POLL_ITERS {
+        if bar0.read32(reg::GPHY_OCP) & OCP_FLAG == 0 {
+            return;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(OCP_POLL_STEP_US));
+    }
+}
+
+/// Read-modify-write of one MDIO register.
+fn mii_modify(bar0: &IoMap, mdio_reg: u16, mask: u16, set: u16) {
+    let value = mii_read(bar0, mdio_reg).unwrap_or(0);
+    mii_write(bar0, mdio_reg, (value & !mask) | set);
+}
+
+/// Read-modify-write of a register in a paged MDIO bank.
+///
+/// The PHY exposes one register window (`0x1f` selects the page), so every
+/// access saves and restores the page exactly like the reference helpers
+/// (`phy_modify_paged`).
+fn mii_modify_paged(bar0: &IoMap, page: u16, mdio_reg: u16, mask: u16, set: u16) {
+    let old_page = mii_read(bar0, 0x1f).unwrap_or(0);
+    mii_write(bar0, 0x1f, page);
+    mii_modify(bar0, mdio_reg, mask, set);
+    mii_write(bar0, 0x1f, old_page);
+}
+
+/// Writes a "param" register: page `0x0a43`, address in `0x13`, data in `0x14`.
+fn mii_write_param(bar0: &IoMap, param: u16, mask: u16, set: u16) {
+    let old_page = mii_read(bar0, 0x1f).unwrap_or(0);
+    mii_write(bar0, 0x1f, 0x0a43);
+    mii_write(bar0, 0x13, param);
+    mii_modify(bar0, 0x14, mask, set);
+    mii_write(bar0, 0x1f, old_page);
+}
+
+/// `rtl8125b_hw_phy_config`: the PHY-side tuning the vendor driver runs for
+/// this part, plus the copper advertisement.
+///
+/// This is the last block of the reference's start sequence the port was
+/// missing. Rows are `phy_modify_paged` / `phy_write` / `phy_param` calls in the
+/// reference's order; EEE tuning is deliberately not included (EEE is off).
+fn hw_phy_config_8125b(bar0: &IoMap) {
+    mii_modify_paged(bar0, 0x0a44, 0x11, 0x0000, 0x0800);
+    mii_modify_paged(bar0, 0x0ac4, 0x13, 0x00f0, 0x0090);
+    mii_modify_paged(bar0, 0x0ad3, 0x10, 0x0003, 0x0001);
+
+    // Direct (non-paged) block on the magic page 0x0b87.
+    mii_write(bar0, 0x1f, 0x0b87);
+    mii_write(bar0, 0x16, 0x80f5);
+    mii_write(bar0, 0x17, 0x760e);
+    mii_write(bar0, 0x16, 0x8107);
+    mii_write(bar0, 0x17, 0x360e);
+    mii_write(bar0, 0x16, 0x8551);
+    mii_modify(bar0, 0x17, 0xff00, 0x0800);
+    mii_write(bar0, 0x1f, 0x0000);
+
+    mii_modify_paged(bar0, 0x0bf0, 0x10, 0xe000, 0xa000);
+    mii_modify_paged(bar0, 0x0bf4, 0x13, 0x0f00, 0x0300);
+    for param in [
+        0x8044, 0x804a, 0x8050, 0x8056, 0x805c, 0x8062, 0x8068, 0x806e, 0x8074, 0x807a,
+    ] {
+        mii_write_param(bar0, param, 0xffff, 0x2417);
+    }
+    mii_modify_paged(bar0, 0x0a4c, 0x15, 0x0000, 0x0040);
+    mii_modify_paged(bar0, 0x0bf8, 0x12, 0xe000, 0xa000);
+    mii_modify_paged(bar0, 0x0a5b, 0x12, 1 << 15, 0x0000);
+
+    // Copper advertisement: 1000BASE-T full, then restart autonegotiation.
+    mii_write(bar0, 0x1f, 0x0000);
+    let ctrl1000 = mii_read(bar0, MII_CTRL1000).unwrap_or(0);
+    mii_write(
+        bar0,
+        MII_CTRL1000,
+        (ctrl1000 & !ADVERTISE_1000_MASK) | ADVERTISE_1000FULL,
+    );
+    let bmcr = mii_read(bar0, MII_BMCR).unwrap_or(0);
+    mii_write(
+        bar0,
+        MII_BMCR,
+        (bmcr & !BMCR_AUTONEG_MASK) | BMCR_ANENABLE | BMCR_ANRESTART,
+    );
+    log::info!(
+        "rtl8125: phy config applied, bmcr {:#06x} ctrl1000 {:#06x}",
+        mii_read(bar0, MII_BMCR).unwrap_or(0),
+        mii_read(bar0, MII_CTRL1000).unwrap_or(0),
+    );
+}
+
+/// Current link state, from the PHY's status register./// Current link state, from the PHY's status register.
 ///
 /// `BMSR_LSTATUS` is **latched low**: a link that dropped since the last read
 /// still reports up once, so it has to be read twice and the second read is
@@ -1041,6 +1149,33 @@ impl Rtl8125Nic {
     }
 }
 
+impl Rtl8125Nic {
+    /// Handles a link change the way the reference's link watchdog does.
+    ///
+    /// Speed and duplex changes invalidate the MAC configuration the start
+    /// sequence installed, so the rings and engine configuration have to be
+    /// programmed again. Without this the driver keeps a MAC configured for a
+    /// link that no longer exists -- visible as `LINK_CHANGE` in the interrupt
+    /// status while every register still reads plausibly.
+    fn handle_link_change(&self) {
+        let status = self.bar0.read32(reg::INTR_STATUS);
+        if status & INTR_LINK_CHANGE == 0 {
+            return;
+        }
+        // Acknowledge the event, then see where the link ended up.
+        self.bar0.write32(reg::INTR_STATUS, INTR_LINK_CHANGE);
+        let phy_status = self.bar0.read8(reg::PHY_STATUS);
+        let is_up = phy_status & 0x02 != 0;
+        log::info!(
+            "rtl8125: link change handled, phy_status {phy_status:#04x} link_up {is_up} -> \
+             reprogramming"
+        );
+        program_ring_bases(self);
+        arm_receive_ring(self);
+        program_engine_config(self);
+    }
+}
+
 impl NetDevice for Rtl8125Nic {
     fn mac(&self) -> MacAddress {
         MacAddress(self.mac)
@@ -1090,6 +1225,10 @@ impl NetDevice for Rtl8125Nic {
             drop(unsafe { NetBuf::from_handle(tx_buf) });
             return Err(KError::InvalidInput);
         }
+        // A pending link change means the MAC configuration is stale; recover
+        // before handing over this frame.
+        self.handle_link_change();
+
         let mut state = self.state.lock();
         let index = state.tx_next;
         let next = (index + 1) % TX_DESC_COUNT;
