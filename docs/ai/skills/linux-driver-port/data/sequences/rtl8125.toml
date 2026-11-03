@@ -11,13 +11,18 @@
 [port]
 name = "rtl8125"
 crate_path = "drivers/drv/net"
-authoritative = "linux-7.1.8:drivers/net/ethernet/realtek/r8169_main.c"
+# PCIe 配置调优（MRRS）属于 bus 层，锚点在那里。
+crate_paths = ["drivers/bus/pci"]
+authoritative = "realtek-r8125:src/r8125_n.c"
 provenance = """
 board: `modinfo r8125 | head -3` ->
   filename: /lib/modules/6.1.99-rockchip-rk3588/kernel/drivers/net/ethernet/realtek/r8125/r8125.ko
   version:  9.014.01-NAPI
-vendor 源码离线不可得，序列取自 mainline r8169（含 8125 分支），
-并用参考板 r8125 运行态的寄存器 dump 交叉验证（bring-up log §4.1.1）。
+源码: curl -sL https://codeload.github.com/awesometic/realtek-r8125-dkms/tar.gz/refs/heads/master
+      -> Realtek r8125 9.018.00-NAPI, 已解到 /workspace/r8125-vendor-9.018.00
+      (data/references.json 里 id=realtek-r8125)
+序列由 `ldp sequence extract` 从该源码抽取；mainline r8169 只作交叉验证，
+两者在 TxConfig/RxConfig 表值、OCP 行、hw_config 顺序上确有差异。
 """
 # 可达性起点：两条 probe 路径 + 框架通过 trait object 进入的数据面入口
 # （`send`/`recv` 等由 `NetDevice` vtable 调用，静态调用图里看不到）。
@@ -29,6 +34,8 @@ entries = [
   "recycle_tx",
   "recycle_rx",
   "alloc_tx_buf",
+  # PCIe 配置调优在 bus 层：枚举时对每个 function 调用一次。
+  "discover_root",
 ]
 
 # ---- init：MAC MCU / link-list 初始化（mainline: rtl_hw_init_8125）----
@@ -286,3 +293,94 @@ op = "call"
 target = "rtl8169_tso_csum_v2"
 note = "校验和/TSO 卸载；本 port 走软件栈，opts2 保持 0"
 v2 = "waived"
+
+# ---- vendor r8125 (authoritative) 里我们逐项确认过的额外步骤 ----
+[[path]]
+name = "vendor-config"
+
+[[path.step]]
+id = "cfg.mrrs"
+src = "r8125_n.c:18676"
+op = "write"
+target = "PCI config 0x79 bits[6:4]"
+value = "0x40 (=2048B)"
+note = "Max Read Request Size；影响描述符抓取的读请求尺寸"
+v2 = "anchored"
+
+[[path.step]]
+id = "cfg.force-clkreq-off"
+src = "r8125_n.c:5606"
+op = "call"
+target = "rtl8125_enable_force_clkreq(0)"
+note = "参考板实测 Config2/Config5 的 ClkReq/ASPM 位是开着的，我们不动"
+v2 = "waived"
+
+[[path.step]]
+id = "cfg.aspm-clkreq-lock-off"
+src = "r8125_n.c:5615"
+op = "call"
+target = "rtl8125_enable_aspm_clkreq_lock(0)"
+note = "与上一行同因：参考板这些电源位是开着的，改了反而偏离工作实例（实测会退）"
+v2 = "waived"
+
+[[path.step]]
+id = "cfg.rx-packet-filter-off"
+src = "r8125_n.c:4682"
+op = "call"
+target = "rtl8125_disable_rx_packet_filter"
+note = "配置前先关掉 RX 包过滤器；我们直接写 accept 位"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.tally-addr"
+src = "r8125_n.c:8034"
+op = "call"
+target = "rtl8125_tally_counter_addr_fill"
+note = "把 CounterAddrLow/High 指向 tally 缓冲（DMA 写）"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.extend-tally"
+src = "r8125_n.c:5586"
+op = "rmw"
+target = "OCP(0xea84) |= BIT(1)|BIT(0)"
+note = "扩展统计计数器使能"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.tcam-enable"
+src = "r8125_n.c:18804"
+op = "call"
+target = "rtl8125_enable_tcam"
+note = "CFG_METHOD_2..7（含 8125B）都会做 TCAM 初始化"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.l1-l0s-latency"
+src = "r8125_n.c:18650"
+op = "call"
+target = "rtl8125_set_l1_l0s_entry_latency"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.ephy-config-8125b"
+src = "r8125_n.c:8977"
+op = "call"
+target = "rtl8125_hw_ephy_config"
+note = "该函数在 8125B 路径上共 76 步；我们只照 r8169 做了 6 行 EPHY 表"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.phy-config-full"
+src = "r8125_n.c:14954"
+op = "call"
+target = "rtl8125_hw_phy_config"
+note = "vendor 版本 19 步（比 r8169 的 8125B 表更长）"
+v2 = "unported"
+
+[[path.step]]
+id = "cfg.desc-addr-fill"
+src = "r8125_n.c:19567"
+op = "call"
+target = "rtl8125_desc_addr_fill"
+v2 = "anchored"

@@ -161,6 +161,7 @@ pub fn discover_root<C: crate::ConfigurationAccess>(
                 Ok(added) => log::debug!("pci: registered {added:?}"),
                 Err(err) => log::warn!("pci: device registration rejected: {err:?}"),
             }
+            tune_pcie_device_control(root, bdf, info.vendor_id, info.device_id);
             // info, not debug: this line is the enumeration evidence (BDF,
             // ids and the BAR resources the descriptor carries).
             log::info!(
@@ -270,4 +271,64 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
     }
     #[cfg(not(target_arch = "x86_64"))]
     None
+}
+
+/// Raises a function's PCIe Max Read Request Size to 2048 bytes and logs the
+/// result.
+///
+/// MRRS governs how large a memory read the endpoint may issue, and descriptor
+/// fetching is exactly that: a read. The vendor r8125 driver raises it to 2048
+/// bytes (`pci_write_config_byte(pdev, 0x79, 0x40)`) on every chip it drives,
+/// while firmware leaves the PCIe default of 512 here. Whether 512 is enough is
+/// device-specific, but matching the proven driver costs one config write and
+/// removes the field as a variable.
+fn tune_pcie_device_control<C: crate::ConfigurationAccess>(
+    root: &mut crate::PciRoot<C>,
+    bdf: crate::DeviceFunction,
+    vendor_id: u16,
+    device_id: u16,
+) {
+    const PCIE_CAP_ID: u8 = 0x10;
+    const DEVICE_CONTROL_OFFSET: u8 = 0x08;
+    const MRRS_SHIFT: u32 = 12;
+    const MRRS_2048: u32 = 4;
+
+    let mut caps = root.capabilities(bdf);
+    let Some(offset) = caps
+        .find(|cap| cap.id == PCIE_CAP_ID)
+        .map(|cap| cap.offset.wrapping_add(DEVICE_CONTROL_OFFSET))
+    else {
+        return;
+    };
+
+    // Config space is accessed in 32-bit words; Device Control straddles none
+    // of them because the PCIe capability is 4-byte aligned.
+    let word_offset = offset & !0x3;
+    let shift = u32::from(offset & 0x3) * 8;
+    let word = root.configuration_access.read_word(bdf, word_offset);
+    let control = (word >> shift) & 0xffff;
+    let mps = (control >> 5) & 0x7;
+    let mrrs = (control >> 12) & 0x7;
+    log::info!(
+        "pci: {:04x}:{:04x} device control {control:#06x} (max payload {}B, max read request {}B)",
+        vendor_id,
+        device_id,
+        128u32 << mps,
+        128u32 << mrrs,
+    );
+    if mrrs >= MRRS_2048 {
+        return;
+    }
+    // ldp:step cfg.mrrs
+    let updated = (control & !(0x7 << MRRS_SHIFT)) | (MRRS_2048 << MRRS_SHIFT);
+    let new_word = (word & !(0xffff << shift)) | (u32::from(updated as u16) << shift);
+    root.configuration_access
+        .write_word(bdf, word_offset, new_word);
+    let readback = (root.configuration_access.read_word(bdf, word_offset) >> shift) & 0xffff;
+    log::info!(
+        "pci: {:04x}:{:04x} max read request raised to {}B (device control {readback:#06x})",
+        vendor_id,
+        device_id,
+        128u32 << ((readback >> MRRS_SHIFT) & 0x7),
+    );
 }

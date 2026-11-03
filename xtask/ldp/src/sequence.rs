@@ -37,7 +37,12 @@ pub struct PortMeta {
     /// port 名（与 `data/sequences/<port>.toml` 同名）。
     pub name: String,
     /// v2 侧要扫描锚点的 crate 目录（相对仓库根）。
+    #[serde(default)]
     pub crate_path: String,
+    /// 额外的 crate 目录：一步可能落在别的 crate（例如 PCIe 配置调优属于
+    /// host 侧的 bus crate），锚点因此要跨 crate 扫描。
+    #[serde(default)]
+    pub crate_paths: Vec<String>,
     /// 权威参考源码：`<tree>:<file>`。必须是**板子上真正在跑的那个驱动**。
     pub authoritative: String,
     /// 怎么确认它是权威源的（可复现命令 + 预期输出片段）。空 = 门禁失败。
@@ -169,8 +174,15 @@ fn check_one(doc: &SequenceDoc, strict: bool) -> Result<bool, String> {
         ok = false;
     }
 
-    let crate_dir = repo::repo_root().join(&doc.port.crate_path);
-    let sources = collect_sources(&crate_dir)?;
+    let mut sources = Vec::new();
+    let mut dirs: Vec<&str> = Vec::new();
+    if !doc.port.crate_path.is_empty() {
+        dirs.push(&doc.port.crate_path);
+    }
+    dirs.extend(doc.port.crate_paths.iter().map(String::as_str));
+    for dir in dirs {
+        sources.extend(collect_sources(&repo::repo_root().join(dir))?);
+    }
     let anchors = collect_anchors(&sources);
     let reachable = reachable_functions(&sources, &doc.port.entries);
 
@@ -548,6 +560,7 @@ pub fn extract(file: &Path, function: &str, path_name: &str) -> Result<(), Strin
         port: PortMeta {
             name: function.to_string(),
             crate_path: String::from("TODO/填入 v2 crate 路径"),
+            crate_paths: Vec::new(),
             authoritative: format!("TODO:<tree>:{file_name}"),
             provenance: String::new(),
             entries: vec![String::from("TODO")],

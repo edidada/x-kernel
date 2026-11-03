@@ -403,6 +403,7 @@ fn program_ring_bases(nic: &Rtl8125Nic) {
         reg::RX_DESC_ADDR_LOW,
         (nic.rx_ring.bus_addr() & u64::from(u32::MAX)) as u32,
     );
+    // ldp:step cfg.desc-addr-fill
     // How many descriptors one transmit doorbell may fetch. The chip comes up
     // with 1, which means a doorbell pulls exactly one descriptor; the vendor
     // driver sets 16 here. Measured difference: the register reads 0x01 on
@@ -1183,6 +1184,7 @@ impl Rtl8125Nic {
     /// link that no longer exists -- visible as `LINK_CHANGE` in the interrupt
     /// status while every register still reads plausibly.
     fn handle_link_change(&self) {
+        // ldp:step link.change-reprogram
         let status = self.bar0.read32(reg::INTR_STATUS);
         if status & INTR_LINK_CHANGE == 0 {
             return;

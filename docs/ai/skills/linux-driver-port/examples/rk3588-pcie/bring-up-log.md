@@ -567,6 +567,31 @@ curl -sL -o r8125.tgz \
 
 补上 TDFNR 与上述 OCP 行后复测：**TX 仍不消费**。
 
+### 4.1.4 序列门禁现在跑在 vendor 源码上（41 步 / 9 未移植）
+
+`data/sequences/rtl8125.toml` 的 `authoritative` 已改成 vendor 源码，并支持
+**跨 crate 锚点**（`crate_paths = ["drivers/bus/pci"]`）——因为 PCIe 配置调优属于
+bus 层，不在驱动 crate 里。当前门禁输出：
+
+```
+步骤 41：anchored 26 / waived 6 / unported 9
+未移植：start.irq-enable, start.tally-counter,
+        cfg.rx-packet-filter-off, cfg.tally-addr, cfg.extend-tally,
+        cfg.tcam-enable, cfg.l1-l0s-latency, cfg.ephy-config-8125b,
+        cfg.phy-config-full
+```
+
+**已按 vendor 做法补的一项**：`cfg.mrrs` —— 枚举时把每个 function 的
+`PCI config 0x79 bits[6:4]`（Max Read Request Size）从固件留下的 **512B** 提到
+vendor 使用的 **2048B**：
+
+```
+pci: 10ec:8125 device control 0x2010 (max payload 128B, max read request 512B)
+pci: 10ec:8125 max read request raised to 2048B (device control 0x4010)
+```
+
+TX 仍不消费，所以 MRRS 也不是根因。
+
 **下一步（按优先级）**：
 1. **顺着 TX 读指针线索做一次干净实验**（见上）：t+0 用 `send` 发第 1 帧、t+5 s
    发第 2 帧，比较两帧的 `reclaimed`。若第 2 帧也不被消费，则指针假说成立，
