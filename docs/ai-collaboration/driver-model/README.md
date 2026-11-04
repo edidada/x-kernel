@@ -1,5 +1,17 @@
 # 新驱动框架模型：协作进度
 
+## 当前优先级：按职责替换，先整理 PR-01
+
+用户明确调整主线合入方式：每个 PR 用新实现接管一个完整职责、迁移全部消费者、
+删除被替代的旧实现，不采用整套新旧框架平行合入再逐个迁移的方式。
+允许新能力层服务尚未替换的设备模型，不允许同一职责保留两套实现。
+当前大分支作为开发底稿保留；transport 开发先暂停。
+
+先整理 [PR-01：统一 OS 能力层并退役 device-res](mainline-replacement-pr01.md)。
+已核对 main 基线和消费者；当前 os-api 还缺旧模型的 threaded IRQ、CPU/time
+能力，DMA 获取合同也需收口，不能直接搬入并删除旧 crate。此时是 PR 范围整理，
+尚未生成代码 PR、推送或完成验收。PR-01 整理至可评审状态后再继续 transport。
+
 ## 当前处理顺序：RNG 生命周期评审收口
 
 用户要求集中整理问题、分批解决，特别明确缺少独立 virtio-mmio 驱动职责。
@@ -14,8 +26,8 @@
 M-04/M-05 已按用户确认名称整理：unregister_device、Bound、
 PlatformRngRegistration、ensure_root_initialized；澄清 online/attempted/path
 合同，单独清理无实际转换的 Removed。model+kdriver+procfs 最终回归 213/0/6，
-两路 review 无阻断，详见计划中的第三批验收。下一步是 M-06 transport 分层
-设计收口，不直接恢复平台迁移开发。
+两路 review 无阻断，详见计划中的第三批验收。M-06 transport 分层设计保留，
+当前优先执行上方 PR-01 职责替换整理，不直接恢复平台迁移开发。
 
 ## 平台 / VirtIO-MMIO 枚举迁移（暂停，保留设计稿）
 
