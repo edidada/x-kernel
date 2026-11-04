@@ -9,6 +9,8 @@
 与串口接管推进。[对象关系与生命周期设计稿](platform-migration-object-design.md)
 待评审，特别是 transport 向功能驱动交接运行能力的接口缺口；人口规则、详细
 接口与验收随后收口，未生成开发 tickets。不改变下述已完成 R1 的范围。
+[transport 能力交接设计](platform-migration-transport-handoff.md) 比较接入方案，
+建议由总线定义运行能力、domain 条目承载；vendor 独占会话及构造失败回滚仍待闭合。
 
 ## 当前执行状态（2026-11-04）
 
