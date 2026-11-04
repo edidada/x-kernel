@@ -1,234 +1,56 @@
 # device-res — Security And Reliability
 
-IRQ callback/result contracts are now defined by os-api and re-exported here.
-This facade retains resource acquisition and guard release, not another handler
-implementation. The shared callback still receives the resolved virq, preserves
-the handled result and requires IRQ-safe behavior; threaded intent alone grants no
-sleepable context or thread registration.
+## Trust boundary
 
-## Scope
+Device descriptors and host providers are kernel-supplied, not trusted
+user pointers. The framework must validate firmware ranges/routes before
+acquisition. This facade neither validates device presence nor proves that
+hardware has stopped. IRQ identities and operations now use os-api types.
 
-MMIO/DMA descriptors, MmioOp/DmaOp, IoMap/CoherentMem and ResError belong to driver-os-api;
-this crate only consumes them in device descriptions and devm helpers. The
-MMIO flows below describe that integration, not a second implementation.
-See [os-api design](../../../base/os-api/docs/design.md) and
-[security](../../../base/os-api/docs/security.md) for the owned contract.
+## Lifetime and concurrency
 
-This analysis covers the remaining crate: `src/lib.rs` (device descriptions),
-`src/irq.rs` (IRQ/MSI resources),
-`src/provider.rs`; the monotonic time contract is defined in driver-os-api.
-No modules are excluded; every unsafe item is enumerated in the
-inventory below. The host-side implementation lives in
-`device-res-xkernel` and is audited in its own security document.
+Successful acquisition transfers an owning guard to device cleanup. MMIO and
+DMA raw views are usable only while that acquisition remains live. Cleanup
+must occur once, in reverse registration order, after driver quiescence.
+An external reference to the device object does not authorize use after
+unbind. DeviceResource itself provides no lock or liveness gate.
 
+IRQ cleanup calls synchronous provider release with the original resource and
+action token. Normal return must establish callback quiescence. Invalid
+calling context or rejected release cannot be treated as successful teardown.
+Threaded requests remain Unsupported unless a provider implements the matching
+registration and drain protocol.
 
-## Overview
+## Unsafe inventory
 
-`device-res` is x-kernel's unified abstraction layer through which drivers
-acquire hardware resources. MMIO/DMA access and guards are delegated to
-driver-os-api; device cleanup retains their owners until teardown.
-Incorrect use or broken invariants
-can lead to undefined behavior or device malfunction.
+This crate contains no unsafe implementation or unsafe block. Actual mapping,
+DMA and IRQ implementation obligations belong to os-api contracts and their
+host provider. Returning a safe-to-construct raw pointer does not make arbitrary
+dereferencing safe; drivers must obey bounds, alignment and lifetime rules.
 
-## Trust Model
+## Failure analysis
 
-```
-Driver code (trusted)
-   │
-   │ safe API: IoMap::map_with, Irq::request_with,
-   │           CoherentMem::alloc_with, devm_*_with_provider
-   │
-   v
-┌──────────────────────────────────────────────────────────────┐
-│  device-res                                                  │
-│                                                              │
-│  ┌── unsafe boundaries ───────────────────────────────────┐ │
-│  │ unsafe impl Send for MmioMapping, DmaAllocation        │ │
-│  │ IoMap::access_ptr → ptr.add(offset)                       │ │
-│  │ IoMap read*/write* → ptr.read_volatile / write_volatile   │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                                                              │
-│  MmioOp / IrqOp / DmaOp / TimeOp provider traits            │
-└──────────────────┬───────────────────────────────────────────┘
-                   │
-                   v
-         Host Kernel implementation (trusted)
-```
+| Failure | Required behavior / limitation |
+|---|---|
+| Provider rejects acquisition | Propagate error; register no cleanup. |
+| Probe fails after earlier acquisitions | Framework runs their cleanup once in reverse order. |
+| IRQ callback still in flight | Provider release waits; resources used by it remain live. |
+| Cleanup in atomic context or under handler-needed lock | Caller contract violation; may panic/deadlock in host; framework must prevent it. |
+| Cleanup closure/storage allocation failure | Existing infallible allocation policy remains; no recoverable transaction is claimed. |
+| Device continues DMA after driver remove | Cleanup cannot repair this; driver stop protocol is required before memory release. |
+| MSI reservation release rejected | Current os-api unit-returning release limitation remains; this facade does not supply retry ownership. |
 
-- **Driver code**: trusts `device-res` to manage RAII handle lifetimes
-  and bounds checks correctly.
-- **Host kernel providers**: trusted to implement `MmioOp` / `IrqOp` /
-  `DmaOp` / `TimeOp` mapping, registration, and release correctly.
-- **Driver framework**: owns provider custody and passes it explicitly;
-  `device-res` keeps no global provider state.
-- **Device firmware/hardware**: untrusted input source — MMIO read values
-  and interrupt events come from outside.
+No global registries, logging or user data are introduced here. Existing kernel
+provider diagnostics may expose resource identifiers through kernel logs.
 
-## External Boundaries / Attack Surface
+## Audit checklist
 
-| Boundary | Type | Description |
-|------|------|------|
-| MMIO registers | Device input | Values read back by `read_volatile` come from hardware and may be arbitrary |
-| MMIO registers | Device output | `write_volatile` programs device-visible registers |
-| DMA buffers | Device-writable memory | Coherent DMA buffers can be modified concurrently by the device |
-| Interrupts | Device signals | Interrupt handlers run in interrupt context, at device-chosen frequency |
-| MSI message | Device output | `MsiResource::message` is written into device MSI/MSI-X registers or tables |
-| Firmware/ACPI resource description | Boot metadata | `ResourceDesc` (addresses, sizes, IRQ numbers) comes from firmware discovery |
-| Monotonic clock | Host input | `TimeOp::monotonic_time()` comes from the host kernel and drives driver timeouts |
+- Only successful acquisitions are registered for cleanup.
+- Provider and original acquisition identity remain available through release.
+- Driver stop precedes cleanup, and no required callback locks are held.
+- Raw views cannot be used after cleanup.
+- No framework identity or registry is moved into os-api to retire this facade.
 
-This module:
-
-- **never accesses user memory directly**;
-- **never parses bootloader/firmware input directly** — resource
-  descriptions are constructed by callers;
-- **depends on no FFI or inline assembly** — it uses `core::ptr` volatile
-  operations;
-- **processes no filesystem, network, or IPC input**.
-
-## Unsafe Code Inventory
-
-DMA guards and typed pointer views are audited in driver-os-api.
-
-MMIO volatile access and provider release are audited in driver-os-api.
-
-## Memory-Safety Invariants
-
-The following must hold at all times:
-
-1. **Mapping validity**: `MmioMapping.vaddr` held by an `IoMap` handle stays
-   valid from handle construction to drop. Guaranteed by the `MmioOp`
-   implementation.
-
-2. **Exclusive ownership**: one mapped region is not referenced by
-   multiple `IoMap` handles. Callers must not double-map a region.
-
-3. **Bounds checking**: every `read*`/`write*` call satisfies
-   `offset + size <= region.size`. Runtime-enforced by the `assert!` in
-   `access_ptr`.
-
-4. **Alignment checking**: multi-byte MMIO accesses are naturally
-   aligned. Checked by `debug_assert!` in debug builds.
-
-5. **DMA buffer alignment**: `DmaAllocation.cpu_addr` satisfies
-   `DmaSpec.align`. Guaranteed by the `DmaOp` implementation.
-
-6. **Provider lifetime**: the provider passed by the caller stays valid
-   longer than every RAII handle and devres cleanup callback it created.
-   The API requires `&'static dyn ...` providers, encoding the constraint
-   in the type.
-
-7. **MSI message origin**: `MsiResource::message` is produced by the host
-   IRQ core or its backend provider. Drivers must not build messages from
-   APIC ids, CPU vectors, or other controller-private state.
-
-## Thread Safety
-
-| Type | `Send` | `Sync` | Notes |
-|------|--------|--------|------|
-| `MmioMapping` | auto | auto | Integer address metadata; a copy is not another mapping acquisition |
-| `DmaAllocation` | auto | auto | Integer address metadata; a copy does not authorize another release |
-| `IoMap` | auto | auto | Register protocols still require caller synchronization |
-| `Irq` | auto | auto | `IrqResource` is `Copy`; `bool` is `Send + Sync` |
-| `CoherentMem` | auto | auto | Sharing ownership does not authorize concurrent CPU/device access |
-
-## Threat Analysis
-
-| ID | Threat | Impact | Trigger | Existing control |
-|------|----------|----------|----------|----------|
-| T-01 | Out-of-bounds MMIO read/write corrupts kernel memory | High | Driver-supplied `offset + size` exceeds the mapped region | Runtime bounds check in `access_ptr` (`checked_add` + `assert!`) |
-| T-02 | Unaligned MMIO access raises an architecture fault | High | Driver supplies an unaligned offset | `debug_assert!` in debug builds; release builds rely on driver correctness |
-| T-03 | Device modifies kernel memory via DMA | High | Malicious or faulty device writes into kernel-visible memory through a DMA buffer | Coherent DMA buffers are explicitly allocated by the driver and device-writable range is limited to `DmaSpec.len`; an IOMMU can isolate further |
-| T-04 | Interrupt storm exhausts CPU resources | Medium | Device fires interrupts continuously or interrupts are not acknowledged correctly | Throttling and masking are owned by the `IrqOp` implementation; `Irq::set_enabled(false)` can disable temporarily |
-| T-05 | Drop releases into the wrong provider | High | Acquisition used one provider; drop re-resolves a different one | RAII handles remember the creating provider and drop through it |
-| T-06 | Double-mapping the same MMIO region | Medium | Two drivers request overlapping MMIO regions | Overlap detection (`Busy`) is owned by the `MmioOp` implementation; this module does not check overlaps |
-| T-07 | Firmware supplies malicious or wrong resource descriptions | High | Malicious or buggy firmware reports wrong MMIO bases, zero-size regions, or invalid IRQ numbers | Provider implementations should validate arguments in `map_mmio` / `request_irq`; this module does not validate `ResourceDesc` contents |
-| T-09 | Driver builds its own MSI message | High | Driver writes an MSI-X table using the current APIC id or a raw vector | Wrong delivery target or vector conflict under SMP/affinity/x2APIC | The API only hands out provider-generated `MsiResource::message`; no APIC id query exists |
-| T-10 | MSI resource copied implicitly, then double-freed | Medium | The resource is `Copy` or held by multiple owners | Backend vector double-free or stale MSI message reuse | `MsiResource` does not implement `Copy`; release requires moved ownership |
-
-## Failure Modes And Effects Analysis (FMEA)
-
-| ID | Failure mode | Cause | Local effect | System effect | Severity | Handling |
-|------|----------|----------|--------|------|----------|----------|
-| F-01 | `IoMap::map_with` returns an error | Provider refuses the mapping or mapping fails | Driver cannot access device registers | Device unavailable | 3 | `ResResult` forces error handling |
-| F-02 | `Irq::request_with` returns `Busy` | Provider refuses registration, e.g. shared-handler limit reached or underlying IRQ registration failed | Driver receives no interrupts | Device interrupt function unavailable | 3 | Returns `ResError::Busy`; driver aborts probe or picks another mode |
-| F-03 | `CoherentMem::alloc_with` returns `NoMemory` | Kernel memory exhausted | DMA buffer allocation fails | DMA-dependent device function unavailable | 3 | Returns `ResError::NoMemory`; driver can degrade |
-| F-04 | Offset overflow during MMIO access | `checked_add` detects usize overflow | `assert!` panic | Calling thread panics | 2 | `checked_add` prevents silent out-of-bounds |
-| F-05 | MMIO access out of bounds | `offset + size > region.size` | `assert!` panic | Calling thread panics | 2 | `assert!` blocks the actual out-of-bounds access |
-| F-06 | Drop releases the wrong shared IRQ handler | An armed handle constructed after a failed request, or the provider-returned token not stored | Current handler not released correctly, or other handlers on the line removed | Device interrupts misbehave | 2 | `Irq` is constructed only after `request_irq` succeeds and keeps the token so drop releases precisely |
-| F-07 | `IoMap::map_with` / `Irq::request_with` / `CoherentMem::alloc_with` called in interrupt context | Driver acquires resources inside an interrupt handler | Provider methods may sleep or block | System hang | 1 | Documentation constrains provider methods to normal context; no runtime detection |
-| F-09 | MSI resource freed before its IRQ handler is unregistered | Wrong driver teardown order | Provider may free the backend vector while the OS-visible IRQ is still registered | Later vector reuse may hit a stale handler | 2 | Host providers should diagnose the ordering; drivers must release the handler before freeing the MSI resource |
-
-## Failure Management
-
-`device-res` handles failure through:
-
-- **Error propagation**: every acquisition function returns
-  `ResResult<T>`; callers propagate with `?`.
-- **Panic paths**: MMIO bounds and overflow checks use `assert!` and
-  panic on failure. Those are programming errors and are not recoverable.
-- **Drop pairing**: every RAII handle remembers its creating provider and
-  drops through it, so acquire/release backends can never mismatch.
-- **MSI message encapsulation**: an MSI-X request returns the
-  provider-generated `MsiResource`; drivers consume only the virq and
-  message and never touch irqchip-private vectors/APIC ids.
-- **No errno mapping**: no POSIX error codes are returned; the `ResError`
-  enum is used instead.
-
-## Privacy Analysis
-
-This module is a hardware resource abstraction layer: it processes no
-user data, performs no I/O on behalf of users, and involves no network
-communication. No direct user-privacy concerns apply. DMA buffer contents
-may include data received from the network, but their lifecycle is
-managed by drivers.
-
-## Known Limitations
-
-1. **No overlap detection**: the module does not check whether
-   repeatedly mapped MMIO regions overlap; it relies entirely on the
-   `MmioOp` implementation's `Busy` check.
-
-2. **No alignment check in release builds**: MMIO alignment is checked
-   only in debug builds. In release builds an unaligned access may raise
-   an architecture fault without a clear diagnosis.
-
-3. **Providers must be `'static`**: RAII handles and devres cleanup
-   closures store provider references, so short-lived providers
-   constructed transiently during probe are not supported by the current
-   API.
-
-4. **`devm_*` returns raw pointers**: `devm_iomap` returns `NonNull<u8>`;
-   callers must not use the pointer after device removal.
-
-5. **Interrupt-context constraint not enforced**: `IrqHandler::handle`
-   documents the no-blocking rule, but the module performs no runtime
-   check.
-
-6. **No RAII handle for MSI-X**: `MsiResource` is an explicit
-   alloc/free resource without a RAII `Drop` like `Irq`. It does not
-   implement `Copy`, but callers must still follow the provider contract
-   to free it.
-
-## Audit Checklist
-
-When modifying `device-res`, verify:
-
-- [ ] Every `unsafe impl Send/Sync` carries a `SAFETY:` comment stating
-  its invariants.
-- [ ] `IoMap::access_ptr` bounds checks cover every `read*`/`write*` entry
-  point.
-- [ ] New MMIO access methods include acquire/release fences.
-- [ ] RAII handle drop paths use the provider saved at handle creation.
-- [ ] `Irq` is constructed only after `request_irq` succeeds and stores
-  the provider-returned handler token.
-- [ ] New MSI APIs expose no APIC ids, CPU vectors, or controller-private
-  cookies.
-- [ ] `devm_*` functions acquire the resource before registering the
-  cleanup callback (no empty callbacks on failure).
-- [ ] New provider trait methods document their execution-context
-  constraints.
-
-## CPU-only aligned storage
-
-The CPU storage contract and its tests now live in driver-os-api. See
-[its security analysis](../../../base/os-api/docs/security.md).
+Tests under ut-tests verify cleanup order and failure pairing. Callback-tail
+drain and shared-peer isolation are covered by provider/kdriver SMP fixtures,
+not inferred solely from mock cleanup tests.

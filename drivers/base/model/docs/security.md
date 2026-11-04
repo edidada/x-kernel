@@ -289,7 +289,7 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
 ## 已知限制
 
 1. **新模型无 threaded IRQ 入口**。共享 IrqEvent 的 wake 位不代表线程化注册；
-   `driver_os_api::IrqOp`、`DeviceServices` 与 `DeviceAccess` 均没有线程化注册入口。
+   `DeviceServices` 与 `DeviceAccess` 没有线程化注册入口；os-api IrqOp 入口默认 Unsupported。
    普通设备 IRQ handler 不得阻塞或作为 pseudo-NMI handler 使用。
    Linux `devm_request_threaded_irq` **禁止机械映射**。
 2. **无 MSI-X per-vector 暴露**。`driver_os_api::MsiResource` 有分配接口，`DeviceAccess`

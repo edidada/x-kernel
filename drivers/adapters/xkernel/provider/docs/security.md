@@ -2,7 +2,7 @@
 
 ## Scope
 
-Explicit IRQ domains cross the legacy adapter unchanged and are retained in
+Explicit IRQ domains cross the static-provider entry unchanged and are retained in
 the mapped resource. Root fallback applies only to absent domains. Core domain
 validation remains authoritative: an unknown explicit domain cannot silently
 select a different controller namespace. No new domain registry or ownership
@@ -47,7 +47,7 @@ driver-os-api-xkernel
 
 The crate exposes no driver-facing `devm_*` helpers and never installs a
 global provider itself; resource acquisition must go through the
-`device_res` provider contract. `kdriver::resource` holds the static
+`driver_os_api` provider contract. `kdriver::resource` holds the static
 `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` and to internal adaptation paths
 such as VirtIO PCI/MSI-X that need direct provider capabilities.
@@ -101,7 +101,7 @@ Invariants:
 
 ## Known Limitations
 
-- `device_res` has reserved the threaded IRQ provider contract, but the
+- `driver_os_api` has reserved the threaded IRQ provider contract, but the
   current X-Kernel provider, built on the mainline `kirq`, supports only
   shared hardirq requests; threaded requests still return
   `ResError::Unsupported`.
@@ -128,10 +128,12 @@ shared callback contract grants neither thread context nor hardware ownership.
 
 NativeIrq and its SMP tail-drain tests now belong to this provider crate.
 Both IRQ entry points share exact-action registration and synchronous release;
-an unmatched token is not evidence of quiescence. The legacy infallible release
+an unmatched token is not evidence of quiescence. The static-provider infallible release
 panics on rejected detach/drain, including no match, rather than allowing the
 caller to reclaim live resources. The native backend returns a typed error to
 its infallible release wrapper, which also fails closed.
-Legacy routing conversion remains separate. MSI release still has the existing
+Both entries use the same resolved-resource conversion. Their route admission
+and error-classification policies remain distinct; this migration does not
+silently tighten existing consumers' preconditions. MSI release still has the existing
 unit-returning/warn limitation; no stronger device-stop guarantee is claimed.
 Device identity and managed cleanup are outside this crate.

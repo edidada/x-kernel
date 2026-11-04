@@ -1,5 +1,15 @@
 # kdriver — Design
 
+## Unified IRQ ownership
+
+Host services now acquire DevIrq with an Arc-held provider instead of building
+an extra release closure. Existing static-provider consumers use the same
+guard and IrqOp/IrqResource definitions. IRQ descriptors in legacy device
+discovery are os-api resources; no local device-res IRQ shape remains.
+Guard acquisition does not change binding identity, cleanup ownership or
+hardware stop requirements. Static-provider mapping/admission policy remains
+unchanged; the stricter NativeIrq policy is not imposed on old consumers here.
+
 ## Host service composition
 
 `src/host/mod.rs` exposes domain service constructors. Private `services.rs`

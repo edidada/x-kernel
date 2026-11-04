@@ -11,12 +11,12 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
-use driver_os_api::{CoherentMem, DmaOp, DmaSpec, IoMap, MmioOp, MmioRegion, TimeOp};
-
-use crate::{
-    DeviceResource, ResResult,
-    irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
+use driver_os_api::{
+    CoherentMem, DevIrq, DmaOp, DmaSpec, IoMap, IrqHandler, IrqOp, IrqResource, IrqThreadHandler,
+    MmioOp, MmioRegion, TimeOp,
 };
+
+use crate::{DeviceResource, ResResult};
 
 /// Combined MMIO, DMA, IRQ and time capabilities for device drivers.
 ///
@@ -54,7 +54,7 @@ pub fn devm_request_irq_with_provider(
     irq: IrqResource,
     handler: Arc<dyn IrqHandler>,
 ) -> ResResult<()> {
-    let guard = Irq::request_with(provider, irq, handler)?;
+    let guard = DevIrq::request_with(provider, irq, handler)?;
     device.register_cleanup(Box::new(move || drop(guard)));
     Ok(())
 }
@@ -69,7 +69,7 @@ pub fn devm_request_threaded_irq_with_provider(
     thread: Arc<dyn IrqThreadHandler>,
     name: Option<&'static str>,
 ) -> ResResult<()> {
-    let guard = Irq::request_threaded_with(provider, irq, primary, thread, name)?;
+    let guard = DevIrq::request_threaded_with(provider, irq, primary, thread, name)?;
     device.register_cleanup(Box::new(move || drop(guard)));
     Ok(())
 }
@@ -83,7 +83,7 @@ pub fn devm_request_threaded_irq_default_with_provider(
     thread: Arc<dyn IrqThreadHandler>,
     name: Option<&'static str>,
 ) -> ResResult<()> {
-    let guard = Irq::request_threaded_default_with(provider, irq, thread, name)?;
+    let guard = DevIrq::request_threaded_default_with(provider, irq, thread, name)?;
     device.register_cleanup(Box::new(move || drop(guard)));
     Ok(())
 }

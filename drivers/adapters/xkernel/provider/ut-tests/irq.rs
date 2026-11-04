@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use driver_os_api::IrqEvent as DevIrqEvent;
+use driver_os_api::{IrqEvent as DevIrqEvent, IrqTrigger as DevIrqTrigger, Virq};
 use unittest::{assert_eq, def_test};
 
 use super::*;
@@ -21,10 +21,13 @@ fn explicit_domain_is_preserved_for_route_and_resource() {
         .with_controller(route.controller)
         .with_domain(domain);
     assert_eq!(irq_route_to_kirq_desc(route), expected);
-    let resource = IrqResource::new(903, route.trigger)
-        .with_controller(route.controller)
-        .with_domain(domain)
-        .with_hwirq(route.hwirq);
+    let resource = IrqResource::mapped(
+        Virq::new(903),
+        route.trigger,
+        route.controller,
+        Some(domain),
+        route.hwirq,
+    );
     assert_eq!(
         irq_resource_to_kirq_spec(resource),
         kirq::IrqSpec::Desc(expected.with_virq(903))
@@ -60,9 +63,12 @@ fn mapped_resource_retains_domain_and_nonidentity_virq() {
         assert_eq!(desc.domain, expected);
         assert_eq!(desc.controller, controller);
         assert_eq!(desc.hwirq, 37);
-        assert_eq!(resource.number, 903);
-        assert_eq!(resource.domain, expected);
-        assert_eq!(resource.trigger, route.trigger);
+        assert_eq!(resource.virq().raw(), 903);
+        assert_eq!(
+            resource,
+            IrqResource::mapped(Virq::new(903), route.trigger, controller, expected, 37)
+        );
+        assert_eq!(resource.trigger(), route.trigger);
         assert_eq!(
             irq_resource_to_kirq_spec(resource),
             kirq::IrqSpec::Desc(desc.with_virq(903))
@@ -90,7 +96,7 @@ fn rejected_explicit_domain_never_retries_with_a_root_domain() {
 
 #[def_test]
 fn test_plain_irq_resource_maps_to_plain_virq_spec() {
-    let resource = IrqResource::new(32, DevIrqTrigger::Unknown(0));
+    let resource = IrqResource::plain(Virq::new(32), DevIrqTrigger::Unknown(0));
 
     let spec = irq_resource_to_kirq_spec(resource);
 
@@ -99,9 +105,13 @@ fn test_plain_irq_resource_maps_to_plain_virq_spec() {
 
 #[def_test]
 fn test_routed_irq_resource_maps_to_descriptor_spec() {
-    let resource = IrqResource::new(48, DevIrqTrigger::LevelHigh)
-        .with_controller(DevIrqController::Gic)
-        .with_hwirq(30);
+    let resource = IrqResource::mapped(
+        Virq::new(48),
+        DevIrqTrigger::LevelHigh,
+        DevIrqController::Gic,
+        Some(kirq::GIC_ROOT_DOMAIN),
+        30,
+    );
 
     let spec = irq_resource_to_kirq_spec(resource);
     let kirq::IrqSpec::Desc(desc) = spec else {

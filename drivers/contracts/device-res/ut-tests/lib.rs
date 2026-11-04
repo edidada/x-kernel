@@ -256,7 +256,7 @@ fn provider_methods_record_lifecycle_with_explicit_calls() {
         base: 0x2000,
         size: 16,
     };
-    let irq = IrqResource::new(7, IrqTrigger::LevelHigh);
+    let irq = IrqResource::plain(driver_os_api::Virq::new(7), IrqTrigger::LevelHigh);
     let spec = DmaSpec::new(24, 8);
 
     let mapping = provider.map_mmio(region, "regs").unwrap();
@@ -326,7 +326,7 @@ fn provider_errors_propagate_from_explicit_calls() {
     assert_eq!(
         provider
             .request_irq(
-                IrqResource::new(9, IrqTrigger::EdgeRising),
+                IrqResource::plain(driver_os_api::Virq::new(9), IrqTrigger::EdgeRising),
                 Arc::new(|_| IrqEvent::NOT_HANDLED),
             )
             .unwrap_err(),
@@ -338,7 +338,7 @@ fn provider_errors_propagate_from_explicit_calls() {
     assert_eq!(
         provider
             .request_threaded_irq_default(
-                IrqResource::new(10, IrqTrigger::LevelLow),
+                IrqResource::plain(driver_os_api::Virq::new(10), IrqTrigger::LevelLow),
                 Arc::new(|_| IrqEvent::HANDLED),
                 Some("unsupported"),
             )
@@ -393,7 +393,7 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
         base: 0x4000,
         size: 32,
     };
-    let irq = IrqResource::new(11, IrqTrigger::LevelHigh);
+    let irq = IrqResource::plain(driver_os_api::Virq::new(11), IrqTrigger::LevelHigh);
     let spec = DmaSpec::new(16, 8);
     let device = TestDevice::new(vec![
         ResourceDesc::Mmio(region),

@@ -2,16 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::IrqOp`] provider contract.
+//! X-Kernel implementation of the [`driver_os_api::IrqOp`] provider contract.
 
 use alloc::sync::Arc;
 
-use device_res::{
+use driver_os_api::{
     IrqController as DevIrqController, IrqHandler as DevIrqHandler, IrqHandlerToken, IrqOp,
-    IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource, ResError, ResResult,
+    IrqResource, IrqRouteDesc, MsiResource, ResError, ResResult,
 };
 
-use crate::XKernelResourceProvider;
+use crate::{XKernelResourceProvider, native_irq::resource_spec as irq_resource_to_kirq_spec};
 
 impl IrqOp for XKernelResourceProvider {
     fn request_irq(
@@ -53,16 +53,11 @@ impl IrqOp for XKernelResourceProvider {
     }
 
     fn alloc_msix(&self) -> ResResult<MsiResource> {
-        let resource = crate::msi::allocate()?;
-        Ok(MsiResource::new(
-            IrqResource::new(resource.irq.virq().raw(), DevIrqTrigger::EdgeRising)
-                .with_controller(DevIrqController::Unknown),
-            device_res::MsiMessage::new(resource.message.address, resource.message.data),
-        ))
+        crate::msi::allocate()
     }
 
     fn free_msix(&self, resource: MsiResource) {
-        crate::msi::release(resource.irq.number);
+        crate::msi::release(resource.irq.virq().raw());
     }
 }
 
@@ -94,30 +89,13 @@ fn map_route_with(
         log::warn!("failed to map IRQ route {route:?}: {err:?}");
         map_irq_desc_error(err)
     })?;
-    let mut resource = IrqResource::new(virq, route.trigger)
-        .with_controller(route.controller)
-        .with_hwirq(route.hwirq);
-    resource.domain = desc.domain;
-    Ok(resource)
-}
-
-fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
-    if irq.hwirq.is_none()
-        && irq.domain.is_none()
-        && irq.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
-    {
-        return kirq::IrqSpec::PlainVirq(irq.number);
-    }
-
-    let hwirq = irq.hwirq.unwrap_or(irq.number);
-    let controller = irq.controller.unwrap_or(DevIrqController::Unknown);
-    let mut desc = kirq::IrqDesc::new(hwirq, irq.trigger)
-        .with_controller(controller)
-        .with_virq(irq.number);
-    if let Some(domain) = irq.domain.or_else(|| default_domain(controller)) {
-        desc = desc.with_domain(domain);
-    }
-    kirq::IrqSpec::Desc(desc)
+    Ok(IrqResource::mapped(
+        driver_os_api::Virq::new(virq),
+        desc.trigger,
+        desc.controller,
+        desc.domain,
+        desc.hwirq,
+    ))
 }
 
 fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {

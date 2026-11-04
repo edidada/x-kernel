@@ -6,12 +6,11 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
-use driver_os_api::IrqEvent;
+use driver_os_api::{DevIrq, IrqEvent, IrqOp, IrqResource, IrqTrigger};
 use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
@@ -72,8 +71,8 @@ static_lock! {
 }
 static_lock! {
     /// Keeps the network interrupt registrations alive for the lifetime of the
-    /// kernel; dropping an [`Irq`] guard would release the handler.
-    static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
+    /// kernel; dropping an [`DevIrq`] guard would release the handler.
+    static NET_IRQ_GUARDS: SpinNoIrq<Vec<DevIrq>> = SpinNoIrq::new(Vec::new());
 }
 
 fn remove_virtio_net_irq_handle(handle_id: usize) {
@@ -118,8 +117,8 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }));
 
     if REGISTERED_NET_IRQS.lock().insert(irq) {
-        let resource = IrqResource::new(irq, IrqTrigger::Unknown(0));
-        match Irq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq)) {
+        let resource = IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::Unknown(0));
+        match DevIrq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq)) {
             Ok(guard) => NET_IRQ_GUARDS.lock().push(guard),
             Err(_) => {
                 remove_virtio_net_irq_handle(handle_id);
@@ -142,7 +141,7 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
             let mut guards = NET_IRQ_GUARDS.lock();
             guards
                 .iter()
-                .position(|guard| guard.number() == irq)
+                .position(|guard| guard.virq().raw() == irq)
                 .map(|index| guards.swap_remove(index))
         };
         drop(guard);

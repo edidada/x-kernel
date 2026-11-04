@@ -7,9 +7,8 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_res::{Irq, IrqOp, IrqResource, ResError};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use driver_os_api::{IrqEvent, IrqHandler};
+use driver_os_api::{DevIrq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use subsys_hwrng::{HwrngDevice, completion::RngCompletion};
@@ -221,21 +220,7 @@ pub struct VirtIoRngDev<H: Hal, T: Transport, B: DmaBackend = StaticHal<H>> {
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
     // unregisters its completion handler.
-    irq_guard: SpinNoIrq<Option<RngIrq>>,
-}
-
-enum RngIrq {
-    Legacy(Irq),
-    Model(driver_os_api::DevIrq),
-}
-
-impl RngIrq {
-    fn release(self) {
-        match self {
-            Self::Legacy(guard) => drop(guard),
-            Self::Model(guard) => drop(guard),
-        }
-    }
+    irq_guard: SpinNoIrq<Option<DevIrq>>,
 }
 
 impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> {
@@ -297,7 +282,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
             completion,
             |device| {
                 let weak = Arc::downgrade(device);
-                Irq::request_with(
+                DevIrq::request_with(
                     provider,
                     resource,
                     Arc::new(move |number| {
@@ -305,7 +290,6 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
                             .map_or(IrqEvent::NOT_HANDLED, |device| device.handle(number))
                     }),
                 )
-                .map(RngIrq::Legacy)
                 .map_err(map_irq_error)
             },
             wait_reset,
@@ -347,7 +331,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
                     weak.upgrade()
                         .map_or(IrqEvent::NOT_HANDLED, |device| device.handle_interrupt())
                 });
-                request(handler).map(RngIrq::Model)
+                request(handler)
             },
             wait_reset,
         )
@@ -357,7 +341,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
         transport: T,
         backend: B,
         completion: Arc<dyn RngCompletion>,
-        request: impl FnOnce(&Arc<Self>) -> DriverResult<RngIrq>,
+        request: impl FnOnce(&Arc<Self>) -> DriverResult<DevIrq>,
         wait_reset: impl FnMut(),
     ) -> DriverResult<Arc<Self>> {
         let device = Arc::new(Self::new_with_dma(transport, backend, completion)?);
@@ -447,7 +431,7 @@ impl<H: Hal, T: Transport, B: DmaBackend> VirtIoRngDev<H, T, B> {
         }
         let irq = self.irq_guard.lock().take();
         if let Some(irq) = irq {
-            irq.release();
+            drop(irq);
         }
         if let RequestState::Pending(token) = state {
             let RequestResources { device, buffer } = &mut *resources;

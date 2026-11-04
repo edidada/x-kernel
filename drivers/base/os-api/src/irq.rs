@@ -5,53 +5,16 @@
 //! The IRQ family: handler callback vocabulary and the request guard.
 
 use alloc::sync::Arc;
-use core::fmt;
 
 pub use irq_types::{IrqController, IrqDomainId, IrqTrigger};
 
+mod guard;
 mod handler;
 
+pub use guard::DevIrq;
 pub use handler::{IrqEvent, IrqHandler, IrqThreadHandler};
 
-use super::ReleaseHook;
 use crate::{ResError, ResResult};
-
-/// One registered device interrupt action, synchronously released on Drop.
-///
-/// Stop device access first and drop in the provider's permitted teardown
-/// context, without locks needed by handlers. Releasing an action does not
-/// imply exclusive ownership of its interrupt line.
-pub struct DevIrq {
-    virq: Virq,
-    release: Option<ReleaseHook>,
-}
-
-impl fmt::Debug for DevIrq {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DevIrq")
-            .field("virq", &self.virq)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DevIrq {
-    /// Construct a guard for a host registration with its matching release hook.
-    pub fn new(virq: Virq, release: Option<ReleaseHook>) -> Self {
-        Self { virq, release }
-    }
-
-    pub const fn virq(&self) -> Virq {
-        self.virq
-    }
-}
-
-impl Drop for DevIrq {
-    fn drop(&mut self) {
-        if let Some(release) = self.release.take() {
-            release();
-        }
-    }
-}
 
 /// An OS-visible virtual interrupt number (the number the host IRQ core
 /// dispatches).
@@ -231,7 +194,7 @@ pub struct IrqRouteDesc {
 ///
 /// Shared hardirq registrations are released by the provider-local action id.
 /// Non-shared regular registrations own the whole IRQ action and are released
-/// without a per-action id. This model has no threaded registration entry.
+/// without a per-action id. Threaded registration defaults to Unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqHandlerToken {
     /// One handler within a shared IRQ action list.
@@ -263,6 +226,39 @@ pub trait IrqOp: Send + Sync {
         irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken>;
+
+    /// Register a primary interrupt handler and a sleepable threaded handler.
+    ///
+    /// The primary handler still runs in interrupt context and should return
+    /// [`IrqEvent::WAKE_THREAD`] when
+    /// the threaded handler should run. Providers that do not support threaded
+    /// IRQs return [`ResError::Unsupported`].
+    fn request_threaded_irq(
+        &self,
+        irq: IrqResource,
+        primary: Arc<dyn IrqHandler>,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<IrqHandlerToken> {
+        let _ = (irq, primary, thread, name);
+        Err(ResError::Unsupported)
+    }
+
+    /// Register a sleepable threaded handler with the provider's default
+    /// primary wake handler.
+    ///
+    /// This is the common level-triggered device path: the provider is expected
+    /// to apply its safe oneshot policy so the line remains masked until the
+    /// threaded handler reaches idle.
+    fn request_threaded_irq_default(
+        &self,
+        irq: IrqResource,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<IrqHandlerToken> {
+        let _ = (irq, thread, name);
+        Err(ResError::Unsupported)
+    }
 
     /// Detach the exact previously registered action and drain in-flight calls.
     ///

@@ -9,6 +9,27 @@
 驱动或 transport 内处理，不通过通用 IRQ 返回值上交。以下旧验证记录中的位图
 保留只描述当时迁移状态，不再是目标要求。KIRQ 自身的冗余位图本批不修改。
 
+## 当前 IRQ 迁移收口
+
+IrqResource/MsiResource/IrqOp 和 DevIrq 均已统一到 os-api；旧 irq.rs 删除。
+device-res 仅暂时重导出类型并保留 ResourceDesc/Set、DeviceResource、ResourceProvider
+聚合及 devm 清理辅助函数。VirtIO 和 xkernel provider 已移除 device-res 依赖。
+下一步处理这些框架集成归属，随后再抽取 PR1；本批仍不宣称整个 PR1 完成。
+
+DevIrq 持原 provider/resource/token（静态借用或 Arc 保活），或原有外部 hook。
+模型宿主不再另造释放闭包，RNG 的 Legacy/Model guard 分支删除。未使用的旧
+guard set_enabled 便利方法删除；整线开关仍由 IrqOp 提供，不作为 action 所有权。
+threaded 注册契约统一且默认 Unsupported，未新增宿主实现。MSI 释放失败 owner
+问题和网络 close 仍是既有独立工作，不在本批静默改变。
+
+验证：位图修正独立提交 fb366650f，通过 266/0/5（通过/失败/忽略）的驱动 UT。
+资源/Op/guard 收敛通过 AArch64 SMP4 269/0/5，覆盖导出完成；包括 provider 保活、
+原始 domain/hwirq/virq/token 精确释放、失败无 guard、threaded 默认 Unsupported
+及无回调残留、RNG notify 尾部 drain 和 shared peer/负控用例。
+AArch64/x86_64 UNITTEST clippy 通过，恢复 AArch64 配置。独立审查发现并修复
+x86 INTx 路径残留字段访问后复审无阻塞。日志分别位于本地
+`.scratch/pr01-irq-source-removal/` 和 `.scratch/pr01-irq-ownership/`。
+
 状态：用户已确认按职责逐步替换旧模型；本页是首个 PR 的范围与缺口清单，
 不是已完成的实现、验收或已创建的远端 PR。transport 开发暂停，先整理 PR-01。
 

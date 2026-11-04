@@ -6,7 +6,8 @@ contract it is implementing or consuming.
 The new device model is being migrated under [`base/`](base/README.md):
 `driver-model` owns binding, device lifecycle and read-only publication provenance.
 Subsystems such as hwrng own their registration and synchronous drain. `driver-os-api` owns the new OS capability
-contracts and guards; it remains separate from legacy `device-res`. The legacy crates listed below remain
+contracts and guards; `device-res` now only retains transitional framework
+descriptions and cleanup helpers, not parallel capability definitions. The legacy crates listed below remain
 in use during migration. The unused generic `base/class` layer is retired;
 legacy `kclass` still serves Input/DRM projections.
 
@@ -40,7 +41,8 @@ drivers and a host kernel:
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
-| `device-res` | Kernel capability contracts requested by drivers: MMIO, IRQ, DMA, time, and devres ownership helpers. |
+| `driver-os-api` | OS capability contracts and owning guards for MMIO, IRQ, DMA, memory and time. |
+| `device-res` | Transitional framework resource descriptions and device-managed cleanup helpers; capabilities are imported from os-api. |
 | `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
@@ -56,7 +58,7 @@ These crates or modules adapt the portable driver contracts to X-Kernel:
 
 | Crate or module | Role |
 |----------------|------|
-| `driver-os-api-xkernel` | Implements os-api capabilities using host subsystems; temporarily retains the legacy device-res IRQ adapter. |
+| `driver-os-api-xkernel` | Implements os-api capabilities using host subsystems; does not depend on device-res or the device model. |
 | `kdriver` | X-Kernel driver orchestration: bus discovery, provider holder, concrete-driver glue, and publication into `kclass`. |
 | `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
 | `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
@@ -73,7 +75,7 @@ kernel APIs. Current examples include:
 
 | Crate | Expected boundary |
 |------|-------------------|
-| `virtio` | Uses `virtio-drivers` plus `device-res` / class traits. It must not depend on `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`. |
+| `virtio` | Uses `virtio-drivers` plus `driver-os-api` / class traits. It must not depend on `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`. |
 
 When a concrete driver needs a new kernel facility, add a capability contract
 first, implement it in an adapter crate, then pass the provider through

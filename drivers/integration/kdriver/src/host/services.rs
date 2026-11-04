@@ -98,16 +98,8 @@ impl DeviceResourceServices for HostDeviceServices {
         handler: Arc<dyn IrqHandler>,
     ) -> Result<DevIrq, RuntimeError> {
         let resource = self.resolve_irq(spec)?;
-        let provider = self.irq.clone();
-        let token = provider
-            .request_irq(resource, handler)
-            .map_err(RuntimeError::from)?;
-        Ok(DevIrq::new(
-            resource.virq(),
-            Some(Arc::new(move || {
-                provider.release_irq(resource, token);
-            })),
-        ))
+        DevIrq::request_with_shared_provider(self.irq.clone(), resource, handler)
+            .map_err(RuntimeError::from)
     }
 
     fn alloc_coherent(

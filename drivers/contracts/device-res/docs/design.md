@@ -1,302 +1,59 @@
 # device-res — Design
 
-TimeOp now belongs to driver-os-api, alongside MMIO, CPU memory and raw DMA.
-The legacy ResourceProvider aggregate imports it; it is no longer defined or
-re-exported here. Legacy IRQ vocabulary remains pending migration.
+## Remaining responsibility
 
-IRQ trigger, controller and domain identity now use the common irq-types
-definitions through os-api. IrqRouteDesc, IrqHandlerToken and MsiMessage are
-also imported from os-api instead of independently defined here. These
-temporary re-exports keep legacy consumers building during PR-01; they do not
-introduce another owned contract. IrqResource and guard acquisition
-still need migration because their semantics differ, not merely their names.
+This is a transitional framework resource-description and cleanup facade.
+It no longer defines MMIO, DMA, IRQ or time capabilities or resource guards.
+All such contracts belong to driver-os-api. The deleted src/irq.rs is not
+replaced by another local IRQ model.
 
-Callback migration: IrqEvent, IrqHandler and IrqThreadHandler now also belong
-to os-api and are only re-exported here. Providers receive the same callback
-objects; IRQ arguments and handled results are preserved. Resource shape,
-IrqOp acquisition methods and the Irq guard remain legacy pending migration.
+src/lib.rs owns ResourceDesc, ResourceSet and DeviceResource. ResourceDesc is
+a discovery container; its IRQ variant contains os-api's resolved IrqResource.
+ResourceSet is a small vector. DeviceResource lends the discovered resources
+and registers a device-owned cleanup callback.
 
-Kernel unit tests live in `ut-tests/` and are mounted from their original
-source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+src/provider.rs combines os-api traits into ResourceProvider and implements
+devm acquisition helpers. Provider selection is explicit; this crate installs
+no global provider, IRQ registry, allocator or device topology.
 
-## Purpose
+## Lifecycle
 
-`device-res` provides the OS-neutral device resource description model and
-provider contract. During migration to os-api, this crate remains the entry point through which the driver
-subsystem expresses "which kernel capabilities a driver needs", covering
-MMIO mapping, I/O ports, interrupts and DMA buffers,
-and the monotonic clock,
-and it decouples those semantics from concrete kernel implementations.
+Each helper first acquires an os-api guard. If acquisition fails, no cleanup
+callback is registered. On success it moves that guard into a cleanup closure.
+The device framework runs registered closures in reverse order at probe
+rollback/removal. It must stop hardware and prevent new operations before
+releasing resources; LIFO cleanup alone is not a hardware-stop protocol.
 
-Upstream subsystems that depend on this module include:
+IRQ helpers use DevIrq for ordinary, explicit-threaded and default-primary
+registration. Unsupported threaded registration stays an error. The guard
+retains the exact provider/resource/action token and synchronously releases
+that action on drop. There is no duplicate armed flag or local IRQ wrapper.
 
-- platform drivers (acquiring resources via RAII handles or `devm_*`
-  functions);
-- the kernel bus/device model (implementing the [`DeviceResource`] trait to
-  support device-managed resources).
+MMIO helpers return a mapped pointer while cleanup owns IoMap. Coherent DMA
+helpers return CPU/bus addresses while cleanup owns CoherentMem. These raw
+views do not keep a device binding alive and must not escape its permitted
+resource-access lifetime.
 
-## Non-Responsibilities
+## Context and failure boundaries
 
-- No concrete kernel behavior behind the provider traits: `MmioOp` /
-  `IrqOp` / `DmaOp` / `TimeOp` implementations belong to the host kernel's
-  provider crate (in x-kernel, `device-res-xkernel`, backed by `memspace`,
-  `kirq`, and `kdma`).
-- No global provider state or provider selection: the driver framework
-  (for example `kdriver::resource`) holds the provider instance and passes
-  it explicitly; this crate stores none.
-- No MMIO region overlap detection: rejecting overlapping maps (`Busy`) is
-  owned by the `MmioOp` implementation.
-- No validation of `ResourceDesc` contents: firmware-derived addresses,
-  sizes, and IRQ numbers are trusted to the provider implementations,
-  which must check them at the `map_mmio` / `request_irq` boundary.
-- No interrupt vector, APIC id, or CPU vector allocation: those are
-  internal state of the host IRQ core; this crate only hands out the
-  provider-generated `MsiResource` (see Threat T-09).
-- No DMA cache-coherency protocol of its own: coherency strategy
-  (uncached mappings, fences, cache maintenance) is decided by the
-  `DmaOp` backend.
-- No devres lifecycle engine: cleanup callbacks are registered through
-  the caller's `DeviceResource` implementation, and the device model
-  drives their LIFO execution.
+Providers define acquisition context. IRQ cleanup may sleep while draining
+callbacks and must run without locks needed by those callbacks. The framework
+must invoke cleanup outside its own conflicting locks. DeviceResource does
+not implement serialization or device liveness checks.
 
-## Background
+register_cleanup currently returns no allocation error. Closure allocation
+and framework cleanup storage retain their existing allocation policy; this
+migration does not claim recoverable registration OOM.
 
-Different kernels expose different interfaces for the same class of
-capability: mapping MMIO, registering interrupts, allocating DMA, reading
-monotonic time. Driver code that calls kernel APIs directly must be edited
-function by function when ported. This module separates resource discovery
-from resource use: the driver describes "what it needs", and the host
-kernel supplies "how it is provided" through the MMIO / IRQ / DMA provider
-traits, which is what makes drivers portable across kernels.
+## Migration and verification
 
-## Scope
+IRQ names are temporarily re-exported from os-api for remaining framework
+consumers. Concrete VirtIO drivers and the xkernel provider now use os-api
+directly and no longer depend on device-res. Next, move the remaining
+description/cleanup integration to its framework owner and retire this crate;
+do not move device identity or cleanup registries into os-api.
 
-MMIO/DMA descriptors, MmioOp/DmaOp, IoMap/CoherentMem and ResError belong to driver-os-api;
-this crate only consumes them in device descriptions and devm helpers. The
-MMIO flows below describe that integration, not a second implementation.
-See [os-api design](../../../base/os-api/docs/design.md) and
-[security](../../../base/os-api/docs/security.md) for the owned contract.
-
-```text
-drivers/contracts/device-res/
-├── src/
-│   ├── lib.rs
-│   ├── irq.rs
-│   ├── provider.rs
-├── Cargo.toml
-└── docs/
-    ├── design.md
-    └── security.md
-```
-
-## Architecture
-
-```text
-                    ┌─────────────────────────────────────────────┐
-                    │             Host Kernel                      │
-                    │  implements provider traits                  │
-                    │  passes provider to driver framework         │
-                    └───────────────┬─────────────────────────────┘
-                                    │
-            ┌───────────────────────┼───────────────────────┐
-            │                       │                       │
-            v                       v                       v
-     ┌──────────────┐      ┌──────────────┐      ┌──────────────────┐
-     │  IoMap (MMIO)   │      │  Irq         │      │  CoherentMem     │
-     │  RAII handle │      │  RAII handle │      │  RAII handle     │
-     │  map on new  │      │  request     │      │  alloc on new    │
-     │  unmap drop  │      │  release drop│      │  free on drop    │
-     └──────────────┘      └──────────────┘      └──────────────────┘
-            ^                       ^                       ^
-            │                       │                       │
-     ┌─────────────────────────────────────────────────────────────┐
-     │              devm_* helpers (device-managed)                │
-     │  devm_iomap / devm_request_irq* / devm_alloc_coherent      │
-     │  register cleanup via DeviceResource trait                 │
-     └─────────────────────────────────────────────────────────────┘
-                        ^
-                        │
-               ┌────────────────┐
-               │  Driver Code   │
-               │  reads/writes  │
-               │  registers via │
-               │  RAII or devm  │
-               └────────────────┘
-```
-
-### Core Components
-
-| Component | Responsibility |
-|------|------|
-| `ResourceDesc` / `ResourceSet` | Describes one device's hardware resources (MMIO, I/O ports, interrupts, DMA) |
-| `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` traits | The capability backends a host kernel implements (map/unmap, request/release IRQ, alloc/free DMA, alloc/free MSI-X, monotonic time) |
-| `ResourceProvider` trait | Combined `MmioOp + IrqOp + DmaOp + TimeOp` trait; CPU storage is requested separately |
-| `IoMap` | RAII handle over an MMIO mapping, with register read/write methods using acquire/release fences |
-| `Irq` | RAII handle over an interrupt registration, released automatically on drop |
-| `CoherentMem` | RAII handle over a coherent DMA buffer, freed automatically on drop |
-| `DeviceResource` trait | OS-neutral device abstraction through which drivers read resources and register cleanup callbacks |
-| `devm_*_with_provider` functions | Bind resource lifetime to a device, cleaning up automatically on probe failure or removal |
-
-### Provider Selection
-
-`device-res` keeps no global provider state. The driver framework holds the
-provider instance supplied by the host kernel and calls
-`IoMap::map_with()`, `Irq::request_with()`, `CoherentMem::alloc_with()`, or
-`devm_*_with_provider()`. RAII handles remember the provider that created
-them and return to that same provider for release on drop.
-
-## Calling Constraints / Execution Context
-
-- **Callable in early boot**: the module depends on neither the scheduler
-  nor a process-thread context; provider lifetime is guaranteed by the
-  caller.
-- **No resource acquisition or release from interrupt context**: the
-  provider trait method docs declare that they run in normal (non-IRQ)
-  context. MMIO register reads/writes themselves may run in any context,
-  but acquisition/release (`map`, `request`, `alloc`, and the
-  corresponding drops) must not run in interrupt context.
-  `TimeOp::monotonic_time()` may be used for short polling and timeout
-  checks; each provider implementation must state whether it is callable
-  from IRQ-like contexts.
-- **No sleeping or blocking**: `device-res` itself takes no global
-  provider lock; provider methods must still respect each host kernel's
-  probe/remove context constraints.
-- **No current process thread required**: the API depends only on the
-  current execution path.
-- **Reentrancy**: `device-res` never calls into a provider while holding a
-  global lock; provider implementations should still avoid their own lock
-  recursion inside resource-release callbacks.
-
-## Flows
-
-### Resource acquisition (`IoMap::map_with` as the example)
-
-```text
-IoMap::map_with(provider, region, name)
-  │
-  ├─ provider.map_mmio(region, name)?
-  │    └─ host kernel performs the actual mapping
-  │
-  └─ Ok(IoMap retaining the provider and original mapping token)
-```
-
-### RAII resource release (`IoMap::drop` as the example)
-
-```text
-IoMap::drop()
-  │
-  ├─ provider.take()
-  │
-  └─ if a provider is retained:
-       provider.unmap_mmio(mapping)
-```
-
-An RAII handle keeps the provider that created it. Drop does not re-query
-external state, so a release request can never be routed to a different
-provider, and cleanup does not depend on the framework re-selecting one.
-
-### Device-managed resources (`devm_iomap` as the example)
-
-```text
-devm_iomap_with_provider(provider, device, region, name)
-  │
-  ├─ IoMap::map_with(provider, region, name)?  → io
-  ├─ io.as_ptr()                           → ptr
-  ├─ device.register_cleanup(move || drop(io))
-  │    └─ callback runs LIFO when the device is removed
-  │
-  └─ Ok(ptr)
-```
-
-## Concurrency Model
-
-- **Explicit provider**: the driver framework holds the provider; resource
-  handles remember their creating provider and add no shared mutable state.
-  DMA, MMIO and IRQ handles retain their existing static-provider requirement.
-- **DMA ownership**: `CoherentMem` is Send + Sync, but that does not authorize
-  concurrent CPU/device access. The owner must enforce its DMA/cache protocol
-  and stop hardware before final release.
-- **MMIO access**: the `read*`/`write*` methods of `IoMap` use acquire/release
-  fences to order register accesses. Multi-byte accesses carry
-  unconditional alignment checks.
-
-## Design Decisions
-
-### Why the provider API uses trait objects
-
-RAII handles store `&'static dyn MmioOp` / `IrqOp` / `DmaOp` internally:
-
-- the driver framework can hold a concrete provider type and manage
-  capabilities through trait bounds;
-- handles must store a provider reference inside devres cleanup closures;
-  trait objects keep provider generics from leaking into ordinary driver
-  code and cleanup containers;
-- provider selection happens explicitly at the framework boundary; driver
-  code still sees only device-resource methods.
-
-### Why devm_* returns raw pointers instead of RAII handles
-
-`devm_iomap` returns `NonNull<u8>` rather than an `IoMap`, because `IoMap`'s
-drop behavior conflicts with device-managed cleanup: if `IoMap` were
-returned, the driver dropping the `IoMap` would release the mapping while the
-device cleanup callback would also try to release the same mapping.
-
-Resolution: `devm_iomap` creates the `IoMap` internally, extracts the
-pointer, then registers the drop closure via `register_cleanup`. The
-`IoMap`'s lifetime is managed by the callback; the driver keeps only the raw
-pointer.
-
-### Why IoMap::read*/write* use fences instead of volatile Ordering parameters
-
-`core::ptr::read_volatile` / `write_volatile` guarantee the compiler will
-not elide or reorder volatile accesses, but they give no CPU-side memory
-ordering. The extra `fence(Acquire)` / `fence(Release)` ensure that on
-weakly ordered architectures (AArch64) register reads and writes are not
-reordered by the CPU across the fence. On strongly ordered architectures
-(x86) the fences compile to no-ops.
-
-### Why drop keeps the creating provider
-
-Resource release must return to the same provider that allocated the
-resource. Otherwise, once per-framework, per-bus, or test-mock providers
-exist, re-selecting a provider at drop time could release into the wrong
-backend. Keeping the creating provider encodes the acquire/release pairing
-in the RAII handle itself.
-
-## Drop / Resource Release
-
-| Type | Drop behavior |
-|------|----------|
-| `IoMap` | Returns the original token to its retained provider, or invokes the unsafe constructor's release hook |
-| `Irq` | If `armed` and provider is `Some`, calls `provider.release_irq(resource, token)` |
-| `CoherentMem` | Returns the original allocation to its provider or invokes its hook, selected by a private owner enum |
-
-`Irq` uses an `armed` flag so a failed `request_irq` does not trigger a
-spurious `release_irq` on drop, and it stores the provider-returned token
-so releasing a shared IRQ removes only the handler registered by this
-handle.
-
-### MSI-X Resources
-
-`IrqOp::alloc_msix()` returns an `MsiResource`:
-
-- `MsiResource::irq` is the OS-visible IRQ, used by the driver or upper
-  framework to register the handler;
-- `MsiResource::message` is the device-visible MSI message, used by the
-  PCI/MSI-X code to program the device table or MSI register.
-
-`MsiResource` is an explicitly owned resource and does not implement
-`Copy`. Callers may move it along one ownership chain and must call
-`free_msix()` to release it after the IRQ handler is unregistered; implicit
-copies cannot create multiple releasers of one MSI allocation.
-
-`device-res` exposes no APIC ids, CPU vectors, or irqchip-private
-allocation cookies. Those are internal state of the host IRQ core and its
-backends. In x-kernel this provider is implemented by
-`device-res-xkernel`, which forwards to `kirq::alloc_msix()`; `device-res`
-itself stays OS-neutral and does not depend on `kirq`.
-
-### Ordinary CPU storage
-
-CPU-only storage moved to driver-os-api. See
-[its design](../../../base/os-api/docs/design.md) for the provider and guard contract.
+ut-tests/lib.rs verifies provider error propagation, no cleanup after failed
+acquisition, reverse cleanup order, and ordinary/threaded IRQ release pairing.
+os-api tests verify exact registration identity, provider retention and guard
+failure/drop behavior. Native/RNG SMP tests verify callback-tail drain.

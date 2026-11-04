@@ -752,3 +752,12 @@ and an IRQ-registration failure rollback. The static HAL counters remain unchang
 on the instance path. These establish forwarding and ownership, not host DMA
 address translation or real MMIO sampling. A native instance backend and exclusive
 new/legacy device selection remain R1-08 work; no boot ownership changes here.
+# IRQ capability convergence
+
+All VirtIO IRQ acquisition uses driver-os-api IrqOp/IrqResource/DevIrq;
+this crate no longer depends on device-res. Resolved virqs and mapped routes
+are explicit resource variants, including the original domain/hwirq. MSI
+reservations use the same os-api MsiResource without an adapter copy.
+RNG stores one DevIrq directly, not a Legacy/Model guard enum. Reset, callback
+drain and DMA cleanup ordering are unchanged. Network lifecycle redesign is
+still deferred; removing the old dependency does not implement network close.

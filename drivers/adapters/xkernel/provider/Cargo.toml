@@ -16,7 +16,6 @@ name = "driver_os_api_xkernel"
 ktask.workspace = true
 kbuild_config.workspace = true
 kcpu_id_map.workspace = true
-device_res = { workspace = true }
 driver_os_api = { workspace = true }
 kalloc = { workspace = true }
 kdma = { workspace = true }

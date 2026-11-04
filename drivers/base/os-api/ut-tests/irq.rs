@@ -13,6 +13,42 @@ use crate::{
 struct MockIrqProvider;
 
 #[def_test]
+fn unsupported_threaded_requests_do_not_invoke_callbacks() {
+    static PROVIDER: MockIrqProvider = MockIrqProvider;
+    let calls = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+    let primary_calls = calls.clone();
+    let thread_calls = calls.clone();
+    let resource = IrqResource::plain(Virq::new(41), crate::IrqTrigger::LevelHigh);
+    let result = crate::DevIrq::request_threaded_with(
+        &PROVIDER,
+        resource,
+        Arc::new(move |_| {
+            primary_calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            IrqEvent::WAKE_THREAD
+        }),
+        Arc::new(move |_| {
+            thread_calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            IrqEvent::HANDLED
+        }),
+        None,
+    );
+    assert_eq!(result.unwrap_err(), crate::ResError::Unsupported);
+    let thread_calls = calls.clone();
+    let result = crate::DevIrq::request_threaded_default_with(
+        &PROVIDER,
+        resource,
+        Arc::new(move |_| {
+            thread_calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            IrqEvent::HANDLED
+        }),
+        None,
+    );
+    assert_eq!(result.unwrap_err(), crate::ResError::Unsupported);
+    assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&calls), 1);
+}
+
+#[def_test]
 fn irq_events_preserve_claim_and_thread_intent() {
     let mut event = IrqEvent::NOT_HANDLED;
     event.merge(IrqEvent::HANDLED);

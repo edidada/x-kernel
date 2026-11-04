@@ -2,15 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! OS-agnostic device resource model and capability abstraction.
+//! Transitional device resource descriptions and managed cleanup helpers.
 //!
+//! Capability traits and guards are defined by `driver_os_api`, not here.
 //! This crate describes the hardware resources a driver consumes (MMIO
 //! regions, I/O port ranges, interrupts, coherent/streaming DMA buffers, and
 //! small capabilities such as a monotonic clock)
 //! without binding to any particular kernel. A host kernel provides capability
 //! implementations — [`IrqOp`] — to its
 //! driver framework; framework code then acquires resources through RAII
-//! handles ([`Irq`]) or the device-managed `devm_*`
+//! handles ([`DevIrq`]) or the device-managed `devm_*`
 //! helpers.
 //!
 //! Keeping the OS-semantic operations (map/unmap, request/release IRQ,
@@ -21,7 +22,6 @@
 
 extern crate alloc;
 
-mod irq;
 mod provider;
 
 use alloc::boxed::Box;
@@ -34,7 +34,7 @@ pub enum ResourceDesc {
     /// x86 I/O port range.
     IoPort(driver_os_api::IoPortRange),
     /// Interrupt line.
-    Irq(crate::irq::IrqResource),
+    Irq(driver_os_api::IrqResource),
     /// Coherent DMA buffer request.
     Dma(driver_os_api::DmaSpec),
 }
@@ -62,7 +62,10 @@ pub trait DeviceResource {
     fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>);
 }
 
-pub use irq::*;
+pub use driver_os_api::{
+    DevIrq, IrqController, IrqDomainId, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource,
+    IrqRouteDesc, IrqThreadHandler, IrqTrigger, MsiMessage, MsiResource,
+};
 pub use provider::*;
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

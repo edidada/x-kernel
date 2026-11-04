@@ -118,7 +118,7 @@ fn map_route_with(
     ))
 }
 
-fn resource_spec(irq: IrqResource) -> kirq::IrqSpec {
+pub(super) fn resource_spec(irq: IrqResource) -> kirq::IrqSpec {
     match irq {
         IrqResource::PlainVirq { virq, .. } => kirq::IrqSpec::PlainVirq(virq.raw()),
         IrqResource::DomainMapped {

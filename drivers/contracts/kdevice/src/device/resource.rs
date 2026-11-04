@@ -7,5 +7,5 @@
 //! The descriptor types themselves are OS-agnostic and live in [`device_res`].
 //! This module re-exports them for the shared device model.
 
-pub use device_res::{IrqResource, IrqTrigger, ResourceDesc, ResourceSet};
-pub use driver_os_api::{DmaSpec, IoPortRange, MmioRegion};
+pub use device_res::{ResourceDesc, ResourceSet};
+pub use driver_os_api::{DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion};

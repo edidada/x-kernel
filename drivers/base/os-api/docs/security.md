@@ -8,8 +8,11 @@ virtual IRQ, not the firmware hardware number. IrqEvent preserves the handled re
 and threaded intent without allocation. Ordinary callbacks cannot sleep.
 The xkernel ordinary adapter preserves handled information but has no
 paired IRQ thread; wake intent alone cannot create one. Threaded registration
-remains unsupported in that provider. Callback sharing does not change guard
-ownership, hardware-stop obligations or synchronous release requirements.
+remains unsupported in that provider. The single DevIrq guard retains an exact provider/resource/token or the existing
+external hook. Static and Arc-held providers remain live through release.
+Failed acquisition constructs no guard and creates no release obligation.
+Hook construction retains its caller contract. There is no armed flag or
+second copy of virq; hardware-stop and synchronous-drain obligations remain.
 
 ## MMIO mapping ownership
 
@@ -126,7 +129,8 @@ DMA 窗口构造检查 CPU 与 bus 两侧区间末端，不使用可能截断的
 
 irq-types 的 IrqDomainId 不证明域存在，宿主必须验证并执行正确映射。
 IRQ handler 只用于普通设备 IRQ，不能睡眠或被当作 pseudo-NMI 回调。
-默认恒等 map_irq 不适用于非恒等中断域。新模型没有 threaded IRQ 入口。
+默认恒等 map_irq 不适用于非恒等中断域。IrqOp 的 threaded 入口默认 Unsupported；
+保留该契约不意味着宿主已实现线程化注册。
 
 ResError 不携带 DeviceId、依赖等待或 probe 策略；model 显式转换错误分类。
 不允许为了错误转换而让本 crate 反向依赖 model、旧 device_res 或内核实现。

@@ -6,7 +6,8 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use block::completion::BlockCompletionOperations;
-use device_res::{IrqHandlerToken, IrqTrigger, ResError};
+use device_res::ResError;
+use driver_os_api::{IrqHandlerToken, IrqTrigger};
 use kirq::{
     context::test_support::ScopedHardIrqContext, softirq::test_support::ScopedDaemonWakeGate,
 };
@@ -31,11 +32,16 @@ impl IrqOp for MockProvider {
         irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        if irq.number == FAILED_IRQ {
+        if irq.virq().raw() == FAILED_IRQ {
             return Err(ResError::Busy);
         }
         let id = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        core::assert!(ACTIONS.lock().insert((irq.number, id), handler).is_none());
+        core::assert!(
+            ACTIONS
+                .lock()
+                .insert((irq.virq().raw(), id), handler)
+                .is_none()
+        );
         Ok(IrqHandlerToken::shared_action(id))
     }
 
@@ -43,7 +49,7 @@ impl IrqOp for MockProvider {
         let IrqHandlerToken::SharedAction(id) = token else {
             panic!("expected shared action");
         };
-        core::assert!(ACTIONS.lock().remove(&(irq.number, id)).is_some());
+        core::assert!(ACTIONS.lock().remove(&(irq.virq().raw(), id)).is_some());
     }
 
     fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {
@@ -86,10 +92,10 @@ impl BlockCompletionOperations for TestDevice {
 }
 
 fn resource(irq: usize) -> IrqResource {
-    IrqResource::new(irq, IrqTrigger::LevelHigh)
+    IrqResource::plain(driver_os_api::Virq::new(irq), IrqTrigger::LevelHigh)
 }
 
-fn subscribe(device: &Arc<TestDevice>, irq: usize) -> (Irq, Arc<BlockIoReclaimer>) {
+fn subscribe(device: &Arc<TestDevice>, irq: usize) -> (DevIrq, Arc<BlockIoReclaimer>) {
     let completion: Arc<dyn BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
     let handler: Arc<dyn IrqHandler> = device.clone();

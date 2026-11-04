@@ -4,8 +4,8 @@
 
 Trigger/controller/domain identities use irq-types, also used by the host IRQ
 core. IrqRouteDesc, IrqHandlerToken and MsiMessage have one definition here.
-The transitional device-res facade re-exports them; it still owns its legacy
-resource shape and acquisition protocol until consumers migrate. A domain value
+The transitional device-res facade re-exports them; it no longer owns an IRQ
+resource shape, operation trait or guard. A domain value
 only names a host namespace; construction does not validate/register a domain.
 
 ## Monotonic time
@@ -102,8 +102,8 @@ host adapter → driver-os-api + kernel subsystems
 ```
 
 宿主适配方实现 Op，并在实现 DeviceResourceServices 时返回能力句柄。
-新模型的生产宿主服务尚待接入；不能把旧 device-res-xkernel 的实现当作新 Op 实现。
-旧 device_res 保持独立，未改动其类型、调用方或生命周期。
+生产宿主实现位于 driver-os-api-xkernel。device-res 仅暂留框架资源描述和清理
+登记辅助函数，已不定义独立 IRQ 能力或 guard。
 
 ## 内部模块
 
@@ -140,7 +140,14 @@ OF 的局部 parent 地址必须先完成祖先转换，不能直接当作 CPU �
 设备描述仍为唯一配置来源，宿主通过设备上下文读取；不增加第二份可变配置。
 
 IoMap 和 CoherentMem 可直接保留原 provider/token；显式构造的 hook 路径以及
-DevIrq、ClkHandle 保存宿主提供的 ReleaseHook，Drop 至多调用一次。
+ClkHandle 保存宿主提供的 ReleaseHook，Drop 至多调用一次。
+DevIrq 的私有 owner 二选一：原始 provider/resource/token，或已有 hook 形式。
+provider 可静态借用或持有 Arc；释放返回之前一直保留 provider，不另分配释放闭包。
+guard 不复制保存 virq，按实际 owner 查询；request 失败不产生 guard 或释放责任。
+IRQ handler/threaded 契约位于 irq/handler.rs，guard 生命周期位于 irq/guard.rs。
+旧 Irq、armed 标志和 RNG 的 Legacy/Model guard 分支已删除。
+旧 guard 的未使用 set_enabled 便利方法不迁入；整线 enable/mask 仍是 IrqOp 能力，
+不能误当作单个 shared action 的开关。
 没有 hook 不代表没有资源：应按 guard 的实际获取方式判断所有权。
 宿主负责建立正确的获取/释放配对，驱动必须先停止硬件和依赖它的操作。
 
@@ -156,8 +163,9 @@ DomainMapped，保留来源域/hwirq 与强类型 Virq。默认 map_irq 只适�
 IRQ 回调统一为 `Arc<dyn IrqHandler>`，`handle(usize) -> IrqEvent` 的参数为
 OS-visible virq。闭包携带设备上下文；普通 IRQ 调用不得睡眠或用于 pseudo-NMI。
 `irq/handler.rs` 聚合回调和结果词汇，只保留 handled、merge 和 wake-thread 意图，设备事件留在驱动内部。
-不再保留独立 IrqAction 或无参 IrqHandlerFn。IrqThreadHandler 的迁入只保留已有
-契约，不新增 threaded 注册实现；普通入口没有配对线程，不能依靠 wake 位调度它。
+不再保留独立 IrqAction 或无参 IrqHandlerFn。IrqOp 保留原有 threaded 注册入口，
+默认返回 Unsupported；本次不新增宿主线程化实现。普通入口没有配对线程，
+不能依靠 wake 位调度它。
 
 ## 上下文与验证
 

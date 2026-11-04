@@ -99,7 +99,7 @@ cfg_if! {
                     transport,
                     crate::rng_completion::new_rng_completion(),
                     crate::resource::resource_provider(),
-                    device_res::IrqResource::new(irq, device_res::IrqTrigger::Unknown(0)),
+                    driver_os_api::IrqResource::plain(driver_os_api::Virq::new(irq), driver_os_api::IrqTrigger::Unknown(0)),
                     ktask::yield_now,
                 )?;
                 Ok(device)

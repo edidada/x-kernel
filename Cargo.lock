@@ -1265,7 +1265,6 @@ dependencies = [
 name = "driver-os-api-xkernel"
 version = "0.3.0-dev"
 dependencies = [
- "device-res",
  "driver-os-api",
  "kalloc",
  "kbuild_config",
@@ -6113,7 +6112,6 @@ version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
  "block",
- "device-res",
  "display",
  "driver-os-api",
  "driver_base",

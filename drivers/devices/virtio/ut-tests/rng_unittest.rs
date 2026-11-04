@@ -150,7 +150,10 @@ fn instance_dma_constructor_irq_failure_releases_original_backend() {
         InstanceDma(counts.clone()),
         Arc::new(Completion::default()),
         &STOP_IRQ,
-        IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+        IrqResource::plain(
+            driver_os_api::Virq::new(7),
+            driver_os_api::IrqTrigger::Unknown(0),
+        ),
         || {},
     );
     STOP_IRQ.fail_request.store(false, Ordering::Relaxed);
@@ -743,16 +746,16 @@ impl IrqOp for StopIrqProvider {
         &self,
         _irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
-    ) -> device_res::ResResult<device_res::IrqHandlerToken> {
+    ) -> driver_os_api::ResResult<driver_os_api::IrqHandlerToken> {
         if self.fail_request.load(Ordering::Relaxed) {
             return Err(ResError::Busy);
         }
         *self.handler.lock() = Some(handler);
-        Ok(device_res::IrqHandlerToken::shared_action(42))
+        Ok(driver_os_api::IrqHandlerToken::shared_action(42))
     }
 
-    fn release_irq(&self, _irq: IrqResource, token: device_res::IrqHandlerToken) {
-        core::assert_eq!(token, device_res::IrqHandlerToken::shared_action(42));
+    fn release_irq(&self, _irq: IrqResource, token: driver_os_api::IrqHandlerToken) {
+        core::assert_eq!(token, driver_os_api::IrqHandlerToken::shared_action(42));
         let handler = self.handler.lock().take();
         let action = self.on_release.lock().take();
         if let Some(action) = action {
@@ -800,7 +803,10 @@ fn rng_removal_resets_then_releases_irq_before_canceling_pending_dma() {
             transport,
             completion,
             &STOP_IRQ,
-            IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+            IrqResource::plain(
+                driver_os_api::Virq::new(7),
+                driver_os_api::IrqTrigger::Unknown(0),
+            ),
             || {},
         )
         .unwrap();
@@ -935,7 +941,10 @@ fn rng_irq_registration_failure_confirms_reset_before_freeing_queue() {
         transport,
         completion.clone(),
         &STOP_IRQ,
-        IrqResource::new(7, device_res::IrqTrigger::Unknown(0)),
+        IrqResource::plain(
+            driver_os_api::Virq::new(7),
+            driver_os_api::IrqTrigger::Unknown(0),
+        ),
         || {
             waits += 1;
             retained_until_reset &= DMA_BLOCKS.load(Ordering::Relaxed) == dma + 2

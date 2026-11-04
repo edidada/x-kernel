@@ -6,22 +6,23 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 ## Purpose
 
 The public types are `XKernelResourceProvider` and `NativeIrq`. The latter
-implements os-api IRQ operations; `irq.rs` temporarily translates the legacy
-IRQ contract into the same registration/release backend in `native_irq.rs`.
+implements strict native IRQ admission; `irq.rs` implements the same os-api
+contract for the static provider with its historical admission/mapping policy.
+Both use the registration/release backend in `native_irq.rs`.
 `msi.rs` owns the shared MSI allocation/release implementation. Neither entry
 owns device identity, cleanup registration or service composition. This crate
-has no dependency on driver-model or kdriver.
+has no dependency on device-res, driver-model or kdriver.
 
 Shared registration now uses the native typed error classification, including
 BadState for invalid context and Busy for teardown. Exact-token release must
 return a handler after drain: no match is NotFound, not successful release.
-The legacy infallible release fails closed on rejection rather than permitting
-resource reclamation. Legacy resource shapes and acquisition contracts have not
-yet been unified. Unit-returning MSI release still warns on refusal; this
+The static-provider infallible release fails closed on rejection rather than permitting
+resource reclamation. Resource shapes, acquisition contracts and guards now
+all belong to os-api. Unit-returning MSI release still warns on refusal; this
 slice does not resolve its ownership/retry limitations.
 
 CPU-only storage, MMIO, raw DMA, IRQ and time implement driver-os-api contracts.
-The legacy IRQ adapter remains during PR-01's staged migration; there is only
+The static provider remains the entry for existing consumers; there is only
 one CPU allocator provider implementation.
 
 IRQ reverse-map owner preparation errors map from `IrqDescError::NoMemory` to
@@ -40,7 +41,7 @@ needs onto the X-Kernel kernel subsystems:
 - `driver_os_api::MmioOp` -> `memspace::iomap_device` / `memspace::iounmap`
 - `driver_os_api::DmaOp` -> the `kdma` coherent / streaming DMA API
 - `driver_os_api::CpuMemoryOp` -> ordinary fallible `kalloc` allocation
-- `device_res::IrqOp` -> the `kirq` shared hardirq and MSI-X API
+- `driver_os_api::IrqOp` -> the `kirq` shared hardirq and MSI-X API
 - `driver_os_api::TimeOp` -> `khal::time::monotonic_time`
 
 ## Architecture
@@ -50,7 +51,7 @@ driver crates / kdriver
         │
         │ OS-neutral resource API
         ▼
- driver-os-api / legacy device-res IRQ adapter
+ driver-os-api
         │
         │ provider traits
         ▼
@@ -69,14 +70,14 @@ drivers/adapters/xkernel/provider/src/
 ├── mmio.rs  # MmioOp -> memspace
 ├── dma.rs   # DmaOp -> kdma
 ├── memory.rs # CpuMemoryOp -> ordinary kalloc storage
-├── irq.rs   # legacy IRQ vocabulary adapter
+├── irq.rs   # static-provider IRQ admission and mapping
 ├── native_irq.rs # os-api IRQ, shared registration/drain backend
 ├── msi.rs   # shared MSI reservations
 └── time.rs  # TimeOp -> khal::time
 ```
 
 `XKernelResourceProvider` implements
-the provider traits required by `device_res`, but it does not own the
+the provider traits defined by `driver-os-api`, but it does not own the
 driver framework's provider-selection policy. `kdriver::resource` holds a
 static `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` inside the driver-facing
@@ -86,11 +87,11 @@ static `XKernelResourceProvider` instance and passes it explicitly to
 
 IRQ trigger/controller/domain values, route descriptions, action tokens and
 MSI messages use os-api's shared vocabulary; no per-variant conversion remains.
-The legacy resource structure is still distinct. Callback contracts now come
-from os-api for both entry points. A single adapter forwards the dispatched
+IrqResource explicitly distinguishes PlainVirq and DomainMapped for both
+entry points; neither guesses route shape from absent struct fields. A single adapter forwards the dispatched
 virq and preserves handled results; it does not schedule a thread.
 
-Legacy mapping now honors an explicit domain unchanged. Only absent domains
+Static-provider mapping honors an explicit domain unchanged. Only absent domains
 use the historical GIC/PLIC/IOAPIC root fallback; unknown/LoongArch/MSI families
 without a domain still leave validation to kirq. The returned resource retains
 the selected domain and actual mapped virq, so request, enable and release
@@ -101,12 +102,12 @@ Mapping does not allocate or register domains on the caller's behalf.
 `XKernelResourceProvider` keeps no local IRQ line state:
 
 - `request_irq()` calls `kirq::try_register_shared()` and returns
-  `device_res::IrqHandlerToken::SharedAction(id)`.
+  `driver_os_api::IrqHandlerToken::SharedAction(id)`.
 - `release_irq()` calls `kirq::try_free_irq_action()` for shared tokens;
   if a later provider returns a non-shared regular token, the whole action
   is freed through `kirq::try_free_irq()`.
 - `request_threaded_irq()` / `request_threaded_irq_default()` return
-  `ResError::Unsupported` from the `device_res::IrqOp` default
+  `ResError::Unsupported` from the `driver_os_api::IrqOp` default
   implementations.
 - MSI-X is implemented on the x86_64 backend only; other architectures
   return `ResError::Unsupported` (see the Known Limitations section of
