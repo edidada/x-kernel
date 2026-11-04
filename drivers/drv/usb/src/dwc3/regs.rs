@@ -26,6 +26,8 @@ pub const GUSB2PHYACC: usize = GLOBALS_START + 0x180;
 /// SuperSpeed PIPE control, one word per PHY, starting at 0xc2c0.
 pub const GUSB3PIPECTL: usize = GLOBALS_START + 0x1c0;
 pub const GDCTL: usize = GLOBALS_START + 0x14;
+/// Core configuration word 1 (spacing, park mode, L1/L2 events).
+pub const GUCTL1: usize = GLOBALS_START + 0x1c;
 /// Hardware parameters, 8 words from 0xc140.
 pub const GHWPARAMS0: usize = GLOBALS_START + 0x40;
 pub const GHWPARAMS1: usize = GLOBALS_START + 0x44;

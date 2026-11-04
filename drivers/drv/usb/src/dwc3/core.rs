@@ -52,7 +52,6 @@ pub fn init(
     // Order matches the reference implementations: reset first, then select the
     // host role. (Trying it the other way round changes nothing observable.)
     core_soft_reset(regs);
-    set_host_mode(regs);
     let params = HwParams {
         gsnpsid: regs.read32(regs::DWC_USB3_GSNPSID),
         hwparams0: regs.read32(regs::GHWPARAMS0),
@@ -74,7 +73,12 @@ pub fn init(
     }
 
     program_usb2_phy(regs, utmi_wide, dis_enblslpm);
+    program_guctl1(regs);
     program_usb3_pipe(regs);
+
+    // Role selection comes after the PHY words, as in dwc3_core_init:
+    // `dwc3_phy_setup` runs before `dwc3_set_prtcap`.
+    set_host_mode(regs);
     let _ = dev;
     Ok(params)
 }
@@ -109,6 +113,26 @@ fn set_host_mode(regs: &IoMap) {
         (after >> 12) & 0x3,
     );
 }
+
+/// Programs `GUCTL1`.
+///
+/// The value is the one a working board reads (0x9107018a). The bits that matter
+/// for a USB2 device are `PARKMODE_DISABLE_HS` (bit 16) and `..._SS` (bit 17): park
+/// mode parks the UTMI PHY between transactions, and a PHY that does not expect it
+/// leaves the controller waiting for a transaction that never completes -- connect
+/// detection is unaffected, which is exactly the failure seen here. The firmware
+/// declares both quirks in the device tree (`snps,parkmode-disable-{hs,ss}-quirk`).
+fn program_guctl1(regs: &IoMap) {
+    let before = regs.read32(regs::GUCTL1);
+    regs.write32(regs::GUCTL1, GUCTL1_VALUE);
+    info!(
+        "dwc3: GUCTL1 {before:#010x} -> {:#010x}",
+        regs.read32(regs::GUCTL1),
+    );
+}
+
+/// `GUCTL1` as read from a working board (includes park-mode disable).
+const GUCTL1_VALUE: u32 = 0x9107_018a;
 
 /// Programs the SuperSpeed PIPE control word.
 ///

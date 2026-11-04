@@ -283,6 +283,17 @@ fn log_diff_set(bar: &IoMap, operational: usize, runtime: usize) {
         bar.read32(operational + op::CRCR),
     );
     info!(
+        "xhci: diff-set guctl {:#010x} guctl1 {:#010x} guctl2 {:#010x} gfladj {:#010x} gbuscfg1 \
+         {:#010x} txfifo0 {:#04x} rxfifo0 {:#04x}",
+        bar.read32(0xc12c),
+        bar.read32(0xc11c),
+        bar.read32(0xc19c),
+        bar.read32(0xc630),
+        bar.read32(0xc104),
+        bar.read32(0xc300) & 0xffff,
+        bar.read32(0xc380) & 0xffff,
+    );
+    info!(
         "xhci: diff-set iman {:#x} imod {:#x} erstsz {:#x}",
         bar.read32(runtime + RT_IR0),
         bar.read32(runtime + RT_IR0 + 0x04),
