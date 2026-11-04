@@ -897,6 +897,28 @@ fn connector_mode_tracks_a_host_resize() {
 }
 
 #[def_test]
+fn refresh_notifies_the_hotplug_sink_once() {
+    let (dev, backend) = fake_device();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    dev.set_hotplug_sink(Arc::new(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+
+    // A query with nothing to report must not publish a hotplug.
+    assert_eq!(dev.refresh_info(), None);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    backend.set_resolution(1024, 768);
+    assert_eq!(dev.refresh_info().map(|info| info.width), Some(1024));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    // The change was acknowledged, so the next refresh notifies nobody.
+    assert_eq!(dev.refresh_info(), None);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
 fn refresh_reports_a_pending_host_change_once() {
     let (dev, backend) = fake_device();
     assert_eq!(dev.refresh_info(), None);

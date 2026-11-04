@@ -163,10 +163,13 @@ at startup and cannot grow past them later; reporting the boot size as the
 maximum would make every larger host size unreachable. `GETCRTC` keeps
 reporting the committed mode, which is what the card is actually scanning.
 
-There is no hotplug event: a client that wants the new size re-reads the
-connector (for example through a RandR re-probe). Emitting a Linux-style
-`HOTPLUG=1` uevent is a separate change, since this driver has no connector
-kobject to publish it from.
+A refresh that observes a change also calls the hotplug sink installed with
+[`DrmDevice::set_hotplug_sink`]. The card does not know what a sink does: the
+filesystem that owns the device node installs one that publishes a Linux-style
+`change` uevent with `HOTPLUG=1` on `drm/cardN`, which is the object udev and
+the compositor watch. A client that is not listening can still re-read the
+connector, for example through a RandR re-probe. The sink runs in the querying
+syscall context and therefore must not block.
 
 ## Concurrency
 
