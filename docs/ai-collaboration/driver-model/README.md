@@ -1,5 +1,13 @@
 # 新驱动框架模型：协作进度
 
+## 下一阶段：平台 / VirtIO-MMIO 枚举迁移（范围待评审）
+
+用户要求从 RNG 专用接入扩展为完整平台 / VirtIO-MMIO 枚举迁移，并分 PR
+清楚过渡。当前仅完成 [入口、消费者与范围盘点](platform-enumeration-migration-scope.md)
+及 [配置依赖调查](platform-migration-config-inventory.md)，没有修改生产代码或默认配置。
+PCI host 例外、首个包含 block/RNG 与串口接管的可启动配置，以及设备人口规则
+需要先确认；之后再做详细设计、验收和 tickets。不改变下述已完成 R1 的范围。
+
 ## 当前执行状态（2026-11-04）
 
 R1-01～R1-06 已完成本地实现/验收，R1-07 的库、驱动收尾及模型组合测试
