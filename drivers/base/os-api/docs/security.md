@@ -4,9 +4,9 @@
 
 IrqHandler and IrqThreadHandler are Send + Sync contracts; sharing their Arc
 does not quiesce the device or extend DMA validity. The argument is the resolved
-virtual IRQ, not the firmware hardware number. IrqEvent preserves source bits
+virtual IRQ, not the firmware hardware number. IrqEvent preserves the handled result
 and threaded intent without allocation. Ordinary callbacks cannot sleep.
-The xkernel ordinary adapter preserves handled/source information but has no
+The xkernel ordinary adapter preserves handled information but has no
 paired IRQ thread; wake intent alone cannot create one. Threaded registration
 remains unsupported in that provider. Callback sharing does not change guard
 ownership, hardware-stop obligations or synchronous release requirements.

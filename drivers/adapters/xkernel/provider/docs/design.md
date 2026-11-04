@@ -88,7 +88,7 @@ IRQ trigger/controller/domain values, route descriptions, action tokens and
 MSI messages use os-api's shared vocabulary; no per-variant conversion remains.
 The legacy resource structure is still distinct. Callback contracts now come
 from os-api for both entry points. A single adapter forwards the dispatched
-virq and preserves handled/source results; it does not schedule a thread.
+virq and preserves handled results; it does not schedule a thread.
 
 Legacy mapping now honors an explicit domain unchanged. Only absent domains
 use the historical GIC/PLIC/IOAPIC root fallback; unknown/LoongArch/MSI families
@@ -114,8 +114,7 @@ Mapping does not allocate or register domains on the caller's behalf.
   threaded-IRQ integration; this branch does not introduce IRQ-core
   threaded semantics ahead of that.
 
-In the current provider, `driver_os_api::IrqEvent::WAKE_THREAD` and
-`wake_thread_from_sources()` only translate the handled/source bitmap on
+In the current provider, `driver_os_api::IrqEvent::WAKE_THREAD` only translates the handled result on
 the hardirq shared-handler path; real wake-thread semantics take effect
 once a kirq threadirq provider override is integrated.
 

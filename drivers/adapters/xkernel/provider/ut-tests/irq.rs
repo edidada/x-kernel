@@ -115,16 +115,16 @@ fn test_routed_irq_resource_maps_to_descriptor_spec() {
 
 #[def_test]
 fn test_device_irq_event_wake_request_maps_to_handled_until_threadirq_is_available() {
-    let event = event_to_kirq(DevIrqEvent::wake_thread_from_sources(0b1010));
+    let event = event_to_kirq(DevIrqEvent::WAKE_THREAD);
 
     assert!(event.handled());
-    assert_eq!(event.sources(), 0b1010);
+    assert_eq!(event.sources(), 0);
 }
 
 #[def_test]
 fn test_device_irq_event_handled_does_not_wake_thread() {
-    let event = event_to_kirq(DevIrqEvent::from_sources(0b0101));
+    let event = event_to_kirq(DevIrqEvent::HANDLED);
 
     assert!(event.handled());
-    assert_eq!(event.sources(), 0b0101);
+    assert_eq!(event.sources(), 0);
 }

@@ -13,7 +13,7 @@ still need migration because their semantics differ, not merely their names.
 
 Callback migration: IrqEvent, IrqHandler and IrqThreadHandler now also belong
 to os-api and are only re-exported here. Providers receive the same callback
-objects; source bits and IRQ arguments are not narrowed. Resource shape,
+objects; IRQ arguments and handled results are preserved. Resource shape,
 IrqOp acquisition methods and the Irq guard remain legacy pending migration.
 
 Kernel unit tests live in `ut-tests/` and are mounted from their original

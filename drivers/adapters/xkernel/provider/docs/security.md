@@ -122,7 +122,7 @@ the kernel out of memory.
 ## Provider consolidation boundary
 
 Both IRQ entry points use os-api IrqHandler/IrqEvent and the same host callback
-adapter. It forwards the actual virq rather than hwirq, preserves source bits,
+adapter. It forwards the actual virq rather than hwirq, preserves the handled result,
 and retains the existing ordinary-only treatment of wake-thread intent. The
 shared callback contract grants neither thread context nor hardware ownership.
 

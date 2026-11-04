@@ -113,8 +113,7 @@ fn native_irq_request_and_release_keep_exact_action_identity() {
     for action in [
         IrqEvent::HANDLED,
         IrqEvent::NOT_HANDLED,
-        IrqEvent::from_sources(0b1010),
-        IrqEvent::wake_thread_from_sources(0b0101),
+        IrqEvent::WAKE_THREAD,
     ] {
         let mut registered = None;
         let token = request_with(
@@ -141,7 +140,7 @@ fn native_irq_request_and_release_keep_exact_action_identity() {
         let event = registered.unwrap();
         assert_eq!(event.0, resource_spec(resource));
         assert_eq!(event.1.handled(), action.handled());
-        assert_eq!(event.1.sources(), action.sources());
+        assert_eq!(event.1.sources(), 0);
         assert_eq!(released, Some((resource_spec(resource), 73)));
     }
 }

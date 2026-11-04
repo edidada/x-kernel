@@ -155,7 +155,7 @@ DomainMapped，保留来源域/hwirq 与强类型 Virq。默认 map_irq 只适�
 
 IRQ 回调统一为 `Arc<dyn IrqHandler>`，`handle(usize) -> IrqEvent` 的参数为
 OS-visible virq。闭包携带设备上下文；普通 IRQ 调用不得睡眠或用于 pseudo-NMI。
-`irq/handler.rs` 聚合回调和结果词汇，保留 source 位图、merge 和 wake-thread 意图。
+`irq/handler.rs` 聚合回调和结果词汇，只保留 handled、merge 和 wake-thread 意图，设备事件留在驱动内部。
 不再保留独立 IrqAction 或无参 IrqHandlerFn。IrqThreadHandler 的迁入只保留已有
 契约，不新增 threaded 注册实现；普通入口没有配对线程，不能依靠 wake 位调度它。
 

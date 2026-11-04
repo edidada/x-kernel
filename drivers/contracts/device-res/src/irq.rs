@@ -9,8 +9,8 @@
 use alloc::sync::Arc;
 
 pub use driver_os_api::{
-    IRQ_EVENT_SOURCES, IrqController, IrqDomainId, IrqEvent, IrqEventSource, IrqHandler,
-    IrqHandlerToken, IrqRouteDesc, IrqThreadHandler, IrqTrigger, MsiMessage,
+    IrqController, IrqDomainId, IrqEvent, IrqHandler, IrqHandlerToken, IrqRouteDesc,
+    IrqThreadHandler, IrqTrigger, MsiMessage,
 };
 
 use crate::{ResError, ResResult};
@@ -96,7 +96,7 @@ pub trait IrqOp: Sync {
     /// Register a primary interrupt handler and a sleepable threaded handler.
     ///
     /// The primary handler still runs in interrupt context and should return
-    /// [`IrqEvent::WAKE_THREAD`] or [`IrqEvent::wake_thread_from_sources`] when
+    /// [`IrqEvent::WAKE_THREAD`] when
     /// the threaded handler should run. Providers that do not support threaded
     /// IRQs return [`ResError::Unsupported`].
     fn request_threaded_irq(

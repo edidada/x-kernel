@@ -550,9 +550,9 @@ let Some(service) = env.extension::<PciTransportService>() else { … };
 
 ### 回调结果不等于线程化注册
 
-本模型使用共享 `IrqEvent`，保留 source 位图及 threaded 意图；Op、设备服务和
+本模型使用共享 `IrqEvent`，保留 handled 及 threaded 意图；Op、设备服务和
 DeviceAccess 仍没有 threaded IRQ 注册入口。普通回调接收 OS-visible virq。
-当前宿主普通入口只转发 handled/source，不安排线程。这是已知接口限制，不是
+当前宿主普通入口只转发 handled，不安排线程。这是已知接口限制，不是
 对底层能力的判断；实际接入必须连同线程注册、退出同步和驱动侧入口一起设计。
 
 ### 驱动身份是注册键，不是对象地址

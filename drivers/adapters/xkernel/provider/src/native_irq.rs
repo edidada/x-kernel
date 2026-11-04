@@ -143,7 +143,7 @@ pub(super) fn adapt_handler(handler: Arc<dyn IrqHandler>) -> kirq::Handler {
 
 pub(super) fn event_to_kirq(event: IrqEvent) -> kirq::IrqEvent {
     if event.handled() {
-        kirq::IrqEvent::from_sources(event.sources())
+        kirq::IrqEvent::HANDLED
     } else {
         kirq::IrqEvent::NOT_HANDLED
     }

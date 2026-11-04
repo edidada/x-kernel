@@ -94,7 +94,7 @@ impl DriverOps<PlatformBus> for IrqProbe {
             .res()
             .request_irq(self.spec, "host-services-ut", move |irq| {
                 core::assert_eq!(irq, expected_irq.raw());
-                IrqEvent::from_sources(0x81)
+                IrqEvent::HANDLED
             });
         *self.result.lock() = Some(match &result {
             Ok(guard) => Ok(guard.virq()),
@@ -176,7 +176,7 @@ fn host_services_preserve_irq_mapping_and_release_each_binding_once() {
             {
                 expected.push(Event::Map(controller, domain, hwirq, trigger));
             }
-            expected.push(Event::Request(resource, IrqEvent::from_sources(0x81)));
+            expected.push(Event::Request(resource, IrqEvent::HANDLED));
             expected.push(Event::Release(resource, IrqHandlerToken::SharedAction(91)));
         }
         let actual = events.lock().clone();

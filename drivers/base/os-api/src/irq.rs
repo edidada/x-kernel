@@ -11,7 +11,7 @@ pub use irq_types::{IrqController, IrqDomainId, IrqTrigger};
 
 mod handler;
 
-pub use handler::{IRQ_EVENT_SOURCES, IrqEvent, IrqEventSource, IrqHandler, IrqThreadHandler};
+pub use handler::{IrqEvent, IrqHandler, IrqThreadHandler};
 
 use super::ReleaseHook;
 use crate::{ResError, ResResult};
@@ -254,7 +254,7 @@ pub trait IrqOp: Send + Sync {
     /// IRQ number and returns IrqEvent. The host
     /// adapts this to its own callback and result types; it must not dispatch
     /// this callback through a pseudo-NMI path. Invocation must not sleep.
-    /// Source bits must be preserved. A wake-thread bit does not establish a
+    /// A wake-thread bit does not establish a
     /// threaded registration; this ordinary entry has no paired thread handler.
     /// The callback may run before this method returns. On error the provider
     /// must retain neither a new registration nor its callback.

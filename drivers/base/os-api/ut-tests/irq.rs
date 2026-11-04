@@ -13,17 +13,12 @@ use crate::{
 struct MockIrqProvider;
 
 #[def_test]
-fn irq_events_preserve_sources_merge_and_thread_intent() {
+fn irq_events_preserve_claim_and_thread_intent() {
     let mut event = IrqEvent::NOT_HANDLED;
-    event.merge(IrqEvent::from_sources(0x81));
-    event.merge(IrqEvent::wake_thread_from_sources(0x02));
+    event.merge(IrqEvent::HANDLED);
+    event.merge(IrqEvent::WAKE_THREAD);
     assert_eq!(event.handled(), true);
-    assert_eq!(event.sources(), 0x83);
     assert_eq!(event.wake_thread(), true);
-    assert_eq!(event.has_source(0), true);
-    assert_eq!(event.has_source(7), true);
-    assert_eq!(event.has_source(8), false);
-    assert_eq!(event.has_source(u8::MAX), false);
     assert_eq!(IrqEvent::default(), IrqEvent::HANDLED);
 }
 

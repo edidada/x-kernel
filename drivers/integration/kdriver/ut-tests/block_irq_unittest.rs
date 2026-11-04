@@ -38,12 +38,14 @@ impl IrqOp for MockProvider {
         core::assert!(ACTIONS.lock().insert((irq.number, id), handler).is_none());
         Ok(IrqHandlerToken::shared_action(id))
     }
+
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
         let IrqHandlerToken::SharedAction(id) = token else {
             panic!("expected shared action");
         };
         core::assert!(ACTIONS.lock().remove(&(irq.number, id)).is_some());
     }
+
     fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {
         panic!("block removal must not mask a shared line");
     }
@@ -70,7 +72,7 @@ impl IrqHandler for TestDevice {
         core::assert!(kirq::context::is_in_hardirq());
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.is_claimed.load(Ordering::Relaxed) {
-            IrqEvent::from_sources(0b101)
+            IrqEvent::HANDLED
         } else {
             IrqEvent::NOT_HANDLED
         }
@@ -130,7 +132,7 @@ fn block_irq_registers_each_device_and_releases_only_its_action() {
     let (second_irq, second_reclaimer) = subscribe(&second, 0x4000);
     let (other_irq, other_reclaimer) = subscribe(&other, 0x4001);
     assert_eq!(ACTIONS.lock().len(), 3);
-    assert_eq!(dispatch(0x4000), IrqEvent::from_sources(0b101));
+    assert_eq!(dispatch(0x4000), IrqEvent::HANDLED);
     kirq::softirq::run_pending_softirqs();
     assert_eq!(first.reclaims.load(Ordering::Relaxed), 1);
     assert_eq!(second.reclaims.load(Ordering::Relaxed), 0);

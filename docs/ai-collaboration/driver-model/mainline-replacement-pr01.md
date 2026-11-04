@@ -1,5 +1,14 @@
 # 主线交付原则与 PR-01：统一 OS 能力层，退役 device-res
 
+## IRQ source 位图取舍修正
+
+此前“网络消费者需要 source 位图”的结论撤回：生产 RX 调度在 handler 内直接
+完成，位图没有行为消费者，仅被转存/合并及测试读取。os-api 删除 source 字段、
+类型和访问/构造 API；virtio-net 保留原有 IRQ 过滤、ack、RX 调度及 handled 结果。
+这与本地 Linux irqreturn.h / virtio_ring.c 的职责划分一致：设备/队列事件在
+驱动或 transport 内处理，不通过通用 IRQ 返回值上交。以下旧验证记录中的位图
+保留只描述当时迁移状态，不再是目标要求。KIRQ 自身的冗余位图本批不修改。
+
 状态：用户已确认按职责逐步替换旧模型；本页是首个 PR 的范围与缺口清单，
 不是已完成的实现、验收或已创建的远端 PR。transport 开发暂停，先整理 PR-01。
 
