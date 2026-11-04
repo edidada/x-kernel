@@ -335,20 +335,23 @@ passes; caller-side waits use the common block adapter only.
 > resource ID 由 DRM 层分配并随 dumb buffer 生命周期释放；virtio-gpu 驱动负责把这些
 > resource 命令串行提交到 control virtqueue。
 
-### 显示尺寸变化
+### Display size changes
 
-host 改变控制台尺寸（例如拖动 QEMU 窗口）时，会在 config 空间的 `events_read`
-置 `VIRTIO_GPU_EVENT_DISPLAY`。本驱动没有为显示设备注册中断（`pci.rs` 有意屏蔽
-Display 的 INTx），因此在查询路径上轮询：
+When the host changes the console size (for example by resizing the QEMU
+window), it sets `VIRTIO_GPU_EVENT_DISPLAY` in the config-space `events_read`
+word. This driver registers no interrupt for the display device (`pci.rs`
+deliberately masks the Display INTx), so the query path polls instead:
 
-1. `DisplayDevice::refresh_info()` 读 `events_read`，把已读到的位写回
-   `events_clear` 应答，再发 `GET_DISPLAY_INFO`
-2. 尺寸与缓存值不同时更新 `DisplayInfo` 并返回 `Some(new)`，否则返回 `None`
-3. `drmdevice` 在 `GETCONNECTOR` 前调用它，于是新的尺寸以 `<width>x<height>`
-   命名的 mode 出现在连接器上；`GETRESOURCES` 报告的是尺寸包络而不是当前值
+1. `DisplayDevice::refresh_info()` reads `events_read`, acknowledges the bits it
+   consumed by writing `events_clear`, and issues `GET_DISPLAY_INFO` again.
+2. When the size differs from the cached value it updates `DisplayInfo` and
+   returns `Some(new)`; otherwise it returns `None`.
+3. `drmdevice` calls it before `GETCONNECTOR`, so the new size appears as a
+   mode named `<width>x<height>` on the connector, and `GETRESOURCES` reports
+   the capability envelope rather than the current size.
 
-`refresh_info()` 会发起 control virtqueue 请求，只能在进程上下文调用，不能放进
-中断处理。
+`refresh_info()` issues control virtqueue requests, so it may only run in
+process context and never from interrupt handling.
 
 ### 输入设备事件读取
 

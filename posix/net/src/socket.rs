@@ -65,6 +65,12 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     // Extract the type bits (lower 8 bits, ignoring flags like SOCK_CLOEXEC)
     let ty = raw_ty & 0xFF;
 
+    // Linux `unix_create` accepts the default protocol and PF_UNIX itself and
+    // refuses anything else, for every AF_UNIX type.
+    if domain == AF_UNIX && proto != 0 && proto != AF_UNIX {
+        return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+    }
+
     let cred = kprocess::current_cred();
     // Create the appropriate socket type based on domain and type
     let socket = match (domain, ty) {

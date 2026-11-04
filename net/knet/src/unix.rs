@@ -375,7 +375,10 @@ impl UnixDomainSocket {
         }
     }
 
-    /// Whether this socket uses datagram transport, including current seqpacket pairs.
+    /// Whether this socket uses the datagram transport.
+    ///
+    /// Seqpacket sockets now have their own connection-oriented transport, so
+    /// only genuine `SOCK_DGRAM` sockets answer `true`.
     pub fn is_datagram(&self) -> bool {
         matches!(&self.transport, UnixTransport::Dgram(_))
     }

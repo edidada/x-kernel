@@ -5,6 +5,7 @@
 //! VirtIO GPU driver adapter.
 
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
@@ -52,13 +53,28 @@ impl ScanoutBinding {
     }
 }
 
+/// Packs a visible size into the one atomic word the driver keeps.
+const fn pack_display_info(info: DisplayInfo) -> u64 {
+    ((info.width as u64) << 32) | info.height as u64
+}
+
+/// Unpacks the atomic word written by [`pack_display_info`].
+const fn unpack_display_info(packed: u64) -> DisplayInfo {
+    DisplayInfo {
+        width: (packed >> 32) as u32,
+        height: packed as u32,
+    }
+}
+
 /// The VirtIO GPU device driver.
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
-    /// Host-reported visible size.
+    /// Host-reported visible size, packed as `width << 32 | height`.
     ///
-    /// Updated only by [`DisplayDevice::refresh_info`]; see there why the host
-    /// size is latched instead of being queried per call.
-    info: SpinNoIrq<DisplayInfo>,
+    /// Only the query path (`info`/`refresh_info`) touches it and no interrupt
+    /// or softirq context does, so an atomic copy needs no lock. A plain
+    /// relaxed load/store is enough: the value publishes no other state, and a
+    /// reader that observes a stale size is corrected by the next refresh.
+    info: AtomicU64,
     inner: SpinNoIrq<VirtIoGpu2d<H, T>>,
 }
 
@@ -77,7 +93,7 @@ impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
         let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
 
         Ok(Self {
-            info: SpinNoIrq::new(DisplayInfo { width, height }),
+            info: AtomicU64::new(pack_display_info(DisplayInfo { width, height })),
             inner: SpinNoIrq::new(device),
         })
     }
@@ -95,7 +111,7 @@ impl<H: Hal, T: Transport> Device for VirtIoGpuDev<H, T> {
 
 impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
     fn info(&self) -> DisplayInfo {
-        *self.info.lock()
+        unpack_display_info(self.info.load(Ordering::Relaxed))
     }
 
     fn refresh_info(&self) -> Option<DisplayInfo> {
@@ -119,19 +135,23 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             }
         };
 
-        let mut info = self.info.lock();
+        // The device lock above serializes refreshes, so the compare and the
+        // store cannot race another refresh; the relaxed access only has to
+        // carry the value, not order it against other state.
+        let previous = unpack_display_info(self.info.load(Ordering::Relaxed));
         let refreshed = DisplayInfo { width, height };
-        if *info == refreshed {
+        if previous == refreshed {
             return None;
         }
         log::info!(
             "virtio-gpu: display size changed from {}x{} to {}x{}",
-            info.width,
-            info.height,
+            previous.width,
+            previous.height,
             refreshed.width,
             refreshed.height
         );
-        *info = refreshed;
+        self.info
+            .store(pack_display_info(refreshed), Ordering::Relaxed);
         Some(refreshed)
     }
 

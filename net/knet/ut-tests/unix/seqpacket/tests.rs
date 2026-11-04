@@ -104,3 +104,54 @@ fn connecting_to_a_bound_but_unlistened_socket_is_refused() {
         Some(KError::ConnectionRefused)
     );
 }
+
+#[def_test]
+fn shutdown_write_makes_the_peer_see_eof() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+    sender.shutdown(Shutdown::Write).unwrap();
+
+    let mut buf = [0u8; 8];
+    let nonblocking = RecvOptions {
+        flags: RecvFlags::DONT_WAIT,
+        ..RecvOptions::default()
+    };
+    // The peer's receive side is closed: it reports EOF instead of blocking.
+    assert_eq!(receiver.recv(&mut buf[..], nonblocking), Ok(0));
+    // The closed direction refuses further sends.
+    assert_eq!(
+        sender.send(&b"late"[..], SendOptions::default()),
+        Err(KError::BrokenPipe)
+    );
+}
+
+#[def_test]
+fn accepted_socket_inherits_listener_pass_credentials() {
+    use crate::options::GetSocketOption;
+
+    let listener = SeqpacketTransport::new();
+    listener
+        .set_option(SetSocketOption::PassCredentials(&true))
+        .unwrap();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+        panic!("seqpacket listener returned another transport");
+    };
+
+    let mut enabled = false;
+    accepted
+        .get_option(GetSocketOption::PassCredentials(&mut enabled))
+        .unwrap();
+    assert!(enabled);
+}
