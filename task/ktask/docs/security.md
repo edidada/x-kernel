@@ -906,3 +906,21 @@ Explicitly exempt kernel workers can still run, so platform preparation must
 drain/suppress their device accesses before resources disappear. Missing safe
 points refuse suspension by timeout rather than silently claiming global
 quiescence. No new production worker exemptions or real platform PM are enabled.
+
+### Explicit freezable wait wakeup
+
+`PreparedTaskWait::park_freezable` rejects user/non-sleepable contexts before
+setting its scoped flag. A request wakes only an explicit participant; it does
+not convert arbitrary blocking into a freeze acknowledgment. Confirmation still
+occurs exclusively in `checkpoint`, after the caller has released dependencies.
+A sleeping callback using ordinary waits remains unconfirmed and can time out.
+
+The request is published before reading the opt-in flag, and no request lock is
+held while waking the scheduler. The existing blocked-state stop predicate
+rechecks the slot under scheduler exclusion; this closes both publication-before-
+park and wake-before-block races. Its run-queue-to-request lock order has no
+reverse publisher edge. The flag is task-context-only, independent atomic state;
+no IRQ reader or raw pointer is added. It introduces no new unsafe code or
+Send/Sync implementation. The prepared handle retains its task and remains
+neither Send nor Sync. Ordinary waker hints survive confirmed freezing, while
+request cancellation never independently releases a successfully returned guard.

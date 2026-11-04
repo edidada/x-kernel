@@ -204,6 +204,12 @@ pub fn freeze_tasks(
     };
     for (task, request) in &frozen.requests {
         *task.freeze_request.lock() = Some(request.clone());
+        // Release the request lock before scheduler entry. A freezer-aware
+        // park rechecks the request after publishing Blocked, closing the
+        // running-to-blocked race even when this wake observes a running task.
+        if task.is_freezer_wait.load(Ordering::Acquire) {
+            crate::wake_task(task, false);
+        }
     }
     cancellation.0.changed.notify_all();
     let confirmed = || {
@@ -266,3 +272,6 @@ pub(crate) fn notify_exit(task: &crate::TaskInner) {
 
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../ut-tests/freezer.rs");
+
+#[cfg(unittest)]
+unittest::path_mod_test!(wait_tests, "../ut-tests/freezer_wait.rs");

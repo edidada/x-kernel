@@ -357,6 +357,8 @@ pub struct TaskInner {
     state: AtomicU8,
     // Task-only access needs preemption exclusion; no IRQ handler reads this slot.
     pub(crate) freeze_request: SpinNoPreempt<Option<Arc<crate::freezer::Request>>>,
+    // Only explicit freezer-aware parking opts into request-driven task wakeup.
+    pub(crate) is_freezer_wait: AtomicBool,
     pub(crate) suspend_registration: klazy::Once<Arc<crate::freezer::system::Registration>>,
 
     /// CPU affinity mask.
@@ -982,6 +984,7 @@ impl TaskInner {
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             freeze_request: SpinNoPreempt::new(None),
+            is_freezer_wait: AtomicBool::new(false),
             suspend_registration: klazy::Once::new(),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
