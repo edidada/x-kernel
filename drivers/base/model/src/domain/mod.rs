@@ -383,7 +383,7 @@ impl DeviceResourceServices for NoServices {
         _: crate::DeviceContext<'_>,
         _: IrqSpec,
         _: &'static str,
-        _: crate::IrqHandlerFn,
+        _: Arc<dyn crate::IrqHandler>,
     ) -> Result<crate::DevIrq, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }

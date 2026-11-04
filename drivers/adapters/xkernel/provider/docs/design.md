@@ -16,7 +16,7 @@ Shared registration now uses the native typed error classification, including
 BadState for invalid context and Busy for teardown. Exact-token release must
 return a handler after drain: no match is NotFound, not successful release.
 The legacy infallible release fails closed on rejection rather than permitting
-resource reclamation. Legacy resource shapes and callback contracts have not
+resource reclamation. Legacy resource shapes and acquisition contracts have not
 yet been unified. Unit-returning MSI release still warns on refusal; this
 slice does not resolve its ownership/retry limitations.
 
@@ -86,7 +86,9 @@ static `XKernelResourceProvider` instance and passes it explicitly to
 
 IRQ trigger/controller/domain values, route descriptions, action tokens and
 MSI messages use os-api's shared vocabulary; no per-variant conversion remains.
-The legacy resource structure and callback protocol are still distinct.
+The legacy resource structure is still distinct. Callback contracts now come
+from os-api for both entry points. A single adapter forwards the dispatched
+virq and preserves handled/source results; it does not schedule a thread.
 
 Legacy mapping now honors an explicit domain unchanged. Only absent domains
 use the historical GIC/PLIC/IOAPIC root fallback; unknown/LoongArch/MSI families
@@ -112,7 +114,7 @@ Mapping does not allocate or register domains on the caller's behalf.
   threaded-IRQ integration; this branch does not introduce IRQ-core
   threaded semantics ahead of that.
 
-In the current provider, `device_res::IrqEvent::WAKE_THREAD` and
+In the current provider, `driver_os_api::IrqEvent::WAKE_THREAD` and
 `wake_thread_from_sources()` only translate the handled/source bitmap on
 the hardirq shared-handler path; real wake-thread semantics take effect
 once a kirq threadirq provider override is integrated.

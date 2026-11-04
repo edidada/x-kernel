@@ -9,6 +9,10 @@ use core::fmt;
 
 pub use irq_types::{IrqController, IrqDomainId, IrqTrigger};
 
+mod handler;
+
+pub use handler::{IRQ_EVENT_SOURCES, IrqEvent, IrqEventSource, IrqHandler, IrqThreadHandler};
+
 use super::ReleaseHook;
 use crate::{ResError, ResResult};
 
@@ -48,26 +52,6 @@ impl Drop for DevIrq {
         }
     }
 }
-
-/// Outcome of an interrupt handler invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqAction {
-    /// The interrupt was ours and has been acked.
-    Handled,
-    /// Not ours (shared line).
-    NotHandled,
-}
-
-/// Type-erased ordinary device interrupt handler.
-///
-/// Runs in normal device IRQ context; it must not sleep. This is not a
-/// pseudo-NMI or threaded-IRQ callback. Host adapters translate its result
-/// to their IRQ core's vocabulary.
-///
-/// The handler carries its own context (the `dev_id` pattern): drivers close
-/// over a `Weak` handle into their own `Data`; there is no global irq-to-
-/// device routing table anywhere in the framework.
-pub type IrqHandlerFn = Arc<dyn Fn() -> IrqAction + Send + Sync>;
 
 /// An OS-visible virtual interrupt number (the number the host IRQ core
 /// dispatches).
@@ -266,12 +250,19 @@ pub enum IrqHandlerToken {
 pub trait IrqOp: Send + Sync {
     /// Register a normal device interrupt handler for the resolved `irq`.
     ///
-    /// The handler captures its device context and returns IrqAction. The host
+    /// The handler captures its device context, receives the OS-visible virtual
+    /// IRQ number and returns IrqEvent. The host
     /// adapts this to its own callback and result types; it must not dispatch
     /// this callback through a pseudo-NMI path. Invocation must not sleep.
+    /// Source bits must be preserved. A wake-thread bit does not establish a
+    /// threaded registration; this ordinary entry has no paired thread handler.
     /// The callback may run before this method returns. On error the provider
     /// must retain neither a new registration nor its callback.
-    fn request_irq(&self, irq: IrqResource, handler: IrqHandlerFn) -> ResResult<IrqHandlerToken>;
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken>;
 
     /// Detach the exact previously registered action and drain in-flight calls.
     ///

@@ -35,8 +35,9 @@ pub use dma::{
 };
 pub use error::{ResError, ResResult};
 pub use irq::{
-    DevIrq, IrqAction, IrqController, IrqDomainId, IrqHandlerFn, IrqHandlerToken, IrqOp,
-    IrqResource, IrqRouteDesc, IrqSpec, IrqTrigger, MsiMessage, MsiResource, Virq,
+    DevIrq, IRQ_EVENT_SOURCES, IrqController, IrqDomainId, IrqEvent, IrqEventSource, IrqHandler,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqSpec, IrqThreadHandler, IrqTrigger,
+    MsiMessage, MsiResource, Virq,
 };
 pub use memory::{CpuBuffer, CpuMemoryOp};
 pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};

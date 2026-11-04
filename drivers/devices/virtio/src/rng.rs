@@ -7,8 +7,9 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_res::{Irq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
+use device_res::{Irq, IrqOp, IrqResource, ResError};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::{IrqEvent, IrqHandler};
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use subsys_hwrng::{HwrngDevice, completion::RngCompletion};
@@ -333,7 +334,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
         transport: T,
         backend: B,
         completion: Arc<dyn RngCompletion>,
-        request: impl FnOnce(driver_os_api::IrqHandlerFn) -> DriverResult<driver_os_api::DevIrq>,
+        request: impl FnOnce(Arc<dyn driver_os_api::IrqHandler>) -> DriverResult<driver_os_api::DevIrq>,
         wait_reset: impl FnMut(),
     ) -> DriverResult<Arc<Self>> {
         Self::try_new_with_registration(
@@ -342,15 +343,9 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static, B: DmaBackend + Sen
             completion,
             |device| {
                 let weak = Arc::downgrade(device);
-                let handler: driver_os_api::IrqHandlerFn = Arc::new(move || {
-                    if weak
-                        .upgrade()
-                        .is_some_and(|device| device.handle_interrupt().handled())
-                    {
-                        driver_os_api::IrqAction::Handled
-                    } else {
-                        driver_os_api::IrqAction::NotHandled
-                    }
+                let handler: Arc<dyn driver_os_api::IrqHandler> = Arc::new(move |_| {
+                    weak.upgrade()
+                        .map_or(IrqEvent::NOT_HANDLED, |device| device.handle_interrupt())
                 });
                 request(handler).map(RngIrq::Model)
             },

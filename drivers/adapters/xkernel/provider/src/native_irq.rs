@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 
 use driver_os_api::{
-    IrqAction, IrqController, IrqHandlerFn, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc,
+    IrqController, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc,
     ResError, ResResult, Virq,
 };
 
@@ -41,7 +41,11 @@ impl IrqOp for NativeIrq {
         map_route_with(route, kirq::try_map)
     }
 
-    fn request_irq(&self, irq: IrqResource, handler: IrqHandlerFn) -> ResResult<IrqHandlerToken> {
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken> {
         request_with(
             irq,
             handler,
@@ -133,16 +137,21 @@ fn resource_spec(irq: IrqResource) -> kirq::IrqSpec {
     }
 }
 
-fn adapt_handler(handler: IrqHandlerFn) -> kirq::Handler {
-    Arc::new(move |_| match handler() {
-        IrqAction::Handled => kirq::IrqEvent::HANDLED,
-        IrqAction::NotHandled => kirq::IrqEvent::NOT_HANDLED,
-    })
+pub(super) fn adapt_handler(handler: Arc<dyn IrqHandler>) -> kirq::Handler {
+    Arc::new(move |virq| event_to_kirq(handler.handle(virq)))
+}
+
+pub(super) fn event_to_kirq(event: IrqEvent) -> kirq::IrqEvent {
+    if event.handled() {
+        kirq::IrqEvent::from_sources(event.sources())
+    } else {
+        kirq::IrqEvent::NOT_HANDLED
+    }
 }
 
 fn request_with(
     irq: IrqResource,
-    handler: IrqHandlerFn,
+    handler: Arc<dyn IrqHandler>,
     is_sleepable: bool,
     lookup: impl FnOnce(usize) -> Option<kirq::IrqDesc>,
     register: impl FnOnce(

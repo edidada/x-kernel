@@ -7,17 +7,39 @@ use alloc::sync::Arc;
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    IrqAction, IrqHandlerFn, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, ResResult, Virq,
+    IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, ResResult, Virq,
 };
 
 struct MockIrqProvider;
 
+#[def_test]
+fn irq_events_preserve_sources_merge_and_thread_intent() {
+    let mut event = IrqEvent::NOT_HANDLED;
+    event.merge(IrqEvent::from_sources(0x81));
+    event.merge(IrqEvent::wake_thread_from_sources(0x02));
+    assert_eq!(event.handled(), true);
+    assert_eq!(event.sources(), 0x83);
+    assert_eq!(event.wake_thread(), true);
+    assert_eq!(event.has_source(0), true);
+    assert_eq!(event.has_source(7), true);
+    assert_eq!(event.has_source(8), false);
+    assert_eq!(event.has_source(u8::MAX), false);
+    assert_eq!(IrqEvent::default(), IrqEvent::HANDLED);
+}
+
 impl IrqOp for MockIrqProvider {
-    fn request_irq(&self, _irq: IrqResource, handler: IrqHandlerFn) -> ResResult<IrqHandlerToken> {
-        match handler() {
-            IrqAction::Handled => Ok(IrqHandlerToken::shared_action(7)),
-            IrqAction::NotHandled => Ok(IrqHandlerToken::shared_action(8)),
-        }
+    fn request_irq(
+        &self,
+        irq: IrqResource,
+        handler: Arc<dyn IrqHandler>,
+    ) -> ResResult<IrqHandlerToken> {
+        Ok(IrqHandlerToken::shared_action(
+            if handler.handle(irq.virq().raw()).handled() {
+                7
+            } else {
+                8
+            },
+        ))
     }
 
     fn release_irq(&self, _irq: IrqResource, _token: IrqHandlerToken) {}
@@ -54,8 +76,8 @@ fn irq_mapping_retains_shared_vocabulary_and_origin() {
 fn irq_provider_accepts_model_owned_handler_results() {
     let provider = MockIrqProvider;
     let irq = IrqResource::plain(Virq::new(41), crate::IrqTrigger::LevelHigh);
-    for (action, token) in [(IrqAction::Handled, 7), (IrqAction::NotHandled, 8)] {
-        let handler: IrqHandlerFn = Arc::new(move || action);
+    for (action, token) in [(IrqEvent::HANDLED, 7), (IrqEvent::NOT_HANDLED, 8)] {
+        let handler: Arc<dyn IrqHandler> = Arc::new(move |_| action);
         assert_eq!(
             provider.request_irq(irq, handler),
             Ok(IrqHandlerToken::shared_action(token))

@@ -7,9 +7,8 @@
 use alloc::sync::Arc;
 
 use device_res::{
-    IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
-    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource,
-    ResError, ResResult,
+    IrqController as DevIrqController, IrqHandler as DevIrqHandler, IrqHandlerToken, IrqOp,
+    IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource, ResError, ResResult,
 };
 
 use crate::XKernelResourceProvider;
@@ -20,10 +19,7 @@ impl IrqOp for XKernelResourceProvider {
         irq: IrqResource,
         handler: Arc<dyn DevIrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        let dispatch_handler: Arc<dyn kirq::IrqHandler> = Arc::new(move |virq| {
-            let event = handler.handle(virq);
-            dev_irq_event_to_kirq(event)
-        });
+        let dispatch_handler = crate::native_irq::adapt_handler(handler);
         let token =
             crate::native_irq::register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler)?;
         Ok(IrqHandlerToken::shared_action(token.id()))
@@ -122,14 +118,6 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
         desc = desc.with_domain(domain);
     }
     kirq::IrqSpec::Desc(desc)
-}
-
-fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
-    if event.handled() {
-        kirq::IrqEvent::from_sources(event.sources())
-    } else {
-        kirq::IrqEvent::NOT_HANDLED
-    }
 }
 
 fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {

@@ -330,9 +330,9 @@ fn concrete_rng_finish_stop_waits_for_native_irq_notification_tail() {
             resource,
             Arc::new({
                 let peer_calls = peer_calls.clone();
-                move || {
+                move |_| {
                     peer_calls.fetch_add(1, Ordering::Relaxed);
-                    driver_os_api::IrqAction::Handled
+                    driver_os_api::IrqEvent::HANDLED
                 }
             }),
         )

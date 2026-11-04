@@ -179,7 +179,7 @@ OS 能力契约、句柄和纯资源描述现位于 `drivers/base/os-api`。
 model 通过 driver-os-api 使用 irq-types 的基础 IRQ 词汇，不依赖 kirq 或旧 device_res。
 新旧资源模型暂时并存，不迁移旧调用方；生产宿主服务由 kdriver 实现。
 model 拥有带借用设备上下文的设备服务、deferred probe、ResourceMap 以及错误转换。
-宿主适配方实现 OS Op；普通 IRQ 回调通过 IrqHandlerFn / IrqAction 交接，不暴露内核 handler。
+宿主适配方实现 OS Op；普通 IRQ 回调通过 os-api 的 IrqHandler / IrqEvent 交接，不暴露内核 handler。
 边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
 依赖方向为 `hwrng → driver-model → driver-os-api`，模型不反向依赖子系统。
@@ -548,11 +548,12 @@ let Some(service) = env.extension::<PciTransportService>() else { … };
 家族知识"本身，不是框架的泄漏。
 登记为例外 E-02。
 
-### `IrqAction` 没有 `WakeThread` 变体
+### 回调结果不等于线程化注册
 
-本模型的 `IrqAction` 只表示同步处理结果，Op、设备服务和 DeviceAccess 均没有
-threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是对底层能力的判断。
-未来需要连同线程注册、退出同步和驱动侧入口一起设计，不得静默降级唤醒请求。
+本模型使用共享 `IrqEvent`，保留 source 位图及 threaded 意图；Op、设备服务和
+DeviceAccess 仍没有 threaded IRQ 注册入口。普通回调接收 OS-visible virq。
+当前宿主普通入口只转发 handled/source，不安排线程。这是已知接口限制，不是
+对底层能力的判断；实际接入必须连同线程注册、退出同步和驱动侧入口一起设计。
 
 ### 驱动身份是注册键，不是对象地址
 

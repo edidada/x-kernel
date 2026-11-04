@@ -18,7 +18,7 @@ mod probe_progress;
 
 use super::*;
 use crate::{
-    ClkHandle, DepKind, DevIrq, DeviceDescriptor, IoMap, IrqAction, OfMatch, PlatformBus,
+    ClkHandle, DepKind, DevIrq, DeviceDescriptor, IoMap, IrqEvent, OfMatch, PlatformBus,
     bus::{BusInstanceId, PlatformId, platform_bus::PlatformBusData},
     driver::{DriverDesc, DriverOps},
     management_tests::TestManagementLock,
@@ -190,7 +190,7 @@ impl DeviceResourceServices for MockServices {
         device: crate::DeviceContext<'_>,
         spec: IrqSpec,
         _: &'static str,
-        _: crate::IrqHandlerFn,
+        _: Arc<dyn crate::IrqHandler>,
     ) -> Result<DevIrq, RuntimeError> {
         self.record_request("request_irq", &device);
         Ok(DevIrq::new(
@@ -336,7 +336,7 @@ impl DriverOps<PlatformBus> for TestSer {
     ) -> Result<SerData, ProbeError> {
         PROBES.fetch_add(1, Ordering::Relaxed);
         let regs = dev.res().iomap(0)?;
-        let irq = dev.res().request_irq_at(0, || IrqAction::Handled)?;
+        let irq = dev.res().request_irq_at(0, |_| IrqEvent::HANDLED)?;
         let clk = dev.res().clk("baudclk")?;
         clk.prepare_enable()?;
         Ok(SerData { regs, irq, clk })
@@ -487,7 +487,7 @@ fn resource_services_receive_the_same_device_and_release_each_guard_once() {
             let resources = dev.res();
             let mapping = resources.iomap(0)?;
             let _virq = resources.resolve_irq(0)?;
-            let irq = resources.request_irq_at(0, || IrqAction::Handled)?;
+            let irq = resources.request_irq_at(0, |_| IrqEvent::HANDLED)?;
             let dma = resources.alloc_coherent(0x1000, 0x1000)?;
             let clock = resources.clk("baudclk")?;
             Ok((irq, mapping, dma, clock))
@@ -554,7 +554,7 @@ fn deferred_clock_request_releases_partial_acquisitions() {
             _env: &crate::Environment<'_>,
         ) -> Result<Self::Data, ProbeError> {
             let _mapping = dev.res().iomap(0)?;
-            let _irq = dev.res().request_irq_at(0, || IrqAction::Handled)?;
+            let _irq = dev.res().request_irq_at(0, |_| IrqEvent::HANDLED)?;
             let _clock = dev.res().clk("baudclk")?;
             Ok(())
         }

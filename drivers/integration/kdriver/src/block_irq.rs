@@ -9,7 +9,8 @@
 
 use alloc::sync::{Arc, Weak};
 
-use device_res::{Irq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResResult};
+use device_res::{Irq, IrqOp, IrqResource, ResResult};
+use driver_os_api::{IrqEvent, IrqHandler};
 
 use crate::block_completion_dispatch::BlockIoReclaimer;
 

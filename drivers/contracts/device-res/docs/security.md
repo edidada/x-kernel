@@ -1,5 +1,11 @@
 # device-res — Security And Reliability
 
+IRQ callback/result contracts are now defined by os-api and re-exported here.
+This facade retains resource acquisition and guard release, not another handler
+implementation. The shared callback still receives the resolved virq, preserves
+source bits and requires IRQ-safe behavior; threaded intent alone grants no
+sleepable context or thread registration.
+
 ## Scope
 
 MMIO/DMA descriptors, MmioOp/DmaOp, IoMap/CoherentMem and ResError belong to driver-os-api;

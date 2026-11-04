@@ -110,11 +110,19 @@ fn native_irq_request_and_release_keep_exact_action_identity() {
         Some(IrqDomainId::new(0x7051)),
         37,
     );
-    for action in [IrqAction::Handled, IrqAction::NotHandled] {
+    for action in [
+        IrqEvent::HANDLED,
+        IrqEvent::NOT_HANDLED,
+        IrqEvent::from_sources(0b1010),
+        IrqEvent::wake_thread_from_sources(0b0101),
+    ] {
         let mut registered = None;
         let token = request_with(
             resource,
-            Arc::new(move || action),
+            Arc::new(move |virq| {
+                core::assert_eq!(virq, 903);
+                action
+            }),
             true,
             |_| None,
             |spec, handler| {
@@ -126,14 +134,14 @@ fn native_irq_request_and_release_keep_exact_action_identity() {
         let mut released = None;
         let result = release_with(resource, token, |spec, token| {
             released = Some((spec, token.id()));
-            Ok(Some(adapt_handler(Arc::new(|| IrqAction::NotHandled))))
+            Ok(Some(adapt_handler(Arc::new(|_| IrqEvent::NOT_HANDLED))))
         });
         assert_eq!(result, Ok(()));
         assert_eq!(token, IrqHandlerToken::SharedAction(73));
         let event = registered.unwrap();
         assert_eq!(event.0, resource_spec(resource));
-        assert_eq!(event.1.handled(), action == IrqAction::Handled);
-        assert_eq!(event.1.sources(), 0);
+        assert_eq!(event.1.handled(), action.handled());
+        assert_eq!(event.1.sources(), action.sources());
         assert_eq!(released, Some((resource_spec(resource), 73)));
     }
 }
@@ -143,7 +151,7 @@ fn native_irq_invalid_context_rejects_before_registration() {
     let mut called = false;
     let result = request_with(
         IrqResource::plain(Virq::new(903), IrqTrigger::LevelHigh),
-        Arc::new(|| IrqAction::Handled),
+        Arc::new(|_| IrqEvent::HANDLED),
         false,
         |_| None,
         |_, _| {
@@ -167,7 +175,7 @@ fn native_irq_failures_never_report_successful_registration_or_release() {
     let token = IrqHandlerToken::SharedAction(73);
     let result = request_with(
         resource,
-        Arc::new(|| IrqAction::Handled),
+        Arc::new(|_| IrqEvent::HANDLED),
         true,
         |_| None,
         |_, _| Ok(None),
@@ -175,7 +183,7 @@ fn native_irq_failures_never_report_successful_registration_or_release() {
     assert_eq!(result, Err(ResError::Busy));
     let result = request_with(
         resource,
-        Arc::new(|| IrqAction::Handled),
+        Arc::new(|_| IrqEvent::HANDLED),
         true,
         |_| None,
         |_, _| Err(kirq::IrqDescError::TeardownInProgress { virq: 903 }),
@@ -236,7 +244,7 @@ fn native_irq_preserves_owner_preparation_and_hwirq_bounds_errors() {
         assert_eq!(
             request_with(
                 resource,
-                Arc::new(|| IrqAction::Handled),
+                Arc::new(|_| IrqEvent::HANDLED),
                 true,
                 |_| None,
                 |_, _| Err(error),
@@ -265,7 +273,7 @@ fn native_irq_configuration_errors_preserve_typed_request_failures() {
             ResError::Unsupported,
         ),
     ] {
-        let handler: IrqHandlerFn = Arc::new(|| IrqAction::Handled);
+        let handler: Arc<dyn IrqHandler> = Arc::new(|_| IrqEvent::HANDLED);
         let mut registered = None;
         let result = request_with(
             resource,
@@ -311,7 +319,7 @@ fn native_irq_plain_request_validates_existing_descriptor_without_remapping() {
         let mut registered = None;
         let result = request_with(
             IrqResource::plain(Virq::new(903), trigger),
-            Arc::new(|| IrqAction::Handled),
+            Arc::new(|_| IrqEvent::HANDLED),
             true,
             |virq| {
                 queried = Some(virq);

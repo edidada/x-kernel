@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use driver_model::{
     ClkHandle, ClkSpec, ClockConsumerServices, CoherentMem, DevIrq, DeviceContext,
     DeviceManagementLock, DeviceResourceServices, DeviceServices, ExtensionRegistry,
-    ExtensionServices, IoMap, IrqHandlerFn, IrqSpec, MmioRegion, ProviderRegistration,
+    ExtensionServices, IoMap, IrqHandler, IrqSpec, MmioRegion, ProviderRegistration,
     ProviderServices, RuntimeError, ServiceError, Virq,
 };
 use driver_os_api::{DeviceDma, IrqOp, IrqResource, IrqRouteDesc};
@@ -95,7 +95,7 @@ impl DeviceResourceServices for HostDeviceServices {
         _: DeviceContext<'_>,
         spec: IrqSpec,
         _: &'static str,
-        handler: IrqHandlerFn,
+        handler: Arc<dyn IrqHandler>,
     ) -> Result<DevIrq, RuntimeError> {
         let resource = self.resolve_irq(spec)?;
         let provider = self.irq.clone();

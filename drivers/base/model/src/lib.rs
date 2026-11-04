@@ -115,8 +115,8 @@ pub use domain::{
 };
 pub use driver::{DriverDesc, DriverOps};
 pub use driver_os_api::{
-    ClkHandle, CoherentMem, DevIrq, DeviceDma, DmaDirection, EnabledClock, IoMap, IrqAction,
-    IrqHandlerFn, ReleaseHook, StreamingMapping,
+    ClkHandle, CoherentMem, DevIrq, DeviceDma, DmaDirection, EnabledClock, IoMap, IrqEvent,
+    IrqHandler, ReleaseHook, StreamingMapping,
 };
 pub use environment::Environment;
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};

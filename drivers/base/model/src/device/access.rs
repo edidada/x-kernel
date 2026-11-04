@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 
 use super::DeviceRef;
 use crate::{
-    ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction,
+    ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqEvent,
     bus::Bus,
     error::{ProbeError, RuntimeError},
     firmware::{FirmwareNodeInfo, FirmwareProp},
@@ -223,6 +223,7 @@ impl<B: Bus> Resources<'_, B> {
     /// `devm_request_irq(dev, irq, handler, 0, name, dev_id)` — the handler
     /// closes over its own context (`dev_id`), typically a `Weak` into the
     /// driver's `Data`.
+    /// The callback receives the OS-visible virtual IRQ, never a hardware IRQ.
     pub fn request_irq<F>(
         &self,
         spec: IrqSpec,
@@ -230,7 +231,7 @@ impl<B: Bus> Resources<'_, B> {
         handler: F,
     ) -> Result<DevIrq, ProbeError>
     where
-        F: Fn() -> IrqAction + Send + Sync + 'static,
+        F: Fn(usize) -> IrqEvent + Send + Sync + 'static,
     {
         self.services
             .request_irq(
@@ -245,7 +246,7 @@ impl<B: Bus> Resources<'_, B> {
     /// [`Self::request_irq`] on the n-th interrupt resource.
     pub fn request_irq_at<F>(&self, index: usize, handler: F) -> Result<DevIrq, ProbeError>
     where
-        F: Fn() -> IrqAction + Send + Sync + 'static,
+        F: Fn(usize) -> IrqEvent + Send + Sync + 'static,
     {
         let spec = self.irq(index)?;
         self.request_irq(spec, "irq", handler)
@@ -254,7 +255,7 @@ impl<B: Bus> Resources<'_, B> {
     /// [`Self::request_irq`] on an `interrupt-names` entry.
     pub fn request_irq_by_name<F>(&self, name: &str, handler: F) -> Result<DevIrq, ProbeError>
     where
-        F: Fn() -> IrqAction + Send + Sync + 'static,
+        F: Fn(usize) -> IrqEvent + Send + Sync + 'static,
     {
         let spec = self.irq_by_name(name)?;
         self.request_irq(spec, "irq", handler)

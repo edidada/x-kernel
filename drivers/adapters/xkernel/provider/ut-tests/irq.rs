@@ -2,9 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use driver_os_api::IrqEvent as DevIrqEvent;
 use unittest::{assert_eq, def_test};
 
 use super::*;
+use crate::native_irq::event_to_kirq;
 
 #[def_test]
 fn explicit_domain_is_preserved_for_route_and_resource() {
@@ -113,7 +115,7 @@ fn test_routed_irq_resource_maps_to_descriptor_spec() {
 
 #[def_test]
 fn test_device_irq_event_wake_request_maps_to_handled_until_threadirq_is_available() {
-    let event = dev_irq_event_to_kirq(DevIrqEvent::wake_thread_from_sources(0b1010));
+    let event = event_to_kirq(DevIrqEvent::wake_thread_from_sources(0b1010));
 
     assert!(event.handled());
     assert_eq!(event.sources(), 0b1010);
@@ -121,7 +123,7 @@ fn test_device_irq_event_wake_request_maps_to_handled_until_threadirq_is_availab
 
 #[def_test]
 fn test_device_irq_event_handled_does_not_wake_thread() {
-    let event = dev_irq_event_to_kirq(DevIrqEvent::from_sources(0b0101));
+    let event = event_to_kirq(DevIrqEvent::from_sources(0b0101));
 
     assert!(event.handled());
     assert_eq!(event.sources(), 0b0101);

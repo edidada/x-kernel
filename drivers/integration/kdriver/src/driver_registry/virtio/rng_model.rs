@@ -99,7 +99,7 @@ impl DriverOps<PlatformBus> for RngDriver {
             new_rng_completion(),
             |handler| {
                 dev.res()
-                    .request_irq(irq, "virtio-rng-mmio-model", move || handler())
+                    .request_irq(irq, "virtio-rng-mmio-model", move |irq| handler.handle(irq))
                     .map_err(|_| DriverError::Io)
             },
             ktask::yield_now,

@@ -6,7 +6,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 
 use driver_model::{
     Bus, DeviceAccess, DeviceDescriptor, DeviceDomain, DeviceState, DriverDesc, DriverOps,
-    Environment, IrqAction, IrqController, IrqDomainId, IrqTrigger, OfMatch, PlatformBus,
+    Environment, IrqController, IrqDomainId, IrqEvent, IrqTrigger, OfMatch, PlatformBus,
     PlatformBusData, PlatformId, ProbeError,
 };
 use driver_os_api::{IrqHandlerToken, ResError, ResResult};
@@ -18,7 +18,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Event {
     Map(IrqController, Option<IrqDomainId>, usize, IrqTrigger),
-    Request(IrqResource, IrqAction),
+    Request(IrqResource, IrqEvent),
     Release(IrqResource, IrqHandlerToken),
     Enable(IrqResource, bool),
 }
@@ -46,9 +46,9 @@ impl IrqOp for TestIrq {
     fn request_irq(
         &self,
         resource: IrqResource,
-        handler: IrqHandlerFn,
+        handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
-        let action = handler();
+        let action = handler.handle(resource.virq().raw());
         self.events.lock().push(Event::Request(resource, action));
         if let Some(error) = self.request_error {
             return Err(error);
@@ -89,9 +89,13 @@ impl DriverOps<PlatformBus> for IrqProbe {
         device: &mut DeviceAccess<'_, PlatformBus>,
         _: &Environment<'_>,
     ) -> Result<DevIrq, ProbeError> {
+        let expected_irq = self.spec.virq().unwrap_or(mapped_resource().virq());
         let result = device
             .res()
-            .request_irq(self.spec, "host-services-ut", || IrqAction::NotHandled);
+            .request_irq(self.spec, "host-services-ut", move |irq| {
+                core::assert_eq!(irq, expected_irq.raw());
+                IrqEvent::from_sources(0x81)
+            });
         *self.result.lock() = Some(match &result {
             Ok(guard) => Ok(guard.virq()),
             Err(ProbeError::Fatal(error)) => Err(*error),
@@ -172,7 +176,7 @@ fn host_services_preserve_irq_mapping_and_release_each_binding_once() {
             {
                 expected.push(Event::Map(controller, domain, hwirq, trigger));
             }
-            expected.push(Event::Request(resource, IrqAction::NotHandled));
+            expected.push(Event::Request(resource, IrqEvent::from_sources(0x81)));
             expected.push(Event::Release(resource, IrqHandlerToken::SharedAction(91)));
         }
         let actual = events.lock().clone();

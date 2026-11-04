@@ -14,7 +14,7 @@ use driver_model::{
     AddDeviceError, Bus, BusInstanceId, ClkHandle, ClkSpec, ClockConsumerServices, CoherentMem,
     DevIrq, DeviceAccess, DeviceContext, DeviceDescriptor, DeviceDomain, DeviceManagementError,
     DeviceManagementLock, DeviceRef, DeviceResourceServices, DeviceServices, DeviceState,
-    DriverDesc, DriverOps, Environment, ExtensionRegistry, ExtensionServices, IoMap, IrqHandlerFn,
+    DriverDesc, DriverOps, Environment, ExtensionRegistry, ExtensionServices, IoMap, IrqHandler,
     IrqSpec, MmioRegion, OfMatch, PlatformBus, PlatformBusData, PlatformId, ProbeError,
     ProviderRegistration, ProviderServices, RuntimeError, ServiceError, Virq,
 };
@@ -84,7 +84,7 @@ impl DeviceResourceServices for HostServices {
         device: DeviceContext<'_>,
         spec: IrqSpec,
         name: &'static str,
-        handler: IrqHandlerFn,
+        handler: Arc<dyn IrqHandler>,
     ) -> Result<DevIrq, RuntimeError> {
         self.inner.request_irq(device, spec, name, handler)
     }
@@ -109,7 +109,7 @@ impl driver_os_api::IrqOp for UnavailableIrq {
     fn request_irq(
         &self,
         _: driver_os_api::IrqResource,
-        _: IrqHandlerFn,
+        _: Arc<dyn IrqHandler>,
     ) -> driver_os_api::ResResult<driver_os_api::IrqHandlerToken> {
         Err(driver_os_api::ResError::Unsupported)
     }

@@ -8,8 +8,13 @@ IRQ trigger, controller and domain identity now use the common irq-types
 definitions through os-api. IrqRouteDesc, IrqHandlerToken and MsiMessage are
 also imported from os-api instead of independently defined here. These
 temporary re-exports keep legacy consumers building during PR-01; they do not
-introduce another owned contract. IrqResource, callbacks and guard acquisition
+introduce another owned contract. IrqResource and guard acquisition
 still need migration because their semantics differ, not merely their names.
+
+Callback migration: IrqEvent, IrqHandler and IrqThreadHandler now also belong
+to os-api and are only re-exported here. Providers receive the same callback
+objects; source bits and IRQ arguments are not narrowed. Resource shape,
+IrqOp acquisition methods and the Irq guard remain legacy pending migration.
 
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.

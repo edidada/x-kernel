@@ -6,11 +6,12 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqEventSource, IrqOp, IrqResource, IrqTrigger};
+use device_res::{Irq, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
+use driver_os_api::{IrqEvent, IrqEventSource};
 use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 

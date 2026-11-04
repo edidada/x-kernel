@@ -27,7 +27,7 @@ and invalid classification, including legacy/modern, empty slots and bad extents
 ## RNG caller-owned IRQ acquisition
 
 `VirtIoRngDev::try_new_with_irq_factory(transport, backend, completion, request,
-wait_reset)` accepts a one-shot factory from an os-api IrqHandlerFn to an owned
+wait_reset)` accepts a one-shot factory from an os-api `Arc<dyn IrqHandler>` to an owned
 DevIrq, returning DriverError on failure. The factory may borrow the actual
 model DeviceAccess and call its resource service; neither the callback context
 nor a fabricated IRQ number is stored. The registered callback holds only a

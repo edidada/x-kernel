@@ -15,7 +15,7 @@ use driver_model::{
     Environment, OfMatch, PlatformBus, PlatformBusData, PlatformId, ProbeError, RuntimeError,
 };
 use driver_os_api::{
-    IrqAction, IrqHandlerFn, IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, ResResult, Virq,
+    IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqTrigger, ResResult, Virq,
 };
 use kerrno::{KError, KResult};
 use kspin::{IrqSave, SpinNoIrq, SpinNoPreempt};
@@ -32,7 +32,7 @@ static RINGS: AtomicUsize = AtomicUsize::new(0);
 static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static UNSHARES: AtomicUsize = AtomicUsize::new(0);
 static RELEASES: AtomicUsize = AtomicUsize::new(0);
-static HANDLER: SpinNoIrq<Option<IrqHandlerFn>> = SpinNoIrq::new(None);
+static HANDLER: SpinNoIrq<Option<Arc<dyn IrqHandler>>> = SpinNoIrq::new(None);
 static REGISTRY: HwrngRegistry = HwrngRegistry::new();
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible(
     "test,actual-virtio-rng",
@@ -98,7 +98,7 @@ impl IrqOp for TestIrq {
     fn request_irq(
         &self,
         resource: IrqResource,
-        handler: IrqHandlerFn,
+        handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
         if resource != IrqResource::plain(Virq::new(7), IrqTrigger::LevelHigh) {
             return Err(driver_os_api::ResError::InvalidResource);
@@ -111,7 +111,7 @@ impl IrqOp for TestIrq {
         core::assert_eq!(token, IrqHandlerToken::shared_action(1));
         let handler = HANDLER.lock().take();
         if let Some(handler) = handler {
-            core::assert_eq!(handler(), IrqAction::NotHandled);
+            core::assert_eq!(handler.handle(7), IrqEvent::NOT_HANDLED);
         }
         RELEASES.fetch_add(1, Ordering::Relaxed);
     }
@@ -205,7 +205,7 @@ impl DriverOps<PlatformBus> for TestDriver {
             new_rng_completion(),
             |handler| {
                 dev.res()
-                    .request_irq_at(0, move || handler())
+                    .request_irq_at(0, move |irq| handler.handle(irq))
                     .map_err(|_| driver_base::DriverError::Io)
             },
             ktask::yield_now,

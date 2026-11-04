@@ -7,8 +7,10 @@
 //! The host implements these over its kernel capabilities; mock services
 //! in tests keep the model host-free (L0-b).
 
+use alloc::sync::Arc;
+
 use crate::{
-    ClkHandle, CoherentMem, DevIrq, IoMap, IrqHandlerFn,
+    ClkHandle, CoherentMem, DevIrq, IoMap, IrqHandler,
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion, Virq},
 };
@@ -128,7 +130,7 @@ pub trait DeviceResourceServices: Send + Sync {
         device: crate::DeviceContext<'_>,
         spec: IrqSpec,
         name: &'static str,
-        handler: IrqHandlerFn,
+        handler: Arc<dyn IrqHandler>,
     ) -> Result<DevIrq, RuntimeError>;
 
     /// Allocate coherent DMA memory (`dmam_alloc_coherent`) FOR THIS

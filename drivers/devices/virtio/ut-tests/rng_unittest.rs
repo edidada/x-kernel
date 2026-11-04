@@ -964,7 +964,7 @@ fn rng_irq_registration_failure_confirms_reset_before_freeing_queue() {
 
 #[def_test(serial)]
 fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
-    use driver_os_api::{DevIrq, IrqAction, Virq};
+    use driver_os_api::{DevIrq, IrqEvent, Virq};
 
     let mappings = MAPPINGS.load(Ordering::Relaxed);
     let dma = DMA_BLOCKS.load(Ordering::Relaxed);
@@ -987,7 +987,7 @@ fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
         completion.clone(),
         |handler| {
             requests += 1;
-            registration_action = Some(handler());
+            registration_action = Some(handler.handle(7));
             captured_handler = Some(handler.clone());
             let reset = reset.clone();
             let releases = releases.clone();
@@ -999,7 +999,7 @@ fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
                         reset.confirmations.load(Ordering::Relaxed) > 0
                             && MAPPINGS.load(Ordering::Relaxed) == mappings + 1
                             && DMA_BLOCKS.load(Ordering::Relaxed) > dma
-                            && handler() == IrqAction::NotHandled,
+                            && handler.handle(7) == IrqEvent::NOT_HANDLED,
                         Ordering::Relaxed,
                     );
                     releases.fetch_add(1, Ordering::Relaxed);
@@ -1010,15 +1010,15 @@ fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
     )
     .unwrap();
     let handler = captured_handler.unwrap();
-    let unrelated = handler();
+    let unrelated = handler.handle(7);
     status.store(2, Ordering::Relaxed);
-    let configuration = handler();
+    let configuration = handler.handle(7);
     let config_notifications = completion.notifications.load(Ordering::Relaxed);
     device.request.lock().submit().unwrap();
     // SAFETY: The sole live submission owns the queue and buffer until this callback reclaims it.
     unsafe { finish(&queue.lock(), 8, false) };
     status.store(1, Ordering::Relaxed);
-    let completed = handler();
+    let completed = handler.handle(7);
     let completed_mappings = MAPPINGS.load(Ordering::Relaxed);
     let completed_notifications = completion.notifications.load(Ordering::Relaxed);
     let mut output = [0xaa; 8];
@@ -1041,21 +1041,21 @@ fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
     let ack_after_stop = acknowledgements.load(Ordering::Relaxed);
     let notifications_after_stop = completion.notifications.load(Ordering::Relaxed);
     status.store(3, Ordering::Relaxed);
-    let stopped_action = handler();
+    let stopped_action = handler.handle(7);
     let mut late_output = [0xaa; 8];
     let late_read = retained_source.read(&mut late_output);
     drop(device);
     drop(retained_source);
     let is_released = weak.upgrade().is_none();
-    let expired_action = handler();
+    let expired_action = handler.handle(7);
     drop(handler);
 
     assert_eq!(requests, 1);
-    assert_eq!(registration_action, Some(IrqAction::NotHandled));
-    assert_eq!(unrelated, IrqAction::NotHandled);
-    assert_eq!(configuration, IrqAction::Handled);
+    assert_eq!(registration_action, Some(IrqEvent::NOT_HANDLED));
+    assert_eq!(unrelated, IrqEvent::NOT_HANDLED);
+    assert_eq!(configuration, IrqEvent::HANDLED);
     assert_eq!(config_notifications, 0);
-    assert_eq!(completed, IrqAction::Handled);
+    assert_eq!(completed, IrqEvent::HANDLED);
     assert_eq!(completed_mappings, mappings);
     assert_eq!(completed_notifications, 1);
     assert_eq!(read, Ok(8));
@@ -1066,8 +1066,8 @@ fn rng_irq_factory_callback_is_weak_and_release_precedes_pending_dma_cleanup() {
     assert!(release_is_ordered.load(Ordering::Relaxed));
     assert_eq!(releases.load(Ordering::Relaxed), 1);
     assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
-    assert_eq!(stopped_action, IrqAction::NotHandled);
-    assert_eq!(expired_action, IrqAction::NotHandled);
+    assert_eq!(stopped_action, IrqEvent::NOT_HANDLED);
+    assert_eq!(expired_action, IrqEvent::NOT_HANDLED);
     assert!(is_released);
     assert_eq!(late_read, Err(KError::BadState));
     assert_eq!(late_output, [0xaa; 8]);
@@ -1128,7 +1128,7 @@ fn rng_irq_factory_failure_resets_before_dma_rollback_and_expires_callback() {
     let ack_after_rollback = acknowledgements.load(Ordering::Relaxed);
     let notifications_after_rollback = completion.notifications.load(Ordering::Relaxed);
     status.store(3, Ordering::Relaxed);
-    let expired_action = handler();
+    let expired_action = handler.handle(7);
     drop(handler);
 
     assert_eq!(error, Some(DriverError::ResourceBusy));
@@ -1137,7 +1137,7 @@ fn rng_irq_factory_failure_resets_before_dma_rollback_and_expires_callback() {
     assert!(retained_until_reset);
     assert_eq!(reset.requests.load(Ordering::Relaxed), 1);
     assert_eq!(reset.confirmations.load(Ordering::Relaxed), 1);
-    assert_eq!(expired_action, driver_os_api::IrqAction::NotHandled);
+    assert_eq!(expired_action, driver_os_api::IrqEvent::NOT_HANDLED);
     assert_eq!(acknowledgements.load(Ordering::Relaxed), ack_after_rollback);
     assert_eq!(
         completion.notifications.load(Ordering::Relaxed),

@@ -348,3 +348,26 @@ Validation: AArch64 SMP4 selected driver suites passed 265 tests, zero failures,
 five ignored; coverage exported. UNITTEST clippy passed on AArch64 and x86_64,
 and canonical AArch64 configuration was restored. Independent review found no
 blockers. Local red/green and lint logs: `.scratch/pr01-irq-vocabulary/`.
+
+### Unified IRQ callbacks
+
+IrqEvent, IrqHandler and IrqThreadHandler now have one definition in os-api's
+`irq/handler.rs`. Native and legacy providers both accept `Arc<dyn IrqHandler>`
+and share their host callback adapter. The separate IrqAction and no-argument
+IrqHandlerFn contract were removed, not retained as compatibility alternatives.
+Callbacks receive the dispatched virq and preserve the source bitmap required
+by network consumers. Model resources and the RNG path use this same contract.
+
+Threaded intent/traits are preserved from the existing contract, not implemented
+as a new feature: ordinary registration has no paired thread and the xkernel
+adapter only forwards handled/source results. Legacy threaded registration
+still defaults to Unsupported. Guard ownership, stop/drain sequencing and MSI
+reservation release are unchanged. Resource shapes, guard acquisition and the
+remaining device-res consumers are the next replacement slice.
+
+Validation: AArch64 SMP4 selected suites passed 266 tests, zero failures and
+five ignored; coverage exported. Tests include model virq/source forwarding,
+event merging, callback tail drain/shared peers and concrete RNG notify-tail
+with the existing negative control. AArch64 and x86_64 UNITTEST clippy passed;
+AArch64 configuration restored. Independent read-only review found no blocker.
+Local evidence: `.scratch/pr01-irq-callback/`.

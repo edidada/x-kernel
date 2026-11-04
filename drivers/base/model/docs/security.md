@@ -226,8 +226,8 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
   （与 `kdevice` 旧模型的限制相同）。
 - `DriverOps: Send + Sync`，`DriverOps::Data: Send + Sync`——因为中断 handler 与
   work item 通过 `Weak` 共享 `Data`。
-- `ReleaseHook = Arc<dyn Fn() + Send + Sync>`、`IrqHandlerFn = Arc<dyn Fn() ->
-  IrqAction + Send + Sync>`：都要能跨 CPU 执行。
+- `ReleaseHook = Arc<dyn Fn() + Send + Sync>`、`Arc<dyn IrqHandler>`：
+  都要能跨 CPU 执行；IrqHandler 契约要求 Send + Sync。
 - 队列直接分派，没有全局 probe 标志；不同设备的 matching/probe/remove
   可以并行，宿主不能依赖域级串行来保护单槽资源收集器。
 - 同设备其他任务等待管理锁，同任务重入被拒绝。matching、驱动回调、
@@ -288,13 +288,13 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
 
 ## 已知限制
 
-1. **新模型无 threaded IRQ 入口**。`IrqAction` 只有 `Handled`/`NotHandled`；
+1. **新模型无 threaded IRQ 入口**。共享 IrqEvent 的 wake 位不代表线程化注册；
    `driver_os_api::IrqOp`、`DeviceServices` 与 `DeviceAccess` 均没有线程化注册入口。
    普通设备 IRQ handler 不得阻塞或作为 pseudo-NMI handler 使用。
    Linux `devm_request_threaded_irq` **禁止机械映射**。
 2. **无 MSI-X per-vector 暴露**。`driver_os_api::MsiResource` 有分配接口，`DeviceAccess`
    没有方法。旧 virtio transport 使用的是旧资源模型，不代表新模型已接入。
-   driver-os-api 的 provider 与 model 的设备服务均使用 `Fn()->IrqAction`；宿主负责内核回调转换。
+   provider 与设备服务均使用 `Arc<dyn IrqHandler>`；宿主负责内核回调转换。
 3. **无 runtime PM / suspend-resume**。`DriverOps` 只有 `probe`/`remove`，
    **没有** `suspend`/`resume` 预留位。
 4. **无热插拔再枚举入口**。`add_device` 是增量的，但没有旧模型

@@ -76,9 +76,9 @@ struct CallbackTail {
 }
 
 impl CallbackTail {
-    fn handler(self: &Arc<Self>) -> IrqHandlerFn {
+    fn handler(self: &Arc<Self>) -> Arc<dyn IrqHandler> {
         let tail = self.clone();
-        Arc::new(move || {
+        Arc::new(move |_| {
             tail.calls.fetch_add(1, Ordering::Relaxed);
             tail.cpu
                 .store(khal::percpu::this_cpu_id().as_usize(), Ordering::Relaxed);
@@ -88,7 +88,7 @@ impl CallbackTail {
             while !tail.gate.load(Ordering::Acquire) {
                 core::hint::spin_loop();
             }
-            IrqAction::Handled
+            IrqEvent::HANDLED
         })
     }
 }
@@ -127,9 +127,9 @@ fn native_irq_smp_release_waits_for_callback_tail_and_preserves_shared_peer() {
                 resource,
                 Arc::new({
                     let peer_calls = peer_calls.clone();
-                    move || {
+                    move |_| {
                         peer_calls.fetch_add(1, Ordering::Relaxed);
-                        IrqAction::Handled
+                        IrqEvent::HANDLED
                     }
                 }),
             )

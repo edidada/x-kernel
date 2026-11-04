@@ -5,7 +5,7 @@
 Trigger/controller/domain identities use irq-types, also used by the host IRQ
 core. IrqRouteDesc, IrqHandlerToken and MsiMessage have one definition here.
 The transitional device-res facade re-exports them; it still owns its legacy
-resource shape and callback protocol until consumers migrate. A domain value
+resource shape and acquisition protocol until consumers migrate. A domain value
 only names a host namespace; construction does not validate/register a domain.
 
 ## Monotonic time
@@ -153,8 +153,11 @@ DevIrq 是设备服务返回的拥有型句柄；IrqResource 和 IrqHandlerToken
 DomainMapped，保留来源域/hwirq 与强类型 Virq。默认 map_irq 只适合恒等映射宿主；
 非恒等域必须覆盖该方法，不能把 hwirq 当成已解析 virq。
 
-IrqHandlerFn 为 Fn()->IrqAction，闭包携带设备上下文。普通 IRQ 调用不得睡眠；
-不用于 pseudo-NMI，没有 threaded IRQ 注册入口。宿主负责内核回调转换。
+IRQ 回调统一为 `Arc<dyn IrqHandler>`，`handle(usize) -> IrqEvent` 的参数为
+OS-visible virq。闭包携带设备上下文；普通 IRQ 调用不得睡眠或用于 pseudo-NMI。
+`irq/handler.rs` 聚合回调和结果词汇，保留 source 位图、merge 和 wake-thread 意图。
+不再保留独立 IrqAction 或无参 IrqHandlerFn。IrqThreadHandler 的迁入只保留已有
+契约，不新增 threaded 注册实现；普通入口没有配对线程，不能依靠 wake 位调度它。
 
 ## 上下文与验证
 

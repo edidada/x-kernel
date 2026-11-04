@@ -284,7 +284,7 @@ the virq as a hardware number. The lookup is a preflight snapshot: the bus owner
 must keep the resolved mapping stable through registration and release. Missing
 MSI domains have no default-root fallback; MSI allocation remains unsupported.
 
-Requests require sleepable context and adapt ordinary IrqAction callbacks to
+Requests require sleepable context and adapt ordinary os-api IrqHandler callbacks to
 kirq shared actions. The first action retains kirq's auto-enable policy; this
 is not a disabled-registration API. The host guard captures the provider,
 resource and returned action ID. Release removes that exact shared action and
