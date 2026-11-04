@@ -1,0 +1,16 @@
+[package]
+name = "xk-compositor"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "renderer_pixman",
+    "wayland_frontend",
+] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace]
