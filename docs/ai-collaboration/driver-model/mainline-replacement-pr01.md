@@ -3,6 +3,10 @@
 状态：用户已确认按职责逐步替换旧模型；本页是首个 PR 的范围与缺口清单，
 不是已完成的实现、验收或已创建的远端 PR。transport 开发暂停，先整理 PR-01。
 
+后续需求核对与取舍见 [能力契约整理](pr01-capability-contract-decisions.md)。
+该稿纠正了初期把 threaded API 声明误当已实现资源能力的问题；以下清单按此修正。
+旧 API 的存在不自动成为新接口需求，新旧设计均须按实际功能与生命周期评估。
+
 审计基线：开发底稿 `5bbdc8bc2`；2026-11-04 fetch 后的 `origin/main` 为
 `f429a5953`。两者不同：实现必须从届时最新 main 单独提取，不能直接 cherry-pick
 整条开发分支，更不能覆盖 main 已前进的 IRQ 错误处理等改动。
@@ -52,7 +56,7 @@
 | device-res/dma.rs：DmaOp、DmaCoherent、typed helpers | os-api 同时有 DmaOp 和 per-device DeviceDma/guard | 先明确唯一的获取/释放接口及 per-device DMA 来源；不能复制两套 allocator/provider。保留现有地址、缓存、失败和释放语义 |
 | device-res/memory.rs：CpuMemoryOp/CpuBuffer | os-api 缺失；block AHCI/SDHCI/word_io 已使用 | 纳入统一 CPU 存储能力，保留 fallible allocation、初始化和原 provider 配对释放；不得借 DMA 代替 CPU 存储 |
 | device-res/time.rs：TimeOp | os-api 的 ClkOps 是设备时钟控制，不是单调时间；当前扫描只有聚合 trait 与 host 实现，未见具体驱动调用 | 两种职责不能互相替代；明确保留或删除无消费者接口的依据，不把它当成已使用功能，也不额外引入 clock provider 框架 |
-| device-res/irq.rs：普通和 threaded IRQ、IrqEvent、token、MSI | 新 IrqAction 只有 Handled/NotHandled；NativeIrq 只覆盖普通 handler | 保留 threaded/default-primary/oneshot 与事件来源语义，不能把 WAKE_THREAD 压成 Handled；精确摘除 action 并等待完整 callback |
+| device-res/irq.rs：普通 IRQ、IrqEvent、token、MSI；threaded 仅接口预留 | 新 IrqAction 只有 Handled/NotHandled；旧生产 adapter 也没有覆盖 threaded 默认 Unsupported | 保留普通 IRQ、事件来源、MSI 和精确 action drain；不把 threaded mock 支持误报为生产能力，不为此自动新增线程化项目 |
 | device-res/lib.rs：ResourceDesc/ResourceSet | 新 model 另有自己的描述模型 | 本批让旧 kdevice 自持其描述集合，元素能力类型来自 os-api；不为此引入新 domain |
 | DeviceResource/register_cleanup + provider.rs 的 devm helper | kdevice::DeviceObject 实现 cleanup sink | 保留已用生命周期，不把 cleanup sink 变成 OS provider；helper 归框架集成，guard 归能力层 |
 | device-res-xkernel：MMIO/DMA/IRQ/CPU/time 实现 | 新 NativeIrq/host_dma/host_mmio 在 kdriver 另有实现 | 主线 PR 只保留单一 adapter；可提取已验证机制，不能合入两套宿主接线 |
@@ -95,7 +99,8 @@
 
 1. 明确 IRQ、DMA、guard 的最终合同，补齐现有能力与测试；不引入 model 依赖。
 2. 把现有 host 实现与全部旧消费者切到唯一合同；保留资源失败回滚、清理顺序、
-   threaded IRQ、CPU buffer 与现有 PCI/MMIO 行为。按能力拆可审阅提交。
+   普通 IRQ、CPU buffer 与现有 PCI/MMIO 行为。无消费者的 threaded 预留接口
+   可退役，不为接口数量对齐新增功能。按能力拆可审阅提交。
 3. 删除旧 contract/provider package、Cargo 别名与旧测试入口；同步边界规则、
    模块文档、Kconfig/构建清单和消费者测试路径，完成整体验收。
 
@@ -111,10 +116,11 @@
 
 - workspace、Cargo.lock、配置与源文件不再依赖旧 package；历史文档提到旧名
   不等于活跃依赖，检查应区分二者。
-- 原 device-res/provider UT 迁入正确的新目录，保留覆盖，不靠删用例消除失败。
+- 原 device-res/provider 的有效语义 UT 迁入正确的新目录；无消费者接口退役的
+  mock 用例记录理由，不机械搬迁，也不靠删回归用例消除真实失败。
 - MMIO 与 DMA：成功/失败配对、清理一次性、probe 回滚、CPU/DMA 存储区分；
   实际改到 per-device DMA 时验证 mask/window/streaming 语义，不借机放宽约束。
-- IRQ：普通、共享、threaded/default-primary、token 精确释放、完整回调 drain、
+- IRQ：普通、共享、事件来源、token 精确释放、完整回调 drain、
   非法上下文与 MSI 失败语义；涉及同步机制时保留针对性负控，不能只跑 RNG。
 - 框架：现有 kdevice probe 失败 LIFO 清理、解绑清理、资源仍被使用时的约束不变。
 - 平台：按仓库流程准备配置，AArch64/x86 构建和 clippy；现有 PCI 与 MMIO
@@ -125,8 +131,9 @@
 ## 7. 当前落点与恢复条件
 
 已完成的是原则记录、基线核对、消费者盘点和 PR-01 范围，不是代码提取。
-当前 os-api 无法直接作为全量替代品：threaded IRQ、CPU/time 和 DMA 获取合同
-必须先收口。下一动作是对此范围形成可实施的接口差异设计，然后从最新 main
+当前 os-api 无法直接作为全量替代品：普通 IRQ 结果信息、MSI owner、CPU memory
+和 DMA 获取合同必须先收口；Time/clock/threaded 预留不自动搬入。
+下一动作是对此范围形成可实施的接口差异设计，然后从最新 main
 提取独立 PR 分支；未经验证不称为可合入，不自动推送或创建远端 PR。
 
 先把 PR-01 整理至可评审状态，再恢复 transport 开发。后续设备注册/绑定、
@@ -143,7 +150,8 @@ Cargo.lock 同时保留 kirq 的新 kalloc-types 依赖和共享 irq-types 依�
 逐项保留检查：
 
 - 旧 device-res、device-res-xkernel、block、kdevice 与此 main 基线内容一致，
-  包括 CPU buffer、threaded IRQ 以及主线 adapter 新增的错误分类。
+  包括 CPU buffer、threaded IRQ 接口预留及主线 adapter 新增的错误分类；
+  保留声明不代表生产 provider 已实现 threaded 功能。
 - 主线 KIRQ 的 fallible reverse-map owner 准备、MSI 无分配删除与失败恢复机制
   保留。基础类型抽取仅替换类型定义来源，不删除新增 NoMemory/InvalidHwirq。
 - 新 NativeIrq 原有 exhaustive match 缺少这两类错误；已补 NoMemory → NoMemory、
@@ -153,7 +161,7 @@ Cargo.lock 同时保留 kirq 的新 kalloc-types 依赖和共享 irq-types 依�
   不把核心无分配释放误称为已解决全部驱动 teardown 问题。
 
 这些检查证明最新 main 的能力没有被 rebase 覆盖，不代表 os-api 全量迁移已完成。
-第 3 节的 threaded IRQ、CPU 内存、TimeOp 去留和 DMA 合同仍是 PR-01 的明确工作，
+第 3 节的普通 IRQ/MSI、CPU 内存、预留接口去留和 DMA 合同仍是 PR-01 的明确工作，
 不得在缺失这些决策/实现时删除旧 crate。验证日志放在
 `.scratch/driver-pr01-rebase/`。
 
