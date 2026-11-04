@@ -380,10 +380,12 @@ fn enable_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
         return;
     };
     let before = grf.read32(offset);
-    // Bits [31:16] are the write-enable mask; [15:0] the data:
-    // bit15 PIPE_ENABLE=1, bit12 PHY_DISABLE=0, bit10 SUSPEND_ENABLE=0,
-    // bit8 U3_PORT_DISABLE=0.
-    grf.write32(offset, 0xffff_8800);
+    // The value comes from a working board, not from another implementation:
+    // the reference reads 0x1100 here with SuperSpeed devices enumerated, while
+    // the value another port uses (0x8800) drives different bits -- it clears
+    // bit 12 and bit 8 and sets 15 and 11, which is not what this board wants.
+    // Bits [31:16] are the write-enable mask, [15:0] the data.
+    grf.write32(offset, 0xffff_1100);
     info!(
         "dwc3: usb-grf u3 port {port} cfg {before:#06x} -> {:#06x}",
         grf.read32(offset),

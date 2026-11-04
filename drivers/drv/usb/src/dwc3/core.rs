@@ -75,6 +75,7 @@ pub fn init(
 
     set_host_mode(regs);
     program_usb2_phy(regs, utmi_wide, dis_enblslpm);
+    program_usb3_pipe(regs);
     let _ = dev;
     Ok(params)
 }
@@ -105,6 +106,24 @@ fn set_host_mode(regs: &IoMap) {
         gsts,
     );
 }
+
+/// Programs the SuperSpeed PIPE control word.
+///
+/// The value is taken from a working board (`GUSB3PIPECTL0` reads 0x075e8020
+/// there); this driver never touched the register before, so a device that
+/// enumerates over SuperSpeed would find the PIPE unconfigured.
+fn program_usb3_pipe(regs: &IoMap) {
+    let offset = crate::dwc3::regs::GUSB3PIPECTL;
+    let before = regs.read32(offset);
+    regs.write32(offset, USB3_PIPE_CONTROL);
+    info!(
+        "dwc3: GUSB3PIPECTL {before:#010x} -> {:#010x}",
+        regs.read32(offset),
+    );
+}
+
+/// `GUSB3PIPECTL0` as measured on a board whose SuperSpeed ports work.
+const USB3_PIPE_CONTROL: u32 = 0x075e_8020;
 
 fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     // Port 0 of the USB2 PHY block; the reference programs every port it finds
