@@ -148,6 +148,11 @@ fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     } else {
         config |= gux2phycfg::ENABLSLPM;
     }
+    // Linux clears SUSPHY before the PHY is initialised and only lets it suspend
+    // again from its `plat_start` hook, i.e. never during enumeration. The value
+    // copied from a *running* board has that bit set, which is the wrong state for
+    // a controller that still has to send its first SET_ADDRESS.
+    config &= !gux2phycfg::SUSPHY;
     regs.write32(GUSB2PHYCFG, config);
     info!(
         "dwc3: GUSB2PHYCFG {before:#010x} -> {:#010x} (utmi_wide {utmi_wide} dis_enblslpm \
