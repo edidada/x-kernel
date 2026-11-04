@@ -159,6 +159,14 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 driver_base::MmioRegion::new(base as usize, 0x4000),
                 "usb2phy-before-enum",
             ) {
+                let mut tail = alloc::string::String::new();
+                for offset in (0x30..0x100).step_by(2) {
+                    let value = block.read16(offset);
+                    if value != 0 {
+                        tail.push_str(&alloc::format!(" {offset:#04x}={value:#x}"));
+                    }
+                }
+                info!("dwc3: before enumeration {name} tail:{tail}");
                 info!(
                     "dwc3: before enumeration {name} +0x00 {:#06x} +0x04 {:#06x} +0x08 {:#06x} \
                      +0x0c {:#06x}",
