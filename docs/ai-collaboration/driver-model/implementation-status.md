@@ -15,7 +15,10 @@ build pass. Independent Standards/Spec review passes after documentation fixes.
 [R1-09 evidence and R01–R13 map](r1-09-retirement-acceptance.md) records exact
 limits and separates older negative controls from current positive runs.
 R1-01–09 are complete in the approved scope on this branch, not merged upstream.
-The additional network lifecycle work is still unimplemented.
+The additional network lifecycle work is still unimplemented. Per the user's
+subsequent scheduling decision, it will be designed, implemented and accepted
+together with network-driver migration to the new framework, not as an immediate
+R1 closeout blocker; see the [migration handoff](network-lifecycle-handoff.md).
 
 ## Current closeout — 2026-11-04
 

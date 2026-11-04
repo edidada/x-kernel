@@ -1,4 +1,19 @@
-# Accepted PCI virtio-net lifecycle follow-up
+# PCI virtio-net lifecycle requirements for future migration
+
+## Scheduling decision — 2026-11-04
+
+The user deferred this work to the future migration of network device drivers
+onto the new framework. Design, implementation and acceptance of network close
+will be performed together with that migration, not as a separate immediate
+follow-up or a blocker for the completed RNG-focused R1 work.
+
+The findings and ownership requirements below remain migration acceptance
+inputs, not resolved defects. Before starting migration, re-audit the then-current
+driver, vendor and KIRQ contracts and incorporate the remaining issues into its
+requirements, design and tickets. This scheduling decision does not authorize
+vendor changes or claim the existing network teardown is safe.
+
+## Original handoff
 
 Accepted on 2026-11-04 by explicit user delegation to the driver-framework
 workstream. This expands the previously RNG-focused scope; the earlier statement
@@ -107,5 +122,6 @@ Linux reference supplied with the handoff:
 Inspect these implementations during design; this receipt does not claim a new
 Linux audit or establish equivalent X-Kernel hardware guarantees.
 
-Status: received; no production implementation or acceptance completed by this
-handoff. The other worktree and vendor remain untouched.
+Status: deferred to network-driver migration; no production implementation or
+acceptance completed by this handoff. The other worktree and vendor remain
+untouched.
