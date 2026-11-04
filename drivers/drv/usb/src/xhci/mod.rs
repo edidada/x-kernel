@@ -335,6 +335,17 @@ impl Xhci {
         // CRCR: the ring's base with the initial cycle state (RCS) set.
         self.bar
             .write64(self.operational + op::CRCR, self.command.mem.bus_addr() | 1);
+        // Read every ring register back: a write that silently does not stick is
+        // indistinguishable from a controller that ignores commands, and that
+        // cost a round on this port already.
+        info!(
+            "xhci: rings read back crcr {:#018x} dcbaa {:#x} erstsz {:#x} erstba {:#x} erdp {:#x}",
+            self.bar.read64(self.operational + op::CRCR),
+            self.bar.read64(self.operational + op::DCBAAP),
+            self.bar.read32(self.runtime + 0x08),
+            self.bar.read64(self.runtime + 0x10),
+            self.bar.read64(self.runtime + 0x18),
+        );
         info!(
             "xhci: command ring {:#x}, event ring {:#x}, dcbaa {:#x}",
             self.command.mem.bus_addr(),
@@ -466,7 +477,18 @@ impl Xhci {
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
         }
-        log::error!("xhci: {what} timed out after {EVENT_POLL_STEPS} us");
+        // Nothing arrived: report what the event slot actually holds and where
+        // the consumer thinks it is, so "controller never wrote" and "we are
+        // looking at the wrong address" cannot be confused.
+        let raw = self.event.read(self.event_dequeue);
+        log::error!(
+            "xhci: {what} timed out after {EVENT_POLL_STEPS} us (dequeue {} cycle {} raw {:#010x} \
+             type {})",
+            self.event_dequeue,
+            self.event_cycle,
+            raw.control,
+            raw.trb_type(),
+        );
         Err(KError::TimedOut)
     }
 
@@ -481,6 +503,15 @@ impl Xhci {
         }
         self.command.push(trb);
         // Doorbell 0, target 0 is the command ring.
+        info!(
+            "xhci: {what}: cmd trb {:#010x} crcr {:#018x} usbcmd {:#010x} usbsts {:#010x} dcbaa \
+             {:#x}",
+            trb.control,
+            self.bar.read64(self.operational + op::CRCR),
+            self.bar.read32(self.operational + op::USBCMD),
+            self.bar.read32(self.operational + op::USBSTS),
+            self.bar.read64(self.operational + op::DCBAAP),
+        );
         self.bar.write32(self.doorbell, 0);
         let event = self.wait_event(regs::trb::COMMAND_COMPLETION, what)?;
         let code = event.completion_code();
