@@ -20,9 +20,16 @@ use driver_os_api::{
 /// it. Unknown trigger means no new requirement, not a request to reconfigure.
 /// The caller must keep the resolved mapping stable through registration and
 /// release; the descriptor preflight is not an atomic mapping-lifetime guard.
+/// Configuration failure returns `Io`; unsupported source configuration or live
+/// flow changes return `Unsupported`. Configuration failure publishes no new
+/// action token and preserves existing shared owners, but resolved metadata may
+/// remain and hardware may be masked. It is not a hardware rollback guarantee;
+/// successful retry restores delivery only when logical enablement and disable
+/// depth allow.
 ///
 /// Release must receive the exact resource/token returned for one registration,
 /// exactly once, in sleepable task context with no locks needed by the handler.
+/// Queued replay must be able to drain through kirq's boot-installed BH executor.
 /// Hardware must already be stopped by the driver. A normal release return
 /// guarantees synchronous removal and drain of that action. Contract violations
 /// fail closed by panicking: the infallible release API cannot authorize resource
@@ -173,6 +180,8 @@ fn map_error(error: kirq::IrqDescError) -> ResError {
         kirq::IrqDescError::VirqExhausted { .. } => ResError::NoMemory,
         kirq::IrqDescError::InvalidContext { .. } => ResError::BadState,
         kirq::IrqDescError::TeardownInProgress { .. } => ResError::Busy,
+        kirq::IrqDescError::ConfigurationFailed { .. } => ResError::Io,
+        kirq::IrqDescError::UnsupportedFlow { .. } => ResError::Unsupported,
         kirq::IrqDescError::HwirqConflict { .. }
         | kirq::IrqDescError::DomainConflict { .. }
         | kirq::IrqDescError::VirqConflict { .. }

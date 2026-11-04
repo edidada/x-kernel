@@ -139,6 +139,8 @@ NativeIrq requests reject non-sleepable context before registration. Callbacks
 are ordinary non-sleeping hardirq callbacks, not threaded or pseudo-NMI handlers.
 The driver must stop hardware before dropping its IRQ guard and must release in
 sleepable task context without locks or resources required by the handler.
+Queued replay must be able to progress through kirq's boot-installed BH executor
+while release waits; sleepable caller context alone does not establish this.
 Admission checks are snapshots, not permission across later context changes.
 
 Explicit firmware domains and returned action IDs are retained without a global
@@ -161,6 +163,11 @@ original resource/token exactly once, without external removal of that action.
 Mapping depends on initialized IRQ domains, and teardown depends on the current
 branch's scheduler-backed kirq synchronization contract. First shared registration
 can enable delivery; callers must make callback-visible state ready beforehand.
+Configuration failure returns Io without a new action token and preserves
+existing shared owners, but can retain resolved metadata and leave hardware
+masked. It is not proof of hardware rollback or drain. Unsupported source
+configuration or live flow changes return Unsupported rather than a resource
+identity error.
 The constructor does not activate hardware or install global services. Pure
 helper UT establish adapter decisions only, not real IRQ draining, physical
 interrupt routing or acceptance of the deferred IRQ work.

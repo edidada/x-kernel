@@ -193,6 +193,43 @@ fn native_irq_failures_never_report_successful_registration_or_release() {
 }
 
 #[def_test]
+fn native_irq_configuration_errors_preserve_typed_request_failures() {
+    let resource = IrqResource::mapped(
+        Virq::new(903),
+        IrqTrigger::LevelHigh,
+        IrqController::Gic,
+        Some(IrqDomainId::new(0x7051)),
+        37,
+    );
+    for (error, expected) in [
+        (
+            kirq::IrqDescError::ConfigurationFailed { hwirq: 37 },
+            ResError::Io,
+        ),
+        (
+            kirq::IrqDescError::UnsupportedFlow { hwirq: 37 },
+            ResError::Unsupported,
+        ),
+    ] {
+        let handler: IrqHandlerFn = Arc::new(|| IrqAction::Handled);
+        let mut registered = None;
+        let result = request_with(
+            resource,
+            Arc::clone(&handler),
+            true,
+            |_| None,
+            |spec, _| {
+                registered = Some(spec);
+                Err(error)
+            },
+        );
+        assert_eq!(result, Err(expected));
+        assert_eq!(registered, Some(resource_spec(resource)));
+        assert_eq!(Arc::strong_count(&handler), 1);
+    }
+}
+
+#[def_test]
 fn native_irq_plain_request_validates_existing_descriptor_without_remapping() {
     let configured = kirq::IrqDesc::new(37, IrqTrigger::LevelHigh)
         .with_virq(903)

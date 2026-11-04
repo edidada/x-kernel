@@ -228,6 +228,12 @@ kirq shared actions. The first action retains kirq's auto-enable policy; this
 is not a disabled-registration API. The host guard captures the provider,
 resource and returned action ID. Release removes that exact shared action and
 synchronously drains it before returning, outside locks needed by callbacks.
+Queued replay must be able to drain through kirq's boot-installed BH executor.
+Core ConfigurationFailed maps to Io and UnsupportedFlow to Unsupported.
+Configuration failure publishes no new action token and preserves existing
+shared owners, but may retain resolved metadata and leave hardware masked; it
+does not guarantee hardware rollback. Successful retry restores delivery only
+when logical enablement and disable depth allow.
 There is no host action registry, threaded IRQ, pseudo-NMI or MSI allocation.
 
 External host_irq UT exercise pure conversion and injected map/register/free

@@ -148,7 +148,7 @@ fn real_model_mmio_rng_procfs_tracks_unbind_rebind_and_remove() {
     assert_eq!(devices.len(), 1);
     let device = devices.pop().unwrap().device;
     assert!(same_registration(&device, DeviceState::Active));
-    let fs = crate::new_procfs(SuperBlockFlags::empty());
+    let fs = crate::new_procfs(SuperBlockFlags::empty()).unwrap();
     let root = Mount::new_root(&fs).root_path();
     assert_eq!(
         check_projection(&root, &device, Some(DeviceState::Active)),

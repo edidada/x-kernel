@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kvfs::{DeviceFileOps, NodeFlags};
-use kvfs::{Filename, Mount, NodePermission, NodeType, Path, SuperBlockFlags};
+use kvfs::{
+    DeviceFileOps, Filename, Mount, NodeFlags, NodePermission, NodeType, Path, SuperBlockFlags,
+};
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use super::*;
@@ -21,8 +22,8 @@ fn urandom_node() -> EntropyNode {
 /// not the identity, availability or output quality of a hardware RNG source.
 #[def_test]
 fn shared_devtmpfs_random_nodes_are_readable_character_devices() {
-    let super_block = crate::new_devfs(SuperBlockFlags::empty());
-    let second_mount = crate::new_devfs(SuperBlockFlags::empty());
+    let super_block = crate::new_devfs(SuperBlockFlags::empty()).unwrap();
+    let second_mount = crate::new_devfs(SuperBlockFlags::empty()).unwrap();
     assert!(alloc::sync::Arc::ptr_eq(&super_block, &second_mount));
     let root = Path::new(Mount::new_root(&super_block), super_block.root_dir());
     for (name, minor) in [("random", 8), ("urandom", 9)] {
@@ -124,7 +125,10 @@ fn dev_random_provides_a_poll_handler() {
         IoEvents::OUT | IoEvents::WRNORM
     };
     // `IoEvents` carries no `PartialEq`, so compare the raw bits.
-    assert_eq!(file.poll_handler().map(|events| events.bits()), Some(expected.bits()));
+    assert_eq!(
+        file.poll_handler().map(|events| events.bits()),
+        Some(expected.bits())
+    );
 }
 
 /// `/dev/urandom` is `urandom_fops`, which provides no poll operation: the

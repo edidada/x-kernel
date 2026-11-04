@@ -30,12 +30,8 @@ impl AllocationOps for KernelAllocationOps {
     }
 
     fn map_coherent(&mut self, address: usize, pages: usize) -> AllocResult<()> {
-        DmaMappingIf::set_mode(
-            va!(address),
-            pages * PAGE_SIZE_4K,
-            DmaMappingMode::Coherent,
-        )
-        .map_err(|_| AllocError::NoMemory)
+        DmaMappingIf::set_mode(va!(address), pages * PAGE_SIZE_4K, DmaMappingMode::Coherent)
+            .map_err(|_| AllocError::NoMemory)
     }
 
     fn prepare(&mut self, address: usize, pages: usize) -> AllocResult<()> {
@@ -49,12 +45,8 @@ impl AllocationOps for KernelAllocationOps {
     }
 
     fn restore(&mut self, address: usize, pages: usize) -> AllocResult<()> {
-        DmaMappingIf::set_mode(
-            va!(address),
-            pages * PAGE_SIZE_4K,
-            DmaMappingMode::Normal,
-        )
-        .map_err(|_| AllocError::NoMemory)
+        DmaMappingIf::set_mode(va!(address), pages * PAGE_SIZE_4K, DmaMappingMode::Normal)
+            .map_err(|_| AllocError::NoMemory)
     }
 
     fn free(&mut self, address: usize, pages: usize) {
