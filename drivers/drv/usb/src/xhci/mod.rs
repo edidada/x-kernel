@@ -1128,11 +1128,6 @@ impl Xhci {
                 _ => continue,
             }
             log::info!("xhci: port {} has a device, bringing it up", port + 1);
-            // Behaviour, not read-back: a port reset must make the controller
-            // write a Port Status Change Event into the event ring. If the ring
-            // memory is untouched afterwards, the event ring was never published
-            // -- which is a fact about the controller instead of a guess based on
-            // a register whose read-back this IP does not honour.
             let before = self.event.read(0);
             log::info!(
                 "xhci: event ring[0] before reset p {:#x} c {:#x}",

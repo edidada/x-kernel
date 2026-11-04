@@ -889,6 +889,18 @@ num-hc-interrupters
 的**写序是 hi→lo**，与通用的 `lo_hi_writeq` 相反。这一轮我曾把它"修正"成 lo→hi，
 属于按通用规范改错特例 —— 后续必须保持 hi→lo。
 
+**板厂源码对比（`rockchip-linux/kernel` develop-6.1，已下载到 /tmp/rk-*.c）**：
+
+| 位置 | 板厂 | mainline 7.1.8 | 我们 |
+|---|---|---|---|
+| `dwc3/host.c` properties | 有 `xhci-sg-trb-cache-size-quirk`、`xhci-u2-broken-suspend` | 有 `write-64-hi-lo-quirk`（板厂没有） | 照 mainline 写 hi→lo |
+| `dwc3_xhci_plat_start` | `dwc3_enable_susphy(dwc, true)` | 同 | 未做（只有 susphy 相关） |
+| `xhci_ring_cmd_db` | `writel(0, doorbell[0])` + **读回 flush** | 同 | 写 0，未读回 |
+| `xhci_alloc_dev` | `queue_slot_control(TRB_ENABLE_SLOT, 0)` → `xhci_ring_cmd_db` | 同 | 相同 |
+| `DB_VALUE_HOST` | `0` | `0` | `0` |
+
+**结论：板厂在命令提交路径上与 mainline 完全一致**，没有针对性补丁 —— 所以 `Enable Slot` 被拒不是"缺了某个 vendor 步骤"。
+
 **剩余候选**：① 确认是否 `num-hc-interrupters` 影响（我们只用 interrupter 0）；
 ② 用标记值扫描直接验证 `Enable Slot` TRB 的四个 dword 是否原样进了环；
 ③ 若字段确实无误，则问题在控制器侧（DWC3 slot 管理），需要对照 dwc3 的 `GCTL`/`DCFG`
