@@ -883,6 +883,43 @@ fn ordered_probe_skips_nonmatches_and_stops_after_success() {
 }
 
 #[def_test(serial)]
+fn probe_failures_preserve_registration_and_allow_explicit_retry() {
+    for error in [
+        RuntimeError::Unsupported,
+        RuntimeError::Invalid,
+        RuntimeError::NotFound,
+        RuntimeError::NoMemory,
+        RuntimeError::Io,
+    ] {
+        let (domain, _services, root) = fresh_domain();
+        let calls = Arc::new(AtomicUsize::new(0));
+        domain.register_driver(DriverDesc::new(
+            "diagnostic-failure",
+            TIE_IDS,
+            CountedProbe {
+                calls: calls.clone(),
+                outcome: Err(ProbeError::Fatal(error)),
+            },
+        ));
+        let device = domain.add_device(test_descriptor(root)).unwrap();
+        assert!(device.is_online());
+        assert_eq!(
+            domain.snapshot(&device).unwrap().state,
+            DeviceState::Unclaimed
+        );
+        assert_eq!(device.driver_name(), None);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(domain.bind_device(&device).unwrap().failed, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            domain.snapshot(&device).unwrap().state,
+            DeviceState::Unclaimed
+        );
+        domain.remove_device(&device).unwrap();
+    }
+}
+
+#[def_test(serial)]
 fn deferred_candidate_waits_without_probing_later_candidates() {
     let (domain, _services, root) = fresh_domain();
     let deferred = Arc::new(AtomicUsize::new(0));

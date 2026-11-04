@@ -560,6 +560,13 @@ threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是�
 
 ### 匹配与候选探测
 
+Fatal 候选失败由统一 probe 分支记录设备内部身份、path、驱动名及具体
+RuntimeError；Unsupported 是可预期的候选拒绝，使用 debug，其余错误使用 warn。
+NotFound 也可能是资源缺失，不能仅因它的名字就静默视为无匹配。Deferred 继续
+使用已有依赖诊断；没有匹配不是 probe 失败，不输出故障日志。日志在域状态锁外
+执行，不增加失败历史表，不改变 attempted、候选顺序或重试策略。
+add_device 成功仍只表示注册成功；具体 probe 失败不会被提升为注册失败。
+
 `Bus::match_device` 对描述事实和一条匹配项返回 bool。任意一项匹配即可尝试
 该驱动；没有跨驱动评分，也不由通用框架推断“专用驱动优先”。domain 按注册
 顺序选择尚未失败且匹配的第一个候选，成功后保存 Data 并停止。Fatal 记入

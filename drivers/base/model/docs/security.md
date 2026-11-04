@@ -1,5 +1,12 @@
 # driver-model — 安全与可靠性分析
 
+## Probe 失败诊断
+
+框架在 Fatal 分支保留错误内容并记录设备身份、path 与候选驱动；Unsupported
+为 debug，其他错误为 warn。日志不记录原始指针或 DMA 内容，不增加诊断保活表，
+也不改变失败后的生命周期。debug 被过滤时正常拒绝可能不可见；真实初始化失败
+在 warn 启用时可诊断。设备注册成功不能被当成已绑定或硬件可用的证明。
+
 ## Held DMA capability lifetime
 
 The model checks descriptor DMA presence but does not manufacture an identity

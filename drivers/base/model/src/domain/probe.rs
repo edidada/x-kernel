@@ -188,10 +188,21 @@ impl DeviceDomain {
                 device.core.clear_driver();
                 self.park_deferred(&mut self.inner.lock(), id, dep, stats, driver.name());
             }
-            Err(ProbeError::Fatal(_)) => {
+            Err(ProbeError::Fatal(error)) => {
                 device.core.clear_driver();
                 Self::record_failure(&mut self.inner.lock(), id, &driver);
                 stats.failed += 1;
+                let level = match error {
+                    RuntimeError::Unsupported => log::Level::Debug,
+                    _ => log::Level::Warn,
+                };
+                log::log!(
+                    level,
+                    "driver-core: probe failed: device={device:?} path={} driver={} \
+                     error={error:?}",
+                    device.path(),
+                    driver.name(),
+                );
             }
         }
         Ok(())
