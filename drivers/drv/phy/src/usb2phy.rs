@@ -103,6 +103,13 @@ impl Usb2Phy {
         self.grf.write32(0x0004, (0xf << 24) | 0x0900);
         // HS Transmitter Pre-Emphasis Current Control 2'b10: 2x.
         self.grf.write32(0x0008, (0x3 << 19) | 0x0010);
+        // The USB3_0/USB3_1 blocks get one more step in the reference: pull up the
+        // IDDIG pin so the port behaves as a host. Without it the OTG port never
+        // leaves its default role, which is consistent with a port that detects a
+        // connect but cannot complete a transaction.
+        if matches!(self.block, Block::Usb3_0 | Block::Usb3_1) {
+            self.grf.write32(0x0010, (0x3 << 16) | 0x0003);
+        }
     }
 
     /// `phy_sus` suspend-bit write (hiword convention): `false` = power
