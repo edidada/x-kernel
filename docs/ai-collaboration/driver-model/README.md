@@ -8,11 +8,15 @@
 当前大分支作为开发底稿保留；transport 开发先暂停。
 
 先整理 [PR-01：统一 OS 能力层并退役 device-res](mainline-replacement-pr01.md)。
-已核对 main 基线和消费者；普通 IRQ 事件信息、MSI owner、CPU 内存和 DMA 获取
-合同需收口，不能直接搬入并删除旧 crate。旧 threaded API 仅预留，生产 adapter
-未实现，不能算作必须补齐的已有功能。详见 [能力契约取舍](pr01-capability-contract-decisions.md)。
-以需求判断新旧设计，不机械补齐旧 API；Time/clock 等无消费者能力不自动迁入。
-此时是 PR 范围整理，
+用户已确认先统一归属，再在唯一 crate 内演进：重复能力只留一套，尚无等价新
+实现的必要能力先保留主线语义迁入 os-api；迁移全部消费者并删除 device-res。
+per-device DMA、VirtIO HAL、MSI owner 最终设计不再阻塞首个 PR，而是后续逐项
+推进。设备资源集合与绑定清理仍归设备框架，不为删 crate 全塞进 os-api。
+旧 threaded API 仅预留，不能误报为生产能力；首批也不强制清理所有无消费者
+接口。详见 [能力契约取舍](pr01-capability-contract-decisions.md) 的范围修正。
+先在当前新框架分支完成归属迁移与回归，再从最新 main 抽取 PR-01 并独立验收。
+已迁移 CPU 内存契约及块驱动消费者，继续统一 MMIO 契约、guard 和宿主映射；
+DMA/IRQ、资源集合及清理职责迁移和旧 crate 删除尚未完成。
 尚未生成代码 PR、推送或完成验收。PR-01 整理至可评审状态后再继续 transport。
 
 开发底稿已 rebase 到 main `f429a5953`，保留最新 KIRQ owner 准备和主线资源能力，

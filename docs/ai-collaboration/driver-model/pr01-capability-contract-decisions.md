@@ -4,6 +4,12 @@
 基线：开发底稿 `2daaa4bc0`，已包含 main `f429a5953`。
 范围沿用 [PR-01 交付计划](mainline-replacement-pr01.md)，transport 开发继续暂停。
 
+**范围修正（用户已确认）**：本稿中 per-device DMA、guard/ReleaseHook、MSI
+owner 等最终设计要求转为后续能力层内部演进事项，不再阻塞 PR-01 删除旧 crate。
+PR-01 先统一到 os-api；已有重复能力只留一套，尚无等价新实现的必要能力先保留
+主线语义迁入。本文的“未决门槛”约束的是对应重设计，不是单纯归属迁移。
+TimeOp/threaded 等接口的去留可后续独立清理，首批不以删无消费者接口为必需条件。
+
 ## 1. 判断标准
 
 先问消费者需要完成什么、谁拥有状态、何时结束生命周期，再确定接口。
@@ -109,8 +115,8 @@ WAKE_THREAD 退化成普通 handled。不能据此宣称主线资源层已有可
 IRQ，也不应为了“能力不丢失”在 PR-01 新实现一个 threaded IRQ 接入项目。
 KIRQ 自身是否支持其他线程化路径是另一层的问题，不能混同。
 
-建议本 PR 只兑现现有普通 IRQ 路径；threaded 作为明确扩展需求另行设计，旧无用
-helper 可退役，不把 mock 支持当生产合同验收。普通 handler 的事件来源信息则
+本 PR 保留现有普通 IRQ 路径；threaded 预留接口可迁入并保持 Unsupported，
+实际支持与无用 helper 清理后续另行处理，不把 mock 支持当生产合同验收。普通 handler 的事件来源信息则
 不能机械丢弃：VirtIO net 生成 RX/TX source 位，旧 adapter 向 KIRQ 传递它们。
 新 IrqAction 两值接口不足以无损携带此信息。最终需要保留信息或证明消费者迁移
 后不再需要它，不能仅以 Linux irqreturn_t 无 source 位为理由删除。
@@ -133,22 +139,22 @@ Linux `kernel/irq/manage.c::free_irq/request_threaded_irq` 将共享 action 身�
 reservation 不是 action token；必须明确设备停止、消息排序、action drain 与
 reservation 释放顺序。主线的无分配释放不等于后端永不拒绝或设备已经停止。
 
-**设计门槛**：失败是否能返回仍有效 owner、PCI 调用方如何保留它；是否需要与
+**后续重设计门槛**：失败是否能返回仍有效 owner、PCI 调用方如何保留它；是否需要与
 已暂缓的网络生命周期工作交叉。不得只将返回类型改成 Result 后让调用方仍提前
-丢 owner，不得默默建全局隔离表。如果完整契约要求扩大 PR-01 范围，先报告并
-重新确定拆分，而不是在这个整理稿里默认批准网络 close 重构。
+丢 owner，不得默默建全局隔离表。PR-01 只迁移现有语义，不以最终契约扩大范围，
+也不在这个整理稿里默认批准网络 close 重构。
 
 证据：`drivers/devices/virtio/src/pci/x86_64.rs`、
 `drivers/adapters/xkernel/device-res/src/irq.rs`；另见既有 network-lifecycle-handoff。
 
-### 3.6 Time、clock 与聚合 provider：不自动搬迁
+### 3.6 Time、clock 与聚合 provider：迁移与清理分开
 
-- TimeOp 当前只有旧聚合 trait 与 host 实现，未见树内直接驱动调用；建议本批
-  不引入。host glue 自己调用单调时间不等于需要一个所有驱动必须依赖的接口。
+- TimeOp 当前只有旧聚合 trait 与 host 实现，未见树内直接驱动调用；本批可原样
+  迁入，后续评估删除。host glue 自己调用单调时间不等于需要一个所有驱动必须依赖的接口。
 - ClkOps 是设备时钟 prepare/enable/rate 控制，不是 TimeOp 替代品。当前底稿
   只有测试 provider，生产 host 返回 Unsupported；不作为 PR-01 必带能力。
 - ResourceProvider 聚合 MMIO/DMA/IRQ/Time，当前未见消费其 trait bound 的代码；
-  建议删除该聚合接口。一个 host 类型实现多个独立能力，不需要公共总接口。
+  本批可保留，后续评估删除。一个 host 类型实现多个独立能力，不需要公共总接口。
 - 可移植驱动以后确需时间/时钟时，应补相应最小能力契约，不能借本次省略允许它
   直接调用 khal/ktask。
 
@@ -168,21 +174,23 @@ reservation 释放顺序。主线的无分配释放不等于后端永不拒绝�
 Linux `drivers/base/devres.c::__devm_add_action` 本身也可能返回 ENOMEM；可失败
 清理登记不能在资源获得后被忽略。这里借鉴失败处理，不照搬 Linux 链表结构。
 
-## 5. 首个 PR 的执行顺序（设计门槛在实现之前）
+## 5. 修正后的执行顺序
 
-1. 先收口 DMA 视图来源/guard 释放协议；它决定 host adapter 与旧消费者如何接线。
-2. 同时收口普通 IRQ 结果信息、action 与 MSI owner 的边界；明确网络交叉是否阻塞。
-3. 确认统一能力层的最小公开面，保留 CPU memory，移除无消费者的预留/聚合接口；
-   MMIO/devm 组合不改变当前设备模型的注册/解绑职责。
-4. 实现并迁移全部消费者，删除旧 resource crate/provider；再从最新 main 提取
-   独立 PR 验收。不先发一个“新增 os-api，但消费者以后再迁”的 PR。
+1. PR-01 先迁移能力归属：Op/guard/基础词汇归 os-api，设备资源集合与清理
+   归设备框架；已有 host 实现统一接线，维持主线现有行为。
+2. 新接口暂不能等价接管的必要能力，先采用现有可用接口形式迁入；不并行复制
+   一套新旧 provider，不强制转换 VirtIO static HAL，不引入新的默认 DMA 假设。
+3. 全部消费者依赖 os-api，删除 device-res 与旧 package/兼容转发接线；在独立
+   main 基线上验证。第一批不是只新增 os-api 等以后再迁消费者。
+4. 后续在唯一能力层中逐项处理 DMA/HAL、IRQ/MSI owner、guard 失败语义以及
+   无消费者接口清理。每项先收口设计，再同步迁移消费者并删除被替代接口。
 
 验收不只要求 API 可编译：必须覆盖原有效功能、错误分类、申请失败回滚、释放
 一次性、共享隔离、callback drain、CPU/DMA 区分和真实主线受影响路径。
 无消费者接口退役的 mock 用例不机械照搬；覆盖实际语义的回归用例必须保留或迁移。
 
-本稿尚未定稿具体 Rust 签名、adapter 名字或分配失败实现细节；不据此开始生产
-代码修改。首先评审上述取舍，再逐项关闭第 3/4 节的设计门槛。
+本稿尚未定稿最终 Rust 签名或分配失败实现细节，不授权直接实现这些重设计。
+已批准的归属迁移按 PR-01 范围执行，不再等待第 3/4 节全部问题关闭。
 
 文档核对：IRQ/MSI 与 DMA/CPU/MMIO 两路只读调研均无阻断性事实问题；已据此
 收窄旧 DmaOp 的描述，区分 trait 表达能力与当前全局 provider 接线。此结论
