@@ -15,6 +15,13 @@
 extern crate alloc;
 
 pub mod dwc3;
+pub mod ehci;
 pub mod xhci;
 
-pub use dwc3::{Dwc3Data, Dwc3Driver, register};
+pub use dwc3::{Dwc3Data, Dwc3Driver};
+
+/// Registers every USB controller driver this crate provides.
+pub fn register() {
+    dwc3::register();
+    ehci::driver::register();
+}
