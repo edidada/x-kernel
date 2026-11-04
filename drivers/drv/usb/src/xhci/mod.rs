@@ -150,6 +150,9 @@ pub struct Xhci {
     event: Ring,
     erst: CoherentMem,
     device_contexts: CoherentMem,
+    /// Scratchpad buffers required by the controller (`HCSPARAMS2`), kept alive
+    /// for its lifetime; `DCBAA[0]` points at the pointer array.
+    _scratchpads: Option<Scratchpads>,
     /// One device-visible scratch buffer for control data stages.
     bounce: CoherentMem,
     /// Event ring consumer position, independent of the producer side.
@@ -158,6 +161,54 @@ pub struct Xhci {
     /// One addressed device slot: its input context (reused for every command)
     /// and the EP0 transfer ring the slot context points at.
     slots: Vec<Slot>,
+}
+
+/// The scratchpad buffer pool a controller asks for.
+struct Scratchpads {
+    _array: CoherentMem,
+    _buffers: CoherentMem,
+}
+
+/// Allocates the scratchpad buffers `HCSPARAMS2` asks for.
+///
+/// xHCI 4.2: `Max Scratchpad Buffers = HCSPARAMS2[31:27] << 5 | HCSPARAMS2[25:21]`
+/// (Linux `HCS_MAX_SCRATCHPAD`). When it is non-zero the DCBAA's first entry must
+/// point at an array of pointers to that many buffers *before* the controller is
+/// started; without it the first command that allocates a device slot (`Enable
+/// Slot`) fails with a TRB error while a No-Op still succeeds.
+fn allocate_scratchpads(
+    dev: &Device<'_, driver_base::PlatformBus>,
+    hcsparams2: u32,
+    device_contexts: &CoherentMem,
+) -> Result<Option<Scratchpads>, ProbeError> {
+    let count = ((((hcsparams2 >> 27) & 0x1f) << 5) | ((hcsparams2 >> 21) & 0x1f)) as usize;
+    if count == 0 {
+        return Ok(None);
+    }
+    let array = dev
+        .res()
+        .alloc_coherent(count * core::mem::size_of::<u64>(), 64)?;
+    let buffers = dev.res().alloc_coherent(count * 4096, 4096)?;
+    for index in 0..count {
+        let entry = array.as_ptr().cast::<u64>().wrapping_add(index);
+        // SAFETY: `index < count` inside the array allocation.
+        unsafe {
+            core::ptr::write_volatile(entry, buffers.bus_addr() + (index * 4096) as u64);
+        }
+    }
+    let slot_zero = device_contexts.as_ptr().cast::<u64>();
+    // SAFETY: `slot_zero` is the first entry of the DCBAA allocation.
+    unsafe {
+        core::ptr::write_volatile(slot_zero, array.bus_addr());
+    }
+    info!(
+        "xhci: {count} scratchpad buffers, array at {:#x}",
+        array.bus_addr()
+    );
+    Ok(Some(Scratchpads {
+        _array: array,
+        _buffers: buffers,
+    }))
 }
 
 /// One enabled + addressed device slot.
@@ -341,6 +392,11 @@ impl Xhci {
             ),
         ]);
 
+        // After the structures are zeroed: `allocate_scratchpads` writes
+        // DCBAA[0], and doing it before the zeroing pass wiped that entry, which
+        // left the controller without the scratchpad array it asks for and made
+        // `Enable Slot` fail while a No-Op still worked.
+        let scratchpads = allocate_scratchpads(dev, hcsparams2, &device_contexts)?;
         let mut xhci = Self {
             bar,
             operational,
@@ -353,6 +409,7 @@ impl Xhci {
             event,
             erst,
             device_contexts,
+            _scratchpads: scratchpads,
             bounce,
             event_dequeue: 0,
             // The controller publishes the first event with the cycle bit set.
