@@ -352,6 +352,13 @@ impl Hcd for Ehci {
         );
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(50_000));
         let after = self.regs.read32(offset);
+        info!(
+            "ehci: port {} during reset, portsc {after:#010x} (pr {}, ped {}, ccs {})",
+            port + 1,
+            after & portsc::RST != 0,
+            after & portsc::PED != 0,
+            after & portsc::CCS != 0,
+        );
         self.regs.write32(
             offset,
             (after & !portsc::RST & !portsc::CHANGE_BITS) | portsc::PP,
@@ -428,6 +435,11 @@ pub mod driver {
         /// The controller owns the register window; keeping it here is what
         /// keeps the mapping alive for the controller's lifetime.
         _ehci: Ehci,
+        /// Enabled clocks, held for the controller's lifetime. The device tree
+        /// lists four clocks without names, so they are taken by index; the
+        /// controller can detect a connect without them but cannot run its reset
+        /// state machine.
+        _clocks: alloc::vec::Vec<driver_base::EnabledClock>,
     }
 
     impl DriverOps<PlatformBus> for EhciDriver {
@@ -435,6 +447,16 @@ pub mod driver {
 
         fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<EhciData, ProbeError> {
             let regs = dev.res().iomap(0)?;
+            let mut clocks = alloc::vec::Vec::new();
+            for index in 0..4 {
+                let Ok(clock) = dev.res().clk_at(index) else {
+                    continue;
+                };
+                if let Ok(enabled) = clock.prepare_enable() {
+                    info!("ehci: clock {index} at {} Hz", clock.get_rate());
+                    clocks.push(enabled);
+                }
+            }
             info!(
                 "ehci: probing {:#x}+{:#x}",
                 regs.region().base,
@@ -464,7 +486,10 @@ pub mod driver {
             }
             info!("ehci: enumeration found {devices} device(s)");
 
-            Ok(EhciData { _ehci: ehci })
+            Ok(EhciData {
+                _ehci: ehci,
+                _clocks: clocks,
+            })
         }
     }
 
