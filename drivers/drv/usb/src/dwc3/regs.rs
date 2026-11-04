@@ -16,6 +16,7 @@ pub const GSTS: usize = GLOBALS_START + 0x08;
 pub const GUSB2PHYCFG: usize = GLOBALS_START + 0x40;
 pub const GUSB2PHYACC: usize = GLOBALS_START + 0x48;
 pub const GUSB3PIPECTL: usize = GLOBALS_START + 0x58;
+pub const GDCTL: usize = GLOBALS_START + 0x14;
 pub const GTXFIFOSIZ: usize = GLOBALS_START + 0x80;
 pub const GRXFIFOSIZ: usize = GLOBALS_START + 0x100;
 pub const GEVNTADR: usize = GLOBALS_START + 0x180;

@@ -97,13 +97,17 @@ fn core_soft_reset(regs: &IoMap) {
 }
 
 fn set_host_mode(regs: &IoMap) {
-    let gctl = regs.read32(GCTL);
-    regs.write32(GCTL, (gctl & !gctl::PRTCAPDIR_MASK) | gctl::PRTCAPDIR_HOST);
-    let gsts = regs.read32(GSTS);
+    // GCTL.PrtCapDir is deliberately NOT written. The reference board's DWC3_1
+    // reads GCTL = 0x00000001 here -- PrtCapDir 0, i.e. the controller keeps the
+    // mode its wrapper selected -- and its host ports work. This driver used to
+    // force bit 12 (host) and that was the last register difference left between
+    // the two boards once VBUS, the PHY words, the GRF and the PIPE control all
+    // matched.
     info!(
-        "dwc3: host mode selected, GCTL {:#010x} GSTS {:#010x}",
+        "dwc3: GCTL {:#010x} GSTS {:#010x} (prtcapdir {}, mode left to the wrapper)",
         regs.read32(GCTL),
-        gsts,
+        regs.read32(GSTS),
+        (regs.read32(GCTL) >> 12) & 0x3,
     );
 }
 
@@ -146,5 +150,14 @@ fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     info!(
         "dwc3: GUSB2PHYCFG {:#010x} (utmi_wide {utmi_wide} dis_enblslpm {dis_enblslpm})",
         regs.read32(GUSB2PHYCFG),
+    );
+    // Read-only for now: the reference board reads 0x20180101 here (UTMI+ PHY
+    // vendor control). If this differs, the PHY is being held out of the state
+    // the controller expects, which no amount of VBUS or port power can fix.
+    info!(
+        "dwc3: GUSB2PHYACC0 {:#010x} GDCTL {:#010x} GCTL {:#010x}",
+        regs.read32(regs::GUSB2PHYACC),
+        regs.read32(regs::GDCTL),
+        regs.read32(GCTL),
     );
 }
