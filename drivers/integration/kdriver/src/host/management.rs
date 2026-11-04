@@ -26,8 +26,8 @@ use ksync::Mutex;
 /// invalid context before checking ownership or taking its lock, and rejects
 /// same-task recursion with [`DeviceManagementError::Reentrant`]. Neither
 /// rejection invokes the callback or acquires the lock.
-pub fn new_device_management_lock() -> Result<Arc<dyn DeviceManagementLock>, DeviceManagementError>
-{
+pub(super) fn new_device_management_lock()
+-> Result<Arc<dyn DeviceManagementLock>, DeviceManagementError> {
     if !ktask::is_sleepable_context() {
         return Err(DeviceManagementError::InvalidContext);
     }
@@ -56,29 +56,29 @@ impl DeviceManagementLock for HostDeviceManagementLock {
 
 unittest::path_mod_test!(
     device_management_unittest,
-    "../ut-tests/device_management_unittest.rs"
+    "../../ut-tests/device_management_unittest.rs"
 );
 
 #[cfg(feature = "hwrng")]
 unittest::path_mod_test!(
     device_management_lifecycle_unittest,
-    "../ut-tests/device_management_lifecycle_unittest.rs"
+    "../../ut-tests/device_management_lifecycle_unittest.rs"
 );
 
 #[cfg(feature = "hwrng")]
 unittest::path_mod_test!(
     device_management_downstream_unittest,
-    "../ut-tests/device_management_downstream_unittest.rs"
+    "../../ut-tests/device_management_downstream_unittest.rs"
 );
 
 #[cfg(feature = "hwrng")]
 unittest::path_mod_test!(
     hwrng_binding_unittest,
-    "../ut-tests/hwrng_binding_unittest.rs"
+    "../../ut-tests/hwrng_binding_unittest.rs"
 );
 
 #[cfg(feature = "virtio-rng")]
 unittest::path_mod_test!(
     virtio_rng_lifecycle_unittest,
-    "../ut-tests/virtio_rng_lifecycle_unittest.rs"
+    "../../ut-tests/virtio_rng_lifecycle_unittest.rs"
 );

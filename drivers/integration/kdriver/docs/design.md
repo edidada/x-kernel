@@ -1,5 +1,18 @@
 # kdriver — Design
 
+## Host service composition
+
+`src/host/mod.rs` exposes domain service constructors. Private `services.rs`
+composes capabilities, extensions and management locks; `management.rs`
+implements the sleepable device-management lock. Identity, descriptors and
+cleanup storage remain model-owned. This is framework integration, not a
+separate services crate or a new provider registry.
+
+The target provider crate belongs under `drivers/adapters/xkernel/provider`
+and must not depend on this module or driver-model. That migration is pending:
+`host_irq.rs` and native parts of `host_dma.rs` still need consolidation with
+the old adapter. This directory change does not claim that work is complete.
+
 MMIO acquisition in both device models delegates to the single host
 MmioOp implementation. Model host_mmio only translates os-api errors to
 RuntimeError; it no longer allocates a release hook or implements native
@@ -249,7 +262,7 @@ conveys no binding ownership.
 
 ## Native ordinary IRQ composition
 
-`host_services::new_native_device_services` composes the existing native MMIO,
+`host::new_native_device_services` composes the existing native MMIO,
 DMA and management-lock services with `host_irq::NativeIrq`. Construction does
 not install services, enumerate firmware, activate a bus or probe any device.
 The `device-model` feature enables the direct kirq dependency independently of
@@ -1061,7 +1074,7 @@ result, and static discovery propagates it before registering another device.
 
 ## Device management lock adapter (R1-01)
 
-`device_management.rs` implements the portable `driver_model::DeviceManagementLock`
+`host/management.rs` implements the portable `driver_model::DeviceManagementLock`
 capability with one private `ksync::Mutex<()>` per factory call.
 The optional `device-model` feature enables only `driver_model`, `ktask`, and
 `ksync`; `hwrng` selects it. The factory validates sleepability before allocating.
@@ -1265,7 +1278,7 @@ enumerator now applies it before registering a scoped model descriptor.
 
 ### Model host service composition
 
-`host_services::new_device_services` composes the native MMIO/DMA helpers and
+`host::new_device_services` composes the native MMIO/DMA helpers and
 management-lock factory into the existing DeviceServices contract. Construction
 does not change the global domain or enumerate hardware. The caller supplies an
 owned OS-api IrqOp capability; the host aggregate keeps no copied device facts.

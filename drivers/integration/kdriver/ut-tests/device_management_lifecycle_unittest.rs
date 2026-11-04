@@ -31,7 +31,7 @@ pub(super) struct HostServices {
 impl HostServices {
     pub(super) fn new() -> Self {
         Self {
-            inner: crate::host_services::new_device_services(Arc::new(UnavailableIrq)),
+            inner: crate::host::new_device_services(Arc::new(UnavailableIrq)),
             factory_calls: AtomicUsize::new(0),
         }
     }

@@ -275,7 +275,7 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
         let mappings = MAPPINGS.load(Ordering::Relaxed);
         let releases = RELEASES.load(Ordering::Relaxed);
         let domain = DeviceDomain::new();
-        domain.set_services(crate::host_services::new_device_services(Arc::new(TestIrq)));
+        domain.set_services(crate::host::new_device_services(Arc::new(TestIrq)));
         let root = domain
             .add_bus_instance(PlatformBus::ID, None, "rng-model-ut")
             .unwrap();

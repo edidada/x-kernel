@@ -113,10 +113,23 @@ per-device DMA、VirtIO HAL 或 MSI owner 的最终设计。已有重复能力�
 provider。不能只搬类型而让旧 adapter 与 kdriver/host_* 长期各自实现同一能力。
 先在当前分支完成接线与回归，再抽取主线 PR；不是先抽取再适配新模型。
 
-目标位置拟为 `drivers/adapters/xkernel/os-api`，包名 `driver-os-api-xkernel`，
+目标位置确定为 `drivers/adapters/xkernel/provider`，包名 `driver-os-api-xkernel`，
 Rust 名 `driver_os_api_xkernel`。它实现 os-api，不依赖 driver-model、kdevice、
 kdriver 或具体设备驱动。统一的是宿主实现归属，不要求所有能力塞进一个总 trait
 或一个总 provider 对象；可以保留职责明确的各家族实现。
+
+按现有层次组织，不新增笼统的 host 大 crate：`adapters/xkernel` 已是宿主
+适配层，provider 是其下独立 crate；框架服务组合放在
+`drivers/integration/kdriver/src/host/`，保留为 kdriver 的内部模块组。
+`host/mod.rs` 仅导出服务构造入口，`services.rs` 组合能力，`management.rs`
+实现设备管理锁。设备身份/描述/清理仍归模型，不建立对等 services crate。
+当前先落地服务模块组与调用路径；旧 adapter 和 host_irq/host_dma 的宿主
+实现归并尚未完成。此次目录调整不代表 provider 已完成迁移。
+
+服务模块组验证：AArch64 SMP4、无网络/vsock 的 model+kdriver UT
+165 passed、0 failed、5 ignored，覆盖率导出成功；UNITTEST clippy 与只读
+复核通过。UT 仍放在 ut-tests，挂载路径及调用入口同步更新；管理测试的
+全限定名称随模块路径变化。日志：`.scratch/pr01-host-layout/`。
 
 ```text
 设备模型 / kdriver 服务组合 ──► driver-os-api-xkernel ──► kirq/kdma/memspace/kalloc

@@ -1,5 +1,11 @@
 # kdriver — Security and Reliability Analysis
 
+Host service construction is exposed through `kdriver::host`. Its private
+management-lock implementation retains sleepable-context and reentrancy checks.
+The directory grouping introduces no global state, resource owner, cleanup
+storage or additional authority. Capability contracts are unchanged; provider
+implementation consolidation remains a separate step.
+
 ## Discovery count scope
 
 Legacy discovery counters do not certify that model RNG devices bound, or that

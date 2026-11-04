@@ -126,7 +126,7 @@ impl DeviceResourceServices for HostDeviceServices {
 
 impl DeviceServices for HostDeviceServices {
     fn create_management_lock(&self) -> Result<Arc<dyn DeviceManagementLock>, RuntimeError> {
-        crate::device_management::new_device_management_lock().map_err(RuntimeError::from)
+        super::management::new_device_management_lock().map_err(RuntimeError::from)
     }
 }
 
@@ -148,4 +148,4 @@ impl ProviderServices for HostDeviceServices {
     }
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/host_services.rs");
+unittest::path_mod_test!(tests, "../../ut-tests/host_services.rs");

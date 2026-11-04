@@ -40,7 +40,7 @@ kdriver 外置测试组合模型与 hwrng，使用真实管理锁和 RngDrain、
 
 `services.rs` 的 `DeviceManagementLock` 是 model 所需的宿主能力，不是
 驱动可用的通用同步 API。每个设备在发布前需要独立实例，宿主实现位于
-`kdriver::device_management`，model 不依赖 ktask 或 ksync。
+`kdriver::host` 内部的管理锁实现，model 不依赖 ktask 或 ksync。
 
 `run_locked` 接受借用的回调；成功时同步执行恰好一次，返回前释放宿主局部
 mutex guard。非法上下文返回 `DeviceManagementError::InvalidContext`，

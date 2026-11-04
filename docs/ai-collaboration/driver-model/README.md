@@ -19,7 +19,10 @@ per-device DMA、VirtIO HAL、MSI owner 最终设计不再阻塞首个 PR，而�
 DMA 基础契约与 coherent guard 已收敛；IRQ、资源集合及清理职责迁移和旧 crate 删除尚未完成。
 用户进一步确认 provider 要随 os-api 一起收口。后续不是单独搬 IRQ 类型，
 而是同步统一宿主实现：native 能力归 adapter，设备描述读取与服务组合留在
-kdriver。具体迁移边界和顺序见 PR-01 第 5 节；provider 迁移尚未实现。
+kdriver。服务组合已整理到 `kdriver::host`（私有 services/management 模块）；
+provider 目标位于 `drivers/adapters/xkernel/provider`，不另建 services crate。
+本轮 AArch64 model+kdriver UT 165/0/5、clippy 与复核通过；仅目录/入口整理，
+不代表宿主后端已归并。具体迁移边界和顺序见 PR-01 第 5 节。
 尚未生成代码 PR、推送或完成验收。PR-01 整理至可评审状态后再继续 transport。
 
 开发底稿已 rebase 到 main `f429a5953`，保留最新 KIRQ owner 准备和主线资源能力，

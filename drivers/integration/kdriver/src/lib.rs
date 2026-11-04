@@ -40,20 +40,18 @@ unittest::path_mod_test!(
     "../ut-tests/block_requests_unittest.rs"
 );
 mod bus;
-#[cfg(feature = "device-model")]
-pub mod device_management;
 pub mod driver_registry;
 mod enumeration;
 #[cfg(feature = "device-model")]
 pub mod firmware_dma;
+#[cfg(feature = "device-model")]
+pub mod host;
 #[cfg(feature = "device-model")]
 pub mod host_dma;
 #[cfg(feature = "device-model")]
 pub mod host_irq;
 #[cfg(feature = "device-model")]
 pub mod host_mmio;
-#[cfg(feature = "device-model")]
-pub mod host_services;
 mod manager;
 #[cfg(feature = "virtio-rng")]
 mod platform_model;

@@ -97,7 +97,7 @@ impl PlatformRngRegistration {
             return result;
         }
         let domain = global_domain();
-        domain.set_services(crate::host_services::new_native_device_services());
+        domain.set_services(crate::host::new_native_device_services());
         let instance = match domain.add_bus_instance(PlatformBus::ID, None, "firmware-platform") {
             Ok(instance) => instance,
             Err(_) => {
