@@ -107,8 +107,9 @@ pub(crate) enum PropKind {
         /// Maximum.
         max: u64,
     },
-    /// Id of another object.
-    Object,
+    /// Id of another object; the payload is the `DRM_MODE_OBJECT_*` tag that
+    /// names the class of that value.
+    Object(u32),
     /// Id of a blob.
     Blob,
 }
@@ -321,7 +322,7 @@ pub(crate) static PROPS: &[PropDesc] = &[
         name: "FB_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Plane,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_FB),
         read: read_plane_fb,
         write: Some(write_plane_fb),
     },
@@ -330,7 +331,7 @@ pub(crate) static PROPS: &[PropDesc] = &[
         name: "CRTC_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Plane,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_CRTC),
         read: read_plane_crtc,
         write: Some(write_plane_crtc),
     },
@@ -438,7 +439,7 @@ pub(crate) static PROPS: &[PropDesc] = &[
         name: "CRTC_ID",
         flags: DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC,
         object: ObjectType::Connector,
-        kind: PropKind::Object,
+        kind: PropKind::Object(DRM_MODE_OBJECT_CRTC),
         read: read_conn_crtc,
         write: Some(write_conn_crtc),
     },
@@ -928,7 +929,14 @@ impl Ioctl for DrmModeGetProperty {
                 g.count_values = report_user_array(g.values_ptr, g.count_values, &[min, max])?;
                 g.count_enum_blobs = 0;
             }
-            PropKind::Object | PropKind::Blob => {
+            PropKind::Object(target) => {
+                // Linux reports the class of the value as the property's single
+                // value, and libdrm reads it from `values[0]`; drm-rs (and
+                // Smithay through it) indexes that slot unconditionally.
+                g.count_values = report_user_array(g.values_ptr, g.count_values, &[target as u64])?;
+                g.count_enum_blobs = 0;
+            }
+            PropKind::Blob => {
                 g.count_values = 0;
                 g.count_enum_blobs = 0;
             }

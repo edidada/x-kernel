@@ -122,6 +122,7 @@ pub(crate) const DRM_FORMAT_ARGB8888: u32 =
 pub(crate) const DRM_MODE_OBJECT_CRTC: u32 = 0xcccc_cccc;
 pub(crate) const DRM_MODE_OBJECT_CONNECTOR: u32 = 0xc0c0_c0c0;
 pub(crate) const DRM_MODE_OBJECT_PLANE: u32 = 0xeeee_eeee;
+pub(crate) const DRM_MODE_OBJECT_FB: u32 = 0xfbfb_fbfb;
 
 // ======== connector / encoder types ========
 
