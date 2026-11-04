@@ -53,14 +53,7 @@ impl IrqOp for XKernelResourceProvider {
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        let desc = irq_route_to_kirq_desc(route);
-        let virq = kirq::try_map(desc).map_err(|err| {
-            log::warn!("failed to map IRQ route {route:?}: {err:?}");
-            map_irq_desc_error(err)
-        })?;
-        Ok(IrqResource::new(virq, route.trigger)
-            .with_controller(route.controller)
-            .with_hwirq(route.hwirq))
+        map_route_with(route, kirq::try_map)
     }
 
     fn alloc_msix(&self) -> ResResult<MsiResource> {
@@ -77,9 +70,7 @@ impl IrqOp for XKernelResourceProvider {
     }
 }
 
-fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
-    // `device_res::IrqDomainId` is provider-local. Only controllers with a
-    // registered kirq domain can produce data-plane-resolvable mappings here.
+fn default_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
     match controller {
         DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
         DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
@@ -92,10 +83,26 @@ fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kir
 
 fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
     let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
-    if let Some(domain) = dev_irq_controller_to_kirq_domain(route.controller) {
+    if let Some(domain) = route.domain.or_else(|| default_domain(route.controller)) {
         desc = desc.with_domain(domain);
     }
     desc
+}
+
+fn map_route_with(
+    route: IrqRouteDesc,
+    map: impl FnOnce(kirq::IrqDesc) -> Result<usize, kirq::IrqDescError>,
+) -> ResResult<IrqResource> {
+    let desc = irq_route_to_kirq_desc(route);
+    let virq = map(desc).map_err(|err| {
+        log::warn!("failed to map IRQ route {route:?}: {err:?}");
+        map_irq_desc_error(err)
+    })?;
+    let mut resource = IrqResource::new(virq, route.trigger)
+        .with_controller(route.controller)
+        .with_hwirq(route.hwirq);
+    resource.domain = desc.domain;
+    Ok(resource)
 }
 
 fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
@@ -111,7 +118,7 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
     let mut desc = kirq::IrqDesc::new(hwirq, irq.trigger)
         .with_controller(controller)
         .with_virq(irq.number);
-    if let Some(domain) = dev_irq_controller_to_kirq_domain(controller) {
+    if let Some(domain) = irq.domain.or_else(|| default_domain(controller)) {
         desc = desc.with_domain(domain);
     }
     kirq::IrqSpec::Desc(desc)

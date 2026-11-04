@@ -16,7 +16,7 @@ Shared registration now uses the native typed error classification, including
 BadState for invalid context and Busy for teardown. Exact-token release must
 return a handler after drain: no match is NotFound, not successful release.
 The legacy infallible release fails closed on rejection rather than permitting
-resource reclamation. Route vocabulary and the legacy IRQ contract have not
+resource reclamation. Legacy resource shapes and callback contracts have not
 yet been unified. Unit-returning MSI release still warns on refusal; this
 slice does not resolve its ownership/retry limitations.
 
@@ -83,6 +83,18 @@ static `XKernelResourceProvider` instance and passes it explicitly to
 `DeviceResourceExt` methods.
 
 ## IRQ Adaptation
+
+IRQ trigger/controller/domain values, route descriptions, action tokens and
+MSI messages use os-api's shared vocabulary; no per-variant conversion remains.
+The legacy resource structure and callback protocol are still distinct.
+
+Legacy mapping now honors an explicit domain unchanged. Only absent domains
+use the historical GIC/PLIC/IOAPIC root fallback; unknown/LoongArch/MSI families
+without a domain still leave validation to kirq. The returned resource retains
+the selected domain and actual mapped virq, so request, enable and release
+reconstruct the same descriptor. A rejected explicit domain is never retried
+against a root. A resource with no route metadata still remains PlainVirq.
+Mapping does not allocate or register domains on the caller's behalf.
 
 `XKernelResourceProvider` keeps no local IRQ line state:
 

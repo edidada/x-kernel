@@ -8,6 +8,7 @@ IRQ 领域的共享值词汇，不是驱动资源层或 IRQ 核心的缩小版�
 ```text
 kirq ──────────→ irq-types
 driver-model → driver-os-api → irq-types
+device-res ──→ driver-os-api → irq-types
 ```
 
 IrqController 表达类别，不是控制器实例。Unknown 触发方式保留原始标志。
@@ -18,7 +19,8 @@ IrqDomainId 是宿主分配的不透明 u32；本 crate 不分配编号、定义
 
 kirq 的描述符合并、域注册映射、handler/event、分发、同步退出和根域常量；
 driver-os-api 的强类型 Virq、资源状态枚举、provider Op、token 和资源 guard；
-旧 device_res 的契约。新旧 devres 暂时并存，不因共享词汇而合并。
+旧 device_res 的资源结构、回调和获取契约。其 trigger/controller/domain
+现引用同一份词汇；尚未迁移的契约不因共享词汇而自动合并。
 
 全部实现位于 src/lib.rs：三个紧密相关的值类型不再机械拆 mod。
 没有初始化、锁、回调或生命周期操作，可用于任何执行上下文。

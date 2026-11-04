@@ -2,6 +2,13 @@
 
 ## Scope
 
+Explicit IRQ domains cross the legacy adapter unchanged and are retained in
+the mapped resource. Root fallback applies only to absent domains. Core domain
+validation remains authoritative: an unknown explicit domain cannot silently
+select a different controller namespace. No new domain registry or ownership
+is introduced. Injected mapping tests cover a nonidentity virq, explicit-domain
+rejection, root defaults and plain-virq preservation.
+
 Fallible IRQ owner preparation propagates as NoMemory before mapping admission.
 MSI cleanup does not gain a new OOM failure mode: the IRQ core clears a prepared
 slot without allocation. Existing backend rejection still produces a warning;

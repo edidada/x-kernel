@@ -330,3 +330,21 @@ NativeIrq shared-peer/tail-drain and concrete RNG notify-tail fixtures.
 UNITTEST-enabled clippy passed on AArch64 and x86_64; AArch64 configuration
 was restored. Independent read-only review found no code blocker. Logs are
 local under `.scratch/pr01-irq-provider/` (not committed).
+
+### Shared IRQ vocabulary and domain preservation
+
+Trigger/controller/domain values now share irq-types via os-api; route
+descriptions, handler tokens and MSI messages are defined only in os-api.
+Device-res temporarily re-exports these definitions while its consumers migrate.
+Legacy resource shapes, callback protocol and guards remain outstanding.
+
+A separately committed correction makes the legacy adapter preserve explicit
+domains through mapping and later request/enable/release, instead of silently
+substituting a controller root. Only absent domains use the historical fallback.
+The explicit-domain regression test failed before the fix; no global KIRQ
+mapping policy or domain ownership was changed.
+
+Validation: AArch64 SMP4 selected driver suites passed 265 tests, zero failures,
+five ignored; coverage exported. UNITTEST clippy passed on AArch64 and x86_64,
+and canonical AArch64 configuration was restored. Independent review found no
+blockers. Local red/green and lint logs: `.scratch/pr01-irq-vocabulary/`.
