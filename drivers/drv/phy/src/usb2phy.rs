@@ -26,6 +26,7 @@ use driver_base::{
     ClkHandle, Device, DriverOps, EnabledClock, IoMap, OfMatch, PlatformBus, PlatformId,
     ProbeError, ResetHandle, RuntimeError,
 };
+use kclk::{ClkBuilder, ClkCore, ClkLookup, FixedRate, ProviderId};
 use kphy::{PhyError, PhyHwOps, PhyInstance, PhyLookup};
 
 /// The usb2phy-grf block this port node belongs to (the node's own `reg`
@@ -179,6 +180,34 @@ static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible(
     "rockchip,rk3588-usb2phy",
 ))];
 
+/// The PHY's 480 MHz output as a clock provider.
+///
+/// The firmware gives the phy node `#clock-cells = <0>` and
+/// `clock-output-names = "usb480m_phyN"`, and both EHCI (`utmi`) and the DWC3
+/// reference it as a clock source. This provider published only the PHY
+/// instance, so those `clocks` entries resolved to nothing and the controllers
+/// ran without their 480 MHz reference -- with connect detection working and no
+/// transaction ever completing.
+struct Usb2PhyClockLookup {
+    provider_id: ProviderId,
+    name: &'static str,
+    core: Arc<ClkCore>,
+}
+
+impl ClkLookup for Usb2PhyClockLookup {
+    fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
+    fn get_by_index(&self, index: kclk::ClkIndex) -> Option<Arc<ClkCore>> {
+        (index == 0).then(|| self.core.clone())
+    }
+
+    fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
+        (name == self.name).then(|| self.core.clone())
+    }
+}
+
 /// Driver-private data (boot-static provider).
 pub struct Usb2PhyData {}
 
@@ -243,7 +272,27 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
         dev.env()
             .provide::<driver_host::PhyProvider>(phandle, lookup)?;
 
-        log::info!("usb2phy: block {block:?} published (phandle {phandle:#x}, grf {grf_base:#x})");
+        // Publish the 480 MHz output under the same phandle: consumers list this
+        // phy node in `clocks`, and a missing provider is what left both
+        // controllers without their reference clock.
+        let clock_name: &'static str = firmware.clock_output_name.unwrap_or("usb480m_phy");
+        if let Ok(core) =
+            ClkBuilder::new(clock_name, FixedRate::new(480_000_000).into_ops()).build()
+        {
+            let lookup: &'static Usb2PhyClockLookup = Box::leak(Box::new(Usb2PhyClockLookup {
+                provider_id: phandle,
+                name: clock_name,
+                core: core.clone(),
+            }));
+            dev.env()
+                .provide::<driver_host::ClkProvider>(phandle, lookup)?;
+            log::info!(
+                "usb2phy: block {block:?} published (phandle {phandle:#x}, grf {grf_base:#x}), \
+                 clock `{clock_name}` @ 480 MHz",
+            );
+        } else {
+            log::warn!("usb2phy: could not build the 480 MHz clock for phandle {phandle:#x}");
+        }
         Ok(Usb2PhyData {})
     }
 }

@@ -1334,6 +1334,7 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-base",
  "driver-host",
+ "kclk",
  "khal",
  "kphy",
  "kspin",

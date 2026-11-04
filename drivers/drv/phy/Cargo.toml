@@ -20,6 +20,9 @@ rk3588-pcie3phy = []
 driver_base = { workspace = true }
 driver_host = { workspace = true }
 kphy = { workspace = true }
+# The usb2 phy publishes its 480 MHz output as a clock, so consumers (the EHCI
+# and DWC3 controllers) can resolve the phandle their `clocks` entry names.
+kclk = { workspace = true }
 # The PHY holds the 480m clock enable token across calls.
 ksync = { workspace = true }
 of = { workspace = true }

@@ -450,12 +450,15 @@ pub mod driver {
             let mut clocks = alloc::vec::Vec::new();
             for index in 0..4 {
                 match dev.res().clk_at(index) {
-                    // The first two entries are the controller's own gates from
-                    // the CRU: without them there is nothing to drive the reset
-                    // state machine, so defer. The remaining two are the
-                    // usb2phy's 480m clock output and a CRU gate-link clock,
-                    // neither of which has a provider in this tree yet.
-                    Err(err @ ProbeError::Deferred(_)) if index < 2 => return Err(err),
+                    // Every entry is a real dependency: the CRU gates, the usb2phy's
+                    // 480 MHz output (now published by the phy provider) and the
+                    // CRU gate-link clock. Hand the deferral back so the framework
+                    // retries once they exist, instead of bringing the controller
+                    // up without its reference clock.
+                    // Index 3 is the `rk3588-clock-gate-link` node, which has no
+                    // driver in this tree yet; the other three are the controller's
+                    // own gates and the phy's 480 MHz output.
+                    Err(err @ ProbeError::Deferred(_)) if index < 3 => return Err(err),
                     Err(err) => info!("ehci: clock {index} unavailable: {err:?}"),
                     Ok(clock) => match clock.prepare_enable() {
                         Ok(enabled) => {

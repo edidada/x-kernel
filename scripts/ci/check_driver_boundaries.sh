@@ -73,6 +73,11 @@ DRV_HOST_ALLOW=(
     # E-05 (net): the r8169 reset sequence polls `CmdReset` for up to 10 ms in
     # probe context (the reference's `rtl_loop_wait_low`), which cannot sleep.
     "drivers/drv/net khal"
+    # E-06: drv/phy publishes the usb2 phy's 480 MHz clock output through the
+    # same kclk provider registry drv/clk uses; the firmware describes that
+    # output on the phy node (#clock-cells/clock-output-names) and both USB
+    # controllers list it in their `clocks`.
+    "drivers/drv/phy kclk"
     # E-05 (usb): the DWC3 core soft reset polls GCTL.CoreSoftReset and the
     # xHCI stop/reset bits, both self-clearing within microseconds, in probe
     # context where sleeping is not available.
