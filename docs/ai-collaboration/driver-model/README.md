@@ -1,6 +1,17 @@
 # 新驱动框架模型：协作进度
 
-## 下一阶段：平台 / VirtIO-MMIO 枚举迁移（设计中）
+## 平台 / VirtIO-MMIO 枚举迁移（暂停，保留设计稿）
+
+用户要求暂停迁移开发，先沿已实现的生命周期分批 review、修正并整理 PR。
+当前收口匹配模型：移除跨驱动评分，按注册顺序匹配并尝试 probe，成功即停止。
+设计与接口说明见 model 的 `docs/design.md`“匹配与候选探测”小节。
+
+本轮基线 `42be96da7`：AArch64 canonical qemu_defconfig，经 `make defconfig`
+后执行 `make unittest UNITTEST_CRATE=driver_model XKMAKE_ARGS='--no-net --no-vsock'`，
+SMP4、独立 disk，68 passed / 0 failed / 0 ignored，coverage 已持久化。
+`make clippy UNITTEST=y`、修改文件的 nightly-2026-03-08 rustfmt 检查及 diff 检查
+通过；规范和需求两路只读评审无阻断。日志在 `.scratch/driver-match-review/`。
+这是本轮 model 验收，不替代后续分批 PR 的完整集成验收。
 
 用户要求从 RNG 专用接入扩展为完整平台 / VirtIO-MMIO 枚举迁移，并分 PR
 清楚过渡。当前仅完成 [入口、消费者与范围盘点](platform-enumeration-migration-scope.md)

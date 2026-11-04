@@ -223,7 +223,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | 文件 | 职责 |
 |---|---|
 | `src/lib.rs` | crate 门面 + Linux↔x-kernel 映射表 + 所有权模型说明 |
-| `src/bus/mod.rs`, `src/bus/platform_bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId` / `MatchScore`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch`（`driver_base` 根上各导出一次，不再有用 `platform::` 二次路径） |
+| `src/bus/mod.rs`, `src/bus/platform_bus.rs` | 总线抽象：`Bus` / `BusId` / `BusInstanceId`；参考实现 `PlatformBus` + `OfMatch`/`AliasMatch`（`driver_base` 根上各导出一次，不再有用 `platform::` 二次路径） |
 | `src/device/descriptor.rs` | 描述符：`DeviceDescriptor`（`bus_data` 总线数据 + `resources` + `fw` + `dma` + 拓扑） |
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
@@ -555,9 +555,26 @@ threaded IRQ 注册入口。这是 driver-os-api 尚未接入的能力，不是�
 驱动注册按（总线类型， 名字）去重并拒绝（Linux `driver_register` 对同一情形
 返回 `-EBUSY`）：同一 probe 体出现两个键，一次 Fatal 失败会留下仍匹配的孪生
 键，让每个设备把同一个 probe 跑两遍；per 总线名字唯一同时保证 `DeviceCore`
-驱动名身份卡无歧义。同分 tie-break：锁外 matching 用 `max_by_key` 在注册序
-Vec 上取最高分，平分时后注册者胜——这是显式决定，由
-`same_score_later_registration_wins` 钉住。
+驱动名身份卡无歧义。
+
+### 匹配与候选探测
+
+`Bus::match_device` 对描述事实和一条匹配项返回 bool。任意一项匹配即可尝试
+该驱动；没有跨驱动评分，也不由通用框架推断“专用驱动优先”。domain 按注册
+顺序选择尚未失败且匹配的第一个候选，成功后保存 Data 并停止。Fatal 记入
+attempted 后继续下一候选；全部不匹配或失败则 Unclaimed。显式 bind 开始
+新一轮尝试；后来注册的驱动不抢占 Active 设备。匹配与 probe 都不持 domain
+状态锁，仍由设备管理锁串行化本设备的绑定与退出。
+
+依据本地 Linux `drivers/base/dd.c::__device_attach_driver` 与
+`drivers/base/bus.c::bus_for_each_drv`：match 正数表示匹配，不是竞争分数，
+候选按遍历顺序尝试。这不是完整移植 Linux 的探测机制：当前 match 只读取
+描述事实，不提供 match 阶段错误/延迟返回，也不新增异步 probe。保留现有
+probe Deferred 策略：挂起设备等待依赖，不立即改试其他驱动；依赖唤醒后重新
+按顺序选择候选。该策略不宣称与 Linux 所有 probe-defer 分支等价。
+
+`matching_drivers_follow_registration_order` 固定顺序；计数测试覆盖非匹配跳过、
+Fatal 后继续、成功后停止、晚注册不抢占、显式重绑以及 Deferred 等待与唤醒。
 
 ## Drop / 资源释放
 

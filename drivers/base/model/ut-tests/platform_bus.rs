@@ -7,9 +7,9 @@
 //! `compatible = "vendor,soc-widget", "vendor,generic-ip"` and the generic IP
 //! driver must still claim the device.
 
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
-use super::{MatchScore, OfMatch, PlatformBus, PlatformBusData, PlatformId};
+use super::{OfMatch, PlatformBus, PlatformBusData, PlatformId};
 use crate::bus::Bus;
 
 fn node(compatibles: &[&str]) -> PlatformBusData {
@@ -22,14 +22,14 @@ fn of_match_hits_any_compatible_not_just_primary() {
     // names no device family, and the check is mechanical.
     let data = node(&["vendor,soc-widget", "vendor,generic-ip"]);
     let row = PlatformId::Of(OfMatch::compatible("vendor,generic-ip"));
-    assert_eq!(PlatformBus::match_device(&data, &row), MatchScore::Exact);
+    assert!(PlatformBus::match_device(&data, &row));
 }
 
 #[def_test(serial)]
 fn of_match_misses_when_no_compatible_agrees() {
     let data = node(&["vendor,soc-uart"]);
     let row = PlatformId::Of(OfMatch::compatible("vendor,other-uart"));
-    assert_eq!(PlatformBus::match_device(&data, &row), MatchScore::NoMatch);
+    assert!(!PlatformBus::match_device(&data, &row));
 }
 
 #[def_test(serial)]
@@ -37,8 +37,8 @@ fn alias_match_hits_only_board_static_identity() {
     let data = PlatformBusData::static_config(0, "board-alias0");
     let hit = PlatformId::Alias(super::AliasMatch::new("board-alias0"));
     let miss = PlatformId::Of(OfMatch::compatible("serial0"));
-    assert_eq!(PlatformBus::match_device(&data, &hit), MatchScore::Exact);
-    assert_eq!(PlatformBus::match_device(&data, &miss), MatchScore::NoMatch);
+    assert!(PlatformBus::match_device(&data, &hit));
+    assert!(!PlatformBus::match_device(&data, &miss));
 }
 
 #[def_test(serial)]

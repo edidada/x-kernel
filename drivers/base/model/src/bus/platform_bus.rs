@@ -21,7 +21,7 @@
 
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 
-use super::{Bus, BusDeviceData, BusId, MatchScore};
+use super::{Bus, BusDeviceData, BusId};
 
 // ---------------------------------------------------------------------------
 // Device data
@@ -195,23 +195,16 @@ impl Bus for PlatformBus {
 
     const ID: BusId = BusId("platform");
 
-    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore {
+    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> bool {
         match entry {
             PlatformId::Of(of) => {
                 // of_device_id semantics: the driver entry matches if it
                 // names ANY of the node's compatible strings (a
                 // SoC-specific entry followed by the generic IP name is
                 // the common DT spelling).
-                if data.identity.compatibles.iter().any(|c| c == of.compatible) {
-                    MatchScore::Exact
-                } else {
-                    MatchScore::NoMatch
-                }
+                data.identity.compatibles.iter().any(|c| c == of.compatible)
             }
-            PlatformId::Alias(alias) => match &data.identity.alias {
-                Some(candidate) if candidate == alias.alias => MatchScore::Exact,
-                _ => MatchScore::NoMatch,
-            },
+            PlatformId::Alias(alias) => data.identity.alias.as_deref() == Some(alias.alias),
         }
     }
 }

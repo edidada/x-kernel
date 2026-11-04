@@ -42,27 +42,6 @@ impl BusInstanceId {
     }
 }
 
-/// How well an id-table row matches a device: the score picks the driver
-/// AND the modalias row (Linux `bus_type.match` returning a probe score).
-/// Equal scores between drivers tie-break by registration order — the
-/// later registration wins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MatchScore {
-    /// The row does not bind this device.
-    NoMatch = 0,
-    /// Class-level match.
-    Generic = 5,
-    /// Specific compatible string or exact vendor/device id.
-    Exact   = 10,
-}
-
-impl MatchScore {
-    /// Whether this score binds a driver at all.
-    pub fn binds(self) -> bool {
-        self != Self::NoMatch
-    }
-}
-
 /// The per-bus device-data vtable: what the core can ask of ANY device's
 /// data without knowing its bus.
 ///
@@ -115,9 +94,12 @@ pub trait Bus: Sized + Send + Sync + 'static {
     /// Stable identity of this bus type.
     const ID: BusId;
 
-    /// The bus's matching rule: how well `data` satisfies one id-table
-    /// row. Drivers bind through the best-scoring row.
-    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore;
+    /// Whether enumeration facts satisfy one driver id-table row.
+    ///
+    /// A match permits probing; it does not rank drivers or promise a binding.
+    /// Matching must not acquire hardware resources. Runtime dependencies are
+    /// resolved by probe, which can defer until they become available.
+    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> bool;
 }
 
 /// Format the canonical physical path for a device location (the

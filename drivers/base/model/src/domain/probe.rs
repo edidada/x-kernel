@@ -137,34 +137,29 @@ impl DeviceDomain {
             inner.sched.pending.retain(|pending| *pending != id);
             selected
         };
-        let best = drivers
+        let candidate = drivers
             .iter()
             .filter(|driver| !attempted.contains(&driver.key()))
-            .map(|driver| {
-                (
-                    driver,
-                    driver.matches(bus, device.core.desc.bus_data.as_ref()),
-                )
-            })
-            .filter(|(_, score)| *score != MatchScore::NoMatch)
-            .max_by_key(|(_, score)| *score)
-            .map(|(driver, _)| driver.clone());
+            .find(|driver| driver.matches(bus, device.core.desc.bus_data.as_ref()))
+            .cloned();
         {
             let mut inner = self.inner.lock();
             let registry_changed = inner.next_driver_key != driver_generation;
             let entry = inner.devices.get_mut(&id).ok_or(RuntimeError::NotFound)?;
-            entry.lifecycle.state = if best.is_some() {
+            entry.lifecycle.state = if candidate.is_some() {
                 DeviceState::Probing
             } else if registry_changed {
                 DeviceState::Pending
             } else {
                 DeviceState::Unclaimed
             };
-            if best.is_none() && registry_changed {
+            if candidate.is_none() && registry_changed {
                 inner.sched.pending.push(id);
             }
         }
-        let Some(driver) = best else { return Ok(()) };
+        let Some(driver) = candidate else {
+            return Ok(());
+        };
         match driver.probe(&device.core, services.as_ref()) {
             Ok(data) => {
                 let mut uncommitted = Some(data);

@@ -778,8 +778,7 @@ fn late_driver_registration_skips_unmatched_unclaimed() {
     );
 }
 
-/// Tie-break fixture: both drivers match `test,serial` with the SAME
-/// score (Exact), so selection is decided by registration order alone.
+/// Both drivers match the same device without ranking one above the other.
 struct TieA;
 struct TieB;
 
@@ -809,12 +808,8 @@ impl DriverOps<PlatformBus> for TieB {
     }
 }
 
-/// Equal MatchScore on every row: `max_by_key` returns the LAST maximum
-/// over the registration-ordered registry, so the LATER registration
-/// binds. This pins an explicit decision — switching to earliest-wins
-/// must edit this test first.
 #[def_test(serial)]
-fn same_score_later_registration_wins() {
+fn matching_drivers_follow_registration_order() {
     let (domain, _services, root) = fresh_domain();
     domain.register_driver(DriverDesc::new("tie-a", TIE_IDS, TieA));
     domain.register_driver(DriverDesc::new("tie-b", TIE_IDS, TieB));
@@ -822,7 +817,102 @@ fn same_score_later_registration_wins() {
     let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("tie-b"));
+    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("tie-a"));
+}
+
+struct CountedProbe {
+    calls: Arc<AtomicUsize>,
+    outcome: Result<(), ProbeError>,
+}
+
+impl DriverOps<PlatformBus> for CountedProbe {
+    type Data = ();
+
+    fn probe(
+        &self,
+        _dev: &mut DeviceAccess<'_, PlatformBus>,
+        _env: &crate::Environment<'_>,
+    ) -> Result<Self::Data, ProbeError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.outcome.clone()
+    }
+}
+
+#[def_test(serial)]
+fn ordered_probe_skips_nonmatches_and_stops_after_success() {
+    let (domain, _services, root) = fresh_domain();
+    let missed = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    let succeeded = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    static MISS_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("test,other"))];
+    for (name, ids, calls, outcome) in [
+        ("nonmatch", MISS_IDS, &missed, Ok(())),
+        (
+            "failure",
+            TIE_IDS,
+            &failed,
+            Err(ProbeError::Fatal(RuntimeError::Io)),
+        ),
+        ("success", TIE_IDS, &succeeded, Ok(())),
+        ("unused", TIE_IDS, &skipped, Ok(())),
+    ] {
+        assert!(domain.register_driver(DriverDesc::new(
+            name,
+            ids,
+            CountedProbe {
+                calls: calls.clone(),
+                outcome
+            },
+        )));
+    }
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("success"));
+    assert_eq!(missed.load(Ordering::Relaxed), 0);
+    assert_eq!(failed.load(Ordering::Relaxed), 1);
+    assert_eq!(succeeded.load(Ordering::Relaxed), 1);
+    assert_eq!(skipped.load(Ordering::Relaxed), 0);
+    assert!(domain.register_driver(DriverDesc::new("late", TIE_IDS, TieB)));
+    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("success"));
+    domain.unbind_device(&device).unwrap();
+    domain.bind_device(&device).unwrap();
+    assert_eq!(domain.snapshot(&device).unwrap().driver, Some("success"));
+    assert_eq!(failed.load(Ordering::Relaxed), 2);
+    assert_eq!(succeeded.load(Ordering::Relaxed), 2);
+    assert_eq!(skipped.load(Ordering::Relaxed), 0);
+}
+
+#[def_test(serial)]
+fn deferred_candidate_waits_without_probing_later_candidates() {
+    let (domain, _services, root) = fresh_domain();
+    let deferred = Arc::new(AtomicUsize::new(0));
+    let later = Arc::new(AtomicUsize::new(0));
+    domain.register_driver(DriverDesc::new(
+        "deferred",
+        TIE_IDS,
+        CountedProbe {
+            calls: deferred.clone(),
+            outcome: Err(ProbeError::Deferred(DepSource::clk(0x42))),
+        },
+    ));
+    domain.register_driver(DriverDesc::new(
+        "later",
+        TIE_IDS,
+        CountedProbe {
+            calls: later.clone(),
+            outcome: Ok(()),
+        },
+    ));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    assert_eq!(
+        domain.snapshot(&device).unwrap().state,
+        DeviceState::Deferred
+    );
+    assert_eq!(deferred.load(Ordering::Relaxed), 1);
+    assert_eq!(later.load(Ordering::Relaxed), 0);
+    domain.wake(DepSource::clk(0x42));
+    assert_eq!(deferred.load(Ordering::Relaxed), 2);
+    assert_eq!(later.load(Ordering::Relaxed), 0);
 }
 
 /// One driver definition, one registration (Linux `driver_register`

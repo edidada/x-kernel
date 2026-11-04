@@ -103,7 +103,7 @@ mod services;
 // `driver_base::platform` module was a second name for these items — an alias
 // surface that let two call sites disagree about where a platform type lives.
 pub use bus::{
-    Bus, BusDeviceData, BusId, BusInstanceId, MatchScore, physical_path,
+    Bus, BusDeviceData, BusId, BusInstanceId, physical_path,
     platform_bus::{
         AliasMatch, OfMatch, PlatformBus, PlatformBusData, PlatformBusIdentity, PlatformId,
     },

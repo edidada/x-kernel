@@ -56,7 +56,7 @@ use lazyinit::LazyInit;
 
 use crate::{
     DeviceDescriptor,
-    bus::{Bus, BusDeviceData, BusId, MatchScore},
+    bus::{Bus, BusDeviceData, BusId},
     device::DeviceAccess,
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
@@ -196,7 +196,7 @@ trait AnyDriver: Send + Sync {
     fn bus_id(&self) -> BusId;
     /// The registration key the domain handed out for this driver.
     fn key(&self) -> DriverKey;
-    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> MatchScore;
+    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> bool;
     fn probe(
         &self,
         core: &alloc::sync::Arc<crate::device::DeviceCore>,
@@ -230,26 +230,19 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         self.key
     }
 
-    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> MatchScore {
+    fn matches(&self, bus: BusId, data: &dyn BusDeviceData) -> bool {
         // Bus identity first (Linux separates bus_type matching from
         // structural checks): a driver registered for one bus never sees
         // another bus's devices.
         if bus != B::ID || data.bus_id() != B::ID {
-            return MatchScore::NoMatch;
+            return false;
         }
         // The one downcast in the match path, guarded by the bus_id check
         // above: recover this driver's bus vocabulary and let the bus's
-        // own rule score its table.
+        // own rule match its table.
         data.as_any()
             .downcast_ref::<B::DeviceData>()
-            .map(|typed| {
-                self.ids
-                    .iter()
-                    .map(|entry| B::match_device(typed, entry))
-                    .max()
-                    .unwrap_or(MatchScore::NoMatch)
-            })
-            .unwrap_or(MatchScore::NoMatch)
+            .is_some_and(|typed| self.ids.iter().any(|entry| B::match_device(typed, entry)))
     }
 
     fn probe(

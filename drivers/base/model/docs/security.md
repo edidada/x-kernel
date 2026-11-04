@@ -231,7 +231,7 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
 | T-06 | 父设备先于子设备释放硬件，子设备仍访问它 | 高 | 控制器退出而下游仍活动 | **当前边界**：模型只注销本设备，Removing/删除状态阻止新成员挂载；总线负责停止枚举、下游退出与锁序。没有自动 parent/bridge 递归；测试控制器覆盖父服务保活和枚举交错，但不证明真实硬件退出安全 |
 | T-07 | provider 在"驱动检查依赖"与"域记录 Deferred"之间注册，唤醒丢失，设备永久 parked | 中 | 启动期时钟 provider 与消费者并发探测 | **已实现**：`dep_generations` 对每个 `DepSource` 计数，**即使无设备 parked 也自增**；提交 Deferred 时发现 generation 前进就重新入队。测试注入 `mid_check_hook` 精确复现该窗口 |
 | T-08 | 依赖永不发布，设备静默停在 Deferred，故障不可见 | 中 | 固件引用了一个不存在的 clock phandle | **已实现**：`finish_probe_phase(false)` + `deferred_report()` 在探测阶段结束时把卡住的设备 `log::warn` 出来并降级为 `Unclaimed`。实测启动日志可见 `device 70 gave up waiting on dependency clk:66 (provider never registered)` |
-| T-09 | 后注册的驱动抢走已绑定设备 | 中 | 驱动注册顺序变化 | **已实现**：队列探测仅处理 Pending；显式 bind 对 Active 不变；attempted 避免同轮重复选择失败驱动，显式重绑可清除该历史 |
+| T-09 | 后注册的驱动抢走已绑定设备 | 中 | 驱动注册顺序变化 | **已实现**：队列探测仅处理 Pending；显式 bind 对 Active 不变；候选按注册顺序匹配而非跨驱动评分，成功即停止；attempted 避免同轮重复选择失败驱动，显式重绑可清除该历史 |
 | T-10 | 外域或同键不同对象被误认为本域设备 | 中 | 管理调用、控制器挂载 | **已实现**：内部键不导出；remove/snapshot/with_data/控制器挂载在域锁内核对 Arc 身份。测试 `management_requires_the_registered_object_not_just_its_key` 和 `devices_have_distinct_object_identity_across_domains`；旧引用不会影响同位置新注册 |
 | T-12 | `DeviceDescriptor` 的 `compatibles: Vec<String>` 来自固件，超长或超多导致枚举期分配放大 | 低 | 恶意/畸形 DT | **部分实现**：`driver-init` 侧的 `FirmwareNode{id}` 分配器有 u32 耗尽拒绝；本 crate 不限制字符串长度或 compatible 条数。**残余风险**：启动期内存放大，不影响运行期。加固建议：在 `firmware/of` 解析处限长 |
 
