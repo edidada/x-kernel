@@ -6,11 +6,14 @@
 //! dumb buffer and presents it through Smithay's DRM surface.
 
 use std::{
+    fs::File,
+    io::Read,
     os::fd::{AsRawFd, OwnedFd},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use smithay::backend::input::{ButtonState, KeyState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
     backend::{
@@ -22,7 +25,12 @@ use smithay::{
     },
     desktop::{Space, Window},
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
-    input::{Seat, SeatHandler, SeatState},
+    utils::Serial,
+    input::{
+        Seat, SeatHandler, SeatState,
+        keyboard::Keycode,
+        pointer::{ButtonEvent, MotionEvent},
+    },
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
         wayland_server::{
@@ -37,6 +45,11 @@ use smithay::{
         compositor::{CompositorClientState, CompositorHandler, CompositorState, get_parent, with_states},
         output::{OutputHandler, OutputManagerState},
 
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
+        text_input::TextInputManagerState,
+        viewporter::ViewporterState,
         selection::{
             SelectionHandler,
             data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
@@ -69,6 +82,10 @@ struct State {
     shm_state: ShmState,
     output_manager_state: OutputManagerState,
     data_device_state: DataDeviceState,
+    xdg_activation_state: XdgActivationState,
+    viewporter_state: ViewporterState,
+    text_input_state: TextInputManagerState,
+    output: Output,
     xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<State>,
     seat: Seat<State>,
@@ -81,6 +98,18 @@ struct State {
     height: u32,
     dirty: bool,
     first_commit: bool,
+    focus: Option<WlSurface>,
+    pointer_location: smithay::utils::Point<f64, smithay::utils::Logical>,
+    serial: u32,
+    start: std::time::Instant,
+    frame: u32,
+    selftest_at: Option<u32>,
+    focus_sent: bool,
+}
+
+enum InputEvent {
+    Key { code: u16, value: i32 },
+    Rel { code: u16, value: i32 },
 }
 
 impl State {
@@ -138,6 +167,8 @@ impl State {
             }
         }
 
+        self.draw_cursor();
+
         let state = PlaneState {
             handle: self.surface.planes().primary[0].handle,
             config: Some(PlaneConfig {
@@ -188,6 +219,35 @@ impl CompositorHandler for State {
         if get_parent(surface).is_none() {
             self.dirty = true;
         }
+        // Give the keyboard focus only once the toplevel has a committed
+        // buffer; clients ignore input for an unmapped surface.
+        if !self.focus_sent && self.focus.as_ref() == Some(surface) {
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                self.serial = self.serial.wrapping_add(1);
+                keyboard.set_focus(self, self.focus.clone(), Serial::from(self.serial));
+                self.focus_sent = true;
+                // First configure: the size and activation hint go out once,
+                // on the commit of the mapped surface.
+                let toplevel = self
+                    .space
+                    .elements()
+                    .find(|window| {
+                        window.toplevel().is_some_and(|t| t.wl_surface() == surface)
+                    })
+                    .and_then(|window| window.toplevel())
+                    .cloned();
+                if let Some(toplevel) = toplevel {
+                    toplevel.with_pending_state(|state| {
+                        state.size = Some((self.width as i32, self.height as i32).into());
+                        state.states.set(
+                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                        );
+                    });
+                    toplevel.send_configure();
+                }
+                eprintln!("focus: keyboard focus set after commit");
+            }
+        }
     }
 }
 
@@ -228,6 +288,31 @@ impl DataDeviceHandler for State {
 impl ClientDndGrabHandler for State {}
 impl ServerDndGrabHandler for State {}
 
+impl XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        _token: XdgActivationToken,
+        _token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        // Activation only raises; keyboard focus is granted by the commit
+        // path so that the initial configure and the focus stay in order.
+        let target = self
+            .space
+            .elements()
+            .find(|window| window.toplevel().is_some_and(|t| t.wl_surface() == &surface))
+            .cloned();
+        if let Some(window) = target {
+            self.space.raise_element(&window, true);
+            eprintln!("activation: raised window");
+        }
+    }
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         self.request_mode(toplevel, DecorationMode::ClientSide);
@@ -255,6 +340,23 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        eprintln!("new_toplevel: creating window");
+        // Tell the client which output it is on and give it an explicit size;
+        // Chromium only treats the window as on-screen once both are known.
+        self.output.enter(surface.wl_surface());
+        // `Activated` is what tells the client its window is focused; without
+        // it Chromium drops pointer and keyboard input.
+        let activated = smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated;
+        surface.with_pending_state(|state| {
+            state.size = Some((self.width as i32, self.height as i32).into());
+            state.states.set(activated);
+        });
+        surface.send_configure();
+        self.focus = Some(surface.wl_surface().clone());
+        self.focus_sent = false;
+        if std::env::var("XK_SELFTEST").is_ok() {
+            self.selftest_at = Some(self.frame + 900);
+        }
         let window = Window::new_wayland_window(surface);
         self.space.map_element(window, (0, 0), false);
         // Give the client an initial configure so it can map.
@@ -294,6 +396,220 @@ impl XdgShellHandler for State {
 
 }
 
+/// A 12x18 arrow cursor: 0 transparent, 1 black, 2 white.
+const CURSOR: [[u8; 12]; 18] = [
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+    [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+    [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0],
+    [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0, 0],
+    [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0],
+    [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+    [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+];
+
+impl State {
+    fn draw_cursor(&self) {
+        let origin_x = self.pointer_location.x as i32;
+        let origin_y = self.pointer_location.y as i32;
+        for (row_index, row) in CURSOR.iter().enumerate() {
+            let y = origin_y + row_index as i32;
+            if y < 0 || y >= self.height as i32 {
+                continue;
+            }
+            for (column_index, pixel) in row.iter().enumerate() {
+                if *pixel == 0 {
+                    continue;
+                }
+                let x = origin_x + column_index as i32;
+                if x < 0 || x >= self.width as i32 {
+                    continue;
+                }
+                let color: u32 = if *pixel == 1 { 0x0000_0000 } else { 0x00ff_ffff };
+                let offset = y as usize * self.pitch + x as usize * 4;
+                // SAFETY: the offset stays inside the dumb-buffer mapping.
+                unsafe {
+                    *(self.map.add(offset) as *mut u32) = color;
+                }
+            }
+        }
+    }
+
+    fn tick_selftest(&mut self) {
+        let Some(at) = self.selftest_at else { return };
+        if self.frame < at {
+            return;
+        }
+        self.selftest_at = None;
+        let time = self.start.elapsed().as_millis() as u32;
+        // Click into the page first: Chromium only focuses its document once the
+        // window receives a pointer press.
+        self.serial = self.serial.wrapping_add(1);
+        let serial = Serial::from(self.serial);
+        self.pointer_location = (200.0, 200.0).into();
+        if let Some(pointer) = self.seat.get_pointer() {
+            // Smithay expects (surface, surface origin in global space); the
+            // pointer location itself is `MotionEvent.location`.
+            let origin = (0.0, 0.0).into();
+            let focus = self.focus.clone().map(|surface| (surface, origin));
+            pointer.motion(
+                self,
+                focus,
+                &MotionEvent { location: self.pointer_location, serial, time },
+            );
+            pointer.frame(self);
+            pointer.button(
+                self,
+                &ButtonEvent { button: 0x110, state: ButtonState::Pressed, serial, time },
+            );
+            pointer.frame(self);
+            pointer.button(
+                self,
+                &ButtonEvent { button: 0x110, state: ButtonState::Released, serial, time },
+            );
+            pointer.frame(self);
+            eprintln!("selftest: clicked at {:?}", self.pointer_location);
+        }
+        // evdev keycodes for "hello"
+        for code in [35u16, 18, 38, 38, 24] {
+            self.handle_input(InputEvent::Key { code, value: 1 });
+            self.handle_input(InputEvent::Key { code, value: 0 });
+        }
+        eprintln!("selftest: injected hello");
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let time = self.start.elapsed().as_millis() as u32;
+        self.serial = self.serial.wrapping_add(1);
+        let serial = Serial::from(self.serial);
+        match event {
+            InputEvent::Key { code, value } if code < 0x100 => {
+                eprintln!("key {code} {value}");
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    let state = if value == 0 {
+                        KeyState::Released
+                    } else {
+                        KeyState::Pressed
+                    };
+                    keyboard.input::<(), _>(
+                        self,
+                        Keycode::new(u32::from(code) + 8),
+                        state,
+                        serial,
+                        time,
+                        |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+                    );
+                }
+            }
+            InputEvent::Key { code, value } if (0x110..=0x11f).contains(&code) => {
+                if value != 0 {
+                    if let Some(surface) = self.focus.clone() {
+                        if let Some(keyboard) = self.seat.get_keyboard() {
+                            keyboard.set_focus(self, Some(surface), serial);
+                        }
+                    }
+                }
+                if let Some(pointer) = self.seat.get_pointer() {
+                    let state = if value == 0 {
+                        ButtonState::Released
+                    } else {
+                        ButtonState::Pressed
+                    };
+                    pointer.button(
+                        self,
+                        &ButtonEvent {
+                            button: u32::from(code),
+                            state,
+                            serial,
+                            time,
+                        },
+                    );
+                    pointer.frame(self);
+                }
+            }
+            InputEvent::Rel { code, value } => {
+                match code {
+                    0 => self.pointer_location.x += f64::from(value),
+                    1 => self.pointer_location.y += f64::from(value),
+                    _ => return,
+                }
+                self.dirty = true;
+                if let Some(pointer) = self.seat.get_pointer() {
+                    let origin = (0.0, 0.0).into();
+                    let focus = self.focus.clone().map(|surface| (surface, origin));
+                    pointer.motion(
+                        self,
+                        focus,
+                        &MotionEvent {
+                            location: self.pointer_location,
+                            serial,
+                            time,
+                        },
+                    );
+                    pointer.frame(self);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn spawn_evdev(index: u32, sender: smithay::reexports::calloop::channel::Sender<InputEvent>) {
+    let path = format!("/dev/input/event{index}");
+    std::thread::spawn(move || {
+        let Ok(mut file) = File::open(&path) else {
+            eprintln!("input: cannot open {path}");
+            return;
+        };
+        eprintln!("input: opened {path}");
+        let mut buf = [0u8; 24];
+        let mut filled = 0usize;
+        loop {
+            // Accumulate partial reads: an input event is exactly 24 bytes and
+            // a driver may hand out fewer at a time.
+            match file.read(&mut buf[filled..]) {
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Ok(n) => {
+                    filled += n;
+                    if filled < 24 {
+                        continue;
+                    }
+                    filled = 0;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+            }
+            let kind = u16::from_ne_bytes([buf[16], buf[17]]);
+            let code = u16::from_ne_bytes([buf[18], buf[19]]);
+            let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
+            let event = match kind {
+                1 => InputEvent::Key { code, value },
+                2 => InputEvent::Rel { code, value },
+                _ => continue,
+            };
+            if sender.send(event).is_err() {
+                break;
+            }
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
@@ -316,6 +632,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shm_state = ShmState::new::<State>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&display_handle);
     let data_device_state = DataDeviceState::new::<State>(&display_handle);
+    let xdg_activation_state = XdgActivationState::new::<State>(&display_handle);
+    let viewporter_state = ViewporterState::new::<State>(&display_handle);
+    let text_input_state = TextInputManagerState::new::<State>(&display_handle);
     let xdg_decoration_state = XdgDecorationState::new::<State>(&display_handle);
     let mut seat_state = SeatState::new();
     let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
@@ -341,6 +660,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         None,
     );
+    output.set_preferred(OutputMode {
+        size: (width as i32, height as i32).into(),
+        refresh: 60_000,
+    });
     output.create_global::<State>(&display_handle);
 
     let socket = ListeningSocketSource::new_auto()?;
@@ -367,6 +690,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
+    let (input_tx, input_rx) = smithay::reexports::calloop::channel::channel::<InputEvent>();
+    event_loop
+        .handle()
+        .insert_source(input_rx, |event, _, state: &mut State| {
+            if let smithay::reexports::calloop::channel::Event::Msg(event) = event {
+                state.handle_input(event);
+            }
+        })?;
+    for index in 0..8 {
+        spawn_evdev(index, input_tx.clone());
+    }
+
     let mut state = State {
         display_handle,
         socket_name: socket_name.clone(),
@@ -376,7 +711,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shm_state,
         output_manager_state,
         data_device_state,
+        xdg_activation_state,
+        viewporter_state,
+        text_input_state,
         xdg_decoration_state,
+        output,
         seat_state,
         seat,
         surface,
@@ -388,7 +727,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         height,
         dirty: true,
         first_commit: true,
+        focus: None,
+        pointer_location: (0.0, 0.0).into(),
+        serial: 0,
+        start: std::time::Instant::now(),
+        frame: 0,
+        selftest_at: None,
+        focus_sent: false,
     };
+
+    state.space.map_output(&state.output, (0, 0));
 
     // SAFETY: the process is single-threaded at this point.
     unsafe {
@@ -412,10 +760,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = 0u32;
     event_loop.run(Some(Duration::from_millis(16)), &mut state, |state: &mut State| {
         let _ = state.display_handle.flush_clients();
-        if state.dirty || frame % 60 == 0 {
+        if state.dirty || state.frame % 60 == 0 {
             state.composite();
         }
-        frame = frame.wrapping_add(1);
+        // Frame callbacks: clients (Chromium) wait for these before the next
+        // frame and before considering the surface fully mapped.
+        let output = state.output.clone();
+        let windows: Vec<Window> = state.space.elements().cloned().collect();
+        for window in windows {
+            window.send_frame(
+                &output,
+                Duration::from_millis(16),
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        }
+        state.space.refresh();
+
+        state.frame = state.frame.wrapping_add(1);
+        state.tick_selftest();
+        let _ = frame;
     })?;
     Ok(())
 }
@@ -514,3 +878,6 @@ smithay::delegate_seat!(State);
 smithay::delegate_output!(State);
 smithay::delegate_data_device!(State);
 smithay::delegate_xdg_decoration!(State);
+smithay::delegate_xdg_activation!(State);
+smithay::delegate_viewporter!(State);
+smithay::delegate_text_input_manager!(State);
