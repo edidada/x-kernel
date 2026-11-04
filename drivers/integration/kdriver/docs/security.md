@@ -1,5 +1,23 @@
 # kdriver — Security and Reliability Analysis
 
+## Synthetic IRQ-tail test boundary
+
+The NativeIrq and concrete RNG SMP fixtures reserve distinct software descriptor
+identities only after checking they are absent. They neither program physical
+interrupt routing nor fabricate controller completion cookies. Their callbacks
+spin only on test-owned atomic gates outside device and completion locks; the
+coordinator opens those gates before joining workers and asserting results.
+Release/acquire handshakes publish entry and release observations across CPUs;
+resource counters are observed after those handshakes or task joins.
+
+The native sentinel is independent of callback-owned storage. The RNG's gated
+notification retains a completion Arc and no queue pointers: even an intentional
+negative control that frees queues early does not dereference freed ring memory
+after the gate. Controlled used-ring writes occur only for the retained sole
+request before dispatch or stop starts. These assumptions are specific to the
+fixture, not permission for production callbacks to use freed device resources.
+Synthetic drain evidence cannot establish physical device shutdown or MSI flush.
+
 ## Scoped production RNG ownership boundary
 
 The explicitly enabled real-MMIO lifecycle test operates only on a fixture with

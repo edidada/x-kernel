@@ -194,3 +194,4 @@ fn map_error(error: kirq::IrqDescError) -> ResError {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/host_irq.rs");
+unittest::path_mod_test!(smp_tests, "../ut-tests/host_irq_smp.rs");

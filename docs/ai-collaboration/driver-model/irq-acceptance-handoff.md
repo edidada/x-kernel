@@ -4,6 +4,26 @@ Checkpoint: driver branch `ca8e22486`, 2026-10-25. This is a read-only evidence
 reconciliation and execution plan, not a new IRQ implementation or a completed
 G-IRQ gate. It preserves the approved synchronous release contract.
 
+## Revalidation baseline — 2026-11-04
+
+The driver branch is now based on main `289e2276b`, with compatibility checkpoint
+`e1ab737f9`. Current KIRQ retains dispatch admission through the complete action
+callback and drains the original Line after withdrawing the exact action token.
+The missing evidence is native adapter and RNG notification-tail integration,
+not a request to replace that production mechanism. The older independent
+worktree below remains historical evidence and is not imported.
+
+Revalidation uses one KIRQ-owned test-only synthetic dispatch entry, exercising
+the production admission, action snapshot and drain without a fabricated
+controller claim. NativeIrq registration and release remain real. The two
+integration layers below are the agreed acceptance boundaries. A temporary
+negative-control mutation must bypass only the fixture-owned Lines' release
+drain, leave real IRQ Lines unaffected, and be restored before final validation.
+An assertion detecting early release is required; a hang is not success.
+
+The current test implementation and execution evidence are recorded in
+[Native IRQ/RNG tail acceptance](irq-tail-acceptance-2026-11-04.md).
+
 ## Current evidence and missing dependency
 
 The independent `xiaohui/irq-sync-acceptance` worktree is still based on
@@ -26,17 +46,19 @@ valid within their recorded scope, but do not fill this concurrency gap.
 
 ### 1. IRQ core prerequisite
 
-Have the independent acceptance change reviewed, updated against its intended
-base and delivered as an auditable commit. Revalidate ordinary/shared action
-release, actual blocking, resource-drop order, peer preservation, repeated
-release and the negative control. Preserve the test's distinction between
-software fanout and controller delivery. An ignored SMP case is not acceptance.
+On the current baseline, audit the delivered core and validate ordinary/shared
+action release, actual blocking, resource-drop order, peer preservation,
+repeated release and the negative control. The independent historical patch is
+not itself a required dependency when current-core integration supplies this
+evidence. Preserve the distinction between software fanout and controller
+delivery. An ignored SMP case is not acceptance.
 
 The existing candidate synthetic-dispatch helper belongs to kirq's test-only
 support: it must enter the scoped hardirq context, use the production action
 snapshot/in-flight guard and avoid acknowledging or completing a nonexistent
-hardware claim. Reuse the delivered seam rather than maintaining a second
-driver-private IRQ dispatcher or copying the entire unfinished external patch.
+hardware claim. Reuse a delivered seam when available; otherwise add only this
+test-only entry in KIRQ, rather than maintaining a second driver-private IRQ
+dispatcher or copying the entire unfinished external patch.
 
 The current public `generic_handle_irq` is not an alternative test seam: its
 contract requires an active irqchip invocation and a genuine pending claim.

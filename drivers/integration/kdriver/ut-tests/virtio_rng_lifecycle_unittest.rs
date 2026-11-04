@@ -30,6 +30,7 @@ use crate::rng_completion::{new_rng_completion, new_rng_drain};
 
 static RINGS: AtomicUsize = AtomicUsize::new(0);
 static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
+static UNSHARES: AtomicUsize = AtomicUsize::new(0);
 static RELEASES: AtomicUsize = AtomicUsize::new(0);
 static HANDLER: SpinNoIrq<Option<IrqHandlerFn>> = SpinNoIrq::new(None);
 static REGISTRY: HwrngRegistry = HwrngRegistry::new();
@@ -85,8 +86,11 @@ unsafe impl VirtIoHal for TrackingHal {
         // SAFETY: The RNG returns its original buffer/mapping after hardware access has ended.
         unsafe { MockHal::unshare(address, buffer, direction, platform) };
         MAPPINGS.fetch_sub(1, Ordering::Relaxed);
+        UNSHARES.fetch_add(1, Ordering::Relaxed);
     }
 }
+
+unittest::path_mod_test!(notify_tail, "virtio_rng_notify_tail.rs");
 
 struct TestIrq;
 

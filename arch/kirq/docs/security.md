@@ -1,5 +1,16 @@
 # kirq — 安全与可靠性分析
 
+## Synthetic dispatch is not hardware evidence
+
+The unit-test-only `synthetic_irq::dispatch` validates a metadata-free software
+descriptor before entering scoped hardirq context. Its caller owns descriptor
+stability and excludes physical delivery. It uses real dispatch admission and
+action retirement but a local claim-completion closure: it cannot establish
+controller routing, EOI ordering, pending physical delivery or DMA quiescence.
+Its non-sleeping gated handlers are bounded by the external test-run watchdog,
+not a production teardown timeout. No synthetic entry is compiled into normal
+kernel builds.
+
 ## CPU-local Control Boundary
 
 `runtime/manager.rs::PerCpuForwarding::set_local_state` is an unsafe boundary.

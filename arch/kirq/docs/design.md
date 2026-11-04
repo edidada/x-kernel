@@ -30,6 +30,18 @@ This follows the allocation-free removal principle in linux-stable
 `8d3ae59288f1`, `kernel/irq/irqdomain.c::irq_domain_clear_mapping`, without
 adopting Linux's RCU reclamation or domain mutex implementation.
 
+## Test-only software dispatch entry
+
+`synthetic_irq::dispatch`, compiled only for kernel unit tests from
+`ut-tests/synthetic_irq.rs`, lets host integration tests exercise the production
+dispatch admission and complete callback drain. It requires a fixture-owned,
+metadata-free high-numbered software descriptor, enters scoped hardirq context,
+and calls `dispatch_claim` with a local completion closure. It does not create a
+physical claim, call the controller completion interface, or replace the
+production dispatcher. Fixtures retain their identity and join dispatchers
+before final teardown. NativeIrq/RNG integration tests live in kdriver, which
+owns the adapter and concrete-driver composition being tested.
+
 ## CPU-local Ordinary Flow
 
 `prepare_percpu_forwarding` retains an already registered Line and obtains the

@@ -1,5 +1,28 @@
 # kdriver — Design
 
+## Native IRQ notification-tail acceptance
+
+The serial SMP tests in `ut-tests/host_irq_smp.rs` and
+`ut-tests/virtio_rng_notify_tail.rs` use NativeIrq registration and synchronous
+release against isolated, metadata-free software IRQ descriptors. KIRQ supplies
+a test-only dispatch entry using its actual action snapshot and in-flight
+accounting, without a hardware claim. The coordinator and removal task run on
+CPU0; the gated hardirq callback runs on CPU1. An explicit handshake observes
+the removal task blocked before opening the callback gate. All workers retire
+before checking teardown observations.
+
+The native case verifies resource retention, exact-action withdrawal, repeated
+withdrawal and continued shared-peer dispatch. The concrete RNG case gates its
+injected completion notification outside the request lock, after a controlled
+request completes. Closing reads can therefore proceed, but queue destruction
+must wait for the full callback to return. The completed request has already
+been unmapped; it must not be cancelled or unmapped a second time.
+
+These are software integration tests, not controller delivery, EOI timing,
+physical DMA shutdown or MSI ordering evidence. Execution results and the
+temporary negative-control protocol are recorded in the driver-model IRQ
+acceptance documents at repository root.
+
 ## Scoped production MMIO RNG model binding
 
 The compatibility inventory and remaining acceptance gaps are tracked in

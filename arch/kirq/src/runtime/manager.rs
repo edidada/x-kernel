@@ -1384,6 +1384,7 @@ fn run_irq_exit_tail_with_context(
 }
 
 unittest::path_mod_test!(pub mod tests_irq, "../../ut-tests/runtime_manager.rs");
+unittest::path_mod_test!(pub mod synthetic_irq, "../../ut-tests/synthetic_irq.rs");
 unittest::path_mod_test!(
     tests_management_identity,
     "../../ut-tests/management_identity.rs"
