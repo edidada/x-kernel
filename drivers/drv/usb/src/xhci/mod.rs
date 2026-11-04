@@ -214,6 +214,22 @@ fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
     if bar.read32(operational + op::USBCMD) & cmd::HCRST != 0 {
         warn!("xhci: reset did not complete");
     }
+    // §4.2: after a reset the controller is "not ready" until it says so, and
+    // operational register writes made while CNR is set are ignored. Not waiting
+    // here is why the command ring register kept reading zero while DCBAAP --
+    // written later, once the controller had become ready -- took its value.
+    for _ in 0..200_000 {
+        if bar.read32(operational + op::USBSTS) & sts::CNR == 0 {
+            break;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
+    }
+    let status = bar.read32(operational + op::USBSTS);
+    if status & sts::CNR != 0 {
+        warn!("xhci: controller never became ready after reset (USBSTS {status:#010x})");
+    } else {
+        info!("xhci: controller ready after reset (USBSTS {status:#010x})");
+    }
     // §4.2: everything is written again after a reset; the controller has
     // forgotten the rings, the DCBAA and the number of enabled slots.
     bar.write32(operational + op::CONFIG, max_slots);
@@ -326,6 +342,18 @@ impl Xhci {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let status = xhci.bar.read32(xhci.operational + op::USBSTS);
         info!("xhci: running, USBSTS {status:#010x}");
+        // The command ring register was refused while the controller was
+        // stopped. Re-programme it now that it runs and report the read-back; a
+        // working board reads a non-zero CRCR here.
+        let crcr = xhci.operational + op::CRCR;
+        let cmd_addr = xhci.command.mem.bus_addr() | 1;
+        xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
+        xhci.bar.write32(crcr, cmd_addr as u32);
+        info!(
+            "xhci: crcr after run {:#018x} (wrote {:#x})",
+            xhci.bar.read64(crcr),
+            cmd_addr,
+        );
         Ok(xhci)
     }
 
@@ -501,6 +529,16 @@ impl Xhci {
         // Nothing arrived: report what the event slot actually holds and where
         // the consumer thinks it is, so "controller never wrote" and "we are
         // looking at the wrong address" cannot be confused.
+        // Does the controller write into the ring at all? A non-zero TRB here
+        // with a zero dequeue means the events arrive and our consumer logic is
+        // wrong; all-zero means the ring was never published to the controller.
+        let first = self.event.read(0);
+        log::error!(
+            "xhci: event ring[0] p {:#018x} s {:#010x} c {:#010x}",
+            first.parameter,
+            first.status,
+            first.control,
+        );
         let raw = self.event.read(self.event_dequeue);
         log::error!(
             "xhci: {what} timed out after {EVENT_POLL_STEPS} us (dequeue {} cycle {} raw {:#010x} \
