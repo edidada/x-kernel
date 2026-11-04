@@ -77,26 +77,6 @@ impl IrqOp for XKernelResourceProvider {
     }
 }
 
-fn dev_irq_trigger_to_kirq(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
-    match trigger {
-        DevIrqTrigger::EdgeRising => kirq::IrqTrigger::EdgeRising,
-        DevIrqTrigger::EdgeFalling => kirq::IrqTrigger::EdgeFalling,
-        DevIrqTrigger::LevelHigh => kirq::IrqTrigger::LevelHigh,
-        DevIrqTrigger::LevelLow => kirq::IrqTrigger::LevelLow,
-        DevIrqTrigger::Unknown(flags) => kirq::IrqTrigger::Unknown(flags),
-    }
-}
-
-fn dev_irq_controller_to_kirq(controller: DevIrqController) -> kirq::IrqController {
-    match controller {
-        DevIrqController::Gic => kirq::IrqController::Gic,
-        DevIrqController::Plic => kirq::IrqController::Plic,
-        DevIrqController::IoApic => kirq::IrqController::IoApic,
-        DevIrqController::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
-        DevIrqController::Unknown => kirq::IrqController::Unknown,
-    }
-}
-
 fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
     // `device_res::IrqDomainId` is provider-local. Only controllers with a
     // registered kirq domain can produce data-plane-resolvable mappings here.
@@ -104,13 +84,14 @@ fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kir
         DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
         DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
         DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
-        DevIrqController::LoongArchExtioi | DevIrqController::Unknown => None,
+        DevIrqController::LoongArchExtioi | DevIrqController::Unknown | DevIrqController::Msi => {
+            None
+        }
     }
 }
 
 fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
-    let mut desc = kirq::IrqDesc::new(route.hwirq, dev_irq_trigger_to_kirq(route.trigger))
-        .with_controller(dev_irq_controller_to_kirq(route.controller));
+    let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
     if let Some(domain) = dev_irq_controller_to_kirq_domain(route.controller) {
         desc = desc.with_domain(domain);
     }
@@ -127,8 +108,8 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
 
     let hwirq = irq.hwirq.unwrap_or(irq.number);
     let controller = irq.controller.unwrap_or(DevIrqController::Unknown);
-    let mut desc = kirq::IrqDesc::new(hwirq, dev_irq_trigger_to_kirq(irq.trigger))
-        .with_controller(dev_irq_controller_to_kirq(controller))
+    let mut desc = kirq::IrqDesc::new(hwirq, irq.trigger)
+        .with_controller(controller)
         .with_virq(irq.number);
     if let Some(domain) = dev_irq_controller_to_kirq_domain(controller) {
         desc = desc.with_domain(domain);

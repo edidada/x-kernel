@@ -1,5 +1,13 @@
 # driver-os-api — 设计
 
+## Shared IRQ vocabulary
+
+Trigger/controller/domain identities use irq-types, also used by the host IRQ
+core. IrqRouteDesc, IrqHandlerToken and MsiMessage have one definition here.
+The transitional device-res facade re-exports them; it still owns its legacy
+resource shape and callback protocol until consumers migrate. A domain value
+only names a host namespace; construction does not validate/register a domain.
+
 ## Monotonic time
 
 `TimeOp` is the host monotonic-clock contract, moved unchanged from device-res.

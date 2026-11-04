@@ -21,6 +21,23 @@ use crate::{
     devm_iomap_with_provider, devm_request_irq_with_provider,
 };
 
+#[def_test]
+fn irq_vocabulary_is_shared_with_os_api() {
+    let domain: crate::IrqDomainId = driver_os_api::IrqDomainId::new(0x7319);
+    let route: crate::IrqRouteDesc = driver_os_api::IrqRouteDesc {
+        hwirq: 37,
+        trigger: driver_os_api::IrqTrigger::Unknown(0x81),
+        controller: driver_os_api::IrqController::Msi,
+        domain: Some(domain),
+    };
+    let token: crate::IrqHandlerToken = driver_os_api::IrqHandlerToken::shared_action(73);
+    let message: crate::MsiMessage = driver_os_api::MsiMessage::new(0xfee0_0000, 0x51);
+    unittest::assert_eq!(route.domain.map(|id| id.as_u32()), Some(0x7319));
+    unittest::assert_eq!(route.trigger, crate::IrqTrigger::Unknown(0x81));
+    unittest::assert_eq!(token, crate::IrqHandlerToken::SharedAction(73));
+    unittest::assert_eq!(message.data, 0x51);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
     MapMmio(MmioRegion),

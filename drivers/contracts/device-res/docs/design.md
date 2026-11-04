@@ -4,6 +4,13 @@ TimeOp now belongs to driver-os-api, alongside MMIO, CPU memory and raw DMA.
 The legacy ResourceProvider aggregate imports it; it is no longer defined or
 re-exported here. Legacy IRQ vocabulary remains pending migration.
 
+IRQ trigger, controller and domain identity now use the common irq-types
+definitions through os-api. IrqRouteDesc, IrqHandlerToken and MsiMessage are
+also imported from os-api instead of independently defined here. These
+temporary re-exports keep legacy consumers building during PR-01; they do not
+introduce another owned contract. IrqResource, callbacks and guard acquisition
+still need migration because their semantics differ, not merely their names.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 

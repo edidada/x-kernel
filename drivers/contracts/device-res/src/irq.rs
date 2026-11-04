@@ -8,53 +8,11 @@
 
 use alloc::sync::Arc;
 
+pub use driver_os_api::{
+    IrqController, IrqDomainId, IrqHandlerToken, IrqRouteDesc, IrqTrigger, MsiMessage,
+};
+
 use crate::{ResError, ResResult};
-
-/// Interrupt trigger mode.
-///
-/// This is intentionally OS-neutral. Host kernels convert their own trigger
-/// representation into this enum at discovery time. `Unknown` carries the raw
-/// flag bits the host preserved (0 when truly unknown) so downstream layers
-/// never lose firmware-described trigger information.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqTrigger {
-    /// Interrupt asserted on the rising edge.
-    EdgeRising,
-    /// Interrupt asserted on the falling edge.
-    EdgeFalling,
-    /// Interrupt active while the line is high.
-    LevelHigh,
-    /// Interrupt active while the line is low.
-    LevelLow,
-    /// Trigger mode not described by firmware; carries raw flag bits (0 if none).
-    Unknown(u32),
-}
-
-/// The interrupt controller family that owns an IRQ line.
-///
-/// OS-neutral: host kernels translate their own controller representation
-/// into this enum when describing a discovered interrupt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqController {
-    /// ARM Generic Interrupt Controller (GIC v2/v3/v4) family.
-    Gic,
-    /// RISC-V Platform-Level Interrupt Controller.
-    Plic,
-    /// x86 I/O APIC.
-    IoApic,
-    /// LoongArch Extend I/O interrupt controller.
-    LoongArchExtioi,
-    /// Controller not described by firmware / unknown.
-    Unknown,
-}
-
-/// Opaque identifier for an interrupt domain.
-///
-/// Host kernels that partition interrupt numbers into domains (e.g. separate
-/// GIC / PLIC / IO-APIC number spaces) use this to disambiguate. The raw value
-/// is meaningless outside the host that minted it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IrqDomainId(pub u32);
 
 /// An interrupt resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,22 +61,6 @@ impl IrqResource {
     }
 }
 
-/// Device-visible MSI message returned by the host IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiMessage {
-    /// Message address programmed into the device.
-    pub address: u64,
-    /// Message data programmed into the device.
-    pub data: u32,
-}
-
-impl MsiMessage {
-    /// Creates a device-visible MSI message.
-    pub const fn new(address: u64, data: u32) -> Self {
-        Self { address, data }
-    }
-}
-
 /// MSI/MSI-X interrupt resource allocated by the host IRQ core.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MsiResource {
@@ -133,23 +75,6 @@ impl MsiResource {
     pub const fn new(irq: IrqResource, message: MsiMessage) -> Self {
         Self { irq, message }
     }
-}
-
-/// A discovered interrupt route awaiting translation into an [`IrqResource`].
-///
-/// Firmware (device-tree / ACPI) or bus discovery produces this raw
-/// description; the provider's [`IrqOp::map_irq`] turns it into the OS-visible
-/// [`IrqResource`].
-#[derive(Debug, Clone, Copy)]
-pub struct IrqRouteDesc {
-    /// Hardware IRQ number as discovered (e.g. GIC SPI number, PLIC source).
-    pub hwirq: usize,
-    /// Trigger mode.
-    pub trigger: IrqTrigger,
-    /// Controller family that owns this route.
-    pub controller: IrqController,
-    /// Domain id, when the host partitions IRQ number space.
-    pub domain: Option<IrqDomainId>,
 }
 
 /// A small opaque identifier for a logical interrupt event source.
@@ -289,31 +214,6 @@ where
 {
     fn handle(&self, irq: usize) -> IrqEvent {
         self(irq)
-    }
-}
-
-/// Provider-owned identity for one registered interrupt handler.
-///
-/// Shared hardirq registrations are released by the provider-local action id.
-/// Non-shared regular registrations, including current threaded IRQ requests,
-/// own the whole IRQ action and are released without a per-action id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqHandlerToken {
-    /// One handler within a shared IRQ action list.
-    SharedAction(usize),
-    /// The sole regular action installed on an IRQ line.
-    RegularAction,
-}
-
-impl IrqHandlerToken {
-    /// Create a token for one shared IRQ action.
-    pub const fn shared_action(id: usize) -> Self {
-        Self::SharedAction(id)
-    }
-
-    /// Create a token for a non-shared regular IRQ action.
-    pub const fn regular_action() -> Self {
-        Self::RegularAction
     }
 }
 
