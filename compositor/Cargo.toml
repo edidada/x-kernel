@@ -13,4 +13,7 @@ smithay = { version = "0.7", default-features = false, features = [
 ] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+
+libc = "0.2"
+
 [workspace]
