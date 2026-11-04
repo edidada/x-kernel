@@ -614,21 +614,30 @@ reusing either neighbour. `bind` publishes a bounded rendezvous in
 `async_channel` queues of the connection, queues both client ends in the
 rendezvous, and returns without waiting for `accept`, matching Linux queueing a
 connection that the peer may not have accepted yet. `accept` takes one entry
-out and owns the server ends. A message is one `Datagram`: `send` copies the
-caller's bytes into one queued record and fails with `EMSGSIZE`-style loss as
-`BrokenPipe` if the peer is gone, while `recv` consumes exactly one record and
-truncates it when the caller's buffer is short, discarding the remainder. The
-socket keeps the type it was created with, so `SO_TYPE` reports `SOCK_SEQPACKET`
-even though the queues are shared with the datagram transport.
+out and owns the server ends. `accept` on a bound socket that has not called
+`listen` fails with `EINVAL` instead of waiting; after a read shutdown it still
+drains connections queued earlier, then returns `EINVAL`. A message is one
+`Datagram`: `send` copies the caller's bytes into one queued record and fails
+with `EMSGSIZE`-style loss as `BrokenPipe` if the peer is gone, while `recv`
+consumes exactly one record and truncates it when the caller's buffer is short,
+discarding the remainder. The socket keeps the type it was created with, so
+`SO_TYPE` reports `SOCK_SEQPACKET` even though the queues are shared with the
+datagram transport.
 
 `shutdown(SHUT_WR)` drops only this side's sender and keeps the connection
 record, so the peer observes EOF, a second `connect` still fails with `EISCONN`,
 and `SO_PEERCRED` remains available. `shutdown(SHUT_RD)` closes the receive
 channel after retaining already-queued records, makes the peer's sends fail, and
 stops a listener from queueing new connections; queued connections can still be
-accepted, and once the queue is empty `accept` returns `EINVAL`. `poll` reports
+accepted, and once the queue is empty `accept` returns `EINVAL`. A shutdown
+issued before `connect` is applied when the connection is installed: a pending
+read shutdown closes the new receive channel so peer sends fail immediately,
+and a pending write shutdown leaves no outgoing sender. `poll` reports
 `EPOLLRDHUP` for a one-way close and reserves `EPOLLHUP` for a socket whose read
-and write directions are both gone.
+and write directions are both gone. A connected socket reports only its
+connection readiness even when the same socket also owns a bind listener, and
+an active listener does not advertise `POLLOUT`; its accept readiness and
+shutdown state are shared with `poll` through `ListenerState`.
 
 ### Unix Stream Listener Lifecycle
 

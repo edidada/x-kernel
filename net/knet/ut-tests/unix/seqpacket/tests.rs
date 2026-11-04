@@ -105,6 +105,51 @@ fn accept_would_block_without_a_connection() {
 }
 
 #[def_test]
+fn accept_on_a_bound_but_unlistened_socket_fails() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+
+    assert_eq!(
+        block_on(listener.accept(false)).err(),
+        Some(KError::InvalidInput)
+    );
+    assert_eq!(
+        block_on(listener.accept(true)).err(),
+        Some(KError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn only_an_active_listener_hides_writability() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    assert!(listener.poll().contains(IoEvents::OUT));
+
+    listener.listen(1, &test_peer_credentials()).unwrap();
+    assert!(!listener.poll().contains(IoEvents::OUT));
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    let events = listener.poll();
+    assert!(events.contains(IoEvents::IN));
+    assert!(!events.contains(IoEvents::OUT));
+
+    listener.shutdown(Shutdown::Read).unwrap();
+    let events = listener.poll();
+    assert!(events.contains(IoEvents::IN | IoEvents::RDHUP));
+    assert!(!events.contains(IoEvents::OUT | IoEvents::HUP));
+}
+
+#[def_test]
 fn connecting_to_a_bound_but_unlistened_socket_is_refused() {
     let listener = SeqpacketTransport::new();
     let entry = BindEntry::default();
@@ -224,6 +269,86 @@ fn shutdown_write_keeps_the_connection_and_queued_input() {
     assert_eq!(client.recv(&mut buf[..], RecvOptions::default()), Ok(6));
     assert_eq!(&buf[..6], b"queued");
     assert_eq!(client.recv(&mut buf[..], RecvOptions::default()), Ok(0));
+}
+
+#[def_test]
+fn a_bound_client_still_reports_connection_readiness() {
+    let listener = SeqpacketTransport::new();
+    let server_entry = BindEntry::default();
+    listener.bind(&server_entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    // A client can bind before connecting. Its own listener queue must not
+    // mask readiness of the accepted connection.
+    let client = SeqpacketTransport::new();
+    let client_entry = BindEntry::default();
+    client.bind(&client_entry, &UnixAddr::Unbound).unwrap();
+    client
+        .connect(
+            &server_entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+        panic!("seqpacket listener returned another transport");
+    };
+
+    accepted.send(&b"ping"[..], SendOptions::default()).unwrap();
+    assert!(client.poll().contains(IoEvents::IN));
+
+    accepted.shutdown(Shutdown::Write).unwrap();
+    let events = client.poll();
+    assert!(events.contains(IoEvents::IN | IoEvents::RDHUP));
+    assert!(!events.contains(IoEvents::HUP));
+
+    accepted.shutdown(Shutdown::Read).unwrap();
+    let events = client.poll();
+    assert!(events.contains(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP));
+}
+
+#[def_test]
+fn read_shutdown_before_connect_applies_to_the_connection() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client.shutdown(Shutdown::Read).unwrap();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+        panic!("seqpacket listener returned another transport");
+    };
+
+    // The peer cannot enqueue records the client would read after EOF.
+    assert_eq!(
+        accepted.send(&b"late"[..], SendOptions::default()),
+        Err(KError::BrokenPipe)
+    );
+    let events = client.poll();
+    assert!(events.contains(IoEvents::IN | IoEvents::RDHUP));
+    assert!(!events.contains(IoEvents::HUP));
+
+    let mut buf = [0u8; 8];
+    let nonblocking = RecvOptions {
+        flags: RecvFlags::DONT_WAIT,
+        ..RecvOptions::default()
+    };
+    assert_eq!(client.recv(&mut buf[..], nonblocking), Ok(0));
+
+    // Only the read direction was shut down, so sending still works.
+    assert_eq!(client.send(&b"pong"[..], SendOptions::default()), Ok(4));
+    assert_eq!(accepted.recv(&mut buf[..], RecvOptions::default()), Ok(4));
+    assert_eq!(&buf[..4], b"pong");
 }
 
 #[def_test]

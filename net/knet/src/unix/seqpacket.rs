@@ -52,23 +52,52 @@ struct Pending {
     client_credentials: PeerCredentials,
 }
 
+/// Whether a bound socket accepts connections.
+///
+/// `Unlistened` is distinct from `AcceptShutdown`: the first must fail `accept`
+/// immediately, while the second still lets `accept` drain connections queued
+/// before `shutdown(SHUT_RD)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenerState {
+    Unlistened,
+    Listening,
+    AcceptShutdown,
+}
+
+impl ListenerState {
+    fn is_listening(self) -> bool {
+        self == Self::Listening
+    }
+
+    fn is_accept_shutdown(self) -> bool {
+        self == Self::AcceptShutdown
+    }
+}
+
+/// Accept side of a bound socket, shared with the transport while it is bound.
+#[derive(Clone)]
+struct Listener {
+    pending: async_channel::Receiver<Pending>,
+    poll: Arc<PollSet>,
+    state: Arc<Mutex<ListenerState>>,
+}
+
 /// Rendezvous a bound seqpacket socket publishes to `connect`.
 pub(crate) struct Bind {
     queue: async_channel::Sender<Pending>,
     poll: Arc<PollSet>,
-    /// Whether `listen` has enabled the rendezvous.
+    /// Accept queue lifecycle, shared with the transport's `Listener`.
     ///
     /// Connecting to a bound-but-not-listening socket fails with
-    /// `ECONNREFUSED`, so the address alone cannot decide acceptance. It is a
-    /// plain field because every access happens under the `BindEntry` lock.
-    is_listening: bool,
+    /// `ECONNREFUSED`, so the address alone cannot decide acceptance.
+    state: Arc<Mutex<ListenerState>>,
     /// Identity `listen` recorded; a connecting client reports it as its peer.
     listener_credentials: Mutex<PeerCredentials>,
 }
 
 impl Bind {
     fn enqueue(&self, pending: Pending) -> KResult<()> {
-        if !self.is_listening {
+        if !self.state.lock().is_listening() {
             return Err(KError::ConnectionRefused);
         }
         self.queue
@@ -106,7 +135,7 @@ pub struct SeqpacketTransport {
     /// Outgoing direction and the peer's identity.
     peer: RwLock<Option<PeerChannel>>,
     /// Accepted-connection queue of a listening socket.
-    listener: Mutex<Option<(async_channel::Receiver<Pending>, Arc<PollSet>)>>,
+    listener: Mutex<Option<Listener>>,
     /// Directions closed by `shutdown`.
     shutdown: Mutex<ShutdownState>,
     bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
@@ -160,8 +189,9 @@ impl SeqpacketTransport {
 
     /// Stops a listening socket from queueing new connections.
     ///
-    /// Closing the queue's sender wakes a blocked `accept` once the pending
-    /// connections already queued have been drained; `accept` then observes
+    /// Marking the state `AcceptShutdown` stops new connections. Closing the
+    /// queue's sender wakes a blocked `accept` once the pending connections
+    /// already queued have been drained; `accept` then observes
     /// `TryRecvError::Closed` and returns `EINVAL`, matching Linux after
     /// `shutdown(SHUT_RD)` on a listener.
     fn close_listener_accepts(&self) {
@@ -173,10 +203,12 @@ impl SeqpacketTransport {
             let Some(bind) = slot.as_mut() else {
                 return;
             };
-            if !bind.is_listening {
+            let mut state = bind.state.lock();
+            if !state.is_listening() {
                 return;
             }
-            bind.is_listening = false;
+            *state = ListenerState::AcceptShutdown;
+            drop(state);
             bind.queue.close();
             bind.poll.clone()
         };
@@ -236,14 +268,19 @@ impl UnixTransportOps for SeqpacketTransport {
         }
         let (tx, rx) = async_channel::bounded(LISTEN_BACKLOG);
         let poll = Arc::new(PollSet::new());
+        let state = Arc::new(Mutex::new(ListenerState::Unlistened));
         *bind = Some(Bind {
             queue: tx,
             poll: poll.clone(),
-            is_listening: false,
+            state: state.clone(),
             listener_credentials: Mutex::new(PeerCredentials::none()),
         });
         drop(bind);
-        *guard = Some((rx, poll));
+        *guard = Some(Listener {
+            pending: rx,
+            poll,
+            state,
+        });
         self.local_addr.write().clone_from(local_addr);
         *self.bind_slot.lock() = Some(bind_slot_handle);
         self.poll_state.wake();
@@ -254,11 +291,14 @@ impl UnixTransportOps for SeqpacketTransport {
         let handle = self.bind_slot.lock().clone().ok_or(KError::InvalidInput)?;
         let mut bind = handle.lock();
         let bind = bind.as_mut().ok_or(KError::InvalidInput)?;
-        if bind.is_listening {
-            return Err(KError::InvalidInput);
+        {
+            let mut state = bind.state.lock();
+            if state.is_listening() || state.is_accept_shutdown() {
+                return Err(KError::InvalidInput);
+            }
+            *state = ListenerState::Listening;
         }
         *bind.listener_credentials.lock() = credentials.clone();
-        bind.is_listening = true;
         self.poll_state.wake();
         Ok(())
     }
@@ -301,28 +341,52 @@ impl UnixTransportOps for SeqpacketTransport {
         bind.enqueue(pending)?;
         drop(bind_slot);
 
+        // A shutdown may have run before this connection existed. Hold the
+        // shutdown lock until both directions are installed so a concurrent
+        // shutdown sees either no connection yet or the finished one, never a
+        // half-installed connection that misses its state.
+        let shutdown = self.shutdown.lock();
+        if shutdown.read {
+            client_rx.close();
+        }
         *self.rx.lock() = Some((client_rx, client_poll));
         *peer = Some(PeerChannel {
-            tx: Some(to_server),
+            tx: (!shutdown.write).then_some(to_server),
             read_poll: server_poll,
             // Linux connects seqpacket sockets through the stream path, so the
             // client reports the listening socket's identity as its peer.
             peer_credentials: listener_credentials,
         });
+        drop(shutdown);
         self.poll_state.wake();
         Ok(())
     }
 
     async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        let (pending_rx, _) = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        if *listener.state.lock() == ListenerState::Unlistened {
+            return Err(KError::InvalidInput);
+        }
+
         let pending = if nonblocking || self.options.nonblocking() {
-            match pending_rx.try_recv() {
+            match listener.pending.try_recv() {
                 Ok(pending) => pending,
-                Err(TryRecvError::Empty) => return Err(KError::WouldBlock),
+                Err(TryRecvError::Empty) => {
+                    let state = *listener.state.lock();
+                    return if state.is_listening() {
+                        Err(KError::WouldBlock)
+                    } else {
+                        Err(KError::InvalidInput)
+                    };
+                }
                 Err(TryRecvError::Closed) => return Err(KError::InvalidInput),
             }
         } else {
-            pending_rx.recv().await.map_err(|_| KError::InvalidInput)?
+            listener
+                .pending
+                .recv()
+                .await
+                .map_err(|_| KError::InvalidInput)?
         };
 
         let accepted = Self::new();
@@ -490,11 +554,18 @@ impl Pollable for SeqpacketTransport {
             // `stream` and Linux rather than reporting the peer's `SHUT_WR`
             // as a fully dead connection.
             events.set(IoEvents::HUP, is_read_shutdown && is_write_shutdown);
-        }
-        if let Some((pending, _)) = self.listener.lock().as_ref() {
-            events.set(IoEvents::IN, !pending.is_empty() || state.read);
+        } else if let Some(listener) = self.listener.lock().as_ref() {
+            let listener_state = *listener.state.lock();
+            events.set(IoEvents::IN, !listener.pending.is_empty() || state.read);
             events.set(IoEvents::RDHUP, state.read);
             events.set(IoEvents::HUP, state.read && state.write);
+            // Linux does not report POLLOUT while the socket is in TCP_LISTEN,
+            // including after a read shutdown that stops new accepts. A bound
+            // socket that never called `listen` is not listening and stays
+            // writable.
+            if listener_state != ListenerState::Unlistened {
+                events.set(IoEvents::OUT, false);
+            }
         }
         events
     }
@@ -509,9 +580,8 @@ impl Pollable for SeqpacketTransport {
         }
         if let Some((_, poll)) = self.rx.lock().as_ref() {
             context.register(poll)?;
-        }
-        if let Some((_, poll)) = self.listener.lock().as_ref() {
-            context.register(poll)?;
+        } else if let Some(listener) = self.listener.lock().as_ref() {
+            context.register(&listener.poll)?;
         }
         Ok(())
     }
