@@ -537,13 +537,15 @@ impl Xhci {
         // interrupter (IMAN.IE), and only then set RUN. This driver used to write
         // `RS|INTE|EWE` in one go and never touched IMAN at all.
         let usbcmd = xhci.operational + op::USBCMD;
-        xhci.bar.write32(usbcmd, xhci.bar.read32(usbcmd) | cmd::EWE);
         let iman = xhci.runtime + RT_IR0;
         xhci.bar.write32(iman, xhci.bar.read32(iman) | 0x2); // IMAN.IE
-        // A working board's USBCMD reads exactly 0x5 (RUN | INTE); EWE is not set
-        // there and is not part of host-mode operation.
-        xhci.bar
-            .write32(usbcmd, xhci.bar.read32(usbcmd) | cmd::RS | cmd::INTE);
+        // A working board's USBCMD reads exactly 0x5: RUN | INTE and nothing else.
+        // EWE (bit 10) belongs to device mode; setting it in host mode is what this
+        // driver had been doing, and it read back as 0x405 instead of 0x5.
+        xhci.bar.write32(
+            usbcmd,
+            (xhci.bar.read32(usbcmd) & !cmd::EWE) | cmd::RS | cmd::INTE,
+        );
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let status = xhci.bar.read32(xhci.operational + op::USBSTS);
         info!("xhci: running, USBSTS {status:#010x}");
@@ -774,6 +776,14 @@ impl Xhci {
             sts & sts::HCH != 0,
             sts & sts::EINT != 0,
         );
+        // Is the command ring still running after the timeout? CRCR only reports
+        // status bits on this IP, but CRR going clear would mean the controller
+        // stopped consuming commands.
+        log::error!(
+            "xhci: {what} after timeout: crcr {:#x} usbcmd {:#x}",
+            self.bar.read32(self.operational + op::CRCR),
+            self.bar.read32(self.operational + op::USBCMD),
+        );
         // Where did the controller put the event? Dump the first slots so a
         // consumer/pointer mismatch is visible instead of inferred.
         let mut line = alloc::string::String::new();
@@ -832,7 +842,21 @@ impl Xhci {
             self.bar.read64(self.operational + op::DCBAAP),
         );
         self.ring_command_doorbell();
-        let event = self.wait_event(regs::trb::COMMAND_COMPLETION, what)?;
+        // A command that is never fetched looks exactly like a lost notification:
+        // the ring is still running (CRR set) and the TRB is on it, but the
+        // controller's dequeue never moves. Ring the doorbell again before giving
+        // up, and log which attempt produced the completion.
+        let event = match self.wait_event(regs::trb::COMMAND_COMPLETION, what) {
+            Ok(event) => event,
+            Err(first) => {
+                warn!("xhci: {what} not fetched, ringing the doorbell again");
+                self.ring_command_doorbell();
+                match self.wait_event(regs::trb::COMMAND_COMPLETION, what) {
+                    Ok(event) => event,
+                    Err(_) => return Err(first),
+                }
+            }
+        };
         let code = event.completion_code();
         // The completion event's parameter word is the address of the command TRB
         // that finished, so it identifies which command the code belongs to --
@@ -1028,7 +1052,24 @@ impl Xhci {
             (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
                 | (slot_id << regs::trb::SLOT_SHIFT),
         );
-        self.command(trb, "address device")?;
+        match self.command(trb, "address device") {
+            Ok(_) => {}
+            Err(err) => {
+                // Did the controller write the device context? A filled context
+                // means the command ran and only its completion went missing; a
+                // zeroed one means it never started.
+                let dwords = self.slots[slot_index].device.as_ptr().cast::<u32>();
+                let mut line = alloc::string::String::new();
+                for index in 0..10 {
+                    let cell = dwords.wrapping_add(index);
+                    // SAFETY: `index` stays inside the device context allocation.
+                    let value = unsafe { core::ptr::read_volatile(cell) };
+                    line.push_str(&alloc::format!(" {index}={value:#x}"));
+                }
+                log::error!("xhci: address device {err:?}; device ctx:{line}");
+                return Err(err);
+            }
+        }
         self.slots[slot_index].speed = speed_id;
         log::info!(
             "xhci: slot {slot_id} addressed on port {}, speed {}, ep0 max packet {ep0_max_packet}",
@@ -1310,6 +1351,17 @@ impl Xhci {
         // and `Address Device` afterwards relies on that state.
         let speed = self.reset_port(port)?;
         let slot_id = self.enable_slot()?;
+        // Discriminator: a No-Op as the third TRB. If this also stalls, the ring
+        // stops being consumed after two commands and the fault is in the ring;
+        // if it completes, only Address Device is affected.
+        let second_noop = Trb::new(0, 0, regs::trb::NO_OP << regs::trb::TYPE_SHIFT);
+        match self.command(second_noop, "second no-op") {
+            Ok(event) => info!(
+                "xhci: second no-op (third TRB) -> code {}",
+                event.completion_code()
+            ),
+            Err(err) => log::error!("xhci: second no-op (third TRB) -> {err:?}"),
+        }
         let slot = self.allocate_slot(dev, slot_id)?;
         self.slots.push(slot);
         let slot_index = self.slots.len() - 1;
