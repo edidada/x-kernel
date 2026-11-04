@@ -1,9 +1,10 @@
 # R1-08 acceptance audit
 
-Audit starting point: `aa4305341`. This is an evidence reconciliation, not a
-declaration that R1-08 or the deferred IRQ safety gate is complete. Historical
-"pending" statements in implementation-status describe their own slice; later
-slice results supersede them.
+Audit starting point: `aa4305341`; current reconciliation baseline:
+`00b4f0fc0`, incorporating main `289e2276b`. The current-source commands, results
+and scoped decision live in [R1-07/08 closeout](r1-07-08-closeout-2026-11-04.md).
+Historical "pending" statements in implementation-status describe their own
+slice; later slice results supersede them.
 
 ## Requirement evidence
 
@@ -13,12 +14,12 @@ slice results supersede them.
 | DMA facts from firmware/platform policy | Slices 1–7; saved QEMU DT, original-node provenance, bounded RAM window and coherency tests; [scoped mask basis](qemu-mmio-dma-mask.md) | Source rationale covered for the selected QEMU modern-MMIO path; 64-bit width is not permission to use all physical addresses or proof of above-4-GiB execution |
 | Missing/malformed/unrepresentable DMA inputs | `of`, HAL topology and kdriver firmware-DMA tests; slice 7 regression | Covered for the supported representable window policy |
 | Descriptor authority, host bounds, per-instance acquisition/release | Slices 5–13 plus real two-device slice 18 | Covered for coherent identity-DMA QEMU scope; no IOMMU/non-coherent claim |
-| Provider installation before probe and failure rollback | Native composition and controlled failure/rollback tests, slices 8–15 | Software contract coverage present; native shared-IRQ/notification-tail gate remains open |
+| Provider installation before probe and failure rollback | Native composition and controlled failure/rollback tests, slices 8–15; [native and concrete RNG SMP tail acceptance](irq-tail-acceptance-2026-11-04.md) | Software gate covered, including shared peer survival and failing bypass negative controls; not physical IRQ/MSI ordering proof |
 | Real sampling, pending unbind, old-handle rebind and domain unregister | Slices 15–19 | Covered individually; withheld-response test is not late-response cancellation proof |
 | Two instances and stale binding separation | Slice 18, 257-byte reads force fresh I/O in each phase | Sequential isolation covered; not a concurrent IRQ-tail stress claim |
 | Existing nodes, attributes and events | Inventory below; devfs/sysfs/uevent tests; dedicated real procfs lifecycle run | Three model device views verified across unbind/rebind/unregister; driver list remains legacy-only |
 | Legacy PCI and unaffected paths | Repeated canonical PCI regressions; expanded projection suite in current slice | Keep current-run results separate from historical evidence |
-| Documentation and reproducibility | Saved configurations/commands/logs; per-slice tracked status | Ongoing until remaining gates close |
+| Documentation and reproducibility | Saved configurations/commands/logs; per-slice tracked status and current-source closeout | Results and limits reconciled in the linked closeout record |
 
 ## Source compatibility baseline
 
@@ -73,10 +74,17 @@ is separate evidence, not inferred from this fixture.
 
 ## Next work
 
-1. Complete the deferred shared-IRQ/notification-tail gate when that prerequisite
-   is ready. No mock, ordinary lifecycle run or withholding backend replaces it.
-   The [IRQ acceptance handoff](irq-acceptance-handoff.md) separates delivery of
-   the existing core tests, native adapter integration and concrete RNG tail
-   evidence; the independent worktree remains unmodified and uncommitted.
-2. Only then reconcile final R1-08 checkboxes and unblock R1-09 retirement and
-   full requirements-mapped acceptance. No old projection facility is retired now.
+Scope update (2026-11-04): the separately delegated
+[PCI virtio-net lifecycle follow-up](network-lifecycle-handoff.md) is now owned
+by this workstream. It is additional work, not a completed R1-08 requirement;
+"only IRQ confirmation remains" must not describe the expanded overall scope.
+
+The deferred software IRQ gate is delivered in `00b4f0fc0`, not inferred from
+the independent KIRQ worktree or its uncommitted audit. Both NativeIrq and the
+concrete RNG fixture preserve a shared peer after draining the old action.
+Ordinary lifecycle and withheld-response runs remain separate evidence.
+
+Next is R1-09 consumer inventory, compatibility-layer retirement where safe,
+and full requirements-mapped acceptance. No old projection facility is retired
+by this reconciliation; PCI network shutdown still needs its own design and
+implementation under the linked handoff.

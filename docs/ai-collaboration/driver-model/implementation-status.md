@@ -1,5 +1,19 @@
 # Driver model R1 implementation checkpoint — 2026-10-25
 
+## Current closeout — 2026-11-04
+
+At source `00b4f0fc0` (main `289e2276b`), R1-07/08 are accepted within the
+approved QEMU modern-MMIO RNG scope. Five real-device lifecycle/pending/isolation/
+unregister/procfs fixtures pass; worker-enabled MMIO regression is 437 passed,
+0 failed, 5 ignored, and canonical PCI is 436 passed, 0 failed, 6 ignored.
+Both configurations pass clippy. NativeIrq and concrete RNG software tail/peer
+acceptance, including negative controls, was committed separately in `00b4f0fc0`.
+See [closeout commands, evidence map and limits](r1-07-08-closeout-2026-11-04.md).
+This reconciliation changes no production code. R1-09 is ready but unstarted;
+the separate PCI network handoff is not implemented or accepted.
+The sections below retain historical slice states, including then-open gates;
+this current entry supersedes those status statements, not their evidence limits.
+
 ## Scope
 
 Branch: `xiaohui/driver-base-hwrng`. Implementation started from the accumulated
