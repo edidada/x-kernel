@@ -167,6 +167,25 @@ struct Slot {
 /// Halt, reset, then program the number of enabled device slots. The
 /// self-clearing bits are polled: a reset that does not complete is reported,
 /// because every later step assumes the controller is idle.
+/// BRING-UP PROBE: writes a distinctive value to a register and reports every
+/// offset in the first 2 KiB of the block that then holds it.
+///
+/// "The register reads back zero" has two very different causes -- the write was
+/// dropped, or it landed somewhere else because the offset is wrong -- and only a
+/// search for the value tells them apart.
+fn scan_marker(bar: &IoMap, value: u32, what: &str) {
+    let mut found = 0usize;
+    for offset in (0..0x800).step_by(4) {
+        if bar.read32(offset) == value {
+            info!("xhci: {what} marker {value:#010x} found at bar+{offset:#05x}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        info!("xhci: {what} marker {value:#010x} not present anywhere in 0..0x800");
+    }
+}
+
 fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
     // §4.2: the controller must not be running before it is reset.
     let status = bar.read32(operational + op::USBSTS);
@@ -338,6 +357,8 @@ impl Xhci {
         // Read every ring register back: a write that silently does not stick is
         // indistinguishable from a controller that ignores commands, and that
         // cost a round on this port already.
+        scan_marker(&self.bar, self.command.mem.bus_addr() as u32 | 1, "crcr");
+        scan_marker(&self.bar, self.erst.bus_addr() as u32, "erstba");
         info!(
             "xhci: rings read back crcr {:#018x} dcbaa {:#x} erstsz {:#x} erstba {:#x} erdp {:#x}",
             self.bar.read64(self.operational + op::CRCR),

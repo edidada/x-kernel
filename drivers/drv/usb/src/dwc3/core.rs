@@ -16,10 +16,7 @@
 use driver_base::{Device, IoMap, PlatformBus, ProbeError};
 use log::info;
 
-use crate::dwc3::regs::{self, GCTL, GSTS, GUSB2PHYCFG, gctl, gstst, gux2phycfg};
-
-/// Bounded wait for a self-clearing bit, in microseconds.
-const POLL_ITERS: usize = 10_000;
+use crate::dwc3::regs::{self, GCTL, GSTS, GUSB2PHYCFG, gctl, gux2phycfg};
 
 /// Hardware parameters `dwc3_cache_hwparams` keeps.
 #[derive(Clone, Copy, Debug)]
@@ -81,18 +78,19 @@ pub fn init(
 }
 
 fn core_soft_reset(regs: &IoMap) {
+    // CoreSoftReset is NOT self-clearing: the reference driver asserts it,
+    // waits 100 us and clears it again. Waiting for the bit to fall on its own
+    // leaves the core held in reset -- every xHCI register then reads back zero,
+    // including the command ring, and no command can ever be fetched.
     let gctl = regs.read32(GCTL);
     regs.write32(GCTL, gctl | gctl::CORESOFTRESET);
-    let mut waited = 0;
-    while regs.read32(GCTL) & gctl::CORESOFTRESET != 0 && waited < POLL_ITERS {
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
-        waited += 1;
-    }
-    let gsts = regs.read32(GSTS);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+    regs.write32(GCTL, regs.read32(GCTL) & !gctl::CORESOFTRESET);
+    let gctl = regs.read32(GCTL);
     info!(
-        "dwc3: soft reset done after {waited} us, GSTS {gsts:#010x} (csrst {} curmod {})",
-        gsts & gstst::CSRST != 0,
-        (gsts & gstst::CURMOD_HOST) != 0,
+        "dwc3: soft reset released, GCTL {gctl:#010x} GSTS {:#010x} (asserted {})",
+        regs.read32(GSTS),
+        gctl & gctl::CORESOFTRESET != 0,
     );
 }
 

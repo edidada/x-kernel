@@ -34,13 +34,15 @@ pub const GHWPARAMS4: usize = GLOBALS_START + 0x50;
 pub const DWC_USB3_GSNPSID: usize = GLOBALS_START + 0x20;
 
 pub mod gctl {
-    /// Core soft reset; self-clears when complete.
-    pub const CORESOFTRESET: u32 = 1 << 0;
+    /// Core soft reset (bit 11); self-clears when complete. Bit 0 is
+    /// DSBLCLKGTNG -- writing that instead, as this driver first did, resets
+    /// nothing and the wait simply runs out.
+    pub const CORESOFTRESET: u32 = 1 << 11;
     /// Port capability direction: host.
     pub const PRTCAPDIR_HOST: u32 = 1 << 12;
     pub const PRTCAPDIR_MASK: u32 = 0x3 << 12;
-    /// Disable the scrambling of the PIPE (SuperSpeed).
-    pub const DISSCRAMBLE: u32 = 1 << 10;
+    /// SOF ITP sync (bit 10), not the scramble disable this used to claim.
+    pub const SOFITPSYNC: u32 = 1 << 10;
 }
 
 pub mod gstst {
