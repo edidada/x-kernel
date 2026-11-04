@@ -252,6 +252,44 @@ struct Slot {
 /// "The register reads back zero" has two very different causes -- the write was
 /// dropped, or it landed somewhere else because the offset is wrong -- and only a
 /// search for the value tells them apart.
+/// Zeroes interrupter 0 before the rings are programmed.
+///
+/// RTSOFF points at MFINDEX; the primary interrupter starts 0x20 into the runtime
+/// block. Writing ERSTSZ/ERSTBA/ERDP at RTSOFF+0x08.. is writing into a reserved
+/// hole, which is why those registers never held anything.
+fn clear_interrupter(bar: &IoMap, runtime: usize) {
+    bar.write32(runtime + RT_IR0 + 0x08, 0); // ERSTSZ0: no segments yet
+    bar.write32(runtime + RT_IR0, 0); // IMAN0: no interrupt pending
+    bar.write32(runtime + RT_IR0 + 0x04, 0); // IMOD0
+}
+
+/// Logs the register set that was read from a working board at the same offsets,
+/// so "what still differs" is a diff instead of a hunt.
+fn log_diff_set(bar: &IoMap, operational: usize, runtime: usize) {
+    info!(
+        "xhci: diff-set gsbuscfg0 {:#010x} gctl {:#010x} gsts {:#010x} gsnpsid {:#010x}",
+        bar.read32(0xc100),
+        bar.read32(0xc110),
+        bar.read32(0xc118),
+        bar.read32(0xc120),
+    );
+    info!(
+        "xhci: diff-set usbcmd {:#010x} usbsts {:#010x} dnctrl {:#010x} config {:#010x} crcr \
+         {:#010x}",
+        bar.read32(operational + op::USBCMD),
+        bar.read32(operational + op::USBSTS),
+        bar.read32(operational + 0x14),
+        bar.read32(operational + op::CONFIG),
+        bar.read32(operational + op::CRCR),
+    );
+    info!(
+        "xhci: diff-set iman {:#x} imod {:#x} erstsz {:#x}",
+        bar.read32(runtime + RT_IR0),
+        bar.read32(runtime + RT_IR0 + 0x04),
+        bar.read32(runtime + RT_IR0 + 0x08),
+    );
+}
+
 /// Takes the controller over from the firmware's legacy (SMI) interface.
 ///
 /// xHCI 7.1: the USB Legacy Support extended capability carries a BIOS/OS
@@ -430,13 +468,7 @@ impl Xhci {
 
         reset_controller(&bar, operational, max_slots);
         claim_legacy_ownership(&bar, hccparams1);
-        // RTSOFF points at MFINDEX; interrupter 0's register set starts 0x20
-        // into the runtime block. Writing ERSTSZ/ERSTBA/ERDP at RTSOFF+0x08.. is
-        // writing into a reserved hole, which is why those registers never held
-        // anything and the controller never had an event ring.
-        bar.write32(runtime + RT_IR0 + 0x08, 0); // ERSTSZ0: no segments yet
-        bar.write32(runtime + RT_IR0, 0); // IMAN0: no interrupt pending
-        bar.write32(runtime + RT_IR0 + 0x04, 0); // IMOD0
+        clear_interrupter(&bar, runtime);
 
         let erst = dev
             .res()
@@ -479,6 +511,7 @@ impl Xhci {
         // left the controller without the scratchpad array it asks for and made
         // `Enable Slot` fail while a No-Op still worked.
         let scratchpads = allocate_scratchpads(dev, hcsparams2, &device_contexts)?;
+        log_diff_set(&bar, operational, runtime);
         let mut xhci = Self {
             bar,
             operational,
@@ -499,11 +532,18 @@ impl Xhci {
             slots: Vec::new(),
         };
         xhci.program_rings()?;
-        // §4.2: run only after the rings and the DCBAA are visible.
-        xhci.bar.write32(
-            xhci.operational + op::USBCMD,
-            cmd::RS | cmd::INTE | cmd::EWE,
-        );
+        // Linux `xhci_run_finished` does these as three separate read-modify-writes
+        // and in this order: enable event interrupts (EIE), enable the primary
+        // interrupter (IMAN.IE), and only then set RUN. This driver used to write
+        // `RS|INTE|EWE` in one go and never touched IMAN at all.
+        let usbcmd = xhci.operational + op::USBCMD;
+        xhci.bar.write32(usbcmd, xhci.bar.read32(usbcmd) | cmd::EWE);
+        let iman = xhci.runtime + RT_IR0;
+        xhci.bar.write32(iman, xhci.bar.read32(iman) | 0x2); // IMAN.IE
+        // A working board's USBCMD reads exactly 0x5 (RUN | INTE); EWE is not set
+        // there and is not part of host-mode operation.
+        xhci.bar
+            .write32(usbcmd, xhci.bar.read32(usbcmd) | cmd::RS | cmd::INTE);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let status = xhci.bar.read32(xhci.operational + op::USBSTS);
         info!("xhci: running, USBSTS {status:#010x}");
@@ -537,7 +577,11 @@ impl Xhci {
                 },
             );
         }
-        self.bar.write32(self.runtime + RT_IR0 + 0x08, 1); // ERSTSZ0
+        // Linux `xhci_add_interrupter` keeps the fields it does not own: ERSTSZ
+        // only carries the segment count, ERSTBA only the base address.
+        let erstsz = self.runtime + RT_IR0 + 0x08;
+        self.bar
+            .write32(erstsz, (self.bar.read32(erstsz) & !0xffff) | 1);
         self.bar
             .write64(self.runtime + RT_IR0 + 0x10, self.erst.bus_addr()); // ERSTBA0
         self.bar
@@ -717,6 +761,33 @@ impl Xhci {
             first.parameter,
             first.status,
             first.control,
+        );
+        // A command that produces no completion at all usually means the
+        // controller faulted rather than refused: report the error bits.
+        let sts = self.bar.read32(self.operational + op::USBSTS);
+        log::error!(
+            "xhci: {what} no completion; USBSTS {sts:#010x} (hse {}, hce {}, cnr {}, hch {}, eint \
+             {})",
+            sts & sts::HSE != 0,
+            sts & sts::HCE != 0,
+            sts & sts::CNR != 0,
+            sts & sts::HCH != 0,
+            sts & sts::EINT != 0,
+        );
+        // Where did the controller put the event? Dump the first slots so a
+        // consumer/pointer mismatch is visible instead of inferred.
+        let mut line = alloc::string::String::new();
+        for index in 0..8 {
+            let trb = self.event.read(index);
+            line.push_str(&alloc::format!(
+                " [{index}]={:#x}/{:#x}",
+                trb.control,
+                trb.status
+            ));
+        }
+        log::error!(
+            "xhci: {what} event slots:{line} (dequeue {})",
+            self.event_dequeue
         );
         let raw = self.event.read(self.event_dequeue);
         log::error!(
@@ -936,6 +1007,21 @@ impl Xhci {
         write(ep0_ctx + 3, (ep0_ring >> 32) as u32);
         write(ep0_ctx + 4, context::endpoint_dword4(8));
         let slot_id = u32::from(self.slots[slot_index].id);
+        // What the controller is about to read: the input control context and the
+        // contexts this command adds.
+        {
+            let dwords = self.slots[slot_index].input.as_ptr().cast::<u32>();
+            let mut line = alloc::string::String::new();
+            for index in 0..(dwords_per_context * 2 + 5) {
+                let cell = dwords.wrapping_add(index);
+                // SAFETY: `index` stays inside the input context allocation.
+                let value = unsafe { core::ptr::read_volatile(cell) };
+                if value != 0 {
+                    line.push_str(&alloc::format!(" {index}={value:#x}"));
+                }
+            }
+            info!("xhci: input ctx {input_addr:#x} for slot {slot_id}:{line}");
+        }
         let trb = Trb::new(
             input_addr,
             0,
@@ -1066,7 +1152,14 @@ impl Xhci {
                     .write32(offset, (value & portsc::PRESERVE) | portsc::CHANGE_BITS);
                 let speed =
                     regs::speed_from_psiv((value & portsc::PSIV_MASK) >> portsc::PSIV_SHIFT);
-                log::info!("xhci: port {} reset, speed {}", port + 1, speed.as_str());
+                log::info!(
+                    "xhci: port {} reset, speed {}, portsc {:#010x} (ped {}, pls {})",
+                    port + 1,
+                    speed.as_str(),
+                    value,
+                    value & portsc::PED != 0,
+                    (value & portsc::PLS_MASK) >> portsc::PLS_SHIFT,
+                );
                 return Ok(speed);
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));

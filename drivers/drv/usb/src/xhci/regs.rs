@@ -94,9 +94,14 @@ pub mod trb {
     pub const DATA: u32 = 3;
     pub const STATUS: u32 = 4;
     pub const LINK: u32 = 6;
-    pub const ENABLE_SLOT: u32 = 8;
-    pub const ADDRESS_DEVICE: u32 = 10;
-    pub const CONFIGURE_ENDPOINT: u32 = 11;
+    /// Command TRB types start at 9, not 8: 8 is No-Op *Transfer*. Writing 8 here
+    /// made the controller answer TRB Error for every `Enable Slot` while a No-Op
+    /// Command (23) on the same ring succeeded -- the whole command range had been
+    /// numbered from the transfer table.
+    pub const ENABLE_SLOT: u32 = 9;
+    pub const DISABLE_SLOT: u32 = 10;
+    pub const ADDRESS_DEVICE: u32 = 11;
+    pub const CONFIGURE_ENDPOINT: u32 = 12;
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;

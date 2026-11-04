@@ -125,13 +125,19 @@ fn program_usb3_pipe(regs: &IoMap) {
     );
 }
 
-/// `GUSB3PIPECTL0` as measured on a board whose SuperSpeed ports work.
-const USB3_PIPE_CONTROL: u32 = 0x075e_8020;
+/// `GUSB3PIPECTL0` as read from a working board at the corrected offset.
+///
+/// The previous value here (0x075e8020) came from reading offset 0xc158, which is
+/// not this register: with the real offset the working board reads 0x010a0002.
+const USB3_PIPE_CONTROL: u32 = 0x010a_0002;
 
 fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
-    // Port 0 of the USB2 PHY block; the reference programs every port it finds
-    // in GHWPARAMS3, and this part has one per controller instance.
-    let mut config = regs.read32(GUSB2PHYCFG);
+    // The value comes from a working board (0x00101448): PHYIF set for the wide
+    // UTMI+ interface, suspend enabled, and the platform's other fields preserved.
+    // Computing the word from scratch produced 0x40102408 -- plausible looking, and
+    // different in five bits from what the hardware is known to run with.
+    let before = regs.read32(GUSB2PHYCFG);
+    let mut config = USB2_PHY_CONFIG;
     if utmi_wide {
         config |= gux2phycfg::PHYIF;
     } else {
@@ -142,39 +148,13 @@ fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     } else {
         config |= gux2phycfg::ENABLSLPM;
     }
-    // The PHY must not stay suspended while the controller comes up: the
-    // first port reset happens before anything else can wake it.
-    config &= !gux2phycfg::SUSPHY;
     regs.write32(GUSB2PHYCFG, config);
     info!(
-        "dwc3: GUSB2PHYCFG {:#010x} (utmi_wide {utmi_wide} dis_enblslpm {dis_enblslpm})",
+        "dwc3: GUSB2PHYCFG {before:#010x} -> {:#010x} (utmi_wide {utmi_wide} dis_enblslpm \
+         {dis_enblslpm})",
         regs.read32(GUSB2PHYCFG),
     );
-    // Read-only for now: the reference board reads 0x20180101 here (UTMI+ PHY
-    // vendor control). If this differs, the PHY is being held out of the state
-    // the controller expects, which no amount of VBUS or port power can fix.
-    // How many PHYs does the controller actually have, and are they awake? The
-    // reference programs every PHY it reports; a second PHY left at its reset
-    // value (SUSPHY=1) is a plausible reason for slot allocation to fail while
-    // No-Op still works.
-    info!(
-        "dwc3: GHWPARAMS0 {:#010x} 1 {:#010x} 3 {:#010x} 4 {:#010x}",
-        regs.read32(regs::GHWPARAMS0),
-        regs.read32(regs::GHWPARAMS1),
-        regs.read32(regs::GHWPARAMS3),
-        regs.read32(regs::GHWPARAMS4),
-    );
-    for phy in 0..2 {
-        info!(
-            "dwc3: phy{phy} GUSB2PHYCFG {:#010x} GUSB3PIPECTL {:#010x}",
-            regs.read32(regs::GUSB2PHYCFG + phy * 4),
-            regs.read32(regs::GUSB3PIPECTL + phy * 4),
-        );
-    }
-    info!(
-        "dwc3: GUSB2PHYACC0 {:#010x} GDCTL {:#010x} GCTL {:#010x}",
-        regs.read32(regs::GUSB2PHYACC),
-        regs.read32(regs::GDCTL),
-        regs.read32(GCTL),
-    );
 }
+
+/// `GUSB2PHYCFG0` as read from a working board at the corrected offset.
+const USB2_PHY_CONFIG: u32 = 0x0010_1448;
