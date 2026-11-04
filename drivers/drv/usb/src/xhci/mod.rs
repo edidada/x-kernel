@@ -232,6 +232,17 @@ struct Slot {
 /// "The register reads back zero" has two very different causes -- the write was
 /// dropped, or it landed somewhere else because the offset is wrong -- and only a
 /// search for the value tells them apart.
+/// 64-bit register write in the order the DWC3 wrapper requires.
+///
+/// Linux hands its xHCI platform device the `write-64-hi-lo-quirk`, i.e. on this
+/// IP the high half goes first -- the opposite of the generic `lo_hi_writeq`.
+/// Registers whose upper half is zero (DCBAAP, ERSTBA) hide the difference; the
+/// ones that carry flags in the low word do not.
+fn write64_hi_lo(bar: &IoMap, offset: usize, value: u64) {
+    bar.write32(offset + 4, (value >> 32) as u32);
+    bar.write32(offset, value as u32);
+}
+
 /// BRING-UP PROBE: logs every non-zero dword in the register window.
 ///
 /// Read-back of one register cannot distinguish "the write was dropped" from
@@ -431,8 +442,8 @@ impl Xhci {
         let crcr = xhci.operational + op::CRCR;
         let cmd_addr = xhci.command.mem.bus_addr() | 1;
         // lo_hi_writeq: low half first (Linux writeq order), high half after.
-        xhci.bar.write32(crcr, cmd_addr as u32);
         xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
+        xhci.bar.write32(crcr, cmd_addr as u32);
         info!(
             "xhci: crcr after run {:#018x} (wrote {:#x})",
             xhci.bar.read64(crcr),
