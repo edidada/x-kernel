@@ -730,6 +730,40 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 
 ## USB bring-up（M1：DWC3 + xHCI，High-Speed）
 
+### 当前快照（最新一轮之后，从这里继续）
+
+**已彻底排除的假设（不要再查）**：
+
+- **`clkout_ctl`（usb2phy GRF `+0x0000` bit0）不是根因。** 参考板（USB 正常工作）上
+  该位也读 0。Linux 只在消费者 prepare `usb480m_phyN` 时才 lazy 打开它；我们已在
+  `drivers/drv/phy/src/usb2phy.rs` 把它做成真实时钟 ops（`Usb2Phy480mOps::prepare`
+  写位 + 等 1.25 ms），EHCI 一 prepare 它就开、dwc3 不消费则不开 —— 与 Linux 逐位
+  一致。行为不变，**已证明无关**。
+- **GRF 读回一致性**：同一物理地址两个 IoMap 句柄给出不同值是"读后写/另一驱动再写"
+  的时序错觉，不是映射别名。自洽性测试（同一 handle 写后立读）通过。
+
+**当前卡点（两条路都卡在"检测到设备但无法完成事务"）**：
+
+1. **EHCI `fc880000`**：`port 1 ccs true`（检测到设备）→ 复位后 `PED` 不置位 →
+   "did not enable after reset"。复位序列已逐字对照 Linux `ehci_hub_control`
+   （`SetPortFeature PORT_RESET` / `GetPortStatus` 里的 `temp |= PORT_RESET; temp &= ~PORT_PE`），
+   无实质差异。
+2. **DWC3/xHCI `fc000000`**：端口复位到 High-Speed（`ped true`）→ `Enable Slot` 成功 →
+   **`Address Device` 超时**（命令不被取走，`device ctx` 全 0）。此时控制器全局寄存器
+   为 `GCTL 0x30c11004 (prtcapdir 1=host)` / `GUSB2PHYCFG 0x00101408` /
+   `GSTS 0x7e800081`（`BUS_ERR_ADDR_VLD` 置位但 `GBUSERRADDR=0`）。
+
+**下一个最可疑的差异（尚未验证，优先级最高）**：
+
+- **`utmi_bvalid`（OTG block `+0xc0` bit6）**：参考板 = 1，我们 = 0。参考板的 dwc3
+  `usb2-phy@0/otg-port` 节点带 `rockchip,typec-vbus-det` 标记（vendor linux-jr 树消费它
+  选 VBUS 检测源），我们的 PHY init 没有对应的 VBUS-valid 路径。若 USB3 OTG 口的
+  VBUS-valid 没起来，`Address Device` 要的第一次 SETUP 就发不出去 —— 与超时症状吻合。
+  查 vendor `phy-rockchip-inno-usb2.c` 里 `typec_vbus_det` 影响的 GRF 写。
+- **`usbdp_phy0_u3`（usb3-phy）从未初始化**：dwc3 `phys=<&u2phy0_otg>,<&usbdp_phy0_u3>`，
+  我们只 acquire 了 usb2-phy。usbdp-phy 是 1666 行的 `phy-rockchip-usbdp.c`，若它的
+  pipe/电源没起，OTG 口的一部分可能缺。
+
 ### 已落地
 
 - `drivers/bus/usb`（package `usb`）：描述符线格式、`Hcd` 传输契约、枚举状态机

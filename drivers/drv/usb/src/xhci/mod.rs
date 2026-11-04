@@ -992,6 +992,42 @@ impl Xhci {
         })
     }
 
+    /// Dump the controller-side view when `Address Device` times out: whether
+    /// the device context got written (a filled one means the command ran and
+    /// only its completion went missing) and the DWC3 globals that decide
+    /// whether the core can talk to a device at all.
+    fn dump_address_device_failure(&self, slot_index: usize, err: KError) {
+        let dwords = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        let mut line = alloc::string::String::new();
+        for index in 0..10 {
+            let cell = dwords.wrapping_add(index);
+            // SAFETY: `index` stays inside the device context allocation.
+            let value = unsafe { core::ptr::read_volatile(cell) };
+            line.push_str(&alloc::format!(" {index}={value:#x}"));
+        }
+        log::error!("xhci: address device {err:?}; device ctx:{line}");
+        let gctl = self.bar.read32(crate::dwc3::regs::GCTL);
+        let gusb2 = self.bar.read32(crate::dwc3::regs::GUSB2PHYCFG);
+        let gsts = self.bar.read32(crate::dwc3::regs::GSTS);
+        // GSTS.BUS_ERR_ADDR_VLD (bit 4) means the core recorded a bus fault;
+        // GBUSERRADDR then names the address it faulted on.
+        let (err_lo, err_hi) = if gsts & (1 << 4) != 0 {
+            (
+                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x30),
+                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x34),
+            )
+        } else {
+            (0, 0)
+        };
+        log::error!(
+            "xhci: dwc3 globals at timeout: GCTL {gctl:#010x} (prtcapdir {}) GUSB2PHYCFG \
+             {gusb2:#010x} GSTS {gsts:#010x} bus_err_addr {:#x}{:08x}",
+            (gctl >> 12) & 0x3,
+            err_hi,
+            err_lo,
+        );
+    }
+
     /// `Address Device`: hands the controller the slot and EP0 contexts, which
     /// is what gives the device its USB address.
     fn address_device(
@@ -1082,18 +1118,7 @@ impl Xhci {
         match self.command(trb, "address device") {
             Ok(_) => {}
             Err(err) => {
-                // Did the controller write the device context? A filled context
-                // means the command ran and only its completion went missing; a
-                // zeroed one means it never started.
-                let dwords = self.slots[slot_index].device.as_ptr().cast::<u32>();
-                let mut line = alloc::string::String::new();
-                for index in 0..10 {
-                    let cell = dwords.wrapping_add(index);
-                    // SAFETY: `index` stays inside the device context allocation.
-                    let value = unsafe { core::ptr::read_volatile(cell) };
-                    line.push_str(&alloc::format!(" {index}={value:#x}"));
-                }
-                log::error!("xhci: address device {err:?}; device ctx:{line}");
+                self.dump_address_device_failure(slot_index, err);
                 // Fallback: the port reports High-Speed, but the same device read as
                 // low-speed on EHCI (line state K). A wrong speed in the slot context
                 // makes the controller address it with signalling the device cannot

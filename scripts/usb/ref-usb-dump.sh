@@ -89,9 +89,23 @@ row "gpio3_ext_port" 0xfec40070
 echo
 echo "== USB2 PHY blocks (phy_sus bit lives at block+0x0c bit11 for usb3 pairs)"
 row "usb2phy usb3_0 +0x00" 0xfd5d0000
+row "usb2phy usb3_0 +0x04" 0xfd5d0004
+row "usb2phy usb3_0 +0x08" 0xfd5d0008
 row "usb2phy usb3_0 +0x0c" 0xfd5d000c
+row "usb2phy usb3_0 +0x80" 0xfd5d0080
+row "usb2phy usb3_0 +0x84" 0xfd5d0084
 row "usb2phy usb3_1 +0x00" 0xfd5d4000
+row "usb2phy usb3_1 +0x04" 0xfd5d4004
+row "usb2phy usb3_1 +0x08" 0xfd5d4008
 row "usb2phy usb3_1 +0x0c" 0xfd5d400c
+row "usb2phy usb3_1 +0x80" 0xfd5d4080
+row "usb2phy usb3_1 +0x84" 0xfd5d4084
+echo
+echo "== USB2 HOST PHY blocks (clkout_ctl at +0x0000 bit0; phy_sus at +0x08 bit2)"
+row "usb2phy usb2_0 +0x00" 0xfd5d8000
+row "usb2phy usb2_0 +0x08" 0xfd5d8008
+row "usb2phy usb2_1 +0x00" 0xfd5dc000
+row "usb2phy usb2_1 +0x08" 0xfd5dc008
 echo
 echo "== DWC3: xHCI capability word @base, GSNPSID @base+0xc100"
 row "fc000000 caplen/ver" 0xfc000000
