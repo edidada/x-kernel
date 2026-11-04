@@ -232,6 +232,56 @@ struct Slot {
 /// "The register reads back zero" has two very different causes -- the write was
 /// dropped, or it landed somewhere else because the offset is wrong -- and only a
 /// search for the value tells them apart.
+/// Takes the controller over from the firmware's legacy (SMI) interface.
+///
+/// xHCI 7.1: the USB Legacy Support extended capability carries a BIOS/OS
+/// ownership semaphore. While the firmware still owns the controller it keeps
+/// running in its legacy mode, where commands such as `Enable Slot` are refused
+/// with a TRB error even though the ring is fine and a No-Op still completes.
+/// Both working implementations on this board hand it over first (Linux in
+/// `quirk_usb_handoff_xhci`, tgoskits in its `legacy_init`).
+fn claim_legacy_ownership(bar: &IoMap, hccparams1: u32) {
+    let mut offset = (((hccparams1 >> 16) & 0xffff) as usize) * 4;
+    if offset == 0 || offset >= 0x1000 {
+        info!("xhci: no extended capability list to hand off");
+        return;
+    }
+    loop {
+        let header = bar.read32(offset);
+        let id = header & 0xff;
+        let next = (((header >> 8) & 0xff) as usize) * 4;
+        if id == 1 {
+            let legsup = bar.read32(offset);
+            let bios_owned = legsup & (1 << 16) != 0;
+            info!(
+                "xhci: legacy support at {offset:#x}: legsup {legsup:#010x} (bios_owned \
+                 {bios_owned})",
+            );
+            if bios_owned {
+                bar.write32(offset, legsup | (1 << 24));
+                for _ in 0..100_000 {
+                    if bar.read32(offset) & (1 << 16) == 0 {
+                        break;
+                    }
+                    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+                }
+                info!("xhci: legacy claimed, legsup {:#010x}", bar.read32(offset));
+            }
+            bar.write32(offset + 4, 0);
+            info!(
+                "xhci: legacy SMI control cleared ({:#010x})",
+                bar.read32(offset + 4)
+            );
+            return;
+        }
+        if next == 0 || offset + next >= 0x1000 {
+            break;
+        }
+        offset += next;
+    }
+    info!("xhci: no legacy support capability found");
+}
+
 /// 64-bit register write in the order the DWC3 wrapper requires.
 ///
 /// Linux hands its xHCI platform device the `write-64-hi-lo-quirk`, i.e. on this
@@ -359,6 +409,7 @@ impl Xhci {
         let doorbell = db_offset as usize;
 
         reset_controller(&bar, operational, max_slots);
+        claim_legacy_ownership(&bar, hccparams1);
         // RTSOFF points at MFINDEX; interrupter 0's register set starts 0x20
         // into the runtime block. Writing ERSTSZ/ERSTBA/ERDP at RTSOFF+0x08.. is
         // writing into a reserved hole, which is why those registers never held
