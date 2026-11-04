@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
     backend::{
         allocator::{Allocator, Buffer as AllocBuffer, Fourcc, Modifier, dumb::DumbAllocator},
@@ -36,7 +37,14 @@ use smithay::{
         compositor::{CompositorClientState, CompositorHandler, CompositorState, get_parent, with_states},
         output::{OutputHandler, OutputManagerState},
 
-        shell::xdg::{ToplevelSurface, XdgShellHandler, XdgShellState},
+        selection::{
+            SelectionHandler,
+            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
+        },
+        shell::xdg::{
+            ToplevelSurface, XdgShellHandler, XdgShellState,
+            decoration::{XdgDecorationHandler, XdgDecorationState},
+        },
         shm::{ShmHandler, ShmState, with_buffer_contents},
         socket::ListeningSocketSource,
     },
@@ -60,6 +68,8 @@ struct State {
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
     output_manager_state: OutputManagerState,
+    data_device_state: DataDeviceState,
+    xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<State>,
     seat: Seat<State>,
     surface: smithay::backend::drm::DrmSurface,
@@ -205,6 +215,40 @@ impl SeatHandler for State {
 
 impl OutputHandler for State {}
 
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {}
+
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        self.request_mode(toplevel, DecorationMode::ClientSide);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        // The compositor draws no decorations, so always agree on client-side.
+        let mode = if mode == DecorationMode::ServerSide {
+            DecorationMode::ClientSide
+        } else {
+            mode
+        };
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, _toplevel: ToplevelSurface) {}
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -271,6 +315,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let xdg_shell_state = XdgShellState::new::<State>(&display_handle);
     let shm_state = ShmState::new::<State>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&display_handle);
+    let data_device_state = DataDeviceState::new::<State>(&display_handle);
+    let xdg_decoration_state = XdgDecorationState::new::<State>(&display_handle);
     let mut seat_state = SeatState::new();
     let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
     seat.add_keyboard(Default::default(), 200, 25)?;
@@ -329,6 +375,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         xdg_shell_state,
         shm_state,
         output_manager_state,
+        data_device_state,
+        xdg_decoration_state,
         seat_state,
         seat,
         surface,
@@ -464,3 +512,5 @@ smithay::delegate_xdg_shell!(State);
 smithay::delegate_shm!(State);
 smithay::delegate_seat!(State);
 smithay::delegate_output!(State);
+smithay::delegate_data_device!(State);
+smithay::delegate_xdg_decoration!(State);
