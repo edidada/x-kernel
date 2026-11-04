@@ -117,7 +117,6 @@ impl DeviceDomain {
                 DeviceState::Removed => return Err(RuntimeError::BadState),
             }
             entry.lifecycle.state = DeviceState::Removing;
-            entry.lifecycle.generation += 1;
             entry.probe.last_deferred_dep = None;
             if unregister {
                 entry.core.mark_offline();

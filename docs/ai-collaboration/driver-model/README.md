@@ -6,7 +6,9 @@
 见 [问题台账与分批计划](rng-review-remediation-plan.md)：先精简 probe 提交机制，
 再补诊断/统计、整理命名，最后补完 transport 分层设计再开发。
 缺的是 transport 驱动的注册与子设备管理层，不是已有 vendor MmioTransport。
-完整平台迁移仍不自动恢复；下一项是 M-01，目前尚未修改生产代码。
+完整平台迁移仍不自动恢复。M-01 已完成：删除生命周期版本及过期提交回收，
+保留设备管理锁及身份/状态不变量。model+kdriver QEMU 验收 162/0/5，UT clippy
+与格式检查通过，两路评审完成；详见计划末尾验收记录。下一项是 M-02/M-03。
 
 ## 平台 / VirtIO-MMIO 枚举迁移（暂停，保留设计稿）
 

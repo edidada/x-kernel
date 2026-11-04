@@ -18,7 +18,7 @@
 | 编号 | 问题 | 分类 / 处理 |
 |---|---|---|
 | M-00 | 跨驱动 MatchScore、同分后注册优先 | 已修复：`7f9798126`；保留在待整理 PR 的验收材料中 |
-| M-01 | 管理锁之外仍用生命周期 generation 判定 probe 提交失效 | 当前机制精简，第一批 |
+| M-01 | 管理锁之外仍用生命周期 generation 判定 probe 提交失效 | 第一批已实现并验证，见下方验收记录 |
 | M-02 | Fatal probe 丢弃具体错误，注册成功但未绑定时缺少原因 | 当前诊断缺口，第二批 |
 | M-03 | 发现统计只覆盖旧路径却使用总量语义的名称/日志 | 当前诊断口径，第二批 |
 | M-04 | remove/Active/online 等名称与实际注册、绑定语义混淆 | 命名整理，第三批；具体名字先确认 |
@@ -105,5 +105,33 @@ transport 负责物理资源、协议识别及 child 注册/退出；功能驱�
 
 ## 7. 当前下一步
 
-先执行第一批 M-01，完成后自审与验收并单独提交。M-06 不遗忘，但不抢跑未完成
+第一批 M-01 已完成，下一步第二批 M-02/M-03。M-06 不遗忘，但不抢跑未完成
 的所有权设计。M-07/M-08 先明确支持范围，不新增无消费者的完整动态框架。
+
+## 8. M-01 验收记录
+
+- 基线 `51fdb4760`；删除生命周期 generation、过期提交回收及人工修改版本的
+  测试；保留管理锁、身份/Probing/空绑定不变量、依赖及注册表变化检查。
+- 新 model 测试在 probe 内调用真实 bind/unbind/remove 入口，验证同任务重入
+  被拒绝而成功 Data 正常提交；随后解绑/重绑/注销验证 remove-before-drop。
+- 新 host 测试阻塞 probe，确认另一任务 unbind 等待；开 gate 后无条件 join，
+  再重绑/清理/断言。等待任务的异常停滞交由外部 watchdog 判失败，不提前返回。
+- 原有 host probe/注销交错、并行设备推进、初始化失败回滚及清理一次性测试
+  也在本轮执行；规范和需求两路评审完成，收尾问题已修正并复核。
+
+验证配置为 AArch64 canonical qemu_defconfig，先 `make defconfig`；独立 worktree
+与 disk，SMP4，无网络/vsock，非性能测量。执行：
+
+```sh
+timeout 600 make unittest UNITTEST_CRATE=driver_model,kdriver XKMAKE_ARGS='--no-net --no-vsock'
+timeout 600 make clippy UNITTEST=y
+```
+
+最终 162 passed / 0 failed / 5 ignored，coverage 持久化并导出成功；UT clippy、
+修改文件 nightly-2026-03-08 rustfmt 和 diff 检查通过。忽略项是单独 opt-in 的
+真实 MMIO 专项及 MMIO 启动断言，不计为本轮通过；不声称重跑完整硬件验收。
+
+首轮运行暴露上一轮顺序匹配修改遗漏的 hwrng 重绑测试：它仍假定后注册 B
+自动赢过 A。测试现让 A 显式拒绝后续 probe，由 B 按顺序接管；不改变生产匹配
+策略，单独提交该测试修正。初次失败保留在 `.scratch/driver-model-review-m01/ut.log`，
+最终结果在同目录 `ut-final.log`，lint 在 `clippy-ut.log`，配置在 `config.log`。

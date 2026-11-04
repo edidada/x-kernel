@@ -320,7 +320,6 @@ impl DeviceDomain {
                     core: core.clone(),
                     lifecycle: LifecycleState {
                         state: DeviceState::Pending,
-                        generation: 0,
                     },
                     binding: BindingState {
                         driver: None,

@@ -147,7 +147,7 @@ UT 验证未配置时宿主调用次数为零，配置后保留地址转换和�
 | 边界 | 谁在外面 | 本 crate 假设什么 |
 |---|---|---|
 | 固件 → 描述符 | DT / ACPI / PCI 配置空间（`driver-init`、`bus/pci`、`firmware/of` 转换后交给 `add_device`） | **半可信**：地址、大小、中断号、compatible 字符串都可能与真实硬件不符或被篡改。本 crate 只做结构校验，不做"这段物理地址真的是 MMIO"的判断——那是 `driver-host` + `memspace` 的职责 |
-| `DriverOps` 实现 → 域 | `drv/**` 里的驱动 | **可信内核代码**。域不防御驱动的错误，但把驱动能造成的破坏限制在"这一个设备"内（generation 守卫、独占移除声明） |
+| `DriverOps` 实现 → 域 | `drv/**` 里的驱动 | **可信内核代码**。设备管理锁串行化同设备管理并拒绝同任务重入；不宣称能隔离任意错误驱动造成的破坏 |
 | `DeviceServices` 实现 → 域 | `driver-host::Host` 或测试 mock | **可信**。契约要求返回的 guard 携带正确的 `ReleaseHook` |
 | 驱动 → provider 注册表 | `env.provide::<C>(key, lookup)`（经 `ProviderServices`） | 半可信输入：`key` 与 lookup 自称的 id 必须一致（`Host` 校验，不一致返回 `Invalid`）；重复 key 返回 `AlreadyExists`，不覆盖已有 provider |
 | 驱动 → 类发布 | `dev.publish(&CLASS, …)` → `Registration` | **可信**；返回的所有者存进 `Data`（drop 即撤销），`InUse` 计数保证 class 侧 teardown 不在在途操作下运行；consumer 拿到的是无撤销权限的 Publication |
@@ -198,8 +198,9 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
    `data.downcast_mut::<P::Data>()` 失败会 panic（带 `CG-021` 例外说明），
    而它不可能失败：域只把 binding 的 `Data` 交回**创建它的那个** `RegisteredDriver`
    （`entry.binding.driver` 与 `entry.binding.data` 在同一把锁下同时写入）。
-4. **陈旧 probe 结果不会落进 entry**。管理锁串行化同设备绑定操作，提交仍检查
-   generation 与 Probing 状态；无法提交时调用 remove 再 drop Data。
+4. **probe 与 teardown 不能在同设备上交错提交**。管理锁覆盖匹配、probe 到
+   绑定提交，注销/解绑必须等待；同任务重入在入口拒绝。成功提交检查对象、
+   Probing 状态及空绑定这些内部不变量，不维护额外生命周期版本或过期回收。
 5. **`DeviceState` 的迁移只在域锁内发生**；管理锁覆盖同设备 teardown、
    Data 析构和 entry 删除，防止并发调用重复清理。
 
@@ -226,7 +227,7 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
 | T-01 | 固件给出一个 `MmioRegion`，其 `base+size` 覆盖内核自身映射；驱动 `iomap` 后写寄存器 → 破坏内核内存 | 高 | 被篡改的 DT / ACPI，或固件描述与真实硬件不符 | **已实现**：driver-os-api 只按 `region.size` 做访问边界检查，不判断物理地址合法性；映射由 `driver-host` 经 `memspace` 建立，`memspace` 拥有物理地址空间的分配与重叠检测。**残余风险**：若 `memspace` 允许映射一段与内核镜像重叠的物理地址，本层无法发现。加固建议在 `driver-host`/`memspace` 侧拒绝已知保留区 |
 | T-02 | 驱动用超出实际寄存器窗口的 `offset` 访问 `IoMap` | 高 | 驱动 bug 或转写错误 | **已实现**：`access_ptr` 用 `checked_add` 防溢出 + `assert!(end <= region.size)`，越界立即 panic 而不是静默访问相邻寄存器 |
 | T-03 | 驱动以未对齐 offset 做 `read32`/`write64` | 高 | 转写 Linux 驱动时把寄存器偏移算错 | **已实现**：`access_ptr` 总是检查 `is_multiple_of(size)`，不满足即 panic。旧模型此处是 `debug_assert`（release = UB），本 crate 已修正 |
-| T-04 | probe 结果在 teardown 后提交，造成绑定资源归属错误 | 高 | 同设备绑定与注销竞争 | **已实现**：每设备管理锁串行化；提交另校验 generation 与 Probing 状态，未提交 Data 先 remove 再 drop |
+| T-04 | probe 结果在 teardown 后提交，造成绑定资源归属错误 | 高 | 同设备绑定与注销竞争 | **已实现**：每设备管理锁覆盖 probe 与提交，解绑/注销等待；同任务重入拒绝；提交检查对象、状态与空绑定不变量 |
 | T-05 | 同一设备被两条路径同时移除，teardown 跑两遍 | 中 | 热插拔事件与手动移除竞争 | **已实现**：管理锁使竞争者等待；entry 删除后同域重复注销返回 Ok，不重复 remove/Data drop；同任务重入在回调前拒绝 |
 | T-06 | 父设备先于子设备释放硬件，子设备仍访问它 | 高 | 控制器退出而下游仍活动 | **当前边界**：模型只注销本设备，Removing/删除状态阻止新成员挂载；总线负责停止枚举、下游退出与锁序。没有自动 parent/bridge 递归；测试控制器覆盖父服务保活和枚举交错，但不证明真实硬件退出安全 |
 | T-07 | provider 在"驱动检查依赖"与"域记录 Deferred"之间注册，唤醒丢失，设备永久 parked | 中 | 启动期时钟 provider 与消费者并发探测 | **已实现**：`dep_generations` 对每个 `DepSource` 计数，**即使无设备 parked 也自增**；提交 Deferred 时发现 generation 前进就重新入队。测试注入 `mid_check_hook` 精确复现该窗口 |
@@ -246,7 +247,7 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
 | F-05 | MMIO 访问越界 / 未对齐 | 驱动偏移算错 | **panic** | 内核 panic（`panic = "abort"` 配置下即停机） | 2 | 刻意选择 panic 而不是 UB 或静默截断；panic 消息带 vaddr、offset、要求对齐 |
 | F-06 | 管理入口拒绝 | 非可睡眠上下文或同任务重入 | 回调不执行、绑定与注册不改变 | 调用方获得入口错误 | 3 | RuntimeError::Management 保留 InvalidContext/Reentrant；批量探测计入 rejected 并重新入队 |
 | F-07 | `Data` downcast 失败 | 域把 binding 交给了错误的驱动（只能是本 crate 的逻辑 bug） | **panic** | 停机 | 1 | 不变量 3 保证不可达；panic 优于把 `Data` 当错误类型解释（那会是类型混淆） |
-| F-08 | probe 结果无法提交 | generation 或状态不满足提交条件 | remove 后 drop 未提交 Data | 返回 BadState，不覆盖 entry | 3 | 管理锁与提交守卫，见 T-04 |
+| F-08 | 同设备 probe 期间请求解绑/注销 | 合法跨任务竞争或同任务重入 | 跨任务等待 probe 提交后再清理，同任务返回 Reentrant | 不撤销正在执行的 probe；无未提交结果回收协议 | 3 | 设备管理锁，见 T-04 |
 | F-09 | 固件节点 id 空间耗尽 | 畸形 DT（>4G 节点，实际不可能） | 后续 DT 设备不再枚举 | 已枚举的设备正常工作 | 4 | compose 侧 `next_firmware_node_id()` 拒绝并 `log::error` 一次，不回绕 |
 
 ## 故障管理
@@ -313,7 +314,7 @@ model 的测试 mock 仍使用 unsafe 构造测试映射，不代表生产宿主
       延迟 `hooks.unpublish`？
 - [ ] 新增的 guard 是否 `take()` 掉 `ReleaseHook`（保证至多释放一次）？
 - [ ] 新的 `DeviceState` 迁移是否在所有并发入口（probe 提交、unbind/remove、
-      wake）下都被考虑？是否需要 bump `generation`？
+      wake）下都被考虑？调度是否只改变允许的非 Probing 状态，管理是否持设备锁？
 - [ ] 新的失败模式是 `Deferred` 还是 `Fatal`？分类错了会导致设备永久 parked
       或过早 `Unclaimed`。
 - [ ] 新的 `unsafe` 是否有紧邻的 `SAFETY:` 说明，并写清哪个 safe 入口保证不变量？

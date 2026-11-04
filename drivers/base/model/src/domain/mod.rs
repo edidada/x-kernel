@@ -18,7 +18,7 @@
 //! * [`registry`] — device/driver/bus-instance registries: entry types,
 //!   the per-entry state domains, validation, snapshots, topology links.
 //! * [`probe`] — the probe engine: batch selection, out-of-lock driver
-//!   execution, generation-guarded commits.
+//!   execution and binding commits under the device management lock.
 //! * [`dependency`] — the deferred-probe waiter: parking, wake (with the
 //!   late-provider resweep), the lost-wakeup generation guard.
 //! * [`lifecycle`] — per-device unbind and unregister; downstream ownership
@@ -338,8 +338,6 @@ struct DeviceEntry {
 /// Lifecycle state domain of [`DeviceEntry`].
 struct LifecycleState {
     state: DeviceState,
-    /// Bumped on teardown; successful probe results are checked before commit.
-    generation: u64,
 }
 
 /// Binding state domain of [`DeviceEntry`].

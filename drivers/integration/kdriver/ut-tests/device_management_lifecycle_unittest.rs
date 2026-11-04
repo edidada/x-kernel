@@ -988,6 +988,67 @@ fn unregister_waits_for_same_device_probe_then_drops_data_once() {
 }
 
 #[def_test(serial)]
+fn unbind_waits_for_same_device_probe_and_preserves_registration() {
+    let fixture = Fixture::new().unwrap();
+    let gate = ProbeGate::install(fixture.observations.clone());
+    let registration = RegistrationTask::spawn(fixture.domain.clone(), fixture.descriptor(1));
+    let probe_entered = wait_bounded(|| gate.entered.try_wait());
+    let device = gate.device.lock().clone();
+    let started = Arc::new(Completion::new());
+    let result = Arc::new(Mutex::new(None));
+    let unbinder = device.as_ref().map(|device| {
+        ktask::spawn({
+            let domain = fixture.domain.clone();
+            let device = device.clone();
+            let started = started.clone();
+            let result = result.clone();
+            move || {
+                started.complete();
+                let unbound = domain.unbind_device(&device);
+                *result.lock() = Some(unbound);
+            }
+        })
+    });
+    let unbinder_started = unbinder.is_some() && wait_bounded(|| started.try_wait());
+    let unbinder_blocked = unbinder
+        .as_ref()
+        .is_some_and(|task| wait_bounded(|| task.state() == ktask::TaskState::Blocked));
+    let counts_before_release = fixture.observations.counts();
+    gate.release.complete_all();
+    let registration_exit = registration.task.join();
+    let unbinder_exit = unbinder.as_ref().map(|task| task.join());
+    let gate_released = gate.was_released.load(Ordering::Acquire);
+    drop(gate);
+    let counts_after_unbind = fixture.observations.counts();
+    let state_after_unbind = device
+        .as_ref()
+        .and_then(|device| fixture.domain.snapshot(device))
+        .map(|snapshot| snapshot.state);
+    let is_online = device.as_ref().is_some_and(DeviceRef::is_online);
+    let retained = device.or_else(|| registration.device());
+    let rebound = retained.as_ref().map(|device| {
+        fixture
+            .domain
+            .bind_device(device)
+            .map(|stats| stats.activated)
+    });
+    let cleanup = retained
+        .as_ref()
+        .map(|device| fixture.domain.remove_device(device));
+    assert!(probe_entered && unbinder_started && unbinder_blocked && gate_released);
+    assert_eq!(counts_before_release, (1, 0, 0));
+    assert_eq!(registration_exit, 0);
+    assert_eq!(unbinder_exit, Some(0));
+    assert_eq!(*result.lock(), Some(Ok(())));
+    assert_eq!(counts_after_unbind, (1, 1, 1));
+    assert_eq!(state_after_unbind, Some(DeviceState::Unclaimed));
+    assert!(is_online);
+    assert_eq!(rebound, Some(Ok(1)));
+    assert_eq!(cleanup, Some(Ok(())));
+    assert_eq!(fixture.observations.counts(), (2, 2, 2));
+}
+
+#[def_test(serial)]
 fn explicit_bind_waits_for_same_device_probe_without_probing_twice() {
     let fixture = Fixture::new().unwrap();
     let gate = ProbeGate::install(fixture.observations.clone());

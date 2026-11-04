@@ -24,9 +24,9 @@ A 解绑后换到 B，设备当前关联为 B，而旧发布仍解释为 A。同
 provider，不把旧消费者转接新 runtime。来源 online 仅表示设备注册，不是操作许可。
 
 probe 失败由驱动先停运行活动并显式注销已发布能力，再释放资源、返回错误；
-模型不会对失败 probe 调 remove。成功 probe 若提交校验失败，模型先调用 remove
-再销毁返回的 Data，已有 generation 失配 UT 覆盖这个防御分支。正常管理锁串行下
-它不是一个可自然制造的并发卸载窗口，不新增公共故障注入接口。
+模型不会对失败 probe 调 remove。成功 probe 在同一设备管理锁内提交，解绑和
+注销不能令其结果过期；提交时只检查内部身份/状态/空绑定不变量。测试通过真实
+管理入口验证同任务重入被拒绝，以及跨任务解绑/注销等待 probe 完成后清理。
 
 kdriver 外置测试组合模型与 hwrng，使用真实管理锁和 RngDrain、模拟运行对象/资源，
 验证发布前后失败、A/B 与同驱动重绑、多设备隔离、身份不保活 ops、最后引用
@@ -241,7 +241,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/error.rs` | OS 能力错误到 RuntimeError / ProbeError 的转换，ServiceError 转换位于 services.rs |
 | `src/domain/mod.rs` | `DeviceId` 管理键与 `DeviceDomain` 门面：域身份、短状态锁、entry 的四个状态域、`global_domain()`（组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
-| `src/domain/probe.rs` | 探测引擎：批选择、锁外执行、generation 守卫的提交 |
+| `src/domain/probe.rs` | 探测引擎：批选择、域锁外执行、设备管理锁内提交 |
 | `src/domain/dependency.rs` | deferred 等待器：park、精确 wake（含 late-provider 重扫）、丢唤醒 generation 守卫 |
 | `src/domain/lifecycle.rs` | 每设备管理入口、解绑与注销、锁外 Data visitor；teardown 为 `remove()` → drop `Data`，不自动处理下游设备 |
 | `ut-tests/domain.rs` | 模型单测（`MockServices` 上运行），含 `env.provide` provider 门与 defer/wake 链路 |
@@ -262,14 +262,14 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
     registry      probe          dependency        lifecycle
    （三张表 +    （队列分派 →    （park / wake /   （设备管理锁 →
     entry 的      锁外匹配执行 →   generation 守卫   unbind / remove
-    四个状态域）   守卫式提交）     / late provider）  → teardown）
+    四个状态域）   管理锁内提交）     / late provider）  → teardown）
 
     DomainInner { bus_instances, drivers, devices, sched, services,
                   next_device_id, next_driver_key }
 
     DeviceEntry { core          ← Arc<DeviceCore>：描述符 + 身份 + management + domain
                   services      ← 注册时选定的宿主 bundle
-                  lifecycle     ← 状态机 + generation
+                  lifecycle     ← 状态机
                   binding       ← driver / Data / attempted
                   topology      ← children
                   probe         ← last_deferred_dep / dep_seen_generations }
@@ -429,12 +429,13 @@ Pending / Deferred / Unclaimed / Active
 1. 在域短锁内取走 `sched.pending` 并取得设备引用，随后逐设备进入管理锁。
    没有全局 probe 标志；并发分派者可处理不同设备，同一设备仍串行。
 2. 核对注册对象与 Pending 状态，快照驱动列表、attempted、注册时的 services
-   及 generation。域锁外 matching 选择未永久失败且得分最高的驱动。
+   及驱动注册表版本。域锁外 matching 按注册顺序选择本轮未失败的首个匹配驱动。
 3. 重新持域锁置 Probing；无候选且驱动注册表未变化时置 Unclaimed，
    若注册表有变化则重新入队。probe 在域锁外使用该 entry 的宿主 bundle。
-4. 提交时校验 generation 与 Probing 状态：成功转 Active；未能提交的 Data
-   先经 driver.remove 再 drop，并返回 BadState；Deferred 进入依赖等待，
-   Fatal 记入 attempted 并重新入队以尝试其他候选。
+4. 管理锁覆盖 probe 到提交：成功时核对同一对象仍为 Probing 且未持有绑定，
+   存入 driver/Data 并转 Active。这些是内部不变量，不存在合法并发 teardown
+   使成功结果过期的分支；不再维护生命周期 generation 或未提交结果回收协议。
+   Deferred 进入依赖等待，Fatal 记入 attempted 并重新入队以尝试其他候选。
 5. 循环至队列为空。管理入口被拒绝的设备计入 `ProbeStats::rejected`，
    本轮结束时仍为 Pending 的对象重新入队，不在同轮无限重试。
 
@@ -452,7 +453,7 @@ Pending / Deferred / Unclaimed / Active
 
 1. 核对域身份，进入设备管理锁，再在域短锁内核对注册对象。注销已完成的
    同域对象返回 Ok；foreign 返回 NotFound。
-2. 置 Removing、增加 generation、取消 pending/deferred，取出 driver/Data
+2. 置 Removing、取消 pending/deferred，取出 driver/Data
    与 entry.services。只有注销关闭来源；普通 unbind 保持 online。
 3. 域锁外运行 `DriverOps::remove`，然后 drop Data、清空驱动名。
 4. unbind 将状态恢复为 Unclaimed；remove 从父反向列表摘链并删除 entry，
@@ -597,7 +598,7 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 域侧的释放责任：
 
-- probe 结果无法提交 → 使用注册时的 services 调用 remove，再 drop 未提交 Data；
+- probe 返回 Err → 驱动自行完成初始化回滚，框架不会对未返回的 Data 调用 remove；
 - unbind → remove、drop Data、清驱动名、恢复 Unclaimed；
 - 注销 → 关闭来源、清工作表、remove、drop Data、删除 entry；未绑定时无驱动清理。
 

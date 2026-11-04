@@ -116,7 +116,7 @@ impl DeviceDomain {
         stats: &mut ProbeStats,
     ) -> Result<(), RuntimeError> {
         let id = device.core.id.raw();
-        let (drivers, attempted, bus, services, generation, driver_generation) = {
+        let (drivers, attempted, bus, services, driver_generation) = {
             let mut inner = self.inner.lock();
             let entry = inner
                 .devices
@@ -131,7 +131,6 @@ impl DeviceDomain {
                 entry.binding.attempted.clone(),
                 bus_type(&inner.bus_instances, &device.core.desc),
                 entry.services.clone(),
-                entry.lifecycle.generation,
                 inner.next_driver_key,
             );
             inner.sched.pending.retain(|pending| *pending != id);
@@ -162,32 +161,28 @@ impl DeviceDomain {
         };
         match driver.probe(&device.core, services.as_ref()) {
             Ok(data) => {
-                let mut uncommitted = Some(data);
-                {
-                    let mut inner = self.inner.lock();
-                    if let Some(entry) = inner.devices.get_mut(&id)
-                        && entry.lifecycle.generation == generation
-                        && entry.lifecycle.state == DeviceState::Probing
-                    {
-                        entry.binding.driver = Some(driver.clone());
-                        entry.binding.data = uncommitted.take();
-                        entry.lifecycle.state = DeviceState::Active;
-                        stats.activated += 1;
-                    }
-                }
-                if let Some(mut data) = uncommitted {
-                    driver.remove(&device.core, data.as_mut(), services.as_ref());
-                    drop(data);
-                    device.core.clear_driver();
-                    let mut inner = self.inner.lock();
-                    if let Some(entry) = inner.devices.get_mut(&id)
-                        && Arc::ptr_eq(&entry.core, &device.core)
-                        && entry.lifecycle.state == DeviceState::Probing
-                    {
-                        entry.lifecycle.state = DeviceState::Unclaimed;
-                    }
-                    return Err(RuntimeError::BadState);
-                }
+                let mut inner = self.inner.lock();
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the device management lock \
+                              spans probe and commit; unregister/unbind require that lock and \
+                              same-task reentry is rejected; scheduling only changes Pending, \
+                              Deferred or Unclaimed entries, never this Probing registration"
+                )]
+                let entry = inner
+                    .devices
+                    .get_mut(&id)
+                    .filter(|entry| {
+                        Arc::ptr_eq(&entry.core, &device.core)
+                            && entry.lifecycle.state == DeviceState::Probing
+                            && entry.binding.driver.is_none()
+                            && entry.binding.data.is_none()
+                    })
+                    .expect("management lock preserves the unbound probing registration");
+                entry.binding.driver = Some(driver);
+                entry.binding.data = Some(data);
+                entry.lifecycle.state = DeviceState::Active;
+                stats.activated += 1;
             }
             Err(ProbeError::Deferred(dep)) => {
                 device.core.clear_driver();

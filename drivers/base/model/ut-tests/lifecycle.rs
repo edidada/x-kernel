@@ -11,16 +11,13 @@ use super::*;
 
 type Events = Arc<SpinNoPreempt<Vec<&'static str>>>;
 
-/// Synthetic commit-validation failure, not a reachable management race:
-/// the probe deliberately edits the generation while owning management.
 #[def_test]
-fn uncommitted_probe_data_is_removed_before_drop_and_can_bind_again() {
-    struct CommitFailureDriver {
+fn probe_rejects_same_device_management_and_commits_before_teardown() {
+    struct ReentrantProbeDriver {
         domain: alloc::sync::Weak<DeviceDomain>,
-        should_invalidate: Arc<AtomicBool>,
         events: Events,
     }
-    impl DriverOps<PlatformBus> for CommitFailureDriver {
+    impl DriverOps<PlatformBus> for ReentrantProbeDriver {
         type Data = LifecycleData;
 
         fn probe(
@@ -29,16 +26,17 @@ fn uncommitted_probe_data_is_removed_before_drop_and_can_bind_again() {
             _env: &crate::Environment<'_>,
         ) -> Result<Self::Data, ProbeError> {
             self.events.lock().push("probe");
-            if self.should_invalidate.swap(false, Ordering::Relaxed) {
-                let domain = self.domain.upgrade().unwrap();
-                let mut inner = domain.inner.lock();
-                let entry = inner
-                    .devices
-                    .get_mut(&dev.reference().core.id.raw())
-                    .unwrap();
-                core::assert_eq!(entry.lifecycle.state, DeviceState::Probing);
-                entry.lifecycle.generation += 1;
-            }
+            let domain = self.domain.upgrade().unwrap();
+            let device = dev.reference();
+            let rejected = RuntimeError::Management(crate::DeviceManagementError::Reentrant);
+            core::assert_eq!(domain.unbind_device(&device), Err(rejected));
+            core::assert_eq!(domain.remove_device(&device), Err(rejected));
+            core::assert_eq!(domain.bind_device(&device), Err(rejected));
+            core::assert_eq!(
+                domain.snapshot(&device).unwrap().state,
+                DeviceState::Probing
+            );
+            core::assert!(device.is_online());
             Ok(LifecycleData {
                 events: self.events.clone(),
             })
@@ -56,71 +54,36 @@ fn uncommitted_probe_data_is_removed_before_drop_and_can_bind_again() {
 
     let (domain, _services, root) = fresh_domain();
     let domain = Arc::new(domain);
-    let device = domain.add_device(test_descriptor(root)).unwrap();
     let events = Arc::new(SpinNoPreempt::new(Vec::new()));
-    let should_invalidate = Arc::new(AtomicBool::new(true));
-    device
-        .core
-        .management
-        .run_locked(&mut || {
-            core::assert!(domain.register_driver(DriverDesc::new(
-                "commit-failure",
-                IDS,
-                CommitFailureDriver {
-                    domain: Arc::downgrade(&domain),
-                    should_invalidate: should_invalidate.clone(),
-                    events: events.clone(),
-                },
-            )));
-        })
-        .unwrap();
-    assert_eq!(
-        domain.snapshot(&device).unwrap().state,
-        DeviceState::Pending
+    assert!(domain.register_driver(DriverDesc::new(
+        "reentrant-probe",
+        IDS,
+        ReentrantProbeDriver {
+            domain: Arc::downgrade(&domain),
+            events: events.clone(),
+        },
+    )));
+    let device = domain.add_device(test_descriptor(root)).unwrap();
+    assert_eq!(*events.lock(), alloc::vec!["probe"]);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert!(
+        domain
+            .with_data::<LifecycleData, ()>(&device, |_| ())
+            .is_some()
     );
-    assert!(events.lock().is_empty());
-    assert_eq!(
-        domain.probe_pending(),
-        ProbeStats {
-            failed: 1,
-            ..ProbeStats::default()
-        }
-    );
+    domain.unbind_device(&device).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
+    assert!(device.is_online());
     assert_eq!(
         domain.snapshot(&device).unwrap().state,
         DeviceState::Unclaimed
     );
-    assert_eq!(device.driver_name(), None);
-    assert!(
-        domain
-            .with_data::<LifecycleData, ()>(&device, |_| ())
-            .is_none()
-    );
-    assert_eq!(domain.devices().len(), 1);
-    assert_eq!(domain.probe_pending(), ProbeStats::default());
-
-    events.lock().clear();
-    should_invalidate.store(true, Ordering::Relaxed);
-    assert_eq!(domain.bind_device(&device), Err(RuntimeError::BadState));
-    assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
-    assert_eq!(
-        domain.snapshot(&device).unwrap().state,
-        DeviceState::Unclaimed
-    );
-    assert_eq!(device.driver_name(), None);
-    assert!(
-        domain
-            .with_data::<LifecycleData, ()>(&device, |_| ())
-            .is_none()
-    );
-
     events.lock().clear();
     assert_eq!(domain.bind_device(&device).unwrap().activated, 1);
     assert_eq!(*events.lock(), alloc::vec!["probe"]);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
     domain.remove_device(&device).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
+    assert!(!device.is_online());
     assert!(domain.devices().is_empty());
 }
 
