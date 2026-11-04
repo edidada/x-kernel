@@ -1,5 +1,19 @@
 # kdriver — Design
 
+## Discovery statistics during model coexistence
+
+EnumerationContext stages model RNG registrations and legacy descriptors, then
+dispatches both paths outside discovery locks. Its `legacy_registered_count`,
+`legacy_unclaimed_count` and `legacy_unclaimed` describe only legacy kdevice.
+`probe_pending` returns only legacy descriptor activations. Requeued and failed
+descriptors also enter the legacy unclaimed list; it is not a pure no-match count.
+Manager logs explicitly exclude model devices and distinguish descriptor
+activations from the nonnegative increase in legacy active records, which may
+also reflect other registration/removal activity. Neither is a cross-model total.
+Model registration success is not counted as activation. Model probe failures
+are diagnosed by driver-model; staged conversion/registration failures keep their
+existing logs and do not fall back to legacy registration.
+
 ## Native IRQ notification-tail acceptance
 
 The serial SMP tests in `ut-tests/host_irq_smp.rs` and

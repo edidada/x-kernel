@@ -56,6 +56,43 @@ fn selected_mmio_reservation_blocks_aliases_and_drop_allows_retry() {
 }
 
 #[def_test]
+fn staged_model_registration_is_excluded_from_legacy_counts() {
+    let owner = PlatformModel::new();
+    let mut observed = None;
+    khal::firmware::devices::for_each_compatible_view(
+        |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
+        |view| {
+            if observed.is_some() || !view.is_root_child_of("linux,dummy-virt") {
+                return;
+            }
+            let Some(mmio) = view.description().mmio else {
+                return;
+            };
+            let mut context = crate::enumeration::EnumerationContext::new();
+            context.model_owner = owner.clone();
+            context.stage_model_rng(&view);
+            let owns = owner.owns_range(mmio.base, mmio.size);
+            let registered = context.legacy_registered_count();
+            let unclaimed = context.legacy_unclaimed_count();
+            let list_empty = context.legacy_unclaimed().is_empty();
+            drop(context);
+            observed = Some((
+                owns,
+                registered,
+                unclaimed,
+                list_empty,
+                !owner.owns_range(mmio.base, mmio.size),
+                owner.root.lock().is_none(),
+            ));
+        },
+    );
+    let Some(observed) = observed else {
+        return unittest::TestResult::Ignored;
+    };
+    assert_eq!(observed, (true, 0, 0, true, true, true));
+}
+
+#[def_test]
 fn staged_registration_rejects_atomic_context_and_releases_reservation() {
     let owner = PlatformModel::new();
     let mut observed = None;

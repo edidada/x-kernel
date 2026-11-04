@@ -5,8 +5,9 @@
 //! Enumeration context for bus backends.
 //!
 //! Bus backends use [`EnumerationContext`] while emitting discovery-stage
-//! descriptors. Matching/probing is run after enumeration through the current
-//! `kdevice` compatibility bridge.
+//! descriptors. Matching/probing runs after enumeration: staged model RNG
+//! registrations first, then legacy `kdevice` descriptors. Counts and the
+//! unclaimed list describe only the legacy path, not both frameworks.
 
 use alloc::vec::Vec;
 
@@ -147,6 +148,8 @@ impl EnumerationContext {
     /// Requires sleepable task context with all bus-manager and platform
     /// discovery locks released. Model registration can initialize the root,
     /// install native services and synchronously invoke driver callbacks.
+    /// Returns only the number of legacy descriptors activated by this call.
+    /// Model registration success is not a binding-success count.
     pub fn probe_pending(&mut self) -> usize {
         #[cfg(feature = "virtio-rng")]
         for pending in core::mem::take(&mut self.model_pending) {
@@ -178,18 +181,21 @@ impl EnumerationContext {
         activated
     }
 
-    /// Iterate over all enumerated descriptors that were not immediately terminal.
-    pub fn unclaimed(&self) -> &[DeviceDesc] {
+    /// Legacy descriptors requeued, unclaimed or failed during probing.
+    /// Does not include model devices or distinguish those three outcomes.
+    pub fn legacy_unclaimed(&self) -> &[DeviceDesc] {
         &self.unclaimed
     }
 
-    /// Number of descriptors emitted in this enumeration pass.
-    pub fn registered_count(&self) -> usize {
+    /// Legacy descriptor registrations accepted in this enumeration pass.
+    /// Excludes reused MMIO descriptors and all staged model registrations.
+    pub fn legacy_registered_count(&self) -> usize {
         self.registered_count
     }
 
-    /// Number of enumerated descriptors that were not immediately terminal.
-    pub fn unclaimed_count(&self) -> usize {
+    /// Number of entries in the legacy requeued/unclaimed/failed list.
+    /// This is not a count of devices with no matching driver across both models.
+    pub fn legacy_unclaimed_count(&self) -> usize {
         self.unclaimed.len()
     }
 }

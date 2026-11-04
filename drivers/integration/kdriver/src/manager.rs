@@ -46,7 +46,7 @@ impl DeviceManager {
     /// Discover devices on all buses and run driver matching/probing.
     pub fn discover_and_probe(&self) -> EnumerationContext {
         let mut context = EnumerationContext::new();
-        let active_before = active_device_count();
+        let active_before = legacy_active_device_count();
 
         {
             let mut bus_mgr = self.bus_mgr.lock();
@@ -54,13 +54,13 @@ impl DeviceManager {
             bus_mgr.enumerate_all(&mut context);
         }
 
-        let activated_from_desc = context.probe_pending();
+        let legacy_activated_from_desc = context.probe_pending();
 
         log::info!(
-            "Unified discovery: {} descriptor(s) found on bus",
-            context.registered_count()
+            "Legacy discovery: {} descriptor registration(s); model devices excluded",
+            context.legacy_registered_count()
         );
-        for device in context.unclaimed() {
+        for device in context.legacy_unclaimed() {
             log::info!(
                 "  {:?} at {:?} (origin={:?})",
                 device.identity(),
@@ -69,13 +69,14 @@ impl DeviceManager {
             );
         }
 
-        let activated = active_device_count().saturating_sub(active_before);
+        let legacy_active_increase = legacy_active_device_count().saturating_sub(active_before);
 
         log::info!(
-            "Unified probe: {} activated ({} from descriptors), {} unmatched",
-            activated,
-            activated_from_desc,
-            context.unclaimed_count()
+            "Legacy probe: active count increased by {}, {} descriptor activations, {} \
+             requeued/unclaimed/failed; model devices excluded",
+            legacy_active_increase,
+            legacy_activated_from_desc,
+            context.legacy_unclaimed_count()
         );
 
         context
@@ -84,18 +85,19 @@ impl DeviceManager {
     /// Re-scan buses and probe newly discovered devices.
     pub fn rescan(&self) -> EnumerationContext {
         let mut context = EnumerationContext::new();
-        let active_before = active_device_count();
+        let active_before = legacy_active_device_count();
         {
             let mut bus_mgr = self.bus_mgr.lock();
             bus_mgr.rescan_all(&mut context);
         }
-        let activated_from_desc = context.probe_pending();
-        let activated = active_device_count().saturating_sub(active_before);
+        let legacy_activated_from_desc = context.probe_pending();
+        let legacy_active_increase = legacy_active_device_count().saturating_sub(active_before);
         log::info!(
-            "Unified rescan: {} activated ({} from descriptors), {} unmatched",
-            activated,
-            activated_from_desc,
-            context.unclaimed_count()
+            "Legacy rescan: active count increased by {}, {} descriptor activations, {} \
+             requeued/unclaimed/failed; model devices excluded",
+            legacy_active_increase,
+            legacy_activated_from_desc,
+            context.legacy_unclaimed_count()
         );
         context
     }
@@ -164,7 +166,7 @@ pub fn discover_unified() -> EnumerationContext {
     device_manager().discover_and_probe()
 }
 
-fn active_device_count() -> usize {
+fn legacy_active_device_count() -> usize {
     kdevice::device_records_snapshot()
         .into_iter()
         .filter(|record| record.state == kdevice::DeviceState::Active)

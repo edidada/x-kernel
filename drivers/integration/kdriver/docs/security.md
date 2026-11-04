@@ -1,5 +1,12 @@
 # kdriver — Security and Reliability Analysis
 
+## Discovery count scope
+
+Legacy discovery counters do not certify that model RNG devices bound, or that
+all discovered hardware is usable. Logs and accessors mark this scope explicitly;
+the unclaimed list includes requeued and failed descriptors, not only no-match
+devices. Model registration/probe errors retain their separate diagnostics.
+
 ## Synthetic IRQ-tail test boundary
 
 The NativeIrq and concrete RNG SMP fixtures reserve distinct software descriptor

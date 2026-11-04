@@ -19,8 +19,8 @@
 |---|---|---|
 | M-00 | 跨驱动 MatchScore、同分后注册优先 | 已修复：`7f9798126`；保留在待整理 PR 的验收材料中 |
 | M-01 | 管理锁之外仍用生命周期 generation 判定 probe 提交失效 | 第一批已实现并验证，见下方验收记录 |
-| M-02 | Fatal probe 丢弃具体错误，注册成功但未绑定时缺少原因 | 当前诊断缺口，第二批 |
-| M-03 | 发现统计只覆盖旧路径却使用总量语义的名称/日志 | 当前诊断口径，第二批 |
+| M-02 | Fatal probe 丢弃具体错误，注册成功但未绑定时缺少原因 | 第二批已实现并验证，见下方验收记录 |
+| M-03 | 发现统计只覆盖旧路径却使用总量语义的名称/日志 | 第二批已实现并验证，见下方验收记录 |
 | M-04 | remove/Active/online 等名称与实际注册、绑定语义混淆 | 命名整理，第三批；具体名字先确认 |
 | M-05 | attempted 写成永久失败；Removed 只有保留状态；physical_path 被过度类比 DEVPATH | 合同与状态整理，第三批；删除状态前核对消费者 |
 | M-06 | 缺独立的 virtio-mmio transport 驱动与 VirtIO 功能设备层 | 结构性缺口，第四批设计后再开发 |
@@ -105,7 +105,8 @@ transport 负责物理资源、协议识别及 child 注册/退出；功能驱�
 
 ## 7. 当前下一步
 
-第一批 M-01 已完成，下一步第二批 M-02/M-03。M-06 不遗忘，但不抢跑未完成
+第一、二批 M-01～M-03 已完成，下一步第三批 M-04/M-05，具体名字先确认。
+M-06 不遗忘，但不抢跑未完成
 的所有权设计。M-07/M-08 先明确支持范围，不新增无消费者的完整动态框架。
 
 ## 8. M-01 验收记录
@@ -135,3 +136,26 @@ timeout 600 make clippy UNITTEST=y
 自动赢过 A。测试现让 A 显式拒绝后续 probe，由 B 按顺序接管；不改变生产匹配
 策略，单独提交该测试修正。初次失败保留在 `.scratch/driver-model-review-m01/ut.log`，
 最终结果在同目录 `ut-final.log`，lint 在 `clippy-ut.log`，配置在 `config.log`。
+
+## 9. M-02/M-03 验收记录
+
+- 基线 `d6732f7be`；probe 失败记录设备身份、路径、驱动及具体错误。
+  Unsupported 记 debug，其余 RuntimeError 记 warn；不新增错误历史表，
+  不改变注册成功、候选推进、Deferred 或显式重试的语义。
+- 新测试覆盖五类 probe 错误后的注册保留和显式重试；已有无匹配、Deferred、
+  失败后下一候选成功用例一并回归。
+- EnumerationContext 公开统计改为 legacy 前缀，日志明确排除 model，区分
+  旧设备活跃数增长和描述符激活数；未绑定列表明确包含重排队、未认领及失败。
+  新测试验证 model 暂存注册不增加旧统计，取消暂存释放范围预留。
+- 规范与需求两路独立 review 无阻断；修改文件格式及 diff 检查通过。
+
+沿用第一批 AArch64 canonical 配置、独立 disk、SMP4、无网络/vsock，运行同一
+model+kdriver QEMU UT 命令。WARN 与 DEBUG 两种配置均为 164 passed / 0 failed /
+5 ignored，coverage 成功导出。忽略项仍是 opt-in MMIO 专项，不作为硬件验收。
+实际 guest 日志断言确认四类实际错误在两种配置各输出两次，Unsupported 只在
+DEBUG 出现两次；发现日志明确标注 legacy，并实际出现活跃增长 5、描述符激活 4
+的不同结果，未将二者混称总激活数。已恢复 canonical WARN 配置，UT clippy 通过。
+
+证据在 `.scratch/driver-model-review-m02/`：`ut.log`、`ut-debug.log`、
+`log-assertions.log`、`clippy-ut.log`，以及配置生成日志和两份配置快照。
+本批不恢复平台迁移，不新增 model 总量统计或硬件 transport 分层。

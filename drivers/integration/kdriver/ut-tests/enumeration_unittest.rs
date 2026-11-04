@@ -33,7 +33,7 @@ fn test_register_device_creates_descriptor_without_runtime_record() {
 
     let desc = kdevice::find_device_desc(id).unwrap();
     assert_eq!(desc.id(), id);
-    assert_eq!(context.registered_count(), 1);
+    assert_eq!(context.legacy_registered_count(), 1);
     assert_eq!(kdevice::device_records_snapshot().len(), 0);
 }
 
@@ -57,9 +57,9 @@ fn test_probe_pending_requeues_unmatched_descriptor() {
         .unwrap();
 
     assert_eq!(context.probe_pending(), 0);
-    assert_eq!(context.unclaimed_count(), 1);
+    assert_eq!(context.legacy_unclaimed_count(), 1);
     assert_eq!(
-        context.unclaimed()[0].identity(),
+        context.legacy_unclaimed()[0].identity(),
         DeviceIdentity::Platform(PlatformIdentity {
             alias: Some("test-device"),
             firmware_id: None,
@@ -95,11 +95,11 @@ fn mmio_rescan_reuses_descriptor_and_rejects_overlapping_aliases() {
     assert_eq!(rescan.revisit_mmio(0x1000, 0x100), true);
     assert_eq!(rescan.revisit_mmio(0x1200, 0x200), false);
     assert_eq!(rescan.revisit_mmio(0x1000, 0), false);
-    assert_eq!(rescan.registered_count(), 0);
+    assert_eq!(rescan.legacy_registered_count(), 0);
     assert_eq!(rescan.pending.len(), 1);
     assert_eq!(rescan.pending[0].id(), id);
     assert_eq!(kdevice::device_descs_snapshot().len(), 1);
     assert_eq!(rescan.probe_pending(), 0);
-    assert_eq!(rescan.unclaimed_count(), 1);
-    assert_eq!(rescan.unclaimed()[0].id(), id);
+    assert_eq!(rescan.legacy_unclaimed_count(), 1);
+    assert_eq!(rescan.legacy_unclaimed()[0].id(), id);
 }
