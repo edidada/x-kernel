@@ -1057,6 +1057,17 @@ impl Xhci {
             (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
                 | (slot_id << regs::trb::SLOT_SHIFT),
         );
+        // Port and PHY state at the moment of the transaction, not at reset time.
+        let portsc = self
+            .bar
+            .read32(self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE);
+        info!(
+            "xhci: before address device: portsc {portsc:#010x} (ccs {}, ped {}, pls {}, psiv {})",
+            portsc & portsc::CCS != 0,
+            portsc & portsc::PED != 0,
+            (portsc & portsc::PLS_MASK) >> portsc::PLS_SHIFT,
+            (portsc & portsc::PSIV_MASK) >> portsc::PSIV_SHIFT,
+        );
         match self.command(trb, "address device") {
             Ok(_) => {}
             Err(err) => {

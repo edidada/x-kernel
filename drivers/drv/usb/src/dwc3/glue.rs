@@ -153,6 +153,22 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         // Enumerate what is already attached. The controller runs on its own
         // after this, so a device that appears later needs interrupt delivery,
         // which this port does not have yet.
+        // PHY state at the moment the controller first has to talk to the device.
+        for (base, name) in [(0xfd5d_0000_u64, "usb3_0"), (0xfd5d_4000, "usb3_1")] {
+            if let Ok(block) = dev.res().iomap_region(
+                driver_base::MmioRegion::new(base as usize, 0x4000),
+                "usb2phy-before-enum",
+            ) {
+                info!(
+                    "dwc3: before enumeration {name} +0x00 {:#06x} +0x04 {:#06x} +0x08 {:#06x} \
+                     +0x0c {:#06x}",
+                    block.read32(0),
+                    block.read32(0x04),
+                    block.read32(0x08),
+                    block.read32(0x0c),
+                );
+            }
+        }
         let (found, ready) = xhci.enumerate(dev);
         info!("dwc3: enumeration found {found} device(s), {ready} usable");
 
