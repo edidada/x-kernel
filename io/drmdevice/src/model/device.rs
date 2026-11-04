@@ -108,6 +108,14 @@ impl DrmDevice {
         Ok(self.backend()?.info())
     }
 
+    /// Re-reads the visible mode and returns it when the host changed it.
+    ///
+    /// The query paths call this so a host resize (for example a resized QEMU
+    /// window) is visible without a hotplug notification path.
+    pub(crate) fn refresh_info(&self) -> Option<DisplayInfo> {
+        self.backend().ok()?.refresh_info()
+    }
+
     /// Backend capabilities.
     pub(crate) fn caps(&self) -> BackendCaps {
         self.backend.caps()
