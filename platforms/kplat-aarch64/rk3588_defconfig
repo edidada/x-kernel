@@ -33,6 +33,10 @@ KFEAT_DRIVER_CLK_RK3588_CRU=y
 # RK3588 phy providers: the `phys = <&...>` consumers (EHCI/OHCI, DWC3,
 # PCIe RCs) resolve through the kphy registry.
 KFEAT_DRIVER_PHY_USB2PHY=y
+# DWC3's usb3-phy: the USBDP (U3/SuperSpeed + 480M) provider the dwc3 node's
+# `phys` second entry names. Without it the DWC3 OT G port never completes a
+# transaction (connect detection works, SET_ADDRESS times out).
+KFEAT_DRIVER_PHY_USBDP=y
 KFEAT_DRIVER_PHY_COMBPHY=y
 KFEAT_DRIVER_PHY_PCIE3PHY=y
 # RK3588 DesignWare PCIe root-complex host (DBI + iATU, no ECAM).

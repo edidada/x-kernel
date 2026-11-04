@@ -13,6 +13,9 @@ pub mod grf;
 #[cfg(feature = "rk3588-usb2phy")]
 pub mod usb2phy;
 
+#[cfg(feature = "rk3588-usbdp")]
+pub mod usbdp;
+
 #[cfg(feature = "rk3588-combphy")]
 pub mod combphy;
 

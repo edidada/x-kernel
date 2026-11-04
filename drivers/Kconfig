@@ -386,6 +386,17 @@ config KFEAT_DRIVER_PHY_USB2PHY
       consumers resolve. Translation of the pinned inno-usb2 reference
       (host-path subset; OTG/BC11 recorded as gaps).
 
+config KFEAT_DRIVER_PHY_USBDP
+    bool "RK3588 USBDP PHY provider (usb3/DP combophy, USB path)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the DWC3 `usb3-phy` (the U3/SuperSpeed port and its 480M
+      reference path) through the kphy registry, running the PMA init +
+      LCPLL/CDR lock sequence and clearing the U3 port's GRF disable word.
+      Translation of the pinned usbdp-phy reference (USB path only; DP is
+      out of scope on this board).
+
 config KFEAT_DRIVER_PHY_COMBPHY
     bool "RK3588 naneng combo PHY provider"
     depends on KFEAT_CHAR

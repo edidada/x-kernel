@@ -13,6 +13,7 @@ categories = ["os", "no-std"]
 [features]
 default = []
 rk3588-usb2phy = []
+rk3588-usbdp = []
 rk3588-combphy = []
 rk3588-pcie3phy = []
 

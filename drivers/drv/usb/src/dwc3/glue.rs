@@ -115,6 +115,14 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?,
         );
         info!("dwc3: usb2 phy powered");
+        // The USB3 (USBDP) PHY too: it owns the OTG port's U3/480M path, and
+        // its init runs only once a consumer acquires the published u3-port.
+        let usb3 = usb3_phy_of_port(dev)?;
+        phys.push(
+            usb3.init_powered()
+                .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?,
+        );
+        info!("dwc3: usb3 phy powered");
         // Diagnostic: +0x0000 bit0 is the reference's `clkout_ctl` (480 MHz
         // output gate), +0x0c bit11 is `phy_sus`. Both settle whether the
         // PHY is actually feeding the controller.
@@ -479,6 +487,24 @@ fn usb2_phy_of_port(dev: &Device<'_, PlatformBus>) -> Result<driver_base::PhyHan
         spec.cells,
         spec.ncells,
     ))
+}
+
+/// Acquires the USB3 (SuperSpeed / USBDP) PHY the `usb3-phy` entry points at.
+///
+/// Unlike the usb2-phy (whose firmware references the port node and whose
+/// provider binds the parent block), the usbdp provider publishes the
+/// `u3-port` node directly, so no port→block re-resolution is needed — the
+/// spec's phandle IS the published one. Without this PHY the DWC3 OTG port's
+/// SuperSpeed/480M path is never powered, which is exactly how a port that
+/// detects a connect but times out on SET_ADDRESS looks.
+fn usb3_phy_of_port(dev: &Device<'_, PlatformBus>) -> Result<driver_base::PhyHandle, ProbeError> {
+    let spec = dev
+        .res()
+        .map()
+        .phy_by_name("usb3-phy")
+        .ok_or(ProbeError::Fatal(RuntimeError::NotFound))?;
+    info!("dwc3: usb3 phy port {:#x}", spec.provider);
+    dev.res().phy_spec(spec)
 }
 
 /// The n-th clock the parent node lists.

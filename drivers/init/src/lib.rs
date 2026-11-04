@@ -88,6 +88,8 @@ fn level3_drivers() {
     drv_clk::rk3588_cru::register();
     #[cfg(feature = "rk3588-usb2phy")]
     drv_phy::usb2phy::register();
+    #[cfg(feature = "rk3588-usbdp")]
+    drv_phy::usbdp::register();
     #[cfg(feature = "rk3588-combphy")]
     drv_phy::combphy::register();
     #[cfg(feature = "rk3588-pcie3phy")]

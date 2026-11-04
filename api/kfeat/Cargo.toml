@@ -138,6 +138,8 @@ driver_clk_rk3588_cru = ["dep:drv-clk", "drv-clk/rk3588-cru", "driver-init/rk358
 # RK3588 phy providers: usb2 (EHCI/OHCI + dwc3), naneng combphy (PCIe2 +
 # USB3), snps pcie3 (gen3 RCs). Consumers resolve them via `phys = <&...>`.
 driver_phy_usb2phy = ["dep:drv-phy", "drv-phy/rk3588-usb2phy", "driver-init/rk3588-usb2phy"]
+# USBDP PHY (DWC3's usb3-phy, the U3/SuperSpeed port + its 480M path).
+driver_phy_usbdp = ["dep:drv-phy", "drv-phy/rk3588-usbdp", "driver-init/rk3588-usbdp"]
 driver_phy_combphy = ["dep:drv-phy", "drv-phy/rk3588-combphy", "driver-init/rk3588-combphy"]
 driver_phy_pcie3phy = ["dep:drv-phy", "drv-phy/rk3588-pcie3phy", "driver-init/rk3588-pcie3phy"]
 # RK3588 PCIe root complex (DesignWare host): config space via DBI+iATU.
