@@ -115,23 +115,10 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?,
         );
         info!("dwc3: usb2 phy powered");
-        // The PHY's own state decides whether D+ can be detected at all: `phy_sus`
-        // (bit 11 of the block's +0x0c word) asserted means the analog front end
-        // is off, and then no amount of VBUS will produce a connect. A working
-        // board reads 0x215 here, i.e. not suspended.
-        for (base, name) in [(0xfd5d_0000_u64, "usb3_0"), (0xfd5d_4000, "usb3_1")] {
-            if let Ok(block) = dev.res().iomap_region(
-                driver_base::MmioRegion::new(base as usize, 0x4000),
-                "usb2phy-state",
-            ) {
-                info!(
-                    "dwc3: usb2phy {name} +0x00 {:#06x} +0x0c {:#06x} (bit11 suspended {})",
-                    block.read32(0),
-                    block.read32(0x0c),
-                    block.read32(0x0c) & (1 << 11) != 0,
-                );
-            }
-        }
+        // Diagnostic: +0x0000 bit0 is the reference's `clkout_ctl` (480 MHz
+        // output gate), +0x0c bit11 is `phy_sus`. Both settle whether the
+        // PHY is actually feeding the controller.
+        log_usb2phy_state(dev);
 
         // The USB3 port has to be taken out of "disabled" in the USB GRF before
         // the controller can see anything on it: PIPE_ENABLE=1, PHY_DISABLE=0,
@@ -151,31 +138,9 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         xhci.log_ports();
         // Enumerate what is already attached. The controller runs on its own
         // after this, so a device that appears later needs interrupt delivery,
-        // which this port does not have yet.
-        // PHY state at the moment the controller first has to talk to the device.
-        for (base, name) in [(0xfd5d_0000_u64, "usb3_0"), (0xfd5d_4000, "usb3_1")] {
-            if let Ok(block) = dev.res().iomap_region(
-                driver_base::MmioRegion::new(base as usize, 0x4000),
-                "usb2phy-before-enum",
-            ) {
-                let mut tail = alloc::string::String::new();
-                for offset in (0x30..0x100).step_by(2) {
-                    let value = block.read16(offset);
-                    if value != 0 {
-                        tail.push_str(&alloc::format!(" {offset:#04x}={value:#x}"));
-                    }
-                }
-                info!("dwc3: before enumeration {name} tail:{tail}");
-                info!(
-                    "dwc3: before enumeration {name} +0x00 {:#06x} +0x04 {:#06x} +0x08 {:#06x} \
-                     +0x0c {:#06x}",
-                    block.read32(0),
-                    block.read32(0x04),
-                    block.read32(0x08),
-                    block.read32(0x0c),
-                );
-            }
-        }
+        // which this port does not have yet. PHY state at the moment the
+        // controller first has to talk to the device:
+        log_usb2phy_state(dev);
         let (found, ready) = xhci.enumerate(dev);
         info!("dwc3: enumeration found {found} device(s), {ready} usable");
 
@@ -391,6 +356,28 @@ fn mux_pin_to_gpio(dev: &mut Device<'_, PlatformBus>) {
 /// 0xfd5ac000) holds one `USB3OTGn_CFG` word per controller: 0x1c for port 0
 /// (`usb@fc000000`) and 0x34 for port 1 (`usb@fc400000`). The write is the
 /// Rockchip hiword-mask form with data `0x8800`.
+/// One-line-per-block dump of the two usb2phy-grf OTG blocks' key words:
+/// `+0x0000` bit0 = `clkout_ctl` (the PHY's 480 MHz output gate) and
+/// `+0x0c` bit11 = `phy_sus` (suspended when 1). These are the two signals
+/// that decide whether D+ is detectable and whether transactions complete.
+fn log_usb2phy_state(dev: &mut Device<'_, PlatformBus>) {
+    for (base, name) in [(0xfd5d_0000_u64, "usb3_0"), (0xfd5d_4000, "usb3_1")] {
+        if let Ok(block) = dev.res().iomap_region(
+            driver_base::MmioRegion::new(base as usize, 0x4000),
+            "usb2phy-state",
+        ) {
+            let word0 = block.read32(0x0000);
+            let word_c = block.read32(0x000c);
+            info!(
+                "dwc3: usb2phy {name} +0x00 {word0:#06x} (clkout_ctl {}) +0x0c {word_c:#06x} \
+                 (suspended {})",
+                if word0 & 0x1 != 0 { "on" } else { "off" },
+                word_c & (1 << 11) != 0,
+            );
+        }
+    }
+}
+
 fn enable_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
     const USB_GRF: u64 = 0xfd5a_c000;
     const GRF_WINDOW: usize = 0x4000;

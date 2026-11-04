@@ -417,7 +417,7 @@ impl Hcd for Ehci {
 /// Platform glue for the RK3588 EHCI nodes.
 pub mod driver {
     use driver_base::{
-        Device, DriverOps, OfMatch, PlatformBus, PlatformId, ProbeError, RuntimeError,
+        Device, DriverOps, OfMatch, PlatformBus, PlatformId, PoweredPhy, ProbeError, RuntimeError,
     };
     use log::info;
     use usb::Hcd;
@@ -440,6 +440,8 @@ pub mod driver {
         /// controller can detect a connect without them but cannot run its reset
         /// state machine.
         _clocks: alloc::vec::Vec<driver_base::EnabledClock>,
+        /// Powered-on phys, held so power_on's clock reference is not dropped.
+        _phys: alloc::vec::Vec<PoweredPhy>,
     }
 
     impl DriverOps<PlatformBus> for EhciDriver {
@@ -447,6 +449,47 @@ pub mod driver {
 
         fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<EhciData, ProbeError> {
             let regs = dev.res().iomap(0)?;
+            let base = regs.region().base as u64;
+            // The controller's `usb2-phy` port resolves to its block
+            // (0xfd5d8000/0xfd5dc000); acquiring and powering the PHY here is
+            // what turns its 480 MHz reference clock on.
+            let mut phys: alloc::vec::Vec<PoweredPhy> = alloc::vec::Vec::new();
+            if let Some(spec) = dev.res().map().phy_by_name("usb2-phy")
+                && let Some(port) = of::find_node_by_phandle(spec.provider as u32)
+                && let Some(parent_phandle) = port.parent_property_u32("phandle")
+            {
+                let phy = dev.res().phy_spec(driver_base::PhySpec::by_phandle_cells(
+                    u64::from(parent_phandle),
+                    spec.cells,
+                    spec.ncells,
+                ))?;
+                phys.push(
+                    phy.init_powered()
+                        .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?,
+                );
+                info!("ehci: usb2 phy powered");
+            }
+            // Diagnostic: the usb2phy-grf block for this controller starts at
+            // +0x0000 bit0 = `clkout_ctl` (the PHY's 480 MHz output gate).
+            let (grf_base, block_base) = if base == 0xfc800000 {
+                (0xfd5d8000_usize, 0xfd5d8000_usize)
+            } else {
+                (0xfd5dc000_usize, 0xfd5dc000_usize)
+            };
+            if let Ok(block) = dev.res().iomap_region(
+                driver_base::MmioRegion::new(grf_base, 0x4000),
+                "usb2phy-grf",
+            ) {
+                info!(
+                    "ehci: usb2phy {block_base:#x} +0x0000 {:#06x} (clkout_ctl bit0 {})",
+                    block.read32(0),
+                    if block.read32(0) & 0x1 != 0 {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                );
+            }
             let mut clocks = alloc::vec::Vec::new();
             for index in 0..4 {
                 match dev.res().clk_at(index) {
@@ -501,6 +544,7 @@ pub mod driver {
             Ok(EhciData {
                 _ehci: ehci,
                 _clocks: clocks,
+                _phys: phys,
             })
         }
     }
