@@ -16,6 +16,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 
 libc = "0.2"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 tracing = "0.1"
 
 [workspace]
