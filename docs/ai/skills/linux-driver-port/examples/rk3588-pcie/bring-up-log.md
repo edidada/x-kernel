@@ -812,6 +812,41 @@ xhci: port 2 PORTSC 0x2a0 pp true pls 5
 所以 U 盘看不到的唯一原因是 **`vcc5v0-host` 那路 5V 没使能**，而 `vcc5v0-host` 由
 `gpio3.15` 控制，这个 bank 的**寄存器写入被丢弃**（读正常、写无效、重试无效）。
 
+### 寄存器偏移的三次翻车（USB 这条线最贵的教训）
+
+三处"偏移假设错了、而读回值看起来完全正常"，每次都是靠**行为**判据才发现：
+
+| 位置 | 我们以为 | 实际 | 症状 |
+|---|---|---|---|
+| DWC3 全局块 | `GCTL=0xc100`、`GUSB2PHYCFG=0xc140` | `GCTL=0xc110`、`GUSB2PHYCFG=0xc200`、`GHWPARAMS0=0xc140` | 读了 `GSBUSCFG0`/`GHWPARAMS0`（两边同值 → 日志显示"与参考板一致"），**USB2 PHY 从未解除挂起、控制器一直停在外设模式** |
+| xHCI interrupter | `RTSOFF+0x08` | **`RTSOFF+0x20`**（RTSOFF 指向 MFINDEX） | 事件环从未建立 → 完成事件凭空消失 → 每条命令超时 |
+| xHCI `CRCR` | `op+0x18`（未解决） | 待查 | 写不进去 → 控制器取到非法命令 → `Enable Slot` 返回 code 5 (TRB Error) |
+
+`GCTL` 那次的连带错误：因为读的是 `GSBUSCFG0`（值恰好合理），我们把"设置 host 模式"这个**正确**动作当成"多余"删掉了，控制器实际上一直停在 **PrtCapDir=2（外设模式）**，主机口自然永远看不到设备。
+
+### 判据升级：读回值不是证据
+
+这一段的三个阶段，正好是判据的三级台阶：
+
+1. **读回寄存器** —— 一度有效（`CLKGATE_CON42` 从 `0x75` 读到 `0`），但在这块 IP 上会被骗：
+   参考板（USB 正常）的 `ERSTSZ/ERSTBA/ERDP` **也读回 0**，`CRCR` 只回状态位。
+2. **标记值扫描**（写一个花纹值，扫整个窗口找它落在哪）—— 能区分"写丢了"和"写到别处"。
+3. **行为判据**（唯一可靠）：
+   - 事件环内存里是否出现 TRB（本次靠它定位到 interrupter 偏移错误：端口复位成功但环里全 0）
+   - 命令的 completion code（`TimedOut` → `code 5` 说明环通了、命令被判非法）
+   - 设备是否真被识别（`ccs` / `PORTSC` / `psiv`）
+
+### 当前状态（USB）
+
+```
+xhci: port 1 reset, speed high                 ← 设备（鼠标/键鼠）复位到 High-Speed
+event ring[0] p 0x1000000 c 0x8801             ← 控制器在投递 Port Status Change 事件
+xhci: enable slot failed, completion code 5    ← TRB Error：命令环指针 CRCR 没写进去
+```
+
+已通：VBUS（GPIO write-mask）、DWC3 偏移/软复位/host 模式、USB GRF U3、PHY、端口检测、
+端口复位、事件环。**唯一剩余**：`CRCR` 接受命令环地址。
+
 ### 从参考实现补上的一步：USB GRF 的 U3 端口使能
 
 tgoskits（同板已验证的 Rust USB 栈）在 `dwc/grf.rs::enable_u3_port()` 里写

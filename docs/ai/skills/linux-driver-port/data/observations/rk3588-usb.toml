@@ -80,3 +80,37 @@ why = """
 bit11 是 `phy_sus`（1=挂起）。参考板与我们的可用态都是 0x215；若这里是
 0xE15 说明模拟前端还关着，D+ 上拉检测不可能发生 —— 与 VBUS 是两个独立条件。
 """
+
+[[fact]]
+id = "dwc3-global-offsets"
+reg = "0xfc400000 + {0xc100 GSBUSCFG0, 0xc110 GCTL, 0xc118 GSTS, 0xc140 GHWPARAMS0, 0xc200 GUSB2PHYCFG0, 0xc2c0 GUSB3PIPECTL0}"
+rule = "prtcapdir_equals_1_in_gctl"
+why = """
+DWC3 全局块不连续：本 port 曾把 GCTL 写成 0xc100（GSBUSCFG0）、GUSB2PHYCFG 写成 0xc140
+（GHWPARAMS0）。两处读回都是"像样的值"，日志因此显示与参考板一致，而实际上
+USB2 PHY 从未解除挂起（GUSB2PHYCFG 的 SUSPHY 保持复位值）、控制器一直停在
+PrtCapDir=2（外设模式），主机口永远看不到设备。正确值：GCTL(0xc110)[13:12]=1 表示 host。
+"""
+
+[[fact]]
+id = "xhci-interrupter-offset"
+reg = "bar + RTSOFF + 0x20 (interrupter 0: IMAN +0x00, IMOD +0x04, ERSTSZ +0x08, ERSTBA +0x10, ERDP +0x18)"
+rule = "erstsz_equals_1_and_event_ring_receives_trb"
+why = """
+RTSOFF 指向 MFINDEX，主 interrupter 在 +0x20 之后；写 RTSOFF+0x08 是保留洞。
+症状：ERSTSZ/ERSTBA/ERDP 写入无声消失、事件环内存始终全 0、每条命令超时。
+判据不是读回值，而是**事件环内存里出现 TRB**（例如端口复位后应出现
+type=34 Port Status Change）。改成 +0x20 后 `erstsz 0x1 / erstba 0x...` 读回正确，
+环里立刻出现 `c 0x8801` 的事件 TRB。
+"""
+
+[[fact]]
+id = "crrc-not-writable-yet"
+reg = "bar + op + 0x18 (CRCR)"
+rule = "crr_bit_set_after_start"
+why = """
+未解决：所有写形式（64 位整体、先高后低、先低后高、带/不带 RCS、RS 前后）之后读回均为 0，
+标记值在窗口内任何位置都找不到；参考板该寄存器只回状态位（0x8 = CRR），所以读回
+不能作为判据。当前用行为判据观察：Enable Slot 返回 completion code 5 (TRB Error)，
+说明控制器取到了命令但判其非法 —— 命令环指针没有生效。
+"""
