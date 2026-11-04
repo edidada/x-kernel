@@ -1044,7 +1044,12 @@ impl Xhci {
                     line.push_str(&alloc::format!(" {index}={value:#x}"));
                 }
             }
-            info!("xhci: input ctx {input_addr:#x} for slot {slot_id}:{line}");
+            info!(
+                "xhci: input ctx {input_addr:#x} for slot {slot_id}, device ctx {:#x}, dcbaa \
+                 {:#x}: {line}",
+                self.slots[slot_index].device.bus_addr(),
+                self.device_contexts.bus_addr(),
+            );
         }
         let trb = Trb::new(
             input_addr,
@@ -1350,6 +1355,11 @@ impl Xhci {
         // brings the device to a known state and makes the controller report it,
         // and `Address Device` afterwards relies on that state.
         let speed = self.reset_port(port)?;
+        // USB 2.0 7.1.7.5 reset recovery: the host must not send a SETUP packet
+        // until 10 ms after the reset ends. Address Device without BSR makes the
+        // controller issue SET_ADDRESS to the device, which is the first such
+        // transaction -- issuing it immediately is what left the command hanging.
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
         let slot_id = self.enable_slot()?;
         // Discriminator: a No-Op as the third TRB. If this also stalls, the ring
         // stops being consumed after two commands and the fault is in the ring;

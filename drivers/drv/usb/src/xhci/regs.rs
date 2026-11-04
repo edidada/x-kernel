@@ -107,6 +107,9 @@ pub mod trb {
     pub const PORT_STATUS_CHANGE: u32 = 34;
     pub const NO_OP: u32 = 23;
 
+    /// Block Set Address Request (`SETUP_CONTEXT_ONLY`): build the contexts
+    /// without assigning an address yet.
+    pub const BSR: u32 = 1 << 9;
     /// Control (dword 3) field masks.
     pub const CYCLE: u32 = 1 << 0;
     pub const TYPE_SHIFT: u32 = 10;
