@@ -56,7 +56,7 @@ These crates or modules adapt the portable driver contracts to X-Kernel:
 
 | Crate or module | Role |
 |----------------|------|
-| `device-res-xkernel` | Implements `device-res` provider traits using `memspace`, `kirq`, `kdma`, and `khal`. |
+| `driver-os-api-xkernel` | Implements os-api capabilities using host subsystems; temporarily retains the legacy device-res IRQ adapter. |
 | `kdriver` | X-Kernel driver orchestration: bus discovery, provider holder, concrete-driver glue, and publication into `kclass`. |
 | `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
 | `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
@@ -82,7 +82,7 @@ first, implement it in an adapter crate, then pass the provider through
 ## Naming Guidance
 
 - Use `*-xkernel` for X-Kernel implementations of portable contracts, as with
-  `device-res-xkernel`.
+  `driver-os-api-xkernel`.
 - Keep portable contracts free of `xkernel`, `khal`, `kirq`, `memspace`, or
   other host implementation terms in their public API.
 - Avoid adding broad public helper APIs in adapter crates. Adapter crates should

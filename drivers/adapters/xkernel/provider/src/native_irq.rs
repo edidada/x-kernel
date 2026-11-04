@@ -72,6 +72,14 @@ impl IrqOp for NativeIrq {
     fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
         kirq::enable(resource_spec(irq), enabled);
     }
+
+    fn alloc_msix(&self) -> ResResult<driver_os_api::MsiResource> {
+        crate::msi::allocate()
+    }
+
+    fn free_msix(&self, resource: driver_os_api::MsiResource) {
+        crate::msi::release(resource.irq.virq().raw());
+    }
 }
 
 fn route_desc(route: IrqRouteDesc) -> ResResult<kirq::IrqDesc> {
@@ -151,10 +159,28 @@ fn request_with(
             return Err(ResError::InvalidResource);
         }
     }
-    let token = register(resource_spec(irq), adapt_handler(handler))
-        .map_err(map_error)?
-        .ok_or(ResError::Busy)?;
+    let token = register_shared_with(resource_spec(irq), adapt_handler(handler), register)?;
     Ok(IrqHandlerToken::SharedAction(token.id()))
+}
+
+pub(super) fn register_shared(
+    spec: kirq::IrqSpec,
+    handler: kirq::Handler,
+) -> ResResult<kirq::IrqActionToken> {
+    register_shared_with(spec, handler, kirq::try_register_shared)
+}
+
+fn register_shared_with(
+    spec: kirq::IrqSpec,
+    handler: kirq::Handler,
+    register: impl FnOnce(
+        kirq::IrqSpec,
+        kirq::Handler,
+    ) -> Result<Option<kirq::IrqActionToken>, kirq::IrqDescError>,
+) -> ResResult<kirq::IrqActionToken> {
+    register(spec, handler)
+        .map_err(map_error)?
+        .ok_or(ResError::Busy)
 }
 
 fn release_with(
@@ -168,7 +194,22 @@ fn release_with(
     let IrqHandlerToken::SharedAction(id) = token else {
         return Err(ResError::InvalidResource);
     };
-    let handler = free(resource_spec(irq), kirq::IrqActionToken::new(id))
+    release_shared_with(resource_spec(irq), id, free)
+}
+
+pub(super) fn release_shared(spec: kirq::IrqSpec, id: usize) -> ResResult {
+    release_shared_with(spec, id, kirq::try_free_irq_action)
+}
+
+fn release_shared_with(
+    spec: kirq::IrqSpec,
+    id: usize,
+    free: impl FnOnce(
+        kirq::IrqSpec,
+        kirq::IrqActionToken,
+    ) -> Result<Option<kirq::Handler>, kirq::IrqDescError>,
+) -> ResResult {
+    let handler = free(spec, kirq::IrqActionToken::new(id))
         .map_err(map_error)?
         .ok_or(ResError::NotFound)?;
     drop(handler);
@@ -196,5 +237,5 @@ fn map_error(error: kirq::IrqDescError) -> ResError {
     }
 }
 
-unittest::path_mod_test!(tests, "../ut-tests/host_irq.rs");
-unittest::path_mod_test!(smp_tests, "../ut-tests/host_irq_smp.rs");
+unittest::path_mod_test!(tests, "../ut-tests/native_irq.rs");
+unittest::path_mod_test!(smp_tests, "../ut-tests/native_irq_smp.rs");

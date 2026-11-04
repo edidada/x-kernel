@@ -308,3 +308,25 @@ AArch64 与 x86_64 各自 canonical defconfig 下的 `make clippy UNITTEST=y`
 均通过；这是双架构编译/lint 检查，不是 x86 QEMU 启动验收。已恢复 AArch64
 canonical 配置。修改文件 rustfmt 和 diff 检查通过，旧资源层与 main 的内容
 一致性及 range-diff 核对均通过。
+## Provider consolidation progress (2026-11-04)
+
+The host implementation now lives in `drivers/adapters/xkernel/provider`
+(`driver-os-api-xkernel`). NativeIrq and its lifecycle/SMP tests moved from
+kdriver into that crate. Legacy IRQ entry points reuse the shared registration,
+exact-action release and MSI backend, preserving source bitmaps. TimeOp moved
+unchanged into os-api. Framework identity, cleanup registration and service
+composition remain outside the provider.
+
+This is not PR-01 completion: legacy IRQ vocabulary/routing, the aggregate
+provider and device-res consumers still need migration. Native per-device DMA
+must preserve mask/window/bounce/discard semantics when its backend is moved.
+MSI consuming-release failure ownership remains a separately tracked limit.
+After validation in this branch, extract the replacement PR onto main and
+revalidate; do not submit a permanently parallel capability layer.
+
+Validation: AArch64 SMP4 selected driver suites passed 261 tests, with zero
+failures and five ignored tests; coverage was exported. This includes moved
+NativeIrq shared-peer/tail-drain and concrete RNG notify-tail fixtures.
+UNITTEST-enabled clippy passed on AArch64 and x86_64; AArch64 configuration
+was restored. Independent read-only review found no code blocker. Logs are
+local under `.scratch/pr01-irq-provider/` (not committed).

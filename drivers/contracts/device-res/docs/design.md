@@ -1,5 +1,9 @@
 # device-res — Design
 
+TimeOp now belongs to driver-os-api, alongside MMIO, CPU memory and raw DMA.
+The legacy ResourceProvider aggregate imports it; it is no longer defined or
+re-exported here. Legacy IRQ vocabulary remains pending migration.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
@@ -67,7 +71,6 @@ drivers/contracts/device-res/
 │   ├── lib.rs
 │   ├── irq.rs
 │   ├── provider.rs
-│   └── time.rs
 ├── Cargo.toml
 └── docs/
     ├── design.md

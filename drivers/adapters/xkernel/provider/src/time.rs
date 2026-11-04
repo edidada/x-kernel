@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::TimeOp`] provider contract.
+//! X-Kernel implementation of the [`driver_os_api::TimeOp`] provider contract.
 
-use device_res::TimeOp;
+use driver_os_api::TimeOp;
 use ktime_types::MonotonicInstant;
 
 use crate::XKernelResourceProvider;

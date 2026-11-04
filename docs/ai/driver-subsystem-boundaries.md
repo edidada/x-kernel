@@ -40,7 +40,7 @@ host kernel adapter
   device-class traits.
 - Host-specific adapter crates may depend on host-kernel crates only to
   implement driver subsystem contracts. Current examples are
-  `device-res-xkernel`, irqchip drivers, timer drivers, and X-Kernel integration
+  `driver-os-api-xkernel`, irqchip drivers, timer drivers, and X-Kernel integration
   glue under `kdriver`.
 - `device_res` remains OS-neutral. It defines capability traits and RAII/devres
   ownership helpers, but it must not depend on X-Kernel implementation crates.
@@ -62,7 +62,7 @@ inventory.
   `net`, and `vsock`.
 - **Portable concrete drivers**: reusable hardware/protocol drivers such as
   `virtio`. These crates consume contracts and implement device class traits.
-- **X-Kernel adapters and integration**: `device-res-xkernel`, `kdriver`, and
+- **X-Kernel adapters and integration**: `driver-os-api-xkernel`, `kdriver`, and
   platform/host integration drivers such as `irq-driver`, `timer-driver`,
   `rtc-driver`, `x86-apic`, and early `console-driver` paths.
 

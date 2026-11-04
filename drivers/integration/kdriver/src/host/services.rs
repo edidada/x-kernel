@@ -44,9 +44,9 @@ pub fn new_device_services(irq: Arc<dyn IrqOp>) -> Arc<dyn DeviceServices> {
 /// kirq's auto-enable policy. IRQ guards must be dropped exactly once in sleepable
 /// task context after hardware stops, without locks needed by handlers. Release
 /// synchronously drains the exact registration and panics on failure rather
-/// than permitting unsafe reclamation. See [`crate::host_irq::NativeIrq`].
+/// than permitting unsafe reclamation. See [`driver_os_api_xkernel::NativeIrq`].
 pub fn new_native_device_services() -> Arc<dyn DeviceServices> {
-    new_device_services(Arc::new(crate::host_irq::NativeIrq))
+    new_device_services(Arc::new(driver_os_api_xkernel::NativeIrq))
 }
 
 struct HostDeviceServices {

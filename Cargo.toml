@@ -261,7 +261,7 @@ vsock = { path = "drivers/contracts/vsock" }
 virtio = { path = "drivers/devices/virtio" }
 
 # Internal: driver adapters and integration
-device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
+driver_os_api_xkernel = { path = "drivers/adapters/xkernel/provider", package = "driver-os-api-xkernel" }
 kdriver = { path = "drivers/integration/kdriver" }
 kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
 

@@ -10,7 +10,7 @@ See [os-api design](../../../base/os-api/docs/design.md) and
 
 This analysis covers the remaining crate: `src/lib.rs` (device descriptions),
 `src/irq.rs` (IRQ/MSI resources),
-`src/provider.rs`, and `src/time.rs`.
+`src/provider.rs`; the monotonic time contract is defined in driver-os-api.
 No modules are excluded; every unsafe item is enumerated in the
 inventory below. The host-side implementation lives in
 `device-res-xkernel` and is audited in its own security document.

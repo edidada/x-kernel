@@ -8,10 +8,10 @@ implements the sleepable device-management lock. Identity, descriptors and
 cleanup storage remain model-owned. This is framework integration, not a
 separate services crate or a new provider registry.
 
-The target provider crate belongs under `drivers/adapters/xkernel/provider`
-and must not depend on this module or driver-model. That migration is pending:
-`host_irq.rs` and native parts of `host_dma.rs` still need consolidation with
-the old adapter. This directory change does not claim that work is complete.
+The provider crate lives under `drivers/adapters/xkernel/provider` and does
+not depend on this module or driver-model. NativeIrq and its lifecycle tests
+now live there; host services only compose it. Native parts of `host_dma.rs`
+remain to be consolidated without losing per-device DMA constraints.
 
 MMIO acquisition in both device models delegates to the single host
 MmioOp implementation. Model host_mmio only translates os-api errors to
@@ -34,7 +34,7 @@ existing logs and do not fall back to legacy registration.
 
 ## Native IRQ notification-tail acceptance
 
-The serial SMP tests in `ut-tests/host_irq_smp.rs` and
+The serial SMP tests in `../../adapters/xkernel/provider/ut-tests/native_irq_smp.rs` and
 `ut-tests/virtio_rng_notify_tail.rs` use NativeIrq registration and synchronous
 release against isolated, metadata-free software IRQ descriptors. KIRQ supplies
 a test-only dispatch entry using its actual action snapshot and in-flight
@@ -263,7 +263,7 @@ conveys no binding ownership.
 ## Native ordinary IRQ composition
 
 `host::new_native_device_services` composes the existing native MMIO,
-DMA and management-lock services with `host_irq::NativeIrq`. Construction does
+DMA and management-lock services with `driver_os_api_xkernel::NativeIrq`. Construction does
 not install services, enumerate firmware, activate a bus or probe any device.
 The `device-model` feature enables the direct kirq dependency independently of
 block drivers. The scoped PlatformRngRegistration root now installs this composition;
@@ -300,7 +300,7 @@ does not guarantee hardware rollback. Successful retry restores delivery only
 when logical enablement and disable depth allow.
 There is no host action registry, threaded IRQ, pseudo-NMI or MSI allocation.
 
-External host_irq UT exercise pure conversion and injected map/register/free
+Provider native_irq UT exercise pure conversion and injected map/register/free
 helper seams, including nonidentity numbering, explicit domains, callback results,
 context rejection and release errors. They do not register real interrupts or
 modify production root domains, and do not prove IRQ hardware or synchronization
@@ -535,7 +535,7 @@ outside that guarantee.
 | `DriverRegistrar` | Driver registration facade: registers `DeviceDriver` impls into the `kdevice` driver core |
 | `PlatformBackend` | Unified platform bus: firmware-described (device-tree / ACPI) plus compile-time-known static devices |
 | `PciBackend` | PCI bus: ECAM/MmioCam enumeration, BAR allocation, host-bridge / PCI-to-PCI-bridge adoption |
-| `device-res-xkernel` | x-kernel resource provider implementation; bridges `memspace` (iomap), `kirq` (irq), `kdma` (dma) |
+| `driver-os-api-xkernel` | x-kernel resource provider implementation; bridges `memspace` (iomap), `kirq` (irq), `kdma` (dma) |
 | VirtIO driver family | Each VirtIO device type yields two `DeviceDriver` descriptors (PCI/MMIO) sharing one activation path |
 | Platform driver family | ramdisk, AHCI, bcm2835-sdhci, sdmmc, fxmac, and other platform device drivers |
 
@@ -836,7 +836,7 @@ transports:
 
 ### Resource management (devres)
 
-`device-res-xkernel` provides x-kernel's implementation type for the
+`driver-os-api-xkernel` provides x-kernel's implementation type for the
 `device-res` provider contract; the driver-facing resource API is exposed
 to drivers by `kdriver::resource` as `DeviceResourceExt`.
 `kdriver::resource` holds the static `XKernelResourceProvider` and passes
@@ -859,10 +859,10 @@ handles return to the same provider that created them:
 - **`device.devm_request_threaded_irq` /
   `device.devm_request_threaded_irq_default`**: bind devres primary/thread
   handlers to the provider contract. The current mainline
-  `device-res-xkernel` provider does not yet cover the threaded IRQ
+  `driver-os-api-xkernel` provider does not yet cover the threaded IRQ
   methods, so they return `DriverError::Unsupported`; a later kirq
   threadirq branch will supply the xkernel implementation.
-  `device-res-xkernel` is the adaptation layer between devres IRQ
+  `driver-os-api-xkernel` is the adaptation layer between devres IRQ
   resources and the kernel IRQ core, translating `device_res`
   trigger/controller/event/handler values into `kirq`'s own types; `kirq`
   does not depend back on devres.
@@ -881,7 +881,7 @@ are never inverted.
 
 ### IRQ dispatch mechanism
 
-`device-res-xkernel::XKernelResourceProvider` keeps no local IRQ line
+`driver-os-api-xkernel::XKernelResourceProvider` keeps no local IRQ line
 state. It converts `device_res::IrqResource` into `kirq::IrqSpec`, wraps
 `device_res::IrqHandler` as `kirq::IrqHandler`, and registers with the IRQ
 core per API:
@@ -915,7 +915,7 @@ not allocate from the heap.
   bridge between bus backends and probe, filled only inside the `bus_mgr`
   lock.
 - IRQ action fanout, threaded wake/ONESHOT, token teardown, and
-  `in_flight` synchronization are owned by `kirq`; `device-res-xkernel`
+  `in_flight` synchronization are owned by `kirq`; `driver-os-api-xkernel`
   only stores the mapping from devres tokens to `kirq` release calls, and
   `kdriver` keeps no IRQ core state.
 - `PCI_BAR_ALLOCATOR` uses `SpinNoPreempt`: BAR allocation happens only in
@@ -1005,9 +1005,9 @@ Fewer descriptors, but the matcher would compare bus type and VirtIO type
 together, and `probe_device` would branch between two transport init
 logics.
 
-### IRQ handlers reach kirq through device-res-xkernel
+### IRQ handlers reach kirq through driver-os-api-xkernel
 
-**Choice**: `device-res-xkernel` is the `device_res` provider adapting
+**Choice**: `driver-os-api-xkernel` is the `device_res` provider adapting
 driver devres IRQ requests onto `kirq`; `kirq` keeps the shared action
 list per IRQ line and manages devres handler lifetimes via tokens.
 

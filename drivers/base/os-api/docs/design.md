@@ -1,5 +1,11 @@
 # driver-os-api — 设计
 
+## Monotonic time
+
+`TimeOp` is the host monotonic-clock contract, moved unchanged from device-res.
+It is not a device clock or scheduling service. The xkernel provider implements
+it through khal; the legacy provider aggregate imports this same trait.
+
 ## Unified MMIO capability
 
 MmioRegion, IoPortRange, MmioMapping and MmioOp are defined only here.

@@ -49,8 +49,6 @@ pub mod host;
 #[cfg(feature = "device-model")]
 pub mod host_dma;
 #[cfg(feature = "device-model")]
-pub mod host_irq;
-#[cfg(feature = "device-model")]
 pub mod host_mmio;
 mod manager;
 #[cfg(feature = "virtio-rng")]

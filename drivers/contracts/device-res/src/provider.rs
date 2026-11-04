@@ -11,12 +11,11 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
-use driver_os_api::{CoherentMem, DmaOp, DmaSpec, IoMap, MmioOp, MmioRegion};
+use driver_os_api::{CoherentMem, DmaOp, DmaSpec, IoMap, MmioOp, MmioRegion, TimeOp};
 
 use crate::{
     DeviceResource, ResResult,
     irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
-    time::TimeOp,
 };
 
 /// Combined MMIO, DMA, IRQ and time capabilities for device drivers.

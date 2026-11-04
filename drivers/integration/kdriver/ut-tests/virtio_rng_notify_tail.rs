@@ -17,6 +17,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 
 use driver_os_api::{DevIrq, IrqOp, IrqResource};
+use driver_os_api_xkernel::NativeIrq;
 use kerrno::KResult;
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use subsys_hwrng::{HwrngDevice, completion::RngCompletion};
@@ -24,7 +25,7 @@ use unittest::{assert, assert_eq, def_test};
 use virtio::mock_virtio::{MockQueue, MockReset, MockTransport};
 
 use super::{MAPPINGS, RINGS, Runtime, UNSHARES};
-use crate::{host_irq::NativeIrq, rng_completion::new_rng_completion};
+use crate::rng_completion::new_rng_completion;
 
 struct TailCompletion {
     inner: Arc<dyn RngCompletion>,

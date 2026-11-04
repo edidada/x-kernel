@@ -4,7 +4,7 @@
 
 //! Driver-facing resource helpers backed by the [`device_res`] provider model.
 //!
-//! The X-Kernel provider implementation lives in `device-res-xkernel`. This
+//! The X-Kernel provider implementation lives in `driver-os-api-xkernel`. This
 //! module keeps the driver orchestration crate's `DriverResult` boundary while
 //! acquiring resources through the OS-neutral `device_res` API.
 
@@ -14,9 +14,9 @@ use core::ptr::NonNull;
 use device_res::{
     IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler, ResError,
 };
-use device_res_xkernel::XKernelResourceProvider;
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::{DmaSpec, MmioRegion};
+use driver_os_api_xkernel::XKernelResourceProvider;
 use kdevice::DeviceObject;
 
 static XKERNEL_RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();

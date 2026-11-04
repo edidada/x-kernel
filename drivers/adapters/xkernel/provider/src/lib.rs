@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel provider adapter for [`device_res`].
+//! X-Kernel capability implementations for [`driver_os_api`].
 //!
-//! The OS-agnostic resource model in [`device_res`] describes *what* a driver
-//! needs; this crate binds those operations to X-Kernel's MMIO mapping, IRQ
-//! manager, CPU and DMA allocators, and monotonic clock. For IRQs, this crate is the adapter
-//! between `device_res` vocabulary and `kirq`; the IRQ core does not depend on
-//! devres.
+//! Binds MMIO, IRQ, CPU memory, raw DMA and monotonic time to the host kernel.
+//! A temporary [`device_res`] IRQ adapter shares the registration, synchronous
+//! release and MSI backend with [`NativeIrq`]. Device identity, service
+//! composition and managed cleanup remain in the driver framework.
 
 #![no_std]
 
@@ -18,7 +17,11 @@ mod dma;
 mod irq;
 mod memory;
 mod mmio;
+mod msi;
+mod native_irq;
 mod time;
+
+pub use native_irq::NativeIrq;
 
 /// X-Kernel implementation of the OS-agnostic resource provider traits.
 ///

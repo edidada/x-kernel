@@ -1179,25 +1179,7 @@ version = "0.3.0-dev"
 dependencies = [
  "driver-os-api",
  "kspin",
- "ktime_types",
  "smallvec",
- "unittest",
-]
-
-[[package]]
-name = "device-res-xkernel"
-version = "0.3.0-dev"
-dependencies = [
- "device-res",
- "driver-os-api",
- "kalloc",
- "kdma",
- "khal",
- "kirq",
- "ktime_types",
- "log",
- "memaddr",
- "memspace",
  "unittest",
 ]
 
@@ -1275,6 +1257,27 @@ name = "driver-os-api"
 version = "0.3.0-dev"
 dependencies = [
  "irq-types",
+ "ktime_types",
+ "unittest",
+]
+
+[[package]]
+name = "driver-os-api-xkernel"
+version = "0.3.0-dev"
+dependencies = [
+ "device-res",
+ "driver-os-api",
+ "kalloc",
+ "kbuild_config",
+ "kcpu_id_map",
+ "kdma",
+ "khal",
+ "kirq",
+ "ktask",
+ "ktime_types",
+ "log",
+ "memaddr",
+ "memspace",
  "unittest",
 ]
 
@@ -2332,10 +2335,10 @@ dependencies = [
  "console-driver",
  "crate_interface",
  "device-res",
- "device-res-xkernel",
  "display",
  "driver-model",
  "driver-os-api",
+ "driver-os-api-xkernel",
  "driver_base",
  "input",
  "kalloc",

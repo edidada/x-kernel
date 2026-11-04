@@ -1,4 +1,4 @@
-# device-res-xkernel — Security And Reliability
+# driver-os-api-xkernel — Security And Reliability
 
 ## Scope
 
@@ -20,14 +20,14 @@ excluded; the crate adds no state of its own and forwards to `memspace`
 device-res provider contract
         │ validated resource descriptors and handler objects
         ▼
-device-res-xkernel
+driver-os-api-xkernel
         │
         ├── memspace MMIO mapping
         ├── kirq IRQ registration / MSI-X
         └── kdma DMA allocation / mapping
 ```
 
-`device-res-xkernel` trusts:
+`driver-os-api-xkernel` trusts:
 
 - `memspace::iomap_device` to reject invalid MMIO physical ranges;
 - `kirq` to validate IRQ descriptors, manage the shared action
@@ -112,3 +112,14 @@ or change mapping flags; drivers must separately perform any DMA/cache work.
 Tests exercise this host path at small, bounded-staging and larger-alignment
 sizes. Exhaustion is injected at the capability boundary rather than forcing
 the kernel out of memory.
+## Provider consolidation boundary
+
+NativeIrq and its SMP tail-drain tests now belong to this provider crate.
+Both IRQ entry points share exact-action registration and synchronous release;
+an unmatched token is not evidence of quiescence. The legacy infallible release
+panics on rejected detach/drain, including no match, rather than allowing the
+caller to reclaim live resources. The native backend returns a typed error to
+its infallible release wrapper, which also fails closed.
+Legacy routing conversion remains separate. MSI release still has the existing
+unit-returning/warn limitation; no stronger device-stop guarantee is claimed.
+Device identity and managed cleanup are outside this crate.

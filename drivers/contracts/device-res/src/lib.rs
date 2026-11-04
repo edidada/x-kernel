@@ -8,7 +8,7 @@
 //! regions, I/O port ranges, interrupts, coherent/streaming DMA buffers, and
 //! small capabilities such as a monotonic clock)
 //! without binding to any particular kernel. A host kernel provides capability
-//! implementations — [`IrqOp`], [`TimeOp`] — to its
+//! implementations — [`IrqOp`] — to its
 //! driver framework; framework code then acquires resources through RAII
 //! handles ([`Irq`]) or the device-managed `devm_*`
 //! helpers.
@@ -23,7 +23,6 @@ extern crate alloc;
 
 mod irq;
 mod provider;
-mod time;
 
 use alloc::boxed::Box;
 
@@ -65,6 +64,5 @@ pub trait DeviceResource {
 
 pub use irq::*;
 pub use provider::*;
-pub use time::*;
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

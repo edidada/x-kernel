@@ -8,6 +8,24 @@ use unittest::{assert_eq, def_test};
 use super::*;
 
 #[def_test]
+fn shared_backend_preserves_legacy_sources_and_rejects_missing_release() {
+    let token = register_shared_with(
+        kirq::IrqSpec::PlainVirq(903),
+        Arc::new(|_| kirq::IrqEvent::from_sources(0b1010)),
+        |_, handler| {
+            core::assert_eq!(handler.handle(903).sources(), 0b1010);
+            Ok(Some(kirq::IrqActionToken::new(73)))
+        },
+    )
+    .unwrap();
+    assert_eq!(token.id(), 73);
+    assert_eq!(
+        release_shared_with(kirq::IrqSpec::PlainVirq(903), token.id(), |_, _| Ok(None)),
+        Err(ResError::NotFound)
+    );
+}
+
+#[def_test]
 fn native_irq_mapping_preserves_explicit_domain_and_nonidentity_virq() {
     let domain = IrqDomainId::new(0x7051);
     let route = IrqRouteDesc {

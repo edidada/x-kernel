@@ -24,70 +24,27 @@ impl IrqOp for XKernelResourceProvider {
             let event = handler.handle(virq);
             dev_irq_event_to_kirq(event)
         });
-        match kirq::try_register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler) {
-            Ok(Some(token)) => Ok(IrqHandlerToken::shared_action(token.id())),
-            Ok(None) => Err(ResError::Busy),
-            Err(err) => {
-                log::warn!("failed to register IRQ handler for {irq:?}: {err:?}");
-                Err(map_irq_desc_error(err))
-            }
-        }
+        let token =
+            crate::native_irq::register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler)?;
+        Ok(IrqHandlerToken::shared_action(token.id()))
     }
 
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
-        match token {
-            IrqHandlerToken::RegularAction => {
-                match kirq::try_free_irq(irq_resource_to_kirq_spec(irq)) {
-                    Ok(Some(_handler)) => {}
-                    Ok(None) => {
-                        log::warn!(
-                            "IRQ {} regular action was not registered or was not released",
-                            irq.number
-                        );
-                    }
-                    #[expect(
-                        clippy::panic,
-                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
-                                  IrqOp::release_irq returns (), so a kirq free error such as an \
-                                  invalid calling context cannot reach the driver; make \
-                                  release_irq fallible and propagate the error through device \
-                                  teardown"
-                    )]
-                    Err(err) => {
-                        panic!(
-                            "failed to release IRQ {} regular action: {err:?}",
-                            irq.number
-                        );
-                    }
-                }
-            }
-            IrqHandlerToken::SharedAction(id) => {
-                let action_token = kirq::IrqActionToken::new(id);
-                match kirq::try_free_irq_action(irq_resource_to_kirq_spec(irq), action_token) {
-                    Ok(Some(_handler)) => {}
-                    Ok(None) => {
-                        log::warn!(
-                            "IRQ {} action token {} was not registered or was not released",
-                            irq.number,
-                            id
-                        );
-                    }
-                    #[expect(
-                        clippy::panic,
-                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
-                                  IrqOp::release_irq returns (), so a kirq free error such as an \
-                                  invalid calling context cannot reach the driver; make \
-                                  release_irq fallible and propagate the error through device \
-                                  teardown"
-                    )]
-                    Err(err) => {
-                        panic!(
-                            "failed to release IRQ {} action token {}: {err:?}",
-                            irq.number, id
-                        );
-                    }
-                }
-            }
+        let spec = irq_resource_to_kirq_spec(irq);
+        let result = match token {
+            IrqHandlerToken::SharedAction(id) => crate::native_irq::release_shared(spec, id),
+            IrqHandlerToken::RegularAction => kirq::try_free_irq(spec)
+                .map_err(map_irq_desc_error)
+                .and_then(|handler| handler.map(drop).ok_or(ResError::NotFound)),
+        };
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): infallible IRQ release \
+                      cannot authorize reclamation after rejected detach/drain; fallible teardown \
+                      must retain owners"
+        )]
+        if let Err(error) = result {
+            panic!("IRQ release did not establish quiescence: {irq:?} {token:?}: {error:?}");
         }
     }
 
@@ -107,39 +64,16 @@ impl IrqOp for XKernelResourceProvider {
     }
 
     fn alloc_msix(&self) -> ResResult<MsiResource> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).ok_or(ResError::NoMemory)?;
-            let irq = IrqResource::new(allocation.virq(), DevIrqTrigger::EdgeRising)
-                .with_controller(DevIrqController::Unknown);
-            let message = allocation.message();
-            Ok(MsiResource::new(
-                irq,
-                device_res::MsiMessage::new(message.address(), message.data()),
-            ))
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            Err(ResError::Unsupported)
-        }
+        let resource = crate::msi::allocate()?;
+        Ok(MsiResource::new(
+            IrqResource::new(resource.irq.virq().raw(), DevIrqTrigger::EdgeRising)
+                .with_controller(DevIrqController::Unknown),
+            device_res::MsiMessage::new(resource.message.address, resource.message.data),
+        ))
     }
 
     fn free_msix(&self, resource: MsiResource) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !kirq::free_msix(resource.irq.number) {
-                log::warn!(
-                    "failed to free MSI-X IRQ {} (not allocated?)",
-                    resource.irq.number
-                );
-            }
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let _ = resource;
-        }
+        crate::msi::release(resource.irq.number);
     }
 }
 

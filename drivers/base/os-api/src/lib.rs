@@ -18,6 +18,7 @@ mod error;
 mod irq;
 mod memory;
 mod mmio;
+mod time;
 
 use alloc::sync::Arc;
 
@@ -39,5 +40,6 @@ pub use irq::{
 };
 pub use memory::{CpuBuffer, CpuMemoryOp};
 pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};
+pub use time::TimeOp;
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");
