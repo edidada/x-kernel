@@ -92,9 +92,29 @@ impl Ring {
             }
         }
         let index = self.index % self.trbs;
-        // SAFETY: `index < trbs` inside this ring's own allocation.
+        let slot = self.trb(index);
+        // Publish in the order the controller expects (Linux `queue_trb`): the
+        // payload words first, then a store barrier, and the control word -- which
+        // carries the cycle bit -- last. The cycle bit is what makes the TRB
+        // visible, so writing it together with the payload lets the controller
+        // fetch a TRB whose parameter/status are still in flight; `wmb()` is
+        // `dsb(st)` on arm64, i.e. stronger than the `dmb` a Rust fence emits.
+        let base = slot.cast::<u8>();
+        // SAFETY: `base` is the first byte of one TRB inside this ring's own
+        // allocation, and the offsets below stay inside its 16 bytes.
         unsafe {
-            core::ptr::write_volatile(self.trb(index), trb);
+            core::ptr::write_volatile(base.cast::<u64>(), trb.parameter);
+        }
+        let status_ptr = base.wrapping_add(8).cast::<u32>();
+        let control_ptr = base.wrapping_add(12).cast::<u32>();
+        // SAFETY: dword 2 of the same TRB.
+        unsafe {
+            core::ptr::write_volatile(status_ptr, trb.status);
+        }
+        karch::dsb_ishst();
+        // SAFETY: dword 3 of the same TRB.
+        unsafe {
+            core::ptr::write_volatile(control_ptr, trb.control);
         }
         let address = self.mem.bus_addr() + (index * core::mem::size_of::<Trb>()) as u64;
         self.index += 1;

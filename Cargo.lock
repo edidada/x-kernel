@@ -1376,6 +1376,7 @@ name = "drv-usb"
 version = "0.3.0-dev"
 dependencies = [
  "driver-base",
+ "karch",
  "kerrno",
  "khal",
  "ktime_types",

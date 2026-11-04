@@ -23,6 +23,9 @@ kerrno = { workspace = true }
 # `busy_wait` is the microsecond-scale poll the core soft reset needs in probe
 # context (the same primitive drv/clk and drv/phy register, boundaries E-05).
 khal = { workspace = true }
+# The arch store barrier (`dsb ishst`) publishes a TRB before its cycle bit, the
+# same ordering Linux gets from `wmb()`; drv/clk takes karch for the same reason.
+karch = { workspace = true }
 ktime_types.workspace = true
 log.workspace = true
 # The DWC3 child node's clocks live on its parent block (`clocks` is a parent
