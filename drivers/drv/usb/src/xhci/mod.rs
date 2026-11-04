@@ -40,6 +40,9 @@ const COMMAND_RING_MIN_TRBS: usize = 16;
 const TRB_LEN: usize = core::mem::size_of::<Trb>();
 /// Runtime register: Event Ring Dequeue Pointer (interrupter 0).
 const RT_ERDP: usize = 0x18;
+/// Interrupter 0 starts this far into the runtime block; RTSOFF itself points
+/// at MFINDEX, so everything at RTSOFF+0x00..0x1f is not an interrupter.
+const RT_IR0: usize = 0x20;
 /// Writing this bit to ERDP clears the "event handler busy" state.
 const ERDP_EHB: u32 = 1 << 3;
 /// The controller's scratch buffer for control data stages.
@@ -99,6 +102,11 @@ impl Ring {
             self.cycle = !self.cycle;
         }
         address
+    }
+
+    /// The TRB most recently published (for diagnostics).
+    fn trb_at(&self, index: usize) -> Trb {
+        self.read(index)
     }
 
     /// Reads one TRB without claiming ownership of it (event rings are consumed,
@@ -173,6 +181,21 @@ struct Slot {
 /// "The register reads back zero" has two very different causes -- the write was
 /// dropped, or it landed somewhere else because the offset is wrong -- and only a
 /// search for the value tells them apart.
+/// BRING-UP PROBE: logs every non-zero dword in the register window.
+///
+/// Read-back of one register cannot distinguish "the write was dropped" from
+/// "it landed somewhere else", so dump what the window actually holds.
+fn dump_nonzero(bar: &IoMap) {
+    let mut line = alloc::string::String::new();
+    for offset in (0..0x600).step_by(4) {
+        let value = bar.read32(offset);
+        if value != 0 {
+            line.push_str(&alloc::format!(" {offset:#05x}={value:#010x}"));
+        }
+    }
+    info!("xhci: non-zero registers:{}", line);
+}
+
 fn scan_marker(bar: &IoMap, value: u32, what: &str) {
     let mut found = 0usize;
     for offset in (0..0x800).step_by(4) {
@@ -274,10 +297,13 @@ impl Xhci {
         let doorbell = db_offset as usize;
 
         reset_controller(&bar, operational, max_slots);
-        // Interrupter 0 sits at RTSOFF; its own registers start 0x20 in.
-        bar.write32(runtime + 0x08, 0); // ERSTSZ: no segments programmed yet
-        bar.write32(runtime + 0x20 + 0x04, 0); // IMAN: no interrupt pending
-        bar.write32(runtime + 0x20, 1); // IMOD: one event's worth of delay
+        // RTSOFF points at MFINDEX; interrupter 0's register set starts 0x20
+        // into the runtime block. Writing ERSTSZ/ERSTBA/ERDP at RTSOFF+0x08.. is
+        // writing into a reserved hole, which is why those registers never held
+        // anything and the controller never had an event ring.
+        bar.write32(runtime + RT_IR0 + 0x08, 0); // ERSTSZ0: no segments yet
+        bar.write32(runtime + RT_IR0, 0); // IMAN0: no interrupt pending
+        bar.write32(runtime + RT_IR0 + 0x04, 0); // IMOD0
 
         let erst = dev
             .res()
@@ -347,8 +373,9 @@ impl Xhci {
         // working board reads a non-zero CRCR here.
         let crcr = xhci.operational + op::CRCR;
         let cmd_addr = xhci.command.mem.bus_addr() | 1;
-        xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
+        // lo_hi_writeq: low half first (Linux writeq order), high half after.
         xhci.bar.write32(crcr, cmd_addr as u32);
+        xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
         info!(
             "xhci: crcr after run {:#018x} (wrote {:#x})",
             xhci.bar.read64(crcr),
@@ -371,8 +398,9 @@ impl Xhci {
                 },
             );
         }
-        self.bar.write32(self.runtime + 0x08, 1); // ERSTSZ
-        self.bar.write64(self.runtime + 0x10, self.erst.bus_addr()); // ERSTBA
+        self.bar.write32(self.runtime + RT_IR0 + 0x08, 1); // ERSTSZ0
+        self.bar
+            .write64(self.runtime + RT_IR0 + 0x10, self.erst.bus_addr()); // ERSTBA0
         self.bar
             .write64(self.runtime + 0x18, self.event.mem.bus_addr()); // ERDP
         self.bar.write64(
@@ -380,20 +408,23 @@ impl Xhci {
             self.device_contexts.bus_addr(),
         );
         // CRCR: the ring's base with the initial cycle state (RCS) set.
-        self.bar
-            .write64(self.operational + op::CRCR, self.command.mem.bus_addr() | 1);
+        let crcr_reg = self.operational + op::CRCR;
+        let crcr_addr = self.command.mem.bus_addr() | 1;
+        self.bar.write32(crcr_reg, crcr_addr as u32);
+        self.bar.write32(crcr_reg + 4, (crcr_addr >> 32) as u32);
         // Read every ring register back: a write that silently does not stick is
         // indistinguishable from a controller that ignores commands, and that
         // cost a round on this port already.
+        dump_nonzero(&self.bar);
         scan_marker(&self.bar, self.command.mem.bus_addr() as u32 | 1, "crcr");
         scan_marker(&self.bar, self.erst.bus_addr() as u32, "erstba");
         info!(
             "xhci: rings read back crcr {:#018x} dcbaa {:#x} erstsz {:#x} erstba {:#x} erdp {:#x}",
             self.bar.read64(self.operational + op::CRCR),
             self.bar.read64(self.operational + op::DCBAAP),
-            self.bar.read32(self.runtime + 0x08),
-            self.bar.read64(self.runtime + 0x10),
-            self.bar.read64(self.runtime + 0x18),
+            self.bar.read32(self.runtime + RT_IR0 + 0x08),
+            self.bar.read64(self.runtime + RT_IR0 + 0x10),
+            self.bar.read64(self.runtime + RT_IR0 + 0x18),
         );
         info!(
             "xhci: command ring {:#x}, event ring {:#x}, dcbaa {:#x}",
@@ -502,8 +533,10 @@ impl Xhci {
         }
         // Hand the consumed slot back to the controller (ERDP, clearing EHB).
         let dequeue = self.event.mem.bus_addr() + (self.event_dequeue * TRB_LEN) as u64;
-        self.bar
-            .write64(self.runtime + RT_ERDP, dequeue | u64::from(ERDP_EHB));
+        self.bar.write64(
+            self.runtime + RT_IR0 + RT_ERDP,
+            dequeue | u64::from(ERDP_EHB),
+        );
         Some(trb)
     }
 
@@ -560,12 +593,13 @@ impl Xhci {
             log::error!("xhci: command ring exhausted during {what}");
             return Err(KError::NoMemory);
         }
-        self.command.push(trb);
+        let published = self.command.push(trb);
+        let _ = published;
         // Doorbell 0, target 0 is the command ring.
         info!(
             "xhci: {what}: cmd trb {:#010x} crcr {:#018x} usbcmd {:#010x} usbsts {:#010x} dcbaa \
              {:#x}",
-            trb.control,
+            self.command.trb_at(self.command.index - 1).control,
             self.bar.read64(self.operational + op::CRCR),
             self.bar.read32(self.operational + op::USBCMD),
             self.bar.read32(self.operational + op::USBSTS),
