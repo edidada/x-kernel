@@ -58,7 +58,10 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 2. **`kms/props.rs::PROPS`** — every property once: id, wire metadata, reader and
    optional writer. `OBJ_GETPROPERTIES`, `GETPROPERTY` and the write path all
    consume this table, so metadata cannot disagree with a writer and a property
-   cannot be readable but unwritable.
+   cannot be readable but unwritable. `GETPROPERTY` reports an OBJECT
+   property's value class as its single value (`DRM_MODE_OBJECT_CRTC` for a
+   `CRTC_ID`), because libdrm reads it from `values[0]`; BLOB properties keep
+   reporting no inline value and are read through `GETBLOB`.
 3. **`ids::IdRegistry`** — every object id comes from the one allocator of its
    class, and the id carries its class (`FbId`, `BlobId`, `DumbHandle`, ...), so
    ids of different tables cannot be mixed up.

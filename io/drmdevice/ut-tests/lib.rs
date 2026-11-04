@@ -779,6 +779,52 @@ fn object_properties_accept_the_wildcard_type() {
 }
 
 #[def_test]
+fn object_properties_report_their_value_class() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+
+    // libdrm reads a property's value class from `values[0]`, and drm-rs
+    // indexes that slot unconditionally, so an OBJECT property that reports
+    // zero values makes every consumer panic.
+    for (prop_id, target) in [
+        (PROP_PLANE_FB_ID, DRM_MODE_OBJECT_FB),
+        (PROP_PLANE_CRTC_ID, DRM_MODE_OBJECT_CRTC),
+        (PROP_CONN_CRTC_ID, DRM_MODE_OBJECT_CRTC),
+    ] {
+        let mut request = DrmModeGetProperty {
+            prop_id,
+            ..Default::default()
+        };
+        assert_eq!(
+            DrmModeGetProperty::handle(&dev, &file, &mut request),
+            Ok(0)
+        );
+        assert_eq!(
+            request.count_values, 1,
+            "OBJECT property {prop_id:#x} must report one value"
+        );
+        assert_eq!(request.count_enum_blobs, 0);
+
+        let desc = PROPS
+            .iter()
+            .find(|desc| desc.id == PropertyId::from_raw(prop_id))
+            .expect("property exists");
+        assert!(
+            matches!(desc.kind, PropKind::Object(kind) if kind == target),
+            "OBJECT property {prop_id:#x} must name its value class"
+        );
+    }
+
+    // BLOB properties carry no inline value; their content is read by GETBLOB.
+    let mut blob = DrmModeGetProperty {
+        prop_id: PROP_CRTC_MODE_ID,
+        ..Default::default()
+    };
+    assert_eq!(DrmModeGetProperty::handle(&dev, &file, &mut blob), Ok(0));
+    assert_eq!(blob.count_values, 0);
+}
+
+#[def_test]
 fn get_blob_short_buffer_is_a_size_probe() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");
