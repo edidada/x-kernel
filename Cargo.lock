@@ -3100,6 +3100,7 @@ dependencies = [
  "ktask",
  "ktime",
  "ktime_types",
+ "kworkng",
  "unittest",
 ]
 
