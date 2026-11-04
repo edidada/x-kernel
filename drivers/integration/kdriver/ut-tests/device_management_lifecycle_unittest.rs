@@ -175,11 +175,11 @@ fn model_callbacks_allocate_with_each_descriptor_dma_view() {
             .build();
         let device = domain.add_device(descriptor).unwrap();
         domain.probe_pending();
-        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
         domain.unbind_device(&device).unwrap();
         domain.bind_device(&device).unwrap();
-        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
-        domain.remove_device(&device).unwrap();
+        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
+        domain.unregister_device(&device).unwrap();
     }
 }
 
@@ -288,7 +288,10 @@ fn held_dma_keeps_two_device_views_after_callbacks_and_removal() {
         exercise_held_dma(first_dma.as_ref(), first_view),
         exercise_held_dma(second_dma.as_ref(), second_view),
     ];
-    let removals = [domain.remove_device(&first), domain.remove_device(&second)];
+    let removals = [
+        domain.unregister_device(&first),
+        domain.unregister_device(&second),
+    ];
     let registrations_gone =
         domain.snapshot(&first).is_none() && domain.snapshot(&second).is_none();
     drop(first);
@@ -330,8 +333,8 @@ fn held_dma_acquisition_rejects_missing_and_noncoherent_views() {
         domain.snapshot(&noncoherent).map(|snapshot| snapshot.state),
     ];
     let removals = [
-        domain.remove_device(&missing),
-        domain.remove_device(&noncoherent),
+        domain.unregister_device(&missing),
+        domain.unregister_device(&noncoherent),
     ];
     drop(domain);
     let attempts_snapshot = attempts.lock().clone();
@@ -368,7 +371,7 @@ fn native_device_dma_works_through_virtio_backend_and_clone_release() {
     let capability = domain
         .with_data::<Arc<dyn driver_os_api::DeviceDma>, _>(&device, Arc::clone)
         .unwrap();
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     drop(device);
     drop(domain);
     // SAFETY: this native QEMU identity capability uses non-sleeping allocation
@@ -448,7 +451,7 @@ fn model_callbacks_release_mmio_across_unbind_and_rebind() {
     let first_release = !is_mapped();
     domain.bind_device(&device).unwrap();
     let second_mapping = is_mapped();
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert!(first_mapping && first_release && second_mapping && !is_mapped());
 }
 
@@ -588,7 +591,7 @@ fn factory_rejection_leaves_no_registered_or_pending_device() {
     assert_eq!(fixture.services.factory_calls.load(Ordering::Relaxed), 2);
     assert_eq!(fixture.domain.bus_instance_devices(fixture.root).len(), 1);
     assert_eq!(fixture.observations.counts(), (1, 0, 0));
-    assert_eq!(fixture.domain.remove_device(&device), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&device), Ok(()));
     assert_eq!(fixture.observations.counts(), (1, 1, 1));
 }
 
@@ -596,7 +599,7 @@ fn invalid_operations(domain: &DeviceDomain, device: &DeviceRef) -> bool {
     let results = [
         domain.unbind_device(device),
         domain.bind_device(device).map(|_| ()),
-        domain.remove_device(device),
+        domain.unregister_device(device),
     ];
     results
         == [Err(RuntimeError::Management(
@@ -608,7 +611,7 @@ fn invalid_operations(domain: &DeviceDomain, device: &DeviceRef) -> bool {
 fn invalid_context_lifecycle_calls_preserve_binding_and_publication() {
     let fixture = Fixture::new().unwrap();
     let device = fixture.add(1).unwrap();
-    for expected_state in [DeviceState::Active, DeviceState::Unclaimed] {
+    for expected_state in [DeviceState::Bound, DeviceState::Unclaimed] {
         let counts_before = fixture.observations.counts();
         let was_online = device.is_online();
         let driver_before = device.driver_name();
@@ -630,15 +633,15 @@ fn invalid_context_lifecycle_calls_preserve_binding_and_publication() {
             expected_state
         );
         assert_eq!(fixture.domain.bus_instance_devices(fixture.root).len(), 1);
-        if expected_state == DeviceState::Active {
+        if expected_state == DeviceState::Bound {
             assert_eq!(fixture.domain.unbind_device(&device), Ok(()));
             assert_eq!(fixture.observations.counts(), (1, 1, 1));
         }
     }
     assert_eq!(fixture.domain.bind_device(&device).unwrap().activated, 1);
     assert_eq!(fixture.observations.counts(), (2, 1, 1));
-    assert_eq!(fixture.domain.remove_device(&device), Ok(()));
-    assert_eq!(fixture.domain.remove_device(&device), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&device), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&device), Ok(()));
     assert!(fixture.domain.snapshot(&device).is_none());
     assert_eq!(fixture.observations.counts(), (2, 2, 2));
 }
@@ -654,14 +657,14 @@ fn remove_callback_cannot_reenter_same_device_management() {
         move |device| {
             if let Some(domain) = domain.upgrade() {
                 *results.lock() = Some([
-                    domain.remove_device(device),
+                    domain.unregister_device(device),
                     domain.unbind_device(device),
                     domain.bind_device(device).map(|_| ()),
                 ]);
             }
         }
     }));
-    let result = fixture.domain.remove_device(&device);
+    let result = fixture.domain.unregister_device(&device);
     *fixture.observations.remove_hook.lock() = None;
     assert_eq!(result, Ok(()));
     assert_eq!(
@@ -670,7 +673,7 @@ fn remove_callback_cannot_reenter_same_device_management() {
     );
     assert_eq!(fixture.observations.counts(), (1, 1, 1));
     assert!(fixture.domain.snapshot(&device).is_none());
-    assert_eq!(fixture.domain.remove_device(&device), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&device), Ok(()));
 }
 
 pub(super) fn wait_bounded(mut ready: impl FnMut() -> bool) -> bool {
@@ -708,7 +711,7 @@ impl RemovalTask {
             let result = result.clone();
             move || {
                 started.complete();
-                let removal_result = domain.remove_device(&device);
+                let removal_result = domain.unregister_device(&device);
                 *result.lock() = Some(removal_result);
                 finished.complete();
             }
@@ -918,7 +921,7 @@ fn different_devices_probe_callbacks_progress_independently() {
     drop(gate);
     let cleanup = if exit_codes == [Some(0), Some(0)] {
         [first.device(), second.device()]
-            .map(|device| device.map(|device| fixture.domain.remove_device(&device)))
+            .map(|device| device.map(|device| fixture.domain.unregister_device(&device)))
     } else {
         [None, None]
     };
@@ -926,7 +929,7 @@ fn different_devices_probe_callbacks_progress_independently() {
     assert!(second_finished_while_first_waited);
     assert!(!first_finished_early);
     assert_eq!(first_state, Some(DeviceState::Probing));
-    assert_eq!(second_state, Some(DeviceState::Active));
+    assert_eq!(second_state, Some(DeviceState::Bound));
     assert!(gate_released);
     assert_eq!(exit_codes, [Some(0), Some(0)]);
     assert_eq!(cleanup, [Some(Ok(())), Some(Ok(()))]);
@@ -973,7 +976,7 @@ fn unregister_waits_for_same_device_probe_then_drops_data_once() {
         && (remover.is_none() || remover_exit == Some(0))
         && let Some(device) = registration.device()
     {
-        let _ = fixture.domain.remove_device(&device);
+        let _ = fixture.domain.unregister_device(&device);
     }
     assert!(probe_entered && remover_started && remover_blocked);
     assert_eq!(counts_before_release, (1, 0, 0));
@@ -1034,7 +1037,7 @@ fn unbind_waits_for_same_device_probe_and_preserves_registration() {
     });
     let cleanup = retained
         .as_ref()
-        .map(|device| fixture.domain.remove_device(device));
+        .map(|device| fixture.domain.unregister_device(device));
     assert!(probe_entered && unbinder_started && unbinder_blocked && gate_released);
     assert_eq!(counts_before_release, (1, 0, 0));
     assert_eq!(registration_exit, 0);
@@ -1086,7 +1089,7 @@ fn explicit_bind_waits_for_same_device_probe_without_probing_twice() {
     let cleanup = if registration_exit == Some(0) && binder_exit == Some(0) {
         registration
             .device()
-            .map(|device| fixture.domain.remove_device(&device))
+            .map(|device| fixture.domain.unregister_device(&device))
     } else {
         None
     };

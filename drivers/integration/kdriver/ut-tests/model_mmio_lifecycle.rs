@@ -77,7 +77,7 @@ impl RestoreBinding {
         let domain = global_domain();
         domain.bind_device(&self.device)?;
         if !domain.snapshot(&self.device).is_some_and(|snapshot| {
-            snapshot.state == DeviceState::Active && snapshot.driver == Some(DRIVER_NAME)
+            snapshot.state == DeviceState::Bound && snapshot.driver == Some(DRIVER_NAME)
         }) {
             return Err(RuntimeError::BadState);
         }
@@ -119,7 +119,7 @@ fn real_model_mmio_rng_unbind_rebind_closes_retained_publication() {
     assert_eq!(devices.len(), 1);
     assert_eq!(initial.len(), 1);
     let snapshot = devices.pop().unwrap();
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     let device = snapshot.device;
     let old = initial.pop().unwrap();
     assert!(old.is_available());
@@ -170,7 +170,7 @@ fn real_model_mmio_rng_unbind_rebind_closes_retained_publication() {
     assert_eq!(old_read_unbound.result, Err(kerrno::KError::BadState));
     assert!(old_read_unbound.buffer_unchanged);
     assert_eq!(rebound, Ok(()));
-    assert_eq!(restored_state, Some(DeviceState::Active));
+    assert_eq!(restored_state, Some(DeviceState::Bound));
     assert_eq!(restored_driver, Some(DRIVER_NAME));
     assert!(restored_same_device);
     assert_eq!(current_count, 1);

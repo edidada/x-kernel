@@ -313,7 +313,7 @@ online 不表示已绑定，也不是并发操作许可；Probing 期间仍允�
 
 `unbind_device` 取消 pending/deferred 工作，在域锁外调用 remove 并销毁 Data，
 清空驱动名后回到 `Unclaimed`；注册、身份和 online 状态保留，可用 `bind_device` 重试。
-`remove_device` 只注销指定设备，在 teardown 前关闭来源，完成后从域表删除 entry，
+`unregister_device` 只注销指定设备，在 teardown 前关闭来源，完成后从域表删除 entry，
 entry 析构也在域锁外。父子设备和控制器下游成员的顺序由总线负责，模型不递归退出。
 外部引用不会推迟 remove 或 Data 释放，最后一个引用的 Drop 不触发注销。
 
@@ -363,12 +363,12 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 ## 调用约束 / 执行上下文
 
 - 域锁是 `kspin::SpinNoPreempt`：**禁抢占、不关中断**。因此 `add_device` /
-  `remove_device` / `probe_pending` / `wake` / 各类快照都**不得在硬中断上下文
+  `unregister_device` / `probe_pending` / `wake` / 各类快照都**不得在硬中断上下文
   调用**——持锁期间来中断会在同一把锁上自死锁。
 - matching、`DriverOps::probe` / `remove` 和 `with_data` visitor 在域锁外、
   设备管理锁内运行，可以睡眠，但不能重入同设备管理或等待需要该锁的工作。
   不同设备可以并行；跨设备调用仍须由调用方避免锁依赖环。
-- `remove_device` 的 teardown 相（`DriverOps::remove` → drop `Data`）
+- `unregister_device` 的 teardown 相（`DriverOps::remove` → drop `Data`）
   同样在锁外，且按构造运行在任务上下文——这是各驱动 `Drop` 里
   `block_wait::prepare_block_wait()` 之类可睡眠调用的前提。
 - 域状态机编排设备移除；驱动 remove 必须显式停止活动并注销子系统发布。
@@ -396,7 +396,7 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 枚举中保留的 `Removed` 变体不表示当前注销路径会留下该状态的条目。
 
 ```text
-add_device ──► Pending ── matching ──► Probing ── Ok(Data) ──► Active
+add_device ──► Pending ── matching ──► Probing ── Ok(Data) ──► Bound
                   │                     │
                   │ 无候选               ├─ Fatal ──► Pending（记录 attempted）
                   ▼                     └─ Deferred(dep) ──► Deferred
@@ -404,14 +404,21 @@ add_device ──► Pending ── matching ──► Probing ── Ok(Data) �
                   │                                           │
                   └─ bind / late driver / late provider ──► Pending ◄─ wake
 
-Pending / Deferred / Unclaimed / Active
-                  │ unbind_device 或 remove_device
+Pending / Deferred / Unclaimed / Bound
+                  │ unbind_device 或 unregister_device
                   ▼
                Removing ── unbind ──► Unclaimed（保留注册与 online）
-                  └─────── remove ──► 删除 entry（offline）
+                  └── unregister ──► 删除 entry（offline）
 ```
 
 要点：
+
+- `Bound` 只表示 probe 成功并提交 driver/Data，不保证硬件一直可用；快照的
+  `as_str()` 输出为 `bound`，包含 procfs 中的新模型状态列，旧 kdevice 状态不变。
+- `is_online` 在注销开始、driver remove 之前变为 false，先于注册项删除；普通
+  unbind 不关闭它。它不是精确的“仍在注册表中”判断，更不是硬件访问许可。
+- `DeviceRef::path` / `physical_path` 是总线给出的稳定位置分量，未组合父拓扑、
+  sysfs 挂载点或命名空间，不承诺完整 DEVPATH 或全局唯一性。
 
 - 同设备其他任务的管理请求等待当前 probe/teardown 释放管理锁；同任务重入
   返回 `Management(Reentrant)`，非法上下文返回 `Management(InvalidContext)`。
@@ -419,7 +426,7 @@ Pending / Deferred / Unclaimed / Active
 - `Unclaimed` 不是终态：后注册的驱动（`late_driver_registration_*` 测试）与
   后发布的 provider（`late_provider_wakes_unclaimed_device` 测试）都能把它捞回来。
   `ProbeState::last_deferred_dep` 因此要跨 `finish_probe_phase` → Unclaimed 保留。
-- `bind_device` 对未绑定设备清除 attempted/deferred 记录后重新尝试，Active 不变。
+- `bind_device` 对未绑定设备清除 attempted/deferred 记录后重新尝试，Bound 不变。
   注销后的引用不能再次绑定；同域重复注销通过上下文检查后返回 Ok。
 
 ## 算法流程
@@ -433,7 +440,7 @@ Pending / Deferred / Unclaimed / Active
 3. 重新持域锁置 Probing；无候选且驱动注册表未变化时置 Unclaimed，
    若注册表有变化则重新入队。probe 在域锁外使用该 entry 的宿主 bundle。
 4. 管理锁覆盖 probe 到提交：成功时核对同一对象仍为 Probing 且未持有绑定，
-   存入 driver/Data 并转 Active。这些是内部不变量，不存在合法并发 teardown
+   存入 driver/Data 并转 Bound。这些是内部不变量，不存在合法并发 teardown
    使成功结果过期的分支；不再维护生命周期 generation 或未提交结果回收协议。
    Deferred 进入依赖等待，Fatal 记入 attempted 并重新入队以尝试其他候选。
 5. 循环至队列为空。管理入口被拒绝的设备计入 `ProbeStats::rejected`，
@@ -464,7 +471,7 @@ Pending / Deferred / Unclaimed / Active
 
 ### 数据访问（`with_data`）
 
-持设备管理锁，在域短锁内验证 Active 并暂取 Data；释放域锁后运行类型化 visitor，
+持设备管理锁，在域短锁内验证 Bound 并暂取 Data；释放域锁后运行类型化 visitor，
 再持域锁归还 Data，最后释放管理锁。visitor 不可重入同设备管理。
 管理入口失败、foreign、未绑定或类型不匹配均返回 None，不执行 visitor。
 
@@ -571,7 +578,7 @@ add_device 成功仍只表示注册成功；具体 probe 失败不会被提升�
 该驱动；没有跨驱动评分，也不由通用框架推断“专用驱动优先”。domain 按注册
 顺序选择尚未失败且匹配的第一个候选，成功后保存 Data 并停止。Fatal 记入
 attempted 后继续下一候选；全部不匹配或失败则 Unclaimed。显式 bind 开始
-新一轮尝试；后来注册的驱动不抢占 Active 设备。匹配与 probe 都不持 domain
+新一轮尝试；后来注册的驱动不抢占 Bound 设备。匹配与 probe 都不持 domain
 状态锁，仍由设备管理锁串行化本设备的绑定与退出。
 
 依据本地 Linux `drivers/base/dd.c::__device_attach_driver` 与

@@ -40,6 +40,8 @@ namespace)` section to `/proc/devices`, `/proc/bus/devices`, and
 no kdriver dependency; the optional portable dependency adds no host provider.
 The composition root must enable this feature when routing devices into the
 new model. Legacy rows remain unchanged. Empty model snapshots add no section.
+The model's committed binding state is rendered as `bound`, not `active`;
+this reports a binding, not a guarantee that hardware is usable.
 Rows contain `model:<device path> bus=<bus> <identity> [<state>]
 driver=<driver> parent=model:<parent path>` (or `parent=<root>`). These paths are
 diagnostic labels, not legacy numeric DeviceRecord IDs or public model handles.
@@ -60,8 +62,8 @@ filter, `device-model`, aarch64 modern MMIO, one active model RNG, no VirtIO
 entropy worker and no other lifecycle opt-ins. Each phase opens `/devices`,
 `/bus/devices` and `/bus/topology` under a real procfs root using Filename/VFS,
 then reads with an explicit position to EOF with a 64-KiB per-file bound.
-It checks the exact model-path row across active, retained unclaimed with no
-driver, rebound active on the same registration, and terminal removal absent.
+It checks the exact model-path row across bound, retained unclaimed with no
+driver, rebound bound on the same registration, and terminal removal absent.
 Unbind observations are saved until restoration completes; terminal removal
 is intentionally permanent in this dedicated guest. Recorded runs and limits
 are tracked in the driver-model R1-08 acceptance audit.

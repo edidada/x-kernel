@@ -62,7 +62,7 @@ impl DeviceCore {
         *self.driver.lock() = None;
     }
 
-    /// The physical path (DEVPATH source), as derived from the bus data.
+    /// The stable location component derived from the immutable bus data.
     pub(crate) fn physical_path(&self) -> &str {
         self.physical_path.as_str()
     }
@@ -114,7 +114,7 @@ impl DeviceRef {
         &self.core.desc
     }
 
-    /// Physical location derived from the registered bus data.
+    /// Bus-defined location component, not a complete sysfs path or unique key.
     pub fn path(&self) -> &str {
         self.core.physical_path()
     }
@@ -125,6 +125,8 @@ impl DeviceRef {
     }
 
     /// Whether removal has not yet closed this device's publication source.
+    /// Unregistration closes it before driver teardown and registry deletion;
+    /// ordinary unbinding leaves it online even though no driver remains bound.
     /// This snapshot is neither a binding check nor an in-flight operation permit.
     pub fn is_online(&self) -> bool {
         self.core.is_online()

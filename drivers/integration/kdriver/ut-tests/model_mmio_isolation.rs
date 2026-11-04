@@ -39,7 +39,7 @@ fn has_state(device: &DeviceRef, state: DeviceState) -> bool {
         snapshot.device.same_device(device)
             && snapshot.state == state
             && snapshot.driver
-                == if state == DeviceState::Active {
+                == if state == DeviceState::Bound {
                     Some(DRIVER_NAME)
                 } else {
                     None
@@ -84,7 +84,7 @@ struct RestoreBinding {
 impl RestoreBinding {
     fn restore(&mut self) -> Result<(), RuntimeError> {
         global_domain().bind_device(&self.device)?;
-        if !has_state(&self.device, DeviceState::Active) {
+        if !has_state(&self.device, DeviceState::Bound) {
             return Err(RuntimeError::BadState);
         }
         self.is_armed = false;
@@ -148,8 +148,8 @@ fn isolation_round(device: &DeviceRef, peer_device: &DeviceRef) -> Result<(), &'
     if initial.len() != 2
         || !initial.iter().all(HwrngHandle::is_available)
         || initial[0].same_publication(&initial[1])
-        || !has_state(device, DeviceState::Active)
-        || !has_state(peer_device, DeviceState::Active)
+        || !has_state(device, DeviceState::Bound)
+        || !has_state(peer_device, DeviceState::Bound)
     {
         return Err("round requires two distinct active publications and devices");
     }
@@ -159,7 +159,7 @@ fn isolation_round(device: &DeviceRef, peer_device: &DeviceRef) -> Result<(), &'
     };
     let unbind = global_domain().unbind_device(device);
     let is_unclaimed = has_state(device, DeviceState::Unclaimed);
-    let peer_active = has_state(peer_device, DeviceState::Active);
+    let peer_active = has_state(peer_device, DeviceState::Bound);
     let pair = withdrawn_pair(&initial);
     let during_unbind = if unbind.is_ok() && is_unclaimed && peer_active {
         pair.is_some_and(|(old, peer)| stale_is_closed(old) && sample_is_valid(peer))
@@ -169,7 +169,7 @@ fn isolation_round(device: &DeviceRef, peer_device: &DeviceRef) -> Result<(), &'
     let rebound = restore.restore();
     drop(restore);
     let both_active =
-        has_state(device, DeviceState::Active) && has_state(peer_device, DeviceState::Active);
+        has_state(device, DeviceState::Bound) && has_state(peer_device, DeviceState::Bound);
     let after_rebind = if rebound.is_ok() && both_active {
         pair.is_some_and(|(old, peer)| stale_is_closed(old) && restored_sample(old, peer))
     } else {

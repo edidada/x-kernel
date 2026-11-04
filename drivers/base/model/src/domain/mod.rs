@@ -30,11 +30,11 @@
 //!
 //! # Probe algorithm
 //!
-//! `probe_pending` selects, per descriptor, the highest-scoring registered
-//! driver that has not permanently failed it, runs the probe **outside**
-//! the domain lock, and commits the result:
+//! `probe_pending` tries matching drivers in registration order, skipping
+//! candidates already failed in this binding attempt. Probe runs **outside**
+//! the domain lock under the device management lock; success stops the search:
 //!
-//! * `Ok(data)` — device becomes `Active`; the boxed `Data` is owned by
+//! * `Ok(data)` — device becomes `Bound`; the boxed `Data` is owned by
 //!   the domain until removal.
 //! * `Err(Deferred(dep))` — the device parks in `deferred` until exactly
 //!   [`wake`](DeviceDomain::wake) fires with the same dependency. No
@@ -100,10 +100,10 @@ pub enum DeviceState {
     /// A probe is currently running.
     Probing,
     /// Bound and initialized.
-    Active,
+    Bound,
     /// Parked on a [`DepSource`], waiting for [`DeviceDomain::wake`].
     Deferred,
-    /// No driver matched or every candidate failed permanently.
+    /// No candidate bound, or the deferred-probe phase ended without a provider.
     Unclaimed,
     /// Being torn down.
     Removing,
@@ -116,7 +116,7 @@ impl DeviceState {
         match self {
             Self::Pending => "pending",
             Self::Probing => "probing",
-            Self::Active => "active",
+            Self::Bound => "bound",
             Self::Deferred => "deferred",
             Self::Unclaimed => "unclaimed",
             Self::Removing => "removing",
@@ -344,7 +344,8 @@ struct LifecycleState {
 struct BindingState {
     driver: Option<Arc<dyn AnyDriver>>,
     data: Option<Box<DataBox>>,
-    /// Driver registrations that failed this device permanently.
+    /// Driver registrations that failed during the current binding attempt.
+    /// Explicit `bind_device` clears this set before starting a fresh attempt.
     ///
     /// Keys are never reused ([`DriverKey`] is monotonic), so entries
     /// stay harmless even if a registration is someday withdrawn —
@@ -474,6 +475,13 @@ static DEVICE_ID_ALLOCATOR: core::sync::atomic::AtomicU64 = core::sync::atomic::
 #[cfg(unittest)]
 type DispatchHookFn = dyn Fn(&DeviceDomain, bool) + Send + Sync;
 
+/// Owns device registrations, bus instances, driver candidates and bindings.
+///
+/// Coordinates matching, deferred probing and per-device lifecycle operations.
+/// Each device's management lock serializes binding, unbinding and unregistering;
+/// the domain lock protects bookkeeping, never driver callbacks. Bus owners
+/// enumerate and unregister their downstream devices explicitly. Retained
+/// `DeviceRef`s preserve identity, not a binding or permission to access hardware.
 pub struct DeviceDomain {
     identity: Arc<()>,
     inner: SpinNoPreempt<DomainInner>,

@@ -85,7 +85,7 @@ impl ChildManager {
         let mut all_removed = true;
         if let Some(domain) = self.domain.upgrade() {
             for child in children {
-                all_removed &= domain.remove_device(&child).is_ok();
+                all_removed &= domain.unregister_device(&child).is_ok();
             }
         } else {
             all_removed = false;
@@ -281,7 +281,7 @@ impl Drop for Fixture {
         }
         if self.can_cleanup {
             for snapshot in self.domain.devices() {
-                let _ = self.domain.remove_device(&snapshot.device);
+                let _ = self.domain.unregister_device(&snapshot.device);
             }
         }
     }
@@ -305,7 +305,7 @@ fn controller_removes_only_owned_children_before_stopping_parent_services() {
             Some(parent.clone()),
         ))
         .unwrap();
-    assert_eq!(fixture.domain.remove_device(&parent), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&parent), Ok(()));
     assert!(fixture.domain.snapshot(&parent).is_none());
     assert!(fixture.domain.snapshot(&owned).is_none());
     assert_eq!(
@@ -330,7 +330,7 @@ fn controller_removes_only_owned_children_before_stopping_parent_services() {
             Event::ParentDrop,
         ]
     );
-    assert_eq!(fixture.domain.remove_device(&outsider), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&outsider), Ok(()));
     assert!(fixture.domain.devices().is_empty());
 }
 
@@ -414,9 +414,9 @@ fn enumeration_commit_is_drained_and_old_binding_cannot_publish_after_rebind() {
     let fresh = new.commit(4).unwrap();
     assert_eq!(
         fixture.domain.snapshot(&fresh).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
-    assert_eq!(fixture.domain.remove_device(&parent), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&parent), Ok(()));
     assert!(new.children_removed.load(Ordering::Acquire));
     assert!(fixture.domain.snapshot(&fresh).is_none());
     assert!(fixture.domain.devices().is_empty());

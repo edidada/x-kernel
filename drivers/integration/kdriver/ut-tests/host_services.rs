@@ -157,10 +157,10 @@ fn host_services_preserve_irq_mapping_and_release_each_binding_once() {
         };
         let observed = *result.lock();
         assert_eq!(observed, Some(Ok(resource.virq())));
-        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+        assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
         domain.unbind_device(&device).unwrap();
         domain.bind_device(&device).unwrap();
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
         let mut expected = Vec::new();
         for _ in 0..2 {
             if let IrqSpec::FirmwareRoute {
@@ -220,7 +220,7 @@ fn host_services_irq_errors_and_failed_probe_do_not_double_release() {
             domain.snapshot(&device).unwrap().state,
             DeviceState::Unclaimed
         );
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
         let observed = *result.lock();
         assert_eq!(observed, Some(expected_result));
         let actual = events.lock().clone();

@@ -68,7 +68,7 @@ fn check_projection(
             (None, None) => {}
             (Some(state), Some(row)) => {
                 let state_field = format!("[{}]", state.as_str());
-                let driver_field = if state == DeviceState::Active {
+                let driver_field = if state == DeviceState::Bound {
                     format!("driver={DRIVER_NAME}")
                 } else {
                     String::from("driver=<none>")
@@ -90,7 +90,7 @@ fn same_registration(device: &DeviceRef, state: DeviceState) -> bool {
         snapshot.device.same_device(device)
             && snapshot.state == state
             && snapshot.driver
-                == if state == DeviceState::Active {
+                == if state == DeviceState::Bound {
                     Some(DRIVER_NAME)
                 } else {
                     None
@@ -107,7 +107,7 @@ struct RestoreBinding {
 impl RestoreBinding {
     fn restore(&mut self) -> Result<(), RuntimeError> {
         global_domain().bind_device(&self.device)?;
-        if !same_registration(&self.device, DeviceState::Active) {
+        if !same_registration(&self.device, DeviceState::Bound) {
             return Err(RuntimeError::BadState);
         }
         self.is_armed = false;
@@ -147,11 +147,11 @@ fn real_model_mmio_rng_procfs_tracks_unbind_rebind_and_remove() {
         .collect();
     assert_eq!(devices.len(), 1);
     let device = devices.pop().unwrap().device;
-    assert!(same_registration(&device, DeviceState::Active));
+    assert!(same_registration(&device, DeviceState::Bound));
     let fs = crate::new_procfs(SuperBlockFlags::empty()).unwrap();
     let root = Mount::new_root(&fs).root_path();
     assert_eq!(
-        check_projection(&root, &device, Some(DeviceState::Active)),
+        check_projection(&root, &device, Some(DeviceState::Bound)),
         Ok(())
     );
 
@@ -164,8 +164,8 @@ fn real_model_mmio_rng_procfs_tracks_unbind_rebind_and_remove() {
     let unclaimed_text = check_projection(&root, &device, Some(DeviceState::Unclaimed));
     let rebound = restore.restore();
     drop(restore);
-    let active_again = same_registration(&device, DeviceState::Active);
-    let rebound_text = check_projection(&root, &device, Some(DeviceState::Active));
+    let active_again = same_registration(&device, DeviceState::Bound);
+    let rebound_text = check_projection(&root, &device, Some(DeviceState::Bound));
     assert_eq!(unbind, Ok(()));
     assert!(retained);
     assert_eq!(unclaimed_text, Ok(()));
@@ -173,7 +173,7 @@ fn real_model_mmio_rng_procfs_tracks_unbind_rebind_and_remove() {
     assert!(active_again);
     assert_eq!(rebound_text, Ok(()));
 
-    let removal = domain.remove_device(&device);
+    let removal = domain.unregister_device(&device);
     let removed_text = check_projection(&root, &device, None);
     assert_eq!(removal, Ok(()));
     assert!(!device.is_online());

@@ -64,9 +64,9 @@ pub trait BusDeviceData: core::fmt::Debug + Send + Sync + 'static {
     /// Clone the payload as its own boxed trait object.
     fn clone_erased(&self) -> Box<dyn BusDeviceData>;
 
-    /// The device's path component for devnode/DEVPATH derivation
-    /// (`dev_name`): unique within its bus, stable for the device's
-    /// lifetime.
+    /// Bus-defined location component, stable for this device's lifetime.
+    /// The framework neither composes parent paths nor enforces uniqueness;
+    /// devnode naming and namespace collision checks belong to their publisher.
     fn path_component(&self) -> String;
 
     /// The device-derived MODALIAS (uevent/module loading). Platform-bus
@@ -102,12 +102,10 @@ pub trait Bus: Sized + Send + Sync + 'static {
     fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> bool;
 }
 
-/// Format the canonical physical path for a device location (the
-/// `devices/...` prefix source for DEVPATH and sysfs).
+/// Format the bus-defined location component of a device.
 ///
-/// THE single derivation: drivers and the class projections must all
-/// call this — independent copies drifted before (DEVPATH vs sysfs
-/// tree mismatch).
+/// This does not compose parent topology or a sysfs namespace. It is neither
+/// a complete Linux DEVPATH nor a globally unique device/publication key.
 pub fn physical_path(data: &dyn BusDeviceData) -> alloc::string::String {
     data.path_component()
 }

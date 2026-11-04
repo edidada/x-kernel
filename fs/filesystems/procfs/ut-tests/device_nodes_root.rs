@@ -19,7 +19,7 @@ fn model_rows_append_without_reinterpreting_legacy_ids() {
                 bus: "platform",
                 identity: Some("controller"),
                 driver: Some("controller-driver"),
-                state: "active",
+                state: driver_model::DeviceState::Bound.as_str(),
             },
             ModelDeviceRow {
                 path: "devices/platform/controller/rng",
@@ -27,16 +27,16 @@ fn model_rows_append_without_reinterpreting_legacy_ids() {
                 bus: "platform",
                 identity: Some("virtio-mmio:4"),
                 driver: Some("virtio-rng-mmio"),
-                state: "active",
+                state: driver_model::DeviceState::Bound.as_str(),
             },
         ],
     );
     unittest::assert_eq!(
         text,
         "platform       7 firmware:legacy [active] driver=legacy\nModel devices (model:path \
-         namespace):\n  model:devices/platform/controller bus=platform controller [active] \
+         namespace):\n  model:devices/platform/controller bus=platform controller [bound] \
          driver=controller-driver parent=<root>\n  model:devices/platform/controller/rng \
-         bus=platform virtio-mmio:4 [active] driver=virtio-rng-mmio \
+         bus=platform virtio-mmio:4 [bound] driver=virtio-rng-mmio \
          parent=model:devices/platform/controller\n"
     );
 }

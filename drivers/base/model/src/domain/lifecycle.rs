@@ -59,7 +59,7 @@ impl DeviceDomain {
     /// Requires sleepable management context and rejects same-device reentry.
     /// No children or controller-owned bus members are removed automatically:
     /// their owning bus must arrange downstream teardown and lock ordering.
-    pub fn remove_device(&self, device: &crate::DeviceRef) -> Result<(), RuntimeError> {
+    pub fn unregister_device(&self, device: &crate::DeviceRef) -> Result<(), RuntimeError> {
         self.with_management(device, || {
             let id = device.core.id.raw();
             {
@@ -110,7 +110,7 @@ impl DeviceDomain {
                 DeviceState::Pending
                 | DeviceState::Deferred
                 | DeviceState::Unclaimed
-                | DeviceState::Active => {}
+                | DeviceState::Bound => {}
                 DeviceState::Probing | DeviceState::Removing => {
                     return Err(RuntimeError::Busy);
                 }
@@ -220,7 +220,7 @@ impl DeviceDomain {
                     .get_mut(&device.core.id.raw())
                     .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
                     .ok_or(RuntimeError::NotFound)?;
-                if entry.lifecycle.state != DeviceState::Active {
+                if entry.lifecycle.state != DeviceState::Bound {
                     return Err(RuntimeError::BadState);
                 }
                 entry.binding.data.take().ok_or(RuntimeError::NotFound)?
@@ -233,7 +233,7 @@ impl DeviceDomain {
                     .get_mut(&device.core.id.raw())
                     .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
                     .ok_or(RuntimeError::NotFound)?;
-                if entry.lifecycle.state != DeviceState::Active || entry.binding.data.is_some() {
+                if entry.lifecycle.state != DeviceState::Bound || entry.binding.data.is_some() {
                     return Err(RuntimeError::BadState);
                 }
                 entry.binding.data = Some(data);

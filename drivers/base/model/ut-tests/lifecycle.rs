@@ -30,7 +30,7 @@ fn probe_rejects_same_device_management_and_commits_before_teardown() {
             let device = dev.reference();
             let rejected = RuntimeError::Management(crate::DeviceManagementError::Reentrant);
             core::assert_eq!(domain.unbind_device(&device), Err(rejected));
-            core::assert_eq!(domain.remove_device(&device), Err(rejected));
+            core::assert_eq!(domain.unregister_device(&device), Err(rejected));
             core::assert_eq!(domain.bind_device(&device), Err(rejected));
             core::assert_eq!(
                 domain.snapshot(&device).unwrap().state,
@@ -65,7 +65,7 @@ fn probe_rejects_same_device_management_and_commits_before_teardown() {
     )));
     let device = domain.add_device(test_descriptor(root)).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe"]);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert!(
         domain
             .with_data::<LifecycleData, ()>(&device, |_| ())
@@ -81,7 +81,7 @@ fn probe_rejects_same_device_management_and_commits_before_teardown() {
     events.lock().clear();
     assert_eq!(domain.bind_device(&device).unwrap().activated, 1);
     assert_eq!(*events.lock(), alloc::vec!["probe"]);
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
     assert!(!device.is_online());
     assert!(domain.devices().is_empty());
@@ -146,14 +146,14 @@ fn service_replacement_preserves_each_devices_registration_host() {
         .unwrap();
     assert_eq!(
         domain.snapshot(&device_a).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(
         domain.snapshot(&device_b).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
-    domain.remove_device(&device_a).unwrap();
-    domain.remove_device(&device_b).unwrap();
+    domain.unregister_device(&device_a).unwrap();
+    domain.unregister_device(&device_b).unwrap();
     assert_eq!(
         *events.lock(),
         alloc::vec![
@@ -229,9 +229,9 @@ fn rejected_probe_stays_pending_and_retries_after_management_exit() {
         }
     );
     assert_eq!(PROBES.load(Ordering::Relaxed), probes_before + 1);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(domain.probe_pending(), ProbeStats::default());
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
 }
 
 #[def_test]
@@ -254,7 +254,7 @@ fn nested_add_binds_another_device_before_outer_probe_returns() {
             let mut descriptor = test_descriptor_for_node(self.root, 2);
             descriptor.parent = Some(dev.reference());
             let child = domain.add_device(descriptor).unwrap();
-            core::assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
+            core::assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Bound);
             core::assert_eq!(
                 domain.snapshot(&dev.reference()).unwrap().state,
                 DeviceState::Probing
@@ -269,7 +269,11 @@ fn nested_add_binds_another_device_before_outer_probe_returns() {
             _env: &crate::Environment<'_>,
             child: &mut Self::Data,
         ) {
-            self.domain.upgrade().unwrap().remove_device(child).unwrap();
+            self.domain
+                .upgrade()
+                .unwrap()
+                .unregister_device(child)
+                .unwrap();
             self.events.lock().push("outer-remove");
         }
     }
@@ -308,9 +312,9 @@ fn nested_add_binds_another_device_before_outer_probe_returns() {
         *events.lock(),
         alloc::vec!["outer-enter", "probe", "outer-exit"]
     );
-    assert_eq!(domain.snapshot(&outer).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&outer).unwrap().state, DeviceState::Bound);
     assert_eq!(domain.devices().len(), 2);
-    domain.remove_device(&outer).unwrap();
+    domain.unregister_device(&outer).unwrap();
     assert_eq!(
         *events.lock(),
         alloc::vec![
@@ -381,8 +385,9 @@ fn bind_unbind_rebind_unregister_orders_remove_before_each_data_drop() {
         },
     ));
     assert_eq!(*events.lock(), alloc::vec!["probe"]);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(domain.bind_device(&device).unwrap(), ProbeStats::default());
+    assert_eq!(domain.snapshot(&device).unwrap().state.as_str(), "bound");
     assert_eq!(*events.lock(), alloc::vec!["probe"]);
     let retained = device.clone();
     let weak = Arc::downgrade(&device.core);
@@ -394,6 +399,7 @@ fn bind_unbind_rebind_unregister_orders_remove_before_each_data_drop() {
     );
     assert_eq!(device.driver_name(), None);
     assert_eq!(domain.devices().len(), 1);
+    assert!(retained.is_online());
     assert!(domain.devices()[0].device.same_device(&retained));
     assert!(
         domain
@@ -404,7 +410,7 @@ fn bind_unbind_rebind_unregister_orders_remove_before_each_data_drop() {
     domain.unbind_device(&device).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
     assert_eq!(domain.bind_device(&device).unwrap().activated, 1);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(device.driver_name(), Some("lifecycle"));
     assert!(retained.is_online());
     assert!(
@@ -414,7 +420,7 @@ fn bind_unbind_rebind_unregister_orders_remove_before_each_data_drop() {
             .device
             .same_device(&retained)
     );
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(
         *events.lock(),
         alloc::vec!["probe", "remove", "drop", "probe", "remove", "drop"]
@@ -424,7 +430,7 @@ fn bind_unbind_rebind_unregister_orders_remove_before_each_data_drop() {
     assert!(domain.bus_instance_devices(root).is_empty());
     assert!(!retained.is_online());
     assert_eq!(retained.path(), "platform/firmware1");
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(domain.bind_device(&device), Err(RuntimeError::NotFound));
     drop(device);
     assert!(weak.upgrade().is_some());
@@ -449,8 +455,8 @@ fn unregister_after_unbind_does_not_remove_or_drop_the_binding_twice() {
     ));
     let device = domain.add_device(test_descriptor(root)).unwrap();
     domain.unbind_device(&device).unwrap();
-    domain.remove_device(&device).unwrap();
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(*events.lock(), alloc::vec!["probe", "remove", "drop"]);
     assert!(domain.snapshot(&device).is_none());
     assert!(domain.devices().is_empty());
@@ -507,8 +513,8 @@ fn failed_or_deferred_probe_never_calls_remove_without_bound_data() {
             domain.snapshot(&device).unwrap().state,
             DeviceState::Unclaimed
         );
-        domain.remove_device(&device).unwrap();
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
         assert_eq!(removes.load(Ordering::Relaxed), 0);
         assert!(domain.devices().is_empty());
         assert!(domain.deferred_report().is_empty());
@@ -547,7 +553,7 @@ fn missing_management_services_reject_registration_without_residue() {
         domain.snapshot(&device).unwrap().state,
         DeviceState::Unclaimed
     );
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
 }
 
 #[def_test]
@@ -560,7 +566,7 @@ fn same_device_callback_reentry_is_rejected_without_disturbing_outer_lifecycle()
         fn assert_rejected(&self, device: &crate::DeviceRef) {
             let domain = self.domain.upgrade().unwrap();
             let expected = RuntimeError::Management(crate::DeviceManagementError::Reentrant);
-            core::assert_eq!(domain.remove_device(device), Err(expected));
+            core::assert_eq!(domain.unregister_device(device), Err(expected));
             core::assert_eq!(domain.unbind_device(device), Err(expected));
             core::assert_eq!(domain.bind_device(device), Err(expected));
         }
@@ -599,7 +605,7 @@ fn same_device_callback_reentry_is_rejected_without_disturbing_outer_lifecycle()
         },
     ));
     let device = domain.add_device(test_descriptor(root)).unwrap();
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     domain.unbind_device(&device).unwrap();
     assert_eq!(removes.load(Ordering::Relaxed), 1);
     assert_eq!(
@@ -607,7 +613,7 @@ fn same_device_callback_reentry_is_rejected_without_disturbing_outer_lifecycle()
         DeviceState::Unclaimed
     );
     assert_eq!(domain.bind_device(&device).unwrap().activated, 1);
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(removes.load(Ordering::Relaxed), 2);
     assert!(domain.snapshot(&device).is_none());
     assert!(domain.devices().is_empty());

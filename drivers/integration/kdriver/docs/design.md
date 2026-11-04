@@ -104,7 +104,7 @@ testing: handles are associated behaviorally by observing exactly one original
 publication close when a selected device is unbound, while the other stays live.
 
 Each device is unbound and rebound in turn. While one is Unclaimed, the peer
-must retain its Active registration and exact publication and perform guarded
+must retain its Bound registration and exact publication and perform guarded
 reads totalling more than the driver's 256-byte request/cache bound. This forces
 new device I/O rather than accepting only data cached before peer teardown.
 Rebinding must retain the selected device identity, introduce a
@@ -149,11 +149,17 @@ policy, not direct test mutation of the slot map.
 
 ### Production ownership
 
+`PlatformRngRegistration` is the transitional registration owner for selected
+boot-DT RNG nodes, not the general platform model or a transport driver.
+`ensure_root_initialized()` may install services and register the root and RNG
+driver once; it is not a side-effect-free bus accessor. The module remains
+`platform_model` to preserve existing test-filter entry points during migration.
+
 With `virtio-rng`, EnumerationContext::new always obtains the same
-`production_owner()` from LazyInit<Arc<PlatformModel>>; managers have no separate
+`production_owner()` from LazyInit<Arc<PlatformRngRegistration>>; managers have no separate
 platform-owner field.
 DeviceManager instances and public default bus-manager enumeration routes share
-one PlatformModel, root bus and native-service installation; manager identity
+one PlatformRngRegistration, root bus and native-service installation; manager identity
 is not hardware ownership. The source is the single immutable boot DT. HAL node
 IDs are full-tree u32 indices, stable independently of matching but not across
 boots, overlays or tree replacement. Staging copies the original compatible
@@ -242,7 +248,7 @@ conveys no binding ownership.
 DMA and management-lock services with `host_irq::NativeIrq`. Construction does
 not install services, enumerate firmware, activate a bus or probe any device.
 The `device-model` feature enables the direct kirq dependency independently of
-block drivers. The scoped PlatformModel root now installs this composition;
+block drivers. The scoped PlatformRngRegistration root now installs this composition;
 constructing the bundle alone still performs no discovery.
 
 Firmware routes go through kirq::try_map once per host-service request. Explicit

@@ -225,7 +225,7 @@ impl DeviceDomain {
                 Some(
                     DeviceState::Pending
                     | DeviceState::Probing
-                    | DeviceState::Active
+                    | DeviceState::Bound
                     | DeviceState::Deferred
                     | DeviceState::Unclaimed,
                 ) => {}
@@ -300,7 +300,7 @@ impl DeviceDomain {
                 match parent_entry.lifecycle.state {
                     DeviceState::Pending
                     | DeviceState::Probing
-                    | DeviceState::Active
+                    | DeviceState::Bound
                     | DeviceState::Deferred
                     | DeviceState::Unclaimed => {
                         parent_entry.topology.children.push(id.raw());

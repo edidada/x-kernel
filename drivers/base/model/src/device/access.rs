@@ -121,7 +121,7 @@ pub struct DeviceInfo<'a, B: Bus> {
 }
 
 impl<B: Bus> DeviceInfo<'_, B> {
-    /// The bus-vocabulary path component (DEVPATH source).
+    /// The bus-defined location component, not a complete DEVPATH or unique key.
     pub fn path(&self) -> &str {
         self.device.reference.path()
     }

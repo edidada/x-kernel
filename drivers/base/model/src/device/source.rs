@@ -20,10 +20,11 @@ pub trait PublicationSource: Send + Sync + 'static {
     /// The publishing driver; absent identity prevents subsystem registration.
     fn driver_name(&self) -> Option<&'static str>;
 
-    /// Stable physical location, not a publication uniqueness key.
+    /// Stable bus-defined location, not a complete DEVPATH or uniqueness key.
     fn physical_path(&self) -> &str;
 
     /// Device registration liveness, not permission to use a runtime.
+    /// False from the start of unregistration, before teardown completes.
     fn is_online(&self) -> bool;
 }
 

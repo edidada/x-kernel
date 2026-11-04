@@ -8,7 +8,7 @@ use super::*;
 
 #[def_test]
 fn selected_mmio_reservation_blocks_aliases_and_drop_allows_retry() {
-    let owner = PlatformModel::new();
+    let owner = PlatformRngRegistration::new();
     let mut observed = None;
     khal::firmware::devices::for_each_compatible_view(
         |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
@@ -57,7 +57,7 @@ fn selected_mmio_reservation_blocks_aliases_and_drop_allows_retry() {
 
 #[def_test]
 fn staged_model_registration_is_excluded_from_legacy_counts() {
-    let owner = PlatformModel::new();
+    let owner = PlatformRngRegistration::new();
     let mut observed = None;
     khal::firmware::devices::for_each_compatible_view(
         |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
@@ -94,7 +94,7 @@ fn staged_model_registration_is_excluded_from_legacy_counts() {
 
 #[def_test]
 fn staged_registration_rejects_atomic_context_and_releases_reservation() {
-    let owner = PlatformModel::new();
+    let owner = PlatformRngRegistration::new();
     let mut observed = None;
     khal::firmware::devices::for_each_compatible_view(
         |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
@@ -129,7 +129,7 @@ fn staged_qemu_dma_mask_does_not_expand_the_ram_window() {
     if !kbuild_config::MACHINE_AARCH64_QEMU {
         return unittest::TestResult::Ignored;
     }
-    let owner = PlatformModel::new();
+    let owner = PlatformRngRegistration::new();
     let mut observed = None;
     khal::firmware::devices::for_each_compatible_view(
         |compatible| (compatible == "virtio,mmio").then_some("virtio,mmio"),
@@ -164,7 +164,7 @@ fn staged_qemu_dma_mask_does_not_expand_the_ram_window() {
 }
 
 #[def_test(serial)]
-fn modern_mmio_boot_rng_is_active_in_the_model() {
+fn modern_mmio_boot_rng_is_bound_in_the_model() {
     if option_env!("XK_EXPECT_MODEL_MMIO_RNG") != Some("1") {
         return unittest::TestResult::Ignored;
     }
@@ -177,7 +177,7 @@ fn modern_mmio_boot_rng_is_active_in_the_model() {
         .collect();
     assert!(!selected.is_empty());
     for snapshot in selected {
-        assert_eq!(snapshot.state, driver_model::DeviceState::Active);
+        assert_eq!(snapshot.state, driver_model::DeviceState::Bound);
         let region = snapshot.device.descriptor().resources.mmio(0).unwrap();
         assert!(!kdevice::device_descs_snapshot().iter().any(|legacy| {
             matches!(legacy.location(), kdevice::DeviceLocation::Mmio { base, .. } if base == region.base)

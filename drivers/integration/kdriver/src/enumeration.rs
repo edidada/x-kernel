@@ -24,7 +24,7 @@ use kdevice::{
 /// objects.
 pub struct EnumerationContext {
     #[cfg(feature = "virtio-rng")]
-    pub(crate) model_owner: alloc::sync::Arc<crate::platform_model::PlatformModel>,
+    pub(crate) model_owner: alloc::sync::Arc<crate::platform_model::PlatformRngRegistration>,
     #[cfg(feature = "virtio-rng")]
     model_pending: Vec<crate::platform_model::StagedRng>,
     pending: Vec<DeviceDesc>,

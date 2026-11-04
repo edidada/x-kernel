@@ -21,7 +21,7 @@ use kspin::SpinNoPreempt;
 use ksync::Mutex;
 use lazyinit::LazyInit;
 
-static PLATFORM_MODEL: LazyInit<Arc<PlatformModel>> = LazyInit::new();
+static PLATFORM_MODEL: LazyInit<Arc<PlatformRngRegistration>> = LazyInit::new();
 
 const QEMU_MODERN_MMIO_DMA_MASK: u64 = u64::MAX;
 
@@ -31,8 +31,8 @@ const QEMU_MODERN_MMIO_DMA_MASK: u64 = u64::MAX;
 /// All platform discovery holds this owner's discovery lock from ownership
 /// checks through classification and reservation or legacy registration.
 /// Root initialization and probing must occur after releasing that lock.
-pub(crate) fn production_owner() -> Arc<PlatformModel> {
-    PLATFORM_MODEL.call_once(PlatformModel::new);
+pub(crate) fn production_owner() -> Arc<PlatformRngRegistration> {
+    PLATFORM_MODEL.call_once(PlatformRngRegistration::new);
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: call_once permanently published the \
@@ -58,13 +58,15 @@ impl Slot {
     }
 }
 
-pub(crate) struct PlatformModel {
+/// Transitional registration owner for selected boot-DT platform RNG devices.
+/// Not a general platform model or a VirtIO transport driver.
+pub(crate) struct PlatformRngRegistration {
     pub(crate) discovery: SpinNoPreempt<()>,
     root: Mutex<Option<Result<BusInstanceId, RuntimeError>>>,
     slots: SpinNoPreempt<BTreeMap<u32, Slot>>,
 }
 
-impl PlatformModel {
+impl PlatformRngRegistration {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             discovery: SpinNoPreempt::new(()),
@@ -86,7 +88,7 @@ impl PlatformModel {
     /// global domain's lifetime. Only its reserved QEMU nodes may be added to
     /// this bus; initialization failure is terminal rather than reinstalling
     /// services or registering another partially initialized root on retry.
-    fn root(&self) -> Result<BusInstanceId, RuntimeError> {
+    fn ensure_root_initialized(&self) -> Result<BusInstanceId, RuntimeError> {
         if !ktask::is_sleepable_context() || self.root.is_owned_by_current() {
             return Err(RuntimeError::BadState);
         }
@@ -183,7 +185,7 @@ fn overlaps(region: MmioRegion, base: usize, size: usize) -> bool {
 }
 
 pub(crate) struct StagedRng {
-    owner: Arc<PlatformModel>,
+    owner: Arc<PlatformRngRegistration>,
     node: u32,
     bus_data: PlatformBusData,
     resources: ResourceMap,
@@ -192,7 +194,7 @@ pub(crate) struct StagedRng {
 
 impl StagedRng {
     pub(crate) fn register(self) -> Result<(), RuntimeError> {
-        let instance = self.owner.root()?;
+        let instance = self.owner.ensure_root_initialized()?;
         let descriptor = DeviceDescriptor::builder()
             .bus_instance(instance)
             .bus_data(Box::new(self.bus_data.clone()))

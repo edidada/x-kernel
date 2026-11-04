@@ -11,12 +11,13 @@ use super::*;
 impl DeviceDomain {
     /// Declare probe activity finished (the boot/scan phase is over).
     ///
-    /// Devices still Deferred after this point are permanently unclaimed —
-    /// their provider never arrived. Each is moved to `Unclaimed` with a
+    /// With `keep_waiting` false, devices still Deferred become `Unclaimed`
+    /// because their provider has not arrived. Each is moved with a
     /// warning naming the dependency, instead of staying parked forever
     /// with no diagnostic. Devices parked on a dependency that a FUTURE
     /// driver might still publish stay deferred only if `keep_waiting` is
-    /// set; boot-time callers pass false (nothing else will register).
+    /// set. This is not permanent rejection: a later dependency wake or
+    /// explicit bind can retry an unclaimed device.
     pub fn finish_probe_phase(&self, keep_waiting: bool) {
         let stuck: Vec<(u64, DepSource)> = {
             let mut inner = self.inner.lock();
@@ -155,7 +156,7 @@ impl DeviceDomain {
                 }
                 if let Some(entry) = inner.devices.get_mut(&id) {
                     // Only a parked (Deferred) device may be woken: a device
-                    // flipped to `Removing` by a concurrent remove_device —
+                    // flipped to `Removing` by a concurrent unregister_device —
                     // still sitting in the deferred list until its light
                     // path re-takes the lock — must NOT be resurrected into
                     // the probe queue (same guard as `finish_probe_phase`).

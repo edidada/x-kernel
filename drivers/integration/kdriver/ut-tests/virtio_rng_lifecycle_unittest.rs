@@ -303,7 +303,7 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
             .unwrap();
         let state = domain.snapshot(&device).unwrap().state;
         let pending_before_remove = MAPPINGS.load(Ordering::Relaxed);
-        let remove_result = domain.remove_device(&device);
+        let remove_result = domain.unregister_device(&device);
         drop(domain);
         let reader = observations.reader.lock().take().unwrap();
         let reader_exit =
@@ -326,7 +326,7 @@ fn concrete_rng_model_remove_and_failed_probe_release_dma_with_old_handles_alive
             if fail_after_publish {
                 DeviceState::Unclaimed
             } else {
-                DeviceState::Active
+                DeviceState::Bound
             }
         );
         assert!(observations.submitted_pending.load(Ordering::Relaxed));

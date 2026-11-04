@@ -62,7 +62,7 @@ fn publications() -> Vec<HwrngHandle> {
 
 fn is_restored(device: &DeviceRef) -> bool {
     global_domain().snapshot(device).is_some_and(|snapshot| {
-        snapshot.state == DeviceState::Active
+        snapshot.state == DeviceState::Bound
             && snapshot.driver == Some(DRIVER_NAME)
             && snapshot.device.same_device(device)
     })
@@ -179,7 +179,7 @@ fn real_model_mmio_rng_pending_unbind_releases_reader() {
     assert_eq!(devices.len(), 1);
     assert_eq!(initial.len(), 1);
     let snapshot = devices.pop().unwrap();
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     let device = snapshot.device;
     let old = initial.pop().unwrap();
     assert!(old.is_available());

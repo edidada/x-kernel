@@ -240,7 +240,7 @@ fn probe_failure_rolls_back_before_return_without_framework_remove() {
         ));
         let device = domain.add_device(descriptor(root, 1)).unwrap();
         let state = domain.snapshot(&device).unwrap().state;
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
         drop(domain);
         let handles = core::mem::take(&mut *observations.handles.lock());
         assert_eq!(state, DeviceState::Unclaimed);
@@ -327,8 +327,8 @@ fn rebind_preserves_provenance_and_does_not_retain_ops_or_repeat_cleanup() {
     let is_distinct = !replacement.same_publication(&rebound);
     let replacement_read = replacement.read(&mut [0]);
     let rebound_read = rebound.read(&mut [0]);
-    domain.remove_device(&device).unwrap();
-    domain.remove_device(&sibling).unwrap();
+    domain.unregister_device(&device).unwrap();
+    domain.unregister_device(&sibling).unwrap();
     drop(domain);
     let retained_names = (old.driver_name(), rebound.driver_name());
     let retained_ops_drops = (

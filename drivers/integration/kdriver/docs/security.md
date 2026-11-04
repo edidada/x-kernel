@@ -97,7 +97,7 @@ trusted for board identity and physical ranges: header/numeric checks do not
 authenticate hardware or authorize arbitrary MMIO. No overlay, replacement-tree
 or general cross-bus resource ownership scheme is supplied here.
 
-EnumerationContext::new uses the LazyInit<Arc<PlatformModel>> production owner;
+EnumerationContext::new uses the LazyInit<Arc<PlatformRngRegistration>> production owner;
 separate DeviceManager/default bus-manager instances must not create independent
 ownership tables or per-manager owner fields. The platform backend's shared
 owner.discovery SpinNoPreempt lock spans ownership checks, temporary

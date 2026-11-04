@@ -77,7 +77,7 @@ fn real_model_mmio_rng_unregister_closes_retained_references() {
     assert_eq!(devices.len(), 1);
     assert_eq!(handles.len(), 1);
     let snapshot = devices.pop().unwrap();
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     let device = snapshot.device;
     let retained = device.clone();
     let handle = handles.pop().unwrap();
@@ -89,7 +89,7 @@ fn real_model_mmio_rng_unregister_closes_retained_references() {
     assert!(!has_legacy_device(region.base));
     assert!(sample_is_valid(&handle));
 
-    assert_eq!(domain.remove_device(&device), Ok(()));
+    assert_eq!(domain.unregister_device(&device), Ok(()));
     assert!(!retained.is_online());
     assert!(retained.same_device(&device));
     assert_eq!(retained.path(), path.as_str());
@@ -112,7 +112,7 @@ fn real_model_mmio_rng_unregister_closes_retained_references() {
         Err(RuntimeError::NotFound)
     ));
     assert_eq!(domain.unbind_device(&retained), Err(RuntimeError::NotFound));
-    assert_eq!(domain.remove_device(&retained), Ok(()));
+    assert_eq!(domain.unregister_device(&retained), Ok(()));
     assert!(domain.snapshot(&retained).is_none());
     assert!(publications().is_empty());
     assert!(owner.owns_range(region.base, region.size));

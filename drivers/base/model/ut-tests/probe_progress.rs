@@ -109,7 +109,7 @@ impl Drop for Fixture {
         let check = self.progress.check_hook_fn.lock().take();
         drop((dispatch, check));
         for snapshot in self.domain.devices() {
-            let _ = self.domain.remove_device(&snapshot.device);
+            let _ = self.domain.unregister_device(&snapshot.device);
         }
     }
 }
@@ -122,7 +122,7 @@ fn dependency_available_before_probe_binds_without_retry() {
     let device = fixture.add();
     assert_eq!(
         fixture.domain.snapshot(&device).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(fixture.probes(), 1);
     assert!(fixture.domain.deferred_report().is_empty());
@@ -144,7 +144,7 @@ fn dependency_arriving_after_check_before_parking_retries_without_another_wake()
     let device = fixture.add();
     assert_eq!(
         fixture.domain.snapshot(&device).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(fixture.probes(), 2);
     assert!(fixture.domain.deferred_report().is_empty());
@@ -168,7 +168,7 @@ fn dependency_arriving_after_parking_wakes_only_its_waiters() {
     assert_eq!(fixture.domain.wake(DEPENDENCY), 1);
     assert_eq!(
         fixture.domain.snapshot(&device).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(fixture.probes(), 2);
     assert_eq!(fixture.domain.wake(DEPENDENCY), 0);
@@ -187,7 +187,7 @@ fn enqueue_after_empty_dispatch_observation_is_driven_by_the_producer() {
         move |domain, is_empty| {
             core::assert!(is_empty);
             core::assert_eq!(domain.wake(DEPENDENCY), 1);
-            core::assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+            core::assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
             observed.store(true, Ordering::Release);
         }
     }));
@@ -196,7 +196,7 @@ fn enqueue_after_empty_dispatch_observation_is_driven_by_the_producer() {
     assert_eq!(fixture.probes(), 2);
     assert_eq!(
         fixture.domain.snapshot(&device).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
 }
 
@@ -211,7 +211,7 @@ fn registration_after_empty_dispatch_observation_needs_no_third_dispatch() {
         move |domain, is_empty| {
             core::assert!(is_empty);
             let device = domain.add_device(test_descriptor(root)).unwrap();
-            core::assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+            core::assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
             *registered.lock() = Some(device);
         }
     }));
@@ -229,7 +229,7 @@ fn unregistered_dequeued_candidate_and_late_dependency_cannot_probe_again() {
         let device = device.clone();
         move |domain, is_empty| {
             core::assert!(!is_empty);
-            core::assert_eq!(domain.remove_device(&device), Ok(()));
+            core::assert_eq!(domain.unregister_device(&device), Ok(()));
             core::assert_eq!(domain.wake(DEPENDENCY), 0);
         }
     }));
@@ -260,10 +260,10 @@ fn explicit_binding_of_dequeued_candidate_does_not_probe_twice() {
     assert_eq!(fixture.domain.wake(DEPENDENCY), 1);
     assert_eq!(
         fixture.domain.snapshot(&device).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(fixture.probes(), 2);
-    assert_eq!(fixture.domain.remove_device(&device), Ok(()));
+    assert_eq!(fixture.domain.unregister_device(&device), Ok(()));
     assert_eq!(fixture.progress.removes.load(Ordering::Relaxed), 1);
     assert_eq!(fixture.progress.drops.load(Ordering::Relaxed), 1);
 }

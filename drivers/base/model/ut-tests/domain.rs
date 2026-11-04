@@ -464,7 +464,7 @@ fn framework_environment_is_supplied_to_probe_and_remove() {
     let device = domain.add_device(test_descriptor(root)).unwrap();
     domain.probe_pending();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(services.provider_keys(), alloc::vec![(DepKind::Clk, 0x42)]);
     assert!(services.clk_providers.lock().contains_key(&0x42));
@@ -500,7 +500,7 @@ fn resource_services_receive_the_same_device_and_release_each_guard_once() {
     let mut descriptor = test_descriptor(root);
     descriptor.dma = Some(crate::DmaInfo::DEFAULT);
     let device = domain.add_device(descriptor).unwrap();
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     let observed = services
         .requests
         .lock()
@@ -523,7 +523,7 @@ fn resource_services_receive_the_same_device_and_release_each_guard_once() {
         ]
     );
     assert_eq!(services.released.load(Ordering::Relaxed), 0);
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(services.released.load(Ordering::Relaxed), 4);
     let mut rejected = test_descriptor_for_node(root, 2);
     rejected.dma = Some(crate::DmaInfo {
@@ -536,7 +536,7 @@ fn resource_services_receive_the_same_device_and_release_each_guard_once() {
         DeviceState::Unclaimed
     );
     assert_eq!(services.released.load(Ordering::Relaxed), 6);
-    domain.remove_device(&rejected).unwrap();
+    domain.unregister_device(&rejected).unwrap();
     drop(device);
     drop(domain);
     assert_eq!(services.released.load(Ordering::Relaxed), 6);
@@ -567,7 +567,7 @@ fn deferred_clock_request_releases_partial_acquisitions() {
         DeviceState::Deferred
     );
     assert_eq!(services.released.load(Ordering::Relaxed), 2);
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(services.released.load(Ordering::Relaxed), 2);
 }
 
@@ -639,14 +639,14 @@ fn retained_reference_does_not_retain_binding_resources() {
         Some(true)
     );
 
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert_eq!(removes.load(Ordering::Relaxed), 1);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!retained.is_online());
     assert_eq!(retained.descriptor().bus_instance, root);
     assert_eq!(retained.path(), "platform/firmware1");
     assert!(domain.with_data::<BoundData, ()>(&device, |_| ()).is_none());
-    assert_eq!(domain.remove_device(&device), Ok(()));
+    assert_eq!(domain.unregister_device(&device), Ok(()));
     drop(domain);
     drop(device);
     assert!(weak.upgrade().is_some());
@@ -669,18 +669,18 @@ fn unbound_removal_retires_identity_without_invalidating_metadata() {
     drop(device);
     assert!(retained.is_online());
     assert!(domain.snapshot(&retained).is_some());
-    domain.remove_device(&retained).unwrap();
+    domain.unregister_device(&retained).unwrap();
     assert!(!retained.is_online());
     assert!(domain.snapshot(&retained).is_none());
     assert_eq!(retained.descriptor().bus_instance, root);
     assert_eq!(retained.path(), "platform/firmware1");
-    assert_eq!(domain.remove_device(&retained), Ok(()));
+    assert_eq!(domain.unregister_device(&retained), Ok(()));
     let replacement = domain.add_device(test_descriptor(root)).unwrap();
     assert!(!replacement.same_device(&retained));
-    assert_eq!(domain.remove_device(&retained), Ok(()));
+    assert_eq!(domain.unregister_device(&retained), Ok(()));
     assert!(domain.snapshot(&retained).is_none());
     assert!(replacement.is_online());
-    domain.remove_device(&replacement).unwrap();
+    domain.unregister_device(&replacement).unwrap();
     drop(retained);
     assert!(weak.upgrade().is_none());
 }
@@ -696,13 +696,13 @@ fn probe_binds_data_and_remove_quiesces() {
         .add_device(test_descriptor(root))
         .expect("add device");
     let snapshot = domain.snapshot(&device).unwrap();
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     assert_eq!(snapshot.driver, Some("test-serial"));
 
     let rate = domain.with_data::<SerData, u64>(&device, |data| data.clk.get_rate());
     assert_eq!(rate, Some(24_000_000));
 
-    domain.remove_device(&device).unwrap();
+    domain.unregister_device(&device).unwrap();
     assert!(REMOVE_RAN.load(Ordering::Acquire));
     assert!(domain.snapshot(&device).is_none());
     assert!(domain.devices().is_empty());
@@ -732,7 +732,7 @@ fn deferred_probe_wakes_exactly_on_dependency() {
 
     services.publish_clk(0x42);
     assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 }
 
@@ -752,7 +752,7 @@ fn late_driver_registration_claims_unclaimed_device() {
 
     // A driver registered later must still claim it.
     domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(
         domain.snapshot(&device).unwrap().driver,
         Some("test-serial")
@@ -915,7 +915,7 @@ fn probe_failures_preserve_registration_and_allow_explicit_retry() {
             domain.snapshot(&device).unwrap().state,
             DeviceState::Unclaimed
         );
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
     }
 }
 
@@ -967,7 +967,7 @@ fn duplicate_registration_is_rejected() {
     let device = domain
         .add_device(test_descriptor(root))
         .expect("add device");
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     // Exactly one probe body ran for the device.
     assert_eq!(PROBES.load(Ordering::Relaxed), 1);
 }
@@ -1070,7 +1070,7 @@ fn controller_explicitly_removes_children_before_parent() {
     let _ = domain.probe_pending();
     assert_eq!(
         domain.snapshot(&parent_ref).unwrap().state,
-        DeviceState::Active,
+        DeviceState::Bound,
         "parent must bind before the child references it"
     );
 
@@ -1084,16 +1084,16 @@ fn controller_explicitly_removes_children_before_parent() {
         .build();
     let child = domain.add_device(child_desc).expect("add device");
     let _ = domain.probe_pending();
-    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Bound);
 
-    domain.remove_device(&child).unwrap();
+    domain.unregister_device(&child).unwrap();
     assert_eq!(*ORDER.lock(), alloc::vec!["child"]);
     assert!(parent_ref.is_online());
     assert_eq!(
         domain.snapshot(&parent_ref).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
-    domain.remove_device(&parent_ref).unwrap();
+    domain.unregister_device(&parent_ref).unwrap();
     assert_eq!(*ORDER.lock(), alloc::vec!["child", "parent"]);
     let mut late_child = test_descriptor(root);
     late_child.parent = Some(parent.clone());
@@ -1122,7 +1122,10 @@ fn parent_removal_during_child_probe_leaves_child_registered() {
             _dev: &mut DeviceAccess<'_, PlatformBus>,
             _env: &crate::Environment<'_>,
         ) -> Result<(), ProbeError> {
-            self.domain.upgrade().unwrap().remove_device(&self.parent)?;
+            self.domain
+                .upgrade()
+                .unwrap()
+                .unregister_device(&self.parent)?;
             Ok(())
         }
 
@@ -1160,10 +1163,10 @@ fn parent_removal_during_child_probe_leaves_child_registered() {
         .unwrap();
     assert!(domain.snapshot(&parent).is_none());
     assert!(!parent.is_online());
-    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&child).unwrap().state, DeviceState::Bound);
     assert_eq!(removes.load(Ordering::Relaxed), 0);
     assert_eq!(domain.devices().len(), 1);
-    domain.remove_device(&child).unwrap();
+    domain.unregister_device(&child).unwrap();
     assert_eq!(removes.load(Ordering::Relaxed), 1);
     assert!(domain.devices().is_empty());
 }
@@ -1228,7 +1231,7 @@ fn bus_instances_validate_query_and_explicit_bridge_exit() {
     assert_eq!(members.len(), 1);
     assert!(members[0].same_device(&behind));
 
-    domain.remove_device(&bridge_dev).expect("bridge eject");
+    domain.unregister_device(&bridge_dev).expect("bridge eject");
     let (_, retained_bridge, _) = domain.bus_instance_identity(secondary).unwrap();
     let retained_bridge = retained_bridge.unwrap();
     assert!(retained_bridge.same_device(&bridge_dev));
@@ -1239,7 +1242,7 @@ fn bus_instances_validate_query_and_explicit_bridge_exit() {
     );
     assert!(behind.is_online());
     assert_eq!(domain.bus_instance_devices(secondary).len(), 1);
-    domain.remove_device(&behind).unwrap();
+    domain.unregister_device(&behind).unwrap();
     assert!(domain.snapshot(&behind).is_none());
     assert!(domain.bus_instance_devices(secondary).is_empty());
     assert!(matches!(
@@ -1304,7 +1307,10 @@ fn management_requires_the_registered_object_not_just_its_key() {
     };
     let visits = AtomicUsize::new(0);
     for rejected in [&foreign, &impostor] {
-        assert_eq!(domain.remove_device(rejected), Err(RuntimeError::NotFound));
+        assert_eq!(
+            domain.unregister_device(rejected),
+            Err(RuntimeError::NotFound)
+        );
         assert_eq!(domain.unbind_device(rejected), Err(RuntimeError::NotFound));
         assert_eq!(domain.bind_device(rejected), Err(RuntimeError::NotFound));
         assert!(domain.snapshot(rejected).is_none());
@@ -1333,11 +1339,14 @@ fn management_requires_the_registered_object_not_just_its_key() {
             .device
             .same_device(&device)
     );
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
-    assert_eq!(other.remove_device(&device), Err(RuntimeError::NotFound));
-    domain.remove_device(&device).unwrap();
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
+    assert_eq!(
+        other.unregister_device(&device),
+        Err(RuntimeError::NotFound)
+    );
+    domain.unregister_device(&device).unwrap();
     assert_eq!(removes.load(Ordering::Relaxed), 1);
-    other.remove_device(&foreign).unwrap();
+    other.unregister_device(&foreign).unwrap();
 }
 
 #[def_test]
@@ -1353,7 +1362,7 @@ fn parent_reference_must_belong_to_the_registering_domain() {
     ));
     assert!(second.devices().is_empty());
     assert!(parent.is_online());
-    first.remove_device(&parent).unwrap();
+    first.unregister_device(&parent).unwrap();
 }
 
 #[def_test]
@@ -1375,7 +1384,7 @@ fn parent_key_alone_does_not_validate_object_identity() {
         Err(AddDeviceError::ParentMissing(id)) if id == parent.core.id.raw()
     ));
     assert_eq!(domain.devices().len(), 1);
-    domain.remove_device(&parent).unwrap();
+    domain.unregister_device(&parent).unwrap();
 }
 
 #[def_test]
@@ -1398,12 +1407,12 @@ fn child_reference_retains_offline_parent_without_a_reference_cycle() {
     drop(parent);
 
     domain
-        .remove_device(child.descriptor().parent.as_ref().unwrap())
+        .unregister_device(child.descriptor().parent.as_ref().unwrap())
         .unwrap();
     assert_eq!(domain.devices().len(), 1);
     assert!(child.is_online());
     assert!(domain.snapshot(&child).is_some());
-    domain.remove_device(&child).unwrap();
+    domain.unregister_device(&child).unwrap();
     assert!(domain.devices().is_empty());
     assert!(!child.is_online());
     let retained_parent = child.descriptor().parent.as_ref().unwrap();
@@ -1424,7 +1433,7 @@ fn removing_child_unlinks_reverse_topology_without_losing_parent_metadata() {
     let mut descriptor = test_descriptor_for_node(root, 2);
     descriptor.parent = Some(parent.clone());
     let child = domain.add_device(descriptor).unwrap();
-    domain.remove_device(&child).unwrap();
+    domain.unregister_device(&child).unwrap();
     assert!(parent.is_online());
     assert!(
         child
@@ -1444,7 +1453,7 @@ fn removing_child_unlinks_reverse_topology_without_losing_parent_metadata() {
         .children
         .clone();
     assert!(children.is_empty());
-    domain.remove_device(&parent).unwrap();
+    domain.unregister_device(&parent).unwrap();
     assert!(!child.descriptor().parent.as_ref().unwrap().is_online());
 }
 
@@ -1455,7 +1464,7 @@ fn add_device_rejects_missing_parent() {
     let (domain, services, root) = fresh_domain();
     domain.set_services(services);
     let parent = domain.add_device(test_descriptor(root)).unwrap();
-    domain.remove_device(&parent).unwrap();
+    domain.unregister_device(&parent).unwrap();
     let err = domain
         .add_device(
             DeviceDescriptor::builder()
@@ -1628,7 +1637,7 @@ fn wake_during_probe_window_does_not_lose_the_device() {
     // sees the dependency moved and the pump re-attempts; TestSer's
     // second probe finds the provider and binds.
     let state = domain.snapshot(&device).unwrap().state;
-    assert_eq!(state, DeviceState::Active);
+    assert_eq!(state, DeviceState::Bound);
     assert_eq!(
         domain.snapshot(&device).unwrap().driver,
         Some("test-serial")
@@ -1673,7 +1682,7 @@ fn late_provider_wakes_unclaimed_device() {
     // Mock services publish without auto-waking (the real runtime's
     // registry wake hook does); drive it explicitly as the runtime would.
     assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
-    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&device).unwrap().state, DeviceState::Bound);
     assert_eq!(
         domain.snapshot(&device).unwrap().driver,
         Some("test-serial")
@@ -1738,8 +1747,8 @@ fn removing_unbound_device_frees_entry_and_worklists() {
 
     // Light-path removal: entries freed, worklists drained, not kept
     // as tombstones — the table does not grow under hotplug churn.
-    domain.remove_device(&unclaimed).unwrap();
-    domain.remove_device(&deferred).unwrap();
+    domain.unregister_device(&unclaimed).unwrap();
+    domain.unregister_device(&deferred).unwrap();
     assert!(domain.snapshot(&unclaimed).is_none());
     assert!(domain.snapshot(&deferred).is_none());
     assert_eq!(domain.devices().len(), 0);
@@ -1765,8 +1774,8 @@ fn removing_twice_is_idempotent() {
         .add_device(test_descriptor(root))
         .expect("add device");
 
-    domain.remove_device(&device).unwrap();
-    assert_eq!(domain.remove_device(&device), Ok(()));
+    domain.unregister_device(&device).unwrap();
+    assert_eq!(domain.unregister_device(&device), Ok(()));
     assert!(domain.snapshot(&device).is_none());
     assert!(domain.devices().is_empty());
 }
@@ -1782,7 +1791,7 @@ fn fatal_failure_falls_through_to_next_candidate() {
         .add_device(test_descriptor(root))
         .expect("add device");
     let snapshot = domain.snapshot(&device).unwrap();
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     assert_eq!(snapshot.driver, Some("test-serial"));
 }
 
@@ -2121,32 +2130,32 @@ fn controller_exit_explicitly_drains_members_and_preserves_saved_snapshots() {
     let snapshot = domain.snapshot(&member).unwrap();
     assert_eq!(
         domain.snapshot(&controller).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
 
     for owned in domain.bus_instance_devices(instance) {
-        domain.remove_device(&owned).unwrap();
+        domain.unregister_device(&owned).unwrap();
     }
     assert!(domain.bus_instance_devices(instance).is_empty());
     assert!(controller.is_online());
-    domain.remove_device(&controller).unwrap();
+    domain.unregister_device(&controller).unwrap();
     assert!(domain.snapshot(&controller).is_none());
     assert!(domain.snapshot(&member).is_none());
     assert_eq!(snapshot.bus, PlatformBus::ID);
     assert!(snapshot.device.same_device(&member));
     assert!(!snapshot.device.is_online());
-    assert_eq!(snapshot.state, DeviceState::Active);
+    assert_eq!(snapshot.state, DeviceState::Bound);
     assert_eq!(
         domain.snapshot(&unrelated).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert!(matches!(
         domain.add_device(test_descriptor(instance)),
         Err(AddDeviceError::BusInstanceUnavailable(_))
     ));
     assert_eq!(domain.devices().len(), 1);
-    domain.remove_device(&unrelated).unwrap();
+    domain.unregister_device(&unrelated).unwrap();
 }
 
 fn ccu_descriptor(root: crate::BusInstanceId) -> DeviceDescriptor {
@@ -2192,12 +2201,12 @@ fn provider_registration_wakes_exactly_its_consumer() {
         .expect("add provider");
     assert_eq!(
         domain.snapshot(&provider).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(services.provider_keys(), alloc::vec![(DepKind::Clk, 0x42)]);
     assert_eq!(
         domain.snapshot(&consumer).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
     assert_eq!(PROBES.load(Ordering::Relaxed), 2);
 
@@ -2225,7 +2234,7 @@ fn one_driver_binds_many_devices() {
 
     for device in [&first, &second] {
         let snapshot = domain.snapshot(device).unwrap();
-        assert_eq!(snapshot.state, DeviceState::Active);
+        assert_eq!(snapshot.state, DeviceState::Bound);
         assert_eq!(snapshot.driver, Some("test-serial"));
         assert_eq!(
             domain.with_data::<SerData, u64>(device, |data| data.clk.get_rate()),
@@ -2235,9 +2244,9 @@ fn one_driver_binds_many_devices() {
     assert_eq!(PROBES.load(Ordering::Relaxed) - probes_before, 2);
 
     // Tearing one device down leaves the other binding intact.
-    domain.remove_device(&first).expect("remove first");
+    domain.unregister_device(&first).expect("remove first");
     assert!(domain.snapshot(&first).is_none());
-    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Bound);
 }
 
 /// One provider key wakes every consumer parked on it (provider 1:N
@@ -2279,10 +2288,10 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
         .expect("add provider");
     assert_eq!(
         domain.snapshot(&provider).unwrap().state,
-        DeviceState::Active
+        DeviceState::Bound
     );
-    assert_eq!(domain.snapshot(&first).unwrap().state, DeviceState::Active);
-    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Active);
+    assert_eq!(domain.snapshot(&first).unwrap().state, DeviceState::Bound);
+    assert_eq!(domain.snapshot(&second).unwrap().state, DeviceState::Bound);
     // Two deferred first attempts plus one re-probe per woken consumer.
     assert_eq!(PROBES.load(Ordering::Relaxed), 4);
 }
@@ -2335,7 +2344,7 @@ mod publication_contract {
         let source = SOURCE.lock().take().unwrap();
         assert!(source.is_online());
         assert_eq!(source.driver_name(), Some("publisher"));
-        domain.remove_device(&device).unwrap();
+        domain.unregister_device(&device).unwrap();
         assert!(!device.is_online());
         assert!(CLOSED_AT_REMOVE.load(Ordering::SeqCst));
         assert!(!source.is_online());

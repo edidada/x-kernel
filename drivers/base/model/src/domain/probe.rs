@@ -85,7 +85,7 @@ impl DeviceDomain {
                     .get_mut(&id)
                     .filter(|entry| Arc::ptr_eq(&entry.core, &device.core))
                     .ok_or(RuntimeError::NotFound)?;
-                if entry.lifecycle.state == DeviceState::Active {
+                if entry.lifecycle.state == DeviceState::Bound {
                     return Ok(ProbeStats::default());
                 }
                 entry.lifecycle.state = DeviceState::Pending;
@@ -181,7 +181,7 @@ impl DeviceDomain {
                     .expect("management lock preserves the unbound probing registration");
                 entry.binding.driver = Some(driver);
                 entry.binding.data = Some(data);
-                entry.lifecycle.state = DeviceState::Active;
+                entry.lifecycle.state = DeviceState::Bound;
                 stats.activated += 1;
             }
             Err(ProbeError::Deferred(dep)) => {
