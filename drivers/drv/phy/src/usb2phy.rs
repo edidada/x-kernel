@@ -23,8 +23,8 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{
-    ClkHandle, Device, DriverOps, IoMap, OfMatch, PlatformBus, PlatformId, ProbeError, ResetHandle,
-    RuntimeError,
+    ClkHandle, Device, DriverOps, EnabledClock, IoMap, OfMatch, PlatformBus, PlatformId,
+    ProbeError, ResetHandle, RuntimeError,
 };
 use kphy::{PhyError, PhyHwOps, PhyInstance, PhyLookup};
 
@@ -54,6 +54,11 @@ struct Usb2Phy {
     grf: IoMap,
     block: Block,
     clk480m: ClkHandle,
+    /// The enable token has to be *held*: dropping it gates the clock again.
+    /// Without the 480 MHz reference the PHY still detects a connect (that path
+    /// runs off the always-on UTMI clock) but no transaction can ever complete,
+    /// which is exactly how a controller that never answers SET_ADDRESS looks.
+    clk480m_enabled: ksync::Mutex<Option<EnabledClock>>,
     resets: [ResetHandle; 2],
     /// Linux drives power through the `phy_sus` bit — SUSPEND asserted
     /// means powered DOWN (note the inverted polarity vs reset lines).
@@ -127,7 +132,8 @@ impl PhyHwOps for Usb2Phy {
 
     /// `rockchip_usb2phy_power_on`: 480m clock + `phy_sus` cleared.
     fn hw_power_on(&self) -> Result<(), PhyError> {
-        self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
+        let enabled = self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
+        *self.clk480m_enabled.lock() = Some(enabled);
         self.set_suspended(false);
         Ok(())
     }
@@ -135,7 +141,8 @@ impl PhyHwOps for Usb2Phy {
     /// `rockchip_usb2phy_power_off`: `phy_sus` set + clock gated.
     fn hw_power_off(&self) {
         self.set_suspended(true);
-        self.clk480m.disable_unprepare();
+        // Dropping the token releases the same reference that power_on took.
+        *self.clk480m_enabled.lock() = None;
     }
 
     fn hw_set_mode(&self, _mode: kphy::PhyMode) -> Result<(), PhyError> {
@@ -209,6 +216,7 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
         };
 
         let phy = Usb2Phy {
+            clk480m_enabled: ksync::Mutex::new(None),
             grf,
             block,
             clk480m,

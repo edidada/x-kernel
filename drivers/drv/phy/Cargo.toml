@@ -20,6 +20,8 @@ rk3588-pcie3phy = []
 driver_base = { workspace = true }
 driver_host = { workspace = true }
 kphy = { workspace = true }
+# The PHY holds the 480m clock enable token across calls.
+ksync = { workspace = true }
 of = { workspace = true }
 khal = { workspace = true }
 kspin = { workspace = true }

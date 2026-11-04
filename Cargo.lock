@@ -1337,6 +1337,7 @@ dependencies = [
  "khal",
  "kphy",
  "kspin",
+ "ksync",
  "ktime_types",
  "log",
  "of",
