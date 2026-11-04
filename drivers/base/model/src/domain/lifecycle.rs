@@ -114,7 +114,6 @@ impl DeviceDomain {
                 DeviceState::Probing | DeviceState::Removing => {
                     return Err(RuntimeError::Busy);
                 }
-                DeviceState::Removed => return Err(RuntimeError::BadState),
             }
             entry.lifecycle.state = DeviceState::Removing;
             entry.probe.last_deferred_dep = None;

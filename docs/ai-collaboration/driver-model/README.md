@@ -11,7 +11,11 @@
 与格式检查通过，两路评审完成。M-02/M-03 也已完成：补齐 probe 错误诊断，
 发现统计 API 和日志明确限定 legacy 口径；WARN/DEBUG 两配置均为 164/0/5，
 实际日志过滤断言、UT clippy、格式及两路评审通过。详见计划末尾验收记录。
-下一项是 M-04/M-05 命名与合同整理，具体名字先确认。
+M-04/M-05 已按用户确认名称整理：unregister_device、Bound、
+PlatformRngRegistration、ensure_root_initialized；澄清 online/attempted/path
+合同，单独清理无实际转换的 Removed。model+kdriver+procfs 最终回归 213/0/6，
+两路 review 无阻断，详见计划中的第三批验收。下一步是 M-06 transport 分层
+设计收口，不直接恢复平台迁移开发。
 
 ## 平台 / VirtIO-MMIO 枚举迁移（暂停，保留设计稿）
 

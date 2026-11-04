@@ -122,7 +122,7 @@ impl DeviceDomain {
     /// device that created it (None for a root bus). The controller, not this
     /// registry, is responsible for unregistering its owned members.
     /// A controller reference must name the exact registered object in this
-    /// domain and not be Removing/Removed. The instance retains only its identity.
+    /// domain and not be Removing. The instance retains only its identity.
     pub fn add_bus_instance(
         &self,
         bus: BusId,
@@ -141,7 +141,7 @@ impl DeviceDomain {
                 .filter(|entry| Arc::ptr_eq(&entry.core, &bridge.core))
                 .map(|entry| entry.lifecycle.state)
             {
-                Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
+                Some(state @ DeviceState::Removing) => {
                     return Err(AddDeviceError::ParentUnavailable {
                         parent: bridge.core.id.raw(),
                         state: state.as_str(),
@@ -229,7 +229,7 @@ impl DeviceDomain {
                     | DeviceState::Deferred
                     | DeviceState::Unclaimed,
                 ) => {}
-                Some(DeviceState::Removing | DeviceState::Removed) | None => {
+                Some(DeviceState::Removing) | None => {
                     return Err(AddDeviceError::BusInstanceUnavailable(instance.raw()));
                 }
             }
@@ -285,7 +285,7 @@ impl DeviceDomain {
             // Topology validation, under the SAME lock that governs
             // removal: a stated parent must exist AND be accepting
             // children. A parent mid-teardown (Removing) or gone
-            // (Removed) rejects the add — the cascade snapshot cannot see
+            // (unregistered) rejects the add — the cascade snapshot cannot see
             // an entry added after it, so accepting it would orphan the
             // child at the parent's teardown. A missing parent is an
             // error, not a silent root placement: the descriptor's own
@@ -305,7 +305,7 @@ impl DeviceDomain {
                     | DeviceState::Unclaimed => {
                         parent_entry.topology.children.push(id.raw());
                     }
-                    state @ (DeviceState::Removing | DeviceState::Removed) => {
+                    state @ DeviceState::Removing => {
                         return Err(AddDeviceError::ParentUnavailable {
                             parent: parent_id,
                             state: state.as_str(),

@@ -107,8 +107,6 @@ pub enum DeviceState {
     Unclaimed,
     /// Being torn down.
     Removing,
-    /// Reserved terminal state; unregistered entries are deleted from the domain.
-    Removed,
 }
 
 impl DeviceState {
@@ -120,7 +118,6 @@ impl DeviceState {
             Self::Deferred => "deferred",
             Self::Unclaimed => "unclaimed",
             Self::Removing => "removing",
-            Self::Removed => "removed",
         }
     }
 }

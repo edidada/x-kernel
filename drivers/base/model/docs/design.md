@@ -331,7 +331,7 @@ class 在途 runtime 持有，不能藏进描述符。销毁整个域不能替�
 
 注册在同一域锁内完成查找、Arc 身份核对、状态校验及反向 children 更新。
 外域对象、已从表中删除的对象或同键不同对象返回 `ParentMissing`；
-域内 Removing/Removed 条目返回 `ParentUnavailable`。仅持有引用或观察到
+域内 Removing 条目返回 `ParentUnavailable`。仅持有引用或观察到
 online 不能证明可以挂载子设备。Probing 父设备仍可枚举孩子，保持原有行为。
 
 引用方向是子设备强持有父设备，反向 children 仅保存域内部管理键，父设备不持有
@@ -393,7 +393,7 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 ## 状态机
 
 注册与绑定分开：`Unclaimed` 仍在域表中，注销则删除 entry。
-枚举中保留的 `Removed` 变体不表示当前注销路径会留下该状态的条目。
+状态枚举不包含 `Removed`：注销后的身份可以被引用保留，但域内已无注册项。
 
 ```text
 add_device ──► Pending ── matching ──► Probing ── Ok(Data) ──► Bound
@@ -412,6 +412,9 @@ Pending / Deferred / Unclaimed / Bound
 ```
 
 要点：
+
+- 注销后直接删除注册项，`snapshot` 返回 None；不保留无实际转换的 Removed
+  状态。旧 DeviceRef 的离线身份不等同于域内仍有一个终态 entry。
 
 - `Bound` 只表示 probe 成功并提交 driver/Data，不保证硬件一直可用；快照的
   `as_str()` 输出为 `bound`，包含 procfs 中的新模型状态列，旧 kdevice 状态不变。

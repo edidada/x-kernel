@@ -21,8 +21,8 @@
 | M-01 | 管理锁之外仍用生命周期 generation 判定 probe 提交失效 | 第一批已实现并验证，见下方验收记录 |
 | M-02 | Fatal probe 丢弃具体错误，注册成功但未绑定时缺少原因 | 第二批已实现并验证，见下方验收记录 |
 | M-03 | 发现统计只覆盖旧路径却使用总量语义的名称/日志 | 第二批已实现并验证，见下方验收记录 |
-| M-04 | remove/Active/online 等名称与实际注册、绑定语义混淆 | 命名整理，第三批；具体名字先确认 |
-| M-05 | attempted 写成永久失败；Removed 只有保留状态；physical_path 被过度类比 DEVPATH | 合同与状态整理，第三批；删除状态前核对消费者 |
+| M-04 | remove/Active/online 等名称与实际注册、绑定语义混淆 | 第三批按用户确认名称完成整理；验收见下方 |
+| M-05 | attempted 写成永久失败；Removed 只有保留状态；physical_path 被过度类比 DEVPATH | 第三批完成合同修正与空状态清理；与命名分开提交 |
 | M-06 | 缺独立的 virtio-mmio transport 驱动与 VirtIO 功能设备层 | 结构性缺口，第四批设计后再开发 |
 | M-07 | provider 注册只有 static 发布、没有撤销合同 | 后续 provider 驱动接入前置；当前 RNG 不使用，不扩实现 |
 | M-08 | 无驱动定义注销/模块卸载接口 | 当前范围限制，文档明确；不把设备解绑冒充驱动卸载 |
@@ -53,7 +53,7 @@
 
 ## 5. 第三批：命名与公开合同
 
-优先确认：`remove_device → unregister_device`、`Active → Bound`；明确
+已确认并实施：`remove_device → unregister_device`、`Active → Bound`；明确
 `is_online` 是注册存活快照而非硬件可用性，避免换名后又混淆注销开始/完成时点。
 `PlatformModel` 的名字体现 RNG 过渡注册责任，`root()` 体现初始化副作用。
 
@@ -105,9 +105,8 @@ transport 负责物理资源、协议识别及 child 注册/退出；功能驱�
 
 ## 7. 当前下一步
 
-第一、二批 M-01～M-03 已完成，下一步第三批 M-04/M-05，具体名字先确认。
-M-06 不遗忘，但不抢跑未完成
-的所有权设计。M-07/M-08 先明确支持范围，不新增无消费者的完整动态框架。
+前三批 M-01～M-05 已整理，下一步 M-06 的 transport 分层设计收口，不直接
+开始平台迁移开发。M-07/M-08 先明确支持范围，不新增无消费者的完整动态框架。
 
 ## 8. M-01 验收记录
 
@@ -159,3 +158,28 @@ DEBUG 出现两次；发现日志明确标注 legacy，并实际出现活跃增�
 证据在 `.scratch/driver-model-review-m02/`：`ut.log`、`ut-debug.log`、
 `log-assertions.log`、`clippy-ut.log`，以及配置生成日志和两份配置快照。
 本批不恢复平台迁移，不新增 model 总量统计或硬件 transport 分层。
+
+## 10. M-04/M-05 验收记录
+
+基线 `926cef526`。用户确认命名后实施：
+
+- 新模型 `remove_device` 改为 `unregister_device`，驱动 remove 回调不改；
+  `DeviceState::Active` 改为 `Bound`，状态字符串同步为 `bound`。
+- `PlatformModel` 改为 `PlatformRngRegistration`，`root()` 改为
+  `ensure_root_initialized()`；保留模块路径及专项测试过滤入口，避免影响验收脚本。
+- 旧 kdevice 的 Active/Removed 及管理 API 不改。procfs 的 model 行显示 bound，
+  legacy 行仍显示 active；formatter 用例直接使用新状态的 as_str 验证区别。
+- 明确 is_online 在注销开始、remove 回调前关闭，普通解绑不关闭；attempted
+  由显式 bind 清空，不是永久黑名单；路径只是总线位置，不承诺 DEVPATH/唯一性。
+- 补充 DeviceDomain 职责，保留已暂停的历史设计稿，不将旧提案改写成现行合同。
+- 全树核对确认新模型 Removed 无写入、无有效生产状态转换，单独删除变体和
+  冗余判断；注销仍直接删除 entry，旧引用离线，重复注销不重复清理。
+
+验证沿用 AArch64 canonical defconfig、独立 disk、SMP4、无网络/vsock；扩大到
+`UNITTEST_CRATE=driver_model,kdriver,procfs`。首轮 213 passed / 0 failed / 6 ignored，
+coverage 导出成功；补齐 formatter 用例后再次运行同组回归，仍为 213/0/6，
+coverage 再次导出成功。六项忽略仍是 opt-in
+MMIO 验收，不将其计为通过。现有绑定/解绑/重绑/注销测试还增加 bound 字符串和
+解绑后来源保持 online 的断言。规范与需求两路 review 无剩余阻断，修改文件
+nightly-2026-03-08 rustfmt、diff 检查及 `make clippy UNITTEST=y` 通过。
+日志在 `.scratch/driver-model-review-m04/`，最终回归为 `ut-final.log`。
