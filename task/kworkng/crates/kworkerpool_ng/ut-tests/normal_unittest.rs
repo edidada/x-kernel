@@ -24,6 +24,7 @@ struct Probe {
     completed: AtomicUsize,
     sleep_in_callback: bool,
     hold_first: AtomicBool,
+    hold_gate: Option<Arc<ktask::WaitQueue>>,
     last_cpu: AtomicUsize,
 }
 
@@ -55,8 +56,12 @@ impl AcquiredExecution for Arc<Probe> {
             .store(khal::percpu::this_cpu_id().as_usize(), Ordering::Release);
         let first = self.entered.fetch_add(1, Ordering::AcqRel) == 0;
         if first {
-            while self.hold_first.load(Ordering::Acquire) {
-                ktask::sleep(TimeSpan::from_millis(1));
+            if let Some(gate) = &self.hold_gate {
+                gate.wait_until(|| !self.hold_first.load(Ordering::Acquire));
+            } else {
+                while self.hold_first.load(Ordering::Acquire) {
+                    ktask::sleep(TimeSpan::from_millis(1));
+                }
             }
         }
         if self.sleep_in_callback {
@@ -71,10 +76,18 @@ fn prepare() -> (Arc<NormalService<Arc<Probe>>>, usize) {
 }
 
 fn prepare_on(cpu: LogicalCpuId) -> (Arc<NormalService<Arc<Probe>>>, usize) {
-    let service = NormalService::new(
+    prepare_with_policy(cpu, NormalFreezePolicy::KeepRunning)
+}
+
+fn prepare_with_policy(
+    cpu: LogicalCpuId,
+    policy: NormalFreezePolicy,
+) -> (Arc<NormalService<Arc<Probe>>>, usize) {
+    let service = NormalService::new_with_policy(
         cpu,
         NonZeroUsize::new(2).unwrap(),
         kalloc_types::AllocFlags::NOWAIT,
+        policy,
     )
     .unwrap();
     let worker = {
@@ -147,6 +160,7 @@ fn probe(pending: usize, sleep_in_callback: bool) -> Arc<Probe> {
         completed: AtomicUsize::new(0),
         sleep_in_callback,
         hold_first: AtomicBool::new(false),
+        hold_gate: None,
         last_cpu: AtomicUsize::new(usize::MAX),
     })
 }
@@ -427,4 +441,99 @@ fn normal_growth_notification_does_not_spin_when_capacity_is_full() {
         service.dispatch.detach(&source);
         assert_eq!(count.0.load(Ordering::Relaxed), usize::from(limit > 1));
     }
+}
+
+#[def_test(serial)]
+fn cooperative_idle_worker_freezes_without_work_and_defers_new_demand_until_thaw() {
+    if kcpu_id_map::nr_cpus() != 1 {
+        return unittest::TestResult::Ignored;
+    }
+    let (service, worker) =
+        prepare_with_policy(khal::percpu::this_cpu_id(), NormalFreezePolicy::Cooperative);
+    let probe = probe(0, false);
+    let source = service.dispatch.create_source(probe.clone());
+    let running = service.clone();
+    let task = start(&service, move || running.run_worker(worker));
+    until(|| task.state() == ktask::TaskState::Blocked);
+    let cancellation = ktask::freezer::FreezeCancellation::new();
+    let frozen = ktask::freezer::freeze_tasks(
+        core::slice::from_ref(&task),
+        TimeSpan::from_secs(5),
+        &cancellation,
+    )
+    .unwrap();
+    probe.pending.store(1, Ordering::Release);
+    service.dispatch.notify(&source);
+    service.notification_waker().wake_by_ref();
+    ktask::yield_now();
+    assert_eq!(probe.entered.load(Ordering::Acquire), 0);
+    drop(frozen);
+    until(|| probe.completed.load(Ordering::Acquire) == 1);
+    stop(&service, worker, task);
+    service.dispatch.detach(&source);
+}
+
+#[def_test(serial)]
+fn cooperative_worker_confirms_only_after_claimed_callback_finishes() {
+    if kcpu_id_map::nr_cpus() != 1 {
+        return unittest::TestResult::Ignored;
+    }
+    let (service, worker) =
+        prepare_with_policy(khal::percpu::this_cpu_id(), NormalFreezePolicy::Cooperative);
+    let mut probe = probe(1, false);
+    let gate = Arc::new(ktask::WaitQueue::new());
+    Arc::get_mut(&mut probe).unwrap().hold_gate = Some(gate.clone());
+    probe.hold_first.store(true, Ordering::Release);
+    let source = service.dispatch.create_source(probe.clone());
+    service.dispatch.notify(&source);
+    let running = service.clone();
+    let task = start(&service, move || running.run_worker(worker));
+    until(|| {
+        probe.entered.load(Ordering::Acquire) == 1 && task.state() == ktask::TaskState::Blocked
+    });
+    assert!(matches!(
+        ktask::freezer::freeze_tasks(
+            core::slice::from_ref(&task),
+            TimeSpan::ZERO,
+            &ktask::freezer::FreezeCancellation::new()
+        ),
+        Err(ktask::freezer::FreezeError::TimedOut)
+    ));
+    assert_eq!(probe.completed.load(Ordering::Acquire), 0);
+    probe.hold_first.store(false, Ordering::Release);
+    gate.notify_all(false);
+    until(|| {
+        probe.completed.load(Ordering::Acquire) == 1 && task.state() == ktask::TaskState::Blocked
+    });
+    for _ in 0..2 {
+        let frozen = ktask::freezer::freeze_tasks(
+            core::slice::from_ref(&task),
+            TimeSpan::from_secs(5),
+            &ktask::freezer::FreezeCancellation::new(),
+        )
+        .unwrap();
+        drop(frozen);
+    }
+    stop(&service, worker, task);
+    service.dispatch.detach(&source);
+}
+
+#[def_test(serial)]
+fn default_idle_worker_does_not_implicitly_acknowledge_freezing() {
+    if kcpu_id_map::nr_cpus() != 1 {
+        return unittest::TestResult::Ignored;
+    }
+    let (service, worker) = prepare();
+    let running = service.clone();
+    let task = start(&service, move || running.run_worker(worker));
+    until(|| task.state() == ktask::TaskState::Blocked);
+    assert!(matches!(
+        ktask::freezer::freeze_tasks(
+            core::slice::from_ref(&task),
+            TimeSpan::ZERO,
+            &ktask::freezer::FreezeCancellation::new()
+        ),
+        Err(ktask::freezer::FreezeError::TimedOut)
+    ));
+    stop(&service, worker, task);
 }

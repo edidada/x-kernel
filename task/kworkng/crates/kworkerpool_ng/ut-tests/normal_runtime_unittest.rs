@@ -139,3 +139,33 @@ fn normal_runtime_stop_is_scoped_to_its_owner() {
     assert!(!second.service.workers.lock().stop_requested);
     second.stop().unwrap();
 }
+
+#[def_test(serial)]
+fn cooperative_manager_freezes_idle_and_defers_stop_until_thaw() {
+    if kcpu_id_map::nr_cpus() != 1 {
+        return unittest::TestResult::Ignored;
+    }
+    let runtime = NormalRuntime::<Empty>::start_with_policy(
+        khal::percpu::this_cpu_id(),
+        NonZeroUsize::new(1).unwrap(),
+        TimeSpan::from_secs(60),
+        NormalFreezePolicy::Cooperative,
+    )
+    .unwrap();
+    while runtime.task.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
+    let frozen = ktask::freezer::freeze_tasks(
+        core::slice::from_ref(&runtime.task),
+        TimeSpan::from_secs(5),
+        &ktask::freezer::FreezeCancellation::new(),
+    )
+    .unwrap();
+    runtime.service.request_stop();
+    ktask::yield_now();
+    assert_ne!(runtime.task.state(), ktask::TaskState::Exited);
+    drop(frozen);
+    runtime.stop().unwrap();
+    assert_eq!(runtime.task.state(), ktask::TaskState::Exited);
+    assert_eq!(runtime.service.workers.lock().pool.reserved_workers(), 0);
+}

@@ -1597,3 +1597,28 @@ using X-Kernel's cooperative checkpoints rather than Linux's freezer internals.
 It does not implement SMP rendezvous, wakeup sources, device control or firmware
 entry. Tests exercise actual scheduler admission, complete selection, deferred
 lifetime, timeout, cancellation and recovery without freezing hardware clocks.
+
+### Freezer-aware prepared task parking
+
+`PreparedTaskWait::park_freezable` is an explicit kernel-worker safe point.
+Ordinary `park`, completion waits, blocked syscalls and callback waits retain
+normal behavior. Each task has one independent `is_freezer_wait` atomic flag;
+a scoped guard sets it only across this call and clears it on return/unwind.
+No new persistent waker registration or allocation is added to the park path.
+
+The freezer publishes a request under the existing task-only request lock,
+then wakes the task only when that flag is set, with the slot lock released.
+The waiter checks a checkpoint before parking, rechecks its request through the
+existing scheduler blocked-state handshake, and checks a checkpoint after wake.
+Thus a request either prevents parking or wakes the blocked participant; it
+cannot be lost between the first checkpoint and scheduler blocking. The
+request's own persistent release predicate still prevents ordinary work/stop
+wakes or cancellation from returning a confirmed task before thaw. Prepared
+business-wake hints remain latched independently of the freezer wake.
+
+The stop predicate under the run-queue lock only reads the short request slot;
+no request publisher retains that slot while entering the scheduler. Flag
+release/acquire and request-lock ordering cover entry concurrent with publication.
+This remains single-present-CPU freezing; the new wait can be used in an SMP
+kernel, but does not add remote freeze rendezvous. Call only without resources
+needed by PM/recovery. A busy callback must complete before opting in.
