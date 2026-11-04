@@ -1587,6 +1587,28 @@ a4100000: 7fbffddb fff8ffaf f7ffdfff 7ffdd7ed   ← DBI 窗口：浮空数据
 高位 PCIe 段（`0x9_0000_0000`–`0xa_ffff_ffff`）的解码在 rk3588 上属于**安全/
 地址映射配置**（ATF 或 U-Boot 早期初始化），内核侧改寄存器改不动它。
 
+#### 对齐 Linux 初始化序列后的结论（仍未解决）
+
+按 Linux `xhci_reset` / `xhci_init` / `xhci_run_finished` 逐条对齐后仍完全一致地失败：
+
+| 参数 | Linux 做法 | 我们 | 结果 |
+|---|---|---|---|
+| `CRCR` 写序 | RMW（保留指针/cycle 外的位） | 已改 RMW | 读回仍 0 |
+| 64 位写序 | `lo_hi_writeq`（先低后高） | 已改 lo→hi | 无变化 |
+| 顺序 | CRCR → DCBAAP → ERST → 起机 | 已对齐 | 无变化 |
+| interrupter | 起机前 `IMAN.IE` + `USBCMD.EIE` | 已照抄 | 无变化 |
+| CNR 等待 | HCRST 后等 CNR 清 | 已加（日志 `controller ready`） | 无变化 |
+| scratchpad | `HCSPARAMS2` 非 0 必须分配，`DCBAA[0]` 指向数组 | **原本完全没有**，已补（本板报 1 个） | 无变化 |
+| 事件环内存 | — | 超时后读 `event ring[0]` 全 0 | 控制器从未写事件 |
+
+结论：`CRCR` 与整个 interrupter 块的写入在这块 DWC3 上被拒，而 `USBCMD`/`USBSTS`/`DCBAAP`
+正常。参考板同一批寄存器中 `ERSTSZ/ERSTBA/ERDP` **也读回 0**，`CRCR` 读回 `0x8`（只有 `CRR`
+状态位，无基址）—— 说明**这块 IP 上这些寄存器读回来的不是写入值**，用"读回 0"判断写失败
+本身就不可靠。
+
+下一步方向（尚未验证）：不要再用读回判断，而是**看控制器行为**——例如写好环后置 `CRCR.CA`
+（Command Ring Abort）看是否有反应，或用 `COM`/事件环内存是否出现 TRB 作为唯一判据。
+
 ### 下一步（按优先级）
 
 
