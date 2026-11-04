@@ -7,8 +7,9 @@ use alloc::boxed::Box;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
-use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
+use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec};
 use driver_base::DriverResult;
+use driver_os_api::{MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {

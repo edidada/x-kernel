@@ -15,11 +15,12 @@ use crate::ResResult;
 /// A mapped MMIO region with checked volatile accessors.
 ///
 /// Auto-unmapped on drop. The accessors carry release/acquire fences and
-/// bounds checks, matching readl/writel semantics.
+/// bounds checks. Architecture-specific device ordering remains a host obligation.
 pub struct IoMap {
     vaddr: usize,
     region: MmioRegion,
     release: Option<ReleaseHook>,
+    provider: Option<&'static dyn MmioOp>,
 }
 
 impl fmt::Debug for IoMap {
@@ -45,7 +46,23 @@ impl IoMap {
             vaddr,
             region,
             release,
+            provider: None,
         }
+    }
+
+    /// Acquire one mapping and retain its original provider for release.
+    pub fn map_with(
+        provider: &'static dyn MmioOp,
+        region: MmioRegion,
+        name: &'static str,
+    ) -> ResResult<Self> {
+        let mapping = provider.map_mmio(region, name)?;
+        Ok(Self {
+            vaddr: mapping.vaddr,
+            region: mapping.region,
+            release: None,
+            provider: Some(provider),
+        })
     }
 
     pub const fn region(&self) -> MmioRegion {
@@ -157,6 +174,16 @@ impl IoMap {
 
 impl Drop for IoMap {
     fn drop(&mut self) {
+        if let Some(provider) = self.provider.take() {
+            // SAFETY: this non-Clone guard owns the original provider token;
+            // its borrowed accesses have ended before drop.
+            unsafe {
+                provider.unmap_mmio(MmioMapping {
+                    vaddr: self.vaddr,
+                    region: self.region,
+                })
+            };
+        }
         if let Some(release) = self.release.take() {
             release();
         }
@@ -186,8 +213,9 @@ pub struct IoPortRange {
 /// A mapping token returned by [`MmioOp::map_mmio`].
 ///
 /// The provider is responsible for interpreting the token in
-/// [`MmioOp::unmap_mmio`]. Drivers never construct this directly; they hold an
-/// [`IoMap`] handle instead.
+/// [`MmioOp::unmap_mmio`]. Copying or constructing this metadata does not create
+/// an acquisition. Only the original unreleased token may be passed to unsafe
+/// unmap; drivers normally retain an [`IoMap`] instead.
 #[derive(Debug, Clone, Copy)]
 pub struct MmioMapping {
     /// Virtual address the CPU uses to access the region.
@@ -201,10 +229,20 @@ pub struct MmioMapping {
 ///
 /// A host kernel implements this and passes it to its driver framework. Runs
 /// in normal (non-interrupt) context during device probe and removal.
-pub trait MmioOp: Sync {
+/// # Safety
+/// Successful mappings must be non-null and valid for volatile access throughout
+/// the returned region until their matching unmap. Concurrent acquisitions must
+/// retain independent mapping references. Implementations synchronize their state.
+pub unsafe trait MmioOp: Sync {
     /// Map an MMIO region and return a token for later teardown.
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping>;
 
     /// Release a mapping previously returned by [`Self::map_mmio`].
-    fn unmap_mmio(&self, mapping: MmioMapping);
+    ///
+    /// # Safety
+    /// The token must be an unreleased acquisition from this provider, and all
+    /// accesses through that acquisition must have ended.
+    unsafe fn unmap_mmio(&self, mapping: MmioMapping);
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/mmio.rs");

@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+driver_os_api.workspace = true
 device_res.workspace = true
 driver_base.workspace = true
 kspin.workspace = true

@@ -5,6 +5,10 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose
 
+CPU-only storage and MMIO implement driver-os-api's CpuMemoryOp and MmioOp. The remaining
+capabilities still implement device-res during PR-01's staged migration;
+there is only one CPU allocator provider implementation.
+
 IRQ reverse-map owner preparation errors map from `IrqDescError::NoMemory` to
 `ResError::NoMemory`; invalid hardware-number bounds map to InvalidResource.
 The consuming unit-returning MSI release interface remains unchanged because
@@ -18,9 +22,9 @@ probe/remove orchestration, device publication, or the driver-facing
 The crate's job is to wire the resource capabilities the driver subsystem
 needs onto the X-Kernel kernel subsystems:
 
-- `device_res::MmioOp` -> `memspace::iomap_device` / `memspace::iounmap`
+- `driver_os_api::MmioOp` -> `memspace::iomap_device` / `memspace::iounmap`
 - `device_res::DmaOp` -> the `kdma` coherent / streaming DMA API
-- `device_res::CpuMemoryOp` -> ordinary fallible `kalloc` allocation
+- `driver_os_api::CpuMemoryOp` -> ordinary fallible `kalloc` allocation
 - `device_res::IrqOp` -> the `kirq` shared hardirq and MSI-X API
 - `device_res::TimeOp` -> `khal::time::monotonic_time`
 

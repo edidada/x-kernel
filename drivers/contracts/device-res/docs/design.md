@@ -6,9 +6,9 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 ## Purpose
 
 `device-res` provides the OS-neutral device resource description model and
-provider contract. It is the single entry point through which the driver
+provider contract. During migration to os-api, this crate remains the entry point through which the driver
 subsystem expresses "which kernel capabilities a driver needs", covering
-MMIO mapping, I/O ports, interrupts, DMA buffers, ordinary aligned CPU storage,
+MMIO mapping, I/O ports, interrupts and DMA buffers,
 and the monotonic clock,
 and it decouples those semantics from concrete kernel implementations.
 
@@ -22,7 +22,7 @@ Upstream subsystems that depend on this module include:
 ## Non-Responsibilities
 
 - No concrete kernel behavior behind the provider traits: `MmioOp` /
-  `IrqOp` / `DmaOp` / `CpuMemoryOp` / `TimeOp` implementations belong to the host kernel's
+  `IrqOp` / `DmaOp` / `TimeOp` implementations belong to the host kernel's
   provider crate (in x-kernel, `device-res-xkernel`, backed by `memspace`,
   `kirq`, and `kdma`).
 - No global provider state or provider selection: the driver framework
@@ -55,14 +55,18 @@ traits, which is what makes drivers portable across kernels.
 
 ## Scope
 
+MMIO descriptors, MmioOp, IoMap and ResError now belong to driver-os-api;
+this crate only consumes them in device descriptions and devm helpers. The
+MMIO flows below describe that integration, not a second implementation.
+See [os-api design](../../../base/os-api/docs/design.md) and
+[security](../../../base/os-api/docs/security.md) for the owned contract.
+
 ```text
 drivers/contracts/device-res/
 ├── src/
 │   ├── lib.rs
 │   ├── dma.rs
 │   ├── irq.rs
-│   ├── mmio.rs
-│   ├── memory.rs
 │   ├── provider.rs
 │   └── time.rs
 ├── Cargo.toml
@@ -84,7 +88,7 @@ drivers/contracts/device-res/
             │                       │                       │
             v                       v                       v
      ┌──────────────┐      ┌──────────────┐      ┌──────────────────┐
-     │  Io (MMIO)   │      │  Irq         │      │  DmaCoherent     │
+     │  IoMap (MMIO)   │      │  Irq         │      │  DmaCoherent     │
      │  RAII handle │      │  RAII handle │      │  RAII handle     │
      │  map on new  │      │  request     │      │  alloc on new    │
      │  unmap drop  │      │  release drop│      │  free on drop    │
@@ -113,8 +117,7 @@ drivers/contracts/device-res/
 | `ResourceDesc` / `ResourceSet` | Describes one device's hardware resources (MMIO, I/O ports, interrupts, DMA) |
 | `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` traits | The capability backends a host kernel implements (map/unmap, request/release IRQ, alloc/free DMA, alloc/free MSI-X, monotonic time) |
 | `ResourceProvider` trait | Combined `MmioOp + IrqOp + DmaOp + TimeOp` trait; CPU storage is requested separately |
-| `CpuMemoryOp` / `CpuBuffer` | Fallible ordinary aligned memory with an initialized exclusive byte view and paired release; no DMA mapping |
-| `Io` | RAII handle over an MMIO mapping, with register read/write methods using acquire/release fences |
+| `IoMap` | RAII handle over an MMIO mapping, with register read/write methods using acquire/release fences |
 | `Irq` | RAII handle over an interrupt registration, released automatically on drop |
 | `DmaCoherent` | RAII handle over a coherent DMA buffer, freed automatically on drop |
 | `DeviceResource` trait | OS-neutral device abstraction through which drivers read resources and register cleanup callbacks |
@@ -124,7 +127,7 @@ drivers/contracts/device-res/
 
 `device-res` keeps no global provider state. The driver framework holds the
 provider instance supplied by the host kernel and calls
-`Io::map_with()`, `Irq::request_with()`, `DmaCoherent::alloc_with()`, or
+`IoMap::map_with()`, `Irq::request_with()`, `DmaCoherent::alloc_with()`, or
 `devm_*_with_provider()`. RAII handles remember the provider that created
 them and return to that same provider for release on drop.
 
@@ -152,26 +155,25 @@ them and return to that same provider for release on drop.
 
 ## Flows
 
-### Resource acquisition (`Io::map_with` as the example)
+### Resource acquisition (`IoMap::map_with` as the example)
 
 ```text
-Io::map_with(provider, region, name)
+IoMap::map_with(provider, region, name)
   │
   ├─ provider.map_mmio(region, name)?
   │    └─ host kernel performs the actual mapping
   │
-  └─ Ok(Io { provider, mapping: Some(mapping) })
+  └─ Ok(IoMap retaining the provider and original mapping token)
 ```
 
-### RAII resource release (`Io::drop` as the example)
+### RAII resource release (`IoMap::drop` as the example)
 
 ```text
-Io::drop()
+IoMap::drop()
   │
-  ├─ mapping.take()
   ├─ provider.take()
   │
-  └─ if both Some:
+  └─ if a provider is retained:
        provider.unmap_mmio(mapping)
 ```
 
@@ -184,7 +186,7 @@ provider, and cleanup does not depend on the framework re-selecting one.
 ```text
 devm_iomap_with_provider(provider, device, region, name)
   │
-  ├─ Io::map_with(provider, region, name)?  → io
+  ├─ IoMap::map_with(provider, region, name)?  → io
   ├─ io.as_ptr()                           → ptr
   ├─ device.register_cleanup(move || drop(io))
   │    └─ callback runs LIFO when the device is removed
@@ -196,13 +198,12 @@ devm_iomap_with_provider(provider, device, region, name)
 
 - **Explicit provider**: the driver framework holds the provider; resource
   handles remember their creating provider and add no shared mutable state.
-  `CpuBuffer<'a>` borrows its provider for the local allocation lifetime; DMA,
-  MMIO and IRQ handles retain their existing static-provider requirement.
-- **RAII handles**: `Io`, `Irq`, and `DmaCoherent` are not `Sync` (they
+  DMA, MMIO and IRQ handles retain their existing static-provider requirement.
+- **RAII handles**: `Irq` and `DmaCoherent` are not `Sync` (they
   hold `NonNull` internally) and cannot be shared across threads. They may
   move between threads (`Send`), but only one thread holds a handle at a
   time.
-- **MMIO access**: the `read*`/`write*` methods of `Io` use acquire/release
+- **MMIO access**: the `read*`/`write*` methods of `IoMap` use acquire/release
   fences to order register accesses. Multi-byte accesses carry
   `debug_assert` alignment checks.
 
@@ -222,17 +223,17 @@ RAII handles store `&'static dyn MmioOp` / `IrqOp` / `DmaOp` internally:
 
 ### Why devm_* returns raw pointers instead of RAII handles
 
-`devm_iomap` returns `NonNull<u8>` rather than an `Io`, because `Io`'s
-drop behavior conflicts with device-managed cleanup: if `Io` were
-returned, the driver dropping the `Io` would release the mapping while the
+`devm_iomap` returns `NonNull<u8>` rather than an `IoMap`, because `IoMap`'s
+drop behavior conflicts with device-managed cleanup: if `IoMap` were
+returned, the driver dropping the `IoMap` would release the mapping while the
 device cleanup callback would also try to release the same mapping.
 
-Resolution: `devm_iomap` creates the `Io` internally, extracts the
+Resolution: `devm_iomap` creates the `IoMap` internally, extracts the
 pointer, then registers the drop closure via `register_cleanup`. The
-`Io`'s lifetime is managed by the callback; the driver keeps only the raw
+`IoMap`'s lifetime is managed by the callback; the driver keeps only the raw
 pointer.
 
-### Why Io::read*/write* use fences instead of volatile Ordering parameters
+### Why IoMap::read*/write* use fences instead of volatile Ordering parameters
 
 `core::ptr::read_volatile` / `write_volatile` guarantee the compiler will
 not elide or reorder volatile accesses, but they give no CPU-side memory
@@ -253,7 +254,7 @@ in the RAII handle itself.
 
 | Type | Drop behavior |
 |------|----------|
-| `Io` | If both mapping and provider are `Some`, calls `provider.unmap_mmio(mapping)` |
+| `IoMap` | Returns the original token to its retained provider, or invokes the unsafe constructor's release hook |
 | `Irq` | If `armed` and provider is `Some`, calls `provider.release_irq(resource, token)` |
 | `DmaCoherent` | If both allocation and provider are `Some`, calls `provider.free_coherent(allocation)` |
 
@@ -282,18 +283,7 @@ backends. In x-kernel this provider is implemented by
 `device-res-xkernel`, which forwards to `kirq::alloc_msix()`; `device-res`
 itself stays OS-neutral and does not depend on `kirq`.
 
-### Ordinary CPU storage is separate from DMA
+### Ordinary CPU storage
 
-`CpuMemoryOp` supplies a fallible allocation for a nonempty `Layout` and
-releases its original pointer/layout. It is an unsafe implementation contract:
-providers must return unique live storage with the requested alignment.
-`CpuBuffer<'a>` retains that provider borrow, initializes all bytes, lends one
-exclusive byte slice, and releases exactly once. It adds no test-only storage
-variants or accounting fields. Tests inject providers through the same API.
-
-CPU staging neither needs nor creates a device bus address, DMA mapping,
-uncached mapping, or platform-sharing operation. Backends still own any actual
-DMA/cache protocol. `ResourceProvider` keeps its existing four capabilities;
-drivers that need CPU staging request `CpuMemoryOp` explicitly. Host adapters
-may use their ordinary fallible allocator without coupling portable drivers to
-that allocator.
+CPU-only storage moved to driver-os-api. See
+[its design](../../../base/os-api/docs/design.md) for the provider and guard contract.

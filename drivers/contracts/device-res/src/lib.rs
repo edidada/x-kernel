@@ -6,11 +6,11 @@
 //!
 //! This crate describes the hardware resources a driver consumes (MMIO
 //! regions, I/O port ranges, interrupts, coherent/streaming DMA buffers, and
-//! ordinary aligned CPU storage and small capabilities such as a monotonic clock)
+//! small capabilities such as a monotonic clock)
 //! without binding to any particular kernel. A host kernel provides capability
-//! implementations — [`MmioOp`], [`DmaOp`], [`CpuMemoryOp`], [`IrqOp`], [`TimeOp`] — to its
+//! implementations — [`DmaOp`], [`IrqOp`], [`TimeOp`] — to its
 //! driver framework; framework code then acquires resources through RAII
-//! handles ([`Io`], [`Irq`], [`DmaCoherent`], [`CpuBuffer`]) or the device-managed `devm_*`
+//! handles ([`Irq`], [`DmaCoherent`]) or the device-managed `devm_*`
 //! helpers.
 //!
 //! Keeping the OS-semantic operations (map/unmap, request/release IRQ,
@@ -23,8 +23,6 @@ extern crate alloc;
 
 mod dma;
 mod irq;
-mod memory;
-mod mmio;
 mod provider;
 mod time;
 
@@ -34,9 +32,9 @@ use alloc::boxed::Box;
 #[derive(Debug, Clone, Copy)]
 pub enum ResourceDesc {
     /// Memory-mapped I/O region.
-    Mmio(crate::mmio::MmioRegion),
+    Mmio(driver_os_api::MmioRegion),
     /// x86 I/O port range.
-    IoPort(crate::mmio::IoPortRange),
+    IoPort(driver_os_api::IoPortRange),
     /// Interrupt line.
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
@@ -46,23 +44,7 @@ pub enum ResourceDesc {
 /// A collection of resources for a single device.
 pub type ResourceSet = smallvec::SmallVec<[ResourceDesc; 4]>;
 
-/// Error returned by resource acquisition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResError {
-    /// The resource descriptor was invalid (e.g. zero-sized region).
-    InvalidResource,
-    /// The host failed to establish the requested mapping.
-    MappingFailed,
-    /// The host ran out of memory while acquiring the resource.
-    NoMemory,
-    /// The resource is already in use and cannot be shared.
-    Busy,
-    /// The host does not support this kind of resource.
-    Unsupported,
-}
-
-/// Result type for resource operations.
-pub type ResResult<T = ()> = Result<T, ResError>;
+pub use driver_os_api::{ResError, ResResult};
 
 /// OS-agnostic view of a device that a driver binds resources to.
 ///
@@ -84,8 +66,6 @@ pub trait DeviceResource {
 
 pub use dma::*;
 pub use irq::*;
-pub use memory::*;
-pub use mmio::*;
 pub use provider::*;
 pub use time::*;
 

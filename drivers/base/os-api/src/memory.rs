@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Fallible CPU-only aligned storage, separate from DMA resources.
+//! Fallible CPU-only aligned storage, independent of DMA resources.
 
 use core::{alloc::Layout, ptr::NonNull};
 

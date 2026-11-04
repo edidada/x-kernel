@@ -1,5 +1,10 @@
 # kdriver — Design
 
+MMIO acquisition in both device models delegates to the single host
+MmioOp implementation. Model host_mmio only translates os-api errors to
+RuntimeError; it no longer allocates a release hook or implements native
+map/unmap itself. Device-managed cleanup retains the same IoMap guard.
+
 ## Discovery statistics during model coexistence
 
 EnumerationContext stages model RNG registrations and legacy descriptors, then
@@ -328,13 +333,13 @@ for deterministic publication/rejection tests, not submitted-DMA cancellation.
 
 ## Model host MMIO mapping
 
-`host_mmio::iomap` delegates the model's resource-service operation to memspace.
+`host_mmio::iomap` delegates to the shared host MmioOp implementation over memspace.
 It accepts explicit bus-resolved regions as well as descriptor-indexed resources;
 it does not invent a second device resource registry or authorization policy.
 The returned IoMap owns one native mapping reference, not necessarily the entire
 mapping: overlapping guards may share the native mapping, and pinned boot
-mappings must survive guard Drop. Each successful acquisition installs a private
-release hook calling `iounmap` once with the exact returned virtual address,
+mappings must survive guard Drop. Each successful acquisition retains the static
+provider and its token without allocating a hook; unmap uses the original address,
 including page offset. Native errors retain Invalid/NoMemory/Io distinctions;
 release failures are logged because Drop cannot return an error.
 

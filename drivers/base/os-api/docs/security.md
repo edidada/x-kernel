@@ -1,5 +1,38 @@
 # driver-os-api — 安全与可靠性
 
+## MMIO mapping ownership
+
+The unsafe MmioOp implementation guarantees non-null live mapping extents.
+IoMap::map_with retains the original mapping address, extent and provider;
+drop consumes its acquisition once. Raw MmioMapping is copyable metadata,
+not an additional owner: unmap requires proof of the original live acquisition.
+Providers must synchronize their mapping references, and users must stop
+register/device access before cleanup. Safe accessors check bounds and alignment
+before volatile operations. IoMap does not serialize device register protocols.
+The raw-pointer escape does not extend the mapping lifetime.
+
+Host mapping/registry allocation may still fail. Direct provider retention
+avoids a separate Arc release-hook allocation but does not make mapping itself
+allocation-free. Hook-based unsafe construction retains its existing caller
+obligations. Tests cover all register widths, per-acquisition release, rejection
+without release, framework LIFO cleanup and native overlapping mapping references.
+
+## CPU-only aligned storage
+
+`src/memory.rs` adds an unsafe `CpuMemoryOp` implementation boundary and two
+raw-memory operations: initialization of the complete allocation, and creation
+of its exclusive initialized byte view. The safe `CpuBuffer` API depends on the
+provider's size/alignment/uniqueness guarantees. Its lifetime retains the
+provider; drop returns the original pointer and layout once, after all views
+end. Zero-size requests are rejected before provider entry. Acquisition errors
+expose neither a handle nor uninitialized memory.
+
+The capability must not establish DMA mappings or change cache attributes.
+It grants no bus address or device access guarantee; those remain with the
+separate `DmaOp` protocol. The handle has no `Send`/`Sync` overrides. Tests
+cover initialization, alignment, matching release, empty requests and injected
+allocation failure; real memory exhaustion is not induced.
+
 ## IRQ teardown boundary
 
 An IRQ release hook returning successfully authorizes callback-owned state to

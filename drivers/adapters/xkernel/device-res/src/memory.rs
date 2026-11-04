@@ -6,7 +6,7 @@
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use device_res::{CpuMemoryOp, ResError, ResResult};
+use driver_os_api::{CpuMemoryOp, ResError, ResResult};
 
 use crate::XKernelResourceProvider;
 

@@ -16,6 +16,7 @@ mod clock;
 mod dma;
 mod error;
 mod irq;
+mod memory;
 mod mmio;
 
 use alloc::sync::Arc;
@@ -36,6 +37,7 @@ pub use irq::{
     DevIrq, IrqAction, IrqController, IrqDomainId, IrqHandlerFn, IrqHandlerToken, IrqOp,
     IrqResource, IrqRouteDesc, IrqSpec, IrqTrigger, MsiMessage, MsiResource, Virq,
 };
+pub use memory::{CpuBuffer, CpuMemoryOp};
 pub use mmio::{IoMap, IoPortRange, MmioMapping, MmioOp, MmioRegion};
 
 unittest::path_mod_test!(tests, "../ut-tests/guards.rs");

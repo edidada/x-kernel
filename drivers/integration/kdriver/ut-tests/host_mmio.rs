@@ -19,9 +19,18 @@ fn model_mmio_rejects_invalid_extents_and_preserves_error_kinds() {
             RuntimeError::Invalid
         );
     }
-    assert_eq!(map_error(IoMapError::InvalidRange), RuntimeError::Invalid);
-    assert_eq!(map_error(IoMapError::NoMemory), RuntimeError::NoMemory);
-    assert_eq!(map_error(IoMapError::MappingFailed), RuntimeError::Io);
+    assert_eq!(
+        RuntimeError::from(driver_os_api::ResError::InvalidResource),
+        RuntimeError::Invalid
+    );
+    assert_eq!(
+        RuntimeError::from(driver_os_api::ResError::NoMemory),
+        RuntimeError::NoMemory
+    );
+    assert_eq!(
+        RuntimeError::from(driver_os_api::ResError::MappingFailed),
+        RuntimeError::Io
+    );
 }
 
 #[def_test(serial)]

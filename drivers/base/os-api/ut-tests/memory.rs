@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use unittest::def_test;
 
-use super::*;
+use super::{CpuBuffer, CpuMemoryOp, Layout, NonNull, ResError, ResResult};
 
 struct Provider {
     allocations: AtomicUsize,

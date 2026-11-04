@@ -1009,8 +1009,8 @@ uses these contracts; the fixture does not validate its hardware.
 The new host MMIO helper is for trusted model resource callbacks, not untrusted
 physical-address requests. Explicit regions are valid for bus-resolved BARs and
 are not forced to duplicate descriptor entries. Safe IoMap construction is backed
-by a successful native mapping covering the full requested extent. A unique
-private release hook pairs one native reference with one guard Drop; shared and
+by a successful native mapping covering the full requested extent. The retained
+static provider/token pairs one native reference with one guard Drop; shared and
 pinned mappings retain memspace's existing lifetime policy. Native unmap errors
 are logged, not silently swallowed or retried. Callers must stop IRQ/register
 access before dropping their final mapping guard. Tests never dereference the

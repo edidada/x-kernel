@@ -1,5 +1,36 @@
 # driver-os-api — 设计
 
+## Unified MMIO capability
+
+MmioRegion, IoPortRange, MmioMapping and MmioOp are defined only here.
+IoMap is the single guard. map_with retains the original static provider and
+mapping token without allocating a release closure; drop returns that token
+exactly once. The unsafe constructor retains its explicit external ownership
+contract for bus/test integrations. Neither path claims a physical resource
+range or enforces exclusive device ownership.
+
+MmioOp is an unsafe provider contract: success establishes a valid mapping;
+unmap is unsafe because copying a raw token does not create another acquisition.
+Register access retains checked bounds/alignment and acquire/release fences.
+These fences alone are not a claim of Linux readl/writel ordering equivalence.
+Device protocols and architecture-specific ordering remain host obligations.
+
+### Ordinary CPU storage is separate from DMA
+
+`CpuMemoryOp` supplies a fallible allocation for a nonempty `Layout` and
+releases its original pointer/layout. It is an unsafe implementation contract:
+providers must return unique live storage with the requested alignment.
+`CpuBuffer<'a>` retains that provider borrow, initializes all bytes, lends one
+exclusive byte slice, and releases exactly once. It adds no test-only storage
+variants or accounting fields. Tests inject providers through the same API.
+
+CPU staging neither needs nor creates a device bus address, DMA mapping,
+uncached mapping, or platform-sharing operation. Backends still own any actual
+DMA/cache protocol. Drivers that need CPU staging request `CpuMemoryOp`
+explicitly rather than inferring CPU allocation from a DMA provider. Host adapters
+may use their ordinary fallible allocator without coupling portable drivers to
+that allocator.
+
 ## IRQ acquisition and release
 
 IrqOp request may invoke a fully initialized callback before returning; failure

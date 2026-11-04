@@ -2,16 +2,21 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::MmioOp`] provider contract.
+//! X-Kernel implementation of the [`driver_os_api::MmioOp`] provider contract.
 
 use core::ptr::NonNull;
 
-use device_res::{MmioMapping, MmioOp, MmioRegion, ResError, ResResult};
+use driver_os_api::{MmioMapping, MmioOp, MmioRegion, ResError, ResResult};
 
 use crate::XKernelResourceProvider;
 
-impl MmioOp for XKernelResourceProvider {
+// SAFETY: memspace supplies stable device mappings with one reference per
+// acquisition and synchronizes mapping lifetime until matching unmap.
+unsafe impl MmioOp for XKernelResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {
+        if region.size > isize::MAX as usize {
+            return Err(ResError::InvalidResource);
+        }
         let vaddr =
             memspace::iomap_device(region.base.into(), region.size, name).map_err(map_iomap_err)?;
         let ptr = NonNull::new(vaddr.as_mut_ptr()).ok_or(ResError::MappingFailed)?;
@@ -21,10 +26,11 @@ impl MmioOp for XKernelResourceProvider {
         })
     }
 
-    fn unmap_mmio(&self, mapping: MmioMapping) {
+    unsafe fn unmap_mmio(&self, mapping: MmioMapping) {
         let vaddr = memaddr::VirtAddr::from(mapping.vaddr);
-        // Teardown has no error return; an already absent mapping needs no action.
-        let _ = memspace::iounmap(vaddr);
+        if let Err(error) = memspace::iounmap(vaddr) {
+            log::error!("MMIO release failed at {vaddr:?}: {error:?}");
+        }
     }
 }
 

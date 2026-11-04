@@ -2,9 +2,14 @@
 
 ## Scope
 
-This analysis covers the entire crate: `src/lib.rs` (handles, the MMIO
-access surface, `unsafe impl Send`), `src/dma.rs` (coherent handles),
-`src/irq.rs` (IRQ/MSI resources), `src/memory.rs` (CPU-only storage),
+MMIO descriptors, MmioOp, IoMap and ResError now belong to driver-os-api;
+this crate only consumes them in device descriptions and devm helpers. The
+MMIO flows below describe that integration, not a second implementation.
+See [os-api design](../../../base/os-api/docs/design.md) and
+[security](../../../base/os-api/docs/security.md) for the owned contract.
+
+This analysis covers the remaining crate: `src/lib.rs` (device descriptions), `src/dma.rs` (coherent handles),
+`src/irq.rs` (IRQ/MSI resources),
 `src/provider.rs`, and `src/time.rs`.
 No modules are excluded; every unsafe item is enumerated in the
 inventory below. The host-side implementation lives in
@@ -14,8 +19,7 @@ inventory below. The host-side implementation lives in
 ## Overview
 
 `device-res` is x-kernel's unified abstraction layer through which drivers
-acquire hardware resources. The module operates directly on MMIO registers
-and DMA buffers, and contains `unsafe impl Send`, raw-pointer
+acquire hardware resources. MMIO access is delegated to driver-os-api; this module handles DMA buffers and contains `unsafe impl Send`, raw-pointer
 dereferences, and volatile accesses. Incorrect use or broken invariants
 can lead to undefined behavior or device malfunction.
 
@@ -24,7 +28,7 @@ can lead to undefined behavior or device malfunction.
 ```
 Driver code (trusted)
    │
-   │ safe API: Io::map_with, Irq::request_with,
+   │ safe API: IoMap::map_with, Irq::request_with,
    │           DmaCoherent::alloc_with, devm_*_with_provider
    │
    v
@@ -33,8 +37,8 @@ Driver code (trusted)
 │                                                              │
 │  ┌── unsafe boundaries ───────────────────────────────────┐ │
 │  │ unsafe impl Send for MmioMapping, DmaAllocation        │ │
-│  │ Io::access_ptr → ptr.add(offset)                       │ │
-│  │ Io read*/write* → ptr.read_volatile / write_volatile   │ │
+│  │ IoMap::access_ptr → ptr.add(offset)                       │ │
+│  │ IoMap read*/write* → ptr.read_volatile / write_volatile   │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  MmioOp / IrqOp / DmaOp / TimeOp provider traits            │
@@ -76,21 +80,6 @@ This module:
 
 ## Unsafe Code Inventory
 
-### 1. `unsafe impl Send for MmioMapping` (`src/lib.rs`)
-
-```rust
-unsafe impl Send for MmioMapping {}
-```
-
-**Invariant**: `MmioMapping` carries only address values and plain
-descriptors. Ownership of the underlying device mapping is exclusive to a
-single `Io` handle, the address stays valid for the mapping lifetime, and
-release returns to the provider that created the handle.
-
-**Why sound**: `Io` is not `Sync` (`NonNull` is `!Sync`), so one `Io` is
-never shared across threads. A `MmioMapping` is created when the `Io` is
-constructed and consumed in `Io::drop`; ownership is singular.
-
 ### 2. `unsafe impl Send for DmaAllocation` (`src/lib.rs`)
 
 ```rust
@@ -104,54 +93,18 @@ returns to the provider that created the handle.
 **Why sound**: same argument — `DmaCoherent` is not `Sync`; when the
 handle moves between threads, buffer ownership moves with it.
 
-### 3. `Io::access_ptr` raw-pointer offset (`src/lib.rs`)
-
-```rust
-unsafe { self.as_ptr().as_ptr().add(offset) }
-```
-
-**Invariants**:
-- `offset + size <= region.size` (enforced by `checked_add` + `assert!`).
-- The base address `vaddr` is guaranteed valid for the mapping lifetime by
-  the provider.
-
-**Why sound**: the offset is overflow-checked and bounds-checked, so the
-resulting pointer never leaves the mapped region.
-
-### 4. `Io::read*` — `ptr.read_volatile()` (`src/lib.rs`)
-
-```rust
-let value = unsafe { ptr.read_volatile() };
-```
-
-**Invariants**:
-- The pointer is guaranteed by `access_ptr` to lie inside the mapping.
-- Multi-byte reads carry a `debug_assert` natural-alignment check.
-
-**Why sound**: `read_volatile` causes no UB (the pointer is valid and
-aligned); the value read is interpreted by the caller.
-
-### 5. `Io::write*` — `ptr.write_volatile(value)` (`src/lib.rs`)
-
-```rust
-unsafe { ptr.write_volatile(value) };
-```
-
-**Invariants**: same as `read*` — the pointer is inside the mapping and
-naturally aligned.
-
-**Why sound**: `write_volatile` writes to a valid MMIO-mapped address.
+MMIO volatile access and provider release are audited in driver-os-api.
 
 ## Memory-Safety Invariants
 
 The following must hold at all times:
 
-1. **Mapping validity**: `MmioMapping.vaddr` held by an `Io` handle stays
+1. **Mapping validity**: `MmioMapping.vaddr` held by an `IoMap` handle stays
    valid from handle construction to drop. Guaranteed by the `MmioOp`
    implementation.
 
 2. **Exclusive ownership**: one mapped region is not referenced by
-   multiple `Io` handles. Callers must not double-map a region.
+   multiple `IoMap` handles. Callers must not double-map a region.
 
 3. **Bounds checking**: every `read*`/`write*` call satisfies
    `offset + size <= region.size`. Runtime-enforced by the `assert!` in
@@ -178,7 +131,7 @@ The following must hold at all times:
 |------|--------|--------|------|
 | `MmioMapping` | manual `unsafe impl` | auto `!Sync` (`NonNull`) | Address values may move between threads |
 | `DmaAllocation` | manual `unsafe impl` | auto `!Sync` (`NonNull`) | Address values may move between threads |
-| `Io` | auto (all fields `Send`) | `!Sync` (`NonNull`) | One handle is never shared across threads |
+| `IoMap` | auto (all fields `Send`) | `!Sync` (`NonNull`) | One handle is never shared across threads |
 | `Irq` | auto | auto | `IrqResource` is `Copy`; `bool` is `Send + Sync` |
 | `DmaCoherent` | auto (all fields `Send`) | `!Sync` (`NonNull`) | One handle is never shared across threads |
 
@@ -200,13 +153,13 @@ The following must hold at all times:
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Handling |
 |------|----------|----------|--------|------|----------|----------|
-| F-01 | `Io::map_with` returns an error | Provider refuses the mapping or mapping fails | Driver cannot access device registers | Device unavailable | 3 | `ResResult` forces error handling |
+| F-01 | `IoMap::map_with` returns an error | Provider refuses the mapping or mapping fails | Driver cannot access device registers | Device unavailable | 3 | `ResResult` forces error handling |
 | F-02 | `Irq::request_with` returns `Busy` | Provider refuses registration, e.g. shared-handler limit reached or underlying IRQ registration failed | Driver receives no interrupts | Device interrupt function unavailable | 3 | Returns `ResError::Busy`; driver aborts probe or picks another mode |
 | F-03 | `DmaCoherent::alloc_with` returns `NoMemory` | Kernel memory exhausted | DMA buffer allocation fails | DMA-dependent device function unavailable | 3 | Returns `ResError::NoMemory`; driver can degrade |
 | F-04 | Offset overflow during MMIO access | `checked_add` detects usize overflow | `assert!` panic | Calling thread panics | 2 | `checked_add` prevents silent out-of-bounds |
 | F-05 | MMIO access out of bounds | `offset + size > region.size` | `assert!` panic | Calling thread panics | 2 | `assert!` blocks the actual out-of-bounds access |
 | F-06 | Drop releases the wrong shared IRQ handler | An armed handle constructed after a failed request, or the provider-returned token not stored | Current handler not released correctly, or other handlers on the line removed | Device interrupts misbehave | 2 | `Irq` is constructed only after `request_irq` succeeds and keeps the token so drop releases precisely |
-| F-07 | `Io::map_with` / `Irq::request_with` / `DmaCoherent::alloc_with` called in interrupt context | Driver acquires resources inside an interrupt handler | Provider methods may sleep or block | System hang | 1 | Documentation constrains provider methods to normal context; no runtime detection |
+| F-07 | `IoMap::map_with` / `Irq::request_with` / `DmaCoherent::alloc_with` called in interrupt context | Driver acquires resources inside an interrupt handler | Provider methods may sleep or block | System hang | 1 | Documentation constrains provider methods to normal context; no runtime detection |
 | F-09 | MSI resource freed before its IRQ handler is unregistered | Wrong driver teardown order | Provider may free the backend vector while the OS-visible IRQ is still registered | Later vector reuse may hit a stale handler | 2 | Host providers should diagnose the ordering; drivers must release the handler before freeing the MSI resource |
 
 ## Failure Management
@@ -266,7 +219,7 @@ When modifying `device-res`, verify:
 
 - [ ] Every `unsafe impl Send/Sync` carries a `SAFETY:` comment stating
   its invariants.
-- [ ] `Io::access_ptr` bounds checks cover every `read*`/`write*` entry
+- [ ] `IoMap::access_ptr` bounds checks cover every `read*`/`write*` entry
   point.
 - [ ] New MMIO access methods include acquire/release fences.
 - [ ] RAII handle drop paths use the provider saved at handle creation.
@@ -281,16 +234,5 @@ When modifying `device-res`, verify:
 
 ## CPU-only aligned storage
 
-`src/memory.rs` adds an unsafe `CpuMemoryOp` implementation boundary and two
-raw-memory operations: initialization of the complete allocation, and creation
-of its exclusive initialized byte view. The safe `CpuBuffer` API depends on the
-provider's size/alignment/uniqueness guarantees. Its lifetime retains the
-provider; drop returns the original pointer and layout once, after all views
-end. Zero-size requests are rejected before provider entry. Acquisition errors
-expose neither a handle nor uninitialized memory.
-
-The capability must not establish DMA mappings or change cache attributes.
-It grants no bus address or device access guarantee; those remain with the
-separate `DmaOp` protocol. The handle has no `Send`/`Sync` overrides. Tests
-cover initialization, alignment, matching release, empty requests and injected
-allocation failure; real memory exhaustion is not induced.
+The CPU storage contract and its tests now live in driver-os-api. See
+[its security analysis](../../../base/os-api/docs/security.md).

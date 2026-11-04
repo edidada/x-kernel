@@ -11,14 +11,14 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use driver_os_api::{MmioMapping, MmioOp, MmioRegion};
 use kspin::SpinNoIrq;
 use unittest::def_test;
 
 use crate::{
     DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp,
-    IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError,
-    ResResult, ResourceDesc, devm_alloc_coherent_with_provider, devm_iomap_with_provider,
-    devm_request_irq_with_provider,
+    IrqResource, IrqThreadHandler, IrqTrigger, ResError, ResResult, ResourceDesc,
+    devm_alloc_coherent_with_provider, devm_iomap_with_provider, devm_request_irq_with_provider,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,12 +97,17 @@ impl TestProvider {
     }
 }
 
-impl MmioOp for TestProvider {
+// SAFETY: fixtures retain stable backing words for each mapping until cleanup;
+// the state lock serializes access and unmap only records reference release.
+unsafe impl MmioOp for TestProvider {
     fn map_mmio(&self, region: MmioRegion, _name: &'static str) -> ResResult<MmioMapping> {
         let mut state = self.state.lock();
         state.events.push(Event::MapMmio(region));
         if let Some(error) = state.map_error.take() {
             return Err(error);
+        }
+        if region.size == 0 || region.size > core::mem::size_of_val(&state.mmio_words) {
+            return Err(ResError::InvalidResource);
         }
         Ok(MmioMapping {
             vaddr: state.mmio_words.as_mut_ptr() as usize,
@@ -110,7 +115,7 @@ impl MmioOp for TestProvider {
         })
     }
 
-    fn unmap_mmio(&self, mapping: MmioMapping) {
+    unsafe fn unmap_mmio(&self, mapping: MmioMapping) {
         self.state
             .lock()
             .events
@@ -239,7 +244,8 @@ fn provider_methods_record_lifecycle_with_explicit_calls() {
 
     let mapping = provider.map_mmio(region, "regs").unwrap();
     assert_eq!(mapping.region, region);
-    provider.unmap_mmio(mapping);
+    // SAFETY: the token belongs to this provider and no access remains active.
+    unsafe { provider.unmap_mmio(mapping) };
 
     let token = provider
         .request_irq(irq, Arc::new(|_| IrqEvent::HANDLED))

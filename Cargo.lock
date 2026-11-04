@@ -341,7 +341,7 @@ name = "block"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
- "device-res",
+ "driver-os-api",
  "driver_base",
  "kdevice",
  "kerrno",
@@ -1177,6 +1177,7 @@ dependencies = [
 name = "device-res"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-os-api",
  "kspin",
  "ktime_types",
  "smallvec",
@@ -1188,6 +1189,7 @@ name = "device-res-xkernel"
 version = "0.3.0-dev"
 dependencies = [
  "device-res",
+ "driver-os-api",
  "kalloc",
  "kdma",
  "khal",
@@ -2286,6 +2288,7 @@ name = "kdevice"
 version = "0.3.0-dev"
 dependencies = [
  "device-res",
+ "driver-os-api",
  "driver_base",
  "kspin",
  "lazyinit",

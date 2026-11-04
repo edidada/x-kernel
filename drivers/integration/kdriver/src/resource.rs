@@ -13,10 +13,11 @@ use core::ptr::NonNull;
 
 use device_res::{
     DmaSpec, IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler,
-    MmioRegion, ResError,
+    ResError,
 };
 use device_res_xkernel::XKernelResourceProvider;
 use driver_base::{DriverError, DriverResult};
+use driver_os_api::MmioRegion;
 use kdevice::DeviceObject;
 
 static XKERNEL_RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();
@@ -28,9 +29,11 @@ pub(crate) fn resource_provider() -> &'static XKernelResourceProvider {
 pub(crate) fn map_res_err(err: ResError) -> DriverError {
     match err {
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed => DriverError::Io,
+        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
+            DriverError::Io
+        }
         ResError::NoMemory => DriverError::NoMemory,
-        ResError::Busy => DriverError::ResourceBusy,
+        ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
     }
 }

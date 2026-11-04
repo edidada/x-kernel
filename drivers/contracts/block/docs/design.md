@@ -195,7 +195,7 @@ one initialized, provider-owned `CpuBuffer` allocation; each successful read chu
 copied out, or each write chunk is copied in before submission. One buffer is
 reused for at most 64 KiB at a time, except that a larger device block requires
 one complete block. Allocation happens before the callback takes a device lock.
-Staging requests ordinary aligned CPU memory through `CpuMemoryOp`. The host
+Staging requests ordinary aligned CPU memory through `driver_os_api::CpuMemoryOp`. The host
 adapter uses the ordinary allocator's inherent fallible entry, not the fatal
 `GlobalAlloc` entry that can abort even through Vec's try-reserve API. The
 initialized `CpuBuffer` owner releases through its original provider. There is

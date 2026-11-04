@@ -11,11 +11,12 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
+use driver_os_api::{IoMap, MmioOp, MmioRegion};
+
 use crate::{
     DeviceResource, ResResult,
     dma::{DmaCoherent, DmaOp, DmaSpec},
     irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
-    mmio::{Io, MmioOp, MmioRegion},
     time::TimeOp,
 };
 
@@ -24,7 +25,7 @@ use crate::{
 /// Host kernels may pass a concrete type implementing this trait into a driver
 /// framework. The individual operation traits remain split so framework code
 /// can require only the capability it is about to use.
-/// Ordinary CPU storage is requested separately through [`crate::CpuMemoryOp`];
+/// Ordinary CPU storage is requested separately through `driver_os_api::CpuMemoryOp`;
 /// a DMA provider does not imply CPU allocation capability.
 pub trait ResourceProvider: MmioOp + DmaOp + IrqOp + TimeOp {}
 
@@ -41,8 +42,8 @@ pub fn devm_iomap_with_provider(
     region: MmioRegion,
     name: &'static str,
 ) -> ResResult<NonNull<u8>> {
-    let io = Io::map_with(provider, region, name)?;
-    let ptr = io.as_ptr();
+    let io = IoMap::map_with(provider, region, name)?;
+    let ptr = NonNull::new(io.as_ptr()).ok_or(crate::ResError::MappingFailed)?;
     device.register_cleanup(Box::new(move || drop(io)));
     Ok(ptr)
 }

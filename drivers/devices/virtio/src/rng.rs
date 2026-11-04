@@ -40,9 +40,11 @@ fn map_driver_error(error: DriverError) -> KError {
 fn map_irq_error(error: ResError) -> DriverError {
     match error {
         ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed => DriverError::Io,
+        ResError::MappingFailed | ResError::Io | ResError::BadState | ResError::NotFound => {
+            DriverError::Io
+        }
         ResError::NoMemory => DriverError::NoMemory,
-        ResError::Busy => DriverError::ResourceBusy,
+        ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
     }
 }
