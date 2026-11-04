@@ -447,6 +447,28 @@ fn parent_clock_provider(dev: &Device<'_, PlatformBus>) -> Option<u64> {
 /// is no device at all" indistinguishable. Setting port power (and running the
 /// controller) turns the question into a readable bit.
 fn probe_ehci_ports(dev: &mut Device<'_, PlatformBus>) {
+    // The USB2 Type-A ports use the *other* two usb2phy blocks (Usb2_0 at
+    // 0xfd5d8000, Usb2_1 at 0xfd5dc000) -- the DWC3 ports have their own
+    // (Usb3_0/Usb3_1). Nobody powers those blocks in this tree, and a suspended
+    // PHY (phy_sus asserted) cannot see a D+ pull-up, so a mouse plugged into a
+    // USB2 port is invisible no matter what VBUS does. Power them here until
+    // EHCI gets its own driver that acquires the PHY through the framework.
+    for (base, name) in [(0xfd5d_8000_u64, "usb2_0"), (0xfd5d_c000, "usb2_1")] {
+        if let Ok(block) = dev.res().iomap_region(
+            driver_base::MmioRegion::new(base as usize, 0x4000),
+            "usb2phy-ehci",
+        ) {
+            let before = block.read32(0x08);
+            // phy_sus is bit 2 for the host-only pairs (the DWC3 pairs use
+            // bit 11 of +0x0c); clearing it takes the analog front end out of
+            // suspend.
+            block.write32(0x08, before & !(1 << 2));
+            info!(
+                "dwc3: usb2phy {name} +0x08 {before:#06x} -> {:#06x} (phy_sus cleared)",
+                block.read32(0x08),
+            );
+        }
+    }
     const EHCI: [(u64, &str); 2] = [(0xfc80_0000, "fc800000"), (0xfc88_0000, "fc880000")];
     const USBCMD: usize = 0x00;
     const USBSTS: usize = 0x04;
