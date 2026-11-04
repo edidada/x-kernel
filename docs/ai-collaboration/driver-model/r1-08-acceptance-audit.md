@@ -74,6 +74,10 @@ is separate evidence, not inferred from this fixture.
 
 ## Next work
 
+Subsequent update: [R1-09 retirement and scoped final acceptance](r1-09-retirement-acceptance.md)
+has now completed on this branch. The next-work list below records the R1-08
+handoff; it does not reopen that completed ticket.
+
 Scope update (2026-11-04): the separately delegated
 [PCI virtio-net lifecycle follow-up](network-lifecycle-handoff.md) is now owned
 by this workstream. It is additional work, not a completed R1-08 requirement;

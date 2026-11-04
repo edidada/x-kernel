@@ -11,8 +11,6 @@ keywords = ["driver", "x-kernel"]
 categories = ["os", "no-std"]
 
 [dependencies]
-driver_class.workspace = true
-kerrno.workspace = true
 kspin.workspace = true
 driver_os_api.workspace = true
 lazyinit.workspace = true

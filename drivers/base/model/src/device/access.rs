@@ -106,30 +106,11 @@ impl<'a, B: Bus> DeviceAccess<'a, B> {
     /// Later unbind/rebind cannot change the reported driver. This source keeps
     /// no ops, binding Data or acquired hardware resources alive. Its online
     /// bit describes device registration, not permission to access hardware.
-    pub fn publication_source(&self) -> Arc<dyn driver_class::PublicationSource> {
+    pub fn publication_source(&self) -> Arc<dyn super::PublicationSource> {
         Arc::new(super::source::BindingSource {
             device: self.reference.clone(),
             driver: self.driver.clone(),
         })
-    }
-
-    /// Legacy generic class-publication adapter using this binding's provenance.
-    ///
-    /// Store the returned Registration in DriverOps::Data. Dropping it closes
-    /// admission immediately; class teardown waits for existing permits.
-    /// This does not delay destruction of Data's other fields. The runtime must
-    /// own resources needed by operations, or remove must join those operations
-    /// before releasing resources. Field order alone is not sufficient.
-    pub fn publish<T, H>(
-        &self,
-        class: &'static driver_class::Class<T, H>,
-        runtime: T,
-    ) -> kerrno::KResult<driver_class::Registration<T>>
-    where
-        T: Send + Sync + 'static,
-        H: driver_class::ClassHooks<T>,
-    {
-        class.publish(self.publication_source(), runtime)
     }
 }
 

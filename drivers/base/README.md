@@ -1,218 +1,58 @@
 # 驱动设备模型基础设施
 
-## 定位
+## 职责与边界
 
-`drivers/base` 承载与设备家族、具体总线实现和宿主内核实现无关的
-**驱动设备模型基础设施**，不是驱动子系统所有公共代码的集合。
+`drivers/base` 是与设备家族和宿主实现无关的模型基础设施，不是所有驱动公共代码的集合。
+设备的注册、绑定、解绑、注销由 model 编排；能力的注册、操作准入和同步排空由
+具体子系统拥有。保留身份引用不意味着保留硬件操作权限。
 
-它拥有设备身份与绑定生命周期，以及通用能力发布和退出协调机制。
-它通过驱动能力契约获取宿主服务，通过设备子系统表达具体设备能力，
-不拥有这些服务的宿主实现或设备家族语义。
-
-它负责回答：一个设备如何进入模型、与驱动绑定、发布能力，以及如何安全退出。
-具体设备怎样收发数据、访问硬件，以及宿主内核怎样提供运行能力，由各自的层负责。
-
-本文定义后续演进的职责边界，不表示当前代码已经完成分层。
-当前目录是根 workspace 下三个 crate 的容器：
-
-| 目录 / package | Rust crate 名 | 职责 |
-|---|---|---|
-| `model/` / `driver-model` | `driver_model` | 设备模型、绑定与退出编排 |
-| `class/` / `driver-class` | `driver_class` | 通用发布、使用许可和撤销协调 |
-| `os-api/` / `driver-os-api` | `driver_os_api` | OS 能力契约、描述、句柄及释放协议 |
-
-依赖方向为 `model → class`、`model → os-api`、`hwrng → class`、`entropy → hwrng`；能力消费者不依赖模型。
-它们与 `drivers/contracts/driver_base` 中的旧 `driver_base` crate 分别演进。
-内核 `entry` 仅在 `unittest` feature 下链接 model，保证模型 UT 在迁移期间仍被执行。
-OS 能力契约已抽到 os-api；设备服务协调和 platform 总线暂留 model。
-
-## model 与 class 分别是什么
-
-**model 管设备如何与驱动建立并结束绑定；class 管驱动提供的能力如何被发现、
-使用和撤销。** 两者不是按代码大小划分，而是分别拥有不同的状态和生命周期。
-
-| 维度 | model | class |
-|---|---|---|
-| 管理的关系 | 设备实例与驱动实现 | 能力提供者与消费者 |
-| 核心问题 | 谁驱动设备、何时重试、怎样移除 | 哪些能力可用、谁持有发布权、怎样停止使用 |
-| 自己拥有的状态 | 身份、拓扑、绑定、probe 等待与移除状态 | 注册项、发布所有权、drain gate、在途计数和 finalizer |
-| 主要使用者 | 枚举与集成代码、驱动实现 | 设备子系统、能力消费者及模型集成代码 |
-| 不拥有的内容 | 设备家族数据面、class 注册表、宿主资源实现 | 驱动匹配、probe 调度、设备拓扑、具体设备接口和硬件协议 |
-
-### model 的内容归属
-
-- `DeviceRef`：可长期持有的只读设备身份与静态描述，不保留驱动绑定资源。
-- `DeviceAccess`：probe/remove 回调期间的类型化操作视图；`DeviceContext` 是传给设备服务的借用上下文。
-- `Environment`：独立传给回调的框架环境，提供 host provider 注册与扩展查询，不拥有设备或 provider 的撤销生命周期。
-- 私有 `DeviceCore`：共享描述符与来源状态；内部 `DeviceId` 只用于索引、调度和诊断，不作为公开身份 API。
-- `DriverOps`、驱动注册描述：驱动如何参与绑定与移除。
-- `DeviceDomain`：设备表、驱动表、拓扑和绑定状态的所有者。
-- probe、deferred dependency、remove 编排：设备绑定状态机的内部实现。
-- 通用 `Bus` 契约和设备描述：匹配、绑定及生命周期所需的事实与规则入口。
-
-枚举代码提交设备描述，model 选择驱动并调用 probe，保存成功建立的驱动私有
-数据。缺少依赖时暂缓探测，依赖就绪后重试；退出时协调子设备移除、remove
-以及私有数据释放。具体总线枚举和资源的宿主实现由外部提供。
-注册返回 `DeviceRef`，管理和父子关系使用对象引用。域在锁内核对对象归属与状态，
-注销不等待外部身份引用耗尽；保留下来的引用只能继续读取离线元数据。
-
-### class 的内容归属
-
-- `Class<T>`、注册表和订阅机制：管理一类能力的发布集合。
-- `Registration<T>`：唯一注册权；`Publication<T>`：可克隆的消费者引用。
-- `InUse<T>`、使用许可、在途计数：协调数据面操作与撤销。
-- 通用 hooks、撤销和延迟 teardown：完成发布生命周期。
-- `PublicationSource`：只读访问提供者的活身份和在线状态，不授予设备退休权限。
-
-class 不定义随机字节如何读取。`HwrngDevice`、`HWRNG` 注册入口和读取语义
-属于 hwrng 子系统；同理，block 和 net 的能力接口属于各自子系统。
-
-### 为什么需要两个 crate
-
-一个设备可以产生多项 publication，一个 class 也可以收纳不同设备、不同驱动
-提供的能力。设备与 publication 不是一一对应的对象，其状态机不能混成一套。
-
-能力消费者只需要发布接口，不应为了使用随机源而依赖驱动匹配、探测调度和
-设备拓扑。拆分让 model 使用 class，而 class 不反向依赖 model，也不要求消费
-者了解模型内部状态。hwrng 当前仍通过遗留桥接发布，不能把它使用新 class
-等同于具体驱动已经完成新 model 的绑定迁移。
-
-### 两者如何交接
-
-`DeviceAccess::publish` 将同一个 `Arc<DeviceCore>` 作为 `PublicationSource` 交给 class。
-模型仍拥有唯一的设备在线状态；class 的 drain gate 表示某项发布是否接受新
-操作，在途计数表示该发布尚有多少操作未退出，都不是设备在线状态的副本。
-
-Registration Drop 只撤销该项能力，不使共享设备身份 offline。设备移除时由
-model 关闭来源，再由驱动 quiesce；发布许可仅延迟 class finalizer，不延迟
-驱动 Data 其他字段的析构。驱动必须等待操作退出或由共享 runtime 保有资源。
-
-## base 拥有的职责
-
-| 职责 | 拥有的状态与不变量 |
+| 目录 / package | 职责 |
 |---|---|
-| 设备与驱动绑定 | 设备身份、拓扑、驱动匹配、probe/defer/retry/remove，以及绑定状态的修改权限 |
-| 通用能力发布 | 发布身份、注册与撤销、消费者访问许可、在途操作和延迟 teardown |
-| 设备生命周期协调 | 退出后哪些操作必须拒绝，驱动私有数据、发布对象和持有资源如何协调收尾 |
+| `model/` / `driver-model` | 设备事实、总线契约、绑定与退出编排、只读发布来源 |
+| `os-api/` / `driver-os-api` | OS 能力描述、Op、资源句柄及释放协议 |
 
-这些机制不应需要知道设备属于 hwrng、block 还是 net，也不应需要知道宿主
-使用哪种调度器、IRQ 核心或内存管理器。所需宿主能力通过契约注入。
+依赖方向为 `hwrng → model → os-api`、`entropy → hwrng`。
+hwrng 只使用模型的只读 `PublicationSource` 契约，不调用域管理或检查绑定状态。
+model 不依赖设备家族或宿主内核。宿主适配层实现 OS 能力；可复用驱动不直接
+调用 kirq、ktask、kdma 等宿主 API。
 
-设备绑定状态由设备模型维护，发布状态由通用 class 机制维护。两者通过明确的
-身份与生命周期接口协作；拆分时不得复制设备的在线状态，或让多个模块成为
-同一个状态的修改权威。
+## 模型对象
 
-## 不属于 base 的内容
+- `DeviceDescriptor` 是枚举事实的唯一权威，注册后由私有 `DeviceCore` 拥有。
+- `DeviceRef` 保留身份和静态事实，不保留驱动绑定资源。
+- `DeviceAccess` 是 probe/remove 回调期间的借用视图，提供 info/res/fw。
+- `DeviceDomain` 拥有注册表、绑定状态和管理编排；内部管理键不作为公开身份。
+- `DriverOps::Data` 拥有本次绑定的运行对象；remove 先完成收尾，再释放 Data。
+- `PublicationSource` 只读查询发布绑定的驱动身份、物理路径和设备注册在线状态。
+  私有 BindingSource 保留 DeviceRef 与原驱动的只读身份，不保留 ops 或运行资源。
+  unbind/rebind 不改变旧来源报告的驱动；设备在线位不充当子系统操作许可。
+- `Environment` 提供 host provider 与扩展查询，不拥有子系统的注册生命周期。
 
-| 内容 | 归属 |
-|---|---|
-| hwrng 的读取和随机源失败语义、block 请求语义、net 收发语义 | 对应的设备子系统，如 `drivers/subsystems/hwrng` |
-| virtio-rng 队列操作、具体寄存器布局和硬件协议 | 具体设备驱动 |
-| platform compatible 匹配、PCI 配置空间访问及枚举 | 相应总线实现 |
-| IRQ 注册、DMA 分配、MMIO 映射等宿主实现 | host adapter / integration / provider 实现 |
-| 与设备模型无关的通用数据结构和工具 | 仓库已有的工具层 |
+设备服务携带设备上下文取得 OS 资源，RAII 释放不能代替显式停机、IRQ 同步排空
+及在途操作退出。新 os-api 与旧 device-res 暂时并存，不能将其误认为重复可删接口。
 
-“很多驱动都会用”不足以成为放入 base 的理由。通用 `Bus` 契约属于设备模型，
-具体 `PlatformBus` 实现则有自己的身份、匹配和枚举语义。
+## 子系统与旧兼容路径
 
-通用 class 机制与具体设备 class 也必须区分：`Class`、`Publication`、使用许可
-和撤销协调属于基础设施；hwrng 的设备接口和注册入口属于 hwrng 子系统。
-其他设备家族迁移时遵循相同划分。
+hwrng 拥有 HwrngRegistry、唯一 HwrngRegistration 和操作句柄 HwrngHandle。
+注册凭证 Drop 不自动注销；驱动先停止准入、唤醒读者，再显式注销并排空。
+元数据最终析构不得要求睡眠。硬件释放必须在有保证的 teardown 上下文完成。
 
-## 资源契约与 devres 的边界
+旧 `base/class` 的泛型注册表、许可、finalizer 及 `DeviceAccess::publish`
+已在消费者迁出后退役。其只读来源契约归回 model，不另建只装一个 trait 的 crate。
+仍使用旧设备模型的 PCI RNG 通过 hwrng 的 `attach_legacy` 接入，不能删除该桥。
+旧 `contracts/kclass` 与 DeviceNode 仍负责 Input/DRM 投影，与已退役泛型层不同。
 
-当前 `devres` 涉及两种不同职责，不能把整个目录直接等同于一个未来的 crate：
+## crate 与 mod
 
-- **模型侧协调**：资源请求携带哪个设备身份，获取失败怎样影响 probe，持有资源
-  的驱动数据何时释放。这些属于 base。
-- **资源能力契约**：资源如何描述、获取、操作和释放，包括 MMIO、IRQ、DMA、
-  时钟句柄及 provider 契约。这些属于驱动能力契约层，宿主实现位于适配层。
-
-例如，`dev.res().iomap()` 可以属于 base，但返回的映射对象和底层映射契约不必
-由 base 定义。RAII 释放也不能替代 remove 阶段显式停止硬件和协调在途操作。
-
-仓库已有 `device-res` 能力契约。调整此处资源抽象前，必须明确与它的复用、演进
-或替代关系，避免维护两套永久平行契约。当前新旧 devres 暂时并存，本轮不迁移旧模型。
-model 经 os-api 与 kirq 共同使用 `arch/irq-types` 的触发方式、控制器类别和不透明域编号；
-新模型的资源状态、Op、handler 和句柄由 os-api 拥有，内核转换属于宿主适配层。
-model 不再直接依赖 kirq，也不通过旧 device_res 重新导出资源契约。
-
-## crate 与 mod 的划分
-
-遵循仓库的[模块与 crate 规则](../../docs/ai/skills/code-guidelines/modules-and-attributes.md)：
-
-- crate 围绕内聚的所有权职责组织：数据、状态、不变量、生命周期和执行上下文
-  约束需要共同维护，且形成可供多个同级 crate 使用的完整能力。
-- mod 保留单个 crate 的实现细节，不因文件大、代码多或存在 trait 就单独建 crate。
-- 不为拆分而公开内部状态、注册表细节或桥接辅助函数；跨 crate 暴露的是自然的
-  领域对象与稳定能力。
-- 不建立仅用于收纳零散类型、错误或工具的 `common`、`types` 等兜底 crate。
-
-按这个标准，model、class 与 os-api 已分成三个 crate；
-`domain` 的 `registry`、`probe`、`dependency`、`lifecycle` 共同维护
-`DomainInner`、锁及 generation 协议，应继续作为模型内部的 mod。
-OS 能力契约已独立归位；宿主接入与旧模型迁移另行推进，具体总线实现仍应与模型核心分开。
-
-`base/` 可以演进为包含多个职责完整 crate 的目录容器，不必保留一个重新导出
-所有内容的总入口 crate。子 crate 仍加入根 workspace，各自维护 `ut-tests/`
-和设计、安全文档，不新建嵌套 workspace。具体数量、名字和目录布局由职责与
-依赖设计决定，本文不预先固定。
-
-class 定义 `PublicationSource` 契约，model 的私有 `DeviceCore` 实现它；
-`DeviceAccess::publish` 向 class 传递同一个身份的 `Arc`。模型仍持有唯一在线状态，
-class 只读来源在线状态，单项注册独立撤销；设备下线由 model 决定。
-没有复制状态、公开 `DeviceCore` 或增加反向依赖。
-遗留设备的合成身份由 class 内部过渡适配器拥有，不依赖 model。
-
-## 演进与归属判断
-
-hwrng 是第一条验证新模型的迁移链路，并非 base 唯一的目标消费者。
-划分应面向其他设备家族继续迁移后的稳定职责，再用当前 hwrng 的完整链路验证
-接口是否成立。无需等多个家族迁移完才确立边界，也不为假设中的扩展逐个拆出
-trait crate。
-
-新增或迁移代码时，先回答：
-
-1. 它拥有哪个状态、生命周期或不变量？谁有权修改？
-2. 它是否必须知道具体设备家族、总线实现或宿主内核？若必须，哪一层应拥有它？
-3. 它是模型自身的决定，还是模型通过契约向外请求的能力？
-4. 独立 crate 后是否形成完整能力，还是迫使调用者了解更多内部状态和调用顺序？
-5. 是否已有契约承担这项职责？迁移后如何避免状态和接口重复？
-
-先明确所有权和依赖方向，再确定 crate 数量及名称。结构重构与行为修改分开提交。
-
-## 当前停止点与后续工作
-
-当前已完成 model/class/os-api 的职责拆分，继续 review 接口、所有权和退出协议。
-这足以形成一个可独立审查的重构步骤，不表示 model 内的所有内容都已归位，
-也不表示资源层已经满足最终可移植边界。
-
-| 内容 | 当前决定 | 后续条件或动作 |
-|---|---|---|
-| model / class / os-api | 保持三个 crate | review 各自状态归属、单向依赖及跨 crate 生命周期协议 |
-| domain 的四个引擎 | 保持内部 mod | 共同维护锁和 generation 协议，不按文件机械拆分 |
-| class 注册表、使用计数、finalizer | 保持 class 内部实现 | 它们共同实现一个发布生命周期，不分别建立 crate |
-| OS 能力契约与句柄 | 由 os-api 拥有 | 与旧 device-res 暂时并存；旧调用方迁移和新宿主适配另行审查 |
-| `PlatformBus` 具体实现 | 暂留 model，目标移出核心 | 在总线迁移步骤中确定落点并调整枚举/驱动依赖，不连带拆走通用 `Bus` 契约 |
-| firmware 快照、provider、extension、错误类型 | 暂留所属职责内的 mod | 出现独立共享的所有权职责时再评估；不要预先建立兜底类型 crate |
-
-review 优先确认以下事项，再决定下一项结构工作：
-
-1. `PublicationSource` 的只读查询权限是否足够小，设备身份是否始终只有一个权威来源。
-2. 设备移除与单项 publication 撤销是否保持隔离，特别是多能力设备。
-3. 注册凭证、消费者引用、在途操作与驱动私有数据的生命周期是否一致。
-4. 遗留桥接和新模型入口是否清楚区分，错误回退与跨 crate 测试是否覆盖交接处。
-
-这些行为判断不会仅靠增加 crate 数量得到答案；review 发现的问题应按状态和
-权限归属修正，资源及总线迁移另做可独立审查的步骤。
+按内聚的状态、不变量、生命周期及上下文建立 crate；仅属单个所有者的实现细节
+保留为 mod。domain 的 registry/probe/dependency/lifecycle 共同维护域状态，
+不按文件机械拆 crate。source 是设备身份的内部实现，不是新通用发布框架。
+base 不增加总入口或 common/types 兜底 crate；具体数量随真实责任演进。
 
 ## 相关文档
 
-- [驱动子系统边界规则](../../docs/ai/driver-subsystem-boundaries.md)
+- [驱动边界硬规则](../../docs/ai/driver-subsystem-boundaries.md)
 - [驱动目录分层](../README.md)
-- [设备模型设计](model/docs/design.md)
-- [通用 class 设计](class/docs/design.md)
-- [设备模型安全分析](model/docs/security.md)
-- [通用 class 安全分析](class/docs/security.md)
-
-OS 能力边界与生命周期详见 [os-api 设计](os-api/docs/design.md) 和 [安全分析](os-api/docs/security.md)。
+- [模型设计](model/docs/design.md) 与 [安全分析](model/docs/security.md)
+- [OS 能力设计](os-api/docs/design.md) 与 [安全分析](os-api/docs/security.md)
+- [hwrng 设计](../subsystems/hwrng/docs/design.md) 与 [安全分析](../subsystems/hwrng/docs/security.md)

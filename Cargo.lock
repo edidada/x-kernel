@@ -1257,22 +1257,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "driver-class"
-version = "0.3.0-dev"
-dependencies = [
- "kerrno",
- "kspin",
- "log",
- "unittest",
-]
-
-[[package]]
 name = "driver-model"
 version = "0.3.0-dev"
 dependencies = [
- "driver-class",
  "driver-os-api",
- "kerrno",
  "kspin",
  "lazyinit",
  "log",
@@ -5454,7 +5442,7 @@ dependencies = [
 name = "subsys-hwrng"
 version = "0.3.0-dev"
 dependencies = [
- "driver-class",
+ "driver-model",
  "kerrno",
  "kspin",
  "unittest",

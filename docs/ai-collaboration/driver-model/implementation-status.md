@@ -1,5 +1,22 @@
 # Driver model R1 implementation checkpoint — 2026-10-25
 
+## R1-09 retirement and final scoped acceptance — 2026-11-04
+
+Starting at `5e3815f1e`, unused base/class and DeviceAccess::publish are removed.
+PublicationSource now belongs to model; hwrng retains subsystem-owned admission
+and explicit drain. PCI attach_legacy and all used legacy kclass/DeviceNode paths
+remain. Two generic-class-only model tests are retired, explaining the broad
+suite count decrease.
+
+Five real MMIO fixtures pass. Worker-enabled MMIO passes 435/0/5; PCI passes
+434/0/6, including a repeat after final unused-dependency/lock cleanup. MMIO
+production and UT clippy, PCI production clippy, focused fmt and canonical x86
+build pass. Independent Standards/Spec review passes after documentation fixes.
+[R1-09 evidence and R01–R13 map](r1-09-retirement-acceptance.md) records exact
+limits and separates older negative controls from current positive runs.
+R1-01–09 are complete in the approved scope on this branch, not merged upstream.
+The additional network lifecycle work is still unimplemented.
+
 ## Current closeout — 2026-11-04
 
 At source `00b4f0fc0` (main `289e2276b`), R1-07/08 are accepted within the

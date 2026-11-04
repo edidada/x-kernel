@@ -11,7 +11,11 @@ R1-07/08 现已按批准范围完成本分支验收：五组真实 MMIO 专项�
 worker-enabled MMIO 回归 437 passed，PCI 兼容回归 436 passed，均无失败；
 两配置 clippy 通过。命令、证据边界与 entropy 组合验证限制见
 [R1-07/08 收口](r1-07-08-closeout-2026-11-04.md)。
-R1-09 已就绪，尚未开始兼容层清理和整体验收；新交接的 PCI 网络关闭工作
+R1-09 已完成批准范围内的退役及整体验收：旧泛型 base/class 已删除，
+只读来源契约归回 model，保留仍有消费者的 PCI 桥接及旧 kclass。
+清理后 MMIO 435/0/5、PCI 434/0/6，五组真实专项、clippy 与 x86 构建通过；
+需求映射、源码基线差异及限制见 [R1-09 验收](r1-09-retirement-acceptance.md)。
+R1-01～09 至此在本分支完成，尚未合入 main。新交接的 PCI 网络关闭工作
 另行收口需求与设计，不归入本次完成声明。
 其他实现进度见 [实现检查点](implementation-status.md)。
 本次仅授权本地提交，不推送、不发主线 PR；整体完成后再整理面向 main 的 PR。

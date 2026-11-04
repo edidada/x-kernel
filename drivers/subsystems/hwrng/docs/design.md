@@ -9,14 +9,13 @@ scheduler state, DMA storage, entropy accounting, or source trust policy.
 `src/registration.rs` defines HwrngRegistry, its HWRNG instance, HwrngRegistration
 and the operation-only HwrngHandle. This subsystem owns registration, admission
 and synchronous drain; it does not use generic Class/Registration/Publication.
-It does not depend on the device binding model in `drivers/base/model`.
 
 The registry is a subsystem provider registry, not a Linux device class.
-The remaining driver_class dependency supplies only the existing read-only
-PublicationSource interface. The model now constructs immutable per-binding
-provenance through DeviceAccess::publication_source; hwrng does not depend on
-that model or inspect its binding state. Retiring the legacy trait dependency
-remains R1-09 work.
+The driver_model dependency supplies only read-only PublicationSource metadata.
+The model constructs immutable per-binding provenance through
+DeviceAccess::publication_source; hwrng does not inspect binding state or call
+domain management. The old generic class implementation is retired.
+The legacy PCI publisher still needs attach_legacy; that bridge is retained.
 
 ## Architecture and execution context
 

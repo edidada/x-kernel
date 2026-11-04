@@ -15,6 +15,7 @@ use alloc::sync::Arc;
 
 pub use access::DeviceAccess;
 pub use descriptor::DeviceDescriptor;
+pub use source::PublicationSource;
 
 use crate::domain::DeviceId;
 

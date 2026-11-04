@@ -2161,32 +2161,31 @@ fn provider_publication_wakes_every_consumer_on_the_key() {
 }
 
 mod publication_contract {
-    //! Device-model integration with the independent class publication contract.
-
     use alloc::sync::Arc;
 
-    use driver_class::Class;
+    use kspin::SpinNoPreempt;
     use unittest::{assert_eq, def_test};
 
-    use crate::{device::DeviceCore, domain::DeviceId};
+    use crate::PublicationSource;
 
     #[def_test(serial)]
     fn device_removal_closes_source_before_driver_quiesce() {
         use core::sync::atomic::{AtomicBool, Ordering};
 
-        static CLASS: Class<u32> = Class::new(());
+        static SOURCE: SpinNoPreempt<Option<Arc<dyn PublicationSource>>> = SpinNoPreempt::new(None);
         static CLOSED_AT_REMOVE: AtomicBool = AtomicBool::new(false);
         struct Publisher;
         impl crate::driver::DriverOps<crate::PlatformBus> for Publisher {
-            type Data = driver_class::Registration<u32>;
+            type Data = Arc<dyn PublicationSource>;
 
             fn probe(
                 &self,
                 dev: &mut crate::DeviceAccess<'_, crate::PlatformBus>,
                 _env: &crate::Environment<'_>,
             ) -> Result<Self::Data, crate::ProbeError> {
-                dev.publish(&CLASS, 42)
-                    .map_err(|_| crate::ProbeError::Fatal(crate::RuntimeError::BadState))
+                let source = dev.publication_source();
+                *SOURCE.lock() = Some(source.clone());
+                Ok(source)
             }
 
             fn remove(
@@ -2195,7 +2194,7 @@ mod publication_contract {
                 _env: &crate::Environment<'_>,
                 data: &mut Self::Data,
             ) {
-                CLOSED_AT_REMOVE.store(data.publication().acquire_use().is_err(), Ordering::SeqCst);
+                CLOSED_AT_REMOVE.store(!data.is_online(), Ordering::SeqCst);
             }
         }
         CLOSED_AT_REMOVE.store(false, Ordering::SeqCst);
@@ -2206,99 +2205,16 @@ mod publication_contract {
             Publisher,
         ));
         let device = domain.add_device(super::test_descriptor(root)).unwrap();
-        let consumer = CLASS.devices().pop().unwrap();
-        let permit = consumer.acquire_use().unwrap();
+        let source = SOURCE.lock().take().unwrap();
+        assert!(source.is_online());
+        assert_eq!(source.driver_name(), Some("publisher"));
         domain.remove_device(&device).unwrap();
         assert!(!device.is_online());
-        assert_eq!(consumer.location(), device.path());
         assert!(CLOSED_AT_REMOVE.load(Ordering::SeqCst));
-        assert!(!consumer.is_available());
-        assert!(CLASS.devices().is_empty());
-        assert_eq!(permit.with(|value| *value), 42);
-    }
-
-    impl driver_class::PublicationSource for DeviceCore {
-        fn driver_name(&self) -> Option<&'static str> {
-            self.driver_name()
-        }
-
-        fn physical_path(&self) -> &str {
-            self.physical_path()
-        }
-
-        fn is_online(&self) -> bool {
-            self.is_online()
-        }
-    }
-
-    impl DeviceCore {
-        pub(crate) fn synthetic(device_id: DeviceId, driver_name: &'static str) -> Arc<Self> {
-            let owner = Self::new(
-                device_id,
-                super::test_descriptor(crate::BusInstanceId::from_raw(0)),
-                Arc::new(super::TestManagementLock::new()),
-                Arc::new(()),
-            );
-            owner.bind_driver(Arc::new(crate::driver::DriverIdentity {
-                name: driver_name,
-            }));
-            owner
-        }
-    }
-
-    #[def_test(serial)]
-    fn class_uses_live_model_identity_for_independent_publications() {
-        static CLASS: Class<u32> = Class::new(());
-
-        let owner = DeviceCore::new(
-            DeviceId(1),
-            super::test_descriptor(crate::BusInstanceId::from_raw(0)),
-            Arc::new(super::TestManagementLock::new()),
-            Arc::new(()),
-        );
-        assert_eq!(
-            CLASS.publish(owner.clone(), 1).unwrap_err(),
-            kerrno::KError::BadState
-        );
-        owner.bind_driver(Arc::new(crate::driver::DriverIdentity {
-            name: "model-test-driver",
-        }));
-        let publication = CLASS.publish(owner.clone(), 1).unwrap();
-        assert_eq!(
-            publication.publication().driver_name(),
-            Some("model-test-driver")
-        );
-        let consumer = publication.publication();
-        assert_eq!(consumer.location(), owner.physical_path());
-        let second = CLASS.publish(owner.clone(), 2).unwrap();
-        assert!(!consumer.same_publication(&second.publication()));
-        assert_eq!(CLASS.devices().len(), 2);
-        assert!(owner.is_online());
-        let borrow = publication.publication();
-        owner.mark_offline();
-        assert!(!borrow.is_available());
-        drop(publication);
-        assert!(CLASS.devices().is_empty());
-    }
-
-    #[def_test(serial)]
-    fn class_withdrawal_preserves_siblings_and_in_flight_data() {
-        static FIRST: Class<u32> = Class::new(());
-        static SECOND: Class<u32> = Class::new(());
-
-        let owner = DeviceCore::synthetic(DeviceId(2), "model-test");
-        let first = FIRST.publish(owner.clone(), 11).unwrap();
-        let second = SECOND.publish(owner.clone(), 22).unwrap();
-        let in_flight = first.publication().acquire_use().unwrap();
-        drop(first);
-        assert!(owner.is_online());
-        assert!(second.publication().is_available());
-        assert_eq!(in_flight.with(|value| *value), 11);
-        assert!(second.publication().acquire_use().is_ok());
-        drop(in_flight);
-        drop(second);
-        assert!(FIRST.devices().is_empty());
-        assert!(SECOND.devices().is_empty());
+        assert!(!source.is_online());
+        assert_eq!(source.physical_path(), device.path());
+        assert_eq!(source.driver_name(), Some("publisher"));
+        assert_eq!(device.driver_name(), None);
     }
 }
 

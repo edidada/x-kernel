@@ -127,10 +127,10 @@ Deferred 时部分获取的资源立即回滚。未配置 DMA 的原有测试继
 测试 `ut-tests/domain.rs` 不在分析范围内，但其中的 `MockServices` 是信任模型的
 一个具体实例。
 
-通用 class 已移到独立 `driver-class`，见 [class 安全分析](../../class/docs/security.md)。
-模型保有私有 `DeviceCore` 和唯一设备在线状态，通过 `PublicationSource` 提供
-只读身份查询。跨 crate 传递同一个 `Arc` allocation，共享实时来源状态；
-同源多项发布独立注册，单项撤销不修改来源在线状态。class 不依赖模型或访问其私有字段。
+通用 base/class 层已退役。模型拥有 PublicationSource 只读来源契约；私有
+BindingSource 保留同一 DeviceRef 与原绑定驱动的不可变身份，不保留 ops/Data。
+设备注册在线状态由模型唯一维护；普通 unbind 不关闭设备在线位，子系统必须
+自行管理操作准入与排空。来源的最终析构不要求睡眠，路径不作为发布唯一性键。
 
 ## 信任模型
 

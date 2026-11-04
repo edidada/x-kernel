@@ -7,7 +7,7 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
-use driver_class::PublicationSource;
+use driver_model::PublicationSource;
 use kerrno::{KError, KResult};
 use kspin::SpinNoPreempt;
 

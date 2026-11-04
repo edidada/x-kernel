@@ -11,7 +11,7 @@ categories.workspace = true
 
 
 [dependencies]
-driver_class = { workspace = true }
+driver_model = { workspace = true }
 kerrno.workspace = true
 kspin.workspace = true
 unittest.workspace = true

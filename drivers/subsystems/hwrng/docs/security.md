@@ -8,7 +8,7 @@ whether to credit returned bytes as entropy. Implementations must validate
 device lengths before copying into caller-owned buffers.
 
 The hwrng registry owns admission and in-flight accounting independently of
-device-online state. driver_class supplies only PublicationSource metadata,
+device-online state. driver_model supplies only PublicationSource metadata,
 not generic withdrawal. Model publishers supply provenance retaining the
 original driver's immutable identity, not the device's later binding name.
 

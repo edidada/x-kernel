@@ -22,9 +22,8 @@
 //! | `clk_get(dev, "apb_pclk")` | `dev.res().clk()` |
 //! | `-EPROBE_DEFER` | [`ProbeError::Deferred`] |
 //!
-//! Class publication is provided by `driver_class`; this crate owns the device
-//! identity and implements its `PublicationSource` contract without exposing
-//! internal device state.
+//! Subsystems own capability registration and drain. This crate supplies
+//! read-only [`PublicationSource`] provenance without exposing device state.
 //!
 //! # Ownership model
 //!
@@ -109,7 +108,7 @@ pub use bus::{
         AliasMatch, OfMatch, PlatformBus, PlatformBusData, PlatformBusIdentity, PlatformId,
     },
 };
-pub use device::{DeviceAccess, DeviceDescriptor, DeviceRef};
+pub use device::{DeviceAccess, DeviceDescriptor, DeviceRef, PublicationSource};
 pub use domain::{
     AddDeviceError, DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,

@@ -4,10 +4,11 @@ The driver subsystem is split by role. Keep new code in the layer that owns the
 contract it is implementing or consuming.
 
 The new device model is being migrated under [`base/`](base/README.md):
-`driver-model` owns binding and device lifecycle, while `driver-class` owns
-generic publication and withdrawal. `driver-os-api` owns the new OS capability
+`driver-model` owns binding, device lifecycle and read-only publication provenance.
+Subsystems such as hwrng own their registration and synchronous drain. `driver-os-api` owns the new OS capability
 contracts and guards; it remains separate from legacy `device-res`. The legacy crates listed below remain
-in use during migration; hwrng already consumes the independent class crate.
+in use during migration. The unused generic `base/class` layer is retired;
+legacy `kclass` still serves Input/DRM projections.
 
 ## Layers
 

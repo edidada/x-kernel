@@ -61,8 +61,8 @@ bind、unbind、remove 和 `with_data` 均通过该设备的管理锁执行。
 再退出孩子，最后停止父服务。孩子退出使用的父事务锁独立于枚举门禁；父方
 不能持事务锁等待孩子。已开始的枚举提交被纳入退出，重绑也不重新开放旧门禁。
 这是总线所有权协议的测试实现，不是 model 新增的递归退出机制或真实总线迁移。
-旧 class 接入仍未完全退役；绑定来源已固定为原驱动身份，但 unbind 保留设备在线，
-不能据此推导旧发布已被统一撤销或排空。
+泛型 base/class 已退役；绑定来源固定为原驱动身份，unbind 保留设备在线。
+来源仅提供元数据，子系统负责显式注销与排空。
 
 ## R1-02 探测交接验收
 
@@ -97,7 +97,7 @@ wake/注册、出队后的注销/显式绑定。每域一次性 `dispatch_hook_f
 ## 回调视图的借用关系
 
 驱动回调显式接收两个入口：`probe(dev, env)` 与 `remove(dev, env, data)`。
-`DeviceAccess` 只提供设备身份、信息、固件、资源和 class 发布接口；
+`DeviceAccess` 只提供设备身份、信息、固件、资源和只读发布来源接口；
 它不拥有设备状态或返回的资源句柄。`Environment` 位于 `environment.rs`，
 不携带设备身份或总线类型，只提供 host provider 注册和扩展查询。
 两者借用同一宿主 DeviceServices 实现，不增加新的宿主聚合契约。
@@ -110,7 +110,7 @@ provider 注册不记录设备来源，不返回撤销句柄，也不随 remove 
 构造时从同一描述符 downcast 出类型化 bus_data 借用；不允许调用方单独
 传入其他设备的总线数据，类型不匹配则构造失败。
 `DeviceInfo` 仅借用 DeviceAccess，查询不克隆 Arc，也不能脱离 DeviceAccess 的借用期。
-需要跨回调保留身份必须显式调用 `reference()`；class 发布仍持有同一核心。
+需要跨回调保留身份必须显式调用 `reference()`；发布来源仍持有同一核心。
 modalias 保持回调期借用：probe 提供总线派生值，remove 保持 None。
 资源、固件视图均读取同一 DeviceRef 的描述符，不持有独立事实副本。
 
@@ -134,7 +134,7 @@ modalias 保持回调期借用：probe 提供总线派生值，remove 保持 Non
 `parent`，都拒绝向其下游实例挂载。检查和插入与移除状态迁移共用域锁，确保
 进入 teardown 后不会再接受新成员。控制器不存在或已移除时也拒绝挂载，
 返回 `BusInstanceUnavailable`；保留的实例记录只承担身份查询，不复活硬件。
-本次接口迁移的调用点均在 model UT；旧驱动资源链路和 legacy class 接入不变。
+本次接口迁移的调用点均在 model UT；旧驱动资源链路和 hwrng legacy 桥接不变。
 
 ## 可选 DMA 配置
 
@@ -170,25 +170,25 @@ builder 不是不可绕过的安全边界，也不禁止构造后的字段修改
 新驱动设备模型。它拥有 bus/device/driver 三类契约、const id 表、
 deferred probe、设备域（`DeviceDomain`）与每设备服务面（`DeviceServices`）。
 
-当前作为独立 workspace member 保留模型与 UT；hwrng 依赖 `driver-class`，entropy 经 hwrng 的封装接口消费能力，不再经此 crate 使用发布能力。host 服务实现、总线枚举和具体
-驱动后续通过对应契约接入，旧设备模型仍在迁移中。
+当前模型是独立 workspace member；hwrng 仅依赖模型的只读来源契约，entropy
+经 hwrng 消费能力。modern-MMIO RNG 已通过 kdriver 宿主接入；旧 PCI 路径仍保留。
 `entry` 的 `unittest` feature 显式链接本 crate，保证模型测试没有随着生产依赖拆分而丢失。
 
 它不依赖任何设备家族，也不依赖 `memspace`/`kdma`/`khal`/`kirq`。
 OS 能力契约、句柄和纯资源描述现位于 `drivers/base/os-api`。
 model 通过 driver-os-api 使用 irq-types 的基础 IRQ 词汇，不依赖 kirq 或旧 device_res。
-新旧资源模型暂时并存，本轮不迁移旧调用方。生产宿主服务仍待通过契约接入。
+新旧资源模型暂时并存，不迁移旧调用方；生产宿主服务由 kdriver 实现。
 model 拥有带借用设备上下文的设备服务、deferred probe、ResourceMap 以及错误转换。
 宿主适配方实现 OS Op；普通 IRQ 回调通过 IrqHandlerFn / IrqAction 交接，不暴露内核 handler。
 边界目前依靠代码审查，没有专门的自动边界检查脚本。
 
-依赖方向为 `driver-model → driver-class` 和 `driver-model → driver-os-api`。
+依赖方向为 `hwrng → driver-model → driver-os-api`，模型不反向依赖子系统。
 `DeviceAccess::publication_source` 构造 BindingSource，保留共享设备与当次驱动身份；
-旧 `publish` 入口也使用该来源，不再读取设备后来绑定的驱动名。
+已删除旧泛型 `publish` 入口；来源不读取设备后来绑定的驱动名。
 model 在注销的 remove 回调前标记设备 offline，普通 unbind 保持设备在线；
 家族操作准入和同步排空由子系统负责，不属于只读来源。
 `domain` 内部四个引擎仍共享原有状态与锁，没有拆成独立 crate。
-发布、drain 和 finalizer 的实现见 [class 设计](../../class/docs/design.md)。
+发布和同步 drain 由 [hwrng](../../../subsystems/hwrng/docs/design.md) 等子系统拥有。
 
 ## 职责与拆分边界
 
@@ -197,14 +197,13 @@ model 管设备实例与驱动实现的绑定关系：设备进入模型、选�
 它拥有设备身份、拓扑和绑定状态，不拥有 class 注册表、publication 在途计数
 或具体设备家族的数据面接口。
 
-一台设备可以发布多项能力；能力消费者经 class 使用这些能力，无需了解
-model 的驱动匹配和 probe 引擎。两套状态机通过同一个活身份协作。
-单项 Registration Drop 只撤销该发布，不改变来源或其他发布。设备移除由
-model 标记来源 offline，驱动随后 quiesce 并释放注册与资源。
+一台设备可以发布多项能力；消费者经子系统的操作接口使用能力，无需了解
+model 的匹配和 probe 引擎。hwrng 注册凭证 Drop 不注销发布，驱动必须显式停止
+并注销排空。设备注销由 model 标记来源 offline，但该标志不替代子系统准入。
 
 本轮不继续拆分 `domain` 的四个引擎，它们共同维护 `DomainInner` 和同步协议。
 资源契约与 `PlatformBus` 暂留本 crate 不代表最终归属；后续迁移顺序和判断依据
-见 [base 的职责与停止点](../../README.md#当前停止点与后续工作)。
+见 [base 的职责与边界](../../README.md#职责与边界)。
 
 ## 背景
 
@@ -229,7 +228,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/firmware.rs` | 固件节点快照（`FirmwareNodeInfo` / `FirmwareProp`）：设备事实，与总线无关，经 `dev.fw()` 访问 |
 | `src/driver.rs` | `DriverOps`（含 `type Data`）与 `DriverDesc`；`declare_driver!`（`module_*_driver()` 的等价物：一行声明 id 表 + ops + 注册入口） |
 | `src/device/mod.rs` | `DeviceCore` 持有注册描述符与共享状态；`DeviceRef` 管理同一对象的共享引用 |
-| `src/device/access.rs` | `DeviceAccess` 与 info/res/fw 视图：回调期间的设备访问、资源申请和 class 发布 |
+| `src/device/access.rs` | `DeviceAccess` 与 info/res/fw 视图：回调期间的设备访问、资源申请和只读发布来源 |
 | `src/device/source.rs` | `BindingSource`：共享设备事实与固定驱动身份，不保活 ops/Data |
 | `src/environment.rs` | 不关联设备身份的框架环境：host provider 注册与扩展查询 |
 | `src/services.rs` | 设备侧服务契约：`DeviceResourceServices` / `ClockConsumerServices` / `ProviderServices` / `DeviceServices` / `ExtensionService` / `ServiceError` |
@@ -238,7 +237,7 @@ Box<dyn FnOnce>>`、virtio-net 的 IRQ 号反查表），资源生命周期只�
 | `src/resource.rs` | 设备枚举集合 ResourceMap / ResourceEntry / ResourceKind；纯描述类型从 driver-os-api 引用 |
 | `src/provider.rs` | provider 注册惯例（**唯一一条**）：`ProviderClass`（一个 provider 家族 = key/lookup/`DepKind` 描述符）、`ProviderRegistration`（类型擦除的一次发布）、`ProviderServices`（host 侧落点） |
 | `src/extension.rs` | 家族扩展：按类型注册/查找（`ExtensionRegistry` + `ExtensionService` + `ExtensionServices`），替掉 `DeviceServices::as_any` |
-| `driver_class`（独立 crate） | `Class<T,H>`（registry + hooks）+ `Registration<T>`（注册权）+ `Publication<T>`（消费者引用）+ `InUse<T>`（在途计数 guard）；投影与撤销由 class hooks 管理。`Class::attach_legacy` 是过渡门：仅供仍在旧设备模型上 probe 的驱动（virtio 家族迁移期）以合成身份发布，随最后一个遗留发布者一起删除 |
+| `src/device/source.rs` | PublicationSource 只读契约与私有 BindingSource；无泛型发布或自动 finalizer |
 | `src/error.rs` | OS 能力错误到 RuntimeError / ProbeError 的转换，ServiceError 转换位于 services.rs |
 | `src/domain/mod.rs` | `DeviceId` 管理键与 `DeviceDomain` 门面：域身份、短状态锁、entry 的四个状态域、`global_domain()`（组合根与 `declare_driver!` 之外不应出现） |
 | `src/domain/registry.rs` | 注册引擎：device/driver/bus-instance 表、entry 类型、add 时校验、快照、拓扑链接 |
@@ -372,10 +371,8 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 - `remove_device` 的 teardown 相（`DriverOps::remove` → drop `Data`）
   同样在锁外，且按构造运行在任务上下文——这是各驱动 `Drop` 里
   `block_wait::prepare_block_wait()` 之类可睡眠调用的前提。
-- 没有 lifecycle observer / remove notifier：域状态机是移除的唯一权威，
-  发布回收由 `Data` 持有的 `Registration` 完成。类发布的 `ClassHooks::unpublish`
-  （`del_gendisk`、transport close）在仍有在途 `InUse` 时推迟到最后一个许可 drop
-  ——见 `../class/src/publication.rs` 的 `finish_or_defer`。
+- 域状态机编排设备移除；驱动 remove 必须显式停止活动并注销子系统发布。
+  hwrng 的同步排空不等待所有元数据引用耗尽，也不把硬件释放交给最后一个句柄 Drop。
 - `global_domain()` 的初始化不代表设备已可注册。`NoServices` 使用默认工厂，
   `add_device` 返回 `AddDeviceError::Management(RuntimeError::Unsupported)`，
   不入表也不探测。真实宿主工厂与管理入口要求已初始化的可睡眠任务上下文。
@@ -389,7 +386,7 @@ DMA 缺失时模型在调用宿主前返回 Unsupported；宿主从上下文取�
 ## 公开名词预算
 
 驱动面只允许出现这些名词，其余都是实现细节：`DeviceAccess`、`Driver`/`DriverDesc`、
-`Bus`、`Resource`（devm guard 族）、`Class`（发布）、`Provider`（家族描述符）、
+`Bus`、`Resource`（devm guard 族）、`PublicationSource`（来源）、`Provider`（家族描述符）、
 `Host`（进程级根，driver-host 侧）。新增一个公共名词要说明它归并/删除了哪个既有
 名词；只有单个使用者的抽象不进公共面。
 
@@ -480,8 +477,7 @@ Pending / Deferred / Unclaimed / Active
 - `DEVICE_ID_ALLOCATOR` 是 crate 级 `AtomicU64`，`fetch_add`，跨域唯一。
 - 队列分派只克隆共享核心的 Arc，不深拷贝描述符和 compatibles。
   attempted 集合仍按批次复制，`modalias` 每次 probe 重算；本次不改变匹配策略。
-- class 注册表（`driver-class` 的私有 `ClassRegistry`）仍是 `Vec` + 线性扫描，与本 crate 无关
-  但同样是已知的、被接受的小集合线性扫描。
+- 子系统注册表的集合和查询策略由子系统维护，不属于模型。
 
 ## 设计决策
 
@@ -570,7 +566,6 @@ drop 字段）。因此中断 guard 要声明在它服务的 MMIO 映射**之前
 
 ```rust
 pub struct Pl011Data {
-    _registration: Option<Registration<SerialRuntime>>,  // 先撤可见性
     _irq: Option<DevIrq>,                               // 再停中断
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,                               // 再解映射
@@ -595,12 +590,8 @@ mask 设备侧中断、停 worker）的窗口，它在 guards 还活着的时候
 
 ## 注册与资源清理约束
 
-DeviceAccess::publish 返回不可克隆的 Registration；publication() 返回不撤销注册的
-消费者引用。remove_device 在调用驱动 remove 之前使 DeviceCore offline，拒绝
-新使用；remove 必须停止并等待已获准操作，或者把所需资源保留在共享 runtime 中。
-Registration Drop 只延迟 class hook，不阻塞 Data 的后续字段析构。
-当前 model 不持有所有 class 注册的 drain/join 集合，不能声称字段顺序自动保证
-MMIO、IRQ、DMA 生命周期安全。具体资源析构不得先于依赖它们的操作退出。
-
-DeviceAccess::publish 仅接收 Class 与 runtime，不接收发布名。通用 class 允许同源多项
-独立注册；这不改变 model 自己的驱动注册去重或 provider 的业务键检查。
+能力注册与撤销属于具体子系统，DeviceAccess 只提供 publication_source。
+hwrng 的注册凭证不会在 Drop 中自动注销；remove 先停止驱动并唤醒读者，
+再显式 unregister 等待在途调用退出，随后才释放相关资源。model 不持有
+通用 drain/join 集合。字段顺序不能替代 reset、IRQ 排空及子系统同步注销。
+物理路径不作为能力发布的唯一性键，保留来源只保留元数据而不是操作权限。
