@@ -1174,16 +1174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "device-res"
-version = "0.3.0-dev"
-dependencies = [
- "driver-os-api",
- "kspin",
- "smallvec",
- "unittest",
-]
-
-[[package]]
 name = "devpts"
 version = "0.3.0-dev"
 dependencies = [
@@ -2289,12 +2279,12 @@ dependencies = [
 name = "kdevice"
 version = "0.3.0-dev"
 dependencies = [
- "device-res",
  "driver-os-api",
  "driver_base",
  "kspin",
  "lazyinit",
  "log",
+ "smallvec",
  "unittest",
 ]
 
@@ -2333,7 +2323,6 @@ dependencies = [
  "char_driver",
  "console-driver",
  "crate_interface",
- "device-res",
  "display",
  "driver-model",
  "driver-os-api",

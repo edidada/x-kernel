@@ -529,3 +529,17 @@ lock is simple but slow; nesting deadlocks easily.
   by `remove_device_managed` (devres LIFO).
 - `DeviceRegistry` does not implement `Drop` — it is a global static.
 - `DeviceTopology` is a plain data snapshot; dropping it frees the `Vec`s.
+
+## Managed resources after device-res retirement
+
+`device::resource` owns `ResourceDesc` and `ResourceSet`: discovered resource
+metadata belongs to the device model, not to the OS provider.
+`device::managed` acquires os-api guards through explicit per-capability providers
+and attaches their destruction to the concrete `DeviceObject::add_cleanup`.
+There is no separate `DeviceResource` interface or unused aggregate provider trait.
+
+The host integration in kdriver selects the provider and maps errors; kdevice
+retains cleanup ownership. Failed acquisitions register nothing. Successful
+guards are captured once, without an extra boxed callback layer. Probe rollback
+and removal drain callbacks in reverse acquisition order outside the devres lock.
+The existing infallible callback-allocation policy is unchanged.

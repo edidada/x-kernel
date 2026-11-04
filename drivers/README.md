@@ -6,8 +6,8 @@ contract it is implementing or consuming.
 The new device model is being migrated under [`base/`](base/README.md):
 `driver-model` owns binding, device lifecycle and read-only publication provenance.
 Subsystems such as hwrng own their registration and synchronous drain. `driver-os-api` owns the new OS capability
-contracts and guards; `device-res` now only retains transitional framework
-descriptions and cleanup helpers, not parallel capability definitions. The legacy crates listed below remain
+contracts and guards. `device-res` is retired; `kdevice` owns the remaining
+framework descriptions and device-managed cleanup helpers. The legacy crates listed below remain
 in use during migration. The unused generic `base/class` layer is retired;
 legacy `kclass` still serves Input/DRM projections.
 
@@ -16,7 +16,7 @@ legacy `kclass` still serves Input/DRM projections.
 ```text
                   driver contracts and device model
                ┌────────────────────────────────────┐
-               │ driver_base / device-res / kdevice │
+               │ driver_base / os-api / kdevice │
                │ kclass / block / net / char / ...  │
                └───────────────┬────────────────────┘
                                │
@@ -42,8 +42,7 @@ drivers and a host kernel:
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
 | `driver-os-api` | OS capability contracts and owning guards for MMIO, IRQ, DMA, memory and time. |
-| `device-res` | Transitional framework resource descriptions and device-managed cleanup helpers; capabilities are imported from os-api. |
-| `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
+| `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and resource descriptions and device-managed cleanup. |
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 

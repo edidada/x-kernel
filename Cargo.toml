@@ -250,7 +250,6 @@ driver_base = { path = "drivers/contracts/driver_base" }
 driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
 driver_model = { path = "drivers/base/model", package = "driver-model" }
 subsys_hwrng = { path = "drivers/subsystems/hwrng", package = "subsys-hwrng" }
-device_res = { path = "drivers/contracts/device-res", package = "device-res" }
 kclass = { path = "drivers/contracts/kclass" }
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }

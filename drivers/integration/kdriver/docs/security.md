@@ -287,14 +287,14 @@ kdriver
 driver-os-api-xkernel / kirq / khal / kdma / memspace / driver crates
 ```
 
-- `kdriver` trusts `driver-os-api-xkernel` to implement the `device_res` provider contract
+- `kdriver` trusts `driver-os-api-xkernel` to implement the `driver_os_api` provider contract
   correctly. Driver-facing devres APIs are exposed through
   `kdriver::resource::DeviceResourceExt`.
   `kdriver::resource` explicitly passes `XKernelResourceProvider` and converts
   `ResError` into `DriverError`.
 - `driver-os-api-xkernel` trusts `kirq::try_register_shared()` to validate interrupt
   descriptors, manage action fanout, and provide teardown synchronization.
-  `device_res` reserves a threaded-IRQ provider contract; the X-Kernel provider based
+  `driver_os_api` reserves a threaded-IRQ provider contract; the X-Kernel provider based
   on `main` currently still returns `Unsupported`.
 - `kdriver` and `driver-os-api-xkernel` trust `memspace::iomap_device` to reject mappings
   of invalid physical address ranges.
@@ -791,7 +791,7 @@ Callers:
 | T-12 | VirtIO MMIO discovery reads unmapped or invalid registers | Medium | Firmware advertises `virtio,mmio` but no VirtIO device exists at the physical address | `classify_mmio_device` checks extent/alignment and identification without a transport; ownership lookup precedes mapping. Firmware must still describe readable hardware. |
 | T-13 | An unchecked firmware IRQ number is registered on the wrong vector | Medium | `kirq::register` does not validate the IRQ number sufficiently | Depends on the platform IRQ backend and `kirq` descriptor handling; IRQ numbers passed by `kdriver` come from firmware or PCI INTx routing. |
 | T-14 | Static platform device addresses such as AHCI_PADDR are misconfigured at compile time | Low | `kbuild_config` constants specify invalid physical addresses | `iomap_first_mmio` validates through `devm_iomap` and `iomap_device`; mapping failure prevents driver activation. |
-| T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/event/wake-thread fields | `driver-os-api-xkernel` centralizes `device_res` to `kirq` conversion; the IRQ core does not depend on devres. |
+| T-15 | Incorrect conversion between devres and kernel IRQ types causes bad IRQ configuration, unwoken IRQ threads | Medium | The `driver-os-api-xkernel` adapter omits trigger/controller/event/wake-thread fields | `driver-os-api-xkernel` centralizes `driver_os_api` to `kirq` conversion; the IRQ core does not depend on devres. |
 | T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
 
 Impact levels:

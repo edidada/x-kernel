@@ -2,20 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Driver-facing resource helpers backed by the [`device_res`] provider model.
+//! Driver-facing resource helpers backed by the `driver_os_api` provider model.
 //!
 //! The X-Kernel provider implementation lives in `driver-os-api-xkernel`. This
 //! module keeps the driver orchestration crate's `DriverResult` boundary while
-//! acquiring resources through the OS-neutral `device_res` API.
+//! acquiring resources through the OS-neutral `driver_os_api` API.
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 
-use device_res::ResError;
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::{
     DmaSpec, IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler,
-    MmioRegion,
+    MmioRegion, ResError,
 };
 use driver_os_api_xkernel::XKernelResourceProvider;
 use kdevice::DeviceObject;
@@ -47,7 +46,7 @@ pub(crate) fn devm_iomap(
     region: MmioRegion,
     name: &'static str,
 ) -> DriverResult<NonNull<u8>> {
-    device_res::devm_iomap_with_provider(resource_provider(), device, region, name)
+    kdevice::device::managed::devm_iomap_with_provider(resource_provider(), device, region, name)
         .map_err(map_res_err)
 }
 
@@ -61,14 +60,19 @@ pub(crate) fn devm_request_irq(
     irq: IrqResource,
     handler: Arc<dyn DevIrqHandler>,
 ) -> DriverResult<()> {
-    device_res::devm_request_irq_with_provider(resource_provider(), device, irq, handler)
-        .map_err(map_res_err)
+    kdevice::device::managed::devm_request_irq_with_provider(
+        resource_provider(),
+        device,
+        irq,
+        handler,
+    )
+    .map_err(map_res_err)
 }
 
 /// Register primary and threaded interrupt handlers and tie their lifetime to
 /// `device`.
 ///
-/// The request is routed through the framework-owned `device_res` IRQ provider.
+/// The request is routed through the framework-owned `driver_os_api` IRQ provider.
 pub(crate) fn devm_request_threaded_irq(
     device: &DeviceObject,
     irq: IrqResource,
@@ -76,7 +80,7 @@ pub(crate) fn devm_request_threaded_irq(
     thread: Arc<dyn DevIrqThreadHandler>,
     name: Option<&'static str>,
 ) -> DriverResult<()> {
-    device_res::devm_request_threaded_irq_with_provider(
+    kdevice::device::managed::devm_request_threaded_irq_with_provider(
         resource_provider(),
         device,
         irq,
@@ -90,14 +94,14 @@ pub(crate) fn devm_request_threaded_irq(
 /// Register a default-primary threaded interrupt handler and tie its lifetime
 /// to `device`.
 ///
-/// The request is routed through the framework-owned `device_res` IRQ provider.
+/// The request is routed through the framework-owned `driver_os_api` IRQ provider.
 pub(crate) fn devm_request_threaded_irq_default(
     device: &DeviceObject,
     irq: IrqResource,
     thread: Arc<dyn DevIrqThreadHandler>,
     name: Option<&'static str>,
 ) -> DriverResult<()> {
-    device_res::devm_request_threaded_irq_default_with_provider(
+    kdevice::device::managed::devm_request_threaded_irq_default_with_provider(
         resource_provider(),
         device,
         irq,
@@ -115,7 +119,7 @@ pub(crate) fn devm_alloc_coherent(
     device: &DeviceObject,
     spec: DmaSpec,
 ) -> DriverResult<(NonNull<u8>, u64)> {
-    device_res::devm_alloc_coherent_with_provider(resource_provider(), device, spec)
+    kdevice::device::managed::devm_alloc_coherent_with_provider(resource_provider(), device, spec)
         .map_err(map_res_err)
 }
 
@@ -123,7 +127,7 @@ pub(crate) fn devm_alloc_coherent(
 ///
 /// Drivers use this extension trait to acquire resources from their
 /// [`DeviceObject`] without naming the concrete host provider. The provider is
-/// owned by the driver framework and passed explicitly into `device_res`.
+/// owned by the driver framework and passed explicitly into `driver_os_api`.
 pub trait DeviceResourceExt {
     /// Map an MMIO region and tie its lifetime to this device.
     fn devm_iomap(&self, region: MmioRegion, name: &'static str) -> DriverResult<NonNull<u8>>;

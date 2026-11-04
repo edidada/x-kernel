@@ -4,15 +4,14 @@
 
 Trigger/controller/domain identities use irq-types, also used by the host IRQ
 core. IrqRouteDesc, IrqHandlerToken and MsiMessage have one definition here.
-The transitional device-res facade re-exports them; it no longer owns an IRQ
-resource shape, operation trait or guard. A domain value
+The device-res facade is retired; consumers use this crate directly. A domain value
 only names a host namespace; construction does not validate/register a domain.
 
 ## Monotonic time
 
 `TimeOp` is the host monotonic-clock contract, moved unchanged from device-res.
 It is not a device clock or scheduling service. The xkernel provider implements
-it through khal; the legacy provider aggregate imports this same trait.
+it through khal; callers require this individual capability, not a provider aggregate.
 
 ## Unified MMIO capability
 
@@ -102,8 +101,8 @@ host adapter → driver-os-api + kernel subsystems
 ```
 
 宿主适配方实现 Op，并在实现 DeviceResourceServices 时返回能力句柄。
-生产宿主实现位于 driver-os-api-xkernel。device-res 仅暂留框架资源描述和清理
-登记辅助函数，已不定义独立 IRQ 能力或 guard。
+生产宿主实现位于 driver-os-api-xkernel。device-res 已退役；框架资源描述和清理
+登记辅助函数归 kdevice，不进入 os-api。
 
 ## 内部模块
 

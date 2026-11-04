@@ -24,7 +24,7 @@ excluded; the crate adds no state of its own and forwards to `memspace`
 ## Trust Model
 
 ```text
-device-res provider contract
+driver-os-api provider contract
         │ validated resource descriptors and handler objects
         ▼
 driver-os-api-xkernel
@@ -49,7 +49,7 @@ The crate exposes no driver-facing `devm_*` helpers and never installs a
 global provider itself; resource acquisition must go through the
 `driver_os_api` provider contract. `kdriver::resource` holds the static
 `XKernelResourceProvider` instance and passes it explicitly to
-`device_res::devm_*_with_provider()` and to internal adaptation paths
+`kdevice::device::managed::devm_*_with_provider()` and to internal adaptation paths
 such as VirtIO PCI/MSI-X that need direct provider capabilities.
 
 ## Unsafe Boundaries

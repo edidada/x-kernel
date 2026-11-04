@@ -594,7 +594,7 @@ are unchanged. Request-local waiting remains separately owned in block_completio
 ### DMA And Execution Context
 
 Ordinary block completion follows `complete_* -> pop_used -> Hal::unshare ->
-device_res::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
+driver_os_api::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
 removes its mapping, copies reads back and returns bounce storage to the TLSF
 pool. Pool creation is on map, not unmap; pool recycling and indirect descriptor
 deallocation do not sleep in the audited implementation. Coherent virtqueue
@@ -612,7 +612,7 @@ bookkeeping is not a claim of allocation-free end-to-end wakeup.
 
 ### Registration And Removal
 
-`request_block_irq` returns the existing `device_res::Irq` directly. Its closure
+`request_block_irq` returns the existing `driver_os_api::DevIrq` directly. Its closure
 holds a Weak device IRQ handler and the device's reclaimer Arc. It acknowledges
 only that device, marks pending only for a claimed event, and preserves the
 complete IrqEvent. An expired device returns NOT_HANDLED.
@@ -847,10 +847,10 @@ transports:
 ### Resource management (devres)
 
 `driver-os-api-xkernel` provides x-kernel's implementation type for the
-`device-res` provider contract; the driver-facing resource API is exposed
+`driver-os-api` provider contract; the driver-facing resource API is exposed
 to drivers by `kdriver::resource` as `DeviceResourceExt`.
 `kdriver::resource` holds the static `XKernelResourceProvider` and passes
-it explicitly to `device_res::devm_*_with_provider()`; on release the RAII
+it explicitly to `kdevice::device::managed::devm_*_with_provider()`; on release the RAII
 handles return to the same provider that created them:
 
 - **`device.devm_iomap`**: maps MMIO through `memspace::iomap_device`;
@@ -873,7 +873,7 @@ handles return to the same provider that created them:
   methods, so they return `DriverError::Unsupported`; a later kirq
   threadirq branch will supply the xkernel implementation.
   `driver-os-api-xkernel` is the adaptation layer between devres IRQ
-  resources and the kernel IRQ core, translating `device_res`
+  resources and the kernel IRQ core, translating `driver_os_api`
   trigger/controller/event/handler values into `kirq`'s own types; `kirq`
   does not depend back on devres.
   Future IRQ core capability extensions belong in `kirq`; the driver
@@ -883,7 +883,7 @@ handles return to the same provider that created them:
   `kdma::allocate_dma_memory`; release calls
   `kdma::deallocate_dma_memory`.
 - **`resource_provider().monotonic_time`**: only X-Kernel glue passes
-  `device_res::TimeOp` into reusable drivers; concrete drivers must not
+  `driver_os_api::TimeOp` into reusable drivers; concrete drivers must not
   call `khal::time` directly.
 
 Release runs in reverse acquisition order (LIFO) so resource dependencies
@@ -892,20 +892,20 @@ are never inverted.
 ### IRQ dispatch mechanism
 
 `driver-os-api-xkernel::XKernelResourceProvider` keeps no local IRQ line
-state. It converts `device_res::IrqResource` into `kirq::IrqSpec`, wraps
-`device_res::IrqHandler` as `kirq::IrqHandler`, and registers with the IRQ
+state. It converts `driver_os_api::IrqResource` into `kirq::IrqSpec`, wraps
+`driver_os_api::IrqHandler` as `kirq::IrqHandler`, and registers with the IRQ
 core per API:
 
 1. `request_irq` calls `kirq::try_register_shared()`; `kirq` allocates a
    line-local `IrqActionToken` and stores the action identity; the provider
-   returns `device_res::IrqHandlerToken::SharedAction(id)` to devres.
+   returns `driver_os_api::IrqHandlerToken::SharedAction(id)` to devres.
 2. `request_threaded_irq` / `request_threaded_irq_default` currently reuse
-   the `device_res::IrqOp` default implementations, returning
+   the `driver_os_api::IrqOp` default implementations, returning
    `Unsupported` until a kirq threadirq provider override lands.
 3. When an interrupt arrives, `kirq` snapshots the actions from
    `IrqDescRuntimeState`, invokes each handler in order, and passes the
    resolved `virq` as the handler argument. Each wrapper then converts the
-   devres handler's `device_res::IrqEvent` into `kirq::IrqEvent`.
+   devres handler's `driver_os_api::IrqEvent` into `kirq::IrqEvent`.
 4. After the whole line's fanout, `kirq` aggregates the handled result.
    VirtIO input reports `NOT_HANDLED` for an empty device ISR and calls the
    input layer's notifier only for an event-queue interrupt. The input layer
@@ -1017,7 +1017,7 @@ logics.
 
 ### IRQ handlers reach kirq through driver-os-api-xkernel
 
-**Choice**: `driver-os-api-xkernel` is the `device_res` provider adapting
+**Choice**: `driver-os-api-xkernel` is the `driver_os_api` provider adapting
 driver devres IRQ requests onto `kirq`; `kirq` keeps the shared action
 list per IRQ line and manages devres handler lifetimes via tokens.
 

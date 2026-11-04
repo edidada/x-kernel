@@ -6,5 +6,7 @@
 
 pub mod desc;
 pub mod handles;
+/// Device-owned cleanup of resources acquired through explicit OS providers.
+pub mod managed;
 pub mod object;
 pub mod resource;

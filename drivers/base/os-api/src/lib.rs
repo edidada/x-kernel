@@ -6,8 +6,8 @@
 //!
 //! Hosts implement operations; callers retain capability guards and arrange
 //! their release order. This crate owns no device identity, probe state,
-//! provider registry or kernel implementation. Legacy device-res remains
-//! separate during migration.
+//! provider registry or kernel implementation. Device descriptions and managed
+//! cleanup registration belong to the device framework.
 #![no_std]
 
 extern crate alloc;

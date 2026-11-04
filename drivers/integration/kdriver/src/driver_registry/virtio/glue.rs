@@ -118,7 +118,7 @@ pub(super) struct VirtIoHalImpl;
 // device views of a buffer coherent.
 //
 // This implementation upholds those invariants by routing every operation
-// through the `device_res` provider rather than x-kernel APIs directly:
+// through the `driver_os_api` provider rather than x-kernel APIs directly:
 // * `dma_alloc` / `dma_dealloc` use `alloc_coherent` / `free_coherent`, which
 //   return a paired (`cpu_addr`, `bus_addr`) for the same region and free it
 //   in one call;
@@ -136,7 +136,7 @@ const fn hal_direction(direction: BufferDirection) -> DmaDirection {
     }
 }
 
-// SAFETY: every method routes hardware access through the `device_res`
+// SAFETY: every method routes hardware access through the `driver_os_api`
 // provider, so the HAL holds no x-kernel state; DMA / MMIO ownership
 // invariants are delegated to the installed provider.
 unsafe impl VirtIoHal for VirtIoHalImpl {

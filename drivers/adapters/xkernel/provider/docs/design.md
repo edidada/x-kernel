@@ -33,7 +33,7 @@ KIRQ now removes production MSI reverse lookup without allocating an owner.
 `driver-os-api-xkernel` is X-Kernel's implementation layer for OS-neutral
 driver capabilities. It is not responsible for driver matching,
 probe/remove orchestration, device publication, or the driver-facing
-`devm_*` API; those belong to `kdriver` and `device_res` respectively.
+`devm_*` API; those belong to the device framework (`kdriver` and `kdevice`).
 
 The crate's job is to wire the resource capabilities the driver subsystem
 needs onto the X-Kernel kernel subsystems:
@@ -80,7 +80,7 @@ drivers/adapters/xkernel/provider/src/
 the provider traits defined by `driver-os-api`, but it does not own the
 driver framework's provider-selection policy. `kdriver::resource` holds a
 static `XKernelResourceProvider` instance and passes it explicitly to
-`device_res::devm_*_with_provider()` inside the driver-facing
+`kdevice::device::managed::devm_*_with_provider()` inside the driver-facing
 `DeviceResourceExt` methods.
 
 ## IRQ Adaptation
@@ -125,13 +125,13 @@ This crate provides no `devm_*` helpers. Driver-side resource acquisition
 is exposed by `kdriver::resource` as `DeviceResourceExt` — a driver calls
 `device.devm_iomap(...)`, for example. `kdriver::resource` is responsible
 for passing `XKernelResourceProvider` explicitly into the OS-neutral
-`device_res` helpers and for mapping `ResError` onto `DriverError`. This
+`kdevice::device::managed` helpers and for mapping `ResError` onto `DriverError`. This
 keeps `driver-os-api-xkernel` a pure host provider implementation, with no
 parallel API that bypasses the provider contract.
 
 ## Ownership Boundaries
 
-- `device-res` defines the resource capabilities drivers need and does not
+- `driver-os-api` defines the resource capabilities drivers need and does not
   depend on X-Kernel kernel subsystems.
 - `driver-os-api-xkernel` implements those capabilities and depends on
   `kirq`, `memspace`, `kdma`, and `kalloc`, but provides no driver-facing helpers and

@@ -6,8 +6,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use block::completion::BlockCompletionOperations;
-use device_res::ResError;
-use driver_os_api::{IrqHandlerToken, IrqTrigger};
+use driver_os_api::{IrqHandlerToken, IrqTrigger, ResError};
 use kirq::{
     context::test_support::ScopedHardIrqContext, softirq::test_support::ScopedDaemonWakeGate,
 };

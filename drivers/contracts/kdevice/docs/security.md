@@ -279,3 +279,15 @@ When modifying this module, verify:
   complete.
 - New `DeviceMatcher` implementations keep `matches()` pure (no side
   effects, no lock acquisition).
+
+## Managed resource ownership boundary
+
+The device framework must stop hardware and dependent consumers before running
+cleanup. Returned MMIO pointers and DMA addresses are borrowed views, not
+lifetime-extending owners; callers must not use them after cleanup.
+Explicit providers must return valid, uniquely releasable os-api tokens.
+IRQ cleanup must run in the provider's permitted synchronous-release context.
+Cleanup drains once in LIFO order outside the device lock; repeated drains are
+empty. This migration does not add fallible cleanup registration, fix legacy
+remove-error continuation, or change the MSI release failure/owner contract.
+Tests exercise the real DeviceObject cleanup path, not a replacement test queue.

@@ -8,35 +8,20 @@
 //! call into an event log backed by real memory. Tests exercise explicit
 //! provider calls so resource acquire/release pairing stays visible.
 
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use driver_os_api::{DmaAllocation, DmaOp, DmaSpec, MmioMapping, MmioOp, MmioRegion};
+use driver_os_api::{
+    DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource,
+    IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
+};
 use kspin::SpinNoIrq;
 use unittest::def_test;
 
-use crate::{
-    DeviceResource, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqThreadHandler,
-    IrqTrigger, ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
-    devm_iomap_with_provider, devm_request_irq_with_provider,
+use super::{
+    devm_alloc_coherent_with_provider, devm_iomap_with_provider, devm_request_irq_with_provider,
 };
-
-#[def_test]
-fn irq_vocabulary_is_shared_with_os_api() {
-    let domain: crate::IrqDomainId = driver_os_api::IrqDomainId::new(0x7319);
-    let route: crate::IrqRouteDesc = driver_os_api::IrqRouteDesc {
-        hwirq: 37,
-        trigger: driver_os_api::IrqTrigger::Unknown(0x81),
-        controller: driver_os_api::IrqController::Msi,
-        domain: Some(domain),
-    };
-    let token: crate::IrqHandlerToken = driver_os_api::IrqHandlerToken::shared_action(73);
-    let message: crate::MsiMessage = driver_os_api::MsiMessage::new(0xfee0_0000, 0x51);
-    unittest::assert_eq!(route.domain.map(|id| id.as_u32()), Some(0x7319));
-    unittest::assert_eq!(route.trigger, crate::IrqTrigger::Unknown(0x81));
-    unittest::assert_eq!(token, crate::IrqHandlerToken::SharedAction(73));
-    unittest::assert_eq!(message.data, 0x51);
-}
+use crate::{DeviceObject, ResourceDesc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -217,35 +202,19 @@ impl IrqOp for TestProvider {
     }
 }
 
-struct TestDevice {
-    resources: Vec<ResourceDesc>,
-    cleanups: SpinNoIrq<Vec<Box<dyn FnOnce() + Send>>>,
-}
-
-impl TestDevice {
-    fn new(resources: Vec<ResourceDesc>) -> Self {
-        Self {
-            resources,
-            cleanups: SpinNoIrq::new(Vec::new()),
-        }
-    }
-
-    fn run_cleanups(&self) {
-        let mut cleanups = self.cleanups.lock();
-        while let Some(clean) = cleanups.pop() {
-            clean();
-        }
-    }
-}
-
-impl DeviceResource for TestDevice {
-    fn resources(&self) -> &[ResourceDesc] {
-        &self.resources
-    }
-
-    fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>) {
-        self.cleanups.lock().push(cleanup);
-    }
+fn test_device(resources: Vec<ResourceDesc>) -> DeviceObject {
+    DeviceObject::new(
+        crate::DeviceId::new(0),
+        crate::BusId::new(0),
+        crate::DeviceLocation::PlatformStatic { id: 0 },
+        crate::DiscoveryOrigin::PlatformStatic,
+        crate::DeviceIdentity::Platform(crate::PlatformIdentity {
+            alias: Some("managed-resource-test"),
+            firmware_id: None,
+        }),
+        None,
+        resources.into_iter().collect(),
+    )
 }
 
 #[def_test]
@@ -287,7 +256,7 @@ fn provider_methods_record_lifecycle_with_explicit_calls() {
     assert_eq!(dma.bus_addr, 0xfeed_cafe);
     provider.free_coherent(dma);
 
-    let device = TestDevice::new(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
+    let device = test_device(vec![ResourceDesc::Irq(irq), ResourceDesc::Dma(spec)]);
     assert_eq!(device.resources().len(), 2);
 
     assert_eq!(
@@ -371,12 +340,12 @@ fn device_cleanups_run_lifo_order() {
     ORDER.lock().clear();
     NEXT.store(0, Ordering::Relaxed);
 
-    let device = TestDevice::new(Vec::new());
+    let device = test_device(Vec::new());
     for id in 0..3 {
-        device.register_cleanup(Box::new(move || {
+        device.add_cleanup(move || {
             let seq = NEXT.fetch_add(1, Ordering::Relaxed);
             ORDER.lock().push((seq << 8) | id);
-        }));
+        });
     }
 
     device.run_cleanups();
@@ -395,7 +364,7 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
     };
     let irq = IrqResource::plain(driver_os_api::Virq::new(11), IrqTrigger::LevelHigh);
     let spec = DmaSpec::new(16, 8);
-    let device = TestDevice::new(vec![
+    let device = test_device(vec![
         ResourceDesc::Mmio(region),
         ResourceDesc::Irq(irq),
         ResourceDesc::Dma(spec),
@@ -416,6 +385,7 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
     assert_eq!(bus_addr, 0xfeed_cafe);
 
     device.run_cleanups();
+    device.run_cleanups();
 
     assert_eq!(
         PROVIDER.events(),
@@ -426,6 +396,91 @@ fn devm_helpers_use_explicit_provider_for_cleanup() {
             Event::FreeCoherent(spec),
             Event::ReleaseIrq(irq),
             Event::UnmapMmio(region),
+        ]
+    );
+}
+
+#[def_test]
+fn failed_managed_acquisitions_register_no_cleanup() {
+    static PROVIDER: TestProvider = TestProvider::new();
+    PROVIDER.reset();
+    let device = test_device(Vec::new());
+    let region = MmioRegion {
+        base: 0x5000,
+        size: 8,
+    };
+    let irq = IrqResource::plain(driver_os_api::Virq::new(12), IrqTrigger::LevelHigh);
+    let spec = DmaSpec::new(8, 8);
+    PROVIDER.set_map_error(ResError::MappingFailed);
+    assert_eq!(
+        devm_iomap_with_provider(&PROVIDER, &device, region, "failure"),
+        Err(ResError::MappingFailed)
+    );
+    PROVIDER.set_irq_error(ResError::Busy);
+    assert_eq!(
+        devm_request_irq_with_provider(&PROVIDER, &device, irq, Arc::new(|_| IrqEvent::HANDLED)),
+        Err(ResError::Busy)
+    );
+    PROVIDER.set_dma_error(ResError::NoMemory);
+    assert_eq!(
+        devm_alloc_coherent_with_provider(&PROVIDER, &device, spec),
+        Err(ResError::NoMemory)
+    );
+    device.run_cleanups();
+    assert_eq!(
+        PROVIDER.events(),
+        vec![
+            Event::MapMmio(region),
+            Event::RequestIrq(irq),
+            Event::AllocCoherent(spec)
+        ]
+    );
+}
+
+#[def_test]
+fn managed_threaded_guards_release_once_after_success_only() {
+    static PROVIDER: TestProvider = TestProvider::new();
+    PROVIDER.reset();
+    let device = test_device(Vec::new());
+    let irq = IrqResource::plain(driver_os_api::Virq::new(13), IrqTrigger::LevelHigh);
+    super::devm_request_threaded_irq_with_provider(
+        &PROVIDER,
+        &device,
+        irq,
+        Arc::new(|_| IrqEvent::WAKE_THREAD),
+        Arc::new(|_| IrqEvent::HANDLED),
+        Some("primary"),
+    )
+    .unwrap();
+    super::devm_request_threaded_irq_default_with_provider(
+        &PROVIDER,
+        &device,
+        irq,
+        Arc::new(|_| IrqEvent::HANDLED),
+        Some("default"),
+    )
+    .unwrap();
+    PROVIDER.set_irq_error(ResError::Unsupported);
+    assert_eq!(
+        super::devm_request_threaded_irq_default_with_provider(
+            &PROVIDER,
+            &device,
+            irq,
+            Arc::new(|_| IrqEvent::HANDLED),
+            None
+        ),
+        Err(ResError::Unsupported)
+    );
+    device.run_cleanups();
+    device.run_cleanups();
+    assert_eq!(
+        PROVIDER.events(),
+        vec![
+            Event::RequestThreadedIrq(irq),
+            Event::RequestThreadedIrqDefault(irq),
+            Event::RequestThreadedIrqDefault(irq),
+            Event::ReleaseIrq(irq),
+            Event::ReleaseIrq(irq)
         ]
     );
 }

@@ -7,27 +7,22 @@
 //! Framework code passes provider objects explicitly to these helpers. This
 //! crate does not own global provider state; provider selection belongs to
 //! the host driver framework.
+//!
+//! Callers serialize acquisition with probe/removal. Successful acquisitions
+//! register guards for framework-driven LIFO cleanup; failures register nothing.
+//! Raw MMIO/DMA views are valid only until that cleanup, not until the last
+//! device reference is dropped. The framework must quiesce hardware and users
+//! first and run cleanup in the provider's permitted release context.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use driver_os_api::{
     CoherentMem, DevIrq, DmaOp, DmaSpec, IoMap, IrqHandler, IrqOp, IrqResource, IrqThreadHandler,
-    MmioOp, MmioRegion, TimeOp,
+    MmioOp, MmioRegion, ResError, ResResult,
 };
 
-use crate::{DeviceResource, ResResult};
-
-/// Combined MMIO, DMA, IRQ and time capabilities for device drivers.
-///
-/// Host kernels may pass a concrete type implementing this trait into a driver
-/// framework. The individual operation traits remain split so framework code
-/// can require only the capability it is about to use.
-/// Ordinary CPU storage is requested separately through `driver_os_api::CpuMemoryOp`;
-/// a DMA provider does not imply CPU allocation capability.
-pub trait ResourceProvider: MmioOp + DmaOp + IrqOp + TimeOp {}
-
-impl<T: ?Sized> ResourceProvider for T where T: MmioOp + DmaOp + IrqOp + TimeOp {}
+use crate::DeviceObject;
 
 /// Map an MMIO region with an explicit provider and tie its lifetime to
 /// `device`.
@@ -36,13 +31,13 @@ impl<T: ?Sized> ResourceProvider for T where T: MmioOp + DmaOp + IrqOp + TimeOp 
 /// at the call boundary, while the cleanup remains device-managed.
 pub fn devm_iomap_with_provider(
     provider: &'static dyn MmioOp,
-    device: &dyn DeviceResource,
+    device: &DeviceObject,
     region: MmioRegion,
     name: &'static str,
 ) -> ResResult<NonNull<u8>> {
     let io = IoMap::map_with(provider, region, name)?;
-    let ptr = NonNull::new(io.as_ptr()).ok_or(crate::ResError::MappingFailed)?;
-    device.register_cleanup(Box::new(move || drop(io)));
+    let ptr = NonNull::new(io.as_ptr()).ok_or(ResError::MappingFailed)?;
+    device.add_cleanup(move || drop(io));
     Ok(ptr)
 }
 
@@ -50,12 +45,12 @@ pub fn devm_iomap_with_provider(
 /// to `device`.
 pub fn devm_request_irq_with_provider(
     provider: &'static dyn IrqOp,
-    device: &dyn DeviceResource,
+    device: &DeviceObject,
     irq: IrqResource,
     handler: Arc<dyn IrqHandler>,
 ) -> ResResult<()> {
     let guard = DevIrq::request_with(provider, irq, handler)?;
-    device.register_cleanup(Box::new(move || drop(guard)));
+    device.add_cleanup(move || drop(guard));
     Ok(())
 }
 
@@ -63,14 +58,14 @@ pub fn devm_request_irq_with_provider(
 /// and tie their lifetime to `device`.
 pub fn devm_request_threaded_irq_with_provider(
     provider: &'static dyn IrqOp,
-    device: &dyn DeviceResource,
+    device: &DeviceObject,
     irq: IrqResource,
     primary: Arc<dyn IrqHandler>,
     thread: Arc<dyn IrqThreadHandler>,
     name: Option<&'static str>,
 ) -> ResResult<()> {
     let guard = DevIrq::request_threaded_with(provider, irq, primary, thread, name)?;
-    device.register_cleanup(Box::new(move || drop(guard)));
+    device.add_cleanup(move || drop(guard));
     Ok(())
 }
 
@@ -78,13 +73,13 @@ pub fn devm_request_threaded_irq_with_provider(
 /// provider and tie its lifetime to `device`.
 pub fn devm_request_threaded_irq_default_with_provider(
     provider: &'static dyn IrqOp,
-    device: &dyn DeviceResource,
+    device: &DeviceObject,
     irq: IrqResource,
     thread: Arc<dyn IrqThreadHandler>,
     name: Option<&'static str>,
 ) -> ResResult<()> {
     let guard = DevIrq::request_threaded_default_with(provider, irq, thread, name)?;
-    device.register_cleanup(Box::new(move || drop(guard)));
+    device.add_cleanup(move || drop(guard));
     Ok(())
 }
 
@@ -92,12 +87,14 @@ pub fn devm_request_threaded_irq_default_with_provider(
 /// lifetime to `device`.
 pub fn devm_alloc_coherent_with_provider(
     provider: &'static dyn DmaOp,
-    device: &dyn DeviceResource,
+    device: &DeviceObject,
     spec: DmaSpec,
 ) -> ResResult<(NonNull<u8>, u64)> {
     let dma = CoherentMem::alloc_with(provider, spec)?;
-    let cpu_ptr = NonNull::new(dma.as_ptr()).ok_or(crate::ResError::InvalidResource)?;
+    let cpu_ptr = NonNull::new(dma.as_ptr()).ok_or(ResError::InvalidResource)?;
     let bus_addr = dma.bus_addr();
-    device.register_cleanup(Box::new(move || drop(dma)));
+    device.add_cleanup(move || drop(dma));
     Ok((cpu_ptr, bus_addr))
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/managed_resources.rs");

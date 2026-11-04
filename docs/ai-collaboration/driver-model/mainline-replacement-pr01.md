@@ -1,5 +1,24 @@
 # 主线交付原则与 PR-01：统一 OS 能力层，退役 device-res
 
+## device-res 退役批次（已验证，待抽取 PR）
+
+ResourceDesc/Set 归回 kdevice::device::resource；devm 助手归回
+kdevice::device::managed，直接使用 DeviceObject::add_cleanup。
+删除仅由这层实现的 DeviceResource trait 及无消费者的 ResourceProvider 聚合。
+os-api 不接管设备描述、身份或清理登记。旧 crate 和依赖删除。
+原 UT 迁到 kdevice 并用真实设备对象执行清理；删除仅验证旧 re-export 的过渡用例。
+以下“仅暂时保留”的记录为前一批历史状态，当前不再保留该 crate。
+本批不改变 MSI 失败处理、网络关闭或 native DMA 约束。
+
+验证：AArch64 SMP4 282 通过、0 失败、5 忽略，覆盖导出完成；选择
+driver_os_api/kdevice/driver_os_api_xkernel/driver_model/kdriver/virtio。
+kdevice 的 6 个资源用例使用真实设备对象，覆盖 LIFO、重复 drain、失败不登记和
+threaded guard 成功释放。Native IRQ/RNG callback 尾部、shared peer 与负控仍通过。
+AArch64、x86_64 UNITTEST clippy 通过，已恢复 AArch64 配置。
+独立只读审查未发现阻塞；源码/manifest/lockfile 已无 device-res 依赖。
+日志：`.scratch/pr01-device-res-retirement/`。下一步审计 PR1 抽取范围与最新主线
+能力差异，单独抽取后重跑验收；当前不代表远端 PR 已创建或主线迁移已完成。
+
 ## IRQ source 位图取舍修正
 
 此前“网络消费者需要 source 位图”的结论撤回：生产 RX 调度在 handler 内直接

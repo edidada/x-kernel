@@ -85,7 +85,6 @@ default = []
 [dependencies]
 kalloc = { workspace = true, optional = true }
 kdma = { workspace = true, optional = true }
-device_res = { workspace = true }
 driver_os_api_xkernel = { workspace = true }
 driver_base = { workspace = true }
 driver_model = { workspace = true, optional = true }
