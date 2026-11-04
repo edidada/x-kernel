@@ -31,6 +31,7 @@ enum Failure {
 
 struct Observations {
     failure: Failure,
+    can_probe: AtomicBool,
     events: SpinNoPreempt<Vec<&'static str>>,
     handles: SpinNoPreempt<Vec<HwrngHandle>>,
     removes: AtomicUsize,
@@ -43,6 +44,7 @@ impl Observations {
     fn new(failure: Failure) -> Arc<Self> {
         Arc::new(Self {
             failure,
+            can_probe: AtomicBool::new(true),
             events: SpinNoPreempt::new(Vec::with_capacity(64)),
             handles: SpinNoPreempt::new(Vec::new()),
             removes: AtomicUsize::new(0),
@@ -139,6 +141,9 @@ impl DriverOps<PlatformBus> for PublishingDriver {
         dev: &mut DeviceAccess<'_, PlatformBus>,
         _: &Environment<'_>,
     ) -> Result<Self::Data, ProbeError> {
+        if !self.observations.can_probe.load(Ordering::Relaxed) {
+            return Err(RuntimeError::Unsupported.into());
+        }
         let drain = new_rng_drain().map_err(|_| RuntimeError::BadState)?;
         if self.observations.failure == Failure::Resource {
             return Err(RuntimeError::NoMemory.into());
@@ -300,6 +305,7 @@ fn rebind_preserves_provenance_and_does_not_retain_ops_or_repeat_cleanup() {
     let first_remove_count = first.removes.load(Ordering::Relaxed);
     let old_read = old.read(&mut [0]);
     let sibling_read = sibling_handle.read(&mut [0]);
+    first.can_probe.store(false, Ordering::Relaxed);
     let second = Observations::new(Failure::None);
     domain.register_driver(DriverDesc::new(
         "driver-b",
