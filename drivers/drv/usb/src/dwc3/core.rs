@@ -97,17 +97,16 @@ fn core_soft_reset(regs: &IoMap) {
 }
 
 fn set_host_mode(regs: &IoMap) {
-    // GCTL.PrtCapDir is deliberately NOT written. The reference board's DWC3_1
-    // reads GCTL = 0x00000001 here -- PrtCapDir 0, i.e. the controller keeps the
-    // mode its wrapper selected -- and its host ports work. This driver used to
-    // force bit 12 (host) and that was the last register difference left between
-    // the two boards once VBUS, the PHY words, the GRF and the PIPE control all
-    // matched.
+    // GCTL.PrtCapDir (bits 13:12): 0 OTG, 1 host, 2 peripheral. The wrapper's
+    // reset value on this board leaves the controller in peripheral mode (read
+    // as 2), so a host port never sees a device no matter how correct the PHY
+    // and VBUS are.
+    let gctl = regs.read32(GCTL);
+    regs.write32(GCTL, (gctl & !gctl::PRTCAPDIR_MASK) | gctl::PRTCAPDIR_HOST);
+    let after = regs.read32(GCTL);
     info!(
-        "dwc3: GCTL {:#010x} GSTS {:#010x} (prtcapdir {}, mode left to the wrapper)",
-        regs.read32(GCTL),
-        regs.read32(GSTS),
-        (regs.read32(GCTL) >> 12) & 0x3,
+        "dwc3: host mode, GCTL {gctl:#010x} -> {after:#010x} (prtcapdir {})",
+        (after >> 12) & 0x3,
     );
 }
 
