@@ -641,10 +641,17 @@ impl Xhci {
     /// against flips every time the dequeue pointer wraps, so a stale TRB from
     /// the previous lap can never be mistaken for a new event.
     fn next_event(&mut self) -> Option<Trb> {
-        let trb = self.event.read(self.event_dequeue);
+        let mut trb = self.event.read(self.event_dequeue);
         if trb.control & regs::trb::CYCLE != u32::from(self.event_cycle) {
             return None;
         }
+        // The cycle bit is the controller's "this TRB is mine to publish" flag:
+        // seeing it does not yet mean the rest of the event has landed, so the
+        // read is fenced and repeated (Linux does `rmb()` after reading the TRB).
+        // Without this a completion can be consumed with a zero status word, which
+        // reads exactly like a completion code of 0.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        trb = self.event.read(self.event_dequeue);
         self.event_dequeue += 1;
         if self.event_dequeue == self.event.trbs {
             self.event_dequeue = 0;
@@ -733,7 +740,7 @@ impl Xhci {
             self.bar.read32(self.operational + op::USBSTS),
             self.bar.read64(self.operational + op::DCBAAP),
         );
-        self.bar.write32(self.doorbell, 0);
+        self.ring_command_doorbell();
         let event = self.wait_event(regs::trb::COMMAND_COMPLETION, what)?;
         let code = event.completion_code();
         // The completion event's parameter word is the address of the command TRB
@@ -757,6 +764,18 @@ impl Xhci {
         Ok(event)
     }
 
+    /// Rings the command-ring doorbell and flushes the write.
+    ///
+    /// Both the vendor kernel and mainline follow the store with a read-back
+    /// (`writel(DB_VALUE_HOST, &doorbell[0]); readl(&doorbell[0]);`): the doorbell
+    /// is a posted write, and without the flush the controller may see the
+    /// command ring pointer update before it sees the notification that there is
+    /// work on it.
+    fn ring_command_doorbell(&self) {
+        self.bar.write32(self.doorbell, 0);
+        let _ = self.bar.read32(self.doorbell);
+    }
+
     /// Re-publishes the command ring dequeue pointer after a command error.
     fn rearm_command_ring(&self) {
         let dequeue = self.command.dequeue_address();
@@ -768,7 +787,7 @@ impl Xhci {
         self.bar.write32(crcr + 4, (dequeue >> 32) as u32);
         // Re-publishing the pointer is only half of a restart: the controller
         // also has to be told there is work, i.e. the command-ring doorbell.
-        self.bar.write32(self.doorbell, 0);
+        self.ring_command_doorbell();
         info!("xhci: command ring re-armed at {dequeue:#x}");
     }
 

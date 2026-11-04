@@ -901,6 +901,16 @@ num-hc-interrupters
 
 **结论：板厂在命令提交路径上与 mainline 完全一致**，没有针对性补丁 —— 所以 `Enable Slot` 被拒不是"缺了某个 vendor 步骤"。
 
+**doorbell 读回 flush 与事件读屏障（都已补）**：
+
+- 板厂与 mainline 的 `xhci_ring_cmd_db` 都是 `writel(0, doorbell[0])` **再读回 flush**；
+  我们只写不读。已补（`ring_command_doorbell`）。
+- 读事件 TRB 时若**看到 cycle 位就立刻取用**，会读到**半写的事件**：表现为 completion code
+  `0`、slot id `0` —— 假的"完成码 0"。规范要求看到 cycle 后 `rmb()` 再重读。已补
+  （`next_event` 里 fence + 重读），补上后真实的码稳定为 5。
+
+**`MaxSlotsEn` 试过 64 / 8 / 1，全部 code 5** —— 与本控制器实际支持的 slot 数无关。
+
 **剩余候选**：① 确认是否 `num-hc-interrupters` 影响（我们只用 interrupter 0）；
 ② 用标记值扫描直接验证 `Enable Slot` TRB 的四个 dword 是否原样进了环；
 ③ 若字段确实无误，则问题在控制器侧（DWC3 slot 管理），需要对照 dwc3 的 `GCTL`/`DCFG`
