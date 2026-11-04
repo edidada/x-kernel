@@ -21,12 +21,13 @@
 //! out of the v1 surface (no Type-C/OTG consumer yet).
 
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use driver_base::{
     ClkHandle, Device, DriverOps, EnabledClock, IoMap, OfMatch, PlatformBus, PlatformId,
     ProbeError, ResetHandle, RuntimeError,
 };
-use kclk::{ClkBuilder, ClkCore, ClkLookup, FixedRate, ProviderId};
+use kclk::{ClkBuilder, ClkCore, ClkHwOps, ClkLookup, ClkResult, ProviderId, Rate};
 use kphy::{PhyError, PhyHwOps, PhyInstance, PhyLookup};
 
 /// The usb2phy-grf block this port node belongs to (the node's own `reg`
@@ -126,10 +127,24 @@ impl Usb2Phy {
 }
 
 impl PhyHwOps for Usb2Phy {
-    /// HOST-mode `rockchip_usb2phy_init`: the reference arms the
-    /// linestate/disconnect detect IRQs — out of the v1 surface (see the
-    /// module docs); the phy functions without them (consumers poll).
+    /// `rockchip_usb2phy_init` (HOST/OTG host subset): clear and enable the
+    /// linestate and VBUS-valid detect circuits. The reference also arms the
+    /// detect IRQs, which is out of the v1 surface (consumers poll port
+    /// status), but the detection enable bits themselves decide whether the
+    /// `ls_det`/`bvalid` status words ever report anything.
     fn hw_init(&self) -> Result<(), PhyError> {
+        match self.block {
+            Block::Usb3_0 | Block::Usb3_1 => {
+                // OTG port: clear bvalid/ls detect, then enable both.
+                self.grf.write32(0x0088, 0x3 | (0x3 << 16));
+                self.grf.write32(0x0080, 0x3 | (0x3 << 16));
+            }
+            Block::Usb2_0 | Block::Usb2_1 => {
+                // Host port: clear ls detect, then enable it.
+                self.grf.write32(0x0088, 0x1 | (0x1 << 16));
+                self.grf.write32(0x0080, 0x1 | (0x1 << 16));
+            }
+        }
         Ok(())
     }
 
@@ -138,11 +153,17 @@ impl PhyHwOps for Usb2Phy {
         Ok(())
     }
 
-    /// `rockchip_usb2phy_power_on`: 480m clock + `phy_sus` cleared.
+    /// `rockchip_usb2phy_power_on`: `phy_sus` cleared, then a fresh reset and
+    /// the UTMI stabilisation wait (the reference resets again when leaving
+    /// suspend because the analog blocks were powered down). The 480 MHz
+    /// output itself is opened by the consumer's `usb480m_phyN` prepare —
+    /// matching Linux, where `clkout_ctl` is lazy and reads 0 even on the
+    /// working board, so it is NOT driven from here.
     fn hw_power_on(&self) -> Result<(), PhyError> {
         let enabled = self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
         *self.clk480m_enabled.lock() = Some(enabled);
         self.set_suspended(false);
+        self.reset_pulse();
         // The reference (and the U-Boot code it mirrors) waits 2 ms here for the
         // UTMI clock to stabilise before the controller is allowed to touch the
         // port; without it the PHY can accept a connect but not a transaction.
@@ -196,6 +217,63 @@ struct Usb2PhyClockLookup {
     provider_id: ProviderId,
     name: &'static str,
     core: Arc<ClkCore>,
+}
+
+/// `clkout_ctl`: the GRF bit that gates the PHY's 480 MHz output.
+///
+/// The reference (`rk3588_phy_cfgs`) puts it at block-relative offset 0x0000,
+/// bit 0, with 1 = clock out / 0 = off; it is written with the inno GRF
+/// hiword convention (upper half = write-enable mask). Linux opens it lazily
+/// from `usb480m_phyN`'s `prepare` and waits ~1.2 ms for the clock to
+/// stabilise; our previous `FixedRate` publication never touched the bit, so
+/// the controllers ran without their 480 MHz reference even though connect
+/// detection (an always-on path) still worked.
+struct Usb2Phy480mOps {
+    grf: IoMap,
+    enabled: AtomicBool,
+}
+
+impl Usb2Phy480mOps {
+    const BIT: u32 = 0;
+    const OFFSET: usize = 0x0000;
+
+    fn write_ctl(&self, on: bool) {
+        let mask = 1u32 << Self::BIT;
+        let value: u32 = if on { 1 } else { 0 };
+        self.grf
+            .write32(Self::OFFSET, (value << Self::BIT) | (mask << 16));
+    }
+}
+
+impl ClkHwOps for Usb2Phy480mOps {
+    /// `rockchip_usb2phy_clk480m_prepare`: open the output gate, then wait
+    /// for the clock to stabilise before the consumer relies on it.
+    fn prepare(&self) -> ClkResult {
+        if !self.enabled.load(Ordering::Acquire) {
+            self.write_ctl(true);
+            self.enabled.store(true, Ordering::Release);
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_250));
+        }
+        Ok(())
+    }
+
+    /// `rockchip_usb2phy_clk480m_unprepare`.
+    fn unprepare(&self) -> ClkResult {
+        self.write_ctl(false);
+        self.enabled.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// `rockchip_usb2phy_clk480m_prepared`.
+    fn is_prepared(&self) -> ClkResult<bool> {
+        Ok(self.enabled.load(Ordering::Acquire))
+    }
+
+    /// `rockchip_usb2phy_clk480m_recalc_rate`: the output is a fixed 480 MHz
+    /// divided from the `phyclk` reference; the divider is not programmable.
+    fn recalc_rate(&self, _parent_rate: Rate) -> ClkResult<Rate> {
+        Ok(480_000_000)
+    }
 }
 
 impl ClkLookup for Usb2PhyClockLookup {
@@ -255,6 +333,34 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
             Block::Usb2_0 | Block::Usb2_1 => (0x0008, 2),
         };
 
+        // Diagnostic: the reference gates the PHY's 480 MHz output behind
+        // `clkout_ctl` (block-relative GRF word 0x0000, bit 0: 1 = clock out,
+        // 0 = off), opened lazily when a consumer prepares `usb480m_phyN`.
+        // Our published clock is a plain FixedRate, so nothing has ever
+        // touched this bit — print it (and the port status word) so the
+        // board run can say whether the 480 MHz reference ever leaves the PHY.
+        {
+            let word0 = grf.read32(0x0000);
+            log::info!(
+                "usb2phy: block {block:?} +0x0000 {word0:#06x} (clkout_ctl bit0 {})",
+                if word0 & 0x1 != 0 { "on" } else { "off" },
+            );
+        }
+
+        // The OTG port owns the detect status word at +0x80/+0x84: bit0 of
+        // +0x84 is `ls_det` (a device is on D+/D-), bit1 is `bvalid`. These
+        // are the values to compare against the reference board's
+        // "device enumerated" state. Read before `grf` moves into `phy`.
+        if matches!(block, Block::Usb3_0 | Block::Usb3_1) {
+            log::info!(
+                "usb2phy: block {block:?} detect +0x80 {:#06x} +0x84 {:#06x} (ls_det {} bvalid {})",
+                grf.read32(0x0080),
+                grf.read32(0x0084),
+                grf.read32(0x0084) & 0x1 != 0,
+                grf.read32(0x0084) & 0x2 != 0,
+            );
+        }
+
         let phy = Usb2Phy {
             clk480m_enabled: ksync::Mutex::new(None),
             grf,
@@ -268,6 +374,12 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
         // `rk3588_usb2phy_tuning` runs at probe (before any consumer).
         phy.tuning();
 
+        // The 480 MHz clock's ops need their own view of the GRF window;
+        // take it before `phy` moves into the instance (the provider owns the
+        // mapping and lives for the kernel's lifetime, so the borrow is
+        // sound).
+        let grf_for_clock = phy.grf.clone_shared();
+
         let instance = PhyInstance::new(Arc::new(phy));
         let lookup: &'static Usb2PhyLookup = Box::leak(Box::new(Usb2PhyLookup {
             provider_id: phandle,
@@ -276,26 +388,43 @@ impl DriverOps<PlatformBus> for Usb2PhyDriver {
         dev.env()
             .provide::<driver_host::PhyProvider>(phandle, lookup)?;
 
-        // Publish the 480 MHz output under the same phandle: consumers list this
-        // phy node in `clocks`, and a missing provider is what left both
-        // controllers without their reference clock.
+        // Publish the 480 MHz output under the same phandle. The clock is a
+        // real `clkout_ctl`-gated output (see `Usb2Phy480mOps`): the parent's
+        // `phyclk` is its reference, and `prepare` opens the GRF gate. The
+        // view borrows the GRF mapping via `clone_shared` — the provider owns
+        // the mapping and lives for the kernel's lifetime, so the borrow is
+        // sound.
         let clock_name: &'static str = firmware.clock_output_name.unwrap_or("usb480m_phy");
-        if let Ok(core) =
-            ClkBuilder::new(clock_name, FixedRate::new(480_000_000).into_ops()).build()
-        {
-            let lookup: &'static Usb2PhyClockLookup = Box::leak(Box::new(Usb2PhyClockLookup {
-                provider_id: phandle,
-                name: clock_name,
-                core: core.clone(),
-            }));
-            dev.env()
-                .provide::<driver_host::ClkProvider>(phandle, lookup)?;
-            log::info!(
-                "usb2phy: block {block:?} published (phandle {phandle:#x}, grf {grf_base:#x}), \
-                 clock `{clock_name}` @ 480 MHz",
-            );
-        } else {
-            log::warn!("usb2phy: could not build the 480 MHz clock for phandle {phandle:#x}");
+        let mut builder = ClkBuilder::new(
+            clock_name,
+            Arc::new(Usb2Phy480mOps {
+                grf: grf_for_clock,
+                enabled: AtomicBool::new(false),
+            }),
+        );
+        // The reference parent is the CRU's `phyclk` output
+        // (`clk_usb2phy_hdptxrxphy_ref`); `parent_name` resolves it through
+        // the global registry even if the CRU driver probes after us.
+        builder = builder.parent_name("clk_usb2phy_hdptxrxphy_ref");
+        match builder.build() {
+            Ok(core) => {
+                let lookup: &'static Usb2PhyClockLookup = Box::leak(Box::new(Usb2PhyClockLookup {
+                    provider_id: phandle,
+                    name: clock_name,
+                    core: core.clone(),
+                }));
+                dev.env()
+                    .provide::<driver_host::ClkProvider>(phandle, lookup)?;
+                log::info!(
+                    "usb2phy: block {block:?} published (phandle {phandle:#x}, grf \
+                     {grf_base:#x}), clock `{clock_name}` @ 480 MHz (clkout_ctl gated)",
+                );
+            }
+            Err(err) => {
+                log::warn!(
+                    "usb2phy: could not build the 480 MHz clock for phandle {phandle:#x}: {err:?}"
+                );
+            }
         }
         Ok(Usb2PhyData {})
     }

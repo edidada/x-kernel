@@ -22,6 +22,15 @@ pub struct IoMap {
     release: Option<ReleaseHook>,
 }
 
+// A mapping is a shared kernel VA window: reads/writes through it are plain
+// volatile accesses, so a second handle imposes no aliasing beyond what the
+// device registers already imply.
+// SAFETY: same reasoning — the handle is just a (VA, region) pair over an
+// already-shared device window; sending/sharing it adds no aliasing hazard.
+unsafe impl Send for IoMap {}
+// SAFETY: see `Send` above.
+unsafe impl Sync for IoMap {}
+
 impl fmt::Debug for IoMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IoMap")
@@ -50,6 +59,20 @@ impl IoMap {
 
     pub const fn region(&self) -> MmioRegion {
         self.region
+    }
+
+    /// A second handle to the same mapping, WITHOUT the release hook.
+    ///
+    /// The clone borrows the original's lifetime: it must not outlive the
+    /// `IoMap` it came from. Used to hand one consumer-visible view of a
+    /// provider-owned window to a published lookup object (e.g. a PHY whose
+    /// clock output is a GRF bit inside the provider's mapped region).
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            vaddr: self.vaddr,
+            region: self.region,
+            release: None,
+        }
     }
 
     pub fn as_ptr(&self) -> *mut u8 {
