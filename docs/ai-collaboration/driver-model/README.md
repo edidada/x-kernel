@@ -13,6 +13,10 @@ SMP4、独立 disk，68 passed / 0 failed / 0 ignored，coverage 已持久化。
 通过；规范和需求两路只读评审无阻断。日志在 `.scratch/driver-match-review/`。
 这是本轮 model 验收，不替代后续分批 PR 的完整集成验收。
 
+后续源码对照见 [RNG 全生命周期模型评审](rng-lifecycle-model-comparison.md) 与
+[Linux 本地源码参照](rng-linux-lifecycle-reference.md)：区分当前应精简/补诊断的
+问题、命名候选和暂停迁移/未来扩展事项；这些建议尚未实施，不改变上述验收。
+
 用户要求从 RNG 专用接入扩展为完整平台 / VirtIO-MMIO 枚举迁移，并分 PR
 清楚过渡。当前仅完成 [入口、消费者与范围盘点](platform-enumeration-migration-scope.md)
 及 [配置依赖调查](platform-migration-config-inventory.md)，没有修改生产代码或默认配置。
