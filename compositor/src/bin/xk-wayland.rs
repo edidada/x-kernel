@@ -32,10 +32,7 @@ use smithay::{
     utils::{Buffer, DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
     wayland::{
         buffer::BufferHandler,
-        compositor::{
-            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, get_parent, with_states,
-        },
+        compositor::{CompositorClientState, CompositorHandler, CompositorState, get_parent, with_states},
         output::{OutputHandler, OutputManagerState},
 
         shell::xdg::{ToplevelSurface, XdgShellHandler, XdgShellState},
@@ -91,15 +88,19 @@ impl State {
             let Some(toplevel) = window.toplevel() else { continue };
             let surface = toplevel.wl_surface();
             let location = self.space.element_location(window).unwrap_or_default();
-            with_states(surface, |states| {
-                let Some(attributes) = states.data_map.get::<Mutex<SurfaceAttributes>>() else {
-                    return;
-                };
-                let attributes = attributes.lock().unwrap();
-                let Some(BufferAssignment::NewBuffer(buffer)) = attributes.buffer.as_ref() else {
-                    return;
-                };
-                let _ = with_buffer_contents(buffer, |ptr, _len, data| {
+            // The committed buffer lives in the renderer surface state; the raw
+            // `SurfaceAttributes.buffer` is only the pending assignment and is
+            // consumed by `on_commit_buffer_handler`.
+            let buffer = with_states(surface, |states| {
+                let data = states
+                    .data_map
+                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()?;
+                let data = data.lock().unwrap();
+                data.buffer().cloned()
+            });
+            let Some(buffer) = buffer else { continue };
+            {
+                let _ = with_buffer_contents(&buffer, |ptr, _len, data| {
                     let stride = data.stride as usize;
                     let offset = data.offset as usize;
                     let copy_width = (data.width as usize).min(width);
@@ -123,7 +124,7 @@ impl State {
                         }
                     }
                 });
-            });
+            }
         }
 
         let state = PlaneState {
