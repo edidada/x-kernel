@@ -760,9 +760,25 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
   选 VBUS 检测源），我们的 PHY init 没有对应的 VBUS-valid 路径。若 USB3 OTG 口的
   VBUS-valid 没起来，`Address Device` 要的第一次 SETUP 就发不出去 —— 与超时症状吻合。
   查 vendor `phy-rockchip-inno-usb2.c` 里 `typec_vbus_det` 影响的 GRF 写。
-- **`usbdp_phy0_u3`（usb3-phy）从未初始化**：dwc3 `phys=<&u2phy0_otg>,<&usbdp_phy0_u3>`，
-  我们只 acquire 了 usb2-phy。usbdp-phy 是 1666 行的 `phy-rockchip-usbdp.c`，若它的
-  pipe/电源没起，OTG 口的一部分可能缺。
+
+### USBDP（usb3-phy）provider 已写，卡在枚举顺序（当前阻塞点）
+
+`drivers/drv/phy/src/usbdp/`（commit `3097bf6df`）已把 `rockchip,rk3588-usbdp-phy`
+做成 kphy provider：probe 映射 PMA（`reg` +0x8000）+ 两个 GRF syscon + 5 个命名复位 +
+4 路时钟，按 `dp-lane-mux` 定 lane/flip，发布 `u3-port`；`hw_init` 逐字跑
+`udphy_init`（复位、RX LFPS、PMA 上电、init 序列 + 24M refclk 表、lane mux、
+LCPLL/RX-CDR lock 轮询），再清 U3 口的 GRF disable 字。dwc3 已直接 acquire
+`usb3-phy`（usbdp 发布的是 `u3-port` 本身，不用像 usb2-phy 那样做 port→block 解析）。
+
+**但设备枚举从没走到 `phy@fed80000` / `phy@fed90000`**：板上遍历 DT 的
+`enumerate_firmware_nodes_direct` 在 DWC3 处同步 `add_device → probe_pending`，dwc3
+probe 里 acquire usb3-phy 因 usbdp 尚未 probe 而 defer，枚举就此停住，永远轮不到
+usbdp 节点。`driver-init: usbdp register -> true` 有了，但 `phy@fed80000` 的
+compatible 从未出现在枚举里（连 "no match" 诊断都没它的份）。**这是当前唯一的
+硬阻塞**：要拆开"枚举全部节点"与"同步 probe"，或让 usbdp 在 dwc3 之前被枚举
+（例如把 phy provider 的 probe 提到 level 早于 dwc3，或枚举时把 usbdp 这类
+provider 节点排队到消费者之前）。在修好它之前 dwc3 拿不到 usb3-phy，`Address Device`
+超时那条线没法往下验证。
 
 ### 已落地
 
