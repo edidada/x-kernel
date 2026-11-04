@@ -5,7 +5,7 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose
 
-CPU-only storage and MMIO implement driver-os-api's CpuMemoryOp and MmioOp. The remaining
+CPU-only storage, MMIO and raw DMA implement driver-os-api's contracts. The remaining
 capabilities still implement device-res during PR-01's staged migration;
 there is only one CPU allocator provider implementation.
 
@@ -23,7 +23,7 @@ The crate's job is to wire the resource capabilities the driver subsystem
 needs onto the X-Kernel kernel subsystems:
 
 - `driver_os_api::MmioOp` -> `memspace::iomap_device` / `memspace::iounmap`
-- `device_res::DmaOp` -> the `kdma` coherent / streaming DMA API
+- `driver_os_api::DmaOp` -> the `kdma` coherent / streaming DMA API
 - `driver_os_api::CpuMemoryOp` -> ordinary fallible `kalloc` allocation
 - `device_res::IrqOp` -> the `kirq` shared hardirq and MSI-X API
 - `device_res::TimeOp` -> `khal::time::monotonic_time`

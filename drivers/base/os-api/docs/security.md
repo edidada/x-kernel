@@ -44,6 +44,20 @@ no newly registered callback; successful requests may invoke it before return.
 
 ## Held DMA provider boundary
 
+The consolidated raw DmaOp retains the existing mainline contract. Its
+copyable allocation/mapping records are release tuples, not independent owners.
+CoherentMem's private owner enum selects exactly one release path and retains
+the original tuple without reconstructing it from a translated device address.
+Typed pointer views do not initialize arbitrary Rust T values or grant CPU
+access while hardware owns the memory.
+
+This migration does not resolve the raw contract's safe-method/raw-pointer
+boundary or the static HAL's reconstructed release tokens. Those pre-existing
+limitations require a separately scoped contract change. Likewise the existing
+raw adapter's zero-bus streaming shortcut is not proof that address zero is
+invalid; no claim is made here that this release policy has been repaired.
+The stronger DeviceDma safety requirements below are not weakened to match it.
+
 Implementing `DeviceDma` is unsafe: successful coherent allocations must be
 valid, exclusive, aligned, zeroed and coherent throughout their lifetime, and
 all results must obey the captured device view. Guards retain the exact native

@@ -2,13 +2,13 @@
 
 ## Scope
 
-MMIO descriptors, MmioOp, IoMap and ResError now belong to driver-os-api;
+MMIO/DMA descriptors, MmioOp/DmaOp, IoMap/CoherentMem and ResError belong to driver-os-api;
 this crate only consumes them in device descriptions and devm helpers. The
 MMIO flows below describe that integration, not a second implementation.
 See [os-api design](../../../base/os-api/docs/design.md) and
 [security](../../../base/os-api/docs/security.md) for the owned contract.
 
-This analysis covers the remaining crate: `src/lib.rs` (device descriptions), `src/dma.rs` (coherent handles),
+This analysis covers the remaining crate: `src/lib.rs` (device descriptions),
 `src/irq.rs` (IRQ/MSI resources),
 `src/provider.rs`, and `src/time.rs`.
 No modules are excluded; every unsafe item is enumerated in the
@@ -19,8 +19,9 @@ inventory below. The host-side implementation lives in
 ## Overview
 
 `device-res` is x-kernel's unified abstraction layer through which drivers
-acquire hardware resources. MMIO access is delegated to driver-os-api; this module handles DMA buffers and contains `unsafe impl Send`, raw-pointer
-dereferences, and volatile accesses. Incorrect use or broken invariants
+acquire hardware resources. MMIO/DMA access and guards are delegated to
+driver-os-api; device cleanup retains their owners until teardown.
+Incorrect use or broken invariants
 can lead to undefined behavior or device malfunction.
 
 ## Trust Model
@@ -29,7 +30,7 @@ can lead to undefined behavior or device malfunction.
 Driver code (trusted)
    │
    │ safe API: IoMap::map_with, Irq::request_with,
-   │           DmaCoherent::alloc_with, devm_*_with_provider
+   │           CoherentMem::alloc_with, devm_*_with_provider
    │
    v
 ┌──────────────────────────────────────────────────────────────┐
@@ -80,18 +81,7 @@ This module:
 
 ## Unsafe Code Inventory
 
-### 2. `unsafe impl Send for DmaAllocation` (`src/lib.rs`)
-
-```rust
-unsafe impl Send for DmaAllocation {}
-```
-
-**Invariant**: `DmaAllocation` carries the coherent buffer's address
-values; ownership is exclusive to the `DmaCoherent` handle, and release
-returns to the provider that created the handle.
-
-**Why sound**: same argument — `DmaCoherent` is not `Sync`; when the
-handle moves between threads, buffer ownership moves with it.
+DMA guards and typed pointer views are audited in driver-os-api.
 
 MMIO volatile access and provider release are audited in driver-os-api.
 
@@ -129,11 +119,11 @@ The following must hold at all times:
 
 | Type | `Send` | `Sync` | Notes |
 |------|--------|--------|------|
-| `MmioMapping` | manual `unsafe impl` | auto `!Sync` (`NonNull`) | Address values may move between threads |
-| `DmaAllocation` | manual `unsafe impl` | auto `!Sync` (`NonNull`) | Address values may move between threads |
-| `IoMap` | auto (all fields `Send`) | `!Sync` (`NonNull`) | One handle is never shared across threads |
+| `MmioMapping` | auto | auto | Integer address metadata; a copy is not another mapping acquisition |
+| `DmaAllocation` | auto | auto | Integer address metadata; a copy does not authorize another release |
+| `IoMap` | auto | auto | Register protocols still require caller synchronization |
 | `Irq` | auto | auto | `IrqResource` is `Copy`; `bool` is `Send + Sync` |
-| `DmaCoherent` | auto (all fields `Send`) | `!Sync` (`NonNull`) | One handle is never shared across threads |
+| `CoherentMem` | auto | auto | Sharing ownership does not authorize concurrent CPU/device access |
 
 ## Threat Analysis
 
@@ -155,11 +145,11 @@ The following must hold at all times:
 |------|----------|----------|--------|------|----------|----------|
 | F-01 | `IoMap::map_with` returns an error | Provider refuses the mapping or mapping fails | Driver cannot access device registers | Device unavailable | 3 | `ResResult` forces error handling |
 | F-02 | `Irq::request_with` returns `Busy` | Provider refuses registration, e.g. shared-handler limit reached or underlying IRQ registration failed | Driver receives no interrupts | Device interrupt function unavailable | 3 | Returns `ResError::Busy`; driver aborts probe or picks another mode |
-| F-03 | `DmaCoherent::alloc_with` returns `NoMemory` | Kernel memory exhausted | DMA buffer allocation fails | DMA-dependent device function unavailable | 3 | Returns `ResError::NoMemory`; driver can degrade |
+| F-03 | `CoherentMem::alloc_with` returns `NoMemory` | Kernel memory exhausted | DMA buffer allocation fails | DMA-dependent device function unavailable | 3 | Returns `ResError::NoMemory`; driver can degrade |
 | F-04 | Offset overflow during MMIO access | `checked_add` detects usize overflow | `assert!` panic | Calling thread panics | 2 | `checked_add` prevents silent out-of-bounds |
 | F-05 | MMIO access out of bounds | `offset + size > region.size` | `assert!` panic | Calling thread panics | 2 | `assert!` blocks the actual out-of-bounds access |
 | F-06 | Drop releases the wrong shared IRQ handler | An armed handle constructed after a failed request, or the provider-returned token not stored | Current handler not released correctly, or other handlers on the line removed | Device interrupts misbehave | 2 | `Irq` is constructed only after `request_irq` succeeds and keeps the token so drop releases precisely |
-| F-07 | `IoMap::map_with` / `Irq::request_with` / `DmaCoherent::alloc_with` called in interrupt context | Driver acquires resources inside an interrupt handler | Provider methods may sleep or block | System hang | 1 | Documentation constrains provider methods to normal context; no runtime detection |
+| F-07 | `IoMap::map_with` / `Irq::request_with` / `CoherentMem::alloc_with` called in interrupt context | Driver acquires resources inside an interrupt handler | Provider methods may sleep or block | System hang | 1 | Documentation constrains provider methods to normal context; no runtime detection |
 | F-09 | MSI resource freed before its IRQ handler is unregistered | Wrong driver teardown order | Provider may free the backend vector while the OS-visible IRQ is still registered | Later vector reuse may hit a stale handler | 2 | Host providers should diagnose the ordering; drivers must release the handler before freeing the MSI resource |
 
 ## Failure Management

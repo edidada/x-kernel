@@ -11,14 +11,14 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use driver_os_api::{MmioMapping, MmioOp, MmioRegion};
+use driver_os_api::{DmaAllocation, DmaOp, DmaSpec, MmioMapping, MmioOp, MmioRegion};
 use kspin::SpinNoIrq;
 use unittest::def_test;
 
 use crate::{
-    DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp,
-    IrqResource, IrqThreadHandler, IrqTrigger, ResError, ResResult, ResourceDesc,
-    devm_alloc_coherent_with_provider, devm_iomap_with_provider, devm_request_irq_with_provider,
+    DeviceResource, IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqThreadHandler,
+    IrqTrigger, ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
+    devm_iomap_with_provider, devm_request_irq_with_provider,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

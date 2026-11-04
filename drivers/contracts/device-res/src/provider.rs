@@ -11,11 +11,10 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::ptr::NonNull;
 
-use driver_os_api::{IoMap, MmioOp, MmioRegion};
+use driver_os_api::{CoherentMem, DmaOp, DmaSpec, IoMap, MmioOp, MmioRegion};
 
 use crate::{
     DeviceResource, ResResult,
-    dma::{DmaCoherent, DmaOp, DmaSpec},
     irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
     time::TimeOp,
 };
@@ -97,8 +96,8 @@ pub fn devm_alloc_coherent_with_provider(
     device: &dyn DeviceResource,
     spec: DmaSpec,
 ) -> ResResult<(NonNull<u8>, u64)> {
-    let dma = DmaCoherent::alloc_with(provider, spec)?;
-    let cpu_ptr = dma.cpu_ptr();
+    let dma = CoherentMem::alloc_with(provider, spec)?;
+    let cpu_ptr = NonNull::new(dma.as_ptr()).ok_or(crate::ResError::InvalidResource)?;
     let bus_addr = dma.bus_addr();
     device.register_cleanup(Box::new(move || drop(dma)));
     Ok((cpu_ptr, bus_addr))

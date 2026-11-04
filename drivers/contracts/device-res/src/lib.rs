@@ -8,9 +8,9 @@
 //! regions, I/O port ranges, interrupts, coherent/streaming DMA buffers, and
 //! small capabilities such as a monotonic clock)
 //! without binding to any particular kernel. A host kernel provides capability
-//! implementations — [`DmaOp`], [`IrqOp`], [`TimeOp`] — to its
+//! implementations — [`IrqOp`], [`TimeOp`] — to its
 //! driver framework; framework code then acquires resources through RAII
-//! handles ([`Irq`], [`DmaCoherent`]) or the device-managed `devm_*`
+//! handles ([`Irq`]) or the device-managed `devm_*`
 //! helpers.
 //!
 //! Keeping the OS-semantic operations (map/unmap, request/release IRQ,
@@ -21,7 +21,6 @@
 
 extern crate alloc;
 
-mod dma;
 mod irq;
 mod provider;
 mod time;
@@ -38,7 +37,7 @@ pub enum ResourceDesc {
     /// Interrupt line.
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
-    Dma(crate::dma::DmaSpec),
+    Dma(driver_os_api::DmaSpec),
 }
 
 /// A collection of resources for a single device.
@@ -64,7 +63,6 @@ pub trait DeviceResource {
     fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>);
 }
 
-pub use dma::*;
 pub use irq::*;
 pub use provider::*;
 pub use time::*;

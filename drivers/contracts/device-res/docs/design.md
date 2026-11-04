@@ -55,7 +55,7 @@ traits, which is what makes drivers portable across kernels.
 
 ## Scope
 
-MMIO descriptors, MmioOp, IoMap and ResError now belong to driver-os-api;
+MMIO/DMA descriptors, MmioOp/DmaOp, IoMap/CoherentMem and ResError belong to driver-os-api;
 this crate only consumes them in device descriptions and devm helpers. The
 MMIO flows below describe that integration, not a second implementation.
 See [os-api design](../../../base/os-api/docs/design.md) and
@@ -65,7 +65,6 @@ See [os-api design](../../../base/os-api/docs/design.md) and
 drivers/contracts/device-res/
 ├── src/
 │   ├── lib.rs
-│   ├── dma.rs
 │   ├── irq.rs
 │   ├── provider.rs
 │   └── time.rs
@@ -88,7 +87,7 @@ drivers/contracts/device-res/
             │                       │                       │
             v                       v                       v
      ┌──────────────┐      ┌──────────────┐      ┌──────────────────┐
-     │  IoMap (MMIO)   │      │  Irq         │      │  DmaCoherent     │
+     │  IoMap (MMIO)   │      │  Irq         │      │  CoherentMem     │
      │  RAII handle │      │  RAII handle │      │  RAII handle     │
      │  map on new  │      │  request     │      │  alloc on new    │
      │  unmap drop  │      │  release drop│      │  free on drop    │
@@ -119,7 +118,7 @@ drivers/contracts/device-res/
 | `ResourceProvider` trait | Combined `MmioOp + IrqOp + DmaOp + TimeOp` trait; CPU storage is requested separately |
 | `IoMap` | RAII handle over an MMIO mapping, with register read/write methods using acquire/release fences |
 | `Irq` | RAII handle over an interrupt registration, released automatically on drop |
-| `DmaCoherent` | RAII handle over a coherent DMA buffer, freed automatically on drop |
+| `CoherentMem` | RAII handle over a coherent DMA buffer, freed automatically on drop |
 | `DeviceResource` trait | OS-neutral device abstraction through which drivers read resources and register cleanup callbacks |
 | `devm_*_with_provider` functions | Bind resource lifetime to a device, cleaning up automatically on probe failure or removal |
 
@@ -127,7 +126,7 @@ drivers/contracts/device-res/
 
 `device-res` keeps no global provider state. The driver framework holds the
 provider instance supplied by the host kernel and calls
-`IoMap::map_with()`, `Irq::request_with()`, `DmaCoherent::alloc_with()`, or
+`IoMap::map_with()`, `Irq::request_with()`, `CoherentMem::alloc_with()`, or
 `devm_*_with_provider()`. RAII handles remember the provider that created
 them and return to that same provider for release on drop.
 
@@ -199,13 +198,12 @@ devm_iomap_with_provider(provider, device, region, name)
 - **Explicit provider**: the driver framework holds the provider; resource
   handles remember their creating provider and add no shared mutable state.
   DMA, MMIO and IRQ handles retain their existing static-provider requirement.
-- **RAII handles**: `Irq` and `DmaCoherent` are not `Sync` (they
-  hold `NonNull` internally) and cannot be shared across threads. They may
-  move between threads (`Send`), but only one thread holds a handle at a
-  time.
+- **DMA ownership**: `CoherentMem` is Send + Sync, but that does not authorize
+  concurrent CPU/device access. The owner must enforce its DMA/cache protocol
+  and stop hardware before final release.
 - **MMIO access**: the `read*`/`write*` methods of `IoMap` use acquire/release
   fences to order register accesses. Multi-byte accesses carry
-  `debug_assert` alignment checks.
+  unconditional alignment checks.
 
 ## Design Decisions
 
@@ -256,7 +254,7 @@ in the RAII handle itself.
 |------|----------|
 | `IoMap` | Returns the original token to its retained provider, or invokes the unsafe constructor's release hook |
 | `Irq` | If `armed` and provider is `Some`, calls `provider.release_irq(resource, token)` |
-| `DmaCoherent` | If both allocation and provider are `Some`, calls `provider.free_coherent(allocation)` |
+| `CoherentMem` | Returns the original allocation to its provider or invokes its hook, selected by a private owner enum |
 
 `Irq` uses an `armed` flag so a failed `request_irq` does not trigger a
 spurious `release_irq` on drop, and it stores the provider-returned token

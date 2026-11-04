@@ -4,7 +4,7 @@
 
 use core::ptr::NonNull;
 
-use device_res::{DmaAllocation, DmaOp, DmaSpec};
+use driver_os_api::{DmaAllocation, DmaOp, DmaSpec};
 use khal::mem::{p2v, v2p};
 use net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
 

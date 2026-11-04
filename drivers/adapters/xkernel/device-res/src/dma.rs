@@ -2,11 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::DmaOp`] provider contract.
+//! X-Kernel implementation of the [`driver_os_api::DmaOp`] provider contract.
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult};
+use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult};
 
 use crate::XKernelResourceProvider;
 
@@ -15,8 +15,8 @@ impl DmaOp for XKernelResourceProvider {
         let layout =
             Layout::from_size_align(spec.len, spec.align).map_err(|_| ResError::InvalidResource)?;
         // SAFETY: `layout` is a valid non-zero layout and the returned buffer is
-        // owned exclusively by the `DmaCoherent` handle that wraps this
-        // allocation until it is freed via `free_coherent`.
+        // owned by the caller (a guard or static HAL) until the matching
+        // `free_coherent` returns the original allocation token.
         let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
         Ok(DmaAllocation {
             cpu_addr: info.cpu_addr.as_ptr() as usize,

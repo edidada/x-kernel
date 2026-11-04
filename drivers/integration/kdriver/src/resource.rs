@@ -12,12 +12,11 @@ use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use device_res::{
-    DmaSpec, IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler,
-    ResError,
+    IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler, ResError,
 };
 use device_res_xkernel::XKernelResourceProvider;
 use driver_base::{DriverError, DriverResult};
-use driver_os_api::MmioRegion;
+use driver_os_api::{DmaSpec, MmioRegion};
 use kdevice::DeviceObject;
 
 static XKERNEL_RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();

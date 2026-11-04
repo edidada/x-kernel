@@ -64,7 +64,7 @@ per-device DMA、VirtIO HAL 或 MSI owner 的最终设计。已有重复能力�
 |---|---|---|
 | 原 device-res/mmio.rs：描述、MmioOp、Io | 已删除重复模块；统一使用 os-api MmioOp/IoMap | 旧 devm 与新模型均保留同一 guard，宿主映射委托单一 provider |
 | ResourceDesc::IoPort / IoPortRange | os-api 有范围类型，但不是 MMIO 映射 | 保留 x86 I/O port 资源描述及现有访问路径，不把端口当内存映射或在迁移时丢弃 |
-| device-res/dma.rs：DmaOp、DmaCoherent、typed helpers | 底稿同时有 DmaOp 和 per-device DeviceDma/guard | 首批迁入主线当前可工作的 DMA 合同和单一 provider，保留 HAL 获取/释放语义；不并行引入第二套 per-device 接线，后续再演进 |
+| 原 device-res/dma.rs：DmaOp、DmaCoherent、typed helpers | 重复模块已删除；基础契约与 coherent guard 统一到 os-api | 保留 static HAL 原获取/释放协议；DeviceDma 的既有窗口/缓存策略不降级，不宣称两种 native backend 已合并 |
 | 原 device-res/memory.rs：CpuMemoryOp/CpuBuffer | 首批已迁入 os-api；block AHCI/SDHCI/word_io 与 host 实现直接依赖新归属 | 保留 fallible allocation、初始化和原 provider 配对释放；不得借 DMA 代替 CPU 存储 |
 | device-res/time.rs：TimeOp | os-api 的 ClkOps 是设备时钟控制，不是单调时间；当前扫描只有聚合 trait 与 host 实现，未见具体驱动调用 | 首批允许原样迁入以减少语义变化，不新增 clock provider；无消费者接口的删除可作为后续独立清理 |
 | device-res/irq.rs：普通 IRQ、IrqEvent、token、MSI；threaded 仅接口预留 | 新 IrqAction 只有 Handled/NotHandled；旧生产 adapter 也没有覆盖 threaded 默认 Unsupported | 首批保留普通 IRQ/事件来源/MSI 的现有语义；threaded 预留可随接口迁入但仍为 Unsupported，不新增线程化实现或借迁移改变释放协议 |
@@ -183,6 +183,23 @@ class、transport 的 PR 顺序仍需按依赖核对，不能把本页误读为�
   只读复核无阻断。日志位于 `.scratch/pr01-mmio/`。
 - CPU/MMIO 完成不等于 PR-01 完成；后续继续 DMA、IRQ、设备资源/cleanup
   职责迁移、旧 package 删除及双架构整体验收，再从 main 抽取 PR。
+
+### 第三批实施：DMA 基础契约与 coherent guard
+
+- 删除 device-res/dma.rs，所有基础类型与 DmaOp 只定义于 os-api；宿主 raw
+  provider、static VirtIO/ixgbe HAL、devm 与资源描述消费者直接使用统一类型。
+- 删除 DmaCoherent，统一为 CoherentMem。私有 owner 枚举选择 provider/完整
+  allocation token 或原有 hook 路径，避免同时复制 cpu/bus/len。typed helpers
+  迁入 dma/typed.rs，保持现有接口语义并共用同一 guard。
+- 不改设备级 DeviceDma 策略：窗口/mask、接收 bounce 初始化、拒绝时 discard
+  仍由既有实现负责。raw DmaMapping 不具备这些 native 元数据，不能机械替换。
+  本批不宣称 native backend 统一，也不宣称解决 raw DMA 历史安全签名问题。
+- AArch64 SMP4、无网络/vsock 定向 UT：260 passed、0 failed、5 ignored，
+  覆盖 os-api/device-res/adapter/model/kdriver/virtio，含新增原始释放 spec、
+  coherent 零 bus 地址、失败无释放及 typed guard 测试；覆盖率导出成功。
+- AArch64 与 x86 UNITTEST clippy 均通过，AArch64 canonical 配置已恢复；
+  x86 为编译/lint 检查，不冒称硬件或 QEMU 功能验收。只读复核与差异检查通过。
+  日志位于 `.scratch/pr01-dma/`。下一批处理 IRQ 契约和消费者。
 
 ## 8. 最新 main 对齐审计（2026-11-04）
 

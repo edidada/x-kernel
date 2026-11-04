@@ -7,9 +7,8 @@ use alloc::boxed::Box;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
-use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec};
 use driver_base::DriverResult;
-use driver_os_api::{MmioOp, MmioRegion};
+use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
@@ -157,7 +156,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) };
                 // Ownership of the allocation is handed to the virtio transport
                 // and returned via `dma_dealloc`. We deliberately do NOT wrap it
-                // in `DmaCoherent` (whose Drop would free it on return).
+                // in `CoherentMem` (whose Drop would free it on return).
                 let paddr = alloc.bus_addr as PhysAddr;
                 #[expect(
                     clippy::expect_used,

@@ -9,19 +9,33 @@ use core::{fmt, ptr::NonNull};
 use super::ReleaseHook;
 use crate::{ResError, ResResult};
 
+mod typed;
+pub use typed::{CoherentArray, CoherentBox};
+
 /// Coherent DMA memory; freed on drop.
 pub struct CoherentMem {
-    cpu: usize,
-    bus: u64,
-    len: usize,
-    release: Option<ReleaseHook>,
+    owner: CoherentOwner,
+}
+
+enum CoherentOwner {
+    Provider {
+        provider: &'static dyn DmaOp,
+        allocation: DmaAllocation,
+    },
+    Hook {
+        cpu: usize,
+        bus: u64,
+        len: usize,
+        release: Option<ReleaseHook>,
+    },
 }
 
 impl fmt::Debug for CoherentMem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CoherentMem")
-            .field("bus", &self.bus)
-            .field("len", &self.len)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CoherentMem")
+            .field("bus", &self.bus_addr())
+            .field("len", &self.len())
             .finish_non_exhaustive()
     }
 }
@@ -30,34 +44,67 @@ impl CoherentMem {
     /// Construct a guard for a host allocation with its matching release hook.
     pub fn new(cpu: usize, bus: u64, len: usize, release: Option<ReleaseHook>) -> Self {
         Self {
-            cpu,
-            bus,
-            len,
-            release,
+            owner: CoherentOwner::Hook {
+                cpu,
+                bus,
+                len,
+                release,
+            },
         }
     }
 
+    /// Acquire coherent storage and retain the exact provider allocation token.
+    ///
+    /// Device access must stop before drop. This preserves the provider's policy;
+    /// it does not infer a device DMA view.
+    pub fn alloc_with(provider: &'static dyn DmaOp, spec: DmaSpec) -> ResResult<Self> {
+        let allocation = provider.alloc_coherent(spec)?;
+        Ok(Self {
+            owner: CoherentOwner::Provider {
+                provider,
+                allocation,
+            },
+        })
+    }
+
     pub fn as_ptr(&self) -> *mut u8 {
-        self.cpu as *mut u8
+        match &self.owner {
+            CoherentOwner::Provider { allocation, .. } => allocation.cpu_addr as *mut u8,
+            CoherentOwner::Hook { cpu, .. } => *cpu as *mut u8,
+        }
     }
 
     pub const fn bus_addr(&self) -> u64 {
-        self.bus
+        match &self.owner {
+            CoherentOwner::Provider { allocation, .. } => allocation.bus_addr,
+            CoherentOwner::Hook { bus, .. } => *bus,
+        }
     }
 
     pub const fn len(&self) -> usize {
-        self.len
+        match &self.owner {
+            CoherentOwner::Provider { allocation, .. } => allocation.spec.len,
+            CoherentOwner::Hook { len, .. } => *len,
+        }
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 }
 
 impl Drop for CoherentMem {
     fn drop(&mut self) {
-        if let Some(release) = self.release.take() {
-            release();
+        match &mut self.owner {
+            CoherentOwner::Provider {
+                provider,
+                allocation,
+            } => provider.free_coherent(*allocation),
+            CoherentOwner::Hook { release, .. } => {
+                if let Some(release) = release.take() {
+                    release();
+                }
+            }
         }
     }
 }
@@ -321,6 +368,11 @@ pub struct DmaMapping {
     pub direction: DmaDirection,
 }
 
+/// Raw DMA allocation/mapping contract used by static HAL integrations.
+///
+/// Raw callers retain the original release tuple, buffer lifetime and cache
+/// synchronization obligations. DeviceDma supplies device-scoped policy; this
+/// contract does not infer a device window from ambient state.
 pub trait DmaOp: Sync {
     /// Allocate a coherent DMA buffer.
     fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation>;
@@ -391,3 +443,4 @@ pub enum DmaDirection {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/dma.rs");
+unittest::path_mod_test!(coherent_tests, "../ut-tests/coherent.rs");

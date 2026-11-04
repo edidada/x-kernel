@@ -43,6 +43,25 @@ core shutdown protocol.
 
 ## Held per-device DMA
 
+### Shared raw contract and coherent owner
+
+DmaDirection, DmaSpec, DmaAllocation, DmaMapping and DmaOp are defined only in
+os-api. Static VirtIO/ixgbe HALs keep their existing acquire/reconstruct/release
+protocol; this consolidation does not retrofit a device-context channel into
+those HALs. CoherentMem replaces the duplicate DmaCoherent owner. Its private
+owner enum retains either the original provider/allocation tuple or the
+device-scoped hook-backed addresses, never both. Provider-backed accessors read
+the retained tuple instead of copying its metadata into additional fields.
+Drop returns the original spec (including direction) and native address once.
+Typed CoherentBox/CoherentArray are pointer views over that same guard.
+
+DeviceDma remains a distinct device-policy contract, not another definition of
+DmaOp. Its existing native backend checks full windows/masks, zeroes coherent
+storage, and preserves untouched receive bytes. The raw DmaOp record lacks the
+bounce CPU address and discard operation needed by that policy implementation;
+do not replace it with raw map/unmap calls merely to remove similar code.
+Native backend consolidation is not claimed by this batch.
+
 `DeviceDma` is an unsafe, Send + Sync provider contract for one stable device
 DMA view. Unlike the legacy `DmaOp` records, it returns owned `CoherentMem` and
 non-Clone `StreamingMapping` guards. Streaming construction requires a release
@@ -106,8 +125,9 @@ OF 的局部 parent 地址必须先完成祖先转换，不能直接当作 CPU �
 `DmaWindow::IDENTITY` 是显式全地址恒等策略，不表示缺失固件属性。
 设备描述仍为唯一配置来源，宿主通过设备上下文读取；不增加第二份可变配置。
 
-IoMap、DevIrq、CoherentMem、ClkHandle 保存宿主提供的 ReleaseHook，
-Drop 通过 Option::take 至多调用一次。没有 hook 不代表拥有实际硬件资源；
+IoMap 和 CoherentMem 可直接保留原 provider/token；显式构造的 hook 路径以及
+DevIrq、ClkHandle 保存宿主提供的 ReleaseHook，Drop 至多调用一次。
+没有 hook 不代表没有资源：应按 guard 的实际获取方式判断所有权。
 宿主负责建立正确的获取/释放配对，驱动必须先停止硬件和依赖它的操作。
 
 EnabledClock 拥有一份 ClkOps Arc，独立于 ClkHandle 生命周期。

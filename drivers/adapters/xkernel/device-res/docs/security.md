@@ -55,7 +55,7 @@ such as VirtIO PCI/MSI-X that need direct provider capabilities.
 Invariants:
 
 - the layout is non-zero with a legal alignment;
-- the returned buffer is owned exclusively by a `device_res::DmaCoherent`
+- the returned buffer is owned exclusively by a `driver_os_api::CoherentMem`
   or a devres cleanup;
 - release rebuilds the layout from the same `DmaSpec`.
 

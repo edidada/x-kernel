@@ -463,12 +463,13 @@ Safety rationale:
 
 - `free_coherent` reconstructs the layout using the same `Layout::from_size_align`
   arguments as `alloc_coherent`.
-- `DmaAllocation` does not implement `Clone`; devres holds the sole ownership.
+- `DmaAllocation` is Copy metadata, not an independent owner; cleanup must
+  return only the original live acquisition once.
 
 Callers:
 
 - The `free_coherent` method of the `device-res-xkernel` provider, triggered by
-  `device_res::DmaAllocation` destruction or devres release.
+  `driver_os_api::CoherentMem` destruction or explicit static HAL release.
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 

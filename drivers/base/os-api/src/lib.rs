@@ -29,8 +29,8 @@ pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 pub use clock::{ClkHandle, ClkOps, ClkSpec, EnabledClock};
 pub use dma::{
-    CoherentMem, DeviceDma, DmaAllocation, DmaDirection, DmaInfo, DmaMapping, DmaOp, DmaSpec,
-    DmaWindow, StreamingMapping,
+    CoherentArray, CoherentBox, CoherentMem, DeviceDma, DmaAllocation, DmaDirection, DmaInfo,
+    DmaMapping, DmaOp, DmaSpec, DmaWindow, StreamingMapping,
 };
 pub use error::{ResError, ResResult};
 pub use irq::{
