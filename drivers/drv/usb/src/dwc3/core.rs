@@ -153,6 +153,24 @@ fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     // Read-only for now: the reference board reads 0x20180101 here (UTMI+ PHY
     // vendor control). If this differs, the PHY is being held out of the state
     // the controller expects, which no amount of VBUS or port power can fix.
+    // How many PHYs does the controller actually have, and are they awake? The
+    // reference programs every PHY it reports; a second PHY left at its reset
+    // value (SUSPHY=1) is a plausible reason for slot allocation to fail while
+    // No-Op still works.
+    info!(
+        "dwc3: GHWPARAMS0 {:#010x} 1 {:#010x} 3 {:#010x} 4 {:#010x}",
+        regs.read32(regs::GHWPARAMS0),
+        regs.read32(regs::GHWPARAMS1),
+        regs.read32(regs::GHWPARAMS3),
+        regs.read32(regs::GHWPARAMS4),
+    );
+    for phy in 0..2 {
+        info!(
+            "dwc3: phy{phy} GUSB2PHYCFG {:#010x} GUSB3PIPECTL {:#010x}",
+            regs.read32(regs::GUSB2PHYCFG + phy * 4),
+            regs.read32(regs::GUSB3PIPECTL + phy * 4),
+        );
+    }
     info!(
         "dwc3: GUSB2PHYACC0 {:#010x} GDCTL {:#010x} GCTL {:#010x}",
         regs.read32(regs::GUSB2PHYACC),

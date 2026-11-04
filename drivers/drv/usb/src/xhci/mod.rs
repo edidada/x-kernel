@@ -662,6 +662,15 @@ impl Xhci {
             return Err(KError::NoMemory);
         }
         let published = self.command.push(trb);
+        // Read back the TRB from our own DMA memory: what the controller fetches
+        // is memory, and memory is the only place where "what we submitted" and
+        // "what it parsed" cannot diverge.
+        let index = self.command.index - 1;
+        let raw = self.command.read(index);
+        info!(
+            "xhci: {what} trb[{index}] p {:#x} s {:#010x} c {:#010x} at {published:#x}",
+            raw.parameter, raw.status, raw.control
+        );
         let _ = published;
         // Doorbell 0, target 0 is the command ring.
         info!(
@@ -706,6 +715,9 @@ impl Xhci {
             dequeue as u32 | u32::from(self.command.current_cycle()),
         );
         self.bar.write32(crcr + 4, (dequeue >> 32) as u32);
+        // Re-publishing the pointer is only half of a restart: the controller
+        // also has to be told there is work, i.e. the command-ring doorbell.
+        self.bar.write32(self.doorbell, 0);
         info!("xhci: command ring re-armed at {dequeue:#x}");
     }
 
