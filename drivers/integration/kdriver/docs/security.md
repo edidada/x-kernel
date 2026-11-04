@@ -160,6 +160,10 @@ Unmap failures are logged and are not retried by releasing another reference.
 
 ## Native ordinary IRQ provider
 
+Reverse-map owner preparation failure remains NoMemory at the capability seam;
+out-of-range hardware numbers remain InvalidResource. Neither failure authorizes
+hardware access or produces a successful action token.
+
 NativeIrq requests reject non-sleepable context before registration. Callbacks
 are ordinary non-sleeping hardirq callbacks, not threaded or pseudo-NMI handlers.
 The driver must stop hardware before dropping its IRQ guard and must release in

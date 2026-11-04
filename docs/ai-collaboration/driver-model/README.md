@@ -12,6 +12,10 @@
 能力，DMA 获取合同也需收口，不能直接搬入并删除旧 crate。此时是 PR 范围整理，
 尚未生成代码 PR、推送或完成验收。PR-01 整理至可评审状态后再继续 transport。
 
+开发底稿已 rebase 到 main `f429a5953`，保留最新 KIRQ owner 准备和主线资源能力，
+并补齐 NativeIrq 的 NoMemory/InvalidHwirq 错误映射。旧资源层与此 main 基线一致；
+新增兼容检查不等于 os-api 全量迁移完成，详细审计与验证见 PR-01 文档第 8 节。
+
 ## 当前处理顺序：RNG 生命周期评审收口
 
 用户要求集中整理问题、分批解决，特别明确缺少独立 virtio-mmio 驱动职责。

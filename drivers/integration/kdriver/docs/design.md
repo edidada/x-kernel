@@ -273,6 +273,9 @@ resource and returned action ID. Release removes that exact shared action and
 synchronously drains it before returning, outside locks needed by callbacks.
 Queued replay must be able to drain through kirq's boot-installed BH executor.
 Core ConfigurationFailed maps to Io and UnsupportedFlow to Unsupported.
+Fallible reverse-map owner preparation maps NoMemory to NoMemory; hardware
+numbers outside the domain range map InvalidHwirq to InvalidResource. Mapping
+and registration preserve these errors rather than manufacturing a resource/token.
 Configuration failure publishes no new action token and preserves existing
 shared owners, but may retain resolved metadata and leave hardware masked; it
 does not guarantee hardware rollback. Successful retry restores delivery only

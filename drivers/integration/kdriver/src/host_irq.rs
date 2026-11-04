@@ -177,12 +177,15 @@ fn release_with(
 
 fn map_error(error: kirq::IrqDescError) -> ResError {
     match error {
-        kirq::IrqDescError::VirqExhausted { .. } => ResError::NoMemory,
+        kirq::IrqDescError::VirqExhausted { .. } | kirq::IrqDescError::NoMemory => {
+            ResError::NoMemory
+        }
         kirq::IrqDescError::InvalidContext { .. } => ResError::BadState,
         kirq::IrqDescError::TeardownInProgress { .. } => ResError::Busy,
         kirq::IrqDescError::ConfigurationFailed { .. } => ResError::Io,
         kirq::IrqDescError::UnsupportedFlow { .. } => ResError::Unsupported,
-        kirq::IrqDescError::HwirqConflict { .. }
+        kirq::IrqDescError::InvalidHwirq { .. }
+        | kirq::IrqDescError::HwirqConflict { .. }
         | kirq::IrqDescError::DomainConflict { .. }
         | kirq::IrqDescError::VirqConflict { .. }
         | kirq::IrqDescError::MappingConflict { .. }

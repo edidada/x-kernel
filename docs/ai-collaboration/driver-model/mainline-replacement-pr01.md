@@ -57,8 +57,9 @@
 | DeviceResource/register_cleanup + provider.rs 的 devm helper | kdevice::DeviceObject 实现 cleanup sink | 保留已用生命周期，不把 cleanup sink 变成 OS provider；helper 归框架集成，guard 归能力层 |
 | device-res-xkernel：MMIO/DMA/IRQ/CPU/time 实现 | 新 NativeIrq/host_dma/host_mmio 在 kdriver 另有实现 | 主线 PR 只保留单一 adapter；可提取已验证机制，不能合入两套宿主接线 |
 
-主线 adapter 已新增 `IrqDescError::NoMemory`、`InvalidHwirq` 的映射，当前底稿
-尚未包含；提取时必须保留。KIRQ/MSI 的并行开发由 IRQ 负责人负责，本 PR 不
+主线 adapter 已新增 `IrqDescError::NoMemory`、`InvalidHwirq` 的映射；初次审计
+底稿尚未包含，现已随 rebase 保留并补齐 NativeIrq 接线，见第 8 节。提取时必须
+保留这两类错误语义。KIRQ/MSI 的并行开发由 IRQ 负责人负责，本 PR 不
 改其 worktree、不另造 IRQ core 释放机制，也不能回退已合入的核心合同。
 
 ## 4. 必须同批迁移的消费者
@@ -130,3 +131,45 @@
 
 先把 PR-01 整理至可评审状态，再恢复 transport 开发。后续设备注册/绑定、
 class、transport 的 PR 顺序仍需按依赖核对，不能把本页误读为全部顺序已定。
+
+## 8. 最新 main 对齐审计（2026-11-04）
+
+开发底稿已从 `eec7d7722` rebase 到 `origin/main=f429a5953`，rebase 后为
+`a5aabed3d`。main 是分支祖先；64 个提交的 range-diff 只有两处冲突解决变化：
+Cargo.lock 同时保留 kirq 的新 kalloc-types 依赖和共享 irq-types 依赖，kirq
+设计文档同时保留主线 fallible reverse-map owner 与分支的软件派发测试说明。
+未修改其他 worktree，也没有推送。
+
+逐项保留检查：
+
+- 旧 device-res、device-res-xkernel、block、kdevice 与此 main 基线内容一致，
+  包括 CPU buffer、threaded IRQ 以及主线 adapter 新增的错误分类。
+- 主线 KIRQ 的 fallible reverse-map owner 准备、MSI 无分配删除与失败恢复机制
+  保留。基础类型抽取仅替换类型定义来源，不删除新增 NoMemory/InvalidHwirq。
+- 新 NativeIrq 原有 exhaustive match 缺少这两类错误；已补 NoMemory → NoMemory、
+  InvalidHwirq → InvalidResource，并增加 map/request 两条入口的错误传播用例。
+- 主线的 kbox owner 发布前准备、kmutex FIFO 等更新通过 rebase 继承，不以
+  开发分支旧代码覆盖。现有 MSI 后端拒绝与消费者 owner 丢失问题仍按原交接处理，
+  不把核心无分配释放误称为已解决全部驱动 teardown 问题。
+
+这些检查证明最新 main 的能力没有被 rebase 覆盖，不代表 os-api 全量迁移已完成。
+第 3 节的 threaded IRQ、CPU 内存、TimeOp 去留和 DMA 合同仍是 PR-01 的明确工作，
+不得在缺失这些决策/实现时删除旧 crate。验证日志放在
+`.scratch/driver-pr01-rebase/`。
+
+AArch64 canonical defconfig 经 `make defconfig` 后，独立 worktree/disk、SMP4、
+无网络/vsock，非性能测量；两组 QEMU UT 均成功导出 coverage：
+
+- `UNITTEST_CRATE=driver_os_api,device_res,device_res_xkernel,driver_model,kdriver`：
+  188 passed / 0 failed / 5 ignored，含新的 map/request 错误传播用例。
+  五项忽略为 opt-in MMIO 专项，不计为通过。
+- `UNITTEST_CRATE=kirq,block`：266 passed / 0 failed / 0 ignored，包含主线
+  MSI owner 准备失败/槽恢复、IRQ admission 及 block CPU buffer 失败路径。
+
+adapter 新增测试是注入错误的传播验证，不冒充真实 allocator OOM；核心 MSI
+用例也不替代真实设备停止或已发 MSI 的硬件排序证明。两路只读评审无阻断。
+
+AArch64 与 x86_64 各自 canonical defconfig 下的 `make clippy UNITTEST=y`
+均通过；这是双架构编译/lint 检查，不是 x86 QEMU 启动验收。已恢复 AArch64
+canonical 配置。修改文件 rustfmt 和 diff 检查通过，旧资源层与 main 的内容
+一致性及 range-diff 核对均通过。

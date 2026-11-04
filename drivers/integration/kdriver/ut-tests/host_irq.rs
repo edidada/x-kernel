@@ -193,6 +193,42 @@ fn native_irq_failures_never_report_successful_registration_or_release() {
 }
 
 #[def_test]
+fn native_irq_preserves_owner_preparation_and_hwirq_bounds_errors() {
+    let route = IrqRouteDesc {
+        controller: IrqController::IoApic,
+        domain: Some(kirq::IO_APIC_DOMAIN),
+        hwirq: 37,
+        trigger: IrqTrigger::LevelHigh,
+    };
+    let resource = IrqResource::mapped(
+        Virq::new(903),
+        route.trigger,
+        route.controller,
+        route.domain,
+        route.hwirq,
+    );
+    for (error, expected) in [
+        (kirq::IrqDescError::NoMemory, ResError::NoMemory),
+        (
+            kirq::IrqDescError::InvalidHwirq { hwirq: 37 },
+            ResError::InvalidResource,
+        ),
+    ] {
+        assert_eq!(map_route_with(route, |_| Err(error)), Err(expected));
+        assert_eq!(
+            request_with(
+                resource,
+                Arc::new(|| IrqAction::Handled),
+                true,
+                |_| None,
+                |_, _| Err(error),
+            ),
+            Err(expected)
+        );
+    }
+}
+
+#[def_test]
 fn native_irq_configuration_errors_preserve_typed_request_failures() {
     let resource = IrqResource::mapped(
         Virq::new(903),
