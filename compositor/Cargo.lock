@@ -993,6 +993,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "smithay",
+ "tracing",
  "tracing-subscriber",
 ]
 
