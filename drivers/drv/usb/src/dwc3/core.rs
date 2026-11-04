@@ -49,7 +49,10 @@ pub fn init(
         log::error!("dwc3: the controller does not answer at offset 0");
         return Err(ProbeError::Fatal(driver_base::RuntimeError::Io));
     }
+    // Order matches the reference implementations: reset first, then select the
+    // host role. (Trying it the other way round changes nothing observable.)
     core_soft_reset(regs);
+    set_host_mode(regs);
     let params = HwParams {
         gsnpsid: regs.read32(regs::DWC_USB3_GSNPSID),
         hwparams0: regs.read32(regs::GHWPARAMS0),
@@ -70,7 +73,6 @@ pub fn init(
         return Err(ProbeError::Fatal(driver_base::RuntimeError::Io));
     }
 
-    set_host_mode(regs);
     program_usb2_phy(regs, utmi_wide, dis_enblslpm);
     program_usb3_pipe(regs);
     let _ = dev;

@@ -608,11 +608,37 @@ impl Xhci {
         self.bar.write32(self.doorbell, 0);
         let event = self.wait_event(regs::trb::COMMAND_COMPLETION, what)?;
         let code = event.completion_code();
+        // The completion event's parameter word is the address of the command TRB
+        // that finished, so it identifies which command the code belongs to --
+        // "we consumed someone else's completion" and "this command failed" look
+        // identical otherwise.
+        info!(
+            "xhci: {what} completion code {code} for trb {:#x} (slot {}, submitted {:#x})",
+            event.parameter,
+            event.slot_id(),
+            published,
+        );
         if code != regs::code::SUCCESS {
             log::error!("xhci: {what} failed, completion code {code}");
+            // A command error stops the controller from processing the ring, so
+            // every following command would time out. Hand it the dequeue
+            // pointer again (with the current cycle state) to restart it.
+            self.rearm_command_ring();
             return Err(KError::Io);
         }
         Ok(event)
+    }
+
+    /// Re-publishes the command ring dequeue pointer after a command error.
+    fn rearm_command_ring(&self) {
+        let dequeue = self.command.dequeue_address();
+        let crcr = self.operational + op::CRCR;
+        self.bar.write32(
+            crcr,
+            dequeue as u32 | u32::from(self.command.current_cycle()),
+        );
+        self.bar.write32(crcr + 4, (dequeue >> 32) as u32);
+        info!("xhci: command ring re-armed at {dequeue:#x}");
     }
 
     /// `Enable Slot`: asks the controller for a device slot.

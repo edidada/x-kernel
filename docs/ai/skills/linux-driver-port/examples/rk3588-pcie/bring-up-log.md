@@ -860,7 +860,21 @@ xhci: enable slot failed, completion code 5
 
 已通：VBUS、DWC3 偏移/软复位/host 模式、GRF U3、PHY、端口检测、端口复位(High-Speed)、
 **事件环**、**命令环（No-Op 验证）**。剩余：`Enable Slot` 的 TRB 被拒 ——
-下一个判别实验是对比参考实现里 Enable Slot TRB 的字段（特别是 slot type / 保留位）。
+### `Enable Slot` 被拒（当前卡点）已排除的项
+
+| 排查项 | 结果 |
+|---|---|
+| 完成事件是否属于我们的命令 | 是：事件 `parameter` = 我们提交的 TRB 地址（`0x2a40010`） |
+| 命令环是否通 | 通：同一环上 No-Op(type 23) 返回 code 1 |
+| 环指针 `CRCR` | 正常：读回 `0x8` 与参考板一致（只回状态位） |
+| TRB 结构 | 与 No-Op 完全同构，仅 type 字段不同（`0x2000` vs `0x5c00`） |
+| 软复位/模式顺序 | 先复位后选 host，或先选 host 后复位 —— 结果相同 |
+| 命令出错后恢复 | 已按规范在失败后重写 `CRCR` 重新武装环（`re-armed at 0x2a40020`） |
+| 命令类型普查（type 8–17） | type 9 → code 1；8、10–17 → 超时（error 后环会停，需重武装） |
+
+**下一步候选**：① 逐字段对齐 Linux `xhci_queue_slot_control` 的 TRB 构造（尤其 dword3 的
+slot type/保留位）；② 检查 `CONFIG.MaxSlotsEn` 的写入时机（我们在 `CRCR` 之前写）；
+③ 用标记值扫描确认这条命令是否真的只有 type 字段差异。
 
 ### 从参考实现补上的一步：USB GRF 的 U3 端口使能
 
