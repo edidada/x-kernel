@@ -872,9 +872,27 @@ xhci: enable slot failed, completion code 5
 | 命令出错后恢复 | 已按规范在失败后重写 `CRCR` 重新武装环（`re-armed at 0x2a40020`） |
 | 命令类型普查（type 8–17） | type 9 → code 1；8、10–17 → 超时（error 后环会停，需重武装） |
 
-**下一步候选**：① 逐字段对齐 Linux `xhci_queue_slot_control` 的 TRB 构造（尤其 dword3 的
-slot type/保留位）；② 检查 `CONFIG.MaxSlotsEn` 的写入时机（我们在 `CRCR` 之前写）；
-③ 用标记值扫描确认这条命令是否真的只有 type 字段差异。
+**已排除**：TRB 字段与 Linux `xhci_queue_slot_control` **逐字节相同**
+（`field1..3 = 0`，`field4 = TRB_TYPE(8) | SLOT_ID(0) | cycle`）；`CONFIG.MaxSlotsEn = 0x40` 已写入。
+
+**DWC3 给 xHCI 挂的 quirk（`drivers/usb/dwc3/host.c`）—— 重要**：
+
+```
+xhci-sg-trb-cache-size-quirk
+write-64-hi-lo-quirk          ← 64 位寄存器必须【先高半、后低半】写入
+usb3-lpm-capable / usb2-lpm-disable
+quirk-broken-port-ped         仅 dwc3 <= 3.00a
+num-hc-interrupters
+```
+
+`write-64-hi-lo-quirk` 说明：本 IP 上 64 位寄存器（`DCBAAP`/`CRCR`/`ERSTBA`/`ERDP`）
+的**写序是 hi→lo**，与通用的 `lo_hi_writeq` 相反。这一轮我曾把它"修正"成 lo→hi，
+属于按通用规范改错特例 —— 后续必须保持 hi→lo。
+
+**剩余候选**：① 确认是否 `num-hc-interrupters` 影响（我们只用 interrupter 0）；
+② 用标记值扫描直接验证 `Enable Slot` TRB 的四个 dword 是否原样进了环；
+③ 若字段确实无误，则问题在控制器侧（DWC3 slot 管理），需要对照 dwc3 的 `GCTL`/`DCFG`
+相关位。
 
 ### 从参考实现补上的一步：USB GRF 的 U3 端口使能
 
