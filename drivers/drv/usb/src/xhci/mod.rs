@@ -924,6 +924,17 @@ impl Xhci {
                 _ => continue,
             }
             log::info!("xhci: port {} has a device, bringing it up", port + 1);
+            // Behaviour, not read-back: a port reset must make the controller
+            // write a Port Status Change Event into the event ring. If the ring
+            // memory is untouched afterwards, the event ring was never published
+            // -- which is a fact about the controller instead of a guess based on
+            // a register whose read-back this IP does not honour.
+            let before = self.event.read(0);
+            log::info!(
+                "xhci: event ring[0] before reset p {:#x} c {:#x}",
+                before.parameter,
+                before.control
+            );
             match self.prepare_device(dev, port) {
                 Ok(address) => {
                     // The bus core owns every request from here: descriptors,
@@ -938,7 +949,16 @@ impl Xhci {
                         }
                     }
                 }
-                Err(err) => log::error!("xhci: port {} could not be prepared: {err:?}", port + 1),
+                Err(err) => {
+                    let after = self.event.read(0);
+                    log::error!(
+                        "xhci: port {} could not be prepared: {err:?}; event ring[0] now p {:#x} \
+                         c {:#x}",
+                        port + 1,
+                        after.parameter,
+                        after.control
+                    );
+                }
             }
         }
         (found, ready)
@@ -954,11 +974,14 @@ impl Xhci {
         dev: &Device<'_, driver_base::PlatformBus>,
         port: usize,
     ) -> Result<u8, KError> {
+        // The port is reset first, as Linux' hub path does: the reset is what
+        // brings the device to a known state and makes the controller report it,
+        // and `Address Device` afterwards relies on that state.
+        let speed = self.reset_port(port)?;
         let slot_id = self.enable_slot()?;
         let slot = self.allocate_slot(dev, slot_id)?;
         self.slots.push(slot);
         let slot_index = self.slots.len() - 1;
-        let speed = self.reset_port(port)?;
         // The control endpoint's packet size follows the speed: high and Super
         // speed devices always use 64, low speed always 8, full speed is told by
         // the device descriptor -- which cannot be read before addressing, so
