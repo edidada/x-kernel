@@ -20,6 +20,7 @@ use smithay::{
         },
     },
     desktop::{Space, Window},
+    output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
     input::{Seat, SeatHandler, SeatState},
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -271,7 +272,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shm_state = ShmState::new::<State>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<State>(&display_handle);
     let mut seat_state = SeatState::new();
-    let seat = seat_state.new_wl_seat(&display_handle, "seat0");
+    let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
+    seat.add_keyboard(Default::default(), 200, 25)?;
+    seat.add_pointer();
+
+    // Chromium asks for an output before it creates its window.
+    let output = Output::new(
+        "Virtual-1".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "X-Kernel".into(),
+            model: "Virtual-1".into(),
+        },
+    );
+    output.change_current_state(
+        Some(OutputMode {
+            size: (width as i32, height as i32).into(),
+            refresh: 60_000,
+        }),
+        None,
+        None,
+        None,
+    );
+    output.create_global::<State>(&display_handle);
 
     let socket = ListeningSocketSource::new_auto()?;
     let socket_name = socket.socket_name().to_os_string();
