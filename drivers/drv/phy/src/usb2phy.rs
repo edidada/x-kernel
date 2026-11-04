@@ -143,6 +143,10 @@ impl PhyHwOps for Usb2Phy {
         let enabled = self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
         *self.clk480m_enabled.lock() = Some(enabled);
         self.set_suspended(false);
+        // The reference (and the U-Boot code it mirrors) waits 2 ms here for the
+        // UTMI clock to stabilise before the controller is allowed to touch the
+        // port; without it the PHY can accept a connect but not a transaction.
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(2_000));
         Ok(())
     }
 
