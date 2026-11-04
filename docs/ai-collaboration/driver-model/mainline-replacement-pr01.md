@@ -107,6 +107,58 @@ per-device DMA、VirtIO HAL 或 MSI owner 的最终设计。已有重复能力�
 
 ## 5. PR 内的实现顺序与删除清单
 
+### Provider 随契约一起收口（最新确认）
+
+用户同意：不仅迁移 os-api，还要把两边有效的宿主能力实现收敛到新框架使用的
+provider。不能只搬类型而让旧 adapter 与 kdriver/host_* 长期各自实现同一能力。
+先在当前分支完成接线与回归，再抽取主线 PR；不是先抽取再适配新模型。
+
+目标位置拟为 `drivers/adapters/xkernel/os-api`，包名 `driver-os-api-xkernel`，
+Rust 名 `driver_os_api_xkernel`。它实现 os-api，不依赖 driver-model、kdevice、
+kdriver 或具体设备驱动。统一的是宿主实现归属，不要求所有能力塞进一个总 trait
+或一个总 provider 对象；可以保留职责明确的各家族实现。
+
+```text
+设备模型 / kdriver 服务组合 ──► driver-os-api-xkernel ──► kirq/kdma/memspace/kalloc
+          │                            │
+          └──────────────► driver-os-api ◄┘
+```
+
+| 当前部分 | 目标职责与迁移要求 |
+|---|---|
+| 旧 adapter 的 CPU/MMIO/raw DMA/time | 纳入统一宿主 adapter，保留当前有效协议；TimeOp 尚需完成契约迁移 |
+| kdriver/host_irq::NativeIrq 与旧 adapter/irq | 统一普通 IRQ 接入，保留精确 token/drain、旧事件来源与 MSI 能力；不是搬进两个模块就算完成 |
+| kdriver/host_dma 的 native 分配、bounce、地址翻译、释放 | 归宿主 adapter；内部可以区分 coherent/streaming 生命周期，但底层 native 获取/回收只维护一份 |
+| HostDeviceDma 保留 DeviceRef、读取 descriptor.dma | 留在框架接线，按操作借用权威 DMA 描述；不能为搬 crate 缓存第二份设备配置或让 adapter 依赖 model |
+| host_services 的 DeviceServices/extension/management lock 组合 | 留在 kdriver；这是设备框架服务，不是 OS 能力 provider |
+| host_mmio 薄接线 | 可内联到服务组合，或仅做 RuntimeError 转换；不得恢复 memspace 映射实现 |
+| devm helpers、DeviceResource、资源集合与 cleanup | 随设备框架职责迁移，不放进宿主 provider |
+
+DMA 收口必须区分两个地址：设备可见地址与 native 回收凭证。raw static HAL
+保持既有协议，设备级路径仍验证整个区间/window/mask、初始化接收 bounce、
+拒绝时 discard 而不破坏原 buffer。现有 raw DmaMapping 没有 bounce CPU 地址
+及 discard 操作，不能用其 map/unmap 强行替换设备级实现。应把所需 native
+owner/操作放在 adapter 内部，使两种入口复用底层机制，不为了内部复用扩大
+os-api 的公共合同。若需要修改 kdma 或 vendor，先单列前置，不隐含批准。
+
+IRQ 同样不能直接把 NativeIrq 当作旧实现的完整替代：它目前只实现普通 IRQ，
+旧消费者仍用事件来源信息、MSI 分配/释放及 threaded 预留。先统一公共合同，
+再迁移两个模型的消费者到同一宿主注册/释放路径。threaded Unsupported 继续
+保持，不新增线程化项目；MSI owner/网络 close 重设计仍延期。
+
+接下来按以下增量执行，每步都须构建和定向回归：
+
+1. 收口 IRQ/time 契约与消费者，同时合并对应宿主实现，不再只搬类型。
+2. 把设备级 DMA native 后端迁入统一 adapter，与 raw 入口复用内部所有者；
+   保留原始设备描述读取位置，删除 kdriver 内的重复 native 操作。
+3. 删除旧 adapter package，更新 Cargo、测试入口、边界规则和模块文档。
+   重命名是上述职责归并的结果，不单独用重命名宣称迁移完成。
+4. 验证 adapter 对设备模型无反向依赖，旧 package/重复能力实现无残留；
+   重跑 CPU/MMIO/DMA、IRQ shared/drain、RNG 完整生命周期与现有 HAL 回归。
+
+本节为实施边界，尚未完成 provider 迁移。先前 CPU/MMIO/DMA 批次的验收只覆盖
+当时已实现的改动，不替代本次宿主收口验收。
+
 以下是同一个 PR 的工作顺序，不是三个允许新旧长期共存的独立 PR：
 
 1. 以主线已用合同为起点确定迁移映射：能力类型/Op/guard 归 os-api，描述集合

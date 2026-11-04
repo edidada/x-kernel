@@ -17,6 +17,9 @@ per-device DMA、VirtIO HAL、MSI owner 最终设计不再阻塞首个 PR，而�
 先在当前新框架分支完成归属迁移与回归，再从最新 main 抽取 PR-01 并独立验收。
 已迁移 CPU 内存契约及块驱动消费者，继续统一 MMIO 契约、guard 和宿主映射；
 DMA 基础契约与 coherent guard 已收敛；IRQ、资源集合及清理职责迁移和旧 crate 删除尚未完成。
+用户进一步确认 provider 要随 os-api 一起收口。后续不是单独搬 IRQ 类型，
+而是同步统一宿主实现：native 能力归 adapter，设备描述读取与服务组合留在
+kdriver。具体迁移边界和顺序见 PR-01 第 5 节；provider 迁移尚未实现。
 尚未生成代码 PR、推送或完成验收。PR-01 整理至可评审状态后再继续 transport。
 
 开发底稿已 rebase 到 main `f429a5953`，保留最新 KIRQ owner 准备和主线资源能力，
