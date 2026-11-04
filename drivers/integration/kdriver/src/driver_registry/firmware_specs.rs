@@ -8,7 +8,8 @@
     feature = "ahci",
     feature = "bcm2835-sdhci",
     feature = "sdmmc",
-    feature = "fxmac"
+    feature = "fxmac",
+    feature = "rockchip-vop2"
 ))]
 use kdevice::FirmwareMatchSpec;
 
@@ -41,5 +42,13 @@ pub(crate) const SDMMC: FirmwareMatchSpec = FirmwareMatchSpec {
 pub(crate) const FXMAC: FirmwareMatchSpec = FirmwareMatchSpec {
     alias: "fxmac",
     dt_compatibles: &["cdns,phytium-gem-1.0", "cdns,gem", "cdns,zynqmp-gem"],
+    acpi_ids: &[],
+};
+
+/// Rockchip RK3588 VOP2 display controller.
+#[cfg(feature = "rockchip-vop2")]
+pub(crate) const RK3588_VOP: FirmwareMatchSpec = FirmwareMatchSpec {
+    alias: "rockchip-vop2",
+    dt_compatibles: &["rockchip,rk3588-vop"],
     acpi_ids: &[],
 };

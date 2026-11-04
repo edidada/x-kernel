@@ -292,9 +292,20 @@ impl SerialPort {
     ///
     /// Must not be called from NMI context; use [`Self::write_data_atomic`].
     pub fn write_data(&self, bytes: &[u8]) {
-        let mut io = self.io.lock();
-        for &c in bytes {
-            io.backend.send_byte(c);
+        {
+            let mut io = self.io.lock();
+            for &c in bytes {
+                io.backend.send_byte(c);
+            }
+        }
+        // Mirror stdout output to the secondary console sink (e.g. a
+        // framebuffer text console) after the UART lock is released, so a slow
+        // sink cannot stall other writers of this port. Auxiliary ports are not
+        // the console and are deliberately left alone.
+        if matches!(self.role, SerialRole::Stdout)
+            && let Some(sink) = khal::console::output_mirror()
+        {
+            sink(bytes);
         }
     }
 

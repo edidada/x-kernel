@@ -1526,6 +1526,7 @@ version = "0.3.0-dev"
 dependencies = [
  "display",
  "kalloc",
+ "karch",
  "kclass",
  "khal",
  "kspin",
@@ -2339,7 +2340,9 @@ dependencies = [
  "memaddr",
  "memspace",
  "net",
+ "of",
  "pci",
+ "rockchip-vop2",
  "smallvec",
  "unittest",
  "virtio",
@@ -4949,6 +4952,15 @@ dependencies = [
  "const-default",
  "libc",
  "rustversion",
+]
+
+[[package]]
+name = "rockchip-vop2"
+version = "0.3.0-dev"
+dependencies = [
+ "device-res",
+ "display",
+ "tock-registers 0.10.1",
 ]
 
 [[package]]

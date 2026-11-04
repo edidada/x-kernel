@@ -141,20 +141,20 @@ impl DeviceFileOps for FrameBuffer {
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let slice = self.as_mut_slice();
-        let len = buf
-            .len()
-            .min((slice.len() as u64).saturating_sub(offset) as usize);
-        buf[..len].copy_from_slice(&slice[..len]);
+        let start = offset as usize;
+        let len = buf.len().min(slice.len().saturating_sub(start));
+        buf[..len].copy_from_slice(&slice[start..start + len]);
         Ok(len)
     }
 
     fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let slice = self.as_mut_slice();
-        if offset >= slice.len() as u64 {
+        let start = offset as usize;
+        if start >= slice.len() {
             return Err(VfsError::StorageFull);
         }
-        let len = buf.len().min(slice.len() - offset as usize);
-        slice[..len].copy_from_slice(&buf[..len]);
+        let len = buf.len().min(slice.len() - start);
+        slice[start..start + len].copy_from_slice(&buf[..len]);
         // Make the written pixels visible: write() is the fbdev "explicit
         // demand" trigger (see module docs). Failure is not fatal for the
         // write itself; the host may be busy presenting another resource.

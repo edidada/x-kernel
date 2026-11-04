@@ -32,11 +32,14 @@ extern crate log;
 
 extern crate alloc;
 
-use alloc::sync::Arc;
+pub mod console;
+mod font;
+
+use alloc::{boxed::Box, sync::Arc};
 
 use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
 use kalloc::{PageRef, UsageKind, alloc_zeroed_pages_exact_ref};
-use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
+use kclass::display_devices as class_display_devices;
 use khal::mem::p2v;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -53,11 +56,11 @@ const FB_RESOURCE_ID: u32 = 1;
 /// [`fb_init`] against the primary display device.
 struct FbEmulation {
     info: DisplayInfo,
-    /// Primary display device the shadow is bound to, cached so a present pays
-    /// one Arc clone instead of re-snapshotting (and allocating) the whole
-    /// class registry on every [`fb_present`] call. The device outlives fbdev
-    /// (no teardown), so the cached handle cannot dangle.
-    device: ClassDevice<DisplayDeviceImpl>,
+    /// Display device the shadow is bound to. Either a device taken from the
+    /// display class registry or one handed in directly by a platform that
+    /// already owns the scanout. The device outlives fbdev (no teardown), so
+    /// the handle cannot dangle.
+    device: Box<dyn DisplayDevice + Send + Sync>,
     /// Guest-mapped shadow buffer; userspace reads/writes land here. Kept alive
     /// for the framebuffer lifetime, so the host scanout resource's backing
     /// memory stays valid.
@@ -80,16 +83,24 @@ pub fn fb_init() {
 
     FB.init_once(SpinNoIrq::new(None));
 
-    if let Err(e) = try_setup() {
+    // Pick the primary display device. Display device registration races with
+    // fb_init in general, but the kclass registry is seeded before fb_init
+    // runs in the boot sequence; a missing device here means no display at all.
+    let Some(device) = class_display_devices().into_iter().next() else {
+        warn!("fbdev emulation unavailable: no display device registered");
+        return;
+    };
+
+    if let Err(e) = install(Box::new(device)) {
         warn!("fbdev emulation unavailable: {:?}", e);
     }
 }
 
-fn try_setup() -> Result<(), ()> {
-    // Pick the primary display device. Display device registration races with
-    // fb_init in general, but the kclass registry is seeded before fb_init
-    // runs in the boot sequence; a missing device here means no display at all.
-    let device = class_display_devices().into_iter().next().ok_or(())?;
+fn install(device: Box<dyn DisplayDevice + Send + Sync>) -> Result<(), ()> {
+    if FB.lock().is_some() {
+        warn!("fbdev emulation already installed; ignoring re-initialization");
+        return Err(());
+    }
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");
@@ -200,6 +211,10 @@ pub fn fb_present() -> bool {
         width: fb.info.width,
         height: fb.info.height,
     };
+    // The shadow is written through the cacheable kernel mapping while the
+    // display controller reads physical memory, so dirty lines have to reach
+    // the point of coherency before the controller scans the buffer out.
+    karch::cache::clean_dcache_range_to_poc(p2v(fb.shadow.phys_addr()), fb.shadow_len_bytes);
     fb.device
         .present_scanout_resource(FB_RESOURCE_ID, rect)
         .is_ok()

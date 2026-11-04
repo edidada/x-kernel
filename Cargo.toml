@@ -1,26 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "arch/kcpu_slot",
-    "util/kxarray",
-    "util/krcu-list",
-    "util/kiface/crates/task-api",
-    "util/kiface/crates/mm-api",
-    "util/kiface/crates/logging-api",
-    "util/kiface/crates/console-api",
-    "util/kiface/crates/time-api",
-    "util/kiface/crates/irq-context-api",
-    "util/kiface/crates/cpu-api",
-    "util/kiface/crates/task-wait-api",
-    "core/kpm",
     # kernel entry
     "entry",
     # boot and loader
     "boot/*",
-    "task/kworkng/crates/kworkerpool_ng",
-    "task/kworkng/crates/kworkqueue_ng",
-    "task/kworkng",
-    "task/ktimer-core",
+    # tee
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -253,6 +238,7 @@ vsock = { path = "drivers/contracts/vsock" }
 
 # Internal: portable concrete drivers
 virtio = { path = "drivers/devices/virtio" }
+rockchip-vop2 = { path = "drivers/devices/rockchip-vop2" }
 
 # Internal: driver adapters and integration
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }

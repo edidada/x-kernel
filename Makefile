@@ -103,6 +103,14 @@ RAMDISK_IMG ?= $(CURDIR)/ramdisk.img
 RAMDISK_IMG_SIZE ?= 8
 RAMDISK_IMG_FS ?= ext4
 RAMDISK_ROOTFS ?= $(DISK_IMG)
+
+# `KFEAT_DRIVER_RAMDISK_STATIC=y` embeds $(RAMDISK_IMG) at compile time through
+# `XKERNEL_RAMDISK_IMG` (see drivers/contracts/block/src/ramdisk_image.rs).
+# Forward it whenever the image exists so `make build` and `make clippy` work
+# without the caller exporting the path by hand.
+ifneq ($(wildcard $(RAMDISK_IMG)),)
+export XKERNEL_RAMDISK_IMG := $(RAMDISK_IMG)
+endif
 ROOTFS_URL ?= https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
 ROOTFS_VARIANT ?= debian-openrc
 

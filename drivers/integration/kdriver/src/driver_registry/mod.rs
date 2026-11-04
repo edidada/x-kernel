@@ -12,6 +12,7 @@ use kdevice::{DeviceDriver, DeviceId};
 pub(crate) mod block;
 #[cfg(feature = "char")]
 pub(crate) mod char;
+pub(crate) mod display;
 pub(crate) mod firmware_specs;
 pub(crate) mod net;
 pub(crate) mod virtio;
@@ -37,6 +38,7 @@ pub fn register_factories(registrar: &mut DriverRegistrar, factories: &[DriverFa
 pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
     block::register_all(registrar);
     net::register_all(registrar);
+    display::register_all(registrar);
 }
 
 /// Lightweight summary of the current long-lived ownership graph visible at

@@ -27,6 +27,10 @@ NR_CPUS=8
 KERNEL_STACK_SIZE=0x40000
 # Character device class (the NS16550 MMIO console driver depends on it).
 KFEAT_CHAR=y
+# RK3588 VOP2 display controller, driving the MIPI-DSI panel that firmware
+# leaves running (fed by fbdevice's /dev/fb0 and the text console).
+KFEAT_DISPLAY=y
+KFEAT_DRIVER_ROCKCHIP_VOP2=y
 # RK3588 UART2 is a DesignWare APB UART (16550-compatible) -> ns16550-mmio.
 KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_DRIVER_CONSOLE_PL011 is not set

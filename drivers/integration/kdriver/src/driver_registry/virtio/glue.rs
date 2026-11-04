@@ -3,11 +3,28 @@
 // See LICENSES for license details.
 
 //! VirtIO device probing and HAL integration.
+// `Box` and `DriverResult` are only referenced by the device-class adapters
+// below, which are compiled per VirtIO device feature. A build that selects
+// only `virtio-blk` (no net/gpu/socket/9p/rng adapter) must not import them.
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-gpu",
+    feature = "virtio-socket",
+    feature = "virtio-9p",
+    feature = "virtio-rng"
+))]
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
 use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-gpu",
+    feature = "virtio-socket",
+    feature = "virtio-9p",
+    feature = "virtio-rng"
+))]
 use driver_base::DriverResult;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 

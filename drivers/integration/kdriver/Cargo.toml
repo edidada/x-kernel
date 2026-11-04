@@ -53,6 +53,9 @@ virtio-socket = ["vsock", "virtio", "virtio/socket"]
 virtio-9p = ["virtio", "virtio/virtio-9p", "kclass/virtio-9p"]
 virtio-rng = ["hwrng", "virtio", "virtio/rng"]
 
+# Platform display controllers.
+rockchip-vop2 = ["display", "dep:rockchip-vop2", "dep:of"]
+
 console = ["char", "dep:console_driver"]
 console-pl011 = ["console", "console_driver/pl011"]
 console-ns16550-mmio = ["console", "console_driver/ns16550-mmio"]
@@ -107,6 +110,8 @@ net = { workspace = true, optional = true }
 pci = { workspace = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
+rockchip-vop2 = { workspace = true, optional = true }
+of = { workspace = true, optional = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 memspace = { workspace = true }

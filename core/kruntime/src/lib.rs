@@ -404,7 +404,15 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     init_setup::init_cb();
 
     #[cfg(feature = "display")]
-    fbdevice::fb_init();
+    {
+        fbdevice::fb_init();
+        // Turn the framebuffer into a text console once it is available: the
+        // boot banner and every later console line are mirrored onto it.
+        if fbdevice::fb_available() {
+            fbdevice::console::init(LOGO);
+            khal::console::set_output_mirror(fbdevice::console::write);
+        }
+    }
     #[cfg(feature = "input")]
     inputdev::init_input();
 

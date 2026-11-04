@@ -349,6 +349,14 @@ config KFEAT_DRIVER_VIRTIO_GPU
     help
       Enable the virtio-gpu display driver.
 
+config KFEAT_DRIVER_ROCKCHIP_VOP2
+    bool "Rockchip RK3588 VOP2 display"
+    depends on MACHINE_AARCH64_RK3588
+    help
+      Enable the Rockchip RK3588 VOP2 display controller driver. It takes over
+      the video port that firmware already programmed, so it only needs the
+      controller register window and the panel timing from the device tree.
+
 config KFEAT_DRIVER_VIRTIO_INPUT
     bool "virtio-input input device"
     help

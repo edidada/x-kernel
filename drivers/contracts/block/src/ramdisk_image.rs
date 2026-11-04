@@ -10,6 +10,11 @@
 //! from the `RAMDISK_IMG` variable (defaulting to an empty EXT4 image built
 //! by `make ramdisk_img`, but any FAT/ext4 image may be substituted).
 //!
+//! When the variable is absent while the feature is on -- `cargo check`, or
+//! rust-analyzer running outside the Makefile environment -- the build script
+//! embeds an empty stub and warns, so tooling keeps working while a real boot
+//! image still has to come from `make build`.
+//!
 //! The image bytes live in a 512-byte-aligned, writable static so that
 //! [`crate::ramdisk_static::RamDisk`] can use them directly as a zero-copy
 //! block backend. Because the root filesystem is mounted read-write, the

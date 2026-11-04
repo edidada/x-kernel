@@ -12,6 +12,8 @@
 
 use core::ops::{Deref, DerefMut};
 
+use memaddr::VirtAddr;
+
 /// Minimum alignment used to separate independently updated SMP state.
 ///
 /// Derived from the wrapper so consumers and the representation cannot disagree.
@@ -75,6 +77,27 @@ mod layout;
 compile_error!("karch cache alignment needs an explicit architecture policy");
 
 pub use layout::CacheAligned;
+
+/// Publishes dirty CPU cache lines covering `start..start + size` to the point
+/// of coherency.
+///
+/// Call this after the CPU wrote a buffer that a device is about to read, such
+/// as a display scan-out or a DMA source. Architectures whose devices snoop the
+/// CPU caches do nothing; AArch64 runs the `dc civac` maintenance loop.
+#[inline]
+pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    #[cfg(target_arch = "aarch64")]
+    // The AArch64 implementation is re-exported at the crate root.
+    crate::clean_dcache_range_to_poc(start, size);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // x86_64, riscv64 and loongarch64 keep DMA coherent with the CPU caches
+        // in the configurations this kernel supports, so no maintenance is
+        // required. A non-coherent platform must add its own implementation
+        // instead of inheriting this no-op.
+        let _ = (start, size);
+    }
+}
 
 impl<T> CacheAligned<T> {
     /// Wraps `value` without allocation or any execution-context requirement.

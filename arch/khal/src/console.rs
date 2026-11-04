@@ -17,6 +17,31 @@ pub fn write_data_atomic(buf: &[u8]) {
     kiface_console_api::EmergencyConsoleWriteIf::write_data_atomic(buf)
 }
 
+/// Secondary console sink, e.g. a framebuffer text console.
+///
+/// The provider of [`kiface_console_api::ConsoleIoIf`] forwards every ordinary
+/// console write here after sending it to the boot UART, which is what lets
+/// kernel log and native TTY output appear on a display as well.
+type OutputMirror = Option<fn(&[u8])>;
+
+kspin::static_lock! {
+    static OUTPUT_MIRROR: kspin::SpinNoIrq<OutputMirror> = kspin::SpinNoIrq::new(None);
+}
+
+/// Installs `sink` as the secondary console output target.
+///
+/// Replaces any previous sink. The sink runs in console write context: it must
+/// not allocate, log, or block.
+pub fn set_output_mirror(sink: fn(&[u8])) {
+    *OUTPUT_MIRROR.lock() = Some(sink);
+}
+
+/// Returns the installed secondary console sink, if any.
+#[inline]
+pub fn output_mirror() -> OutputMirror {
+    *OUTPUT_MIRROR.lock()
+}
+
 #[inline]
 pub fn read_data(buf: &mut [u8]) -> usize {
     kiface_console_api::ConsoleIoIf::read_data(buf)
