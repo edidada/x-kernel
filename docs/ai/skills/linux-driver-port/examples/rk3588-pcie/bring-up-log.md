@@ -844,8 +844,23 @@ event ring[0] p 0x1000000 c 0x8801             ← 控制器在投递 Port Statu
 xhci: enable slot failed, completion code 5    ← TRB Error：命令环指针 CRCR 没写进去
 ```
 
-已通：VBUS（GPIO write-mask）、DWC3 偏移/软复位/host 模式、USB GRF U3、PHY、端口检测、
-端口复位、事件环。**唯一剩余**：`CRCR` 接受命令环地址。
+**更新**：`CRCR` 其实一直是好的 —— 用 **No-Op 命令**（type 23，无参数）做行为判据：
+
+```
+xhci: no-op: cmd trb 0x00005c01 crcr 0x0000000000000000 ...
+xhci: no-op completed (code 1), command ring works
+xhci: enable slot: ... crcr 0x0000000000000008 ...      ← 与参考板一致（只回状态位）
+xhci: enable slot failed, completion code 5
+```
+
+- No-Op 成功 ⇒ 命令环被正确取用、事件环正确投递；
+- 同一条环上 `Enable Slot`（type 8）却被判 **TRB Error (code 5)** ⇒ 问题在**这个 TRB 的内容**，不在环。
+
+这是本轮第二次"读回值骗人"：`CRCR` 读回 0 并不代表写失败，它读回的是 `CRR` 等状态位。
+
+已通：VBUS、DWC3 偏移/软复位/host 模式、GRF U3、PHY、端口检测、端口复位(High-Speed)、
+**事件环**、**命令环（No-Op 验证）**。剩余：`Enable Slot` 的 TRB 被拒 ——
+下一个判别实验是对比参考实现里 Enable Slot TRB 的字段（特别是 slot type / 保留位）。
 
 ### 从参考实现补上的一步：USB GRF 的 U3 端口使能
 

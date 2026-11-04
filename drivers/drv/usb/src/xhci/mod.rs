@@ -617,6 +617,19 @@ impl Xhci {
 
     /// `Enable Slot`: asks the controller for a device slot.
     fn enable_slot(&mut self) -> Result<u8, KError> {
+        // Discriminator: a No-Op command carries no parameters, so if it succeeds
+        // the command ring is being fetched correctly and any later TRB Error is
+        // about that command's contents rather than about the ring pointer.
+        let noop = Trb::new(0, 0, regs::trb::NO_OP << regs::trb::TYPE_SHIFT);
+        match self.command(noop, "no-op") {
+            Ok(event) => info!(
+                "xhci: no-op completed (code {}), command ring works",
+                event.completion_code()
+            ),
+            Err(err) => {
+                log::error!("xhci: no-op failed ({err:?}), the command ring is not being fetched")
+            }
+        }
         let trb = Trb::new(0, 0, regs::trb::ENABLE_SLOT << regs::trb::TYPE_SHIFT);
         let event = self.command(trb, "enable slot")?;
         let slot = event.slot_id();
