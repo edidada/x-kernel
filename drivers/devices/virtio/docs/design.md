@@ -317,8 +317,8 @@ passes; caller-side waits use the common block adapter only.
 
 1. `try_new(transport)`：协商 feature、分配 control/cursor virtqueue
 2. `GET_DISPLAY_INFO`：查询显示分辨率 `(width, height)`
-3. 将 `width`、`height` 封装为 `DisplayInfo { width, height }`，之后只由
-   `refresh_info()` 更新（见下文“显示尺寸变化”）。
+3. Wrap `width` and `height` in `DisplayInfo { width, height }`; from then on only
+   `refresh_info()` updates it (see "Display size changes" below).
    virtio-gpu 是 scanout-only 设备，不暴露直接 framebuffer 映射——`DisplayDevice`
    trait 不再包含 `fb()` / 直接映射字段，所有像素输出经 scanout resource 路径
    （由 `fbdevice` 的 fbdev emulation 和 `drmdevice` 共享使用）。

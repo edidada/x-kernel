@@ -621,6 +621,15 @@ truncates it when the caller's buffer is short, discarding the remainder. The
 socket keeps the type it was created with, so `SO_TYPE` reports `SOCK_SEQPACKET`
 even though the queues are shared with the datagram transport.
 
+`shutdown(SHUT_WR)` drops only this side's sender and keeps the connection
+record, so the peer observes EOF, a second `connect` still fails with `EISCONN`,
+and `SO_PEERCRED` remains available. `shutdown(SHUT_RD)` closes the receive
+channel after retaining already-queued records, makes the peer's sends fail, and
+stops a listener from queueing new connections; queued connections can still be
+accepted, and once the queue is empty `accept` returns `EINVAL`. `poll` reports
+`EPOLLRDHUP` for a one-way close and reserves `EPOLLHUP` for a socket whose read
+and write directions are both gone.
+
 ### Unix Stream Listener Lifecycle
 
 The following diagram uses descriptive lifecycle labels, not Rust enum variants. `ListenerState` stores `is_listening`, `is_receive_shutdown`, pending requests, and capacity reservations; the socket binding and optional channel distinguish unbound, bound, and connected endpoints. `listen` enables reception, read shutdown rejects new requests while retaining queued ones, and `close` clears listening state and drains the queue.

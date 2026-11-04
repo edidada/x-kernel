@@ -2,14 +2,33 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
+
+use kpoll::{IoEvents, Pollable};
+use ksync::Mutex;
 use ktask::future::block_on;
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::unix::BindEntry;
+use crate::{
+    options::{Configurable, GetSocketOption},
+    unix::BindEntry,
+};
+
+const TASK_WAIT_ROUNDS: usize = 100_000;
 
 fn test_peer_credentials() -> PeerCredentials {
     PeerCredentials::new(kidentity::PidHandle::fixed_root(7), 1000, 1001)
+}
+
+fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
+    for _ in 0..TASK_WAIT_ROUNDS {
+        if predicate() {
+            return true;
+        }
+        ktask::yield_now();
+    }
+    false
 }
 
 #[def_test]
@@ -126,8 +145,6 @@ fn shutdown_write_makes_the_peer_see_eof() {
 
 #[def_test]
 fn accepted_socket_inherits_listener_pass_credentials() {
-    use crate::options::GetSocketOption;
-
     let listener = SeqpacketTransport::new();
     listener
         .set_option(SetSocketOption::PassCredentials(&true))
@@ -154,4 +171,162 @@ fn accepted_socket_inherits_listener_pass_credentials() {
         .get_option(GetSocketOption::PassCredentials(&mut enabled))
         .unwrap();
     assert!(enabled);
+}
+
+#[def_test]
+fn shutdown_write_keeps_the_connection_and_queued_input() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+        panic!("seqpacket listener returned another transport");
+    };
+
+    // Data already in flight when the client half-closes must remain readable.
+    accepted.send(&b"queued"[..], SendOptions::default()).unwrap();
+    accepted.shutdown(Shutdown::Write).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+
+    assert_eq!(
+        client
+            .connect(
+                &entry,
+                &UnixAddr::Unbound,
+                ConnectOptions::default(),
+                &test_peer_credentials(),
+            )
+            .err(),
+        Some(KError::AlreadyConnected)
+    );
+
+    // A half-closed connection still has an identity.
+    let mut peer = PeerCredentials::none();
+    client
+        .get_option(GetSocketOption::PeerCredentials(&mut peer))
+        .unwrap();
+    let peer = peer.resolve_in(kidentity::root_pid_namespace());
+    assert_eq!(peer.pid, 7);
+    assert_eq!(peer.uid, 1000);
+    assert_eq!(peer.gid, 1001);
+
+    let mut buf = [0u8; 8];
+    assert_eq!(client.recv(&mut buf[..], RecvOptions::default()), Ok(6));
+    assert_eq!(&buf[..6], b"queued");
+    assert_eq!(client.recv(&mut buf[..], RecvOptions::default()), Ok(0));
+}
+
+#[def_test]
+fn peer_write_shutdown_reports_rdhup_not_hup() {
+    let (left, right) = SeqpacketTransport::new_pair(test_peer_credentials());
+    right.shutdown(Shutdown::Write).unwrap();
+
+    let events = left.poll();
+    assert!(events.contains(IoEvents::IN | IoEvents::RDHUP));
+    assert!(!events.contains(IoEvents::HUP));
+    // Only the peer's write direction is gone; the local direction still works.
+    assert_eq!(left.send(&b"still-open"[..], SendOptions::default()), Ok(10));
+
+    left.shutdown(Shutdown::Write).unwrap();
+    assert!(left.poll().contains(IoEvents::HUP));
+}
+
+#[def_test]
+fn listener_read_shutdown_drains_accepts_then_refuses_connections() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+
+    listener.shutdown(Shutdown::Read).unwrap();
+    assert!(listener.poll().contains(IoEvents::IN | IoEvents::RDHUP));
+    assert!(!listener.poll().contains(IoEvents::HUP));
+
+    // A queued connection is not discarded by the read shutdown.
+    assert!(block_on(listener.accept(true)).is_ok());
+    assert_eq!(
+        block_on(listener.accept(true)).map(|_| ()),
+        Err(KError::InvalidInput)
+    );
+
+    let late_client = SeqpacketTransport::new();
+    assert_eq!(
+        late_client
+            .connect(
+                &entry,
+                &UnixAddr::Unbound,
+                ConnectOptions::default(),
+                &test_peer_credentials(),
+            )
+            .err(),
+        Some(KError::ConnectionRefused)
+    );
+}
+
+#[def_test(serial)]
+fn listener_read_shutdown_wakes_blocked_accept() {
+    let listener = Arc::new(SeqpacketTransport::new());
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let accept_result = Arc::new(Mutex::new(None));
+    let accept_task = ktask::spawn({
+        let listener = listener.clone();
+        let accept_result = accept_result.clone();
+        move || {
+            *accept_result.lock() = Some(block_on(listener.accept(false)).map(|_| ()));
+        }
+    });
+    let acceptor_is_waiting = wait_until(|| accept_task.state() == ktask::TaskState::Blocked);
+    if !acceptor_is_waiting {
+        listener.shutdown(Shutdown::Read).unwrap();
+        accept_task.join();
+    }
+    assert!(acceptor_is_waiting);
+
+    listener.shutdown(Shutdown::Read).unwrap();
+    accept_task.join();
+    assert_eq!(
+        accept_result.lock().take().unwrap(),
+        Err(KError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn read_shutdown_drains_queued_records_and_rejects_peer_sends() {
+    let (left, right) = SeqpacketTransport::new_pair(test_peer_credentials());
+    right.send(&b"queued"[..], SendOptions::default()).unwrap();
+
+    left.shutdown(Shutdown::Read).unwrap();
+    assert!(left.poll().contains(IoEvents::RDHUP));
+
+    let mut buf = [0u8; 8];
+    assert_eq!(left.recv(&mut buf[..], RecvOptions::default()), Ok(6));
+    assert_eq!(&buf[..6], b"queued");
+    assert_eq!(left.recv(&mut buf[..], RecvOptions::default()), Ok(0));
+    assert_eq!(
+        right.send(&b"late"[..], SendOptions::default()),
+        Err(KError::BrokenPipe)
+    );
 }

@@ -20,7 +20,7 @@ use kio::{IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
-use super::dgram::{Channel, Datagram};
+use super::dgram::Datagram;
 use crate::{
     ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx,
     general::GeneralOptions,
@@ -86,11 +86,25 @@ struct ShutdownState {
     write: bool,
 }
 
+/// The outgoing direction of a connected socket and the peer's identity.
+///
+/// `tx` sends into the peer's receive queue and is cleared by
+/// `shutdown(SHUT_WR)` rather than dropping the whole record: Linux keeps a
+/// connected socket connected after a half-close, so a second `connect` must
+/// still fail with `EISCONN` and `SO_PEERCRED` must survive. Clearing the
+/// sender still closes the peer's receive channel once the last sender is gone.
+struct PeerChannel {
+    tx: Option<async_channel::Sender<Datagram>>,
+    /// Poll set the peer registers for readability of its receive channel.
+    read_poll: Arc<PollSet>,
+    peer_credentials: PeerCredentials,
+}
+
 pub struct SeqpacketTransport {
     /// Incoming messages from the peer.
     rx: Mutex<Option<(async_channel::Receiver<Datagram>, Arc<PollSet>)>>,
     /// Outgoing direction and the peer's identity.
-    peer: RwLock<Option<Channel>>,
+    peer: RwLock<Option<PeerChannel>>,
     /// Accepted-connection queue of a listening socket.
     listener: Mutex<Option<(async_channel::Receiver<Pending>, Arc<PollSet>)>>,
     /// Directions closed by `shutdown`.
@@ -130,18 +144,43 @@ impl SeqpacketTransport {
         let transport1 = Self::new();
         let transport2 = Self::new();
         *transport1.rx.lock() = Some((rx1, poll1.clone()));
-        *transport1.peer.write() = Some(Channel {
-            tx: tx2,
-            poll: poll2.clone(),
+        *transport1.peer.write() = Some(PeerChannel {
+            tx: Some(tx2),
+            read_poll: poll2.clone(),
             peer_credentials: credentials.clone(),
         });
         *transport2.rx.lock() = Some((rx2, poll2.clone()));
-        *transport2.peer.write() = Some(Channel {
-            tx: tx1,
-            poll: poll1,
+        *transport2.peer.write() = Some(PeerChannel {
+            tx: Some(tx1),
+            read_poll: poll1,
             peer_credentials: credentials,
         });
         (transport1, transport2)
+    }
+
+    /// Stops a listening socket from queueing new connections.
+    ///
+    /// Closing the queue's sender wakes a blocked `accept` once the pending
+    /// connections already queued have been drained; `accept` then observes
+    /// `TryRecvError::Closed` and returns `EINVAL`, matching Linux after
+    /// `shutdown(SHUT_RD)` on a listener.
+    fn close_listener_accepts(&self) {
+        let Some(handle) = self.bind_slot.lock().clone() else {
+            return;
+        };
+        let poll = {
+            let mut slot = handle.lock();
+            let Some(bind) = slot.as_mut() else {
+                return;
+            };
+            if !bind.is_listening {
+                return;
+            }
+            bind.is_listening = false;
+            bind.queue.close();
+            bind.poll.clone()
+        };
+        poll.wake();
     }
 }
 
@@ -160,7 +199,7 @@ impl Configurable for SeqpacketTransport {
                     .peer
                     .read()
                     .as_ref()
-                    .map(|channel| channel.peer_credentials.clone())
+                    .map(|peer| peer.peer_credentials.clone())
                     .unwrap_or_default();
             }
             _ => return Ok(OptionHandled::No),
@@ -263,9 +302,9 @@ impl UnixTransportOps for SeqpacketTransport {
         drop(bind_slot);
 
         *self.rx.lock() = Some((client_rx, client_poll));
-        *peer = Some(Channel {
-            tx: to_server,
-            poll: server_poll,
+        *peer = Some(PeerChannel {
+            tx: Some(to_server),
+            read_poll: server_poll,
             // Linux connects seqpacket sockets through the stream path, so the
             // client reports the listening socket's identity as its peer.
             peer_credentials: listener_credentials,
@@ -291,9 +330,9 @@ impl UnixTransportOps for SeqpacketTransport {
             accepted.set_option(SetSocketOption::PassCredentials(&true))?;
         }
         *accepted.rx.lock() = Some((pending.to_server, pending.server_poll));
-        *accepted.peer.write() = Some(Channel {
-            tx: pending.from_server,
-            poll: pending.client_poll,
+        *accepted.peer.write() = Some(PeerChannel {
+            tx: Some(pending.from_server),
+            read_poll: pending.client_poll,
             peer_credentials: pending.client_credentials,
         });
         accepted
@@ -321,20 +360,26 @@ impl UnixTransportOps for SeqpacketTransport {
             return Err(KError::BrokenPipe);
         }
         let connected = self.peer.read();
-        let Some(chan) = connected.as_ref() else {
+        let Some(peer) = connected.as_ref() else {
             return Err(KError::NotConnected);
         };
-        chan.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
-        chan.poll.wake();
+        let Some(tx) = peer.tx.as_ref() else {
+            return Err(KError::BrokenPipe);
+        };
+        tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
+        peer.read_poll.wake();
         Ok(len)
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), move || {
-                if self.shutdown.lock().read {
-                    return Ok(0);
-                }
+                // `shutdown(SHUT_RD)` closes the receiver, but `async_channel`
+                // still yields records queued before the close. Draining them
+                // first matches Linux, where a read shutdown does not discard
+                // data already received. `state.read` also covers a shutdown
+                // issued before `connect` installed the receiver.
+                let is_read_shutdown = self.shutdown.lock().read;
                 let mut guard = self.rx.lock();
                 let Some((rx, _)) = guard.as_mut() else {
                     return Err(KError::NotConnected);
@@ -347,6 +392,7 @@ impl UnixTransportOps for SeqpacketTransport {
                     sender_credentials,
                 } = match rx.try_recv() {
                     Ok(packet) => packet,
+                    Err(TryRecvError::Empty) if is_read_shutdown => return Ok(0),
                     Err(TryRecvError::Empty) => return Err(KError::WouldBlock),
                     Err(TryRecvError::Closed) => return Ok(0),
                 };
@@ -388,22 +434,33 @@ impl UnixTransportOps for SeqpacketTransport {
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult {
-        // A seqpacket connection is a pair of message channels: closing the
-        // write direction drops the peer's sender, so the peer's receive side
-        // reports EOF. The read direction only has to make this side's
-        // `recv` return EOF without discarding messages already queued.
+        // A seqpacket connection is a pair of message channels. Closing the
+        // write direction drops this side's sender, so the peer observes EOF;
+        // the connected record stays so `connect` still reports `EISCONN` and
+        // `SO_PEERCRED` survives the half-close. Closing the read direction
+        // closes this side's receiver, which makes the peer's sends fail while
+        // leaving records already queued here available for `recv`.
         let mut state = self.shutdown.lock();
-        if how.has_write() {
-            state.write = true;
-            if let Some(chan) = self.peer.write().take() {
-                chan.poll.wake();
-            }
+        state.read |= how.has_read();
+        state.write |= how.has_write();
+        drop(state);
+
+        if how.has_write()
+            && let Some(peer) = self.peer.write().as_mut()
+        {
+            peer.tx.take();
+            peer.read_poll.wake();
         }
+
         if how.has_read() {
-            state.read = true;
-            if let Some((_, poll)) = self.rx.lock().as_ref() {
+            let rx_poll = self.rx.lock().as_ref().map(|(rx, poll)| {
+                rx.close();
+                poll.clone()
+            });
+            if let Some(poll) = rx_poll {
                 poll.wake();
             }
+            self.close_listener_accepts();
         }
         Ok(())
     }
@@ -412,18 +469,32 @@ impl UnixTransportOps for SeqpacketTransport {
 impl Pollable for SeqpacketTransport {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::OUT;
-        let read_closed = self.shutdown.lock().read;
+        let state = *self.shutdown.lock();
+
+        // Read the peer before taking `rx`: `connect` holds the peer write
+        // lock and then installs `rx`, so nesting the locks in the opposite
+        // order here would deadlock.
+        let is_peer_rx_closed = self
+            .peer
+            .read()
+            .as_ref()
+            .is_none_or(|peer| peer.tx.as_ref().is_none_or(|tx| tx.is_closed()));
+
         if let Some((rx, _)) = self.rx.lock().as_ref() {
-            events.set(
-                IoEvents::IN,
-                !rx.is_empty() || read_closed || rx.is_closed(),
-            );
-            // A closed channel means every sender is gone: a reader must see
-            // the disconnect instead of blocking forever.
-            events.set(IoEvents::HUP, rx.is_closed());
+            let is_read_shutdown = state.read || rx.is_closed();
+            let is_write_shutdown = state.write || is_peer_rx_closed;
+            events.set(IoEvents::IN, !rx.is_empty() || is_read_shutdown);
+            events.set(IoEvents::RDHUP, is_read_shutdown);
+            // A half-close only ends one direction. `HUP` is reserved for a
+            // socket whose read and write directions are both gone, matching
+            // `stream` and Linux rather than reporting the peer's `SHUT_WR`
+            // as a fully dead connection.
+            events.set(IoEvents::HUP, is_read_shutdown && is_write_shutdown);
         }
         if let Some((pending, _)) = self.listener.lock().as_ref() {
-            events.set(IoEvents::IN, !pending.is_empty());
+            events.set(IoEvents::IN, !pending.is_empty() || state.read);
+            events.set(IoEvents::RDHUP, state.read);
+            events.set(IoEvents::HUP, state.read && state.write);
         }
         events
     }
@@ -433,7 +504,7 @@ impl Pollable for SeqpacketTransport {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if !events.contains(IoEvents::IN) {
+        if !events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP) {
             return Ok(());
         }
         if let Some((_, poll)) = self.rx.lock().as_ref() {
@@ -451,8 +522,8 @@ impl Drop for SeqpacketTransport {
         if let Some(slot) = self.bind_slot.lock().take() {
             *slot.lock() = None;
         }
-        if let Some(chan) = self.peer.write().take() {
-            chan.poll.wake();
+        if let Some(peer) = self.peer.write().take() {
+            peer.read_poll.wake();
         }
     }
 }
