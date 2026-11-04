@@ -28,7 +28,8 @@ use knet::{
     tcp::TcpSocket,
     udp::UdpSocket,
     unix::{
-        DgramTransport, StreamTransport, UnixDomainSocket, UnixSocketType, current_peer_credentials,
+        DgramTransport, SeqpacketTransport, StreamTransport, UnixDomainSocket, UnixSocketType,
+        current_peer_credentials,
     },
 };
 use linux_raw_sys::{
@@ -97,6 +98,14 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
                 StreamTransport::new(),
                 UnixSocketType::Stream,
+            ))?)
+        }
+        (AF_UNIX, SOCK_SEQPACKET) => {
+            // Unix domain seqpacket socket: connection-oriented, but every send
+            // stays one message.
+            knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
+                SeqpacketTransport::new(),
+                UnixSocketType::Seqpacket,
             ))?)
         }
         (AF_UNIX, SOCK_DGRAM) => {
@@ -292,18 +301,21 @@ pub fn sys_socketpair(
                 UnixDomainSocket::new(sock2, UnixSocketType::Stream),
             )
         }
-        // Both use the datagram transport, but `SO_TYPE` reports the type the
-        // caller asked for, as Linux keeps it in `sk_type`.
-        SOCK_DGRAM | SOCK_SEQPACKET => {
-            let socket_type = if ty == SOCK_SEQPACKET {
-                UnixSocketType::Seqpacket
-            } else {
-                UnixSocketType::Datagram
-            };
+        // Seqpacket keeps message boundaries and is connection-oriented, so it
+        // gets its own pair; `SO_TYPE` reports the type the caller asked for, as
+        // Linux keeps it in `sk_type`.
+        SOCK_SEQPACKET => {
+            let (sock1, sock2) = SeqpacketTransport::new_pair(current_peer_credentials());
+            (
+                UnixDomainSocket::new(sock1, UnixSocketType::Seqpacket),
+                UnixDomainSocket::new(sock2, UnixSocketType::Seqpacket),
+            )
+        }
+        SOCK_DGRAM => {
             let (sock1, sock2) = DgramTransport::new_pair(current_peer_credentials());
             (
-                UnixDomainSocket::new(sock1, socket_type),
-                UnixDomainSocket::new(sock2, socket_type),
+                UnixDomainSocket::new(sock1, UnixSocketType::Datagram),
+                UnixDomainSocket::new(sock2, UnixSocketType::Datagram),
             )
         }
         _ => {
