@@ -42,6 +42,10 @@ pub struct Ehci {
     buffers: CoherentMem,
     /// Page-aligned DMA buffer for bulk transfers.
     bulk: CoherentMem,
+    /// Bus address of each bulk endpoint's dummy descriptor (index 0 = OUT,
+    /// 1 = IN). A queue head's `qtd_next` points here permanently; enqueueing
+    /// replaces the descriptor's contents instead of repointing the head.
+    bulk_dummy_bus: [u32; 2],
     /// The periodic frame list: allocated and programmed even though the
     /// periodic schedule is off, because the reference always has one.
     _frame_lists: alloc::vec::Vec<CoherentMem>,
@@ -302,6 +306,7 @@ impl Ehci {
             qtds,
             buffers,
             bulk,
+            bulk_dummy_bus: [0; 2],
             _frame_lists: frame_lists,
             speed: Speed::Full,
         })
@@ -649,7 +654,7 @@ impl Ehci {
         is_in: bool,
     ) -> KResult<usize> {
         let BULK_QH: usize = if is_in { 3 } else { 2 };
-        self.ensure_running();
+        let dummy_slot: usize = if is_in { 6 } else { 5 };
         let length = data.len();
         if length == 0 || length > BULK_BUFFER_LEN {
             return Err(KError::InvalidInput);
@@ -669,9 +674,76 @@ impl Ehci {
                 core::ptr::copy_nonoverlapping(data.as_ptr(), self.bulk.as_ptr(), length);
             }
         }
-        // One qTD, with the interrupt-on-complete bit so completion is observed
-        // on the qTD itself rather than on the queue head overlay.
-        let qtd_bus = self.qtds.bus_addr() as u32;
+        // The queue head is programmed once per endpoint (when the disk is
+        // published) and never again: its `qtd_next` always points at this
+        // endpoint's dummy descriptor, and enqueueing means replacing that
+        // descriptor's contents. Repointing a queue head the controller may be
+        // reading is what produced the intermittent faults this replaces.
+        let dummy_bus =
+            self.qtds.bus_addr() as u32 + (dummy_slot * core::mem::size_of::<Qtd>()) as u32;
+        if self.bulk_dummy_bus[BULK_QH - 2] != dummy_bus {
+            let head = self.qh.as_ptr().cast::<Qh>();
+            let qh = Qh {
+                next: self.qh_successor_bus(BULK_QH),
+                info1: info1::NAK_RELOAD
+                    | ((max_packet) << info1::MAX_PACKET_SHIFT)
+                    | eps
+                    | (address as u32 & info1::ADDRESS_MASK)
+                    | (u32::from(endpoint & 0x0f) << info1::ENDPOINT_SHIFT),
+                info2: if eps == regs::eps_high() {
+                    regs::info2::MULT_HIGH_SPEED
+                } else {
+                    0
+                },
+                current: 0,
+                qtd_next: dummy_bus,
+                alt_next: regs::LIST_END,
+                token: 0,
+                buffer: [0; 5],
+            };
+            // Stop the schedule for the one-time programming of the queue head.
+            let command = self.regs.read32(self.operational + op::USBCMD);
+            self.regs
+                .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
+            // SAFETY: this endpoint's queue head, inside the four-QH allocation.
+            unsafe {
+                core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
+            }
+            // The dummy descriptor the queue head parks on: inactive but NOT
+            // halted. A halted descriptor makes the controller mark the queue
+            // head halted and stop the walk; an inactive one just ends the list,
+            // which is the state an empty queue head is supposed to be in.
+            let dummy = Qtd {
+                next: regs::LIST_END,
+                alt_next: regs::LIST_END,
+                token: 0,
+                buffer: [0; 5],
+            };
+            let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
+            // SAFETY: the dummy slot is one of the eight qTDs in this allocation.
+            unsafe {
+                core::ptr::write_volatile(qtd_ptr, dummy);
+            }
+            self.regs.write32(
+                self.operational + op::ASYNCLISTADDR,
+                self.qh.bus_addr() as u32,
+            );
+            self.regs.write32(
+                self.operational + op::USBCMD,
+                command | regs::cmd::RS | regs::cmd::ASE,
+            );
+            for _ in 0..40 {
+                if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                    break;
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+            }
+            self.bulk_dummy_bus[BULK_QH - 2] = dummy_bus;
+        }
+        // Enqueue by replacing the dummy's contents: payload and status first,
+        // the token -- which is what makes the descriptor visible -- last. The
+        // queue head itself is untouched.
         let qtd_token = ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
             | (3 << token::CERR_SHIFT)
             | ((length as u32) << token::LEN_SHIFT)
@@ -680,116 +752,30 @@ impl Ehci {
         let qtd = Qtd {
             next: regs::LIST_END,
             alt_next: regs::LIST_END,
-            token: ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
-                | (3 << token::CERR_SHIFT)
-                | ((length as u32) << token::LEN_SHIFT)
-                // No DT bit: with QH_TOGGLE_CTL clear the controller ignores it.
-                | token::IOC
-                | token::ACTIVE,
-            // One page pointer only: the buffer is exactly one page and a
-            // transfer never leaves it, and a pointer one page past the end of
-            // the allocation is the kind of address that becomes a Host System
-            // Error if the controller ever reads it.
+            token: qtd_token,
             buffer: [self.bulk.bus_addr() as u32, 0, 0, 0, 0],
         };
-        let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>();
-        // SAFETY: the qTD allocation holds three elements; index 0 is used here
-        // because control transfers and bulk transfers never overlap.
+        let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
+        let base = qtd_ptr.cast::<u8>();
+        // SAFETY: the dummy slot is inside this controller's qTD allocation, and
+        // the offsets below stay within its 32 bytes. The token is deliberately
+        // not written yet.
         unsafe {
-            core::ptr::write_volatile(qtd_ptr, qtd);
+            core::ptr::write_volatile(base.wrapping_add(0).cast::<u32>(), qtd.next);
+            core::ptr::write_volatile(base.wrapping_add(4).cast::<u32>(), qtd.alt_next);
+            core::ptr::write_volatile(base.wrapping_add(16).cast::<u32>(), qtd.buffer[0]);
+            core::ptr::write_volatile(base.wrapping_add(20).cast::<u32>(), 0);
         }
+        karch::dsb_ishst();
+        // `qh_refresh()`: a queue head the controller halted keeps HALT in its
+        // overlay, and a halted queue head stops the walk. The halt is cleared
+        // *before* the descriptor's token makes it Active -- the other order
+        // lets the controller read the still-halted dummy in between, mark the
+        // queue head halted, and ignore the descriptor entirely (measured as
+        // `token 0x00000040` on every transfer).
         let head = self.qh.as_ptr().cast::<Qh>();
-        // `qh_update()`: QH_TOGGLE_CTL is set for control endpoints only. For
-        // every other type "we make hardware maintain data toggle (like OHCI)",
-        // and software merely preserves the toggle it finds in the old overlay.
-        let previous = {
-            // SAFETY: dword 6 of the bulk QH is its overlay token.
-            unsafe {
-                core::ptr::read_volatile(
-                    head.wrapping_add(BULK_QH)
-                        .cast::<u8>()
-                        .wrapping_add(24)
-                        .cast::<u32>(),
-                )
-            }
-        };
-        let qh = Qh {
-            next: self.qh_successor_bus(BULK_QH),
-            info1: info1::NAK_RELOAD
-                | ((max_packet) << info1::MAX_PACKET_SHIFT)
-                | eps
-                | (address as u32 & info1::ADDRESS_MASK)
-                // The endpoint *number*, not its address: 0x81 shifted by 8
-                // would land its bit 7 on the queue head's H bit.
-                | (u32::from(endpoint & 0x0f) << info1::ENDPOINT_SHIFT),
-            info2: if eps == regs::eps_high() {
-                regs::info2::MULT_HIGH_SPEED
-            } else {
-                0
-            },
-            current: 0,
-            qtd_next: qtd_bus,
-            alt_next: regs::LIST_END,
-            // `hw->hw_token &= (QTD_TOGGLE | QTD_STS_PING)`: the hardware owns the
-            // data toggle for a bulk endpoint, so it is carried across from the
-            // overlay rather than derived from the qTD.
-            token: previous & (token::DT | token::PING),
-            buffer: [0; 5],
-        };
-        // Stop the schedule for the edit itself: with RS cleared the controller
-        // fetches nothing, so the queue head and its descriptor cannot be read
-        // while they are being written. The queue head stays in the list; only
-        // its contents change.
-        let command = self.regs.read32(self.operational + op::USBCMD);
-        self.regs
-            .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
-        // SAFETY: `qh` is this endpoint's queue head inside the four-QH
-        // allocation.
-        unsafe {
-            core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
-        }
-        // Reload the schedule base before re-enabling: the controller samples
-        // ASYNCLISTADDR when it starts the schedule, and the reference stops and
-        // restarts the whole controller around idle periods
-        // (`enable_async`/`disable_async`). Leaving the base untouched across a
-        // stop/start pair leaves it traversing whatever it happened to cache.
-        self.regs.write32(
-            self.operational + op::ASYNCLISTADDR,
-            self.qh.bus_addr() as u32,
-        );
-        self.regs.write32(
-            self.operational + op::USBCMD,
-            command | regs::cmd::RS | regs::cmd::ASE,
-        );
-        // Wait for the controller to acknowledge the enable before queueing is
-        // considered done (`ehci_poll_ASS`'s want/actual comparison).
-        for _ in 0..40 {
-            if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
-                break;
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
-        }
-        // Snapshot what the schedule was given, and whether the controller is
-        // even running, at the moment the transfer is handed over.
-        {
-            let status = self.regs.read32(self.operational + op::USBSTS);
-            log::info!(
-                "ehci: bulk start qh {BULK_QH}: info1 {:#x} qtd {qtd_bus:#x} token \
-                 {qtd_token:#x}, USBSTS {status:#010x} (halted {}, ass {})",
-                qh.info1,
-                status & sts::HCHALTED != 0,
-                status & sts::ASS != 0,
-            );
-        }
-        // Did the controller pick the queue head up at all? A queue head that is
-        // in the asynchronous list has its descriptor overlaid into the overlay
-        // area within a microframe; one that was never fetched keeps the value
-        // software wrote. That distinction is the difference between "the device
-        // is not answering" and "the queue head is not in the list".
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(2_000));
         // SAFETY: dword 6 of this endpoint's queue head is its overlay token.
-        let fetched = unsafe {
+        let overlay = unsafe {
             core::ptr::read_volatile(
                 head.wrapping_add(BULK_QH)
                     .cast::<u8>()
@@ -797,75 +783,31 @@ impl Ehci {
                     .cast::<u32>(),
             )
         };
-        log::info!(
-            "ehci: bulk qh {BULK_QH} overlay {fetched:#010x} after link (descriptor \
-             {qtd_token:#010x})"
-        );
-        let mut token = token::ACTIVE;
-        // Sample the window the controller is supposed to pick the transfer up
-        // in, not just its end state: "qtd_next still points at the descriptor
-        // and the descriptor is still Active" is a different failure from "the
-        // controller fetched it and put it back".
-        let mut samples = 0usize;
-        let mut last_status = self.regs.read32(self.operational + op::USBSTS);
-        for _ in 0..POLL_STEPS {
-            // SAFETY: dword 2 of the qTD is its token.
-            token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
-            if token & token::ACTIVE == 0 {
-                break;
-            }
-            // Every ~50 ms while the transfer is outstanding, record what the
-            // schedule looks like, for the first few samples only.
-            if samples < 3 && self.regs.read32(self.operational + op::USBSTS) != last_status
-                || (samples < 3 && token == qtd_token && (last_status & sts::ASS != 0))
-            {
-                if samples < 3 {
-                    let status = self.regs.read32(self.operational + op::USBSTS);
-                    let command = self.regs.read32(self.operational + op::USBCMD);
-                    // SAFETY: dword 4 of this endpoint's queue head.
-                    let next = unsafe {
-                        core::ptr::read_volatile(
-                            head.wrapping_add(BULK_QH)
-                                .cast::<u8>()
-                                .wrapping_add(16)
-                                .cast::<u32>(),
-                        )
-                    };
-                    log::info!(
-                        "ehci: outstanding sample {samples}: USBCMD {command:#010x} USBSTS                          {status:#010x}, qh{BULK_QH} qtd_next {next:#x}, qtd token {token:#x}"
-                    );
-                    samples += 1;
-                    last_status = status;
-                }
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
-        }
-        // A queue head may only be modified while the controller has released
-        // it. `USBSTS.REC` (reclamation) says the asynchronous schedule has no
-        // work left, i.e. the controller finished this queue head and parked it;
-        // touching it earlier is what produced the intermittent Host System
-        // Errors, because the controller's own overlay write landed after ours
-        // and left it fetching a stale descriptor.
-        for _ in 0..POLL_STEPS {
-            let status = self.regs.read32(self.operational + op::USBSTS);
-            if status & sts::REC != 0 {
-                break;
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
-        }
-        // Park the queue head: with `qtd_next` at LIST_END the controller finds
-        // nothing more to execute here and moves on to the next endpoint.
-        // SAFETY: dword 4 of this endpoint's queue head.
+        // SAFETY: dword 6 of the same queue head.
         unsafe {
             core::ptr::write_volatile(
                 head.wrapping_add(BULK_QH)
                     .cast::<u8>()
-                    .wrapping_add(16)
+                    .wrapping_add(24)
                     .cast::<u32>(),
-                regs::LIST_END,
+                overlay & (regs::token::DT | regs::token::PING),
             );
         }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
+        karch::dsb_ishst();
+        // SAFETY: dword 3 of the same descriptor: the token, written last, is
+        // what hands the transfer to the controller.
+        unsafe {
+            core::ptr::write_volatile(base.wrapping_add(24).cast::<u32>(), qtd.token);
+        }
+        let mut token = token::ACTIVE;
+        for _ in 0..POLL_STEPS {
+            // SAFETY: dword 2 of the dummy descriptor is its token.
+            token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
+            if token & token::ACTIVE == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
         if token & token::ACTIVE != 0 {
             let status = self.regs.read32(self.operational + op::USBSTS);
             log::error!(
@@ -876,64 +818,6 @@ impl Ehci {
                 status & sts::ASS != 0,
                 status & sts::REC != 0,
             );
-            // SAFETY: dword 4 of this endpoint's queue head holds its next qTD.
-            let qtd_next = unsafe {
-                core::ptr::read_volatile(
-                    head.wrapping_add(BULK_QH)
-                        .cast::<u8>()
-                        .wrapping_add(16)
-                        .cast::<u32>(),
-                )
-            };
-            // SAFETY: dword 6 of the same queue head holds its overlay token.
-            let overlay = unsafe {
-                core::ptr::read_volatile(
-                    head.wrapping_add(BULK_QH)
-                        .cast::<u8>()
-                        .wrapping_add(24)
-                        .cast::<u32>(),
-                )
-            };
-            let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
-            let asynclist = self.regs.read32(self.operational + op::ASYNCLISTADDR);
-            let mut links = alloc::string::String::new();
-            for index in 0..4usize {
-                // SAFETY: all four queue heads are in this controller's allocation.
-                let next =
-                    unsafe { core::ptr::read_volatile(head.wrapping_add(index).cast::<u32>()) };
-                links.push_str(&alloc::format!(" {index}->{next:#x}"));
-            }
-            log::error!("ehci: ring at failure: ASYNCLISTADDR {asynclist:#x}, links{links}");
-            log::error!(
-                "ehci: bulk qh {BULK_QH}: head next {head_next:#x}, qtd_next {qtd_next:#x}, \
-                 overlay {overlay:#010x}"
-            );
-            // The rest of the ring: info1 carries the endpoint number, speed and
-            // maximum packet size, and it is the only part that has never been
-            // read back at failure.
-            for index in 0..4usize {
-                // SAFETY: all four queue heads are in this controller's allocation.
-                let entry = unsafe { core::ptr::read_volatile(head.wrapping_add(index)) };
-                log::error!(
-                    "ehci: qh{index} info1 {:#x} info2 {:#x} current {:#x} qtd_next {:#x} alt \
-                     {:#x} overlay {:#x}",
-                    entry.info1,
-                    entry.info2,
-                    entry.current,
-                    entry.qtd_next,
-                    entry.alt_next,
-                    entry.token,
-                );
-            }
-            // SAFETY: dword 2 of the descriptor being executed is its token.
-            let qtd_now = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
-            // SAFETY: dword 3 of the same descriptor is its first buffer pointer.
-            let qtd_buf = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(3)) };
-            log::error!("ehci: failing qtd token {qtd_now:#x} buf {qtd_buf:#x}");
-            // A Host System Error halts the controller; clearing the status bit
-            // and restarting the asynchronous schedule is the only way back, and
-            // without it every later transfer on every endpoint fails too.
-            self.recover_async_schedule();
             return Err(KError::TimedOut);
         }
         if token & token::HALT != 0 {

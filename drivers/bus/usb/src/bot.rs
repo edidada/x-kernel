@@ -68,7 +68,14 @@ fn transfer(
         endpoints.endpoint_out,
         &mut written,
         false,
-    )?;
+    );
+    let sent = match sent {
+        Ok(sent) => sent,
+        Err(err) => {
+            log::error!("bot: CBW transfer failed: {err:?}");
+            return Err(err);
+        }
+    };
     if sent != CBW_LEN {
         return Err(KError::Io);
     }
@@ -103,8 +110,16 @@ fn transfer(
             endpoints.endpoint_in,
             &mut csw[got..],
             true,
-        )?;
+        );
+        let read = match read {
+            Ok(read) => read,
+            Err(err) => {
+                log::error!("bot: CSW transfer failed after {got} bytes: {err:?}");
+                return Err(err);
+            }
+        };
         if read == 0 {
+            log::error!("bot: CSW read returned nothing after {got} bytes");
             break;
         }
         got += read;

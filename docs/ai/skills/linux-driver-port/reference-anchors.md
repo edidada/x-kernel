@@ -55,3 +55,6 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 10:29 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-timer.c` | `ehci_poll_ASS` | the schedule base is reloaded and ASS acknowledged across a stop/start |
 | 2026-11-05 10:34 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-mem.c` | `ehci_mem_init` | periodic frame list allocated and programmed even when PSE is off |
 | 2026-11-05 10:36 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `disable_async` | the controller is stopped outright when the asynchronous schedule goes idle |
+| 2026-11-05 10:45 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_append_tds` | enqueue by replacing the dummy descriptor's contents; the queue head's qtd_next never changes |
+| 2026-11-05 10:46 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | the overlay halt is cleared before the descriptor becomes active |
+| 2026-11-05 10:48 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | an idle queue head is inactive, not halted |
