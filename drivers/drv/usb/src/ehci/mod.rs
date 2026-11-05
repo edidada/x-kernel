@@ -79,13 +79,19 @@ impl Ehci {
         // No periodic schedule (all-zero base means "disabled" once PSE is off).
         regs.write32(operational + op::PERIODICLISTBASE, 0);
 
-        let qh = dev.res().alloc_coherent(core::mem::size_of::<Qh>(), 64)?;
+        // Two queue heads: the asynchronous reclamation list's head (H=1, no
+        // transfers) and the control endpoint's own QH linked after it. Linux
+        // arranges the same way (`ehci->async` is an empty head QH); putting the
+        // transfer directly in the head QH leaves the qTDs unexecuted.
+        let qh = dev
+            .res()
+            .alloc_coherent(2 * core::mem::size_of::<Qh>(), 64)?;
         let qtds = dev
             .res()
             .alloc_coherent(3 * core::mem::size_of::<Qtd>(), 32)?;
         let buffers = dev.res().alloc_coherent(EP0_BUFFER_LEN, EP0_BUFFER_LEN)?;
         for (pointer, length) in [
-            (qh.as_ptr(), core::mem::size_of::<Qh>()),
+            (qh.as_ptr(), 2 * core::mem::size_of::<Qh>()),
             (qtds.as_ptr(), 3 * core::mem::size_of::<Qtd>()),
             (buffers.as_ptr(), EP0_BUFFER_LEN),
         ] {
@@ -101,6 +107,23 @@ impl Ehci {
         let head_bytes = head.cast::<u8>();
         let info1_ptr = head_bytes.wrapping_add(4).cast::<u32>();
         let next_ptr = head_bytes.cast::<u32>();
+        let ep_qh = head.wrapping_add(1);
+        let ep_bus = qh.bus_addr() as u32 + core::mem::size_of::<Qh>() as u32;
+        // Endpoint QH: empty, linked back to the head so the reclamation list is
+        // a closed ring of two.
+        // SAFETY: the allocation holds two queue heads.
+        unsafe {
+            core::ptr::write_volatile(ep_qh, Qh::default());
+        }
+        let ep_qtd_next = ep_qh.cast::<u8>().wrapping_add(16).cast::<u32>();
+        // SAFETY: dword 4 of the endpoint QH.
+        unsafe {
+            core::ptr::write_volatile(ep_qtd_next, regs::LIST_END);
+        }
+        // SAFETY: dword 0 of the endpoint QH.
+        unsafe {
+            core::ptr::write_volatile(ep_qh.cast::<u32>(), qh.bus_addr() as u32 | 2);
+        }
         // SAFETY: `head` is the one QH in this allocation.
         unsafe {
             core::ptr::write_volatile(head, Qh::default());
@@ -109,11 +132,38 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(info1_ptr, info1::HEAD);
         }
-        // SAFETY: dword 0 of the same QH.
+        // An empty queue head's transfer pointers are LIST_END, not zero: the
+        // hardware would otherwise fetch a qTD at address 0, raise a Host System
+        // Error and halt -- which it did, immediately on enabling the schedule,
+        // before any transfer had been queued.
+        let qtd_next_ptr = head_bytes.wrapping_add(16).cast::<u32>();
+        // SAFETY: dword 4 of the same QH.
         unsafe {
-            core::ptr::write_volatile(next_ptr, (qh.bus_addr() as u32) | 2);
+            core::ptr::write_volatile(qtd_next_ptr, regs::LIST_END);
+        }
+        let alt_next_ptr = head_bytes.wrapping_add(20).cast::<u32>();
+        // SAFETY: dword 5 of the same QH.
+        unsafe {
+            core::ptr::write_volatile(alt_next_ptr, regs::LIST_END);
+        }
+        // SAFETY: dword 0 of the head QH: the list is head -> endpoint -> head.
+        unsafe {
+            core::ptr::write_volatile(next_ptr, ep_bus | 2);
         }
         regs.write32(operational + op::ASYNCLISTADDR, qh.bus_addr() as u32);
+        // `ehci_reset()` clears the sticky status bits by writing them back. A
+        // latched Host System Error keeps the controller halted, and a halted
+        // controller never fetches the schedule: every qTD stays Active and the
+        // data stage of a transfer silently returns nothing.
+        let status_before = regs.read32(operational + op::USBSTS);
+        regs.write32(operational + op::USBSTS, status_before);
+        info!(
+            "ehci: status before run {status_before:#010x} (halted {}, hse {}, pcd {}, ass {})",
+            status_before & sts::HCHALTED != 0,
+            status_before & sts::HSE != 0,
+            status_before & sts::PCD != 0,
+            status_before & sts::ASS != 0,
+        );
         // Run with the asynchronous schedule only.
         regs.write32(
             operational + op::USBCMD,
@@ -121,6 +171,19 @@ impl Ehci {
                 | crate::ehci::regs::cmd::RS
                 | crate::ehci::regs::cmd::ASE,
         );
+        // Let the controller leave the halted state before anything is queued.
+        for _ in 0..100 {
+            let status = regs.read32(operational + op::USBSTS);
+            if status & sts::HCHALTED == 0 {
+                info!(
+                    "ehci: running, status {status:#010x} (halted false, hse {}, ass {})",
+                    status & sts::HSE != 0,
+                    status & sts::ASS != 0,
+                );
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
         // `HCSPARAMS.PPC` says software controls port power: without PP set the
         // ports stay unpowered and report nothing at all.
         if hcsparams & (1 << 4) != 0 {
@@ -216,7 +279,7 @@ impl Ehci {
 
         // Program the QH for this device and point it at the chain. Writing the
         // current-qTD pointer as zero clears any overlay left by the last run.
-        let head = self.qh.as_ptr().cast::<Qh>();
+        let head = self.qh.as_ptr().cast::<Qh>().wrapping_add(1);
         let eps = match speed {
             Speed::Low => regs::eps_low(),
             Speed::High => regs::eps_high(),
@@ -225,7 +288,10 @@ impl Ehci {
         let max_packet = if speed == Speed::High { 64 } else { 8 };
         let qh = Qh {
             next: (self.qh.bus_addr() as u32) | 2,
-            info1: info1::HEAD
+            // No HEAD here: only the empty list head carries H, and a second
+            // QH with it reads as the end of the reclamation list, so the
+            // controller overlays this QH's qTD and never executes it.
+            info1: info1::TOGGLE_CTL
                 | info1::CONTROL_EP
                 | ((max_packet as u32) << info1::MAX_PACKET_SHIFT)
                 | eps
@@ -243,19 +309,59 @@ impl Ehci {
             core::ptr::write_volatile(head, qh);
         }
 
+        // Wait for the *last* qTD of the chain to retire. The queue head overlay
+        // starts with ACTIVE clear, so polling it returns immediately and reports
+        // a transfer that never happened.
+        let qtd_base = self.qtds.as_ptr().cast::<regs::Qtd>();
+        let mut status_token = token::ACTIVE;
         for _ in 0..POLL_STEPS {
-            // SAFETY: dword 6 of the QH is its overlay token, which the hardware
-            // keeps up to date while the transfer runs.
-            let token_ptr = head.cast::<u8>().wrapping_add(24).cast::<u32>();
-            // SAFETY: `token_ptr` is dword 6 of the QH allocated above.
-            let overlay = unsafe { core::ptr::read_volatile(token_ptr) };
-            if overlay & token::ACTIVE == 0 {
-                if overlay & token::HALT != 0 {
-                    info!("ehci: transfer halted, token {overlay:#010x}");
+            // SAFETY: index 0 of the three qTDs in this allocation is the status
+            // stage, which the controller executes last.
+            status_token = unsafe { core::ptr::read_volatile(qtd_base.cast::<u32>().add(2)) };
+            if status_token & token::ACTIVE == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        {
+            {
+                for (name, qh_ptr) in [("head", self.qh.as_ptr().cast::<Qh>()), ("ep", head)] {
+                    // SAFETY: both queue heads are inside this controller's
+                    // two-QH allocation.
+                    let qh = unsafe { core::ptr::read_volatile(qh_ptr) };
+                    log::info!(
+                        "ehci: qh {name}: next {:#x} info1 {:#x} qtd_next {:#x} alt {:#x} token \
+                         {:#x}",
+                        qh.next,
+                        qh.info1,
+                        qh.qtd_next,
+                        qh.alt_next,
+                        qh.token,
+                    );
+                }
+                // SAFETY: dword 2 of the setup qTD holds its token.
+                let setup_token =
+                    unsafe { core::ptr::read_volatile(qtd_base.cast::<u32>().add(2 + 16)) };
+                log::info!("ehci: setup qtd token {setup_token:#010x}");
+                // SAFETY: index 1 of the three qTDs is the data stage.
+                let data_token =
+                    unsafe { core::ptr::read_volatile(qtd_base.cast::<u32>().add(2 + 8)) };
+                if status_token & token::ACTIVE != 0 {
+                    let status = self.regs.read32(self.operational + op::USBSTS);
+                    log::error!(
+                        "ehci: control transfer did not complete, status token \
+                         {status_token:#010x}, USBSTS {status:#010x} (halted {}, hse {}, ass {})",
+                        status & sts::HCHALTED != 0,
+                        status & sts::HSE != 0,
+                        status & sts::ASS != 0,
+                    );
+                    return Err(KError::TimedOut);
+                }
+                if data_token & token::HALT != 0 {
+                    info!("ehci: data stage halted, token {data_token:#010x}");
                     return Err(KError::Io);
                 }
-                // STATUS_MASK: bytes still to transfer in the status stage.
-                let residual = (overlay & token::LEN_MASK) >> token::LEN_SHIFT;
+                let residual = (data_token & token::LEN_MASK) >> token::LEN_SHIFT;
                 let transferred = (length as u32).saturating_sub(residual) as usize;
                 if is_in && transferred > 0 {
                     // SAFETY: the controller wrote into the data buffer.
@@ -263,6 +369,33 @@ impl Ehci {
                     // SAFETY: the controller wrote `transferred` bytes there.
                     unsafe {
                         core::ptr::copy_nonoverlapping(from, data.as_mut_ptr(), transferred);
+                    }
+                    // Diagnostic: the byte count alone cannot distinguish "the
+                    // device answered" from "the buffer holds something else",
+                    // and the descriptor parse only reports that it disliked
+                    // what it saw.
+                    log::info!(
+                        "ehci: in {transferred} bytes: {:02x?}",
+                        &data[..transferred.min(8)]
+                    );
+                    // Which stages the controller actually executed, and with
+                    // what result: a chain that stops early and a chain that runs
+                    // but lands in the wrong buffer look identical from the data
+                    // alone.
+                    let qtd_base = self.qtds.as_ptr().cast::<regs::Qtd>();
+                    for index in 0..3 {
+                        // SAFETY: the allocation holds three qTDs.
+                        let qtd = unsafe { core::ptr::read_volatile(qtd_base.wrapping_add(index)) };
+                        log::info!(
+                            "ehci: qtd{index} token {:#010x} (active {}, halt {}, pid {}, len {}, \
+                             buf0 {:#x})",
+                            qtd.token,
+                            qtd.token & token::ACTIVE != 0,
+                            qtd.token & token::HALT != 0,
+                            (qtd.token & token::PID_MASK) >> token::PID_SHIFT,
+                            (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
+                            qtd.buffer[0],
+                        );
                     }
                 }
                 return Ok(transferred);
@@ -279,29 +412,53 @@ impl Ehci {
         let qtd_bus = self.qtds.bus_addr() as u32;
         let qtd_stride = core::mem::size_of::<Qtd>() as u32;
         let mut index = 0usize;
-        let mut push = |next_addr: u32, pid_code: u32, len: u32, dt: bool, ioc: bool| -> u32 {
-            let qtd = Qtd {
-                next: next_addr | regs::LIST_END,
-                alt_next: regs::LIST_END,
-                token: (pid_code << token::PID_SHIFT)
-                    | (3 << token::CERR_SHIFT)
-                    | (len << token::LEN_SHIFT)
-                    | if dt { token::DT } else { 0 }
-                    | if ioc { token::IOC } else { 0 }
-                    | token::ACTIVE,
-                buffer: [self.buffers.bus_addr() as u32, data_base, 0, 0, 0],
+        // Each stage carries its own buffer: a qTD's first buffer pointer is the
+        // one the controller starts at, so handing every stage the setup
+        // packet's address made the data stage write over the setup packet while
+        // the driver read from the data offset -- an IN transfer then reported
+        // the right byte count and a buffer full of zeros.
+        let setup_buf = self.buffers.bus_addr() as u32;
+        let mut push =
+            |next_addr: u32, pid_code: u32, len: u32, dt: bool, ioc: bool, buf: u32| -> u32 {
+                let qtd = Qtd {
+                    // Next qTD Pointer bit 0 is T (terminate): setting it turns the
+                    // qTD into the last one and the hardware never advances to
+                    // `next_addr`, so only the setup stage of a control transfer ran
+                    // and the driver read the status it happened to leave behind.
+                    next: if next_addr == 0 {
+                        regs::LIST_END
+                    } else {
+                        next_addr
+                    },
+                    alt_next: regs::LIST_END,
+                    token: (pid_code << token::PID_SHIFT)
+                        | (3 << token::CERR_SHIFT)
+                        | (len << token::LEN_SHIFT)
+                        | if dt { token::DT } else { 0 }
+                        | if ioc { token::IOC } else { 0 }
+                        | token::ACTIVE,
+                    // The second page pointer lets a stage that starts at offset 64
+                    // of the 4 KiB buffer cross into the next page.
+                    buffer: [buf, buf + 4096, 0, 0, 0],
+                };
+                let address = qtd_bus + index as u32 * qtd_stride;
+                let cell = qtd_base.wrapping_add(index);
+                // SAFETY: `index` selects one of the three qTDs in the allocation.
+                unsafe {
+                    core::ptr::write_volatile(cell, qtd);
+                }
+                index += 1;
+                address
             };
-            let address = qtd_bus + index as u32 * qtd_stride;
-            let cell = qtd_base.wrapping_add(index);
-            // SAFETY: `index` selects one of the three qTDs in the allocation.
-            unsafe {
-                core::ptr::write_volatile(cell, qtd);
-            }
-            index += 1;
-            address
-        };
         // The chain is built back to front so each qTD knows its successor.
-        let status_addr = push(0, if is_in { pid::OUT } else { pid::IN }, 0, true, true);
+        let status_addr = push(
+            0,
+            if is_in { pid::OUT } else { pid::IN },
+            0,
+            true,
+            true,
+            setup_buf,
+        );
         let data_addr = if length > 0 {
             push(
                 status_addr,
@@ -309,11 +466,12 @@ impl Ehci {
                 length as u32,
                 true,
                 false,
+                data_base,
             )
         } else {
             status_addr
         };
-        push(data_addr, pid::SETUP, 8, false, false)
+        push(data_addr, pid::SETUP, 8, false, false, setup_buf)
     }
 }
 
@@ -353,6 +511,27 @@ impl Hcd for Ehci {
         self.regs.write32(
             offset,
             (current | portsc::PP | portsc::RST) & !portsc::CHANGE_BITS,
+        );
+        // The reset must be held for at least 50 ms: `hub_port_reset()` asks for
+        // the feature and `hub_port_wait_reset()` only looks at the port again
+        // after the reset timer expires. A high-speed device answers the host's
+        // SE0 with a chirp K during this window, so the line states seen here
+        // record whether it took part in the handshake.
+        let mut saw_k = false;
+        let mut saw_j = false;
+        for _ in 0..50 {
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+            let sample = self.regs.read32(offset);
+            match (sample & portsc::LINE_MASK) >> 10 {
+                1 => saw_k = true,
+                2 => saw_j = true,
+                _ => {}
+            }
+        }
+        info!(
+            "ehci: port {} reset window: chirp K seen {saw_k}, J seen {saw_j} (a high-speed \
+             device chirps K; a full-speed one never leaves J)",
+            port + 1
         );
         // `ehci_hub_control()` completes the reset from its GetPortStatus path:
         // it reads PORTSC, writes it back with the reset bit and the RWC bits

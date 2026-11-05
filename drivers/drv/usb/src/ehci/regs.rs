@@ -41,7 +41,13 @@ pub mod sts {
     pub const PCD: u32 = 1 << 2;
     pub const FLR: u32 = 1 << 3;
     pub const HSE: u32 = 1 << 4;
+    /// Controller halted.
     pub const HCH: u32 = 1 << 12;
+    pub const HCHALTED: u32 = HCH;
+    /// Reclamation: the asynchronous schedule is empty.
+    pub const REC: u32 = 1 << 13;
+    /// Asynchronous schedule status: the schedule is actually being executed.
+    pub const ASS: u32 = 1 << 15;
 }
 
 pub mod portsc {
@@ -119,6 +125,10 @@ pub mod info1 {
     /// Head of the reclamation list: required for the one QH that is the
     /// asynchronous schedule's entry point.
     pub const HEAD: u32 = 1 << 15;
+    /// Data toggle control: use each qTD's own DT bit instead of the queue
+    /// head's, which is what a control transfer needs (DATA0 for the setup
+    /// stage, DATA1 for the data and status stages).
+    pub const TOGGLE_CTL: u32 = 1 << 14;
     pub const EPS_SHIFT: u32 = 12;
     pub const EPS_MASK: u32 = 0x3 << EPS_SHIFT;
     pub const ENDPOINT_SHIFT: u32 = 8;
