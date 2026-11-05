@@ -728,10 +728,27 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
         }
+        // Reload the schedule base before re-enabling: the controller samples
+        // ASYNCLISTADDR when it starts the schedule, and the reference stops and
+        // restarts the whole controller around idle periods
+        // (`enable_async`/`disable_async`). Leaving the base untouched across a
+        // stop/start pair leaves it traversing whatever it happened to cache.
+        self.regs.write32(
+            self.operational + op::ASYNCLISTADDR,
+            self.qh.bus_addr() as u32,
+        );
         self.regs.write32(
             self.operational + op::USBCMD,
             command | regs::cmd::RS | regs::cmd::ASE,
         );
+        // Wait for the controller to acknowledge the enable before queueing is
+        // considered done (`ehci_poll_ASS`'s want/actual comparison).
+        for _ in 0..40 {
+            if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
         // Snapshot what the schedule was given, and whether the controller is
         // even running, at the moment the transfer is handed over.
         {

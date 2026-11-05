@@ -52,3 +52,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 09:52 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_make` | queue head endpoint characteristics: endpoint number, speed, maximum packet size |
 | 2026-11-05 10:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | sampling the outstanding window instead of only the end state |
 | 2026-11-05 10:24 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | reclamation-list head must carry the H bit; it is what ends the list |
+| 2026-11-05 10:29 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-timer.c` | `ehci_poll_ASS` | the schedule base is reloaded and ASS acknowledged across a stop/start |
