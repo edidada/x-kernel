@@ -68,3 +68,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 11:21 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `scan_async` | a queue head ahead of the ring blocks every endpoint behind it |
 | 2026-11-05 11:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_completions` | observing whether the controller ever sees the descriptor's Active bit |
 | 2026-11-05 11:25 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_irq` | the controller must react to a corrupted ring if it is walking it |
+| 2026-11-05 11:32 | `/workspace/linux-7.1.8/drivers/clk/rockchip/clk-rk3588.c` | `CLKGATE_CON` | CRU clock-gate words can gate a host clock behind the driver's back |

@@ -28,6 +28,9 @@ const EP0_BUFFER_LEN: usize = 4096;
 /// Bulk DMA buffer: one page, enough for a mass-storage sector and for the
 /// 31-byte command block wrapper plus its status.
 const BULK_BUFFER_LEN: usize = 4096;
+/// CRU `CLKGATE_CON` offset covering the USB host gates (dwc3's is CON42 at
+/// 0x8a8; the host gates live in the same neighbourhood).
+const CLKGATE_SNAPSHOT: usize = 0x8a0;
 
 pub struct Ehci {
     regs: IoMap,
@@ -42,6 +45,10 @@ pub struct Ehci {
     buffers: CoherentMem,
     /// Page-aligned DMA buffer for bulk transfers.
     bulk: CoherentMem,
+    /// CRU clock-gate words snapshotted at init, for comparing on failure.
+    gate_snapshot: [u32; 2],
+    /// The CRU window, kept so the gate snapshot can be re-read on failure.
+    cru: IoMap,
     /// Bus address of each bulk endpoint's dummy descriptor (index 0 = OUT,
     /// 1 = IN). A queue head's `qtd_next` points here permanently; enqueueing
     /// replaces the descriptor's contents instead of repointing the head.
@@ -243,6 +250,24 @@ impl Ehci {
         }
         // Every endpoint queue head lives in the ring; see `build_async_ring()`.
         build_async_ring(qh.bus_addr(), qh.as_ptr().cast::<Qh>());
+        // Snapshot the CRU clock-gate words around the USB hosts: a later
+        // driver's CRU write that gates one of these clocks stops the
+        // controller's traversal while every register keeps its value, and the
+        // gate word is the only place that shows.
+        // The CRU sits at its own base; the gate words live at +0x8a0 (the dwc3
+        // neighbour is CON42 at 0x8a8).
+        let cru = dev.res().iomap_region(
+            driver_base::MmioRegion::new(0xfd7c_0000, 0x1000),
+            "ehci-cru-gates",
+        )?;
+        let mut gates = [0u32; 2];
+        for (word, cell) in gates.iter_mut().enumerate() {
+            *cell = cru.read32(CLKGATE_SNAPSHOT + word * 4);
+        }
+        info!(
+            "ehci: cru gate snapshot {:#010x} {:#010x} (offsets {:#x}..)",
+            gates[0], gates[1], CLKGATE_SNAPSHOT,
+        );
         regs.write32(operational + op::ASYNCLISTADDR, qh.bus_addr() as u32);
         // `ehci_reset()` clears the sticky status bits by writing them back. A
         // latched Host System Error keeps the controller halted, and a halted
@@ -307,6 +332,8 @@ impl Ehci {
             buffers,
             bulk,
             bulk_dummy_bus: [0; 2],
+            gate_snapshot: gates,
+            cru,
             _frame_lists: frame_lists,
             speed: Speed::Full,
         })
@@ -909,6 +936,18 @@ impl Ehci {
                 bytes[5],
                 bytes[6],
                 bytes[7],
+            );
+            let now0 = self.cru.read32(CLKGATE_SNAPSHOT);
+            let now1 = self.cru.read32(CLKGATE_SNAPSHOT + 4);
+            log::error!(
+                "ehci: cru gates now {now0:#010x} {now1:#010x} (snapshot {:#010x} {:#010x}){}",
+                self.gate_snapshot[0],
+                self.gate_snapshot[1],
+                if now0 != self.gate_snapshot[0] || now1 != self.gate_snapshot[1] {
+                    " -- CHANGED"
+                } else {
+                    ""
+                },
             );
             return Err(KError::TimedOut);
         }
