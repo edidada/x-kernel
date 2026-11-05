@@ -250,6 +250,7 @@ impl Ehci {
         data: &mut [u8],
         speed: Speed,
     ) -> KResult<usize> {
+        self.ensure_running();
         let is_in = setup.request_type & 0x80 != 0;
         let length = data
             .len()
@@ -397,6 +398,23 @@ impl Ehci {
         Err(KError::TimedOut)
     }
 
+    /// Clears a latched halt before queueing new work.
+    ///
+    /// A Host System Error halts the controller and stays latched until software
+    /// writes USBSTS back. Every transfer path needs this, control transfers
+    /// included: the BOT soft reset is itself a control transfer, so without it
+    /// the recovery path cannot run either.
+    fn ensure_running(&self) {
+        let status = self.regs.read32(self.operational + op::USBSTS);
+        if status & (sts::HCHALTED | sts::HSE) != 0 {
+            log::warn!(
+                "ehci: controller halted before a transfer (USBSTS {status:#010x}); restarting \
+                 the schedule"
+            );
+            self.recover_async_schedule();
+        }
+    }
+
     /// Restarts the asynchronous schedule after a controller halt.
     fn recover_async_schedule(&self) {
         let status = self.regs.read32(self.operational + op::USBSTS);
@@ -450,6 +468,7 @@ impl Ehci {
         is_in: bool,
     ) -> KResult<usize> {
         let BULK_QH: usize = if is_in { 3 } else { 2 };
+        self.ensure_running();
         let length = data.len();
         if length == 0 || length > BULK_BUFFER_LEN {
             return Err(KError::InvalidInput);
@@ -472,6 +491,11 @@ impl Ehci {
         // One qTD, with the interrupt-on-complete bit so completion is observed
         // on the qTD itself rather than on the queue head overlay.
         let qtd_bus = self.qtds.bus_addr() as u32;
+        let qtd_token = ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
+            | (3 << token::CERR_SHIFT)
+            | ((length as u32) << token::LEN_SHIFT)
+            | token::IOC
+            | token::ACTIVE;
         let qtd = Qtd {
             next: regs::LIST_END,
             alt_next: regs::LIST_END,
@@ -537,6 +561,18 @@ impl Ehci {
             core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
         }
         self.link_endpoint(BULK_QH);
+        // Snapshot what the schedule was given, and whether the controller is
+        // even running, at the moment the transfer is handed over.
+        {
+            let status = self.regs.read32(self.operational + op::USBSTS);
+            log::info!(
+                "ehci: bulk start qh {BULK_QH}: info1 {:#x} qtd {qtd_bus:#x} token \
+                 {qtd_token:#x}, USBSTS {status:#010x} (halted {}, ass {})",
+                qh.info1,
+                status & sts::HCHALTED != 0,
+                status & sts::ASS != 0,
+            );
+        }
         let mut token = token::ACTIVE;
         for _ in 0..POLL_STEPS {
             // SAFETY: dword 2 of the qTD is its token.
@@ -1028,10 +1064,21 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
                 (block_id + (done / 512) as u64) as u32,
                 sectors as u16,
             )
-            .inspect_err(|err| {
+            .or_else(|err| {
                 log::error!(
-                    "ehci: read_block {block_id} sector {} x{sectors} failed: {err:?}",
+                    "ehci: read_block {block_id} sector {} x{sectors} failed: {err:?}; running \
+                     the bulk-only reset",
                     block_id + (done / 512) as u64
+                );
+                // A BOT device that lost track of a command NAKs everything,
+                // which looks like a transfer that never completes. The
+                // reference's soft reset is the documented way back.
+                usb::bot::reset_recovery(&mut *guard, &self.endpoints)?;
+                usb::bot::read_sectors(
+                    &mut *guard,
+                    &self.endpoints,
+                    (block_id + (done / 512) as u64) as u32,
+                    sectors as u16,
                 )
             })?;
             if data.len() < sectors * 512 {
@@ -1104,6 +1151,7 @@ fn publish_mass_storage(
                 endpoint_in,
                 endpoint_out,
                 max_packet: 512,
+                interface: interface.number,
             };
             // Capacity comes from the device itself, and the block layer needs
             // it before the disk is published.
@@ -1196,6 +1244,7 @@ fn probe_mass_storage(ehci: &mut Ehci, device: &usb::UsbDevice) {
                 endpoint_in,
                 endpoint_out,
                 max_packet: 512,
+                interface: interface.number,
             };
             log::info!("ehci: mass storage on ep in {endpoint_in:#04x} out {endpoint_out:#04x}",);
             usb::bot::describe(ehci, &endpoints);

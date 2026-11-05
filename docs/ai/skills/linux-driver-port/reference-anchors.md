@@ -29,3 +29,7 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:46 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_map_blocks` | which block reads a directory walk issues |
 | 2026-11-05 06:49 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `ehci_handle_halted_endpoint` | endpoint halt after a failed transfer |
 | 2026-11-05 06:51 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_reset` | clearing a latched Host System Error and restarting the schedule |
+| 2026-11-05 06:54 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_reset` | BOT soft reset: class reset then CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints |
+| 2026-11-05 06:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | the queue head handed to the asynchronous schedule |
+| 2026-11-05 06:57 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_work` | recovering a controller that latched a halt before new work is queued |
+| 2026-11-05 06:58 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_urb_enqueue` | every enqueue path clears a latched halt first |

@@ -28,6 +28,8 @@ pub struct BotEndpoints {
     pub endpoint_in: u8,
     pub endpoint_out: u8,
     pub max_packet: u16,
+    /// Interface number the class reset addresses (`us->ifnum`).
+    pub interface: u8,
 }
 
 /// Builds a 31-byte command block wrapper.
@@ -227,5 +229,46 @@ pub fn describe(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
         }
         Ok(_) => log::warn!("bot: short read capacity reply"),
         Err(err) => log::warn!("bot: read capacity failed: {err:?}"),
+    }
+}
+
+/// Bulk-Only Mass Storage Reset: class request `0xff`, recipient interface
+/// (`usb_stor_Bulk_reset()` → `usb_stor_reset_common()`).
+pub const BULK_ONLY_RESET: u8 = 0xff;
+/// `USB_REQ_CLEAR_FEATURE`, `USB_RECIP_ENDPOINT`, `USB_ENDPOINT_HALT`.
+const CLEAR_FEATURE_ENDPOINT: u8 = 0x02;
+const ENDPOINT_HALT: u16 = 0;
+
+/// Soft reset of a mass-storage device (`usb_stor_Bulk_reset()`).
+///
+/// A BOT device that has lost track of a command keeps NAKing every
+/// transaction, which on the host side looks exactly like a transfer that never
+/// completes. The reference clears that state with the class reset followed by
+/// `CLEAR_FEATURE(ENDPOINT_HALT)` on both bulk endpoints, and waits six seconds
+/// between the two steps.
+pub fn reset_recovery(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<()> {
+    let setup =
+        crate::SetupPacket::new(0x21, BULK_ONLY_RESET, 0, u16::from(endpoints.interface), 0);
+    let mut none = [0u8; 0];
+    hcd.control_transfer(endpoints.address, &setup, &mut none)?;
+    // "Give the device some time to recover from the reset" -- the reference
+    // waits up to six seconds here; the bulk-only spec asks for at least one.
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_100_000));
+    let mut first_error = None;
+    for endpoint in [endpoints.endpoint_in, endpoints.endpoint_out] {
+        let clear = crate::SetupPacket::new(
+            CLEAR_FEATURE_ENDPOINT,
+            1, // USB_REQ_CLEAR_FEATURE
+            ENDPOINT_HALT,
+            u16::from(endpoint),
+            0,
+        );
+        if let Err(err) = hcd.control_transfer(endpoints.address, &clear, &mut none) {
+            first_error.get_or_insert(err);
+        }
+    }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
