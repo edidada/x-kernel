@@ -153,9 +153,44 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(alt_next_ptr, regs::LIST_END);
         }
-        // SAFETY: dword 0 of the head QH: the list is head -> endpoint -> head.
+        // The asynchronous list holds every endpoint queue head at once, the way
+        // `ehci_urb_enqueue()` keeps one per endpoint and links them all.
+        // Repointing the head at one endpoint evicts the others, which is why a
+        // transfer could find its queue head outside the schedule.
+        //
+        // head -> EP0 -> bulk OUT -> bulk IN -> head
+        let qh_size = core::mem::size_of::<Qh>() as u32;
+        let base = qh.bus_addr() as u32;
+        let _ = ep_bus;
+        // SAFETY: dword 0 of the head QH.
         unsafe {
-            core::ptr::write_volatile(next_ptr, ep_bus | 2);
+            core::ptr::write_volatile(next_ptr, base + qh_size | 2);
+        }
+        for index in 1..4u32 {
+            let entry = head.wrapping_add(index as usize);
+            let next = if index == 3 {
+                base | 2
+            } else {
+                base + (index + 1) * qh_size | 2
+            };
+            // SAFETY: dword 0 of queue head `index`, inside the four-QH
+            // allocation.
+            unsafe {
+                core::ptr::write_volatile(entry.cast::<u32>(), next);
+            }
+            for offset in [16u32, 20u32] {
+                // SAFETY: dwords 4 and 5 of the same queue head: qtd_next and
+                // alt_next both terminate.
+                unsafe {
+                    core::ptr::write_volatile(
+                        entry
+                            .cast::<u8>()
+                            .wrapping_add(offset as usize)
+                            .cast::<u32>(),
+                        regs::LIST_END,
+                    );
+                }
+            }
         }
         regs.write32(operational + op::ASYNCLISTADDR, qh.bus_addr() as u32);
         // `ehci_reset()` clears the sticky status bits by writing them back. A
@@ -296,7 +331,7 @@ impl Ehci {
         };
         let max_packet = if speed == Speed::High { 64 } else { 8 };
         let qh = Qh {
-            next: (self.qh.bus_addr() as u32) | 2,
+            next: self.qh_successor_bus(1),
             // No HEAD here: only the empty list head carries H, and a second
             // QH with it reads as the end of the reclamation list, so the
             // controller overlays this QH's qTD and never executes it.
@@ -396,6 +431,22 @@ impl Ehci {
         }
         log::error!("ehci: control transfer timed out");
         Err(KError::TimedOut)
+    }
+
+    /// The queue head that follows `index` in the asynchronous ring.
+    ///
+    /// The ring is head(0) -> EP0(1) -> bulk OUT(2) -> bulk IN(3) -> head, and
+    /// every endpoint queue head is written with its own successor: writing the
+    /// head's address into an endpoint queue head would cut the ring short and
+    /// strand every endpoint after it.
+    fn qh_successor_bus(&self, index: usize) -> u32 {
+        let base = self.qh.bus_addr() as u32;
+        let size = core::mem::size_of::<Qh>() as u32;
+        match index {
+            1 => base + 2 * size | 2,
+            2 => base + 3 * size | 2,
+            _ => base | 2,
+        }
     }
 
     /// Clears a latched halt before queueing new work.
@@ -558,7 +609,7 @@ impl Ehci {
             }
         };
         let qh = Qh {
-            next: self.qh.bus_addr() as u32 | 2,
+            next: self.qh_successor_bus(BULK_QH),
             info1: info1::NAK_RELOAD
                 | ((max_packet) << info1::MAX_PACKET_SHIFT)
                 | eps
@@ -580,22 +631,19 @@ impl Ehci {
             token: previous & (token::DT | token::PING),
             buffer: [0; 5],
         };
-        // SAFETY: `qh` is this endpoint's bulk queue head inside the four-QH
-        // allocation, and it is off the schedule at this point.
-        unsafe {
-            core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
-        }
         // Stop the schedule for the edit itself: with RS cleared the controller
         // fetches nothing, so the queue head and its descriptor cannot be read
-        // while they are being written. The alternative -- trusting the
-        // reclamation bit to mean "the controller is done with this QH" -- left
-        // an intermittent Host System Error, which is this controller's way of
-        // saying it fetched a descriptor mid-write.
+        // while they are being written. The queue head stays in the list; only
+        // its contents change.
         let command = self.regs.read32(self.operational + op::USBCMD);
         self.regs
             .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
-        self.link_endpoint(BULK_QH);
+        // SAFETY: `qh` is this endpoint's queue head inside the four-QH
+        // allocation.
+        unsafe {
+            core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
+        }
         self.regs.write32(
             self.operational + op::USBCMD,
             command | regs::cmd::RS | regs::cmd::ASE,
@@ -653,11 +701,19 @@ impl Ehci {
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
-        // SAFETY: dword 0 of the list head.
+        // Park the queue head: with `qtd_next` at LIST_END the controller finds
+        // nothing more to execute here and moves on to the next endpoint.
+        // SAFETY: dword 4 of this endpoint's queue head.
         unsafe {
-            core::ptr::write_volatile(head.cast::<u32>(), self.qh.bus_addr() as u32 | 2);
+            core::ptr::write_volatile(
+                head.wrapping_add(BULK_QH)
+                    .cast::<u8>()
+                    .wrapping_add(16)
+                    .cast::<u32>(),
+                regs::LIST_END,
+            );
         }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
         if token & token::ACTIVE != 0 {
             let status = self.regs.read32(self.operational + op::USBSTS);
             log::error!(
@@ -1102,6 +1158,52 @@ struct UsbBotDisk {
 /// request larger than eight sectors is split.
 const BOT_MAX_SECTORS: usize = 8;
 
+impl UsbBotDisk {
+    /// One-shot probe of everything the failing path depends on: the registers
+    /// the controller reads, the memory software wrote, and whether a control
+    /// transfer (EP0, its own queue head and descriptors) still works from this
+    /// context. Runs once so a board log answers where the bulk path breaks.
+    fn probe_context(&self) {
+        let mut guard = self.ehci.lock();
+        let asynclist = guard.regs.read32(guard.operational + op::ASYNCLISTADDR);
+        let command = guard.regs.read32(guard.operational + op::USBCMD);
+        let status = guard.regs.read32(guard.operational + op::USBSTS);
+        log::info!(
+            "ehci: context probe: ASYNCLISTADDR {asynclist:#x} (head {:#x}), USBCMD \
+             {command:#010x}, USBSTS {status:#010x}",
+            guard.qh.bus_addr(),
+        );
+        let head = guard.qh.as_ptr().cast::<Qh>();
+        // SAFETY: both queue heads are inside this controller's allocation.
+        let (head_next, bulk_next, bulk_overlay) = unsafe {
+            (
+                core::ptr::read_volatile(head.cast::<u32>()),
+                core::ptr::read_volatile(head.wrapping_add(2).cast::<u32>()),
+                core::ptr::read_volatile(
+                    head.wrapping_add(2)
+                        .cast::<u8>()
+                        .wrapping_add(24)
+                        .cast::<u32>(),
+                ),
+            )
+        };
+        log::info!(
+            "ehci: context probe: head.next {head_next:#x}, bulk qh next {bulk_next:#x}, bulk \
+             overlay {bulk_overlay:#010x}"
+        );
+        let speed = guard.speed;
+        let mut descriptor = [0u8; 8];
+        let setup = SetupPacket::get_descriptor(usb::descriptor::ty::DEVICE, 0, 8);
+        match guard.control_transfer_inner(1, &setup, &mut descriptor, speed) {
+            Ok(length) => log::info!(
+                "ehci: context probe: control transfer on EP0 read {length} bytes: {:02x?}",
+                &descriptor[..length.min(8)]
+            ),
+            Err(err) => log::error!("ehci: context probe: control transfer on EP0 failed: {err:?}"),
+        }
+    }
+}
+
 impl subsys_block::BlockDeviceOperations for UsbBotDisk {
     fn num_blocks(&self) -> u64 {
         self.blocks
@@ -1120,6 +1222,13 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
             return Err(kerrno::KError::InvalidInput);
         }
         log::info!("ehci: read_block {block_id} + {} bytes", buf.len());
+        {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            static PROBED: AtomicBool = AtomicBool::new(false);
+            if !PROBED.swap(true, Ordering::Relaxed) {
+                self.probe_context();
+            }
+        }
         let mut guard = self.ehci.lock();
         let mut done = 0usize;
         while done < buf.len() {

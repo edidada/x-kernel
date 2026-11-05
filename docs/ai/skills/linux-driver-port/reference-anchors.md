@@ -39,3 +39,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 07:08 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_run` | the run bit gates all schedule fetches |
 | 2026-11-05 07:11 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | queue head overlay is the record of what the controller fetched |
 | 2026-11-05 07:12 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | a halted queue head keeps HALTED in its overlay until software clears it |
+| 2026-11-05 07:15 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_work` | which register or descriptor the controller stops fetching |
+| 2026-11-05 07:17 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | every endpoint queue head stays in the asynchronous list; only its contents change |
