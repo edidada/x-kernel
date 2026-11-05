@@ -1088,12 +1088,23 @@ impl Xhci {
     }
 
     /// Waits for the completion of the command TRB published at `trb_addr`.
+    ///
     /// Completion events arrive in order, so a plain type match is usually
-    /// right — but a command whose completion never came would let a LATER
-    /// command's completion stand in for it, so the TRB address is verified.
-    fn wait_for_command(&mut self, trb_addr: u64, what: &str) -> Result<Trb, KError> {
+    /// right — but two details need care: most commands report the command
+    /// TRB's own address in the event parameter, while **Set TR Dequeue
+    /// Pointer reports the new dequeue pointer** (the command's parameter
+    /// field); and a command whose completion never came would let a LATER
+    /// command's completion stand in for it. Matching either address covers
+    /// both.
+    fn wait_for_command(
+        &mut self,
+        trb_addr: u64,
+        cmd_param: u64,
+        what: &str,
+    ) -> Result<Trb, KError> {
         let matches = |event: &Trb| {
-            event.trb_type() == regs::trb::COMMAND_COMPLETION && event.parameter == trb_addr
+            event.trb_type() == regs::trb::COMMAND_COMPLETION
+                && (event.parameter == trb_addr || event.parameter == cmd_param)
         };
         if let Some(event) = self.take_pending(matches) {
             return Ok(event);
@@ -1185,12 +1196,12 @@ impl Xhci {
         // the ring is still running (CRR set) and the TRB is on it, but the
         // controller's dequeue never moves. Ring the doorbell again before giving
         // up, and log which attempt produced the completion.
-        let event = match self.wait_for_command(published, what) {
+        let event = match self.wait_for_command(published, trb.parameter, what) {
             Ok(event) => event,
             Err(first) => {
                 warn!("xhci: {what} not fetched, ringing the doorbell again");
                 self.ring_command_doorbell();
-                match self.wait_for_command(published, what) {
+                match self.wait_for_command(published, trb.parameter, what) {
                     Ok(event) => event,
                     Err(_) => return Err(first),
                 }
@@ -1945,6 +1956,17 @@ impl Xhci {
             }
         };
         let code = event.completion_code();
+        if code == regs::code::STALL {
+            // A stalled control transfer leaves EP0 Halted: the controller
+            // stops the ring at the stalled TD and will not fetch anything
+            // queued behind it (`xhci_cleanup_halted_endpoint()`). Reset
+            // Endpoint returns the endpoint to Running; the next transfer can
+            // proceed. The stall itself propagates to the caller.
+            if let Err(reset_err) = self.reset_ep0(slot_index) {
+                log::warn!("xhci: ep0 reset after stall failed: {reset_err:?}");
+            }
+            return Err(KError::InvalidInput);
+        }
         if code != regs::code::SUCCESS && code != regs::code::SHORT_PACKET {
             // The event says which slot and endpoint the controller blames, and
             // which TRB it stopped at. Without that, "the device did not answer"
