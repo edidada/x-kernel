@@ -12,6 +12,14 @@ use kerrno::{KError, KResult};
 
 use crate::Hcd;
 
+/// The status signature the device first showed us
+/// (`us->bcs_signature`): compared against later, not against the spec value.
+static LEARNT_SIGNATURE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The command tag: `usb_stor_Bulk_transport()` increments it per command
+/// (`bcb->Tag = ++us->tag`) and the status wrapper must echo it.
+static TAG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Command Block Wrapper: 31 bytes (`usb_stor_Bulk_transport()`).
 pub const CBW_LEN: usize = 31;
 /// Command Status Wrapper: 13 bytes.
@@ -58,8 +66,11 @@ fn transfer(
     command: &[u8],
     transfer_length: usize,
     is_in: bool,
-    tag: u32,
+    _tag: u32,
 ) -> KResult<Vec<u8>> {
+    // `bcb->Tag = ++us->tag`: the status wrapper echoes this, and the echo is
+    // checked below.
+    let tag = TAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     let cbw = build_cbw(tag, transfer_length as u32, is_in, command);
     let mut written = [0u8; CBW_LEN];
     written.copy_from_slice(&cbw);
@@ -100,6 +111,24 @@ fn transfer(
         }
         if received != transfer_length {
             log::warn!("bot: short data stage {received}/{transfer_length}");
+            // `usb_stor_Bulk_transport()`: "Sometimes a device will mistakenly
+            // skip the data phase and go directly to the status phase without
+            // sending a zero-length packet. If we get a 13-byte response here,
+            // check whether it really is a CSW."
+            if is_in
+                && transfer_length.saturating_sub(received) == CSW_LEN
+                && received + CSW_LEN <= data.len()
+            {
+                let candidate = &data[received..received + CSW_LEN];
+                let signature =
+                    u32::from_le_bytes([candidate[0], candidate[1], candidate[2], candidate[3]]);
+                if signature == CSW_SIGNATURE {
+                    log::warn!("bot: device skipped the data phase; using its status wrapper");
+                    let mut wrapper = [0u8; CSW_LEN];
+                    wrapper.copy_from_slice(candidate);
+                    return finish_status(&wrapper, tag, Some(data));
+                }
+            }
         }
     }
     let mut csw = [0u8; CSW_LEN];
@@ -124,20 +153,68 @@ fn transfer(
         }
         got += read;
     }
+    // `usb_stor_Bulk_transport()`: a zero-length status wrapper is retried once
+    // ("Some broken devices add unnecessary zero-length packets"), and a stalled
+    // status phase is retried after the endpoint halt is cleared.
+    if got == 0 {
+        log::warn!("bot: zero-length CSW; retrying");
+        let read = hcd.bulk_transfer(endpoints.address, endpoints.endpoint_in, &mut csw, true)?;
+        got = read;
+    }
     if got < CSW_LEN {
+        let _ = reset_recovery(hcd, endpoints);
+        let read = hcd.bulk_transfer(endpoints.address, endpoints.endpoint_in, &mut csw, true)?;
+        got = read;
+    }
+    if got < CSW_LEN {
+        log::error!("bot: short CSW {got}/{CSW_LEN} after recovery");
         return Err(KError::Io);
     }
+    finish_status(&csw, tag, Some(data))
+}
+
+/// `usb_stor_Bulk_transport()`'s status-wrapper checks: learnt signature,
+/// echoed tag, and the status code. `US_BULK_STAT_PHASE` means the device and
+/// host disagree about the command's phases, and the flow chart on page 15 of
+/// the spec routes it to a reset recovery rather than a retry.
+fn finish_status(
+    csw: &[u8; CSW_LEN],
+    tag: u32,
+    mut data: Option<alloc::vec::Vec<u8>>,
+) -> KResult<Vec<u8>> {
     let signature = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
+    // "Some broken devices report odd signatures, so we do not check them for
+    // validity against the spec. We store the first one we see, and check
+    // subsequent transfers for validity against this signature."
+    let learnt = LEARNT_SIGNATURE.load(core::sync::atomic::Ordering::Relaxed);
+    if learnt == 0 {
+        LEARNT_SIGNATURE.store(signature, core::sync::atomic::Ordering::Relaxed);
+        if signature != CSW_SIGNATURE {
+            log::warn!("bot: learnt non-standard status signature {signature:#010x}");
+        }
+    } else if signature != learnt {
+        log::error!("bot: signature mismatch: got {signature:#010x}, expecting {learnt:#010x}");
+        return Err(KError::Io);
+    }
+    let echoed_tag = u32::from_le_bytes([csw[4], csw[5], csw[6], csw[7]]);
+    if echoed_tag != tag {
+        log::error!("bot: status tag {echoed_tag} does not match command tag {tag}");
+        return Err(KError::Io);
+    }
     let status = csw[12];
-    if signature != CSW_SIGNATURE {
-        log::error!("bot: bad status signature {signature:#010x}");
-        return Err(KError::Io);
+    match status {
+        0 => {}
+        // US_BULK_STAT_PHASE: only a reset recovery gets out of this.
+        2 => {
+            log::error!("bot: phase error; running the bulk-only reset");
+            return Err(KError::Io);
+        }
+        other => log::error!("bot: command status {other}"),
     }
-    if status != 0 {
-        log::error!("bot: command status {status}");
-        return Err(KError::Io);
+    match data.take() {
+        Some(data) => Ok(data),
+        None => Ok(alloc::vec![]),
     }
-    Ok(data)
 }
 
 /// `READ(10)`: reads `count` blocks of 512 bytes starting at `lba`.

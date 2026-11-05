@@ -58,3 +58,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 10:45 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_append_tds` | enqueue by replacing the dummy descriptor's contents; the queue head's qtd_next never changes |
 | 2026-11-05 10:46 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | the overlay halt is cleared before the descriptor becomes active |
 | 2026-11-05 10:48 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | an idle queue head is inactive, not halted |
+| 2026-11-05 11:01 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_transport` | tag increment, learnt signature, zero-length and stalled CSW retries |
+| 2026-11-05 11:03 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_transport` | skipped-data-phase CSW detection and the phase-error reset path |
