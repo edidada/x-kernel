@@ -800,6 +800,25 @@ unsafe 缺 SAFETY、unsafe-op 分组、too_many_lines ×8 等 + pci 1 条）；c
 真机回归：两个 hub 配置、鼠标枚举、scratchpad=1、Reset Endpoint code 1 全部符合预期；
 SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——鉴别结论在修正后的机制上成立。
 
+**暖复位/重训练实验（同日更晚，commit `7d84abb5d`+`a64c43175`）**：SS 子设备的恢复阶梯
+变为 尝试1 热复位 → 失败后 打链路到 Rx.Detect 等重连 + 热复位（尝试2）→ 失败后 warm
+（BH）复位（尝试3）。结果与两个新事实：
+
+1. **hub 自己的 EP0 在诊断后完全停止应答**：第一次 diagnose 的地址 0 描述符读超时之后，
+   发往 hub（slot 3）的一切控制传输（Rx.Detect、PORT_RESET、BH_RESET）全部 5s 无完成
+   事件（x3）。事件环 dump 出现非事件数据（疑似 dequeue/消费状态与控制器脱同步，或
+   slot-4 遗留传输的事件未被正确消费）。**这是下一个要修的 xHCI 侧问题**：把 wait_event
+   改成按 (slot, ep, trb 地址) 匹配事件、超时后把未消费事件排干，而不是丢弃/误归属。
+2. **盘的 USB2 侧在 EHCI 路径上完整枚举并绑定了 mass storage**（`0951:1666 DataTraveler
+   3.0`，bulk 0x81/0x02，512B）——但 BOT bulk 读超时（`bot: read attempt N failed:
+   TimedOut`，最终 "reported no capacity"）。EHCI+BOT 是历史上有过能挂载记录的路径
+   （`4081d111e`），现在卡在 bulk 传输不完成——这是当前最快的通盘路径。
+3. 5s 超时让每笔死传输都耗满 5s：本轮启动 67s（原 38s）。诊断阶梯累计 ~30s；后续应
+   把 diagnose 限为每端口一次。
+
+下一个会话的选择点：(a) 修 EHCI bulk（最快拿盘）；(b) 修 hub EP0 哑火（SS 线）；
+(c) 参考板 dmesg 对照（等插盘）。
+
 ### 交接快照（旧）：hub 类已通、鼠标可用、U 盘卡在“地址 0 的 SETUP 无应答”
 
 **铁律（已写进 `AGENTS.md`）**：寄存器位域、描述符布局、命令时序一律以源码为准
