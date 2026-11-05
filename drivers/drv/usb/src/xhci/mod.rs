@@ -292,17 +292,20 @@ struct Scratchpads {
 
 /// Allocates the scratchpad buffers `HCSPARAMS2` asks for.
 ///
-/// xHCI 4.2: `Max Scratchpad Buffers = HCSPARAMS2[31:27] << 5 | HCSPARAMS2[25:21]`
-/// (Linux `HCS_MAX_SCRATCHPAD`). When it is non-zero the DCBAA's first entry must
-/// point at an array of pointers to that many buffers *before* the controller is
-/// started; without it the first command that allocates a device slot (`Enable
-/// Slot`) fails with a TRB error while a No-Op still succeeds.
+/// Max Scratchpad Buffers = `HCSPARAMS2[25:21] << 5 | HCSPARAMS2[31:27]`
+/// (`HCS_MAX_SCRATCHPAD`: the count's five HIGH bits live at 25:21 and its five
+/// LOW bits at 31:27 — the register positions are the reverse of the field
+/// names, which is why this once allocated 32 buffers where the controller asks
+/// for 1 on `hcsparams2 = 0x0c0000f1`). When it is non-zero the DCBAA's first
+/// entry must point at an array of pointers to that many buffers *before* the
+/// controller is started; without it the first command that allocates a device
+/// slot (`Enable Slot`) fails with a TRB error while a No-Op still succeeds.
 fn allocate_scratchpads(
     dev: &Device<'_, driver_base::PlatformBus>,
     hcsparams2: u32,
     device_contexts: &CoherentMem,
 ) -> Result<Option<Scratchpads>, ProbeError> {
-    let count = ((((hcsparams2 >> 27) & 0x1f) << 5) | ((hcsparams2 >> 21) & 0x1f)) as usize;
+    let count = ((((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f)) as usize;
     if count == 0 {
         return Ok(None);
     }
@@ -522,6 +525,14 @@ fn write64_hi_lo(bar: &IoMap, offset: usize, value: u64) {
     bar.write32(offset, value as u32);
 }
 
+/// The generic 64-bit register write: low word first, then high
+/// (`xhci_write_64` = `lo_hi_writeq`). DCBAAP, CRCR and ERDP all take this
+/// order; ERSTBA is the one register the `WRITE_64_HI_LO` quirk reverses.
+fn write64_lo_hi(bar: &IoMap, offset: usize, value: u64) {
+    bar.write32(offset, value as u32);
+    bar.write32(offset + 4, (value >> 32) as u32);
+}
+
 /// BRING-UP PROBE: logs every non-zero dword in the register window.
 ///
 /// Read-back of one register cannot distinguish "the write was dropped" from
@@ -558,7 +569,8 @@ fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
     }
     bar.write32(operational + op::USBCMD, 0);
     let mut waited = 0;
-    while bar.read32(operational + op::USBSTS) & sts::HCH == 0 && waited < RESET_POLL_ITERS {
+    // `xhci_halt()`: XHCI_MAX_HALT_USEC (32 ms) for the halt to stick.
+    while bar.read32(operational + op::USBSTS) & sts::HCH == 0 && waited < HALT_POLL_US {
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
         waited += 1;
     }
@@ -571,7 +583,10 @@ fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
 
     bar.write32(operational + op::USBCMD, cmd::HCRST);
     let mut waited = 0;
-    while bar.read32(operational + op::USBCMD) & cmd::HCRST != 0 && waited < RESET_POLL_ITERS {
+    // `xhci_reset(XHCI_RESET_SHORT_USEC)`: 250 ms for HCRST to self-clear and
+    // the same for CNR to drop; both were once given 20 ms, which only ever
+    // worked because warm boots reset faster than that.
+    while bar.read32(operational + op::USBCMD) & cmd::HCRST != 0 && waited < RESET_POLL_US {
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
         waited += 1;
     }
@@ -582,7 +597,7 @@ fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
     // operational register writes made while CNR is set are ignored. Not waiting
     // here is why the command ring register kept reading zero while DCBAAP --
     // written later, once the controller had become ready -- took its value.
-    for _ in 0..200_000 {
+    for _ in 0..RESET_POLL_US {
         if bar.read32(operational + op::USBSTS) & sts::CNR == 0 {
             break;
         }
@@ -738,9 +753,11 @@ impl Xhci {
         // working board reads a non-zero CRCR here.
         let crcr = xhci.operational + op::CRCR;
         let cmd_addr = xhci.command.mem.bus_addr() | 1;
-        // lo_hi_writeq: low half first (Linux writeq order), high half after.
-        xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
+        // Generic 64-bit order (`xhci_write_64` = `lo_hi_writeq`): low half
+        // first. The hi-first order here was an artefact of generalising the
+        // ERSTBA quirk to every register; ERSTBA is the only hi-first one.
         xhci.bar.write32(crcr, cmd_addr as u32);
+        xhci.bar.write32(crcr + 4, (cmd_addr >> 32) as u32);
         info!(
             "xhci: crcr after run {:#018x} (wrote {:#x})",
             xhci.bar.read64(crcr),
@@ -768,11 +785,20 @@ impl Xhci {
         let erstsz = self.runtime + RT_IR0 + 0x08;
         self.bar
             .write32(erstsz, (self.bar.read32(erstsz) & !0xffff) | 1);
-        self.bar
-            .write64(self.runtime + RT_IR0 + 0x10, self.erst.bus_addr()); // ERSTBA0
-        self.bar
-            .write64(self.runtime + 0x18, self.event.mem.bus_addr()); // ERDP
-        self.bar.write64(
+        // ERSTBA is the one 64-bit register the reference writes HIGH word first
+        // when the `WRITE_64_HI_LO` quirk is set (`xhci_add_interrupter`); every
+        // other 64-bit register — DCBAAP, CRCR, ERDP — goes through
+        // `xhci_write_64` = `lo_hi_writeq`, low word first. This controller runs
+        // with the quirk (the working board's xHCI quirks word has bit 47 set),
+        // so both orders below are the reference's, not one order for all.
+        write64_hi_lo(
+            &self.bar,
+            self.runtime + RT_IR0 + 0x10,
+            self.erst.bus_addr(),
+        ); // ERSTBA0
+        write64_lo_hi(&self.bar, self.runtime + 0x18, self.event.mem.bus_addr()); // ERDP
+        write64_lo_hi(
+            &self.bar,
             self.operational + op::DCBAAP,
             self.device_contexts.bus_addr(),
         );
@@ -858,6 +884,13 @@ impl Xhci {
 
 const RESET_POLL_ITERS: usize = 20_000;
 
+/// `xhci_halt()`'s `XHCI_MAX_HALT_USEC`: 32 ms for Run/Stop to take effect.
+const HALT_POLL_US: usize = 32_000;
+
+/// `xhci_reset(XHCI_RESET_SHORT_USEC)`: 250 ms for HCRST to self-clear and for
+/// CNR to drop (the long variant is 10 s on the resume path).
+const RESET_POLL_US: usize = 250_000;
+
 /// Zeroes a set of freshly allocated coherent buffers.
 ///
 /// The controller must find zeroed structures: a stale word reads as a valid
@@ -875,9 +908,17 @@ fn for_each_alloc_zeroed(allocations: &[(*mut u8, usize)]) {
 
 // ---- enumeration: event ring, command ring, control transfers ----
 
-/// How long to wait for the controller to answer a command or a transfer, in
-/// 1 µs steps. A device that is not answering must not wedge the boot.
-const EVENT_POLL_STEPS: usize = 200_000;
+/// How long to wait for a command or transfer completion: the reference's
+/// command timeout is `XHCI_CMD_DEFAULT_TIMEOUT` = 5 s and the USB core's
+/// default control-urb timeout is also 5 s, so a slow device is given the same
+/// window here instead of failing earlier than Linux would. 1 ms polling
+/// steps; a completion that arrives early is caught on the next poll.
+const EVENT_POLL_STEPS: usize = 5_000;
+
+/// Root port reset: how long to poll PORTSC for PRC / the enabled state, in
+/// 1 µs steps (the hub layer allows `HUB_RESET_TIMEOUT`, 1 s, for a reset to
+/// finish; this controller completes one in single-digit milliseconds).
+const PORT_RESET_POLL_STEPS: usize = 200_000;
 
 /// xHCI speed id for a bus speed (Table 6-70 `PSIV` / slot context `Speed`).
 fn speed_id(speed: Speed) -> u8 {
@@ -982,11 +1023,11 @@ impl Xhci {
             self.event_cycle = !self.event_cycle;
         }
         // Hand the consumed slot back to the controller (ERDP, clearing EHB).
-        // ERDP's low word carries EHB, so it is one of the registers where the
-        // DWC3 wrapper's hi-then-lo write order actually matters (the generic
-        // 64-bit store can land the halves the other way round).
+        // ERDP takes the generic low-word-first order (`xhci_write_64`); the
+        // low word carries EHB, so it lands last and clears the flag only after
+        // the new pointer is in place.
         let dequeue = self.event.mem.bus_addr() + (self.event_dequeue * TRB_LEN) as u64;
-        write64_hi_lo(
+        write64_lo_hi(
             &self.bar,
             self.runtime + RT_IR0 + RT_ERDP,
             dequeue | u64::from(ERDP_EHB),
@@ -1011,7 +1052,7 @@ impl Xhci {
                 );
                 continue;
             }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         }
         // Nothing arrived: report what the event slot actually holds and where
         // the consumer thinks it is, so "controller never wrote" and "we are
@@ -1063,8 +1104,8 @@ impl Xhci {
         );
         let raw = self.event.read(self.event_dequeue);
         log::error!(
-            "xhci: {what} timed out after {EVENT_POLL_STEPS} us (dequeue {} cycle {} raw {:#010x} \
-             type {})",
+            "xhci: {what} timed out after {} ms (dequeue {} cycle {} raw {:#010x} type {})",
+            EVENT_POLL_STEPS,
             self.event_dequeue,
             self.event_cycle,
             raw.control,
@@ -1641,6 +1682,13 @@ impl Xhci {
             port + 1,
             speed.as_str(),
         );
+        // `hub_port_init()`: "cope with hardware quirkiness: let SET_ADDRESS
+        // settle" — 10 ms before the next control request, for device firmware
+        // that is not ready to answer right after the status stage. BSR = 1
+        // issued no SET_ADDRESS, so it needs no settle.
+        if !bsr {
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
+        }
         // What the controller wrote back is the only trustworthy statement
         // about whether `Address Device` took effect: EP0's context must say
         // Running and carry the ring pointer we handed over.
@@ -1888,7 +1936,7 @@ impl Xhci {
         // bits that must be preserved exactly as read.
         self.bar
             .write32(offset, (current & portsc::PRESERVE) | portsc::PR);
-        for _ in 0..EVENT_POLL_STEPS {
+        for _ in 0..PORT_RESET_POLL_STEPS {
             let value = self.bar.read32(offset);
             if value & portsc::PRC != 0 || (value & portsc::PED != 0 && value & portsc::PR == 0) {
                 // Acknowledge every change bit we caused, then report the speed.

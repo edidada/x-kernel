@@ -107,7 +107,12 @@ pub mod trb {
     pub const CONFIGURE_ENDPOINT: u32 = 12;
     /// `TRB_RESET_EP`: returns a halted endpoint to Running without touching its
     /// ring; paired with `SET_TR_DEQUEUE` to re-point it.
-    pub const RESET_ENDPOINT: u32 = 15;
+    ///
+    /// 15 is NOT Reset Endpoint — it is Stop Endpoint (`TRB_STOP_RING`); the
+    /// command range is 9 Enable Slot, 10 Disable Slot, 11 Address Device,
+    /// 12 Configure Endpoint, 13 Evaluate Context, **14 Reset Endpoint**,
+    /// 15 Stop Endpoint, 16 Set TR Dequeue (`xhci.h` `TRB_RESET_EP`).
+    pub const RESET_ENDPOINT: u32 = 14;
     /// `TRB_SET_DEQ`: hands the endpoint a dequeue pointer (and its DCS) again.
     pub const SET_TR_DEQUEUE: u32 = 16;
     pub const TRANSFER_EVENT: u32 = 32;

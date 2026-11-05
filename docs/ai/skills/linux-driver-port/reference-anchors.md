@@ -88,3 +88,9 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/core/usb.c` | `usb_endpoint_max_periodic_payload` | ESIT payload: ss_ep_comp.wBytesPerInterval for SS, max_packet*maxp_mult otherwise, 0 for ctrl/bulk |
 | 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-mem.c` | `xhci_endpoint_init` | ep ctx fill sequence: ep_info=ESIT_HI|INTERVAL|MULT, ep_info2=TYPE|MAX_PACKET|MAX_BURST|ERROR_COUNT(3), tx_info=ESIT_LO|AVG with avg_trb_len=max_esit_payload (ctrl: 8 on xHCI>=1.0) |
 | 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/core/config.c` | `usb_parse_ss_endpoint_companion` | companion 0x30 sits right after its endpoint; missing/malformed falls back to an all-zero descriptor |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `TRB_RESET_EP` | Reset Endpoint = 14; 15 is Stop Endpoint (TRB_STOP_RING) |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-caps.h` | `HCS_MAX_SCRATCHPAD` | count = (bits25:21)<<5 | (bits31:27); register positions are reversed vs the field names |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `xhci_write_64 / xhci_add_interrupter` | generic 64-bit writes are lo_hi_writeq; ERSTBA alone flips to hi_lo when WRITE_64_HI_LO is set |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_reset / xhci_halt` | halt wait XHCI_MAX_HALT_USEC=32ms; HCRST self-clear and CNR drop use the caller timeout (short=250ms) |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/include/uapi/linux/usb/ch11.h` | `USB_PORT_STAT_C_BH_RESET / USB_PORT_STAT_LINK_STATE` | C_BH_RESET change bit5 0x0020; SS link state bits 8:5 mask 0x01e0 |
+| 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/core/hub.h` | `hub_power_on_good_delay` | external hub power-on wait = max(bPwrOn2PwrGood*2ms, 100ms) |

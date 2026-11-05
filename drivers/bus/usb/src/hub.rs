@@ -47,8 +47,10 @@ const PORT_ST_CONNECTION: u32 = 1 << 0;
 const PORT_ST_ENABLE: u32 = 1 << 1;
 const PORT_ST_LOW_SPEED: u32 = 1 << 9;
 const PORT_ST_HIGH_SPEED: u32 = 1 << 10;
-/// USB3 hubs report the link speed in bits 6:3 instead, with 4 = SuperSpeed.
-const PORT_ST_SS_SHIFT: u32 = 3;
+/// USB3 hubs report the link state in bits 8:5 (`USB_PORT_STAT_LINK_STATE`):
+/// 0 = U0, 5 = Rx.Detect, 6 = SS.Inactive… There is no speed field on an SS
+/// hub port status — speed comes from the hub itself, not this word.
+const PORT_ST_SS_SHIFT: u32 = 5;
 const PORT_ST_SS_MASK: u32 = 0xf;
 
 /// `wPortChange` bits.
@@ -195,9 +197,10 @@ pub fn power_ports(hcd: &mut dyn Hcd, address: u8, info: HubInfo) {
             if ok { "on" } else { "FAILED" }
         );
     }
-    // bPwrOn2PwrGood counts 2 ms units; devices need it before they answer.
+    // bPwrOn2PwrGood counts 2 ms units; `hub_power_on_good_delay()` makes an
+    // external hub wait at least 100 ms for power to become stable.
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(
-        u64::from(info.power_on_2ms) * 2_000 + 10_000,
+        (u64::from(info.power_on_2ms) * 2_000).max(100_000),
     ));
 }
 
@@ -214,7 +217,7 @@ pub fn port_status(hcd: &mut dyn Hcd, address: u8, port: u8) -> Option<(u32, u32
         return None;
     }
     let status = u32::from(buf[0]) | (u32::from(buf[1]) << 8);
-    let change = u32::from(buf[2]) | (u32::from(buf[3]) << 16);
+    let change = u32::from(buf[2]) | (u32::from(buf[3]) << 8);
     Some((status, change))
 }
 
@@ -248,8 +251,8 @@ fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32, info: Hu
     for (bit, feature) in [
         (PORT_CH_CONNECTION, 16), // C_PORT_CONNECTION
         (PORT_CH_RESET, 20),      // C_PORT_RESET
-        (1 << 3, 29),             // C_BH_PORT_RESET (SS only)
-        (1 << 6, 25),             // C_PORT_LINK_STATE (SS only)
+        (1 << 5, 29),             // C_BH_PORT_RESET (SS only; USB_PORT_STAT_C_BH_RESET)
+        (1 << 6, 25),             // C_PORT_LINK_STATE (SS only; USB_PORT_STAT_C_LINK_STATE)
     ] {
         if feature >= 25 && !ss {
             continue;
