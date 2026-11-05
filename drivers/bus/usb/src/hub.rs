@@ -331,7 +331,12 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
     for _ in 0..RESET_POLLS {
         let (status, change) = port_status(hcd, address, port)?;
-        if change & PORT_CH_RESET != 0 || status & PORT_ST_ENABLE != 0 {
+        // Wait for C_PORT_RESET specifically. `PORT_ENABLE` is already set on a
+        // SuperSpeed port before the reset is requested (the hub brings its link
+        // up on attach), so treating it as "reset done" returns immediately and
+        // the Address Device that follows races a reset that is still running —
+        // the device answers nothing and the command ends in a Transaction Error.
+        if change & PORT_CH_RESET != 0 {
             clear_changes(hcd, address, port, change);
             let speed = speed_of(status, info);
             log::info!(
