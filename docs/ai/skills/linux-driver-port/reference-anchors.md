@@ -33,3 +33,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | the queue head handed to the asynchronous schedule |
 | 2026-11-05 06:57 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_work` | recovering a controller that latched a halt before new work is queued |
 | 2026-11-05 06:58 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_urb_enqueue` | every enqueue path clears a latched halt first |
+| 2026-11-05 07:01 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_work` | the HSE latch is fatal and survives a completed qTD |
+| 2026-11-05 07:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_append_tds` | a transfer descriptor the controller may still own is never rewritten: dummy qTD / rotating slots |
