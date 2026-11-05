@@ -42,6 +42,9 @@ pub struct Ehci {
     buffers: CoherentMem,
     /// Page-aligned DMA buffer for bulk transfers.
     bulk: CoherentMem,
+    /// The periodic frame list: allocated and programmed even though the
+    /// periodic schedule is off, because the reference always has one.
+    _frame_lists: alloc::vec::Vec<CoherentMem>,
     /// Speed of the device currently addressed. Enumeration handles one port at
     /// a time, so one value is enough until a hub driver exists.
     speed: Speed,
@@ -145,8 +148,25 @@ impl Ehci {
         // Take ownership of every port: without this the companion controllers
         // keep the low/full speed ports and this controller never sees them.
         regs.write32(operational + op::CONFIGFLAG, 1);
-        // No periodic schedule (all-zero base means "disabled" once PSE is off).
-        regs.write32(operational + op::PERIODICLISTBASE, 0);
+        // A periodic frame list exists even though the periodic schedule stays
+        // off: the reference allocates one and programs its base on every
+        // controller (measured `PERIODICLISTBASE 0xec451000` on an idle
+        // ehci-platform), and a controller that prefetches the list sees a valid,
+        // all-terminated table instead of address 0. FLF stays at 1024 entries
+        // (`USBCMD 0x00010004`, frame list size 1024), each entry terminated.
+        let mut frame_lists: alloc::vec::Vec<CoherentMem> = alloc::vec::Vec::new();
+        let frame_list = dev
+            .res()
+            .alloc_coherent(1024 * core::mem::size_of::<u32>(), 4096)?;
+        // SAFETY: the whole frame list was just allocated and zeroed below.
+        unsafe {
+            core::ptr::write_bytes(frame_list.as_ptr(), 0, 1024 * core::mem::size_of::<u32>());
+        }
+        regs.write32(
+            operational + op::PERIODICLISTBASE,
+            frame_list.bus_addr() as u32,
+        );
+        frame_lists.push(frame_list);
 
         // Two queue heads: the asynchronous reclamation list's head (H=1, no
         // transfers) and the control endpoint's own QH linked after it. Linux
@@ -282,6 +302,7 @@ impl Ehci {
             qtds,
             buffers,
             bulk,
+            _frame_lists: frame_lists,
             speed: Speed::Full,
         })
     }
