@@ -64,6 +64,24 @@ struct Ring {
 }
 
 impl Ring {
+    /// A ring whose last slot is a Link TRB back to its own base.
+    ///
+    /// `mem` must hold `trbs + 1` TRBs. xHCI requires every ring segment to end
+    /// with a Link TRB — the reference refuses to enqueue otherwise ("Missing
+    /// link TRB at end of ring segment") — because the controller follows that
+    /// link to wrap; without one it walks off the end of the allocation.
+    fn with_link(mem: CoherentMem, trbs: usize) -> Self {
+        let ring = Self {
+            mem,
+            trbs,
+            index: 0,
+            cycle: true,
+        };
+        ring.write_link(true);
+        ring
+    }
+
+    /// The event ring: a consumer-owned ring with no Link TRB.
     fn new(mem: CoherentMem, trbs: usize) -> Self {
         Self {
             mem,
@@ -73,6 +91,24 @@ impl Ring {
             // life as "not mine" from the controller's point of view until the
             // doorbell write that carries the matching cycle bit.
             cycle: true,
+        }
+    }
+
+    /// (Re)writes the Link TRB that closes the ring, with the producer's current
+    /// cycle bit — the controller follows it only when the bits agree.
+    fn write_link(&self, cycle: bool) {
+        let base = self.mem.bus_addr();
+        let slot = self.mem.as_ptr().cast::<Trb>();
+        // SAFETY: the allocation holds `trbs + 1` TRBs and this is the last.
+        unsafe {
+            let link = slot.add(self.trbs);
+            core::ptr::write_volatile(link.cast::<u64>(), base);
+            core::ptr::write_volatile(link.cast::<u8>().add(8).cast::<u32>(), 0);
+            karch::dsb_ishst();
+            let control = (regs::trb::LINK << regs::trb::TYPE_SHIFT)
+                | regs::trb::LINK_TOGGLE_CYCLE
+                | u32::from(cycle);
+            core::ptr::write_volatile(link.cast::<u8>().add(12).cast::<u32>(), control);
         }
     }
 
@@ -118,8 +154,12 @@ impl Ring {
         }
         let address = self.mem.bus_addr() + (index * core::mem::size_of::<Trb>()) as u64;
         self.index += 1;
-        if self.index.is_multiple_of(self.trbs) {
+        if self.index == self.trbs {
+            // Step over the Link TRB: the producer never writes into it, it
+            // re-arms it with the new cycle bit so the controller keeps wrapping.
+            self.index = 0;
             self.cycle = !self.cycle;
+            self.write_link(self.cycle);
         }
         address
     }
@@ -558,9 +598,9 @@ impl Xhci {
                 .alloc_coherent(EVENT_RING_TRBS * core::mem::size_of::<Trb>(), 64)?,
             EVENT_RING_TRBS,
         );
-        let command = Ring::new(
+        let command = Ring::with_link(
             dev.res()
-                .alloc_coherent(RING_TRBS * core::mem::size_of::<Trb>(), 64)?,
+                .alloc_coherent((RING_TRBS + 1) * core::mem::size_of::<Trb>(), 64)?,
             RING_TRBS,
         );
         let bounce = dev.res().alloc_coherent(BOUNCE_LEN, 64)?;
@@ -1061,9 +1101,9 @@ impl Xhci {
             .res()
             .alloc_coherent(context_size * 32, 64)
             .map_err(|_| KError::NoMemory)?;
-        let ep0 = Ring::new(
+        let ep0 = Ring::with_link(
             dev.res()
-                .alloc_coherent(RING_TRBS * TRB_LEN, 64)
+                .alloc_coherent((RING_TRBS + 1) * TRB_LEN, 64)
                 .map_err(|_| KError::NoMemory)?,
             RING_TRBS,
         );
@@ -1468,8 +1508,12 @@ impl Xhci {
             .push(Trb::new(0, 0, status_control));
 
         // Doorbell for this slot, target = EP0's device slot context index (1).
-        self.bar
-            .write32(self.doorbell + 4 * u32::from(slot_id) as usize, 1);
+        let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
+        self.bar.write32(doorbell, 1);
+        // Flush the write, as `xhci_ring_ep_doorbell` does with a read-back: a
+        // posted doorbell that is still in flight when the controller looks for
+        // work is indistinguishable from a ring that is not being fetched.
+        let _ = self.bar.read32(doorbell);
         let event = match self.wait_event(regs::trb::TRANSFER_EVENT, "control transfer") {
             Ok(event) => event,
             Err(err) => {
@@ -1496,7 +1540,17 @@ impl Xhci {
         };
         let code = event.completion_code();
         if code != regs::code::SUCCESS && code != regs::code::SHORT_PACKET {
-            log::error!("xhci: control transfer completion code {code}");
+            // The event says which slot and endpoint the controller blames, and
+            // which TRB it stopped at. Without that, "the device did not answer"
+            // and "the controller never routed it" look identical.
+            log::error!(
+                "xhci: control transfer completion code {code} (slot {}, ep {}, trb {:#x}, \
+                 residual {})",
+                (event.control >> regs::trb::SLOT_SHIFT) & 0xff,
+                (event.control >> 16) & 0x1f,
+                event.parameter,
+                event.transfer_length(),
+            );
             return Err(KError::Io);
         }
         let residual = event.transfer_length() as usize;
@@ -2086,8 +2140,12 @@ impl Xhci {
             (regs::trb::NO_OP_TRANSFER << regs::trb::TYPE_SHIFT) | regs::trb::IOC,
         );
         self.slots[slot_index].ep0.push(trb);
-        self.bar
-            .write32(self.doorbell + 4 * u32::from(slot_id) as usize, 1);
+        let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
+        self.bar.write32(doorbell, 1);
+        // Flush the write, as `xhci_ring_ep_doorbell` does with a read-back: a
+        // posted doorbell that is still in flight when the controller looks for
+        // work is indistinguishable from a ring that is not being fetched.
+        let _ = self.bar.read32(doorbell);
         match self.wait_event(regs::trb::TRANSFER_EVENT, "no-op transfer") {
             Ok(event) => info!(
                 "xhci: no-op transfer completed (code {}) — EP0 ring, doorbell and event delivery \

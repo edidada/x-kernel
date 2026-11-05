@@ -340,9 +340,11 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
             clear_changes(hcd, address, port, change);
             let speed = speed_of(status, info);
             log::info!(
-                "usb: hub {address} port {port} reset done, enabled {}, speed {}",
+                "usb: hub {address} port {port} reset done, enabled {}, speed {}, status \
+                 {status:#06x} (link state {})",
                 status & PORT_ST_ENABLE != 0,
                 speed.as_str(),
+                (status >> 5) & 0xf,
             );
             return (status & PORT_ST_ENABLE != 0).then_some(speed);
         }

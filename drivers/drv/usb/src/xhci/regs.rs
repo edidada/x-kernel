@@ -94,6 +94,9 @@ pub mod trb {
     pub const DATA: u32 = 3;
     pub const STATUS: u32 = 4;
     pub const LINK: u32 = 6;
+    /// Link TRB "Toggle Cycle" (bit 1): flip the consumer's cycle bit when it
+    /// follows this link, i.e. what makes a wrapping ring work.
+    pub const LINK_TOGGLE_CYCLE: u32 = 1 << 1;
     /// Command TRB types start at 9, not 8: 8 is No-Op *Transfer*. Writing 8 here
     /// made the controller answer TRB Error for every `Enable Slot` while a No-Op
     /// Command (23) on the same ring succeeded -- the whole command range had been
