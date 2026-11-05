@@ -534,9 +534,16 @@ fn add_devices(
     }
 
     if needs_graphic {
+        let mut device = format!("virtio-gpu-{suffix}");
+        if let Some(xres) = args.gpu_xres {
+            device.push_str(&format!(",xres={xres}"));
+        }
+        if let Some(yres) = args.gpu_yres {
+            device.push_str(&format!(",yres={yres}"));
+        }
         command
             .arg("-device")
-            .arg(format!("virtio-gpu-{suffix}"))
+            .arg(device)
             .args(["-vga", "none", "-serial", "mon:stdio"]);
     }
 
