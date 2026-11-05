@@ -653,6 +653,7 @@ impl Ehci {
         data: &mut [u8],
         is_in: bool,
     ) -> KResult<usize> {
+        self.ensure_running();
         let BULK_QH: usize = if is_in { 3 } else { 2 };
         let dummy_slot: usize = if is_in { 6 } else { 5 };
         let length = data.len();
@@ -757,14 +758,22 @@ impl Ehci {
         };
         let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
         let base = qtd_ptr.cast::<u8>();
+        // qTD layout: next(0), alt_next(4), token(8), buffer[5](12..31). The
+        // token is written last, at ITS offset (8) -- writing it at the queue
+        // head overlay's offset (24) left the real token holding the previous
+        // transfer's state, and every transfer "completed" instantly without the
+        // controller executing anything.
+        //
         // SAFETY: the dummy slot is inside this controller's qTD allocation, and
-        // the offsets below stay within its 32 bytes. The token is deliberately
-        // not written yet.
+        // the offsets below stay within its 32 bytes.
         unsafe {
             core::ptr::write_volatile(base.wrapping_add(0).cast::<u32>(), qtd.next);
             core::ptr::write_volatile(base.wrapping_add(4).cast::<u32>(), qtd.alt_next);
-            core::ptr::write_volatile(base.wrapping_add(16).cast::<u32>(), qtd.buffer[0]);
+            core::ptr::write_volatile(base.wrapping_add(12).cast::<u32>(), qtd.buffer[0]);
+            core::ptr::write_volatile(base.wrapping_add(16).cast::<u32>(), 0);
             core::ptr::write_volatile(base.wrapping_add(20).cast::<u32>(), 0);
+            core::ptr::write_volatile(base.wrapping_add(24).cast::<u32>(), 0);
+            core::ptr::write_volatile(base.wrapping_add(28).cast::<u32>(), 0);
         }
         karch::dsb_ishst();
         // `qh_refresh()`: a queue head the controller halted keeps HALT in its
@@ -794,10 +803,10 @@ impl Ehci {
             );
         }
         karch::dsb_ishst();
-        // SAFETY: dword 3 of the same descriptor: the token, written last, is
+        // SAFETY: dword 2 of the same descriptor: the token, written last, is
         // what hands the transfer to the controller.
         unsafe {
-            core::ptr::write_volatile(base.wrapping_add(24).cast::<u32>(), qtd.token);
+            core::ptr::write_volatile(base.wrapping_add(8).cast::<u32>(), qtd.token);
         }
         let mut token = token::ACTIVE;
         for _ in 0..POLL_STEPS {
@@ -1400,6 +1409,15 @@ fn publish_mass_storage(
             // it before the disk is published.
             let blocks = {
                 let mut guard = ehci.lock();
+                // A device that has just been configured can still carry BOT
+                // state from an earlier host; the specification's reset recovery
+                // is the documented way to start the state machine clean.
+                let _ = usb::bot::reset_recovery(&mut *guard, &endpoints);
+                // SET_CONFIGURATION to the first bulk command is a state change
+                // the device's firmware also has to absorb; the reference
+                // spreads its first commands over `msleep` gaps for the same
+                // reason.
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
                 match usb::bot::read_capacity(&mut *guard, &endpoints) {
                     Ok(data) if data.len() >= 8 => {
                         let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);

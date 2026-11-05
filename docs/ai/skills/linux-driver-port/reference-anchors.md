@@ -60,3 +60,7 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 10:48 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | an idle queue head is inactive, not halted |
 | 2026-11-05 11:01 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_transport` | tag increment, learnt signature, zero-length and stalled CSW retries |
 | 2026-11-05 11:03 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_transport` | skipped-data-phase CSW detection and the phase-error reset path |
+| 2026-11-05 11:06 | `/workspace/linux-7.1.8/drivers/usb/host/ehci.h` | `struct ehci_qtd` | qTD field offsets: next(0) alt_next(4) token(8) buffer[5](12..31) |
+| 2026-11-05 11:08 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_urb_enqueue` | every enqueue path starts from a running, unhalted controller |
+| 2026-11-05 11:09 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_reset` | BOT reset recovery before first use |
+| 2026-11-05 11:11 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_init` | gaps between configuration and the first bulk traffic |
