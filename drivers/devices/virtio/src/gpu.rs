@@ -88,9 +88,19 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and reads the display resolution.
+    ///
+    /// The host advertises the resolution it was configured to start with in
+    /// the EDID preferred timing; the display-info size is only whatever the
+    /// UI used last (a fresh window reports the UI default, not the requested
+    /// size). Prefer the EDID value so `-device virtio-gpu-pci,xres=…,yres=…`
+    /// is honoured at boot, and fall back to the display info when the host
+    /// has no EDID.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let mut device = VirtIoGpu2d::new(transport).map_err(crate::as_driver_error)?;
-        let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
+        let (width, height) = match device.edid_preferred_resolution() {
+            Ok((width, height)) if width > 0 && height > 0 => (width, height),
+            _ => device.resolution().map_err(crate::as_driver_error)?,
+        };
 
         Ok(Self {
             info: AtomicU64::new(pack_display_info(DisplayInfo { width, height })),
@@ -120,7 +130,7 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
         // config space; there is no interrupt for it here, so the query paths
         // ask for it explicitly and acknowledge what they consumed.
         match inner.take_display_event() {
-            Ok(true) => {}
+            Ok(true) => log::info!("virtio-gpu: display change event observed"),
             Ok(false) => return None,
             Err(err) => {
                 log::warn!("virtio-gpu: cannot read the display event: {err:?}");
@@ -365,6 +375,36 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             .map_err(|_| virtio_drivers::Error::IoError)
     }
 
+    /// Reads the EDID block the host advertises for scanout 0.
+    fn get_edid(&mut self) -> virtio_drivers::Result<[u8; EDID_BLOCK]> {
+        let rsp: RespEdid = self.request(CmdGetEdid {
+            header: CtrlHeader::with_type(Command::GET_EDID),
+            scanout: SCANOUT_ID,
+            _padding: 0,
+        })?;
+        rsp.header.check_type(Command::OK_EDID)?;
+        if rsp.size < BASE_EDID_BLOCK {
+            return Err(virtio_drivers::Error::IoError);
+        }
+        Ok(rsp.edid)
+    }
+
+    /// Preferred resolution from the EDID's first detailed timing.
+    ///
+    /// The host puts the configured start-up size in this descriptor; the
+    /// display-info size is only what the UI used last.
+    fn edid_preferred_resolution(&mut self) -> virtio_drivers::Result<(u32, u32)> {
+        let edid = self.get_edid()?;
+        // EDID base block, first Detailed Timing Descriptor at offset 54.
+        // The active-pixel fields keep their high nibble in the neighbour byte.
+        let h_active = u16::from(edid[56]) | (u16::from(edid[58] & 0xf0) << 4);
+        let v_active = u16::from(edid[59]) | (u16::from(edid[61] & 0xf0) << 4);
+        if h_active == 0 || v_active == 0 {
+            return Err(virtio_drivers::Error::IoError);
+        }
+        Ok((u32::from(h_active), u32::from(v_active)))
+    }
+
     fn get_display_info(&mut self) -> virtio_drivers::Result<RespDisplayInfo> {
         let info: RespDisplayInfo =
             self.request(CtrlHeader::with_type(Command::GET_DISPLAY_INFO))?;
@@ -501,6 +541,7 @@ bitflags::bitflags! {
 
 const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
     .union(Features::RING_INDIRECT_DESC)
+    .union(Features::EDID)
     .union(Features::VERSION_1);
 
 #[repr(transparent)]
@@ -509,7 +550,9 @@ struct Command(u32);
 
 impl Command {
     const GET_DISPLAY_INFO: Command = Command(0x100);
+    const GET_EDID: Command = Command(0x10a);
     const OK_DISPLAY_INFO: Command = Command(0x1101);
+    const OK_EDID: Command = Command(0x1104);
     const OK_NODATA: Command = Command(0x1100);
     const RESOURCE_ATTACH_BACKING: Command = Command(0x106);
     const RESOURCE_CREATE_2D: Command = Command(0x101);
@@ -559,6 +602,28 @@ struct Rect {
     y: u32,
     width: u32,
     height: u32,
+}
+
+/// Size of the EDID buffer in the GET_EDID response.
+const EDID_BLOCK: usize = 1024;
+/// Size of the mandatory base EDID block.
+const BASE_EDID_BLOCK: u32 = 128;
+
+#[repr(C)]
+#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+struct CmdGetEdid {
+    header: CtrlHeader,
+    scanout: u32,
+    _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, FromBytes, Immutable, KnownLayout)]
+struct RespEdid {
+    header: CtrlHeader,
+    size: u32,
+    _padding: u32,
+    edid: [u8; EDID_BLOCK],
 }
 
 #[repr(C)]

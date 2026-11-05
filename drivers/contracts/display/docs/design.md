@@ -36,7 +36,11 @@ drivers that can scan out guest memory directly.
 - No mode setting, multi-monitor topology, or EDID handling: one visible
   geometry with no mode enumeration. That geometry is not constant — a
   host may resize its window at run time — but the contract reports it
-  as one size, and enumerating alternatives stays out of scope.
+  as one size, and enumerating alternatives stays out of scope. A driver
+  may consult the host's preferred mode (for example the EDID preferred
+  timing virtio-gpu exposes) when it initializes that size; the choice
+  stays an implementation detail and the contract only carries the
+  resulting geometry.
 - No rendering, compositing, or damage tracking: `need_flush`/`flush` is
   the whole frame-level contract.
 - No user-space exposure: `/dev/dri`-style interfaces belong to the

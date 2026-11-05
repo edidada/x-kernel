@@ -170,7 +170,7 @@ Ready / ResourceAttached / ScanningOut ──设备错误──> Failed
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
-| Uninit | Ready | `try_new()` 完成 feature 协商、virtqueue 初始化并查询分辨率 |
+| Uninit | Ready | `try_new()` 完成 feature 协商、virtqueue 初始化并确定初始分辨率（优先 EDID preferred timing，缺失时回退到 display info） |
 | Ready | ResourceAttached | DRM dumb buffer backing 被创建并 attach 到 virtio-gpu 2D resource |
 | ResourceAttached | ScanningOut | DRM modeset/page-flip 触发 transfer-to-host、set-scanout 和 flush |
 | ScanningOut | ScanningOut | 同一 resource 与几何参数重复提交时复用已有 scanout 绑定；切换 resource 或几何参数时重新设置绑定 |
