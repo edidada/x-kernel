@@ -1651,17 +1651,22 @@ impl Xhci {
             };
             // A full/low-speed device behind a high-speed hub needs the hub's
             // transaction translator; a SuperSpeed device needs neither.
+            // The slot context's MTT bit and its TT fields go together: MTT only
+            // says the parent hub has one translator per port, and a high-speed
+            // device behind the hub is not translated at all, so setting MTT
+            // without the TT fields describes a topology that does not exist.
+            let tt = match (protocol, speed) {
+                (1 | 2, usb::Speed::Low | usb::Speed::Full) => Some(Translator {
+                    think_time: 0,
+                    port: entry.port,
+                    hub_slot: hub.address,
+                }),
+                _ => None,
+            };
             let addressing = Addressing {
                 route: u32::from(entry.port) & 0xf,
-                tt: match (protocol, speed) {
-                    (1 | 2, usb::Speed::Low | usb::Speed::Full) => Some(Translator {
-                        think_time: 0,
-                        port: entry.port,
-                        hub_slot: hub.address,
-                    }),
-                    _ => None,
-                },
-                multi_tt: protocol == 2,
+                tt,
+                multi_tt: tt.is_some() && protocol == 2,
             };
             match self.address_downstream(dev, root_port, speed, addressing) {
                 Ok(address) => match usb::enumerate::enumerate_addressed(
