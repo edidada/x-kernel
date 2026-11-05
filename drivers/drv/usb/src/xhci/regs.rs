@@ -113,6 +113,10 @@ pub mod trb {
     /// 12 Configure Endpoint, 13 Evaluate Context, **14 Reset Endpoint**,
     /// 15 Stop Endpoint, 16 Set TR Dequeue (`xhci.h` `TRB_RESET_EP`).
     pub const RESET_ENDPOINT: u32 = 14;
+    /// `TRB_STOP_RING`: halts the endpoint's ring processing where it is; the
+    /// dequeue pointer is then moved with `SET_TR_DEQUEUE` (the dequeue half of
+    /// `xhci_urb_dequeue()`).
+    pub const STOP_ENDPOINT: u32 = 15;
     /// `TRB_SET_DEQ`: hands the endpoint a dequeue pointer (and its DCS) again.
     pub const SET_TR_DEQUEUE: u32 = 16;
     pub const TRANSFER_EVENT: u32 = 32;

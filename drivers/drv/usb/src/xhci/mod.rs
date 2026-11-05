@@ -278,6 +278,11 @@ pub struct Xhci {
     /// One addressed device slot: its input context (reused for every command)
     /// and the EP0 transfer ring the slot context points at.
     slots: Vec<Slot>,
+    /// Transfer/command events that arrived while waiting for a different one.
+    /// A timed-out transfer's completion lands here instead of being consumed as
+    /// the next transfer's own completion (the single-threaded equivalent of
+    /// `handle_tx_event()` demultiplexing by endpoint).
+    pending_events: alloc::vec::Vec<Trb>,
     /// Slot whose contexts a Block-Set-Address-Request `Address Device` installed,
     /// i.e. the device still answering on the default address 0. xHCI keeps such
     /// a device reachable only through its slot.
@@ -728,6 +733,7 @@ impl Xhci {
             // The controller publishes the first event with the cycle bit set.
             event_cycle: true,
             slots: Vec::new(),
+            pending_events: alloc::vec::Vec::new(),
             address_zero_slot: None,
         };
         xhci.program_rings()?;
@@ -1035,34 +1041,90 @@ impl Xhci {
         Some(trb)
     }
 
-    /// Waits for the event that belongs to `trb_type`, returning it after the
-    /// completion code has been checked.
-    fn wait_event(&mut self, trb_type: u32, what: &str) -> Result<Trb, KError> {
+    /// Pulls one deferred event back if it matches `pred`, without consuming
+    /// ring slots (pending events are already off the ring).
+    fn take_pending(&mut self, pred: impl Fn(&Trb) -> bool) -> Option<Trb> {
+        if let Some(index) = self.pending_events.iter().position(pred) {
+            return Some(self.pending_events.remove(index));
+        }
+        None
+    }
+
+    /// Waits for a transfer event belonging to `slot_id` / `ep_id`.
+    ///
+    /// A raw type match is not enough: a timed-out transfer's completion event
+    /// arrives later, and consuming it as the next transfer's own completion
+    /// misattributes one error to another transfer and leaves the real one
+    /// unanswered forever (this is how the hub's EP0 went silent for whole
+    /// seconds after the address-0 diagnostics). Events for other waiters are
+    /// deferred to `pending_events`; port status changes are dropped, since the
+    /// port scan reads PORTSC directly.
+    fn wait_for_transfer(&mut self, slot_id: u8, ep_id: u32, what: &str) -> Result<Trb, KError> {
+        let matches = |event: &Trb| {
+            event.trb_type() == regs::trb::TRANSFER_EVENT
+                && event.slot_id() == slot_id
+                && (event.control >> 16) & 0x1f == ep_id
+        };
+        if let Some(event) = self.take_pending(matches) {
+            return Ok(event);
+        }
         for _ in 0..EVENT_POLL_STEPS {
             if let Some(event) = self.next_event() {
-                if event.trb_type() == trb_type {
+                if matches(&event) {
                     return Ok(event);
                 }
-                // Anything else (a port status change, a stray transfer event)
-                // is not ours to consume here; the port scan reads PORTSC
-                // directly, so dropping it is safe and cheaper than a queue.
-                log::debug!(
-                    "xhci: dropped event type {} during {what}",
-                    event.trb_type()
-                );
+                if event.trb_type() == regs::trb::PORT_STATUS_CHANGE {
+                    continue;
+                }
+                if self.pending_events.len() < 16 {
+                    self.pending_events.push(event);
+                }
                 continue;
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         }
+        self.log_event_timeout(what);
+        Err(KError::TimedOut)
+    }
+
+    /// Waits for the completion of the command TRB published at `trb_addr`.
+    /// Completion events arrive in order, so a plain type match is usually
+    /// right — but a command whose completion never came would let a LATER
+    /// command's completion stand in for it, so the TRB address is verified.
+    fn wait_for_command(&mut self, trb_addr: u64, what: &str) -> Result<Trb, KError> {
+        let matches = |event: &Trb| {
+            event.trb_type() == regs::trb::COMMAND_COMPLETION && event.parameter == trb_addr
+        };
+        if let Some(event) = self.take_pending(matches) {
+            return Ok(event);
+        }
+        for _ in 0..EVENT_POLL_STEPS {
+            if let Some(event) = self.next_event() {
+                if matches(&event) {
+                    return Ok(event);
+                }
+                if event.trb_type() == regs::trb::PORT_STATUS_CHANGE {
+                    continue;
+                }
+                if self.pending_events.len() < 16 {
+                    self.pending_events.push(event);
+                }
+                continue;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
+        self.log_event_timeout(what);
+        Err(KError::TimedOut)
+    }
+
+    /// The timeout diagnostics shared by both waiters.
+    fn log_event_timeout(&mut self, what: &str) {
         // Nothing arrived: report what the event slot actually holds and where
         // the consumer thinks it is, so "controller never wrote" and "we are
         // looking at the wrong address" cannot be confused.
-        // Does the controller write into the ring at all? A non-zero TRB here
-        // with a zero dequeue means the events arrive and our consumer logic is
-        // wrong; all-zero means the ring was never published to the controller.
-        let first = self.event.read(0);
+        let first = self.event.read(self.event_dequeue);
         log::error!(
-            "xhci: event ring[0] p {:#018x} s {:#010x} c {:#010x}",
+            "xhci: event ring[dequeue] p {:#018x} s {:#010x} c {:#010x}",
             first.parameter,
             first.status,
             first.control,
@@ -1079,39 +1141,13 @@ impl Xhci {
             sts & sts::HCH != 0,
             sts & sts::EINT != 0,
         );
-        // Is the command ring still running after the timeout? CRCR only reports
-        // status bits on this IP, but CRR going clear would mean the controller
-        // stopped consuming commands.
         log::error!(
-            "xhci: {what} after timeout: crcr {:#x} usbcmd {:#x}",
-            self.bar.read32(self.operational + op::CRCR),
-            self.bar.read32(self.operational + op::USBCMD),
-        );
-        // Where did the controller put the event? Dump the first slots so a
-        // consumer/pointer mismatch is visible instead of inferred.
-        let mut line = alloc::string::String::new();
-        for index in 0..8 {
-            let trb = self.event.read(index);
-            line.push_str(&alloc::format!(
-                " [{index}]={:#x}/{:#x}",
-                trb.control,
-                trb.status
-            ));
-        }
-        log::error!(
-            "xhci: {what} event slots:{line} (dequeue {})",
-            self.event_dequeue
-        );
-        let raw = self.event.read(self.event_dequeue);
-        log::error!(
-            "xhci: {what} timed out after {} ms (dequeue {} cycle {} raw {:#010x} type {})",
+            "xhci: {what} timed out after {} ms (dequeue {} cycle {}, pending {})",
             EVENT_POLL_STEPS,
             self.event_dequeue,
             self.event_cycle,
-            raw.control,
-            raw.trb_type(),
+            self.pending_events.len(),
         );
-        Err(KError::TimedOut)
     }
 
     /// Issues a command on the command ring and returns its completion event.
@@ -1149,12 +1185,12 @@ impl Xhci {
         // the ring is still running (CRR set) and the TRB is on it, but the
         // controller's dequeue never moves. Ring the doorbell again before giving
         // up, and log which attempt produced the completion.
-        let event = match self.wait_event(regs::trb::COMMAND_COMPLETION, what) {
+        let event = match self.wait_for_command(published, what) {
             Ok(event) => event,
             Err(first) => {
                 warn!("xhci: {what} not fetched, ringing the doorbell again");
                 self.ring_command_doorbell();
-                match self.wait_event(regs::trb::COMMAND_COMPLETION, what) {
+                match self.wait_for_command(published, what) {
                     Ok(event) => event,
                     Err(_) => return Err(first),
                 }
@@ -1720,6 +1756,34 @@ impl Xhci {
         );
     }
 
+    /// `xhci_urb_dequeue()`'s endpoint recovery: Stop Endpoint, then Set TR
+    /// Dequeue Pointer past every queued TD (at our enqueue position, with the
+    /// cycle the next TD will carry). Without this the dead TDs stay first on
+    /// the ring and block every later transfer on the endpoint.
+    fn flush_ep0(&mut self, slot_index: usize) -> Result<(), KError> {
+        let slot_id = u32::from(self.slots[slot_index].id);
+        let endpoint = |trb_type: u32| {
+            (trb_type << regs::trb::TYPE_SHIFT)
+                | (regs::trb::EP0 << regs::trb::EP_SHIFT)
+                | (slot_id << regs::trb::SLOT_SHIFT)
+        };
+        self.command(
+            Trb::new(0, 0, endpoint(regs::trb::STOP_ENDPOINT)),
+            "stop endpoint",
+        )?;
+        let slot = &self.slots[slot_index];
+        let dequeue = slot.ep0.dequeue_address() | u64::from(slot.ep0.current_cycle());
+        self.command(
+            Trb::new(dequeue, 0, endpoint(regs::trb::SET_TR_DEQUEUE)),
+            "set tr dequeue",
+        )?;
+        // The stopped endpoint's stale transfer events belong to the dead TDs;
+        // drop anything queued for this slot so the next transfer starts clean.
+        self.pending_events
+            .retain(|event| event.slot_id() != slot_id as u8);
+        Ok(())
+    }
+
     /// `xhci_handle_halted_endpoint()`: Reset Endpoint, then re-point the ring.
     ///
     /// A failed control transfer (a USB Transaction Error in particular) leaves
@@ -1849,7 +1913,7 @@ impl Xhci {
         // posted doorbell that is still in flight when the controller looks for
         // work is indistinguishable from a ring that is not being fetched.
         let _ = self.bar.read32(doorbell);
-        let event = match self.wait_event(regs::trb::TRANSFER_EVENT, "control transfer") {
+        let event = match self.wait_for_transfer(slot_id, 1, "control transfer") {
             Ok(event) => event,
             Err(err) => {
                 // The ring we handed the controller vs. what is actually in it:
@@ -1870,6 +1934,13 @@ impl Xhci {
                     self.slots[slot_index].ep0.mem.bus_addr(),
                     self.slots[slot_index].ep0.current_cycle(),
                 );
+                // The timed-out TDs are still on the ring and block everything
+                // queued behind them — and their late completion events would
+                // poison the next transfer. `xhci_urb_dequeue()`: stop the
+                // endpoint, then hand it a dequeue pointer past the dead TDs.
+                if let Err(stop_err) = self.flush_ep0(slot_index) {
+                    log::warn!("xhci: ep0 flush after timeout failed: {stop_err:?}");
+                }
                 return Err(err);
             }
         };
@@ -2678,7 +2749,7 @@ impl Xhci {
         // posted doorbell that is still in flight when the controller looks for
         // work is indistinguishable from a ring that is not being fetched.
         let _ = self.bar.read32(doorbell);
-        match self.wait_event(regs::trb::TRANSFER_EVENT, "no-op transfer") {
+        match self.wait_for_transfer(slot_id, 1, "no-op transfer") {
             Ok(event) => info!(
                 "xhci: no-op transfer completed (code {}) — EP0 ring, doorbell and event delivery \
                  work; a later control-transfer timeout is the device not answering",

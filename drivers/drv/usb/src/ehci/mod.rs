@@ -835,15 +835,6 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(base.wrapping_add(8).cast::<u32>(), qtd.token);
         }
-        // PROBE: corrupt the ring for one transfer. If the controller is
-        // walking this memory it will choke immediately (the head's next
-        // pointer terminates, so the list looks empty) and every transfer fails
-        // exactly as before; if transfers keep working, it stopped walking this
-        // list long ago and the real failure is upstream of the ring.
-        // SAFETY: dword 0 of the head queue head, inside this allocation.
-        unsafe {
-            core::ptr::write_volatile(head.cast::<u32>(), 0xffff_ffff);
-        }
         karch::dsb_ishst();
         // Ring the async-advance doorbell (`start_unlink_async()` sets IAAD for
         // the same reason): a controller sitting in the reclamation state does
