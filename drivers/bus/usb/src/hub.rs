@@ -37,10 +37,12 @@ const RT_OUT_CLASS_OTHER: u8 = 0x23;
 
 /// Port feature selectors (USB 2.0 §11.24.2, USB 3.x §10.16.1).
 const FEAT_PORT_ENABLE: u16 = 1;
-/// `USB_PORT_FEAT_LINK_STATE` (USB 3.x only): the value written selects U0..U3.
+/// `USB_PORT_FEAT_LINK_STATE` (USB 3.x only): wIndex = (link state << 8) | port.
 const FEAT_PORT_LINK_STATE: u16 = 5;
 const FEAT_PORT_RESET: u16 = 4;
 const FEAT_PORT_POWER: u16 = 8;
+/// Warm reset of a SuperSpeed port (`USB_PORT_FEAT_BH_PORT_RESET`).
+const FEAT_PORT_BH_RESET: u16 = 28;
 
 /// `wPortStatus` bits (identical low half in both specs).
 const PORT_ST_CONNECTION: u32 = 1 << 0;
@@ -56,6 +58,16 @@ const PORT_ST_SS_MASK: u32 = 0xf;
 /// `wPortChange` bits.
 const PORT_CH_CONNECTION: u32 = 1 << 0;
 const PORT_CH_RESET: u32 = 1 << 4;
+/// SS-only change bits (`USB_PORT_STAT_C_BH_RESET`, `USB_PORT_STAT_C_LINK_STATE`).
+const PORT_CH_BH_RESET: u32 = 1 << 5;
+const PORT_CH_LINK_STATE: u32 = 1 << 6;
+
+/// Port link states for `SetFeature(PORT_LINK_STATE)`, pre-shifted into
+/// `wIndex`'s high byte (`USB_SS_PORT_LS_*` are `<< 5`, and
+/// `hub_set_port_link_state()` ors `port | (link << 3)` on top).
+pub const LINK_RX_DETECT: u8 = 5;
+pub const LINK_SS_INACTIVE: u8 = 6;
+pub const LINK_COMP_MOD: u8 = 7;
 
 /// How many times a port reset is followed before giving up.
 const RESET_POLLS: usize = 100;
@@ -251,8 +263,8 @@ fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32, info: Hu
     for (bit, feature) in [
         (PORT_CH_CONNECTION, 16), // C_PORT_CONNECTION
         (PORT_CH_RESET, 20),      // C_PORT_RESET
-        (1 << 5, 29),             // C_BH_PORT_RESET (SS only; USB_PORT_STAT_C_BH_RESET)
-        (1 << 6, 25),             // C_PORT_LINK_STATE (SS only; USB_PORT_STAT_C_LINK_STATE)
+        (PORT_CH_BH_RESET, 29),   // C_BH_PORT_RESET (SS only)
+        (PORT_CH_LINK_STATE, 25), // C_PORT_LINK_STATE (SS only)
     ] {
         if feature >= 25 && !ss {
             continue;
@@ -344,23 +356,6 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
     }
     // The hub needs a few ms to finish the reset before it clears the bit.
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
-    // SuperSpeed ports are reset through the same PORT_RESET feature, but their
-    // link state is separate: after the reset the port must end up in U0 before
-    // anything is sent through it, and the reference drives that explicitly via
-    // USB_PORT_FEAT_LINK_STATE (hub_set_port_link_state).
-    if info.is_superspeed() {
-        let _ = control_no_data(
-            hcd,
-            address,
-            SetupPacket::new(
-                RT_OUT_CLASS_OTHER,
-                REQ_SET_FEATURE,
-                FEAT_PORT_LINK_STATE,
-                u16::from(port),
-                0,
-            ),
-        );
-    }
     for _ in 0..RESET_POLLS {
         let (status, change) = port_status(hcd, address, port)?;
         // Wait for C_PORT_RESET specifically. `PORT_ENABLE` is already set on a
@@ -371,8 +366,65 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
         if change & PORT_CH_RESET != 0 {
             clear_changes(hcd, address, port, change, info);
             let speed = speed_of(status, info);
+            let link_state = (status >> PORT_ST_SS_SHIFT) & PORT_ST_SS_MASK;
             log::info!(
                 "usb: hub {address} port {port} reset done, enabled {}, speed {}, status \
+                 {status:#06x} (link state {link_state})",
+                status & PORT_ST_ENABLE != 0,
+                speed.as_str(),
+            );
+            // `hub_port_reset()`'s escalation: a port that migrates from reset
+            // into SS.Inactive or Compliance Mode needs a warm (BH) reset — the
+            // hot reset trained the link but did not reset the device.
+            if info.is_superspeed()
+                && (link_state == u32::from(LINK_SS_INACTIVE)
+                    || link_state == u32::from(LINK_COMP_MOD))
+            {
+                log::warn!(
+                    "usb: hub {address} port {port}: hot reset left link state {link_state}, warm \
+                     reset as the reference does"
+                );
+                return reset_port_warm(hcd, address, port, info);
+            }
+            return (status & PORT_ST_ENABLE != 0).then_some(speed);
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
+    }
+    log::error!("usb: hub {address} port {port} never enabled after reset");
+    None
+}
+
+/// Warm (BH) reset for a SuperSpeed port: `SetFeature(BH_PORT_RESET)` re-runs
+/// the full LFPS reset sequence and puts the device back into the Default
+/// state even when the hot reset only retrained the link. Completion is
+/// observed as `C_BH_PORT_RESET` (`hub_port_reset()`'s `warm` branch).
+pub fn reset_port_warm(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Option<Speed> {
+    let ok = control_no_data(
+        hcd,
+        address,
+        SetupPacket::new(
+            RT_OUT_CLASS_OTHER,
+            REQ_SET_FEATURE,
+            FEAT_PORT_BH_RESET,
+            u16::from(port),
+            0,
+        ),
+    );
+    if !ok {
+        log::error!("usb: hub {address} port {port} BH_PORT_RESET rejected");
+        return None;
+    }
+    // A warm reset re-runs link training; it takes longer than a hot reset.
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
+    for _ in 0..RESET_POLLS {
+        let Some((status, change)) = port_status(hcd, address, port) else {
+            return None;
+        };
+        if change & PORT_CH_BH_RESET != 0 {
+            clear_changes(hcd, address, port, change, info);
+            let speed = speed_of(status, info);
+            log::info!(
+                "usb: hub {address} port {port} warm reset done, enabled {}, speed {}, status \
                  {status:#06x} (link state {})",
                 status & PORT_ST_ENABLE != 0,
                 speed.as_str(),
@@ -382,8 +434,43 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
         }
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
     }
-    log::error!("usb: hub {address} port {port} never enabled after reset");
+    log::error!("usb: hub {address} port {port} never enabled after warm reset");
     None
+}
+
+/// `hub_port_disable()` for a SuperSpeed port: drive the link to Rx.Detect.
+/// The device sees the link go away and re-trains from scratch, so the next
+/// reset+address cycle runs against a freshly detected device instead of one
+/// stuck in a half-configured state. Returns once the port reports the device
+/// again (`C_PORT_CONNECTION`) or the poll budget runs out.
+pub fn redetect_link(hcd: &mut dyn Hcd, address: u8, port: u8) -> bool {
+    let ok = control_no_data(
+        hcd,
+        address,
+        SetupPacket::new(
+            RT_OUT_CLASS_OTHER,
+            REQ_SET_FEATURE,
+            FEAT_PORT_LINK_STATE,
+            (u16::from(LINK_RX_DETECT) << 8) | u16::from(port),
+            0,
+        ),
+    );
+    if !ok {
+        log::error!("usb: hub {address} port {port} link state Rx.Detect rejected");
+        return false;
+    }
+    log::info!("usb: hub {address} port {port}: link driven to Rx.Detect, waiting for reconnect");
+    for _ in 0..200 {
+        if let Some((_, change)) = port_status(hcd, address, port) {
+            if change & PORT_CH_CONNECTION != 0 {
+                log::info!("usb: hub {address} port {port}: device reconnected");
+                return true;
+            }
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
+    }
+    log::error!("usb: hub {address} port {port}: no reconnect after Rx.Detect");
+    false
 }
 
 /// Whether the port-enable feature is exposed (used by the scan diagnostic).

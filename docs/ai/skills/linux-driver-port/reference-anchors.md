@@ -94,3 +94,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_reset / xhci_halt` | halt wait XHCI_MAX_HALT_USEC=32ms; HCRST self-clear and CNR drop use the caller timeout (short=250ms) |
 | 2026-11-05 15:00 | `/workspace/linux-7.1.8/include/uapi/linux/usb/ch11.h` | `USB_PORT_STAT_C_BH_RESET / USB_PORT_STAT_LINK_STATE` | C_BH_RESET change bit5 0x0020; SS link state bits 8:5 mask 0x01e0 |
 | 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/core/hub.h` | `hub_power_on_good_delay` | external hub power-on wait = max(bPwrOn2PwrGood*2ms, 100ms) |
+| 2026-11-05 15:10 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_reset warm branch / hub_port_disable / hub_set_port_link_state` | BH reset = SetFeature(28), completion C_BH_RESET(29); SS disable = link to Rx.Detect (wIndex = (LS<<8)|port); no routine U0 write after reset |

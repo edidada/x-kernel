@@ -2290,7 +2290,33 @@ impl Xhci {
                 // is what puts the device back into the state where it accepts
                 // SET_ADDRESS. Retrying the command against a device that just
                 // refused one only produced the same Transaction Error again.
-                if self.reset_hub_port(hub, entry.port, protocol).is_none() {
+                //
+                // Beyond that, two recovery steps the reference reaches through
+                // other paths are tried in order, logged as the experiment they
+                // are: (a) `hub_port_disable()` for a SuperSpeed port drives the
+                // link to Rx.Detect so the device re-trains from scratch, and
+                // (b) a warm (BH) reset — the full LFPS reset that puts the
+                // device back into Default even when the hot reset only
+                // retrained the link. A drive that reports enabled/U0 yet never
+                // answers address 0 is exactly the case both target.
+                if retry == 1 && is_usb3 {
+                    let _ = usb::hub::redetect_link(self, hub.address, entry.port);
+                }
+                let reset = if retry == 2 && is_usb3 {
+                    usb::hub::reset_port_warm(
+                        self,
+                        hub.address,
+                        entry.port,
+                        usb::hub::HubInfo {
+                            ports: 0,
+                            protocol,
+                            power_on_2ms: 0,
+                        },
+                    )
+                } else {
+                    self.reset_hub_port(hub, entry.port, protocol)
+                };
+                if reset.is_none() {
                     attempt = Err(KError::Io);
                     continue;
                 }
