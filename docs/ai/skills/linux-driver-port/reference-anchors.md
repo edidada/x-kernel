@@ -45,3 +45,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 07:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | recovery rebuilds the whole ring, never truncates it to an empty list |
 | 2026-11-05 07:24 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | recovery rebuilds the ring instead of truncating it |
 | 2026-11-05 07:25 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | every queue head's overlay HALT is cleared, not only the list head |
+| 2026-11-05 07:29 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | full queue head state at the moment a transfer is not fetched |
