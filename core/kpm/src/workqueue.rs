@@ -37,12 +37,14 @@ pub struct WorkqueueFreezeError {
     pub error: QueueFreezeError,
 }
 
-pub(crate) struct WorkqueueSet<'a> {
+/// Owns one PM attempt's queue policy and acquired pause guards.
+/// Successful guards survive a later failure until platform cleanup completes.
+pub(crate) struct WorkqueueFreezeSession<'a> {
     policy: Option<SuspendWorkqueues<'a>>,
     frozen: Vec<FrozenQueue>,
 }
 
-impl<'a> WorkqueueSet<'a> {
+impl<'a> WorkqueueFreezeSession<'a> {
     pub(crate) fn empty() -> Self {
         Self {
             policy: None,
