@@ -1771,9 +1771,13 @@ impl Xhci {
         let slot = self.allocate_slot(dev, slot_id)?;
         self.slots.push(slot);
         let slot_index = self.slots.len() - 1;
+        // From the reference's xhci_setup_addressable_virt_dev(): 8 for low
+        // speed, 64 for full AND high speed (the USB core guesses 64 for a full
+        // speed device until the descriptor arrives), 512 for SuperSpeed/Plus.
+        // Full speed used to be given 8 here, which is the low-speed value.
         let ep0_max_packet = match speed {
-            usb::Speed::Low | usb::Speed::Full => 8,
-            usb::Speed::Super => 512,
+            usb::Speed::Low => 8,
+            usb::Speed::Super | usb::Speed::SuperPlus => 512,
             _ => 64,
         };
         self.address_device(
