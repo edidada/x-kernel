@@ -228,6 +228,24 @@ Key local rules:
   *sequence*, not just the field values: order (what runs before what, which
   reset happens between which steps, which command is retried and how often)
   explains failures that no field-level fix can.
+- **Bit definitions are the easy half; mechanisms are the half that breaks.**
+  Transcribing `#define`s is necessary but not sufficient — the reference's
+  *structure and ordering* must be diffed function by function, and a structure
+  the reference never builds must be treated as wrong until the source says
+  otherwise. Concretely, before writing a controller driver path, read and
+  quote the function that: builds the descriptor/queue structure, enqueues the
+  transfer, decides completion, and tears it down. The EHCI bring-up is the
+  cautionary example: every register bit matched the reference (the token field
+  layout was copied verbatim and was correct) while seven mechanisms were
+  invented — a queue head with the transfer in the reclamation-list head, a
+  zero height `MULT` in a high-speed queue head, `0` instead of `LIST_END` for
+  an empty transfer pointer, `next | LIST_END` setting the terminate bit on
+  every queue element, one shared buffer pointer for all stages, completion
+  polled on the overlay that starts inactive, and a 50 ms reset hold that was
+  never held. Each looked reasonable; none survived the hardware. The rule:
+  for anything structural, `sed` the reference function out first and diff our
+  version against it field by field and step by step, and say in the commit
+  message which function was read.
 
 ## Change Completeness
 
