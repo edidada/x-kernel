@@ -1171,11 +1171,75 @@ impl Xhci {
     }
 
     /// Reads the first 8 descriptor bytes on the default address (0).
+    /// `get_bMaxPacketSize0()`: the device descriptor read that precedes the
+    /// address assignment.
+    ///
+    /// The reference asks for `GET_DESCRIPTOR_BUFSIZE` (64) bytes here, not the
+    /// 8 that the descriptor's own size field suggests — "this is what Windows
+    /// does, so it may help with some non-standards-compliant devices" — and
+    /// retries `GET_MAXPACKET0_TRIES` times. It then accepts only a DEVICE
+    /// descriptor whose bMaxPacketSize0 is one of the encodings the
+    /// specification allows (9 means 512, for SuperSpeed).
     fn read_device_head(&mut self) -> Result<(u16, u8), KError> {
-        let mut buf = [0u8; 8];
-        let setup = usb::SetupPacket::get_descriptor(usb::descriptor::ty::DEVICE, 0, 8);
-        self.control_transfer(0, &setup, &mut buf)?;
-        Ok((u16::from(buf[7]), buf[4]))
+        const TRIES: usize = 3;
+        let mut last = Err(KError::Io);
+        for _ in 0..TRIES {
+            let mut buf = [0u8; 64];
+            let setup = usb::SetupPacket::get_descriptor(usb::descriptor::ty::DEVICE, 0, 64);
+            match self.control_transfer(0, &setup, &mut buf) {
+                Ok(length) => {
+                    let max_packet = buf[7];
+                    let is_device = buf[1] == usb::descriptor::ty::DEVICE;
+                    let is_legal = matches!(max_packet, 8 | 16 | 32 | 64 | 9);
+                    if length >= 8 && is_device && is_legal {
+                        return Ok((u16::from(max_packet), buf[4]));
+                    }
+                    log::warn!(
+                        "xhci: descriptor head rejected: type {:#04x}, max packet {max_packet}, \
+                         length {length}",
+                        buf[1]
+                    );
+                    last = Err(KError::Io);
+                }
+                Err(err) => last = Err(err),
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
+        }
+        last
+    }
+
+    /// The old enumeration scheme: assign the address, then read the descriptor.
+    ///
+    /// `use_new_scheme()` refuses the new scheme for USB 3 devices outright —
+    /// "`new scheme` enumeration ... causes USB3 devices to receive control
+    /// commands in the default state. This has been seen to cause enumeration
+    /// failures" — so a SuperSpeed device is reset once, addressed, and only
+    /// then asked for its descriptor. Running the new scheme on one exposes it
+    /// to exactly the traffic the reference goes out of its way to avoid.
+    fn address_device_direct(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        root_port: usize,
+        speed: usb::Speed,
+        addressing: Addressing,
+    ) -> Result<u8, KError> {
+        let guess = match speed {
+            usb::Speed::Low => 8,
+            usb::Speed::Super | usb::Speed::SuperPlus => 512,
+            _ => 64,
+        };
+        let slot_id = self.enable_slot()?;
+        let slot = self.allocate_slot(dev, slot_id)?;
+        self.slots.push(slot);
+        let slot_index = self.slots.len() - 1;
+        if let Err(err) =
+            self.address_device(slot_index, root_port, speed, guess, addressing, false)
+        {
+            let _ = self.disable_slot(slot_id);
+            return Err(err);
+        }
+        self.address_zero_slot = None;
+        Ok(slot_id)
     }
 
     /// `xhci_setup_device()` with BSR: install the contexts, no address yet.
@@ -1927,8 +1991,17 @@ impl Xhci {
             // read bMaxPacketSize0 on address 0, reset the port AGAIN, then assign
             // the address on the same slot. The middle reset is the one the device
             // is in when it is finally addressed.
-            let mut attempt: Result<u8, KError> = Err(KError::Io);
-            for _ in 0..1 {
+            // `use_new_scheme()`: the new scheme is not used for USB 3 devices.
+            let is_usb3 = matches!(speed, usb::Speed::Super | usb::Speed::SuperPlus);
+            let mut attempt: Result<u8, KError> = if is_usb3 {
+                self.address_device_direct(dev, root_port, speed, addressing)
+            } else {
+                Err(KError::Io)
+            };
+            for _ in 0..usize::from(is_usb3) {
+                break;
+            }
+            for _ in 0..usize::from(!is_usb3) {
                 let slot_index = match self.slot_bootstrap(dev, root_port, speed, addressing) {
                     Ok(index) => index,
                     Err(err) => {
@@ -2085,7 +2158,10 @@ impl Xhci {
         unsafe {
             core::ptr::write_volatile(input.wrapping_add(slot_ctx + 3), 0);
         }
-        // Add flags: the slot context only.
+        // Add flags: the slot context only, as `xhci_update_hub_device()` sets
+        // it. Adding EP0 here changed nothing measurable: the controller leaves
+        // the slot in the Addressed state either way (see the context dump), and
+        // a device behind the USB 2.0 hub enumerates from that state.
         unsafe {
             core::ptr::write_volatile(input.wrapping_add(1), 1);
         }
@@ -2098,6 +2174,10 @@ impl Xhci {
         );
         self.command(trb, "configure hub")?;
         info!("xhci: slot {slot_id} configured as a hub with {num_ports} port(s)");
+        // The controller must report this slot as Configured before it will route
+        // anything to the ports below the hub; the state lives in the slot
+        // context the controller owns, so read it back instead of assuming.
+        self.log_device_context(slot_index);
         Ok(())
     }
 
