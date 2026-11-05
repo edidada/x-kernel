@@ -377,6 +377,34 @@ impl Ehci {
             core::ptr::write_volatile(head, qh);
         }
 
+        // A queue head stays in the ring, so it must not be left pointing at a
+        // descriptor that never completed: the controller would retry that
+        // descriptor forever and never advance to the next queue head. Linux
+        // unlinks the queue head when a transfer ends or times out; parking it
+        // with `qtd_next = LIST_END` is the same thing for a ring we never
+        // rebuild per transfer.
+        let park = |this: &Self, stop_schedule: bool| {
+            let command = this.regs.read32(this.operational + op::USBCMD);
+            if stop_schedule {
+                this.regs
+                    .write32(this.operational + op::USBCMD, command & !regs::cmd::RS);
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
+            }
+            // SAFETY: dword 4 of the EP0 queue head, inside this allocation.
+            unsafe {
+                core::ptr::write_volatile(
+                    head.cast::<u8>().wrapping_add(16).cast::<u32>(),
+                    regs::LIST_END,
+                );
+            }
+            if stop_schedule {
+                this.regs.write32(
+                    this.operational + op::USBCMD,
+                    command | regs::cmd::RS | regs::cmd::ASE,
+                );
+            }
+        };
+
         // Wait for the *last* qTD of the chain to retire. The queue head overlay
         // starts with ACTIVE clear, so polling it returns immediately and reports
         // a transfer that never happened.
@@ -439,11 +467,13 @@ impl Ehci {
                         core::ptr::copy_nonoverlapping(from, data.as_mut_ptr(), transferred);
                     }
                 }
+                park(self, false);
                 return Ok(transferred);
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
         log::error!("ehci: control transfer timed out");
+        park(self, true);
         Err(KError::TimedOut)
     }
 
