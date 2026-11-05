@@ -231,6 +231,17 @@ fn enumerate_firmware_nodes_direct() {
         return;
     };
     for node in fdt.all_nodes() {
+        // `status = "disabled"` means the board does not use this block: its
+        // registers may be ungated, its clocks unlisted, its supply off. Linux
+        // never instantiates such a node, and neither must we — probing one
+        // fails in the middle of resource acquisition (garbage pointers, or a
+        // node whose `reset-names` differ from what the driver expects), and
+        // the failure is indistinguishable from a real driver bug. On this
+        // board `usb@fcd00000` is disabled yet named its reset `usb3-host`
+        // instead of `usb3-otg`, so the dwc3 probe died silently there.
+        if node.property_str("status") == Some("disabled") {
+            continue;
+        }
         // Naked clock-provider nodes (the SCMI `protocol@14` shape: no
         // compatible, but a `#clock-cells` and a phandle consumers bind
         // to) are enumeration products all the same — synthesize the

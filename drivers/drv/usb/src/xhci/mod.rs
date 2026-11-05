@@ -437,6 +437,18 @@ fn reset_controller(bar: &IoMap, operational: usize, max_slots: u32) {
     } else {
         info!("xhci: controller ready after reset (USBSTS {status:#010x})");
     }
+    // Capability registers are only defined once CNR has dropped: reading them
+    // earlier returns whatever the block drives while it is still initialising.
+    // HCSPARAMS1 in particular carries MaxPorts, so a read during that window
+    // reports a port count that has nothing to do with the hardware (observed
+    // the same controller report MaxPorts 2 and 1 on different boots), and a
+    // controller believed to have one port never scans its SuperSpeed port.
+    let hcsparams1_ready = bar.read32(cap::HCSPARAMS1);
+    info!(
+        "xhci: HCSPARAMS1 after ready {hcsparams1_ready:#010x} (max ports {}, max slots {})",
+        (hcsparams1_ready >> 24) & 0xff,
+        hcsparams1_ready & 0xff,
+    );
     // §4.2: everything is written again after a reset; the controller has
     // forgotten the rings, the DCBAA and the number of enabled slots.
     bar.write32(operational + op::CONFIG, max_slots);
