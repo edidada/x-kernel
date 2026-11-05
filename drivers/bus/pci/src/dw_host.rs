@@ -853,7 +853,7 @@ fn log_phy_state(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
 /// only evidence of whether LTSSM ever leaves 0. A trained link reports
 /// 0x00130011 (bits 17:16 = 3); mainline logs 0x3 while it is still
 /// linking, so the *transitions* are the signal, not a single snapshot.
-fn watch_ltssm(apb: &IoMap) {
+fn watch_ltssm(apb: &IoMap) -> bool {
     log::info!("pcie-dw: watching ltssm");
     let mut last = u32::MAX;
     for _ in 0..40 {
@@ -863,10 +863,15 @@ fn watch_ltssm(apb: &IoMap) {
             last = ltssm;
         }
         if (ltssm & PCIE_LINKUP_MASK) >> 16 == PCIE_LINKUP {
-            return;
+            return true;
         }
         khal::time::busy_wait(ktime_types::TimeSpan::from_millis(5));
     }
+    // The link never trained (LTSSM still in Detect at 0x0): the DBI window of
+    // such a controller does not answer, and reading it stalls the bus with no
+    // panic and no abort -- it took down a whole boot. The caller skips the
+    // controller instead.
+    false
 }
 
 /// Fork the remaining hypothesis with one safe read: map a >4 GiB DRAM page
@@ -968,7 +973,16 @@ impl DriverOps<PlatformBus> for DwHostDriver {
             "pcie-dw: client in RC mode (general-con {:#010x})",
             apb.read32(PCIE_CLIENT_GENERAL_CON)
         );
-        watch_ltssm(&apb);
+        if !watch_ltssm(&apb) {
+            // A controller whose link never trained has no working DBI window;
+            // probing it stalls the whole machine, so this controller is
+            // skipped rather than taking the boot down with it.
+            log::warn!(
+                "pcie-dw: link never trained (apb {:#x}); skipping this controller",
+                apb_region.base
+            );
+            return Ok(DwHostData {});
+        }
         probe_high_pa_ram(dev);
         log::info!("pcie-dw: reading own dbi {:#x}", dbi_region.base);
         probe_dbi_page(dev, dbi_region)?;

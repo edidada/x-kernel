@@ -2248,13 +2248,20 @@ impl Xhci {
         let dwords = self.context_size / 4;
         let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
         let device = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        let slot_id = self.slots[slot_index].id;
         // The hub's status-change (interrupt IN) endpoint is configured here so
-        // the slot reaches the Configured state: xHCI 4.3.3 forbids
-        // addressing devices behind a hub whose slot is only Addressed, and an
-        // SS hub's child `Address Device` fails with a Transaction Error until
-        // this endpoint exists. Linux reaches the same state by claiming the
-        // hub's interface, which adds the endpoint through
-        // `xhci_add_endpoint()`.
+        // the slot reaches the Configured state: xHCI 4.3.3 forbids addressing
+        // devices behind a hub whose slot is only Addressed, and an SS hub's
+        // child `Address Device` fails with a Transaction Error until this
+        // endpoint exists. Linux reaches the same state by claiming the hub's
+        // interface, which adds the endpoint through `xhci_add_endpoint()`.
+        //
+        // The reference splits this into two Configure Endpoint commands:
+        // `xhci_update_hub_device()` writes DEV_HUB + MAX_PORTS with add_flags
+        // = SLOT, and `xhci_add_endpoint()` adds the endpoint with
+        // add_flags = SLOT | ep_flag and a raised `context entries`. One
+        // merged command answered Context State Error (17).
+        //
         // The slot context the controller built is in its OWN device context:
         // Configure Endpoint must present the current state, not a guess.
         for offset in 0..dwords {
@@ -2270,17 +2277,7 @@ impl Xhci {
         // dword0 bit26 = Hub; dword1 bits 31:24 = Number of Ports.
         let info0 = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
         unsafe {
-            // Keep route/speed/hub bits; raise `context entries` to 8 so the
-            // slot transitions to Configured (EP3-IN is the highest context).
-            core::ptr::write_volatile(
-                input.wrapping_add(slot_ctx),
-                (info0 & !0xf800_0000)
-                    | (match interrupt {
-                        Some((ep_number, ..)) => (u32::from(ep_number) * 2 + 2) << 27,
-                        None => 1 << 27,
-                    })
-                    | (1 << 26),
-            );
+            core::ptr::write_volatile(input.wrapping_add(slot_ctx), info0 | (1 << 26));
         }
         let info1 = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx + 1)) };
         unsafe {
@@ -2290,31 +2287,31 @@ impl Xhci {
             );
         }
         // dword3 carries the Device State; a Configure Endpoint input context
-        // must present it as 0 (the controller owns that field). Copying it from
-        // the device context, as the loop above does, brings the current state
-        // ('Addressed') along, which the reference explicitly clears.
+        // must present it as 0 (the controller owns that field).
         unsafe {
             core::ptr::write_volatile(input.wrapping_add(slot_ctx + 3), 0);
         }
-        // Add flags: slot, EP0 and the hub's interrupt IN endpoint
-        // (EP3-IN = context index 7). The input context's slot dword0 raises
-        // `context entries` to cover it, which is what moves the slot to
-        // Configured.
-        let interrupt_flag = match interrupt {
-            Some((ep_number, ..)) => 1 << (u32::from(ep_number) * 2 + 1),
-            None => 0,
-        };
-        // `xhci_get_endpoint_flag()` never includes EP0: adding it would
-        // reconfigure EP0 from the stale context left by `Address Device`,
-        // whose ring has advanced since -- EP0 then stops executing and every
-        // later control transfer times out.
+        // Command 1 (`xhci_update_hub_device()`): add_flags = SLOT only.
         unsafe {
-            core::ptr::write_volatile(input.wrapping_add(1), interrupt_flag);
+            core::ptr::write_volatile(input.wrapping_add(1), 1);
         }
-        // The hub's interrupt IN endpoint context (EP3-IN, context index 7,
-        // doorbell target 7): type 7 (interrupt IN), the descriptor's max
-        // packet and interval, and its own transfer ring.
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "configure hub")?;
+        info!("xhci: slot {slot_id} configured as a hub with {num_ports} port(s)");
+
+        // Command 2 (`xhci_add_endpoint()`): add_flags = SLOT | ep_flag, the
+        // endpoint context, and the slot's `context entries` raised to cover
+        // the endpoint's context index (endpoint * 2 + direction + 1). This is
+        // what transitions the slot to Configured, which xHCI 4.3.3 requires
+        // before devices behind the hub are addressed.
         if let Some((ep_number, max_packet, interval)) = interrupt {
+            let context_index = (u32::from(ep_number) * 2) + 1;
+            let entries = context_index + 1;
             let ring = Ring::with_link(
                 dev.res()
                     .alloc_coherent((RING_TRBS + 1) * TRB_LEN, 64)
@@ -2327,9 +2324,6 @@ impl Xhci {
                 let slot = &mut self.slots[slot_index];
                 slot.interrupt = Some(ring);
             }
-            // Context index = endpoint number * 2 + direction (IN = 1);
-            // `context entries` covers the highest configured index.
-            let context_index = (u32::from(ep_number) * 2) + 1;
             let ctx = dwords * (context_index + 1) as usize;
             let write = |offset: usize, value: u32| {
                 // SAFETY: inside the input context allocation (33 contexts).
@@ -2350,16 +2344,26 @@ impl Xhci {
                 ctx + 4,
                 context::endpoint_dword4(u32::from(max_packet).max(8)),
             );
+            // Input control context: add SLOT and the new endpoint; entries
+            // raised to cover it.
+            write(1, 0x1 | (1 << context_index));
+            let entries_dword = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
+            write(
+                slot_ctx,
+                (entries_dword & !0xf800_0000) | (entries << 27) | (1 << 26),
+            );
+            let trb = Trb::new(
+                self.slots[slot_index].input.bus_addr(),
+                0,
+                (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
+                    | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+            );
+            self.command(trb, "configure hub endpoints")?;
+            info!(
+                "xhci: slot {slot_id} hub interrupt endpoint added at context {context_index} \
+                 (entries {entries})"
+            );
         }
-        let slot_id = self.slots[slot_index].id;
-        let trb = Trb::new(
-            self.slots[slot_index].input.bus_addr(),
-            0,
-            (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
-                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
-        );
-        self.command(trb, "configure hub")?;
-        info!("xhci: slot {slot_id} configured as a hub with {num_ports} port(s)");
         // The controller must report this slot as Configured before it will route
         // anything to the ports below the hub; the state lives in the slot
         // context the controller owns, so read it back instead of assuming.

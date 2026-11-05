@@ -77,3 +77,6 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 12:11 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_init` | the retry re-runs hub_port_reset before addressing again |
 | 2026-11-05 12:35 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_get_endpoint_flag` | add-flags bits cover only the endpoint being added; EP0 is never re-added |
 | 2026-11-05 12:52 | `/workspace/linux-7.1.8/drivers/pmdomain/rockchip/pm-domains.c` | `rockchip_pd_power` | PMU mutex + already-on early return: every driver goes through one locked implementation |
+| 2026-11-05 13:16 | `/workspace/linux-7.1.8/drivers/pci/controller/dwc/pcie-dw-rockchip.c` | `ltssm` | a link that never trained has no DBI window; polling for linkup before touching it |
+| 2026-11-05 13:21 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_update_hub_device` | command 1: DEV_HUB + MAX_PORTS, add_flags = SLOT |
+| 2026-11-05 13:21 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | command 2: add_flags = SLOT | ep_flag, entries raised |
