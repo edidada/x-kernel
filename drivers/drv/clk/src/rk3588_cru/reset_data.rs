@@ -26,7 +26,7 @@ pub(crate) struct ResetRow {
     pub bit: u8,
 }
 
-pub(crate) const RESET_ROWS: [ResetRow; 639] = [
+pub(crate) const RESET_ROWS: [ResetRow; 643] = [
     // SRST_A_SECURE_NS_BIU
     ResetRow {
         dts_id: 0xa,
@@ -164,6 +164,39 @@ pub(crate) const RESET_ROWS: [ResetRow; 639] = [
         dts_id: 0x2b,
         word_offset: 0xa08,
         bit: 11,
+    },
+    // SRST_USBDP_COMBO_PHY1_INIT/CMN/LANE/PCS: the second USBDP pair reuses the
+    // SAME reset word, spilling past bit 15 into the next one. Values from the
+    // pinned reference `drivers/clk/rockchip/rst-rk3588.c`
+    // (RK3588_CRU_RESET_OFFSET(id, reg, bit) => word_offset = 0xa00 + reg*4):
+    // PHY1_INIT = (2, 15) -> 0xa08 bit 15, PHY1_{CMN,LANE,PCS} = (3, 0..2) ->
+    // 0xa0c bits 0..2. The board's DTB names them 0x2f..0x32 and the usbdp
+    // provider asks by index, so a missing row makes phy@fed90000's probe fail
+    // with NotFound and its u3-port is never published -- dwc3's second
+    // controller then waits for a provider that never arrives.
+    // SRST_USBDP_COMBO_PHY1_INIT
+    ResetRow {
+        dts_id: 0x2f,
+        word_offset: 0xa08,
+        bit: 15,
+    },
+    // SRST_USBDP_COMBO_PHY1_CMN
+    ResetRow {
+        dts_id: 0x30,
+        word_offset: 0xa0c,
+        bit: 0,
+    },
+    // SRST_USBDP_COMBO_PHY1_LANE
+    ResetRow {
+        dts_id: 0x31,
+        word_offset: 0xa0c,
+        bit: 1,
+    },
+    // SRST_USBDP_COMBO_PHY1_PCS
+    ResetRow {
+        dts_id: 0x32,
+        word_offset: 0xa0c,
+        bit: 2,
     },
     // SRST_P_KEYLADDER
     ResetRow {
