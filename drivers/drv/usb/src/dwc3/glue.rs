@@ -75,16 +75,6 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             "dwc3: usb3-otg reset deasserted, line asserted {} ",
             reset.status()
         );
-        // MaxPorts (HCSPARAMS1 bits 31:24) is read three times: untouched,
-        // after the USBDP PHY init, and after the core soft reset. The working
-        // board reads 2 here while this port read 1, with GHWPARAMS3, GCTL and
-        // GUSB3PIPECTL all identical — so something in our own init changes it,
-        // and the only way to find which step is to bracket them.
-        info!(
-            "dwc3: HCSPARAMS1 untouched {:#010x} (max ports {})",
-            regs.read32(0x04),
-            (regs.read32(0x04) >> 24) & 0xff,
-        );
 
         let mut clocks = Vec::new();
         let mut clock_guards = Vec::new();
@@ -115,6 +105,20 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         }
 
         log_cru_clocks(dev);
+
+        // MaxPorts (HCSPARAMS1 bits 31:24) is bracketed across our own init:
+        // here (clocks on, PHYs untouched), after the USBDP PHY init, and after
+        // the core soft reset. The working board reads 2 at runtime while this
+        // port ends up with 1, with GHWPARAMS3, GCTL and GUSB3PIPECTL all
+        // bit-identical — so one of our steps changes it. It cannot be read any
+        // earlier than this: the xHCI window needs its bus clock, and reading it
+        // before the clock loop stalls the interconnect outright (the console
+        // just stops, with no abort).
+        info!(
+            "dwc3: HCSPARAMS1 after clocks {:#010x} (max ports {})",
+            regs.read32(0x04),
+            (regs.read32(0x04) >> 24) & 0xff,
+        );
 
         // USB2 PHY only in this stage: High-Speed works through it, and the
         // SuperSpeed PHY is a separate driver that lands later.

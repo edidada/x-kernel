@@ -32,7 +32,21 @@ impl DeviceDomain {
 
     pub(super) fn probe_pending_locked(&self) -> ProbeStats {
         let mut stats = ProbeStats::default();
-        loop {
+        // Bounded: every pass either activates, defers, or fails a device, and a
+        // wake re-queues the parked ones. That termination argument only holds
+        // while wakes are finite — a provider published from inside a probe
+        // wakes the consumers parked on it, and one of those consumers may
+        // publish the next thing, which wakes the first again. Observed on
+        // RK3588: the pump stopped returning altogether (the boot never printed
+        // its device census and a phy that deferred 110 ms before its clock
+        // appeared was never retried), which is indistinguishable from a hang
+        // because it *is* one.
+        //
+        // A hard pass cap converts that livelock into a bounded boot plus a
+        // report naming what is still waiting, so the system always makes
+        // progress and the oscillation is visible instead of silent.
+        const MAX_PASSES: usize = 64;
+        for pass in 0..MAX_PASSES {
             let batch = self.select_batch();
             if batch.is_empty() {
                 // Drain late-arrival requests: a producer that hit the
@@ -41,8 +55,17 @@ impl DeviceDomain {
                 // bounded even if more producers race in.
                 let requested = core::mem::take(&mut *self.pump_requested.lock());
                 if !requested {
-                    break stats;
+                    return stats;
                 }
+            } else if pass + 1 == MAX_PASSES {
+                let stuck = self.inner.lock().sched.deferred.clone();
+                log::error!(
+                    "driver-core: probe pump hit its {MAX_PASSES}-pass cap; {} device(s) still \
+                     waiting: {:?}",
+                    stuck.len(),
+                    stuck,
+                );
+                return stats;
             }
             for (id, desc, driver) in batch {
                 let services = self.inner.lock().services.clone();
@@ -105,6 +128,7 @@ impl DeviceDomain {
                 }
             }
         }
+        stats
     }
 
     /// Select the next probe batch: per pending device, the single

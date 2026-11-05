@@ -51,7 +51,22 @@ pub fn init(
     }
     // Order matches the reference implementations: reset first, then select the
     // host role. (Trying it the other way round changes nothing observable.)
+    //
+    // MaxPorts (HCSPARAMS1 bits 31:24) is bracketed across each step below: the
+    // board's working Linux instance reports 2, and measurements show it is 2
+    // right up to this function and 1 by the time it returns, so the step that
+    // costs the SuperSpeed port is in here.
+    info!(
+        "dwc3: HCSPARAMS1 before soft reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
     core_soft_reset(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after soft reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
     let params = HwParams {
         gsnpsid: regs.read32(regs::DWC_USB3_GSNPSID),
         hwparams0: regs.read32(regs::GHWPARAMS0),
@@ -73,12 +88,27 @@ pub fn init(
     }
 
     program_usb2_phy(regs, utmi_wide, dis_enblslpm);
+    info!(
+        "dwc3: HCSPARAMS1 after GUSB2PHYCFG {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
     program_guctl1(regs);
     program_usb3_pipe(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after GUSB3PIPECTL {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
 
     // Role selection comes after the PHY words, as in dwc3_core_init:
     // `dwc3_phy_setup` runs before `dwc3_set_prtcap`.
     set_host_mode(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after host mode {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
     let _ = dev;
     Ok(params)
 }
