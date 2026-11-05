@@ -364,6 +364,10 @@ struct Slot {
     interrupt: Option<Ring>,
     /// Device context array entry handed to the controller by `Address Device`.
     device: CoherentMem,
+    /// The endpoint stopped answering once (a wire/forwarding death): later
+    /// transfers to this slot fast-fail instead of waiting out the full 5 s
+    /// each, so a dead child costs the boot milliseconds, not minutes.
+    wire_dead: bool,
 }
 
 /// Brings the controller to the post-reset state (§4.2).
@@ -930,6 +934,10 @@ fn for_each_alloc_zeroed(allocations: &[(*mut u8, usize)]) {
 /// steps; a completion that arrives early is caught on the next poll.
 const EVENT_POLL_STEPS: usize = 5_000;
 
+/// Fast-fail for a slot whose wire already timed out once: a dead wire
+/// answers nothing no matter how long software waits.
+const WIRE_DEAD_POLL_STEPS: usize = 250;
+
 /// Root port reset: how long to poll PORTSC for PRC / the enabled state, in
 /// 1 µs steps (the hub layer allows `HUB_RESET_TIMEOUT`, 1 s, for a reset to
 /// finish; this controller completes one in single-digit milliseconds).
@@ -1059,7 +1067,7 @@ impl Xhci {
         None
     }
 
-    /// Waits for a transfer event belonging to `slot_id` / `ep_id`.
+    /// Waits for a transfer event belonging to `slot_index`'s EP0.
     ///
     /// A raw type match is not enough: a timed-out transfer's completion event
     /// arrives later, and consuming it as the next transfer's own completion
@@ -1068,18 +1076,29 @@ impl Xhci {
     /// seconds after the address-0 diagnostics). Events for other waiters are
     /// deferred to `pending_events`; port status changes are dropped, since the
     /// port scan reads PORTSC directly.
-    fn wait_for_transfer(&mut self, slot_id: u8, ep_id: u32, what: &str) -> Result<Trb, KError> {
+    ///
+    /// A slot that already timed out once (`wire_dead`) fast-fails at 250 ms —
+    /// a dead wire answers nothing no matter how long software waits, and the
+    /// full 5 s per dead transfer is what blew the boot past its window.
+    fn wait_for_transfer(&mut self, slot_index: usize, what: &str) -> Result<Trb, KError> {
+        let slot_id = self.slots[slot_index].id;
+        let steps = if self.slots[slot_index].wire_dead {
+            WIRE_DEAD_POLL_STEPS
+        } else {
+            EVENT_POLL_STEPS
+        };
         let matches = |event: &Trb| {
             event.trb_type() == regs::trb::TRANSFER_EVENT
                 && event.slot_id() == slot_id
-                && (event.control >> 16) & 0x1f == ep_id
+                && (event.control >> 16) & 0x1f == 1
         };
         if let Some(event) = self.take_pending(matches) {
             return Ok(event);
         }
-        for _ in 0..EVENT_POLL_STEPS {
+        for _ in 0..steps {
             if let Some(event) = self.next_event() {
                 if matches(&event) {
+                    self.slots[slot_index].wire_dead = false;
                     return Ok(event);
                 }
                 if event.trb_type() == regs::trb::PORT_STATUS_CHANGE {
@@ -1092,6 +1111,7 @@ impl Xhci {
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         }
+        self.slots[slot_index].wire_dead = true;
         self.log_event_timeout(what);
         Err(KError::TimedOut)
     }
@@ -1360,6 +1380,7 @@ impl Xhci {
             bulk: [None, None],
             interrupt: None,
             device,
+            wire_dead: false,
         })
     }
 
@@ -1949,7 +1970,7 @@ impl Xhci {
         // posted doorbell that is still in flight when the controller looks for
         // work is indistinguishable from a ring that is not being fetched.
         let _ = self.bar.read32(doorbell);
-        let event = match self.wait_for_transfer(slot_id, 1, "control transfer") {
+        let event = match self.wait_for_transfer(slot_index, "control transfer") {
             Ok(event) => event,
             Err(err) => {
                 // The ring we handed the controller vs. what is actually in it:
@@ -2796,7 +2817,7 @@ impl Xhci {
         // posted doorbell that is still in flight when the controller looks for
         // work is indistinguishable from a ring that is not being fetched.
         let _ = self.bar.read32(doorbell);
-        match self.wait_for_transfer(slot_id, 1, "no-op transfer") {
+        match self.wait_for_transfer(slot_index, "no-op transfer") {
             Ok(event) => info!(
                 "xhci: no-op transfer completed (code {}) — EP0 ring, doorbell and event delivery \
                  work; a later control-transfer timeout is the device not answering",
