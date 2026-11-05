@@ -1776,10 +1776,15 @@ impl Xhci {
         );
     }
 
-    /// `xhci_urb_dequeue()`'s endpoint recovery: Stop Endpoint, then Set TR
-    /// Dequeue Pointer past every queued TD (at our enqueue position, with the
-    /// cycle the next TD will carry). Without this the dead TDs stay first on
-    /// the ring and block every later transfer on the endpoint.
+    /// Endpoint recovery after a transfer timeout.
+    ///
+    /// Two states are possible and each wants a different command: the TD may
+    /// still be active on a running endpoint (Stop Endpoint clears it), or the
+    /// wire errors may have exhausted CErr and HALTED the endpoint — Stop on a
+    /// halted endpoint answers Context State Error (19, measured), and the
+    /// recovery is Reset Endpoint. Either way Set TR Dequeue then hands the
+    /// endpoint a fresh dequeue pointer past the dead TDs
+    /// (`xhci_urb_dequeue()`'s stop + set-deq pair).
     fn flush_ep0(&mut self, slot_index: usize) -> Result<(), KError> {
         let slot_id = u32::from(self.slots[slot_index].id);
         let endpoint = |trb_type: u32| {
@@ -1787,10 +1792,21 @@ impl Xhci {
                 | (regs::trb::EP0 << regs::trb::EP_SHIFT)
                 | (slot_id << regs::trb::SLOT_SHIFT)
         };
-        self.command(
+        match self.command(
             Trb::new(0, 0, endpoint(regs::trb::STOP_ENDPOINT)),
             "stop endpoint",
-        )?;
+        ) {
+            Ok(_) => {}
+            // Context State Error: the endpoint already halted itself (the
+            // wire errors exhausted CErr). Reset Endpoint brings it back.
+            Err(KError::Io) => {
+                self.command(
+                    Trb::new(0, 0, endpoint(regs::trb::RESET_ENDPOINT)),
+                    "reset endpoint",
+                )?;
+            }
+            Err(err) => return Err(err),
+        }
         let slot = &self.slots[slot_index];
         let dequeue = slot.ep0.dequeue_address() | u64::from(slot.ep0.current_cycle());
         self.command(
