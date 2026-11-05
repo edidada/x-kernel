@@ -998,6 +998,26 @@ impl Xhci {
         info!("xhci: command ring re-armed at {dequeue:#x}");
     }
 
+    /// `Disable Slot`: gives a slot back to the controller.
+    ///
+    /// `Address Device` can fail (a Transaction Error on a hub child, for one),
+    /// and a slot left in that state is still owned by the controller: the next
+    /// device then gets a slot whose predecessor never finished addressing, and
+    /// the failure spreads to devices that address fine on their own. Releasing
+    /// it is the only way to keep one device's failure local.
+    fn disable_slot(&mut self, slot_id: u8) -> Result<(), KError> {
+        let trb = Trb::new(
+            0,
+            0,
+            (regs::trb::DISABLE_SLOT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "disable slot")?;
+        self.slots.retain(|slot| slot.id != slot_id);
+        info!("xhci: released slot {slot_id}");
+        Ok(())
+    }
+
     /// `Enable Slot`: asks the controller for a device slot.
     fn enable_slot(&mut self) -> Result<u8, KError> {
         // Discriminator: a No-Op command carries no parameters, so if it succeeds
