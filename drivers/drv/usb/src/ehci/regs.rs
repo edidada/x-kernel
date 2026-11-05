@@ -117,7 +117,10 @@ pub mod pid {
 
 /// `hw_info1` fields.
 pub mod info1 {
-    pub const NAK_RELOAD: u32 = 0 << 28;
+    /// NAK Count Reload, `hw_info1[31:28]` (`EHCI_TUNE_RL_HS`): the number of
+    /// times a NAKing transaction is retried before the controller reports it.
+    /// Zero disables the counter, i.e. retry forever.
+    pub const NAK_RELOAD: u32 = 4 << 28;
     /// Control endpoint flag: this QH carries control transfers.
     pub const CONTROL_EP: u32 = 1 << 27;
     pub const MAX_PACKET_SHIFT: u32 = 16;
@@ -133,6 +136,13 @@ pub mod info1 {
     pub const EPS_MASK: u32 = 0x3 << EPS_SHIFT;
     pub const ENDPOINT_SHIFT: u32 = 8;
     pub const ADDRESS_MASK: u32 = 0x7f;
+}
+
+/// `hw_info2[31:30]`: transactions per microframe, `EHCI_TUNE_MULT_HS`. The
+/// field must be at least 1 for a high-speed endpoint; zero is not a valid
+/// value and leaves the controller without a schedule slot for the transfer.
+pub mod info2 {
+    pub const MULT_HIGH_SPEED: u32 = 1 << 30;
 }
 
 /// Endpoint speed, `hw_info1[13:12]`.

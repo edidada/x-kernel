@@ -293,10 +293,20 @@ impl Ehci {
             // controller overlays this QH's qTD and never executes it.
             info1: info1::TOGGLE_CTL
                 | info1::CONTROL_EP
+                | info1::NAK_RELOAD
                 | ((max_packet as u32) << info1::MAX_PACKET_SHIFT)
                 | eps
                 | (address as u32 & info1::ADDRESS_MASK),
-            info2: 0,
+            // `qh_make()` sets MULT from `EHCI_TUNE_MULT_HS` for a high-speed
+            // endpoint. Zero is not a legal value: with it the controller never
+            // schedules the transfer, the setup qTD is overlaid into the queue
+            // head and then never retires, and every control transfer times out
+            // with no error anywhere.
+            info2: if eps == regs::eps_high() {
+                regs::info2::MULT_HIGH_SPEED
+            } else {
+                0
+            },
             current: 0,
             qtd_next: setup_addr,
             alt_next: regs::LIST_END,
@@ -369,33 +379,6 @@ impl Ehci {
                     // SAFETY: the controller wrote `transferred` bytes there.
                     unsafe {
                         core::ptr::copy_nonoverlapping(from, data.as_mut_ptr(), transferred);
-                    }
-                    // Diagnostic: the byte count alone cannot distinguish "the
-                    // device answered" from "the buffer holds something else",
-                    // and the descriptor parse only reports that it disliked
-                    // what it saw.
-                    log::info!(
-                        "ehci: in {transferred} bytes: {:02x?}",
-                        &data[..transferred.min(8)]
-                    );
-                    // Which stages the controller actually executed, and with
-                    // what result: a chain that stops early and a chain that runs
-                    // but lands in the wrong buffer look identical from the data
-                    // alone.
-                    let qtd_base = self.qtds.as_ptr().cast::<regs::Qtd>();
-                    for index in 0..3 {
-                        // SAFETY: the allocation holds three qTDs.
-                        let qtd = unsafe { core::ptr::read_volatile(qtd_base.wrapping_add(index)) };
-                        log::info!(
-                            "ehci: qtd{index} token {:#010x} (active {}, halt {}, pid {}, len {}, \
-                             buf0 {:#x})",
-                            qtd.token,
-                            qtd.token & token::ACTIVE != 0,
-                            qtd.token & token::HALT != 0,
-                            (qtd.token & token::PID_MASK) >> token::PID_SHIFT,
-                            (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
-                            qtd.buffer[0],
-                        );
                     }
                 }
                 return Ok(transferred);
