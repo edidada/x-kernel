@@ -1307,12 +1307,18 @@ impl Xhci {
                 self.device_contexts.bus_addr(),
             );
         }
-        let trb = Trb::new(
-            input_addr,
-            0,
-            (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
-                | (slot_id << regs::trb::SLOT_SHIFT),
-        );
+        let mut address_control = (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
+            | (u32::from(slot_id) << regs::trb::SLOT_SHIFT);
+        if bsr {
+            // Block Set Address Request: install the slot and EP0 contexts
+            // without assigning an address. The parameter existed here but was
+            // only ever forwarded to the recursive retry, never turned into this
+            // bit — so every "BSR" command this driver issued was a full Address
+            // Device that sent SET_ADDRESS, and the two-step sequence the
+            // reference relies on had never actually run.
+            address_control |= regs::trb::BSR;
+        }
+        let trb = Trb::new(input_addr, 0, address_control);
         // Port and PHY state at the moment of the transaction, not at reset time.
         let portsc = self
             .bar
