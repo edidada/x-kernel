@@ -19,6 +19,7 @@ extern crate alloc;
 
 pub mod descriptor;
 pub mod enumerate;
+pub mod hub;
 
 use alloc::{string::String, vec::Vec};
 

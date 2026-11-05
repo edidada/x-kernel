@@ -18,12 +18,37 @@ pub const EP0_CONTEXT: usize = 1;
 
 /// Slot context dword 0: route string, speed and the number of contexts.
 pub fn slot_dword0(speed_id: u8, context_entries: u32) -> u32 {
-    ((speed_id as u32) << 20) | (context_entries << 27)
+    slot_dword0_routed(0, speed_id, context_entries, false)
+}
+
+/// Slot context dword 0 with a route string and the multi-TT flag.
+///
+/// A device behind a hub is addressed by the **port path**, not by a root port:
+/// bits 19:0 carry the route string (one nibble per tier, the port number of
+/// each hub along the way). `multi_tt` (bit 25) tells the controller the parent
+/// hub has a transaction translator per port; it is only meaningful for a
+/// full/low-speed device behind a high-speed hub.
+pub fn slot_dword0_routed(route: u32, speed_id: u8, context_entries: u32, multi_tt: bool) -> u32 {
+    (route & 0x000f_ffff)
+        | ((speed_id as u32) << 20)
+        | (u32::from(multi_tt) << 25)
+        | (context_entries << 27)
 }
 
 /// Slot context dword 1: root hub port number is 1-based in xHCI.
 pub fn slot_dword1(root_port_1based: u8) -> u32 {
     (root_port_1based as u32) << 16
+}
+
+/// Slot context dword 2: the transaction translator of the hub the device is
+/// behind (xHCI 1.1 Table 6-4).
+///
+/// `ttt` is the hub's TT think time, `tt_port` the hub port the device sits on
+/// and `hub_slot` the device slot id of that hub. The controller uses these to
+/// emit SPLIT transactions for full/low-speed devices behind a high-speed hub;
+/// without them such a device is addressed but never answers.
+pub fn slot_dword2_tt(ttt: u8, tt_port: u8, hub_slot: u8) -> u32 {
+    (u32::from(ttt) & 0x3) | ((u32::from(tt_port) & 0xf) << 4) | (u32::from(hub_slot) << 8)
 }
 
 /// Endpoint context dword 1: CErr, endpoint type and max packet size.

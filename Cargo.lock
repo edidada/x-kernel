@@ -5736,6 +5736,8 @@ name = "usb"
 version = "0.3.0-dev"
 dependencies = [
  "kerrno",
+ "khal",
+ "ktime_types",
  "log",
  "unittest",
 ]

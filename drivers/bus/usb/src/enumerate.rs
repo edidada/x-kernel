@@ -304,6 +304,76 @@ fn control_no_data(hcd: &mut dyn Hcd, address: u8, setup: SetupPacket) -> KResul
     hcd.control_transfer(address, &setup, &mut [])
 }
 
+/// Enumerates a device the controller has already addressed.
+///
+/// This is the downstream half of [`enumerate_port`]: a device behind a hub is
+/// reached by resetting the hub's port and letting the controller assign the
+/// address, so the descriptor work starts at the device's own address with no
+/// default-address phase and no root-port reset.
+pub fn enumerate_addressed(
+    hcd: &mut dyn Hcd,
+    address: u8,
+    port: usize,
+    speed: Speed,
+) -> KResult<UsbDevice> {
+    let mut buf = [0u8; DeviceDescriptor::WIRE_LEN];
+    let read = control_in(
+        hcd,
+        address,
+        SetupPacket::get_descriptor(descriptor::ty::DEVICE, 0, DeviceDescriptor::WIRE_LEN as u16),
+        &mut buf,
+    )?;
+    if read < DeviceDescriptor::WIRE_LEN {
+        return Err(KError::InvalidInput);
+    }
+    let device = DeviceDescriptor::parse(&buf)?;
+    info!(
+        "usb: {address:03}:{port} id {:04x}:{:04x} usb {}.{} class {:#04x}/{:02x}/{:02x} ep0 {} \
+         configs {}",
+        device.vendor,
+        device.product,
+        (device.bcd_usb >> 8) & 0xff,
+        (device.bcd_usb >> 4) & 0x0f,
+        device.class,
+        device.subclass,
+        device.protocol,
+        device.max_packet_size_0,
+        device.num_configurations,
+    );
+    let configurations = read_configurations(hcd, address)?;
+    let manufacturer = read_string(hcd, address, device.manufacturer_index);
+    let product = read_string(hcd, address, device.product_index);
+    let serial = read_string(hcd, address, device.serial_index);
+    if let Some(product) = &product {
+        info!("usb: {address:03}:{port} product {product}");
+    }
+    if let Some(manufacturer) = &manufacturer {
+        info!("usb: {address:03}:{port} manufacturer {manufacturer}");
+    }
+    let first_configuration = configurations
+        .first()
+        .map(|configuration| configuration.configuration_value)
+        .unwrap_or(0);
+    if first_configuration != 0 {
+        control_no_data(
+            hcd,
+            address,
+            SetupPacket::set_configuration(first_configuration),
+        )?;
+        info!("usb: {address:03}:{port} configured with {first_configuration}");
+    }
+    Ok(UsbDevice {
+        address,
+        port,
+        speed,
+        device,
+        configurations,
+        manufacturer,
+        product,
+        serial,
+    })
+}
+
 /// One-line description of a device, for drivers that log their claim.
 pub fn describe(device: &UsbDevice) -> String {
     format!(

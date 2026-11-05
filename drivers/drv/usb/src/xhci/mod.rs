@@ -354,6 +354,42 @@ fn claim_legacy_ownership(bar: &IoMap, hccparams1: u32) {
     info!("xhci: no legacy support capability found");
 }
 
+/// How a device is reached: through the root port directly, or through a
+/// transaction translator of a hub.
+#[derive(Debug, Clone, Copy, Default)]
+struct Addressing {
+    /// xHCI route string: one nibble per hub tier, lowest nibble = first tier.
+    route: u32,
+    /// Set for a full/low-speed device behind a high-speed hub.
+    tt: Option<Translator>,
+    /// The parent hub has one transaction translator per port (bDeviceProtocol 2).
+    multi_tt: bool,
+}
+
+impl Addressing {
+    const fn root() -> Self {
+        Self {
+            route: 0,
+            tt: None,
+            multi_tt: false,
+        }
+    }
+}
+
+/// The transaction translator of the hub a device hangs from.
+#[derive(Debug, Clone, Copy)]
+struct Translator {
+    /// TT think time, copied from the hub descriptor's wHubCharacteristics.
+    think_time: u8,
+    /// Hub port number the device is on.
+    port: u8,
+    /// Device slot id of that hub.
+    hub_slot: u8,
+}
+
+/// `bDeviceClass` of a hub (`bDeviceClass = 09h`, USB 2.0 §11.23).
+const HUB_CLASS: u8 = 0x09;
+
 /// Whether a port's link state means it is still negotiating.
 ///
 /// xHCI §4.19.1: 5 RxDetect, 6 Inactive, 4 Disabled and 0/1/2/3 (U0/U1/U2/U3)
@@ -1074,6 +1110,7 @@ impl Xhci {
         port: usize,
         speed: Speed,
         ep0_max_packet: u16,
+        addressing: Addressing,
     ) -> Result<(), KError> {
         let context_size = self.context_size;
         let (input_addr, ep0_ring, dcs) = {
@@ -1108,8 +1145,17 @@ impl Xhci {
             ),
         );
         let slot_ctx = dwords_per_context * (context::SLOT_CONTEXT + 1);
-        write(slot_ctx, context::slot_dword0(speed_id, 1));
+        write(
+            slot_ctx,
+            context::slot_dword0_routed(addressing.route, speed_id, 1, addressing.multi_tt),
+        );
         write(slot_ctx + 1, context::slot_dword1((port + 1) as u8));
+        if let Some(tt) = addressing.tt {
+            write(
+                slot_ctx + 2,
+                context::slot_dword2_tt(tt.think_time, tt.port, tt.hub_slot),
+            );
+        }
         let ep0_ctx = dwords_per_context * (context::EP0_CONTEXT + 1);
         write(ep0_ctx + 1, context::endpoint_dword1(4, ep0_max_packet));
         write(ep0_ctx + 2, context::endpoint_dword2(ep0_ring, dcs));
@@ -1165,7 +1211,7 @@ impl Xhci {
                     return Err(err);
                 }
                 log::error!("xhci: retrying Address Device as Low-Speed");
-                let low = self.address_device(slot_index, port, Speed::Low, 8);
+                let low = self.address_device(slot_index, port, Speed::Low, 8, addressing);
                 return match low {
                     Ok(()) => Ok(()),
                     Err(low_err) => {
@@ -1545,6 +1591,13 @@ impl Xhci {
                         Ok(device) => {
                             log::info!("xhci: {}", device.summary());
                             ready += 1;
+                            // A hub is not a leaf: everything the user plugs in
+                            // sits one tier below it. Walk its ports now, while
+                            // the device model is being built, so the tree is
+                            // complete before any class driver looks for one.
+                            if device.device.class == HUB_CLASS {
+                                self.scan_hub_ports(dev, &device, port);
+                            }
                         }
                         Err(err) => {
                             log::error!("xhci: port {} enumeration failed: {err:?}", port + 1)
@@ -1564,6 +1617,121 @@ impl Xhci {
             }
         }
         (found, ready)
+    }
+
+    /// Walks a hub's downstream ports and enumerates what is attached.
+    ///
+    /// A device behind a hub is reached differently from a root-port device:
+    /// the hub's port is reset through the hub class (the controller knows
+    /// nothing about it), the slot carries the route string of the port path,
+    /// and a full/low-speed device behind a high-speed hub also carries that
+    /// hub's transaction translator — without it the device is addressed but
+    /// never answers, because every transaction has to be split by the hub.
+    fn scan_hub_ports(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        hub: &usb::UsbDevice,
+        root_port: usize,
+    ) {
+        let ports = usb::hub::scan(self, hub.address);
+        // `bDeviceProtocol` (from the *device* descriptor): 0 FS hub, 1 HS
+        // single-TT, 2 HS multi-TT, 3 SuperSpeed.
+        let protocol = hub.device.protocol;
+        let port_count = ports.len();
+        let _ = port_count;
+        for entry in ports.iter().filter(|port| port.connected) {
+            log::info!(
+                "usb: hub {} port {}: device attached at {} speed",
+                hub.address,
+                entry.port,
+                entry.speed.as_str(),
+            );
+            let Some(speed) = self.reset_hub_port(hub, entry.port, protocol) else {
+                continue;
+            };
+            // A full/low-speed device behind a high-speed hub needs the hub's
+            // transaction translator; a SuperSpeed device needs neither.
+            let addressing = Addressing {
+                route: u32::from(entry.port) & 0xf,
+                tt: match (protocol, speed) {
+                    (1 | 2, usb::Speed::Low | usb::Speed::Full) => Some(Translator {
+                        think_time: 0,
+                        port: entry.port,
+                        hub_slot: hub.address,
+                    }),
+                    _ => None,
+                },
+                multi_tt: protocol == 2,
+            };
+            match self.address_downstream(dev, root_port, speed, addressing) {
+                Ok(address) => match usb::enumerate::enumerate_addressed(
+                    self,
+                    address,
+                    usize::from(entry.port),
+                    speed,
+                ) {
+                    Ok(device) => log::info!(
+                        "xhci: hub {} port {} -> {}",
+                        hub.address,
+                        entry.port,
+                        device.summary()
+                    ),
+                    Err(err) => log::error!(
+                        "xhci: hub {} port {} enumeration failed: {err:?}",
+                        hub.address,
+                        entry.port
+                    ),
+                },
+                Err(err) => log::error!(
+                    "xhci: hub {} port {} address device failed: {err:?}",
+                    hub.address,
+                    entry.port
+                ),
+            }
+        }
+    }
+
+    /// Resets one downstream port through the hub class and returns its speed.
+    fn reset_hub_port(
+        &mut self,
+        hub: &usb::UsbDevice,
+        port: u8,
+        protocol: u8,
+    ) -> Option<usb::Speed> {
+        let info = usb::hub::HubInfo {
+            ports: 0,
+            protocol,
+            power_on_2ms: 0,
+        };
+        let speed = usb::hub::reset_port(self, hub.address, port, info)?;
+        Some(match speed {
+            usb::hub::Speed::Low => usb::Speed::Low,
+            usb::hub::Speed::Full => usb::Speed::Full,
+            usb::hub::Speed::High => usb::Speed::High,
+            usb::hub::Speed::Super => usb::Speed::Super,
+            usb::hub::Speed::Unknown => usb::Speed::High,
+        })
+    }
+
+    /// Allocates a slot for a device behind `hub` and addresses it there.
+    fn address_downstream(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        root_port: usize,
+        speed: usb::Speed,
+        addressing: Addressing,
+    ) -> Result<u8, KError> {
+        let slot_id = self.enable_slot()?;
+        let slot = self.allocate_slot(dev, slot_id)?;
+        self.slots.push(slot);
+        let slot_index = self.slots.len() - 1;
+        let ep0_max_packet = match speed {
+            usb::Speed::Low | usb::Speed::Full => 8,
+            usb::Speed::Super => 512,
+            _ => 64,
+        };
+        self.address_device(slot_index, root_port, speed, ep0_max_packet, addressing)?;
+        Ok(slot_id)
     }
 
     /// Brings one port up far enough that the bus core can talk to the device:
@@ -1615,7 +1783,7 @@ impl Xhci {
             Speed::Super => 512,
             _ => 64,
         };
-        self.address_device(slot_index, port, speed, ep0_max_packet)?;
+        self.address_device(slot_index, port, speed, ep0_max_packet, Addressing::root())?;
         // Behaviour probe, not a register read: a No-Op Transfer TRB on the
         // just-addressed slot's EP0 ring. It completes with a Transfer Event
         // and never touches the device, so it separates "the transfer ring /

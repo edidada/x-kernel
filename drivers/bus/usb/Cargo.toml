@@ -12,6 +12,9 @@ categories = ["os", "no-std"]
 
 [dependencies]
 kerrno = { workspace = true }
+# The hub driver waits for power-on and port-reset timing (USB 2.0 11.11).
+khal = { workspace = true }
+ktime_types = { workspace = true }
 log.workspace = true
 unittest.workspace = true
 
