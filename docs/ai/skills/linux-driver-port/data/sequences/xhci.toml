@@ -104,17 +104,17 @@ note = "Reset Endpoint 把端点送回 Running，但 dequeue 还停在 halted TD
 v2 = "anchored"
 
 [[path.step]]
-id = "irq.cmd-set-deq-done"
-src = "xhci-ring.c:1416"
-op = "call"
-target = "xhci_handle_cmd_set_deq()"
-note = "Set TR Deq 完成后端点才真正越过错过的 TD"
-v2 = "anchored"
-
-[[path.step]]
 id = "irq.cmd-stop-ep-done"
 src = "xhci-ring.c:1230"
 op = "call"
 target = "xhci_handle_cmd_stop_ep() -> halted ? Reset Endpoint : invalidate tds"
 note = "超时=取消：Stop Endpoint 被拒 19 表示端点已 HALT，走 Reset Endpoint 分支"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.cmd-set-deq-done"
+src = "xhci-ring.c:1416"
+op = "call"
+target = "xhci_handle_cmd_set_deq()"
+note = "Set TR Deq 完成后端点才真正越过错过的 TD"
 v2 = "anchored"

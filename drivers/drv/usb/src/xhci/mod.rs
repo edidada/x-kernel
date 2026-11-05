@@ -1421,17 +1421,6 @@ impl Xhci {
         );
         self.completed = Some(cmd);
         match trb_type {
-            regs::trb::RESET_ENDPOINT => {
-                // "This command will only fail if the endpoint wasn't halted,
-                // but we don't care" (xhci_handle_cmd_reset_ep). The halt is
-                // cleared either way, and the ring is then re-pointed past the
-                // TD that stalled: the reference's reset handler calls
-                // xhci_invalidate_cancelled_tds(), which queues Set TR Dequeue.
-                self.clear_halt(slot_id);
-                // `xhci_invalidate_cancelled_tds()`: flush the controller's
-                // cached copy of the halted TD and move the dequeue past it.
-                self.invalidate_ep0(slot_id);
-            }
             // ldp:step irq.cmd-stop-ep-done
             regs::trb::STOP_ENDPOINT => {
                 if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
@@ -1482,6 +1471,17 @@ impl Xhci {
                     slot.set_deq_pending = false;
                 }
                 info!("xhci: set tr dequeue for slot {slot_id} complete");
+            }
+            regs::trb::RESET_ENDPOINT => {
+                // "This command will only fail if the endpoint wasn't halted,
+                // but we don't care" (xhci_handle_cmd_reset_ep). The halt is
+                // cleared either way, and the ring is then re-pointed past the
+                // TD that stalled: the reference's reset handler calls
+                // xhci_invalidate_cancelled_tds(), which queues Set TR Dequeue.
+                self.clear_halt(slot_id);
+                // `xhci_invalidate_cancelled_tds()`: flush the controller's
+                // cached copy of the halted TD and move the dequeue past it.
+                self.invalidate_ep0(slot_id);
             }
             _ => {}
         }
@@ -1549,7 +1549,6 @@ impl Xhci {
     /// descriptors are contiguous, so "one past the last cancelled TRB" is the
     /// TRB that walk computes.)
     // ldp:step irq.cmd-reset-ep-done
-    // ldp:step irq.cmd-stop-ep-done
     fn invalidate_ep0(&mut self, slot_id: u8) {
         let Some(slot_index) = self.slots.iter().position(|slot| slot.id == slot_id) else {
             return;
