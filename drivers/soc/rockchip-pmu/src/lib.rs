@@ -19,7 +19,7 @@
 //! other's status reads, and the reference's `rockchip_pd_power()` exists in
 //! exactly that shape to prevent it.
 
-use driver_base::{IoMap, PlatformBus};
+use driver_base::IoMap;
 use kerrno::{KError, KResult};
 use khal::time::busy_wait;
 use ksync::Mutex;
@@ -67,7 +67,7 @@ pub fn attach_via(
             driver_base::MmioRegion::new(PMU_BASE as usize, PMU_SIZE),
             "rk-pmu-domains",
         )
-        .map_err(|err| kerrno::KError::from(kerrno::KErrorKind::Io))?;
+        .map_err(|_| kerrno::KError::from(kerrno::KErrorKind::Io))?;
     // The mapping is kept for the kernel's lifetime -- drivers are never
     // unbound here, and the reference's `pmu->regs` lives as long as the PMU
     // device (the same `core::mem::forget` the PCIe clock handles make).
@@ -89,7 +89,7 @@ pub fn attach(map: IoMap) {
 ///
 /// `rockchip_pmu_domain_is_on()`: domains with a `repair_status_mask` read
 /// `PD_REPAIR_STATUS` (bit set = powered); the power bit is the fallback.
-fn is_on(pmu: &IoMap, bit: u32, repair_bit: u32) -> bool {
+fn is_on(pmu: &IoMap, _bit: u32, repair_bit: u32) -> bool {
     pmu.read32(PD_REPAIR_STATUS) & repair_bit != 0
 }
 
@@ -115,7 +115,7 @@ pub fn power_domain_on(name: &str, bit: u32, repair_bit: u32) -> KResult {
     }
     for _ in 0..10_000 {
         let done = {
-            let mut guard = PMU.lock();
+            let guard = PMU.lock();
             let Some(pmu) = guard.as_ref() else {
                 return Err(KError::Io);
             };
