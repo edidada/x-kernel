@@ -306,13 +306,12 @@ pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> alloc::vec::Vec<Hub
 /// drives the enable only for a device it recognises, so "reset finished" is
 /// observed as `C_PORT_RESET` together with `PORT_ENABLE` — not as a timeout.
 pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Option<Speed> {
-    // A port that is already enabled needs no reset (and resetting it would drop
-    // whatever the device has negotiated).
-    if let Some((status, _)) = port_status(hcd, address, port)
-        && status & PORT_ST_ENABLE != 0
-    {
-        return Some(speed_of(status, info));
-    }
+    // Always reset. `PORT_ENABLE` says the hub has a link, not that the device is
+    // in the Default state a host needs it in: a SuperSpeed port can already be
+    // enabled (the hub brought its link up on attach) while the device has never
+    // been reset by us, and such a device ignores the SET_ADDRESS that Address
+    // Device issues — measured as completion code 4 on exactly the port whose
+    // status read `enabled true` before the reset.
     let ok = control_no_data(
         hcd,
         address,
