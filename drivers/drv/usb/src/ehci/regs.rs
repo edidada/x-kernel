@@ -158,3 +158,9 @@ pub const fn eps_high() -> u32 {
 
 /// Marks the end of a list (the hardware's "null pointer").
 pub const LIST_END: u32 = 1;
+
+/// Store barrier used between linking a queue head and publishing it in the
+/// reclamation list (`qh_link_async()` does the same with `wmb()`).
+pub fn list_end_barrier() {
+    karch::dsb_ishst();
+}

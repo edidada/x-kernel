@@ -25,6 +25,9 @@ const POLL_STEPS: usize = 200_000;
 
 /// Room for the setup packet plus one data buffer.
 const EP0_BUFFER_LEN: usize = 4096;
+/// Bulk DMA buffer: one page, enough for a mass-storage sector and for the
+/// 31-byte command block wrapper plus its status.
+const BULK_BUFFER_LEN: usize = 4096;
 
 pub struct Ehci {
     regs: IoMap,
@@ -37,6 +40,8 @@ pub struct Ehci {
     qtds: CoherentMem,
     /// Setup packet and data stage share one page-aligned buffer.
     buffers: CoherentMem,
+    /// Page-aligned DMA buffer for bulk transfers.
+    bulk: CoherentMem,
     /// Speed of the device currently addressed. Enumeration handles one port at
     /// a time, so one value is enough until a hub driver exists.
     speed: Speed,
@@ -90,10 +95,12 @@ impl Ehci {
             .res()
             .alloc_coherent(3 * core::mem::size_of::<Qtd>(), 32)?;
         let buffers = dev.res().alloc_coherent(EP0_BUFFER_LEN, EP0_BUFFER_LEN)?;
+        let bulk = dev.res().alloc_coherent(BULK_BUFFER_LEN, BULK_BUFFER_LEN)?;
         for (pointer, length) in [
-            (qh.as_ptr(), 2 * core::mem::size_of::<Qh>()),
+            (qh.as_ptr(), 4 * core::mem::size_of::<Qh>()),
             (qtds.as_ptr(), 3 * core::mem::size_of::<Qtd>()),
             (buffers.as_ptr(), EP0_BUFFER_LEN),
+            (bulk.as_ptr(), BULK_BUFFER_LEN),
         ] {
             // SAFETY: each pair is an allocation made just above.
             unsafe {
@@ -212,6 +219,7 @@ impl Ehci {
             qh,
             qtds,
             buffers,
+            bulk,
             speed: Speed::Full,
         })
     }
@@ -387,6 +395,167 @@ impl Ehci {
         }
         log::error!("ehci: control transfer timed out");
         Err(KError::TimedOut)
+    }
+
+    /// Links one of the two endpoint queue heads into the asynchronous schedule.
+    ///
+    /// The list stays `head -> qh -> head`: `qh_link_async()` splices a queue
+    /// head in right after the list head and only the head carries H.
+    fn link_endpoint(&self, qh_index: usize) {
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let qh = head.wrapping_add(qh_index);
+        let qh_bus = self.qh.bus_addr() as u32 + (qh_index * core::mem::size_of::<Qh>()) as u32;
+        let head_bus = self.qh.bus_addr() as u32;
+        // SAFETY: dword 0 of the endpoint queue head: point it back at the head.
+        unsafe {
+            core::ptr::write_volatile(qh.cast::<u32>(), head_bus | 2);
+        }
+        crate::ehci::regs::list_end_barrier();
+        // SAFETY: dword 0 of the list head: splice the endpoint in.
+        unsafe {
+            core::ptr::write_volatile(head.cast::<u32>(), qh_bus | 2);
+        }
+    }
+
+    /// One bulk transfer.
+    ///
+    /// `qh_make()`'s `PIPE_BULK` branch: the queue head carries the endpoint's
+    /// own maximum packet size, the high-speed NAK reload and MULT, and the data
+    /// toggle comes from the qTD (`QH_TOGGLE_CTL`). One qTD covers the whole
+    /// request, which is all a mass-storage sector needs.
+    fn bulk_transfer_impl(
+        &mut self,
+        address: u8,
+        endpoint: u8,
+        data: &mut [u8],
+        is_in: bool,
+    ) -> KResult<usize> {
+        let BULK_QH: usize = if is_in { 3 } else { 2 };
+        let length = data.len();
+        if length == 0 || length > BULK_BUFFER_LEN {
+            return Err(KError::InvalidInput);
+        }
+        let eps = match self.speed {
+            Speed::Low => regs::eps_low(),
+            Speed::High => regs::eps_high(),
+            _ => regs::eps_full(),
+        };
+        // The specification fixes high-speed bulk endpoints at 512 bytes; a
+        // vendor that ignores that is out of scope until a device shows up.
+        let max_packet: u32 = if self.speed == Speed::High { 512 } else { 64 };
+        // OUT data goes into the DMA buffer first.
+        if !is_in {
+            // SAFETY: `length` bytes were checked against the buffer size.
+            unsafe {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), self.bulk.as_ptr(), length);
+            }
+        }
+        // One qTD, with the interrupt-on-complete bit so completion is observed
+        // on the qTD itself rather than on the queue head overlay.
+        let qtd_bus = self.qtds.bus_addr() as u32;
+        let qtd = Qtd {
+            next: regs::LIST_END,
+            alt_next: regs::LIST_END,
+            token: ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
+                | (3 << token::CERR_SHIFT)
+                | ((length as u32) << token::LEN_SHIFT)
+                // No DT bit: with QH_TOGGLE_CTL clear the controller ignores it.
+                | token::IOC
+                | token::ACTIVE,
+            buffer: [
+                self.bulk.bus_addr() as u32,
+                self.bulk.bus_addr() as u32 + 4096,
+                0,
+                0,
+                0,
+            ],
+        };
+        let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>();
+        // SAFETY: the qTD allocation holds three elements; index 0 is used here
+        // because control transfers and bulk transfers never overlap.
+        unsafe {
+            core::ptr::write_volatile(qtd_ptr, qtd);
+        }
+        let head = self.qh.as_ptr().cast::<Qh>();
+        // `qh_update()`: QH_TOGGLE_CTL is set for control endpoints only. For
+        // every other type "we make hardware maintain data toggle (like OHCI)",
+        // and software merely preserves the toggle it finds in the old overlay.
+        let previous = {
+            // SAFETY: dword 6 of the bulk QH is its overlay token.
+            unsafe {
+                core::ptr::read_volatile(
+                    head.wrapping_add(BULK_QH)
+                        .cast::<u8>()
+                        .wrapping_add(24)
+                        .cast::<u32>(),
+                )
+            }
+        };
+        let qh = Qh {
+            next: self.qh.bus_addr() as u32 | 2,
+            info1: info1::NAK_RELOAD
+                | ((max_packet) << info1::MAX_PACKET_SHIFT)
+                | eps
+                | (address as u32 & info1::ADDRESS_MASK)
+                // The endpoint *number*, not its address: 0x81 shifted by 8
+                // would land its bit 7 on the queue head's H bit.
+                | (u32::from(endpoint & 0x0f) << info1::ENDPOINT_SHIFT),
+            info2: if eps == regs::eps_high() {
+                regs::info2::MULT_HIGH_SPEED
+            } else {
+                0
+            },
+            current: 0,
+            qtd_next: qtd_bus,
+            alt_next: regs::LIST_END,
+            // `hw->hw_token &= (QTD_TOGGLE | QTD_STS_PING)`: the hardware owns the
+            // data toggle for a bulk endpoint, so it is carried across from the
+            // overlay rather than derived from the qTD.
+            token: previous & (token::DT | token::PING),
+            buffer: [0; 5],
+        };
+        // SAFETY: `qh` is this endpoint's bulk queue head inside the four-QH
+        // allocation, and it is off the schedule at this point.
+        unsafe {
+            core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
+        }
+        self.link_endpoint(BULK_QH);
+        let mut token = token::ACTIVE;
+        for _ in 0..POLL_STEPS {
+            // SAFETY: dword 2 of the qTD is its token.
+            token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
+            if token & token::ACTIVE == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        // Take the endpoint back off the schedule, then let the controller leave
+        // the queue head before it is rewritten: software must not modify a QH
+        // the controller still owns, or the controller's own overlay write can
+        // land after ours and undo the new transfer pointer.
+        // SAFETY: dword 0 of the list head.
+        unsafe {
+            core::ptr::write_volatile(head.cast::<u32>(), self.qh.bus_addr() as u32 | 2);
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        if token & token::ACTIVE != 0 {
+            log::error!("ehci: bulk transfer did not complete, token {token:#010x}");
+            return Err(KError::TimedOut);
+        }
+        if token & token::HALT != 0 {
+            log::error!("ehci: bulk transfer halted, token {token:#010x}");
+            return Err(KError::Io);
+        }
+        let residual = ((token & token::LEN_MASK) >> token::LEN_SHIFT) as usize;
+        let transferred = length.saturating_sub(residual);
+        if is_in && transferred > 0 {
+            // SAFETY: the controller wrote `transferred` bytes into the bulk
+            // buffer, which is at least `transferred` bytes long.
+            unsafe {
+                core::ptr::copy_nonoverlapping(self.bulk.as_ptr(), data.as_mut_ptr(), transferred);
+            }
+        }
+        Ok(transferred)
     }
 
     /// Builds the setup/data/status qTD chain and returns the first one's address.
@@ -584,12 +753,12 @@ impl Hcd for Ehci {
 
     fn bulk_transfer(
         &mut self,
-        _address: u8,
-        _endpoint: u8,
-        _data: &mut [u8],
-        _is_in: bool,
+        address: u8,
+        endpoint: u8,
+        data: &mut [u8],
+        is_in: bool,
     ) -> KResult<usize> {
-        Err(KError::Unsupported)
+        self.bulk_transfer_impl(address, endpoint, data, is_in)
     }
 
     fn name(&self) -> &'static str {
@@ -718,6 +887,7 @@ pub mod driver {
                     Ok(device) => {
                         info!("ehci: {}", device.summary());
                         devices += 1;
+                        super::probe_mass_storage(&mut ehci, &device);
                     }
                     Err(err) => log::error!("ehci: port {} enumeration failed: {err:?}", port + 1),
                 }
@@ -733,4 +903,39 @@ pub mod driver {
     }
 
     driver_base::declare_driver!(PlatformBus, EhciDriver, "ehci", IDS);
+}
+
+/// If the device exposes a bulk-only mass-storage interface, read its first
+/// sector: enumeration alone does not prove the bulk path works.
+fn probe_mass_storage(ehci: &mut Ehci, device: &usb::UsbDevice) {
+    for config in &device.configurations {
+        for interface in &config.interfaces {
+            if interface.class != 0x08 || interface.protocol != 0x50 {
+                continue;
+            }
+            let mut endpoint_in = 0u8;
+            let mut endpoint_out = 0u8;
+            for endpoint in &interface.endpoints {
+                if endpoint.is_in() {
+                    endpoint_in = endpoint.address;
+                } else {
+                    endpoint_out = endpoint.address;
+                }
+            }
+            if endpoint_in == 0 || endpoint_out == 0 {
+                log::warn!("ehci: mass storage interface without both bulk endpoints");
+                continue;
+            }
+            let endpoints = usb::bot::BotEndpoints {
+                address: device.address,
+                endpoint_in,
+                endpoint_out,
+                max_packet: 512,
+            };
+            log::info!("ehci: mass storage on ep in {endpoint_in:#04x} out {endpoint_out:#04x}",);
+            usb::bot::describe(ehci, &endpoints);
+            usb::bot::probe_filesystem(ehci, &endpoints);
+            return;
+        }
+    }
 }

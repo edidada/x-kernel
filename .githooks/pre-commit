@@ -22,6 +22,18 @@ if [ "${SKIP_ALL:-0}" = "1" ]; then
 	exit 0
 fi
 
+# ---- reference anchor: driver code needs a fresh source-diff record ----
+# AGENTS.md: bit definitions are the easy half, mechanisms are the half that
+# breaks, so structural changes must be diffed against the pinned reference.
+# A long session forgets that between rounds; this gate does not.
+if [ "${SKIP_ANCHOR:-0}" != "1" ]; then
+	if ! scripts/ref-anchor.sh --check; then
+		echo "❌ pre-commit: driver change without a reference anchor (see above)." >&2
+		echo "   bypass with: SKIP_ANCHOR=1 git commit ..." >&2
+		exit 1
+	fi
+fi
+
 # Only relevant when Rust sources are staged.
 mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
 if [ "${#STAGED_RS[@]}" -eq 0 ]; then

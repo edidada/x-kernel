@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# Refuse to build a board image when driver code changed without a reference
+# anchor: the source diff is the step that gets skipped in a long session.
+if [ "${SKIP_ANCHOR:-0}" != "1" ] && ! "$(dirname "$0")/ref-anchor.sh" --check; then
+	echo "board-run: refusing to run — add a reference anchor first (SKIP_ANCHOR=1 to bypass)" >&2
+	exit 1
+fi
+
 RIG=${RIG:-kylin@172.30.193.53}
 TAG=${1:?usage: board-run.sh <tag> [extra rkt run args...]}
 shift || true
