@@ -47,6 +47,57 @@ pub struct Ehci {
     speed: Speed,
 }
 
+/// Builds the asynchronous ring `head -> EP0 -> bulk OUT -> bulk IN -> head`.
+///
+/// Recovery must rebuild all of it. Writing the head's next pointer back to
+/// itself -- an "empty list" -- is only correct when there is no endpoint queue
+/// head at all; with endpoints present it truncates the ring to `head -> head`
+/// and every endpoint becomes unreachable, which is exactly how a transfer ends
+/// up queued with an overlay the controller never touches.
+fn build_async_ring(base_address: u64, head: *mut Qh) {
+    let base = base_address as u32;
+    let size = core::mem::size_of::<Qh>() as u32;
+    let total = 4u32;
+    for index in 0..total {
+        let entry = head.wrapping_add(index as usize);
+        let next = if index + 1 == total {
+            base | 2
+        } else {
+            base + (index + 1) * size | 2
+        };
+        // SAFETY: all four queue heads live in this controller's allocation.
+        unsafe {
+            core::ptr::write_volatile(entry.cast::<u32>(), next);
+        }
+        // Clear the overlay's HALT and ACTIVE bits on every queue head, not just
+        // the head of the list: a halted controller marks the queue head it was
+        // processing, and one halted endpoint earlier in the ring stops the walk
+        // before it reaches the others.
+        // SAFETY: dword 6 of queue head `index`, inside this allocation.
+        let overlay =
+            unsafe { core::ptr::read_volatile(entry.cast::<u8>().wrapping_add(24).cast::<u32>()) };
+        // SAFETY: dword 6 of the same queue head.
+        unsafe {
+            core::ptr::write_volatile(
+                entry.cast::<u8>().wrapping_add(24).cast::<u32>(),
+                overlay & (regs::token::DT | regs::token::PING),
+            );
+        }
+        if index != 0 {
+            for offset in [16usize, 20usize] {
+                // SAFETY: dwords 4 and 5 of an endpoint queue head.
+                unsafe {
+                    core::ptr::write_volatile(
+                        entry.cast::<u8>().wrapping_add(offset).cast::<u32>(),
+                        regs::LIST_END,
+                    );
+                }
+            }
+        }
+    }
+    crate::ehci::regs::list_end_barrier();
+}
+
 impl Ehci {
     pub fn init(dev: &Device<'_, PlatformBus>, regs: IoMap) -> Result<Self, ProbeError> {
         let caplen = regs.read8(cap::CAPLENGTH) as usize;
@@ -153,45 +204,8 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(alt_next_ptr, regs::LIST_END);
         }
-        // The asynchronous list holds every endpoint queue head at once, the way
-        // `ehci_urb_enqueue()` keeps one per endpoint and links them all.
-        // Repointing the head at one endpoint evicts the others, which is why a
-        // transfer could find its queue head outside the schedule.
-        //
-        // head -> EP0 -> bulk OUT -> bulk IN -> head
-        let qh_size = core::mem::size_of::<Qh>() as u32;
-        let base = qh.bus_addr() as u32;
-        let _ = ep_bus;
-        // SAFETY: dword 0 of the head QH.
-        unsafe {
-            core::ptr::write_volatile(next_ptr, base + qh_size | 2);
-        }
-        for index in 1..4u32 {
-            let entry = head.wrapping_add(index as usize);
-            let next = if index == 3 {
-                base | 2
-            } else {
-                base + (index + 1) * qh_size | 2
-            };
-            // SAFETY: dword 0 of queue head `index`, inside the four-QH
-            // allocation.
-            unsafe {
-                core::ptr::write_volatile(entry.cast::<u32>(), next);
-            }
-            for offset in [16u32, 20u32] {
-                // SAFETY: dwords 4 and 5 of the same queue head: qtd_next and
-                // alt_next both terminate.
-                unsafe {
-                    core::ptr::write_volatile(
-                        entry
-                            .cast::<u8>()
-                            .wrapping_add(offset as usize)
-                            .cast::<u32>(),
-                        regs::LIST_END,
-                    );
-                }
-            }
-        }
+        // Every endpoint queue head lives in the ring; see `build_async_ring()`.
+        build_async_ring(qh.bus_addr(), qh.as_ptr().cast::<Qh>());
         regs.write32(operational + op::ASYNCLISTADDR, qh.bus_addr() as u32);
         // `ehci_reset()` clears the sticky status bits by writing them back. A
         // latched Host System Error keeps the controller halted, and a halted
@@ -449,6 +463,18 @@ impl Ehci {
         }
     }
 
+    /// Rebuilds the asynchronous ring: head -> EP0 -> bulk OUT -> bulk IN -> head.
+    ///
+    /// Recovery must rebuild all of it. Writing the head's next pointer back to
+    /// itself -- "empty list" -- is only correct while there is no endpoint
+    /// queue head at all; with endpoints present it truncates the ring to
+    /// `head -> head` and every endpoint becomes unreachable, which is precisely
+    /// how a transfer ends up queued with an overlay the controller never
+    /// touches.
+    fn build_async_ring(&self) {
+        build_async_ring(self.qh.bus_addr(), self.qh.as_ptr().cast::<Qh>());
+    }
+
     /// Clears a latched halt before queueing new work.
     ///
     /// A Host System Error halts the controller and stays latched until software
@@ -487,14 +513,10 @@ impl Ehci {
                 token & (regs::token::DT | regs::token::PING),
             );
         }
-        // SAFETY: dword 0 of the same queue head: back to a self-linked head.
-        unsafe {
-            core::ptr::write_volatile(head.cast::<u32>(), self.qh.bus_addr() as u32 | 2);
-        }
-        // SAFETY: dword 4 of the same queue head.
-        unsafe {
-            core::ptr::write_volatile(head_bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
-        }
+        // Rebuild the whole ring: a self-linked head is only correct when there
+        // are no endpoint queue heads, and with them present it strands every
+        // endpoint ("0->0x...002" in the failure dump is this bug).
+        build_async_ring(self.qh.bus_addr(), head);
         let command = self.regs.read32(self.operational + op::USBCMD);
         self.regs
             .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
@@ -743,6 +765,15 @@ impl Ehci {
                 )
             };
             let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
+            let asynclist = self.regs.read32(self.operational + op::ASYNCLISTADDR);
+            let mut links = alloc::string::String::new();
+            for index in 0..4usize {
+                // SAFETY: all four queue heads are in this controller's allocation.
+                let next =
+                    unsafe { core::ptr::read_volatile(head.wrapping_add(index).cast::<u32>()) };
+                links.push_str(&alloc::format!(" {index}->{next:#x}"));
+            }
+            log::error!("ehci: ring at failure: ASYNCLISTADDR {asynclist:#x}, links{links}");
             log::error!(
                 "ehci: bulk qh {BULK_QH}: head next {head_next:#x}, qtd_next {qtd_next:#x}, \
                  overlay {overlay:#010x}"
