@@ -827,6 +827,28 @@ impl Ehci {
                 "ehci: bulk qh {BULK_QH}: head next {head_next:#x}, qtd_next {qtd_next:#x}, \
                  overlay {overlay:#010x}"
             );
+            // The rest of the ring: info1 carries the endpoint number, speed and
+            // maximum packet size, and it is the only part that has never been
+            // read back at failure.
+            for index in 0..4usize {
+                // SAFETY: all four queue heads are in this controller's allocation.
+                let entry = unsafe { core::ptr::read_volatile(head.wrapping_add(index)) };
+                log::error!(
+                    "ehci: qh{index} info1 {:#x} info2 {:#x} current {:#x} qtd_next {:#x} alt \
+                     {:#x} overlay {:#x}",
+                    entry.info1,
+                    entry.info2,
+                    entry.current,
+                    entry.qtd_next,
+                    entry.alt_next,
+                    entry.token,
+                );
+            }
+            // SAFETY: dword 2 of the descriptor being executed is its token.
+            let qtd_now = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
+            // SAFETY: dword 3 of the same descriptor is its first buffer pointer.
+            let qtd_buf = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(3)) };
+            log::error!("ehci: failing qtd token {qtd_now:#x} buf {qtd_buf:#x}");
             // A Host System Error halts the controller; clearing the status bit
             // and restarting the asynchronous schedule is the only way back, and
             // without it every later transfer on every endpoint fails too.
