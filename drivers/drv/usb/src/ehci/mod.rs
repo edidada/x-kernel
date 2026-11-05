@@ -65,6 +65,19 @@ fn build_async_ring(base_address: u64, head: *mut Qh) {
         } else {
             base + (index + 1) * size | 2
         };
+        if index == 0 {
+            // The reclamation-list head must carry H (bit 15); without it the
+            // controller has no way to recognise where the list ends and stops
+            // advancing through it. Establishing it here keeps the head's
+            // identity in the one function that builds the ring.
+            // SAFETY: dword 1 of the head queue head, inside this allocation.
+            unsafe {
+                core::ptr::write_volatile(
+                    entry.cast::<u8>().wrapping_add(4).cast::<u32>(),
+                    regs::info1::HEAD,
+                );
+            }
+        }
         // SAFETY: all four queue heads live in this controller's allocation.
         unsafe {
             core::ptr::write_volatile(entry.cast::<u32>(), next);
@@ -751,11 +764,41 @@ impl Ehci {
              {qtd_token:#010x})"
         );
         let mut token = token::ACTIVE;
+        // Sample the window the controller is supposed to pick the transfer up
+        // in, not just its end state: "qtd_next still points at the descriptor
+        // and the descriptor is still Active" is a different failure from "the
+        // controller fetched it and put it back".
+        let mut samples = 0usize;
+        let mut last_status = self.regs.read32(self.operational + op::USBSTS);
         for _ in 0..POLL_STEPS {
             // SAFETY: dword 2 of the qTD is its token.
             token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
             if token & token::ACTIVE == 0 {
                 break;
+            }
+            // Every ~50 ms while the transfer is outstanding, record what the
+            // schedule looks like, for the first few samples only.
+            if samples < 3 && self.regs.read32(self.operational + op::USBSTS) != last_status
+                || (samples < 3 && token == qtd_token && (last_status & sts::ASS != 0))
+            {
+                if samples < 3 {
+                    let status = self.regs.read32(self.operational + op::USBSTS);
+                    let command = self.regs.read32(self.operational + op::USBCMD);
+                    // SAFETY: dword 4 of this endpoint's queue head.
+                    let next = unsafe {
+                        core::ptr::read_volatile(
+                            head.wrapping_add(BULK_QH)
+                                .cast::<u8>()
+                                .wrapping_add(16)
+                                .cast::<u32>(),
+                        )
+                    };
+                    log::info!(
+                        "ehci: outstanding sample {samples}: USBCMD {command:#010x} USBSTS                          {status:#010x}, qh{BULK_QH} qtd_next {next:#x}, qtd token {token:#x}"
+                    );
+                    samples += 1;
+                    last_status = status;
+                }
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
