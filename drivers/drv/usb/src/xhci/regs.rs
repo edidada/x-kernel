@@ -105,6 +105,11 @@ pub mod trb {
     pub const DISABLE_SLOT: u32 = 10;
     pub const ADDRESS_DEVICE: u32 = 11;
     pub const CONFIGURE_ENDPOINT: u32 = 12;
+    /// `TRB_RESET_EP`: returns a halted endpoint to Running without touching its
+    /// ring; paired with `SET_TR_DEQUEUE` to re-point it.
+    pub const RESET_ENDPOINT: u32 = 15;
+    /// `TRB_SET_DEQ`: hands the endpoint a dequeue pointer (and its DCS) again.
+    pub const SET_TR_DEQUEUE: u32 = 16;
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;
@@ -123,6 +128,10 @@ pub mod trb {
     pub const TYPE_SHIFT: u32 = 10;
     pub const TYPE_MASK: u32 = 0x3f << TYPE_SHIFT;
     pub const SLOT_SHIFT: u32 = 24;
+    /// Endpoint ID lives in the same control word as the slot ID (bits 23:16);
+    /// EP0 is ID 1.
+    pub const EP_SHIFT: u32 = 16;
+    pub const EP0: u32 = 1;
     pub const SLOT_MASK: u32 = 0xff << SLOT_SHIFT;
     /// Interrupt-on-completion, dword 3 bit 5.
     ///

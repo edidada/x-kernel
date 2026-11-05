@@ -1215,6 +1215,19 @@ impl Xhci {
             }
             Err(err) => {
                 log::warn!("xhci: slot {slot_id} descriptor head unreadable: {err:?}");
+                // Discriminator: an unreachable device fails every SETUP with a
+                // transaction error, while a reachable one answers an unsupported
+                // request with a stall. Which code comes back says whether the
+                // device ever sees this slot's traffic at all.
+                if let Err(reset) = self.reset_ep0(slot_index) {
+                    log::warn!("xhci: reset endpoint failed: {reset:?}");
+                }
+                let bogus = usb::SetupPacket::new(0x80, 6, 0x3f00, 0, 8);
+                let mut probe = [0u8; 8];
+                match self.control_transfer_slot(slot_index, &bogus, &mut probe) {
+                    Ok(_) => log::warn!("xhci: bogus-request probe unexpectedly succeeded"),
+                    Err(probe_err) => log::warn!("xhci: bogus-request probe -> {probe_err:?}"),
+                }
                 self.address_zero_slot = None;
                 let _ = self.disable_slot(slot_id);
                 return Err(err);
@@ -1417,6 +1430,33 @@ impl Xhci {
             unsafe { core::ptr::read_volatile(dwords.wrapping_add(per)) },
             unsafe { core::ptr::read_volatile(dwords.wrapping_add(per)) } & 0x7,
         );
+    }
+
+    /// `xhci_handle_halted_endpoint()`: Reset Endpoint, then re-point the ring.
+    ///
+    /// A failed control transfer (a USB Transaction Error in particular) leaves
+    /// EP0 in the Halted state, and a halted endpoint consumes nothing: every
+    /// further TRB queued on it is simply never executed, which is why retrying
+    /// a transfer without this step can only ever time out. The reference issues
+    /// Reset Endpoint followed by Set TR Dequeue Pointer for exactly that case.
+    fn reset_ep0(&mut self, slot_index: usize) -> Result<(), KError> {
+        let slot_id = u32::from(self.slots[slot_index].id);
+        let endpoint = |trb_type: u32| {
+            (trb_type << regs::trb::TYPE_SHIFT)
+                | (regs::trb::EP0 << regs::trb::EP_SHIFT)
+                | (slot_id << regs::trb::SLOT_SHIFT)
+        };
+        self.command(
+            Trb::new(0, 0, endpoint(regs::trb::RESET_ENDPOINT)),
+            "reset endpoint",
+        )?;
+        let slot = &self.slots[slot_index];
+        let dequeue = slot.ep0.dequeue_address() | u64::from(slot.ep0.current_cycle());
+        self.command(
+            Trb::new(dequeue, 0, endpoint(regs::trb::SET_TR_DEQUEUE)),
+            "set tr dequeue",
+        )?;
+        Ok(())
     }
 
     /// One control transfer on a slot's EP0 ring: setup, optional data, status.
