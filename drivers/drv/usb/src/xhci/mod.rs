@@ -117,6 +117,63 @@ impl Ring {
         unsafe { self.mem.as_ptr().cast::<Trb>().add(index % self.trbs) }
     }
 
+    /// Queues one TRB with its cycle bit inverted, so it stays invisible.
+    ///
+    /// `giveback_first_trb()` writes every TRB of a transfer descriptor first
+    /// and only then flips the first TRB's cycle bit, which is what stops the
+    /// controller from starting to execute a TD whose later TRBs are still being
+    /// written. The inverse bit is used because that is what the reference does:
+    /// a held TRB carries the opposite of the ring's cycle, and publishing it
+    /// writes the real one.
+    fn push_held(&mut self, mut trb: Trb) -> (usize, bool) {
+        let index = self.index % self.trbs;
+        let cycle = self.cycle;
+        if cycle {
+            trb.control &= !regs::trb::CYCLE;
+        } else {
+            trb.control |= regs::trb::CYCLE;
+        }
+        let slot = self.trb(index);
+        let base = slot.cast::<u8>();
+        // SAFETY: `base` is the first byte of one TRB inside this ring's own
+        // allocation; the offsets below stay inside its 16 bytes.
+        unsafe {
+            core::ptr::write_volatile(base.cast::<u64>(), trb.parameter);
+            core::ptr::write_volatile(base.wrapping_add(8).cast::<u32>(), trb.status);
+        }
+        karch::dsb_ishst();
+        // SAFETY: dword 3 of the same TRB.
+        unsafe {
+            core::ptr::write_volatile(base.wrapping_add(12).cast::<u32>(), trb.control);
+        }
+        self.index += 1;
+        if self.index == self.trbs {
+            self.index = 0;
+            self.cycle = !self.cycle;
+            self.write_link(self.cycle);
+        }
+        (index, cycle)
+    }
+
+    /// Makes a held TRB visible: the last write of the transfer descriptor.
+    fn publish(&self, held: (usize, bool)) {
+        let (index, cycle) = held;
+        let control = self.trb(index).cast::<u8>().wrapping_add(12).cast::<u32>();
+        // SAFETY: dword 3 of TRB `index` in this ring's own allocation.
+        let current = unsafe { core::ptr::read_volatile(control) };
+        let updated = if cycle {
+            current | regs::trb::CYCLE
+        } else {
+            current & !regs::trb::CYCLE
+        };
+        // SAFETY: as above. The payload of this TRB was written and barrier-ed
+        // by `push_held`, so this store is the one that hands it over.
+        unsafe {
+            core::ptr::write_volatile(control, updated);
+        }
+        karch::dsb_ishst();
+    }
+
     /// Publishes one TRB and returns the physical address the controller
     /// should be pointed at, i.e. the TRB that was just written.
     fn push(&mut self, mut trb: Trb) -> u64 {
@@ -1572,9 +1629,9 @@ impl Xhci {
             };
             control |= trt << regs::trb::TRT_SHIFT;
         }
-        self.slots[slot_index]
+        let held = self.slots[slot_index]
             .ep0
-            .push(Trb::new(setup_word, 8, control));
+            .push_held(Trb::new(setup_word, 8, control));
         if length > 0 {
             // `xhci_queue_ctrl_tx()` builds the data TRB as
             //   TYPE(DATA) [| DIR_IN] [| ISP if IN]
@@ -1613,6 +1670,10 @@ impl Xhci {
         self.slots[slot_index]
             .ep0
             .push(Trb::new(0, 0, status_control));
+
+        // Only now, with the whole transfer in the ring, does the setup TRB
+        // become visible — `giveback_first_trb()`'s ordering.
+        self.slots[slot_index].ep0.publish(held);
 
         // Doorbell for this slot, target = EP0's device slot context index (1).
         let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
