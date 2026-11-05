@@ -1546,7 +1546,39 @@ impl Xhci {
             _ => 64,
         };
         self.address_device(slot_index, port, speed, ep0_max_packet)?;
+        // Behaviour probe, not a register read: a No-Op Transfer TRB on the
+        // just-addressed slot's EP0 ring. It completes with a Transfer Event
+        // and never touches the device, so it separates "the transfer ring /
+        // doorbell / event delivery is not working" from "the device does not
+        // answer the first SETUP". Both look identical from a control-transfer
+        // timeout, and this port already spent rounds on the difference.
+        self.probe_transfer_ring(slot_index);
         Ok(slot_id)
+    }
+
+    /// Pushes a No-Op Transfer TRB on the slot's EP0 ring and reports whether a
+    /// Transfer Event comes back.
+    fn probe_transfer_ring(&mut self, slot_index: usize) {
+        let slot_id = self.slots[slot_index].id;
+        let trb = Trb::new(
+            0,
+            0,
+            (regs::trb::NO_OP_TRANSFER << regs::trb::TYPE_SHIFT) | regs::trb::IOC,
+        );
+        self.slots[slot_index].ep0.push(trb);
+        self.bar
+            .write32(self.doorbell + 4 * u32::from(slot_id) as usize, 1);
+        match self.wait_event(regs::trb::TRANSFER_EVENT, "no-op transfer") {
+            Ok(event) => info!(
+                "xhci: no-op transfer completed (code {}) — EP0 ring, doorbell and event delivery \
+                 work; a later control-transfer timeout is the device not answering",
+                event.completion_code(),
+            ),
+            Err(err) => log::error!(
+                "xhci: no-op transfer did NOT complete ({err:?}) — the fault is in the EP0 ring / \
+                 doorbell / event path, not in the device"
+            ),
+        }
     }
 }
 

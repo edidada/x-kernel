@@ -106,6 +106,11 @@ pub mod trb {
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;
     pub const NO_OP: u32 = 23;
+    /// No-Op *Transfer* TRB (type 8). Unlike the No-Op Command (23) it travels
+    /// on a slot's transfer ring and completes with a Transfer Event without
+    /// touching the device — the only way to tell "this endpoint's ring is not
+    /// being consumed" from "the device is not answering".
+    pub const NO_OP_TRANSFER: u32 = 8;
 
     /// Block Set Address Request (`SETUP_CONTEXT_ONLY`): build the contexts
     /// without assigning an address yet.
@@ -116,8 +121,19 @@ pub mod trb {
     pub const TYPE_MASK: u32 = 0x3f << TYPE_SHIFT;
     pub const SLOT_SHIFT: u32 = 24;
     pub const SLOT_MASK: u32 = 0xff << SLOT_SHIFT;
-    /// Interrupt-on-completion, dword 2 bit 4.
-    pub const IOC: u32 = 1 << 4;
+    /// Interrupt-on-completion, dword 3 bit 5.
+    ///
+    /// Bit 4 is CH (Chain), not IOC. Defining IOC as `1 << 4` set the chain bit
+    /// on every "last TRB" instead, so a transfer announced three chained TRBs
+    /// and completed none: the controller posted no Transfer Event at all and
+    /// every control transfer timed out with an otherwise perfect ring
+    /// (correct cycle bits, correct TRT, EP0 Running, dequeue matching). Command
+    /// TRBs were unaffected — command completions do not need IOC — which is
+    /// why the command ring, Enable Slot and Address Device all succeeded while
+    /// the first real transfer never finished.
+    pub const IOC: u32 = 1 << 5;
+    /// Chain this TRB to the next one (dword 3 bit 4).
+    pub const CHAIN: u32 = 1 << 4;
     /// Direction bit (IN) in Setup/Data stage TRBs, dword 2 bit 16.
     pub const DIR_IN: u32 = 1 << 16;
     /// Immediate data (Setup TRB carries the packet in the parameter word).
