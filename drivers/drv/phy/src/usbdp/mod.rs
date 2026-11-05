@@ -30,8 +30,8 @@ mod tables;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use driver_base::{
-    ClkHandle, Device, DriverOps, IoMap, OfMatch, PlatformBus, PlatformId, ProbeError, ResetHandle,
-    RuntimeError,
+    ClkHandle, Device, DriverOps, EnabledClock, IoMap, OfMatch, PlatformBus, PlatformId,
+    ProbeError, ResetHandle, RuntimeError,
 };
 use kphy::{PhyError, PhyHwOps, PhyInstance, PhyLookup};
 use tables::{INIT_SEQUENCE, REFCLK_24M_CFG};
@@ -124,10 +124,16 @@ struct UsbDp {
     usbdp_grf: IoMap,
     usb_grf: IoMap,
     resets: Vec<(reset_names::Name, ResetHandle)>,
-    /// The DT clocks (refclk / immortal / pclk / utmi). Enabled in `hw_init`
-    /// on the consumer's acquire edge (the reference's `clk_bulk_prepare_enable`
-    /// runs at setup, not at probe).
+    /// The DT clocks (refclk / immortal / pclk / utmi). Handles only; the
+    /// enable tokens live in `enabled_clocks` because dropping an
+    /// [`EnabledClock`] gates the clock again.
     clocks: Vec<ClkHandle>,
+    /// The enable tokens, held for as long as the PHY is initialised.
+    /// `prepare_enable()` returns a guard whose `Drop` runs
+    /// `disable`+`unprepare`; letting it fall out of scope right after
+    /// `?` is the "enabled then immediately disabled" trap this tree hit on
+    /// the usb2 phy (and the combphy) before.
+    enabled_clocks: ksync::Mutex<Vec<EnabledClock>>,
     cfg: UdphyCfg,
     mode: Mode,
     lane_mux_sel: [u32; 4],
@@ -274,9 +280,22 @@ impl PhyHwOps for UsbDp {
     /// consumer's acquire edge is what powers the PHY, matching the reference
     /// `udphy_setup`'s `clk_bulk_prepare_enable`.
     fn hw_init(&self) -> Result<(), PhyError> {
-        for (index, clock) in self.clocks.iter().enumerate() {
-            clock.prepare_enable().map_err(|_| PhyError::Io)?;
-            log::info!("usbdp: clock {index} enabled in init");
+        {
+            let mut tokens = self.enabled_clocks.lock();
+            if tokens.is_empty() {
+                for (index, clock) in self.clocks.iter().enumerate() {
+                    // Keep the token: dropping it gates the clock again.
+                    let token = clock.prepare_enable().map_err(|err| {
+                        log::error!("usbdp: clock {index} enable failed: {err:?}");
+                        PhyError::Io
+                    })?;
+                    log::info!(
+                        "usbdp: clock {index} enabled ({} Hz) and held",
+                        clock.get_rate()
+                    );
+                    tokens.push(token);
+                }
+            }
         }
         if matches!(self.mode, Mode::Dp) {
             // DP-only (or high-speed-only) routing: keep the U3 port off.
@@ -291,6 +310,8 @@ impl PhyHwOps for UsbDp {
     fn hw_exit(&self) -> Result<(), PhyError> {
         self.assert_all();
         self.u3_port_disable(true);
+        // Release the clock tokens (drops => disable + unprepare).
+        self.enabled_clocks.lock().clear();
         Ok(())
     }
 
@@ -419,6 +440,7 @@ impl DriverOps<PlatformBus> for UsbDpDriver {
             usb_grf,
             resets,
             clocks,
+            enabled_clocks: ksync::Mutex::new(Vec::new()),
             cfg: cfg_of(id),
             mode,
             lane_mux_sel,
