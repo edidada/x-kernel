@@ -66,3 +66,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 11:11 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_init` | gaps between configuration and the first bulk traffic |
 | 2026-11-05 11:18 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_async_advance` | IAAD doorbell forces the controller out of reclamation |
 | 2026-11-05 11:21 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `scan_async` | a queue head ahead of the ring blocks every endpoint behind it |
+| 2026-11-05 11:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_completions` | observing whether the controller ever sees the descriptor's Active bit |

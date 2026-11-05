@@ -822,13 +822,32 @@ impl Ehci {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
         }
         let mut token = token::ACTIVE;
-        for _ in 0..POLL_STEPS {
+        let mut ever_active = false;
+        let mut first_read = 0u32;
+        for step in 0..POLL_STEPS {
             // SAFETY: dword 2 of the dummy descriptor is its token.
             token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
+            if step == 0 {
+                first_read = token;
+            }
+            if token & token::ACTIVE != 0 {
+                ever_active = true;
+            }
             if token & token::ACTIVE == 0 {
                 break;
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        // Two failures look identical from the end state alone: a descriptor the
+        // controller observed and worked on, and one it never saw. If the Active
+        // bit was never set on the very first read, the controller either reset
+        // the descriptor before software's first poll or is reading different
+        // memory than software wrote.
+        if !ever_active {
+            log::error!(
+                "ehci: the descriptor was never observed Active (first read {first_read:#x}, now \
+                 {token:#x})"
+            );
         }
         if token & token::ACTIVE != 0 {
             let status = self.regs.read32(self.operational + op::USBSTS);
@@ -862,6 +881,25 @@ impl Ehci {
                 core::ptr::read_volatile(head.cast::<u8>().wrapping_add(64 + 16).cast::<u32>())
             };
             log::error!("ehci: ep0 qh qtd_next {ep0_next:#x}");
+            // Byte-for-byte readback of the descriptor as it is now: proves
+            // whether what the controller is pointed at is what software wrote.
+            let mut bytes = [0u32; 8];
+            for (index, cell) in bytes.iter_mut().enumerate() {
+                // SAFETY: the dummy slot holds eight dwords.
+                *cell =
+                    unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().wrapping_add(index)) };
+            }
+            log::error!(
+                "ehci: descriptor readback: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
+                bytes[4],
+                bytes[5],
+                bytes[6],
+                bytes[7],
+            );
             return Err(KError::TimedOut);
         }
         if token & token::HALT != 0 {
