@@ -36,7 +36,7 @@ use ktask::{
 };
 use ktime::{RtcSleepAccounting, RtcSleepError, RtcSleepSession};
 use ktime_types::TimeSpan;
-use workqueue::WorkqueueSet;
+use workqueue::WorkqueueFreezeSession;
 pub use workqueue::{SuspendWorkqueues, WorkqueueFreezeError};
 
 /// Platform-owned exclusion and hardware recovery around one PM transaction.
@@ -260,7 +260,7 @@ pub fn suspend_uniprocessor_with_devices<P: PlatformSuspendOps, C: PersistentClo
         &mut SystemOps {
             platform,
             tasks,
-            workqueues: WorkqueueSet::empty(),
+            workqueues: WorkqueueFreezeSession::empty(),
         },
         source,
         &mut DeviceSet::new(devices),
@@ -310,7 +310,7 @@ pub fn suspend_uniprocessor_with_workqueues<P: PlatformSuspendOps, C: Persistent
         &mut SystemOps {
             platform,
             tasks,
-            workqueues: WorkqueueSet::new(workqueues),
+            workqueues: WorkqueueFreezeSession::new(workqueues),
         },
         source,
         &mut DeviceSet::new(devices),
@@ -458,7 +458,7 @@ fn finish<O: SuspendOps>(ops: &mut O, devices: &mut DeviceSet<'_, '_>) {
 struct SystemOps<'a, P> {
     platform: &'a mut P,
     tasks: SuspendTasks<'a>,
-    workqueues: WorkqueueSet<'a>,
+    workqueues: WorkqueueFreezeSession<'a>,
 }
 impl<P: PlatformSuspendOps> SuspendOps for SystemOps<'_, P> {
     type Clock = MonotonicSuspendToken;

@@ -190,7 +190,9 @@ remain frozen and platform exclusion remains held. No live device is suspended.
 ## Selected workqueue participation
 
 `src/workqueue.rs` adapts explicitly selected `kworkng::NormalQueue` handles to
-`FrozenQueue` ownership. `suspend_uniprocessor_with_workqueues` adds a
+`FrozenQueue` ownership. `WorkqueueFreezeSession` owns the policy and acquired
+pause guards for one PM attempt, including its successful prefix on failure.
+`suspend_uniprocessor_with_workqueues` adds a
 `SuspendWorkqueues` policy to the existing task/device/time executor; existing
 entry points use an empty set and retain their API and behavior. No default
 queue registry, worker discovery, BH pause or crosvm protocol is added.

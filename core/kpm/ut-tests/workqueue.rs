@@ -45,7 +45,7 @@ fn queue_set_holds_pending_work_while_unselected_queue_progresses_then_thaws() {
         callback_peer_calls.fetch_add(1, Ordering::Release);
     })
     .unwrap();
-    let mut set = WorkqueueSet::new(SuspendWorkqueues {
+    let mut set = WorkqueueFreezeSession::new(SuspendWorkqueues {
         queues: &queues,
         timeout: TimeSpan::from_secs(5),
         cancellation: &cancellation,
@@ -79,7 +79,7 @@ fn busy_queue_retains_successful_prefix_until_explicit_cleanup_without_stealing_
     let queues = [queue("pm-prefix"), queue("pm-busy")];
     let cancellation = QueueFreezeCancellation::new();
     let external = queues[1].freeze(TimeSpan::ZERO, &cancellation).unwrap();
-    let mut set = WorkqueueSet::new(SuspendWorkqueues {
+    let mut set = WorkqueueFreezeSession::new(SuspendWorkqueues {
         queues: &queues,
         timeout: TimeSpan::ZERO,
         cancellation: &cancellation,
@@ -114,7 +114,7 @@ fn duplicate_queue_alias_fails_at_later_position_and_releases_original_pause() {
     let original = queue("pm-duplicate");
     let queues = [original.clone(), original.clone()];
     let cancellation = QueueFreezeCancellation::new();
-    let mut set = WorkqueueSet::new(SuspendWorkqueues {
+    let mut set = WorkqueueFreezeSession::new(SuspendWorkqueues {
         queues: &queues,
         timeout: TimeSpan::ZERO,
         cancellation: &cancellation,
@@ -136,7 +136,7 @@ fn cancelled_or_closed_queue_set_can_be_cleaned_without_leaving_pauses() {
     let queues = [queue("pm-cancel"), queue("pm-closed")];
     let cancelled = QueueFreezeCancellation::new();
     cancelled.cancel();
-    let mut set = WorkqueueSet::new(SuspendWorkqueues {
+    let mut set = WorkqueueFreezeSession::new(SuspendWorkqueues {
         queues: &queues,
         timeout: TimeSpan::ZERO,
         cancellation: &cancelled,
@@ -151,7 +151,7 @@ fn cancelled_or_closed_queue_set_can_be_cleaned_without_leaving_pauses() {
     set.thaw();
     let fresh = QueueFreezeCancellation::new();
     queues[1].close_and_drain().unwrap();
-    let mut retry = WorkqueueSet::new(SuspendWorkqueues {
+    let mut retry = WorkqueueFreezeSession::new(SuspendWorkqueues {
         queues: &queues,
         timeout: TimeSpan::ZERO,
         cancellation: &fresh,
