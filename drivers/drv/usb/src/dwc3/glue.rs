@@ -128,13 +128,9 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         // PHY is actually feeding the controller.
         log_usb2phy_state(dev);
 
-        // The USB3 port has to be taken out of "disabled" in the USB GRF before
-        // the controller can see anything on it: PIPE_ENABLE=1, PHY_DISABLE=0,
-        // SUSPEND_ENABLE=0, U3_PORT_DISABLE=0. The reference implementations
-        // (Linux's usbdp-phy/u-boot `udphy_u3_port_disable(port, false)`, and the
-        // tgoskits USB host port) all do this step; without it the port stays
-        // dark and a device plugged into it never shows up as a connection.
-        enable_u3_port(dev, regs.region().base);
+        // The USB3 port's GRF word is owned by the USBDP PHY provider (the
+        // reference enables it in `rk_udphy_usb3_phy_init`); this only logs it.
+        log_u3_port(dev, regs.region().base);
 
         let utmi_wide = dev.fw().string("phy_type") == Some("utmi_wide");
         let dis_enblslpm = dev.fw().flag("snps,dis_enblslpm_quirk");
@@ -386,7 +382,18 @@ fn log_usb2phy_state(dev: &mut Device<'_, PlatformBus>) {
     }
 }
 
-fn enable_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
+/// Reads (never writes) the controller's U3 port configuration word.
+///
+/// This word belongs to the USBDP PHY provider: the reference's
+/// `rk_udphy_usb3_phy_init` calls `udphy_u3_port_disable(false)`, which
+/// writes `0x0188` (PIPE enable + phy/suspend/port-disable cleared) from
+/// `phy-rockchip-usbdp.c`. The glue used to write `0x1100` here — the
+/// reference's *disable* value — right after the PHY had enabled the port,
+/// so the controller was handed a port the PHY had just switched back off.
+/// Writing it from two owners was the bug; this is now observation only.
+fn log_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
+    /// `rk3588_udphy_cfgs.grfcfg.usb3otg{0,1}_cfg.enable`.
+    const US3OTG_ENABLE: u32 = 0x0188;
     const USB_GRF: u64 = 0xfd5a_c000;
     const GRF_WINDOW: usize = 0x4000;
     let port = if controller_base < 0xfc40_0000 { 0 } else { 1 };
@@ -397,16 +404,15 @@ fn enable_u3_port(dev: &mut Device<'_, PlatformBus>, controller_base: usize) {
     ) else {
         return;
     };
-    let before = grf.read32(offset);
-    // The value comes from a working board, not from another implementation:
-    // the reference reads 0x1100 here with SuperSpeed devices enumerated, while
-    // the value another port uses (0x8800) drives different bits -- it clears
-    // bit 12 and bit 8 and sets 15 and 11, which is not what this board wants.
-    // Bits [31:16] are the write-enable mask, [15:0] the data.
-    grf.write32(offset, 0xffff_1100);
+    let cfg = grf.read32(offset);
     info!(
-        "dwc3: usb-grf u3 port {port} cfg {before:#06x} -> {:#06x}",
-        grf.read32(offset),
+        "dwc3: usb-grf u3 port {port} cfg {cfg:#06x} ({} the reference's enable word {:#06x})",
+        if cfg & 0xffff == US3OTG_ENABLE {
+            "matches"
+        } else {
+            "differs from"
+        },
+        US3OTG_ENABLE,
     );
 }
 
