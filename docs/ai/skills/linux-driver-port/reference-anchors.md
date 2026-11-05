@@ -20,3 +20,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:26 | `/workspace/linux-7.1.8/fs/ext4/ext4.h` | `EXT4_SUPER_MAGIC` | ext4 superblock/group-descriptor/extent/dirent layout for the listing probe |
 | 2026-11-05 06:26 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_iget` | inode field offsets (i_mode, i_size_lo/hi) |
 | 2026-11-05 06:27 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_iget` | inode field offsets; block size passed in rather than assumed |
+| 2026-11-05 06:29 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_transport` | SB-2: data stage direction is taken from the CBW flags |

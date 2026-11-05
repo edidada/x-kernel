@@ -137,6 +137,29 @@ pub fn read_sectors(
     transfer(hcd, endpoints, &command, usize::from(count) * 512, true, 1)
 }
 
+/// `WRITE(10)`: writes `count` blocks of 512 bytes starting at `lba`.
+///
+/// A filesystem mounted read-write needs this: ext4 replays its journal on the
+/// first mount after an unclean unmount, and that is a write.
+pub fn write_sectors(
+    hcd: &mut dyn Hcd,
+    endpoints: &BotEndpoints,
+    lba: u32,
+    blocks: &[u8],
+) -> KResult<()> {
+    if blocks.len() % 512 != 0 {
+        return Err(KError::InvalidInput);
+    }
+    let count = (blocks.len() / 512) as u16;
+    let mut command = [0u8; 10];
+    command[0] = 0x2A; // WRITE(10)
+    command[2..6].copy_from_slice(&lba.to_be_bytes());
+    command[7..9].copy_from_slice(&count.to_be_bytes());
+    let mut payload = alloc::vec![0u8; blocks.len()];
+    payload.copy_from_slice(blocks);
+    transfer(hcd, endpoints, &command, blocks.len(), false, 4).map(|_| ())
+}
+
 /// Reads the filesystem superblock and reports what it finds.
 ///
 /// An ext4 filesystem created directly on the device has no MBR, so sector 0
