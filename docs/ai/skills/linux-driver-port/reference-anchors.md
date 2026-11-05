@@ -17,3 +17,6 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:19 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_urb_transaction` | empirical check: per-transfer vs per-packet data toggle |
 | 2026-11-05 06:20 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_update` | bulk endpoints: hardware owns the data toggle; QH_TOGGLE_CTL is control-only |
 | 2026-11-05 06:22 | `/workspace/linux-7.1.8/fs/ext4/super.c` | `ext4_fill_super` | ext4 superblock location and magic |
+| 2026-11-05 06:26 | `/workspace/linux-7.1.8/fs/ext4/ext4.h` | `EXT4_SUPER_MAGIC` | ext4 superblock/group-descriptor/extent/dirent layout for the listing probe |
+| 2026-11-05 06:26 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_iget` | inode field offsets (i_mode, i_size_lo/hi) |
+| 2026-11-05 06:27 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_iget` | inode field offsets; block size passed in rather than assumed |

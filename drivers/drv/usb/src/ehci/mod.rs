@@ -935,6 +935,9 @@ fn probe_mass_storage(ehci: &mut Ehci, device: &usb::UsbDevice) {
             log::info!("ehci: mass storage on ep in {endpoint_in:#04x} out {endpoint_out:#04x}",);
             usb::bot::describe(ehci, &endpoints);
             usb::bot::probe_filesystem(ehci, &endpoints);
+            if let Err(err) = usb::bot_fs::list_root(ehci, &endpoints) {
+                log::warn!("ehci: root directory listing failed: {err:?}");
+            }
             return;
         }
     }

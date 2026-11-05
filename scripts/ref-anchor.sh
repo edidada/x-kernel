@@ -83,7 +83,9 @@ if grep -qE "^[a-zA-Z_].*[ *]$symbol\(" "$ref_file" 2>/dev/null; then
 		}
 	' "$ref_file"
 else
-	grep -n -- "$symbol" "$ref_file" | head -40
+	# A symbol may legitimately be absent from the file that was named; the
+	# entry still records that the file was opened and searched.
+	grep -n -- "$symbol" "$ref_file" | head -40 || true
 fi
 echo "=== end $symbol ==="
 

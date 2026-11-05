@@ -18,6 +18,7 @@
 extern crate alloc;
 
 pub mod bot;
+pub mod bot_fs;
 pub mod descriptor;
 pub mod enumerate;
 pub mod hub;
