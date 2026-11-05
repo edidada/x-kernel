@@ -819,6 +819,28 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 下一个会话的选择点：(a) 修 EHCI bulk（最快拿盘）；(b) 修 hub EP0 哑火（SS 线）；
 (c) 参考板 dmesg 对照（等插盘）。
 
+**probe 移除 + 事件完整性修复（同日深夜，`bcb0e6001`+`847a1ba31`）**：
+
+1. **(a) EHCI bulk 根因找到了**：token 回读与软件写入值逐位相同（控制器从未碰过
+   qTD），而失败行里 `rec true`（Reclamation）是铁证——bulk 路径里 fc27f3021 诊断轮的
+   **破坏性 PROBE 一直留在生产路径上**：每次 bulk 传输都把 async list head 的 next 写成
+   0xffffffff（终止）且从不恢复，控制器看到空链表，在 Reclamation 里空转。已删除。
+   待验证：需要一次盘的 USB2 侧出现在 EHCI hub 上的启动（这个可见性本身是间歇的——
+   本轮就未出现，上一轮出现了）。
+2. **(b) hub EP0 哑火的真链条**：鼠标枚举成功后一次 **code 6 STALL**（字符串描述符被拒，
+   正常）把 EP0 打入 Halted，后续传输无人执行；而 `Set TR Dequeue` 的完成事件 parameter
+   = 新 dequeue 指针（非命令 TRB 地址），新加的地址匹配永不命中 → 每次 10s。修复：
+   STALL 后跑 Reset Endpoint（`xhci_cleanup_halted_endpoint`）；命令完成匹配
+   parameter == TRB 地址 **或** 命令自己的 parameter 字段；事件按 (slot, ep) 匹配 +
+   pending 队列；超时后 Stop+Set-TR-Dequeue 清死 TD；diagnose 限每端口一次。
+3. **新间歇失败模式（未解决，下轮优先）**：鼠标的 Address Device (BSR=1, slot 2) 途中
+   控制器整体死亡：USBSTS `HSE+HCH`，`GBUSERRADDR=0xC`。线索：该 slot 的 input ctx
+   分到了 `0xbe5000`——几 ms 前 hub 的 EP0 ring 分配**跳过了**这一页（0xbe3000,
+   0xbe4000, 然后 0xbe6000），随后这页又被发给了鼠标；scratchpad buffer 在
+   0xbe2000。怀疑 coherent 分配器 free-list 有洞/重叠，或控制器内部 scratchpad/
+   bounce 路径与该页冲突。下轮：init 时打印 erst+bounce 地址、审计分配器、以及加
+   HSE 恢复（整个控制器重初始化），避免一次死亡楔死整个启动。
+
 ### 交接快照（旧）：hub 类已通、鼠标可用、U 盘卡在“地址 0 的 SETUP 无应答”
 
 **铁律（已写进 `AGENTS.md`）**：寄存器位域、描述符布局、命令时序一律以源码为准
