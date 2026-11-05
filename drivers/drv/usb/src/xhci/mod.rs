@@ -828,10 +828,12 @@ impl Xhci {
             self.bar.read64(self.runtime + RT_IR0 + 0x18),
         );
         info!(
-            "xhci: command ring {:#x}, event ring {:#x}, dcbaa {:#x}",
+            "xhci: command ring {:#x}, event ring {:#x}, dcbaa {:#x}, erst {:#x}, bounce {:#x}",
             self.command.mem.bus_addr(),
             self.event.mem.bus_addr(),
             self.device_contexts.bus_addr(),
+            self.erst.bus_addr(),
+            self.bounce.bus_addr(),
         );
         Ok(())
     }
