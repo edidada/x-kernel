@@ -730,6 +730,57 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 
 ## USB bring-up（M1：DWC3 + xHCI，High-Speed）
 
+### 里程碑：第一个 USB 设备真正枚举成功（最新一轮）
+
+```
+usb: 001:0 id 05e3:0610 usb 2.1 device 147.9 class 0x09/00/02 ep0 64 configs 1
+usb: 001:0 config 1 total 41 interfaces 2 attributes 0xe0 power 0
+usb: 001:0 product USB2.1 Hub
+usb: 001:0 manufacturer GenesysLogic
+usb: 001:0 configured with 1
+dwc3: enumeration found 1 device(s), 1 usable
+```
+
+**两个物理 USB3.0 口都挂在这个 Genesys Logic hub（05e3:0610）后面**，所以要让
+U 盘和鼠标出现，下一步是 **hub 类驱动**（GET_DESCRIPTOR(HUB)、SetPortFeature
+(PORT_POWER)、端口扫描、下游设备枚举），而不是继续调控制器。
+
+### 这一轮打通的五层（每层都是真 bug，且都是“读回值看着正常”的那种）
+
+| # | 问题 | 判据 |
+|---|---|---|
+| 1 | CRU reset 表缺 phy1 的 0x2f–0x32 | `usbdp: 0x495 reset 0 (init) unavailable: NotFound` → phy1 的 `u3-port` 从不发布 |
+| 2 | usbdp 拿不到时钟还继续跑（只 warn） | `clock 3 unavailable: Deferred(clk 403)` → 没有 480M 参考也算 init 成功 |
+| 3 | 枚举契约假设总线核心拥有寻址 | xHCI 地址就是 slot id，`control_transfer(0)` 找不到 slot → `NotFound`。给 `Hcd` 加 `port_address()` |
+| 4 | `reset_port` 无条件写 PR | 两层都来要速度 → 二次复位把 slot 作废 |
+| 5 | Setup TRB 缺 TRT；ERDP 写序错 | TRT 缺失 = “无数据阶段”；ERDP 低字带 EHB 必须 hi→lo |
+| 6 | **`IOC` 写成 bit 4（那是 CH/Chain），真值是 bit 5** | 整个传输没有任何 TRB 请求完成中断 → 控制器永不投递 Transfer Event |
+
+第 6 条是最终卡点，也是最贵的一条：**命令环、Enable Slot、Address Device 全部 Success**
+（命令完成事件不依赖 IOC），只有第一次真实传输超时 —— 现象与“设备不响应”完全一样。
+
+**定位手法（值得复用）**：往已寻址 slot 的 EP0 环里塞一个 **No-Op Transfer TRB
+（type 8）**。它产生 Transfer Event 但完全不碰设备，所以能一刀切开
+“传输环/门铃/事件投递坏了” 和 “设备不应答”。本次它也不完成 ⇒ 故障在我们这一侧，
+范围立刻从“设备/PHY/信号”缩到“TRB 与事件投递”。这与之前用 No-Op *Command* 定位
+命令环是同一手法，两次都一击命中。
+
+另外记录一个坑：`Address Device` 是**间歇性**的（同一镜像连续两轮，一轮 code 1、
+一轮两次超时）。先把上面的常量/时序 bug 修完再谈间歇性，否则会把它当成根因。
+
+### 下一步：hub 类
+
+1. `GET_DESCRIPTOR(HUB)` 拿下游端口数（`05e3:0610` 是 4 口 USB2.1 hub）；
+2. 每口 `SetPortFeature(PORT_POWER)` → 等 `GetPortStatus` 稳定；
+3. 有连接则对**下游**设备走现有的 `usb::enumerate`（地址分配要从 2 开始，
+   并且要经过 hub 的 `SET_ADDRESS` 转发 —— 即 TT/hub 事务）；
+4. 两个真实设备（U 盘 = mass storage，鼠标 = HID）才能出现。
+
+注意：hub 在 USB2 路径上，下游设备的**低速/全速**要靠 hub 的 TT（Transaction
+Translator）转发，这条路径当前 `Hcd` 契约里没有表达（`bulk_transfer` 也还是
+`Unsupported`）——枚举下游端口本身可以，但要真读写 U 盘还需要端点传输 + TT。
+
+
 ### 当前快照（最新一轮之后，从这里继续）
 
 **已彻底排除的假设（不要再查）**：
