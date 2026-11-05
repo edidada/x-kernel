@@ -47,3 +47,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 07:25 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | every queue head's overlay HALT is cleared, not only the list head |
 | 2026-11-05 07:29 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | full queue head state at the moment a transfer is not fetched |
 | 2026-11-05 07:32 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-timer.c` | `ehci_poll_ASS` | ASS is polled; a stopped schedule is restarted with CMD_ASE, and no queue head is left holding an incomplete descriptor |
+| 2026-11-05 09:45 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-timer.c` | `ehci_poll_ASS` | want/actual comparison of STS_ASS and CMD_ASE, and waiting for ASS to clear before enabling |
+| 2026-11-05 09:46 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-timer.c` | `ehci_poll_ASS` | want/actual STS_ASS comparison and setting CMD_ASE when the schedule stopped |

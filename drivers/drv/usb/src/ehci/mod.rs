@@ -520,6 +520,25 @@ impl Ehci {
             );
             self.recover_async_schedule();
         }
+        // `ehci_poll_ASS()`: `want = (command & CMD_ASE) ? STS_ASS : 0` against
+        // the status bit. The controller stops the asynchronous schedule on its
+        // own once it finds it empty, and the enable bit alone does not bring it
+        // back -- software has to notice and set it again. Without this the first
+        // transfer after the schedule went idle waits out its timeout while every
+        // structure in the ring is correct.
+        let status = self.regs.read32(self.operational + op::USBSTS);
+        if status & sts::ASS == 0 {
+            let command = self.regs.read32(self.operational + op::USBCMD);
+            log::warn!("ehci: asynchronous schedule stopped (USBSTS {status:#010x}); setting ASE");
+            self.regs
+                .write32(self.operational + op::USBCMD, command | regs::cmd::ASE);
+            for _ in 0..40 {
+                if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                    break;
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+            }
+        }
     }
 
     /// Restarts the asynchronous schedule after a controller halt.
