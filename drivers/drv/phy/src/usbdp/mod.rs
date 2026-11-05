@@ -105,10 +105,19 @@ struct UdphyCfg {
 
 fn cfg_of(id: usize) -> UdphyCfg {
     // Offsets/values verbatim from the reference `rk3588_udphy_cfgs.grfcfg`.
+    // The 0x0188/0x1100 pair is the reference's, but its naming does not hold on
+    // this board: `RK_UDPHY_GEN_GRF_REG(offset, bitend, bitstart, disable,
+    // enable)` lists 0x1100 as *disable* and 0x0188 as *enable*, yet writing
+    // 0x0188 makes the DWC3 report one host port while 0x1100 makes it report
+    // two — measured by bracketing HCSPARAMS1 through the whole init sequence
+    // (2 right up to the PHY bring-up, 1 afterwards, back to 2 with 0x1100).
+    // Losing the second port means no SuperSpeed port at all, so the values are
+    // swapped here relative to the reference's names, and the working board's
+    // own usb-grf word is 0x1100 with SuperSpeed devices enumerated.
     let usb3otg_cfg = if id == 0 {
-        GrfReg::new(0x001c, 15, 0, 0x1100, 0x0188)
+        GrfReg::new(0x001c, 15, 0, 0x0188, 0x1100)
     } else {
-        GrfReg::new(0x0034, 15, 0, 0x1100, 0x0188)
+        GrfReg::new(0x0034, 15, 0, 0x0188, 0x1100)
     };
     UdphyCfg {
         low_pwrn: GrfReg::new(0x0004, 13, 13, 0, 1),
@@ -270,7 +279,15 @@ impl UsbDp {
 
     /// `udphy_u3_port_disable`: clear (enable) or set the U3 port's GRF word.
     fn u3_port_disable(&self, disable: bool) {
+        // The word this builds is chosen by the DWC3's port count, not by the
+        // reference's field names (see `cfg_of`): the value the reference calls
+        // "disable" is the one that makes the controller expose its SuperSpeed
+        // port, and the value it calls "enable" removes it.
         grfreg_write(&self.usb_grf, &self.cfg.usb3otg_cfg, !disable);
+        log::info!(
+            "usbdp: usb3otg cfg (disable {disable}) reads {:#06x}",
+            self.usb_grf.read32(self.cfg.usb3otg_cfg.offset) & 0xffff,
+        );
     }
 }
 

@@ -120,6 +120,19 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             (regs.read32(0x04) >> 24) & 0xff,
         );
 
+        // Select the host role while the PHYs are still down. The peripheral ->
+        // host transition is what freezes this core's port map, and it costs the
+        // SuperSpeed port if the SS PIPE is already running at that moment
+        // (measured: MaxPorts 2 before the transition, 1 after, with GCTL
+        // bit-identical to the working board). `core::init` repeats the same
+        // write later — a same-value write does not re-latch.
+        crate::dwc3::core::select_host_role(&regs);
+        info!(
+            "dwc3: HCSPARAMS1 after early host role {:#010x} (max ports {})",
+            regs.read32(0x04),
+            (regs.read32(0x04) >> 24) & 0xff,
+        );
+
         // USB2 PHY only in this stage: High-Speed works through it, and the
         // SuperSpeed PHY is a separate driver that lands later.
         let mut phys = Vec::new();

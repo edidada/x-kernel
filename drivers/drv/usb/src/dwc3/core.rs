@@ -109,6 +109,19 @@ pub fn init(
         regs.read32(0x04),
         (regs.read32(0x04) >> 24) & 0xff,
     );
+    // EXPERIMENT: the host-mode transition above is what costs the SuperSpeed
+    // port (MaxPorts 2 -> 1), while the working board ends at the same GCTL
+    // value with 2 ports — its bootloader had already left the core in host
+    // mode, so Linux's write was same-value and never re-latched. Re-run the
+    // soft reset now that host mode is selected: if the port map is latched at
+    // reset, this reset latches it WITH host capability and the second port
+    // comes back.
+    core_soft_reset(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after host-mode reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
     let _ = dev;
     Ok(params)
 }
@@ -128,6 +141,17 @@ fn core_soft_reset(regs: &IoMap) {
         regs.read32(GSTS),
         gctl & gctl::CORESOFTRESET != 0,
     );
+}
+
+/// Selects the host role, before anything else touches the controller.
+///
+/// The peripheral -> host transition latches the port map this core presents to
+/// its xHCI, and on this IP that latch costs the SuperSpeed port when it happens
+/// with the SS PIPE already running (MaxPorts 2 -> 1, while GCTL ends up
+/// bit-identical to the working board). The composition root calls this as soon
+/// as the controller answers on the bus, i.e. before the PHYs are brought up.
+pub fn select_host_role(regs: &IoMap) {
+    set_host_mode(regs);
 }
 
 fn set_host_mode(regs: &IoMap) {
@@ -172,12 +196,27 @@ const GUCTL1_VALUE: u32 = 0x9107_018a;
 fn program_usb3_pipe(regs: &IoMap) {
     let offset = crate::dwc3::regs::GUSB3PIPECTL;
     let before = regs.read32(offset);
+    // PHYSOFTRST (bit 31) must be pulsed around the SS PHY's bring-up: the core
+    // counts a SuperSpeed port only for a PIPE PHY it actually saw come out of
+    // its soft reset. Writing the configuration word with PHYSOFTRST already
+    // clear (what this port did) leaves the core believing there is no SS PHY,
+    // and it then reports half the host ports — measured as MaxPorts 2 -> 1 at
+    // exactly whichever step is the second of {role selection, PHY bring-up},
+    // with GCTL bit-identical to the working board. The PHY is already powered
+    // when this runs (the composition root acquires it first), which is the
+    // order the reference uses before it releases this bit.
+    regs.write32(offset, USB3_PIPE_CONTROL | GUSB3PIPECTL_PHYSOFTRST);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
     regs.write32(offset, USB3_PIPE_CONTROL);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
     info!(
-        "dwc3: GUSB3PIPECTL {before:#010x} -> {:#010x}",
+        "dwc3: GUSB3PIPECTL {before:#010x} -> {:#010x} (PHYSOFTRST pulsed)",
         regs.read32(offset),
     );
 }
+
+/// `GUSB3PIPECTL.PHYSOFTRST`: PIPE PHY soft reset (active high).
+const GUSB3PIPECTL_PHYSOFTRST: u32 = 1 << 31;
 
 /// `GUSB3PIPECTL0` as read from a working board at the corrected offset.
 ///
