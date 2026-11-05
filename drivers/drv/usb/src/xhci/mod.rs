@@ -309,15 +309,17 @@ struct Scratchpads {
 /// the controller is started; without it the first command that allocates a
 /// device slot (`Enable Slot`) fails with a TRB error while a No-Op still
 /// succeeds.
+/// A/B bisect for the HSE death at the mouse's Address Device: pin the
+/// count to the reference macro's decode (1 on this silicon) and keep
+/// everything else at the current state. If the death persists, the
+/// scratchpad size is exonerated and the trigger is the event-handling
+/// change's timing.
 fn allocate_scratchpads(
     dev: &Device<'_, driver_base::PlatformBus>,
     hcsparams2: u32,
     device_contexts: &CoherentMem,
 ) -> Result<Option<Scratchpads>, ProbeError> {
-    let count_reference =
-        ((((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f)) as usize;
-    let count_spec = (((hcsparams2 >> 27) & 0x1f) << 5 | ((hcsparams2 >> 16) & 0x3ff)) as usize;
-    let count = count_reference.max(count_spec);
+    let count = ((((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f)) as usize;
     if count == 0 {
         return Ok(None);
     }
