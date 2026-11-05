@@ -59,7 +59,14 @@ pub fn slot_dword1(root_port_1based: u8) -> u32 {
 /// emit SPLIT transactions for full/low-speed devices behind a high-speed hub;
 /// without them such a device is addressed but never answers.
 pub fn slot_dword2_tt(ttt: u8, tt_port: u8, hub_slot: u8) -> u32 {
-    (u32::from(ttt) & 0x3) | ((u32::from(tt_port) & 0xf) << 4) | (u32::from(hub_slot) << 8)
+    // Layout per the reference (`xhci_setup_addressable_virt_dev`):
+    //   tt_info = hub_slot_id | (udev->ttport << 8)
+    // i.e. the hub's slot id in bits 7:0, the hub port in bits 15:8, and the
+    // think time in bits 17:16. Getting the two swapped addresses a translator
+    // that does not exist, and every transaction to the device times out.
+    (u32::from(hub_slot) & 0xff)
+        | ((u32::from(tt_port) & 0xff) << 8)
+        | ((u32::from(ttt) & 0x3) << 16)
 }
 
 /// Endpoint context dword 1: CErr, endpoint type and max packet size.

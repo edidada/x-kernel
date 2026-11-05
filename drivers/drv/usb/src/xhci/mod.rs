@@ -1218,22 +1218,7 @@ impl Xhci {
             Ok(_) => {}
             Err(err) => {
                 self.dump_address_device_failure(slot_index, err);
-                // Fallback: the port reports High-Speed, but the same device read as
-                // low-speed on EHCI (line state K). A wrong speed in the slot context
-                // makes the controller address it with signalling the device cannot
-                // answer, which hangs exactly like this. Retry as Low-Speed/8 bytes.
-                if speed == Speed::Low {
-                    return Err(err);
-                }
-                log::error!("xhci: retrying Address Device as Low-Speed");
-                let low = self.address_device(slot_index, port, Speed::Low, 8, addressing, bsr);
-                return match low {
-                    Ok(()) => Ok(()),
-                    Err(low_err) => {
-                        log::error!("xhci: low-speed retry also failed: {low_err:?}");
-                        Err(err)
-                    }
-                };
+                return Err(err);
             }
         }
         self.slots[slot_index].speed = speed_id;
