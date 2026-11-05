@@ -139,12 +139,23 @@ fn control_no_data(hcd: &mut dyn Hcd, address: u8, setup: SetupPacket) -> bool {
 /// The descriptor is 9 bytes for USB 2.0 hubs and 12 for SuperSpeed ones; a
 /// short buffer is fine because every field this driver needs lives in those
 /// first bytes.
-pub fn info(hcd: &mut dyn Hcd, address: u8) -> Option<HubInfo> {
+pub fn info(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> Option<HubInfo> {
+    // SuperSpeed hubs answer descriptor type 0x2A (`USB_DT_SS_HUB`); asking a
+    // SuperSpeed hub for the USB 2.0 hub descriptor (0x29) gets a Stall, which
+    // is exactly what this port did — and why the SuperSpeed hub's downstream
+    // ports (where a USB3 stick appears) were never scanned at all.
+    let descriptor_value: u16 = if protocol == 3 { 0x2a00 } else { 0x2900 };
     let mut buf = [0u8; 16];
     let read = control_in(
         hcd,
         address,
-        SetupPacket::new(RT_IN_CLASS_DEVICE, REQ_GET_DESCRIPTOR, 0x2900, 0, 16),
+        SetupPacket::new(
+            RT_IN_CLASS_DEVICE,
+            REQ_GET_DESCRIPTOR,
+            descriptor_value,
+            0,
+            16,
+        ),
         &mut buf,
     )?;
     if read < 7 {
@@ -153,7 +164,9 @@ pub fn info(hcd: &mut dyn Hcd, address: u8) -> Option<HubInfo> {
     }
     Some(HubInfo {
         ports: buf[2],
-        protocol: buf[1],
+        // From the *device* descriptor (bDeviceProtocol), not the hub descriptor:
+        // 0 FS, 1 HS single-TT, 2 HS multi-TT, 3 SuperSpeed.
+        protocol,
         power_on_2ms: buf[5],
     })
 }
@@ -205,14 +218,14 @@ pub fn port_status(hcd: &mut dyn Hcd, address: u8, port: u8) -> Option<(u32, u32
 
 fn speed_of(status: u32, info: HubInfo) -> Speed {
     if info.is_superspeed() {
-        return match (status >> PORT_ST_SS_SHIFT) & PORT_ST_SS_MASK {
-            4 => Speed::Super,
-            3 => Speed::Unknown, // "functional but speed not yet known"
-            2 => Speed::High,
-            1 => Speed::Full,
-            0 => Speed::Low,
-            _ => Speed::Unknown,
-        };
+        // Every downstream port of a SuperSpeed hub is SuperSpeed: the USB2 half
+        // of the same physical connector is wired to a separate companion hub.
+        // Decoding a speed field here is not just unnecessary, it is wrong — the
+        // port status of an enabled SuperSpeed port reads 0x0203 on this board,
+        // which a USB2-style decode turns into "low" and then addresses a 5 Gbps
+        // device with low-speed signalling.
+        let _ = status;
+        return Speed::Super;
     }
     if status & PORT_ST_LOW_SPEED != 0 {
         Speed::Low
@@ -246,8 +259,8 @@ fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32) {
 }
 
 /// Scans every downstream port of the hub at `address`.
-pub fn scan(hcd: &mut dyn Hcd, address: u8) -> alloc::vec::Vec<HubPort> {
-    let Some(info) = info(hcd, address) else {
+pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> alloc::vec::Vec<HubPort> {
+    let Some(info) = info(hcd, address, protocol) else {
         log::error!("usb: hub {address} did not answer GET_DESCRIPTOR(HUB)");
         return alloc::vec::Vec::new();
     };

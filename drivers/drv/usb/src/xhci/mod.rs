@@ -1640,14 +1640,14 @@ impl Xhci {
     ) {
         // The controller has to be told this slot is a hub before it will route
         // anything to the ports below it.
-        if let Some(info) = usb::hub::info(self, hub.address) {
+        if let Some(info) = usb::hub::info(self, hub.address, hub.device.protocol) {
             if let Some(slot_index) = self.slots.iter().position(|slot| slot.id == hub.address) {
                 if let Err(err) = self.configure_hub(slot_index, info.ports) {
                     log::error!("xhci: hub {} configure failed: {err:?}", hub.address);
                 }
             }
         }
-        let ports = usb::hub::scan(self, hub.address);
+        let ports = usb::hub::scan(self, hub.address, hub.device.protocol);
         // `bDeviceProtocol` (from the *device* descriptor): 0 FS hub, 1 HS
         // single-TT, 2 HS multi-TT, 3 SuperSpeed.
         let protocol = hub.device.protocol;
