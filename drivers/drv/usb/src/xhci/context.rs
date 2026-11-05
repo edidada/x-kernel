@@ -75,8 +75,16 @@ pub fn slot_dword2_tt(ttt: u8, tt_port: u8, hub_slot: u8) -> u32 {
 /// OUT) or 7 (interrupt IN) — the values xHCI assigns, not the USB `bmAttributes`
 /// encoding.
 pub fn endpoint_dword1(ep_type: u32, max_packet_size: u16) -> u32 {
+    endpoint_dword1_num(ep_type, max_packet_size, 0)
+}
+
+/// Same, with the endpoint number (bits 11:8). EP0 is endpoint 0, so the
+/// one-argument form above is the EP0 case; every configured endpoint must
+/// carry its own number or the controller sees the wrong endpoint type/number
+/// pair.
+pub fn endpoint_dword1_num(ep_type: u32, max_packet_size: u16, ep_number: u8) -> u32 {
     let cerr = 3 << 1;
-    (cerr) | (ep_type << 3) | ((max_packet_size as u32) << 16)
+    (cerr) | (ep_type << 3) | ((u32::from(ep_number) & 0xf) << 8) | ((max_packet_size as u32) << 16)
 }
 
 /// Endpoint context dword 2: transfer ring dequeue pointer, low half.

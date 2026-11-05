@@ -69,3 +69,8 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 11:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_completions` | observing whether the controller ever sees the descriptor's Active bit |
 | 2026-11-05 11:25 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_irq` | the controller must react to a corrupted ring if it is walking it |
 | 2026-11-05 11:32 | `/workspace/linux-7.1.8/drivers/clk/rockchip/clk-rk3588.c` | `CLKGATE_CON` | CRU clock-gate words can gate a host clock behind the driver's back |
+| 2026-11-05 11:57 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_update_hub_device` | hub endpoint configuration: the slot must reach Configured before children are addressed |
+| 2026-11-05 11:58 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-hub.c` | `xhci_add_hub_endpoint` | hub interrupt endpoint configured so the slot reaches Configured |
+| 2026-11-05 11:58 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | adding the hub endpoint moves the slot to Configured |
+| 2026-11-05 12:00 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | endpoint number in dword1, context index = ep*2+dir, entries cover it |
+| 2026-11-05 12:01 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | context index = ep*2+dir; dword1 carries the endpoint number; entries cover it |
