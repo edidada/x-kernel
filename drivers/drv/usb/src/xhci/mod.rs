@@ -1265,14 +1265,11 @@ impl Xhci {
             regs::code::STALL
             | regs::code::TRANSACTION_ERROR
             | regs::code::SPLIT_TRANSACTION_ERROR => {
-                let count = &mut self.slots[slot_index].ep0_err_count;
-                *count += 1;
-                let soft = *count <= MAX_SOFT_RETRY;
-                log::warn!(
-                    "xhci: transferless event slot {} code {code} (err {count})",
-                    self.slots[slot_index].id
-                );
-                self.halt_ep0(slot_index, soft);
+                let slot_id = self.slots[slot_index].id;
+                let count = self.slots[slot_index].ep0_err_count + 1;
+                self.slots[slot_index].ep0_err_count = count;
+                log::warn!("xhci: transferless event slot {slot_id} code {code} (err {count})");
+                self.halt_ep0(slot_index, count <= MAX_SOFT_RETRY);
             }
             _ => log::warn!(
                 "xhci: transferless event slot {} ignored code {code}",
@@ -2126,8 +2123,7 @@ impl Xhci {
             .ep0
             .push_held(Trb::new(setup_word, 8, control));
         let setup_index = held.0;
-        let mut last_trb = self.slots[slot_index].ep0.mem.bus_addr()
-            + (setup_index * core::mem::size_of::<Trb>()) as u64;
+        let setup_trb = self.slots[slot_index].ep0.mem.bus_addr() + (setup_index * TRB_LEN) as u64;
         if length > 0 {
             // `xhci_queue_ctrl_tx()` builds the data TRB as
             //   TYPE(DATA) [| DIR_IN] [| ISP if IN]
@@ -2143,10 +2139,9 @@ impl Xhci {
             // The completion event that carries this transfer's byte count.
             data_control |= regs::trb::IOC;
             let bounce_addr = self.bounce.bus_addr();
-            last_trb =
-                self.slots[slot_index]
-                    .ep0
-                    .push(Trb::new(bounce_addr, length as u32, data_control));
+            self.slots[slot_index]
+                .ep0
+                .push(Trb::new(bounce_addr, length as u32, data_control));
         }
         // Status stage: OUT whenever the data stage was IN (and vice versa).
         //
@@ -2163,7 +2158,7 @@ impl Xhci {
         if length == 0 {
             status_control |= regs::trb::IOC;
         }
-        last_trb = self.slots[slot_index]
+        let last_trb = self.slots[slot_index]
             .ep0
             .push(Trb::new(0, 0, status_control));
 
@@ -2171,8 +2166,7 @@ impl Xhci {
         // becomes visible so the dispatcher can always route the completion
         // back to it (`xhci_queue_ctrl_tx()` ends with the same bookkeeping).
         self.slots[slot_index].tds.push_back(Td {
-            first_trb: self.slots[slot_index].ep0.mem.bus_addr()
-                + (setup_index * core::mem::size_of::<Trb>()) as u64,
+            first_trb: setup_trb,
             last_trb,
             what: "control transfer",
         });
