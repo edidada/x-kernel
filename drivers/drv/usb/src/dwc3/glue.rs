@@ -75,6 +75,16 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             "dwc3: usb3-otg reset deasserted, line asserted {} ",
             reset.status()
         );
+        // MaxPorts (HCSPARAMS1 bits 31:24) is read three times: untouched,
+        // after the USBDP PHY init, and after the core soft reset. The working
+        // board reads 2 here while this port read 1, with GHWPARAMS3, GCTL and
+        // GUSB3PIPECTL all identical — so something in our own init changes it,
+        // and the only way to find which step is to bracket them.
+        info!(
+            "dwc3: HCSPARAMS1 untouched {:#010x} (max ports {})",
+            regs.read32(0x04),
+            (regs.read32(0x04) >> 24) & 0xff,
+        );
 
         let mut clocks = Vec::new();
         let mut clock_guards = Vec::new();
@@ -134,7 +144,17 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
 
         let utmi_wide = dev.fw().string("phy_type") == Some("utmi_wide");
         let dis_enblslpm = dev.fw().flag("snps,dis_enblslpm_quirk");
+        info!(
+            "dwc3: HCSPARAMS1 after PHY init {:#010x} (max ports {})",
+            regs.read32(0x04),
+            (regs.read32(0x04) >> 24) & 0xff,
+        );
         let _params = crate::dwc3::core::init(dev, &regs, utmi_wide, dis_enblslpm)?;
+        info!(
+            "dwc3: HCSPARAMS1 after core init {:#010x} (max ports {})",
+            regs.read32(0x04),
+            (regs.read32(0x04) >> 24) & 0xff,
+        );
 
         // The host controller takes the window over: the xHCI registers sit at
         // offset 0 of the same mapping the core's global registers live above.
