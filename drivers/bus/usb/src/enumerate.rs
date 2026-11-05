@@ -80,12 +80,23 @@ pub fn enumerate_port(hcd: &mut dyn Hcd, port: usize, address: u8) -> KResult<Us
         speed.as_str(),
     );
 
+    // A controller that assigns addresses itself (xHCI's `Address Device`) has
+    // already put this device at a known address; there is no default-address
+    // pipe to talk to afterwards, so start from that address and never issue
+    // SET_ADDRESS. Host controllers whose address is a bus-level property
+    // answer `None` and get the standard `address 0` phase below.
+    let pre_addressed = hcd.port_address(port);
+    let default_address = pre_addressed.unwrap_or(0);
+    if let Some(address) = pre_addressed {
+        info!("usb: port {port} already addressed as {address} by the controller");
+    }
+
     // 1. Eight bytes of the device descriptor on the default pipe: enough for
     //    `bMaxPacketSize0`, which the rest of enumeration needs.
     let mut buf = [0u8; DeviceDescriptor::WIRE_LEN];
     let read = control_in(
         hcd,
-        0,
+        default_address,
         SetupPacket::get_descriptor(descriptor::ty::DEVICE, 0, 8),
         &mut buf[..8],
     )?;
@@ -97,8 +108,14 @@ pub fn enumerate_port(hcd: &mut dyn Hcd, port: usize, address: u8) -> KResult<Us
     );
 
     // 2. Address it. From here on the device only answers to `address`.
-    control_no_data(hcd, 0, SetupPacket::set_address(address))?;
-    info!("usb: port {port} addressed as {address}");
+    let address = match pre_addressed {
+        Some(address) => address,
+        None => {
+            control_no_data(hcd, 0, SetupPacket::set_address(address))?;
+            info!("usb: port {port} addressed as {address}");
+            address
+        }
+    };
 
     // 3. The full device descriptor.
     let read = control_in(

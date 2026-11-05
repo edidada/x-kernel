@@ -122,6 +122,15 @@ pub mod trb {
     pub const DIR_IN: u32 = 1 << 16;
     /// Immediate data (Setup TRB carries the packet in the parameter word).
     pub const IDT: u32 = 1 << 6;
+    /// Transfer Type on the Setup Stage TRB (dword 2 bits 17:16), xHCI 1.0
+    /// §6.4.1.2.1: 2 = OUT data stage, 3 = IN data stage. It is REQUIRED —
+    /// with it absent the controller treats the transfer as having no data
+    /// stage, never executes the Data TRB, and the transfer never completes
+    /// (observed as a control-transfer timeout while the command ring, Enable
+    /// Slot and Address Device all returned Success).
+    pub const TRT_SHIFT: u32 = 16;
+    pub const TRT_OUT: u32 = 2;
+    pub const TRT_IN: u32 = 3;
 }
 
 /// Port speed (`PSIV`) to bus speed.

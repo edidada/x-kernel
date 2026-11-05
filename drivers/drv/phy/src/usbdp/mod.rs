@@ -379,6 +379,7 @@ impl UsbDpDriver {
                     .ok_or(ProbeError::Fatal(RuntimeError::Invalid));
             }
         }
+        log::error!("usbdp: {phandle:#x} has no u3-port child");
         Err(ProbeError::Fatal(RuntimeError::NotFound))
     }
 }
@@ -396,11 +397,24 @@ impl DriverOps<PlatformBus> for UsbDpDriver {
 
         // The PHY's own `reg` is the controller window; the PMA block starts
         // at +0x8000 inside it.
-        let base = dev.res().mmio(0)?;
-        let pma = dev.res().iomap_region(
-            driver_base::MmioRegion::new(base.base + PMA_OFFSET, base.size - PMA_OFFSET),
-            "usbdp-pma",
-        )?;
+        let base = dev.res().mmio(0).map_err(|err| {
+            log::error!("usbdp: {phandle:#x} has no mmio: {err:?}");
+            err
+        })?;
+        let pma = dev
+            .res()
+            .iomap_region(
+                driver_base::MmioRegion::new(base.base + PMA_OFFSET, base.size - PMA_OFFSET),
+                "usbdp-pma",
+            )
+            .map_err(|err| {
+                log::error!(
+                    "usbdp: {phandle:#x} PMA map at {:#x}+{:#x} failed: {err:?}",
+                    base.base + PMA_OFFSET,
+                    base.size - PMA_OFFSET,
+                );
+                err
+            })?;
 
         let usbdp_grf = Self::map_syscon(dev, "rockchip,usbdpphy-grf", "usbdpphy-grf")?;
         let usb_grf = Self::map_syscon(dev, "rockchip,usb-grf", "usb-grf")?;
@@ -408,10 +422,20 @@ impl DriverOps<PlatformBus> for UsbDpDriver {
         // Clocks: refclk / immortal / pclk / utmi. Handles only here — the
         // enable runs in `hw_init` on the consumer's acquire edge (the
         // reference enables them in `udphy_setup`, after the consumer binds).
+        //
+        // A clock that is not published yet is a real dependency: the `utmi`
+        // entry is the usb2phy block's `usb480m_phyN` output, which a sibling
+        // provider publishes, and running without it leaves the PHY without
+        // its 480 MHz reference. Hand the deferral back (Linux
+        // -EPROBE_DEFER) instead of skipping the clock.
         let mut clocks = Vec::new();
         for index in 0..4 {
             match dev.res().clk_at(index) {
                 Ok(clock) => clocks.push(clock),
+                Err(err @ ProbeError::Deferred(_)) => {
+                    log::info!("usbdp: clock {index} not published yet, deferring ({err:?})");
+                    return Err(err);
+                }
                 Err(err) => log::warn!("usbdp: clock {index} unavailable: {err:?}"),
             }
         }
@@ -426,7 +450,10 @@ impl DriverOps<PlatformBus> for UsbDpDriver {
         ];
         let mut resets = Vec::new();
         for (index, name) in names.iter().enumerate() {
-            let handle = dev.res().reset_at(index)?;
+            let handle = dev.res().reset_at(index).map_err(|err| {
+                log::error!("usbdp: {phandle:#x} reset {index} ({name}) unavailable: {err:?}");
+                err
+            })?;
             resets.push((*name, handle));
         }
 

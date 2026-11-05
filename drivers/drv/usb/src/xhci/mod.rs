@@ -235,6 +235,9 @@ fn allocate_scratchpads(
 struct Slot {
     id: u8,
     speed: u8,
+    /// Root port this slot was addressed on (`None` until `Address Device`
+    /// completes), so the addressed address can be reported per port.
+    port: Option<usize>,
     input: CoherentMem,
     ep0: Ring,
     /// Device context array entry handed to the controller by `Address Device`.
@@ -735,8 +738,12 @@ impl Xhci {
             self.event_cycle = !self.event_cycle;
         }
         // Hand the consumed slot back to the controller (ERDP, clearing EHB).
+        // ERDP's low word carries EHB, so it is one of the registers where the
+        // DWC3 wrapper's hi-then-lo write order actually matters (the generic
+        // 64-bit store can land the halves the other way round).
         let dequeue = self.event.mem.bus_addr() + (self.event_dequeue * TRB_LEN) as u64;
-        self.bar.write64(
+        write64_hi_lo(
+            &self.bar,
             self.runtime + RT_IR0 + RT_ERDP,
             dequeue | u64::from(ERDP_EHB),
         );
@@ -986,6 +993,7 @@ impl Xhci {
         Ok(Slot {
             id: slot_id,
             speed: 0,
+            port: None,
             input,
             ep0,
             device,
@@ -1138,12 +1146,42 @@ impl Xhci {
             }
         }
         self.slots[slot_index].speed = speed_id;
+        // The controller now owns this device's address (the slot id).
+        self.slots[slot_index].port = Some(port);
         log::info!(
             "xhci: slot {slot_id} addressed on port {}, speed {}, ep0 max packet {ep0_max_packet}",
             port + 1,
             speed.as_str(),
         );
+        // What the controller wrote back is the only trustworthy statement
+        // about whether `Address Device` took effect: EP0's context must say
+        // Running and carry the ring pointer we handed over.
+        self.log_device_context(slot_index);
         Ok(())
+    }
+
+    /// Dump the device context the controller wrote: slot state and EP0's
+    /// state/dequeue. A transfer ring that is never fetched is either "EP0 not
+    /// Running" (here) or "doorbell never landed" (checked at the call site).
+    fn log_device_context(&self, slot_index: usize) {
+        let dwords = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        let per = self.context_size / 4;
+        let mut line = alloc::string::String::new();
+        for index in 0..(per * 2 + 4) {
+            let cell = dwords.wrapping_add(index);
+            // SAFETY: `index` stays inside the device context allocation.
+            let value = unsafe { core::ptr::read_volatile(cell) };
+            line.push_str(&alloc::format!(" {index}={value:#x}"));
+        }
+        log::info!(
+            "xhci: device ctx after address: slot dword0 {:#x} (entries {}, speed {}), ep0 dword0 \
+             {:#x} (state {}):{line}",
+            unsafe { core::ptr::read_volatile(dwords) },
+            (unsafe { core::ptr::read_volatile(dwords) } >> 27) & 0x1f,
+            (unsafe { core::ptr::read_volatile(dwords) } >> 20) & 0xf,
+            unsafe { core::ptr::read_volatile(dwords.wrapping_add(per)) },
+            unsafe { core::ptr::read_volatile(dwords.wrapping_add(per)) } & 0x7,
+        );
     }
 
     /// One control transfer on a slot's EP0 ring: setup, optional data, status.
@@ -1184,6 +1222,17 @@ impl Xhci {
         if is_in {
             control |= regs::trb::DIR_IN;
         }
+        // The data stage this setup announces. xHCI 1.0 §6.4.1.2.1 requires it
+        // whenever the transfer carries data; without it the controller assumes
+        // there is no data stage and never fetches the Data TRB below.
+        if length > 0 {
+            let trt = if is_in {
+                regs::trb::TRT_IN
+            } else {
+                regs::trb::TRT_OUT
+            };
+            control |= trt << regs::trb::TRT_SHIFT;
+        }
         self.slots[slot_index]
             .ep0
             .push(Trb::new(setup_word, 8, control));
@@ -1215,7 +1264,30 @@ impl Xhci {
         // Doorbell for this slot, target = EP0's device slot context index (1).
         self.bar
             .write32(self.doorbell + 4 * u32::from(slot_id) as usize, 1);
-        let event = self.wait_event(regs::trb::TRANSFER_EVENT, "control transfer")?;
+        let event = match self.wait_event(regs::trb::TRANSFER_EVENT, "control transfer") {
+            Ok(event) => event,
+            Err(err) => {
+                // The ring we handed the controller vs. what is actually in it:
+                // "TRBs never written" and "written but never fetched" have
+                // completely different causes, and both look like a timeout.
+                let mut line = alloc::string::String::new();
+                for index in 0..3 {
+                    let trb = self.slots[slot_index].ep0.read(index);
+                    line.push_str(&alloc::format!(
+                        " [{index}] p={:#x} s={:#x} c={:#x}",
+                        trb.parameter,
+                        trb.status,
+                        trb.control
+                    ));
+                }
+                log::error!(
+                    "xhci: control transfer ep0 ring at {:#x} (cycle {}):{line}",
+                    self.slots[slot_index].ep0.mem.bus_addr(),
+                    self.slots[slot_index].ep0.current_cycle(),
+                );
+                return Err(err);
+            }
+        };
         let code = event.completion_code();
         if code != regs::code::SUCCESS && code != regs::code::SHORT_PACKET {
             log::error!("xhci: control transfer completion code {code}");
@@ -1248,6 +1320,23 @@ impl Xhci {
     fn reset_port(&mut self, port: usize) -> Result<Speed, KError> {
         let offset = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
         let current = self.bar.read32(offset);
+        // Idempotent on purpose. Two layers ask for "the port's speed": this
+        // driver's own bring-up (reset → Enable Slot → Address Device) and
+        // `usb::enumerate::enumerate_port`, which calls `port_reset` as its
+        // first step. Re-asserting PR on a port that is already enabled and
+        // addressed resets it again and invalidates the slot's state, so the
+        // very next control transfer fails (`enumeration failed: NotFound`
+        // right after a successful Address Device). Report the current speed
+        // instead when the port is already enabled and not in reset.
+        if current & portsc::PED != 0 && current & portsc::PR == 0 {
+            let speed = regs::speed_from_psiv((current & portsc::PSIV_MASK) >> portsc::PSIV_SHIFT);
+            log::info!(
+                "xhci: port {} already enabled, speed {}, portsc {current:#010x}",
+                port + 1,
+                speed.as_str(),
+            );
+            return Ok(speed);
+        }
         // PORTSC is write-one-to-clear for the change bits and holds reserved
         // bits that must be preserved exactly as read.
         self.bar
@@ -1297,6 +1386,16 @@ impl Hcd for Xhci {
 
     fn port_reset(&mut self, port: usize) -> KResult<Speed> {
         self.reset_port(port)
+    }
+
+    /// xHCI's device addresses are slot ids assigned by `Address Device`, so a
+    /// port whose slot is already addressed reports that id and the bus core
+    /// skips the default-address phase.
+    fn port_address(&self, port: usize) -> Option<u8> {
+        self.slots
+            .iter()
+            .find(|slot| slot.port == Some(port))
+            .map(|slot| slot.id)
     }
 
     fn control_transfer(

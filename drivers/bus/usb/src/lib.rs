@@ -128,6 +128,23 @@ pub trait Hcd: Send + Sync {
     /// Resets a port and returns the speed the device negotiated.
     fn port_reset(&mut self, port: usize) -> KResult<Speed>;
 
+    /// The address the controller already gave this port's device, when the
+    /// controller owns addressing.
+    ///
+    /// USB's default-address phase (`address 0` → `SET_ADDRESS`) is the bus
+    /// core's job on host controllers whose address is a bus-level property
+    /// (EHCI, UHCI). xHCI is different: `Address Device` makes the controller
+    /// assign the address, and that address *is* the device slot id — there is
+    /// no usable address 0 afterwards. A controller that has already addressed
+    /// the port reports it here, and the bus core then starts from that address
+    /// instead of telling the device to move to a new one.
+    ///
+    /// Default: `None` (the controller has not addressed anything; the bus core
+    /// drives the default-address phase itself).
+    fn port_address(&self, _port: usize) -> Option<u8> {
+        None
+    }
+
     /// One control transfer: `setup` stage, then `data` in the direction the
     /// setup packet asks for, then the status stage.
     ///
