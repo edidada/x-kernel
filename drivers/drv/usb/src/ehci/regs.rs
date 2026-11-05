@@ -29,6 +29,10 @@ pub mod op {
 
 pub mod cmd {
     pub const RS: u32 = 1 << 0;
+    /// Interrupt on Async Advance Doorbell: forces the controller out of the
+    /// reclamation state so it re-fetches the asynchronous list. Software
+    /// changes to the list are not guaranteed to be seen without it.
+    pub const IAAD: u32 = 1 << 6;
     pub const HCRESET: u32 = 1 << 1;
     pub const PSE: u32 = 1 << 4;
     pub const ASE: u32 = 1 << 5;

@@ -808,6 +808,19 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(base.wrapping_add(8).cast::<u32>(), qtd.token);
         }
+        // Ring the async-advance doorbell (`start_unlink_async()` sets IAAD for
+        // the same reason): a controller sitting in the reclamation state does
+        // not re-walk the list on its own, so a descriptor queued while it
+        // idles there is never fetched.
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        self.regs
+            .write32(self.operational + op::USBCMD, command | regs::cmd::IAAD);
+        for _ in 0..40 {
+            if self.regs.read32(self.operational + op::USBCMD) & regs::cmd::IAAD == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
         let mut token = token::ACTIVE;
         for _ in 0..POLL_STEPS {
             // SAFETY: dword 2 of the dummy descriptor is its token.
@@ -827,6 +840,28 @@ impl Ehci {
                 status & sts::ASS != 0,
                 status & sts::REC != 0,
             );
+            // The EP0 queue head's descriptors: if one is still Active, the
+            // controller is parked on the control endpoint retrying it forever
+            // and never reaches the bulk queue heads behind it in the ring.
+            for slot in 0..3usize {
+                // SAFETY: the first three qTDs belong to the control path.
+                let control_qtd = unsafe {
+                    core::ptr::read_volatile(self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot))
+                };
+                log::error!(
+                    "ehci: control qtd{slot} token {:#x} (active {}, halt {}, len {})",
+                    control_qtd.token,
+                    control_qtd.token & token::ACTIVE != 0,
+                    control_qtd.token & token::HALT != 0,
+                    (control_qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
+                );
+            }
+            // SAFETY: dword 4 of the EP0 queue head is its next-descriptor
+            // pointer.
+            let ep0_next = unsafe {
+                core::ptr::read_volatile(head.cast::<u8>().wrapping_add(64 + 16).cast::<u32>())
+            };
+            log::error!("ehci: ep0 qh qtd_next {ep0_next:#x}");
             return Err(KError::TimedOut);
         }
         if token & token::HALT != 0 {

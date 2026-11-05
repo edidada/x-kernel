@@ -64,3 +64,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 11:08 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_urb_enqueue` | every enqueue path starts from a running, unhalted controller |
 | 2026-11-05 11:09 | `/workspace/linux-7.1.8/drivers/usb/storage/transport.c` | `usb_stor_Bulk_reset` | BOT reset recovery before first use |
 | 2026-11-05 11:11 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_init` | gaps between configuration and the first bulk traffic |
+| 2026-11-05 11:18 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_async_advance` | IAAD doorbell forces the controller out of reclamation |
+| 2026-11-05 11:21 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `scan_async` | a queue head ahead of the ring blocks every endpoint behind it |
