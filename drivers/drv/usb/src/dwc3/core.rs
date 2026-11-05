@@ -104,6 +104,20 @@ pub fn init(
     // Role selection comes after the PHY words, as in dwc3_core_init:
     // `dwc3_phy_setup` runs before `dwc3_set_prtcap`.
     set_host_mode(regs);
+    // Dump the whole global block (0xc100..0xc300) so it can be diffed against
+    // the working board's, register for register. The SuperSpeed port exists
+    // now but never leaves RxDetect, and every PHY-side register already matches
+    // the working board — so the remaining difference is in this block.
+    {
+        let mut line = alloc::string::String::new();
+        for offset in (0xc100..0xc300).step_by(4) {
+            let value = regs.read32(offset);
+            if value != 0 {
+                line.push_str(&alloc::format!(" {offset:#05x}={value:#010x}"));
+            }
+        }
+        info!("dwc3: globals:{line}");
+    }
     info!(
         "dwc3: HCSPARAMS1 after host mode {:#010x} (max ports {})",
         regs.read32(0x04),
@@ -241,11 +255,12 @@ fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
     } else {
         config |= gux2phycfg::ENABLSLPM;
     }
-    // Linux clears SUSPHY before the PHY is initialised and only lets it suspend
-    // again from its `plat_start` hook, i.e. never during enumeration. The value
-    // copied from a *running* board has that bit set, which is the wrong state for
-    // a controller that still has to send its first SET_ADDRESS.
-    config &= !gux2phycfg::SUSPHY;
+    // SUSPHY is left as the working board has it. An earlier revision cleared it
+    // on the theory that a suspendable PHY could not answer the first
+    // SET_ADDRESS; with the ring, IOC, addressing and U3-port defects fixed the
+    // controller enumerates High-Speed devices fine with this bit set, and it is
+    // the only configuration difference left between this core and the working
+    // board's (every other global register is bit-identical, GUID aside).
     regs.write32(GUSB2PHYCFG, config);
     info!(
         "dwc3: GUSB2PHYCFG {before:#010x} -> {:#010x} (utmi_wide {utmi_wide} dis_enblslpm \

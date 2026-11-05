@@ -320,7 +320,24 @@ impl PhyHwOps for UsbDp {
             return Ok(());
         }
         self.u3_port_disable(false);
-        self.init()
+        let result = self.init();
+        // Post-init state, comparable register-for-register with the working
+        // board (PMA-relative offsets, read there through /dev/mem):
+        //   0x0000 0x6 / 0x0288 0xC0 / 0x0350 0x3E / 0x038c 0x0A /
+        //   0x0b84 0x40004 / 0x1b84 0x0
+        // 0x0288 is the lane mux (0xC0 = lanes 2,3 to DP), 0x0350 the LCPLL
+        // status, 0x038c the DP reset, 0x0b84/0x1b84 the per-lane RX-CDR locks.
+        log::info!(
+            "usbdp: post-init pma 0x0000={:#06x} 0x0288={:#06x} 0x0350={:#06x} 0x038c={:#06x} \
+             0x0b84={:#06x} 0x1b84={:#06x}",
+            self.pma.read32(0x0000),
+            self.pma.read32(0x0288),
+            self.pma.read32(0x0350),
+            self.pma.read32(0x038c),
+            self.pma.read32(0x0b84),
+            self.pma.read32(0x1b84),
+        );
+        result
     }
 
     /// `rockchip_u3phy_exit`: power USB mode back off.
