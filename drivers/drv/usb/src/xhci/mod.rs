@@ -891,6 +891,73 @@ fn speed_id(speed: Speed) -> u8 {
     }
 }
 
+/// `fls` — index of the highest set bit (1-based), as the reference's helper
+/// of the same name; 0 for 0.
+fn fls(value: u32) -> u32 {
+    32 - u32::from(value.leading_zeros())
+}
+
+/// Endpoint context parameters for one endpoint descriptor, transcribed from
+/// the reference's `xhci_endpoint_init` fill sequence: returns `(interval,
+/// max_burst, max_esit_payload)`.
+///
+/// - interval — `xhci_get_endpoint_interval`: control/bulk endpoints are
+///   serviced on demand (0; high-speed NAK rates are not used here),
+///   SuperSpeed and high-speed interrupt endpoints take `bInterval - 1` as
+///   the exponent of 125 µs units (`xhci_parse_exponent_interval`), and
+///   full/low-speed interrupt endpoints convert 1 ms frames with
+///   `fls(8·bInterval) - 1` clamped to 3..=10 (`xhci_parse_frame_interval`).
+///   Full-speed isochronous counts frames, not microframes, so its exponent
+///   is shifted by 3.
+/// - max_burst — `xhci_get_endpoint_max_burst`: the companion descriptor's
+///   `bMaxBurst` for SuperSpeed, the extra packets per microframe
+///   (`wMaxPacketSize >> 11`) for high-speed periodic endpoints, else 0.
+/// - max_esit_payload — `usb_endpoint_max_periodic_payload`: the companion's
+///   `wBytesPerInterval` for SuperSpeed, `max_packet · maxp_mult` otherwise,
+///   and 0 for control/bulk.
+fn endpoint_context_params(
+    speed: usb::Speed,
+    ep: &usb::descriptor::EndpointDescriptor,
+) -> (u32, u32, u32) {
+    let transfer = ep.transfer_type();
+    let periodic = transfer == 1 || transfer == 3; // isochronous | interrupt
+    let max_packet = u32::from(ep.max_packet_size) & 0x7ff; // usb_endpoint_maxp
+    let extra_per_uframe = (u32::from(ep.max_packet_size) >> 11) & 0x3; // maxp_mult - 1
+    let exponent_interval = |b: u8| u32::from(b.clamp(1, 16)) - 1;
+    let frame_interval = |b: u8| fls(u32::from(b) * 8).saturating_sub(1).clamp(3, 10);
+    let interval = if !periodic {
+        0
+    } else {
+        match speed {
+            usb::Speed::High | usb::Speed::Super | usb::Speed::SuperPlus => {
+                exponent_interval(ep.interval)
+            }
+            usb::Speed::Full => {
+                if transfer == 1 {
+                    exponent_interval(ep.interval) + 3
+                } else {
+                    frame_interval(ep.interval)
+                }
+            }
+            usb::Speed::Low => frame_interval(ep.interval),
+            usb::Speed::Unknown => 0,
+        }
+    };
+    let max_burst = match speed {
+        usb::Speed::Super | usb::Speed::SuperPlus => u32::from(ep.max_burst),
+        usb::Speed::High if periodic => extra_per_uframe,
+        _ => 0,
+    };
+    let max_esit = if !periodic {
+        0
+    } else if matches!(speed, usb::Speed::Super | usb::Speed::SuperPlus) {
+        u32::from(ep.bytes_per_interval)
+    } else {
+        max_packet * (extra_per_uframe + 1)
+    };
+    (interval, max_burst, max_esit)
+}
+
 impl Xhci {
     /// Takes the next event off the ring, if the controller published one.
     ///
@@ -1467,10 +1534,10 @@ impl Xhci {
             );
         }
         let ep0_ctx = dwords_per_context * (context::EP0_CONTEXT + 1);
-        write(ep0_ctx + 1, context::endpoint_dword1(4, ep0_max_packet));
+        write(ep0_ctx + 1, context::endpoint_dword1(4, ep0_max_packet, 0));
         write(ep0_ctx + 2, context::endpoint_dword2(ep0_ring, dcs));
         write(ep0_ctx + 3, (ep0_ring >> 32) as u32);
-        write(ep0_ctx + 4, context::endpoint_dword4(8));
+        write(ep0_ctx + 4, context::endpoint_tx_info(0, 8));
         let slot_id = u32::from(self.slots[slot_index].id);
         // What the controller is about to read: the input control context and the
         // contexts this command adds.
@@ -2004,16 +2071,15 @@ impl Xhci {
             if let Some(slot_index) = self.slots.iter().position(|slot| slot.id == hub.address) {
                 let interrupt = hub.configurations.first().and_then(|config| {
                     config.interfaces.first().and_then(|interface| {
-                        interface.endpoints.iter().find_map(|endpoint| {
-                            (endpoint.is_in() && endpoint.attributes & 0x03 == 3).then_some((
-                                endpoint.number(),
-                                endpoint.max_packet_size,
-                                endpoint.interval,
-                            ))
-                        })
+                        interface
+                            .endpoints
+                            .iter()
+                            .find(|endpoint| endpoint.is_in() && endpoint.transfer_type() == 3)
                     })
                 });
-                if let Err(err) = self.configure_hub(dev, slot_index, info.ports, interrupt) {
+                if let Err(err) =
+                    self.configure_hub(dev, slot_index, info.ports, interrupt, hub.speed)
+                {
                     log::error!("xhci: hub {} configure failed: {err:?}", hub.address);
                 }
             }
@@ -2243,7 +2309,8 @@ impl Xhci {
         dev: &driver_base::Device<'_, driver_base::PlatformBus>,
         slot_index: usize,
         num_ports: u8,
-        interrupt: Option<(u8, u16, u8)>,
+        interrupt: Option<&usb::descriptor::EndpointDescriptor>,
+        speed: usb::Speed,
     ) -> Result<(), KError> {
         let dwords = self.context_size / 4;
         let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
@@ -2260,7 +2327,7 @@ impl Xhci {
         // `xhci_update_hub_device()` writes DEV_HUB + MAX_PORTS with add_flags
         // = SLOT, and `xhci_add_endpoint()` adds the endpoint with
         // add_flags = SLOT | ep_flag and a raised `context entries`. One
-        // merged command answered Context State Error (17).
+        // merged command answered Parameter Error (17).
         //
         // The slot context the controller built is in its OWN device context:
         // Configure Endpoint must present the current state, not a guess.
@@ -2309,8 +2376,9 @@ impl Xhci {
         // the endpoint's context index (endpoint * 2 + direction + 1). This is
         // what transitions the slot to Configured, which xHCI 4.3.3 requires
         // before devices behind the hub are addressed.
-        if let Some((ep_number, max_packet, interval)) = interrupt {
-            let context_index = (u32::from(ep_number) * 2) + 1;
+        if let Some(ep) = interrupt {
+            let (interval, max_burst, max_esit) = endpoint_context_params(speed, ep);
+            let context_index = (u32::from(ep.number()) * 2) + 1;
             let entries = context_index + 1;
             let ring = Ring::with_link(
                 dev.res()
@@ -2331,24 +2399,30 @@ impl Xhci {
                     core::ptr::write_volatile(input.wrapping_add(offset), value);
                 }
             };
-            // dword0: interval lives at bits 23:16 (the state bits are
-            // controller-owned).
-            write(ctx, (u32::from(interval) & 0xff) << 16);
+            // dword0: interval at bits 23:16 in 2^interval × 125 µs units
+            // (`xhci_get_endpoint_interval`); Mult and the ESIT high bits are
+            // 0 for a hub's status endpoint.
+            write(ctx, context::endpoint_dword0(interval));
+            // dword1: interrupt IN (type 7), the descriptor's max packet and
+            // Max Burst Size. The endpoint number itself has no field here —
+            // it lives only in `context_index`. Bits 15:8 are Max Burst Size:
+            // putting the endpoint number there (as this driver once did) is
+            // ignored on high speed but rejected with Parameter Error (17) on
+            // SuperSpeed, where the field must match the companion
+            // descriptor's bMaxBurst (`xhci_get_endpoint_max_burst`).
             write(
                 ctx + 1,
-                context::endpoint_dword1_num(7, max_packet, ep_number),
+                context::endpoint_dword1(7, ep.max_packet_size, max_burst as u8),
             );
             write(ctx + 2, context::endpoint_dword2(ring_addr, dcs));
             write(ctx + 3, (ring_addr >> 32) as u32);
-            write(
-                ctx + 4,
-                context::endpoint_dword4(u32::from(max_packet).max(8)),
-            );
+            // dword4: ESIT payload and average TRB length, both the periodic
+            // service-interval bytes for a periodic endpoint
+            // (`xhci_endpoint_init`: avg_trb_len = max_esit_payload).
+            write(ctx + 4, context::endpoint_tx_info(max_esit, max_esit));
             // Input control context: add SLOT and the new endpoint; entries
             // raised to cover it. Contexts between EP0 and the new endpoint
-            // must exist as disabled (state 0) entries first: the controller
-            // answered Context State Error (17) when entries jumped 1 -> 8
-            // over contexts it had never been given.
+            // must exist as disabled (state 0) entries per xHCI 4.4.23.
             for gap in 2..context_index {
                 let gap_ctx = dwords * (gap + 1) as usize;
                 for dword in 0..5usize {

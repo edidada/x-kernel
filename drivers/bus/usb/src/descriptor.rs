@@ -21,6 +21,9 @@ pub mod ty {
     pub const ENDPOINT: u8 = 5;
     pub const DEVICE_QUALIFIER: u8 = 6;
     pub const BOS: u8 = 15;
+    /// SuperSpeed Endpoint Companion (`usb_ss_ep_comp_descriptor`); it
+    /// immediately follows the endpoint descriptor it belongs to.
+    pub const SS_EP_COMPANION: u8 = 0x30;
 }
 
 /// Standard request codes (`bRequest`).
@@ -111,6 +114,15 @@ pub struct EndpointDescriptor {
     pub attributes: u8,
     pub max_packet_size: u16,
     pub interval: u8,
+    /// `ss_ep_comp.bMaxBurst`: packets per burst minus one (SuperSpeed only;
+    /// zero when the companion descriptor is absent, which is the USB core's
+    /// `usb_parse_ss_endpoint_companion()` fallback). The xHCI endpoint
+    /// context's Max Burst Size field takes this value verbatim — anything
+    /// else there is an invalid parameter for a SuperSpeed endpoint.
+    pub max_burst: u8,
+    /// `ss_ep_comp.wBytesPerInterval`: bytes per service interval for
+    /// periodic endpoints; the xHCI Max ESIT Payload.
+    pub bytes_per_interval: u16,
 }
 
 impl EndpointDescriptor {
@@ -186,6 +198,7 @@ pub fn parse_config_descriptors(buf: &[u8]) -> KResult<Vec<ConfigDescriptor>> {
             if item_len < 2 || cursor + item_len > buf.len() {
                 break;
             }
+            let mut step = item_len;
             match buf[cursor + 1] {
                 ty::INTERFACE if item_len >= 9 => {
                     configuration.interfaces.push(InterfaceDescriptor {
@@ -199,17 +212,34 @@ pub fn parse_config_descriptors(buf: &[u8]) -> KResult<Vec<ConfigDescriptor>> {
                 }
                 ty::ENDPOINT if item_len >= 7 => {
                     if let Some(interface) = configuration.interfaces.last_mut() {
-                        interface.endpoints.push(EndpointDescriptor {
+                        let mut endpoint = EndpointDescriptor {
                             address: buf[cursor + 2],
                             attributes: buf[cursor + 3],
                             max_packet_size: read_u16(buf, cursor + 4),
                             interval: buf[cursor + 6],
-                        });
+                            max_burst: 0,
+                            bytes_per_interval: 0,
+                        };
+                        // A SuperSpeed Endpoint Companion (0x30) sits directly
+                        // after its endpoint descriptor, exactly where the USB
+                        // core's `usb_parse_ss_endpoint_companion()` picks it
+                        // up; it carries the burst size the endpoint context
+                        // must be given.
+                        let after = cursor + item_len;
+                        if buf.get(after + 1) == Some(&ty::SS_EP_COMPANION) {
+                            let companion_len = buf[after] as usize;
+                            if companion_len >= 6 && after + companion_len <= buf.len() {
+                                endpoint.max_burst = buf[after + 2] & 0x1f;
+                                endpoint.bytes_per_interval = read_u16(buf, after + 4);
+                                step += companion_len;
+                            }
+                        }
+                        interface.endpoints.push(endpoint);
                     }
                 }
                 _ => {}
             }
-            cursor += item_len;
+            cursor += step;
         }
         offset += length.max(configuration.total_length as usize);
         configurations.push(configuration);

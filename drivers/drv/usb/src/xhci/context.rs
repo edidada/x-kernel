@@ -69,22 +69,33 @@ pub fn slot_dword2_tt(ttt: u8, tt_port: u8, hub_slot: u8) -> u32 {
         | ((u32::from(ttt) & 0x3) << 16)
 }
 
-/// Endpoint context dword 1: CErr, endpoint type and max packet size.
+/// Endpoint context dword 0: interval, Mult and the Max ESIT Payload high
+/// bits (xHCI 1.1 §6.2.1.1 `ep_info`).
 ///
-/// `ep_type` is 4 (control) for EP0, 2 (bulk OUT), 6 (bulk IN), 3 (interrupt
-/// OUT) or 7 (interrupt IN) — the values xHCI assigns, not the USB `bmAttributes`
-/// encoding.
-pub fn endpoint_dword1(ep_type: u32, max_packet_size: u16) -> u32 {
-    endpoint_dword1_num(ep_type, max_packet_size, 0)
+/// `interval` is the polling rate in 2^interval × 125 µs units, already
+/// converted per the device speed (`xhci_get_endpoint_interval`). Mult stays
+/// 0 outside stream-capable isochronous endpoints (`xhci_get_endpoint_mult`),
+/// and the ESIT high bits only exist on hosts with the LEC capability — for
+/// the small payloads this stack configures they are 0 either way.
+pub fn endpoint_dword0(interval: u32) -> u32 {
+    (interval & 0xff) << 16
 }
 
-/// Same, with the endpoint number (bits 11:8). EP0 is endpoint 0, so the
-/// one-argument form above is the EP0 case; every configured endpoint must
-/// carry its own number or the controller sees the wrong endpoint type/number
-/// pair.
-pub fn endpoint_dword1_num(ep_type: u32, max_packet_size: u16, ep_number: u8) -> u32 {
+/// Endpoint context dword 1 (`ep_info2`, xHCI 1.1 §6.2.1.2 / `xhci.h`):
+/// CErr bits 2:1, endpoint type bits 5:3, **Max Burst Size bits 15:8** and
+/// Max Packet Size bits 31:16.
+///
+/// There is NO endpoint-number field in the endpoint context: the number and
+/// direction live only in the context index (`ep * 2 + direction + 1`,
+/// `xhci_get_endpoint_index`). Writing the number into bits 11:8 — what this
+/// driver once did — actually programs Max Burst Size, and the controller
+/// rejects a SuperSpeed endpoint whose burst field contradicts its descriptor
+/// with Parameter Error (completion code 17). Max Burst is the companion
+/// descriptor's `bMaxBurst` for SuperSpeed, and 0 for every other speed
+/// (`xhci_get_endpoint_max_burst`).
+pub fn endpoint_dword1(ep_type: u32, max_packet_size: u16, max_burst: u8) -> u32 {
     let cerr = 3 << 1;
-    (cerr) | (ep_type << 3) | ((u32::from(ep_number) & 0xf) << 8) | ((max_packet_size as u32) << 16)
+    cerr | (ep_type << 3) | ((u32::from(max_burst) & 0xff) << 8) | ((max_packet_size as u32) << 16)
 }
 
 /// Endpoint context dword 2: transfer ring dequeue pointer, low half.
@@ -95,9 +106,16 @@ pub fn endpoint_dword2(ring_addr: u64, dcs: bool) -> u32 {
     (ring_addr as u32 & !0xf) | u32::from(dcs)
 }
 
-/// Endpoint context dword 4: average TRB length, in bytes.
-pub fn endpoint_dword4(average_trb_len: u32) -> u32 {
-    average_trb_len & 0xffff
+/// Endpoint context dword 4 (`tx_info`): Max ESIT Payload bits 31:16 and
+/// Average TRB Length bits 15:0.
+///
+/// For a periodic endpoint both are the bytes the host must move per service
+/// interval (`usb_endpoint_max_periodic_payload`, and `avg_trb_len =
+/// max_esit_payload` in `xhci_endpoint_init`); the control endpoint is not
+/// periodic, so its ESIT payload is 0 and its average TRB length is the
+/// mandated 8 (xHCI ≥ 1.0).
+pub fn endpoint_tx_info(max_esit_payload: u32, average_trb_len: u32) -> u32 {
+    ((max_esit_payload & 0xffff) << 16) | (average_trb_len & 0xffff)
 }
 
 /// Input control context: which contexts this command adds (`add`) and which it
