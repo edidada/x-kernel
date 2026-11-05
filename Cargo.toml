@@ -191,6 +191,7 @@ pagecache = { path = "mm/pagecache" }
 page_table = { path = "mm/page_table" }
 vmobj = { path = "mm/vmobj" }
 kext4 = { path = "fs/filesystems/kext4", default-features = false }
+rockchip-pmu = { path = "drivers/soc/rockchip-pmu" }
 
 # Internal: IO and network subsystem
 fbdevice = { path = "io/fbdevice" }

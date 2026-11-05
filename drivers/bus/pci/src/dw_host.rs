@@ -36,6 +36,7 @@ use driver_base::{
     RuntimeError,
 };
 use kspin::SpinNoIrq;
+use rockchip_pmu;
 
 use crate::{ConfigurationAccess, DeviceFunction, PciRoot};
 
@@ -671,43 +672,22 @@ pub struct DwHostDriver;
 /// 0x290 bit 22) and records the PM-framework gap.
 fn enable_pcie_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
     log::info!("pcie-dw: enabling the pcie power domain (PD_PCIE)");
-    const PMU_BASE: u64 = 0xfd8d_8000;
-    const PD_PWR_CON: usize = 0x150; // pwr_offset(0x14c) + domain offset(0x4)
-    const PD_REPAIR_STATUS: usize = 0x290; // repair_status_offset
-    const PD_PWR_BIT: u32 = 1 << 7; // domain 34's pwr bit
-    let pmu = dev.res().iomap_region(
-        driver_base::MmioRegion::new(PMU_BASE as usize, 0x400),
-        "pcie-pmu",
-    )?;
-    // Polarity taken from the board's own working kernel, not from the
-    // reference's comments: with PCIe running, PWR_CON(0x150) reads
-    // 0x000004c1 (bit 7 SET = powered) and REPAIR_STATUS(0x290) reads
-    // 0xfe9f0001 (bit 22 CLEAR = no repair pending). Our pre-fix state was
-    // the exact inverse (bit7 clear, bit22 set), and the DBI window was not
-    // even decoded.
-    if pmu.read32(PD_PWR_CON) & PD_PWR_BIT != 0 {
-        log::info!("pcie-dw: PD_PCIE already on");
-        return Ok(());
-    }
-    // Hiword write (mask | value): request bit 7 = 1.
-    pmu.write32(PD_PWR_CON, (PD_PWR_BIT << 16) | PD_PWR_BIT);
-    for _ in 0..10_000 {
-        if pmu.read32(PD_PWR_CON) & PD_PWR_BIT != 0 {
-            log::info!(
-                "pcie-dw: PD_PCIE powered on (pwr_con {:#010x} repair {:#010x})",
-                pmu.read32(PD_PWR_CON),
-                pmu.read32(PD_REPAIR_STATUS),
-            );
-            return Ok(());
-        }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
-    }
-    log::error!(
-        "pcie-dw: PD_PCIE failed to power up (pwr_con {:#010x} repair {:#010x})",
-        pmu.read32(PD_PWR_CON),
-        pmu.read32(PD_REPAIR_STATUS),
-    );
-    Err(ProbeError::Fatal(RuntimeError::Io))
+    // Through the shared PMU module: `rockchip_pd_power()`'s mutex and
+    // already-on early exit, so a PD_PCIE enable can no longer interleave with
+    // the USB driver's reads of the same PMU block.
+    rockchip_pmu::attach_via(dev).map_err(|err| {
+        log::error!("pcie-dw: could not attach the PMU window: {err:?}");
+        ProbeError::Fatal(RuntimeError::Io)
+    })?;
+    rockchip_pmu::power_domain_on(
+        "pcie",
+        rockchip_pmu::PD_PCIE_BIT,
+        rockchip_pmu::PD_PCIE_REPAIR_BIT,
+    )
+    .map_err(|err| {
+        log::error!("pcie-dw: PD_PCIE failed to power up: {err:?}");
+        ProbeError::Fatal(RuntimeError::Io)
+    })
 }
 
 /// Bring-up diagnostics: the parsed window bases (a mis-strided `reg`

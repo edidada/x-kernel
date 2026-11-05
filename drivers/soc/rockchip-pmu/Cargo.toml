@@ -1,0 +1,23 @@
+[package]
+name = "rockchip-pmu"
+description = "RK3588 PMU power domains, shared by the drivers whose devices sit in them"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["rockchip", "power", "rk3588"]
+categories = ["os", "no-std"]
+
+[dependencies]
+driver_base = { workspace = true }
+kerrno = { workspace = true }
+khal = { workspace = true }
+ktime_types.workspace = true
+ksync.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true
+

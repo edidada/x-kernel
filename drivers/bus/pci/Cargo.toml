@@ -24,6 +24,7 @@ memspace.workspace = true
 khal = { workspace = true }
 ktime_types = { workspace = true, optional = true }
 driver_base = { workspace = true }
+rockchip-pmu = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }
 tock-registers = { workspace = true }

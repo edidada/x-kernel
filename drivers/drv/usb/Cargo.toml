@@ -20,6 +20,7 @@ usb = { workspace = true }
 # The mass-storage disk is published through the block class, the same way
 # drv/block publishes its ramdisk (`Gendisk::new` + `dev.publish(&BLOCK, ..)`).
 subsys_block = { workspace = true }
+rockchip-pmu = { workspace = true }
 # Diagnostic: reading the devnode snapshot says whether a published node reached
 # the /dev projection at all.
 devnode = { workspace = true }

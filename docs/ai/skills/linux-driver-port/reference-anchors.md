@@ -76,3 +76,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 12:01 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | context index = ep*2+dir; dword1 carries the endpoint number; entries cover it |
 | 2026-11-05 12:11 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_init` | the retry re-runs hub_port_reset before addressing again |
 | 2026-11-05 12:35 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_get_endpoint_flag` | add-flags bits cover only the endpoint being added; EP0 is never re-added |
+| 2026-11-05 12:52 | `/workspace/linux-7.1.8/drivers/pmdomain/rockchip/pm-domains.c` | `rockchip_pd_power` | PMU mutex + already-on early return: every driver goes through one locked implementation |

@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn>
+// See LICENSES for license details.
+
 //! USB Mass Storage, Bulk-Only Transport (BOT).
 //!
 //! The smallest useful slice of `drivers/usb/storage/`: a command block wrapper

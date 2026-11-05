@@ -19,6 +19,7 @@ use driver_base::{
     PoweredPhy, ProbeError, ResetHandle, RuntimeError,
 };
 use log::info;
+use rockchip_pmu;
 
 /// `of_device_id`: the generic Synopsys node.
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("snps,dwc3"))];
@@ -209,49 +210,24 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
 /// register access raises a synchronous external abort instead of reporting an
 /// error.
 fn enable_power_domain(dev: &mut Device<'_, PlatformBus>) -> Result<(), ProbeError> {
-    const PMU_BASE: u64 = 0xfd8d_8000;
-    const PD_PWR_CON: usize = 0x150;
-    const PD_MEM_PWR: usize = 0x1a4;
-    // The authoritative "is it on" bit: repair_status, where 1 means powered
-    // (pm-domains' rockchip_pmu_domain_is_on reads exactly this when the domain
-    // has a repair_status_mask, which PD_USB does -- BIT(25)).
-    const PD_REPAIR_STATUS: usize = 0x290;
-    const PD_USB_REPAIR_BIT: u32 = 1 << 25;
-    const PD_USB_BIT: u32 = 1 << 11;
-    let pmu = dev.res().iomap_region(
-        driver_base::MmioRegion::new(PMU_BASE as usize, 0x400),
-        "usb-pmu",
-    )?;
-    if pmu.read32(PD_PWR_CON) & PD_USB_BIT == 0 {
-        info!(
-            "dwc3: PD_USB already powered ({:#010x} mem {:#010x})",
-            pmu.read32(PD_PWR_CON),
-            pmu.read32(PD_MEM_PWR),
-        );
-    } else {
-        // Hiword write: write-enable bit 11, clear it.
-        pmu.write32(PD_PWR_CON, PD_USB_BIT << 16);
-        for _ in 0..10_000 {
-            if pmu.read32(PD_PWR_CON) & PD_USB_BIT == 0 {
-                break;
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1));
-        }
-        if pmu.read32(PD_PWR_CON) & PD_USB_BIT != 0 {
-            log::error!(
-                "dwc3: PD_USB stayed powered down (pwr_con {:#010x})",
-                pmu.read32(PD_PWR_CON),
-            );
-            return Err(ProbeError::Fatal(RuntimeError::Io));
-        }
-    }
-    let repair = pmu.read32(PD_REPAIR_STATUS);
+    // `rockchip_pd_power()` semantics through the shared PMU module: the PMU
+    // mutex serialises the two dwc3 controllers and the PCIe driver, and a
+    // domain already in the requested state is a no-op.
+    rockchip_pmu::attach_via(dev).map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
+    let Some((pwr_con, mem_pwr, repair)) = rockchip_pmu::state_words() else {
+        return Err(ProbeError::Fatal(RuntimeError::Io));
+    };
     info!(
-        "dwc3: PD_USB state pwr_con {:#010x} mem {:#010x} repair {repair:#010x} (on {})",
-        pmu.read32(PD_PWR_CON),
-        pmu.read32(PD_MEM_PWR),
-        repair & PD_USB_REPAIR_BIT != 0,
+        "dwc3: PD_USB state pwr_con {pwr_con:#010x} mem {mem_pwr:#010x} repair {repair:#010x} (on \
+         {})",
+        repair & rockchip_pmu::PD_USB_REPAIR_BIT != 0,
     );
+    rockchip_pmu::power_domain_on(
+        "usb",
+        rockchip_pmu::PD_USB_BIT,
+        rockchip_pmu::PD_USB_REPAIR_BIT,
+    )
+    .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
     enable_vbus(dev)
 }
 

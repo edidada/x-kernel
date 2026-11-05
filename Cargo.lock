@@ -1386,6 +1386,7 @@ dependencies = [
  "ktime_types",
  "log",
  "of",
+ "rockchip-pmu",
  "subsys-block",
  "unittest",
  "usb",
@@ -3940,6 +3941,7 @@ dependencies = [
  "lazyinit",
  "log",
  "memspace",
+ "rockchip-pmu",
  "tock-registers 0.10.1",
 ]
 
@@ -4632,6 +4634,18 @@ dependencies = [
  "const-default",
  "libc",
  "rustversion",
+]
+
+[[package]]
+name = "rockchip-pmu"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-base",
+ "kerrno",
+ "khal",
+ "ksync",
+ "ktime_types",
+ "log",
 ]
 
 [[package]]

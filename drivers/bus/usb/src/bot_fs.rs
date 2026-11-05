@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn>
+// See LICENSES for license details.
+
 //! Bring-up probe: read the ext4 root directory over the mass-storage path.
 //!
 //! This is deliberately a probe and not a filesystem: it walks exactly the four
