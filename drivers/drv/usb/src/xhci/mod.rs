@@ -2313,6 +2313,13 @@ impl Xhci {
                             power_on_2ms: 0,
                         },
                     )
+                    .map(|speed| match speed {
+                        usb::hub::Speed::Low => usb::Speed::Low,
+                        usb::hub::Speed::Full => usb::Speed::Full,
+                        usb::hub::Speed::High => usb::Speed::High,
+                        usb::hub::Speed::Super => usb::Speed::Super,
+                        usb::hub::Speed::Unknown => usb::Speed::High,
+                    })
                 } else {
                     self.reset_hub_port(hub, entry.port, protocol)
                 };

@@ -417,9 +417,7 @@ pub fn reset_port_warm(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) 
     // A warm reset re-runs link training; it takes longer than a hot reset.
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
     for _ in 0..RESET_POLLS {
-        let Some((status, change)) = port_status(hcd, address, port) else {
-            return None;
-        };
+        let (status, change) = port_status(hcd, address, port)?;
         if change & PORT_CH_BH_RESET != 0 {
             clear_changes(hcd, address, port, change, info);
             let speed = speed_of(status, info);
@@ -461,11 +459,11 @@ pub fn redetect_link(hcd: &mut dyn Hcd, address: u8, port: u8) -> bool {
     }
     log::info!("usb: hub {address} port {port}: link driven to Rx.Detect, waiting for reconnect");
     for _ in 0..200 {
-        if let Some((_, change)) = port_status(hcd, address, port) {
-            if change & PORT_CH_CONNECTION != 0 {
-                log::info!("usb: hub {address} port {port}: device reconnected");
-                return true;
-            }
+        if let Some((_, change)) = port_status(hcd, address, port)
+            && change & PORT_CH_CONNECTION != 0
+        {
+            log::info!("usb: hub {address} port {port}: device reconnected");
+            return true;
         }
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
     }
