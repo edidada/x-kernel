@@ -83,8 +83,15 @@ pub mod portsc {
 /// Completion codes (`TRB Completion Code`, xHCI 1.1 §6.4.2).
 pub mod code {
     pub const SUCCESS: u8 = 1;
+    /// `COMP_USB_TRANSACTION_ERROR` (`xhci.h:837`).
+    pub const TRANSACTION_ERROR: u8 = 4;
     pub const STALL: u8 = 6;
     pub const SHORT_PACKET: u8 = 13;
+    /// `COMP_SPLIT_TRANSACTION_ERROR` (`xhci.h:868`) — 36, not 5: code 5 is
+    /// `COMP_TRB_ERROR`. The two mean opposite things (a wire error halts the
+    /// endpoint, a TRB error does not), so the value has to come from the
+    /// reference rather than from the ordering of the enum.
+    pub const SPLIT_TRANSACTION_ERROR: u8 = 36;
 }
 
 /// TRB types this driver builds or consumes.
@@ -165,6 +172,9 @@ pub mod trb {
     pub const DIR_IN: u32 = 1 << 16;
     /// Immediate data (Setup TRB carries the packet in the parameter word).
     pub const IDT: u32 = 1 << 6;
+    /// `TRB_TSP` (`xhci.h:978`): "Transfer State Preserve", which makes Reset
+    /// Endpoint the soft variant (`xhci_queue_reset_ep`, xhci-ring.c:4483).
+    pub const TSP: u32 = 1 << 9;
     /// Transfer Type on the Setup Stage TRB (dword 2 bits 17:16), xHCI 1.0
     /// §6.4.1.2.1: 2 = OUT data stage, 3 = IN data stage. It is REQUIRED —
     /// with it absent the controller treats the transfer as having no data

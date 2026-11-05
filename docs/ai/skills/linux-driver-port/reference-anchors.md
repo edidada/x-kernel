@@ -96,3 +96,9 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 15:00 | `/workspace/linux-7.1.8/drivers/usb/core/hub.h` | `hub_power_on_good_delay` | external hub power-on wait = max(bPwrOn2PwrGood*2ms, 100ms) |
 | 2026-11-05 15:10 | `/workspace/linux-7.1.8/drivers/usb/core/hub.c` | `hub_port_reset warm branch / hub_port_disable / hub_set_port_link_state` | BH reset = SetFeature(28), completion C_BH_RESET(29); SS disable = link to Rx.Detect (wIndex = (LS<<8)|port); no routine U0 write after reset |
 | 2026-11-05 15:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_urb_dequeue / start_unlink_async` | async list must stay intact; IAAD forces the controller out of reclamation to re-walk the list |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_event` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `handle_cmd_completion` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_halted_host_endpoint` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_halted_endpoint` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_reset_ep` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_set_deq` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |

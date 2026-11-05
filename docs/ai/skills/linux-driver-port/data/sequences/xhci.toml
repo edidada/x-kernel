@@ -1,0 +1,112 @@
+# xHCI 事件路径的参考序列（port: xhci）。
+#
+# 权威源码：`/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c`（mainline 7.1.8，
+# 板上 vendor 内核 6.1 的 xhci 与它在事件架构上同源；DWC3 差异在 host.c 的 quirk，
+# 不在这条路径上）。
+#
+# 为什么这条 path 值得建序列：本 port 最初自研了"等待匹配自己的事件"的模型
+# （事件可按 (slot,ep) 挑出来、命令按 TRB 地址匹配、超时后 Stop/Reset 兜底），
+# 结果一整轮 bring-up 都在给这套自研结构打补丁（pending 队列、双参数匹配、
+# Stop 回退 Reset）。参考的结构是**事件严格按 ring 顺序消费、按类型分派、
+# 命令按 FIFO 配对、端点恢复由完成处理器发起**。序列建在这里，是为了让
+# "机制"和"位段"一样有可对照的真值。
+#
+# 生成方式：`ldp sequence extract <file> --function <fn> --path irq` 对这些
+# static 函数抽不出步骤（switch 结构），按 skill 允许的方式人工归并；
+# 每个 src 是 xhci-ring.c 的行号，v2 侧的锚点是 `// ldp:step <id>`。
+
+[port]
+name = "xhci"
+crate_path = "drivers/drv/usb"
+authoritative = "linux-7.1.8:drivers/usb/host/xhci-ring.c"
+provenance = """
+references.json id = linux-7.1.8（/workspace/linux-7.1.8，钉死的主线树）。
+复核命令：
+  sed -n '2990,3020p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # xhci_handle_event 调用点
+  sed -n '1795,1850p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # handle_cmd_completion 的 FIFO 配对
+  sed -n '2191,2268p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # xhci_halted_host_endpoint / finish_td
+  sed -n '960,1030p'  /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # xhci_handle_halted_endpoint
+  sed -n '1556,1590p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # xhci_handle_cmd_reset_ep
+"""
+# 可达性起点：枚举/传输路径的入口。
+entries = [
+  "control_transfer",
+  "control_transfer_slot",
+  "command",
+  "pump_events",
+]
+
+# ---- irq：事件环消费与分派（xhci_handle_event / handle_tx_event / handle_cmd_completion）
+[[path]]
+name = "irq"
+
+[[path.step]]
+id = "irq.dequeue-event"
+src = "xhci-ring.c:3000"
+op = "poll"
+target = "event_ring->dequeue (cycle bit match)"
+note = "按 ring 顺序取事件；取一个就推进 ERDP 一个（xhci_update_erst_dequeue）"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.dispatch-type"
+src = "xhci-ring.c:3005"
+op = "call"
+target = "TRB type switch -> handle_tx_event / handle_cmd_completion / port status"
+note = "事件只按类型分派一次，不存在“留给某个等待者”的旁路"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.tx-find-ep"
+src = "xhci-ring.c:2640"
+op = "call"
+target = "TRB_TO_SLOT_ID / TRB_TO_EP_INDEX -> xhci_get_virt_ep"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.tx-td-front"
+src = "xhci-ring.c:2680"
+op = "poll"
+target = "list_first_entry(&ep_ring->td_list) + xhci_trb_in_td()"
+note = "事件必须落在队首 TD 的 TRB 范围内；否则属于已回收的 TD，只报告不完成"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.tx-halt"
+src = "xhci-ring.c:2268"
+op = "call"
+target = "xhci_halted_host_endpoint() -> xhci_handle_halted_endpoint(EP_HARD_RESET)"
+note = "STALL 与 USB/Split Transaction Error 都会 halt 端点（EP0 也不例外）"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.halt-reset-ep"
+src = "xhci-ring.c:1014"
+op = "call"
+target = "xhci_reset_halted_ep() (EP_HALTED 去重)"
+note = "已挂起一个 Reset Endpoint 时不再排第二个：第二个会被回 Context State Error"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.cmd-completion"
+src = "xhci-ring.c:1837"
+op = "poll"
+target = "list_first_entry(&xhci->cmd_list) + cmd->command_trb == ring->dequeue"
+note = "命令完成永远属于最老的一条；不按事件里的地址去猜"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.cmd-reset-ep-done"
+src = "xhci-ring.c:1578"
+op = "call"
+target = "xhci_invalidate_cancelled_tds() -> queue Set TR Dequeue"
+note = "Reset Endpoint 把端点送回 Running，但 dequeue 还停在 halted TD 上"
+v2 = "anchored"
+
+[[path.step]]
+id = "irq.cmd-set-deq-done"
+src = "xhci-ring.c:1416"
+op = "call"
+target = "xhci_handle_cmd_set_deq()"
+note = "Set TR Deq 完成后端点才真正越过错过的 TD"
+v2 = "anchored"
