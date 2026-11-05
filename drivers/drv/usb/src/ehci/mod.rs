@@ -419,6 +419,31 @@ impl Ehci {
     fn recover_async_schedule(&self) {
         let status = self.regs.read32(self.operational + op::USBSTS);
         self.regs.write32(self.operational + op::USBSTS, status);
+        // A halted controller leaves the queue head it was processing marked
+        // HALTED in its overlay, and clearing USBSTS does not clear that. When
+        // it is the head of the reclamation list, the whole asynchronous
+        // schedule stops advancing and every later transfer waits forever with
+        // reclamation reported -- which is exactly what the failing reads look
+        // like. Rewrite the head's overlay and its links.
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let head_bytes = head.cast::<u8>();
+        // SAFETY: dword 6 of the head queue head is its overlay token.
+        let token = unsafe { core::ptr::read_volatile(head_bytes.wrapping_add(24).cast::<u32>()) };
+        // SAFETY: dword 6 of the same queue head.
+        unsafe {
+            core::ptr::write_volatile(
+                head_bytes.wrapping_add(24).cast::<u32>(),
+                token & (regs::token::DT | regs::token::PING),
+            );
+        }
+        // SAFETY: dword 0 of the same queue head: back to a self-linked head.
+        unsafe {
+            core::ptr::write_volatile(head.cast::<u32>(), self.qh.bus_addr() as u32 | 2);
+        }
+        // SAFETY: dword 4 of the same queue head.
+        unsafe {
+            core::ptr::write_volatile(head_bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
+        }
         let command = self.regs.read32(self.operational + op::USBCMD);
         self.regs
             .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
@@ -587,6 +612,25 @@ impl Ehci {
                 status & sts::ASS != 0,
             );
         }
+        // Did the controller pick the queue head up at all? A queue head that is
+        // in the asynchronous list has its descriptor overlaid into the overlay
+        // area within a microframe; one that was never fetched keeps the value
+        // software wrote. That distinction is the difference between "the device
+        // is not answering" and "the queue head is not in the list".
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(2_000));
+        // SAFETY: dword 6 of this endpoint's queue head is its overlay token.
+        let fetched = unsafe {
+            core::ptr::read_volatile(
+                head.wrapping_add(BULK_QH)
+                    .cast::<u8>()
+                    .wrapping_add(24)
+                    .cast::<u32>(),
+            )
+        };
+        log::info!(
+            "ehci: bulk qh {BULK_QH} overlay {fetched:#010x} after link (descriptor \
+             {qtd_token:#010x})"
+        );
         let mut token = token::ACTIVE;
         for _ in 0..POLL_STEPS {
             // SAFETY: dword 2 of the qTD is its token.

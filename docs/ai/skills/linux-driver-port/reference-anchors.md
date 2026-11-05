@@ -37,3 +37,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 07:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_append_tds` | a transfer descriptor the controller may still own is never rewritten: dummy qTD / rotating slots |
 | 2026-11-05 07:07 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_work` | USBSTS.REC: the controller has released the asynchronous schedule before software edits it |
 | 2026-11-05 07:08 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_run` | the run bit gates all schedule fetches |
+| 2026-11-05 07:11 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | queue head overlay is the record of what the controller fetched |
+| 2026-11-05 07:12 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | a halted queue head keeps HALTED in its overlay until software clears it |
