@@ -560,7 +560,21 @@ impl Ehci {
         unsafe {
             core::ptr::write_volatile(head.wrapping_add(BULK_QH), qh);
         }
+        // Stop the schedule for the edit itself: with RS cleared the controller
+        // fetches nothing, so the queue head and its descriptor cannot be read
+        // while they are being written. The alternative -- trusting the
+        // reclamation bit to mean "the controller is done with this QH" -- left
+        // an intermittent Host System Error, which is this controller's way of
+        // saying it fetched a descriptor mid-write.
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        self.regs
+            .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200));
         self.link_endpoint(BULK_QH);
+        self.regs.write32(
+            self.operational + op::USBCMD,
+            command | regs::cmd::RS | regs::cmd::ASE,
+        );
         // Snapshot what the schedule was given, and whether the controller is
         // even running, at the moment the transfer is handed over.
         {
@@ -582,10 +596,19 @@ impl Ehci {
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
-        // Take the endpoint back off the schedule, then let the controller leave
-        // the queue head before it is rewritten: software must not modify a QH
-        // the controller still owns, or the controller's own overlay write can
-        // land after ours and undo the new transfer pointer.
+        // A queue head may only be modified while the controller has released
+        // it. `USBSTS.REC` (reclamation) says the asynchronous schedule has no
+        // work left, i.e. the controller finished this queue head and parked it;
+        // touching it earlier is what produced the intermittent Host System
+        // Errors, because the controller's own overlay write landed after ours
+        // and left it fetching a stale descriptor.
+        for _ in 0..POLL_STEPS {
+            let status = self.regs.read32(self.operational + op::USBSTS);
+            if status & sts::REC != 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
         // SAFETY: dword 0 of the list head.
         unsafe {
             core::ptr::write_volatile(head.cast::<u32>(), self.qh.bus_addr() as u32 | 2);
