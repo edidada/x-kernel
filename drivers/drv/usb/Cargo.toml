@@ -20,6 +20,9 @@ usb = { workspace = true }
 # The mass-storage disk is published through the block class, the same way
 # drv/block publishes its ramdisk (`Gendisk::new` + `dev.publish(&BLOCK, ..)`).
 subsys_block = { workspace = true }
+# Diagnostic: reading the devnode snapshot says whether a published node reached
+# the /dev projection at all.
+devnode = { workspace = true }
 # `BlockDeviceOperations::read_block` takes `&self`, so the controller has to be
 # shareable between the USB side and the block backend.
 ksync = { workspace = true }

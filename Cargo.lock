@@ -1377,6 +1377,7 @@ dependencies = [
 name = "drv-usb"
 version = "0.3.0-dev"
 dependencies = [
+ "devnode",
  "driver-base",
  "karch",
  "kerrno",

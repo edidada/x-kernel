@@ -24,3 +24,4 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:37 | `/workspace/linux-7.1.8/fs/super.c` | `get_tree_bdev` | mounting a block device at a path: source path -> dev_t -> BlockDevice |
 | 2026-11-05 06:38 | `/workspace/linux-7.1.8/fs/super.c` | `mount_bdev` | get_tree_bdev: a block device already carrying the root is not mounted twice |
 | 2026-11-05 06:39 | `/workspace/linux-7.1.8/fs/ext4/super.c` | `ext4_fill_super` | why a mount attempt is refused (journal / features) |
+| 2026-11-05 06:42 | `/workspace/linux-7.1.8/drivers/base/core.c` | `device_add` | device-node publication: what reaches /dev after device_add |

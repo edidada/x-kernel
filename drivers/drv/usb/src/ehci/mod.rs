@@ -1082,6 +1082,17 @@ fn publish_mass_storage(
                         "ehci: published {} as a block device with {blocks} 512-byte blocks",
                         device.summary()
                     );
+                    // What the /dev projection actually holds, so a missing node
+                    // can be attributed to the publication or to devtmpfs.
+                    let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
+                    for node in devnode::subscribe(callback) {
+                        log::info!(
+                            "ehci: devnode {} subsystem {} number {:?}",
+                            node.devname(),
+                            node.subsystem(),
+                            node.device_number()
+                        );
+                    }
                     return Some(publication);
                 }
                 Err(err) => log::error!("ehci: block publication failed: {err:?}"),
