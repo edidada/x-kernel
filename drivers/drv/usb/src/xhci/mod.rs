@@ -1206,6 +1206,9 @@ impl Xhci {
             return Err(err);
         }
         self.address_zero_slot = Some(slot_id);
+        // What the controller wrote back decides whether traffic can even be sent:
+        // EP0 must be Running and point at our ring.
+        self.log_device_context(slot_index);
         match self.read_device_head() {
             Ok((max_packet, class)) => {
                 info!("xhci: slot {slot_id} descriptor head: ep0 {max_packet}, class {class:#04x}")

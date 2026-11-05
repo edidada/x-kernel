@@ -37,6 +37,8 @@ const RT_OUT_CLASS_OTHER: u8 = 0x23;
 
 /// Port feature selectors (USB 2.0 §11.24.2, USB 3.x §10.16.1).
 const FEAT_PORT_ENABLE: u16 = 1;
+/// `USB_PORT_FEAT_LINK_STATE` (USB 3.x only): the value written selects U0..U3.
+const FEAT_PORT_LINK_STATE: u16 = 5;
 const FEAT_PORT_RESET: u16 = 4;
 const FEAT_PORT_POWER: u16 = 8;
 
@@ -237,11 +239,21 @@ fn speed_of(status: u32, info: HubInfo) -> Speed {
 }
 
 /// Clears the change bits this driver consumed, so the next read is fresh.
-fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32) {
+fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32, info: HubInfo) {
+    // USB 3.x hubs have three more latched change bits than USB 2.0 ones — the
+    // reference's hub_port_reset() clears C_RESET, C_BH_PORT_RESET,
+    // C_PORT_LINK_STATE and (for a device) C_CONNECTION. A port whose link-state
+    // change is still unacknowledged reports a state the hub has already left.
+    let ss = info.is_superspeed();
     for (bit, feature) in [
         (PORT_CH_CONNECTION, 16), // C_PORT_CONNECTION
         (PORT_CH_RESET, 20),      // C_PORT_RESET
+        (1 << 3, 29),             // C_BH_PORT_RESET (SS only)
+        (1 << 6, 25),             // C_PORT_LINK_STATE (SS only)
     ] {
+        if feature >= 25 && !ss {
+            continue;
+        }
         if change & bit != 0 {
             let _ = control_no_data(
                 hcd,
@@ -281,7 +293,7 @@ pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> alloc::vec::Vec<Hub
             log::warn!("usb: hub {address} port {port} status unreadable");
             continue;
         };
-        clear_changes(hcd, address, port, change);
+        clear_changes(hcd, address, port, change, info);
         let connected = status & PORT_ST_CONNECTION != 0;
         let enabled = status & PORT_ST_ENABLE != 0;
         let speed = speed_of(status, info);
@@ -329,6 +341,23 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
     }
     // The hub needs a few ms to finish the reset before it clears the bit.
     khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
+    // SuperSpeed ports are reset through the same PORT_RESET feature, but their
+    // link state is separate: after the reset the port must end up in U0 before
+    // anything is sent through it, and the reference drives that explicitly via
+    // USB_PORT_FEAT_LINK_STATE (hub_set_port_link_state).
+    if info.is_superspeed() {
+        let _ = control_no_data(
+            hcd,
+            address,
+            SetupPacket::new(
+                RT_OUT_CLASS_OTHER,
+                REQ_SET_FEATURE,
+                FEAT_PORT_LINK_STATE,
+                u16::from(port),
+                0,
+            ),
+        );
+    }
     for _ in 0..RESET_POLLS {
         let (status, change) = port_status(hcd, address, port)?;
         // Wait for C_PORT_RESET specifically. `PORT_ENABLE` is already set on a
@@ -337,7 +366,7 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
         // the Address Device that follows races a reset that is still running —
         // the device answers nothing and the command ends in a Transaction Error.
         if change & PORT_CH_RESET != 0 {
-            clear_changes(hcd, address, port, change);
+            clear_changes(hcd, address, port, change, info);
             let speed = speed_of(status, info);
             log::info!(
                 "usb: hub {address} port {port} reset done, enabled {}, speed {}, status \
