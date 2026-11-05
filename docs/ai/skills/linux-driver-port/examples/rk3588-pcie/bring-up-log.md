@@ -761,24 +761,59 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
   VBUS-valid 没起来，`Address Device` 要的第一次 SETUP 就发不出去 —— 与超时症状吻合。
   查 vendor `phy-rockchip-inno-usb2.c` 里 `typec_vbus_det` 影响的 GRF 写。
 
-### USBDP（usb3-phy）provider 已写，卡在枚举顺序（当前阻塞点）
+### USBDP（usb3-phy）provider 已接入，枚举顺序问题已修
 
-`drivers/drv/phy/src/usbdp/`（commit `3097bf6df`）已把 `rockchip,rk3588-usbdp-phy`
+`drivers/drv/phy/src/usbdp/`（commit `3097bf6df`）把 `rockchip,rk3588-usbdp-phy`
 做成 kphy provider：probe 映射 PMA（`reg` +0x8000）+ 两个 GRF syscon + 5 个命名复位 +
 4 路时钟，按 `dp-lane-mux` 定 lane/flip，发布 `u3-port`；`hw_init` 逐字跑
 `udphy_init`（复位、RX LFPS、PMA 上电、init 序列 + 24M refclk 表、lane mux、
 LCPLL/RX-CDR lock 轮询），再清 U3 口的 GRF disable 字。dwc3 已直接 acquire
 `usb3-phy`（usbdp 发布的是 `u3-port` 本身，不用像 usb2-phy 那样做 port→block 解析）。
 
-**但设备枚举从没走到 `phy@fed80000` / `phy@fed90000`**：板上遍历 DT 的
-`enumerate_firmware_nodes_direct` 在 DWC3 处同步 `add_device → probe_pending`，dwc3
-probe 里 acquire usb3-phy 因 usbdp 尚未 probe 而 defer，枚举就此停住，永远轮不到
-usbdp 节点。`driver-init: usbdp register -> true` 有了，但 `phy@fed80000` 的
-compatible 从未出现在枚举里（连 "no match" 诊断都没它的份）。**这是当前唯一的
-硬阻塞**：要拆开"枚举全部节点"与"同步 probe"，或让 usbdp 在 dwc3 之前被枚举
-（例如把 phy provider 的 probe 提到 level 早于 dwc3，或枚举时把 usbdp 这类
-provider 节点排队到消费者之前）。在修好它之前 dwc3 拿不到 usb3-phy，`Address Device`
-超时那条线没法往下验证。
+**这一轮修掉的三处真 bug（都是“两个 owner / 守卫被丢”类，已上板确认）**：
+
+1. **枚举与 probe 耦合（`9b13172d5`）** —— 最硬的一条。`add_device()` 同步调
+   `probe_pending()`，于是每个设备在 DT 遍历途中就 probe。provider 在自己 probe
+   里发布（CRU 注册时钟树）→ `wake()` 唤醒 parked 的消费者 → 重入 pump → 重新排队，
+   **CRU 之后的 DT 节点再也没被枚举**：`phy@fed80000` 根本没进设备表，dwc3 的
+   usb3-phy 永远拿不到。修法照 Linux 的 `device_register()` / `deferred_probe_initcall()`
+   分工：新增 `DeviceDomain::suspend_probe_until_enumerated()` 门闸，组合根在整个
+   枚举期持有它（只入队不 probe），level5 再跑唯一一次 probe storm。
+   诊断手法记录下来：在 `enumerate_firmware_nodes_direct` 里按 `walked % 50` 打心跳
+   + `build_descriptor <compatible>` 前后打点，一轮就能看出“卡在哪个节点、
+   add_device 有没有返回”。
+2. **usbdp 时钟守卫被丢弃（`bbd12c513`）** —— `prepare_enable()` 返回的
+   `EnabledClock` 被 `?;` 丢掉，Drop 立刻 `disable+unprepare`：日志表现为
+   `enabled ... and held` 前一行就是 `kclk: hw-disable "clk_usbdp_phy0_immortal" (count 0)`。
+   这正是 usb2phy / combphy 以前踩过的同一个坑（bring-up log 早先章节有记），在
+   usbdp 里又犯了一次。修法：token 存进实例，`hw_exit` 才释放。
+3. **U3 端口字有两个 owner（`05d357019`）** —— dwc3 glue 在 probe 里写
+   `usb-grf usb3otg_cfg = 0x1100`，而参考（`rk3588_udphy_cfgs.grfcfg`）里
+   **`0x1100` 是 disable、`0x0188` 是 enable**，且这个字归 PHY provider
+   （`rk_udphy_usb3_phy_init` → `udphy_u3_port_disable(false)`）。于是 PHY 刚使能、
+   控制器紧接着又把它关掉（实测 `cfg 0x0188 -> 0x1100`）。已删掉 glue 的写，只保留
+   一行与参考 enable 值比对的读。
+
+**修完后的真机状态**：
+
+```
+usbdp: phy 0 (0xfed80000) mode Usb flip false lane_mux [0, 0, 0, 0]
+usbdp: u3-port published (port phandle 0x68)
+usbdp: clock 0..2 enabled and held          ← 不再被立刻 disable
+dwc3: usb3 phy powered                       ← dwc3 真的拿到了 usb3-phy
+dwc3: usb-grf u3 port 0 cfg 0x0188 (matches the reference's enable word)
+```
+
+**仍未通的（当前卡点，回到与 udphy 无关的另一条线）**：
+
+- DWC3/xHCI `fc000000`：`PORTSC 0x2a0 ccs false`，端口看不到设备。
+- EHCI `fc880000`：`ccs true, line 1`（设备在这个口，full-speed/high-speed）→
+  复位后 `PED` 不置位 → "did not enable after reset"。
+- 所以“设备到底插在哪个口”需要先确认：现在 DWC3 口 ccs=false、EHCI 口 ccs=true，
+  而早先（`usb-clkout-diag`）是 DWC3 口 ccs=true 且能跑到 Address Device 超时。
+  下一位先确认物理插口，再决定是继续修 EHCI 的 reset 启用。
+
+后面几项的记录（usb2phy `utmi_bvalid` 等）仍然有效，见本节末尾。
 
 ### 已落地
 
