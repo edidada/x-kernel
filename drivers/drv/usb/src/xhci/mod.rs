@@ -1429,11 +1429,18 @@ impl Xhci {
             .ep0
             .push(Trb::new(setup_word, 8, control));
         if length > 0 {
+            // `xhci_queue_ctrl_tx()` builds the data TRB as
+            //   TYPE(DATA) [| DIR_IN] [| ISP if IN]
+            // and puts no IOC on it.
             let mut data_control = regs::trb::DATA << regs::trb::TYPE_SHIFT;
             if is_in {
                 data_control |= regs::trb::DIR_IN;
+                // Interrupt on Short Packet: every descriptor read answers with
+                // fewer bytes than requested, and without ISP the controller
+                // waits for a full-length packet that never arrives.
+                data_control |= regs::trb::ISP;
             }
-            // IOC only on the last TRB of the transfer.
+            // The completion event that carries this transfer's byte count.
             data_control |= regs::trb::IOC;
             // SAFETY: as above.
             let bounce_addr = self.bounce.bus_addr();
@@ -1441,9 +1448,16 @@ impl Xhci {
                 .ep0
                 .push(Trb::new(bounce_addr, length as u32, data_control));
         }
-        // Status stage runs in the opposite direction of the data stage.
+        // Status stage: OUT whenever the data stage was IN (and vice versa).
+        //
+        // IOC goes on the data TRB when there is one, not on the status TRB as
+        // `xhci_queue_ctrl_tx` does: the completion event's transfer-length field
+        // is how this driver learns how many bytes actually arrived, and only the
+        // data TRB carries that number. Linux can put IOC on the status TRB
+        // because it tracks the whole transfer descriptor; until this driver does
+        // the same, the length has to come from the data stage.
         let mut status_control = regs::trb::STATUS << regs::trb::TYPE_SHIFT;
-        if !is_in {
+        if !(length > 0 && is_in) {
             status_control |= regs::trb::DIR_IN;
         }
         if length == 0 {
