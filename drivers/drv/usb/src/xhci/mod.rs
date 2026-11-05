@@ -354,6 +354,17 @@ fn claim_legacy_ownership(bar: &IoMap, hccparams1: u32) {
     info!("xhci: no legacy support capability found");
 }
 
+/// Whether a port's link state means it is still negotiating.
+///
+/// xHCI §4.19.1: 5 RxDetect, 6 Inactive, 4 Disabled and 0/1/2/3 (U0/U1/U2/U3)
+/// are settled; 7 Polling, 8 Recovery, 9 Hot Reset, 10 Compliance and 15 Resume
+/// are transient. A SuperSpeed port sits in RxDetect until a far-end
+/// termination appears and then walks through Polling — that walk is what a
+/// single snapshot misses.
+fn is_transient_pls(pls: u32) -> bool {
+    matches!(pls, 7..=10 | 15)
+}
+
 /// 64-bit register write in the order the DWC3 wrapper requires.
 ///
 /// Linux hands its xHCI platform device the `write-64-hi-lo-quirk`, i.e. on this
@@ -651,10 +662,17 @@ impl Xhci {
         let offset = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
         let value = self.bar.read32(offset);
         if value & portsc::CHANGE_BITS != 0 {
-            self.bar.write32(
-                offset,
-                (value & !portsc::CHANGE_BITS) | (value & portsc::PRESERVE),
-            );
+            // Clear the change bits by writing 1 to them, and nothing else
+            // besides port power. Echoing the read value back (which is what
+            // this did) also echoes PR, and PR is the port RESET bit: every
+            // status read therefore re-asserted a port reset. On the
+            // SuperSpeed port that was visible as the link training to U0 at
+            // PSIV 4 and being knocked to Disabled one poll later
+            // (0x002a1203 -> 0x00020280), i.e. the port worked and our own
+            // bookkeeping reset it. PED/PLS/CSC are read-only or write-1-to-
+            // clear; PP is the only writable bit worth preserving here.
+            self.bar
+                .write32(offset, (value & portsc::PP) | (value & portsc::CHANGE_BITS));
         }
         value
     }
@@ -1447,6 +1465,50 @@ impl Xhci {
     /// Ports are scanned once, after the controller runs: a device that is
     /// already attached shows up here, and hot-plug is a port status change
     /// event away once interrupt delivery exists.
+    /// Watches every root port until none is mid-training, logging each change.
+    ///
+    /// Bounded (6 s). A port whose link state is one of the transient ones —
+    /// Polling, Recovery, Hot Reset, Compliance or Resume — is still negotiating,
+    /// so cutting the wait short there would report a connected device as absent.
+    /// Everything else (U0, U3, RxDetect, Disabled, Inactive) is a settled state
+    /// and worth a line the first time it appears.
+    fn poll_ports_until_settled(&mut self) {
+        const POLL_MS: usize = 100;
+        const MAX_POLLS: usize = 60;
+        let mut last: alloc::vec::Vec<u32> = alloc::vec![u32::MAX; self.ports];
+        for attempt in 0..MAX_POLLS {
+            let mut transient = false;
+            for port in 0..self.ports {
+                let raw = self.port_status_raw(port);
+                if raw != last[port] {
+                    let pls = (raw & portsc::PLS_MASK) >> portsc::PLS_SHIFT;
+                    log::info!(
+                        "xhci: port {} portsc {raw:#010x} -> ccs {}, ped {}, pls {}{}",
+                        port + 1,
+                        raw & portsc::CCS != 0,
+                        raw & portsc::PED != 0,
+                        pls,
+                        if is_transient_pls(pls) {
+                            " (training)"
+                        } else {
+                            ""
+                        },
+                    );
+                    last[port] = raw;
+                }
+                let pls = (raw & portsc::PLS_MASK) >> portsc::PLS_SHIFT;
+                transient |= is_transient_pls(pls);
+            }
+            // Settled and at least one full window has been observed: the
+            // summary is printed by the caller's scan.
+            if !transient && attempt >= 2 {
+                return;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(POLL_MS as u64 * 1_000));
+        }
+        log::warn!("xhci: ports still training after {MAX_POLLS} polls, scanning anyway");
+    }
+
     pub fn enumerate(&mut self, dev: &Device<'_, driver_base::PlatformBus>) -> (usize, usize) {
         let mut found = 0usize;
         let mut ready = 0usize;
@@ -1454,25 +1516,15 @@ impl Xhci {
         // pull up, and this port has no connect interrupt to wait on. Poll the
         // ports for a while so a device that attaches "late" is not reported as
         // absent -- that is exactly the confusion this port already paid for.
-        for attempt in 0..20 {
-            let connected: usize = (0..self.ports)
-                .filter(|port| {
-                    self.port_status(*port)
-                        .map(|status| status.connected)
-                        .unwrap_or(false)
-                })
-                .count();
-            if connected > 0 || attempt == 19 {
-                if connected > 0 {
-                    log::info!(
-                        "xhci: {connected} port(s) reported a device after {} ms",
-                        attempt * 100
-                    );
-                }
-                break;
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
-        }
+        // Poll until the ports settle rather than until the first connect: a
+        // SuperSpeed port reports Connect Status only after it has trained
+        // (RxDetect -> Polling -> U0), which takes far longer than the
+        // High-Speed path that comes up in microseconds. Stopping at "some port
+        // connected" therefore always reports the USB2 side and never gives the
+        // SS port its chance — and a single snapshot cannot tell "nothing is
+        // attached" from "still training", which are the two states this port
+        // has to distinguish.
+        self.poll_ports_until_settled();
         for port in 0..self.ports {
             match self.port_status(port) {
                 Ok(status) if status.connected => found += 1,
@@ -1552,9 +1604,15 @@ impl Xhci {
         // speed devices always use 64, low speed always 8, full speed is told by
         // the device descriptor -- which cannot be read before addressing, so
         // 64 is the safe default for the speeds this port supports.
+        // SuperSpeed's EP0 always uses a 512-byte max packet. Announcing 64 for
+        // a SuperSpeed slot makes `Address Device` fail with completion code 17
+        // (Parameter Error) and leaves the device unaddressable -- measured on
+        // the USB3.2 companion hub, whose port had already trained to U0 at
+        // PSIV 4.
         let ep0_max_packet = match speed {
             Speed::Low => 8,
             Speed::Full => 8,
+            Speed::Super => 512,
             _ => 64,
         };
         self.address_device(slot_index, port, speed, ep0_max_packet)?;
