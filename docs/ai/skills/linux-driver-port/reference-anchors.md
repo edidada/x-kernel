@@ -80,3 +80,5 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 13:16 | `/workspace/linux-7.1.8/drivers/pci/controller/dwc/pcie-dw-rockchip.c` | `ltssm` | a link that never trained has no DBI window; polling for linkup before touching it |
 | 2026-11-05 13:21 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_update_hub_device` | command 1: DEV_HUB + MAX_PORTS, add_flags = SLOT |
 | 2026-11-05 13:21 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | command 2: add_flags = SLOT | ep_flag, entries raised |
+| 2026-11-05 14:03 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `xhci_last_valid_endpoint` | entries must cover contiguous contexts up to the highest added index |
+| 2026-11-05 14:04 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `xhci_last_valid_endpoint` | entries cover contiguous contexts; gaps are filled disabled first |

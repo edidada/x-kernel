@@ -2345,7 +2345,16 @@ impl Xhci {
                 context::endpoint_dword4(u32::from(max_packet).max(8)),
             );
             // Input control context: add SLOT and the new endpoint; entries
-            // raised to cover it.
+            // raised to cover it. Contexts between EP0 and the new endpoint
+            // must exist as disabled (state 0) entries first: the controller
+            // answered Context State Error (17) when entries jumped 1 -> 8
+            // over contexts it had never been given.
+            for gap in 2..context_index {
+                let gap_ctx = dwords * (gap + 1) as usize;
+                for dword in 0..5usize {
+                    write(gap_ctx + dword, 0);
+                }
+            }
             write(1, 0x1 | (1 << context_index));
             let entries_dword = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
             write(
