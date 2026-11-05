@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use smithay::backend::input::{ButtonState, KeyState};
+use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
     backend::{
@@ -29,7 +29,7 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::Keycode,
-        pointer::{ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -538,9 +538,33 @@ impl State {
                 }
             }
             InputEvent::Rel { code, value } => {
+                // Keep the pointer on screen: relative motion accumulates and
+                // would otherwise push the (software) cursor out of view.
+                let max_x = self.width.saturating_sub(1) as f64;
+                let max_y = self.height.saturating_sub(1) as f64;
                 match code {
-                    0 => self.pointer_location.x += f64::from(value),
-                    1 => self.pointer_location.y += f64::from(value),
+                    0 => {
+                        self.pointer_location.x =
+                            (self.pointer_location.x + f64::from(value)).clamp(0.0, max_x)
+                    }
+                    1 => {
+                        self.pointer_location.y =
+                            (self.pointer_location.y + f64::from(value)).clamp(0.0, max_y)
+                    }
+                    // REL_WHEEL / REL_HWHEEL: one notch is 15 logical pixels.
+                    8 | 6 => {
+                        let axis = if code == 8 { Axis::Vertical } else { Axis::Horizontal };
+                        let v120 = -value * 120;
+                        let amount = -f64::from(value) * 15.0;
+                        let axis_event = AxisFrame::new(time)
+                            .source(AxisSource::Wheel)
+                            .value(axis, amount)
+                            .v120(axis, v120);
+                        if let Some(pointer) = self.seat.get_pointer() {
+                            pointer.axis(self, axis_event);
+                            pointer.frame(self);
+                        }
+                    }
                     _ => return,
                 }
                 self.dirty = true;
