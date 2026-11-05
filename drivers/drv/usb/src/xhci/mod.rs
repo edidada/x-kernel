@@ -233,6 +233,52 @@ impl Ring {
         unsafe { core::ptr::read_volatile(self.trb(index)) }
     }
 
+    /// `td_to_noop()` (`xhci-ring.c:148`): overwrites a cancelled transfer
+    /// descriptor's TRBs with No-Op TRBs, preserving only each TRB's cycle bit.
+    ///
+    /// Moving the ring dequeue alone is not enough after a halt: the controller
+    /// **caches** fetched TRBs, and a cached stalled TD keeps being retried even
+    /// though the dequeue has moved past it. Overwriting the TD is what flushes
+    /// that cache (`xhci_invalidate_cancelled_tds()` does it for every cancelled
+    /// TD before queueing Set TR Dequeue).
+    fn no_op_range(&self, first_trb: u64, last_trb: u64) {
+        let base = self.mem.bus_addr();
+        let mut address = first_trb;
+        while address <= last_trb {
+            let offset = (address - base) as usize;
+            if offset % TRB_LEN != 0 || offset / TRB_LEN >= self.trbs {
+                break;
+            }
+            let slot = self.trb(offset / TRB_LEN);
+            // SAFETY: `slot` is one TRB inside this ring's own allocation; the
+            // cycle bit is the only field of the old TRB that is kept.
+            unsafe {
+                let base = slot.cast::<u8>();
+                core::ptr::write_volatile(base.cast::<u64>(), 0);
+                core::ptr::write_volatile(base.wrapping_add(8).cast::<u32>(), 0);
+                let control = base.wrapping_add(12).cast::<u32>();
+                let cycle = core::ptr::read_volatile(control) & regs::trb::CYCLE;
+                core::ptr::write_volatile(
+                    control,
+                    cycle | (regs::trb::NO_OP_TRANSFER << regs::trb::TYPE_SHIFT),
+                );
+            }
+            address += TRB_LEN as u64;
+        }
+        karch::dsb_ishst();
+    }
+
+    /// The cycle bit of the TRB at this address (the Set TR Dequeue Pointer
+    /// command's DCS field is exactly this, `xhci_move_dequeue_past_td()`).
+    fn cycle_at(&self, address: u64) -> bool {
+        let offset = (address - self.mem.bus_addr()) as usize;
+        // SAFETY: the caller passes an address inside this ring.
+        unsafe {
+            let control = self.trb(offset / TRB_LEN).cast::<u8>().wrapping_add(12);
+            core::ptr::read_volatile(control.cast::<u32>()) & regs::trb::CYCLE != 0
+        }
+    }
+
     fn dequeue_address(&self) -> u64 {
         self.mem.bus_addr() + ((self.index % self.trbs) * core::mem::size_of::<Trb>()) as u64
     }
@@ -284,6 +330,14 @@ pub struct Xhci {
     /// instead (what this driver used to do) turns a lost completion into a
     /// misattributed one.
     commands: alloc::collections::VecDeque<PendingCmd>,
+    /// The completion of the oldest command, held for the caller that issued it
+    /// (Linux hands this back through the per-command `completion` object; this
+    /// driver has one command in flight at a time, so one slot is the same
+    /// thing). A command completed by the dispatcher with no waiter is dropped
+    /// here — the reference's `cmd_list` head is removed at dispatch for the
+    /// same reason: a dispatched command must not stay at the head, or every
+    /// later completion is compared against it and desynchronizes the queue.
+    completed: Option<PendingCmd>,
     /// Endpoint-recovery commands the event dispatcher asked for. They are
     /// issued right after the event that requested them, never from inside a
     /// handler: the dispatcher must stay non-reentrant so every completion is
@@ -361,6 +415,7 @@ fn allocate_scratchpads(
 /// A control transfer is one TD spanning its setup, data and status TRBs, and
 /// the completion event names the TRB it stopped at — `xhci_trb_in_td()` uses
 /// exactly that to decide which transfer an event finishes.
+#[derive(Clone, Copy)]
 struct Td {
     /// Bus address of the first TRB (the setup TRB for a control transfer).
     first_trb: u64,
@@ -405,6 +460,17 @@ struct Slot {
     ep0_completions: alloc::collections::VecDeque<Trb>,
     /// `ep->ep_state & EP_HALTED`: a Reset Endpoint is queued or in flight.
     ep0_halted: bool,
+    /// The descriptor whose completion halted the endpoint; its TRBs are turned
+    /// into No-Ops when the Reset Endpoint completes (`cancelled_td_list`).
+    halted_td: Option<Td>,
+    /// `ep->ep_state & EP_STOP_CMD_PENDING`: a Stop Endpoint is in flight.
+    stop_pending: bool,
+    /// `ep->ep_state & SET_DEQ_PENDING`: a Set TR Dequeue is in flight, and the
+    /// ring must not be doorbelled until it completes — doorbelling first starts
+    /// the ring with the old dequeue (`xhci_move_dequeue_past_td()`).
+    set_deq_pending: bool,
+    /// A doorbell was withheld while `set_deq_pending`; ring it afterwards.
+    doorbell_pending: bool,
     /// `ep->err_count`: transferless errors are retried softly a bounded number
     /// of times before the hard reset (`handle_transferless_tx_event()`).
     ep0_err_count: u32,
@@ -789,6 +855,7 @@ impl Xhci {
             event_cycle: true,
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
+            completed: None,
             deferred: alloc::collections::VecDeque::new(),
             address_zero_slot: None,
         };
@@ -1212,7 +1279,7 @@ impl Xhci {
             return;
         }
         // ldp:step irq.tx-td-front
-        let Some(td) = self.slots[slot_index].tds.front() else {
+        let Some(td) = self.slots[slot_index].tds.front().copied() else {
             // `handle_transferless_tx_event()`: an error with no outstanding TD
             // is a wire problem, not a data problem.
             self.handle_transferless(slot_index, code);
@@ -1252,6 +1319,9 @@ impl Xhci {
             // completion still goes back to the waiter, which turns it into the
             // USB error the class driver expects.
             info!("xhci: {what} halted EP0 of slot {slot_id} (code {code})");
+            // Keep the descriptor: its TRBs have to be turned into No-Ops once
+            // the endpoint is reset (the controller caches them).
+            self.slots[slot_index].halted_td = Some(td);
             self.halt_ep0(slot_index, false);
         }
     }
@@ -1337,11 +1407,19 @@ impl Xhci {
             );
             return;
         }
+        // `list_del_init(&cmd->cmd_list)` at the top of the reference's handler:
+        // the command leaves the queue when it is dispatched, not when its
+        // waiter looks at it. A recovery command has no waiter at all, and
+        // leaving it at the head would compare every later completion against
+        // it -- the desynchronization that made every command time out.
+        let mut cmd = self.commands.pop_front().expect("front command");
+        cmd.done = Some(*event);
         let (trb_type, slot_id) = (cmd.trb_type, cmd.slot_id);
-        let event = *event;
-        if let Some(cmd) = self.commands.front_mut() {
-            cmd.done = Some(event);
-        }
+        info!(
+            "xhci: command {trb_type} for slot {slot_id} completed, code {}",
+            event.completion_code()
+        );
+        self.completed = Some(cmd);
         match trb_type {
             regs::trb::RESET_ENDPOINT => {
                 // "This command will only fail if the endpoint wasn't halted,
@@ -1350,17 +1428,83 @@ impl Xhci {
                 // TD that stalled: the reference's reset handler calls
                 // xhci_invalidate_cancelled_tds(), which queues Set TR Dequeue.
                 self.clear_halt(slot_id);
-                self.defer_set_dequeue(slot_id);
+                // `xhci_invalidate_cancelled_tds()`: flush the controller's
+                // cached copy of the halted TD and move the dequeue past it.
+                self.invalidate_ep0(slot_id);
+            }
+            // ldp:step irq.cmd-stop-ep-done
+            regs::trb::STOP_ENDPOINT => {
+                if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
+                    slot.stop_pending = false;
+                }
+                if event.completion_code() == regs::code::CONTEXT_STATE_ERROR {
+                    // `xhci_handle_cmd_stop_ep()`: a Halted endpoint refuses Stop
+                    // Endpoint with Context State Error, and the recovery is
+                    // Reset Endpoint (then the same dequeue move).
+                    info!("xhci: stop endpoint for slot {slot_id} refused (halted), resetting");
+                    if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
+                        if slot.halted_td.is_none() {
+                            slot.halted_td = Some(Td {
+                                first_trb: 0,
+                                last_trb: 0,
+                                what: "cancelled EP0 transfer",
+                            });
+                        }
+                    }
+                    let slot_index = self
+                        .slots
+                        .iter()
+                        .position(|slot| slot.id == slot_id)
+                        .unwrap_or(0);
+                    // A placeholder descriptor (0..0) only marks "something was
+                    // cancelled"; no-op'ing it is a no-op, so drop it first.
+                    if let Some(td) = self.slots[slot_index].halted_td {
+                        if td.first_trb == 0 && td.last_trb == 0 {
+                            self.slots[slot_index].halted_td = None;
+                        }
+                    }
+                    self.halt_ep0(slot_index, false);
+                } else {
+                    self.invalidate_ep0(slot_id);
+                }
             }
             // ldp:step irq.cmd-set-deq-done
             regs::trb::SET_TR_DEQUEUE => {
+                // Fact, not hypothesis: the endpoint state and the hardware
+                // dequeue the controller holds. A Context State Error on Set TR
+                // Dequeue means the endpoint is not Stopped/Error, and only the
+                // context says which state it did end up in.
+                self.log_ep0_state(slot_id, "set tr dequeue completion");
                 // `xhci_handle_cmd_set_deq()`: the endpoint is re-pointed past
                 // the halted TD. That TD was already handed back when its
                 // transfer event arrived, so only the report is left.
+                if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
+                    slot.set_deq_pending = false;
+                }
                 info!("xhci: set tr dequeue for slot {slot_id} complete");
             }
             _ => {}
         }
+    }
+
+    /// Reports EP0's state and dequeue from the slot's output device context.
+    fn log_ep0_state(&self, slot_id: u8, when: &str) {
+        let Some(slot) = self.slots.iter().find(|slot| slot.id == slot_id) else {
+            return;
+        };
+        let ep0 = self.context_size * context::EP0_CONTEXT;
+        let base = slot.device.as_ptr().cast::<u8>();
+        // SAFETY: the output device context holds a slot context and one
+        // endpoint context per DCI; `ep0` is inside this allocation, and the
+        // dwords read are the endpoint context's state and dequeue fields.
+        let (state, dequeue) = unsafe {
+            let dword0 = core::ptr::read_volatile(base.wrapping_add(ep0).cast::<u32>());
+            let dword2 = core::ptr::read_volatile(base.wrapping_add(ep0 + 8).cast::<u32>());
+            let dword3 = core::ptr::read_volatile(base.wrapping_add(ep0 + 12).cast::<u32>());
+            let dequeue = (u64::from(dword3) << 32) | u64::from(dword2 & !0xf);
+            (dword0 & 0x7, dequeue)
+        };
+        info!("xhci: ep0 state {state} deq {dequeue:#x} at {when} (slot {slot_id})");
     }
 
     /// Clears the `EP_HALTED` state for the slot with this id.
@@ -1370,21 +1514,75 @@ impl Xhci {
         }
     }
 
-    /// Queues `Set TR Dequeue Pointer` at the slot's EP0 ring frontier.
+    /// `xhci_urb_dequeue()`: stop the endpoint so the ring can be reconciled.
     ///
-    /// This is the second half of the reference's halted-endpoint cleanup
-    /// (`xhci_handle_cmd_reset_ep` → `xhci_invalidate_cancelled_tds`): Reset
-    /// Endpoint returns the endpoint to Running but leaves its dequeue at the
-    /// halted TD, so without this the next transfer re-executes a dead TD.
+    /// A timed-out control transfer leaves its descriptor Active on the ring.
+    /// Simply abandoning it and queueing the retry behind it puts two
+    /// descriptors in flight while only one completion is expected — and the
+    /// abandoned one's late event then points at a TRB that no longer belongs to
+    /// the head descriptor, which is exactly how this driver lost a mouse's EP0
+    /// for good. The reference cancels the URB instead (`usb_kill_urb()` →
+    /// `xhci_urb_dequeue()`): Stop Endpoint, then move the dequeue past the
+    /// abandoned descriptors, and only then return to the caller.
+    fn cancel_ep0(&mut self, slot_index: usize) {
+        if self.slots[slot_index].stop_pending {
+            // `EP_STOP_CMD_PENDING`: one stop already covers this endpoint.
+            return;
+        }
+        self.slots[slot_index].stop_pending = true;
+        let control = self.ep0_command_field(slot_index, regs::trb::STOP_ENDPOINT);
+        self.deferred.push_back(Trb::new(0, 0, control));
+    }
+
+    /// `xhci_invalidate_cancelled_tds()` + `xhci_move_dequeue_past_td()`.
+    ///
+    /// Two things have to happen for a stopped endpoint to run again, and only
+    /// doing the second is not enough:
+    ///
+    /// 1. every cancelled descriptor's TRBs are rewritten as No-Ops, which
+    ///    flushes the controller's cached copy of them;
+    /// 2. `Set TR Dequeue Pointer` moves the ring past them, with the DCS bit
+    ///    taken from the last rewritten TRB.
+    ///
+    /// (The reference walks the ring to reconcile the hardware dequeue with its
+    /// own before choosing the target TRB; this ring is a single segment whose
+    /// descriptors are contiguous, so "one past the last cancelled TRB" is the
+    /// TRB that walk computes.)
     // ldp:step irq.cmd-reset-ep-done
-    fn defer_set_dequeue(&mut self, slot_id: u8) {
+    // ldp:step irq.cmd-stop-ep-done
+    fn invalidate_ep0(&mut self, slot_id: u8) {
         let Some(slot_index) = self.slots.iter().position(|slot| slot.id == slot_id) else {
             return;
         };
-        let dequeue = self.slots[slot_index].ep0.dequeue_address()
-            | u64::from(self.slots[slot_index].ep0.current_cycle());
+        let mut last = None;
+        while let Some(td) = self.slots[slot_index].tds.pop_front() {
+            self.slots[slot_index]
+                .ep0
+                .no_op_range(td.first_trb, td.last_trb);
+            last = Some(td.last_trb);
+        }
+        if let Some(td) = self.slots[slot_index].halted_td.take() {
+            self.slots[slot_index]
+                .ep0
+                .no_op_range(td.first_trb, td.last_trb);
+            last = Some(last.map_or(td.last_trb, |last: u64| last.max(td.last_trb)));
+        }
+        // Nothing was cancelled (e.g. a transferless error): the endpoint is
+        // reset and the ring keeps its dequeue.
+        let Some(last) = last else {
+            info!("xhci: no cancelled descriptor to skip for slot {slot_id}");
+            return;
+        };
+        let next = last + TRB_LEN as u64;
+        let dcs = self.slots[slot_index].ep0.cycle_at(next);
         let control = self.ep0_command_field(slot_index, regs::trb::SET_TR_DEQUEUE);
-        self.deferred.push_back(Trb::new(dequeue, 0, control));
+        self.deferred
+            .push_back(Trb::new(next | u64::from(dcs), 0, control));
+        // Withhold the doorbell until this command completes: ringing it first
+        // would restart the ring at the old dequeue (`xhci_move_dequeue_past_td`).
+        self.slots[slot_index].set_deq_pending = true;
+        self.slots[slot_index].doorbell_pending = true;
+        info!("xhci: skipping cancelled EP0 descriptors of slot {slot_id} up to {next:#x}");
     }
 
     /// Waits for the next completion the dispatcher hands back for this slot.
@@ -1402,6 +1600,12 @@ impl Xhci {
         };
         for _ in 0..steps {
             self.pump_events();
+            // The withheld doorbell (see control_transfer_slot) goes out as soon
+            // as the Set TR Dequeue that blocked it has completed.
+            if self.slots[slot_index].doorbell_pending && !self.slots[slot_index].set_deq_pending {
+                self.slots[slot_index].doorbell_pending = false;
+                self.ring_slot_doorbell(self.slots[slot_index].id);
+            }
             if let Some(event) = self.slots[slot_index].ep0_completions.pop_front() {
                 self.slots[slot_index].wire_dead = false;
                 return Ok(event);
@@ -1410,6 +1614,17 @@ impl Xhci {
         }
         self.slots[slot_index].wire_dead = true;
         self.log_event_timeout(what);
+        // Leave the ring and the descriptor queue reconciled before the caller
+        // retries: the reference's `usb_kill_urb()` does not return until the
+        // cancelled URB has been given back.
+        self.cancel_ep0(slot_index);
+        for _ in 0..WIRE_DEAD_POLL_STEPS {
+            self.pump_events();
+            if !self.slots[slot_index].stop_pending && !self.slots[slot_index].set_deq_pending {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
         Err(KError::TimedOut)
     }
 
@@ -1486,9 +1701,18 @@ impl Xhci {
         'attempts: for attempt in 0..2 {
             for _ in 0..EVENT_POLL_STEPS {
                 self.pump_events();
-                if let Some(event) = self.commands.front().and_then(|cmd| cmd.done) {
-                    completion = Some(event);
-                    break 'attempts;
+                if let Some(done) = self.completed.take() {
+                    if done.trb_addr == published {
+                        completion = done.done;
+                        break 'attempts;
+                    }
+                    // A recovery command finished; it has no waiter.
+                    info!(
+                        "xhci: recovery command {} for slot {} done, code {}",
+                        done.trb_type,
+                        done.slot_id,
+                        done.done.map_or(0, |event| event.completion_code()),
+                    );
                 }
                 khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
             }
@@ -1526,6 +1750,18 @@ impl Xhci {
             return Err(KError::Io);
         }
         Ok(event)
+    }
+
+    /// Rings an endpoint doorbell (target 1 is EP0) and flushes the write.
+    ///
+    /// `xhci_ring_ep_doorbell()` follows its store with a read-back for the same
+    /// reason the command doorbell does: a posted write that is still in flight
+    /// when the controller looks for work is indistinguishable from a ring that
+    /// is not being fetched at all.
+    fn ring_slot_doorbell(&self, slot_id: u8) {
+        let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
+        self.bar.write32(doorbell, 1);
+        let _ = self.bar.read32(doorbell);
     }
 
     /// Rings the command-ring doorbell and flushes the write.
@@ -1653,6 +1889,10 @@ impl Xhci {
             tds: alloc::collections::VecDeque::new(),
             ep0_completions: alloc::collections::VecDeque::new(),
             ep0_halted: false,
+            halted_td: None,
+            stop_pending: false,
+            set_deq_pending: false,
+            doorbell_pending: false,
             ep0_err_count: 0,
             wire_dead: false,
         })
@@ -2176,12 +2416,14 @@ impl Xhci {
         self.slots[slot_index].ep0.publish(held);
 
         // Doorbell for this slot, target = EP0's device slot context index (1).
-        let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
-        self.bar.write32(doorbell, 1);
-        // Flush the write, as `xhci_ring_ep_doorbell` does with a read-back: a
-        // posted doorbell that is still in flight when the controller looks for
-        // work is indistinguishable from a ring that is not being fetched.
-        let _ = self.bar.read32(doorbell);
+        // Withheld while a Set TR Dequeue is in flight: doorbelling now would
+        // restart the ring at the dequeue the recovery is moving away from
+        // (`xhci_move_dequeue_past_td` sets SET_DEQ_PENDING for this reason).
+        if self.slots[slot_index].set_deq_pending {
+            info!("xhci: doorbell withheld, set tr dequeue pending");
+        } else {
+            self.ring_slot_doorbell(slot_id);
+        }
         let event = match self.wait_for_completion(slot_index, "control transfer") {
             Ok(event) => event,
             Err(err) => {

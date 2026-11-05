@@ -86,6 +86,10 @@ pub mod code {
     /// `COMP_USB_TRANSACTION_ERROR` (`xhci.h:837`).
     pub const TRANSACTION_ERROR: u8 = 4;
     pub const STALL: u8 = 6;
+    /// `COMP_CONTEXT_STATE_ERROR` (`xhci.h:841`): the command was refused
+    /// because the slot/endpoint is in the wrong state — a halted endpoint
+    /// answers Stop Endpoint with exactly this (`xhci_handle_cmd_stop_ep`).
+    pub const CONTEXT_STATE_ERROR: u8 = 19;
     pub const SHORT_PACKET: u8 = 13;
     /// `COMP_SPLIT_TRANSACTION_ERROR` (`xhci.h:868`) — 36, not 5: code 5 is
     /// `COMP_TRB_ERROR`. The two mean opposite things (a wire error halts the

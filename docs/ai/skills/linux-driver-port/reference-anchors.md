@@ -102,3 +102,9 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_halted_endpoint` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
 | 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_reset_ep` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
 | 2026-11-05 16:31 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_set_deq` | event-path restructure: dispatch in ring order, FIFO commands, halt cleanup |
+| 2026-11-05 16:37 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `td_to_noop` | halted-TD cleanup: no-op the cached TD, then move the dequeue with SET_DEQ_PENDING |
+| 2026-11-05 16:37 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_invalidate_cancelled_tds` | halted-TD cleanup: no-op the cached TD, then move the dequeue with SET_DEQ_PENDING |
+| 2026-11-05 16:37 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_move_dequeue_past_td` | halted-TD cleanup: no-op the cached TD, then move the dequeue with SET_DEQ_PENDING |
+| 2026-11-05 16:37 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `trb_to_noop` | halted-TD cleanup: no-op the cached TD, then move the dequeue with SET_DEQ_PENDING |
+| 2026-11-05 16:42 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_urb_dequeue` | timeout path: cancel the URB (Stop Endpoint) and reconcile the ring before returning |
+| 2026-11-05 16:42 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_stop_ep` | timeout path: cancel the URB (Stop Endpoint) and reconcile the ring before returning |
