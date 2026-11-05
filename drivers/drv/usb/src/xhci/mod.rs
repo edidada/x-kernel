@@ -1823,6 +1823,13 @@ impl Xhci {
                 (info1 & 0x00ff_ffff) | (u32::from(num_ports) << 24),
             );
         }
+        // dword3 carries the Device State; a Configure Endpoint input context
+        // must present it as 0 (the controller owns that field). Copying it from
+        // the device context, as the loop above does, brings the current state
+        // ('Addressed') along, which the reference explicitly clears.
+        unsafe {
+            core::ptr::write_volatile(input.wrapping_add(slot_ctx + 3), 0);
+        }
         // Add flags: the slot context only.
         unsafe {
             core::ptr::write_volatile(input.wrapping_add(1), 1);
