@@ -785,8 +785,13 @@ pub mod driver {
 
     pub struct EhciData {
         /// The controller owns the register window; keeping it here is what
-        /// keeps the mapping alive for the controller's lifetime.
-        _ehci: Ehci,
+        /// keeps the mapping alive for the controller's lifetime. Shared with
+        /// the mass-storage block backend, whose `read_block(&self)` cannot take
+        /// the controller by value.
+        _ehci: alloc::sync::Arc<ksync::Mutex<Ehci>>,
+        /// Publications of any disks published from this controller; dropping a
+        /// guard unpublishes them.
+        _disks: alloc::vec::Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>,
         /// Enabled clocks, held for the controller's lifetime. The device tree
         /// lists four clocks without names, so they are taken by index; the
         /// controller can detect a connect without them but cannot run its reset
@@ -872,22 +877,43 @@ pub mod driver {
             let mut ehci = Ehci::init(dev, regs)?;
             ehci.log_ports();
 
-            let ports = Hcd::port_count(&ehci);
+            // The controller becomes shareable here: the block backend needs it
+            // through `&self`, and enumeration needs it mutably.
+            let ehci = alloc::sync::Arc::new(ksync::Mutex::new(ehci));
+            let ports = {
+                let guard = ehci.lock();
+                Hcd::port_count(&*guard)
+            };
             let mut devices = 0usize;
+            let mut disks = alloc::vec::Vec::new();
             for port in 0..ports {
-                let status = ehci
-                    .port_status(port)
-                    .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-                if !status.connected {
-                    continue;
-                }
+                let (status, enumerated) = {
+                    let mut guard = ehci.lock();
+                    let status = guard
+                        .port_status(port)
+                        .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
+                    if !status.connected {
+                        continue;
+                    }
+                    (
+                        status,
+                        usb::enumerate::enumerate_port(&mut *guard, port, 1u8),
+                    )
+                };
+                let _ = status;
                 info!("ehci: port {} has a device", port + 1);
-                let address = 1u8;
-                match usb::enumerate::enumerate_port(&mut ehci, port, address) {
+                match enumerated {
                     Ok(device) => {
                         info!("ehci: {}", device.summary());
                         devices += 1;
-                        super::probe_mass_storage(&mut ehci, &device);
+                        {
+                            let mut guard = ehci.lock();
+                            super::probe_mass_storage(&mut *guard, &device);
+                        }
+                        if let Some(publication) = super::publish_mass_storage(dev, &ehci, &device)
+                        {
+                            disks.push(publication);
+                        }
                     }
                     Err(err) => log::error!("ehci: port {} enumeration failed: {err:?}", port + 1),
                 }
@@ -896,6 +922,7 @@ pub mod driver {
 
             Ok(EhciData {
                 _ehci: ehci,
+                _disks: disks,
                 _clocks: clocks,
                 _phys: phys,
             })
@@ -903,6 +930,165 @@ pub mod driver {
     }
 
     driver_base::declare_driver!(PlatformBus, EhciDriver, "ehci", IDS);
+}
+
+/// The mass-storage disk as the block layer sees it.
+///
+/// `BlockDeviceOperations::read_block` takes `&self`, so the controller is held
+/// behind a lock instead of by value; the BOT layer above the EHCI bulk path is
+/// the same one the bring-up probe uses.
+struct UsbBotDisk {
+    ehci: alloc::sync::Arc<ksync::Mutex<Ehci>>,
+    endpoints: usb::bot::BotEndpoints,
+    blocks: u64,
+}
+
+/// BOT reads go through one bulk transfer, and that buffer is one page, so a
+/// request larger than eight sectors is split.
+const BOT_MAX_SECTORS: usize = 8;
+
+impl subsys_block::BlockDeviceOperations for UsbBotDisk {
+    fn num_blocks(&self) -> u64 {
+        self.blocks
+    }
+
+    fn block_size(&self) -> usize {
+        512
+    }
+
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> kerrno::KResult {
+        if buf.len() % 512 != 0 {
+            return Err(kerrno::KError::InvalidInput);
+        }
+        let mut guard = self.ehci.lock();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let left = (buf.len() - done) / 512;
+            let sectors = left.min(BOT_MAX_SECTORS);
+            let data = usb::bot::read_sectors(
+                &mut *guard,
+                &self.endpoints,
+                (block_id + (done / 512) as u64) as u32,
+                sectors as u16,
+            )?;
+            if data.len() < sectors * 512 {
+                return Err(kerrno::KError::Io);
+            }
+            buf[done..done + sectors * 512].copy_from_slice(&data[..sectors * 512]);
+            done += sectors * 512;
+        }
+        Ok(())
+    }
+
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> kerrno::KResult {
+        if buf.len() % 512 != 0 {
+            return Err(kerrno::KError::InvalidInput);
+        }
+        let mut guard = self.ehci.lock();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let left = (buf.len() - done) / 512;
+            let sectors = left.min(BOT_MAX_SECTORS);
+            usb::bot::write_sectors(
+                &mut *guard,
+                &self.endpoints,
+                (block_id + (done / 512) as u64) as u32,
+                &buf[done..done + sectors * 512],
+            )?;
+            done += sectors * 512;
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> kerrno::KResult {
+        // The BOT path writes through the CSW, and the device acknowledges every
+        // block before it answers; there is no separate cache to drain.
+        Ok(())
+    }
+}
+
+/// Publishes the mass-storage interface as a block device.
+fn publish_mass_storage(
+    dev: &mut driver_base::Device<'_, driver_base::PlatformBus>,
+    ehci: &alloc::sync::Arc<ksync::Mutex<Ehci>>,
+    device: &usb::UsbDevice,
+) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
+    for config in &device.configurations {
+        for interface in &config.interfaces {
+            if interface.class != 0x08 || interface.protocol != 0x50 {
+                continue;
+            }
+            let mut endpoint_in = 0u8;
+            let mut endpoint_out = 0u8;
+            for endpoint in &interface.endpoints {
+                if endpoint.is_in() {
+                    endpoint_in = endpoint.address;
+                } else {
+                    endpoint_out = endpoint.address;
+                }
+            }
+            if endpoint_in == 0 || endpoint_out == 0 {
+                log::warn!("ehci: mass storage interface without both bulk endpoints");
+                continue;
+            }
+            let endpoints = usb::bot::BotEndpoints {
+                address: device.address,
+                endpoint_in,
+                endpoint_out,
+                max_packet: 512,
+            };
+            // Capacity comes from the device itself, and the block layer needs
+            // it before the disk is published.
+            let blocks = {
+                let mut guard = ehci.lock();
+                match usb::bot::read_capacity(&mut *guard, &endpoints) {
+                    Ok(data) if data.len() >= 8 => {
+                        let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                        u64::from(last) + 1
+                    }
+                    _ => {
+                        log::error!("ehci: mass storage reported no capacity");
+                        continue;
+                    }
+                }
+            };
+            let backend = UsbBotDisk {
+                ehci: ehci.clone(),
+                endpoints,
+                blocks,
+            };
+            let name = alloc::format!("usb{}", device.address);
+            let parent_path = alloc::string::String::from(dev.info().path());
+            let modalias = dev.info().modalias().map(alloc::string::String::from);
+            // Major 8 is the conventional disk major; the block core owns the
+            // dev_t registry and rejects a duplicate.
+            let disk =
+                match subsys_block::Gendisk::new(name, 8, 0, 1, alloc::boxed::Box::new(backend))
+                    .map(|disk| disk.with_devnode_context(&parent_path, modalias))
+                {
+                    Ok(disk) => disk,
+                    Err(err) => {
+                        log::error!("ehci: could not create the block disk: {err:?}");
+                        continue;
+                    }
+                };
+            match dev.publish(
+                &subsys_block::class::BLOCK,
+                alloc::sync::Arc::new(disk),
+                "usb-storage",
+            ) {
+                Ok(publication) => {
+                    log::info!(
+                        "ehci: published {} as a block device with {blocks} 512-byte blocks",
+                        device.summary()
+                    );
+                    return Some(publication);
+                }
+                Err(err) => log::error!("ehci: block publication failed: {err:?}"),
+            }
+        }
+    }
+    None
 }
 
 /// If the device exposes a bulk-only mass-storage interface, read its first

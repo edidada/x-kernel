@@ -17,6 +17,12 @@ rk3588-dwc3 = []
 [dependencies]
 driver_base = { workspace = true }
 usb = { workspace = true }
+# The mass-storage disk is published through the block class, the same way
+# drv/block publishes its ramdisk (`Gendisk::new` + `dev.publish(&BLOCK, ..)`).
+subsys_block = { workspace = true }
+# `BlockDeviceOperations::read_block` takes `&self`, so the controller has to be
+# shareable between the USB side and the block backend.
+ksync = { workspace = true }
 kerrno = { workspace = true }
 # Clock/PHY/reset handles arrive through the device resource services; the
 # crates themselves are not named here (the handles are `driver_base` types).

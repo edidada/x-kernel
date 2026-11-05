@@ -497,6 +497,10 @@ fn mount_root_file_system(boot: &BootVfs) {
                 match result {
                     Ok(mount) => {
                         info!("  filesystem type: {:?}", mount.filesystem_name());
+                        ROOT_DEVICE_NUMBER.store(
+                            handle.device_number().0,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
                         return;
                     }
                     Err(err)
@@ -582,6 +586,91 @@ fn root_candidates(
 }
 
 /// Mounts the host-share 9P filesystem into the initial namespace.
+/// Device number of the filesystem mounted as root, recorded by
+/// `mount_root_file_system()` so that `mount_block_devices_at()` can skip it.
+static ROOT_DEVICE_NUMBER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Mounts any block device that carries a registered filesystem at `mount_path`.
+///
+/// This is the same pair the root filesystem uses — `kvfs::get_tree_bdev()`
+/// resolves the `/dev/<name>` source through its device number, and
+/// `MntNamespace::mount_new()` attaches it — only the mountpoint is fixed. It
+/// runs after the driver initcalls, so a disk that appeared during probe (a USB
+/// mass-storage device, for instance) is already published.
+///
+/// Read-write is tried first and read-only second: a filesystem that needs
+/// journal recovery mounts read-write, while media that cannot be written still
+/// becomes visible read-only instead of failing outright.
+pub fn mount_block_devices_at(mount_path: &str) {
+    let boot = BootVfs::initial();
+    if boot.ensure_directory_path(mount_path).is_err() {
+        warn!("could not create mount point {mount_path}");
+        return;
+    }
+    let mountpoint = match boot.lookup(mount_path) {
+        Ok(mountpoint) => mountpoint,
+        Err(err) => {
+            warn!("could not look up mount point {mount_path}: {err:?}");
+            return;
+        }
+    };
+    let cred = kcred::initial_cred();
+    // Whatever carries the root filesystem is already mounted; mounting it again
+    // at a second path would hide the disk this helper is meant to expose.
+    let root_device = ROOT_DEVICE_NUMBER.load(core::sync::atomic::Ordering::Relaxed);
+    let root_device = (root_device != 0).then_some(root_device);
+    for handle in subsys_block::block_devices() {
+        if handle.num_blocks() == 0 {
+            continue;
+        }
+        if Some(handle.device_number().0) == root_device {
+            continue;
+        }
+        let source = format!("/dev/{}", handle.name());
+        for file_system_type in kvfs::registered_filesystems()
+            .into_iter()
+            .filter(|file_system_type| file_system_type.requires_device())
+        {
+            for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
+                let mut mount_flags = MountFlags::RELATIME;
+                if superblock_flags.contains(SuperBlockFlags::RDONLY) {
+                    mount_flags.insert(MountFlags::RDONLY);
+                }
+                let result = kvfs::FsContext::new(
+                    file_system_type,
+                    Some(&source),
+                    None,
+                    superblock_flags,
+                    &cred,
+                )
+                .and_then(|mut context| {
+                    boot.namespace.mount_new(
+                        &mountpoint,
+                        mount_flags,
+                        &mut context,
+                        &boot.root,
+                        &boot.root,
+                    )
+                });
+                match result {
+                    Ok(mount) => {
+                        info!(
+                            "  {source} mounted at {mount_path} as {:?}",
+                            mount.filesystem_name()
+                        );
+                        return;
+                    }
+                    Err(err) => info!(
+                        "{source} as {} ({superblock_flags:?}) failed: {err:?}",
+                        file_system_type.name()
+                    ),
+                }
+            }
+        }
+    }
+    info!("  no filesystem found on any block device for {mount_path}");
+}
+
 #[cfg(feature = "fs9p")]
 pub fn mount_host_share(mount_path: &str) {
     let boot = BootVfs::initial();

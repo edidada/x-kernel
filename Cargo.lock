@@ -1381,9 +1381,11 @@ dependencies = [
  "karch",
  "kerrno",
  "khal",
+ "ksync",
  "ktime_types",
  "log",
  "of",
+ "subsys-block",
  "unittest",
  "usb",
 ]

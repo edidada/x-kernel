@@ -341,6 +341,9 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     {
         fs_boot::prepare_namespace();
         fs_boot::mount_virtual_filesystems();
+        // Disks that appeared during driver probe (USB mass storage) become
+        // usable filesystem trees here, mounted where userspace expects them.
+        fs_boot::mount_block_devices_at("/mnt/usb");
     }
 
     #[cfg(all(feature = "fs9p", not(unittest)))]
