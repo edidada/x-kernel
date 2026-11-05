@@ -730,6 +730,94 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 
 ## USB bring-up（M1：DWC3 + xHCI，High-Speed）
 
+### 交接快照：hub 类已通、鼠标可用、U 盘卡在"地址 0 的 SETUP 无应答"
+
+**铁律（已写进 `AGENTS.md`）**：寄存器位域、描述符布局、命令时序一律以源码为准
+（`/workspace/linux-7.1.8`、`/workspace/linux-jr`、`/workspace/linux-bsp-rk3588`、
+`/workspace/tgoskits`），禁止凭记忆重建。本段列出的**每一个**已修 bug，都是
+"凭记忆推字段"造成的，且每一个都是一次 grep 就能避免的。
+
+**当前能力（真机稳定复现）**
+
+| 对象 | 状态 |
+|---|---|
+| USB2.1 companion hub (05e3:0610) | ✅ HS 枚举 + Configure Endpoint(DEV_HUB/MAX_PORTS) |
+| USB3.2 companion hub (05e3:0620) | ✅ SuperSpeed 枚举 + 配置 |
+| 低速鼠标（HS hub 子设备，走 TT） | ✅ **完整枚举**（`17ef:608d`） |
+| Kingston DataTraveler 3.0（0951:1666，纯 SS） | ❌ 地址 0 的 SETUP 无应答 |
+| USB2.0 口上的设备（EHCI） | ❌ 复位后 PED 不置位（独立问题，同一症状族） |
+
+**拓扑真值（参考板实测，`lsusb -t`）**
+
+```
+Bus 01 (480M)  Port 1: 05e3:0610 USB2.1 Hub (4p)   ← 只有 hub，无子设备
+Bus 02 (5000M) Port 1: 05e3:0620 USB3.2 Hub (4p)
+    Port 4: 0951:1666 DataTraveler 3.0  Mass Storage  5000M
+```
+
+即：**USB3 设备只在 SS hub 出现，USB2 companion hub 上什么都没有**。我们板上
+USB2 hub 报的 `connected/full` 是插入瞬间的毛刺（此时地址 0 完全不应答），
+不是真设备 —— 排查时不要被它带走。
+
+### 本轮修掉的 11 个 bug（全部有源码依据）
+
+| # | 问题 | 依据/判据 |
+|---|---|---|
+| 1 | SS hub 的 hub 描述符类型是 `0x2A`，不是 `0x29` | `hub_is_superspeed()` → `USB_DT_SS_HUB`；发错类型被 Stall(code 6)，SS hub 端口从未被扫过 |
+| 2 | SS hub 端口速度恒为 SuperSpeed | SS 口 USB2 那半在另一个 hub 上；按 USB2 位解码把 `0x0203` 解成 low |
+| 3 | TT 字段位序 | `tt_info = hub_slot_id \| (ttport << 8)`（hub slot 在 7:0，port 在 15:8）—— 原来写反，鼠标因此不通 |
+| 4 | MTT 必须与 TT 字段同现 | `if (udev->tt->multi) dev_info \|= DEV_MTT` |
+| 5 | TT 适用条件 | `udev->speed != USB_SPEED_HIGH && hdev->speed == USB_SPEED_HIGH` |
+| 6 | FS 的 EP0 包长是 64 | `xhci_setup_addressable_virt_dev()` 的 `MAX_PACKET(64)`（原来取了低速的 8） |
+| 7 | **BSR 位从未写进 TRB** | `TRB_BSR`(bit9)；命令 TRB 全是 `0x..2c01`，两步时序从未真正跑过 |
+| 8 | 新设备时序 | `hub_port_init()` new scheme：enable_device(BSR) → 读 8 字节 → **再复位端口** → Address Device(BSR=0) |
+| 9 | 第二次 Address Device 不能重写 slot context | `xhci_setup_device()` 的 else 分支只做 `xhci_copy_ep0_dequeue_into_input_ctx()` |
+| 10 | IN 的 Data TRB 需要 `TRB_ISP` | `xhci_queue_ctrl_tx()`；否则等不满长度包 |
+| 11 | 环必须有 Link TRB + doorbell 读回 flush | `prepare_ring()` 拒绝无 link 的环；`xhci_ring_ep_doorbell()` 有 readl flush |
+
+**一处有意偏离**：IOC 仍放在 Data TRB（Linux 放在 Status TRB）。因为我们靠事件的
+transfer-length 算实际字节数，只有 Data TRB 带这个数；照搬会让短包被当满包
+（字符串描述符立刻变乱码）。要真正对齐，需要先实现 TD 跟踪。
+
+### 卡点的完整证据（不要再重复这些检查）
+
+SS 子设备（slot 6）在 BSR 之后，控制器写回的上下文**逐字段正确**：
+
+```
+slot ctx: 0=0x8400004 (route 4, speed 4, entries 1)  1=0x20000 (root port 2)
+          2=0x0 (无 TT)   3=0x8000000 (slot state Default, addr 0)
+ep0  ctx: state 1(Running)  max packet 0x200(512)  dequeue=我们的环|DCS 1  avg 8
+port    : hub 5 port 4 = CCS+PED+PP, link state 0 (U0)
+hub     : slot 5 configured as a hub with 4 ports (DEV_HUB + MAX_PORTS)
+```
+
+而发往地址 0 的 `GET_DESCRIPTOR(8)` 返回：
+
+```
+control transfer completion code 4 (slot 6, ep 1, trb 0x2f0a000, residual 8)
+```
+
+slot/endpoint 归属正确、residual = 请求全长度 ⇒ **SETUP 发出去了，设备一个字节都没回**。
+
+同一 hub、同一条 SS 链路，**hub 自己的 EP0 传输正常**；差异只在"hub 下游"。
+
+**已排除**（每条都是实测，不要再试）：TT 字段有无/位序、MTT、route string、
+speed、EP0 包长、root port、hub 的 Configure Endpoint、端口复位（单次/两次/
+100ms recovery/等 C_PORT_RESET）、C_PORT_LINK_STATE/C_BH_PORT_RESET 清理、
+显式置 LINK_STATE=U0、切换物理 USB3 口、失败后释放 slot、3 次重试。
+
+**下一步建议（按信息量排序）**
+
+1. **换一个 USB3 设备**插同一口：能区分"Kingston 这只盘特有"与"所有 SS 子设备"。
+   这是当前信息量最大、最省时的一步。
+2. 读 `hub_port_reset()` 的 **warm reset 分支**（`USB_PORT_FEAT_BH_PORT_RESET`=28）
+   与 `hub_port_warm_reset_required()`：SS 设备从 reset 迁到 error 态时需要 warm
+   reset，我们现在只会做 hot reset。
+3. 读 `xhci_urb_enqueue()` 对 `udev->devnum == 0` 的处理，确认发往地址 0 的传输
+   用的是 slot id（我们用的是 slot id + address_zero_slot 映射）。
+
+
+
 ### 里程碑：第一个 USB 设备真正枚举成功（最新一轮）
 
 ```
