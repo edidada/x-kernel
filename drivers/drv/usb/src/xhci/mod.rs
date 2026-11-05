@@ -181,6 +181,10 @@ pub struct Xhci {
     /// One addressed device slot: its input context (reused for every command)
     /// and the EP0 transfer ring the slot context points at.
     slots: Vec<Slot>,
+    /// Slot whose contexts a Block-Set-Address-Request `Address Device` installed,
+    /// i.e. the device still answering on the default address 0. xHCI keeps such
+    /// a device reachable only through its slot.
+    address_zero_slot: Option<u8>,
 }
 
 /// The scratchpad buffer pool a controller asks for.
@@ -364,6 +368,8 @@ struct Addressing {
     tt: Option<Translator>,
     /// The parent hub has one transaction translator per port (bDeviceProtocol 2).
     multi_tt: bool,
+    /// This device is itself a hub (slot context "Hub" flag, bit 26).
+    hub: bool,
 }
 
 impl Addressing {
@@ -372,6 +378,7 @@ impl Addressing {
             route: 0,
             tt: None,
             multi_tt: false,
+            hub: false,
         }
     }
 }
@@ -603,6 +610,7 @@ impl Xhci {
             // The controller publishes the first event with the cycle bit set.
             event_cycle: true,
             slots: Vec::new(),
+            address_zero_slot: None,
         };
         xhci.program_rings()?;
         // Linux `xhci_run_finished` does these as three separate read-modify-writes
@@ -1111,6 +1119,7 @@ impl Xhci {
         speed: Speed,
         ep0_max_packet: u16,
         addressing: Addressing,
+        bsr: bool,
     ) -> Result<(), KError> {
         let context_size = self.context_size;
         let (input_addr, ep0_ring, dcs) = {
@@ -1147,7 +1156,13 @@ impl Xhci {
         let slot_ctx = dwords_per_context * (context::SLOT_CONTEXT + 1);
         write(
             slot_ctx,
-            context::slot_dword0_routed(addressing.route, speed_id, 1, addressing.multi_tt),
+            context::slot_dword0_routed(
+                addressing.route,
+                speed_id,
+                1,
+                addressing.multi_tt,
+                addressing.hub,
+            ),
         );
         write(slot_ctx + 1, context::slot_dword1((port + 1) as u8));
         if let Some(tt) = addressing.tt {
@@ -1211,7 +1226,7 @@ impl Xhci {
                     return Err(err);
                 }
                 log::error!("xhci: retrying Address Device as Low-Speed");
-                let low = self.address_device(slot_index, port, Speed::Low, 8, addressing);
+                let low = self.address_device(slot_index, port, Speed::Low, 8, addressing, bsr);
                 return match low {
                     Ok(()) => Ok(()),
                     Err(low_err) => {
@@ -1482,10 +1497,15 @@ impl Hcd for Xhci {
     ) -> KResult<usize> {
         // xHCI uses the slot id as the device address, so the address the bus
         // core passes back is the slot whose EP0 ring we transfer on.
+        let wanted = if address == 0 {
+            self.address_zero_slot.ok_or(KError::NotFound)?
+        } else {
+            address
+        };
         let slot_index = self
             .slots
             .iter()
-            .position(|slot| slot.id == address)
+            .position(|slot| slot.id == wanted)
             .ok_or(KError::NotFound)?;
         self.control_transfer_slot(slot_index, setup, data)
     }
@@ -1633,6 +1653,15 @@ impl Xhci {
         hub: &usb::UsbDevice,
         root_port: usize,
     ) {
+        // The controller has to be told this slot is a hub before it will route
+        // anything to the ports below it.
+        if let Some(info) = usb::hub::info(self, hub.address) {
+            if let Some(slot_index) = self.slots.iter().position(|slot| slot.id == hub.address) {
+                if let Err(err) = self.configure_hub(slot_index, info.ports) {
+                    log::error!("xhci: hub {} configure failed: {err:?}", hub.address);
+                }
+            }
+        }
         let ports = usb::hub::scan(self, hub.address);
         // `bDeviceProtocol` (from the *device* descriptor): 0 FS hub, 1 HS
         // single-TT, 2 HS multi-TT, 3 SuperSpeed.
@@ -1667,6 +1696,7 @@ impl Xhci {
                 route: u32::from(entry.port) & 0xf,
                 tt,
                 multi_tt: tt.is_some() && protocol == 2,
+                hub: false,
             };
             match self.address_downstream(dev, root_port, speed, addressing) {
                 Ok(address) => match usb::enumerate::enumerate_addressed(
@@ -1735,8 +1765,67 @@ impl Xhci {
             usb::Speed::Super => 512,
             _ => 64,
         };
-        self.address_device(slot_index, root_port, speed, ep0_max_packet, addressing)?;
+        self.address_device(
+            slot_index,
+            root_port,
+            speed,
+            ep0_max_packet,
+            addressing,
+            false,
+        )?;
         Ok(slot_id)
+    }
+
+    /// Tells the controller that a slot is a hub (`xhci_update_hub_device`).
+    ///
+    /// The Hub flag is NOT set at `Address Device` — doing so makes the command
+    /// fail — but through a **Configure Endpoint** afterwards, together with the
+    /// slot context's Number of Ports. Those two are what let the controller
+    /// route transactions into the hub's downstream port paths; without them any
+    /// device behind the hub fails `Address Device` with a Transaction Error
+    /// while the hub itself addresses fine.
+    fn configure_hub(&mut self, slot_index: usize, num_ports: u8) -> Result<(), KError> {
+        let dwords = self.context_size / 4;
+        let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let device = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        // The slot context the controller built is in its OWN device context:
+        // Configure Endpoint must present the current state, not a guess.
+        for offset in 0..dwords {
+            // SAFETY: `offset` stays inside both contexts (input slot context at
+            // dwords..2*dwords, device slot context at 0..dwords).
+            let value = unsafe { core::ptr::read_volatile(device.wrapping_add(offset)) };
+            // SAFETY: as above, on the input context's slot-context slot.
+            unsafe {
+                core::ptr::write_volatile(input.wrapping_add(dwords + offset), value);
+            }
+        }
+        let slot_ctx = dwords;
+        // dword0 bit26 = Hub; dword1 bits 31:24 = Number of Ports.
+        let info0 = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
+        unsafe {
+            core::ptr::write_volatile(input.wrapping_add(slot_ctx), info0 | (1 << 26));
+        }
+        let info1 = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx + 1)) };
+        unsafe {
+            core::ptr::write_volatile(
+                input.wrapping_add(slot_ctx + 1),
+                (info1 & 0x00ff_ffff) | (u32::from(num_ports) << 24),
+            );
+        }
+        // Add flags: the slot context only.
+        unsafe {
+            core::ptr::write_volatile(input.wrapping_add(1), 1);
+        }
+        let slot_id = self.slots[slot_index].id;
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "configure hub")?;
+        info!("xhci: slot {slot_id} configured as a hub with {num_ports} port(s)");
+        Ok(())
     }
 
     /// Brings one port up far enough that the bus core can talk to the device:
@@ -1788,7 +1877,19 @@ impl Xhci {
             Speed::Super => 512,
             _ => 64,
         };
-        self.address_device(slot_index, port, speed, ep0_max_packet, Addressing::root())?;
+        let ep0_max_packet = match speed {
+            Speed::Low | Speed::Full => 8,
+            Speed::Super => 512,
+            _ => 64,
+        };
+        self.address_device(
+            slot_index,
+            port,
+            speed,
+            ep0_max_packet,
+            Addressing::root(),
+            false,
+        )?;
         // Behaviour probe, not a register read: a No-Op Transfer TRB on the
         // just-addressed slot's EP0 ring. It completes with a Transfer Event
         // and never touches the device, so it separates "the transfer ring /

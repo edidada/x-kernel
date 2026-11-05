@@ -18,7 +18,7 @@ pub const EP0_CONTEXT: usize = 1;
 
 /// Slot context dword 0: route string, speed and the number of contexts.
 pub fn slot_dword0(speed_id: u8, context_entries: u32) -> u32 {
-    slot_dword0_routed(0, speed_id, context_entries, false)
+    slot_dword0_routed(0, speed_id, context_entries, false, false)
 }
 
 /// Slot context dword 0 with a route string and the multi-TT flag.
@@ -28,10 +28,21 @@ pub fn slot_dword0(speed_id: u8, context_entries: u32) -> u32 {
 /// each hub along the way). `multi_tt` (bit 25) tells the controller the parent
 /// hub has a transaction translator per port; it is only meaningful for a
 /// full/low-speed device behind a high-speed hub.
-pub fn slot_dword0_routed(route: u32, speed_id: u8, context_entries: u32, multi_tt: bool) -> u32 {
+pub fn slot_dword0_routed(
+    route: u32,
+    speed_id: u8,
+    context_entries: u32,
+    multi_tt: bool,
+    hub: bool,
+) -> u32 {
     (route & 0x000f_ffff)
         | ((speed_id as u32) << 20)
         | (u32::from(multi_tt) << 25)
+        // "Hub" (bit 26): the controller routes transactions down this slot's
+        // port paths only for a slot it knows is a hub, which is why devices
+        // behind a hub fail Address Device with a Transaction Error when the
+        // parent's slot context never carried this bit.
+        | (u32::from(hub) << 26)
         | (context_entries << 27)
 }
 
