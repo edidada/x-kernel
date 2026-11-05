@@ -25,3 +25,7 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 06:38 | `/workspace/linux-7.1.8/fs/super.c` | `mount_bdev` | get_tree_bdev: a block device already carrying the root is not mounted twice |
 | 2026-11-05 06:39 | `/workspace/linux-7.1.8/fs/ext4/super.c` | `ext4_fill_super` | why a mount attempt is refused (journal / features) |
 | 2026-11-05 06:42 | `/workspace/linux-7.1.8/drivers/base/core.c` | `device_add` | device-node publication: what reaches /dev after device_add |
+| 2026-11-05 06:45 | `/workspace/linux-7.1.8/drivers/base/devtmpfs.c` | `devtmpfs_create_node` | creating the /dev node for a published disk |
+| 2026-11-05 06:46 | `/workspace/linux-7.1.8/fs/ext4/inode.c` | `ext4_map_blocks` | which block reads a directory walk issues |
+| 2026-11-05 06:49 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `ehci_handle_halted_endpoint` | endpoint halt after a failed transfer |
+| 2026-11-05 06:51 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_reset` | clearing a latched Host System Error and restarting the schedule |

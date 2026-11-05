@@ -627,6 +627,39 @@ pub fn mount_block_devices_at(mount_path: &str) {
             continue;
         }
         let source = format!("/dev/{}", handle.name());
+        // devtmpfs creates a node for a published disk; if the projection did
+        // not deliver one (a disk published after the devtmpfs projection was
+        // built), the node is created here from the device number the block core
+        // already holds. `Mount::mknod` is the kernel-side equivalent of the
+        // node `devtmpfsd` would have made.
+        if boot.lookup(&source).is_err() {
+            match boot.lookup("/dev") {
+                Ok(dev_dir) => {
+                    let number = handle.device_number();
+                    let device = kvfs::DeviceId::new(number.major(), number.minor());
+                    match dev_dir.mknod(
+                        handle.name(),
+                        kvfs::NodeType::BlockDevice,
+                        kvfs::NodePermission::OWNER_READ
+                            | kvfs::NodePermission::OWNER_WRITE
+                            | kvfs::NodePermission::GROUP_READ
+                            | kvfs::NodePermission::OTHER_READ,
+                        device,
+                        &cred,
+                    ) {
+                        Ok(_) => info!("  created {source} for {}", handle.name()),
+                        Err(err) => {
+                            warn!("  could not create {source}: {err:?}");
+                            continue;
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("  could not look up /dev: {err:?}");
+                    continue;
+                }
+            }
+        }
         for file_system_type in kvfs::registered_filesystems()
             .into_iter()
             .filter(|file_system_type| file_system_type.requires_device())

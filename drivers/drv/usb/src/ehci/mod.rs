@@ -397,6 +397,25 @@ impl Ehci {
         Err(KError::TimedOut)
     }
 
+    /// Restarts the asynchronous schedule after a controller halt.
+    fn recover_async_schedule(&self) {
+        let status = self.regs.read32(self.operational + op::USBSTS);
+        self.regs.write32(self.operational + op::USBSTS, status);
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        self.regs
+            .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        self.regs.write32(
+            self.operational + op::ASYNCLISTADDR,
+            self.qh.bus_addr() as u32,
+        );
+        self.regs.write32(
+            self.operational + op::USBCMD,
+            command | regs::cmd::RS | regs::cmd::ASE,
+        );
+        log::warn!("ehci: restarted the asynchronous schedule after a halt");
+    }
+
     /// Links one of the two endpoint queue heads into the asynchronous schedule.
     ///
     /// The list stays `head -> qh -> head`: `qh_link_async()` splices a queue
@@ -462,13 +481,11 @@ impl Ehci {
                 // No DT bit: with QH_TOGGLE_CTL clear the controller ignores it.
                 | token::IOC
                 | token::ACTIVE,
-            buffer: [
-                self.bulk.bus_addr() as u32,
-                self.bulk.bus_addr() as u32 + 4096,
-                0,
-                0,
-                0,
-            ],
+            // One page pointer only: the buffer is exactly one page and a
+            // transfer never leaves it, and a pointer one page past the end of
+            // the allocation is the kind of address that becomes a Host System
+            // Error if the controller ever reads it.
+            buffer: [self.bulk.bus_addr() as u32, 0, 0, 0, 0],
         };
         let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>();
         // SAFETY: the qTD allocation holds three elements; index 0 is used here
@@ -539,7 +556,42 @@ impl Ehci {
         }
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         if token & token::ACTIVE != 0 {
-            log::error!("ehci: bulk transfer did not complete, token {token:#010x}");
+            let status = self.regs.read32(self.operational + op::USBSTS);
+            log::error!(
+                "ehci: bulk transfer did not complete, token {token:#010x}, USBSTS {status:#010x} \
+                 (halted {}, hse {}, ass {}, rec {})",
+                status & sts::HCHALTED != 0,
+                status & sts::HSE != 0,
+                status & sts::ASS != 0,
+                status & sts::REC != 0,
+            );
+            // SAFETY: dword 4 of this endpoint's queue head holds its next qTD.
+            let qtd_next = unsafe {
+                core::ptr::read_volatile(
+                    head.wrapping_add(BULK_QH)
+                        .cast::<u8>()
+                        .wrapping_add(16)
+                        .cast::<u32>(),
+                )
+            };
+            // SAFETY: dword 6 of the same queue head holds its overlay token.
+            let overlay = unsafe {
+                core::ptr::read_volatile(
+                    head.wrapping_add(BULK_QH)
+                        .cast::<u8>()
+                        .wrapping_add(24)
+                        .cast::<u32>(),
+                )
+            };
+            let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
+            log::error!(
+                "ehci: bulk qh {BULK_QH}: head next {head_next:#x}, qtd_next {qtd_next:#x}, \
+                 overlay {overlay:#010x}"
+            );
+            // A Host System Error halts the controller; clearing the status bit
+            // and restarting the asynchronous schedule is the only way back, and
+            // without it every later transfer on every endpoint fails too.
+            self.recover_async_schedule();
             return Err(KError::TimedOut);
         }
         if token & token::HALT != 0 {
@@ -958,8 +1010,13 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> kerrno::KResult {
         if buf.len() % 512 != 0 {
+            log::error!(
+                "ehci: read_block {block_id} + {} bytes is not a whole number of sectors",
+                buf.len()
+            );
             return Err(kerrno::KError::InvalidInput);
         }
+        log::info!("ehci: read_block {block_id} + {} bytes", buf.len());
         let mut guard = self.ehci.lock();
         let mut done = 0usize;
         while done < buf.len() {
@@ -970,8 +1027,19 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
                 &self.endpoints,
                 (block_id + (done / 512) as u64) as u32,
                 sectors as u16,
-            )?;
+            )
+            .inspect_err(|err| {
+                log::error!(
+                    "ehci: read_block {block_id} sector {} x{sectors} failed: {err:?}",
+                    block_id + (done / 512) as u64
+                )
+            })?;
             if data.len() < sectors * 512 {
+                log::error!(
+                    "ehci: read_block {block_id} short read {} < {}",
+                    data.len(),
+                    sectors * 512
+                );
                 return Err(kerrno::KError::Io);
             }
             buf[done..done + sectors * 512].copy_from_slice(&data[..sectors * 512]);
