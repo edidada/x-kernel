@@ -730,7 +730,56 @@ Linux 的 `ndo_open` / vendor 的 `rtl8125_open` 在**接口 up 之后**才跑
 
 ## USB bring-up（M1：DWC3 + xHCI，High-Speed）
 
-### 交接快照：hub 类已通、鼠标可用、U 盘卡在"地址 0 的 SETUP 无应答"
+### 2026-11-05 深夜：Max Burst 修复后两个 hub 都到 Configured；SS 子设备仍不通，但已定位到 wire 侧
+
+**已修（commit `f52d07e66`）**：`endpoint_dword1_num` 把端点号写进了 ep_info2 bits 15:8 ——
+那里是 **Max Burst Size**。xHCI 端点上下文**没有端点号字段**（号只由 context index 编码，
+`xhci_get_endpoint_index`），SS hub 的 status EP（0x83，index 7）因此被写成 MaxBurst=3，
+控制器回 **Parameter Error（code 17 —— 不是 Context State Error，之前两轮 commit 记错了名字）**。
+HS hub 同路径因为非 SS 忽略该字段而侥幸成功，这就是“同一个代码一个成一个败”的原因。
+修复：MaxBurst 取 SuperSpeed Endpoint Companion 的 `bMaxBurst`（`bus/usb` 新增 0x30 companion
+解析，默认全 0，与 USB core 的 `usb_parse_ss_endpoint_companion()` 回退一致），interval/ESIT
+也按 `xhci_get_endpoint_interval`/`usb_endpoint_max_periodic_payload` 逐字段对齐。
+验证：两个 hub 的 Configure Endpoint 都 code 1，device ctx slot dword3 bits31:27 = **3**
+（注意 Linux 编号：0=Disabled/1=Default/2=Addressed/**3=Configured**）。
+
+**新鉴别结果（hub Configured 之后的全新状态，旧结论作废）**：
+
+| 步骤 | 结果 |
+|---|---|
+| Enable Slot（slot 4） | ✅ code 1 |
+| **BSR=1** Address Device | ✅ **code 1（首次成功，slot 进 Default）** ⇒ 控制器侧（命令环/上下文/事件）全部无辜 |
+| 地址 0 的 GET_DESCRIPTOR | ❌ code 4 ×N（transfer 超时） |
+| BSR=0 Address Device（SET_ADDRESS） | ❌ code 4 |
+| 失败后 Reset Endpoint | code 19 = Context State Error（EP 仍 Running 未 Halted，合理拒绝，非新 bug） |
+
+⇒ **wire 上经过 SS hub 的地址 0 事务不得到应答**：剩下“hub 不转发”或“设备不应答”两个候选。
+每次失败现在会跑 `diagnose_super_child`（BSR bootstrap → EP0 No-Op → 地址 0 描述符读），
+日志找 `super-speed child diagnostic`。
+
+**参考板（已重新接上）**：控制台 = 设备机 `/dev/ttyUSB1`，FTDI 序列号从 A54LQ9PF 换成了
+**A50285BI**（`scripts/usb/ref-usb-dump.sh` 默认值已改；ttyUSB0=A5XK3RJT 是我们板 @1.5M，
+ttyUSB2=继电器）。板子上**当前没有插任何 USB 设备**（金士顿盘在我们板上），lsusb 只有
+两个 onboard hub。已拿到的真值：
+
+- xHCI quirks `0x0000808002010010` = {SPURIOUS_SUCCESS, PLAT, BROKEN_PORT_PED,
+  SG_TRB_CACHE_SIZE, WRITE_64_HI_LO} —— **没有涉及 hub 路由的 quirk**，排除“缺 quirk”假设；
+- hub 05e3:0620 描述符：EP **3 IN (0x83)**、max 2、interval 8、**bMaxBurst 0** —— 与我们解析一致；
+- hcc `0x0220fe64`、hci version `0x110`、拓扑（0610 在 USB2 口 / 0620 在 SS 口）与我们一致；
+- **usbmon 模块 BSP 内核没编** —— 插盘对照只能靠 dmesg；sudo 可用（偶发竞态，重试即可）。
+
+**下次第一件事**：把盘插到参考板 USB3 口 → `REF_CONSOLE=/dev/ttyUSB1 scripts/usb/ref-usb-dump.sh`
++ 抓 `dmesg | grep usb` 的枚举故事（reset 次数 / warm reset / SET_ADDRESS 重试），
+再回到我们板做 **warm reset（BH_PORT_RESET feature 28，等 C_BH_PORT_RESET feature 29）**
+实验（handoff 旧候选，至今未试）。
+
+**工具债（非本线，记录）**：rk3588 defconfig 下 `make clippy` 有 ~44 条存量 lint（EHCI 12 处
+unsafe 缺 SAFETY、unsafe-op 分组、too_many_lines ×8 等 + pci 1 条）；commit 钩子目前是
+在 qemu 配置下过的。`.config` 纪律照旧：qemu 配置用于 clippy/commit/unittest，板机构建由
+`deploy-rk3588.sh --seed-config --build` 自己 seed；`SKIP_BUILD=1` 复用 target/ 里**最近一次**
+构建的镜像，切配置后勿直接 SKIP_BUILD。
+
+### 交接快照（旧）：hub 类已通、鼠标可用、U 盘卡在“地址 0 的 SETUP 无应答”
 
 **铁律（已写进 `AGENTS.md`）**：寄存器位域、描述符布局、命令时序一律以源码为准
 （`/workspace/linux-7.1.8`、`/workspace/linux-jr`、`/workspace/linux-bsp-rk3588`、

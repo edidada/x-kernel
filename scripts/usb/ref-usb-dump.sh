@@ -29,7 +29,9 @@ set -euo pipefail
 RIG=${RIG:-kylin@172.30.193.53}
 # The two FTDI adapters share vendor:product, so the factory serial is the only
 # stable key; /dev/ttyREF only exists when the udev rules are installed.
-REF_SERIAL=${REF_SERIAL:-A54LQ9PF}
+# 2026-11-05: the reference console moved to A50285BI (adapter re-cabled);
+# the old A54LQ9PF no longer enumerates on the rig.
+REF_SERIAL=${REF_SERIAL:-A50285BI}
 REF_SUDO_PW=${REF_SUDO_PW:-orangepi}
 
 payload() {
