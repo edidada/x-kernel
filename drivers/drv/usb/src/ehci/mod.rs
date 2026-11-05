@@ -331,9 +331,11 @@ impl Hcd for Ehci {
         Ok(PortStatus {
             connected: value & portsc::CCS != 0,
             enabled: value & portsc::PED != 0,
+            // EHCI line status: J-state (D+ high) is full/high speed, K-state
+            // (D- high) is low speed (EHCI 2.3.9).
             speed: match value & portsc::LINE_MASK {
-                x if x == (1 << 10) => Speed::Full,
-                x if x == (2 << 10) => Speed::Low,
+                x if x == (1 << 10) => Speed::Low,
+                x if x == (2 << 10) => Speed::Full,
                 _ => Speed::Unknown,
             },
             changed: value & portsc::CHANGE_BITS != 0,
@@ -346,33 +348,52 @@ impl Hcd for Ehci {
         // let it run for 50 ms, then *clear it again by hand* -- PR is not
         // self-clearing here, which is why waiting for it to fall times out.
         let current = self.regs.read32(offset);
+        // PED is read/write in EHCI and a write of 0 disables the port, so it is
+        // never part of a mask-out here: the port is being started, not stopped.
         self.regs.write32(
             offset,
-            (current & !portsc::CHANGE_BITS) | portsc::PP | portsc::RST,
+            (current | portsc::PP | portsc::RST) & !portsc::CHANGE_BITS,
         );
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(50_000));
-        let after = self.regs.read32(offset);
+        // `ehci_hub_control()` completes the reset from its GetPortStatus path:
+        // it reads PORTSC, writes it back with the reset bit and the RWC bits
+        // cleared (keeping PE exactly as read), then handshakes the reset bit to
+        // zero. The controller does not clear PR on its own -- polling for that
+        // leaves the port in reset forever, which reads as "connected, PR set,
+        // never enabled".
+        let in_reset = self.regs.read32(offset);
+        self.regs
+            .write32(offset, in_reset & !(portsc::CHANGE_BITS | portsc::RST));
+        let mut value = in_reset;
+        for _ in 0..200 {
+            value = self.regs.read32(offset);
+            if value & portsc::RST == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(5));
+        }
         info!(
-            "ehci: port {} during reset, portsc {after:#010x} (pr {}, ped {}, ccs {})",
+            "ehci: port {} after reset sequence, portsc {value:#010x} (pr {}, ped {}, ccs {}, \
+             line {})",
             port + 1,
-            after & portsc::RST != 0,
-            after & portsc::PED != 0,
-            after & portsc::CCS != 0,
-        );
-        self.regs.write32(
-            offset,
-            (after & !portsc::RST & !portsc::CHANGE_BITS) | portsc::PP,
+            value & portsc::RST != 0,
+            value & portsc::PED != 0,
+            value & portsc::CCS != 0,
+            (value & portsc::LINE_MASK) >> 10,
         );
         // The device needs its reset recovery time before the first SETUP.
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
 
-        let value = self.regs.read32(offset);
-        // Acknowledge the change bits this reset caused.
-        self.regs
-            .write32(offset, (value & portsc::PP) | portsc::CHANGE_BITS);
+        // Acknowledge the change bits this reset caused, keeping PED as the
+        // controller set it.
+        self.regs.write32(
+            offset,
+            (value & (portsc::PP | portsc::PED)) | portsc::CHANGE_BITS,
+        );
+        // A device that completed the high-speed chirp leaves the port in SE0
+        // (line status 0); J-state means it stayed at full speed.
         let speed = match value & portsc::LINE_MASK {
-            x if x == (2 << 10) => Speed::Low,
-            x if x == (1 << 10) => Speed::Full,
+            x if x == (1 << 10) => Speed::Low,
+            x if x == (2 << 10) => Speed::Full,
             _ => Speed::High,
         };
         info!(
