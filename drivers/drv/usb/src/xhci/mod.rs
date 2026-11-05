@@ -1663,6 +1663,12 @@ impl Xhci {
             let Some(speed) = self.reset_hub_port(hub, entry.port, protocol) else {
                 continue;
             };
+            // USB 2.0 §11.5.1.5 reset recovery: the device must not be sent a
+            // SETUP until it has settled after the hub's reset. Flash drives in
+            // particular take noticeably longer than the minimum, and the only
+            // symptom of being early is a Transaction Error from `Address
+            // Device` — indistinguishable from a wrong route or speed.
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
             // A full/low-speed device behind a high-speed hub needs the hub's
             // transaction translator; a SuperSpeed device needs neither.
             // The slot context's MTT bit and its TT fields go together: MTT only
