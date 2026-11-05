@@ -297,20 +297,27 @@ struct Scratchpads {
 
 /// Allocates the scratchpad buffers `HCSPARAMS2` asks for.
 ///
-/// Max Scratchpad Buffers = `HCSPARAMS2[25:21] << 5 | HCSPARAMS2[31:27]`
-/// (`HCS_MAX_SCRATCHPAD`: the count's five HIGH bits live at 25:21 and its five
-/// LOW bits at 31:27 — the register positions are the reverse of the field
-/// names, which is why this once allocated 32 buffers where the controller asks
-/// for 1 on `hcsparams2 = 0x0c0000f1`). When it is non-zero the DCBAA's first
-/// entry must point at an array of pointers to that many buffers *before* the
-/// controller is started; without it the first command that allocates a device
-/// slot (`Enable Slot`) fails with a TRB error while a No-Op still succeeds.
+/// The count's bit layout is ambiguous on this silicon. The reference's macro
+/// reads `HCSPARAMS2[25:21] << 5 | HCSPARAMS2[31:27]`; the spec-shaped reading
+/// of `hcsparams2 = 0x0c0000f1` gives `bits31:27 << 5` = 32. Both boots where
+/// the controller died with `HSE + GBUSERRADDR=0xC` (the shape of a
+/// NULL-scratchpad-pointer DMA) postdate the array shrinking to one entry, so
+/// the ambiguity is resolved the expensive-but-certain way: allocate the
+/// LARGER count and point every entry at its own valid page. Whatever count
+/// the controller really uses, every pointer it can read is live. When the
+/// count is non-zero the DCBAA's first entry must point at the array *before*
+/// the controller is started; without it the first command that allocates a
+/// device slot (`Enable Slot`) fails with a TRB error while a No-Op still
+/// succeeds.
 fn allocate_scratchpads(
     dev: &Device<'_, driver_base::PlatformBus>,
     hcsparams2: u32,
     device_contexts: &CoherentMem,
 ) -> Result<Option<Scratchpads>, ProbeError> {
-    let count = ((((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f)) as usize;
+    let count_reference =
+        ((((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f)) as usize;
+    let count_spec = (((hcsparams2 >> 27) & 0x1f) << 5 | ((hcsparams2 >> 16) & 0x3ff)) as usize;
+    let count = count_reference.max(count_spec);
     if count == 0 {
         return Ok(None);
     }
