@@ -2300,12 +2300,16 @@ impl Xhci {
         // (EP3-IN = context index 7). The input context's slot dword0 raises
         // `context entries` to cover it, which is what moves the slot to
         // Configured.
+        let interrupt_flag = match interrupt {
+            Some((ep_number, ..)) => 1 << (u32::from(ep_number) * 2 + 1),
+            None => 0,
+        };
+        // `xhci_get_endpoint_flag()` never includes EP0: adding it would
+        // reconfigure EP0 from the stale context left by `Address Device`,
+        // whose ring has advanced since -- EP0 then stops executing and every
+        // later control transfer times out.
         unsafe {
-            let interrupt_flag = match interrupt {
-                Some((ep_number, ..)) => 1 << (u32::from(ep_number) * 2 + 1),
-                None => 0,
-            };
-            core::ptr::write_volatile(input.wrapping_add(1), 0x1 | 0x2 | interrupt_flag);
+            core::ptr::write_volatile(input.wrapping_add(1), interrupt_flag);
         }
         // The hub's interrupt IN endpoint context (EP3-IN, context index 7,
         // doorbell target 7): type 7 (interrupt IN), the descriptor's max
