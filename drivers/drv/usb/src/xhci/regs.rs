@@ -113,6 +113,10 @@ pub mod trb {
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;
+    /// `TRB_RESET_DEV`: tells the controller the slot's device was reset, so it
+    /// drops the context state it kept for the device
+    /// (`hcd->driver->reset_device` = `xhci_discover_or_reset_device()`).
+    pub const RESET_DEVICE: u32 = 17;
     pub const NO_OP: u32 = 23;
     /// No-Op *Transfer* TRB (type 8). Unlike the No-Op Command (23) it travels
     /// on a slot's transfer ring and completes with a Transfer Event without

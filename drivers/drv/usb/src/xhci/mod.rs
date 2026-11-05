@@ -2110,8 +2110,21 @@ impl Xhci {
                     hub.address,
                     entry.port
                 );
+                // `hub_port_init()`'s caller re-runs the whole function on
+                // retry, which begins with `hub_port_reset()`: the port reset
+                // is what puts the device back into the state where it accepts
+                // SET_ADDRESS. Retrying the command against a device that just
+                // refused one only produced the same Transaction Error again.
+                if self.reset_hub_port(hub, entry.port, protocol).is_none() {
+                    attempt = Err(KError::Io);
+                    continue;
+                }
                 khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
-                attempt = self.address_downstream(dev, root_port, speed, addressing);
+                attempt = if is_usb3 {
+                    self.address_device_direct(dev, root_port, speed, addressing)
+                } else {
+                    self.address_downstream(dev, root_port, speed, addressing)
+                };
             }
             match attempt {
                 Ok(address) => match usb::enumerate::enumerate_addressed(
@@ -2139,6 +2152,28 @@ impl Xhci {
                 ),
             }
         }
+    }
+
+    /// `hcd->driver->reset_device()` (`xhci_discover_or_reset_device()`): after
+    /// a port reset the controller is told the device was reset, so it drops
+    /// whatever context state it kept for the slot. The reference runs this
+    /// from `hub_port_reset()`'s success path (`update_devnum(udev, 0)` and the
+    /// `reset_device` call that follows) -- without it the controller carries
+    /// stale per-device state into the next `Address Device`.
+    fn reset_device(&mut self, slot_id: u8) -> Result<(), KError> {
+        let trb = Trb::new(
+            0,
+            0,
+            (regs::trb::RESET_DEVICE << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        let event = self.command(trb, "reset device")?;
+        let code = event.completion_code();
+        // The command "can't fail" per the 0.95/0.96 spec unless the slot is
+        // not enabled or not in the addressed/configured state -- both treated
+        // as success by the reference.
+        log::info!("xhci: reset device for slot {slot_id}: completion code {code}");
+        Ok(())
     }
 
     /// Resets one downstream port through the hub class and returns its speed.
