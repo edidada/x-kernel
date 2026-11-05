@@ -1130,6 +1130,96 @@ impl Xhci {
         );
     }
 
+    /// Reads the first 8 descriptor bytes on the default address (0).
+    fn read_device_head(&mut self) -> Result<(u16, u8), KError> {
+        let mut buf = [0u8; 8];
+        let setup = usb::SetupPacket::get_descriptor(usb::descriptor::ty::DEVICE, 0, 8);
+        self.control_transfer(0, &setup, &mut buf)?;
+        Ok((u16::from(buf[7]), buf[4]))
+    }
+
+    /// `xhci_setup_device()` with BSR: install the contexts, no address yet.
+    ///
+    /// This is the reference's `hub_enable_device()` step, which `hub_port_init`
+    /// runs for every new device before it reads `bMaxPacketSize0` on address 0.
+    fn slot_bootstrap(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        root_port: usize,
+        speed: usb::Speed,
+        addressing: Addressing,
+    ) -> Result<usize, KError> {
+        // From xhci_setup_addressable_virt_dev(): 8 low, 64 full and high,
+        // 512 SuperSpeed/Plus (the USB core guesses 64 for full speed).
+        let guess = match speed {
+            usb::Speed::Low => 8,
+            usb::Speed::Super | usb::Speed::SuperPlus => 512,
+            _ => 64,
+        };
+        let slot_id = self.enable_slot()?;
+        let slot = self.allocate_slot(dev, slot_id)?;
+        self.slots.push(slot);
+        let slot_index = self.slots.len() - 1;
+        if let Err(err) = self.address_device(slot_index, root_port, speed, guess, addressing, true)
+        {
+            let _ = self.disable_slot(slot_id);
+            return Err(err);
+        }
+        self.address_zero_slot = Some(slot_id);
+        match self.read_device_head() {
+            Ok((max_packet, class)) => {
+                info!("xhci: slot {slot_id} descriptor head: ep0 {max_packet}, class {class:#04x}")
+            }
+            Err(err) => {
+                log::warn!("xhci: slot {slot_id} descriptor head unreadable: {err:?}");
+                self.address_zero_slot = None;
+                let _ = self.disable_slot(slot_id);
+                return Err(err);
+            }
+        }
+        self.address_zero_slot = None;
+        Ok(slot_index)
+    }
+
+    /// `xhci_setup_device()` without BSR, on a slot the bootstrap prepared.
+    ///
+    /// The reference's else-branch: the slot context is already set up, so only
+    /// the endpoint state the controller owns is carried back into the input
+    /// context (`xhci_copy_ep0_dequeue_into_input_ctx`). Rewriting the slot
+    /// context instead is what a Context State Error rejected earlier.
+    fn slot_assign_address(&mut self, slot_index: usize) -> Result<(), KError> {
+        let dwords = self.context_size / 4;
+        let slot_id = self.slots[slot_index].id;
+        let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let device = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        for offset in 0..(dwords * 2) {
+            // SAFETY: offset stays inside the input context's slot+EP0 region and
+            // the device context's own slot+EP0 region, both owned here.
+            let value = unsafe { core::ptr::read_volatile(device.wrapping_add(offset)) };
+            // SAFETY: as above.
+            unsafe {
+                core::ptr::write_volatile(input.wrapping_add(dwords + offset), value);
+            }
+        }
+        // Add slot(0) and EP0(1), as `ctrl_ctx->add_flags = SLOT_FLAG | EP0_FLAG`.
+        // SAFETY: dword 1 of the input control context, inside this allocation.
+        unsafe {
+            core::ptr::write_volatile(input.wrapping_add(1), 0x3);
+        }
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::ADDRESS_DEVICE << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        let event = self.command(trb, "address device (assign)")?;
+        info!(
+            "xhci: slot {slot_id} addressed (completion code {})",
+            event.completion_code()
+        );
+        Ok(())
+    }
+
     /// `Address Device`: hands the controller the slot and EP0 contexts, which
     /// is what gives the device its USB address.
     fn address_device(
@@ -1709,7 +1799,51 @@ impl Xhci {
                 multi_tt: tt.is_some() && protocol == 2,
                 hub: false,
             };
-            match self.address_downstream(dev, root_port, speed, addressing) {
+            // `hub_port_init()` retries a new device `GET_DESCRIPTOR_TRIES` (3)
+            // times, 100 ms apart, and `xhci_setup_device()` treats a
+            // Transaction Error from Address Device as retryable: it frees the
+            // slot and lets the caller try again. Devices routinely need that
+            // second or third attempt (they answer before their firmware has
+            // finished settling), so a single failure is not a verdict.
+            const ATTEMPTS: usize = 3;
+            // The reference's new scheme, in its order: enable the slot contexts,
+            // read bMaxPacketSize0 on address 0, reset the port AGAIN, then assign
+            // the address on the same slot. The middle reset is the one the device
+            // is in when it is finally addressed.
+            let mut attempt: Result<u8, KError> = Err(KError::Io);
+            for _ in 0..1 {
+                let slot_index = match self.slot_bootstrap(dev, root_port, speed, addressing) {
+                    Ok(index) => index,
+                    Err(err) => {
+                        attempt = Err(err);
+                        break;
+                    }
+                };
+                if self.reset_hub_port(hub, entry.port, protocol).is_none() {
+                    attempt = Err(KError::Io);
+                    break;
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
+                match self.slot_assign_address(slot_index) {
+                    Ok(()) => attempt = Ok(self.slots[slot_index].id),
+                    Err(err) => attempt = Err(err),
+                }
+            }
+            let _ = &mut attempt;
+
+            for retry in 1..ATTEMPTS {
+                if attempt.is_ok() {
+                    break;
+                }
+                log::info!(
+                    "xhci: hub {} port {}: attempt {retry} failed, retrying as the reference does",
+                    hub.address,
+                    entry.port
+                );
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100_000));
+                attempt = self.address_downstream(dev, root_port, speed, addressing);
+            }
+            match attempt {
                 Ok(address) => match usb::enumerate::enumerate_addressed(
                     self,
                     address,
