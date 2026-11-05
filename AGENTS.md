@@ -213,6 +213,21 @@ Key local rules:
 - Use `?` for ordinary error propagation.
 - Avoid casual atomics and linear scans on hot paths.
 - Use workspace dependencies and existing local helper APIs where available.
+- **Porting and debugging are source-driven, never memory-driven.** When a
+  register field, bit position, descriptor layout, command sequence, or delay is
+  in question, read the pinned reference implementation
+  (`/workspace/linux-7.1.8` mainline, `/workspace/linux-jr` / `linux-bsp-rk3588`
+  vendor, `/workspace/tgoskits` for this family) and transcribe it — quote the
+  function and line in the commit message. Do not reconstruct a layout from
+  recall: this port already lost rounds to a swapped TT field pair, a
+  SuperSpeed hub descriptor requested with the USB 2.0 type, and a full-speed
+  EP0 packet size copied from the low-speed row. Every one of them would have
+  been correct on the first try from the source, and every one of them looked
+  plausible until the hardware disagreed.
+- When the hardware disagrees with the code, first re-read the reference's
+  *sequence*, not just the field values: order (what runs before what, which
+  reset happens between which steps, which command is retried and how often)
+  explains failures that no field-level fix can.
 
 ## Change Completeness
 
