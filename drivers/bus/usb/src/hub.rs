@@ -373,7 +373,7 @@ pub fn reset_port(hcd: &mut dyn Hcd, address: u8, port: u8, info: HubInfo) -> Op
                  {status:#06x} (link state {})",
                 status & PORT_ST_ENABLE != 0,
                 speed.as_str(),
-                (status >> 5) & 0xf,
+                (status >> PORT_ST_SS_SHIFT) & PORT_ST_SS_MASK,
             );
             return (status & PORT_ST_ENABLE != 0).then_some(speed);
         }

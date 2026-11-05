@@ -1340,6 +1340,50 @@ impl Xhci {
         last
     }
 
+    /// Names the failing layer for a SuperSpeed hub child: BSR bootstrap, then
+    /// a wire-free No-Op on the slot's EP0 ring, then the address-0 descriptor
+    /// read. Diagnostics only — every acquired slot is released again, and the
+    /// result is whatever the logs say.
+    fn diagnose_super_child(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        root_port: usize,
+        speed: usb::Speed,
+        addressing: Addressing,
+    ) {
+        let slot_index = match self.slot_bootstrap(dev, root_port, speed, addressing) {
+            Ok(index) => index,
+            Err(err) => {
+                log::warn!(
+                    "xhci: super-speed child diagnostic: BSR bootstrap already fails ({err:?})"
+                );
+                return;
+            }
+        };
+        let slot_id = self.slots[slot_index].id;
+        info!(
+            "xhci: super-speed child diagnostic: slot {slot_id} bootstrapped (BSR), probing EP0 \
+             ring"
+        );
+        self.probe_transfer_ring(slot_index);
+        let mut buf = [0u8; 8];
+        let setup = usb::SetupPacket::get_descriptor(usb::descriptor::ty::DEVICE, 0, 8);
+        match self.control_transfer(0, &setup, &mut buf) {
+            Ok(_) => info!(
+                "xhci: super-speed child diagnostic: address-0 descriptor read SUCCEEDED \
+                 ({:02x?}) — the wire path through the hub is alive; the failure is \
+                 SET_ADDRESS-specific",
+                &buf[..2],
+            ),
+            Err(err) => log::warn!(
+                "xhci: super-speed child diagnostic: address-0 descriptor read fails ({err:?}) — \
+                 with the hub Configured, the hub is not forwarding transactions downstream"
+            ),
+        }
+        self.address_zero_slot = None;
+        let _ = self.disable_slot(slot_id);
+    }
+
     /// The old enumeration scheme: assign the address, then read the descriptor.
     ///
     /// `use_new_scheme()` refuses the new scheme for USB 3 devices outright —
@@ -2140,7 +2184,24 @@ impl Xhci {
             // `use_new_scheme()`: the new scheme is not used for USB 3 devices.
             let is_usb3 = matches!(speed, usb::Speed::Super | usb::Speed::SuperPlus);
             let mut attempt: Result<u8, KError> = if is_usb3 {
-                self.address_device_direct(dev, root_port, speed, addressing)
+                match self.address_device_direct(dev, root_port, speed, addressing) {
+                    ok @ Ok(_) => ok,
+                    Err(err) => {
+                        // Discriminator, run once per port on failure: the
+                        // parent hub is now Configured, which invalidates the
+                        // old "address 0 transaction error" data point taken
+                        // while the hub was still only Addressed. The BSR
+                        // bootstrap plus a No-Op Transfer TRB and an address-0
+                        // descriptor read split the failure into ring/slot
+                        // health (No-Op completes without touching the wire)
+                        // and wire health (the descriptor read is exactly the
+                        // transaction the reference's new scheme would send).
+                        // The result decides whether the next round targets
+                        // the controller side or the hub-forwarding side.
+                        self.diagnose_super_child(dev, root_port, speed, addressing);
+                        Err(err)
+                    }
+                }
             } else {
                 Err(KError::Io)
             };
@@ -2497,12 +2558,6 @@ impl Xhci {
         // (Parameter Error) and leaves the device unaddressable -- measured on
         // the USB3.2 companion hub, whose port had already trained to U0 at
         // PSIV 4.
-        let ep0_max_packet = match speed {
-            Speed::Low => 8,
-            Speed::Full => 8,
-            Speed::Super => 512,
-            _ => 64,
-        };
         let ep0_max_packet = match speed {
             Speed::Low | Speed::Full => 8,
             Speed::Super => 512,

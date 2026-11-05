@@ -226,13 +226,13 @@ pub fn parse_config_descriptors(buf: &[u8]) -> KResult<Vec<ConfigDescriptor>> {
                         // up; it carries the burst size the endpoint context
                         // must be given.
                         let after = cursor + item_len;
-                        if buf.get(after + 1) == Some(&ty::SS_EP_COMPANION) {
-                            let companion_len = buf[after] as usize;
-                            if companion_len >= 6 && after + companion_len <= buf.len() {
-                                endpoint.max_burst = buf[after + 2] & 0x1f;
-                                endpoint.bytes_per_interval = read_u16(buf, after + 4);
-                                step += companion_len;
-                            }
+                        let companion_len = (buf.get(after + 1) == Some(&ty::SS_EP_COMPANION))
+                            .then(|| buf[after] as usize)
+                            .filter(|&len| len >= 6 && after + len <= buf.len());
+                        if let Some(companion_len) = companion_len {
+                            endpoint.max_burst = buf[after + 2] & 0x1f;
+                            endpoint.bytes_per_interval = read_u16(buf, after + 4);
+                            step += companion_len;
                         }
                         interface.endpoints.push(endpoint);
                     }

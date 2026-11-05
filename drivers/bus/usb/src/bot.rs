@@ -249,7 +249,7 @@ pub fn write_sectors(
     lba: u32,
     blocks: &[u8],
 ) -> KResult<()> {
-    if blocks.len() % 512 != 0 {
+    if !blocks.len().is_multiple_of(512) {
         return Err(KError::InvalidInput);
     }
     let count = (blocks.len() / 512) as u16;
