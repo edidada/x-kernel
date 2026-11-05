@@ -779,6 +779,27 @@ unsafe 缺 SAFETY、unsafe-op 分组、too_many_lines ×8 等 + pci 1 条）；c
 `deploy-rk3588.sh --seed-config --build` 自己 seed；`SKIP_BUILD=1` 复用 target/ 里**最近一次**
 构建的镜像，切配置后勿直接 SKIP_BUILD。
 
+**审计轮（同日，commit `d20af2bf0`）**：对 xHCI/hub 层与 7.1.8 逐位重对齐，修了六处：
+
+1. `TRB_RESET_EP` 应为 **14**（15 是 Stop Endpoint）——halted-EP 恢复从未发过真正的
+   Reset Endpoint；修后真机返回 code 1（原先 code 19 就是 Stop Endpoint 的
+   Context State Error）。
+2. Scratchpad 计数解码反转：`HCS_MAX_SCRATCHPAD = (bits25:21)<<5 | (bits31:27)`
+   （字段名与寄存器位置相反）；本机从 32 → **1**，与 Linux 一致。
+3. `WRITE_64_HI_LO` quirk **只管 ERSTBA**（`xhci_add_interrupter` 单点 hi→lo）；
+   DCBAAP/CRCR/ERDP 全部 `xhci_write_64` = lo→hi。旧 handoff 笔记“全部 hi→lo”是错的。
+4. 超时对齐：halt 32ms（`XHCI_MAX_HALT_USEC`）、HCRST/CNR 250ms
+   （`XHCI_RESET_SHORT_USEC`）、命令/传输完成 5s（`XHCI_CMD_DEFAULT_TIMEOUT` /
+   control-urb 默认）。
+5. hub 类：`C_BH_RESET` change 位 = bit5（`USB_PORT_STAT_C_BH_RESET` 0x0020，原写 bit3）；
+   SS link state 在 wPortStatus bits 8:5（`0x01e0`，原写 bits 6:3）；`wPortChange`
+   是 16 位 LE（`buf[3]<<8`，原写 `<<16`）。
+6. 上电等待 `max(bPwrOn2PwrGood×2ms, 100ms)`（`hub_power_on_good_delay`）；SET_ADDRESS
+   后 10ms settle（`hub_port_init` 的 "let SET_ADDRESS settle"）。
+
+真机回归：两个 hub 配置、鼠标枚举、scratchpad=1、Reset Endpoint code 1 全部符合预期；
+SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——鉴别结论在修正后的机制上成立。
+
 ### 交接快照（旧）：hub 类已通、鼠标可用、U 盘卡在“地址 0 的 SETUP 无应答”
 
 **铁律（已写进 `AGENTS.md`）**：寄存器位域、描述符布局、命令时序一律以源码为准
