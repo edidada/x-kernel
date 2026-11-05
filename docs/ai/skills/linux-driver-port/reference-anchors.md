@@ -82,3 +82,9 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 13:21 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.c` | `xhci_add_endpoint` | command 2: add_flags = SLOT | ep_flag, entries raised |
 | 2026-11-05 14:03 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `xhci_last_valid_endpoint` | entries must cover contiguous contexts up to the highest added index |
 | 2026-11-05 14:04 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `xhci_last_valid_endpoint` | entries cover contiguous contexts; gaps are filled disabled first |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/host/xhci.h` | `struct xhci_ep_ctx / MAX_BURST` | ep_info2 has NO endpoint-number field: CErr 2:1, EP_TYPE 5:3, Max Burst 15:8, Max Packet 31:16; the endpoint number lives only in the context index |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-mem.c` | `xhci_get_endpoint_max_burst` | SS: ss_ep_comp.bMaxBurst; HS isoc/int: maxp_mult-1; otherwise 0 |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-mem.c` | `xhci_get_endpoint_interval` | SS/HS int-isoc: bInterval-1 exponent; FS/LS int: fls(8*bInterval)-1 clamped 3..10; FS isoc: exponent+3; ctrl/bulk: 0 |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/core/usb.c` | `usb_endpoint_max_periodic_payload` | ESIT payload: ss_ep_comp.wBytesPerInterval for SS, max_packet*maxp_mult otherwise, 0 for ctrl/bulk |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-mem.c` | `xhci_endpoint_init` | ep ctx fill sequence: ep_info=ESIT_HI|INTERVAL|MULT, ep_info2=TYPE|MAX_PACKET|MAX_BURST|ERROR_COUNT(3), tx_info=ESIT_LO|AVG with avg_trb_len=max_esit_payload (ctrl: 8 on xHCI>=1.0) |
+| 2026-11-05 14:20 | `/workspace/linux-7.1.8/drivers/usb/core/config.c` | `usb_parse_ss_endpoint_companion` | companion 0x30 sits right after its endpoint; missing/malformed falls back to an all-zero descriptor |
