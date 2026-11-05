@@ -9,7 +9,7 @@ use std::{
     fs::File,
     io::Read,
     os::fd::{AsRawFd, OwnedFd},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,7 +17,7 @@ use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
     backend::{
-        allocator::{Allocator, Buffer as AllocBuffer, Fourcc, Modifier, dumb::DumbAllocator},
+        allocator::{Allocator, Fourcc, Modifier, dumb::DumbAllocator},
         drm::{
             DrmDevice, DrmDeviceFd, PlaneConfig, PlaneState,
             dumb::{DumbFramebuffer, framebuffer_from_dumb_buffer},
@@ -39,7 +39,7 @@ use smithay::{
             protocol::{wl_buffer, wl_surface::WlSurface},
         },
     },
-    utils::{Buffer, DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
+    utils::{Buffer, DeviceFd, Physical, Rectangle, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState, get_parent, with_states},
@@ -89,6 +89,10 @@ struct State {
     xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<State>,
     seat: Seat<State>,
+    device: DrmDevice,
+    crtc: smithay::reexports::drm::control::crtc::Handle,
+    connector: smithay::reexports::drm::control::connector::Handle,
+    buffer: smithay::backend::allocator::dumb::DumbBuffer,
     surface: smithay::backend::drm::DrmSurface,
     framebuffer: DumbFramebuffer,
     map: *mut u8,
@@ -113,6 +117,80 @@ enum InputEvent {
 }
 
 impl State {
+    /// Re-read the host display size and follow it when it changed.
+    ///
+    /// The DRM connector query asks the backend for the current host size, so a
+    /// resized QEMU window shows up here as a new mode.
+    fn poll_output(&mut self) {
+        let Ok((connector, crtc, mode)) = pick_output(&self.device) else {
+            return;
+        };
+        let (width, height) = (mode.size().0 as u32, mode.size().1 as u32);
+        tracing::debug!(
+            host = %format!("{width}x{height}"),
+            scanout = %format!("{}x{}", self.width, self.height),
+            "polled display size"
+        );
+        if (width, height) == (self.width, self.height) {
+            return;
+        }
+        if let Err(err) = self.switch_mode(connector, crtc, mode) {
+            tracing::warn!(?err, "display mode switch failed");
+        }
+    }
+
+    fn switch_mode(
+        &mut self,
+        connector: smithay::reexports::drm::control::connector::Handle,
+        crtc: smithay::reexports::drm::control::crtc::Handle,
+        mode: smithay::reexports::drm::control::Mode,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (width, height) = (mode.size().0 as u32, mode.size().1 as u32);
+        let surface = self.device.create_surface(crtc, mode, &[connector])?;
+        let mut allocator = DumbAllocator::new(self.device.device_fd().clone());
+        let buffer =
+            allocator.create_buffer(width, height, Fourcc::Xrgb8888, &[Modifier::Linear])?;
+        let (map, map_len, pitch) = map_buffer(&self.device, &buffer)?;
+        let framebuffer = framebuffer_from_dumb_buffer(self.device.device_fd(), &buffer, true)?;
+
+        self.surface = surface;
+        self.buffer = buffer;
+        self.framebuffer = framebuffer;
+        self.map = map;
+        self.map_len = map_len;
+        self.pitch = pitch;
+        self.width = width;
+        self.height = height;
+        self.connector = connector;
+        self.crtc = crtc;
+        self.first_commit = true;
+        self.dirty = true;
+
+        let output_mode = OutputMode {
+            size: (width as i32, height as i32).into(),
+            refresh: 60_000,
+        };
+        self.output
+            .change_current_state(Some(output_mode), None, None, None);
+        self.output.set_preferred(output_mode);
+
+        // Every toplevel follows the new output size; clients ack with a new
+        // configure round trip.
+        let toplevels: Vec<_> = self
+            .space
+            .elements()
+            .filter_map(|window| window.toplevel().cloned())
+            .collect();
+        for toplevel in toplevels {
+            toplevel.with_pending_state(|state| {
+                state.size = Some((width as i32, height as i32).into());
+            });
+            toplevel.send_configure();
+        }
+        tracing::info!(width, height, "display followed the host size");
+        Ok(())
+    }
+
     fn composite(&mut self) {
         // Background, then every mapped toplevel at its space location.
         // SAFETY: the mapping is owned by this state and covers `map_len`.
@@ -613,7 +691,6 @@ fn spawn_evdev(index: u32, sender: smithay::reexports::calloop::channel::Sender<
                     }
                     filled = 0;
                 }
-                Ok(_) => {}
                 Err(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
@@ -742,6 +819,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output,
         seat_state,
         seat,
+        device,
+        crtc,
+        connector,
+        buffer,
         surface,
         framebuffer,
         map,
@@ -781,7 +862,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::Command::new(client).spawn()?;
     }
 
-    let mut frame = 0u32;
     event_loop.run(Some(Duration::from_millis(16)), &mut state, |state: &mut State| {
         let _ = state.display_handle.flush_clients();
         if state.dirty || state.frame % 60 == 0 {
@@ -802,8 +882,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.space.refresh();
 
         state.frame = state.frame.wrapping_add(1);
+        if state.frame % 15 == 0 {
+            state.poll_output();
+        }
         state.tick_selftest();
-        let _ = frame;
+
     })?;
     Ok(())
 }
