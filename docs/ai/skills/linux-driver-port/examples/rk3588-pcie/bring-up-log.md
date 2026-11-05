@@ -854,6 +854,51 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 3. **死线快速失败生效**：某 slot 超时一次后后续 250ms 快速失败，启动 86.9s PASS
    （原 240s+ 卡死）。
 
+### 事件架构重构（`36367c3d5`…`e771f3dc1`）：按 skill 移植，而非继续打补丁
+
+**为什么重构**：xHCI 事件路径此前是从头自研的（等待者按 (slot,ep) 挑事件、别人的事件进
+pending 队列、命令按 TRB 地址匹配）。那不是"忠实翻译"，而是 AGENTS.md 明令禁止的
+**凭记忆重建机制**；STALL、Set-TR-Dequeue 语义、超时后端点恢复这一整类 bug 都是它的利息。
+
+**移植的结构**（读 `xhci-ring.c`，逐函数 diff）：
+
+| 参考 | 我们的实现 |
+|---|---|
+| `xhci_handle_event()` | `pump_events()`：事件严格按 ring 顺序、消费一次、按类型分派 |
+| `handle_tx_event()` + `xhci_trb_in_td()` | 按端点 TD 队首 + TRB 地址范围匹配 |
+| `handle_cmd_completion()` 的 `cmd_list` + `list_del_init` | 命令 FIFO，**派发即出队**，完成经 `completed` 槽交给等待者 |
+| `xhci_halted_host_endpoint()` | STALL 恒 halt；USB/Split Transaction Error（**36**，不是 5）halt 非 isoc |
+| `xhci_handle_halted_endpoint()` | EP_HALTED 去重后排队 Reset Endpoint（软复位= TSP） |
+| `td_to_noop()` / `xhci_invalidate_cancelled_tds()` | 把 TD 的 TRB 改写成 No-Op（**清控制器 TRB 缓存**） |
+| `xhci_move_dequeue_past_td()` | Set TR Dequeue 到 TD 之后 + `SET_DEQ_PENDING` 期间不敲门铃 |
+| `xhci_urb_dequeue()` | 超时=取消：Stop Endpoint（19=已 halt→Reset），完成后才返回 |
+
+序列数据：`data/sequences/xhci.toml`，`make ldp-sequence PORT=xhci` → 10 anchored / 0 unported。
+锚点：`td_to_noop`、`trb_to_noop`、`xhci_invalidate_cancelled_tds`、
+`xhci_move_dequeue_past_td`、`xhci_urb_dequeue`、`xhci_handle_cmd_stop_ep` 等 6 个。
+
+**四轮上板各修掉一个真 bug**（都是旧架构的产物）：
+
+1. `usb-eventrefactor`：鼠标控制管道 STALL(6) 后，Reset 成功但此后所有命令完成都
+   "mismatched" → 派发时没出队，恢复命令无等待者却永驻队首。
+2. `usb-noopfix`：Set TR Deq 回 **19 (Context State Error)**，端点仍在跑。
+3. `usb-ep0state`：**事实**——EP0 state=2(Running)、硬件 dequeue 已跑到 0x2a340d0（越过
+   被 halt 的 TD 与后面排队的重试 TD）；我们把这些 TD 的事件当 "outside head TD" 丢弃，
+   EP0 从此哑火。缺的机制就是 `td_to_noop` + 超时取消。
+4. `usb-cancel`：取消路径落地。
+
+**HSE 与事件架构无关（已证伪）**：`usb-cancel` 一轮又在低速鼠标 `Address Device` 处
+HSE（`USBSTS 0x1d`、`GBUSERRADDR=0xc`、GSTS 0x7e800091），与重构前同一位置。
+scratchpad 数按 Linux `HCS_MAX_SCRATCHPAD` 解码 = 1（bits25:21 为 Hi、bits31:27 为 Lo，
+我们的解码与参考一致），假说彻底关闭。HSE 仍需要单独一轮：DWC3 全局寄存器对照
+参考板、或在检测到 HSE+HCH 后做整控制器重初始化。
+
+**盘的真实阻塞点是 EHCI bulk，不是 xHCI**：四轮里盘都从 EHCI 枚举成功
+（`ehci: 0951:1666 at 1 (high) "DataTraveler 3.0"`），BOT 卡在
+`bulk transfer did not complete, token 0x000d8d80, USBSTS 0x0000802d (ass true, rec false)`
+与 `the descriptor was never observed Active (first read 0x80008c00)`。下一轮从这里入手：
+async list 的 qTD 首读就不是 Active，说明控制器没有接手该 qTD（不是超时太短）。
+
 **A/B 结果（`6308bb7a7`，未跑完——启动卡死被手动终止）**：回退到 reference 解码
 （1 buffer）后仍卡死 → scratchpad 大小排除，触发条件锁定在事件处理改动
 （`bcb0e6001`+`847a1ba31`：按 (slot,ep) 匹配/_pending 队列/双参数命令匹配/STALL→
