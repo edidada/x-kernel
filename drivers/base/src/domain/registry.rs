@@ -25,6 +25,7 @@ impl DeviceDomain {
         Self {
             probing: SpinNoPreempt::new(false),
             pump_requested: SpinNoPreempt::new(false),
+            enumerate_gate: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
                 next_driver_key: 0,
@@ -108,7 +109,7 @@ impl DeviceDomain {
                 B::ID.name()
             );
         }
-        self.probe_pending();
+        self.pump_unless_enumerating();
         true
     }
 
@@ -298,8 +299,42 @@ impl DeviceDomain {
             inner.sched.pending.push(id.raw());
             id
         };
-        self.probe_pending();
+        self.pump_unless_enumerating();
         Ok(id)
+    }
+
+    /// Pump the probe queue unless the composition root is still
+    /// enumerating: firmware discovery must be a pure bookkeeping pass
+    /// (see [`Self::enumerate_gate`]).
+    fn pump_unless_enumerating(&self) {
+        if !*self.enumerate_gate.lock() {
+            self.probe_pending();
+        }
+    }
+
+    /// Hold the enumeration gate until the returned guard drops.
+    ///
+    /// The composition root wraps its whole enumeration (firmware nodes,
+    /// board-static devices, bus discovery) in this guard, then runs the
+    /// probe storm itself. Without it every `add_device` probes
+    /// immediately, so a provider publishing inside its own probe wakes
+    /// deferred consumers and re-enters the pump while later DT nodes are
+    /// still unvisited — the walk and the pump interleave and nodes after
+    /// the provider are never enumerated.
+    ///
+    /// Reentrant-safe: the previous value is restored on drop, so a nested
+    /// scope keeps the outer holder's state.
+    pub fn suspend_probe_until_enumerated(&self) -> EnumerateGuard<'_> {
+        let previous = {
+            let mut gate = self.enumerate_gate.lock();
+            let previous = *gate;
+            *gate = true;
+            previous
+        };
+        EnumerateGuard {
+            domain: self,
+            previous,
+        }
     }
 
     /// One line per device still parked on a dependency: `(id, dep)`.

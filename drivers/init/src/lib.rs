@@ -139,6 +139,12 @@ fn level3_drivers() {
 }
 
 fn level4_enumeration() {
+    // Enumeration is bookkeeping only: the probe pump runs in level5, so no
+    // probe (and no provider publication it triggers) can interleave with
+    // the firmware walk. See `suspend_probe_until_enumerated`.
+    let domain = global_domain();
+    let guard = domain.suspend_probe_until_enumerated();
+
     enumerate_firmware_devices();
     enumerate_static_devices();
     #[cfg(any(
@@ -152,10 +158,20 @@ fn level4_enumeration() {
         feature = "net-rtl8125"
     ))]
     pci_discover();
+
+    drop(guard);
 }
 
 fn level5_probe_storm() {
     let domain = global_domain();
+
+    // The probe storm proper: enumeration only queued devices (level4 holds
+    // the enumerate gate), so this is the single point where drivers run.
+    // It is also what makes provider publication safe: by now every
+    // provider node is in the domain, so a provider that publishes during
+    // its own probe wakes consumers that are already enumerated.
+    domain.probe_pending();
+
     let devices = domain.devices();
     let active = devices
         .iter()

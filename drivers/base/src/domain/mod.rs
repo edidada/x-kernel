@@ -515,6 +515,19 @@ impl Drop for ProbePumpGuard<'_> {
     }
 }
 
+/// Releases the enumeration gate on drop, restoring whatever the enclosing
+/// scope had set (see [`DeviceDomain::suspend_probe_until_enumerated`]).
+pub struct EnumerateGuard<'a> {
+    domain: &'a DeviceDomain,
+    previous: bool,
+}
+
+impl Drop for EnumerateGuard<'_> {
+    fn drop(&mut self) {
+        *self.domain.enumerate_gate.lock() = self.previous;
+    }
+}
+
 pub struct DeviceDomain {
     inner: SpinNoPreempt<DomainInner>,
     /// Serializes the probe pump across callers. The probe path runs
@@ -530,6 +543,20 @@ pub struct DeviceDomain {
     /// drains this request and runs one more pass, so no enqueued device
     /// is ever left Pending until an unrelated trigger.
     pump_requested: SpinNoPreempt<bool>,
+    /// Enumeration gate: while held, `add_device` and driver registration
+    /// only ENQUEUE work instead of pumping it.
+    ///
+    /// This is Linux's split between `device_register()` (publishes the
+    /// device, never probes it) and `driver_probe_device()` driven by
+    /// `deferred_probe_initcall`. Probing inside the enumeration walk made
+    /// the walk's progress depend on driver behaviour: a provider that
+    /// publishes during its own probe wakes deferred consumers, which
+    /// re-enters the pump while the enumeration loop still has nodes to
+    /// visit — and the two orders interleave into a livelock where nodes
+    /// after the provider are never enumerated. Gating here keeps
+    /// enumeration a pure bookkeeping pass and runs one pump afterwards
+    /// (composition root's probe storm).
+    enumerate_gate: SpinNoPreempt<bool>,
 }
 
 /// Build a consistent snapshot: one filling for `snapshot()` and

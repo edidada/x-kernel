@@ -120,7 +120,7 @@ pub use devres::{
     },
 };
 pub use domain::{
-    DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
+    DataBox, DeviceDomain, DeviceSnapshot, DeviceState, EnumerateGuard, ProbeStats, global_domain,
     global_topology_summary,
 };
 pub use driver::{DriverDesc, DriverOps};
