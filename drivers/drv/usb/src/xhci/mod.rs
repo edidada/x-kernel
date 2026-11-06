@@ -429,6 +429,21 @@ struct Td {
     what: &'static str,
 }
 
+/// One bulk endpoint's recovery state (`struct xhci_virt_ep`'s `ep_state`).
+#[derive(Clone, Copy, Default)]
+struct BulkEndpointState {
+    /// `EP_HALTED`: a Reset Endpoint is queued or in flight.
+    halted: bool,
+    /// `SET_DEQ_PENDING`: a Set TR Dequeue is in flight, and the ring must not be
+    /// doorbelled until it completes (`xhci_ring_ep_doorbell()` returns early).
+    set_deq_pending: bool,
+    /// A doorbell was withheld while `set_deq_pending`; ring it afterwards.
+    doorbell_pending: bool,
+    /// The descriptor whose completion halted the endpoint, to be turned into
+    /// No-Ops when the reset takes effect (`cancelled_td_list`).
+    halted_td: Option<Td>,
+}
+
 /// A command TRB waiting for its completion: one entry of `xhci->cmd_list`.
 struct PendingCmd {
     /// Bus address of the command TRB itself, which is what a completion
@@ -455,6 +470,9 @@ struct Slot {
     /// Device Context Index of each bulk endpoint (`2 * ep_number + direction`),
     /// which is what the doorbell and every transfer event carry.
     bulk_dci: [u8; 2],
+    /// Per-direction bulk endpoint state: the halt/SET_DEQ bookkeeping the
+    /// reference keeps in `xhci_virt_ep`, which this driver only had for EP0.
+    bulk_state: [BulkEndpointState; 2],
     /// Outstanding bulk descriptors per direction, in submission order.
     bulk_tds: [alloc::collections::VecDeque<Td>; 2],
     /// Completed bulk transfers per direction, in giveback order.
@@ -1380,8 +1398,9 @@ impl Xhci {
                 .expect("bulk ring")
                 .publish(held);
         }
-        if self.slots[slot_index].set_deq_pending {
+        if self.slots[slot_index].bulk_state[direction].set_deq_pending {
             info!("xhci: bulk doorbell withheld, set tr dequeue pending");
+            self.slots[slot_index].bulk_state[direction].doorbell_pending = true;
         } else {
             self.ring_doorbell(slot_id, dci);
         }
@@ -1412,6 +1431,79 @@ impl Xhci {
         Ok(transferred)
     }
 
+    /// `xhci_handle_halted_endpoint()` for a bulk endpoint.
+    ///
+    /// A bulk endpoint that returns a completion the controller considers fatal
+    /// (Stall / Transaction Error / Babble) is left in the Halted state and
+    /// consumes nothing more: every later transfer on it, including the CBW of
+    /// the next BOT command, simply never completes. The reference resets the
+    /// endpoint (soft reset, `TRB_TSP`) and then moves the ring's dequeue past the
+    /// descriptor that stalled, turning its TRBs into No-Ops first so the
+    /// controller's cached copies cannot be fetched again.
+    fn recover_bulk_endpoint(&mut self, slot_index: usize, direction: usize) {
+        let state = self.slots[slot_index].bulk_state[direction];
+        if state.halted {
+            info!(
+                "xhci: reset endpoint for slot {} dci {} already pending",
+                self.slots[slot_index].id, self.slots[slot_index].bulk_dci[direction]
+            );
+            return;
+        }
+        let dci = self.slots[slot_index].bulk_dci[direction];
+        let mut control = self.endpoint_command_field(slot_index, dci, regs::trb::RESET_ENDPOINT);
+        // `EP_SOFT_RESET`: preserve the endpoint's transfer state.
+        control |= regs::trb::TSP;
+        self.deferred.push_back(Trb::new(0, 0, control));
+        self.slots[slot_index].bulk_state[direction].halted = true;
+        info!(
+            "xhci: queued reset endpoint for slot {} dci {dci}",
+            self.slots[slot_index].id
+        );
+    }
+
+    /// `xhci_invalidate_cancelled_tds()` for a bulk endpoint: No-Op the
+    /// descriptor that stalled, then re-point the ring past it.
+    fn invalidate_bulk_endpoint(&mut self, slot_index: usize, direction: usize) {
+        let mut last = None;
+        while let Some(td) = self.slots[slot_index].bulk_tds[direction].pop_front() {
+            if let Some(ring) = self.slots[slot_index].bulk[direction].as_mut() {
+                ring.no_op_range(td.first_trb, td.last_trb);
+            }
+            last = Some(td.last_trb);
+        }
+        if let Some(td) = self.slots[slot_index].bulk_state[direction]
+            .halted_td
+            .take()
+        {
+            if let Some(ring) = self.slots[slot_index].bulk[direction].as_mut() {
+                ring.no_op_range(td.first_trb, td.last_trb);
+            }
+            last = Some(last.map_or(td.last_trb, |last: u64| last.max(td.last_trb)));
+        }
+        let Some(ring) = self.slots[slot_index].bulk[direction].as_ref() else {
+            return;
+        };
+        // Nothing to skip: the ring's own enqueue position is already past
+        // everything that was handed to the controller.
+        let next = last.map_or_else(
+            || ring.mem.bus_addr() + (ring.index % ring.trbs) as u64 * TRB_LEN as u64,
+            |last| last + TRB_LEN as u64,
+        );
+        let dcs = ring.cycle_at(next);
+        let dci = self.slots[slot_index].bulk_dci[direction];
+        let control = self.endpoint_command_field(slot_index, dci, regs::trb::SET_TR_DEQUEUE);
+        self.deferred
+            .push_back(Trb::new(next | u64::from(dcs), 0, control));
+        // Withhold the doorbell until this completes: ringing it first restarts
+        // the ring at the dequeue the recovery is moving away from.
+        self.slots[slot_index].bulk_state[direction].set_deq_pending = true;
+        self.slots[slot_index].bulk_state[direction].doorbell_pending = true;
+        info!(
+            "xhci: re-pointed slot {} dci {dci} past the halted descriptor to {next:#x}",
+            self.slots[slot_index].id
+        );
+    }
+
     /// Waits for the oldest outstanding bulk descriptor of one direction.
     fn wait_for_bulk(&mut self, slot_index: usize, direction: usize) -> Result<Trb, KError> {
         let steps = if self.slots[slot_index].wire_dead {
@@ -1421,14 +1513,29 @@ impl Xhci {
         };
         for _ in 0..steps {
             self.pump_events();
+            let state = self.slots[slot_index].bulk_state[direction];
+            if state.doorbell_pending && !state.set_deq_pending {
+                self.slots[slot_index].bulk_state[direction].doorbell_pending = false;
+                let dci = self.slots[slot_index].bulk_dci[direction];
+                let slot_id = self.slots[slot_index].id;
+                self.ring_doorbell(slot_id, dci);
+            }
             if let Some(event) = self.slots[slot_index].bulk_completions[direction].pop_front() {
                 self.slots[slot_index].wire_dead = false;
                 return Ok(event);
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         }
-        self.slots[slot_index].wire_dead = true;
         self.log_event_timeout("bulk transfer");
+        // A descriptor that never completed leaves the endpoint in a state the
+        // controller will not advance: reset it and move past the descriptor, so
+        // the caller's retry starts from a clean ring. (The slot is *not* marked
+        // wire-dead: unlike a device that stopped answering it entirely, this is
+        // recoverable, and the BOT layer retries once.)
+        if let Some(td) = self.slots[slot_index].bulk_tds[direction].front().copied() {
+            self.slots[slot_index].bulk_state[direction].halted_td = Some(td);
+        }
+        self.recover_bulk_endpoint(slot_index, direction);
         // Did the controller ever start this descriptor? The endpoint context's
         // dequeue is the answer: unchanged means the doorbell/DCS never reached
         // it, advanced means it fetched the TRB and stopped somewhere after it.
@@ -1444,7 +1551,13 @@ impl Xhci {
             (dword0 & 0x7, (u64::from(high) << 32) | u64::from(low))
         };
         if let Some(ring) = self.slots[slot_index].bulk[direction].as_ref() {
-            let trb = ring.read(0);
+            // The TRB at the *enqueue* position: what the controller should be
+            // looking at next. Index 0 is a leftover and says nothing about the
+            // transfer that failed.
+            // The last TRB enqueued, i.e. the one the controller's dequeue is
+            // sitting on: what it was actually given.
+            let enqueue_index = (ring.index + ring.trbs - 1) % ring.trbs;
+            let trb = ring.read(enqueue_index);
             // The link state at the moment of the timeout, and the port's power
             // management word: a SuperSpeed link that fell into U1/U2/U3 stops
             // answering IN tokens, which looks exactly like a device that took the
@@ -1502,7 +1615,7 @@ impl Xhci {
             }
             log::error!(
                 "xhci: bulk timeout: ep dci {dci} state {state} dequeue {dequeue:#x} ring {:#x} \
-                 first trb p {:#x} s {:#010x} c {:#010x} (cycle {})",
+                 enqueue[{enqueue_index}] p {:#x} s {:#010x} c {:#010x} (ring cycle {})",
                 ring.mem.bus_addr(),
                 trb.parameter,
                 trb.status,
@@ -1918,8 +2031,15 @@ impl Xhci {
 
     /// The slot/endpoint field block of a command TRB addressed at this EP0.
     fn ep0_command_field(&self, slot_index: usize, trb_type: u32) -> u32 {
+        self.endpoint_command_field(slot_index, regs::trb::EP0 as u8, trb_type)
+    }
+
+    /// The same block for any endpoint: Reset Endpoint and Set TR Dequeue are
+    /// addressed by Device Context Index, not by "EP0", and a bulk endpoint
+    /// needs exactly the same recovery a control endpoint gets.
+    fn endpoint_command_field(&self, slot_index: usize, dci: u8, trb_type: u32) -> u32 {
         (trb_type << regs::trb::TYPE_SHIFT)
-            | (regs::trb::EP0 << regs::trb::EP_SHIFT)
+            | (u32::from(dci) << regs::trb::EP_SHIFT)
             | (u32::from(self.slots[slot_index].id) << regs::trb::SLOT_SHIFT)
     }
 
@@ -1957,7 +2077,7 @@ impl Xhci {
         // it -- the desynchronization that made every command time out.
         let mut cmd = self.commands.pop_front().expect("front command");
         cmd.done = Some(*event);
-        let (trb_type, slot_id) = (cmd.trb_type, cmd.slot_id);
+        let (trb_type, slot_id, cmd_ep) = (cmd.trb_type, cmd.slot_id, cmd.ep_id);
         info!(
             "xhci: command {trb_type} for slot {slot_id} completed, code {}",
             event.completion_code()
@@ -2012,8 +2132,13 @@ impl Xhci {
                 // transfer event arrived, so only the report is left.
                 if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
                     slot.set_deq_pending = false;
+                    for direction in 0..2 {
+                        if slot.bulk_dci[direction] == cmd_ep {
+                            slot.bulk_state[direction].set_deq_pending = false;
+                        }
+                    }
                 }
-                info!("xhci: set tr dequeue for slot {slot_id} complete");
+                info!("xhci: set tr dequeue for slot {slot_id} ep {cmd_ep} complete");
             }
             regs::trb::RESET_ENDPOINT => {
                 // "This command will only fail if the endpoint wasn't halted,
@@ -2022,9 +2147,20 @@ impl Xhci {
                 // TD that stalled: the reference's reset handler calls
                 // xhci_invalidate_cancelled_tds(), which queues Set TR Dequeue.
                 self.clear_halt(slot_id);
-                // `xhci_invalidate_cancelled_tds()`: flush the controller's
-                // cached copy of the halted TD and move the dequeue past it.
-                self.invalidate_ep0(slot_id);
+                if cmd_ep == regs::trb::EP0 as u8 {
+                    // `xhci_invalidate_cancelled_tds()`: flush the controller's
+                    // cached copy of the halted TD and move the dequeue past it.
+                    self.invalidate_ep0(slot_id);
+                } else if let Some(slot_index) =
+                    self.slots.iter().position(|slot| slot.id == slot_id)
+                {
+                    for direction in 0..2 {
+                        if self.slots[slot_index].bulk_dci[direction] == cmd_ep {
+                            self.slots[slot_index].bulk_state[direction].halted = false;
+                            self.invalidate_bulk_endpoint(slot_index, direction);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -2532,6 +2668,7 @@ impl Xhci {
             ep0,
             bulk: [None, None],
             bulk_dci: [0, 0],
+            bulk_state: [BulkEndpointState::default(), BulkEndpointState::default()],
             bulk_tds: [
                 alloc::collections::VecDeque::new(),
                 alloc::collections::VecDeque::new(),

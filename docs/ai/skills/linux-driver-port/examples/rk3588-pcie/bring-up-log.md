@@ -2642,6 +2642,47 @@ usb-host 两套实现逐字段一致）。
 4. 读 `xHCI` 的 `HCCPARAMS2`/`DWC3` 版本相关 quirk（DWC3 对 bulk IN 有已知的
    "no-op/evaluate context" 类 quirk）。
 
+### 5.9.4d bulk 已打通到"发布块设备"，剩下的卡点是第二笔 CBW 不被取
+
+**EP Type 必须按方向** 是 IN 侧完全不工作的根因（`xhci.h:761/765`：`BULK_OUT_EP=2`,
+`BULK_IN_EP=6`；`xhci_get_endpoint_type()` 按方向选择）。两个方向都写 2 时 Configure
+Endpoint 照样接受（2 是合法值，硬件不校验 DCI 与方向的对应），端点 Running、环正确、
+门铃正确，然后**永远没有事件、也没有错误**。修掉之后：
+
+```
+xhci: slot 3 bulk endpoints configured (out 0x02 dci 4, in 0x81 dci 3)
+xhci: published 03f0:7240 at 3 (super) "x5000m" as a block device with 60555264 512-byte blocks
+xhci: devnode usb3 subsystem block number DeviceNumber { major: 8, minor: 1 }
+```
+
+即 SuperSpeed U 盘能 INQUIRY + READ CAPACITY，块设备容量正确（≈28.9 GiB）。
+
+**当前卡点**：同一设备的**第二笔 CBW 不被控制器取走**。逐笔轨迹（临时探针，已移除）：
+
+```
+[34.052] doorbell slot 3 target 4      bulk out td 0x2f08000 ring index 1   <- CBW#1
+[34.052] doorbell slot 3 target 3      bulk in  td 0x2f0a000 ring index 1   <- data
+[34.052] doorbell slot 3 target 3      bulk in  td 0x2f0a010 ring index 2   <- CSW
+[37.812] doorbell slot 3 target 4      bulk out td 0x2f08010 ring index 2   <- CBW#2
+[42.819] bulk timeout: ep dci 4 state 1 dequeue 0x2f08011 ring 0x2f08000
+         enqueue[1] p 0x206000 s 0x0000001f c 0x00000421 (ring cycle true)
+```
+
+逐项都已测得且都正确：TRB（`NORMAL|IOC|CYCLE`，31 字节，bounce 地址）、端点状态 Running、
+控制器 dequeue `0x2f08011`（index 1 + DCS=1）与 TRB 的 cycle 一致、门铃确实写入了 DCI 4。
+所以这不是字段错误，而是**控制器对环位置的视图**或**设备在等上一命令的某个相位**。
+
+已实现但尚未验证有效的部分：bulk 端点的 halt 恢复（`recover_bulk_endpoint()` /
+`invalidate_bulk_endpoint()`，把 EP0 那套 Reset Endpoint + Set TR Dequeue + No-Op 按 DCI
+参数化）——恢复会被触发（`queued reset endpoint for slot 3 dci 4`），但第二次读盘仍失败。
+
+**下一步（仍然是判别式，不是再调字段）**：
+
+1. 在两次 bulk TD 之间插入一个 No-Op TRB，若 CBW#2 因此被取走，问题就在"环的下一格"；
+2. 读回**第一次 TD 完成后**的端点上下文 dequeue（当前只在超时时读），确认控制器的
+   dequeue 是否真的前进到了 index 1；
+3. 完成后立即读 `USBSTS`/`GSTS`，看第一笔 TD 完成时是否有被我们忽略的第二类事件。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
