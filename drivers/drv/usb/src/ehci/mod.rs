@@ -572,24 +572,27 @@ impl Ehci {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
         log::error!("ehci: control transfer timed out");
+        // The chain and the queue head as the controller left them: which stage
+        // it stopped at, and whether it touched the overlay at all.
+        for slot in 0..3usize {
+            // SAFETY: the first three slots are the control chain.
+            let qtd = unsafe {
+                core::ptr::read_volatile(self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot))
+            };
+            log::error!(
+                "ehci: control qtd{slot} next {:#x} token {:#010x} (active {}, halt {}, pid {}, \
+                 len {})",
+                qtd.next,
+                qtd.token,
+                qtd.token & token::ACTIVE != 0,
+                qtd.token & token::HALT != 0,
+                (qtd.token >> token::PID_SHIFT) & 0x3,
+                (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
+            );
+        }
+        self.log_async_ring("control transfer");
         self.qh_unlink(1);
         Err(KError::TimedOut)
-    }
-
-    /// Rebuilds the asynchronous ring: head -> EP0 -> bulk OUT -> bulk IN -> head.
-    ///
-    /// Recovery must rebuild all of it. Writing the head's next pointer back to
-    /// itself -- "empty list" -- is only correct while there is no endpoint
-    /// queue head at all; with endpoints present it truncates the ring to
-    /// `head -> head` and every endpoint becomes unreachable, which is precisely
-    /// how a transfer ends up queued with an overlay the controller never
-    /// touches.
-    fn build_async_ring(&self) {
-        build_async_ring(
-            self.qh.bus_addr(),
-            self.qh.as_ptr().cast::<Qh>(),
-            self.qtds.bus_addr() as u32 + (QTD_CONTROL_DUMMY * core::mem::size_of::<Qtd>()) as u32,
-        );
     }
 
     /// Clears a latched halt before queueing new work.
@@ -599,26 +602,30 @@ impl Ehci {
     /// included: the BOT soft reset is itself a control transfer, so without it
     /// the recovery path cannot run either.
     fn ensure_running(&self) {
+        // The reference clears a latched halt by writing USBSTS back
+        // (`ehci_handshake()`/`ehci_reset()`) and otherwise leaves the schedule
+        // alone. Rebuilding the ring here -- what this used to do -- tears down
+        // the queue head of the transfer that is about to use it, which is how a
+        // single Host System Error used to poison every later transfer.
         let status = self.regs.read32(self.operational + op::USBSTS);
+        let command = self.regs.read32(self.operational + op::USBCMD);
         if status & (sts::HCHALTED | sts::HSE) != 0 {
-            log::warn!(
-                "ehci: controller halted before a transfer (USBSTS {status:#010x}); restarting \
-                 the schedule"
-            );
-            self.recover_async_schedule();
-        }
-        // `ehci_poll_ASS()`: `want = (command & CMD_ASE) ? STS_ASS : 0` against
-        // the status bit. The controller stops the asynchronous schedule on its
-        // own once it finds it empty, and the enable bit alone does not bring it
-        // back -- software has to notice and set it again. Without this the first
-        // transfer after the schedule went idle waits out its timeout while every
-        // structure in the ring is correct.
-        let status = self.regs.read32(self.operational + op::USBSTS);
-        if status & sts::ASS == 0 {
-            let command = self.regs.read32(self.operational + op::USBCMD);
-            log::warn!("ehci: asynchronous schedule stopped (USBSTS {status:#010x}); setting ASE");
+            // `ehci_halt()` + the run write from `ehci_run()`: the halt is a
+            // latch, and clearing the status bit does not leave it -- the run bit
+            // has to be dropped and raised again. The ring is *not* touched: the
+            // queue head of the next transfer is written after this point.
+            log::warn!("ehci: controller halted (USBSTS {status:#010x}); restarting the run bit");
             self.regs
-                .write32(self.operational + op::USBCMD, command | regs::cmd::ASE);
+                .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
+            for _ in 0..20 {
+                if self.regs.read32(self.operational + op::USBSTS) & sts::HCHALTED != 0 {
+                    break;
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+            }
+            self.regs.write32(self.operational + op::USBSTS, status);
+            self.regs
+                .write32(self.operational + op::USBCMD, run_command());
             for _ in 0..40 {
                 if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
                     break;
@@ -626,67 +633,21 @@ impl Ehci {
                 khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
             }
         }
-    }
-
-    /// Restarts the asynchronous schedule after a controller halt.
-    fn recover_async_schedule(&self) {
+        // `ehci_poll_ASS()`: `want = (command & CMD_ASE) ? STS_ASS : 0` against the
+        // status bit. The controller stops the asynchronous schedule on its own
+        // once it finds it empty, and the enable bit alone does not bring it
+        // back -- software has to notice and set it again.
         let status = self.regs.read32(self.operational + op::USBSTS);
-        self.regs.write32(self.operational + op::USBSTS, status);
-        // A halted controller leaves the queue head it was processing marked
-        // HALTED in its overlay, and clearing USBSTS does not clear that. When
-        // it is the head of the reclamation list, the whole asynchronous
-        // schedule stops advancing and every later transfer waits forever with
-        // reclamation reported -- which is exactly what the failing reads look
-        // like. Rewrite the head's overlay and its links.
-        let head = self.qh.as_ptr().cast::<Qh>();
-        let head_bytes = head.cast::<u8>();
-        // SAFETY: dword 6 of the head queue head is its overlay token.
-        let token = unsafe { core::ptr::read_volatile(head_bytes.wrapping_add(24).cast::<u32>()) };
-        // SAFETY: dword 6 of the same queue head.
-        unsafe {
-            core::ptr::write_volatile(
-                head_bytes.wrapping_add(24).cast::<u32>(),
-                token & (regs::token::DT | regs::token::PING),
-            );
-        }
-        // Rebuild the whole ring: a self-linked head is only correct when there
-        // are no endpoint queue heads, and with them present it strands every
-        // endpoint ("0->0x...002" in the failure dump is this bug).
-        build_async_ring(
-            self.qh.bus_addr(),
-            head,
-            self.qtds.bus_addr() as u32 + (QTD_CONTROL_DUMMY * core::mem::size_of::<Qtd>()) as u32,
-        );
-        let command = self.regs.read32(self.operational + op::USBCMD);
-        self.regs
-            .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
-        self.regs.write32(
-            self.operational + op::ASYNCLISTADDR,
-            self.qh.bus_addr() as u32,
-        );
-        self.regs
-            .write32(self.operational + op::USBCMD, run_command());
-        log::warn!("ehci: restarted the asynchronous schedule after a halt");
-    }
-
-    /// Links one of the two endpoint queue heads into the asynchronous schedule.
-    ///
-    /// The list stays `head -> qh -> head`: `qh_link_async()` splices a queue
-    /// head in right after the list head and only the head carries H.
-    fn link_endpoint(&self, qh_index: usize) {
-        let head = self.qh.as_ptr().cast::<Qh>();
-        let qh = head.wrapping_add(qh_index);
-        let qh_bus = self.qh.bus_addr() as u32 + (qh_index * core::mem::size_of::<Qh>()) as u32;
-        let head_bus = self.qh.bus_addr() as u32;
-        // SAFETY: dword 0 of the endpoint queue head: point it back at the head.
-        unsafe {
-            core::ptr::write_volatile(qh.cast::<u32>(), head_bus | 2);
-        }
-        crate::ehci::regs::list_end_barrier();
-        // SAFETY: dword 0 of the list head: splice the endpoint in.
-        unsafe {
-            core::ptr::write_volatile(head.cast::<u32>(), qh_bus | 2);
+        if status & sts::ASS == 0 {
+            log::warn!("ehci: asynchronous schedule stopped (USBSTS {status:#010x}); setting ASE");
+            self.regs
+                .write32(self.operational + op::USBCMD, run_command());
+            for _ in 0..40 {
+                if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                    break;
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+            }
         }
     }
 
@@ -1019,9 +980,11 @@ impl Ehci {
             .wrapping_add(24)
             .cast::<u32>();
         let mut retries = 0u32;
+        let mut last = token::ACTIVE;
         for _ in 0..POLL_STEPS {
             // SAFETY: dword 2 of the slot is its token.
             let token = unsafe { core::ptr::read_volatile(token_word) };
+            last = token;
             if token & token::ACTIVE == 0 {
                 // "retry transaction errors until we reach the software
                 // xacterr limit": CERR exhausted means the three tries are gone.
@@ -1043,7 +1006,9 @@ impl Ehci {
             }
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
-        token::ACTIVE
+        // Return what the descriptor actually holds: a sentinel here would hide
+        // whether the controller never touched it or left it Active.
+        last
     }
 
     /// Dumps the async ring exactly as the controller holds it.
