@@ -1017,6 +1017,8 @@ impl Xhci {
             self.event.mem.bus_addr(),
             (EVENT_RING_TRBS as u32) << ERST_SEG_SIZE_SHIFT,
         );
+        self.dump_erst("programmed");
+        self.log_allocations("init");
         // Linux `xhci_add_interrupter` keeps the fields it does not own: ERSTSZ
         // only carries the segment count, ERSTBA only the base address.
         let erstsz = self.runtime + RT_IR0 + 0x08;
@@ -1795,6 +1797,68 @@ impl Xhci {
         gone
     }
 
+    /// Logs the event-ring segment table entry as the memory holds it.
+    ///
+    /// The stall dump showed the entry holding `0x1` instead of the event ring base,
+    /// which makes the controller's idea of its own event ring garbage. This is the
+    /// same read, placed where it can catch the change: once right after programming
+    /// and once after the first command completes.
+    fn dump_erst(&self, when: &str) {
+        let entry = self.erst.as_ptr().cast::<u32>();
+        // SAFETY: `self.erst` owns one `ErstEntry` = four dwords.
+        let words = unsafe {
+            [
+                core::ptr::read_volatile(entry),
+                core::ptr::read_volatile(entry.wrapping_add(1)),
+                core::ptr::read_volatile(entry.wrapping_add(2)),
+                core::ptr::read_volatile(entry.wrapping_add(3)),
+            ]
+        };
+        info!(
+            "xhci: erst [{when}] virt {:#x} bus {:#x}: [{:#x}, {:#x}, {:#x}, {:#x}]",
+            self.erst.as_ptr() as usize,
+            self.erst.bus_addr(),
+            words[0],
+            words[1],
+            words[2],
+            words[3],
+        );
+    }
+
+    /// Logs every coherent allocation this controller handed to the hardware.
+    ///
+    /// The point is aliasing: if two of these share a page, the write that lands in
+    /// one is a corruption of the other, and a single table makes that visible
+    /// without another guessing round.
+    fn log_allocations(&self, when: &str) {
+        info!(
+            "xhci: allocations [{when}]: erst {:#x} (virt {:#x}), event {:#x}, command {:#x}, \
+             dcbaa {:#x} ({} slots), bounce {:#x}",
+            self.erst.bus_addr(),
+            self.erst.as_ptr() as usize,
+            self.event.mem.bus_addr(),
+            self.command.mem.bus_addr(),
+            self.device_contexts.bus_addr(),
+            self.max_slots,
+            self.bounce.bus_addr(),
+        );
+        for slot in &self.slots {
+            info!(
+                "xhci: allocations [{when}]: slot {} input {:#x} device {:#x} ep0 {:#x} bulk_out \
+                 {:#x} bulk_in {:#x} interrupt {:#x}",
+                slot.id,
+                slot.input.bus_addr(),
+                slot.device.bus_addr(),
+                slot.ep0.mem.bus_addr(),
+                slot.bulk[0].as_ref().map_or(0, |ring| ring.mem.bus_addr()),
+                slot.bulk[1].as_ref().map_or(0, |ring| ring.mem.bus_addr()),
+                slot.interrupt
+                    .as_ref()
+                    .map_or(0, |ring| ring.mem.bus_addr()),
+            );
+        }
+    }
+
     /// Samples every root port and reports what changed while nothing was running.
     ///
     /// The symptom being chased is "the device stops answering after roughly ten
@@ -1843,6 +1907,22 @@ impl Xhci {
             }
         }
         self.last_transfer_ns = now;
+    }
+
+    /// Acknowledges the interrupter's pending flag and `USBSTS.EINT`
+    /// (`xhci_irq()`'s two write-backs).
+    fn acknowledge_events(&self) {
+        let ir = self.runtime + RT_IR0;
+        let pending = self.bar.read32(ir);
+        if pending & 0x1 != 0 {
+            // IMAN.IP is write-one-to-clear; writing the read value back clears it
+            // without disturbing IE.
+            self.bar.write32(ir, pending);
+        }
+        let status = self.bar.read32(self.operational + op::USBSTS);
+        if status & sts::EINT != 0 {
+            self.bar.write32(self.operational + op::USBSTS, status);
+        }
     }
 
     /// `hub_port_debounce_be_stable()`: whether `port` has reported a disconnect
@@ -2319,6 +2399,12 @@ impl Xhci {
     /// transfer's own completion — and left the event ring consumed in an order
     /// the controller's own bookkeeping did not share.
     fn pump_events(&mut self) {
+        // `xhci_irq()` acknowledges what it drained: the interrupter's pending flag
+        // and `USBSTS.EINT`. Both are RW1C, so leaving them set does not block
+        // events, but it makes them useless as evidence -- a set EINT then reads as
+        // "an event is waiting" even when the ring is empty and nothing arrived,
+        // which is exactly the wrong conclusion to draw while chasing a stall.
+        self.acknowledge_events();
         for _ in 0..EVENT_DRAIN_LIMIT {
             // ldp:step irq.dequeue-event
             let Some(event) = self.next_event() else {
@@ -3209,10 +3295,16 @@ impl Xhci {
         // about that command's contents rather than about the ring pointer.
         let noop = Trb::new(0, 0, regs::trb::NO_OP << regs::trb::TYPE_SHIFT);
         match self.command(noop, "no-op") {
-            Ok(event) => info!(
-                "xhci: no-op completed (code {}), command ring works",
-                event.completion_code()
-            ),
+            Ok(event) => {
+                // The first command is the first time the controller reads the ERST
+                // to publish an event: if the entry changes anywhere, it changes
+                // here.
+                self.dump_erst("after first command");
+                info!(
+                    "xhci: no-op completed (code {}), command ring works",
+                    event.completion_code()
+                )
+            }
             Err(err) => {
                 log::error!("xhci: no-op failed ({err:?}), the command ring is not being fetched")
             }
