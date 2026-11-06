@@ -46,6 +46,10 @@ const RT_IR0: usize = 0x20;
 /// Writing this bit to ERDP clears the "event handler busy" state.
 const ERDP_EHB: u32 = 1 << 3;
 /// The controller's scratch buffer for control data stages.
+/// `HUB_DEBOUNCE_STEP` / `HUB_DEBOUNCE_STABLE` (`drivers/usb/core/hub.c:112-113`).
+const HUB_DEBOUNCE_STEP_US: u64 = 25_000;
+const HUB_DEBOUNCE_STABLE_US: u64 = 100_000;
+
 const BOUNCE_LEN: usize = 4096;
 
 /// Events buffered before the interrupter has to be serviced.
@@ -1715,10 +1719,18 @@ impl Xhci {
         // Which addresses still have a connected port. A device behind a hub is not
         // visible in the root ports, so it is only removed when its own port scan
         // says so; that path re-attaches through `bind_and_publish()`.
+        //
+        // `handle_port_status()` does not decide removal: it acknowledges the change
+        // bits and hands the port to the hub layer, which confirms a disconnect with
+        // `hub_port_debounce_be_stable()` (100 ms stable, sampled every 25 ms --
+        // hub.c:111-113) before `usb_disconnect()`, and resuscitates a device whose
+        // port still reports a connection. Removing on one `CCS == 0` sample is what
+        // would delete a working device's table entry -- and with it its block
+        // device -- on a link that merely wobbles.
         let mut connected = alloc::vec::Vec::new();
         for port in 0..self.ports {
             let value = self.port_status_raw(port);
-            if value & portsc::CCS != 0 {
+            if value & portsc::CCS != 0 || !self.port_disconnect_confirmed(port) {
                 connected.push(port);
             }
         }
@@ -1737,6 +1749,25 @@ impl Xhci {
             gone.extend(bus.lock().detach(address));
         }
         gone
+    }
+
+    /// `hub_port_debounce_be_stable()`: whether `port` has reported a disconnect
+    /// continuously for `HUB_DEBOUNCE_STABLE` ms, sampled every
+    /// `HUB_DEBOUNCE_STEP` ms (`hub.c:111-113`).
+    ///
+    /// The change bits are deliberately not acknowledged here: this is the removal
+    /// question, asked after the port change has already been consumed.
+    fn port_disconnect_confirmed(&self, port: usize) -> bool {
+        let offset = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
+        let mut stable = 0u64;
+        while stable < HUB_DEBOUNCE_STABLE_US {
+            if self.bar.read32(offset) & portsc::CCS != 0 {
+                return false;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(HUB_DEBOUNCE_STEP_US));
+            stable += HUB_DEBOUNCE_STEP_US;
+        }
+        true
     }
 
     /// Publishes a class binding for an already enumerated device.
@@ -1774,7 +1805,16 @@ impl Xhci {
             pipe.endpoints.interface,
             alloc::vec![alloc::boxed::Box::new(publication)],
         );
-        bus.lock().bind(address, binding)
+        // A refused bind hands the owners back; the publication is dropped here,
+        // after the table's lock is released.
+        match bus.lock().bind(address, binding) {
+            Ok(()) => Ok(()),
+            Err(rejected) => {
+                let error = rejected.error;
+                usb::bus::drop_bindings(alloc::vec![rejected.binding]);
+                Err(error)
+            }
+        }
     }
 
     /// `usb_reset_and_verify_device()`, minus the class-driver rebind.

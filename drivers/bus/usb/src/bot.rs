@@ -64,6 +64,62 @@ fn build_cbw(tag: u32, transfer_length: u32, is_in: bool, command: &[u8]) -> [u8
     cbw
 }
 
+/// Moves the data stage, returning how many bytes moved.
+///
+/// `usb_stor_Bulk_transfer_buf()` loops until the whole length is done or the
+/// device stops answering; a short stage is the device's business, not an error
+/// (`usb_stor_Bulk_transport()` decides what it means).
+fn data_stage(
+    hcd: &mut dyn Hcd,
+    endpoints: &BotEndpoints,
+    data: &mut [u8],
+    is_in: bool,
+) -> KResult<usize> {
+    let length = data.len();
+    let mut received = 0;
+    while received < length {
+        let read = hcd.bulk_transfer(
+            endpoints.address,
+            if is_in {
+                endpoints.endpoint_in
+            } else {
+                endpoints.endpoint_out
+            },
+            &mut data[received..],
+            is_in,
+        )?;
+        if read == 0 {
+            break;
+        }
+        received += read;
+    }
+    Ok(received)
+}
+
+/// The status wrapper a device may send in place of a skipped data stage.
+///
+/// `usb_stor_Bulk_transport()`: "Sometimes a device will mistakenly skip the data
+/// phase and go directly to the status phase without sending a zero-length packet.
+/// If we get a 13-byte response here, check whether it really is a CSW."
+fn status_wrapper_in_data(
+    data: &[u8],
+    received: usize,
+    expected: usize,
+    is_in: bool,
+) -> Option<[u8; CSW_LEN]> {
+    if !is_in || expected.saturating_sub(received) != CSW_LEN || received + CSW_LEN > data.len() {
+        return None;
+    }
+    let candidate = &data[received..received + CSW_LEN];
+    let signature = u32::from_le_bytes([candidate[0], candidate[1], candidate[2], candidate[3]]);
+    if signature != CSW_SIGNATURE {
+        return None;
+    }
+    let mut wrapper = [0u8; CSW_LEN];
+    wrapper.copy_from_slice(candidate);
+    Some(wrapper)
+}
+
 /// Runs one BOT command and returns the data stage.
 ///
 /// The three phases are strictly ordered: the status wrapper is only valid after
@@ -115,42 +171,12 @@ fn transfer(
     }
     let mut data = alloc::vec![0u8; transfer_length];
     if transfer_length > 0 {
-        let mut received = 0;
-        while received < transfer_length {
-            let read = hcd.bulk_transfer(
-                endpoints.address,
-                if is_in {
-                    endpoints.endpoint_in
-                } else {
-                    endpoints.endpoint_out
-                },
-                &mut data[received..],
-                is_in,
-            )?;
-            if read == 0 {
-                break;
-            }
-            received += read;
-        }
+        let received = data_stage(hcd, endpoints, &mut data, is_in)?;
         if received != transfer_length {
             log::warn!("bot: short data stage {received}/{transfer_length}");
-            // `usb_stor_Bulk_transport()`: "Sometimes a device will mistakenly
-            // skip the data phase and go directly to the status phase without
-            // sending a zero-length packet. If we get a 13-byte response here,
-            // check whether it really is a CSW."
-            if is_in
-                && transfer_length.saturating_sub(received) == CSW_LEN
-                && received + CSW_LEN <= data.len()
-            {
-                let candidate = &data[received..received + CSW_LEN];
-                let signature =
-                    u32::from_le_bytes([candidate[0], candidate[1], candidate[2], candidate[3]]);
-                if signature == CSW_SIGNATURE {
-                    log::warn!("bot: device skipped the data phase; using its status wrapper");
-                    let mut wrapper = [0u8; CSW_LEN];
-                    wrapper.copy_from_slice(candidate);
-                    return finish_status(&wrapper, tag, endpoints.address, Some(data));
-                }
+            if let Some(wrapper) = status_wrapper_in_data(&data, received, transfer_length, is_in) {
+                log::warn!("bot: device skipped the data phase; using its status wrapper");
+                return finish_status(&wrapper, tag, endpoints.address, Some(data));
             }
         }
     }

@@ -51,6 +51,28 @@ const BULK_BUFFER_LEN: usize = 4096;
 /// 0x8a8; the host gates live in the same neighbourhood).
 const CLKGATE_SNAPSHOT: usize = 0x8a0;
 
+/// `HUB_DEBOUNCE_STEP` / `HUB_DEBOUNCE_STABLE` from `drivers/usb/core/hub.c:112-113`.
+const HUB_DEBOUNCE_STEP_US: u64 = 25_000;
+const HUB_DEBOUNCE_STABLE_US: u64 = 100_000;
+
+/// `hub_port_debounce()`: a disconnect counts only once the port has reported it
+/// continuously for `HUB_DEBOUNCE_STABLE` ms, sampled every `HUB_DEBOUNCE_STEP` ms.
+///
+/// The lock is taken once per sample, so the window is not spent inside it. Acting
+/// on a single `CCS == 0` sample is what made the block device disappear on this
+/// board: the link drops and comes back without the device ever leaving the port.
+fn port_disconnect_confirmed(ehci: &alloc::sync::Arc<ksync::Mutex<Ehci>>) -> bool {
+    let mut stable = 0u64;
+    while stable < HUB_DEBOUNCE_STABLE_US {
+        if ehci.lock().port_connected() {
+            return false;
+        }
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(HUB_DEBOUNCE_STEP_US));
+        stable += HUB_DEBOUNCE_STEP_US;
+    }
+    true
+}
+
 pub struct Ehci {
     regs: IoMap,
     /// Operational register base: `bar + CAPLENGTH`.
@@ -856,18 +878,23 @@ impl Ehci {
         self.self_weak = Some(alloc::sync::Arc::downgrade(this));
     }
 
-    /// Removes devices whose port no longer reports a connection.
+    /// Whether the root port still reports a downstream device.
     ///
-    /// The bindings are *returned*, not dropped: their withdrawal may wait for a
-    /// consumer that needs this controller's lock.
-    fn detach_absent(&mut self) -> alloc::vec::Vec<usb::bus::ClassBinding> {
+    /// One sample is *not* evidence of a removal; see [`port_disconnect_confirmed`].
+    fn port_connected(&self) -> bool {
+        self.regs.read32(self.port_register(0)) & portsc::CCS != 0
+    }
+
+    /// Removes the devices that hang off the root port.
+    ///
+    /// The caller has already confirmed the disconnect, because confirmation costs a
+    /// debounce window that must not be spent holding this lock. The bindings are
+    /// *returned*, not dropped: their withdrawal may wait for a consumer that needs
+    /// this controller's lock.
+    fn detach_disconnected(&mut self) -> alloc::vec::Vec<usb::bus::ClassBinding> {
         let Some(bus) = self.bus.clone() else {
             return alloc::vec::Vec::new();
         };
-        let connected = self.regs.read32(self.port_register(0)) & portsc::CCS != 0;
-        if connected {
-            return alloc::vec::Vec::new();
-        }
         let addresses: alloc::vec::Vec<u8> = bus
             .lock()
             .devices()
@@ -2059,15 +2086,12 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
                 self.probe_context();
             }
         }
-        let mut guard = self.ehci.lock();
-        let gone = guard.detach_absent();
-        let still_there = guard
-            .bus
-            .as_ref()
-            .is_none_or(|bus| bus.lock().contains(self.endpoints.address));
-        drop(guard);
-        usb::bus::drop_bindings(gone);
-        if !still_there {
+        // A removal has to be confirmed before the table loses the device: this
+        // board's link drops and recovers while idle, and deleting the entry takes
+        // the block device with it -- nothing re-publishes it afterwards.
+        if !self.ehci.lock().port_connected() && port_disconnect_confirmed(&self.ehci) {
+            let gone = self.ehci.lock().detach_disconnected();
+            usb::bus::drop_bindings(gone);
             log::error!(
                 "ehci: address {} is no longer present",
                 self.endpoints.address
