@@ -2897,11 +2897,11 @@ impl Xhci {
         // and it names which buffer, because every address this driver hands over is
         // one of a handful of allocations.
         let gsts = self.bar.read32(crate::dwc3::regs::GSTS);
-        let bus_err = gsts & (1 << 4) != 0;
+        let bus_err = gsts & crate::dwc3::regs::GSTS_BUS_ERR_ADDR_VLD != 0;
         let (err_lo, err_hi) = if bus_err {
             (
-                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x30),
-                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x34),
+                self.bar.read32(crate::dwc3::regs::GBUSERRADDR0),
+                self.bar.read32(crate::dwc3::regs::GBUSERRADDR1),
             )
         } else {
             (0, 0)
@@ -3273,10 +3273,10 @@ impl Xhci {
         let gsts = self.bar.read32(crate::dwc3::regs::GSTS);
         // GSTS.BUS_ERR_ADDR_VLD (bit 4) means the core recorded a bus fault;
         // GBUSERRADDR then names the address it faulted on.
-        let (err_lo, err_hi) = if gsts & (1 << 4) != 0 {
+        let (err_lo, err_hi) = if gsts & crate::dwc3::regs::GSTS_BUS_ERR_ADDR_VLD != 0 {
             (
-                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x30),
-                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x34),
+                self.bar.read32(crate::dwc3::regs::GBUSERRADDR0),
+                self.bar.read32(crate::dwc3::regs::GBUSERRADDR1),
             )
         } else {
             (0, 0)

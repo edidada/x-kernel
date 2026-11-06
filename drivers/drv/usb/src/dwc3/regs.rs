@@ -20,6 +20,16 @@ pub const GLOBALS_START: usize = 0xc100;
 
 pub const GCTL: usize = GLOBALS_START + 0x10;
 pub const GSTS: usize = GLOBALS_START + 0x18;
+/// Address the core faulted on, valid when `GSTS` bit 4 (`BUS_ERR_ADDR_VLD`) is set.
+///
+/// `DWC3_GBUSERRADDR0/1` (`drivers/usb/dwc3/core.h:101-102`) live at 0xc130/0xc134,
+/// not at 0x30: reading 0x30 returns an unrelated register, which is how an earlier
+/// round convinced itself the faulting address was `0xC` and started looking for a
+/// NULL scratchpad pointer.
+pub const GBUSERRADDR0: usize = GLOBALS_START + 0xc130;
+pub const GBUSERRADDR1: usize = GLOBALS_START + 0xc134;
+/// `DWC3_GSTS_BUS_ERR_ADDR_VLD` (`core.h:273`).
+pub const GSTS_BUS_ERR_ADDR_VLD: u32 = 1 << 4;
 /// USB2 PHY configuration, one word per PHY, starting at 0xc200.
 pub const GUSB2PHYCFG: usize = GLOBALS_START + 0x100;
 pub const GUSB2PHYACC: usize = GLOBALS_START + 0x180;
