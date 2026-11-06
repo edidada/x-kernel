@@ -878,6 +878,43 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 
 锚点：`qh_update`、`qh_append_tds`、`qh_link_async`、`qh_refresh`、`start_unlink_async`。
 
+### 与香橙派 5.10 树的对齐审计（数据 ✓ / 机制一处错位已修）
+
+**数据层：全部对齐。** 逐条核对 `include/linux/usb/ehci_def.h`、`ehci.h`、`xhci.h`：
+
+- EHCI `USBSTS`：HALT 12、**RECL 13**、PSS 14、**ASS 15**（我们代码里就是这个值；
+  我一度按记忆以为是 12/13/14/15 的顺序，回头核对后确认我们的定义是对的）。
+- EHCI `USBCMD`：RUN 0、RESET 1、PSE 4、ASE 5、IAAD 6。
+- qTD token：DT 31、LEN 16..30、IOC 15、CERR 10..11、PID 8..9、ACTIVE 7、HALT 6、
+  BABBLE 4、XACT 3；PID 码 IN=1 / OUT=0 / SETUP=2。
+- QH：info1 ADDR 6:0、EP 11:8、EPS 12、DTC 14、HEAD 15、MaxPacket 26:16、CEP 27、
+  **Nak Counter Reload = `EHCI_TUNE_RL_HS` = 4 << 28**（我们的 `NAK_RELOAD` 一致）；
+  info2 MULT = `EHCI_TUNE_MULT_HS` = 1 << 30；`EHCI_LIST_END` = 1；`Q_TYPE_QH` = 1 << 1。
+- xHCI：COMP 1/3/4/6/13/19/36；TRB_ENABLE_SLOT 9、ADDR_DEV 11、CONFIG_EP 12、
+  RESET_EP 14、STOP_RING 15、SET_DEQ 16、CMD_NOOP 23；TRB_TSP = 1 << 9。
+
+**机制层：EHCI 对齐。** 控制链与 `qh_urb_transaction()` + `qtd_fill()` 逐段一致：
+setup（DT=0、PID=SETUP、len 8、无 IOC）→ data（DT=1、PID IN/OUT、无 IOC）→
+status（DT=1、PID 取反、len 0、**IOC 在这一段**）；buffer page 指针 `[buf, buf+4K, …]`
+也一致；`CONFIGFLAG=1`、`ASYNCLISTADDR` 先于 RUN 写（`ehci_run()`）一致；
+bulk QH 的 RL/MULT/DTC 与 `qh_make()` 的 PIPE_BULK 分支一致。
+
+已知并保留的差异（有理由）：
+1. 末尾 qTD 的 `hw_next` 用 `LIST_END` 而不是指向 QH 的 dummy —— 我们用"每次入队重写
+   overlay 的 `qtd_next`"达到同样效果；
+2. 无 TT 支持 —— 板子的 EHCI 节点本来就没有 `has-transaction-translator`，对齐的。
+
+**机制层：xHCI 一处错位，已修。** 5.10 并没有 `xhci_halted_host_endpoint()`（那是更新
+内核抽出来的），规则内联在 `finish_td()`（`xhci-ring.c:2204`）：
+
+- `COMP_STALL_ERROR`：恒 halt；
+- `COMP_BABBLE_DETECTED_ERROR(3)` / `COMP_USB_TRANSACTION_ERROR(4)` /
+  `COMP_SPLIT_TRANSACTION_ERROR(36)`：**只有端点上下文状态为 Halted 时才 halt**。
+
+我们原来照 7.1.8 写的 `halts_host_endpoint()` 漏了 **babble(3)**，也没有"查端点上下文
+状态"这一步。现已按 5.10 改写（新增 `ep0_state()` 读 EP context，`BABBLE = 3` 加入
+`regs::code`），序列数据 `data/sequences/xhci.toml` 的 `src` 行号也全部换成 BSP 5.10 的。
+
 ### BSP 5.10 树查证：RK3588 EHCI 胶水层没有 async 调度的东西
 
 权威树改用 `/workspace/linux-orange-pi-5.10-rk3588` 后，逐处查了 `ehci-platform.c`：

@@ -1079,12 +1079,20 @@ const MAX_SOFT_RETRY: u32 = 3;
 /// and treats a babbling control endpoint as halted only on controllers newer
 /// than xHCI 0.95 — which this one is. This driver configures no isochronous
 /// endpoint, so every endpoint it tracks follows the full rule.
-fn halts_host_endpoint(code: u8) -> bool {
+fn halts_host_endpoint(code: u8, ep_state: u32) -> bool {
+    // `finish_td()` (`xhci-ring.c:2204`, board kernel 5.10): a STALL always
+    // halts, but the transaction/babble/split errors only halt when the endpoint
+    // context actually says Halted -- a controller that reports one of them
+    // without halting keeps running, and resetting it then would throw away the
+    // endpoint's state. The newer kernels factor this rule out into
+    // `xhci_halted_host_endpoint()`; 5.10 has it inline, which is what this
+    // follows.
+    const EP_STATE_HALTED: u32 = 1;
     match code {
-        // `COMP_STALL_ERROR`
         regs::code::STALL => true,
-        // `COMP_USB_TRANSACTION_ERROR` / `COMP_SPLIT_TRANSACTION_ERROR`
-        regs::code::TRANSACTION_ERROR | regs::code::SPLIT_TRANSACTION_ERROR => true,
+        regs::code::BABBLE
+        | regs::code::TRANSACTION_ERROR
+        | regs::code::SPLIT_TRANSACTION_ERROR => ep_state == EP_STATE_HALTED,
         _ => false,
     }
 }
@@ -1313,7 +1321,7 @@ impl Xhci {
         }
         completions.push_back(*event);
         // ldp:step irq.tx-halt
-        if halts_host_endpoint(code) {
+        if halts_host_endpoint(code, self.ep0_state(slot_index)) {
             // `finish_td()`: this completion halts the host endpoint, so it will
             // consume nothing more until a Reset Endpoint clears the halt. The
             // completion still goes back to the waiter, which turns it into the
@@ -1485,6 +1493,15 @@ impl Xhci {
             }
             _ => {}
         }
+    }
+
+    /// EP0's state, as the controller recorded it (`GET_EP_CTX_STATE`).
+    fn ep0_state(&self, slot_index: usize) -> u32 {
+        let ep0 = self.context_size * context::EP0_CONTEXT;
+        let base = self.slots[slot_index].device.as_ptr().cast::<u8>();
+        // SAFETY: the output device context holds a slot context and one
+        // endpoint context per DCI; `ep0` is inside this allocation.
+        unsafe { core::ptr::read_volatile(base.wrapping_add(ep0).cast::<u32>()) & 0x7 }
     }
 
     /// Reports EP0's state and dequeue from the slot's output device context.

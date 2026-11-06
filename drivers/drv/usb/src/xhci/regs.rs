@@ -83,7 +83,11 @@ pub mod portsc {
 /// Completion codes (`TRB Completion Code`, xHCI 1.1 §6.4.2).
 pub mod code {
     pub const SUCCESS: u8 = 1;
-    /// `COMP_USB_TRANSACTION_ERROR` (`xhci.h:837`).
+    /// `COMP_BABBLE_DETECTED_ERROR` (`xhci.h:1105`) — 3, not 7: 7 is
+    /// `COMP_TRB_ERROR`. A babbling endpoint halts like a transaction error
+    /// (`finish_td()`, 5.10), so the value has to be the reference's.
+    pub const BABBLE: u8 = 3;
+    /// `COMP_USB_TRANSACTION_ERROR` (`xhci.h:1106`).
     pub const TRANSACTION_ERROR: u8 = 4;
     pub const STALL: u8 = 6;
     /// `COMP_CONTEXT_STATE_ERROR` (`xhci.h:841`): the command was refused
