@@ -343,7 +343,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         fs_boot::mount_virtual_filesystems();
         // Disks that appeared during driver probe (USB mass storage) become
         // usable filesystem trees here, mounted where userspace expects them.
-        if !fs_boot::mount_block_devices_at("/mnt/usb") {
+        if !fs_boot::mount_block_devices_at(MNT_USB) {
             // A disk can also appear *after* this point: the USB host
             // controllers on this board enumerate their devices ~130 s in, long
             // after the filesystem namespace exists. Linux mounts on the uevent
@@ -423,6 +423,9 @@ fn prepare_late_init_on_primary(cpu_id: kcpu_id_map::LogicalCpuId) -> ktask::Kta
     task
 }
 
+/// Where removable media is exposed to userspace.
+const MNT_USB: &str = "/mnt/usb";
+
 /// Retries the `/mnt/usb` mount until a disk with a filesystem shows up.
 ///
 /// The retry is a poll because the block core has no notification yet; it ends
@@ -441,21 +444,53 @@ fn spawn_usb_mount_retry() {
 }
 
 fn usb_mount_retry_task() {
-    /// How long to keep watching for a disk, and how often to look. The USB host
-    /// controllers on this board finish enumeration around 130 s, so the window
-    /// is the boot's own scale rather than a transfer timeout.
-    const INTERVAL_MS: u64 = 2_000;
+    /// How often to look for a new block device, and how long to keep watching.
+    /// The USB host controllers on this board finish enumeration around 130 s, so
+    /// the window is the boot's own scale rather than a transfer timeout.
+    const POLL_MS: u64 = 2_000;
     const WATCH_MS: u64 = 240_000;
+    /// A mount attempt against media that is not answering costs two block-read
+    /// timeouts (~19 s measured). Attempting that *before* the disk exists is
+    /// what stretched this board's boot from 67 s to 148 s, so an attempt only
+    /// happens once a device that was not there at task start shows up.
+    const RETRY_MS: u64 = 30_000;
+    let device_numbers = || {
+        subsys_block::block_devices()
+            .iter()
+            .map(|device| device.device_number().0)
+            .collect::<alloc::vec::Vec<u64>>()
+    };
+    let mut known = device_numbers();
+    let mut appeared = false;
     let mut waited = 0u64;
+    let mut since_attempt = RETRY_MS;
     while waited < WATCH_MS {
-        ktask::sleep(ktime_types::TimeSpan::from_millis(INTERVAL_MS));
-        waited += INTERVAL_MS;
-        if fs_boot::mount_block_devices_at("/mnt/usb") {
-            info!("usb: disk mounted at /mnt/usb after {waited} ms");
+        ktask::sleep(ktime_types::TimeSpan::from_millis(POLL_MS));
+        waited += POLL_MS;
+        if !appeared {
+            let devices = device_numbers();
+            if devices.iter().any(|number| !known.contains(number)) {
+                appeared = true;
+                info!("usb: a new block device appeared, trying {MNT_USB}");
+            }
+            known = devices;
+            continue;
+        }
+        since_attempt += POLL_MS;
+        if since_attempt < RETRY_MS {
+            continue;
+        }
+        since_attempt = 0;
+        if fs_boot::mount_block_devices_at(MNT_USB) {
+            info!("usb: disk mounted at {MNT_USB} after {waited} ms");
             return;
         }
+        // One line per attempt, not per block device: a failing mount also
+        // produces block-read timeouts, and the console is what a stuck board
+        // is debugged with.
+        info!("usb: mount attempt at {waited} ms found no filesystem, retrying");
     }
-    warn!("usb: no filesystem appeared for /mnt/usb within {WATCH_MS} ms");
+    warn!("usb: no filesystem appeared for {MNT_USB} within {WATCH_MS} ms");
 }
 
 fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {

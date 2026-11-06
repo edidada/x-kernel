@@ -21,6 +21,9 @@ use usb::{Hcd, PortStatus, SetupPacket, Speed};
 use crate::ehci::regs::{Qh, Qtd, cap, info1, op, pid, portsc, sts, token};
 
 /// Consecutive polls of a self-clearing bit, in microseconds.
+/// How many times the full async-ring dump is printed; see `STALL_DUMPS`' use.
+static STALL_DUMPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 const POLL_STEPS: usize = 200_000;
 
 /// Room for the setup packet plus one data buffer.
@@ -803,6 +806,14 @@ impl Ehci {
             // The EP0 queue head's descriptors: if one is still Active, the
             // controller is parked on the control endpoint retrying it forever
             // and never reaches the bulk queue heads behind it in the ring.
+            // The full ring dump is worth its lines exactly once or twice: after
+            // that the interesting fact is that the same stall happened again,
+            // and a console full of queue-head dumps costs the boot more than it
+            // tells. `STALL_DUMPS` bounds it.
+            let dump = STALL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2;
+            if !dump {
+                log::warn!("ehci: bulk stall again (ring dump suppressed)");
+            }
             // Every queue head in the async ring, as the controller holds it.
             // One halted head anywhere in the circular list stops the walk, and
             // the endpoints behind it then look exactly like "the controller
@@ -820,27 +831,31 @@ impl Ehci {
                         )
                     }
                 };
+                if dump {
+                    log::error!(
+                        "ehci: qh{index} next {:#x} info1 {:#x} qtd_next {:#x} alt {:#x} token \
+                         {:#x} (halt {}, active {})",
+                        word(0),
+                        word(4),
+                        word(16),
+                        word(20),
+                        word(24),
+                        word(24) & regs::token::HALT != 0,
+                        word(24) & regs::token::ACTIVE != 0,
+                    );
+                }
+            }
+            if dump {
                 log::error!(
-                    "ehci: qh{index} next {:#x} info1 {:#x} qtd_next {:#x} alt {:#x} token {:#x} \
-                     (halt {}, active {})",
-                    word(0),
-                    word(4),
-                    word(16),
-                    word(20),
-                    word(24),
-                    word(24) & regs::token::HALT != 0,
-                    word(24) & regs::token::ACTIVE != 0,
+                    "ehci: usbcmd {:#x} (ase {}, pse {}, rs {}) async_next {:#x} frindex {}",
+                    self.regs.read32(self.operational + op::USBCMD),
+                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::ASE != 0,
+                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::PSE != 0,
+                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::RS != 0,
+                    self.regs.read32(self.operational + op::ASYNCLISTADDR),
+                    self.regs.read32(self.operational + op::FRINDEX),
                 );
             }
-            log::error!(
-                "ehci: usbcmd {:#x} (ase {}, pse {}, rs {}) async_next {:#x} frindex {}",
-                self.regs.read32(self.operational + op::USBCMD),
-                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::ASE != 0,
-                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::PSE != 0,
-                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::RS != 0,
-                self.regs.read32(self.operational + op::ASYNCLISTADDR),
-                self.regs.read32(self.operational + op::FRINDEX),
-            );
             for slot in 0..8usize {
                 // SAFETY: the eight qTD slots are inside this allocation.
                 let token = unsafe {
@@ -854,12 +869,14 @@ impl Ehci {
                             .cast::<u32>(),
                     )
                 };
-                log::error!(
-                    "ehci: qtd{slot} at {:#x} token {token:#010x} (halt {}, active {})",
-                    self.qtds.bus_addr() + (slot * core::mem::size_of::<Qtd>()) as u64,
-                    token & regs::token::HALT != 0,
-                    token & regs::token::ACTIVE != 0,
-                );
+                if dump {
+                    log::error!(
+                        "ehci: qtd{slot} at {:#x} token {token:#010x} (halt {}, active {})",
+                        self.qtds.bus_addr() + (slot * core::mem::size_of::<Qtd>()) as u64,
+                        token & regs::token::HALT != 0,
+                        token & regs::token::ACTIVE != 0,
+                    );
+                }
             }
             for slot in 0..3usize {
                 // SAFETY: the first three qTDs belong to the control path.

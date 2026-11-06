@@ -18,9 +18,14 @@
 [port]
 name = "xhci"
 crate_path = "drivers/drv/usb"
-authoritative = "linux-7.1.8:drivers/usb/host/xhci-ring.c"
+authoritative = "linux-orange-pi-5.10-rk3588:drivers/usb/host/xhci-ring.c"
 provenance = """
-references.json id = linux-7.1.8（/workspace/linux-7.1.8，钉死的主线树）。
+权威树 = 板子自己的内核源码 `/workspace/linux-orange-pi-5.10-rk3588`（Orange Pi 5 /
+RK3588 BSP 5.10）。此前用的是主线 7.1.8：EHCI 一侧逐函数对比后逻辑等价
+（`qh_update`/`qh_link_async` 完全相同，diff 只有 `PID_CODE_*` 这类命名），
+所以既有结论仍成立；但**平台胶水层**（`ehci-platform.c` 的
+rockchip,rk3588-ehci 分支、DWC3 host glue）只在这棵 BSP 树里有，涉及
+"控制器行为异常"的判断一律以它为真相源。
 复核命令：
   sed -n '2990,3020p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # xhci_handle_event 调用点
   sed -n '1795,1850p' /workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c   # handle_cmd_completion 的 FIFO 配对

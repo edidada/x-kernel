@@ -118,3 +118,6 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | QH link/unlink per transfer |
 | 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `single_unlink_async` | QH link/unlink per transfer |
 | 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `start_iaa_cycle` | QH link/unlink per transfer |
+| 2026-11-06 05:53 | `/workspace/linux-orange-pi-5.10-rk3588/drivers/usb/host/ehci-platform.c` | `ehci_platform_probe` | board kernel 5.10 is now the authoritative tree |
+| 2026-11-06 05:53 | `/workspace/linux-orange-pi-5.10-rk3588/drivers/usb/host/ehci-platform.c` | `ehci_irq` | board kernel 5.10 is now the authoritative tree |
+| 2026-11-06 05:53 | `/workspace/linux-orange-pi-5.10-rk3588/drivers/usb/host/ehci-platform.c` | `qh_completions` | board kernel 5.10 is now the authoritative tree |
