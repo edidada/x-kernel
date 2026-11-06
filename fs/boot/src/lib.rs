@@ -601,17 +601,17 @@ static ROOT_DEVICE_NUMBER: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 /// Read-write is tried first and read-only second: a filesystem that needs
 /// journal recovery mounts read-write, while media that cannot be written still
 /// becomes visible read-only instead of failing outright.
-pub fn mount_block_devices_at(mount_path: &str) {
+pub fn mount_block_devices_at(mount_path: &str) -> bool {
     let boot = BootVfs::initial();
     if boot.ensure_directory_path(mount_path).is_err() {
         warn!("could not create mount point {mount_path}");
-        return;
+        return false;
     }
     let mountpoint = match boot.lookup(mount_path) {
         Ok(mountpoint) => mountpoint,
         Err(err) => {
             warn!("could not look up mount point {mount_path}: {err:?}");
-            return;
+            return false;
         }
     };
     let cred = kcred::initial_cred();
@@ -691,7 +691,7 @@ pub fn mount_block_devices_at(mount_path: &str) {
                             "  {source} mounted at {mount_path} as {:?}",
                             mount.filesystem_name()
                         );
-                        return;
+                        return true;
                     }
                     Err(err) => info!(
                         "{source} as {} ({superblock_flags:?}) failed: {err:?}",
@@ -702,6 +702,7 @@ pub fn mount_block_devices_at(mount_path: &str) {
         }
     }
     info!("  no filesystem found on any block device for {mount_path}");
+    false
 }
 
 #[cfg(feature = "fs9p")]

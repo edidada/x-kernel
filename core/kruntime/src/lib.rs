@@ -343,7 +343,15 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         fs_boot::mount_virtual_filesystems();
         // Disks that appeared during driver probe (USB mass storage) become
         // usable filesystem trees here, mounted where userspace expects them.
-        fs_boot::mount_block_devices_at("/mnt/usb");
+        if !fs_boot::mount_block_devices_at("/mnt/usb") {
+            // A disk can also appear *after* this point: the USB host
+            // controllers on this board enumerate their devices ~130 s in, long
+            // after the filesystem namespace exists. Linux mounts on the uevent
+            // for the new device; the block core has no device-added
+            // notification yet, so the appearance is polled from a kernel task
+            // rather than being missed for the whole boot.
+            spawn_usb_mount_retry();
+        }
     }
 
     #[cfg(all(feature = "fs9p", not(unittest)))]
@@ -413,6 +421,41 @@ fn prepare_late_init_on_primary(cpu_id: kcpu_id_map::LogicalCpuId) -> ktask::Kta
     let task = ktask::prepare_task(task);
     task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu_id));
     task
+}
+
+/// Retries the `/mnt/usb` mount until a disk with a filesystem shows up.
+///
+/// The retry is a poll because the block core has no notification yet; it ends
+/// as soon as a mount succeeds, so a disk that is already there costs nothing
+/// (that path is taken by `mount_block_devices_at` before this task starts).
+fn spawn_usb_mount_retry() {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+        usb_mount_retry_task,
+        "usb-mount".into(),
+        kbuild_config::TASK_STACK_SIZE,
+    ));
+    task.set_cpumask(ktask::KCpuMask::one_shot_logical(
+        khal::percpu::this_cpu_id(),
+    ));
+    ktask::activate_task(&task);
+}
+
+fn usb_mount_retry_task() {
+    /// How long to keep watching for a disk, and how often to look. The USB host
+    /// controllers on this board finish enumeration around 130 s, so the window
+    /// is the boot's own scale rather than a transfer timeout.
+    const INTERVAL_MS: u64 = 2_000;
+    const WATCH_MS: u64 = 240_000;
+    let mut waited = 0u64;
+    while waited < WATCH_MS {
+        ktask::sleep(ktime_types::TimeSpan::from_millis(INTERVAL_MS));
+        waited += INTERVAL_MS;
+        if fs_boot::mount_block_devices_at("/mnt/usb") {
+            info!("usb: disk mounted at /mnt/usb after {waited} ms");
+            return;
+        }
+    }
+    warn!("usb: no filesystem appeared for /mnt/usb within {WATCH_MS} ms");
 }
 
 fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {

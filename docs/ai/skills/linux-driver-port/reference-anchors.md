@@ -115,3 +115,6 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `start_unlink_async` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
 | 2026-11-06 00:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `ehci_run` | async schedule restart when a stalled transfer still reports ASS |
 | 2026-11-06 00:23 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-hcd.c` | `disable_async` | async schedule restart when a stalled transfer still reports ASS |
+| 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | QH link/unlink per transfer |
+| 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `single_unlink_async` | QH link/unlink per transfer |
+| 2026-11-06 01:03 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `start_iaa_cycle` | QH link/unlink per transfer |

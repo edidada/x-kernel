@@ -878,6 +878,30 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 
 锚点：`qh_update`、`qh_append_tds`、`qh_link_async`、`qh_refresh`、`start_unlink_async`。
 
+### 挂载重试 + QH link/unlink 实验（本轮结论：只留前者）
+
+**先纠正一条错结论**：U 盘**没有**挂载。证据：`/proc/mounts` 无 usb 条目；`/mnt/usb`
+解析到 eMMC 目录（inode 158081，`..`=20）而不是该 ext4 的根 inode 2；写入文件断电即失；
+板上 `mount -t ext4 /dev/usb1 /mnt/usb` 直接失败
+（`KExt4 core mount failed: Device(TimedOut)` → `can't read superblock`）。之前
+`echo/cat` 之所以"成功"，是写进了根文件系统里的同名目录。
+
+**已做（保留）**：`mount_block_devices_at()` 改为返回 bool，并在 kruntime 里加了一个
+`usb-mount` kthread：初次挂载失败时每 2 s 重试、最长 240 s（block 核心没有"设备新增"
+通知，只能用轮询）。上板验证该任务确实在跑（盘 134.8 s 发布，任务 154.2/173.3 s… 在试）。
+
+**试过但回退**：按 `qh_link_async()`/`single_unlink_async()`/`start_iaa_cycle()` 实现
+"队列头只在一次传输期间挂在 async 链表里"，期望消除"控制器在我们写描述符时读 QH"的竞态。
+实测**更差**：首个 bulk 传输即失败（`token 0x001f8c80` 仍 Active），随后出现
+`USBSTS 0xb03d (halted true, hse true)`。已回退到 `1b81289b3` 的状态（保留环 dump +
+调度重启重试）。下轮要带着"为什么 link/unlink 反而更差"的假设去读
+`ehci_hub_control()` 的 reset 流程和 `ehci_setup()` 的 async 初始化（QH 的 `hw_next`
+在 unlink 后应保持什么值、head 的 `qh_next` 软件链是否需要镜像），而不是再改一次顺序。
+
+**当前真实状态**：盘在 EHCI 上枚举、BOT INQUIRY/READ CAPACITY 通、ext4 超级块能解析；
+**持续读会停摆**（`USBSTS 0xa008` REC|ASS，无 HALT、无 HSE，Active qTD 不被取），
+所以 ext4 mount 读超级块超时 → 挂载失败 → 重试任务一直重试。
+
 ### 事件架构重构（`36367c3d5`…`e771f3dc1`）：按 skill 移植，而非继续打补丁
 
 **为什么重构**：xHCI 事件路径此前是从头自研的（等待者按 (slot,ep) 挑事件、别人的事件进
