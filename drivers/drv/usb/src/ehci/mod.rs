@@ -850,6 +850,202 @@ impl Ehci {
         Ok(overlay_target)
     }
 
+    /// `ehci_qtd_init()`: a descriptor that carries nothing and terminates.
+    fn qtd_init(&self, slot: usize) {
+        let cell = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot);
+        // SAFETY: `slot` is inside this controller's qTD allocation.
+        unsafe {
+            core::ptr::write_volatile(
+                cell,
+                Qtd {
+                    next: regs::LIST_END,
+                    alt_next: regs::LIST_END,
+                    token: 0,
+                    buffer: [0; 5],
+                },
+            );
+        }
+    }
+
+    /// `qh_update()`: point the queue head's overlay at `qtd_bus` and hand the
+    /// toggle over, without an Active descriptor.
+    ///
+    /// "Writes to an active overlay are unsafe" -- the controller reads the
+    /// *overlay*, not the descriptor -- so the overlay is deactivated first, its
+    /// `qtd_next`/`alt_next` are rewritten, and only then does a caller publish a
+    /// descriptor token.
+    fn qh_update(&self, qh_index: usize, qtd_bus: u32) {
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let bytes = head.wrapping_add(qh_index).cast::<u8>();
+        // SAFETY: dwords 4..6 of one queue head inside this allocation.
+        unsafe {
+            core::ptr::write_volatile(bytes.wrapping_add(16).cast::<u32>(), qtd_bus);
+            core::ptr::write_volatile(bytes.wrapping_add(20).cast::<u32>(), regs::LIST_END);
+            let token = core::ptr::read_volatile(bytes.wrapping_add(24).cast::<u32>());
+            core::ptr::write_volatile(
+                bytes.wrapping_add(24).cast::<u32>(),
+                token & (token::DT | token::PING),
+            );
+        }
+        karch::dsb_ishst();
+    }
+
+    /// `qh_link_async()`: splice this queue head in right behind the async head.
+    ///
+    /// The queue head is *not* in the list while its descriptors are written; a
+    /// linked queue head is re-read by the controller at every reclamation pass,
+    /// which is what makes writing it unsafe. Linking is the last step before the
+    /// controller may look at it, and unlinking is the first step after the
+    /// transfer is done.
+    fn qh_link(&self, qh_index: usize) {
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let qh = head.wrapping_add(qh_index);
+        let qh_bus = self.qh.bus_addr() as u32 + (qh_index * core::mem::size_of::<Qh>()) as u32;
+        // SAFETY: dword 0 of the async head, inside this allocation.
+        let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
+        // SAFETY: dword 0 of this queue head: it inherits the head's successor.
+        unsafe {
+            core::ptr::write_volatile(qh.cast::<u32>(), head_next);
+        }
+        karch::dsb_ishst();
+        // SAFETY: dword 0 of the head: this store is what links the queue head.
+        unsafe {
+            core::ptr::write_volatile(head.cast::<u32>(), (qh_bus & !0x1f) | regs::QH_TYPE);
+        }
+        karch::dsb_ishst();
+        self.ring_async_advance();
+    }
+
+    /// `single_unlink_async()` + `start_iaa_cycle()`: take the queue head out.
+    ///
+    /// The splice comes first -- the controller must not find the queue head
+    /// through the list any more -- and the async-advance doorbell after it lets
+    /// the controller move past. Two doorbells, as the reference does ("the HC
+    /// can write back the overlay region even after the IAA interrupt occurs").
+    fn qh_unlink(&self, qh_index: usize) {
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let qh = head.wrapping_add(qh_index);
+        let qh_bus = self.qh.bus_addr() as u32 + (qh_index * core::mem::size_of::<Qh>()) as u32;
+        // SAFETY: dword 0 of the async head, inside this allocation.
+        let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
+        if head_next & !0x1f == qh_bus & !0x1f {
+            // SAFETY: dword 0 of this queue head, then of the head.
+            let successor = unsafe { core::ptr::read_volatile(qh.cast::<u32>()) };
+            // SAFETY: dword 0 of the head.
+            unsafe {
+                core::ptr::write_volatile(head.cast::<u32>(), successor);
+            }
+            karch::dsb_ishst();
+        }
+        self.ring_async_advance();
+        self.ring_async_advance();
+    }
+
+    /// `qh_append_tds()`: hand one descriptor to a queue head that is not linked.
+    ///
+    /// The reference deactivates the source descriptor, copies it into the slot
+    /// the queue head is parked on, points the list's tail at the *new* dummy
+    /// (the old source, re-initialised) and only then publishes the real token:
+    ///
+    /// ```c
+    /// 	token = qtd->hw_token;
+    /// 	qtd->hw_token = HALT_BIT(ehci);
+    /// 	dummy = qh->dummy;  dma = dummy->qtd_dma;  *dummy = *qtd;
+    /// 	ehci_qtd_init(ehci, qtd, qtd->qtd_dma);  qh->dummy = qtd;
+    /// 	qtd->hw_next = QTD_NEXT(ehci, dma);      /* tail -> new dummy */
+    /// 	wmb ();  dummy->hw_token = token;
+    /// ```
+    ///
+    /// Returns the bus address the queue head's overlay has to point at.
+    fn qh_append_qtd(&self, source_slot: usize, dummy_slot: usize, qtd: Qtd) -> u32 {
+        let source_bus =
+            self.qtds.bus_addr() as u32 + (source_slot * core::mem::size_of::<Qtd>()) as u32;
+        let dummy_bus =
+            self.qtds.bus_addr() as u32 + (dummy_slot * core::mem::size_of::<Qtd>()) as u32;
+        let source = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(source_slot);
+        let dummy = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
+        // The descriptor is written into the source, deactivated: the controller
+        // never reads this slot, it reads the one the overlay points at.
+        let deactivated = Qtd {
+            token: qtd.token & !token::ACTIVE | token::HALT,
+            ..qtd
+        };
+        // SAFETY: both slots are inside this controller's qTD allocation.
+        unsafe {
+            core::ptr::write_volatile(source, deactivated);
+        }
+        karch::dsb_ishst();
+        // The copy the controller will walk: payload first, and its `next` is the
+        // *new* dummy (the source slot, re-initialised below) so the list parks on
+        // an inactive descriptor instead of halting the queue head.
+        let active = Qtd {
+            next: source_bus,
+            ..qtd
+        };
+        // SAFETY: as above.
+        unsafe {
+            core::ptr::write_volatile(dummy, Qtd { token: 0, ..active });
+        }
+        karch::dsb_ishst();
+        self.qtd_init(source_slot);
+        // "let the hc process these next qtds"
+        karch::dsb_ishst();
+        // SAFETY: dword 2 of the dummy slot is the token that hands it over.
+        unsafe {
+            core::ptr::write_volatile(
+                dummy.cast::<u8>().wrapping_add(8).cast::<u32>(),
+                active.token,
+            );
+        }
+        karch::dsb_ishst();
+        dummy_bus
+    }
+
+    /// `qh_completions()`' poll loop: the descriptor's token, with the reference's
+    /// transaction-error retry.
+    ///
+    /// An XactErr that exhausts CErr leaves the descriptor HALTed; the reference
+    /// re-arms it -- in the descriptor *and* in the queue head overlay, which
+    /// still holds a copy -- and retries up to `QH_XACTERR_MAX` times before
+    /// giving up and reporting the error.
+    fn qh_wait_token(&self, qh_index: usize, slot: usize) -> u32 {
+        const QH_XACTERR_MAX: u32 = 32;
+        let cell = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot);
+        let token_word = cell.cast::<u8>().wrapping_add(8).cast::<u32>();
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let overlay = head
+            .wrapping_add(qh_index)
+            .cast::<u8>()
+            .wrapping_add(24)
+            .cast::<u32>();
+        let mut retries = 0u32;
+        for _ in 0..POLL_STEPS {
+            // SAFETY: dword 2 of the slot is its token.
+            let token = unsafe { core::ptr::read_volatile(token_word) };
+            if token & token::ACTIVE == 0 {
+                // "retry transaction errors until we reach the software
+                // xacterr limit": CERR exhausted means the three tries are gone.
+                let xact = token & token::XACT != 0;
+                let cerr = (token >> token::CERR_SHIFT) & 0x3;
+                if token & token::HALT != 0 && xact && cerr == 0 && retries < QH_XACTERR_MAX {
+                    retries += 1;
+                    let retry = (token & !token::HALT) | token::ACTIVE | (3 << token::CERR_SHIFT);
+                    // SAFETY: the descriptor's token and the queue head's overlay
+                    // copy of it, both inside this controller's allocations.
+                    unsafe {
+                        core::ptr::write_volatile(token_word, retry);
+                        core::ptr::write_volatile(overlay, retry);
+                    }
+                    karch::dsb_ishst();
+                    continue;
+                }
+                return token;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+        }
+        token::ACTIVE
+    }
+
     /// Dumps the async ring exactly as the controller holds it.
     ///
     /// Read once per stall: one halted or mis-pointed queue head anywhere in the
@@ -1057,11 +1253,15 @@ impl Hcd for Ehci {
         // let it run for 50 ms, then *clear it again by hand* -- PR is not
         // self-clearing here, which is why waiting for it to fall times out.
         let current = self.regs.read32(offset);
-        // PED is read/write in EHCI and a write of 0 disables the port, so it is
-        // never part of a mask-out here: the port is being started, not stopped.
+        // `ehci_hub_control()`, SetPortFeature(PORT_RESET): "temp |=
+        // PORT_RESET; temp &= ~PORT_PE;" -- the enable bit is *cleared* as part of
+        // asserting the reset and the controller sets it again if the device
+        // completes the handshake. Keeping the old PE (what this driver did
+        // before) leaves the port reporting "connected, not enabled" after the
+        // reset, which then reads as a device that never answered.
         self.regs.write32(
             offset,
-            (current | portsc::PP | portsc::RST) & !portsc::CHANGE_BITS,
+            (current | portsc::PP | portsc::RST) & !(portsc::CHANGE_BITS | portsc::PED),
         );
         // The reset must be held for at least 50 ms: `hub_port_reset()` asks for
         // the feature and `hub_port_wait_reset()` only looks at the port again
@@ -1110,6 +1310,17 @@ impl Hcd for Ehci {
             value & portsc::CCS != 0,
             (value & portsc::LINE_MASK) >> 10,
         );
+        // `check_reset_complete()`: a port that is still connected but not
+        // enabled after the reset did not complete the handshake, and every later
+        // transfer on it would be sent to a disabled port.
+        if value & portsc::CCS != 0 && value & portsc::PED == 0 {
+            log::error!(
+                "ehci: port {} did not enable after reset (portsc {value:#010x}); line {} -- \
+                 check_reset_complete() treats this as a device that never answered",
+                port + 1,
+                (value & portsc::LINE_MASK) >> 10,
+            );
+        }
         // The device needs its reset recovery time before the first SETUP.
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
 
@@ -1154,13 +1365,8 @@ impl Hcd for Ehci {
         // Active descriptor left unfetched). Restarting the schedule the way
         // `ehci_run()` does revives it, so the retry is a real second attempt
         // and not just a longer wait.
-        match transfer {
-            Err(KError::TimedOut) if self.recover_stalled_schedule() => {
-                log::warn!("ehci: control transfer retried after an async-schedule restart");
-                self.control_transfer_inner(address, setup, data, self.speed)
-            }
-            other => other,
-        }
+        let _ = &transfer;
+        transfer
     }
 
     fn bulk_transfer(

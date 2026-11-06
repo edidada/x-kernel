@@ -17,6 +17,7 @@
 use alloc::vec::Vec;
 
 use kerrno::{KError, KResult};
+use log::info;
 
 use crate::Hcd;
 
@@ -90,7 +91,7 @@ fn transfer(
         "bot: cbw tag {tag} op {:#04x} len {transfer_length} dir {} cdb {:02x?}",
         command.first().copied().unwrap_or(0),
         if is_in { "in" } else { "out" },
-        &command[..length],
+        &command[..command.len().min(16)],
     );
     let sent = hcd.bulk_transfer(
         endpoints.address,
