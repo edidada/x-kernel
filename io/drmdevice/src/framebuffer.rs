@@ -47,7 +47,10 @@ impl Framebuffer {
     }
 }
 
+/// `DRM_IOCTL_MODE_ADDFB`.
 impl Ioctl for DrmModeFbCmd {
+    const NAME: &'static str = "MODE_ADDFB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, f: &mut Self) -> DrmResult<usize> {
         // Legacy ADDFB: translate into the modern form so the two entry points
         // cannot drift apart. There is no pixel_format field; the legacy ABI
@@ -73,7 +76,10 @@ impl Ioctl for DrmModeFbCmd {
     }
 }
 
+/// `DRM_IOCTL_MODE_ADDFB2`.
 impl Ioctl for DrmModeFbCmd2 {
+    const NAME: &'static str = "MODE_ADDFB2";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, f: &mut Self) -> DrmResult<usize> {
         let handle = f.handles[0];
         if handle == 0 || f.offsets[0] != 0 {
@@ -105,7 +111,10 @@ impl Ioctl for DrmModeFbCmd2 {
     }
 }
 
+/// `DRM_IOCTL_MODE_RMFB`.
 impl Ioctl for DrmModeRmFb {
+    const NAME: &'static str = "MODE_RMFB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, fb: &mut Self) -> DrmResult<usize> {
         // `drm_mode_rmfb_ioctl()` walks the caller's `file_priv->fbs`, so an
         // unknown id and another file's id are both ENOENT, and only an
@@ -115,7 +124,10 @@ impl Ioctl for DrmModeRmFb {
     }
 }
 
+/// `DRM_IOCTL_MODE_CLOSEFB`.
 impl Ioctl for DrmModeCloseFb {
+    const NAME: &'static str = "MODE_CLOSEFB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, args: &mut Self) -> DrmResult<usize> {
         // CLOSEFB is RMFB plus "refuse while it is on screen": it tells a client
         // that its framebuffer is still in use instead of pulling the scanout
@@ -130,7 +142,10 @@ impl Ioctl for DrmModeCloseFb {
     }
 }
 
+/// `DRM_IOCTL_MODE_DIRTYFB`.
 impl Ioctl for DrmModeDirtyFb {
+    const NAME: &'static str = "MODE_DIRTYFB";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, dirty: &mut Self) -> DrmResult<usize> {
         // `drm_mode_dirtyfb_ioctl()` looks the framebuffer up first (v4.9
         // through master: no `fb_id == 0` branch), so an unknown id — including

@@ -609,7 +609,10 @@ pub(crate) fn mode_from_bytes(bytes: &[u8]) -> Option<DrmModeModeInfo> {
     })
 }
 
+/// `DRM_IOCTL_MODE_GETRESOURCES`.
 impl Ioctl for DrmModeCardRes {
+    const NAME: &'static str = "MODE_GETRESOURCES";
+
     fn handle(_dev: &DrmDevice, file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
         // Snapshot only this open file's IDs. Bound allocation by both the
         // actual list and the caller's capacity; count-only queries allocate
@@ -640,7 +643,10 @@ impl Ioctl for DrmModeCardRes {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETCRTC`.
 impl Ioctl for DrmModeCrtc {
+    const NAME: &'static str = "MODE_GETCRTC";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, crtc: &mut Self) -> DrmResult<usize> {
         if crtc.crtc_id != CRTC_ID {
             return Err(DrmError::NotFound);
@@ -671,7 +677,10 @@ impl Ioctl for DrmModeCrtc {
     }
 }
 
+/// `DRM_IOCTL_MODE_SETCRTC`.
 impl Ioctl for DrmModeSetCrtc {
+    const NAME: &'static str = "MODE_SETCRTC";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, crtc: &mut Self) -> DrmResult<usize> {
         let c = &crtc.0;
         if c.crtc_id != CRTC_ID {
@@ -740,7 +749,10 @@ impl Ioctl for DrmModeSetCrtc {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETENCODER`.
 impl Ioctl for DrmModeGetEncoder {
+    const NAME: &'static str = "MODE_GETENCODER";
+
     fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, e: &mut Self) -> DrmResult<usize> {
         if e.encoder_id != ENCODER_ID {
             return Err(DrmError::NotFound);
@@ -753,7 +765,10 @@ impl Ioctl for DrmModeGetEncoder {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETCONNECTOR`.
 impl Ioctl for DrmModeGetConnector {
+    const NAME: &'static str = "MODE_GETCONNECTOR";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, c: &mut Self) -> DrmResult<usize> {
         if c.connector_id != CONNECTOR_ID {
             return Err(DrmError::NotFound);
@@ -787,7 +802,10 @@ impl Ioctl for DrmModeGetConnector {
     }
 }
 
+/// `DRM_IOCTL_MODE_PAGE_FLIP`.
 impl Ioctl for DrmModeCrtcPageFlip {
+    const NAME: &'static str = "MODE_PAGE_FLIP";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, f: &mut Self) -> DrmResult<usize> {
         if f.crtc_id != CRTC_ID {
             return Err(DrmError::NotFound);
@@ -823,14 +841,20 @@ impl Ioctl for DrmModeCrtcPageFlip {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETPLANERES`.
 impl Ioctl for DrmModeGetPlaneRes {
+    const NAME: &'static str = "MODE_GETPLANERES";
+
     fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
         r.count_planes = report_user_array(r.plane_id_ptr, r.count_planes, &[PLANE_ID])?;
         Ok(0)
     }
 }
 
+/// `DRM_IOCTL_MODE_GETPLANE`.
 impl Ioctl for DrmModeGetPlane {
+    const NAME: &'static str = "MODE_GETPLANE";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, p: &mut Self) -> DrmResult<usize> {
         if p.plane_id != PLANE_ID {
             return Err(DrmError::InvalidInput);
@@ -846,7 +870,10 @@ impl Ioctl for DrmModeGetPlane {
     }
 }
 
+/// `DRM_IOCTL_MODE_CONNECTOR_SETPROPERTY`.
 impl Ioctl for DrmModeConnectorSetProperty {
+    const NAME: &'static str = "MODE_CONNECTOR_SETPROPERTY";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, req: &mut Self) -> DrmResult<usize> {
         if req.connector_id != CONNECTOR_ID {
             return Err(DrmError::NotFound);
@@ -889,14 +916,20 @@ fn object_for(obj_id: u32, obj_type: u32) -> DrmResult<ObjectType> {
     Ok(object)
 }
 
+/// `DRM_IOCTL_MODE_OBJ_SETPROPERTY`.
 impl Ioctl for DrmModeObjSetProperty {
+    const NAME: &'static str = "MODE_OBJ_SETPROPERTY";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, req: &mut Self) -> DrmResult<usize> {
         let object = object_for(req.obj_id, req.obj_type)?;
         set_one_property(dev, object, req.prop_id, req.value)
     }
 }
 
+/// `DRM_IOCTL_MODE_OBJ_GETPROPERTIES`.
 impl Ioctl for DrmModeObjGetProperties {
+    const NAME: &'static str = "MODE_OBJ_GETPROPERTIES";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, q: &mut Self) -> DrmResult<usize> {
         let object = object_for(q.obj_id, q.obj_type)?;
         let state = dev.kms_state();
@@ -911,7 +944,10 @@ impl Ioctl for DrmModeObjGetProperties {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETPROPERTY`.
 impl Ioctl for DrmModeGetProperty {
+    const NAME: &'static str = "MODE_GETPROPERTY";
+
     fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, g: &mut Self) -> DrmResult<usize> {
         let desc = property(PropertyId::from_raw(g.prop_id)).ok_or(DrmError::NotFound)?;
         g.flags = desc.flags;
@@ -937,7 +973,10 @@ impl Ioctl for DrmModeGetProperty {
     }
 }
 
+/// `DRM_IOCTL_WAIT_VBLANK`.
 impl Ioctl for DrmWaitVblank {
+    const NAME: &'static str = "WAIT_VBLANK";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, request: &mut Self) -> DrmResult<usize> {
         let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
         let current = dev.vblank_sequence();
@@ -993,7 +1032,10 @@ pub(crate) fn atomic_flags_valid(flags: u32, reserved: u64) -> bool {
         && !(flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 && flags & DRM_MODE_PAGE_FLIP_EVENT != 0)
 }
 
+/// `DRM_IOCTL_MODE_ATOMIC`.
 impl Ioctl for DrmModeAtomic {
+    const NAME: &'static str = "MODE_ATOMIC";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, a: &mut Self) -> DrmResult<usize> {
         // A client that never negotiated the atomic capability is told the path
         // is unavailable so it falls back to the legacy one.
@@ -1064,7 +1106,10 @@ impl Ioctl for DrmModeAtomic {
     }
 }
 
+/// `DRM_IOCTL_MODE_CURSOR`.
 impl Ioctl for DrmModeCursor {
+    const NAME: &'static str = "MODE_CURSOR";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, cursor: &mut Self) -> DrmResult<usize> {
         set_cursor(
             dev,
@@ -1080,7 +1125,10 @@ impl Ioctl for DrmModeCursor {
     }
 }
 
+/// `DRM_IOCTL_MODE_CURSOR2`.
 impl Ioctl for DrmModeCursor2 {
+    const NAME: &'static str = "MODE_CURSOR2";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, cursor: &mut Self) -> DrmResult<usize> {
         // The hotspot only matters to a hardware cursor plane, which this driver
         // does not expose; validating it would reject requests the device

@@ -147,7 +147,10 @@ impl DrmDevice {
     }
 }
 
+/// `DRM_IOCTL_GET_MAGIC`.
 impl Ioctl for DrmAuth {
+    const NAME: &'static str = "GET_MAGIC";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, auth: &mut Self) -> DrmResult<usize> {
         let masters = dev.master.lock();
         let mut binding = file.auth.lock();
@@ -189,7 +192,10 @@ impl Ioctl for DrmAuth {
     }
 }
 
+/// `DRM_IOCTL_AUTH_MAGIC`.
 impl Ioctl for DrmAuthMagic {
+    const NAME: &'static str = "AUTH_MAGIC";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, auth: &mut Self) -> DrmResult<usize> {
         // Keep active-master ownership stable through token consumption. The
         // target Arc outlives the lock scope so its final drop cannot re-enter

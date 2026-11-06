@@ -32,7 +32,10 @@ impl Blob {
     }
 }
 
+/// `DRM_IOCTL_MODE_CREATE_BLOB`.
 impl Ioctl for DrmModeCreateBlob {
+    const NAME: &'static str = "MODE_CREATE_BLOB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, c: &mut Self) -> DrmResult<usize> {
         if c.length == 0 || c.length as usize > MAX_BLOB_BYTES {
             return Err(DrmError::InvalidInput);
@@ -47,7 +50,10 @@ impl Ioctl for DrmModeCreateBlob {
     }
 }
 
+/// `DRM_IOCTL_MODE_DESTROY_BLOB`.
 impl Ioctl for DrmModeDestroyBlob {
+    const NAME: &'static str = "MODE_DESTROY_BLOB";
+
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, d: &mut Self) -> DrmResult<usize> {
         // The legacy-slot clear, the device-registry removal and this file's
         // bookkeeping are one commit-section operation (see
@@ -58,7 +64,10 @@ impl Ioctl for DrmModeDestroyBlob {
     }
 }
 
+/// `DRM_IOCTL_MODE_GETBLOB`.
 impl Ioctl for DrmModeGetBlob {
+    const NAME: &'static str = "MODE_GETBLOB";
+
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, g: &mut Self) -> DrmResult<usize> {
         let bytes = dev
             .blob_bytes(BlobId::from_raw(g.blob_id))

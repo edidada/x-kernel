@@ -47,8 +47,11 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 ## The four single sources of truth
 
 1. **`model/ioctl.rs::IOCTLS`** — every command once: number, name, permission
-   bits and handler. Dispatch is a lookup, not a 37-arm match, and a command
-   without `RENDER_ALLOW` is unreachable from a render node by default.
+   bits and handler. The name itself is declared on the wire struct's `Ioctl`
+   impl, next to its handler, with the full `DRM_IOCTL_*` name in its doc; the
+   table lists commands in number order. Dispatch is a lookup, not a 37-arm
+   match, and a command without `RENDER_ALLOW` is unreachable from a render
+   node by default.
 2. **`kms.rs::PROPS`** — every property once: id, wire metadata, reader and
    optional writer. `OBJ_GETPROPERTIES`, `GETPROPERTY` and the write path all
    consume this table, so metadata cannot disagree with a writer and a property
