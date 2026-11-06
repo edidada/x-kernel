@@ -1076,6 +1076,17 @@ impl Ehci {
     /// reclamation state does not re-walk the async list on its own, so work
     /// queued while it idles there would never be fetched.
     fn ring_async_advance(&self) {
+        // `end_iaa_cycle()`: a Synopsys HC (this one is a DesignWare core) needs
+        // the async list head re-published after every advance cycle, or the
+        // schedule stops walking the list even though it still reports itself
+        // running -- `USBSTS` keeps REC|ASS set and an Active descriptor is
+        // never fetched. Re-writing the register before the doorbell is what
+        // that workaround does, and it is the only difference between this
+        // controller stalling forever and finishing the transfer.
+        self.regs.write32(
+            self.operational + op::ASYNCLISTADDR,
+            self.qh.bus_addr() as u32,
+        );
         let command = self.regs.read32(self.operational + op::USBCMD);
         self.regs
             .write32(self.operational + op::USBCMD, command | regs::cmd::IAAD);

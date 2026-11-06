@@ -878,6 +878,39 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 
 锚点：`qh_update`、`qh_append_tds`、`qh_link_async`、`qh_refresh`、`start_unlink_async`。
 
+### BSP 5.10 树查证：RK3588 EHCI 胶水层没有 async 调度的东西
+
+权威树改用 `/workspace/linux-orange-pi-5.10-rk3588` 后，逐处查了 `ehci-platform.c`：
+
+| 胶水动作 | 结论 |
+|---|---|
+| `companion = <&usb_host0_ohci>` + `device_link_add` | rk3588 分支唯一真正的平台动作；只做电源/挂起顺序联动 |
+| `has-transaction-translator` | **rk3588 的 DT 没有这个属性** → 该 EHCI **没有 TT**，FS/LS 设备只能走 xHCI |
+| `rockchip-relinquish-port` | 只在 rk3288 上挂 |
+| `quirk_poll`（端口卡死轮询 + rebind companion） | 只对 R-Car Gen3（`soc_device_match`），rk3588 不用 |
+| clocks/resets/PHY | `usbhost`/`arbiter(HCLK_HOST_ARB)`/`utmi` 三路 + `phys = <&u2phy2_host>` |
+
+**唯一与症状对得上的核心机制**（`ehci-q.c`）：
+
+```c
+static void end_iaa_cycle(struct ehci_hcd *ehci)
+{
+	if (ehci->has_synopsys_hc_bug)
+		ehci_writel(ehci, (u32) ehci->async->qh_dma, &ehci->regs->async_next);
+```
+
+RK3588 的 EHCI 是 Synopsys DesignWare 核，"每个 IAA 周期重发 ASYNCLISTADDR"正是
+`REC=1/ASS=1、Active qTD 不被取`这种停摆的对症 workaround。**已实现**（仅在 `USBSTS.REC`
+置位时重发，避免热路径无谓 MMIO），**上板实测：单独这一条不能解开停摆**，所以它只作为
+workaround 保留，不当修复。
+
+**观测手段补强**：卡死 dump 现在带上 QH 的 `hw_current`（dword 3）。这是下一个判别点——
+`hw_current` 为 0 且 `qtd_next` 指向 Active qTD = 控制器**根本没取这个 QH**；
+`hw_current` 指向该 qTD 而 token 仍 Active = 取到了但没执行（调度问题）。
+
+**停摆是间歇的**：最近三轮里两轮完全正常（`/dev/usb1 mounted at /mnt/usb as "ext4"`，
+130.3 s），一轮停摆。正常那两轮里盘能挂上、能读。
+
 ### 挂载重试 + QH link/unlink 实验（本轮结论：只留前者）
 
 **先纠正一条错结论**：U 盘**没有**挂载。证据：`/proc/mounts` 无 usb 条目；`/mnt/usb`
