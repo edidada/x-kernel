@@ -1,5 +1,27 @@
 # irq-driver — Design
 
+## GIC register discovery
+
+`gic::firmware` is a private binding module, not a new crate. It selects the first
+available supported controller in tree order and consumes OF-translated register
+intervals. GICv2 assigns GICD/GICC and optional GICH/GICV; GICv3 uses GICD and the
+first redistributor interval. Additional region encodings are validated, but full
+multi-redistributor topology is not introduced. Malformed selected nodes fail
+instead of falling through to a later controller.
+
+The parser supplies structural views, OF owns status/address interpretation,
+and irq-driver owns register meaning and hardware initialization, matching Linux
+OF resource helpers and irqchip drivers. `init_from_device_tree` collects metadata
+after allocator initialization, then invokes the existing `init(config)` path.
+This extraction does not publish firmware/domain associations or alter KIRQ,
+NMI transactions, runtime dispatch, PLIC discovery or boot ordering.
+
+The isolated extraction based on main f5f3cf4a1 passed parser host tests (24),
+AArch64 OF/irq-driver guest tests (54/54, coverage exported), and UNITTEST-enabled
+Clippy on AArch64, RISC-V, x86 and LoongArch. Guest boot exercised GICv3; GICv2
+register selection is fixture coverage, not a GICv2 hardware acceptance claim.
+Runs used a private disk with NET=n, VSOCK=n and ACCEL=n.
+
 ## Local NMI Transactions
 
 `IntrManagerIf::percpu_nmi` selects `PerCpuNmiChip` only for a standard GICv3

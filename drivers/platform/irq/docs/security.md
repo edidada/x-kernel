@@ -1,5 +1,15 @@
 # irq-driver — Security And Reliability
 
+## GIC firmware resource boundary
+
+Discovery rejects malformed status, untranslated/malformed reg and ranges,
+missing required register roles and address-width overflow before hardware init.
+Disabled supported nodes are skipped; a malformed selected node is not skipped
+in favor of a later controller. Mapping and register-size admission remain in
+the existing GIC initializer. This change adds no MMIO unsafe block, fallback
+registry or readiness state. DT address metadata is not proof of controller
+presence; hardware setup can still fail at the existing fatal-boot boundary.
+
 ## Local NMI Boundary
 
 `src/gicv3_nmi.rs` accepts only standard PPIs in the GIC domain. Its sole unsafe

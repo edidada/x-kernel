@@ -85,6 +85,7 @@ kcpu_slot::cpu_slot! {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/gic.rs");
+unittest::path_mod_test!(firmware_tests, "../ut-tests/gic_firmware.rs");
 
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
 
@@ -263,15 +264,23 @@ pub fn init(config: GicConfig) -> Result<(), &'static str> {
 
 /// Discovers the GIC and initializes it for the primary CPU.
 ///
-/// Requires the same masked boot context as [`init`].
+/// Requires the same masked boot context as [`init`] and an initialized allocator
+/// for OF resource collection. Register mapping and hardware setup remain here.
 ///
 /// # Errors
-/// Returns an error if configuration is unavailable or local CPU setup fails.
+/// Returns an error if the selected node's status or translated register
+/// resources are invalid, no supported controller is available, or CPU setup fails.
 ///
 /// # Panics
 /// Has the same controller-wide failure conditions as [`init`].
 pub fn init_from_device_tree() -> Result<(), &'static str> {
-    let config = config_from_device_tree().ok_or("failed to parse GIC from device tree")?;
+    let tree = of::fdt().ok_or("device tree is unavailable")?;
+    let (_, config) = config_from_device_tree(tree)
+        .map_err(|error| {
+            error!("invalid GIC device-tree configuration: {error:?}");
+            "invalid GIC device-tree configuration"
+        })?
+        .ok_or("no available supported GIC controller in device tree")?;
     init(config)
 }
 
