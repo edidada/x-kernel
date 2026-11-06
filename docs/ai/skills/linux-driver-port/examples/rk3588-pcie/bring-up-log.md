@@ -2416,18 +2416,49 @@ slot context 与 `xhci_setup_addressable_virt_dev()` 逐项一致（route、spee
 EP0 max packet 512、LAST_CTX(1)），父 hub 的 `MAX_PORTS=4` 也已写。因为 `use_new_scheme()`
 对 `USB_SPEED_SUPER` 返回 false，SS 设备走"直接 Address Device"这条老路，我们也是。
 
-**真正待修的是失败之后的恢复**：`COMP_USB_TRANSACTION_ERROR` 之后控制器不再完成任何命令——
+**已修：失败之后的恢复**（本轮）。原先这里有一个缺口，一个下游设备失败会拖死整条 xHCI 路径：
 
 ```
 xhci: disable slot timed out after 5000 ms (dequeue 98 cycle true, outstanding commands 0)
 xhci: event ring[dequeue] p 0x0000000000000000 s 0x00000000 c 0x00000000
-usb: control IN 0xa3/0x00 ... index 0x0004 on 3 failed: TimedOut   (之后无限重复)
+usb: control IN 0xa3/0x00 ... index 0x0004 on 3 failed: TimedOut     （之后无限重复）
 ```
 
-参考实现在这条路径上做三件事，我们都没有：`xhci_disable_slot()` + 重新分配 virt device
-（`xhci_setup_device()` 的 `COMP_USB_TRANSACTION_ERROR` 分支）、命令环重新武装
-（`xhci_handle_event()` 对 `COMP_COMMAND_RING_STOPPED`）、以及事件环 dequeue 的重同步。
-所以一个下游设备失败会连带把该 hub 及其整条 xHCI 路径全部拖死。
+两个方向相反的错，都按参考改掉了：
+
+1. **命令环超时时只重写 CRCR**，既不发 abort（CA 位）也不等 `CRR` 清零 —— 环被控制器停下时这是空操作。
+   现按 xHCI 1.1 §4.6.1.2 / `xhci_abort_cmd_ring()`（`xhci-ring.c:369`）四步走：
+   `CRCR = dequeue|CS|CA` → 等 `CRR`=0(5s) → 等 Command Ring Stopped(37) 事件(2s) → `CRCR = dequeue|CS` + 敲门铃。
+   事件分派也补了 type 37，之前当未知事件丢弃。
+2. **任何命令错误码都重写 CRCR**，而命令"带着错误码完成"时环仍在运行（CRR=1），在控制器仍持有该命令时写 CRCR
+   正是把"一次 Address Device 失败"变成"之后一条命令都不完成"的原因。参考在 `COMP_USB_TRANSACTION_ERROR`
+   上只释放 slot，不动 CRCR。
+
+实测：
+
+```
+address device completion code 4 for trb 0x204160 (slot 4)
+disable slot  completion code 1 for trb 0x204170 (slot 4)    ← 原来是 5 秒超时
+address device completion code 1 for trb 0x2041a0 (slot 4)   ← 重试成功
+xhci: aborting the command ring at 0x2041e0                  ← 环真被停下时才走 abort
+xhci: command ring restarted at 0x2041e0
+```
+
+**已修：失败端口不再拖慢整轮启动**（同一轮）。补了 `hub_port_disable()`（`hub.c:4419`）：
+USB2 口 `ClearPortFeature(PORT_ENABLE)`，SS 口没有该 feature、改为 `SetPortFeature(PORT_LINK_STATE, U3)`；
+`hub_port_init()` 的 `fail:` 分支在每条失败路径上都要关端口，否则端口被一个从未进入 Addressed 状态的
+子设备占着，下一次 reset 也不干净。同时 `redetect_link()` 不再对着已不应答的 hub 轮询 200 次
+（`hub_port_wait_reset()` 对读不到的端口状态同样是直接放弃）。
+
+| 指标 | 修前 | 修后 |
+| --- | --- | --- |
+| `GetPortStatus` 失败重试 | 136 次 | 1 次 |
+| 到 userspace 的启动时间 | 129 s | **75 s** |
+| EHCI | 正常 | 正常 |
+
+**仍未解决**（设备侧，非控制器侧）：SS hub 下游设备首次 `Address Device` 传输错误 → 重试可成功 →
+但其 EP0 描述符读再报 code 4(residual 8) → **父 hub 自己的 EP0 也随之不再应答**（`U3 (disable) rejected`）。
+需要能对照的参考板或换设备才能继续收敛。
 
 ### 5.9.5 复现与判读要点
 
@@ -2435,7 +2466,9 @@ usb: control IN 0xa3/0x00 ... index 0x0004 on 3 failed: TimedOut   (之后无限
 - 判读 EHCI 是否健康看两行：`port N reset, portsc ... ped true line 0` 和
   `bot: csw tag ... status 0 residue 0`；
 - 判读 xHCI 是否健康看 `no-op transfer completed (code 1)` 和
-  `command N for slot ... completed, code 1`；出现 `completion code 4` 就进入 5.9.4 的恢复缺口。
+  `command N for slot ... completed, code 1`；出现 `completion code 4` 后应看到
+  `disable slot ... completion code 1`（而不是 5 秒超时）和 `command ring restarted`；
+- 根口的 wLength 判别探测（8/18/64）已在定位后移除，`enumerate.rs` 回到单次 8 字节首读。
 
 ## 6. 做 harness 时要固化的教训
 
