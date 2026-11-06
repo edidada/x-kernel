@@ -2683,6 +2683,32 @@ xhci: devnode usb3 subsystem block number DeviceNumber { major: 8, minor: 1 }
    dequeue 是否真的前进到了 index 1；
 3. 完成后立即读 `USBSTS`/`GSTS`，看第一笔 TD 完成时是否有被我们忽略的第二类事件。
 
+### 5.9.4e 规则：每次新判别实验之前，先重读参考并与代码逐行对照
+
+这一轮就是按这条做的，结果是**没有发现新的代码差异**——把它记下来，因为它排除了一片假设空间，
+比"再来一次上板试"值钱。
+
+对照范围（当前卡点："同一环上的下一笔 TD 不被取走"所涉及的整条路径）：
+
+| 参考 | 对照点 | 结论 |
+| --- | --- | --- |
+| `xhci_urb_enqueue()` | 先 `prepare_transfer` 再 `queue_bulk_tx`，最后 `giveback_first_trb` 敲门铃 | 同（`bulk_transfer_on`） |
+| `prepare_ring()` | 端点状态检查：`DISABLED/ERROR` 拒绝，**`HALTED` 容忍并继续排队**，`STOPPED/RUNNING` 通过 | 我们没有状态检查（等价于全部通过），不构成差异 |
+| `prepare_ring()` | 入队指针落在 Link TRB 上时重臂该 Link（清 CHAIN、翻转 cycle） | 我们的 `Ring::push` 在换环时做同样的事 |
+| `prepare_ring()` | "段末必须有 Link TRB"（否则 `Missing link TRB`） | `Ring::with_link` 保证 |
+| `inc_enq()` | 写 TRB 后按 CHAIN 位决定是否越过 Link；换段才翻 `cycle_state` | 同 |
+| `queue_trb()` | payload 三字先写、`wmb()`、控制字最后写 | 同（`push`/`push_held`） |
+| `xhci_queue_bulk_tx()` | 64 KiB 边界、`TD_SIZE`=剩余包数、末 TRB 清 CHAIN 置 IOC、IN 置 ISP | 同（逐项已在 5.9.4b 对过） |
+| `giveback_first_trb()` | `wmb()` → 给首个 TRB 补 cycle → `xhci_ring_ep_doorbell()` | 同（`publish` 后 `ring_doorbell`） |
+| `xhci_ring_ep_doorbell()` | 值 = DCI；`EP_STOP_CMD_PENDING`/`SET_DEQ_PENDING`/`EP_HALTED` 时不敲 | 我们扣的是 `SET_DEQ_PENDING`；HALTED 情况下我们仍会敲（差异存在，但当前端点 state=Running，不是本卡点原因） |
+
+**因此"第二笔 CBW 不被取走"不能用"我们又抄错一个字段/少一个动作"解释**（这条路径已被逐行核对）。
+剩下的候选只有两类：控制器对环位置的内部视图，或设备仍在等上一命令的某个相位。下一轮仍按 5.9.4d
+列的三步做（No-Op TRB 隔开、第一笔完成后立刻读端点上下文 dequeue、同一瞬间的 `USBSTS`/`GSTS`）。
+
+另注：本轮唯一确认的差异是"端点 HALTED 时我们仍敲门铃"，参考会跳过。它当前不触发（state 1），
+但在实现 bulk halt 恢复后应当补上，否则恢复期间的敲门铃会让环从旧的 dequeue 重启。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
