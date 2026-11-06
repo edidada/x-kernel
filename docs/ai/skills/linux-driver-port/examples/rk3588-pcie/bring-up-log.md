@@ -3140,6 +3140,40 @@ xhci: event trb 0x1010c000 outside head TD 0x1010bff0..0x1010b010 (slot 1, contr
    `recover_bulk_endpoint()` 在 halt 路径上用了它）：否则一次超时会静默毒化之后所有
    传输，这正是"设备看起来不再应答"的真相。
 
+### 5.9.14 bulk 超时之后连 EP0 也不应答：设备整条停了，不是端点
+
+`trb_in_td()` 与超时作废两处修好后（`c7a5958a5`），第一次 bulk 超时的现场变成了这样：
+
+```
+bulk transfer timed out after 5000 ms (dequeue 0 cycle false, outstanding commands 0)
+bulk transfer event ring state: erst entry [0x10102000, ...] erdp 0x10102008 iman 0x2
+bulk timeout: ep dci 3 state 1 dequeue 0x1011b4a1 enqueue[73] p 0x0 s 0x0 c 0x00002001
+queued reset endpoint for slot 3 dci 3
+re-pointed slot 3 dci 3 past the halted descriptor to 0x1011b4a0
+...
+control transfer no completion; USBSTS 0x00000000 (hse false, hce false)
+control transfer ep0 ring at 0x10117000: [1] ... c=0x10c25 [2] ... c=0x1001   ← 未被消费
+```
+
+要点三条：
+
+1. **作废生效了**：`enqueue[73]` 的控制字 `0x2001` 已是 No-Op（type 8），端点 dequeue 前进到
+   索引 74 —— `invalidate_bulk_endpoint()` 的 No-Op + Set TR Dequeue 确实工作。
+2. **事件环干净且一致**：ERST 正确、ERDP = 基址+0|EHB、`iman 0x2`（无 pending）、
+   `usbsts 0x0`（无 HSE/HCE）、GBUSERRADDR 未置位。消费者的 lap 是 2（parity false），
+   环里 0..3 是 lap 1 的旧事件（cycle 1），一切自洽。
+3. **但复位端点之后，连 EP0 的控制传输也不完成了**：`reset_recovery()` 的
+   Bulk-Only Reset 是 EP0 上的类请求，它超时；EP0 环里 Data/Status TRB 原样躺着。
+
+也就是说：控制器健康、环健康，而**这个 slot 上的设备对所有端点都不再应答**（不是某个
+端点被 halt）。这与 §5.9.4i 记的"随后连 EP0 也不应答"是同一件事，现在有了干净的控制
+器侧证据。
+
+到此，控制器/xHCI 侧能查的项已经全部被实测排除。**唯一能区分"我们的 bulk 路径把设备
+弄停了"与"设备自己停"的实验，是把同一串命令放到已验证的 EHCI 路径上跑**（盘插 USB2
+口）：若 EHCI 也在同一命令后整条停 → 是设备/BOT 交互；若 EHCI 一直正常 → 才回到 xHCI
+的 slot 层继续挖（例如地址/route 在 100 条命令后是否仍被控制器正确路由）。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
