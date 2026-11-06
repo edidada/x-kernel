@@ -108,3 +108,8 @@ is the record of which mechanisms were transcribed rather than reconstructed.
 | 2026-11-05 16:37 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `trb_to_noop` | halted-TD cleanup: no-op the cached TD, then move the dequeue with SET_DEQ_PENDING |
 | 2026-11-05 16:42 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_urb_dequeue` | timeout path: cancel the URB (Stop Endpoint) and reconcile the ring before returning |
 | 2026-11-05 16:42 | `/workspace/linux-7.1.8/drivers/usb/host/xhci-ring.c` | `xhci_handle_cmd_stop_ep` | timeout path: cancel the URB (Stop Endpoint) and reconcile the ring before returning |
+| 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_update` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
+| 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_append_tds` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
+| 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_link_async` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
+| 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `qh_refresh` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
+| 2026-11-05 23:56 | `/workspace/linux-7.1.8/drivers/usb/host/ehci-q.c` | `start_unlink_async` | bulk enqueue: re-point the QH overlay at the dummy every time, token last, then IAAD |
