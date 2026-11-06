@@ -124,30 +124,11 @@ UEFI ?= n
 MEM ?=
 SMP ?=
 
-# This branch ships a self-contained Debian Wayland kiosk image. When it is
-# present, `make run`/`make justrun` boot it with a graphical session and the
-# virtio input devices the compositor reads, so a plain `make run` works after
-# `make build`. Unit tests keep their own disk and headless setup.
-WAYLAND_IMG ?= $(CURDIR)/debian-wayland-x86_64.img
-ifeq ($(filter y,$(UNITTEST)),)
-GRAPHIC ?= y
-ifneq ($(origin DISK_IMG),command line)
-ifneq ($(wildcard $(WAYLAND_IMG)),)
-WAYLAND_RUN_IMG := $(WAYLAND_IMG)
-else
-WAYLAND_RUN_IMG := $(DISK_IMG)
-endif
-else
-WAYLAND_RUN_IMG := $(DISK_IMG)
-endif
-else
 GRAPHIC ?= n
-WAYLAND_RUN_IMG := $(DISK_IMG)
-endif
 
 # A graphical run needs a display backend and the virtio input devices the
-# compositor reads. Both are part of the `--graphic` contract, so requesting
-# GRAPHIC=y is enough; an explicit -display/-device in QEMU_ARGS still wins.
+# compositor reads. Both are part of the `--graphic` contract, so GRAPHIC=y is
+# enough; an explicit -display/-device in QEMU_ARGS still wins.
 GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
 	$(if $(filter -display%,$(QEMU_ARGS)),,-display gtk,zoom-to-fit=on)\
 	$(if $(filter -device virtio-keyboard%,$(QEMU_ARGS)),,-device virtio-keyboard-pci)\
@@ -173,7 +154,7 @@ XKMAKE_BUILD_ARGS := \
 	$(if $(filter y,$(UNITTEST)),--unittest) \
 	$(if $(and $(filter y,$(UNITTEST)),$(strip $(UNITTEST_CRATE))),--unittest-crate "$(UNITTEST_CRATE)")
 XKMAKE_RUN_ARGS := \
-	--disk-image "$(WAYLAND_RUN_IMG)" \
+	--disk-image "$(DISK_IMG)" \
 	$(if $(strip $(HOSTFWD_PORT)),--hostfwd-port "$(HOSTFWD_PORT)") \
 	$(if $(strip $(VSOCK_CID)),--vsock-cid "$(VSOCK_CID)") \
 	$(if $(filter y,$(UEFI)),--boot uefi) \
