@@ -2456,9 +2456,51 @@ USB2 口 `ClearPortFeature(PORT_ENABLE)`，SS 口没有该 feature、改为 `Set
 | 到 userspace 的启动时间 | 129 s | **75 s** |
 | EHCI | 正常 | 正常 |
 
-**仍未解决**（设备侧，非控制器侧）：SS hub 下游设备首次 `Address Device` 传输错误 → 重试可成功 →
-但其 EP0 描述符读再报 code 4(residual 8) → **父 hub 自己的 EP0 也随之不再应答**（`U3 (disable) rejected`）。
-需要能对照的参考板或换设备才能继续收敛。
+**已解决：SS hub 下游设备无法寻址 —— 缺 `HUB_SET_DEPTH`**（最终根因）
+
+Linux `hub_configure()`（`hub.c:1045`）：
+
+```c
+/* The superspeed hub except for root hub has to use Hub Depth value as an
+ * offset into the route string to locate the bits it uses to determine the
+ * downstream port number. So hub driver should send a set hub depth request
+ * to superspeed hub after the superspeed hub is set configuration ... */
+if (hdev->parent && hub_is_superspeed(hdev)) {
+	ret = usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
+			HUB_SET_DEPTH /* 12, ch11.h:57 */, USB_RT_HUB,
+			hdev->level - 1, 0, NULL, 0, USB_CTRL_SET_TIMEOUT);
+```
+
+- 类请求、**device** 接收者（`USB_RT_HUB` = 0x20，不是端口请求用的 0x23）；
+- `wValue` = hub 的层级-1（直接挂 root 的 SS hub 为 0），无数据阶段；
+- 时机：hub 配置完成之后、使用其任何端口之前。tgoskits 同一步（`backend/kmod/hub/device.rs:354`）。
+
+没发这个请求时，SS hub 不知道 route string 的哪个 nibble 是自己的端口号，**下游包一律不转发**，
+而现象完全不像路由问题：端口报 connected/enabled/U0，随后对该子设备的每个事务都是
+USB Transaction Error，residual 一点没动：
+
+```
+usb: hub 3 port 4 reset done, enabled true, speed super, status 0x0203 (link state 0)
+xhci: address device completion code 4                          ← SET_ADDRESS 被拒
+xhci: control transfer completion code 4 (slot 4, ep 1, residual 8)   ← 连地址 0 的 SETUP 也不应
+xhci: device ctx after address: 3=0x8000000                     ← 地址 0 / Slot State Default
+                                                                  （只有 BSR=1 的命令成功过）
+```
+
+修复后（`hub::scan()` 里在碰任何端口之前发一次）：
+
+```
+usb: hub 3 set hub depth 0
+usb: hub 3 port 4 reset done, enabled true, speed super, status 0x0203 (link state 0)
+xhci: address device completion code 1 for trb 0x204170 (slot 4)   ← 首次即成功
+usb: 004:4 id 03f0:7240 usb 3.1 class 0x00/00/00 ep0 9 configs 1
+usb: 004:4 product x5000m
+usb: 004:4 manufacturer HP
+usb: 004:4 configured with 1
+```
+
+顺带：前面几轮为"失败后恢复"加的机制（命令环 abort/restart、端口 5 次 reset、失败端口
+disable、SET_ADDRESS 后 10 ms）现在**一次都不会被触发**；启动到 shell 的时间从 129 s 降到 47.7 s。
 
 ### 5.9.5 复现与判读要点
 
