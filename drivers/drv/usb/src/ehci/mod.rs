@@ -477,8 +477,15 @@ impl Ehci {
             // No HEAD here: only the empty list head carries H, and a second
             // QH with it reads as the end of the reclamation list, so the
             // controller overlays this QH's qTD and never executes it.
+            // `ehci.h`: `#define QH_CONTROL_EP (1 << 27) /* FS/LS control
+            // endpoint */` -- and `qh_make()` sets it only in the LOW/FULL speed
+            // branch, for split transactions through a TT. On a high-speed control
+            // endpoint it must be clear; setting it told the controller to run this
+            // pipe as a FS/LS control endpoint, which is consistent with a SETUP
+            // that is accepted and a data stage that is never answered. (The
+            // in-tree usb-host stack programs a HS control queue head the same way:
+            // DTC bit 14 only.)
             info1: info1::TOGGLE_CTL
-                | info1::CONTROL_EP
                 | info1::NAK_RELOAD
                 | ((max_packet as u32) << info1::MAX_PACKET_SHIFT)
                 | eps
