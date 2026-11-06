@@ -72,6 +72,12 @@ pub struct Ehci {
     /// 1 = IN). A queue head's `qtd_next` points here permanently; enqueueing
     /// replaces the descriptor's contents instead of repointing the head.
     bulk_dummy_bus: [u32; 2],
+    /// Which qTD slot currently holds the descriptor the controller is parked on
+    /// (index 0 = bulk OUT pair, 1 = bulk IN pair). `qh_append_tds()` alternates
+    /// the role: the descriptor it enqueues is copied onto the current dummy and
+    /// the slot it came from becomes the new dummy, so the address the hardware
+    /// is parked on never changes.
+    bulk_dummy_slot: [usize; 2],
     /// The periodic frame list: allocated and programmed even though the
     /// periodic schedule is off, because the reference always has one. Kept as a
     /// field so the base register can be rewritten after a controller reset.
@@ -251,9 +257,12 @@ impl Ehci {
             core::ptr::write_volatile(
                 qtds.as_ptr().cast::<Qtd>().wrapping_add(QTD_CONTROL_DUMMY),
                 Qtd {
+                    // `ehci_qtd_init()`: token = QTD_STS_HALT, not 0. A descriptor
+                    // that is merely inactive but not halted is one the controller
+                    // may report as completed with no status at all.
                     next: regs::LIST_END,
                     alt_next: regs::LIST_END,
-                    token: 0,
+                    token: token::HALT,
                     buffer: [0; 5],
                 },
             );
@@ -398,6 +407,9 @@ impl Ehci {
             buffers,
             bulk,
             bulk_dummy_bus: [0; 2],
+            // `ehci_qtd_alloc()` hands out a fresh qTD as the endpoint's dummy;
+            // the second slot of each pair plays that part until it is traded.
+            bulk_dummy_slot: [QTD_BULK_OUT.1, QTD_BULK_IN.1],
             gate_snapshot: gates,
             cru,
             frame_lists,
@@ -431,6 +443,7 @@ impl Ehci {
         data: &mut [u8],
         speed: Speed,
     ) -> KResult<usize> {
+        self.recover_if_hse();
         self.ensure_running();
         let is_in = setup.request_type & 0x80 != 0;
         let length = data
@@ -633,6 +646,32 @@ impl Ehci {
     /// writes USBSTS back. Every transfer path needs this, control transfers
     /// included: the BOT soft reset is itself a control transfer, so without it
     /// the recovery path cannot run either.
+    /// Clears a latched Host System Error as cheaply as the situation allows.
+    ///
+    /// `HCRESET` throws the root hub's port state away, which takes the device off
+    /// the bus and costs it its enumeration. The reference pays that because USB
+    /// core re-enumerates the whole tree afterwards (`ehci_hc_died()`); this
+    /// driver has no such loop. So the full reset stays for the case it exists
+    /// for -- the port is gone, `PORT_ENABLE` clear -- and a latched status on a
+    /// still-enabled port is cleared in place: the device is where it was and
+    /// only the run bit has to be re-armed.
+    fn recover_if_hse(&mut self) {
+        let status = self.regs.read32(self.operational + op::USBSTS);
+        if status & sts::HSE == 0 {
+            return;
+        }
+        let portsc = self.regs.read32(self.port_register(0));
+        if portsc & portsc::PED != 0 {
+            log::warn!(
+                "ehci: clearing a latched host system error with the port still enabled (portsc \
+                 {portsc:#010x})"
+            );
+            self.regs.write32(self.operational + op::USBSTS, sts::HSE);
+            return;
+        }
+        self.recover_from_hse();
+    }
+
     /// Recover from a Host System Error, which is what `ehci_hc_died()` reacts to.
     ///
     /// A HSE means the controller hit a fatal internal/system fault; it latches
@@ -777,14 +816,10 @@ impl Ehci {
         is_in: bool,
         retries_left: u8,
     ) -> KResult<usize> {
-        // A latched Host System Error means the previous transfer died with the
-        // controller; recover before spending another timeout on it.
-        if self.regs.read32(self.operational + op::USBSTS) & sts::HSE != 0 {
-            self.recover_from_hse();
-        }
+        self.recover_if_hse();
         self.ensure_running();
         let BULK_QH: usize = if is_in { 3 } else { 2 };
-        let (source_slot, dummy_slot) = if is_in { QTD_BULK_IN } else { QTD_BULK_OUT };
+        let direction = usize::from(is_in);
         let length = data.len();
         if length == 0 || length > BULK_BUFFER_LEN {
             return Err(KError::InvalidInput);
@@ -848,8 +883,24 @@ impl Ehci {
             }
             karch::dsb_ishst();
         }
-        self.bulk_enqueue(BULK_QH, source_slot, dummy_slot, is_in, length)?;
-        let mut token = self.qh_wait_token(BULK_QH, dummy_slot);
+        // The enqueue reports which slot now carries this transfer's descriptor:
+        // the completion loop waits on that one, not on a fixed slot.
+        let overlay_before = self.qh_overlay_token(BULK_QH);
+        let (_, filled_slot) = self.bulk_enqueue(BULK_QH, direction, is_in, length)?;
+        let mut token = self.qh_wait_token(BULK_QH, filled_slot);
+        // Which transfer latches the fault, exactly: checking only on the next
+        // entry names the victim, not the culprit.
+        {
+            let status = self.regs.read32(self.operational + op::USBSTS);
+            if status & sts::HSE != 0 {
+                log::error!(
+                    "ehci: bulk {} len {length} left HSE latched (USBSTS {status:#010x}, token \
+                     {token:#010x})",
+                    if is_in { "in" } else { "out" },
+                );
+                self.regs.write32(self.operational + op::USBSTS, sts::HSE);
+            }
+        }
         // `qh_completions()`: the descriptor is done when the controller clears
         // its Active bit. Anything still Active after the poll is a transfer the
         // controller never finished, and the queue head leaves the list either
@@ -908,13 +959,21 @@ impl Ehci {
     /// token (with the transaction-error retry), and the queue head is unlinked
     /// again before the next transfer touches it.
     fn bulk_enqueue(
-        &self,
+        &mut self,
         qh_index: usize,
-        source_slot: usize,
-        dummy_slot: usize,
+        direction: usize,
         is_in: bool,
         length: usize,
-    ) -> KResult<u32> {
+    ) -> KResult<(u32, usize)> {
+        // `qh_append_tds()` alternates the roles of the two descriptors: the one
+        // the controller is parked on receives this transfer, and the slot it came
+        // from becomes the next dummy. Keeping the roles fixed instead (which this
+        // driver did) forces software to move the queue head's overlay between the
+        // two addresses on every transfer, and the overlay is the one structure the
+        // reference never touches while the hardware may be sitting on it.
+        let (slot_a, slot_b) = if is_in { QTD_BULK_IN } else { QTD_BULK_OUT };
+        let dummy_slot = self.bulk_dummy_slot[direction];
+        let source_slot = if dummy_slot == slot_a { slot_b } else { slot_a };
         let dummy_bus =
             self.qtds.bus_addr() as u32 + (dummy_slot * core::mem::size_of::<Qtd>()) as u32;
         let source_bus =
@@ -922,22 +981,39 @@ impl Ehci {
         // The list ends on the *new* dummy, which `qh_append_qtd()` writes into
         // the source slot; that address is therefore the source's, not the
         // current dummy's.
+        // The data toggle this transfer has to start with is the one the
+        // controller has been driving (`QH_TOGGLE_CTL` stays clear for bulk, so
+        // the descriptor's DT bit is what it sends). The queue head's overlay is
+        // the only place that sequence is recorded: carrying it into the qTD is
+        // what keeps the two views of the toggle equal, and it was the missing
+        // piece behind the transaction errors that appeared after a few dozen
+        // transfers -- `overlay dt true, qtd dt false`.
+        let toggle = self.qh_overlay_token(qh_index) & token::DT != 0;
         let qtd = Qtd {
             next: source_bus,
             alt_next: regs::LIST_END,
             token: ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
                 | (3 << token::CERR_SHIFT)
                 | ((length as u32) << token::LEN_SHIFT)
+                | if toggle { token::DT } else { 0 }
                 | token::IOC
                 | token::ACTIVE,
             // `qtd_fill()`: one buffer entry per 4K, page-aligned after the first.
             buffer: [self.bulk.bus_addr() as u32, 0, 0, 0, 0],
         };
         let overlay_target = self.qh_append_qtd(source_slot, dummy_slot, qtd);
+        self.bulk_dummy_slot[direction] = source_slot;
+        // Point the overlay at the descriptor just activated. Linux can leave it
+        // alone because it always trades the roles the same way, but after a
+        // failed transfer this queue head's overlay is left pointing at (and
+        // still marked Active on) a descriptor nobody owns any more: skipping the
+        // rewrite then makes the controller fetch that stale descriptor and the
+        // next data stage stalls with no error at all. `qh_update()` only clears
+        // the status bits, keeping the data toggle and PING.
         self.qh_update(qh_index, overlay_target);
         self.qh_link(qh_index);
         let _ = dummy_bus;
-        Ok(overlay_target)
+        Ok((overlay_target, dummy_slot))
     }
 
     /// `ehci_qtd_init()`: a descriptor that carries nothing and terminates.
@@ -964,6 +1040,19 @@ impl Ehci {
     /// *overlay*, not the descriptor -- so the overlay is deactivated first, its
     /// `qtd_next`/`alt_next` are rewritten, and only then does a caller publish a
     /// descriptor token.
+    /// The queue head's overlay token: what the controller last wrote back, and
+    /// therefore the only record of its data toggle.
+    fn qh_overlay_token(&self, qh_index: usize) -> u32 {
+        let bytes = self
+            .qh
+            .as_ptr()
+            .cast::<Qh>()
+            .wrapping_add(qh_index)
+            .cast::<u8>();
+        // SAFETY: dword 6 of one queue head inside this allocation.
+        unsafe { core::ptr::read_volatile(bytes.wrapping_add(24).cast::<u32>()) }
+    }
+
     fn qh_update(&self, qh_index: usize, qtd_bus: u32) {
         let head = self.qh.as_ptr().cast::<Qh>();
         let bytes = head.wrapping_add(qh_index).cast::<u8>();
