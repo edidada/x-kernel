@@ -209,8 +209,8 @@ fn address_interval_end(
             AddressErrorReason::ZeroSize,
         ));
     }
-    base.checked_add(size)
-        .filter(|end| address_bytes == 8 || *end - 1 <= u64::from(u32::MAX))
+    base.checked_add(size - 1)
+        .filter(|end| address_bytes == 8 || *end <= u64::from(u32::MAX))
         .ok_or_else(|| address_error(node, property, Some(index), AddressErrorReason::Overflow))
 }
 

@@ -12,6 +12,12 @@ register-role checks and lifetime remain the controller consumer's obligations.
 Resource collection allocates after allocator readiness; it adds no unsafe code,
 global ownership, controller registry or IRQ readiness state.
 
+Nonempty reg/ranges intervals are checked using their last valid byte
+(`base + size - 1`), including the declared 32-bit address width. An interval
+ending at u64::MAX is valid; its unrepresentable exclusive end is not an overflow
+of the resource itself. Zero-sized and genuinely overflowing intervals remain
+errors. Containment uses subtraction/length comparisons without an exclusive end.
+
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs` (global DTB state,

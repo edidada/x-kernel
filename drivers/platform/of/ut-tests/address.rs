@@ -35,6 +35,118 @@ fn fixture(ranges: Option<&[u8]>, reg: &[u8], names: Option<&[u8]>) -> Vec<u8> {
     blob.finish()
 }
 
+fn wide_address_fixture(ranges: &[u32], reg: &[u32]) -> Vec<u8> {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.begin("bus");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("ranges", &cells(ranges));
+    blob.begin("device");
+    blob.property("reg", &cells(reg));
+    blob.end();
+    blob.end();
+    blob.end();
+    blob.finish()
+}
+
+#[def_test]
+fn highest_child_window_translates_without_exclusive_end_overflow() {
+    let bytes = wide_address_fixture(
+        &[u32::MAX, 0xffff_f000, 0, 0x8000, 0x1000],
+        &[u32::MAX, 0xffff_f100, 0x100],
+    );
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let resources = mmio_resources(tree.find_node("/bus/device").unwrap()).unwrap();
+    assert_eq!((resources[0].base, resources[0].size), (0x8100, 0x100));
+}
+
+#[def_test]
+fn highest_valid_bytes_remain_addressable() {
+    for (ranges, reg, expected) in [
+        (&[][..], &[u32::MAX, u32::MAX, 1][..], u64::MAX),
+        (
+            &[][..],
+            &[u32::MAX, 0xffff_f000, 0x1000][..],
+            0xffff_ffff_ffff_f000,
+        ),
+        (
+            &[0, 0, u32::MAX, 0xffff_f000, 0x1000][..],
+            &[0, 0xf00, 0x100][..],
+            0xffff_ffff_ffff_ff00,
+        ),
+        (
+            &[u32::MAX, 0xffff_f000, 0, 0x8000, 0x1000][..],
+            &[u32::MAX, u32::MAX, 1][..],
+            0x8fff,
+        ),
+    ] {
+        let bytes = wide_address_fixture(ranges, reg);
+        let tree = LinuxFdt::new(&bytes).unwrap();
+        let resources = mmio_resources(tree.find_node("/bus/device").unwrap()).unwrap();
+        assert_eq!(resources[0].base, expected);
+        assert_eq!(resources[0].size, u64::from(reg[2]));
+    }
+    for ranges in [&[][..], &[u32::MAX, 0, u32::MAX, 1][..]] {
+        let bytes = fixture(Some(&cells(ranges)), &cells(&[u32::MAX, 1]), None);
+        let tree = LinuxFdt::new(&bytes).unwrap();
+        let resources = mmio_resources(tree.find_node("/bus/device").unwrap()).unwrap();
+        assert_eq!(
+            (resources[0].base, resources[0].size),
+            (u64::from(u32::MAX), 1)
+        );
+    }
+}
+
+#[def_test]
+fn intervals_beyond_last_byte_and_zero_sizes_still_fail() {
+    for (ranges, reg, expected) in [
+        (
+            &[][..],
+            &[u32::MAX, u32::MAX, 2][..],
+            AddressErrorReason::Overflow,
+        ),
+        (&[][..], &[0, 0, 0][..], AddressErrorReason::ZeroSize),
+        (
+            &[u32::MAX, 0xffff_f000, 0, 0x8000, 0x1001][..],
+            &[u32::MAX, 0xffff_f100, 0x100][..],
+            AddressErrorReason::Overflow,
+        ),
+        (
+            &[0, 0, u32::MAX, 0xffff_f000, 0x1001][..],
+            &[0, 0x100, 0x100][..],
+            AddressErrorReason::Overflow,
+        ),
+        (
+            &[0, 0, 0, 0, 0][..],
+            &[0, 0, 1][..],
+            AddressErrorReason::ZeroSize,
+        ),
+    ] {
+        let bytes = wide_address_fixture(ranges, reg);
+        let tree = LinuxFdt::new(&bytes).unwrap();
+        assert_eq!(
+            mmio_resources(tree.find_node("/bus/device").unwrap())
+                .unwrap_err()
+                .reason,
+            expected
+        );
+    }
+    let bytes = fixture(
+        Some(&cells(&[u32::MAX, 0, 0x8000, 2])),
+        &cells(&[u32::MAX, 1]),
+        None,
+    );
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    assert_eq!(
+        mmio_resources(tree.find_node("/bus/device").unwrap())
+            .unwrap_err()
+            .reason,
+        AddressErrorReason::Overflow
+    );
+}
+
 #[def_test]
 fn multiple_regions_translate_and_names_borrow_the_blob() {
     let bytes = fixture(
