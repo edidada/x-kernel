@@ -1989,6 +1989,24 @@ impl Xhci {
             return;
         }
         self.device_probe_done = true;
+        // First the controller itself, with something no device can influence: a No-Op
+        // command. Its Command Completion tells us whether the controller is still
+        // *publishing events at all*. Transfer Events missing while Command
+        // Completions arrive means the event path is fine and the fault is on the
+        // transfer side; both missing means the controller stopped feeding the event
+        // ring.
+        let noop = Trb::new(0, 0, regs::trb::NO_OP << regs::trb::TYPE_SHIFT);
+        match self.command(noop, "no-op probe") {
+            Ok(event) => log::error!(
+                "xhci: probe: No-Op completed (code {}) -- the controller still publishes events, \
+                 so the fault is on the transfer side",
+                event.completion_code()
+            ),
+            Err(err) => log::error!(
+                "xhci: probe: No-Op did not complete ({err:?}) -- the controller is not \
+                 publishing events at all"
+            ),
+        }
         // Ask *every* addressed slot, not just the one whose transfer timed out.
         // The device in question sits behind a hub on this board, so "the device
         // stopped" and "the hub stopped forwarding" produce the same host-side
