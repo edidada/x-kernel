@@ -336,6 +336,7 @@ wayland_disk:
 	img="$(WAYLAND_IMG)"; \
 	if [ ! -f "$$img" ]; then \
 		echo "Downloading $$img from $(ROOTFS_URL)..."; \
+		trap 'rm -f "$$img.xz"' EXIT; \
 		: > "$$img.xz"; \
 		i=0; \
 		while [ $$i -lt $(WAYLAND_IMG_PARTS) ]; do \
