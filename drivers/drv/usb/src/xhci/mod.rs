@@ -1464,6 +1464,42 @@ impl Xhci {
                 (pmsc >> 8) & 0xff,
                 pmsc & (1 << 16) != 0,
             );
+            // The controller's own health at the same instant, and how far its
+            // event consumer has got. A frozen MFINDEX means nothing is being
+            // scheduled at all; an ERDP that never moved since the transfer
+            // started means the event never existed rather than was lost.
+            let gsts = self.bar.read32(0xc118);
+            let usbsts = self.bar.read32(self.operational + op::USBSTS);
+            let mfindex = self.bar.read32(self.runtime);
+            let erdp = self.bar.read64(self.runtime + RT_IR0 + 0x18);
+            log::error!(
+                "xhci: bulk timeout: gsts {gsts:#010x} usbsts {usbsts:#010x} mfindex \
+                 {mfindex:#010x} erdp {erdp:#x}"
+            );
+            // Consumer against producer: our dequeue, the cycle bit we expect
+            // there, and the next few slots as the controller left them. "An event
+            // exists that we never look at" and "the controller posted nothing"
+            // look identical from the outside; this separates them.
+            {
+                let mut line = alloc::string::String::new();
+                for ahead in 0..4usize {
+                    let index = (self.event_dequeue + ahead) % self.event.trbs;
+                    let slot = self.event.read(index);
+                    line.push_str(&alloc::format!(
+                        " [{index}] p={:#x} s={:#x} c={:#x} type {} cycle {}",
+                        slot.parameter,
+                        slot.status,
+                        slot.control,
+                        slot.trb_type(),
+                        u32::from(slot.control & regs::trb::CYCLE),
+                    ));
+                }
+                log::error!(
+                    "xhci: bulk timeout: event dequeue {} expect cycle {}{line}",
+                    self.event_dequeue,
+                    u32::from(self.event_cycle),
+                );
+            }
             log::error!(
                 "xhci: bulk timeout: ep dci {dci} state {state} dequeue {dequeue:#x} ring {:#x} \
                  first trb p {:#x} s {:#010x} c {:#010x} (cycle {})",
@@ -1552,10 +1588,14 @@ impl Xhci {
             // dword0: Interval/Mult are 0 for bulk (`xhci_endpoint_init` only
             // fills them for periodic pipes).
             write(ctx, context::endpoint_dword0(0));
-            // dword1: Bulk(2), C_Err 3, Max Packet Size. Max Burst 0 is the
-            // descriptor's bMaxBurst for a SuperSpeed device with one-packet
-            // bursts, which is what a BOT endpoint uses.
-            write(ctx + 1, context::endpoint_dword1(2, max_packet, 0));
+            // dword1: EP Type is **per direction** — `xhci_get_endpoint_type()`
+            // returns BULK_OUT_EP (2) or BULK_IN_EP (6), never 2 for both. An IN
+            // endpoint declared as "Bulk Out" is accepted by Configure Endpoint
+            // (the value is legal) and then never completes a single transfer:
+            // the controller has no reason to issue IN tokens for it, and it
+            // reports nothing at all -- no event, no error, just silence.
+            let ep_type = if direction == 0 { 2 } else { 6 };
+            write(ctx + 1, context::endpoint_dword1(ep_type, max_packet, 0));
             write(ctx + 2, context::endpoint_dword2(ring_addr, dcs));
             write(ctx + 3, (ring_addr >> 32) as u32);
             // dword4: no ESIT for bulk; Linux leaves Average TRB Length 0 here
