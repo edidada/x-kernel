@@ -105,7 +105,6 @@ fn run_command() -> u32 {
 
 fn build_async_ring(base_address: u64, head: *mut Qh, dummy_qtd_bus: u32) {
     let base = base_address as u32;
-    let size = core::mem::size_of::<Qh>() as u32;
     let total = 4u32;
     for index in 0..total {
         let entry = head.wrapping_add(index as usize);
@@ -277,9 +276,7 @@ impl Ehci {
         let head = qh.as_ptr().cast::<Qh>();
         let head_bytes = head.cast::<u8>();
         let info1_ptr = head_bytes.wrapping_add(4).cast::<u32>();
-        let next_ptr = head_bytes.cast::<u32>();
         let ep_qh = head.wrapping_add(1);
-        let ep_bus = qh.bus_addr() as u32 + core::mem::size_of::<Qh>() as u32;
         // Endpoint QH: empty, linked back to the head so the reclamation list is
         // a closed ring of two.
         // SAFETY: the allocation holds two queue heads.
@@ -806,8 +803,6 @@ impl Ehci {
         // descriptor, and enqueueing means replacing that descriptor's contents.
         // Repointing a queue head the controller may be reading is what produced
         // the intermittent faults this replaces.
-        let dummy_bus =
-            self.qtds.bus_addr() as u32 + (dummy_slot * core::mem::size_of::<Qtd>()) as u32;
         // Programme the endpoint once (`qh_make()`): the queue head carries the
         // endpoint's characteristics and stays out of the list until `qh_link()`.
         // The descriptor slots are per transfer now, so this no longer depends on
@@ -848,7 +843,6 @@ impl Ehci {
             karch::dsb_ishst();
         }
         self.bulk_enqueue(BULK_QH, source_slot, dummy_slot, is_in, length)?;
-        let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
         let mut token = self.qh_wait_token(BULK_QH, dummy_slot);
         // `qh_completions()`: the descriptor is done when the controller clears
         // its Active bit. Anything still Active after the poll is a transfer the

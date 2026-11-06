@@ -44,6 +44,20 @@ pub mod cmd {
     pub const EWE: u32 = 1 << 10;
 }
 
+/// Command Ring Control Register (xHCI 1.1 §5.4.5).
+pub mod crcr {
+    /// Consumer Cycle State: the cycle bit expected on the next TRB fetched.
+    pub const CS: u32 = 1 << 0;
+    /// Command Abort: set by software to stop a running command ring. The
+    /// controller aborts the command in progress, clears CRR and posts a
+    /// Command Ring Stopped event (TRB type 37).
+    pub const CA: u32 = 1 << 2;
+    /// Command Ring Running, read-only. Restarting a stopped ring means writing
+    /// this register with the new dequeue pointer and CS, then ringing the
+    /// command doorbell.
+    pub const CRR: u32 = 1 << 3;
+}
+
 pub mod sts {
     pub const HCH: u32 = 1 << 0;
     pub const HSE: u32 = 1 << 2;
@@ -100,6 +114,11 @@ pub mod code {
     /// endpoint, a TRB error does not), so the value has to come from the
     /// reference rather than from the ordering of the enum.
     pub const SPLIT_TRANSACTION_ERROR: u8 = 36;
+    /// `COMP_COMMAND_RING_STOPPED` (`xhci.h:866`): the command the ring was
+    /// processing was abandoned because software aborted the ring.
+    pub const COMMAND_RING_STOPPED: u8 = 24;
+    /// `COMP_CMD_ABORT`: the command was aborted while in flight.
+    pub const COMMAND_ABORTED: u8 = 25;
 }
 
 /// TRB types this driver builds or consumes.
@@ -134,6 +153,11 @@ pub mod trb {
     pub const STOP_ENDPOINT: u32 = 15;
     /// `TRB_SET_DEQ`: hands the endpoint a dequeue pointer (and its DCS) again.
     pub const SET_TR_DEQUEUE: u32 = 16;
+    /// `TRB_COMMAND_RING_STOPPED` (37): the controller acknowledged a Command Ring
+    /// Abort (CRCR.CA) and stopped fetching the command ring. `xhci_handle_event()`
+    /// has a case for it; a driver that treats it as an unknown event keeps
+    /// believing the ring is running.
+    pub const COMMAND_RING_STOPPED: u32 = 37;
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;

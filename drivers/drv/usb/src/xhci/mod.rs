@@ -330,6 +330,10 @@ pub struct Xhci {
     /// instead (what this driver used to do) turns a lost completion into a
     /// misattributed one.
     commands: alloc::collections::VecDeque<PendingCmd>,
+    /// Set by the event dispatcher when a Command Ring Stopped event (TRB type
+    /// 37) arrives. `abort_command_ring()` alternates on it across its two
+    /// steps: abort (expect the event) and restart (expect nothing).
+    ring_stopped: bool,
     /// The completion of the oldest command, held for the caller that issued it
     /// (Linux hands this back through the per-command `completion` object; this
     /// driver has one command in flight at a time, so one slot is the same
@@ -855,6 +859,7 @@ impl Xhci {
             event_cycle: true,
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
+            ring_stopped: false,
             completed: None,
             deferred: alloc::collections::VecDeque::new(),
             address_zero_slot: None,
@@ -1233,6 +1238,16 @@ impl Xhci {
             match event.trb_type() {
                 regs::trb::TRANSFER_EVENT => self.handle_tx_event(&event),
                 regs::trb::COMMAND_COMPLETION => self.handle_cmd_completion(&event),
+                // `xhci_handle_event()`'s `TRB_COMMAND_RING_STOPPED` case: the
+                // acknowledgement of a Command Ring Abort. Nothing is queued for
+                // it; `abort_command_ring()` is the waiter.
+                regs::trb::COMMAND_RING_STOPPED => {
+                    info!(
+                        "xhci: command ring stopped event (code {})",
+                        event.completion_code()
+                    );
+                    self.ring_stopped = true;
+                }
                 // Port status changes need no queue: the port scan reads PORTSC
                 // directly, and PORTSC is the authoritative copy.
                 _ => {}
@@ -1738,11 +1753,14 @@ impl Xhci {
             }
         }
         let Some(event) = completion else {
-            // `xhci_handle_command_timeout()`'s effect: the oldest command is
-            // not going to complete, so retire it (a stale head would be
-            // compared against every later completion) and restart the ring.
+            // `xhci_handle_command_timeout()`: retire the oldest command (a stale
+            // head would be compared against every later completion) and abort
+            // the ring. Aborting rather than re-publishing CRCR is what actually
+            // restarts it -- see `abort_command_ring()`.
             self.commands.pop_front();
-            self.rearm_command_ring();
+            if let Err(err) = self.abort_command_ring() {
+                log::error!("xhci: command ring abort failed after {what}: {err:?}");
+            }
             self.log_event_timeout(what);
             return Err(KError::TimedOut);
         };
@@ -1759,10 +1777,15 @@ impl Xhci {
         );
         if code != regs::code::SUCCESS {
             log::error!("xhci: {what} failed, completion code {code}");
-            // A command error stops the controller from processing the ring, so
-            // every following command would time out. Hand it the dequeue
-            // pointer again (with the current cycle state) to restart it.
-            self.rearm_command_ring();
+            // A command that *completes* with an error leaves the ring running:
+            // the reference does not touch CRCR here (`xhci_setup_device()` just
+            // releases the slot), and writing CRCR while CRR is set was how this
+            // driver turned one failed Address Device into a controller that
+            // completed no command at all afterwards (the following Disable Slot
+            // timed out after 5 s).
+            if code == regs::code::COMMAND_RING_STOPPED {
+                self.rearm_command_ring();
+            }
             return Err(KError::Io);
         }
         Ok(event)
@@ -1790,6 +1813,76 @@ impl Xhci {
     fn ring_command_doorbell(&self) {
         self.bar.write32(self.doorbell, 0);
         let _ = self.bar.read32(self.doorbell);
+    }
+
+    /// `xhci_abort_cmd_ring()`: stop a command ring the controller has stopped
+    /// fetching, then restart it at the next TRB.
+    ///
+    /// xHCI 1.1 §4.6.1.2. Re-publishing CRCR alone is not a restart: while the
+    /// ring is running (CRR=1) with a command the controller is stuck on, the
+    /// write does not displace that command, and while the ring is stopped
+    /// (CRR=0) the controller needs the abort/stop handshake before it will fetch
+    /// again. The reference's order is:
+    ///
+    /// 1. write CRCR = next dequeue | CS | CA, which aborts the command in
+    ///    progress;
+    /// 2. wait for CRR to clear (5 s, then the host is treated as dead);
+    /// 3. wait for the Command Ring Stopped event (2 s) -- some controllers clear
+    ///    CRR without sending it;
+    /// 4. restart by writing CRCR = dequeue | CS and ringing the doorbell.
+    ///
+    /// The caller has already retired the timed-out command from the software
+    /// queue and skipped its TRB, so the ring restarts past it.
+    fn abort_command_ring(&mut self) -> Result<(), KError> {
+        let crcr_reg = self.operational + op::CRCR;
+        let dequeue = self.command.dequeue_address();
+        let cycle = u32::from(self.command.current_cycle());
+        info!("xhci: aborting the command ring at {dequeue:#x}");
+        self.write_crcr(dequeue, cycle | regs::crcr::CA);
+        // Step 2: CRR must clear.
+        let mut stopped = false;
+        for _ in 0..5000 {
+            if self.bar.read32(crcr_reg) & regs::crcr::CRR == 0 {
+                stopped = true;
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
+        if !stopped {
+            log::error!(
+                "xhci: abort did not stop the command ring (CRCR {:#x})",
+                self.bar.read32(crcr_reg)
+            );
+            return Err(KError::TimedOut);
+        }
+        // Step 3: consume the Command Ring Stopped event, if the controller sends
+        // one. `pump_events()` sets `ring_stopped` when it dispatches type 37.
+        self.ring_stopped = false;
+        for _ in 0..2000 {
+            self.pump_events();
+            if self.ring_stopped {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
+        if !self.ring_stopped {
+            info!("xhci: no Command Ring Stopped event; restarting anyway");
+        }
+        // Step 4: restart.
+        self.ring_stopped = false;
+        self.write_crcr(dequeue, cycle);
+        self.ring_command_doorbell();
+        info!("xhci: command ring restarted at {dequeue:#x}");
+        Ok(())
+    }
+
+    /// Writes the 64-bit CRCR as the reference does (`lo_hi_writeq`, low dword
+    /// first), with `extra` OR-ed into the control half.
+    fn write_crcr(&self, dequeue: u64, extra: u32) {
+        let crcr = self.operational + op::CRCR;
+        let low = (dequeue as u32 & !0x1f) | extra;
+        self.bar.write32(crcr, low);
+        self.bar.write32(crcr + 4, (dequeue >> 32) as u32);
     }
 
     /// Re-publishes the command ring dequeue pointer after a command error.
