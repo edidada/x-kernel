@@ -14,6 +14,10 @@ use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutRes
 use kclass::{ClassDevice, DisplayDeviceImpl};
 
 use super::error::{DrmError, DrmResult};
+use crate::abi::{
+    DRIVER_DATE, DRIVER_DESC, DRIVER_NAME, DRIVER_VERSION_MAJOR, DRIVER_VERSION_MINOR,
+    DRIVER_VERSION_PATCHLEVEL,
+};
 
 /// Driver-local id of one scanout resource.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +72,40 @@ pub(crate) struct BackendCaps {
     pub dumb: bool,
 }
 
+/// The driver identity a backend reports through `VERSION` / `SET_VERSION`.
+///
+/// Linux fills these from `struct drm_driver`, so they belong to the backend
+/// rather than to the UAPI constant table: a second display backend must be
+/// able to report its own identity without touching shared constants.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DriverIdentity {
+    /// Driver name (Linux `drm_driver.name`).
+    pub name: &'static str,
+    /// Driver description.
+    pub desc: &'static str,
+    /// Driver date.
+    pub date: &'static str,
+    /// Driver version major.
+    pub version_major: i32,
+    /// Driver version minor.
+    pub version_minor: i32,
+    /// Driver version patchlevel.
+    pub version_patchlevel: i32,
+}
+
+impl DriverIdentity {
+    /// The built-in simple-DRM identity, also the default for backends that
+    /// do not carry their own (test backends above all).
+    pub(crate) const SIMPLE_DRM: Self = Self {
+        name: DRIVER_NAME,
+        desc: DRIVER_DESC,
+        date: DRIVER_DATE,
+        version_major: DRIVER_VERSION_MAJOR,
+        version_minor: DRIVER_VERSION_MINOR,
+        version_patchlevel: DRIVER_VERSION_PATCHLEVEL,
+    };
+}
+
 impl Rect {
     /// Converts to the display contract's rectangle.
     pub(crate) const fn to_scanout(self) -> ScanoutRect {
@@ -95,6 +133,14 @@ pub(crate) trait Backend: Send + Sync {
     /// default, so `info` stays the only source of truth.
     fn refresh_info(&self) -> Option<DisplayInfo> {
         None
+    }
+
+    /// The driver identity `VERSION` and `SET_VERSION` report.
+    ///
+    /// The default is the built-in simple-DRM identity; a backend that
+    /// represents a real driver overrides it.
+    fn driver_identity(&self) -> DriverIdentity {
+        DriverIdentity::SIMPLE_DRM
     }
 
     /// Capabilities that this backend implements.
@@ -148,6 +194,20 @@ impl Backend for ClassBackend {
 
     fn refresh_info(&self) -> Option<DisplayInfo> {
         self.display.refresh_info()
+    }
+
+    fn driver_identity(&self) -> DriverIdentity {
+        // The display contract does not carry driver identity yet, so the
+        // virtio-gpu path states its own. When the contract grows an identity
+        // field, read it from `self.display` instead.
+        DriverIdentity {
+            name: "virtio_gpu",
+            desc: "X-Kernel virtio-gpu DRM driver",
+            date: DRIVER_DATE,
+            version_major: DRIVER_VERSION_MAJOR,
+            version_minor: DRIVER_VERSION_MINOR,
+            version_patchlevel: DRIVER_VERSION_PATCHLEVEL,
+        }
     }
 
     fn caps(&self) -> BackendCaps {

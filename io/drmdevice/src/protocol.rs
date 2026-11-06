@@ -30,13 +30,14 @@ fn copy_version_field(user_ptr: UserPtr<u8>, capacity: usize, value: &str) -> Dr
 impl Ioctl for DrmVersion {
     const NAME: &'static str = "VERSION";
 
-    fn handle(_dev: &DrmDevice, _file: &Arc<DrmFile>, version: &mut Self) -> DrmResult<usize> {
-        version.version_major = DRIVER_VERSION_MAJOR;
-        version.version_minor = DRIVER_VERSION_MINOR;
-        version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
-        version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
-        version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
-        version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
+    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, version: &mut Self) -> DrmResult<usize> {
+        let identity = dev.backend()?.driver_identity();
+        version.version_major = identity.version_major;
+        version.version_minor = identity.version_minor;
+        version.version_patchlevel = identity.version_patchlevel;
+        version.name_len = copy_version_field(version.name, version.name_len, identity.name)?;
+        version.date_len = copy_version_field(version.date, version.date_len, identity.date)?;
+        version.desc_len = copy_version_field(version.desc, version.desc_len, identity.desc)?;
         Ok(0)
     }
 }
@@ -47,12 +48,13 @@ impl Ioctl for DrmSetVersion {
 
     fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, set_version: &mut Self) -> DrmResult<usize> {
         let requested = *set_version;
+        let identity = dev.backend()?.driver_identity();
         // Linux reports the supported versions even for lower-version requests
         // and validation errors, not the input pair.
         set_version.drm_di_major = 1;
         set_version.drm_di_minor = 4;
-        set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
-        set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
+        set_version.drm_dd_major = identity.version_major;
+        set_version.drm_dd_minor = identity.version_minor;
 
         let masters = dev.master.lock();
         if !masters
@@ -69,15 +71,15 @@ impl Ioctl for DrmSetVersion {
                 return Err(DrmError::InvalidInput);
             }
             if requested.drm_di_minor >= 1 {
-                *binding.master.unique.lock() = Some(driver_unique_name());
+                *binding.master.unique.lock() = Some(driver_unique_name(identity.name));
             }
         }
         // The identity is established before the driver version is validated,
         // matching Linux's ordering; the error still reports the versions above.
         if requested.drm_dd_major != -1
-            && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
+            && (requested.drm_dd_major != identity.version_major
                 || requested.drm_dd_minor < 0
-                || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
+                || requested.drm_dd_minor > identity.version_minor)
         {
             return Err(DrmError::InvalidInput);
         }

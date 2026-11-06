@@ -312,7 +312,8 @@ impl Ioctl for DrmAuthMagic {
 #[derive(Clone, Copy, bytemuck::AnyBitPattern, macros::UserRead, macros::UserWrite)]
 pub(crate) struct DrmAuthMagic(DrmAuth);
 
-/// Builds the name a master reports to `GET_UNIQUE`.
-pub(crate) fn driver_unique_name() -> String {
-    format!("{DRIVER_NAME}:0")
+/// Builds the name a master reports to `GET_UNIQUE`, from the backend's
+/// driver name.
+pub(crate) fn driver_unique_name(name: &str) -> String {
+    format!("{name}:0")
 }
