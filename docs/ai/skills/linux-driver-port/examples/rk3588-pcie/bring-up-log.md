@@ -2892,6 +2892,44 @@ G 阶段的设计（`drivers/bus/usb/docs/design.md`）实现完了，落点是�
 当次启动发布仍然失败（USB3 盘 READ CAPACITY 超时、EHCI 盘描述符首读全零），
 与 §5.9.4i 记录的设备侧漂移一致，不是表的问题。
 
+### 5.9.7 EHCI 现在不发布，但不是设备表弄坏的（附判别过程）
+
+现象：EHCI 枚举成功、设备进表（`usb: address 1 attached`），但发布失败 ——
+`READ CAPACITY` 正常（last LBA 120845299），随后 **LBA 0 的 1536 字节读回全零**
+（`sector 0 has no boot signature`），ext4 探测拒绝卷；接着发布时的第二次
+`READ CAPACITY` 直接 `bulk transfer halted` → `mass storage reported no capacity`。
+
+判别（不是推理，是实验）：
+
+1. **用 git_commit 对齐每次启动**：每个运行目录的 `console.log` 里有
+   `git_commit = ...`。最后一次 EHCI 成功是 `19ea0d205`（`usb-final`，22:41）；
+   之后全部 `pub=0`。
+2. **把 `19ea0d205` 单独 worktree 重建部署**（`git worktree add /tmp/wt-19ea
+   19ea0d205` + `scripts/deploy-rk3588.sh --seed-config --build`），同一台板子再跑：
+   **同样的失败**（`bot: last LBA` 正常 → sector0 全零 → `no capacity`）。
+   → 与设备表、与 P1–P6 无关；那天之后设备/介质侧变了。
+3. 失败点是**介质读写**这一层，不是枚举、不是链路复位、不是发布。
+
+同时发现两个**会真的把 EHCI 弄坏**的自我缺陷，已修（`61c886840`）：
+
+- 移除判定只看一次 `PORTSC.CCS`。这块板子的链路在空闲期会掉又回来，而移除会连带
+  drop 发布物 —— 一次抖动就会让 `/dev/usbN` 消失且**再也回不来**（EHCI 没有 rescan）。
+  现在按参考 `hub_port_debounce()`：连续 100 ms（每 25 ms 采样）报告断开才算移除
+  （`hub.c:111-113`），端口重新连上就保留（`hub_port_connect_change()` 对
+  `CONNECTION` 仍在的设备是"复苏"而不是拔除）。xHCI 侧同样只在端口变化事件已消费后
+  才问这个问题，与 `handle_port_status()` 把端口交给 hub 层一致。
+- **`make build` 在 qemu 配置下根本不编译 `drv-usb`**。所以"构建通过"不等于 USB 代码
+  通过：昨天以来的 xhci/ehci 改动里有一个类型错误（`bind()` 改成返回
+  `RejectedBinding` 后漏改 `bind_and_publish`），只有 rk3588 构建/部署才暴露。
+  规则：**动 `drivers/drv/usb` 后必须用 rk3588 配置构建验证**
+  （`cp platforms/kplat-aarch64/rk3588_defconfig .config && make defconfig && make build`），
+  qemu 配置只能验证 bus/base 层。
+
+下一步（覆盖当前失败）指向设备就绪语义而非控制器：参考在扫描前用 TEST UNIT READY
+轮询到设备 ready（`usb_stor_*`/SCSI 层的 medium-not-ready 重试），而我们在第一次
+`INQUIRY`/`READ CAPACITY` 成功后就假设介质可读；冷启动后若前几笔读返回全零，应当
+按参考重试而不是直接把卷判成"没有文件系统"。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
