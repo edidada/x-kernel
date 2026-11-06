@@ -367,7 +367,7 @@ gen-const:
 # Wayland kiosk rootfs: reassemble the split .xz published in the rootfs
 # release, keep the decompressed image and replace the run disk with it.
 WAYLAND_IMG ?= debian-wayland-$(COMPOSITOR_ARCH).img
-WAYLAND_IMG_PARTS ?= $(if $(filter aarch64,$(COMPOSITOR_ARCH)),7,2)
+WAYLAND_IMG_PARTS ?= 2
 wayland_disk:
 	@set -eu; \
 	img="$(WAYLAND_IMG)"; \
