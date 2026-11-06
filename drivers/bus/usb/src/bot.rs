@@ -301,7 +301,28 @@ pub fn probe_filesystem(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
                         .trim();
                     log::info!("bot: ext2/3/4 superblock found, volume label `{label}`");
                 } else {
-                    log::info!("bot: no ext4 superblock at offset 1024, magic {magic:#06x}");
+                    // Not ext4 -- say what the media actually is, so "the driver
+                    // read garbage" and "the stick is exFAT/FAT32" cannot be
+                    // confused: the signatures are at fixed offsets in sector 0,
+                    // and a boot sector that starts with a jump instruction plus
+                    // the usual OEM/tail bytes proves the data came back intact.
+                    let fs_type = if &sectors[3..11] == b"EXFAT   " {
+                        "exFAT"
+                    } else if &sectors[82..87] == b"FAT32" {
+                        "FAT32"
+                    } else if &sectors[54..59] == b"FAT16" || &sectors[54..59] == b"FAT12" {
+                        "FAT"
+                    } else if sectors[510] == 0x55 && sectors[511] == 0xAA {
+                        "unknown (sector 0 has a valid boot signature)"
+                    } else {
+                        "none (sector 0 has no boot signature)"
+                    };
+                    log::info!(
+                        "bot: no ext4 superblock at offset 1024, magic {magic:#06x}; media looks \
+                         like {fs_type}: sector0 {:02x?} ... {:02x?}",
+                        &sectors[..8],
+                        &sectors[504..512],
+                    );
                 }
                 return;
             }
