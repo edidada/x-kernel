@@ -65,6 +65,8 @@
 #
 # * Root filesystem download (`make rootfs`):
 #     - ROOTFS_URL          Base URL for prebuilt rootfs images
+#     - WAYLAND_IMG         Image fetched by `make wayland_disk`
+#     - WAYLAND_IMG_PARTS   Number of .xz.part-NN pieces published for it
 #     - ROOTFS_VARIANT      Rootfs variant (default debian-openrc;
 #                           also supports alpine-busybox, debian-busybox)
 
@@ -214,7 +216,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: all build run justrun debug disasm clippy dylint dylint_test doc doc_check_missing
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
-.PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
+.PHONY: rootfs wayland_disk uapps rootfs-uapps teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
@@ -325,13 +327,34 @@ gen-const:
 		--output-dir "$(TARGET_DIR)/kbuild/$$platform" \
 		--kconfig Kconfig --srctree .
 
+# Wayland kiosk rootfs: reassemble the split .xz published in the rootfs
+# release, keep the decompressed image and replace the run disk with it.
+WAYLAND_IMG ?= debian-wayland-x86_64.img
+WAYLAND_IMG_PARTS ?= 2
+wayland_disk:
+	@set -eu; \
+	img="$(WAYLAND_IMG)"; \
+	if [ ! -f "$$img" ]; then \
+		echo "Downloading $$img from $(ROOTFS_URL)..."; \
+		: > "$$img.xz"; \
+		i=0; \
+		while [ $$i -lt $(WAYLAND_IMG_PARTS) ]; do \
+			n=$$(printf '%02d' $$i); \
+			curl -fL --progress-bar "$(ROOTFS_URL)/$$img.xz.part-$$n" >> "$$img.xz"; \
+			i=$$((i + 1)); \
+		done; \
+		xz -df "$$img.xz"; \
+	fi; \
+	cp "$$img" "$(DISK_IMG)"; \
+	echo "prepared $(DISK_IMG) from $$img"
+
 rootfs:
 	@set -eu; \
 	arch="$$($(XKMAKE) config arch)"; \
 	image="x-kernel-$(ROOTFS_VARIANT)-$$arch.img"; \
 	if [ ! -f "$$image" ]; then \
 		echo "Image not found, downloading $$image..."; \
-		curl -f -L "$(ROOTFS_URL)/$$image.xz" -o "$$image.xz"; \
+		curl -fL --progress-bar "$(ROOTFS_URL)/$$image.xz" -o "$$image.xz"; \
 		xz -df "$$image.xz"; \
 	fi; \
 	cp "$$image" "$(DISK_IMG)"
