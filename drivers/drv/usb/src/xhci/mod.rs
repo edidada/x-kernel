@@ -2791,9 +2791,21 @@ impl Xhci {
         log::warn!("xhci: ports still training after {MAX_POLLS} polls, scanning anyway");
     }
 
-    pub fn enumerate(&mut self, dev: &Device<'_, driver_base::PlatformBus>) -> (usize, usize) {
+    /// Walks the root ports and reports the devices it brought up.
+    ///
+    /// The devices are returned rather than acted on here on purpose: binding a
+    /// class driver and publishing a block device need the `Device` *and* a
+    /// shared handle to this controller, and only the probe (which owns the
+    /// `Arc`) has both. Enumeration therefore stops at "these devices exist",
+    /// which is also where the reference draws the line between `hub_wq` and the
+    /// class drivers.
+    pub fn enumerate(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+    ) -> (usize, usize, Vec<usb::UsbDevice>) {
         let mut found = 0usize;
         let mut ready = 0usize;
+        let mut devices: Vec<usb::UsbDevice> = Vec::new();
         // VBUS has just been switched on: a device needs time to see it and
         // pull up, and this port has no connect interrupt to wait on. Poll the
         // ports for a while so a device that attaches "late" is not reported as
@@ -2832,7 +2844,9 @@ impl Xhci {
                             // the device model is being built, so the tree is
                             // complete before any class driver looks for one.
                             if device.device.class == HUB_CLASS {
-                                self.scan_hub_ports(dev, &device, port);
+                                devices.extend(self.scan_hub_ports(dev, &device, port));
+                            } else {
+                                devices.push(device);
                             }
                         }
                         Err(err) => {
@@ -2852,7 +2866,7 @@ impl Xhci {
                 }
             }
         }
-        (found, ready)
+        (found, ready, devices)
     }
 
     /// Walks a hub's downstream ports and enumerates what is attached.
@@ -2863,12 +2877,15 @@ impl Xhci {
     /// and a full/low-speed device behind a high-speed hub also carries that
     /// hub's transaction translator — without it the device is addressed but
     /// never answers, because every transaction has to be split by the hub.
+    /// Brings up everything attached to `hub` and returns the devices found,
+    /// for the same reason `enumerate()` does.
     fn scan_hub_ports(
         &mut self,
         dev: &Device<'_, driver_base::PlatformBus>,
         hub: &usb::UsbDevice,
         root_port: usize,
-    ) {
+    ) -> Vec<usb::UsbDevice> {
+        let mut found_devices: Vec<usb::UsbDevice> = Vec::new();
         // The controller has to be told this slot is a hub before it will route
         // anything to the ports below it.
         if let Some(info) = usb::hub::info(self, hub.address, hub.device.protocol) {
@@ -3057,12 +3074,15 @@ impl Xhci {
                     usize::from(entry.port),
                     speed,
                 ) {
-                    Ok(device) => log::info!(
-                        "xhci: hub {} port {} -> {}",
-                        hub.address,
-                        entry.port,
-                        device.summary()
-                    ),
+                    Ok(device) => {
+                        log::info!(
+                            "xhci: hub {} port {} -> {}",
+                            hub.address,
+                            entry.port,
+                            device.summary()
+                        );
+                        found_devices.push(device);
+                    }
                     Err(err) => log::error!(
                         "xhci: hub {} port {} enumeration failed: {err:?}",
                         hub.address,
@@ -3108,6 +3128,7 @@ impl Xhci {
                 }
             }
         }
+        found_devices
     }
 
     /// `hcd->driver->reset_device()` (`xhci_discover_or_reset_device()`): after
@@ -3454,3 +3475,227 @@ const _: () = {
     // The command ring must satisfy xHCI's minimum size.
     assert!(RING_TRBS >= COMMAND_RING_MIN_TRBS);
 };
+
+/// How many sectors one BOT command carries. Same cap the EHCI side uses: the
+/// reference's `max_sectors` default for a bulk-only device is 120, but a single
+/// 8-sector command keeps the CBW/data/CSW phases inside one timeout.
+const BOT_MAX_SECTORS: usize = 8;
+
+/// The mass-storage disk as the block layer sees it.
+///
+/// `BlockDeviceOperations::read_block` takes `&self`, so the controller is held
+/// through a shared handle; `Xhci` itself cannot be borrowed mutably from there.
+struct XhciBotDisk {
+    xhci: alloc::sync::Arc<ksync::Mutex<Xhci>>,
+    endpoints: usb::bot::BotEndpoints,
+    blocks: u64,
+}
+
+impl subsys_block::BlockDeviceOperations for XhciBotDisk {
+    fn num_blocks(&self) -> u64 {
+        self.blocks
+    }
+
+    fn block_size(&self) -> usize {
+        512
+    }
+
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> kerrno::KResult {
+        if buf.len() % 512 != 0 {
+            log::error!(
+                "xhci: read_block {block_id} + {} bytes is not a whole number of sectors",
+                buf.len()
+            );
+            return Err(kerrno::KError::InvalidInput);
+        }
+        let mut guard = self.xhci.lock();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let left = (buf.len() - done) / 512;
+            let sectors = left.min(BOT_MAX_SECTORS);
+            let lba = (block_id + (done / 512) as u64) as u32;
+            let data = usb::bot::read_sectors(&mut *guard, &self.endpoints, lba, sectors as u16)
+                .or_else(|err| {
+                    // A bulk-only device that lost track of a command NAKs
+                    // everything; the reference's soft reset is the documented way
+                    // back, and it is what makes a retry a different attempt rather
+                    // than a longer wait.
+                    log::error!(
+                        "xhci: read_block {block_id} sector {lba} x{sectors} failed: {err:?}; \
+                         running the bulk-only reset"
+                    );
+                    usb::bot::reset_recovery(&mut *guard, &self.endpoints)?;
+                    usb::bot::read_sectors(&mut *guard, &self.endpoints, lba, sectors as u16)
+                })?;
+            if data.len() < sectors * 512 {
+                log::error!(
+                    "xhci: read_block {block_id} short read {} < {}",
+                    data.len(),
+                    sectors * 512
+                );
+                return Err(kerrno::KError::Io);
+            }
+            buf[done..done + sectors * 512].copy_from_slice(&data[..sectors * 512]);
+            done += sectors * 512;
+        }
+        Ok(())
+    }
+
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> kerrno::KResult {
+        if buf.len() % 512 != 0 {
+            return Err(kerrno::KError::InvalidInput);
+        }
+        let mut guard = self.xhci.lock();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let left = (buf.len() - done) / 512;
+            let sectors = left.min(BOT_MAX_SECTORS);
+            let lba = (block_id + (done / 512) as u64) as u32;
+            let slice = &buf[done..done + sectors * 512];
+            let result =
+                usb::bot::write_sectors(&mut *guard, &self.endpoints, lba, slice).or_else(|err| {
+                    log::error!(
+                        "xhci: write_block {block_id} sector {lba} x{sectors} failed: {err:?}; \
+                         running the bulk-only reset"
+                    );
+                    usb::bot::reset_recovery(&mut *guard, &self.endpoints)?;
+                    usb::bot::write_sectors(&mut *guard, &self.endpoints, lba, slice)
+                });
+            result?;
+            done += sectors * 512;
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> kerrno::KResult {
+        // Every block is acknowledged by the CSW; there is no cache to drain.
+        Ok(())
+    }
+}
+
+/// Finds the bulk-only mass-storage interface of `device`, if it has one.
+fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<usb::bot::BotEndpoints> {
+    for config in &device.configurations {
+        for interface in &config.interfaces {
+            if interface.class != 0x08 || interface.protocol != 0x50 {
+                continue;
+            }
+            let mut endpoint_in = 0u8;
+            let mut endpoint_out = 0u8;
+            for endpoint in &interface.endpoints {
+                if endpoint.is_in() {
+                    endpoint_in = endpoint.address;
+                } else {
+                    endpoint_out = endpoint.address;
+                }
+            }
+            if endpoint_in == 0 || endpoint_out == 0 {
+                log::warn!("xhci: mass storage interface without both bulk endpoints");
+                continue;
+            }
+            return Some(usb::bot::BotEndpoints {
+                address: device.address,
+                endpoint_in,
+                endpoint_out,
+                max_packet: 512,
+                interface: interface.number,
+            });
+        }
+    }
+    None
+}
+
+/// Reads the first sectors and lists the root directory: enumeration alone does
+/// not prove the bulk path works, and on this board it has been the difference
+/// between "the device answered descriptors" and "the device answers commands".
+pub(crate) fn probe_mass_storage(xhci: &mut Xhci, device: &usb::UsbDevice) {
+    let Some(endpoints) = mass_storage_endpoints(device) else {
+        return;
+    };
+    log::info!(
+        "xhci: mass storage on ep in {:#04x} out {:#04x}",
+        endpoints.endpoint_in,
+        endpoints.endpoint_out
+    );
+    usb::bot::describe(xhci, &endpoints);
+    usb::bot::probe_filesystem(xhci, &endpoints);
+    if let Err(err) = usb::bot_fs::list_root(xhci, &endpoints) {
+        log::warn!("xhci: root directory listing failed: {err:?}");
+    }
+}
+
+/// Publishes the mass-storage interface as a block device.
+///
+/// This is the action the xHCI path was missing entirely: the EHCI driver had it
+/// and this one stopped at "the device enumerated", so a SuperSpeed disk never
+/// produced a `/dev` node no matter how healthy its transfers were.
+pub(crate) fn publish_mass_storage(
+    dev: &mut Device<'_, driver_base::PlatformBus>,
+    xhci: &alloc::sync::Arc<ksync::Mutex<Xhci>>,
+    device: &usb::UsbDevice,
+) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
+    let endpoints = mass_storage_endpoints(device)?;
+    let blocks = {
+        let mut guard = xhci.lock();
+        let _ = usb::bot::reset_recovery(&mut *guard, &endpoints);
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
+        match usb::bot::read_capacity(&mut *guard, &endpoints) {
+            Ok(data) if data.len() >= 8 => {
+                let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                u64::from(last) + 1
+            }
+            _ => {
+                log::error!("xhci: mass storage reported no capacity");
+                return None;
+            }
+        }
+    };
+    let backend = XhciBotDisk {
+        xhci: xhci.clone(),
+        endpoints,
+        blocks,
+    };
+    let name = alloc::format!("usb{}", device.address);
+    let parent_path = alloc::string::String::from(dev.info().path());
+    let modalias = dev.info().modalias().map(alloc::string::String::from);
+    // Major 8 is the conventional disk major and the block core rejects a
+    // duplicate dev_t; the EHCI side takes minor 0, so this side counts up from
+    // one instead of colliding with it.
+    static NEXT_MINOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+    let minor = NEXT_MINOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let disk = match subsys_block::Gendisk::new(name, 8, minor, 1, alloc::boxed::Box::new(backend))
+        .map(|disk| disk.with_devnode_context(&parent_path, modalias))
+    {
+        Ok(disk) => disk,
+        Err(err) => {
+            log::error!("xhci: could not create the block disk: {err:?}");
+            return None;
+        }
+    };
+    match dev.publish(
+        &subsys_block::class::BLOCK,
+        alloc::sync::Arc::new(disk),
+        "usb-storage",
+    ) {
+        Ok(publication) => {
+            log::info!(
+                "xhci: published {} as a block device with {blocks} 512-byte blocks",
+                device.summary()
+            );
+            let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
+            for node in devnode::subscribe(callback) {
+                log::info!(
+                    "xhci: devnode {} subsystem {} number {:?}",
+                    node.devname(),
+                    node.subsystem(),
+                    node.device_number()
+                );
+            }
+            Some(publication)
+        }
+        Err(err) => {
+            log::error!("xhci: block publication failed: {err:?}");
+            None
+        }
+    }
+}

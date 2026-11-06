@@ -2502,6 +2502,39 @@ usb: 004:4 configured with 1
 顺带：前面几轮为"失败后恢复"加的机制（命令环 abort/restart、端口 5 次 reset、失败端口
 disable、SET_ADDRESS 后 10 ms）现在**一次都不会被触发**；启动到 shell 的时间从 129 s 降到 47.7 s。
 
+### 5.9.4a USB 3.0 的挂载缺口：xHCI 侧根本没有 bulk 传输
+
+用"动作清单"对比（见 §7.1）两轮即定位，不需要上板二分：
+
+| 枚举成功后的动作 | EHCI | xHCI |
+| --- | --- | --- |
+| 读描述符/配置 | ✅ | ✅ |
+| mass-storage 类绑定 + 容量探测 | ✅ `ehci: mass storage on ep …` | 原先缺失 → 已补 `xhci: mass storage on ep …` |
+| 发布块设备 + devnode | ✅ `published … as a block device` / `devnode usb1` | 原先缺失 → 已补 |
+| **bulk 传输** | ✅ | ❌ `Hcd::bulk_transfer` 是 `Err(KError::Unsupported)` 空壳（`drivers/drv/usb/src/xhci/mod.rs:2736`） |
+
+因此 USB3 口当前的状态是"**能识别、不能挂载**"：
+
+```
+usb: 003:4 id 03f0:7240 usb 3.1 ... configured with 1
+xhci: mass storage on ep in 0x81 out 0x02
+bot: cbw tag 1 op 0x12 len 36 dir in cdb [12, 00, 00, 00, 24, 00]
+bot: CBW transfer failed: KError::Unsupported        <- 立即返回，不是超时
+```
+
+要补齐的机制（按参考的四个动作，见 §7.2）：
+
+1. 两个 bulk 端点的端点上下文 + `Configure Endpoint`（add flags、max packet、burst、
+   `Average TRB Length`）；
+2. 每端点 transfer ring（分配、DCS、link TRB、dequeue/cycle）；
+3. 一笔传输的 TRB 链（Normal TRB、64 KiB 边界、`Chain`/`TD Size`）；
+4. 门铃：`Doorbell[slot] = DCI`（`2*idx + dir + 1`）；
+5. 传输事件按 (slot, DCI) 分派——现在是 `ep_id != TRB_EP0 { warn; return }`；
+6. 出错恢复（Reset Endpoint / Set TR Dequeue）对 bulk 端点同样适用。
+
+规模参考：同项目 usb-host 栈里纯 xHCI 端点部分是 `backend/kmod/xhci/endpoint.rs`，
+约 1300 行。这条应当作为缺口报告立项，而不是靠点补丁硬凑。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；

@@ -44,7 +44,13 @@ pub struct Dwc3Data {
     _phys: Vec<PoweredPhy>,
     /// The host controller this driver brought up; it owns the register window
     /// the core was programmed through, and enumeration runs on it next.
-    _xhci: crate::xhci::Xhci,
+    ///
+    /// Shared because the mass-storage block backend reads through it from
+    /// `&self`; the publications below must outlive the probe for the same reason
+    /// the EHCI side keeps them.
+    _xhci: alloc::sync::Arc<ksync::Mutex<crate::xhci::Xhci>>,
+    /// Publications of any disks published from this controller.
+    _disks: Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>,
 }
 
 impl DriverOps<PlatformBus> for Dwc3Driver {
@@ -183,8 +189,30 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         // which this port does not have yet. PHY state at the moment the
         // controller first has to talk to the device:
         log_usb2phy_state(dev);
-        let (found, ready) = xhci.enumerate(dev);
+        // The controller becomes shareable here: a class driver bind and the
+        // block backend both need it through a shared handle, while enumeration
+        // needs it mutably.
+        let xhci = alloc::sync::Arc::new(ksync::Mutex::new(xhci));
+        let (found, ready, devices) = {
+            let mut guard = xhci.lock();
+            guard.enumerate(dev)
+        };
         info!("dwc3: enumeration found {found} device(s), {ready} usable");
+
+        // What the reference does once `hub_wq` has a device: the class drivers
+        // claim their interfaces and the block layer gets a disk. Stopping at
+        // enumeration is why a SuperSpeed mass-storage device never appeared as
+        // a block device on this board.
+        let mut disks = Vec::new();
+        for device in &devices {
+            {
+                let mut guard = xhci.lock();
+                crate::xhci::probe_mass_storage(&mut *guard, device);
+            }
+            if let Some(publication) = crate::xhci::publish_mass_storage(dev, &xhci, device) {
+                disks.push(publication);
+            }
+        }
 
         Ok(Dwc3Data {
             _clocks: clocks,
@@ -192,6 +220,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             _reset: reset,
             _phys: phys,
             _xhci: xhci,
+            _disks: disks,
         })
     }
 }
