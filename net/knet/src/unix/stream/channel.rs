@@ -83,25 +83,23 @@ pub(super) struct StreamEndpoint {
     pub(super) socket_error: AtomicI32,
     /// The `SO_PASSCRED` setting of the socket that owns this endpoint.
     ///
-    /// Both channel directions share the endpoint, so a sender can observe
-    /// whether its peer enabled automatic credential capture. A queued server
-    /// endpoint copies this from the listener when `connect()` builds it.
+    /// Both channel directions share the endpoint, so the sender can read its
+    /// peer's setting. A server endpoint copies the listener's setting during
+    /// connect.
     pub(super) pass_credentials: AtomicBool,
     /// Whether this endpoint belongs to a server-side connection that has not
     /// been returned by `accept()` yet.
     ///
-    /// Linux `unix_passcred_enabled` also requests credentials while the
-    /// receiving peer has no attached socket (`!other->sk_socket`), so data
-    /// sent before `accept()` must carry a snapshot even when the listener did
-    /// not enable `SO_PASSCRED`.
+    /// Data sent before accept must carry sender credentials, even if the
+    /// listener did not enable SO_PASSCRED.
     pub(super) awaiting_accept: AtomicBool,
 }
 
 impl StreamEndpoint {
     /// Whether this endpoint requests automatic sender credentials.
     ///
-    /// This combines the endpoint's own `SO_PASSCRED` selection with the
-    /// pre-accept capture rule for a queued server connection.
+    /// Credentials are needed if SO_PASSCRED is enabled or the server
+    /// connection is still waiting for accept.
     pub(super) fn pass_credentials_enabled(&self) -> bool {
         self.pass_credentials.load(Ordering::Acquire)
             || self.awaiting_accept.load(Ordering::Acquire)

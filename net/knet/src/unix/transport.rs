@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Transport dispatch and addressable communication endpoints.
+//! Common transport operations and endpoints found by address lookup.
 
 use alloc::{boxed::Box, sync::Arc};
 
@@ -21,7 +21,7 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
 };
 
-/// A published rendezvous endpoint, independent of its address registration.
+/// An endpoint that can remain alive after its address registration is removed.
 #[derive(Clone)]
 pub(crate) enum BoundEndpoint {
     Stream(Arc<stream::ListenerQueue>),
@@ -46,19 +46,18 @@ pub(crate) trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, local_endpoint: &UnixAddr) -> KResult<BoundEndpoint>;
     fn local_addr(&self) -> UnixAddr;
     fn peer_addr(&self) -> UnixAddr;
-    /// Starts listening and records the listener's own peer identity.
+    /// Starts listening and records the listener's credentials.
     ///
-    /// Stream clients copy this snapshot when they connect, matching Linux
-    /// `unix_listen` + `unix_stream_connect`.
+    /// Connecting stream clients use these as their peer credentials.
     fn listen(&self, _backlog: usize, _credentials: &PeerCredentials) -> KResult {
         Err(KError::OperationNotSupported)
     }
 
     /// Connects to a bound peer.
     ///
-    /// For streams, `credentials` is the connector's snapshot, which the
-    /// accepted endpoint reports. Datagram transports ignore it because Linux
-    /// does not establish peer credentials on `connect`.
+    /// Stream and seqpacket connections use the caller's `credentials` as the
+    /// accepted endpoint's peer credentials. Datagram sockets ignore this value;
+    /// their `connect` operation does not set peer credentials.
     fn connect(
         &self,
         endpoint: &BoundEndpoint,

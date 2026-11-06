@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Address reservations and publication for Unix sockets.
+//! Address registration and lookup for Unix sockets.
 //!
-//! A socket owns one non-cloneable registration guard. Registry snapshots do
-//! not own the registration and cannot keep a name occupied after socket close.
+//! Each socket owns a registration guard that cannot be cloned. Handles returned
+//! by lookup do not keep the address registered after the socket closes.
 
 use alloc::sync::Arc;
 
@@ -21,8 +21,8 @@ use kvfs::{
 use super::{UnixAddr, UnixSocketType, transport::BoundEndpoint};
 
 type AbstractKey = (Arc<[u8]>, UnixSocketType);
-// None is a reserved address. Publication happens only after transport setup;
-// removal from the table revokes it, independently of outstanding snapshots.
+// None marks a name reserved while its transport is being set up. Removing the
+// table entry frees the name even if lookup handles still exist.
 type Registration = Mutex<Option<BoundEndpoint>>;
 
 struct PathEntry {
@@ -35,7 +35,7 @@ enum BindingKey {
     Path(usize),
 }
 
-/// Exclusive ownership of one address reservation, including failed binds.
+/// Owns one address reservation and releases it if bind fails or the socket closes.
 pub(super) struct BindingGuard {
     key: BindingKey,
     registration: Arc<Registration>,
@@ -49,8 +49,8 @@ impl BindingGuard {
 
 impl Drop for BindingGuard {
     fn drop(&mut self) {
-        // Remove only this registration: inode identities and abstract names
-        // may already have been reused by another socket.
+        // Remove this registration only if it still owns the table entry.
+        // Another socket may have reused the inode key or abstract name.
         match &self.key {
             BindingKey::Abstract(key) => {
                 let mut bindings = ABSTRACT_BINDINGS.lock();
@@ -71,8 +71,8 @@ impl Drop for BindingGuard {
                 }
             }
         }
-        // Release endpoint resources outside the namespace locks. A lookup
-        // which already copied the endpoint is governed by transport closure.
+        // Drop the endpoint after releasing the namespace locks. Earlier lookup
+        // handles can still use it until the transport closes.
         let endpoint = self.registration.lock().take();
         drop(endpoint);
     }
@@ -120,7 +120,7 @@ fn create_bind_location(
         })
 }
 
-/// Reserves a name before transport setup, without publishing a partial endpoint.
+/// Reserves a name. Lookup can find its endpoint only after setup is complete.
 pub(super) fn reserve(
     addr: &UnixAddr,
     kind: UnixSocketType,

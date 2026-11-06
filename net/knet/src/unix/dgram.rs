@@ -29,8 +29,8 @@ pub(crate) struct Datagram {
 pub(crate) struct Channel {
     pub(crate) tx: async_channel::Sender<Datagram>,
     pub(crate) poll: Arc<PollSet>,
-    /// Established only for socketpair peers; datagram `bind` and `connect`
-    /// leave Linux `sk_peer_pid` unset.
+    /// Set only for socketpair peers. Datagram bind and connect do not set
+    /// peer credentials.
     pub(crate) peer_credentials: PeerCredentials,
     peer_addr: UnixAddr,
 }
@@ -115,8 +115,8 @@ impl DgramTransport {
         }
     }
 
-    /// Creates a connected datagram pair whose endpoints both report the
-    /// creator's peer credentials, matching Linux socketpair.
+    /// Creates a connected datagram pair. Both endpoints report the creator's
+    /// credentials as their peer credentials.
     pub fn new_pair(credentials: PeerCredentials) -> (Self, Self) {
         let (tx1, rx1) = async_channel::unbounded();
         let (tx2, rx2) = async_channel::unbounded();
@@ -279,8 +279,8 @@ impl UnixTransportOps for DgramTransport {
                 }
                 match options.ancillary.as_mut() {
                     Some(dst) => {
-                        // Deliver identity before passed files so a short control
-                        // buffer cannot spend the credential space on descriptors.
+                        // Deliver credentials first so passed files cannot fill
+                        // a short control buffer before the credentials are written.
                         if self.options.pass_credentials()
                             && let Some(credentials) = sender_credentials
                         {
@@ -290,11 +290,9 @@ impl UnixTransportOps for DgramTransport {
                         }
                         dst.extend(ancillary);
                     }
-                    // The receive gave no control buffer: the datagram is consumed
-                    // either way, but its control data cannot be delivered. Report
-                    // the loss so the caller sets `MSG_CTRUNC`, like Linux
-                    // `__scm_recv_common`, which also covers `SO_PASSCRED` sender
-                    // credentials and not only passed file descriptions.
+                    // Without a control buffer, reading the datagram discards its
+                    // control data. Report the loss so the caller sets MSG_CTRUNC.
+                    // This includes both passed files and SO_PASSCRED credentials.
                     None => {
                         let exposes_credentials =
                             self.options.pass_credentials() && sender_credentials.is_some();

@@ -62,8 +62,8 @@ impl StreamTransport {
         }
     }
 
-    /// Creates a connected stream pair whose endpoints both report the
-    /// creator's peer credentials, matching Linux socketpair.
+    /// Creates a connected stream pair. Both endpoints report the creator's
+    /// credentials as their peer credentials.
     pub fn new_pair(credentials: PeerCredentials) -> (Self, Self) {
         let endpoint1 = Arc::new(StreamEndpoint::default());
         let endpoint2 = Arc::new(StreamEndpoint::default());
@@ -80,12 +80,9 @@ impl StreamTransport {
 
     /// Whether the connected peer requests automatic sender credentials.
     ///
-    /// Linux attaches automatic stream credentials when the sender *or* the
-    /// receiver enabled the option (`unix_passcred_enabled`). The channel
-    /// keeps both endpoints for the life of the connection, so this reads the
-    /// peer's endpoint rather than this socket's own option state. A queued
-    /// server endpoint also requests credentials until `accept()` attaches a
-    /// socket to it.
+    /// A stream send needs credentials when either peer enables `SO_PASSCRED`.
+    /// This method reads the connected peer's setting from its shared endpoint.
+    /// A server endpoint also requests credentials while waiting for `accept`.
     pub(super) fn peer_pass_credentials(&self) -> bool {
         self.channel
             .lock()
@@ -98,9 +95,8 @@ impl Configurable for StreamTransport {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
-        // The stream endpoint is shared with the peer so automatic capture can
-        // observe the receiver's setting; keep the option state there instead
-        // of in the transport-local `GeneralOptions`.
+        // Store SO_PASSCRED on the shared endpoint so the peer can read it.
+        // GeneralOptions is local to this transport.
         if let O::PassCredentials(enabled) = &mut *opt {
             **enabled = self.pass_credentials();
             return Ok(OptionHandled::Yes);
@@ -225,11 +221,9 @@ impl UnixTransportOps for StreamTransport {
 
         let inherited_pass_credentials = bind.pass_credentials();
         let server_endpoint = Arc::new(StreamEndpoint::default());
-        // Linux `unix_stream_connect` copies the listener's SCM receive flags
-        // into the new peer sock, and `unix_accept` only grafts that sock into
-        // a file. Keep the copied value on the server endpoint, and force
-        // credential capture while accept() has not attached the socket yet
-        // (`!other->sk_socket`).
+        // Save the listener's setting when the connection is created.
+        // Record sender credentials until accept returns the server endpoint,
+        // even if the listener did not enable SO_PASSCRED.
         server_endpoint
             .pass_credentials
             .store(inherited_pass_credentials, Ordering::Release);
@@ -270,9 +264,8 @@ impl UnixTransportOps for StreamTransport {
         channel.peer_addr = peer_addr;
         let accepted = StreamTransport::new_channel(Some(channel));
         accepted.local_addr.write().clone_from(&self.local_addr());
-        // Linux `unix_accept` does not re-read the listener's SCM flags: the
-        // queued peer sock already captured them in `unix_stream_connect`.
-        // Clear only the pre-accept capture gate.
+        // Keep the SO_PASSCRED setting saved at connect time. After accept,
+        // this setting alone decides whether the endpoint needs credentials.
         accepted
             .endpoint
             .awaiting_accept

@@ -4,12 +4,11 @@
 
 //! Unix seqpacket socket transport.
 //!
-//! A seqpacket socket is connection-oriented like a stream socket but keeps
-//! message boundaries like a datagram socket. Both ends of every connection
-//! live in this kernel, so the transport moves whole messages through the same
-//! `async_channel` queues the datagram transport uses and adds the connection
-//! setup a listener needs: `bind` creates the rendezvous, `listen` enables it,
-//! `connect` queues a connection, and `accept` takes one out.
+//! A seqpacket socket uses connections like a stream socket and keeps message
+//! boundaries like a datagram socket. Both endpoints are local, so messages
+//! pass through `async_channel` queues, as in the datagram transport.
+//! `bind` creates the listener endpoint, `listen` enables it, `connect` queues
+//! a connection, and `accept` takes one from the queue.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
@@ -28,17 +27,15 @@ use crate::{
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
-/// Connections a listener may queue before `connect` starts failing.
+/// Maximum number of connections waiting for accept.
 ///
-/// Linux applies the `listen` backlog here. The queue is bounded like a listen
-/// queue rather than unbounded so an unaccepted connection cannot pin memory.
+/// This limit bounds the memory held by connections that have not been accepted.
 const LISTEN_BACKLOG: usize = 128;
 
 /// One connection waiting in a listener's queue.
 ///
-/// The client's end of both directions is already wired when the entry is
-/// queued, so `connect` returns without waiting for `accept`, exactly like
-/// Linux queues the connection and returns.
+/// Both client channels are ready when the connection is queued, so connect
+/// can return without waiting for accept.
 struct Pending {
     /// What the server reads.
     to_server: async_channel::Receiver<Datagram>,
@@ -86,14 +83,14 @@ struct Listener {
     endpoint: Arc<ListenerEndpoint>,
 }
 
-/// Rendezvous a bound seqpacket socket publishes to `connect`.
+/// Listener endpoint used by connecting seqpacket sockets.
 pub(crate) struct ListenerEndpoint {
     queue: async_channel::Sender<Pending>,
     poll: Arc<PollSet>,
-    /// Accept queue lifecycle, shared with the transport's `Listener`.
+    /// Listener state shared with the transport.
     ///
-    /// Connecting to a bound-but-not-listening socket fails with
-    /// `ECONNREFUSED`, so the address alone cannot decide acceptance.
+    /// A bound socket must also be listening before it can accept a connection.
+    /// Otherwise, connect returns ECONNREFUSED.
     state: Mutex<ListenerState>,
 }
 
@@ -122,11 +119,10 @@ struct ShutdownState {
 
 /// The outgoing direction of a connected socket and the peer's identity.
 ///
-/// `tx` sends into the peer's receive queue and is cleared by
-/// `shutdown(SHUT_WR)` rather than dropping the whole record: Linux keeps a
-/// connected socket connected after a half-close, so a second `connect` must
-/// still fail with `EISCONN` and `SO_PEERCRED` must survive. Clearing the
-/// sender still closes the peer's receive channel once the last sender is gone.
+/// `tx` sends into the peer's receive queue. `shutdown(SHUT_WR)` clears `tx`
+/// but keeps the connection record. A second connect still returns EISCONN,
+/// and SO_PEERCRED still reports the peer's credentials. The peer's receive
+/// channel closes once the last sender is dropped.
 struct PeerChannel {
     tx: Option<async_channel::Sender<Datagram>>,
     /// Poll set the peer registers for readability of its receive channel.

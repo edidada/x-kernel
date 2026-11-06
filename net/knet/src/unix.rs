@@ -30,53 +30,48 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
 };
 
-/// Captures the current process identity and effective UID/GID as a peer
-/// credential snapshot.
+/// Records the current process identity and effective UID/GID for a peer.
 ///
-/// User-facing Unix listener and stream-connect entry points call this when
-/// Linux establishes the peer relationship. The PID stays a process identity
-/// until a reader resolves it through its own active PID namespace. Kernel
-/// callers without a user thread call the inherent
+/// The PID is stored as a process handle. Readers get its numeric value in
+/// their own PID namespace.
+///
+/// The `SocketOps` listen and connect methods use this helper to record the
+/// caller's credentials. Kernel tasks must call
 /// [`UnixDomainSocket::listen_with_credentials`] or
-/// [`UnixDomainSocket::connect_with_credentials`] on the concrete Unix socket
-/// with an explicit snapshot (or [`PeerCredentials::none`]); the `SocketOps`
-/// implementations below are the user-facing paths and require a user thread.
+/// [`UnixDomainSocket::connect_with_credentials`] directly and pass credentials
+/// or [`PeerCredentials::none`].
 ///
 /// # Execution context
 ///
-/// Must run on a user thread in process context. It reads the current task's
-/// subjective credentials through a sleepable `RwLock`, so it must not run in
-/// IRQ context, with preemption disabled, or while holding a spinlock; ordinary
-/// sleepable locks may be held. It performs no I/O and does not wait for
-/// another task.
+/// Requires a user thread in task context. Reading the task's credentials takes
+/// a sleepable `RwLock` and may wait for the lock. IRQs and preemption must be
+/// enabled, and the caller must hold no spinlock. Other sleepable locks may be
+/// held. This helper performs no I/O.
 ///
 /// # Panics
 ///
-/// Panics when the current task has no user-thread runtime, including a kernel
-/// task or an interrupt context.
+/// Panics if the current task has no user-thread runtime, as with a kernel task.
 pub fn current_peer_credentials() -> PeerCredentials {
     let thread = kprocess::current_user_thread();
     let cred = thread.cred();
     PeerCredentials::new(thread.process().pid_identity(), cred.euid(), cred.egid())
 }
 
-/// Captures the current sending process's identity and real UID/GID.
+/// Records the current sending process's identity and real UID/GID.
 ///
-/// User-facing socket send entry points call this once per send. The pid stays
-/// a process identity so each receiver resolves it in its own PID namespace
-/// (Linux `pid_vnr` at delivery). Kernel callers without a user thread supply
-/// an explicit [`SendOptions::sender_credentials`] or none.
+/// Socket send entry points call this once per send when credentials are needed.
+/// The PID is stored as a process handle. Each receiver gets its numeric value
+/// in its own PID namespace. Kernel callers can supply
+/// [`SendOptions::sender_credentials`] directly or leave it unset.
+///
+/// Returns `None` if the current task has no user-thread runtime.
 ///
 /// # Execution context
 ///
-/// Runs on a user thread in process context when one exists. It reads the
-/// current task's subjective credentials through a sleepable `RwLock`, so it
-/// must not run in IRQ context, with preemption disabled, or while holding a
-/// spinlock; ordinary sleepable locks may be held. It performs no I/O and does
-/// not wait for another task.
-///
-/// Returns `None` for a kernel task or interrupt context, which have no
-/// user-visible sender identity.
+/// Requires task context. For a user thread, reading credentials takes a
+/// sleepable `RwLock` and may wait for the lock. IRQs and preemption must be
+/// enabled, and the caller must hold no spinlock. Other sleepable locks may be
+/// held. This helper performs no I/O.
 pub fn current_sender_credentials() -> Option<crate::SenderCredentials> {
     let current = ktask::current();
     let thread = current.try_as_thread()?;
@@ -98,10 +93,7 @@ pub enum UnixAddr {
 
 /// The socket type requested at creation.
 ///
-/// Linux keeps it in `sk_type` and reports it back from `SO_TYPE`, so it is
-/// stored rather than derived from the transport: a socket may be created
-/// before its transport kind is observable, and `unix_create` keeps
-/// `SOCK_SEQPACKET` while rewriting only `SOCK_RAW` to `SOCK_DGRAM`.
+/// Stored on the socket so `SO_TYPE` reports the type selected at creation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UnixSocketType {
     Stream,
@@ -121,20 +113,28 @@ impl UnixSocketType {
 }
 
 pub struct UnixDomainSocket {
-    // Serialize bind and retain exclusive ownership of the address registration.
+    // Allow one bind at a time and keep the socket's address registration alive.
     binding: Mutex<Option<BindingGuard>>,
     transport: UnixTransport,
     socket_type: UnixSocketType,
 }
 impl Drop for UnixDomainSocket {
     fn drop(&mut self) {
-        // Revoke the address before field destruction closes the transport.
+        // Remove the address registration before dropping the transport.
         let binding = self.binding.lock().take();
         drop(binding);
     }
 }
 
 impl UnixDomainSocket {
+    pub fn new(transport: impl Into<UnixTransport>, socket_type: UnixSocketType) -> Self {
+        Self {
+            transport: transport.into(),
+            socket_type,
+            binding: Mutex::new(None),
+        }
+    }
+
     fn accept_with_storage(
         &self,
         options: AcceptOptions,
@@ -146,43 +146,28 @@ impl UnixDomainSocket {
             storage,
             Self {
                 transport,
-                // The accepted socket keeps the listener's type, as Linux keeps the
-                // listening socket's `sk_type` for the connection it hands back.
+                // Accepted sockets keep the listener's type.
                 socket_type: self.socket_type,
                 binding: Mutex::new(None),
             },
         )))
     }
 
-    pub fn new(transport: impl Into<UnixTransport>, socket_type: UnixSocketType) -> Self {
-        Self {
-            transport: transport.into(),
-            socket_type,
-            binding: Mutex::new(None),
-        }
-    }
-
     /// Whether this socket uses the datagram transport.
     ///
-    /// Seqpacket sockets now have their own connection-oriented transport, so
-    /// only genuine `SOCK_DGRAM` sockets answer `true`.
+    /// Returns `true` only for `SOCK_DGRAM`, not `SOCK_SEQPACKET`.
     pub fn is_datagram(&self) -> bool {
         matches!(&self.transport, UnixTransport::Dgram(_))
     }
 
-    /// Whether a send should capture the caller's credentials.
+    /// Whether a send needs to record the caller's credentials.
     ///
-    /// Linux datagram sends always capture credentials so a receiver with
-    /// `SO_PASSCRED` can observe the real sender. Stream sends capture when the
-    /// sender or the connected receiver enabled `SO_PASSCRED`; Linux
-    /// `unix_passcred_enabled` tests both sockets (`other` is the receiving
-    /// peer). Ordinary stream traffic with neither option enabled adds no
-    /// per-message credential barrier.
+    /// Datagram and seqpacket sends always record credentials for receivers
+    /// using `SO_PASSCRED`. Stream sends record them when either peer enables
+    /// `SO_PASSCRED`, or while the server connection is waiting for `accept`.
+    /// Otherwise, stream reads have no per-message credential boundaries.
     pub fn should_attach_sender_credentials(&self) -> bool {
         match &self.transport {
-            // Linux sends seqpacket messages through the datagram path, which
-            // always captures the sender so a receiver with `SO_PASSCRED` can
-            // observe it.
             UnixTransport::Dgram(_) | UnixTransport::Seqpacket(_) => true,
             UnixTransport::Stream(stream) => {
                 stream.pass_credentials() || stream.peer_pass_credentials()
@@ -190,11 +175,11 @@ impl UnixDomainSocket {
         }
     }
 
-    /// Binds this socket using an explicit credential for pathname access.
+    /// Binds this socket using the supplied credentials for pathname access.
     ///
-    /// Kernel callers use this entry because they do not have a current user
-    /// task. User-facing bind enters through [`SocketOps::bind`], which takes
-    /// one snapshot of the current task credential before calling this method.
+    /// Kernel tasks can call this method without a current user thread.
+    /// [`SocketOps::bind`] reads the current task's credentials once and passes
+    /// them here.
     /// An unbound address is rejected; callers must supply an explicit name.
     ///
     /// # Execution context
@@ -220,14 +205,12 @@ impl UnixDomainSocket {
         Ok(())
     }
 
-    /// Starts listening with an explicit snapshot of this listener's identity.
+    /// Starts listening with the supplied listener credentials.
     ///
-    /// Kernel callers without a current user thread use this inherent entry on
-    /// the concrete Unix socket before erasing it into a generic [`Socket`]; it
-    /// neither reads nor requires a user-task credential. [`SocketOps::listen`]
-    /// remains the user-facing path and snapshots the current user thread.
-    /// Datagram transports ignore the snapshot because `listen` does not
-    /// establish a peer there.
+    /// Kernel tasks can call this method before wrapping the Unix socket in
+    /// [`Socket`]. It does not read the current task's credentials.
+    /// [`SocketOps::listen`] reads them from the current user thread.
+    /// Datagram sockets do not support `listen` or use these credentials.
     pub fn listen_with_credentials(
         &self,
         backlog: usize,
@@ -236,14 +219,15 @@ impl UnixDomainSocket {
         self.transport.listen(backlog, credentials)
     }
 
-    /// Connects using explicit credentials for pathname lookup and, for a
-    /// stream, an explicit connector identity for the accepted endpoint.
+    /// Connects using the supplied credentials for pathname lookup and peer identity.
     ///
-    /// User-facing [`SocketOps::connect`] snapshots both values from the current
-    /// task. Kernel callers without a user thread supply them here on the
-    /// concrete Unix socket before erasing it into a generic [`Socket`].
-    /// Datagram transports ignore `peer_credentials` because `connect`
-    /// establishes no peer identity.
+    /// Stream and seqpacket sockets record `peer_credentials` for the accepted
+    /// connection. Datagram sockets ignore them: `connect` does not set their
+    /// peer credentials.
+    ///
+    /// [`SocketOps::connect`] reads the credentials from the current task.
+    /// Kernel tasks can pass them directly before wrapping the Unix socket in
+    /// [`Socket`].
     pub fn connect_with_credentials(
         &self,
         remote_addr: SocketAddrEx,
@@ -281,9 +265,7 @@ impl Configurable for UnixDomainSocket {
     }
 }
 impl SocketOps for UnixDomainSocket {
-    /// Returns the type the socket was created with, the way Linux reports
-    /// `sk_type` back from `SO_TYPE`. Deriving it from the transport would
-    /// report `SOCK_DGRAM` for `SOCK_SEQPACKET` pairs.
+    /// Returns the socket type selected at creation.
     fn socket_type(&self) -> i32 {
         self.socket_type.as_raw()
     }
@@ -292,7 +274,7 @@ impl SocketOps for UnixDomainSocket {
         linux_raw_sys::net::AF_UNIX as i32
     }
 
-    /// `unix_create` never records a protocol, so Linux leaves `sk_protocol` 0.
+    /// Unix sockets report protocol 0.
     fn socket_protocol(&self) -> i32 {
         0
     }
@@ -306,8 +288,7 @@ impl SocketOps for UnixDomainSocket {
     fn connect(&self, remote_addr: SocketAddrEx, options: ConnectOptions) -> KResult {
         let remote_addr = remote_addr.into_unix()?;
         let cred = kprocess::current_cred();
-        // Linux initializes peer credentials only while establishing a
-        // connection; datagram `connect` leaves `sk_peer_pid` unset.
+        // Datagram connect does not set peer credentials.
         let peer_credentials = match &self.transport {
             UnixTransport::Stream(_) | UnixTransport::Seqpacket(_) => current_peer_credentials(),
             UnixTransport::Dgram(_) => PeerCredentials::none(),
