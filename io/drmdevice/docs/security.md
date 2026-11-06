@@ -8,7 +8,7 @@ This analysis covers the entire crate: `src/lib.rs`, `src/abi/`, `src/model/`,
 user-copy and mmap primitives, `kclass` device-handle validity, and the display
 backend contract remain the responsibility of their provider crates:
 `model::backend::ClassBackend` is the only code here that calls the display
-contract, and `model::device::DrmMinor` is the only code that implements
+contract, and `model::device::minor::DrmMinor` is the only code that implements
 `DeviceFileOps` for devfs.
 
 ## Trust model and external boundaries

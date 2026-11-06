@@ -229,11 +229,13 @@ fn wo<T: Ioctl + UserRead>(dev: &DrmDevice, file: &Arc<DrmFile>, arg: usize) -> 
 }
 
 fn set_master_entry(dev: &DrmDevice, file: &Arc<DrmFile>, _arg: usize) -> DrmResult<usize> {
-    crate::model::device::set_master(dev, file)
+    dev.set_master(file)?;
+    Ok(0)
 }
 
 fn drop_master_entry(dev: &DrmDevice, file: &Arc<DrmFile>, _arg: usize) -> DrmResult<usize> {
-    crate::model::device::drop_master(dev, file)
+    dev.drop_master(file)?;
+    Ok(0)
 }
 
 /// Copies an id array, reporting the required length.

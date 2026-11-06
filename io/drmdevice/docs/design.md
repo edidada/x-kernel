@@ -11,7 +11,14 @@ they differ only in the per-open file state and in the ioctl permission bits.
 
 ```text
 model/            the object model: no VFS, no display driver
-├── device.rs     DrmDevice + DrmMinor (the only DeviceFileOps adapter)
+├── device/       DrmDevice: struct + one child module per card domain
+│   ├── device.rs struct, construction, device-wide accessors
+│   ├── commit.rs committed KMS state: commit / validate / flush / present
+│   ├── framebuffer.rs  fb registry: add / remove / close / lookup
+│   ├── blob.rs   blob registry and the legacy-mode slot
+│   ├── master.rs card ownership at open + is_master
+│   ├── events.rs event-queue front: flip events, read, poll
+│   └── minor.rs  DrmMinor (the only DeviceFileOps adapter)
 ├── file.rs       DrmFile: per-open caps, handles, fb list, auth
 ├── ioctl.rs      IOCTLS table + permission check + argument marshalling
 ├── backend.rs    trait Backend — the only hardware boundary
@@ -30,7 +37,7 @@ abi/              the Linux UAPI: structures, numbers, constants
 ```
 
 `model` depends on `abi` and on the `Backend` trait, never on `kvfs`, `devfs`
-or `kclass` internals. `device.rs` is the single adapter that converts
+or `kclass` internals. `device/minor.rs` is the single adapter that converts
 `DrmError` to `VfsError` and implements `DeviceFileOps`; a subsystem handler
 cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 `DrmDevice::minor(Primary)` on `/dev/dri/cardN` and
@@ -190,7 +197,7 @@ workqueue is created by this crate.
 
 ## Error model
 
-Handlers and the object model return `DrmError`; `device.rs` maps it to the
+Handlers and the object model return `DrmError`; `device/minor.rs` maps it to the
 errno the syscall layer expects (`EINVAL`, `EOPNOTSUPP`, `ENODEV`, `EBUSY`,
 `EACCES`, `EPERM`, `ENOENT`, `ENOMEM`, `EIO`, `EFAULT`, `EAGAIN`). Unknown
 command numbers are `EOPNOTSUPP`.
