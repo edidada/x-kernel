@@ -35,7 +35,6 @@
 #                           when busy, the next free CID up to 203 is picked)
 #     - COMPOSITOR_IMG      Read-only compositor image attached to GRAPHIC=y
 #                           runs; built from compositor/ when missing or stale
-#     - COMPOSITOR_LIB      libxkbcommon.so.0 bundled into COMPOSITOR_IMG
 #     - QEMU_ARGS           Extra QEMU args, appended verbatim after `--`
 #     - LOG                 Kernel command-line log level for `make run` /
 #                           `make justrun` / `make debug`; shorthand for
@@ -144,7 +143,6 @@ GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
 # first (see the run/justrun prerequisites below).
 COMPOSITOR_DIR ?= $(CURDIR)/compositor
 COMPOSITOR_BIN := $(COMPOSITOR_DIR)/target/release/xk-wayland
-COMPOSITOR_LIB ?= /usr/lib/x86_64-linux-gnu/libxkbcommon.so.0
 COMPOSITOR_IMG ?= $(CURDIR)/compositor.img
 COMPOSITOR_STAGE := $(CURDIR)/target/compositor-root
 COMPOSITOR_DEVICE_ARGS := -device virtio-blk-pci,drive=compositor \
@@ -158,14 +156,9 @@ $(COMPOSITOR_BIN): $(COMPOSITOR_DIR)/Cargo.toml $(COMPOSITOR_DIR)/Cargo.lock $(C
 	@cargo build --release --manifest-path $(COMPOSITOR_DIR)/Cargo.toml --bin xk-wayland
 
 $(COMPOSITOR_IMG): $(COMPOSITOR_BIN)
-	@test -f "$(COMPOSITOR_LIB)" || { \
-		echo "error: $(COMPOSITOR_LIB) not found; set COMPOSITOR_LIB to a libxkbcommon.so.0"; \
-		exit 1; \
-	}
 	@rm -rf "$(COMPOSITOR_STAGE)"
-	@mkdir -p "$(COMPOSITOR_STAGE)/bin" "$(COMPOSITOR_STAGE)/lib"
+	@mkdir -p "$(COMPOSITOR_STAGE)/bin"
 	@cp "$(COMPOSITOR_BIN)" "$(COMPOSITOR_STAGE)/bin/xk-wayland"
-	@cp "$(COMPOSITOR_LIB)" "$(COMPOSITOR_STAGE)/lib/libxkbcommon.so.0"
 	@rm -f "$(COMPOSITOR_IMG)"
 	@mke2fs -q -t ext4 -L xk-compositor -d "$(COMPOSITOR_STAGE)" "$(COMPOSITOR_IMG)" 64M
 	@echo "Built $(COMPOSITOR_IMG)"
