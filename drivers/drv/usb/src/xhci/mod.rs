@@ -2146,11 +2146,16 @@ impl Xhci {
                     core::ptr::write_volatile(input.wrapping_add(offset), value);
                 }
             };
+            // A *placeholder*: xHCI 4.4.23 requires every endpoint context between
+            // EP0's DCI and the highest one Configure Endpoint sets to be present and
+            // disabled. Its fields are never used -- the Add Flags bit for this DCI is
+            // clear, so the controller ignores the context -- which is why leaving
+            // zero/1-packet values here is correct rather than a hardcoded endpoint
+            // parameter. The real contexts are written below, from the descriptors.
             write(ctx, context::endpoint_dword0(0));
-            let ep0_packet = 1024u16;
             write(
                 ctx + 1,
-                context::endpoint_dword1(if direction == 0 { 2 } else { 6 }, ep0_packet, 0),
+                context::endpoint_dword1(if direction == 0 { 2 } else { 6 }, 1024, 0),
             );
             write(ctx + 2, context::endpoint_dword2(next, dcs));
             write(ctx + 3, (next >> 32) as u32);

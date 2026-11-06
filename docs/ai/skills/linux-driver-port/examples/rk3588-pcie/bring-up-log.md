@@ -3196,7 +3196,7 @@ control transfer ep0 ring at 0x10117000: [1] ... c=0x10c25 [2] ... c=0x1001   �
 | 13 | **读 BOS 描述符**（bcdUSB ≥ 0x0201） | `usb_get_bos_descriptor()` | **没有** | **缺**（只影响 LPM 能力判定，不影响传输） |
 | 14 | SetConfiguration(1) → Configure Endpoint | `usb_set_configuration()` → `xhci_add_endpoint()` | `enumerate` + `configure_bulk()` | 一致（`Configure Endpoint` 成功） |
 | 15 | 端点 Context dword0（ep_info） | `EP_MAX_ESIT_PAYLOAD_HI(0)\|EP_INTERVAL(0)\|EP_MULT(0)` | `endpoint_dword0(0)` | 一致 |
-| 16 | 端点 Context dword1（ep_info2） | `EP_TYPE\|MAX_PACKET(usb_endpoint_maxp())\|MAX_BURST(ss_ep_comp.bMaxBurst)\|CErr(3)` | 调 `endpoint_dword1(type, **1024 硬编码**, **0 硬编码**)` | **偏离**：`configure_bulk()` 收到了 `max_packet_*`/`max_burst_*`，写上下文时**两个都丢掉了**（见下） |
+| 16 | 端点 Context dword1（ep_info2） | `EP_TYPE\|MAX_PACKET(usb_endpoint_maxp())\|MAX_BURST(ss_ep_comp.bMaxBurst)\|CErr(3)` | `endpoint_dword1(ep_type, max_packet, max_burst)` —— 均取自描述符 | **一致**（先前的判定是错的，见下） |
 | 17 | 端点 Context dword4（tx_info） | `EP_MAX_ESIT_PAYLOAD_LO(0)\|EP_AVG_TRB_LENGTH(0)`（bulk/control 的 `xhci_get_max_esit_payload()` 返回 0） | `endpoint_tx_info(0,0)` | 一致 |
 | 18 | Bulk TRB（`xhci_queue_bulk_tx`） | 64 KiB 边界、CHAIN/IOC/ISP、TD_SIZE、首 TRB 后发布 | 同（逐字段核过，`len 13 / td_size 0 / intr 0`） | 一致 |
 | 19 | 完成事件匹配 | `trb_in_td()` 按段处理环绕 | `trb_in_td()`（本轮新加） | 一致 |
@@ -3204,22 +3204,17 @@ control transfer ep0 ring at 0x10117000: [1] ... c=0x10c25 [2] ... c=0x1001   �
 | 21 | **SET_SEL / LPM（U1/U2）** | `usb_enable_lpm()` → `usb_req_set_sel()` + `SetPortFeature(PORT_U1/U2_TIMEOUT)` | **没有** | **缺**（合法，但设备行为可能与 Linux 不同） |
 | 22 | `usb_hcd_reset_endpoint` 时机 | 只在设备 CLEAR_FEATURE 成功后 | 同（`clear_endpoint_halt()`） | 一致 |
 
-**两条真正的偏离（第 16 行），证据在代码里**：
+**修正：第 16 行的判定是错的。** 本文件里有**两处**写端点上下文：
 
-```
-write(ctx + 1, context::endpoint_dword1(
-    if direction == 0 { 2 } else { 6 },
-    ep0_packet,        // == 1024u16，硬编码，没用 max_packet_out/in
-    0,                 // MAX_BURST 硬编码 0，没用 max_burst_out/in
-));
-```
+- `configure_bulk()` 主循环（`for (direction, endpoint, max_packet, max_burst)`）写的是
+  `endpoint_dword1(ep_type, max_packet, max_burst)` —— **三个值全取自描述符**，
+  其中 `max_burst` 来自 `ss_ep_comp.bMaxBurst`，与参考一致；
+- 我先前依据的那一处是**占位上下文**（`for dci in 2..=highest`）：xHCI 4.4.23 要求 EP0
+  的 DCI 与最高 DCI 之间的端点上下文"存在但禁用"，其字段控制器**不会使用**（Add Flags
+  里对应位是 0）。那里的 `1024/0` 是占位值，不是被丢掉的参数。
 
-即 `configure_bulk(dev, addr, ep_out, ep_in, max_packet_out, max_packet_in,
-max_burst_out, max_burst_in)` 的**后四个参数一个都没写进上下文**。对这块 SuperSpeed 盘
-packet 恰好是 1024（对上了），但 **`bMaxBurst` 被丢成 0** —— 参考明确取
-`ss_ep_comp.bMaxBurst`（`xhci_get_endpoint_max_burst()`，xhci-mem.c:1423）。这块盘在
-Linux 上按设备声明的 burst 工作，在我们这里被强制成 burst=1，是唯一还没对齐的**设备可见
-配置数据**。
+所以**没有这个偏离**；读到第一处就下结论是我的错。占位处已改写为明确注释 + 常量，
+避免下一个人（或我自己）再把它当成真实参数。
 
 本轮改动编译失败（同一文件里两处写端点上下文，改到了占位循环那一段），已回退，未上板。
 
