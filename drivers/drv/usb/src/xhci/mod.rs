@@ -504,6 +504,11 @@ struct Slot {
     /// Device Context Index of each bulk endpoint (`2 * ep_number + direction`),
     /// which is what the doorbell and every transfer event carry.
     bulk_dci: [u8; 2],
+    /// Each bulk endpoint's `wMaxPacketSize` as the descriptor stated it (512 for
+    /// high speed, 1024 for SuperSpeed). `xhci_queue_bulk_tx()` reads it from the
+    /// endpoint for `xhci_td_remainder()`, so a SuperSpeed transfer computed with
+    /// a high-speed value is a lie about the TD size.
+    bulk_max_packet: [u16; 2],
     /// Per-direction bulk endpoint state: the halt/SET_DEQ bookkeeping the
     /// reference keeps in `xhci_virt_ep`, which this driver only had for EP0.
     bulk_state: [BulkEndpointState; 2],
@@ -1359,7 +1364,7 @@ impl Xhci {
         if length > BOUNCE_LEN {
             return Err(KError::InvalidInput);
         }
-        let max_packet = 512usize;
+        let max_packet = usize::from(self.slots[slot_index].bulk_max_packet[direction]);
         if !is_in && length > 0 {
             // The controller reads the buffer, so it has to be device-visible.
             // SAFETY: the bounce buffer is BOUNCE_LEN bytes, `length` was checked
@@ -2093,6 +2098,7 @@ impl Xhci {
             let ring_addr = ring.mem.bus_addr();
             let dcs = ring.cycle;
             self.slots[slot_index].bulk_dci[direction] = dci as u8;
+            self.slots[slot_index].bulk_max_packet[direction] = max_packet;
             self.slots[slot_index].bulk[direction] = Some(ring);
             let ctx = dwords * (dci as usize + 1);
             let write = |offset: usize, value: u32| {
@@ -3097,6 +3103,7 @@ impl Xhci {
             ep0,
             bulk: [None, None],
             bulk_dci: [0, 0],
+            bulk_max_packet: [0, 0],
             bulk_state: [BulkEndpointState::default(), BulkEndpointState::default()],
             bulk_tds: [
                 alloc::collections::VecDeque::new(),
@@ -4848,6 +4855,31 @@ pub(crate) fn probe_mass_storage(xhci: &mut Xhci, device: &usb::UsbDevice) {
     if let Err(err) = usb::bot_fs::list_root(xhci, &endpoints) {
         log::warn!("xhci: root directory listing failed: {err:?}");
     }
+}
+
+/// Configures a mass-storage device's bulk endpoints from probe.
+///
+/// Ring allocation needs a `Device` (`dev.res().alloc_coherent()`), which only
+/// exists during probe; a runtime re-publication therefore only re-installs the
+/// contexts (`reinstall_bulk_endpoints()`). This has to run before any BOT
+/// command: without it `Doorbell[slot] = DCI` has nothing to start and every bulk
+/// transfer reports `Unsupported`.
+pub(crate) fn configure_mass_storage(
+    xhci: &mut Xhci,
+    dev: &mut Device<'_, driver_base::PlatformBus>,
+    device: &usb::UsbDevice,
+) -> KResult<()> {
+    let pipe = mass_storage_endpoints(device).ok_or(KError::NotFound)?;
+    xhci.configure_bulk(
+        dev,
+        device.address,
+        pipe.endpoints.endpoint_out,
+        pipe.endpoints.endpoint_in,
+        pipe.max_packet_out,
+        pipe.max_packet_in,
+        pipe.max_burst_out,
+        pipe.max_burst_in,
+    )
 }
 
 /// Publishes the mass-storage interface as a block device.

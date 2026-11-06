@@ -207,6 +207,19 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         for device in &devices {
             {
                 let mut guard = xhci.lock();
+                // Endpoints first: the BOT commands below need them, and only
+                // probe can allocate their rings -- this is the `Configure
+                // Endpoint` whose absence made every bulk transfer report
+                // `Unsupported`.
+                match crate::xhci::configure_mass_storage(&mut *guard, dev, device) {
+                    Ok(()) => {
+                        log::info!("dwc3: bulk endpoints configured for {}", device.summary())
+                    }
+                    Err(err) => log::warn!(
+                        "dwc3: could not configure the bulk endpoints of {}: {err:?}",
+                        device.summary()
+                    ),
+                }
                 crate::xhci::probe_mass_storage(&mut *guard, device);
             }
             if let Err(err) = bus.lock().attach(device.clone()) {
