@@ -26,7 +26,10 @@ use vsock::{VsockConnectionInfo, VsockDevice, VsockTransportEvent, VsockTranspor
 use crate::as_driver_error;
 
 /// Per-vsock RX virtqueue buffer size.
-const RX_BUFFER_SIZE: usize = 8192;
+#[cfg(feature = "vsock-tipc")]
+const RX_BUFFER_SIZE: usize = 64 * 1024;
+#[cfg(not(feature = "vsock-tipc"))]
+const RX_BUFFER_SIZE: usize = 8 * 1024;
 
 /// Low-level VirtIO vsock device.
 ///
@@ -34,6 +37,7 @@ const RX_BUFFER_SIZE: usize = 8192;
 /// packet-oriented transport: it does not keep connection tables, listen sets,
 /// accept queues, or per-connection receive buffers. Those are owned by the
 /// connection manager in `net/knet`.
+/// The default RX virtqueue buffer is 8 KiB, or 64 KiB with `vsock-tipc`.
 pub struct VirtIoVsockDev<H: Hal, T: Transport, const RX_BUF_SIZE: usize = RX_BUFFER_SIZE> {
     inner: SpinNoIrq<VirtIOSocket<H, T, RX_BUF_SIZE>>,
     guest_cid: u64,

@@ -41,6 +41,7 @@ virtio-input = ["input", "virtio", "virtio/input"]
 virtio-socket = ["vsock", "virtio", "virtio/socket"]
 virtio-9p = ["virtio", "virtio/virtio-9p", "kclass/virtio-9p"]
 virtio-rng = ["char", "virtio", "virtio/rng"]
+virtio-socket-tipc = ["virtio?/vsock-tipc"]
 
 console = ["char", "dep:console_driver"]
 console-pl011 = ["console", "console_driver/pl011"]

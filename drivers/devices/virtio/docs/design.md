@@ -412,6 +412,12 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 注册表发布 `VirtIoVsockDev`。`net/knet` 的 `VSOCK_CONN_MANAGER` 直接消费该 trait，
 负责连接、监听、缓冲、credit 等所有连接语义。
 
+每个 RX virtqueue 缓冲区默认分配 8 KiB（包含 virtio-vsock 包头）。启用
+`KFEAT_VSOCK_TIPC_BRIDGE` 时，`kfeat` 经 `kdriver/virtio-socket-tipc`
+启用本 crate 的 `vsock-tipc` feature，将该缓冲区扩大到 64 KiB，
+以承载较大的 TIPC 桥接消息。此大小不改变连接管理器通告的 credit；
+单个 64 KiB 缓冲区仍需为包头留空间。
+
 **初始化流程**：
 
 1. `try_new(transport)` → `VirtIOSocket::new(transport)`：协商 feature、分配 VirtIO 队列；

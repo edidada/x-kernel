@@ -19,6 +19,7 @@ input = ["alloc", "dep:input"]
 net = ["alloc", "dep:net"]
 rng = ["alloc", "dep:char_driver"]
 socket = ["alloc", "dep:vsock"]
+vsock-tipc = []
 virtio-9p = ["alloc"]
 
 [dependencies]

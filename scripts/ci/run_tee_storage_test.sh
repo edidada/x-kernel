@@ -13,6 +13,7 @@ read -r -a tee_test_bins <<< "${TEE_TEST_BINS:-storage_test cryp_test}"
 : "${TARGET_DIR:?TARGET_DIR is required}"
 : "${HOSTFWD_PORT:?HOSTFWD_PORT is required}"
 : "${VSOCK_CID:?VSOCK_CID is required}"
+libutee_ref='aca9cd5b6c12ad07bfe6aff844c5017a01b8b102'
 
 if [ "${#tee_test_bins[@]}" -eq 0 ]; then
     echo "TEE_TEST_BINS must contain at least one test binary" >&2
@@ -22,13 +23,12 @@ fi
 libutee_dir="/xkernel-target/libutee-${arch}"
 mkdir -p "${libutee_dir}"
 
-echo "==> Syncing rust-libutee..."
-if [ -d "${libutee_dir}/.git" ]; then
-    git -C "${libutee_dir}" fetch --depth 1 origin HEAD
-    git -C "${libutee_dir}" reset --hard FETCH_HEAD
-else
+echo "==> Syncing rust-libutee ref ${libutee_ref}..."
+if [ ! -d "${libutee_dir}/.git" ]; then
     git clone --depth 1 "${LIBUTEE_REPO}" "${libutee_dir}"
 fi
+git -C "${libutee_dir}" fetch --depth 1 origin "${libutee_ref}"
+git -C "${libutee_dir}" reset --hard FETCH_HEAD
 
 echo "==> Building TEE tests for ${musl_target}: ${tee_test_bins[*]}"
 (
