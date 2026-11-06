@@ -1476,9 +1476,19 @@ pub mod driver {
                 driver_base::MmioRegion::new(grf_base, 0x4000),
                 "usb2phy-grf",
             ) {
+                // Compare against the reference board, where the same PHY reads
+                // 00=7066 04=7933 08=0d14 0c=0214 10=0. The host-port bank starts
+                // at +0x10 in the Inno USB2 PHY layout, so a difference there is a
+                // port that was never programmed.
+                let mut line = alloc::string::String::new();
+                for offset in (0..0x20).step_by(4) {
+                    line.push_str(&alloc::format!(
+                        " {offset:02x}={:08x}",
+                        block.read32(offset)
+                    ));
+                }
                 info!(
-                    "ehci: usb2phy {block_base:#x} +0x0000 {:#06x} (clkout_ctl bit0 {})",
-                    block.read32(0),
+                    "ehci: usb2phy {block_base:#x}{line} (clkout_ctl bit0 {})",
                     if block.read32(0) & 0x1 != 0 {
                         "on"
                     } else {

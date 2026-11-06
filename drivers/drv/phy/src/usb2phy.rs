@@ -163,7 +163,20 @@ impl PhyHwOps for Usb2Phy {
         let enabled = self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
         *self.clk480m_enabled.lock() = Some(enabled);
         self.set_suspended(false);
-        self.reset_pulse();
+        // `rockchip_usb2phy_power_on()` resets the phy only for the OTG port:
+        //
+        // 	if (rport->port_id == USB2PHY_PORT_OTG &&
+        // 	    of_device_is_compatible(..., "rockchip,rk3588-usb2phy"))
+        // 		rockchip_usb2phy_reset(rphy);
+        //
+        // A host port is left alone, which is what keeps the probe-time
+        // `rk3588_usb2phy_tuning()` values (HS DC level, pre-emphasis, UTMI
+        // transceiver select) in the registers. Resetting here wiped them, and the
+        // board read back the untuned values (04=7633 08=0d00 0c=0200) instead of
+        // the reference's 7933/0d14/0214.
+        if matches!(self.block, Block::Usb3_0 | Block::Usb3_1) {
+            self.reset_pulse();
+        }
         // The reference (and the U-Boot code it mirrors) waits 2 ms here for the
         // UTMI clock to stabilise before the controller is allowed to touch the
         // port; without it the PHY can accept a connect but not a transaction.
