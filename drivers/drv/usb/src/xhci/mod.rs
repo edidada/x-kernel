@@ -1665,13 +1665,23 @@ impl Xhci {
         if let Some(td) = self.slots[slot_index].bulk_tds[direction].front().copied() {
             self.slots[slot_index].bulk_state[direction].halted_td = Some(td);
         }
-        self.recover_bulk_endpoint(slot_index, direction);
-        // Queueing the reset is only half of `xhci_handle_halted_endpoint()`: the
-        // reference then No-Ops the descriptor that stalled and moves the ring's
-        // dequeue past it (`xhci_invalidate_cancelled_tds()`). Without that the stale
-        // TRB stays on the ring, the controller's dequeue stays in front of it, and
-        // every later transfer is enqueued behind a descriptor the controller will
-        // never advance past -- one timeout, then a dead endpoint until a full reset.
+        // Deliberately *no* endpoint reset here.
+        //
+        // A timeout is not a halt: the device never told us anything, so resetting
+        // the host-side pipe (`Reset Endpoint`) alone leaves the two sides holding
+        // different pipe state -- for a SuperSpeed endpoint that is a link-level
+        // sequence mismatch, and the device then drops every packet on that pipe. The
+        // reference never does this: a timed-out URB just returns, and the host-side
+        // reset only happens inside `usb_clear_halt()` *after* the device's
+        // `CLEAR_FEATURE(ENDPOINT_HALT)` succeeded (`usb_stor_reset_common()` sends
+        // exactly that as its recovery). That ordering is what this driver now
+        // follows: the class reset drives `clear_endpoint_halt()`, which resets and
+        // invalidates in the right order (see `Hcd::clear_endpoint_halt`).
+        //
+        // The descriptor itself is still No-Op'd and the ring's dequeue moved past it
+        // (`xhci_invalidate_cancelled_tds()`), because that part only touches the ring:
+        // leaving a dead TRB at the head would make every later transfer wait behind a
+        // descriptor the controller never advances past.
         self.invalidate_bulk_endpoint(slot_index, direction);
         // Did the controller ever start this descriptor? The endpoint context's
         // dequeue is the answer: unchanged means the doorbell/DCS never reached
