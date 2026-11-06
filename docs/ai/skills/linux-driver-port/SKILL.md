@@ -292,6 +292,7 @@ knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
 | [`templates/driver-skeleton.md`](templates/driver-skeleton.md) | Phase 3 生成代码时 | 标准 Rust 驱动骨架(可直接填空) |
 | [`templates/gap-report.md`](templates/gap-report.md) | Phase 4 写报告时 | 缺口报告固定格式 |
 | [`workflow/port-workflow.md`](workflow/port-workflow.md) | 贯穿全程 | Phase 0–6 详解(P6=真机带机校验/triage) |
+| [`workflow/porting-heuristics.md`](workflow/porting-heuristics.md) | 贯穿全程 | 跨驱动复用的判断准则:缺席清单、生命周期结构不可局部等价、状态归属、复位爆炸半径、重试≠机制、探测设计、"何时停止点补丁" |
 | [`examples/ls7a-rtc-walkthrough.md`](examples/ls7a-rtc-walkthrough.md) | 需要参照时 | ★ 完整 demo:Linux rtc-loongson → x-kernel(v2,golden 基线) |
 
 ## 工作流一览(详见 `workflow/port-workflow.md`)
