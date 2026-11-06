@@ -139,6 +139,10 @@ pub mod trb {
     pub const DISABLE_SLOT: u32 = 10;
     pub const ADDRESS_DEVICE: u32 = 11;
     pub const CONFIGURE_ENDPOINT: u32 = 12;
+    /// `TRB_EVAL_CONTEXT` (13): updates the slot/EP0 context of an *addressed*
+    /// slot without touching its address, which is how a changed EP0 max packet
+    /// reaches the controller (`xhci_check_maxpacket()`).
+    pub const EVALUATE_CONTEXT: u32 = 13;
     /// `TRB_RESET_EP`: returns a halted endpoint to Running without touching its
     /// ring; paired with `SET_TR_DEQUEUE` to re-point it.
     ///
@@ -161,6 +165,15 @@ pub mod trb {
     pub const TRANSFER_EVENT: u32 = 32;
     pub const COMMAND_COMPLETION: u32 = 33;
     pub const PORT_STATUS_CHANGE: u32 = 34;
+    /// `TRB_HOST_CONTROLLER_ERROR` (35): the controller faulted. Nothing is
+    /// queued for it; the driver has to reset the controller and let the device
+    /// layer re-enumerate, which is `xhci_hc_died()`'s reaction.
+    pub const HOST_CONTROLLER_ERROR: u32 = 35;
+    /// `TRB_DEV_NOTE` (38) and `TRB_MFINDEX_WRAP` (39): no action for a polled
+    /// driver, but naming them keeps them from being mistaken for command
+    /// completions when the debug output is read.
+    pub const DEVICE_NOTIFICATION: u32 = 38;
+    pub const MFINDEX_WRAP: u32 = 39;
     /// `TRB_RESET_DEV`: tells the controller the slot's device was reset, so it
     /// drops the context state it kept for the device
     /// (`hcd->driver->reset_device` = `xhci_discover_or_reset_device()`).

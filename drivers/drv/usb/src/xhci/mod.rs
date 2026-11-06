@@ -125,6 +125,13 @@ impl Ring {
     /// written. The inverse bit is used because that is what the reference does:
     /// a held TRB carries the opposite of the ring's cycle, and publishing it
     /// writes the real one.
+    /// TRBs the producer has written since the last wrap. `inc_enq()`'s
+    /// `num_trbs_free` counterpart: the controller owns everything up to its own
+    /// dequeue, and the ring may only be reused after it has been consumed.
+    fn used_since_wrap(&self) -> usize {
+        self.index % self.trbs
+    }
+
     fn push_held(&mut self, mut trb: Trb) -> (usize, bool) {
         let index = self.index % self.trbs;
         let cycle = self.cycle;
@@ -330,6 +337,12 @@ pub struct Xhci {
     /// instead (what this driver used to do) turns a lost completion into a
     /// misattributed one.
     commands: alloc::collections::VecDeque<PendingCmd>,
+    /// A Port Status Change event arrived since the last port scan. Polled
+    /// drivers still need it: it is the only signal that a port changed while
+    /// nobody was looking at it.
+    port_change: bool,
+    /// A Host Controller Error event arrived: the controller needs a reset.
+    hc_error: bool,
     /// Set by the event dispatcher when a Command Ring Stopped event (TRB type
     /// 37) arrives. `abort_command_ring()` alternates on it across its two
     /// steps: abort (expect the event) and restart (expect nothing).
@@ -892,6 +905,8 @@ impl Xhci {
             event_cycle: true,
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
+            port_change: false,
+            hc_error: false,
             ring_stopped: false,
             completed: None,
             deferred: alloc::collections::VecDeque::new(),
@@ -1633,6 +1648,61 @@ impl Xhci {
         Err(KError::TimedOut)
     }
 
+    /// `xhci_check_maxpacket()`: tell the controller the real EP0 max packet.
+    ///
+    /// `Address Device` can only carry a *guess* (8 for low speed, 64 for full and
+    /// high, 512 for SuperSpeed) because the descriptor has not been read yet. When
+    /// the descriptor then says something else -- a full-speed device with 8, 16 or
+    /// 32 -- the context has to be updated with Evaluate Context, or every later
+    /// control transfer is split into packets the device cannot receive.
+    pub(crate) fn evaluate_ep0_max_packet(&mut self, address: u8, max_packet: u16) -> KResult<()> {
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.id == address)
+            .ok_or(KError::NotFound)?;
+        let slot_id = self.slots[slot_index].id;
+        let dwords = self.context_size / 4;
+        let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let device_ctx = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        // `xhci_endpoint_copy()` of the EP0 context, then the two fields
+        // `xhci_check_maxpacket()` rewrites: the EP state must be cleared and the
+        // packet size replaced.
+        let ep0 = dwords * (context::EP0_CONTEXT + 1);
+        for dword in 0..5usize {
+            // SAFETY: the EP0 context of both contexts is inside its allocation.
+            let value = unsafe { core::ptr::read_volatile(device_ctx.wrapping_add(ep0 + dword)) };
+            // SAFETY: as above, on the input context.
+            unsafe {
+                core::ptr::write_volatile(input.wrapping_add(ep0 + dword), value);
+            }
+        }
+        let info0 = unsafe { core::ptr::read_volatile(input.wrapping_add(ep0)) };
+        // SAFETY: dword0 of the input EP0 context: EP state must read as 0.
+        unsafe {
+            core::ptr::write_volatile(input.wrapping_add(ep0), info0 & !0x7);
+        }
+        let info1 = unsafe { core::ptr::read_volatile(input.wrapping_add(ep0 + 1)) };
+        // SAFETY: dword1 of the same context: Max Packet Size is bits 31:16.
+        unsafe {
+            core::ptr::write_volatile(
+                input.wrapping_add(ep0 + 1),
+                (info1 & !0xffff_0000) | (u32::from(max_packet) << 16),
+            );
+        }
+        // `ctrl_ctx->add_flags = EP0_FLAG; ctrl_ctx->drop_flags = 0;`
+        write_input_control(input, 1 << (context::EP0_CONTEXT as u32));
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::EVALUATE_CONTEXT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "evaluate context")?;
+        info!("xhci: slot {slot_id} ep0 max packet updated to {max_packet}");
+        Ok(())
+    }
+
     /// Configures a device's two bulk endpoints and installs them.
     ///
     /// This is `xhci_endpoint_init()` (5.10 drivers/usb/host/xhci-mem.c:1462) for
@@ -1656,6 +1726,8 @@ impl Xhci {
         ep_in: u8,
         max_packet_out: u16,
         max_packet_in: u16,
+        max_burst_out: u8,
+        max_burst_in: u8,
     ) -> KResult<()> {
         let slot_index = self
             .slots
@@ -1681,9 +1753,9 @@ impl Xhci {
         }
         let mut highest_dci = 1u32;
         let mut add_flags = 1u32; // SLOT
-        for (direction, endpoint, max_packet) in [
-            (0usize, ep_out, max_packet_out),
-            (1usize, ep_in, max_packet_in),
+        for (direction, endpoint, max_packet, max_burst) in [
+            (0usize, ep_out, max_packet_out, max_burst_out),
+            (1usize, ep_in, max_packet_in, max_burst_in),
         ] {
             let ep_number = u32::from(endpoint & 0x0f);
             // `xhci_get_endpoint_index()`: DCI = 2 * ep_number + direction.
@@ -1715,7 +1787,13 @@ impl Xhci {
             // the controller has no reason to issue IN tokens for it, and it
             // reports nothing at all -- no event, no error, just silence.
             let ep_type = if direction == 0 { 2 } else { 6 };
-            write(ctx + 1, context::endpoint_dword1(ep_type, max_packet, 0));
+            // Max Burst Size comes from the endpoint's SuperSpeed companion
+            // descriptor (`xhci_get_endpoint_max_burst()`); 0 means "one packet
+            // per burst", which is only correct for a device that declares 0.
+            write(
+                ctx + 1,
+                context::endpoint_dword1(ep_type, max_packet, max_burst),
+            );
             write(ctx + 2, context::endpoint_dword2(ring_addr, dcs));
             write(ctx + 3, (ring_addr >> 32) as u32);
             // dword4: no ESIT for bulk; Linux leaves Average TRB Length 0 here
@@ -1831,6 +1909,23 @@ impl Xhci {
             match event.trb_type() {
                 regs::trb::TRANSFER_EVENT => self.handle_tx_event(&event),
                 regs::trb::COMMAND_COMPLETION => self.handle_cmd_completion(&event),
+                // Port Status Change: the hotplug and link-state signal. This
+                // driver polls the ports instead of taking an interrupt, so the
+                // event only needs to record that a rescan is due -- dropping it
+                // silently is what makes "the device was replugged" invisible.
+                regs::trb::PORT_STATUS_CHANGE => {
+                    let port = ((event.parameter >> 24) & 0xff) as usize;
+                    info!("xhci: port {} status change event", port);
+                    self.port_change = true;
+                }
+                // `xhci_handle_event()`'s HOST_CONTROLLER_ERROR case leads to
+                // `xhci_hc_died()`: the controller has faulted and everything it
+                // owns is suspect.
+                regs::trb::HOST_CONTROLLER_ERROR => {
+                    log::error!("xhci: host controller error event");
+                    self.hc_error = true;
+                }
+                regs::trb::DEVICE_NOTIFICATION | regs::trb::MFINDEX_WRAP => {}
                 // `xhci_handle_event()`'s `TRB_COMMAND_RING_STOPPED` case: the
                 // acknowledgement of a Command Ring Abort. Nothing is queued for
                 // it; `abort_command_ring()` is the waiter.
@@ -3432,6 +3527,40 @@ impl Hcd for Xhci {
         self.bulk_transfer_slot(slot_index, endpoint, data, is_in)
     }
 
+    /// `xhci_endpoint_reset()`: return a halted endpoint to Running and re-point
+    /// its ring past whatever stalled.
+    ///
+    /// The class driver has just cleared the device's halt with
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)`; the *host* side needs its own reset, or the
+    /// endpoint stays halted and the next transfer is never fetched. Both halves
+    /// are already here for EP0 and for bulk -- this is the mapping from an
+    /// endpoint address to the DCI they take.
+    fn clear_endpoint_halt(&mut self, address: u8, endpoint: u8, is_out: bool) {
+        let Some(slot_index) = self.slots.iter().position(|slot| slot.id == address) else {
+            return;
+        };
+        if endpoint == 0 {
+            let slot_id = self.slots[slot_index].id;
+            self.clear_halt(slot_id);
+            self.invalidate_ep0(slot_id);
+            return;
+        }
+        // Bulk endpoints are found by direction, which is also how their DCI was
+        // recorded when they were configured.
+        let direction = usize::from(!is_out);
+        if self.slots[slot_index].bulk[direction].is_none() {
+            return;
+        }
+        self.slots[slot_index].bulk_state[direction].halted = false;
+        self.recover_bulk_endpoint(slot_index, direction);
+    }
+
+    fn set_ep0_max_packet(&mut self, address: u8, max_packet: u16) {
+        if let Err(err) = self.evaluate_ep0_max_packet(address, max_packet) {
+            log::error!("xhci: evaluate context for address {address} failed: {err:?}");
+        }
+    }
+
     fn name(&self) -> &'static str {
         "xhci"
     }
@@ -4274,6 +4403,8 @@ struct MassStoragePipe {
     endpoints: usb::bot::BotEndpoints,
     max_packet_out: u16,
     max_packet_in: u16,
+    max_burst_out: u8,
+    max_burst_in: u8,
 }
 
 /// Finds the bulk-only mass-storage interface of `device`, if it has one.
@@ -4287,13 +4418,17 @@ fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<MassStoragePipe> {
             let mut endpoint_out = 0u8;
             let mut max_packet_in = 0u16;
             let mut max_packet_out = 0u16;
+            let mut max_burst_in = 0u8;
+            let mut max_burst_out = 0u8;
             for endpoint in &interface.endpoints {
                 if endpoint.is_in() {
                     endpoint_in = endpoint.address;
                     max_packet_in = endpoint.max_packet_size;
+                    max_burst_in = endpoint.max_burst;
                 } else {
                     endpoint_out = endpoint.address;
                     max_packet_out = endpoint.max_packet_size;
+                    max_burst_out = endpoint.max_burst;
                 }
             }
             if endpoint_in == 0 || endpoint_out == 0 {
@@ -4318,6 +4453,8 @@ fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<MassStoragePipe> {
                 },
                 max_packet_out,
                 max_packet_in,
+                max_burst_out,
+                max_burst_in,
             });
         }
     }
@@ -4367,6 +4504,8 @@ pub(crate) fn publish_mass_storage(
             endpoints.endpoint_in,
             pipe.max_packet_out,
             pipe.max_packet_in,
+            pipe.max_burst_out,
+            pipe.max_burst_in,
         ) {
             log::error!("xhci: configuring the bulk endpoints failed: {err:?}");
             return None;

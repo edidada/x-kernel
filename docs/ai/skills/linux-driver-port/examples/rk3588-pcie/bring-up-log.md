@@ -2790,6 +2790,39 @@ PMA 初始化序列，节点被重探时就会在活动链路上做一次完整 
 端口复位 + 完整重枚举 + 重新 bind**；我们这条路径在 xHCI 侧根本不存在（EHCI 有 `reattach()`，
 但它只重设同一地址、不重读描述符）。这就是要先补的机制，而不是继续在 bulk 里找字段。
 
+### 5.9.4h 整体缺口审计（不再"发现一个补一个"）
+
+用工具取证（`grep` 计数 + 与参考函数表对照）得到的完整清单，按"能否独立补"分三层。
+
+**第一层：小缺口（一轮内可补，影响正确性）**
+
+| # | 缺口 | 证据 | 状态 |
+| --- | --- | --- | --- |
+| A | bulk 端点上下文忽略 `bMaxBurst` | `endpoint_dword1(..., 0)`（描述符解析器其实已给 `max_burst`） | 已补 |
+| B | 没有 Evaluate Context：EP0 max packet 只是 Address Device 时的**猜测** | `grep evaluate_context` = 0 | 已补（`xhci_check_maxpacket()` 语义） |
+| C | 环无空闲 TRB 记账，回绕可能覆盖控制器仍持有的 TRB | `grep ring_expansion` = 0 | 已补（`prepare_ring()` 的 `room_on_ring` 语义：有未完成描述符时拒绝入队） |
+| D | xHCI 未实现 `clear_endpoint_halt`（trait 默认空实现），BOT reset 后主机端点仍 halt | trait 默认 `{}` | 已补（按端点地址映射到 EP0/bulk 的 DCI，复用已有恢复） |
+| E | 事件只分派 32/33/37，丢弃 34/35/38/39 | `pump_events` 三分支 | 已补（34 → `port_change` 标志；35 → `hc_error` 标志；38/39 明确忽略） |
+
+**第二层：三块缺失子系统（不是补丁能解决，需要成批设计）**
+
+| # | 子系统 | 缺什么 | 参考 | 后果 |
+| --- | --- | --- | --- | --- |
+| F | **设备生命周期** | 端口变化 → 移除/复位 → 重新枚举 → 重新发布 | `hub_wq`、`usb_reset_and_verify_device()`、`hub_port_init()` | **USB3 当前卡点**；掉盘后挂载点残留 |
+| G | **接口/类驱动绑定层** | bind/unbind、publication 的所有者 | `usb_interface`/`usb_driver`、`pre_reset`/`post_reset` | 发布物挂在 probe 的数据结构里，运行时无法撤销/重建 |
+| H | **端点级恢复收尾** | Reset Endpoint / Set TR Dequeue 与类驱动 retry 串起来 | `xhci_urb_dequeue()`、`usb_stor_pre_reset()` | 一次 stall 后的恢复不可靠 |
+
+**第三层：明确记录、暂不实现（有理由）**
+
+- **中断**：全程轮询，没有 MSI/IRQ。`port_change`/`hc_error` 现在被记录，但仍需一个轮询者去消费。
+- **USB3 LPM（`SET_SEL`/U1-U2）**：Linux 只在使能 LPM 时发送；属信息性配置，非功能前提。
+- **isochronous 端点 / streams / 带宽表**：本项目当前无 isoc 消费者。
+- **ring expansion**：现在是"拒绝入队并报错"，不是"扩展环"；256 TRB × 串行传输足够，但长跑需正式扩展。
+- **多配置 / BOS 描述符**：只读第一个配置。
+
+**执行顺序（按依赖，而不是按现象）**：F 需要 E（已有）；G 是 F 的前提（撤销/重建发布物）；H 是 F 失败后的兜底。
+所以下一批是 **G → F → H**，作为一个"设备生命周期"提交，而不是三轮各自打补丁。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；

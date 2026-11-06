@@ -187,6 +187,13 @@ pub trait Hcd: Send + Sync {
     /// amount of retrying helps.
     ///
     /// Default: the controller keeps no toggle state that software can reset.
+    /// Tells the controller the EP0 max packet size the device's descriptor
+    /// declared. `Address Device` can only carry a guess for it, and controllers
+    /// that keep the guess (xHCI does) then split later control transfers into
+    /// packets the device cannot receive (`xhci_check_maxpacket()`). Controllers
+    /// whose EP0 size is not in a context ignore this.
+    fn set_ep0_max_packet(&mut self, _address: u8, _max_packet: u16) {}
+
     fn clear_endpoint_halt(&mut self, address: u8, endpoint: u8, is_out: bool) {
         let _ = (address, endpoint, is_out);
     }

@@ -144,6 +144,10 @@ pub fn enumerate_port(hcd: &mut dyn Hcd, port: usize, address: u8) -> KResult<Us
         device.num_configurations,
     );
 
+    // The controller was addressed with a *guessed* EP0 packet size; the
+    // descriptor is the first authoritative value, so hand it over before any
+    // transfer that carries more than one packet (`xhci_check_maxpacket()`).
+    hcd.set_ep0_max_packet(address, u16::from(device.max_packet_size_0));
     let configurations = read_configurations(hcd, address)?;
     log_configurations(address, port, &configurations);
 
