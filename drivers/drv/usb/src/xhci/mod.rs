@@ -351,6 +351,8 @@ pub struct Xhci {
     /// Created by the probe (which is where a `DeviceHandle` exists) and used
     /// afterwards, so a device can be withdrawn or published at runtime.
     bus: Option<alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>>,
+    /// Set once the "is the device still there at all?" probe has run.
+    device_probe_done: bool,
     /// Root ports that reported a connection but did not answer when brought up.
     ///
     /// A stacked connector exposes the same physical port in both protocol sets, and
@@ -950,6 +952,7 @@ impl Xhci {
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
             bus: None,
+            device_probe_done: false,
             dead_ports: alloc::vec::Vec::new(),
             last_port_sample: alloc::vec::Vec::new(),
             last_transfer_ns: 0,
@@ -1657,6 +1660,7 @@ impl Xhci {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
         }
         self.log_event_timeout("bulk transfer");
+        self.probe_device_alive(slot_index);
         // A descriptor that never completed leaves the endpoint in a state the
         // controller will not advance: reset it and move past the descriptor, so
         // the caller's retry starts from a clean ring. (The slot is *not* marked
@@ -1967,6 +1971,65 @@ impl Xhci {
         let status = self.bar.read32(self.operational + op::USBSTS);
         if status & sts::EINT != 0 {
             self.bar.write32(self.operational + op::USBSTS, status);
+        }
+    }
+
+    /// Asks the device itself -- over EP0 -- whether it is still there.
+    ///
+    /// A bulk timeout says only that a bulk Transfer Event did not arrive. The two
+    /// states behind that are very different: the *pipe* stopped (a halt, a
+    /// sequence mismatch, a dead ring) or the *device* stopped answering on every
+    /// endpoint. `GET_STATUS(device)` is the smallest request that tells them apart,
+    /// and unlike the bulk pipe it has no BOT state machine in the way.
+    ///
+    /// Runs once per boot: the probe shares the 5 s completion budget, and repeating
+    /// it on every timeout would turn one stuck transfer into minutes of console.
+    fn probe_device_alive(&mut self, slot_index: usize) {
+        if self.device_probe_done {
+            return;
+        }
+        self.device_probe_done = true;
+        // Ask *every* addressed slot, not just the one whose transfer timed out.
+        // The device in question sits behind a hub on this board, so "the device
+        // stopped" and "the hub stopped forwarding" produce the same host-side
+        // symptom; one GET_STATUS per slot separates them in a single boot.
+        for other in 0..self.slots.len() {
+            if other == slot_index {
+                continue;
+            }
+            let other_id = self.slots[other].id;
+            let setup = usb::SetupPacket::new(0x80, 0x00, 0, 0, 2);
+            let mut buffer = [0u8; 2];
+            match self.control_transfer_slot(other, &setup, &mut buffer) {
+                Ok(read) => log::error!(
+                    "xhci: probe: slot {other_id} still answers GET_STATUS(device) ({read} bytes,                      status {:#06x})",
+                    u16::from_le_bytes([buffer[0], buffer.get(1).copied().unwrap_or(0)]),
+                ),
+                Err(err) => log::error!(
+                    "xhci: probe: slot {other_id} does not answer GET_STATUS(device) either                      ({err:?})"
+                ),
+            }
+        }
+        let slot_id = self.slots[slot_index].id;
+        // `GET_STATUS(device)`: bmRequestType 0x80 (IN | standard | device),
+        // bRequest 0, wValue 0, wIndex 0, wLength 2.
+        let setup = usb::SetupPacket::new(0x80, 0x00, 0, 0, 2);
+        let mut buffer = [0u8; 2];
+        match self.control_transfer_slot(slot_index, &setup, &mut buffer) {
+            Ok(read) => {
+                log::error!(
+                    "xhci: probe GET_STATUS(device) on slot {slot_id} answered ({read} bytes, \
+                     status                  {:#06x}): the device is alive, so the bulk pipe is \
+                     what stopped",
+                    u16::from_le_bytes([buffer[0], buffer.get(1).copied().unwrap_or(0)]),
+                )
+            }
+            Err(err) => {
+                log::error!(
+                    "xhci: probe GET_STATUS(device) on slot {slot_id} did not complete ({err:?}): \
+                     the                  device is not answering even on EP0"
+                )
+            }
         }
     }
 
