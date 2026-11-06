@@ -2156,6 +2156,11 @@ impl Xhci {
             return Err(err);
         }
         self.address_zero_slot = None;
+        // What the controller wrote back matters as much as the completion code:
+        // the slot context carries the device address it assigned and the state
+        // it put EP0 in, which is the difference between "the device ignored us"
+        // and "we are talking to the wrong address".
+        self.log_device_context(slot_index);
         // `hub_port_init()`, right after Set Address and before the first
         // descriptor read:
         //
@@ -2883,7 +2888,11 @@ impl Xhci {
                 }
             }
         }
-        let ports = usb::hub::scan(self, hub.address, hub.device.protocol);
+        // Depth 0: this walker only descends one level (root port -> hub ->
+        // device), so every hub it brings up sits directly on a root port. A
+        // nested hub would need its parent's depth plus one -- and
+        // `HUB_SET_DEPTH` is what makes that value reach the hub at all.
+        let ports = usb::hub::scan(self, hub.address, hub.device.protocol, 0);
         // `bDeviceProtocol` (from the *device* descriptor): 0 FS hub, 1 HS
         // single-TT, 2 HS multi-TT, 3 SuperSpeed.
         let protocol = hub.device.protocol;
@@ -3066,6 +3075,22 @@ impl Xhci {
                         hub.address,
                         entry.port
                     );
+                    // Did the link survive the failure? A port that fell out of
+                    // U0 (or out of Enabled) explains a later Transaction Error
+                    // without implicating the device.
+                    if let Some((status, change)) =
+                        usb::hub::port_status(self, hub.address, entry.port)
+                    {
+                        log::error!(
+                            "xhci: hub {} port {} after failure: status {status:#06x} change \
+                             {change:#04x} (connected {}, enabled {}, link state {})",
+                            hub.address,
+                            entry.port,
+                            status & 1 != 0,
+                            status & 2 != 0,
+                            (status >> 5) & 0xf,
+                        );
+                    }
                     // `hub_port_init()`'s `fail:` label calls
                     // `hub_port_disable(hub, port1, 0)` on every failed attempt
                     // path. Leaving the port enabled keeps it claimed by a child

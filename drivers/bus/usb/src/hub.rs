@@ -34,6 +34,10 @@ const RT_IN_CLASS_DEVICE: u8 = 0xA0;
 const RT_IN_CLASS_OTHER: u8 = 0xA3;
 /// `bmRequestType`: OUT, class, host-to-device, recipient = other.
 const RT_OUT_CLASS_OTHER: u8 = 0x23;
+/// Class request, **device** recipient, host to device: `USB_RT_HUB` in the
+/// reference. `HUB_SET_DEPTH` is addressed at the hub device itself, not at a
+/// port, so it is 0x20 and not 0x23.
+const RT_OUT_CLASS_DEVICE: u8 = 0x20;
 
 /// Port feature selectors (USB 2.0 §11.24.2, USB 3.x §10.16.1).
 const FEAT_PORT_ENABLE: u16 = 1;
@@ -43,6 +47,9 @@ const FEAT_PORT_RESET: u16 = 4;
 const FEAT_PORT_POWER: u16 = 8;
 /// Warm reset of a SuperSpeed port (`USB_PORT_FEAT_BH_PORT_RESET`).
 const FEAT_PORT_BH_RESET: u16 = 28;
+/// `HUB_SET_DEPTH` (`include/uapi/linux/usb/ch11.h:57`): a class request every
+/// SuperSpeed hub except the root hub must receive after Set Configuration.
+const REQ_SET_HUB_DEPTH: u8 = 0x0c;
 
 /// `wPortStatus` bits (identical low half in both specs).
 const PORT_ST_CONNECTION: u32 = 1 << 0;
@@ -293,7 +300,42 @@ fn clear_changes(hcd: &mut dyn Hcd, address: u8, port: u8, change: u32, info: Hu
 }
 
 /// Scans every downstream port of the hub at `address`.
-pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> alloc::vec::Vec<HubPort> {
+/// `hub_configure()`'s `HUB_SET_DEPTH` step.
+///
+/// From the reference (`hub.c:1045`):
+///
+/// > The superspeed hub except for root hub has to use Hub Depth value as an
+/// > offset into the route string to locate the bits it uses to determine the
+/// > downstream port number. So hub driver should send a set hub depth request
+/// > to superspeed hub after the superspeed hub is set configuration in
+/// > initialization or reset procedure.
+///
+/// Without it the hub does not know which nibble of a downstream device's route
+/// string names one of its own ports, so it forwards nothing: the child's link
+/// comes up (the port reports connected, enabled, U0) and then every addressed
+/// transaction -- Address Device, and even a SETUP to address 0 -- ends in a USB
+/// Transaction Error with the transfer residual untouched.
+pub fn set_hub_depth(hcd: &mut dyn Hcd, address: u8, depth: u8) {
+    // `usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0), HUB_SET_DEPTH, USB_RT_HUB,
+    //                  hdev->level - 1, 0, NULL, 0, ...)`: class request, device
+    // recipient, wValue = depth, no data stage.
+    let ok = control_no_data(
+        hcd,
+        address,
+        SetupPacket::new(RT_OUT_CLASS_DEVICE, REQ_SET_HUB_DEPTH, depth.into(), 0, 0),
+    );
+    if ok {
+        log::info!("usb: hub {address} set hub depth {depth}");
+    } else {
+        log::error!("usb: hub {address} set hub depth {depth} rejected");
+    }
+}
+
+/// Reads a hub's descriptors and reports its ports.
+///
+/// `depth` is the hub's tier below the root hub (0 for a hub on a root port),
+/// which a SuperSpeed hub has to be told before its ports can be used.
+pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8, depth: u8) -> alloc::vec::Vec<HubPort> {
     let Some(info) = info(hcd, address, protocol) else {
         log::error!("usb: hub {address} did not answer GET_DESCRIPTOR(HUB)");
         return alloc::vec::Vec::new();
@@ -308,6 +350,9 @@ pub fn scan(hcd: &mut dyn Hcd, address: u8, protocol: u8) -> alloc::vec::Vec<Hub
             "USB2"
         },
     );
+    if info.is_superspeed() {
+        set_hub_depth(hcd, address, depth);
+    }
     power_ports(hcd, address, info);
     let mut ports = alloc::vec::Vec::new();
     for port in 1..=info.ports {
