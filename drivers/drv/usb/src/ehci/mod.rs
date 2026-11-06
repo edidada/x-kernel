@@ -772,6 +772,26 @@ impl Ehci {
         // Active after the timeout is evidence of anything.
         if token & token::ACTIVE != 0 {
             let status = self.regs.read32(self.operational + op::USBSTS);
+            if status & sts::ASS != 0 {
+                // The schedule is "running" yet never fetched an Active
+                // descriptor: restart it the way `ehci_run()` does --
+                // `disable_async()` clears ASE and waits for ASS to fall, then
+                // the async head address is re-published and ASE set again.
+                self.restart_async();
+                self.bulk_enqueue(BULK_QH, dummy_slot, is_in, length)?;
+                for _ in 0..POLL_STEPS {
+                    // SAFETY: dword 2 of the dummy descriptor is its token.
+                    token = unsafe { core::ptr::read_volatile(qtd_ptr.cast::<u32>().add(2)) };
+                    if token & token::ACTIVE == 0 {
+                        break;
+                    }
+                    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
+                }
+                if token & token::ACTIVE == 0 {
+                    log::warn!("ehci: transfer completed after an async-schedule restart");
+                    return Ok(0);
+                }
+            }
             log::error!(
                 "ehci: bulk transfer did not complete, token {token:#010x}, USBSTS {status:#010x} \
                  (halted {}, hse {}, ass {}, rec {})",
@@ -783,6 +803,64 @@ impl Ehci {
             // The EP0 queue head's descriptors: if one is still Active, the
             // controller is parked on the control endpoint retrying it forever
             // and never reaches the bulk queue heads behind it in the ring.
+            // Every queue head in the async ring, as the controller holds it.
+            // One halted head anywhere in the circular list stops the walk, and
+            // the endpoints behind it then look exactly like "the controller
+            // ignored what we wrote".
+            for index in 0..4usize {
+                let word = |offset: usize| {
+                    // SAFETY: dword `offset` of queue head `index`, inside the
+                    // four-QH allocation.
+                    unsafe {
+                        core::ptr::read_volatile(
+                            head.wrapping_add(index)
+                                .cast::<u8>()
+                                .wrapping_add(offset)
+                                .cast::<u32>(),
+                        )
+                    }
+                };
+                log::error!(
+                    "ehci: qh{index} next {:#x} info1 {:#x} qtd_next {:#x} alt {:#x} token {:#x} \
+                     (halt {}, active {})",
+                    word(0),
+                    word(4),
+                    word(16),
+                    word(20),
+                    word(24),
+                    word(24) & regs::token::HALT != 0,
+                    word(24) & regs::token::ACTIVE != 0,
+                );
+            }
+            log::error!(
+                "ehci: usbcmd {:#x} (ase {}, pse {}, rs {}) async_next {:#x} frindex {}",
+                self.regs.read32(self.operational + op::USBCMD),
+                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::ASE != 0,
+                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::PSE != 0,
+                self.regs.read32(self.operational + op::USBCMD) & regs::cmd::RS != 0,
+                self.regs.read32(self.operational + op::ASYNCLISTADDR),
+                self.regs.read32(self.operational + op::FRINDEX),
+            );
+            for slot in 0..8usize {
+                // SAFETY: the eight qTD slots are inside this allocation.
+                let token = unsafe {
+                    core::ptr::read_volatile(
+                        self.qtds
+                            .as_ptr()
+                            .cast::<Qtd>()
+                            .wrapping_add(slot)
+                            .cast::<u8>()
+                            .wrapping_add(8)
+                            .cast::<u32>(),
+                    )
+                };
+                log::error!(
+                    "ehci: qtd{slot} at {:#x} token {token:#010x} (halt {}, active {})",
+                    self.qtds.bus_addr() + (slot * core::mem::size_of::<Qtd>()) as u64,
+                    token & regs::token::HALT != 0,
+                    token & regs::token::ACTIVE != 0,
+                );
+            }
             for slot in 0..3usize {
                 // SAFETY: the first three qTDs belong to the control path.
                 let control_qtd = unsafe {
@@ -931,6 +1009,48 @@ impl Ehci {
         // Step 3.
         self.ring_async_advance();
         Ok(())
+    }
+
+    /// Restarts the async schedule if the controller claims it is still running.
+    ///
+    /// Returns `true` when a restart was performed, i.e. when the caller should
+    /// retry the transfer once.
+    fn recover_stalled_schedule(&self) -> bool {
+        if self.regs.read32(self.operational + op::USBSTS) & sts::ASS == 0 {
+            // The schedule is genuinely stopped; that is a different failure and
+            // a restart is `ensure_running()`'s job, not this recovery's.
+            return false;
+        }
+        self.restart_async();
+        true
+    }
+
+    /// Restarts the async schedule: `disable_async()` then `ehci_run()`'s start.
+    fn restart_async(&self) {
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        self.regs
+            .write32(self.operational + op::USBCMD, command & !regs::cmd::ASE);
+        for _ in 0..100 {
+            if self.regs.read32(self.operational + op::USBSTS) & sts::ASS == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
+        self.regs.write32(
+            self.operational + op::ASYNCLISTADDR,
+            self.qh.bus_addr() as u32,
+        );
+        self.regs.write32(
+            self.operational + op::USBCMD,
+            (command & !regs::cmd::ASE) | regs::cmd::ASE | regs::cmd::RS,
+        );
+        for _ in 0..100 {
+            if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
+        self.ring_async_advance();
     }
 
     /// Sets the async-advance doorbell and waits for the controller to take it.
@@ -1140,7 +1260,20 @@ impl Hcd for Ehci {
         data: &mut [u8],
     ) -> KResult<usize> {
         let _ = address;
-        self.control_transfer_inner(address, setup, data, self.speed)
+        let transfer = self.control_transfer_inner(address, setup, data, self.speed);
+        // One retry after a schedule restart: a transfer that times out while
+        // the async schedule still reports itself running is the stall seen on
+        // this controller (`USBSTS 0xa008`: REC|ASS set, nothing halted, an
+        // Active descriptor left unfetched). Restarting the schedule the way
+        // `ehci_run()` does revives it, so the retry is a real second attempt
+        // and not just a longer wait.
+        match transfer {
+            Err(KError::TimedOut) if self.recover_stalled_schedule() => {
+                log::warn!("ehci: control transfer retried after an async-schedule restart");
+                self.control_transfer_inner(address, setup, data, self.speed)
+            }
+            other => other,
+        }
     }
 
     fn bulk_transfer(
