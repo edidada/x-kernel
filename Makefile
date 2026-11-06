@@ -33,6 +33,9 @@
 #                           when busy, candidates 10 ports apart up to 62005 are tried)
 #     - VSOCK_CID           Preferred guest CID for vhost-vsock (default 103; must be >= 3;
 #                           when busy, the next free CID up to 203 is picked)
+#     - COMPOSITOR_IMG      Read-only compositor image attached to GRAPHIC=y
+#                           runs; built from compositor/ when missing or stale
+#     - COMPOSITOR_LIB      libxkbcommon.so.0 bundled into COMPOSITOR_IMG
 #     - QEMU_ARGS           Extra QEMU args, appended verbatim after `--`
 #     - LOG                 Kernel command-line log level for `make run` /
 #                           `make justrun` / `make debug`; shorthand for
@@ -134,11 +137,36 @@ GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
 	$(if $(filter -device virtio-keyboard%,$(QEMU_ARGS)),,-device virtio-keyboard-pci)\
 	$(if $(filter -device virtio-mouse%,$(QEMU_ARGS)),,-device virtio-mouse-pci))
 
-# The compositor ships as a separate read-only disk image mounted on /compositor.
+# The compositor ships as a separate read-only disk image mounted on
+# /compositor. A graphical run builds the compositor and refreshes that image
+# first (see the run/justrun prerequisites below).
+COMPOSITOR_DIR ?= $(CURDIR)/compositor
+COMPOSITOR_BIN := $(COMPOSITOR_DIR)/target/release/xk-wayland
+COMPOSITOR_LIB ?= /usr/lib/x86_64-linux-gnu/libxkbcommon.so.0
 COMPOSITOR_IMG ?= $(CURDIR)/compositor.img
+COMPOSITOR_STAGE := $(CURDIR)/target/compositor-root
 COMPOSITOR_DEVICE_ARGS := -device virtio-blk-pci,drive=compositor \
 	-drive id=compositor,if=none,format=raw,readonly=on,file=$(COMPOSITOR_IMG)
-COMPOSITOR_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),$(if $(wildcard $(COMPOSITOR_IMG)),$(COMPOSITOR_DEVICE_ARGS)))
+COMPOSITOR_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),$(COMPOSITOR_DEVICE_ARGS))
+
+compositor: $(COMPOSITOR_BIN)
+
+COMPOSITOR_SOURCES := $(shell find $(COMPOSITOR_DIR)/src -name '*.rs' 2>/dev/null)
+$(COMPOSITOR_BIN): $(COMPOSITOR_DIR)/Cargo.toml $(COMPOSITOR_DIR)/Cargo.lock $(COMPOSITOR_SOURCES)
+	@cargo build --release --manifest-path $(COMPOSITOR_DIR)/Cargo.toml --bin xk-wayland
+
+$(COMPOSITOR_IMG): $(COMPOSITOR_BIN)
+	@test -f "$(COMPOSITOR_LIB)" || { \
+		echo "error: $(COMPOSITOR_LIB) not found; set COMPOSITOR_LIB to a libxkbcommon.so.0"; \
+		exit 1; \
+	}
+	@rm -rf "$(COMPOSITOR_STAGE)"
+	@mkdir -p "$(COMPOSITOR_STAGE)/bin" "$(COMPOSITOR_STAGE)/lib"
+	@cp "$(COMPOSITOR_BIN)" "$(COMPOSITOR_STAGE)/bin/xk-wayland"
+	@cp "$(COMPOSITOR_LIB)" "$(COMPOSITOR_STAGE)/lib/libxkbcommon.so.0"
+	@rm -f "$(COMPOSITOR_IMG)"
+	@mke2fs -q -t ext4 -L xk-compositor -d "$(COMPOSITOR_STAGE)" "$(COMPOSITOR_IMG)" 64M
+	@echo "Built $(COMPOSITOR_IMG)"
 
 UAPPS ?= all
 UAPP_DIR ?= $(CURDIR)/uapps
@@ -212,6 +240,13 @@ run:
 
 justrun:
 	@$(XKMAKE) run --no-build $(XKMAKE_BUILD_ARGS) $(XKMAKE_RUN_ARGS) $(XKMAKE_ARGS) $(if $(strip $(RUN_QEMU_ARGS)),-- $(RUN_QEMU_ARGS))
+
+# A graphical run needs a current compositor, so build it and refresh the
+# read-only compositor image before booting.
+ifeq ($(filter y,$(GRAPHIC)),y)
+run: $(COMPOSITOR_IMG)
+justrun: $(COMPOSITOR_IMG)
+endif
 
 debug: build
 	@set -eu; \
