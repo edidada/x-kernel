@@ -1295,13 +1295,14 @@ impl Hcd for Ehci {
             offset,
             (value & (portsc::PP | portsc::PED)) | portsc::CHANGE_BITS,
         );
-        // A device that completed the high-speed chirp leaves the port in SE0
-        // (line status 0); J-state means it stayed at full speed.
-        let speed = match value & portsc::LINE_MASK {
-            x if x == (1 << 10) => Speed::Low,
-            x if x == (2 << 10) => Speed::Full,
-            _ => Speed::High,
-        };
+        // `ehci_port_speed()` reports USB_PORT_STAT_HIGH_SPEED for every port
+        // unless the controller has an integrated TT -- which this one does not
+        // (the board's EHCI node has no `has-transaction-translator`, so
+        // `ehci_is_TDI()` is false). The line status is *not* consulted: a
+        // full/low-speed device is handed to the companion controller instead,
+        // and reading K/J here turned a high-speed device into a low- or
+        // full-speed one on the passes that sampled the handshake.
+        let speed = Speed::High;
         info!(
             "ehci: port {} reset, portsc {value:#010x} ped {} line {}",
             port + 1,
