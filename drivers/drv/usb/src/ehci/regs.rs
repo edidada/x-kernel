@@ -162,6 +162,10 @@ pub const fn eps_high() -> u32 {
 
 /// Marks the end of a list (the hardware's "null pointer").
 pub const LIST_END: u32 = 1;
+/// `QH_NEXT()`'s `Q_TYPE_QH` (`ehci.h`): bit 1 of a queue head horizontal link
+/// pointer selects "queue head" (as opposed to an iTD); bit 0 is the terminate
+/// bit and is clear on every live link.
+pub const QH_TYPE: u32 = 1 << 1;
 
 /// Store barrier used between linking a queue head and publishing it in the
 /// reclamation list (`qh_link_async()` does the same with `wmb()`).

@@ -21,6 +21,20 @@ use usb::{Hcd, PortStatus, SetupPacket, Speed};
 use crate::ehci::regs::{Qh, Qtd, cap, info1, op, pid, portsc, sts, token};
 
 /// Consecutive polls of a self-clearing bit, in microseconds.
+/// qTD slots, and what each one is for. The bulk path indexes 3..6 and the async
+/// head's dummy descriptor is slot 7, so the allocation has to cover all of them;
+/// a slot map that the allocator does not match is an out-of-bounds write and a
+/// controller DMA into foreign memory.
+const QTD_SLOTS: usize = 8;
+/// Control chain: setup, data, status.
+const QTD_CONTROL: [usize; 3] = [0, 1, 2];
+/// Bulk descriptors: one per direction (`dummy_slot` in `bulk_transfer_impl`).
+const QTD_BULK_OUT: usize = 5;
+const QTD_BULK_IN: usize = 6;
+/// The descriptor the async head's `alt_next` points at (`ehci_init()` does the
+/// same with `async->dummy`).
+const QTD_HEAD_DUMMY: usize = 7;
+
 /// How many times the full async-ring dump is printed; see `STALL_DUMPS`' use.
 static STALL_DUMPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -71,7 +85,7 @@ pub struct Ehci {
 /// head at all; with endpoints present it truncates the ring to `head -> head`
 /// and every endpoint becomes unreachable, which is exactly how a transfer ends
 /// up queued with an overlay the controller never touches.
-fn build_async_ring(base_address: u64, head: *mut Qh) {
+fn build_async_ring(base_address: u64, head: *mut Qh, dummy_qtd_bus: u32) {
     let base = base_address as u32;
     let size = core::mem::size_of::<Qh>() as u32;
     let total = 4u32;
@@ -83,49 +97,45 @@ fn build_async_ring(base_address: u64, head: *mut Qh) {
             base + (index + 1) * size | 2
         };
         if index == 0 {
-            // The reclamation-list head must carry H (bit 15); without it the
-            // controller has no way to recognise where the list ends and stops
-            // advancing through it. Establishing it here keeps the head's
-            // identity in the one function that builds the ring.
-            // SAFETY: dword 1 of the head queue head, inside this allocation.
+            // `ehci_init()` initialises the reclamation-list head explicitly, and
+            // every field matters:
+            //
+            // - info1 carries H (bit 15), which is how the controller recognises
+            //   the end of the list;
+            // - the overlay token is HALTED. A live token makes the controller try
+            //   to execute the head's descriptor chain, and `qtd_next` is an
+            //   address: with it unset that fetch goes to address zero, which is
+            //   a Host System Error and a halted controller (`USBSTS 0xb03d` on
+            //   this board) rather than a stopped transfer;
+            // - `qtd_next` is LIST_END and `alt_next` points at the head's dummy
+            //   descriptor, which is the "stop here" target the reference uses.
+            //
+            // SAFETY: dwords 0..6 of the head queue head, inside this allocation.
             unsafe {
-                core::ptr::write_volatile(
-                    entry.cast::<u8>().wrapping_add(4).cast::<u32>(),
-                    regs::info1::HEAD,
-                );
+                let bytes = entry.cast::<u8>();
+                core::ptr::write_volatile(bytes.cast::<u32>(), (base & !0x1f) | regs::QH_TYPE);
+                core::ptr::write_volatile(bytes.wrapping_add(4).cast::<u32>(), regs::info1::HEAD);
+                core::ptr::write_volatile(bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
+                core::ptr::write_volatile(bytes.wrapping_add(20).cast::<u32>(), dummy_qtd_bus);
+                core::ptr::write_volatile(bytes.wrapping_add(24).cast::<u32>(), regs::token::HALT);
             }
+            karch::dsb_ishst();
+            continue;
         }
-        // SAFETY: all four queue heads live in this controller's allocation.
+        // An endpoint queue head starts idle: out of the list, no descriptor, no
+        // token. It is written in full before it is linked, and `LIST_END` here
+        // keeps the controller from fetching through an unset pointer if it walks
+        // past an entry that is not in use.
+        // SAFETY: dwords 0..6 of queue head `index`, inside this allocation.
         unsafe {
-            core::ptr::write_volatile(entry.cast::<u32>(), next);
-        }
-        // Clear the overlay's HALT and ACTIVE bits on every queue head, not just
-        // the head of the list: a halted controller marks the queue head it was
-        // processing, and one halted endpoint earlier in the ring stops the walk
-        // before it reaches the others.
-        // SAFETY: dword 6 of queue head `index`, inside this allocation.
-        let overlay =
-            unsafe { core::ptr::read_volatile(entry.cast::<u8>().wrapping_add(24).cast::<u32>()) };
-        // SAFETY: dword 6 of the same queue head.
-        unsafe {
-            core::ptr::write_volatile(
-                entry.cast::<u8>().wrapping_add(24).cast::<u32>(),
-                overlay & (regs::token::DT | regs::token::PING),
-            );
-        }
-        if index != 0 {
-            for offset in [16usize, 20usize] {
-                // SAFETY: dwords 4 and 5 of an endpoint queue head.
-                unsafe {
-                    core::ptr::write_volatile(
-                        entry.cast::<u8>().wrapping_add(offset).cast::<u32>(),
-                        regs::LIST_END,
-                    );
-                }
-            }
+            let bytes = entry.cast::<u8>();
+            core::ptr::write_volatile(bytes.cast::<u32>(), next);
+            core::ptr::write_volatile(bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
+            core::ptr::write_volatile(bytes.wrapping_add(20).cast::<u32>(), regs::LIST_END);
+            core::ptr::write_volatile(bytes.wrapping_add(24).cast::<u32>(), 0);
         }
     }
-    crate::ehci::regs::list_end_barrier();
+    karch::dsb_ishst();
 }
 
 impl Ehci {
@@ -189,9 +199,15 @@ impl Ehci {
         let qh = dev
             .res()
             .alloc_coherent(2 * core::mem::size_of::<Qh>(), 64)?;
+        // Every slot this driver indexes must exist. The bulk path uses slots 3..6
+        // and the async head's dummy descriptor is slot 7; with only three slots
+        // (the original layout) those writes landed past the end of the
+        // allocation and the controller fetched its descriptor from memory that
+        // belonged to somebody else -- a Host System Error, intermittently,
+        // depending on what that memory happened to hold.
         let qtds = dev
             .res()
-            .alloc_coherent(3 * core::mem::size_of::<Qtd>(), 32)?;
+            .alloc_coherent(QTD_SLOTS * core::mem::size_of::<Qtd>(), 32)?;
         let buffers = dev.res().alloc_coherent(EP0_BUFFER_LEN, EP0_BUFFER_LEN)?;
         let bulk = dev.res().alloc_coherent(BULK_BUFFER_LEN, BULK_BUFFER_LEN)?;
         for (pointer, length) in [
@@ -252,7 +268,11 @@ impl Ehci {
             core::ptr::write_volatile(alt_next_ptr, regs::LIST_END);
         }
         // Every endpoint queue head lives in the ring; see `build_async_ring()`.
-        build_async_ring(qh.bus_addr(), qh.as_ptr().cast::<Qh>());
+        build_async_ring(
+            qh.bus_addr(),
+            qh.as_ptr().cast::<Qh>(),
+            qtds.bus_addr() as u32 + (QTD_HEAD_DUMMY * core::mem::size_of::<Qtd>()) as u32,
+        );
         // Snapshot the CRU clock-gate words around the USB hosts: a later
         // driver's CRU write that gates one of these clocks stops the
         // controller's traversal while every register keeps its value, and the
@@ -571,7 +591,11 @@ impl Ehci {
     /// how a transfer ends up queued with an overlay the controller never
     /// touches.
     fn build_async_ring(&self) {
-        build_async_ring(self.qh.bus_addr(), self.qh.as_ptr().cast::<Qh>());
+        build_async_ring(
+            self.qh.bus_addr(),
+            self.qh.as_ptr().cast::<Qh>(),
+            self.qtds.bus_addr() as u32 + (QTD_HEAD_DUMMY * core::mem::size_of::<Qtd>()) as u32,
+        );
     }
 
     /// Clears a latched halt before queueing new work.
@@ -634,7 +658,11 @@ impl Ehci {
         // Rebuild the whole ring: a self-linked head is only correct when there
         // are no endpoint queue heads, and with them present it strands every
         // endpoint ("0->0x...002" in the failure dump is this bug).
-        build_async_ring(self.qh.bus_addr(), head);
+        build_async_ring(
+            self.qh.bus_addr(),
+            head,
+            self.qtds.bus_addr() as u32 + (QTD_HEAD_DUMMY * core::mem::size_of::<Qtd>()) as u32,
+        );
         let command = self.regs.read32(self.operational + op::USBCMD);
         self.regs
             .write32(self.operational + op::USBCMD, command & !regs::cmd::RS);
