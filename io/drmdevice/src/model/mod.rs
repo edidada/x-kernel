@@ -15,5 +15,4 @@ pub(crate) mod error;
 pub(crate) mod event;
 pub(crate) mod file;
 pub(crate) mod ids;
-pub(crate) mod ioctl;
-pub(crate) mod protocol;
+pub(crate) mod scanout;

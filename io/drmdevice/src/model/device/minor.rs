@@ -73,7 +73,7 @@ impl DeviceFileOps for DrmMinor {
         let state = file
             .private_data_get::<DrmFile>()
             .ok_or(VfsError::InvalidInput)?;
-        Ok(crate::model::ioctl::dispatch(&device, &state, cmd, arg)?)
+        Ok(crate::ioctl::dispatch(&device, &state, cmd, arg)?)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
