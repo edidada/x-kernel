@@ -1546,6 +1546,7 @@ dependencies = [
  "tee_kernel",
  "unittest",
  "unittest_support",
+ "usb",
  "xcover",
 ]
 

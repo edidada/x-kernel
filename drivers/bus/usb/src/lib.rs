@@ -20,6 +20,9 @@ extern crate alloc;
 pub mod bot;
 pub mod bot_fs;
 pub mod bus;
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests_bus, "../ut-tests/bus.rs");
 pub mod descriptor;
 pub mod enumerate;
 pub mod hub;

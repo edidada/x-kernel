@@ -264,6 +264,21 @@ pub struct DeviceHandle {
     modalias: Option<alloc::string::String>,
 }
 
+#[cfg(unittest)]
+impl DeviceHandle {
+    /// A handle for tests: the same shape a probe gets, with no domain and no
+    /// record behind it. Tests that need a real registry build it themselves.
+    pub fn synthetic(driver_name: &'static str, physical_path: &str) -> Self {
+        let path = alloc::string::String::from(physical_path);
+        Self {
+            id: DeviceId(0),
+            core: DeviceCore::synthetic(DeviceId(0), driver_name, path.clone()),
+            path,
+            modalias: None,
+        }
+    }
+}
+
 impl DeviceHandle {
     pub const fn id(&self) -> DeviceId {
         self.id

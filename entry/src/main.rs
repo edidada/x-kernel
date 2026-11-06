@@ -23,6 +23,10 @@ extern crate kworkerpool_ng;
 extern crate kworkng;
 #[cfg(feature = "unittest")]
 extern crate kworkqueue_ng;
+// Only linked so `bus/usb`'s `cfg(unittest)` modules reach the registry; nothing
+// in the kernel entry references them at runtime.
+#[cfg(feature = "unittest")]
+extern crate usb as _;
 
 mod image_metadata;
 mod runtime;

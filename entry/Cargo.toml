@@ -16,6 +16,9 @@ unittest = [
     "dep:unittest_support",
     "dep:driver_base",
     "dep:driver_host",
+    # `bus/usb` is only reached through the RK3588 DWC3 driver otherwise, so its
+    # device-table tests would never be linked into a QEMU build.
+    "dep:usb",
 ]
 dma-trace = ["kfeat/dma-trace"]
 
@@ -45,6 +48,7 @@ unittest = { workspace = true, optional = true }
 driver_base = { workspace = true, optional = true }
 driver_host = { workspace = true, optional = true }
 unittest_support = { workspace = true, optional = true }
+usb = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
 tee_kernel.workspace = true

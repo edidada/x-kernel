@@ -159,14 +159,25 @@ impl UsbBus {
     }
 
     /// Adds one class binding. All-or-nothing: a failed bind leaves no entry.
-    pub fn bind(&mut self, address: u8, binding: ClassBinding) -> KResult<()> {
+    ///
+    /// The failure carries the binding back out. Dropping it here would run a
+    /// withdrawal under this lock, which is the deadlock [`Self::detach`] exists to
+    /// avoid; the caller decides where the owners are released.
+    pub fn bind(
+        &mut self,
+        address: u8,
+        binding: ClassBinding,
+    ) -> core::result::Result<(), RejectedBinding> {
         let Some(entry) = self
             .devices
             .iter_mut()
             .find(|entry| entry.device.address == address)
         else {
             log::error!("usb: bind for unknown address {address}");
-            return Err(KError::NotFound);
+            return Err(RejectedBinding {
+                error: KError::NotFound,
+                binding,
+            });
         };
         if entry.binding(binding.interface).is_some() {
             log::error!(
@@ -176,7 +187,10 @@ impl UsbBus {
                     .binding(binding.interface)
                     .map_or("", |b| b.class_name)
             );
-            return Err(KError::BadState);
+            return Err(RejectedBinding {
+                error: KError::BadState,
+                binding,
+            });
         }
         log::info!(
             "usb: address {address} interface {} bound to `{}`",
@@ -217,6 +231,15 @@ impl UsbBus {
         }
         bindings
     }
+}
+
+/// A binding the table refused, handed back with the reason.
+///
+/// Splitting the error from the owners keeps the release point explicit: the
+/// caller drops `binding` after it has released the lock it held.
+pub struct RejectedBinding {
+    pub error: KError,
+    pub binding: ClassBinding,
 }
 
 /// Drops bindings that a removal handed back.

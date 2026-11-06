@@ -224,15 +224,22 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                         .first()
                         .and_then(|config| config.interfaces.first())
                         .map_or(0, |interface| interface.number);
-                    if let Err(err) = bus.lock().bind(
+                    let rejected = bus.lock().bind(
                         device.address,
                         usb::bus::ClassBinding::new(
                             "usb-storage",
                             pipe_interface,
                             alloc::vec![alloc::boxed::Box::new(publication)],
                         ),
-                    ) {
-                        log::error!("dwc3: binding {} failed: {err:?}", device.summary());
+                    );
+                    if let Err(rejected) = rejected {
+                        log::error!(
+                            "dwc3: binding {} failed: {:?}",
+                            device.summary(),
+                            rejected.error
+                        );
+                        // Outside the bus lock: the owners withdraw on drop.
+                        usb::bus::drop_bindings(alloc::vec![rejected.binding]);
                     }
                 }
                 Err(err) => log::error!("dwc3: no class binding for {}: {err:?}", device.summary()),
