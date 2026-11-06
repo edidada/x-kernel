@@ -230,6 +230,66 @@ impl<'a, B: Bus> Device<'a, B> {
         T: Send + Sync + 'static,
         H: crate::class::class_api::ClassHooks<T>,
     {
+        self.handle().publish(class, runtime, name)
+    }
+
+    /// A `'static` handle to this device's identity.
+    ///
+    /// `publish()` only needs the shared [`DeviceCore`], not the probe-scoped
+    /// `Device`, so a class binding may be created *after* probe returns -- which
+    /// is what a device that is re-enumerated (re-plugged, or reset and
+    /// re-addressed) requires. The identity strings are copied here for the same
+    /// reason: nothing in the returned handle borrows this `Device`.
+    pub fn handle(&self) -> DeviceHandle {
+        DeviceHandle {
+            id: self.id,
+            core: self.core.clone(),
+            path: alloc::string::String::from(self.core.physical_path()),
+            modalias: self.modalias.map(alloc::string::String::from),
+        }
+    }
+}
+
+/// A device's identity, detached from the probe call that produced it.
+///
+/// Class publications attach to [`DeviceCore`], so holding this handle is enough to
+/// publish or withdraw a binding at any later point. It names no bus and no device
+/// family: it is `Arc<DeviceCore>` plus the two strings that identity projects
+/// (`DEVPATH` and `MODALIAS`).
+#[derive(Clone)]
+pub struct DeviceHandle {
+    id: DeviceId,
+    core: alloc::sync::Arc<DeviceCore>,
+    path: alloc::string::String,
+    modalias: Option<alloc::string::String>,
+}
+
+impl DeviceHandle {
+    pub const fn id(&self) -> DeviceId {
+        self.id
+    }
+
+    /// The bus-vocabulary path component (`DEVPATH` source).
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn modalias(&self) -> Option<&str> {
+        self.modalias.as_deref()
+    }
+
+    /// Same contract as [`Device::publish`]: the returned [`Publication`] is the
+    /// owner, and dropping it withdraws the binding.
+    pub fn publish<T, H>(
+        &self,
+        class: &'static crate::class::class_api::Class<T, H>,
+        runtime: T,
+        name: impl Into<alloc::string::String>,
+    ) -> kerrno::KResult<crate::Publication<T>>
+    where
+        T: Send + Sync + 'static,
+        H: crate::class::class_api::ClassHooks<T>,
+    {
         class.publish(self.core.clone(), runtime, name)
     }
 }

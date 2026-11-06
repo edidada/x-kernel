@@ -110,7 +110,7 @@ pub use class::{
     ClassAvailabilityCallback, ClassRemovalCallback, InUse, Publication, PublicationId,
 };
 pub use desc::DeviceDescriptor;
-pub use device::{Device, DeviceId};
+pub use device::{Device, DeviceHandle, DeviceId};
 pub use devres::{
     ClkHandle, CoherentMem, DeassertedGuard, DevIrq, EnabledClock, IoMap, IrqAction, IrqHandlerFn,
     PhyHandle, PoweredPhy, ReleaseHook, ResetHandle,

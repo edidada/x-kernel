@@ -19,6 +19,7 @@ extern crate alloc;
 
 pub mod bot;
 pub mod bot_fs;
+pub mod bus;
 pub mod descriptor;
 pub mod enumerate;
 pub mod hub;
@@ -203,9 +204,14 @@ pub trait Hcd: Send + Sync {
 }
 
 /// A device that finished enumeration.
+#[derive(Clone)]
 pub struct UsbDevice {
     pub address: u8,
     pub port: usize,
+    /// The device this one hangs off: `None` for a root-port device, `Some((hub
+    /// address, hub port))` for a child. A port scan uses it to decide which
+    /// devices a root-port change can have removed.
+    pub parent: Option<(u8, u8)>,
     pub speed: Speed,
     pub device: DeviceDescriptor,
     pub configurations: Vec<ConfigDescriptor>,

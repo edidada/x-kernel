@@ -5752,6 +5752,7 @@ dependencies = [
 name = "usb"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-base",
  "kerrno",
  "khal",
  "ktime_types",

@@ -337,6 +337,14 @@ pub struct Xhci {
     /// instead (what this driver used to do) turns a lost completion into a
     /// misattributed one.
     commands: alloc::collections::VecDeque<PendingCmd>,
+    /// The devices on this controller and the class bindings published for them.
+    /// Created by the probe (which is where a `DeviceHandle` exists) and used
+    /// afterwards, so a device can be withdrawn or published at runtime.
+    bus: Option<alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>>,
+    /// A weak handle to this controller, so a runtime path can hand the block
+    /// backend the same `Arc` probe did. Weak, not strong: the controller must not
+    /// keep itself alive.
+    self_weak: Option<alloc::sync::Weak<ksync::Mutex<Xhci>>>,
     /// A Port Status Change event arrived since the last port scan. Polled
     /// drivers still need it: it is the only signal that a port changed while
     /// nobody was looking at it.
@@ -914,6 +922,8 @@ impl Xhci {
             event_cycle: true,
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
+            bus: None,
+            self_weak: None,
             port_change: false,
             hc_error: false,
             ring_stopped: false,
@@ -1045,6 +1055,20 @@ impl Xhci {
 
     /// Logs every port's state once. Bring-up evidence: a port that reports
     /// `PP=0` was never powered, one that reports `CCS=1` has a device.
+    /// Hands the controller the device table it publishes through.
+    ///
+    /// The table is created by the probe, which is the only place a
+    /// `driver_base::DeviceHandle` can be obtained; from then on it belongs to the
+    /// controller's state, so a port scan happens later without needing a `Device`.
+    pub fn attach_bus(&mut self, bus: alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>) {
+        self.bus = Some(bus);
+    }
+
+    /// Records a weak handle to this controller for runtime publication.
+    pub fn attach_self(&mut self, this: &alloc::sync::Arc<ksync::Mutex<Xhci>>) {
+        self.self_weak = Some(alloc::sync::Arc::downgrade(this));
+    }
+
     pub fn log_ports(&self) {
         for port in 0..self.ports {
             let value = self.port_status_raw(port);
@@ -1655,6 +1679,102 @@ impl Xhci {
             );
         }
         Err(KError::TimedOut)
+    }
+
+    /// Polls the ports once and reconciles the device table with what the
+    /// controller reports.
+    ///
+    /// This is the polled counterpart of `hub_wq`: XK has no interrupt path for
+    /// this controller, so the Port Status Change event only sets a flag (see the
+    /// event dispatcher) and a caller drains it here.
+    ///
+    /// Returns the class bindings of every device that went away. The caller drops
+    /// them **after** releasing this controller's lock -- a publication's withdrawal
+    /// may wait for a consumer that needs the same lock.
+    pub fn rescan(&mut self) -> alloc::vec::Vec<usb::bus::ClassBinding> {
+        let mut gone = alloc::vec::Vec::new();
+        let Some(bus) = self.bus.clone() else {
+            return gone;
+        };
+        // A controller error invalidates every slot: `xhci_hc_died()`.
+        if self.hc_error {
+            self.hc_error = false;
+            log::error!("xhci: rescan after a host controller error: dropping all devices");
+            let ids: alloc::vec::Vec<u8> = self.slots.iter().map(|slot| slot.id).collect();
+            for slot in ids {
+                let _ = self.disable_slot(slot);
+            }
+            self.slots.clear();
+            gone.extend(bus.lock().detach_all());
+            return gone;
+        }
+        if !self.port_change {
+            return gone;
+        }
+        self.port_change = false;
+        // Which addresses still have a connected port. A device behind a hub is not
+        // visible in the root ports, so it is only removed when its own port scan
+        // says so; that path re-attaches through `bind_and_publish()`.
+        let mut connected = alloc::vec::Vec::new();
+        for port in 0..self.ports {
+            let value = self.port_status_raw(port);
+            if value & portsc::CCS != 0 {
+                connected.push(port);
+            }
+        }
+        let stale: alloc::vec::Vec<u8> = {
+            let bus = bus.lock();
+            bus.devices()
+                .filter(|entry| entry.device().parent.is_none())
+                .filter(|entry| !connected.contains(&entry.device().port))
+                .map(|entry| entry.device().address)
+                .collect()
+        };
+        for address in stale {
+            log::warn!("xhci: address {address} is gone from its port");
+            let _ = self.disable_slot(address);
+            self.slots.retain(|slot| slot.id != address);
+            gone.extend(bus.lock().detach(address));
+        }
+        gone
+    }
+
+    /// Publishes a class binding for an already enumerated device.
+    ///
+    /// Uses the device table's `DeviceHandle`, so this works after probe returned --
+    /// which is what a re-enumerated device needs.
+    pub fn bind_and_publish(&mut self, address: u8) -> KResult<()> {
+        let Some(bus) = self.bus.clone() else {
+            return Err(KError::BadState);
+        };
+        let device = {
+            let bus = bus.lock();
+            bus.device(address).cloned().ok_or(KError::NotFound)?
+        };
+        let Some(pipe) = mass_storage_endpoints(&device) else {
+            return Ok(());
+        };
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.id == address)
+            .ok_or(KError::NotFound)?;
+        // The endpoint rings were allocated in probe, where a `Device` (and so the
+        // DMA allocator) exists; re-installing the contexts is enough here.
+        self.reinstall_bulk_endpoints(slot_index)?;
+        let handle = bus.lock().handle().clone();
+        let xhci = self
+            .self_weak
+            .as_ref()
+            .and_then(alloc::sync::Weak::upgrade)
+            .ok_or(KError::BadState)?;
+        let publication = publish_mass_storage(&handle, &xhci, &device)?;
+        let binding = usb::bus::ClassBinding::new(
+            "usb-storage",
+            pipe.endpoints.interface,
+            alloc::vec![alloc::boxed::Box::new(publication)],
+        );
+        bus.lock().bind(address, binding)
     }
 
     /// `usb_reset_and_verify_device()`, minus the class-driver rebind.
@@ -4510,6 +4630,26 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
             return Err(kerrno::KError::InvalidInput);
         }
         let mut guard = self.xhci.lock();
+        // Reconcile the device table with the ports before touching the device:
+        // this is the polled `hub_wq`, and the bindings it removes are dropped
+        // outside this lock (see `UsbBus::detach`).
+        let gone = guard.rescan();
+        let still_there = guard
+            .bus
+            .as_ref()
+            .is_none_or(|bus| bus.lock().contains(self.endpoints.address));
+        if !still_there {
+            drop(guard);
+            usb::bus::drop_bindings(gone);
+            log::error!(
+                "xhci: address {} is no longer present",
+                self.endpoints.address
+            );
+            return Err(kerrno::KError::NotFound);
+        }
+        drop(guard);
+        usb::bus::drop_bindings(gone);
+        let mut guard = self.xhci.lock();
         let mut done = 0usize;
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
@@ -4663,100 +4803,85 @@ pub(crate) fn probe_mass_storage(xhci: &mut Xhci, device: &usb::UsbDevice) {
 /// and this one stopped at "the device enumerated", so a SuperSpeed disk never
 /// produced a `/dev` node no matter how healthy its transfers were.
 pub(crate) fn publish_mass_storage(
-    dev: &mut Device<'_, driver_base::PlatformBus>,
+    handle: &driver_base::DeviceHandle,
     xhci: &alloc::sync::Arc<ksync::Mutex<Xhci>>,
     device: &usb::UsbDevice,
-) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
-    let pipe = mass_storage_endpoints(device)?;
+) -> KResult<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
+    let pipe = mass_storage_endpoints(device).ok_or(KError::NotFound)?;
     let endpoints = pipe.endpoints;
+    // The endpoints have to exist before any command can be sent over them. A
+    // runtime (re)publication reuses the rings probe allocated and only re-installs
+    // their contexts; the `Configure Endpoint` in probe is the one that allocates.
+    let mut guard = xhci.lock();
+    if guard
+        .slots
+        .iter()
+        .position(|slot| slot.id == device.address)
+        .is_some_and(|index| guard.slots[index].bulk[0].is_none())
     {
-        // The endpoints have to exist before any command can be sent over them;
-        // this is the `Configure Endpoint` the xHCI path never issued.
-        let mut guard = xhci.lock();
-        if let Err(err) = guard.configure_bulk(
-            dev,
-            device.address,
-            endpoints.endpoint_out,
-            endpoints.endpoint_in,
-            pipe.max_packet_out,
-            pipe.max_packet_in,
-            pipe.max_burst_out,
-            pipe.max_burst_in,
-        ) {
-            log::error!("xhci: configuring the bulk endpoints failed: {err:?}");
-            return None;
-        }
+        return Err(KError::BadState);
     }
-    let blocks = {
-        let mut guard = xhci.lock();
-        // The outcome matters: a bulk-only reset that fails is the difference
-        // between "the device is in a phase error" and "it is not answering the
-        // control pipe either", and discarding it made the two indistinguishable.
-        match usb::bot::reset_recovery(&mut *guard, &endpoints) {
-            Ok(()) => log::info!("xhci: bulk-only reset done (address {})", endpoints.address),
-            Err(err) => log::error!(
-                "xhci: bulk-only reset failed for address {}: {err:?}",
-                endpoints.address
-            ),
+    // `reset_recovery` then the capacity read: the device may carry BOT state from
+    // an earlier host or from before a reset.
+    match usb::bot::reset_recovery(&mut *guard, &endpoints) {
+        Ok(()) => log::info!("xhci: bulk-only reset done (address {})", endpoints.address),
+        Err(err) => log::error!(
+            "xhci: bulk-only reset failed for address {}: {err:?}",
+            endpoints.address
+        ),
+    }
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
+    let blocks = match usb::bot::read_capacity(&mut *guard, &endpoints) {
+        Ok(data) if data.len() >= 8 => {
+            let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            u64::from(last) + 1
         }
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
-        match usb::bot::read_capacity(&mut *guard, &endpoints) {
-            Ok(data) if data.len() >= 8 => {
-                let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                u64::from(last) + 1
-            }
-            _ => {
-                log::error!("xhci: mass storage reported no capacity");
-                return None;
-            }
+        _ => {
+            log::error!("xhci: mass storage reported no capacity");
+            return Err(KError::Io);
         }
     };
+    drop(guard);
     let backend = XhciBotDisk {
         xhci: xhci.clone(),
         endpoints,
         blocks,
     };
     let name = alloc::format!("usb{}", device.address);
-    let parent_path = alloc::string::String::from(dev.info().path());
-    let modalias = dev.info().modalias().map(alloc::string::String::from);
-    // Major 8 is the conventional disk major and the block core rejects a
-    // duplicate dev_t; the EHCI side takes minor 0, so this side counts up from
-    // one instead of colliding with it.
+    let parent_path = alloc::string::String::from(handle.path());
+    let modalias = handle.modalias().map(alloc::string::String::from);
+    // Major 8 is the conventional disk major and the block core rejects a duplicate
+    // dev_t; the EHCI side takes minor 0, so this side counts up from one.
     static NEXT_MINOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
     let minor = NEXT_MINOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let disk = match subsys_block::Gendisk::new(name, 8, minor, 1, alloc::boxed::Box::new(backend))
+    let disk = subsys_block::Gendisk::new(name, 8, minor, 1, alloc::boxed::Box::new(backend))
         .map(|disk| disk.with_devnode_context(&parent_path, modalias))
-    {
-        Ok(disk) => disk,
-        Err(err) => {
+        .map_err(|err| {
             log::error!("xhci: could not create the block disk: {err:?}");
-            return None;
-        }
-    };
-    match dev.publish(
-        &subsys_block::class::BLOCK,
-        alloc::sync::Arc::new(disk),
-        "usb-storage",
-    ) {
-        Ok(publication) => {
-            log::info!(
-                "xhci: published {} as a block device with {blocks} 512-byte blocks",
-                device.summary()
-            );
-            let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
-            for node in devnode::subscribe(callback) {
-                log::info!(
-                    "xhci: devnode {} subsystem {} number {:?}",
-                    node.devname(),
-                    node.subsystem(),
-                    node.device_number()
-                );
-            }
-            Some(publication)
-        }
-        Err(err) => {
+            KError::Io
+        })?;
+    let publication = handle
+        .publish(
+            &subsys_block::class::BLOCK,
+            alloc::sync::Arc::new(disk),
+            "usb-storage",
+        )
+        .map_err(|err| {
             log::error!("xhci: block publication failed: {err:?}");
-            None
-        }
+            KError::Io
+        })?;
+    log::info!(
+        "xhci: published {} as a block device with {blocks} 512-byte blocks",
+        device.summary()
+    );
+    let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
+    for node in devnode::subscribe(callback) {
+        log::info!(
+            "xhci: devnode {} subsystem {} number {:?}",
+            node.devname(),
+            node.subsystem(),
+            node.device_number()
+        );
     }
+    Ok(publication)
 }

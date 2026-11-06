@@ -72,6 +72,10 @@ pub struct Ehci {
     /// 1 = IN). A queue head's `qtd_next` points here permanently; enqueueing
     /// replaces the descriptor's contents instead of repointing the head.
     bulk_dummy_bus: [u32; 2],
+    /// The devices on this controller and the class bindings published for them,
+    /// plus a weak self handle so a runtime path can build a block backend.
+    bus: Option<alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>>,
+    self_weak: Option<alloc::sync::Weak<ksync::Mutex<Ehci>>>,
     /// Which qTD slot currently holds the descriptor the controller is parked on
     /// (index 0 = bulk OUT pair, 1 = bulk IN pair). `qh_append_tds()` alternates
     /// the role: the descriptor it enqueues is copied onto the current dummy and
@@ -414,6 +418,8 @@ impl Ehci {
             buffers,
             bulk,
             bulk_dummy_bus: [0; 2],
+            bus: None,
+            self_weak: None,
             // `ehci_qtd_alloc()` hands out a fresh qTD as the endpoint's dummy;
             // the second slot of each pair plays that part until it is traded.
             bulk_dummy_slot: [QTD_BULK_OUT.1, QTD_BULK_IN.1],
@@ -838,6 +844,42 @@ impl Ehci {
                 (value & portsc::LINE_MASK) >> 10,
             );
         }
+    }
+
+    /// Hands the controller the device table it publishes through, and a weak
+    /// handle to itself for runtime publication.
+    fn attach_bus(&mut self, bus: alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>) {
+        self.bus = Some(bus);
+    }
+
+    fn attach_self(&mut self, this: &alloc::sync::Arc<ksync::Mutex<Ehci>>) {
+        self.self_weak = Some(alloc::sync::Arc::downgrade(this));
+    }
+
+    /// Removes devices whose port no longer reports a connection.
+    ///
+    /// The bindings are *returned*, not dropped: their withdrawal may wait for a
+    /// consumer that needs this controller's lock.
+    fn detach_absent(&mut self) -> alloc::vec::Vec<usb::bus::ClassBinding> {
+        let Some(bus) = self.bus.clone() else {
+            return alloc::vec::Vec::new();
+        };
+        let connected = self.regs.read32(self.port_register(0)) & portsc::CCS != 0;
+        if connected {
+            return alloc::vec::Vec::new();
+        }
+        let addresses: alloc::vec::Vec<u8> = bus
+            .lock()
+            .devices()
+            .filter(|entry| entry.device().parent.is_none())
+            .map(|entry| entry.device().address)
+            .collect();
+        let mut gone = alloc::vec::Vec::new();
+        for address in addresses {
+            log::warn!("ehci: address {address} is gone from its port");
+            gone.extend(bus.lock().detach(address));
+        }
+        gone
     }
 
     fn ensure_running(&self) {
@@ -1718,9 +1760,9 @@ pub mod driver {
         /// the mass-storage block backend, whose `read_block(&self)` cannot take
         /// the controller by value.
         _ehci: alloc::sync::Arc<ksync::Mutex<Ehci>>,
-        /// Publications of any disks published from this controller; dropping a
-        /// guard unpublishes them.
-        _disks: alloc::vec::Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>,
+        /// The device table: devices, their class bindings and the withdrawal
+        /// owners of what was published for them.
+        _bus: alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>,
         /// Enabled clocks, held for the controller's lifetime. The device tree
         /// lists four clocks without names, so they are taken by index; the
         /// controller can detect a connect without them but cannot run its reset
@@ -1823,8 +1865,11 @@ pub mod driver {
                 let guard = ehci.lock();
                 Hcd::port_count(&*guard)
             };
+            // The device table: created here (the only place a `DeviceHandle`
+            // exists) and owned by the controller afterwards, so a device that goes
+            // away can have its bindings withdrawn at runtime.
+            let bus = alloc::sync::Arc::new(ksync::Mutex::new(usb::bus::UsbBus::new(dev.handle())));
             let mut devices = 0usize;
-            let mut disks = alloc::vec::Vec::new();
             // `hub_port_init()` retries a port reset (`for (retry = 0; retry < 3;
             // retry++)`), and the hub core is otherwise driven by port-change
             // events. This driver polls, so the equivalent is a bounded re-scan:
@@ -1860,14 +1905,38 @@ pub mod driver {
                             info!("ehci: {}", device.summary());
                             devices += 1;
                             done_ports.push(port);
+                            if let Err(err) = bus.lock().attach(device.clone()) {
+                                log::error!("ehci: attaching {} failed: {err:?}", device.summary());
+                            }
                             {
                                 let mut guard = ehci.lock();
                                 super::probe_mass_storage(&mut *guard, &device);
                             }
-                            if let Some(publication) =
-                                super::publish_mass_storage(dev, &ehci, &device)
-                            {
-                                disks.push(publication);
+                            let handle = bus.lock().handle().clone();
+                            match super::publish_mass_storage(&handle, &ehci, &device) {
+                                Some(publication) => {
+                                    let interface = device
+                                        .configurations
+                                        .first()
+                                        .and_then(|config| config.interfaces.first())
+                                        .map_or(0, |interface| interface.number);
+                                    if let Err(err) = bus.lock().bind(
+                                        device.address,
+                                        usb::bus::ClassBinding::new(
+                                            "usb-storage",
+                                            interface,
+                                            alloc::vec![alloc::boxed::Box::new(publication)],
+                                        ),
+                                    ) {
+                                        log::error!(
+                                            "ehci: binding {} failed: {err:?}",
+                                            device.summary()
+                                        );
+                                    }
+                                }
+                                None => {
+                                    log::error!("ehci: no class binding for {}", device.summary())
+                                }
                             }
                         }
                         Err(err) => {
@@ -1883,9 +1952,14 @@ pub mod driver {
             }
             info!("ehci: enumeration found {devices} device(s)");
 
+            {
+                let mut guard = ehci.lock();
+                guard.attach_bus(bus.clone());
+                guard.attach_self(&ehci);
+            }
             Ok(EhciData {
                 _ehci: ehci,
-                _disks: disks,
+                _bus: bus,
                 _clocks: clocks,
                 _phys: phys,
             })
@@ -1982,6 +2056,21 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
             }
         }
         let mut guard = self.ehci.lock();
+        let gone = guard.detach_absent();
+        let still_there = guard
+            .bus
+            .as_ref()
+            .is_none_or(|bus| bus.lock().contains(self.endpoints.address));
+        drop(guard);
+        usb::bus::drop_bindings(gone);
+        if !still_there {
+            log::error!(
+                "ehci: address {} is no longer present",
+                self.endpoints.address
+            );
+            return Err(kerrno::KError::NotFound);
+        }
+        let mut guard = self.ehci.lock();
         let mut done = 0usize;
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
@@ -2052,7 +2141,7 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
 
 /// Publishes the mass-storage interface as a block device.
 fn publish_mass_storage(
-    dev: &mut driver_base::Device<'_, driver_base::PlatformBus>,
+    handle: &driver_base::DeviceHandle,
     ehci: &alloc::sync::Arc<ksync::Mutex<Ehci>>,
     device: &usb::UsbDevice,
 ) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
@@ -2111,8 +2200,8 @@ fn publish_mass_storage(
                 blocks,
             };
             let name = alloc::format!("usb{}", device.address);
-            let parent_path = alloc::string::String::from(dev.info().path());
-            let modalias = dev.info().modalias().map(alloc::string::String::from);
+            let parent_path = alloc::string::String::from(handle.path());
+            let modalias = handle.modalias().map(alloc::string::String::from);
             // Major 8 is the conventional disk major; the block core owns the
             // dev_t registry and rejects a duplicate.
             let disk =
@@ -2125,7 +2214,7 @@ fn publish_mass_storage(
                         continue;
                     }
                 };
-            match dev.publish(
+            match handle.publish(
                 &subsys_block::class::BLOCK,
                 alloc::sync::Arc::new(disk),
                 "usb-storage",

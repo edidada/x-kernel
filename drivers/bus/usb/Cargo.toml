@@ -17,6 +17,9 @@ khal = { workspace = true }
 ktime_types = { workspace = true }
 log.workspace = true
 unittest.workspace = true
+# The device table publishes through the device's identity handle; the class
+# itself stays in the subsystem crates (`bus/usb` names no device family).
+driver_base = { workspace = true }
 
 [lints]
 workspace = true

@@ -246,17 +246,22 @@ UsbBus 锁   <  控制器锁（Xhci/Ehci）
 - B. 重新插入 → 自动重新枚举并发布（`/dev/usbN` 回来）；
 - C. 现有回归：USB2 盘 `ls`/`cat`/写入读回；USB3 盘发布块设备（当前已达成）。
 
-### 8. 交付顺序
+### 8. 交付状态
 
-1. **P1** `driver-base`: `DeviceHandle` + `Device::publish` 转发（泛型改动，独立可测）；
-2. **P2** `bus/usb`: `UsbBus`/`ClassBinding` + 单测（无控制器改动）；
-3. **P3** `drv/usb/xhci`: `rescan()`/`detach` 接入，块后端改为从表取设备（行为不变）；
-4. **P4** `drv/usb/xhci`: `bind_and_publish`（第一次真正"运行时发布"）；
-5. **P5** `drv/usb/ehci`: 同一套接口（EHCI 已有 `reattach`，改成走表）；
-6. **P6** 组合根：把表放进驱动数据，`bus/usb/docs/security.md` 补齐（信任边界：
-   描述符来自设备，容量/字符串不参与控制流；发布物只在表内撤销）。
+| 步 | 内容 | 状态 |
+| --- | --- | --- |
+| **P1** | `driver-base::DeviceHandle`（泛型、`'static`）+ `Device::publish` 转发 | ✅ |
+| **P2** | `bus/usb::UsbBus` / `ClassBinding` / `drop_bindings()` | ✅ |
+| **P3** | xHCI：表挂在控制器状态上；`rescan()` 消费 `port_change`/`hc_error` 并摘除消失设备 | ✅ |
+| **P4** | xHCI：`bind_and_publish()` 用 `DeviceHandle` 在 probe 之后发布；块后端入口先 `rescan()`，绑定的 dropdown 在锁外 | ✅ |
+| **P5** | EHCI：同一张表；`detach_absent()` 在块后端入口摘除消失设备 | ✅ |
+| **P6** | 组合根：表由 probe 创建并存入驱动数据（`_bus`），`docs/security.md` 补齐 | ✅ |
 
-每步独立提交、独立可回滚；P1–P2 不改变任何板上行为。
+**P2 的 QEMU 单测尚未编写**（表的语义已按契约实现，但 §7 列的 4 个用例仍是待办），
+这是本设计唯一未完成的验收项。
+
+已知引用环（已记录在 `security.md` §3）：控制器 → `UsbBus` → `Publication` → 块后端 →
+控制器。它不造成自锁（因为移除路径只在锁外 drop），但它让"驱动卸载"没有定义语义。
 
 ### 9. 明确不改
 

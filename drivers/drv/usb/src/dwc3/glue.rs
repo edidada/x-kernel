@@ -49,8 +49,9 @@ pub struct Dwc3Data {
     /// `&self`; the publications below must outlive the probe for the same reason
     /// the EHCI side keeps them.
     _xhci: alloc::sync::Arc<ksync::Mutex<crate::xhci::Xhci>>,
-    /// Publications of any disks published from this controller.
-    _disks: Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>,
+    /// The device table: devices, their class bindings, and the withdrawal owners
+    /// of everything published for them. Kept here so it outlives probe.
+    _bus: alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>,
 }
 
 impl DriverOps<PlatformBus> for Dwc3Driver {
@@ -199,19 +200,48 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
         };
         info!("dwc3: enumeration found {found} device(s), {ready} usable");
 
-        // What the reference does once `hub_wq` has a device: the class drivers
-        // claim their interfaces and the block layer gets a disk. Stopping at
-        // enumeration is why a SuperSpeed mass-storage device never appeared as
-        // a block device on this board.
-        let mut disks = Vec::new();
+        // The device table: created here because this is the only place a
+        // `DeviceHandle` exists, owned by the controller afterwards so a port scan
+        // at runtime can withdraw and publish bindings without a `Device`.
+        let bus = alloc::sync::Arc::new(ksync::Mutex::new(usb::bus::UsbBus::new(dev.handle())));
         for device in &devices {
             {
                 let mut guard = xhci.lock();
                 crate::xhci::probe_mass_storage(&mut *guard, device);
             }
-            if let Some(publication) = crate::xhci::publish_mass_storage(dev, &xhci, device) {
-                disks.push(publication);
+            if let Err(err) = bus.lock().attach(device.clone()) {
+                log::error!("dwc3: attaching {} failed: {err:?}", device.summary());
+                continue;
             }
+            let publication = {
+                let handle = bus.lock().handle().clone();
+                crate::xhci::publish_mass_storage(&handle, &xhci, device)
+            };
+            match publication {
+                Ok(publication) => {
+                    let pipe_interface = device
+                        .configurations
+                        .first()
+                        .and_then(|config| config.interfaces.first())
+                        .map_or(0, |interface| interface.number);
+                    if let Err(err) = bus.lock().bind(
+                        device.address,
+                        usb::bus::ClassBinding::new(
+                            "usb-storage",
+                            pipe_interface,
+                            alloc::vec![alloc::boxed::Box::new(publication)],
+                        ),
+                    ) {
+                        log::error!("dwc3: binding {} failed: {err:?}", device.summary());
+                    }
+                }
+                Err(err) => log::error!("dwc3: no class binding for {}: {err:?}", device.summary()),
+            }
+        }
+        {
+            let mut guard = xhci.lock();
+            guard.attach_bus(bus.clone());
+            guard.attach_self(&xhci);
         }
 
         Ok(Dwc3Data {
@@ -220,7 +250,7 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
             _reset: reset,
             _phys: phys,
             _xhci: xhci,
-            _disks: disks,
+            _bus: bus,
         })
     }
 }

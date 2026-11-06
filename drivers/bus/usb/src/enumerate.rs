@@ -180,6 +180,9 @@ pub fn enumerate_port(hcd: &mut dyn Hcd, port: usize, address: u8) -> KResult<Us
     Ok(UsbDevice {
         address,
         port,
+        // The caller that walks a hub fills this in; a root-port device has no
+        // parent.
+        parent: None,
         speed,
         device,
         configurations,
@@ -369,6 +372,7 @@ pub fn enumerate_addressed(
     Ok(UsbDevice {
         address,
         port,
+        parent: None,
         speed,
         device,
         configurations,
