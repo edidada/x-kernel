@@ -1258,7 +1258,26 @@ impl Xhci {
         data: &mut [u8],
         is_in: bool,
     ) -> KResult<usize> {
-        let direction = usize::from(is_in);
+        self.bulk_transfer_on(slot_index, usize::from(is_in), endpoint, data, is_in)
+    }
+
+    /// One bulk transfer on a chosen endpoint ring.
+    ///
+    /// `ring_index` selects which of the two configured endpoints carries it (0 =
+    /// the OUT one, 1 = the IN one) and `is_in` sets the TRB's direction bits.
+    /// They are separate arguments because they *are* separate things: the ring
+    /// belongs to an endpoint, the direction belongs to the transfer. A bring-up
+    /// probe needs to address one endpoint's ring with the other direction to see
+    /// whether the controller runs the TRB at all.
+    fn bulk_transfer_on(
+        &mut self,
+        slot_index: usize,
+        direction: usize,
+        endpoint: u8,
+        data: &mut [u8],
+        is_in: bool,
+    ) -> KResult<usize> {
+        let _ = endpoint;
         let slot_id = self.slots[slot_index].id;
         if self.slots[slot_index].wire_dead {
             return Err(KError::Io);
@@ -1426,6 +1445,25 @@ impl Xhci {
         };
         if let Some(ring) = self.slots[slot_index].bulk[direction].as_ref() {
             let trb = ring.read(0);
+            // The link state at the moment of the timeout, and the port's power
+            // management word: a SuperSpeed link that fell into U1/U2/U3 stops
+            // answering IN tokens, which looks exactly like a device that took the
+            // CBW and then went silent.
+            let port = self.slots[slot_index].port.unwrap_or(0);
+            let base = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
+            let portsc = self.bar.read32(base);
+            let pmsc = self.bar.read32(base + 4);
+            log::error!(
+                "xhci: bulk timeout: port {} portsc {portsc:#010x} (ccs {}, ped {}, pls {}) pmsc \
+                 {pmsc:#010x} (u1 timeout {}, u2 timeout {}, fie {})",
+                port + 1,
+                portsc & portsc::CCS != 0,
+                portsc & portsc::PED != 0,
+                (portsc >> 5) & 0xf,
+                pmsc & 0xff,
+                (pmsc >> 8) & 0xff,
+                pmsc & (1 << 16) != 0,
+            );
             log::error!(
                 "xhci: bulk timeout: ep dci {dci} state {state} dequeue {dequeue:#x} ring {:#x} \
                  first trb p {:#x} s {:#010x} c {:#010x} (cycle {})",

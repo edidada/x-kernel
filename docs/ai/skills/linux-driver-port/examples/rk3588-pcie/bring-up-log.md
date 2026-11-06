@@ -2591,6 +2591,57 @@ xhci: bulk timeout: ep dci 3 state 1 dequeue 0x2f08001 ring 0x2f08000
 注意 `dequeue` 停在环首**不能**作为"TRB 未被取走"的证据：NAK 重试期间设备上下文里的
 dequeue 本来就不会前进。这一点上一轮误判过一次。
 
+### 5.9.4c bulk 数据相位的判别实验（结论：控制器不跑该 slot 的 IN TRB）
+
+按 5.9.4b 的计划做的两组实验，都用"能区分两种解释"的形式，且都是**有界的临时探针**
+（定位后已从代码里移除）。
+
+**实验 1：零数据阶段命令（TEST UNIT READY）**
+
+CBW 与 CSW 走同一条 OUT/IN 端点，中间没有数据阶段：
+
+```
+bot: cbw tag 1 op 0x12 len 36 ...                 (INQUIRY，有数据阶段)
+xhci: slot 3 bulk endpoints configured
+xhci: bulk timeout: ep dci 3 ... first trb p 0x206000 s 0x0000000d c 0x00000425
+                                     ^^^^^^^^^^^^ 13 字节 = CSW
+xhci: bring-up probe: TEST UNIT READY failed: KErrorKind::TimedOut
+```
+
+即 **CBW（OUT）成功，CSW（IN, 13 字节）永不应答** —— 设备接受命令，但从不在 IN 端点上送数据。
+
+**实验 2：链路是否睡着（SuperSpeed 特有）**
+
+把电源管理这一假设当场量掉：
+
+```
+xhci: bulk timeout: port 2 portsc 0x00001203 (ccs true, ped true, pls 0) pmsc 0x00000000
+                                                                            ^^^^^ U0
+```
+
+PLS=0 是 U0，`PORTPMSC` 的 U1/U2 timeout 都是 0 —— **链路没有睡**，U1/U2/U3 假设证伪
+（这一条要记下来，省得下次再猜电源管理）。
+
+**实验 3：换个方向探同一个 slot**（把"环"和"TRB 方向"拆开之后才做得对）
+
+在**已知能工作的 OUT 端点环**上发一次 IN，期望设备回 STALL（那也意味着控制器会产生事件）。
+结果同样是 **没有任何 Transfer Event**、5 秒超时。
+
+**当前结论**：这个 slot 上**任何 IN 传输都不产生事件**，与设备侧的 IN 端点是否应答无关；
+问题在控制器侧对该 slot 的 IN 调度（或我们给出的 IN 相关上下文位）。已排除的假设：
+数据阶段长度、链路电源状态、设备 IN 端点不应答（CBW 被 ACK 证明链路与设备都在工作）、
+端点上下文（配置后读回逐字段正确、EP state Running、DCS=1）、TRB 字段（与 Linux 和
+usb-host 两套实现逐字段一致）。
+
+**下一步该看的地方**（按 §10 用第二实现/参考对分，而不是再猜）：
+
+1. `EP state` 在**第一次 IN 之后**是否被控制器改写（读回 dci 3 的 state 是否仍为 1）；
+2. `PORTSC` 之外，SuperSpeed 的**链路错误计数/`GSTS`**是否记录了 IN 方向的错误；
+3. 用**同一个 xHCI 的 USB2 根口**（不是 SS hub 下游）跑同一个 bulk IN，区分
+   "SS 链路方向性问题" 与 "控制器 IN 调度问题"；
+4. 读 `xHCI` 的 `HCCPARAMS2`/`DWC3` 版本相关 quirk（DWC3 对 bulk IN 有已知的
+   "no-op/evaluate context" 类 quirk）。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
