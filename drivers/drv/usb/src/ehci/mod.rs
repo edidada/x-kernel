@@ -85,12 +85,33 @@ pub struct Ehci {
 /// head at all; with endpoints present it truncates the ring to `head -> head`
 /// and every endpoint becomes unreachable, which is exactly how a transfer ends
 /// up queued with an overlay the controller never touches.
+/// The value `ehci_run()` writes into USBCMD.
+///
+/// Linux composes this register from scratch (`ehci_init()` builds `ehci->command`
+/// and `ehci_run()` writes it), so every hardware-default bit is replaced. Two of
+/// those default bits matter here: `CMD_PARK` and `PARK_CNT`, whose module
+/// parameter `park` defaults to 0 in the reference but which this controller sets
+/// on its own. A read-modify-write -- what this driver did -- keeps them, and a
+/// parked controller stops walking the async list: every queue head then reads
+/// `hw_current == 0` forever, which is exactly the stall this board shows.
+///
+/// ITC is 1 microframe, as the reference's default `log2_irq_thresh = 0` gives.
+fn run_command() -> u32 {
+    regs::cmd::RS | regs::cmd::ASE | (1 << 16)
+}
+
 fn build_async_ring(base_address: u64, head: *mut Qh, dummy_qtd_bus: u32) {
     let base = base_address as u32;
     let size = core::mem::size_of::<Qh>() as u32;
     let total = 4u32;
     for index in 0..total {
         let entry = head.wrapping_add(index as usize);
+        // A static ring: head -> EP0 -> bulk OUT -> bulk IN -> head. The
+        // reference links only the head permanently and splices endpoints in per
+        // transfer (`qh_link_async`), but splicing needs the unlink handshake as
+        // its counterpart; with every endpoint in the ring and the head carrying
+        // QH_HEAD, the controller walks all four and stops at the reclamation
+        // head, which is the behaviour this driver is built around.
         let next = if index + 1 == total {
             base | 2
         } else {
@@ -113,7 +134,7 @@ fn build_async_ring(base_address: u64, head: *mut Qh, dummy_qtd_bus: u32) {
             // SAFETY: dwords 0..6 of the head queue head, inside this allocation.
             unsafe {
                 let bytes = entry.cast::<u8>();
-                core::ptr::write_volatile(bytes.cast::<u32>(), (base & !0x1f) | regs::QH_TYPE);
+                core::ptr::write_volatile(bytes.cast::<u32>(), next);
                 core::ptr::write_volatile(bytes.wrapping_add(4).cast::<u32>(), regs::info1::HEAD);
                 core::ptr::write_volatile(bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
                 core::ptr::write_volatile(bytes.wrapping_add(20).cast::<u32>(), dummy_qtd_bus);
@@ -305,13 +326,9 @@ impl Ehci {
             status_before & sts::PCD != 0,
             status_before & sts::ASS != 0,
         );
-        // Run with the asynchronous schedule only.
-        regs.write32(
-            operational + op::USBCMD,
-            regs.read32(operational + op::USBCMD)
-                | crate::ehci::regs::cmd::RS
-                | crate::ehci::regs::cmd::ASE,
-        );
+        // Run with the asynchronous schedule only. Written whole, not OR-ed into
+        // the reset value: see `run_command()` for the parking bit this replaces.
+        regs.write32(operational + op::USBCMD, run_command());
         // Let the controller leave the halted state before anything is queued.
         for _ in 0..100 {
             let status = regs.read32(operational + op::USBSTS);
@@ -487,10 +504,8 @@ impl Ehci {
                 );
             }
             if stop_schedule {
-                this.regs.write32(
-                    this.operational + op::USBCMD,
-                    command | regs::cmd::RS | regs::cmd::ASE,
-                );
+                this.regs
+                    .write32(this.operational + op::USBCMD, run_command());
             }
         };
 
@@ -540,6 +555,7 @@ impl Ehci {
                         status & sts::HSE != 0,
                         status & sts::ASS != 0,
                     );
+                    self.log_async_ring("control transfer");
                     return Err(KError::TimedOut);
                 }
                 if data_token & token::HALT != 0 {
@@ -671,10 +687,8 @@ impl Ehci {
             self.operational + op::ASYNCLISTADDR,
             self.qh.bus_addr() as u32,
         );
-        self.regs.write32(
-            self.operational + op::USBCMD,
-            command | regs::cmd::RS | regs::cmd::ASE,
-        );
+        self.regs
+            .write32(self.operational + op::USBCMD, run_command());
         log::warn!("ehci: restarted the asynchronous schedule after a halt");
     }
 
@@ -834,78 +848,7 @@ impl Ehci {
             // The EP0 queue head's descriptors: if one is still Active, the
             // controller is parked on the control endpoint retrying it forever
             // and never reaches the bulk queue heads behind it in the ring.
-            // The full ring dump is worth its lines exactly once or twice: after
-            // that the interesting fact is that the same stall happened again,
-            // and a console full of queue-head dumps costs the boot more than it
-            // tells. `STALL_DUMPS` bounds it.
-            let dump = STALL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2;
-            if !dump {
-                log::warn!("ehci: bulk stall again (ring dump suppressed)");
-            }
-            // Every queue head in the async ring, as the controller holds it.
-            // One halted head anywhere in the circular list stops the walk, and
-            // the endpoints behind it then look exactly like "the controller
-            // ignored what we wrote".
-            for index in 0..4usize {
-                let word = |offset: usize| {
-                    // SAFETY: dword `offset` of queue head `index`, inside the
-                    // four-QH allocation.
-                    unsafe {
-                        core::ptr::read_volatile(
-                            head.wrapping_add(index)
-                                .cast::<u8>()
-                                .wrapping_add(offset)
-                                .cast::<u32>(),
-                        )
-                    }
-                };
-                if dump {
-                    log::error!(
-                        "ehci: qh{index} next {:#x} info1 {:#x} qtd_next {:#x} alt {:#x} token \
-                         {:#x} (halt {}, active {})",
-                        word(0),
-                        word(4),
-                        word(16),
-                        word(20),
-                        word(24),
-                        word(24) & regs::token::HALT != 0,
-                        word(24) & regs::token::ACTIVE != 0,
-                    );
-                }
-            }
-            if dump {
-                log::error!(
-                    "ehci: usbcmd {:#x} (ase {}, pse {}, rs {}) async_next {:#x} frindex {}",
-                    self.regs.read32(self.operational + op::USBCMD),
-                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::ASE != 0,
-                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::PSE != 0,
-                    self.regs.read32(self.operational + op::USBCMD) & regs::cmd::RS != 0,
-                    self.regs.read32(self.operational + op::ASYNCLISTADDR),
-                    self.regs.read32(self.operational + op::FRINDEX),
-                );
-            }
-            for slot in 0..8usize {
-                // SAFETY: the eight qTD slots are inside this allocation.
-                let token = unsafe {
-                    core::ptr::read_volatile(
-                        self.qtds
-                            .as_ptr()
-                            .cast::<Qtd>()
-                            .wrapping_add(slot)
-                            .cast::<u8>()
-                            .wrapping_add(8)
-                            .cast::<u32>(),
-                    )
-                };
-                if dump {
-                    log::error!(
-                        "ehci: qtd{slot} at {:#x} token {token:#010x} (halt {}, active {})",
-                        self.qtds.bus_addr() + (slot * core::mem::size_of::<Qtd>()) as u64,
-                        token & regs::token::HALT != 0,
-                        token & regs::token::ACTIVE != 0,
-                    );
-                }
-            }
+            self.log_async_ring("bulk transfer");
             for slot in 0..3usize {
                 // SAFETY: the first three qTDs belong to the control path.
                 let control_qtd = unsafe {
@@ -1096,6 +1039,81 @@ impl Ehci {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
         }
         self.ring_async_advance();
+    }
+
+    /// Dumps the async ring exactly as the controller holds it.
+    ///
+    /// Read once per stall: one halted or mis-pointed queue head anywhere in the
+    /// circular list stops the walk, and every endpoint behind it then looks
+    /// exactly like "the controller ignored what we wrote". `hw_current` (dword
+    /// 3) is the discriminator: zero with `qtd_next` pointing at an Active
+    /// descriptor means the head was never fetched; equal to that descriptor's
+    /// address with the token still Active means it was fetched and not executed.
+    fn log_async_ring(&self, what: &str) {
+        // The dump is worth its lines once or twice: after that the interesting
+        // fact is that the same stall happened again.
+        const DUMPS: usize = 2;
+        static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= DUMPS {
+            log::warn!("ehci: {what} stalled again (ring dump suppressed)");
+            return;
+        }
+        let head = self.qh.as_ptr().cast::<Qh>();
+        for index in 0..4usize {
+            let word = |offset: usize| {
+                // SAFETY: dword `offset` of queue head `index`, inside the
+                // four-QH allocation.
+                unsafe {
+                    core::ptr::read_volatile(
+                        head.wrapping_add(index)
+                            .cast::<u8>()
+                            .wrapping_add(offset)
+                            .cast::<u32>(),
+                    )
+                }
+            };
+            log::error!(
+                "ehci: qh{index} next {:#x} info1 {:#x} current {:#x} qtd_next {:#x} alt {:#x} \
+                 token {:#x} (halt {}, active {})",
+                word(0),
+                word(4),
+                word(12),
+                word(16),
+                word(20),
+                word(24),
+                word(24) & regs::token::HALT != 0,
+                word(24) & regs::token::ACTIVE != 0,
+            );
+        }
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        log::error!(
+            "ehci: usbcmd {command:#x} (ase {}, pse {}, rs {}) async_next {:#x} frindex {}",
+            command & regs::cmd::ASE != 0,
+            command & regs::cmd::PSE != 0,
+            command & regs::cmd::RS != 0,
+            self.regs.read32(self.operational + op::ASYNCLISTADDR),
+            self.regs.read32(self.operational + op::FRINDEX),
+        );
+        for slot in 0..QTD_SLOTS {
+            // SAFETY: every slot is inside this controller's qTD allocation.
+            let token = unsafe {
+                core::ptr::read_volatile(
+                    self.qtds
+                        .as_ptr()
+                        .cast::<Qtd>()
+                        .wrapping_add(slot)
+                        .cast::<u8>()
+                        .wrapping_add(8)
+                        .cast::<u32>(),
+                )
+            };
+            log::error!(
+                "ehci: qtd{slot} at {:#x} token {token:#010x} (halt {}, active {})",
+                self.qtds.bus_addr() + (slot * core::mem::size_of::<Qtd>()) as u64,
+                token & regs::token::HALT != 0,
+                token & regs::token::ACTIVE != 0,
+            );
+        }
     }
 
     /// Sets the async-advance doorbell and waits for the controller to take it.
