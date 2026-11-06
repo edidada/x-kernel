@@ -3,8 +3,8 @@
 ## Analysis scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/abi/`, `src/model/`,
-`src/kms.rs`, `src/gem.rs`, `src/framebuffer.rs`, `src/scanout.rs`,
-`src/blob.rs`, and `src/auth.rs`. No source module is excluded. KVFS typed
+`src/ioctl.rs`, `src/protocol.rs`, `src/gem.rs`, `src/framebuffer.rs`,
+`src/kms/`, `src/blob.rs`, and `src/auth.rs`. No source module is excluded. KVFS typed
 user-copy and mmap primitives, `kclass` device-handle validity, and the display
 backend contract remain the responsibility of their provider crates:
 `model::backend::ClassBackend` is the only code here that calls the display
