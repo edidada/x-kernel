@@ -3174,6 +3174,55 @@ control transfer ep0 ring at 0x10117000: [1] ... c=0x10c25 [2] ... c=0x1001   �
 口）：若 EHCI 也在同一命令后整条停 → 是设备/BOT 交互；若 EHCI 一直正常 → 才回到 xHCI
 的 slot 层继续挖（例如地址/route 在 100 条命令后是否仍被控制器正确路由）。
 
+### 5.9.15 初始化流程逐环节对比（数据与机制），以及仍缺的项
+
+按纪律把参考的初始化链路拆成环节，每一环在我们的代码里找证据。**"已验证一致"指我读到了
+两侧对应的字段/机制；"缺"指参考有、我们没有；"偏离"指两侧都有但值/来源不同。**
+
+| # | 环 节 | 参考（5.10 BSP） | 我们 | 判定 |
+|---|---|---|---|---|
+| 1 | 控制器复位 | `xhci_reset()`：清 USBSTS、等 CNR=0、USBCMD.RS | `reset_controller()` + 等 CNR | 一致 |
+| 2 | CONFIG.MaxSlotsEn / DCBAAP | `xhci_init()` | `program_rings()` | 一致（板上回读 dcbaa 0x10106000） |
+| 3 | 命令环 CRCR（RCS=1） | `xhci_write_64(CRCR, dma\|1)` | 同 | 一致（`no-op code 1` 证明被取指） |
+| 4 | 事件环 ERST/ERSTSZ/ERSTBA/ERDP | `xhci_alloc_erst()` + interrupter | 同；`ERST_SEG_SIZE_SHIFT=16` A/B 已验证条目稳定 | 一致 |
+| 5 | scratchpad | `HCS_MAX_SCRATCHPAD()` = `(p>>16 & 0x3e0) \| (p>>27 & 0x1f)` = 1 | 同式，=1 | 一致 |
+| 6 | 端口供电 | `hub_port_power` → PORTSC.PP | PP 已置（日志 `pp true`） | 一致 |
+| 7 | Enable Slot | `xhci_queue_slot_control(ENABLE_SLOT)` | `enable_slot()` | 一致（code 1，slot 1/2/3） |
+| 8 | Slot Context | `xhci_setup_addressable_priv_dev()`：route、speed、MEL、root port | route=0x4、speed=4、port=2（见 §5.9.14 数据） | 数据一致；**MEL 恒 0**（参考从端口取，未实现——未见影响） |
+| 9 | EP0 Context | EP_TYPE=CTRL、maxpacket、CErr=3、deq\|DCS | 同 | 一致 |
+| 10 | Address Device (BSR=0) | `xhci_address_device()` | `address_device()` | 一致（code 1） |
+| 11 | Evaluate Context（ep0 maxpacket 变化） | `xhci_check_maxpacket()` | `evaluate_ep0_max_packet()`（`slot 1 ep0 max packet updated to 64`） | 一致 |
+| 12 | 读设备描述符 8→18 字节 | `usb_get_device_descriptor` ×2 | `enumerate_port()` 单次 8 字节首读 + 18 | 一致 |
+| 13 | **读 BOS 描述符**（bcdUSB ≥ 0x0201） | `usb_get_bos_descriptor()` | **没有** | **缺**（只影响 LPM 能力判定，不影响传输） |
+| 14 | SetConfiguration(1) → Configure Endpoint | `usb_set_configuration()` → `xhci_add_endpoint()` | `enumerate` + `configure_bulk()` | 一致（`Configure Endpoint` 成功） |
+| 15 | 端点 Context dword0（ep_info） | `EP_MAX_ESIT_PAYLOAD_HI(0)\|EP_INTERVAL(0)\|EP_MULT(0)` | `endpoint_dword0(0)` | 一致 |
+| 16 | 端点 Context dword1（ep_info2） | `EP_TYPE\|MAX_PACKET(usb_endpoint_maxp())\|MAX_BURST(ss_ep_comp.bMaxBurst)\|CErr(3)` | 调 `endpoint_dword1(type, **1024 硬编码**, **0 硬编码**)` | **偏离**：`configure_bulk()` 收到了 `max_packet_*`/`max_burst_*`，写上下文时**两个都丢掉了**（见下） |
+| 17 | 端点 Context dword4（tx_info） | `EP_MAX_ESIT_PAYLOAD_LO(0)\|EP_AVG_TRB_LENGTH(0)`（bulk/control 的 `xhci_get_max_esit_payload()` 返回 0） | `endpoint_tx_info(0,0)` | 一致 |
+| 18 | Bulk TRB（`xhci_queue_bulk_tx`） | 64 KiB 边界、CHAIN/IOC/ISP、TD_SIZE、首 TRB 后发布 | 同（逐字段核过，`len 13 / td_size 0 / intr 0`） | 一致 |
+| 19 | 完成事件匹配 | `trb_in_td()` 按段处理环绕 | `trb_in_td()`（本轮新加） | 一致 |
+| 20 | halt/超时处理 | `xhci_handle_halted_endpoint` = Reset Endpoint(TSP) + `xhci_invalidate_cancelled_tds` | 同（本轮起超时不再单独 Reset Endpoint） | 一致 |
+| 21 | **SET_SEL / LPM（U1/U2）** | `usb_enable_lpm()` → `usb_req_set_sel()` + `SetPortFeature(PORT_U1/U2_TIMEOUT)` | **没有** | **缺**（合法，但设备行为可能与 Linux 不同） |
+| 22 | `usb_hcd_reset_endpoint` 时机 | 只在设备 CLEAR_FEATURE 成功后 | 同（`clear_endpoint_halt()`） | 一致 |
+
+**两条真正的偏离（第 16 行），证据在代码里**：
+
+```
+write(ctx + 1, context::endpoint_dword1(
+    if direction == 0 { 2 } else { 6 },
+    ep0_packet,        // == 1024u16，硬编码，没用 max_packet_out/in
+    0,                 // MAX_BURST 硬编码 0，没用 max_burst_out/in
+));
+```
+
+即 `configure_bulk(dev, addr, ep_out, ep_in, max_packet_out, max_packet_in,
+max_burst_out, max_burst_in)` 的**后四个参数一个都没写进上下文**。对这块 SuperSpeed 盘
+packet 恰好是 1024（对上了），但 **`bMaxBurst` 被丢成 0** —— 参考明确取
+`ss_ep_comp.bMaxBurst`（`xhci_get_endpoint_max_burst()`，xhci-mem.c:1423）。这块盘在
+Linux 上按设备声明的 burst 工作，在我们这里被强制成 burst=1，是唯一还没对齐的**设备可见
+配置数据**。
+
+本轮改动编译失败（同一文件里两处写端点上下文，改到了占位循环那一段），已回退，未上板。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
