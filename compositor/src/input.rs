@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Stage 2: a Wayland compositor that composites SHM client buffers into a
-//! dumb buffer and presents it through Smithay's DRM surface.
+//! evdev input forwarding into the seat.
 
 use std::{
     fs::File,
