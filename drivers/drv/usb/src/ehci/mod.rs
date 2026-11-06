@@ -230,6 +230,24 @@ impl Ehci {
             .res()
             .alloc_coherent(QTD_SLOTS * core::mem::size_of::<Qtd>(), 32)?;
         let buffers = dev.res().alloc_coherent(EP0_BUFFER_LEN, EP0_BUFFER_LEN)?;
+        // `ehci_qtd_init()`: the descriptor every transfer list ends on. It is
+        // inactive, and its own next pointer terminates -- the controller walks
+        // onto it after the last real descriptor and parks there. Ending a list
+        // with `LIST_END` instead makes the controller write HALT into the queue
+        // head overlay, asynchronously, possibly after software has already
+        // cleared it for the next transfer.
+        // SAFETY: slot `QTD_HEAD_DUMMY` is inside the qTD allocation.
+        unsafe {
+            core::ptr::write_volatile(
+                qtds.as_ptr().cast::<Qtd>().wrapping_add(QTD_HEAD_DUMMY),
+                Qtd {
+                    next: regs::LIST_END,
+                    alt_next: regs::LIST_END,
+                    token: 0,
+                    buffer: [0; 5],
+                },
+            );
+        }
         let bulk = dev.res().alloc_coherent(BULK_BUFFER_LEN, BULK_BUFFER_LEN)?;
         for (pointer, length) in [
             (qh.as_ptr(), 4 * core::mem::size_of::<Qh>()),
@@ -962,9 +980,11 @@ impl Ehci {
             core::ptr::write_volatile(overlay(24), token & (token::DT | token::PING));
         }
         karch::dsb_ishst();
-        // Step 2. The descriptor itself. `next` terminates the list, which is
-        // how the controller reports "no more work" (`hw_qtd_next == LIST_END`
-        // is what `qh_completions()` looks for).
+        // Step 2. The descriptor itself. The list ends on the dummy descriptor:
+        // `qh_append_tds()` points the last qTD's `hw_next` at the queue head's
+        // dummy (`qtd->hw_next = QTD_NEXT(ehci, dma)`) precisely so the
+        // controller parks on an inactive descriptor instead of writing HALT
+        // into the overlay behind software's back.
         let qtd_token = ((if is_in { pid::IN } else { pid::OUT }) << token::PID_SHIFT)
             | (3 << token::CERR_SHIFT)
             | ((length as u32) << token::LEN_SHIFT)
@@ -972,12 +992,18 @@ impl Ehci {
             | token::ACTIVE;
         let qtd_ptr = self.qtds.as_ptr().cast::<Qtd>().wrapping_add(dummy_slot);
         let base = qtd_ptr.cast::<u8>();
+        let list_end =
+            self.qtds.bus_addr() as u32 + (QTD_HEAD_DUMMY * core::mem::size_of::<Qtd>()) as u32;
+        // For an IN transfer the reference points `hw_alt_next` at the same dummy
+        // ("short reads advance to a 'magic' dummy instead of the next qtd"), so a
+        // short packet stops the list without the controller halting the head.
+        let alt_next = if is_in { list_end } else { regs::LIST_END };
         // SAFETY: the dummy slot is inside this controller's qTD allocation and
         // the offsets stay within its 32 bytes. `next`/`alt_next`/buffers land
         // before the token, which is written after the barrier below.
         unsafe {
-            core::ptr::write_volatile(base.cast::<u32>(), regs::LIST_END);
-            core::ptr::write_volatile(base.wrapping_add(4).cast::<u32>(), regs::LIST_END);
+            core::ptr::write_volatile(base.cast::<u32>(), list_end);
+            core::ptr::write_volatile(base.wrapping_add(4).cast::<u32>(), alt_next);
             core::ptr::write_volatile(
                 base.wrapping_add(12).cast::<u32>(),
                 self.bulk.bus_addr() as u32,
@@ -1188,9 +1214,13 @@ impl Ehci {
                 index += 1;
                 address
             };
-        // The chain is built back to front so each qTD knows its successor.
+        // The chain is built back to front so each qTD knows its successor. The
+        // last one ends on the dummy descriptor, as `qh_append_tds()` does
+        // (`qtd->hw_next = QTD_NEXT(ehci, dummy->qtd_dma)`).
+        let dummy =
+            self.qtds.bus_addr() as u32 + (QTD_HEAD_DUMMY * core::mem::size_of::<Qtd>()) as u32;
         let status_addr = push(
-            0,
+            dummy,
             if is_in { pid::OUT } else { pid::IN },
             0,
             true,
