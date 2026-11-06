@@ -4830,8 +4830,21 @@ pub(crate) fn probe_mass_storage(xhci: &mut Xhci, device: &usb::UsbDevice) {
         endpoints.endpoint_in,
         endpoints.endpoint_out
     );
+    // `sd_revalidate_disk()` -> `sd_spinup_disk()`: readiness first. Everything
+    // below asks the medium a question, and a stick that has just been powered
+    // answers `NOT READY` until its flash controller is up -- which is also the
+    // state in which a READ can come back short or full of zeros with a good
+    // status wrapper.
+    match usb::bot::wait_until_ready(xhci, &endpoints) {
+        Ok(()) => log::info!("xhci: mass storage ready"),
+        Err(err) => log::warn!("xhci: mass storage did not report ready: {err:?}"),
+    }
     usb::bot::describe(xhci, &endpoints);
-    usb::bot::probe_filesystem(xhci, &endpoints);
+    if !usb::bot::probe_filesystem(xhci, &endpoints) {
+        // Nothing mountable on the medium, so proving the write path costs
+        // nothing: it writes and restores the last sector.
+        usb::bot::verify_write_path(xhci, &endpoints);
+    }
     if let Err(err) = usb::bot_fs::list_root(xhci, &endpoints) {
         log::warn!("xhci: root directory listing failed: {err:?}");
     }
@@ -4861,17 +4874,11 @@ pub(crate) fn publish_mass_storage(
     {
         return Err(KError::BadState);
     }
-    // `reset_recovery` then the capacity read: the device may carry BOT state from
-    // an earlier host or from before a reset.
-    match usb::bot::reset_recovery(&mut *guard, &endpoints) {
-        Ok(()) => log::info!("xhci: bulk-only reset done (address {})", endpoints.address),
-        Err(err) => log::error!(
-            "xhci: bulk-only reset failed for address {}: {err:?}",
-            endpoints.address
-        ),
-    }
-    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
-    let blocks = match usb::bot::read_capacity(&mut *guard, &endpoints) {
+    // Ready first, then the capacity read; the reset recovery happens *inside*
+    // that call and only if the command actually fails, which is the reference's
+    // order (`usb_stor_invoke_transport()` resets on a transport error, not
+    // before every command).
+    let blocks = match usb::bot::read_capacity_ready(&mut *guard, &endpoints) {
         Ok(data) if data.len() >= 8 => {
             let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             u64::from(last) + 1

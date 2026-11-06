@@ -2202,16 +2202,11 @@ fn publish_mass_storage(
             // it before the disk is published.
             let blocks = {
                 let mut guard = ehci.lock();
-                // A device that has just been configured can still carry BOT
-                // state from an earlier host; the specification's reset recovery
-                // is the documented way to start the state machine clean.
-                let _ = usb::bot::reset_recovery(&mut *guard, &endpoints);
-                // SET_CONFIGURATION to the first bulk command is a state change
-                // the device's firmware also has to absorb; the reference
-                // spreads its first commands over `msleep` gaps for the same
-                // reason.
-                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
-                match usb::bot::read_capacity(&mut *guard, &endpoints) {
+                // Ready first, then the capacity read; the reset recovery happens
+                // inside that call and only when the command fails, which is the
+                // reference's order (`usb_stor_invoke_transport()` resets on a
+                // transport error, not before every command).
+                match usb::bot::read_capacity_ready(&mut *guard, &endpoints) {
                     Ok(data) if data.len() >= 8 => {
                         let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                         u64::from(last) + 1
@@ -2301,8 +2296,15 @@ fn probe_mass_storage(ehci: &mut Ehci, device: &usb::UsbDevice) {
                 interface: interface.number,
             };
             log::info!("ehci: mass storage on ep in {endpoint_in:#04x} out {endpoint_out:#04x}",);
+            // `sd_spinup_disk()`: readiness before anything is asked of the medium.
+            match usb::bot::wait_until_ready(ehci, &endpoints) {
+                Ok(()) => log::info!("ehci: mass storage ready"),
+                Err(err) => log::warn!("ehci: mass storage did not report ready: {err:?}"),
+            }
             usb::bot::describe(ehci, &endpoints);
-            usb::bot::probe_filesystem(ehci, &endpoints);
+            if !usb::bot::probe_filesystem(ehci, &endpoints) {
+                usb::bot::verify_write_path(ehci, &endpoints);
+            }
             if let Err(err) = usb::bot_fs::list_root(ehci, &endpoints) {
                 log::warn!("ehci: root directory listing failed: {err:?}");
             }

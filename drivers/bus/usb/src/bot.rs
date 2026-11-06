@@ -120,6 +120,17 @@ fn status_wrapper_in_data(
     Some(wrapper)
 }
 
+/// What the data phase of one command carries.
+#[derive(Clone, Copy)]
+enum DataPhase<'a> {
+    /// No data stage: `TEST UNIT READY`, `START STOP UNIT`.
+    None,
+    /// Data-in of this many bytes (`READ(10)`, `INQUIRY`, `REQUEST SENSE`).
+    In(usize),
+    /// Data-out: the bytes `WRITE(10)` puts on the wire.
+    Out(&'a [u8]),
+}
+
 /// Runs one BOT command and returns the data stage.
 ///
 /// The three phases are strictly ordered: the status wrapper is only valid after
@@ -129,10 +140,14 @@ fn transfer(
     hcd: &mut dyn Hcd,
     endpoints: &BotEndpoints,
     command: &[u8],
-    transfer_length: usize,
-    is_in: bool,
+    phase: DataPhase<'_>,
     _tag: u32,
 ) -> KResult<Vec<u8>> {
+    let (transfer_length, is_in) = match phase {
+        DataPhase::None => (0, false),
+        DataPhase::In(length) => (length, true),
+        DataPhase::Out(data) => (data.len(), false),
+    };
     // `bcb->Tag = ++us->tag`: the status wrapper echoes this, and the echo is
     // checked below.
     let tag = TAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
@@ -169,7 +184,18 @@ fn transfer(
     if sent != CBW_LEN {
         return Err(KError::Io);
     }
-    let mut data = alloc::vec![0u8; transfer_length];
+    // The OUT payload is the caller's, not a fresh zero buffer: `WRITE(10)` used to
+    // ship 512 zero bytes for every block because this allocation was never filled
+    // from the command's data -- the bug that zeroed the first blocks of the stick
+    // this driver was being brought up on.
+    let mut data = match phase {
+        DataPhase::Out(source) => {
+            let mut buffer = alloc::vec![0u8; source.len()];
+            buffer.copy_from_slice(source);
+            buffer
+        }
+        _ => alloc::vec![0u8; transfer_length],
+    };
     if transfer_length > 0 {
         let received = data_stage(hcd, endpoints, &mut data, is_in)?;
         if received != transfer_length {
@@ -283,7 +309,13 @@ pub fn read_sectors(
     command[0] = 0x28; // READ(10)
     command[2..6].copy_from_slice(&lba.to_be_bytes());
     command[7..9].copy_from_slice(&count.to_be_bytes());
-    transfer(hcd, endpoints, &command, usize::from(count) * 512, true, 1)
+    transfer(
+        hcd,
+        endpoints,
+        &command,
+        DataPhase::In(usize::from(count) * 512),
+        1,
+    )
 }
 
 /// `WRITE(10)`: writes `count` blocks of 512 bytes starting at `lba`.
@@ -304,9 +336,7 @@ pub fn write_sectors(
     command[0] = 0x2A; // WRITE(10)
     command[2..6].copy_from_slice(&lba.to_be_bytes());
     command[7..9].copy_from_slice(&count.to_be_bytes());
-    let mut payload = alloc::vec![0u8; blocks.len()];
-    payload.copy_from_slice(blocks);
-    transfer(hcd, endpoints, &command, blocks.len(), false, 4).map(|_| ())
+    transfer(hcd, endpoints, &command, DataPhase::Out(blocks), 4).map(|_| ())
 }
 
 /// Reads the filesystem superblock and reports what it finds.
@@ -315,13 +345,13 @@ pub fn write_sectors(
 /// carries nothing recognisable; the superblock lives 1024 bytes in, with
 /// `s_magic` at +0x38 and the volume label at +0x78. Checking that is a real
 /// verdict on the bulk path, where "sector 0 is all zeros" is not.
-pub fn probe_filesystem(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
+pub fn probe_filesystem(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> bool {
     for attempt in 0..TRIES {
         match read_sectors(hcd, endpoints, 0, 3) {
             Ok(sectors) => {
                 if sectors.len() < 1536 {
                     log::error!("bot: short read: {} bytes", sectors.len());
-                    return;
+                    return false;
                 }
                 let superblock = &sectors[1024..];
                 let magic = u16::from_le_bytes([superblock[0x38], superblock[0x39]]);
@@ -331,6 +361,7 @@ pub fn probe_filesystem(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
                         .trim_end_matches('\0')
                         .trim();
                     log::info!("bot: ext2/3/4 superblock found, volume label `{label}`");
+                    return true;
                 } else {
                     // Not ext4 -- say what the media actually is, so "the driver
                     // read garbage" and "the stick is exFAT/FAT32" cannot be
@@ -354,25 +385,267 @@ pub fn probe_filesystem(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
                         &sectors[..8],
                         &sectors[504..512],
                     );
+                    // Diagnostic, and the only thing that separates "the medium
+                    // has no filesystem" from "our reads come back empty": two
+                    // LBAs that a bare ext4 always fills (block 1 holds the group
+                    // descriptors, and 1 MiB in is inside the first group).
+                    for lba in [8u32, 2048u32] {
+                        match read_sectors(hcd, endpoints, lba, 1) {
+                            Ok(sector) => log::info!(
+                                "bot: lba {lba} reads {:02x?} ... {:02x?}",
+                                &sector[..8],
+                                &sector[504..512]
+                            ),
+                            Err(err) => log::warn!("bot: lba {lba} read failed: {err:?}"),
+                        }
+                    }
                 }
-                return;
+                return false;
             }
             Err(err) => log::warn!("bot: read attempt {attempt} failed: {err:?}"),
         }
     }
+    false
 }
+/// `TEST UNIT READY`: no data stage, only the transport status means anything.
+///
+/// `sd_spinup_disk()` uses it as the readiness gate before anything else is
+/// asked of the medium, because a stick that has just been powered answers
+/// commands with `NOT READY` until its flash controller is up.
+pub fn test_unit_ready(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<()> {
+    let command = [0u8, 0, 0, 0, 0, 0];
+    transfer(hcd, endpoints, &command, DataPhase::None, 0).map(|_| ())
+}
+
+/// One sense triple from `REQUEST SENSE` (`scsi_normalize_sense()`'s fields).
+#[derive(Clone, Copy, Debug)]
+pub struct Sense {
+    pub response_code: u8,
+    pub sense_key: u8,
+    pub asc: u8,
+    pub ascq: u8,
+}
+
+pub const SENSE_KEY_NOT_READY: u8 = 0x02;
+pub const SENSE_KEY_UNIT_ATTENTION: u8 = 0x06;
+
+/// `REQUEST SENSE`: what the device refused the last command for.
+pub fn request_sense(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<Sense> {
+    let mut command = [0u8; 6];
+    command[0] = 0x03; // REQUEST SENSE
+    command[4] = 18; // allocation length
+    let data = transfer(hcd, endpoints, &command, DataPhase::In(18), 5)?;
+    if data.len() < 14 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(Sense {
+        response_code: data[0] & 0x7f,
+        sense_key: data[2] & 0x0f,
+        asc: data[12],
+        ascq: data[13],
+    })
+}
+
+/// `sd_spinup_disk()`: poll `TEST UNIT READY` until the device reports ready.
+///
+/// Transcribed from `drivers/scsi/sd.c:2156`:
+///
+/// - up to three `TEST UNIT READY`s per round, retrying while the status is not
+///   good or the sense says `UNIT_ATTENTION` (a media change is acknowledged by
+///   failing the next command once);
+/// - `NOT READY` → send `START STOP UNIT` with the start bit (spin up), then wait
+///   one second before asking again;
+/// - `UNIT_ATTENTION` with ASC `0x28` -- the "not ready to ready transition"
+///   that the reference calls out as characteristic of cheap flash sticks --
+///   waits one second too;
+/// - any other sense is pointless to loop on, and the reference stops.
+///
+/// The reference's spin-up window is 100 s (or 5 s for the flash-stick case).
+/// Ten rounds keeps a boot bounded while still covering the sticks that need a
+/// couple of seconds; the total is logged so a device that needs more shows up
+/// as a number rather than as a hang.
+pub fn wait_until_ready(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<()> {
+    const ROUNDS: usize = 10;
+    let mut ready = false;
+    for round in 0..ROUNDS {
+        let mut tried = 0;
+        let mut sense = None;
+        let mut last_error = None;
+        loop {
+            tried += 1;
+            match test_unit_ready(hcd, endpoints) {
+                Ok(()) => {
+                    ready = true;
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    // The transport failed, so there is no status to interpret
+                    // and no sense to ask for; the reference's retry loop breaks
+                    // out on anything that is not a command failure.
+                    sense = request_sense(hcd, endpoints).ok();
+                }
+            }
+            let retry = sense.is_some_and(|s| s.sense_key == SENSE_KEY_UNIT_ATTENTION);
+            if tried >= 3 || !retry {
+                break;
+            }
+        }
+        if ready {
+            if round > 0 {
+                info!(
+                    "bot: addr {} ready after {round} wait(s)",
+                    endpoints.address
+                );
+            }
+            return Ok(());
+        }
+        let Some(sense) = sense else {
+            // `sd_spinup_disk()`: "no sense, TUR either succeeded or failed with
+            // a status error" -- there is nothing to wait for.
+            log::warn!(
+                "bot: addr {} test unit ready failed without sense: {:?}",
+                endpoints.address,
+                last_error
+            );
+            return Err(last_error.unwrap_or(KError::Io));
+        };
+        match (sense.sense_key, sense.asc, sense.ascq) {
+            (SENSE_KEY_NOT_READY, 0x04, 0x03)
+            | (SENSE_KEY_NOT_READY, 0x04, 0x0b)
+            | (SENSE_KEY_NOT_READY, 0x04, 0x0c)
+            | (SENSE_KEY_NOT_READY, 0x04, 0x1b) => {
+                // Manual intervention / standby / unavailable / sanitizing: the
+                // reference breaks out for all four.
+                log::warn!(
+                    "bot: addr {} not ready and will not become ready (asc {:#04x}/{:#04x})",
+                    endpoints.address,
+                    sense.asc,
+                    sense.ascq
+                );
+                return Err(KError::Io);
+            }
+            (SENSE_KEY_NOT_READY, ..) => {
+                if round == 0 {
+                    // "Spinning up disk...": START STOP UNIT with the start bit
+                    // and the no-flush bit set (`cmd[1] = 1`, `cmd[4] = 1`).
+                    let mut command = [0u8; 10];
+                    command[0] = 0x1b;
+                    command[1] = 1;
+                    command[4] = 1;
+                    if let Err(err) = transfer(hcd, endpoints, &command, DataPhase::None, 6) {
+                        log::warn!("bot: start stop unit failed: {err:?}");
+                    }
+                }
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000_000));
+            }
+            (SENSE_KEY_UNIT_ATTENTION, 0x28, _) => {
+                khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000_000));
+            }
+            _ => {
+                log::warn!(
+                    "bot: addr {} unit not ready, sense key {:#04x} asc {:#04x}/{:#04x}",
+                    endpoints.address,
+                    sense.sense_key,
+                    sense.asc,
+                    sense.ascq
+                );
+                return Err(KError::Io);
+            }
+        }
+    }
+    log::error!(
+        "bot: addr {} never became ready after {ROUNDS} rounds",
+        endpoints.address
+    );
+    Err(KError::TimedOut)
+}
+
+/// Round-trips one sector through `WRITE(10)` and back, then restores it.
+///
+/// Until this existed, every `WRITE(10)` shipped 512 zero bytes: the data phase
+/// allocated a fresh buffer and nothing ever copied the caller's blocks into it,
+/// so a read-modify-write filesystem wrote zeros over its own metadata. The
+/// damage is silent -- the command succeeds, the status wrapper reports no
+/// residue -- so the only honest proof the write path works is to write a known
+/// pattern somewhere and read it back.
+///
+/// Only the last sector is touched, and it is written back verbatim afterwards.
+/// This is called only when `probe_filesystem()` found no filesystem, so a volume
+/// that a user can mount never sees it.
+pub fn verify_write_path(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) {
+    let Ok(capacity) = read_capacity(hcd, endpoints) else {
+        log::warn!("bot: write self-test skipped: no capacity");
+        return;
+    };
+    if capacity.len() < 8 {
+        return;
+    }
+    let last = u32::from_be_bytes([capacity[0], capacity[1], capacity[2], capacity[3]]);
+    let Ok(original) = read_sectors(hcd, endpoints, last, 1) else {
+        log::warn!("bot: write self-test skipped: cannot read last sector {last}");
+        return;
+    };
+    let mut pattern = [0u8; 512];
+    pattern[..8].copy_from_slice(b"XKUSBWRT");
+    pattern[8..16].copy_from_slice(&(last as u64).to_le_bytes());
+    if let Err(err) = write_sectors(hcd, endpoints, last, &pattern) {
+        log::error!("bot: write self-test failed at lba {last}: {err:?}");
+        return;
+    }
+    match read_sectors(hcd, endpoints, last, 1) {
+        Ok(read_back) if read_back.len() == 512 && read_back[..16] == pattern[..16] => {
+            log::info!("bot: write self-test ok at lba {last} (pattern read back)");
+        }
+        Ok(read_back) => log::error!(
+            "bot: write self-test mismatch at lba {last}: wrote {:02x?} read {:02x?}",
+            &pattern[..8],
+            &read_back[..8.min(read_back.len())]
+        ),
+        Err(err) => log::error!("bot: write self-test read-back failed: {err:?}"),
+    }
+    // Leave the medium as it was found.
+    if let Err(err) = write_sectors(hcd, endpoints, last, &original) {
+        log::error!("bot: write self-test restore failed at lba {last}: {err:?}");
+    }
+}
+
 /// `INQUIRY`: the device's vendor and product strings.
 pub fn inquiry(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<Vec<u8>> {
     let mut command = [0u8; 6];
     command[0] = 0x12; // INQUIRY
     command[4] = 36; // allocation length
-    transfer(hcd, endpoints, &command, 36, true, 2)
+    transfer(hcd, endpoints, &command, DataPhase::In(36), 2)
+}
+
+/// `read_capacity()` behind the readiness gate, resetting only on failure.
+///
+/// This is the reference's shape, and it is not the same thing as resetting
+/// first: `usb_stor_invoke_transport()` sends a command, and only routes a
+/// *transport error* to `Handle_Errors` -> `usb_stor_port_reset()` ->
+/// `usb_stor_reset_common()`. Resetting a healthy device before every command
+/// costs six seconds each time and, on this stick, leaves it NAKing the command
+/// that follows the reset.
+pub fn read_capacity_ready(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<Vec<u8>> {
+    wait_until_ready(hcd, endpoints)?;
+    match read_capacity(hcd, endpoints) {
+        Ok(data) => Ok(data),
+        Err(err) => {
+            log::warn!(
+                "bot: addr {} read capacity failed ({err:?}); bulk-only reset, then one retry",
+                endpoints.address
+            );
+            reset_recovery(hcd, endpoints)?;
+            wait_until_ready(hcd, endpoints)?;
+            read_capacity(hcd, endpoints)
+        }
+    }
 }
 
 /// `READ CAPACITY (10)`: last logical block address and block size.
 pub fn read_capacity(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<Vec<u8>> {
     let command = [0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    transfer(hcd, endpoints, &command, 8, true, 3)
+    transfer(hcd, endpoints, &command, DataPhase::In(8), 3)
 }
 
 /// Prints what the device says it is and how big.
@@ -419,9 +692,11 @@ pub fn reset_recovery(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<()
         crate::SetupPacket::new(0x21, BULK_ONLY_RESET, 0, u16::from(endpoints.interface), 0);
     let mut none = [0u8; 0];
     hcd.control_transfer(endpoints.address, &setup, &mut none)?;
-    // "Give the device some time to recover from the reset" -- the reference
-    // waits up to six seconds here; the bulk-only spec asks for at least one.
-    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_100_000));
+    // `usb_stor_reset_common()`: "Give the device some time to recover from the
+    // reset" -- `wait_event_interruptible_timeout(..., HZ*6)`, i.e. six seconds.
+    // Waiting less leaves the device answering `NOT READY`/NAKing, which looks
+    // exactly like a wedged endpoint on the host side.
+    khal::time::busy_wait(ktime_types::TimeSpan::from_secs(6));
     let mut first_error = None;
     for endpoint in [endpoints.endpoint_in, endpoints.endpoint_out] {
         let clear = crate::SetupPacket::new(
