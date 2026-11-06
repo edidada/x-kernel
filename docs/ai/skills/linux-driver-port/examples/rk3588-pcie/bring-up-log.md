@@ -2969,6 +2969,59 @@ sense 来自 `REQUEST SENSE`（auto-sense）。
 与 `b84f2ccb7` 记的 idle drop 是同一类；需要按 `hub` 的 resume/重枚举路径处理。
 xHCI 侧仍是 `read capacity failed: Unsupported`（USB3 bulk 路径）。
 
+### 5.9.9 xHCI 通了：bulk 收发、分区发布、FAT 挂载尝试；剩"空闲十秒后不应答"
+
+**先是我自己造成的回归。** `170a67fcc` 重写 `publish_mass_storage` 时把
+`configure_bulk()` 的唯一调用点删掉，换成一个"端点没配好就 `BadState`"的守卫 ——
+而 probe 里从没有别处配端点。于是之后每一次 bulk 传输都在到达环之前
+`bot: CBW transfer failed: KErrorKind::Unsupported`（TUR、REQUEST SENSE、INQUIRY、
+READ CAPACITY 全一样）。`7dbc443ea` 恢复：**probe 配端点（`configure_mass_storage()`，
+环分配需要 `Device` 的 `alloc_coherent`），运行时只重装上下文**。顺带把
+`bulk_transfer_on()` 里硬编码的 `max_packet = 512` 换成端点自己的值（SuperSpeed 是
+1024，`xhci_td_remainder()` 要用它算 TD size）。
+
+修好后板上一次启动内全部通过：
+
+```
+xhci: slot 3 bulk endpoints configured (out 0x02 dci 4, in 0x81 dci 3)
+xhci: mass storage ready
+bot: 512-byte blocks, last LBA 60555263 (29568 MiB)
+bot: write self-test ok at lba 60555263 (pattern read back)
+xhci: published 03f0:7240 ... as usb3p1 with 60553216 512-byte blocks (start LBA 2048)
+xhci: devnode usb3p1 { major: 8, minor: 1 }
+```
+
+这是 SuperSpeed 路径上 **bulk IN 与 bulk OUT 都被证明**（判据是读回介质上的模式，不是
+CSW 状态）。
+
+**分区/文件系统。** 盘是 MBR + `type 0x0c`（FAT32 LBA，起始 LBA 2048）。
+`bot::plan_views()` 按 Linux `check_partition()`（GPT protective MBR → GPT，否则四个
+主分区，跳过空/保护/扩展）给出视图，后端带 `start_lba`；`rk3588_defconfig` 打开
+`KFEAT_FS_FAT`（`mount_block_devices_at()` 会遍历所有已注册文件系统类型）。
+`d87508fc3`。
+
+**顺带修掉一个假移除。** hub 后面的设备 `port` 是 hub 的端口号，而
+`enumerate_addressed()` 把 `UsbDevice::parent` 留成 `None`，于是 `rescan()` 拿 hub
+端口号去比根口 CCS，把好设备判成消失（`xhci: address 3 is no longer present`）。现在
+在 slot 已经记录 parent 的地方同时写回设备。
+
+**遗留（两个控制器同一个症状）：空闲约 10 s 后设备不再应答。**
+33 s 的发布期读、34 s 的写自检都成功；37 s 起的读全部超时。签名：
+
+```
+port 2 portsc 0x00001203 (ccs true, ped true, pls 0) pmsc 0x0   ← 链路在 U0、端口 enabled
+ep dci 4 state 1 dequeue 0x2a6a111 ... enqueue[17] c 0x00000421 ← 端点 Running
+xhci: bulk transfer no completion; USBSTS 0x18 (hint: EINT|PCD)
+event ring dequeue 185 之后全 0（cycle 0）                       ← 没有任何事件
+```
+
+即：TRB 被控制器取走（端点 dequeue 前进）、没有任何 Transfer Event、设备一直 NAK。
+`reset_recovery()` 能把它救回来（所以每次读都变成"失败 → 复位 → 成功"），但每个命令
+付一次 6 s，挂载最终放弃。**下一步**：把这当作"设备被挂起/需要唤醒"处理，而不是每次
+都付一次复位 —— 参考里对应的是 `xhci_hub_control()` 的 U3→U0（`SetPortFeature
+PORT_LINK_STATE`）与 `usb_reset_and_verify_device()` 只在传输错误时用；先取样确认空闲
+期 PORTSC 的 PLS 与 `PORTPMSC` 是否真的没变，再按参考决定是唤醒端口还是重设设备。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
