@@ -73,6 +73,11 @@ pub const LINK_U3: u8 = 3;
 
 /// How many times a port reset is followed before giving up.
 const RESET_POLLS: usize = 100;
+/// `PORT_RESET_TRIES` (`hub.c:2729`): how many times `hub_port_reset()` resets a
+/// port that reports connected but never enabled.
+const PORT_RESET_TRIES: usize = 5;
+/// `HUB_LONG_RESET_TIME` (`hub.c:2734`): the delay between those resets.
+const HUB_LONG_RESET_TIME_US: u64 = 200_000;
 
 /// What a hub told us about itself.
 #[derive(Debug, Clone, Copy)]
@@ -477,6 +482,48 @@ pub fn redetect_link(hcd: &mut dyn Hcd, address: u8, port: u8) -> bool {
     }
     log::error!("usb: hub {address} port {port}: no reconnect after Rx.Detect");
     false
+}
+
+/// `hub_port_reset()`'s retry loop: reset, and if the port still reports
+/// connected-but-not-enabled, reset again -- escalating to a warm (BH) reset for
+/// a SuperSpeed port after the first failure, which is what the reference does
+/// ("hot reset failed, warm reset", `hub.c:4863`).
+///
+/// A hub port reset is not a formality. The USB2 companion port of a SuperSpeed
+/// stick on this board reports `connected true, enabled false` after one reset
+/// and enables on a later one; giving up after the first attempt is how a present
+/// device ends up with no descriptors read at all.
+pub fn reset_port_retries(
+    hcd: &mut dyn Hcd,
+    address: u8,
+    port: u8,
+    info: HubInfo,
+) -> Option<Speed> {
+    let mut warm = false;
+    for attempt in 0..PORT_RESET_TRIES {
+        let result = if warm {
+            reset_port_warm(hcd, address, port, info)
+        } else {
+            reset_port(hcd, address, port, info)
+        };
+        if result.is_some() {
+            return result;
+        }
+        // `hub_port_reset()`: "If the port is in SS.Inactive or Compliance Mode,
+        // the hot or warm reset failed. Try another warm reset."
+        if info.is_superspeed() && !warm {
+            warm = true;
+        }
+        log::warn!(
+            "usb: hub {address} port {port}: not enabled, trying {}reset again ({}/{})",
+            if warm { "warm " } else { "" },
+            attempt + 1,
+            PORT_RESET_TRIES,
+        );
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(HUB_LONG_RESET_TIME_US));
+    }
+    log::error!("usb: hub {address} port {port}: cannot enable after {PORT_RESET_TRIES} resets");
+    None
 }
 
 /// `hub_port_disable()` (`hub.c:4419`): take a port away from a device that

@@ -2156,6 +2156,19 @@ impl Xhci {
             return Err(err);
         }
         self.address_zero_slot = None;
+        // `hub_port_init()`, right after Set Address and before the first
+        // descriptor read:
+        //
+        // 	/* cope with hardware quirkiness:
+        // 	 *  - let SET_ADDRESS settle, some device hardware wants it
+        // 	 *  - read ep0 maxpacket even for high and low speed,
+        // 	 */
+        // 	msleep(10);
+        //
+        // Without it the first control transfer on the new address can come back
+        // as a USB Transaction Error with the whole setup packet untransferred
+        // (`residual 8`) even though Address Device succeeded.
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10_000));
         Ok(slot_id)
     }
 
@@ -3106,7 +3119,10 @@ impl Xhci {
             protocol,
             power_on_2ms: 0,
         };
-        let speed = usb::hub::reset_port(self, hub.address, port, info)?;
+        // `hub_port_reset()`'s retry loop, not a single attempt: a port that
+        // reports connected but not enabled gets `PORT_RESET_TRIES` resets, with
+        // the warm (BH) escalation for a SuperSpeed port.
+        let speed = usb::hub::reset_port_retries(self, hub.address, port, info)?;
         Some(match speed {
             usb::hub::Speed::Low => usb::Speed::Low,
             usb::hub::Speed::Full => usb::Speed::Full,
