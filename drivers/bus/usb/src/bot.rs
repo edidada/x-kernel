@@ -365,6 +365,16 @@ pub fn reset_recovery(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<()
         );
         if let Err(err) = hcd.control_transfer(endpoints.address, &clear, &mut none) {
             first_error.get_or_insert(err);
+        } else {
+            // `usb_hcd_reset_endpoint()`: the device reset its toggle with the
+            // clear-halt, so the controller's copy has to go back to DATA0 too.
+            // Without this the two diverge and every later packet is discarded
+            // by the device.
+            hcd.clear_endpoint_halt(
+                endpoints.address,
+                endpoint,
+                endpoint == endpoints.endpoint_out,
+            );
         }
     }
     match first_error {

@@ -878,6 +878,27 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 
 锚点：`qh_update`、`qh_append_tds`、`qh_link_async`、`qh_refresh`、`start_unlink_async`。
 
+### EHCI 逐函数对照：已对齐 / 仍缺（2026-11，BSP 5.10 为准）
+
+挂载能成、`ls` 触发的第一个块读卡住。为了不再"改一处看一次"，把参考的
+`ehci-q.c`/`ehci-hcd.c` 与我们的实现逐函数列清：
+
+| 参考 | 我们 | 状态 |
+|---|---|---|
+| `ehci_init()` 头 QH overlay（token=HALT、qtd_next=LIST_END、alt_next=dummy） | 已按字段写 | ✅ |
+| `ehci_run()` 整体组合 USBCMD（`park` 默认 0；我们 RW 继承了硬件 `CMD_PARK|PARK_CNT=3`） | `run_command()` | ✅ |
+| `qtd_fill()`：token=count<<16｜ACTIVE｜CERR｜PID｜IOC，buffer[0]=buf，buffer[1..]=**页对齐** | 一致；buffer[1] 用 `buf+4096`（未页对齐，当前长度不跨页所以未触发） | ⚠️小偏差 |
+| `qh_urb_transaction()`：setup DT=0、data DT=1、status DT=1+PID 取反+IOC 在最后一段 | 一致 | ✅ |
+| `qh_append_tds()`：**源 qTD 先置 HALT 再拷进 dummy、尾 qTD 指向新 dummy、最后 wmb 才发 Active** | 只做了"尾指 dummy"；没有 deactivate/swap | ❌ |
+| `qh_link_async()`/`single_unlink_async()`：QH 只在有活时挂在 async 链表里 | 静态环，QH 永久挂在链表里 | ❌ |
+| `qh_completions()`：读 qTD token；**XactErr 且 CERR==0 时重装 qTD+overlay，最多 32 次**；完成后 `qh_update` | 只轮询 token，无 XactErr 重试、无 `qh_update` | ❌ |
+| `ehci_endpoint_reset()`：`CLEAR_FEATURE(HALT)` 后**复位 QH 的 data toggle** | 本次新增 `Hcd::clear_endpoint_halt()` + EHCI 实现 | ✅（新增） |
+| `ehci_urb_dequeue()`：超时=取消（unlink + 让出 qTD） | 超时只是放弃 | ❌ |
+
+结论：**bulk 路径上最核心的三件机制（`qh_append_tds` 的 deactivate/swap、QH 的
+link/unlink 生命周期、`qh_completions` 的 XactErr 重试与 `qh_update`）都还没有**。之前
+尝试过 link/unlink 但当时头 QH 自指、端点不可达，所以"更差"的结论不成立。
+
 ### 与香橙派 5.10 树的对齐审计（数据 ✓ / 机制一处错位已修）
 
 **数据层：全部对齐。** 逐条核对 `include/linux/usb/ehci_def.h`、`ehci.h`、`xhci.h`：

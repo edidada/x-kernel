@@ -1390,6 +1390,53 @@ impl Hcd for Ehci {
         self.bulk_transfer_impl(address, endpoint, data, is_in)
     }
 
+    /// `ehci_endpoint_reset()`: put the queue head's data toggle back to DATA0.
+    ///
+    /// The reference only does this for an idle queue head and unlinks it first
+    /// ("the toggle value in the QH can't be updated while the QH is active"), so
+    /// the overlay is deactivated before the toggle bit is written; the next
+    /// enqueue re-points `qtd_next` and publishes an Active token again.
+    fn clear_endpoint_halt(&mut self, address: u8, endpoint: u8, is_out: bool) {
+        // Bulk OUT is queue head 2, bulk IN is queue head 3 (EP0 is 1).
+        let qh_index = if endpoint == 0 {
+            1
+        } else if is_out {
+            2
+        } else {
+            3
+        };
+        let address_mask = u32::from(address & 0x7f);
+        let head = self.qh.as_ptr().cast::<Qh>();
+        let qh = head.wrapping_add(qh_index);
+        let bytes = qh.cast::<u8>();
+        // SAFETY: dwords 1 and 4..6 of one queue head inside this allocation.
+        let (programmed, token) = unsafe {
+            (
+                core::ptr::read_volatile(bytes.wrapping_add(4).cast::<u32>()) & 0x7f,
+                core::ptr::read_volatile(bytes.wrapping_add(24).cast::<u32>()),
+            )
+        };
+        if programmed != address_mask {
+            return;
+        }
+        let clear = !(regs::token::DT | regs::token::HALT | regs::token::ACTIVE | regs::LIST_END);
+        // SAFETY: dwords 4..6 of the same queue head.
+        unsafe {
+            core::ptr::write_volatile(bytes.wrapping_add(16).cast::<u32>(), regs::LIST_END);
+            core::ptr::write_volatile(
+                bytes.wrapping_add(24).cast::<u32>(),
+                (token & regs::token::PING) & clear,
+            );
+        }
+        karch::dsb_ishst();
+        self.ring_async_advance();
+        info!(
+            "ehci: endpoint {endpoint} ({} {}), halt cleared",
+            if is_out { "out" } else { "in" },
+            "toggle reset to DATA0"
+        );
+    }
+
     fn name(&self) -> &'static str {
         "ehci"
     }

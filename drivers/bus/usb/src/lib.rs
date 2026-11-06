@@ -170,6 +170,27 @@ pub trait Hcd: Send + Sync {
         is_in: bool,
     ) -> KResult<usize>;
 
+    /// `usb_hcd_reset_endpoint()`: client software cleared the endpoint's halt,
+    /// so the controller's own copy of the data toggle has to return to DATA0.
+    ///
+    /// For bulk and interrupt endpoints the toggle lives in the *hardware*, not
+    /// in the device record: `ehci_endpoint_reset()` spells this out -- "for Bulk
+    /// and Interrupt endpoints we maintain the toggle state in the hardware; the
+    /// toggle bits in udev aren't used at all. When an endpoint is reset by
+    /// usb_clear_halt() we must reset the toggle bit in the QH."
+    ///
+    /// Skipping it is not a cosmetic matter: the device resets its toggle on
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)`, and if the host keeps the value the
+    /// aborted transfer stopped at, every later packet is a toggle mismatch that
+    /// the device discards without handshaking. On the host side that looks like
+    /// a descriptor that stays Active in `hw_current` and never completes, and no
+    /// amount of retrying helps.
+    ///
+    /// Default: the controller keeps no toggle state that software can reset.
+    fn clear_endpoint_halt(&mut self, address: u8, endpoint: u8, is_out: bool) {
+        let _ = (address, endpoint, is_out);
+    }
+
     /// The controller name used in logs.
     fn name(&self) -> &'static str;
 }
