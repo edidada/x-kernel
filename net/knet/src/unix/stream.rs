@@ -14,13 +14,13 @@ use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
-use ksync::Mutex;
+use ksync::{Mutex, RwLock};
 use ringbuf::traits::{Consumer, Observer, Producer};
 
-pub(crate) use self::listener::Bind;
+pub(crate) use self::listener::ListenerQueue;
 use self::{
     channel::{Channel, StreamEndpoint},
-    listener::{ConnRequest, ListenerQueue},
+    listener::ConnRequest,
 };
 use crate::{
     AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
@@ -33,9 +33,7 @@ use crate::{
 pub struct StreamTransport {
     channel: Mutex<Option<Channel>>,
     listener: Mutex<Option<Arc<ListenerQueue>>>,
-    /// Handle to the `BindEntry` stream slot. The slot is cleared on drop so
-    /// stale addresses refuse new connections and pending requests are freed.
-    bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
+    local_addr: RwLock<UnixAddr>,
     endpoint: Arc<StreamEndpoint>,
     options: GeneralOptions,
 }
@@ -58,7 +56,7 @@ impl StreamTransport {
         StreamTransport {
             channel: Mutex::new(channel),
             listener: Mutex::new(None),
-            bind_slot: Mutex::new(None),
+            local_addr: RwLock::new(UnixAddr::Unbound),
             endpoint,
             options: GeneralOptions::default(),
         }
@@ -156,7 +154,19 @@ impl Configurable for StreamTransport {
 }
 #[async_trait]
 impl UnixTransportOps for StreamTransport {
-    fn bind(&self, entry: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
+    fn local_addr(&self) -> UnixAddr {
+        self.local_addr.read().clone()
+    }
+
+    fn peer_addr(&self) -> UnixAddr {
+        self.channel
+            .lock()
+            .as_ref()
+            .map(|channel| channel.peer_addr.clone())
+            .unwrap_or_default()
+    }
+
+    fn bind(&self, local_addr: &UnixAddr) -> KResult<super::transport::BoundEndpoint> {
         let channel = self.channel.lock();
         if channel.is_some() {
             return Err(KError::InvalidInput);
@@ -165,22 +175,13 @@ impl UnixTransportOps for StreamTransport {
         if listener_guard.is_some() {
             return Err(KError::InvalidInput);
         }
-        let bind_slot_handle = entry.stream.clone();
-        let mut slot = entry.stream.lock();
-        if slot.is_some() {
-            return Err(KError::AddrInUse);
-        }
         let listener = Arc::new(ListenerQueue::new(self.endpoint.clone()));
-        *slot = Some(Bind {
-            listener: listener.clone(),
-        });
-        drop(slot);
-        *listener_guard = Some(listener);
+        *listener_guard = Some(listener.clone());
+        self.local_addr.write().clone_from(local_addr);
         drop(listener_guard);
         drop(channel);
-        *self.bind_slot.lock() = Some(bind_slot_handle);
         self.endpoint.polls.wake_state_change();
-        Ok(())
+        Ok(super::transport::BoundEndpoint::Stream(listener))
     }
 
     fn listen(&self, backlog: usize, credentials: &PeerCredentials) -> KResult<()> {
@@ -198,21 +199,16 @@ impl UnixTransportOps for StreamTransport {
 
     fn connect(
         &self,
-        slot: &super::BindEntry,
-        local_addr: &UnixAddr,
+        endpoint: &super::transport::BoundEndpoint,
+        remote_addr: &UnixAddr,
         options: ConnectOptions,
         credentials: &PeerCredentials,
     ) -> KResult<()> {
-        let bind = slot
-            .stream
-            .lock()
-            .as_ref()
-            .cloned()
-            .ok_or(KError::ConnectionRefused)?;
+        let super::transport::BoundEndpoint::Stream(bind) = endpoint else {
+            return Err(KError::ConnectionRefused);
+        };
         let is_nonblocking = self.options.nonblocking() || options.nonblocking;
-        let reservation = bind
-            .listener
-            .reserve(is_nonblocking, self.options.send_timeout())?;
+        let reservation = bind.reserve(is_nonblocking, self.options.send_timeout())?;
 
         let mut channel = self.channel.lock();
         if channel.is_some() {
@@ -227,7 +223,7 @@ impl UnixTransportOps for StreamTransport {
             return Err(KError::InvalidInput);
         }
 
-        let inherited_pass_credentials = bind.listener.pass_credentials();
+        let inherited_pass_credentials = bind.pass_credentials();
         let server_endpoint = Arc::new(StreamEndpoint::default());
         // Linux `unix_stream_connect` copies the listener's SCM receive flags
         // into the new peer sock, and `unix_accept` only grafts that sock into
@@ -240,7 +236,7 @@ impl UnixTransportOps for StreamTransport {
         server_endpoint
             .awaiting_accept
             .store(true, Ordering::Release);
-        let (client_channel, server_channel) = channel::new_duplex_channel(
+        let (mut client_channel, server_channel) = channel::new_duplex_channel(
             self.endpoint.clone(),
             server_endpoint,
             reservation.peer_credentials().clone(),
@@ -248,28 +244,32 @@ impl UnixTransportOps for StreamTransport {
         );
         let commit_result = reservation.commit(ConnRequest {
             channel: server_channel,
-            addr: local_addr.clone(),
+            addr: self.local_addr(),
         });
         if let Err(error) = commit_result {
             drop(channel);
-            bind.listener.notify_capacity_available();
+            bind.notify_capacity_available();
             return Err(error);
         }
+        client_channel.peer_addr = remote_addr.clone();
         *channel = Some(client_channel);
         drop(channel);
-        bind.listener.notify_request_available();
+        bind.notify_request_available();
         self.endpoint.polls.wake_state_change();
         Ok(())
     }
 
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self, nonblocking: bool) -> KResult<UnixTransport> {
         let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
         let request = listener.accept(nonblocking).await?;
         let ConnRequest {
             channel,
             addr: peer_addr,
         } = request;
+        let mut channel = channel;
+        channel.peer_addr = peer_addr;
         let accepted = StreamTransport::new_channel(Some(channel));
+        accepted.local_addr.write().clone_from(&self.local_addr());
         // Linux `unix_accept` does not re-read the listener's SCM flags: the
         // queued peer sock already captured them in `unix_stream_connect`.
         // Clear only the pre-accept capture gate.
@@ -277,7 +277,7 @@ impl UnixTransportOps for StreamTransport {
             .endpoint
             .awaiting_accept
             .store(false, Ordering::Release);
-        Ok((UnixTransport::Stream(accepted), peer_addr))
+        Ok(UnixTransport::Stream(accepted))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
@@ -768,9 +768,6 @@ impl Drop for StreamTransport {
         let listener = self.listener.lock().take();
         if let Some(listener) = listener.as_ref() {
             listener.close();
-        }
-        if let Some(slot) = self.bind_slot.lock().take() {
-            *slot.lock() = None;
         }
         let channel = self.channel.lock().take();
         if let Some(channel) = channel {

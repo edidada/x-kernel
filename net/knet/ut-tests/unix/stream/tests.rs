@@ -33,7 +33,7 @@ use crate::{
     AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags,
     SendOptions, Shutdown,
     options::{Configurable, GetSocketOption, PeerCredentials, SetSocketOption, UnixCredentials},
-    unix::{BindEntry, UnixAddr, UnixDomainSocket, UnixSocketType, UnixTransport},
+    unix::{UnixAddr, UnixDomainSocket, UnixSocketType, UnixTransport},
 };
 
 const TASK_WAIT_ROUNDS: usize = 100_000;
@@ -551,10 +551,9 @@ fn unix_stream_peer_drop_with_unread_input_reports_reset_once() {
 fn unix_stream_connection_changes_rearm_existing_waiters() {
     let listener = StreamTransport::new();
     let client = StreamTransport::new();
-    let entry = BindEntry::default();
     let listener_read = register(&listener, IoEvents::IN);
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     assert_eq!(listener_read.0.load(Ordering::SeqCst), 1);
     listener.listen(1, &test_peer_credentials()).unwrap();
 
@@ -576,10 +575,9 @@ fn unix_stream_backlog_limits_pending_connections() {
     let first = StreamTransport::new();
     let second = StreamTransport::new();
     let third = StreamTransport::new();
-    let entry = BindEntry::default();
     let nonblocking = ConnectOptions { nonblocking: true };
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
     first
         .connect(
@@ -633,9 +631,8 @@ fn unix_stream_connect_honors_send_timeout_when_backlog_is_full() {
     let listener = StreamTransport::new();
     let queued = StreamTransport::new();
     let waiting = StreamTransport::new();
-    let entry = BindEntry::default();
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(0, &test_peer_credentials()).unwrap();
     queued
         .connect(
@@ -666,9 +663,8 @@ fn unix_stream_accept_releases_blocked_connector() {
     let listener = Arc::new(StreamTransport::new());
     let queued_client = StreamTransport::new();
     let waiting_client = Arc::new(StreamTransport::new());
-    let entry = Arc::new(BindEntry::default());
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(0, &test_peer_credentials()).unwrap();
     queued_client
         .connect(
@@ -703,7 +699,7 @@ fn unix_stream_accept_releases_blocked_connector() {
     let first_accepted = block_on(listener.accept(false)).unwrap();
     connect_task.join();
     assert_eq!(connect_result.lock().take().unwrap(), Ok(()));
-    let (second_accepted, _) = block_on(listener.accept(true)).unwrap();
+    let second_accepted = block_on(listener.accept(true)).unwrap();
     drop((first_accepted, second_accepted));
 }
 
@@ -712,10 +708,9 @@ fn unix_stream_repeated_listen_updates_backlog() {
     let listener = StreamTransport::new();
     let first = StreamTransport::new();
     let second = StreamTransport::new();
-    let entry = BindEntry::default();
     let nonblocking = ConnectOptions { nonblocking: true };
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(0, &test_peer_credentials()).unwrap();
     first
         .connect(
@@ -749,9 +744,8 @@ fn unix_stream_repeated_listen_updates_backlog() {
 #[def_test]
 fn unix_stream_listening_socket_cannot_connect() {
     let listener = StreamTransport::new();
-    let entry = BindEntry::default();
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
     assert_eq!(
         listener.connect(
@@ -770,12 +764,12 @@ fn unix_stream_listening_socket_cannot_connect() {
 
 #[def_test]
 fn unix_stream_stale_listener_returns_connection_refused() {
-    let entry = BindEntry::default();
-    {
+    let entry = {
         let listener = StreamTransport::new();
-        listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+        let entry = listener.bind(&UnixAddr::Unbound).unwrap();
         listener.listen(1, &test_peer_credentials()).unwrap();
-    }
+        entry
+    };
 
     let client = StreamTransport::new();
     assert_eq!(
@@ -794,9 +788,8 @@ fn unix_stream_listener_shutdown_wakes_connect_and_rejects_empty_accept() {
     let listener = Arc::new(StreamTransport::new());
     let queued_client = StreamTransport::new();
     let waiting_client = Arc::new(StreamTransport::new());
-    let entry = Arc::new(BindEntry::default());
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(0, &test_peer_credentials()).unwrap();
     queued_client
         .connect(
@@ -850,8 +843,7 @@ fn unix_stream_listener_shutdown_wakes_connect_and_rejects_empty_accept() {
 #[def_test(serial)]
 fn unix_stream_listener_shutdown_wakes_blocked_accept() {
     let listener = Arc::new(StreamTransport::new());
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let accept_result = Arc::new(Mutex::new(None));
@@ -881,8 +873,7 @@ fn unix_stream_listener_shutdown_wakes_blocked_accept() {
 fn unix_stream_listener_does_not_leave_a_stale_read_registration() {
     let listener = StreamTransport::new();
     let client = StreamTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
     let listener_read = register(&listener, IoEvents::IN);
 
@@ -1638,9 +1629,8 @@ fn unix_stream_blocking_ready_recv_keeps_pending_signal() {
 #[def_test]
 fn unix_stream_peer_credentials_follow_listen_and_connect_snapshots() {
     let listener = StreamTransport::new();
-    let entry = BindEntry::default();
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     // Binding alone does not make the socket its own peer; Linux only records
     // the listener identity on a successful listen.
     assert_peer_credentials!(&listener, 0, u32::MAX, u32::MAX);
@@ -1659,7 +1649,7 @@ fn unix_stream_peer_credentials_follow_listen_and_connect_snapshots() {
             &first_connector,
         )
         .unwrap();
-    let (first_accepted, _) = block_on(listener.accept(true)).unwrap();
+    let first_accepted = block_on(listener.accept(true)).unwrap();
 
     // Each endpoint reports the other side: the client copied the listener
     // snapshot from listen(), while accept() reports the connector identity.
@@ -1684,7 +1674,7 @@ fn unix_stream_peer_credentials_follow_listen_and_connect_snapshots() {
             &second_connector,
         )
         .unwrap();
-    let (second_accepted, _) = block_on(listener.accept(true)).unwrap();
+    let second_accepted = block_on(listener.accept(true)).unwrap();
     assert_peer_credentials!(&second_client, 12, 1200, 1201);
     assert_peer_credentials!(&second_accepted, 22, 2200, 2201);
 }
@@ -1727,8 +1717,7 @@ fn unix_stream_accepted_socket_inherits_listener_passcred_at_connect() {
     listener
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = StreamTransport::new();
@@ -1752,7 +1741,7 @@ fn unix_stream_accepted_socket_inherits_listener_passcred_at_connect() {
         .unwrap();
     assert!(!listener_enabled);
 
-    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("stream listener returned a non-stream transport");
     };
 
@@ -1773,8 +1762,7 @@ fn unix_stream_accepted_socket_ignores_passcred_enabled_after_connect() {
     use crate::{SocketOps, options::GetSocketOption};
 
     let listener = StreamTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = StreamTransport::new();
@@ -1810,7 +1798,7 @@ fn unix_stream_accepted_socket_ignores_passcred_enabled_after_connect() {
         Ok(2)
     );
 
-    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("stream listener returned a non-stream transport");
     };
     accepted
@@ -1850,8 +1838,7 @@ fn unix_stream_data_sent_before_accept_carries_credentials() {
     use crate::{Socket, socket::file::sock_alloc_file};
 
     let listener = StreamTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
     listener
         .set_option(SetSocketOption::PassCredentials(&true))
@@ -1879,7 +1866,7 @@ fn unix_stream_data_sent_before_accept_carries_credentials() {
     .unwrap();
     assert_eq!(client.write(b"ab"), Ok(2));
 
-    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Stream(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("stream listener returned a non-stream transport");
     };
     accepted
@@ -2185,7 +2172,6 @@ fn unix_stream_coalescing_compares_pid_identity_not_number() {
 #[def_test]
 fn unix_stream_peer_credentials_keep_effective_ids_independent_of_pid_visibility() {
     let listener = StreamTransport::new();
-    let entry = BindEntry::default();
     let listener_namespace = Arc::new(kidentity::PidNamespace::new_root());
     let observer_namespace = Arc::new(kidentity::PidNamespace::new_root());
     let listener_peer = PeerCredentials::new(
@@ -2194,7 +2180,7 @@ fn unix_stream_peer_credentials_keep_effective_ids_independent_of_pid_visibility
         65534,
     );
 
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &listener_peer).unwrap();
     let client = StreamTransport::new();
     client

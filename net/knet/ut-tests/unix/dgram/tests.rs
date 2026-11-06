@@ -10,7 +10,6 @@ use super::*;
 use crate::{
     KernelAncillaryData,
     options::{PeerCredentials, UnixCredentials},
-    unix::BindEntry,
 };
 
 fn test_peer_credentials() -> PeerCredentials {
@@ -261,11 +260,9 @@ fn unix_dgram_peer_credentials_follow_only_socketpair_creation() {
 fn unix_dgram_connect_does_not_create_peer_credentials() {
     let sender = DgramTransport::new();
     let receiver = DgramTransport::new();
-    let sender_entry = BindEntry::default();
-    let receiver_entry = BindEntry::default();
 
-    sender.bind(&sender_entry, &UnixAddr::Unbound).unwrap();
-    receiver.bind(&receiver_entry, &UnixAddr::Unbound).unwrap();
+    sender.bind(&UnixAddr::Unbound).unwrap();
+    let receiver_entry = receiver.bind(&UnixAddr::Unbound).unwrap();
     sender
         .connect(
             &receiver_entry,

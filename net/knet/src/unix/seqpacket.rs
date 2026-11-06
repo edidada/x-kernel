@@ -58,13 +58,13 @@ struct Pending {
 /// immediately, while the second still lets `accept` drain connections queued
 /// before `shutdown(SHUT_RD)`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ListenerState {
+enum ListenerPhase {
     Unlistened,
     Listening,
     AcceptShutdown,
 }
 
-impl ListenerState {
+impl ListenerPhase {
     fn is_listening(self) -> bool {
         self == Self::Listening
     }
@@ -74,37 +74,42 @@ impl ListenerState {
     }
 }
 
+struct ListenerState {
+    phase: ListenerPhase,
+    credentials: PeerCredentials,
+}
+
 /// Accept side of a bound socket, shared with the transport while it is bound.
 #[derive(Clone)]
 struct Listener {
     pending: async_channel::Receiver<Pending>,
-    poll: Arc<PollSet>,
-    state: Arc<Mutex<ListenerState>>,
+    endpoint: Arc<ListenerEndpoint>,
 }
 
 /// Rendezvous a bound seqpacket socket publishes to `connect`.
-pub(crate) struct Bind {
+pub(crate) struct ListenerEndpoint {
     queue: async_channel::Sender<Pending>,
     poll: Arc<PollSet>,
     /// Accept queue lifecycle, shared with the transport's `Listener`.
     ///
     /// Connecting to a bound-but-not-listening socket fails with
     /// `ECONNREFUSED`, so the address alone cannot decide acceptance.
-    state: Arc<Mutex<ListenerState>>,
-    /// Identity `listen` recorded; a connecting client reports it as its peer.
-    listener_credentials: Mutex<PeerCredentials>,
+    state: Mutex<ListenerState>,
 }
 
-impl Bind {
-    fn enqueue(&self, pending: Pending) -> KResult<()> {
-        if !self.state.lock().is_listening() {
+impl ListenerEndpoint {
+    fn enqueue(&self, pending: Pending) -> KResult<PeerCredentials> {
+        let state = self.state.lock();
+        if !state.phase.is_listening() {
             return Err(KError::ConnectionRefused);
         }
         self.queue
             .try_send(pending)
             .map_err(|_| KError::ConnectionRefused)?;
+        let credentials = state.credentials.clone();
+        drop(state);
         self.poll.wake();
-        Ok(())
+        Ok(credentials)
     }
 }
 
@@ -127,6 +132,7 @@ struct PeerChannel {
     /// Poll set the peer registers for readability of its receive channel.
     read_poll: Arc<PollSet>,
     peer_credentials: PeerCredentials,
+    peer_addr: UnixAddr,
 }
 
 pub struct SeqpacketTransport {
@@ -138,7 +144,6 @@ pub struct SeqpacketTransport {
     listener: Mutex<Option<Listener>>,
     /// Directions closed by `shutdown`.
     shutdown: Mutex<ShutdownState>,
-    bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     local_addr: RwLock<UnixAddr>,
     poll_state: Arc<PollSet>,
     options: GeneralOptions,
@@ -157,7 +162,6 @@ impl SeqpacketTransport {
             peer: RwLock::new(None),
             listener: Mutex::new(None),
             shutdown: Mutex::new(ShutdownState::default()),
-            bind_slot: Mutex::new(None),
             local_addr: RwLock::new(UnixAddr::Unbound),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
@@ -177,12 +181,14 @@ impl SeqpacketTransport {
             tx: Some(tx2),
             read_poll: poll2.clone(),
             peer_credentials: credentials.clone(),
+            peer_addr: UnixAddr::Unbound,
         });
         *transport2.rx.lock() = Some((rx2, poll2.clone()));
         *transport2.peer.write() = Some(PeerChannel {
             tx: Some(tx1),
             read_poll: poll1,
             peer_credentials: credentials,
+            peer_addr: UnixAddr::Unbound,
         });
         (transport1, transport2)
     }
@@ -195,21 +201,18 @@ impl SeqpacketTransport {
     /// `TryRecvError::Closed` and returns `EINVAL`, matching Linux after
     /// `shutdown(SHUT_RD)` on a listener.
     fn close_listener_accepts(&self) {
-        let Some(handle) = self.bind_slot.lock().clone() else {
+        let Some(listener) = self.listener.lock().clone() else {
             return;
         };
+        let bind = listener.endpoint;
         let poll = {
-            let mut slot = handle.lock();
-            let Some(bind) = slot.as_mut() else {
-                return;
-            };
             let mut state = bind.state.lock();
-            if !state.is_listening() {
+            if !state.phase.is_listening() {
                 return;
             }
-            *state = ListenerState::AcceptShutdown;
-            drop(state);
+            state.phase = ListenerPhase::AcceptShutdown;
             bind.queue.close();
+            drop(state);
             bind.poll.clone()
         };
         poll.wake();
@@ -256,57 +259,60 @@ impl Configurable for SeqpacketTransport {
 
 #[async_trait]
 impl UnixTransportOps for SeqpacketTransport {
-    fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
-        let bind_slot_handle = slot.seqpacket.clone();
-        let mut bind = bind_slot_handle.lock();
-        if bind.is_some() {
-            return Err(KError::AddrInUse);
-        }
+    fn local_addr(&self) -> UnixAddr {
+        self.local_addr.read().clone()
+    }
+
+    fn peer_addr(&self) -> UnixAddr {
+        self.peer
+            .read()
+            .as_ref()
+            .map(|peer| peer.peer_addr.clone())
+            .unwrap_or_default()
+    }
+
+    fn bind(&self, local_addr: &UnixAddr) -> KResult<super::transport::BoundEndpoint> {
         let mut guard = self.listener.lock();
         if guard.is_some() {
             return Err(KError::InvalidInput);
         }
         let (tx, rx) = async_channel::bounded(LISTEN_BACKLOG);
         let poll = Arc::new(PollSet::new());
-        let state = Arc::new(Mutex::new(ListenerState::Unlistened));
-        *bind = Some(Bind {
+        let bind = Arc::new(ListenerEndpoint {
             queue: tx,
             poll: poll.clone(),
-            state: state.clone(),
-            listener_credentials: Mutex::new(PeerCredentials::none()),
+            state: Mutex::new(ListenerState {
+                phase: ListenerPhase::Unlistened,
+                credentials: PeerCredentials::none(),
+            }),
         });
-        drop(bind);
         *guard = Some(Listener {
             pending: rx,
-            poll,
-            state,
+            endpoint: bind.clone(),
         });
         self.local_addr.write().clone_from(local_addr);
-        *self.bind_slot.lock() = Some(bind_slot_handle);
         self.poll_state.wake();
-        Ok(())
+        Ok(super::transport::BoundEndpoint::Seqpacket(bind))
     }
 
     fn listen(&self, _backlog: usize, credentials: &PeerCredentials) -> KResult {
-        let handle = self.bind_slot.lock().clone().ok_or(KError::InvalidInput)?;
-        let mut bind = handle.lock();
-        let bind = bind.as_mut().ok_or(KError::InvalidInput)?;
-        {
-            let mut state = bind.state.lock();
-            if state.is_listening() || state.is_accept_shutdown() {
-                return Err(KError::InvalidInput);
-            }
-            *state = ListenerState::Listening;
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let bind = listener.endpoint;
+        let mut state = bind.state.lock();
+        if state.phase.is_listening() || state.phase.is_accept_shutdown() {
+            return Err(KError::InvalidInput);
         }
-        *bind.listener_credentials.lock() = credentials.clone();
+        state.phase = ListenerPhase::Listening;
+        state.credentials = credentials.clone();
+        drop(state);
         self.poll_state.wake();
         Ok(())
     }
 
     fn connect(
         &self,
-        slot: &super::BindEntry,
-        _local_addr: &UnixAddr,
+        endpoint: &super::transport::BoundEndpoint,
+        remote_addr: &UnixAddr,
         _options: ConnectOptions,
         credentials: &PeerCredentials,
     ) -> KResult {
@@ -332,14 +338,10 @@ impl UnixTransportOps for SeqpacketTransport {
             client_addr,
             client_credentials,
         };
-        // The bind entry's lock is held across the listening test and the
-        // enqueue, so a concurrent `listen` cannot change the verdict between
-        // them.
-        let bind_slot = slot.seqpacket.lock();
-        let bind = bind_slot.as_ref().ok_or(KError::NotConnected)?;
-        let listener_credentials = bind.listener_credentials.lock().clone();
-        bind.enqueue(pending)?;
-        drop(bind_slot);
+        let super::transport::BoundEndpoint::Seqpacket(bind) = endpoint else {
+            return Err(KError::NotConnected);
+        };
+        let listener_credentials = bind.enqueue(pending)?;
 
         // A shutdown may have run before this connection existed. Hold the
         // shutdown lock until both directions are installed so a concurrent
@@ -356,15 +358,16 @@ impl UnixTransportOps for SeqpacketTransport {
             // Linux connects seqpacket sockets through the stream path, so the
             // client reports the listening socket's identity as its peer.
             peer_credentials: listener_credentials,
+            peer_addr: remote_addr.clone(),
         });
         drop(shutdown);
         self.poll_state.wake();
         Ok(())
     }
 
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self, nonblocking: bool) -> KResult<UnixTransport> {
         let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
-        if *listener.state.lock() == ListenerState::Unlistened {
+        if listener.endpoint.state.lock().phase == ListenerPhase::Unlistened {
             return Err(KError::InvalidInput);
         }
 
@@ -372,7 +375,7 @@ impl UnixTransportOps for SeqpacketTransport {
             match listener.pending.try_recv() {
                 Ok(pending) => pending,
                 Err(TryRecvError::Empty) => {
-                    let state = *listener.state.lock();
+                    let state = listener.endpoint.state.lock().phase;
                     return if state.is_listening() {
                         Err(KError::WouldBlock)
                     } else {
@@ -398,12 +401,13 @@ impl UnixTransportOps for SeqpacketTransport {
             tx: Some(pending.from_server),
             read_poll: pending.client_poll,
             peer_credentials: pending.client_credentials,
+            peer_addr: pending.client_addr,
         });
         accepted
             .local_addr
             .write()
             .clone_from(&self.local_addr.read().clone());
-        Ok((UnixTransport::Seqpacket(accepted), pending.client_addr))
+        Ok(UnixTransport::Seqpacket(accepted))
     }
 
     fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {
@@ -555,7 +559,7 @@ impl Pollable for SeqpacketTransport {
             // as a fully dead connection.
             events.set(IoEvents::HUP, is_read_shutdown && is_write_shutdown);
         } else if let Some(listener) = self.listener.lock().as_ref() {
-            let listener_state = *listener.state.lock();
+            let listener_state = listener.endpoint.state.lock().phase;
             events.set(IoEvents::IN, !listener.pending.is_empty() || state.read);
             events.set(IoEvents::RDHUP, state.read);
             events.set(IoEvents::HUP, state.read && state.write);
@@ -563,7 +567,7 @@ impl Pollable for SeqpacketTransport {
             // including after a read shutdown that stops new accepts. A bound
             // socket that never called `listen` is not listening and stays
             // writable.
-            if listener_state != ListenerState::Unlistened {
+            if listener_state != ListenerPhase::Unlistened {
                 events.set(IoEvents::OUT, false);
             }
         }
@@ -581,7 +585,7 @@ impl Pollable for SeqpacketTransport {
         if let Some((_, poll)) = self.rx.lock().as_ref() {
             context.register(poll)?;
         } else if let Some(listener) = self.listener.lock().as_ref() {
-            context.register(&listener.poll)?;
+            context.register(&listener.endpoint.poll)?;
         }
         Ok(())
     }
@@ -589,8 +593,12 @@ impl Pollable for SeqpacketTransport {
 
 impl Drop for SeqpacketTransport {
     fn drop(&mut self) {
-        if let Some(slot) = self.bind_slot.lock().take() {
-            *slot.lock() = None;
+        if let Some(listener) = self.listener.lock().take() {
+            let mut state = listener.endpoint.state.lock();
+            state.phase = ListenerPhase::AcceptShutdown;
+            listener.endpoint.queue.close();
+            drop(state);
+            listener.endpoint.poll.wake();
         }
         if let Some(peer) = self.peer.write().take() {
             peer.read_poll.wake();

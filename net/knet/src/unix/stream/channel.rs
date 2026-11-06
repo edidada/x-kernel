@@ -127,6 +127,7 @@ pub(super) fn new_duplex_channel(
             endpoint: client_endpoint.clone(),
             peer_endpoint: server_endpoint.clone(),
             peer_credentials: client_peer,
+            peer_addr: crate::unix::UnixAddr::Unbound,
         },
         Channel {
             tx: server_tx,
@@ -136,6 +137,7 @@ pub(super) fn new_duplex_channel(
             endpoint: server_endpoint,
             peer_endpoint: client_endpoint,
             peer_credentials: server_peer,
+            peer_addr: crate::unix::UnixAddr::Unbound,
         },
     )
 }
@@ -425,6 +427,7 @@ pub(super) struct Channel {
     pub(super) endpoint: Arc<StreamEndpoint>,
     pub(super) peer_endpoint: Arc<StreamEndpoint>,
     pub(super) peer_credentials: PeerCredentials,
+    pub(super) peer_addr: crate::unix::UnixAddr,
 }
 
 impl Drop for Channel {

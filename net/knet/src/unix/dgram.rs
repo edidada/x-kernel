@@ -16,7 +16,7 @@ use crate::{
     AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
-    unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
+    unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
 pub(crate) struct Datagram {
@@ -32,19 +32,21 @@ pub(crate) struct Channel {
     /// Established only for socketpair peers; datagram `bind` and `connect`
     /// leave Linux `sk_peer_pid` unset.
     pub(crate) peer_credentials: PeerCredentials,
+    peer_addr: UnixAddr,
 }
 
-pub(crate) struct Bind {
+pub(crate) struct Endpoint {
     tx: async_channel::Sender<Datagram>,
     poll: Arc<PollSet>,
 }
-impl Bind {
-    fn connect(&self) -> Channel {
+impl Endpoint {
+    fn connect(&self, addr: &UnixAddr) -> Channel {
         let tx = self.tx.clone();
         Channel {
             tx,
             poll: self.poll.clone(),
             peer_credentials: PeerCredentials::none(),
+            peer_addr: addr.clone(),
         }
     }
 }
@@ -53,7 +55,6 @@ pub struct DgramTransport {
     rx: Mutex<Option<(async_channel::Receiver<Datagram>, Arc<PollSet>)>>,
     peer: RwLock<Option<Channel>>,
     local_addr: RwLock<UnixAddr>,
-    bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     poll_state: Arc<PollSet>,
     options: GeneralOptions,
 }
@@ -69,10 +70,39 @@ impl DgramTransport {
             rx: Mutex::new(None),
             peer: RwLock::new(None),
             local_addr: RwLock::new(UnixAddr::Unbound),
-            bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
         }
+    }
+
+    pub(super) fn send_to(
+        &self,
+        src: impl Read,
+        options: SendOptions,
+        endpoint: &Endpoint,
+    ) -> KResult<usize> {
+        self.send_packet(src, options, &endpoint.tx, &endpoint.poll)
+    }
+
+    fn send_packet(
+        &self,
+        mut src: impl Read,
+        options: SendOptions,
+        tx: &async_channel::Sender<Datagram>,
+        poll: &PollSet,
+    ) -> KResult<usize> {
+        let mut message = Vec::new();
+        src.read_to_end(&mut message)?;
+        let len = message.len();
+        tx.try_send(Datagram {
+            data: message,
+            ancillary: options.ancillary,
+            sender: self.local_addr.read().clone(),
+            sender_credentials: options.sender_credentials,
+        })
+        .map_err(|_| KError::BrokenPipe)?;
+        poll.wake();
+        Ok(len)
     }
 
     fn new_connected(rx: (async_channel::Receiver<Datagram>, Arc<PollSet>), peer: Channel) -> Self {
@@ -80,7 +110,6 @@ impl DgramTransport {
             rx: Mutex::new(Some(rx)),
             peer: RwLock::new(Some(peer)),
             local_addr: RwLock::new(UnixAddr::Unbound),
-            bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
         }
@@ -99,6 +128,7 @@ impl DgramTransport {
                 tx: tx2,
                 poll: poll2.clone(),
                 peer_credentials: credentials.clone(),
+                peer_addr: UnixAddr::Unbound,
             },
         );
         let transport2 = DgramTransport::new_connected(
@@ -107,6 +137,7 @@ impl DgramTransport {
                 tx: tx1,
                 poll: poll1.clone(),
                 peer_credentials: credentials,
+                peer_addr: UnixAddr::Unbound,
             },
         );
         (transport1, transport2)
@@ -152,34 +183,39 @@ impl Configurable for DgramTransport {
 }
 #[async_trait]
 impl UnixTransportOps for DgramTransport {
-    fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
-        let bind_slot_handle = slot.dgram.clone();
-        let mut slot = slot.dgram.lock();
-        if slot.is_some() {
-            return Err(KError::AddrInUse);
-        }
+    fn local_addr(&self) -> UnixAddr {
+        self.local_addr.read().clone()
+    }
+
+    fn peer_addr(&self) -> UnixAddr {
+        self.peer
+            .read()
+            .as_ref()
+            .map(|peer| peer.peer_addr.clone())
+            .unwrap_or_default()
+    }
+
+    fn bind(&self, local_addr: &UnixAddr) -> KResult<super::transport::BoundEndpoint> {
         let mut guard = self.rx.lock();
         if guard.is_some() {
             return Err(KError::InvalidInput);
         }
         let (tx, rx) = async_channel::unbounded();
         let poll = Arc::new(PollSet::new());
-        *slot = Some(Bind {
+        let endpoint = Arc::new(Endpoint {
             tx,
             poll: poll.clone(),
         });
-        drop(slot);
         *guard = Some((rx, poll));
         self.local_addr.write().clone_from(local_addr);
-        *self.bind_slot.lock() = Some(bind_slot_handle);
         self.poll_state.wake();
-        Ok(())
+        Ok(super::transport::BoundEndpoint::Dgram(endpoint))
     }
 
     fn connect(
         &self,
-        slot: &super::BindEntry,
-        _local_addr: &UnixAddr,
+        endpoint: &super::transport::BoundEndpoint,
+        remote_addr: &UnixAddr,
         _options: ConnectOptions,
         _credentials: &PeerCredentials,
     ) -> KResult {
@@ -187,52 +223,28 @@ impl UnixTransportOps for DgramTransport {
         if guard.is_some() {
             return Err(KError::AlreadyConnected);
         }
-        *guard = Some(
-            slot.dgram
-                .lock()
-                .as_ref()
-                .ok_or(KError::NotConnected)?
-                .connect(),
-        );
+        let super::transport::BoundEndpoint::Dgram(bind) = endpoint else {
+            return Err(KError::NotConnected);
+        };
+        if bind.tx.is_closed() {
+            return Err(KError::NotConnected);
+        }
+        *guard = Some(bind.connect(remote_addr));
         self.poll_state.wake();
         Ok(())
     }
 
-    async fn accept(&self, _nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+    async fn accept(&self, _nonblocking: bool) -> KResult<UnixTransport> {
         Err(KError::InvalidInput)
     }
 
-    fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {
-        let mut message = Vec::new();
-        src.read_to_end(&mut message)?;
-        let len = message.len();
-        let packet = Datagram {
-            data: message,
-            ancillary: options.ancillary,
-            sender: self.local_addr.read().clone(),
-            sender_credentials: options.sender_credentials,
+    fn send(&self, src: impl Read, options: SendOptions) -> KResult<usize> {
+        let (tx, poll) = {
+            let connected = self.peer.read();
+            let peer = connected.as_ref().ok_or(KError::NotConnected)?;
+            (peer.tx.clone(), peer.poll.clone())
         };
-
-        let connected = self.peer.read();
-        if let Some(addr) = options.to {
-            let addr = addr.into_unix()?;
-            let cred = kprocess::current_cred();
-            lookup_bind_entry(&addr, &cred, |slot| {
-                if let Some(bind) = slot.dgram.lock().as_ref() {
-                    bind.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
-                    bind.poll.wake();
-                    Ok(())
-                } else {
-                    Err(KError::NotConnected)
-                }
-            })?;
-        } else if let Some(chan) = connected.as_ref() {
-            chan.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
-            chan.poll.wake();
-        } else {
-            return Err(KError::NotConnected);
-        }
-        Ok(len)
+        self.send_packet(src, options, &tx, &poll)
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
@@ -328,9 +340,6 @@ impl Pollable for DgramTransport {
 
 impl Drop for DgramTransport {
     fn drop(&mut self) {
-        if let Some(slot) = self.bind_slot.lock().take() {
-            *slot.lock() = None;
-        }
         if let Some(chan) = self.peer.write().take() {
             chan.poll.wake();
         }

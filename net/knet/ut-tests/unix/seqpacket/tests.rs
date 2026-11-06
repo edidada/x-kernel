@@ -10,10 +10,7 @@ use ktask::future::block_on;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::{
-    options::{Configurable, GetSocketOption},
-    unix::BindEntry,
-};
+use crate::options::{Configurable, GetSocketOption};
 
 const TASK_WAIT_ROUNDS: usize = 100_000;
 
@@ -57,14 +54,16 @@ fn short_receive_truncates_the_whole_message() {
         flags: RecvFlags::DONT_WAIT,
         ..RecvOptions::default()
     };
-    assert_eq!(receiver.recv(&mut buf[..], nonblocking), Err(KError::WouldBlock));
+    assert_eq!(
+        receiver.recv(&mut buf[..], nonblocking),
+        Err(KError::WouldBlock)
+    );
 }
 
 #[def_test]
 fn listener_accepts_a_queued_connection() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = SeqpacketTransport::new();
@@ -77,7 +76,7 @@ fn listener_accepts_a_queued_connection() {
         )
         .unwrap();
 
-    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("seqpacket listener returned another transport");
     };
 
@@ -94,8 +93,7 @@ fn listener_accepts_a_queued_connection() {
 #[def_test]
 fn accept_would_block_without_a_connection() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     assert_eq!(
@@ -107,8 +105,7 @@ fn accept_would_block_without_a_connection() {
 #[def_test]
 fn accept_on_a_bound_but_unlistened_socket_fails() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.bind(&UnixAddr::Unbound).unwrap();
 
     assert_eq!(
         block_on(listener.accept(false)).err(),
@@ -123,8 +120,7 @@ fn accept_on_a_bound_but_unlistened_socket_fails() {
 #[def_test]
 fn only_an_active_listener_hides_writability() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     assert!(listener.poll().contains(IoEvents::OUT));
 
     listener.listen(1, &test_peer_credentials()).unwrap();
@@ -152,8 +148,7 @@ fn only_an_active_listener_hides_writability() {
 #[def_test]
 fn connecting_to_a_bound_but_unlistened_socket_is_refused() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
 
     let client = SeqpacketTransport::new();
     assert_eq!(
@@ -194,8 +189,7 @@ fn accepted_socket_inherits_listener_pass_credentials() {
     listener
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = SeqpacketTransport::new();
@@ -207,7 +201,7 @@ fn accepted_socket_inherits_listener_pass_credentials() {
             &test_peer_credentials(),
         )
         .unwrap();
-    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("seqpacket listener returned another transport");
     };
 
@@ -221,8 +215,7 @@ fn accepted_socket_inherits_listener_pass_credentials() {
 #[def_test]
 fn shutdown_write_keeps_the_connection_and_queued_input() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = SeqpacketTransport::new();
@@ -234,12 +227,14 @@ fn shutdown_write_keeps_the_connection_and_queued_input() {
             &test_peer_credentials(),
         )
         .unwrap();
-    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("seqpacket listener returned another transport");
     };
 
     // Data already in flight when the client half-closes must remain readable.
-    accepted.send(&b"queued"[..], SendOptions::default()).unwrap();
+    accepted
+        .send(&b"queued"[..], SendOptions::default())
+        .unwrap();
     accepted.shutdown(Shutdown::Write).unwrap();
     client.shutdown(Shutdown::Write).unwrap();
 
@@ -274,15 +269,13 @@ fn shutdown_write_keeps_the_connection_and_queued_input() {
 #[def_test]
 fn a_bound_client_still_reports_connection_readiness() {
     let listener = SeqpacketTransport::new();
-    let server_entry = BindEntry::default();
-    listener.bind(&server_entry, &UnixAddr::Unbound).unwrap();
+    let server_entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     // A client can bind before connecting. Its own listener queue must not
     // mask readiness of the accepted connection.
     let client = SeqpacketTransport::new();
-    let client_entry = BindEntry::default();
-    client.bind(&client_entry, &UnixAddr::Unbound).unwrap();
+    client.bind(&UnixAddr::Unbound).unwrap();
     client
         .connect(
             &server_entry,
@@ -291,7 +284,7 @@ fn a_bound_client_still_reports_connection_readiness() {
             &test_peer_credentials(),
         )
         .unwrap();
-    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("seqpacket listener returned another transport");
     };
 
@@ -311,8 +304,7 @@ fn a_bound_client_still_reports_connection_readiness() {
 #[def_test]
 fn read_shutdown_before_connect_applies_to_the_connection() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = SeqpacketTransport::new();
@@ -325,7 +317,7 @@ fn read_shutdown_before_connect_applies_to_the_connection() {
             &test_peer_credentials(),
         )
         .unwrap();
-    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap().0 else {
+    let UnixTransport::Seqpacket(accepted) = block_on(listener.accept(true)).unwrap() else {
         panic!("seqpacket listener returned another transport");
     };
 
@@ -360,7 +352,10 @@ fn peer_write_shutdown_reports_rdhup_not_hup() {
     assert!(events.contains(IoEvents::IN | IoEvents::RDHUP));
     assert!(!events.contains(IoEvents::HUP));
     // Only the peer's write direction is gone; the local direction still works.
-    assert_eq!(left.send(&b"still-open"[..], SendOptions::default()), Ok(10));
+    assert_eq!(
+        left.send(&b"still-open"[..], SendOptions::default()),
+        Ok(10)
+    );
 
     left.shutdown(Shutdown::Write).unwrap();
     assert!(left.poll().contains(IoEvents::HUP));
@@ -369,8 +364,7 @@ fn peer_write_shutdown_reports_rdhup_not_hup() {
 #[def_test]
 fn listener_read_shutdown_drains_accepts_then_refuses_connections() {
     let listener = SeqpacketTransport::new();
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    let entry = listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let client = SeqpacketTransport::new();
@@ -411,8 +405,7 @@ fn listener_read_shutdown_drains_accepts_then_refuses_connections() {
 #[def_test(serial)]
 fn listener_read_shutdown_wakes_blocked_accept() {
     let listener = Arc::new(SeqpacketTransport::new());
-    let entry = BindEntry::default();
-    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.bind(&UnixAddr::Unbound).unwrap();
     listener.listen(1, &test_peer_credentials()).unwrap();
 
     let accept_result = Arc::new(Mutex::new(None));

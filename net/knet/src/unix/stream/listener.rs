@@ -33,7 +33,7 @@ struct ListenerState {
     peer_credentials: PeerCredentials,
 }
 
-pub(super) struct ListenerQueue {
+pub(crate) struct ListenerQueue {
     state: Mutex<ListenerState>,
     request_available: Event,
     capacity_available: Event,
@@ -240,9 +240,4 @@ impl Drop for ListenerReservation {
         self.listener.state.lock().reserved_slots -= 1;
         self.listener.capacity_available.notify(1);
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct Bind {
-    pub(super) listener: Arc<ListenerQueue>,
 }

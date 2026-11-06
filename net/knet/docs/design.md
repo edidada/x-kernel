@@ -644,8 +644,11 @@ These setters assign the result from their arguments and current endpoint fields
 
 `SOCK_SEQPACKET` is connection-oriented like a stream socket and
 message-oriented like a datagram socket, so it has its own transport rather than
-reusing either neighbour. `bind` publishes a bounded rendezvous in
-`BindEntry::seqpacket`; `listen` marks it accepting; `connect` creates the two
+reusing either neighbour. The transport owns a bounded `ListenerEndpoint`,
+which the namespace publishes after bind setup. Its accept receiver references
+that same endpoint. A single endpoint-state mutex serializes listener phase,
+credential snapshots, connection admission, and accept shutdown. `listen` marks
+it accepting; `connect` creates the two
 `async_channel` queues of the connection, queues both client ends in the
 rendezvous, and returns without waiting for `accept`, matching Linux queueing a
 connection that the peer may not have accepted yet. `accept` takes one entry
@@ -1452,12 +1455,48 @@ The poller revisits an entry after a new packet arrives or whenever its SYN queu
 
 TCP's `bound_endpoint` mutex protects one socket's local binding. `TCP_BOUND_ENDPOINTS` uses a mutex to serialize port-conflict accounting, and the ephemeral-port cursor is separately mutex-protected. Raw socket local and peer addresses and TTL use `RwLock`s; their smoltcp buffers remain under `SOCKET_SET`.
 
-`ABSTRACT_BINDINGS` and `PATH_BINDINGS` use separate mutexes for Unix address lookup. Each `BindEntry` contains independently locked stream and datagram binding slots. `UnixDomainSocket` protects its local and peer addresses with mutexes. Datagram transports protect the receiver and binding slot with mutexes and the connected peer and local address with `RwLock`s; `async_channel` and poll sets handle queued delivery and notifications.
+The Unix socket implementation has three ownership boundaries:
+
+- `unix.rs` adapts `SocketOps`, captures caller context, coordinates address
+  resolution with transport operations, and owns one `BindingGuard`.
+- `unix/namespace.rs` owns address reservations, pathname VFS checks, endpoint
+  publication, and registration removal. Abstract keys contain
+  both name and transport type; pathname keys identify a single inode and retain
+  a weak inode reference to reject pointer reuse.
+- `unix/transport.rs` dispatches operations to the concrete transports and defines
+  `BoundEndpoint`, the addressable stream, datagram, or seqpacket rendezvous.
+  Transports own communication state and never access the namespace tables.
+
+A bind holds the socket's registration mutex, reserves an address, initializes
+its transport, and publishes the returned endpoint. A reserved registration has
+no endpoint, so lookup refuses it until setup completes. Failed binds drop their
+unique guard and remove the reservation. The guard checks registration identity
+before removal, so an old pathname owner cannot remove a replacement entry.
+Pathname socket nodes survive normal close; removing a registration does not
+unlink the filesystem node.
+
+Each transport stores its local address once. Peer addresses live in the
+connection/channel record and are installed under the same lock as the peer
+relationship. Accepted transports inherit the listener's local address and carry
+the connector's peer address, but own no listener registration. Socketpair peers
+start with unnamed addresses. There is no second socket-level address cache.
+
+Lookup snapshots the published endpoint and releases filesystem, table, and
+registration locks before connecting or sending. The unique guard is dropped
+before the transport: it removes the registration and releases the published
+endpoint outside namespace locks. An outstanding endpoint snapshot does not
+retain address ownership. Such a snapshot still refers to the original transport
+resources; stream listener close, seqpacket queue close, and datagram receiver
+destruction reject operations as those resources close. A reused name resolves
+to a new endpoint and cannot redirect an old snapshot.
+
+Binding requires an explicit abstract name or pathname. `UnixAddr::Unbound`
+is rejected, including on a socket which already has a local address.
 
 Unix stream synchronization is divided by responsibility:
 
 - Each endpoint stores its channel in `channel: Mutex<Option<Channel>>`. This mutex serializes the final commit of `connect`, along with `send`, `recv`, `shutdown`, and channel release on the same endpoint.
-- Each listener keeps its FIFO pending queue, reserved-capacity count, backlog limit, listening state, and read-shutdown state in `ListenerState` under a separate mutex. `request_available` wakes `accept`, while `capacity_available` wakes blocked `connect` calls. The binding-slot lock is held only long enough to clone the listener reference and is released before any capacity wait. The fixed lock order is `channel`, listener handle, and `ListenerState`.
+- Each listener keeps its FIFO pending queue, reserved-capacity count, backlog limit, listening state, and read-shutdown state in `ListenerState` under a separate mutex. `request_available` wakes `accept`, while `capacity_available` wakes blocked `connect` calls. Namespace lookup returns the listener reference before any capacity wait; no namespace lock is held while waiting. The fixed lock order is `channel`, listener handle, and `ListenerState`.
 - Each endpoint uses `tx_order: SpinNoPreempt<()>` as the ordering point for one transmit direction. Local write shutdown, peer read shutdown, write-index publication, and peer-side EOF detection on an empty queue all pass through this lock. Code acquires the `channel` mutex before a single `tx_order`, and never holds the ordering locks for both directions at once.
 
 `send` first writes into an unpublished vacant region, then takes `tx_order` to recheck shutdown state and publish the new write index. If `recv` observes an empty queue, it rechecks the occupied length and shutdown state under the same ordering lock. `shutdown` publishes the completed state and clones the peer endpoint reference while holding the `channel` mutex, then releases the mutex before waking waiters. Listener-event notifications likewise occur outside both `ListenerState` and the source socket's `channel` lock, while user-data copies and `PollSet` wakeups occur outside `tx_order`.
@@ -1746,14 +1785,14 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 | IPv4 filter table drop | Releases owned chains, rules, and match values. Construction scratch storage is temporary. |
 | TCP file close | Removes a `Closed` handle immediately when no reset is pending. Unread RX data, including data arriving after file close, causes abort, with the handle retained until RST is sent. Other handles remain in deferred close while the poller completes transmission and closure. Detached connections receive a 60-second reclamation deadline only in `FIN_WAIT_2`. |
 | TCP listener close | Marks the listener closed, drains child handles, and removes them from `SOCKET_SET`. |
-| Unix stream listener drop | Closes the listener queue, wakes waiters, clears the binding slot, and releases pending requests and ring buffers. |
+| Unix stream listener drop | Closes the listener queue, wakes waiters, and releases pending requests and ring buffers. Socket-owned registration is revoked before transport destruction. |
 | Unix stream shutdown / channel drop | Publishes directional closure and wakes affected waiters; channel drop closes both directions before releasing buffers. Pending byte-marked control records are dropped with the channel (received file references are released; no descriptor is installed). Peer recv drains published data before EOF, and poll reports `RDHUP`. Discarded unread data records one peer `ConnectionReset`, consumed by recv or `SO_ERROR`. |
 | UDP socket / PCB drop | Unregisters the socket from the PCB registry; PCB destruction releases receive and asynchronous-error queues. |
 | Raw socket drop | Shuts down both directions and removes the smoltcp handle. |
 | Packet socket drop | Releases queues and decrements the active-handler count. Later registration or publication prunes expired weak entries. |
 | Network namespace drop | `NetNamespace::drop` invokes the hook `knet` installed; `on_namespace_drop` removes the namespace's `Arc<Service>` from `NAMESPACE_STACKS`, releasing the private router, loopback device, smoltcp interface and poll sets with it. The boot namespace never enters the registry, so the global `SERVICE` is untouched. |
 | Netlink socket drop | Releases receive state with the last strong reference. Binding updates or event publication prune weak uevent subscriptions. |
-| Unix datagram drop | Clears the binding slot, releases the peer channel, and wakes peer waiters. |
+| Unix datagram drop | Releases the receive and peer channels and wakes peer waiters. Socket-owned registration is revoked before transport destruction. |
 | Unix pathname socket close | Releases the transport binding; the inode remains under VFS ownership. |
 | Ethernet RX completion | Returns the frame buffer through the driver's `recycle_rx` interface. |
 | Ethernet device removal | Detaches the RX scheduler and unregisters its RX source. `unregister_netdev` removes Router routes, addresses, and device state under `network_config_lock`. |
