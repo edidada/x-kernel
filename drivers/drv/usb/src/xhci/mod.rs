@@ -1398,8 +1398,15 @@ impl Xhci {
                 .expect("bulk ring")
                 .publish(held);
         }
-        if self.slots[slot_index].bulk_state[direction].set_deq_pending {
-            info!("xhci: bulk doorbell withheld, set tr dequeue pending");
+        // `xhci_ring_ep_doorbell()` skips the doorbell while a cancellation is
+        // pending *or* the endpoint is halted: ringing it then restarts the ring at
+        // the dequeue the recovery is moving away from.
+        let state = self.slots[slot_index].bulk_state[direction];
+        if state.set_deq_pending || state.halted {
+            info!(
+                "xhci: bulk doorbell withheld (halted {}, set deq pending {})",
+                state.halted, state.set_deq_pending
+            );
             self.slots[slot_index].bulk_state[direction].doorbell_pending = true;
         } else {
             self.ring_doorbell(slot_id, dci);
@@ -1514,7 +1521,7 @@ impl Xhci {
         for _ in 0..steps {
             self.pump_events();
             let state = self.slots[slot_index].bulk_state[direction];
-            if state.doorbell_pending && !state.set_deq_pending {
+            if state.doorbell_pending && !state.set_deq_pending && !state.halted {
                 self.slots[slot_index].bulk_state[direction].doorbell_pending = false;
                 let dci = self.slots[slot_index].bulk_dci[direction];
                 let slot_id = self.slots[slot_index].id;
@@ -4367,7 +4374,16 @@ pub(crate) fn publish_mass_storage(
     }
     let blocks = {
         let mut guard = xhci.lock();
-        let _ = usb::bot::reset_recovery(&mut *guard, &endpoints);
+        // The outcome matters: a bulk-only reset that fails is the difference
+        // between "the device is in a phase error" and "it is not answering the
+        // control pipe either", and discarding it made the two indistinguishable.
+        match usb::bot::reset_recovery(&mut *guard, &endpoints) {
+            Ok(()) => log::info!("xhci: bulk-only reset done (address {})", endpoints.address),
+            Err(err) => log::error!(
+                "xhci: bulk-only reset failed for address {}: {err:?}",
+                endpoints.address
+            ),
+        }
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(200_000));
         match usb::bot::read_capacity(&mut *guard, &endpoints) {
             Ok(data) if data.len() >= 8 => {

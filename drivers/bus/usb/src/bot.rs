@@ -87,8 +87,12 @@ fn transfer(
     // as it goes on the wire. A device that stops accepting a CBW has to be
     // matched against the command stream that led to it, and the descriptors are
     // the only place that stream is visible.
+    // The address is part of every line: the tag counter is global across
+    // controllers, so without it a "no CSW for tag N" cannot be attributed to a
+    // device, which cost this bring-up more than one round.
     info!(
-        "bot: cbw tag {tag} op {:#04x} len {transfer_length} dir {} cdb {:02x?}",
+        "bot: addr {} cbw tag {tag} op {:#04x} len {transfer_length} dir {} cdb {:02x?}",
+        endpoints.address,
         command.first().copied().unwrap_or(0),
         if is_in { "in" } else { "out" },
         &command[..command.len().min(16)],
@@ -145,7 +149,7 @@ fn transfer(
                     log::warn!("bot: device skipped the data phase; using its status wrapper");
                     let mut wrapper = [0u8; CSW_LEN];
                     wrapper.copy_from_slice(candidate);
-                    return finish_status(&wrapper, tag, Some(data));
+                    return finish_status(&wrapper, tag, endpoints.address, Some(data));
                 }
             }
         }
@@ -189,7 +193,7 @@ fn transfer(
         log::error!("bot: short CSW {got}/{CSW_LEN} after recovery");
         return Err(KError::Io);
     }
-    finish_status(&csw, tag, Some(data))
+    finish_status(&csw, tag, endpoints.address, Some(data))
 }
 
 /// `usb_stor_Bulk_transport()`'s status-wrapper checks: learnt signature,
@@ -199,6 +203,7 @@ fn transfer(
 fn finish_status(
     csw: &[u8; CSW_LEN],
     tag: u32,
+    address: u8,
     mut data: Option<alloc::vec::Vec<u8>>,
 ) -> KResult<Vec<u8>> {
     let signature = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
@@ -222,7 +227,7 @@ fn finish_status(
     }
     let residue = u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]]);
     info!(
-        "bot: csw tag {echoed_tag} status {} residue {residue}",
+        "bot: addr {address} csw tag {echoed_tag} status {} residue {residue}",
         csw[12]
     );
     let status = csw[12];

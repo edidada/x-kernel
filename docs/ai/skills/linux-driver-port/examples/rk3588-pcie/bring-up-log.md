@@ -2709,6 +2709,48 @@ xhci: devnode usb3 subsystem block number DeviceNumber { major: 8, minor: 1 }
 另注：本轮唯一确认的差异是"端点 HALTED 时我们仍敲门铃"，参考会跳过。它当前不触发（state 1），
 但在实现 bulk halt 恢复后应当补上，否则恢复期间的敲门铃会让环从旧的 dequeue 重启。
 
+### 5.9.4f No-Op 探针：环没问题，是设备在第二笔就"闭口"
+
+按 §5.9.4e 的规则，先重读参考（`prepare_ring`/`prepare_transfer`/`inc_enq`/`queue_trb`/
+`giveback_first_trb`/`xhci_ring_ep_doorbell`）逐行对照——**无差异**；唯一真实差异是端点 HALTED
+时我们仍敲门铃（已修）。
+
+随后做了两个探针（都已移除）：
+
+**探针 A：在已知可用的 OUT 环上发一个 No-Op Transfer TRB**（不碰线，只要控制器读到就会
+产生 Transfer Event）。结果：
+
+```
+after bulk out slot 3 dci 4: ep state 1 deq 0x2f08011    <- CBW#1 被取走
+after bulk in  slot 3 dci 3: ep state 1 deq 0x2f0a011    <- data
+after bulk in  slot 3 dci 3: ep state 1 deq 0x2f0a021    <- CSW
+after bulk out slot 3 dci 4: ep state 1 deq 0x2f08021    <- No-Op 在下一格被执行
+bring-up probe: no-op transfer on slot 3 dci 4 completed, code 1
+```
+
+**控制器取走并执行了环的下一格**。所以环位置、cycle、门铃、端点状态（Running）全部不是问题：
+第二笔 CBW 的 TD **被执行了，但设备不回 ACK**。
+
+**探针 B：给 bot 的日志加上设备地址**（tag 计数器是全局的，之前无法判断某条 tag 属于哪根盘，
+这一点已经浪费过一轮）。加了之后序列无歧义：
+
+```
+addr 3 cbw tag 7  ... csw tag 7   <- 容量命令，完整成功
+addr 3 cbw tag 13                <- 第一条 READ(10)，CBW 无 ACK → 超时
+addr 3 cbw tag 14                <- 重试：连 CBW 都没发出去（就 Io 了）
+```
+
+即：**第一次 BOT reset 成功（`bulk-only reset done (address 3)`），但设备在第一条读命令处
+彻底闭口——之后连 EP0 的控制传输也失败**（tag 14 没有 5 秒超时却直接 Io，说明失败在
+`reset_recovery` 的控制传输上，不在 bulk）。这与 SS hub 下游设备当年"失败后父设备 EP0 一起死"
+是同一类现象：**设备在该状态需要一次真正的掉电/重新枚举**，而我们在软件里既没有重枚举路径，
+也没有端口级复位来强制它。
+
+因此当前状态是"识别 + 发布块设备 + 第一条命令 OK，第二条命令设备闭口"。下一步必须先按规则
+重读参考中"设备闭口/锁死"的处理路径（`usb_stor_reset_resume()`、`usb_reset_device()` 的
+re-enumerate 语义，以及 USB3 专有的 `SET_SEL`/U1-U2 交互），再决定实验——而不是继续在
+bulk 路径上找字段。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
