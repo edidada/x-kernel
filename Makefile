@@ -22,7 +22,10 @@
 #                           non-VMM kernels (y/n; default: n on macOS, y
 #                           elsewhere). KFEAT_VMM=y forces QEMU TCG because CI
 #                           hosts normally do not support nested virtualization.
-#     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
+#     - GRAPHIC             Enable graphical output + virtio-gpu (y/n). A
+#                           graphical run also gets `-display gtk,zoom-to-fit=on`
+#                           and the virtio keyboard/mouse devices unless
+#                           QEMU_ARGS already overrides them.
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)
 #     - SMP                 Number of vCPUs (default: configured NR_CPUS)
@@ -128,8 +131,6 @@ SMP ?=
 WAYLAND_IMG ?= $(CURDIR)/debian-wayland-x86_64.img
 ifeq ($(filter y,$(UNITTEST)),)
 GRAPHIC ?= y
-QEMU_ARGS ?= -display gtk,zoom-to-fit=on \
-	-device virtio-keyboard-pci -device virtio-mouse-pci
 ifneq ($(origin DISK_IMG),command line)
 ifneq ($(wildcard $(WAYLAND_IMG)),)
 WAYLAND_RUN_IMG := $(WAYLAND_IMG)
@@ -141,9 +142,16 @@ WAYLAND_RUN_IMG := $(DISK_IMG)
 endif
 else
 GRAPHIC ?= n
-QEMU_ARGS ?=
 WAYLAND_RUN_IMG := $(DISK_IMG)
 endif
+
+# A graphical run needs a display backend and the virtio input devices the
+# compositor reads. Both are part of the `--graphic` contract, so requesting
+# GRAPHIC=y is enough; an explicit -display/-device in QEMU_ARGS still wins.
+GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
+	$(if $(filter -display%,$(QEMU_ARGS)),,-display gtk,zoom-to-fit=on)\
+	$(if $(filter -device virtio-keyboard%,$(QEMU_ARGS)),,-device virtio-keyboard-pci)\
+	$(if $(filter -device virtio-mouse%,$(QEMU_ARGS)),,-device virtio-mouse-pci))
 
 UAPPS ?= all
 UAPP_DIR ?= $(CURDIR)/uapps
@@ -209,7 +217,7 @@ ifneq (,$(and $(strip $(LOG)),$(filter -append%,$(QEMU_ARGS))))
 $(warning LOG="$(LOG)" is ignored: QEMU_ARGS already passes -append, and QEMU keeps only the last one)
 override LOG :=
 endif
-RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(QEMU_ARGS))
+RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(GRAPHIC_QEMU_ARGS) $(QEMU_ARGS))
 
 run:
 	@echo "Running x-kernel..."
