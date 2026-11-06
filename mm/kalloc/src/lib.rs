@@ -632,6 +632,16 @@ impl GlobalAllocator {
         );
         const DMA32_LIMIT: usize = 0x1_0000_0000;
 
+        // A/B: hand out DMA pages from above this physical address instead of from
+        // the general free list.
+        //
+        // The RK3588 map has a 2 MiB "free memory" window at PA 0x200000-0x400000
+        // sitting immediately below the kernel image, and the first coherent
+        // allocations of every probe land in it. A USB controller's event ring
+        // segment table was observed there to be silently rewritten mid-boot with a
+        // value (`0x1`) that looks like a page-table entry, after which the
+        // controller wrote its events to an address derived from it and eventually
+        // raised a Host System Error. Keeping DMA out of that window is the test.
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
 
         let phys = kernel_virt_to_phys(addr);
