@@ -1345,36 +1345,60 @@ pub mod driver {
             };
             let mut devices = 0usize;
             let mut disks = alloc::vec::Vec::new();
-            for port in 0..ports {
-                let (status, enumerated) = {
-                    let mut guard = ehci.lock();
-                    let status = guard
-                        .port_status(port)
-                        .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-                    if !status.connected {
+            // `hub_port_init()` retries a port reset (`for (retry = 0; retry < 3;
+            // retry++)`), and the hub core is otherwise driven by port-change
+            // events. This driver polls, so the equivalent is a bounded re-scan:
+            // a device that connects while the first pass is still running is a
+            // few hundred microseconds behind the scan, not absent -- measured as
+            // `ccs true` at 128.885 s with "enumeration found 0 device(s)" already
+            // printed at 128.783 s.
+            const ENUM_PASSES: usize = 5;
+            const ENUM_RESCAN_DELAY_US: u64 = 100_000;
+            let mut done_ports: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+            for pass in 0..ENUM_PASSES {
+                for port in 0..ports {
+                    if done_ports.contains(&port) {
                         continue;
                     }
-                    (
-                        status,
-                        usb::enumerate::enumerate_port(&mut *guard, port, 1u8),
-                    )
-                };
-                let _ = status;
-                info!("ehci: port {} has a device", port + 1);
-                match enumerated {
-                    Ok(device) => {
-                        info!("ehci: {}", device.summary());
-                        devices += 1;
-                        {
-                            let mut guard = ehci.lock();
-                            super::probe_mass_storage(&mut *guard, &device);
+                    let (status, enumerated) = {
+                        let mut guard = ehci.lock();
+                        let status = guard
+                            .port_status(port)
+                            .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
+                        if !status.connected {
+                            continue;
                         }
-                        if let Some(publication) = super::publish_mass_storage(dev, &ehci, &device)
-                        {
-                            disks.push(publication);
+                        (
+                            status,
+                            usb::enumerate::enumerate_port(&mut *guard, port, 1u8),
+                        )
+                    };
+                    let _ = status;
+                    info!("ehci: port {} has a device", port + 1);
+                    match enumerated {
+                        Ok(device) => {
+                            info!("ehci: {}", device.summary());
+                            devices += 1;
+                            done_ports.push(port);
+                            {
+                                let mut guard = ehci.lock();
+                                super::probe_mass_storage(&mut *guard, &device);
+                            }
+                            if let Some(publication) =
+                                super::publish_mass_storage(dev, &ehci, &device)
+                            {
+                                disks.push(publication);
+                            }
+                        }
+                        Err(err) => {
+                            if pass + 1 == ENUM_PASSES {
+                                log::error!("ehci: port {} enumeration failed: {err:?}", port + 1);
+                            }
                         }
                     }
-                    Err(err) => log::error!("ehci: port {} enumeration failed: {err:?}", port + 1),
+                }
+                if pass + 1 < ENUM_PASSES {
+                    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(ENUM_RESCAN_DELAY_US));
                 }
             }
             info!("ehci: enumeration found {devices} device(s)");

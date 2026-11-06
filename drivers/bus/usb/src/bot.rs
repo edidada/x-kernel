@@ -82,6 +82,16 @@ fn transfer(
     let cbw = build_cbw(tag, transfer_length as u32, is_in, command);
     let mut written = [0u8; CBW_LEN];
     written.copy_from_slice(&cbw);
+    // One line per command: opcode, transfer length and direction, plus the CDB
+    // as it goes on the wire. A device that stops accepting a CBW has to be
+    // matched against the command stream that led to it, and the descriptors are
+    // the only place that stream is visible.
+    info!(
+        "bot: cbw tag {tag} op {:#04x} len {transfer_length} dir {} cdb {:02x?}",
+        command.first().copied().unwrap_or(0),
+        if is_in { "in" } else { "out" },
+        &command[..length],
+    );
     let sent = hcd.bulk_transfer(
         endpoints.address,
         endpoints.endpoint_out,
@@ -209,6 +219,11 @@ fn finish_status(
         log::error!("bot: status tag {echoed_tag} does not match command tag {tag}");
         return Err(KError::Io);
     }
+    let residue = u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]]);
+    info!(
+        "bot: csw tag {echoed_tag} status {} residue {residue}",
+        csw[12]
+    );
     let status = csw[12];
     match status {
         0 => {}
