@@ -2930,6 +2930,45 @@ G 阶段的设计（`drivers/bus/usb/docs/design.md`）实现完了，落点是�
 `INQUIRY`/`READ CAPACITY` 成功后就假设介质可读；冷启动后若前几笔读返回全零，应当
 按参考重试而不是直接把卷判成"没有文件系统"。
 
+### 5.9.8 两个真 bug：写全零、reset 放错位置（EHCI 已恢复发布）
+
+上一节把"EHCI 不发布"归到介质侧。继续按参考对分之后，发现其中一半是我们自己的：
+
+**① `WRITE(10)` 每块都发零。** `bot::transfer()` 在数据阶段 `alloc::vec![0u8; len]`
+之后**从未填入调用方的数据**，而 `write_sectors()` 组好的 `payload` 又被丢掉。
+于是所有写都是 512 个零字节，CSW 还回报 `status 0 residue 0` —— 完全静默。
+这就是介质被写坏的元凶：盘上 block 0（superblock 在 1024 偏移）与 block 1（组描述符）
+现在是全零，而 LBA 2048 仍能读出真实数据（`00 81 00 00 00 81 01 00`），
+即"文件系统头部被我们写没了，其余完好"。修法：数据阶段改成
+`DataPhase::{None,In,Out}` 携带调用方字节；判据改成可观测的 ——
+`verify_write_path()` 写最后一块再读回再复原，板上输出
+`bot: write self-test ok at lba 120845299`。
+
+**② reset 放错位置，等的时间也不够。** 参考只在**传输错误**时复位
+（`usb_stor_invoke_transport()` → `Handle_Errors` → `usb_stor_reset_common()`），
+且复位后等 **6 秒**（`wait_event_interruptible_timeout(..., HZ*6)`）。我们在每次
+读容量前无条件 reset，且只等 1.1 s —— 这块盘被这样 reset 后就 NAK 后续命令，
+表现成"第二次 READ CAPACITY 永不完成"，我们却一直在查 bulk 环。
+改成"先就绪、再读容量，失败才在 `read_capacity_ready()` 里复位并重试一次、等 6 秒"。
+
+**③ 就绪门（`sd_spinup_disk()`，`sd.c:2156`）之前完全不存在。** 现在有：
+TUR 每轮最多 3 试（状态不好或 `UNIT_ATTENTION` 才重试）；`NOT_READY` → 发
+`START STOP UNIT`(start=1,no-flush=1) 后每 1 s 轮询；`UNIT_ATTENTION`/asc `0x28`
+（参考点名的廉价闪存盘情形）同样 1 s；`0x04/{03,0b,0c,1b}` 与未知 sense 直接停。
+sense 来自 `REQUEST SENSE`（auto-sense）。
+
+结果：**EHCI 恢复发布** —— `ehci: published 0951:1666 ... 120845300 512-byte blocks`，
+`devnode usb1 major 8`，启动后经 `/dev` 读扇区成功。挂载仍失败，因为 superblock
+被 ① 写没了，**这块 U 盘需要在 PC 上重新 mkfs.ext4**。
+
+另外新增的判别读（`probe_filesystem()` 失败时补读 LBA 8 与 2048）是这次的关键：
+`lba 2048 reads [00,81,...]` 这一行把"介质没有文件系统"和"我们的读回空"彻底分开，
+单看 CSW 状态永远分不出来。
+
+遗留：设备空闲约 40 s 后再次不应答（`dd` 在 77 s 读超时 → 触发 bulk-only reset），
+与 `b84f2ccb7` 记的 idle drop 是同一类；需要按 `hub` 的 resume/重枚举路径处理。
+xHCI 侧仍是 `read capacity failed: Unsupported`（USB3 bulk 路径）。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
