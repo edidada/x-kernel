@@ -1,5 +1,17 @@
 # of — Security And Reliability
 
+## Translated address input boundary
+
+`availability.rs` and `address.rs` consume strict borrowed parser properties.
+Malformed status, reg tuples, duplicate properties, bad reg-names, unsupported
+cell widths, arithmetic overflow and intervals crossing a translation window
+are reported as errors. A present but invalid declaration must not authorize
+raw-address fallback. Missing ranges is not identity; an empty ranges is.
+Returned intervals are metadata, not permission to access hardware. Mapping,
+register-role checks and lifetime remain the controller consumer's obligations.
+Resource collection allocates after allocator readiness; it adds no unsafe code,
+global ownership, controller registry or IRQ readiness state.
+
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs` (global DTB state,
