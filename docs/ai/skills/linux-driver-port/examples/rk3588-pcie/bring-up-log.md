@@ -2308,6 +2308,135 @@ a4100000: 7fbffddb fff8ffaf f7ffdfff 7ffdd7ed   ← DBI 窗口：浮空数据
 
 ---
 
+## 5.9 USB：EHCI 已全线打通，xHCI 只差 hub 下游设备的恢复路径
+
+### 5.9.1 EHCI 的根因：异步表被写成了环形（一个 bug 解释全部症状）
+
+`build_async_ring()` 把异步表建成了固定环形 `head → EP0 → bulk OUT → bulk IN → head`，
+而 `qh_link()`/`qh_unlink()` 都是"拿 head 的后继做搬运"：
+
+```rust
+qh_link():   qh.next = head.next;   head.next = qh
+qh_unlink(): head.next = qh.next
+```
+
+环里 EP0 的后继就是它自己，所以第一次 link 让 QH 自指，unlink 又把这个自指写回 head：
+
+```
+ehci: qh head: next 0x2f08042   (head → QH1)
+ehci: qh ep:   next 0x2f08042   (QH1 → QH1)
+```
+
+异步表变成 `head → QH → QH → QH …`，回收头永远走不到，advance 永不完成 →
+下一次传输立刻 `USBSTS 0xb03d`(HSE|HCH) → 端口退化到全速且再也不会 enable。
+
+这一根因同时解释了此前所有"像不同问题"的现象：
+
+| 现象 | 解释 |
+| --- | --- |
+| setup 完成、data 阶段静默 | HC 走完 setup 后卡在自指 QH，永远不再推进 |
+| 复位后第一次读必败、第二次常成 | 第一次传输后 unlink 把自指写进 head |
+| 第三次传输起 HSE | 自指环 + 重写 QH 结构 |
+| bulk 在 sector 74056 停摆 | 同一个环，只是发生在第一次 bulk 之后 |
+
+修法与 `ehci_init()` 一致：异步表保持空表（head 自指），端点 QH 每次传输临时插入、
+传完摘出，同一时刻只有一个 QH 在表里。
+
+**修复后实测（同一块盘，首次尝试即成功，无超时无 HSE）**：
+
+```
+usb: port 0 probe wLength 8 -> 8, 18 -> 18, 64 -> 18
+usb: port 0 addressed as 1
+usb: 001:0 id 346d:5678 ... ep0 64
+ehci: mass storage on ep in 0x81 out 0x01
+bot: csw tag 1..4 status 0 residue 0        (INQUIRY / READ CAPACITY / READ(10))
+bot: 512-byte blocks, last LBA 122879999 (60000 MiB)
+```
+
+同一轮还修了三处，各自独立成立：
+
+- 周期帧表填 `EHCI_LIST_END` 而不是 0（0 是空指针）；
+- `qh_unlink()` 等 `USBSTS.IAA`（门铃位清零只代表请求被接受，IAA 才代表 HC 走过了该 QH）；
+- `recover_from_hse()`：HSE 后重做 `ehci_reset()`/`ehci_run()`，而不是让控制器死一整轮启动。
+
+端口复位序列也按参考改成"保留 PORT_ENABLE、只在断言复位时清 change 位、之后不再写 PORTSC"。
+旧的写法有两处竞争：清 PED 后控制器可能刚把它置 1，读到的仍是 0，回写就把端口关掉；
+尾部那次把 PORTSC 掩成 `PP|PED` 的写同理。实测端口因此不再在
+`0x1005`(HS,enabled) 与 `0x180b`(J,disabled) 之间来回跳。
+
+### 5.9.2 判别实验：xHCI 口正常、EHCI 口全长度失败
+
+在 `enumerate.rs` 里对同一条 GET_DESCRIPTOR 依次用 `wLength` 8/18/64 试一次：
+
+```
+usb: port 0 probe wLength 8 -> 8 bytes      ← xHCI 根口
+usb: port 0 probe wLength 18 -> 18 bytes
+usb: port 0 probe wLength 64 -> 18 bytes
+usb: port 0 probe wLength 8 -> TimedOut     ← EHCI 口（修复前）
+usb: port 0 probe wLength 18 -> TimedOut
+usb: port 0 probe wLength 64 -> TimedOut
+```
+
+同一套控制传输代码、同一次启动，xHCI 全过、EHCI 全败 → 与长度无关，问题在 EHCI 驱动内部。
+（该探测是 bring-up 期临时代码，定位后应移除。）
+
+### 5.9.3 介质：驱动已无问题，盘不是 ext4
+
+读回的 boot sector 字节级正确：
+
+```
+bot: media looks like unknown (sector 0 has a valid boot signature):
+     sector0 [eb, 63, 90, 00, 00, 00, 00, 00] ... [00, 00, 00, 00, 00, 00, 55, aa]
+```
+
+`EB 63 90` + `55AA` 是合法引导扇区，OEM 字段全 0，不是 FAT32/exFAT/NTFS 的布局。
+x-kernel 只挂 ext4（`fs/filesystems/kext4`），所以这块盘挂不上——**这一条不是 USB 栈的问题**。
+
+### 5.9.4 xHCI 现状（本轮验证结论）
+
+工作正常的部分：
+
+```
+usb: 001:0 id 05e3:0610 ... class 0x09/00/02   USB2.1 Hub（slot 1，根口 1）
+usb: hub 1 reports 4 port(s), protocol 2 (USB2)
+usb: 002:3 id 17ef:608d ... ep0 8              ← 下游低速设备，枚举并配置成功
+usb: 003:1 id 05e3:0620 ... ep0 9              USB3.2 Hub（slot 3，根口 2，SuperSpeed）
+xhci: slot 3 configured as a hub with 4 port(s)
+```
+
+失败的只有 **SS hub 下游设备**：
+
+```
+usb: hub 3 port 4: reset done, enabled true, speed super, status 0x0203 (link state 0)
+xhci: input ctx ... 16=0x8400004 17=0x20000     (route 4, speed SS, root port 2)
+xhci: address device completion code 4          (USB Transaction Error)
+```
+
+slot context 与 `xhci_setup_addressable_virt_dev()` 逐项一致（route、speed、root hub port、
+EP0 max packet 512、LAST_CTX(1)），父 hub 的 `MAX_PORTS=4` 也已写。因为 `use_new_scheme()`
+对 `USB_SPEED_SUPER` 返回 false，SS 设备走"直接 Address Device"这条老路，我们也是。
+
+**真正待修的是失败之后的恢复**：`COMP_USB_TRANSACTION_ERROR` 之后控制器不再完成任何命令——
+
+```
+xhci: disable slot timed out after 5000 ms (dequeue 98 cycle true, outstanding commands 0)
+xhci: event ring[dequeue] p 0x0000000000000000 s 0x00000000 c 0x00000000
+usb: control IN 0xa3/0x00 ... index 0x0004 on 3 failed: TimedOut   (之后无限重复)
+```
+
+参考实现在这条路径上做三件事，我们都没有：`xhci_disable_slot()` + 重新分配 virt device
+（`xhci_setup_device()` 的 `COMP_USB_TRANSACTION_ERROR` 分支）、命令环重新武装
+（`xhci_handle_event()` 对 `COMP_COMMAND_RING_STOPPED`）、以及事件环 dequeue 的重同步。
+所以一个下游设备失败会连带把该 hub 及其整条 xHCI 路径全部拖死。
+
+### 5.9.5 复现与判读要点
+
+- 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
+- 判读 EHCI 是否健康看两行：`port N reset, portsc ... ped true line 0` 和
+  `bot: csw tag ... status 0 residue 0`；
+- 判读 xHCI 是否健康看 `no-op transfer completed (code 1)` 和
+  `command N for slot ... completed, code 1`；出现 `completion code 4` 就进入 5.9.4 的恢复缺口。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
