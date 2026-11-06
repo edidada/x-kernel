@@ -3081,6 +3081,35 @@ dump）。ERDP 始终正确（`0x203b90` = 0x203000 + 185*16），说明控制�
 `ERST` 只是最先被发现的受害者；同一块池里的 event ring / command ring / bounce
 同样暴露。
 
+### 5.9.12 方案 1（预留低窗口）两次尝试都失败，证据在分配器统计里
+
+目标：把 `PA 0x200000–0x400000` 从可用内存里拿掉，让 DMA 不再落进那个被别的东西
+写过的窗口。
+
+**尝试 A：从 free region 列表里剔除。** `kruntime` 的内存图建立处把该窗口切掉后，
+启动停在 `kruntime memory regions ready` 之后、控制台静默 —— 第一个 region 被整段
+删掉，`global_init` 拿到的不是它预期的区域。
+
+**尝试 B：初始化完成后把这些页分配掉（泄漏即占用）。** 启动正常、USB3 照常发布
+`usb3p1`，但 DMA 仍然落在 `0x201000` / `0x202000`，而且分配器统计直接说明预留没发生：
+
+```
+usages=UsageStats { RustHeap: ..., PageTable: 33673216, Dma: 1241088, Global: 0 }
+```
+
+`Global: 0` = 我那次 `alloc_pages_at(p2v(0x200000), 1, 0x1000, Global)` 一页都没拿到，
+第一页就失败并 `break`。注意 `init_allocator()` 里的 `info!` 在 logger 就绪之前，
+所以"reserved PA ..."这类日志根本不会出现 —— 只能靠 `Allocator state` 的 usage 计数
+验证，这一点值得记住。
+
+因此方案 1 需要一个能解释 `alloc_pages_at` 为何在 0x200000 处失败的原因（是 VA 传错、
+还是 `alloc_at` 的 region 语义不同），本轮没能在预算内查清。
+
+**下一步走方案 2**：`0x10000000–0x20000000` 的 `shared-dma-pool`（DT 保留、内核已解析
+但完全未使用）才是参考里 coherent DMA 该来的地方（Linux 的 `of_reserved_mem` +
+CMA）。在 `kdma` 里实现"优先从该池取"，比在通用分配器里做窗口工程更贴近参考，也不会
+动到 `global_init` 的初始化顺序。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
