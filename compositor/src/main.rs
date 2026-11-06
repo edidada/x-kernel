@@ -50,7 +50,8 @@ use input::{spawn_evdev};
 use state::{ClientState, InputEvent, State};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let (mut device, _notifier) = open_device()?;
     let (connector, crtc, mode) = pick_output(&device)?;
