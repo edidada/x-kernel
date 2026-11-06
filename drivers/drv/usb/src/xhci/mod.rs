@@ -475,6 +475,15 @@ struct Slot {
     /// Root port this slot was addressed on (`None` until `Address Device`
     /// completes), so the addressed address can be reported per port.
     port: Option<usize>,
+    /// The bus the device hangs off: `None` for a root port, `Some((hub address,
+    /// hub port))` for a child. A device that stops answering is brought back by
+    /// resetting *that* port and re-addressing it -- the same path
+    /// `usb_reset_and_verify_device()` takes, minus the class-driver rebind.
+    parent: Option<(u8, u8)>,
+    /// Root port and route the slot was addressed with, so a re-address repeats
+    /// them.
+    root_port: usize,
+    route: u32,
     input: CoherentMem,
     ep0: Ring,
     /// Bulk endpoint rings, created when the device's endpoints are configured
@@ -1648,6 +1657,161 @@ impl Xhci {
         Err(KError::TimedOut)
     }
 
+    /// `usb_reset_and_verify_device()`, minus the class-driver rebind.
+    ///
+    /// A device that stops answering is brought back by resetting the port it
+    /// hangs off and then re-running the address/configure sequence with the slot
+    /// and the address it already had. Everything the class driver holds --
+    /// endpoint addresses, the block backend, the mounted filesystem -- stays
+    /// valid, which is why this is the useful half of a device reset here.
+    ///
+    /// What it deliberately does *not* do: read the descriptors again, rebind a
+    /// class driver or republish a block device. Those need an interface/class
+    /// layer that owns the publications; without it a reset can only repair a
+    /// device whose identity is unchanged, and that is exactly the case this
+    /// recovers from.
+    pub(crate) fn reset_and_reverify(&mut self, slot_index: usize) -> KResult<()> {
+        let slot_id = self.slots[slot_index].id;
+        let speed = regs::speed_from_slot_id(self.slots[slot_index].speed);
+        let root_port = self.slots[slot_index].root_port;
+        let route = self.slots[slot_index].route;
+        let parent = self.slots[slot_index].parent;
+        log::warn!(
+            "xhci: resetting address {slot_id} to bring it back (parent {:?})",
+            parent
+        );
+        match parent {
+            // Behind a hub: reset *that* port. The hub itself is a device on this
+            // controller, so this is a control transfer to it.
+            Some((hub_address, port)) => {
+                if let Some(info) = usb::hub::info(self, hub_address, 2)
+                    && usb::hub::reset_port_retries(self, hub_address, port, info).is_none()
+                {
+                    log::error!("xhci: hub {hub_address} port {port} did not reset");
+                    return Err(KError::Io);
+                }
+            }
+            None => {
+                self.reset_port(root_port)?;
+            }
+        }
+        // The device is back in the Default state at address 0; `Address Device`
+        // gives it the same address the slot already had, and the endpoints the
+        // class driver knows about are re-installed below.
+        let max_packet = match speed {
+            usb::Speed::Low => 8,
+            usb::Speed::Super | usb::Speed::SuperPlus => 512,
+            _ => 64,
+        };
+        let addressing = Addressing {
+            route,
+            tt: None,
+            multi_tt: false,
+            hub: false,
+        };
+        self.address_device(slot_index, root_port, speed, max_packet, addressing, false)?;
+        // Endpoint contexts were dropped with the device's state: install the
+        // bulk pair again (the ring contents are still there, and the dequeue is
+        // re-published by Configure Endpoint).
+        for direction in 0..2 {
+            let dci = self.slots[slot_index].bulk_dci[direction];
+            if dci != 0 {
+                self.slots[slot_index].bulk_state[direction] = BulkEndpointState::default();
+            }
+        }
+        self.reinstall_bulk_endpoints(slot_index)?;
+        log::warn!("xhci: address {slot_id} is back");
+        Ok(())
+    }
+
+    /// Re-installs the bulk endpoint contexts of a slot after its device was reset.
+    fn reinstall_bulk_endpoints(&mut self, slot_index: usize) -> KResult<()> {
+        // The configured endpoints are kept in the slot; re-running Configure
+        // Endpoint with the same contexts is what the reference's
+        // `xhci_discover_or_reset_device()` + `xhci_configure_endpoint()` do.
+        let slot_id = self.slots[slot_index].id;
+        let dci_out = self.slots[slot_index].bulk_dci[0];
+        let dci_in = self.slots[slot_index].bulk_dci[1];
+        if dci_out == 0 && dci_in == 0 {
+            return Ok(());
+        }
+        let dwords = self.context_size / 4;
+        let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let device_ctx = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        for offset in 0..dwords {
+            // SAFETY: one slot context inside each allocation.
+            let value = unsafe { core::ptr::read_volatile(device_ctx.wrapping_add(offset)) };
+            // SAFETY: the input context's own slot-context slot.
+            unsafe {
+                core::ptr::write_volatile(input.wrapping_add(dwords + offset), value);
+            }
+        }
+        let mut add_flags = 1u32;
+        let mut highest = 1u32;
+        for direction in 0..2 {
+            let dci = self.slots[slot_index].bulk_dci[direction];
+            if dci == 0 {
+                continue;
+            }
+            let Some(ring) = self.slots[slot_index].bulk[direction].as_ref() else {
+                continue;
+            };
+            // The ring keeps its position and cycle; the context is re-pointed at
+            // where the producer is now.
+            let next = ring.mem.bus_addr() + (ring.used_since_wrap() as u64) * TRB_LEN as u64;
+            let dcs = ring.cycle_at(next);
+            let ctx = dwords * (dci as usize + 1);
+            let write = |offset: usize, value: u32| {
+                // SAFETY: inside the input context allocation.
+                unsafe {
+                    core::ptr::write_volatile(input.wrapping_add(offset), value);
+                }
+            };
+            write(ctx, context::endpoint_dword0(0));
+            let ep0_packet = 1024u16;
+            write(
+                ctx + 1,
+                context::endpoint_dword1(if direction == 0 { 2 } else { 6 }, ep0_packet, 0),
+            );
+            write(ctx + 2, context::endpoint_dword2(next, dcs));
+            write(ctx + 3, (next >> 32) as u32);
+            write(ctx + 4, context::endpoint_tx_info(0, 0));
+            add_flags |= 1 << dci;
+            highest = highest.max(u32::from(dci));
+        }
+        for dci in 2..=highest {
+            if add_flags & (1 << dci) != 0 {
+                continue;
+            }
+            let gap = dwords * (dci as usize + 1);
+            for dword in 0..5usize {
+                // SAFETY: inside the input context allocation.
+                unsafe {
+                    core::ptr::write_volatile(input.wrapping_add(gap + dword), 0);
+                }
+            }
+        }
+        write_input_control(input, add_flags);
+        let slot_ctx = dwords;
+        let before = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
+        // SAFETY: dword0 of the input slot context.
+        unsafe {
+            core::ptr::write_volatile(
+                input.wrapping_add(slot_ctx),
+                (before & !0xf800_0000) | ((highest + 1) << 27),
+            );
+        }
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "reinstall bulk endpoints")?;
+        info!("xhci: slot {slot_id} bulk endpoints reinstalled");
+        Ok(())
+    }
+
     /// `xhci_check_maxpacket()`: tell the controller the real EP0 max packet.
     ///
     /// `Address Device` can only carry a *guess* (8 for low speed, 64 for full and
@@ -2766,6 +2930,9 @@ impl Xhci {
             id: slot_id,
             speed: 0,
             port: None,
+            parent: None,
+            root_port: 0,
+            route: 0,
             input,
             ep0,
             bulk: [None, None],
@@ -3180,6 +3347,8 @@ impl Xhci {
         self.slots[slot_index].speed = speed_id;
         // The controller now owns this device's address (the slot id).
         self.slots[slot_index].port = Some(port);
+        self.slots[slot_index].root_port = port;
+        self.slots[slot_index].route = addressing.route;
         log::info!(
             "xhci: slot {slot_id} addressed on port {}, speed {}, ep0 max packet {ep0_max_packet}",
             port + 1,
@@ -3906,6 +4075,13 @@ impl Xhci {
                             entry.port,
                             device.summary()
                         );
+                        // Remember the bus, so a device that stops answering can be
+                        // reset through its own hub port and re-addressed.
+                        if let Some(slot_index) =
+                            self.slots.iter().position(|slot| slot.id == address)
+                        {
+                            self.slots[slot_index].parent = Some((hub.address, entry.port));
+                        }
                         found_devices.push(device);
                     }
                     Err(err) => log::error!(

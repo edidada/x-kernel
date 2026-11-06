@@ -249,6 +249,21 @@ pub const fn speed_from_psiv(psiv: u32) -> usb::Speed {
     }
 }
 
+/// Slot-context speed id (`SLOT_SPEED_*`) to bus speed.
+///
+/// The slot stores the id the controller wrote (`xhci.h`: FS 1, LS 2, HS 3, SS 4,
+/// SSP 5), which is not the same numbering `PSIV` uses for a port.
+pub const fn speed_from_slot_id(id: u8) -> usb::Speed {
+    match id {
+        1 => usb::Speed::Full,
+        2 => usb::Speed::Low,
+        3 => usb::Speed::High,
+        4 => usb::Speed::Super,
+        5 => usb::Speed::SuperPlus,
+        _ => usb::Speed::Unknown,
+    }
+}
+
 /// One 16-byte Transfer Request Block, the unit of every xHCI ring.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Default)]
