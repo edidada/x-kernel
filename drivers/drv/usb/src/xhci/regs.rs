@@ -198,6 +198,12 @@ pub mod trb {
     pub const IOC: u32 = 1 << 5;
     /// Interrupt on Short Packet (dword 3 bit 2).
     pub const ISP: u32 = 1 << 2;
+    /// `TRB_TD_SIZE`: packets *remaining after* this TRB, in max-packet units
+    /// (`xhci_td_remainder()`). A wrong value makes the controller treat a
+    /// multi-TRB transfer as finished after the first TRB.
+    pub const TD_SIZE_SHIFT: u32 = 17;
+    /// Transfer-completion events report the residual in status bits 23:0.
+    pub const STATUS_LEN_MASK: u32 = 0x00ff_ffff;
     /// Chain this TRB to the next one (dword 3 bit 4).
     pub const CHAIN: u32 = 1 << 4;
     /// Direction bit (IN) in Setup/Data stage TRBs, dword 2 bit 16.

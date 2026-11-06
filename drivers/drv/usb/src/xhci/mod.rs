@@ -450,8 +450,15 @@ struct Slot {
     input: CoherentMem,
     ep0: Ring,
     /// Bulk endpoint rings, created when the device's endpoints are configured
-    /// (index 0 = EP1-OUT, 1 = EP1-IN); `None` until then.
+    /// (index 0 = OUT, 1 = IN); `None` until then.
     bulk: [Option<Ring>; 2],
+    /// Device Context Index of each bulk endpoint (`2 * ep_number + direction`),
+    /// which is what the doorbell and every transfer event carry.
+    bulk_dci: [u8; 2],
+    /// Outstanding bulk descriptors per direction, in submission order.
+    bulk_tds: [alloc::collections::VecDeque<Td>; 2],
+    /// Completed bulk transfers per direction, in giveback order.
+    bulk_completions: [alloc::collections::VecDeque<Trb>; 2],
     /// The hub's status-change (interrupt IN) ring, created with the hub's
     /// endpoint configuration.
     interrupt: Option<Ring>,
@@ -495,6 +502,14 @@ struct Slot {
 /// "The register reads back zero" has two very different causes -- the write was
 /// dropped, or it landed somewhere else because the offset is wrong -- and only a
 /// search for the value tells them apart.
+/// Writes the input control context's `add` flags (dword 1).
+fn write_input_control(input: *mut u32, add_flags: u32) {
+    // SAFETY: dword 1 of the input context, which the caller owns.
+    unsafe {
+        core::ptr::write_volatile(input.wrapping_add(1), add_flags);
+    }
+}
+
 /// Zeroes interrupter 0 before the rings are programmed.
 ///
 /// RTSOFF points at MFINDEX; the primary interrupter starts 0x20 into the runtime
@@ -1217,6 +1232,386 @@ impl Xhci {
         Some(trb)
     }
 
+    /// One bulk transfer over an already configured endpoint.
+    ///
+    /// The descriptor chain follows `xhci_queue_bulk_tx()` (5.10
+    /// drivers/usb/host/xhci-ring.c:3580):
+    ///
+    /// - a buffer must not cross a 64 KiB boundary, so one transfer becomes one
+    ///   TRB per such boundary (`TRB_BUFF_LEN_UP_TO_BOUNDARY`);
+    /// - every TRB but the last carries `CHAIN`; the last clears it and sets
+    ///   `IOC`, which is the completion this caller waits for;
+    /// - IN transfers set `ISP` so a short packet ends the TD instead of waiting
+    ///   for a full-length one;
+    /// - the TRB length / TD size fields: `TD_SIZE` is the number of packets
+    ///   *remaining* after this TRB, in packets of the endpoint's max packet
+    ///   size (`xhci_td_remainder`), and a wrong value makes the controller
+    ///   treat a multi-TRB transfer as complete after the first one.
+    ///
+    /// The whole chain is published only after it is built (`push_held` +
+    /// `publish`), which is `xhci_queue_bulk_tx()`'s "don't give the first TRB to
+    /// the hardware until the others exist".
+    fn bulk_transfer_slot(
+        &mut self,
+        slot_index: usize,
+        endpoint: u8,
+        data: &mut [u8],
+        is_in: bool,
+    ) -> KResult<usize> {
+        let direction = usize::from(is_in);
+        let slot_id = self.slots[slot_index].id;
+        if self.slots[slot_index].wire_dead {
+            return Err(KError::Io);
+        }
+        if self.slots[slot_index].bulk[direction].is_none() {
+            return Err(KError::Unsupported);
+        }
+        let length = data.len();
+        if length > BOUNCE_LEN {
+            return Err(KError::InvalidInput);
+        }
+        let max_packet = 512usize;
+        if !is_in && length > 0 {
+            // The controller reads the buffer, so it has to be device-visible.
+            // SAFETY: the bounce buffer is BOUNCE_LEN bytes, `length` was checked
+            // against it, and the caller's slice holds `length` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), self.bounce().as_ptr(), length);
+            }
+        }
+        let buffer = self.bounce.bus_addr();
+        // Build the chain back to front is not possible here (each TRB needs the
+        // address of its own forward slot), so it is built forward with the first
+        // TRB held unpublished until the rest exist.
+        let mut addresses: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut offset = 0usize;
+        let mut held: Option<(usize, bool)> = None;
+        loop {
+            let address = buffer + offset as u64;
+            // `TRB_BUFF_LEN_UP_TO_BOUNDARY`: stop at the 64 KiB line.
+            let to_boundary = 0x1_0000 - (address & 0xffff) as usize;
+            let mut trb_len = to_boundary.min(length - offset);
+            let last = offset + trb_len >= length;
+            let mut control = regs::trb::NORMAL << regs::trb::TYPE_SHIFT;
+            if is_in {
+                // `xhci_queue_bulk_tx()` sets ISP for IN and nothing else: DIR_IN
+                // (bit 16) belongs to the control transfer's DATA and STATUS
+                // TRBs, and it is reserved in a Normal TRB. Setting it there made
+                // the controller skip the TRB entirely -- the CBW completed, the
+                // data stage's doorbell was rung, and the endpoint's dequeue never
+                // moved.
+                control |= regs::trb::ISP;
+            }
+            if last {
+                control |= regs::trb::IOC;
+            } else {
+                control |= regs::trb::CHAIN;
+            }
+            // `xhci_td_remainder()`: packets left after this TRB, that is
+            // ceil(remaining / max_packet) - (bytes of this TRB) / max_packet.
+            let remaining = length - offset - trb_len;
+            let packets_left = remaining.div_ceil(max_packet);
+            let td_size = packets_left.min(31) as u32;
+            let status = (trb_len as u32 & 0x1ffff) | (td_size << regs::trb::TD_SIZE_SHIFT);
+            let trb = Trb::new(address, status, control);
+            if held.is_none() {
+                let pushed = self.slots[slot_index].bulk[direction]
+                    .as_mut()
+                    .expect("bulk ring")
+                    .push_held(trb);
+                held = Some((pushed.0, pushed.1));
+                addresses.push(
+                    self.slots[slot_index].bulk[direction]
+                        .as_ref()
+                        .expect("bulk ring")
+                        .mem
+                        .bus_addr()
+                        + (pushed.0 * TRB_LEN) as u64,
+                );
+            } else {
+                let pushed = self.slots[slot_index].bulk[direction]
+                    .as_mut()
+                    .expect("bulk ring")
+                    .push(trb);
+                addresses.push(pushed);
+            }
+            offset += trb_len;
+            if last {
+                break;
+            }
+            // A zero-length remainder would loop forever; `trb_len` is derived
+            // from a non-zero `length` and a boundary that is at least 1 byte.
+            if trb_len == 0 {
+                trb_len = 1;
+            }
+        }
+        let first_trb = *addresses.first().ok_or(KError::InvalidInput)?;
+        let last_trb = *addresses.last().ok_or(KError::InvalidInput)?;
+        self.slots[slot_index].bulk_tds[direction].push_back(Td {
+            first_trb,
+            last_trb,
+            what: "bulk transfer",
+        });
+        let dci = self.slots[slot_index].bulk_dci[direction];
+        if let Some(held) = held {
+            // `giveback_first_trb()`: the first TRB of the chain becomes visible
+            // only now, with the cycle bit that was current when it was written.
+            self.slots[slot_index].bulk[direction]
+                .as_mut()
+                .expect("bulk ring")
+                .publish(held);
+        }
+        if self.slots[slot_index].set_deq_pending {
+            info!("xhci: bulk doorbell withheld, set tr dequeue pending");
+        } else {
+            self.ring_doorbell(slot_id, dci);
+        }
+        let event = self.wait_for_bulk(slot_index, direction)?;
+        let code = event.completion_code();
+        if code != regs::code::SUCCESS && code != regs::code::SHORT_PACKET {
+            log::error!(
+                "xhci: bulk {} on slot {slot_id} ep {endpoint:#04x} failed, code {code}",
+                if is_in { "in" } else { "out" }
+            );
+            return Err(KError::Io);
+        }
+        // The completion event carries what the controller did *not* transfer.
+        let residual = (event.status & regs::trb::STATUS_LEN_MASK) as usize;
+        let transferred = length.saturating_sub(residual);
+        if is_in && transferred > 0 {
+            // SAFETY: the controller wrote `transferred` bytes into the bounce
+            // buffer, which is at least that long, and the caller's slice
+            // matches `length >= transferred`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.bounce().as_ptr(),
+                    data.as_mut_ptr(),
+                    transferred,
+                );
+            }
+        }
+        Ok(transferred)
+    }
+
+    /// Waits for the oldest outstanding bulk descriptor of one direction.
+    fn wait_for_bulk(&mut self, slot_index: usize, direction: usize) -> Result<Trb, KError> {
+        let steps = if self.slots[slot_index].wire_dead {
+            WIRE_DEAD_POLL_STEPS
+        } else {
+            EVENT_POLL_STEPS
+        };
+        for _ in 0..steps {
+            self.pump_events();
+            if let Some(event) = self.slots[slot_index].bulk_completions[direction].pop_front() {
+                self.slots[slot_index].wire_dead = false;
+                return Ok(event);
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
+        self.slots[slot_index].wire_dead = true;
+        self.log_event_timeout("bulk transfer");
+        // Did the controller ever start this descriptor? The endpoint context's
+        // dequeue is the answer: unchanged means the doorbell/DCS never reached
+        // it, advanced means it fetched the TRB and stopped somewhere after it.
+        let dci = self.slots[slot_index].bulk_dci[direction];
+        let offset = self.context_size * usize::from(dci);
+        let base = self.slots[slot_index].device.as_ptr().cast::<u8>();
+        // SAFETY: `dci` is a configured bulk endpoint, so its context is inside
+        // this slot's device context; dwords 0 and 2 are state and dequeue.
+        let (state, dequeue) = unsafe {
+            let dword0 = core::ptr::read_volatile(base.wrapping_add(offset).cast::<u32>());
+            let low = core::ptr::read_volatile(base.wrapping_add(offset + 8).cast::<u32>());
+            let high = core::ptr::read_volatile(base.wrapping_add(offset + 12).cast::<u32>());
+            (dword0 & 0x7, (u64::from(high) << 32) | u64::from(low))
+        };
+        if let Some(ring) = self.slots[slot_index].bulk[direction].as_ref() {
+            let trb = ring.read(0);
+            log::error!(
+                "xhci: bulk timeout: ep dci {dci} state {state} dequeue {dequeue:#x} ring {:#x} \
+                 first trb p {:#x} s {:#010x} c {:#010x} (cycle {})",
+                ring.mem.bus_addr(),
+                trb.parameter,
+                trb.status,
+                trb.control,
+                ring.current_cycle(),
+            );
+        }
+        Err(KError::TimedOut)
+    }
+
+    /// Configures a device's two bulk endpoints and installs them.
+    ///
+    /// This is `xhci_endpoint_init()` (5.10 drivers/usb/host/xhci-mem.c:1462) for
+    /// a bulk pipe plus the `Configure Endpoint` that `xhci_add_endpoint()` issues:
+    ///
+    /// - Endpoint type = Bulk (2), C_Err = 3, Max Packet Size from the endpoint
+    ///   descriptor (512 for a high-speed or SuperSpeed bulk endpoint);
+    /// - Dequeue = ring base | DCS(1);
+    /// - the input control context adds SLOT and both endpoint contexts, and the
+    ///   slot's `context entries` is raised to cover the highest DCI used, with
+    ///   the contexts in between present and disabled (xHCI 4.4.23).
+    ///
+    /// Without this the endpoints simply do not exist: `Doorbell[slot] = DCI`
+    /// has nothing to start, and every transfer event names an endpoint the
+    /// controller never configured.
+    pub(crate) fn configure_bulk(
+        &mut self,
+        dev: &Device<'_, driver_base::PlatformBus>,
+        address: u8,
+        ep_out: u8,
+        ep_in: u8,
+        max_packet_out: u16,
+        max_packet_in: u16,
+    ) -> KResult<()> {
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.id == address)
+            .ok_or(KError::NotFound)?;
+        if self.slots[slot_index].bulk[0].is_some() && self.slots[slot_index].bulk[1].is_some() {
+            return Ok(());
+        }
+        let slot_id = self.slots[slot_index].id;
+        let dwords = self.context_size / 4;
+        let input = self.slots[slot_index].input.as_ptr().cast::<u32>();
+        let device_ctx = self.slots[slot_index].device.as_ptr().cast::<u32>();
+        // The slot context Configure Endpoint presents must be the one the
+        // controller already has, not a guess: copy the device's own.
+        for offset in 0..dwords {
+            // SAFETY: both ranges are one context inside their allocations.
+            let value = unsafe { core::ptr::read_volatile(device_ctx.wrapping_add(offset)) };
+            // SAFETY: as above, on the input context's slot-context slot.
+            unsafe {
+                core::ptr::write_volatile(input.wrapping_add(dwords + offset), value);
+            }
+        }
+        let mut highest_dci = 1u32;
+        let mut add_flags = 1u32; // SLOT
+        for (direction, endpoint, max_packet) in [
+            (0usize, ep_out, max_packet_out),
+            (1usize, ep_in, max_packet_in),
+        ] {
+            let ep_number = u32::from(endpoint & 0x0f);
+            // `xhci_get_endpoint_index()`: DCI = 2 * ep_number + direction.
+            let dci = (ep_number * 2) + direction as u32;
+            let ring = Ring::with_link(
+                dev.res()
+                    .alloc_coherent((RING_TRBS + 1) * TRB_LEN, 64)
+                    .map_err(|_| KError::NoMemory)?,
+                RING_TRBS,
+            );
+            let ring_addr = ring.mem.bus_addr();
+            let dcs = ring.cycle;
+            self.slots[slot_index].bulk_dci[direction] = dci as u8;
+            self.slots[slot_index].bulk[direction] = Some(ring);
+            let ctx = dwords * (dci as usize + 1);
+            let write = |offset: usize, value: u32| {
+                // SAFETY: inside the input context allocation (33 contexts).
+                unsafe {
+                    core::ptr::write_volatile(input.wrapping_add(offset), value);
+                }
+            };
+            // dword0: Interval/Mult are 0 for bulk (`xhci_endpoint_init` only
+            // fills them for periodic pipes).
+            write(ctx, context::endpoint_dword0(0));
+            // dword1: Bulk(2), C_Err 3, Max Packet Size. Max Burst 0 is the
+            // descriptor's bMaxBurst for a SuperSpeed device with one-packet
+            // bursts, which is what a BOT endpoint uses.
+            write(ctx + 1, context::endpoint_dword1(2, max_packet, 0));
+            write(ctx + 2, context::endpoint_dword2(ring_addr, dcs));
+            write(ctx + 3, (ring_addr >> 32) as u32);
+            // dword4: no ESIT for bulk; Linux leaves Average TRB Length 0 here
+            // (`avg_trb_len = max_esit_payload`, and bulk has none).
+            write(ctx + 4, context::endpoint_tx_info(0, 0));
+            add_flags |= 1 << dci;
+            highest_dci = highest_dci.max(dci);
+        }
+        // Every context up to the highest DCI has to be present, and the ones
+        // that are not being added have to read as "disabled" (EP state 0). The
+        // set is decided by `add_flags`, not by the numeric range: zeroing
+        // `2..highest_dci` wiped the IN endpoint this very call configured, and
+        // the controller answered Parameter Error (17) with one endpoint context
+        // all zero and no endpoint in the state it had just accepted.
+        for dci in 2..=highest_dci {
+            if add_flags & (1 << dci) != 0 {
+                continue;
+            }
+            let gap_ctx = dwords * (dci as usize + 1);
+            for dword in 0..5usize {
+                // SAFETY: inside the input context allocation.
+                unsafe {
+                    core::ptr::write_volatile(input.wrapping_add(gap_ctx + dword), 0);
+                }
+            }
+        }
+        write_input_control(input, add_flags);
+        // Raise `context entries` to cover the highest DCI (bits 31:27).
+        let slot_ctx = dwords;
+        let entries = highest_dci + 1;
+        let before = unsafe { core::ptr::read_volatile(input.wrapping_add(slot_ctx)) };
+        // SAFETY: dword0 of the input slot context.
+        unsafe {
+            core::ptr::write_volatile(
+                input.wrapping_add(slot_ctx),
+                (before & !0xf800_0000) | (entries << 27),
+            );
+        }
+        // What the controller is about to read, context by context: with the
+        // command answered by Parameter Error (17), the invalid field is in
+        // here and nowhere else.
+        {
+            let mut line = alloc::string::String::new();
+            for context in 0..=(highest_dci as usize + 1) {
+                line.push_str(&alloc::format!(" [{context}]"));
+                for dword in 0..5usize {
+                    let offset = if context == 0 {
+                        dword
+                    } else {
+                        dwords * context + dword
+                    };
+                    // SAFETY: inside the input context allocation.
+                    let value = unsafe { core::ptr::read_volatile(input.wrapping_add(offset)) };
+                    line.push_str(&alloc::format!(" {value:#x}"));
+                }
+            }
+            info!("xhci: configure bulk input ctx{line}");
+        }
+        let trb = Trb::new(
+            self.slots[slot_index].input.bus_addr(),
+            0,
+            (regs::trb::CONFIGURE_ENDPOINT << regs::trb::TYPE_SHIFT)
+                | (u32::from(slot_id) << regs::trb::SLOT_SHIFT),
+        );
+        self.command(trb, "configure bulk endpoints")?;
+        info!(
+            "xhci: slot {slot_id} bulk endpoints configured (out {ep_out:#04x} dci {}, in \
+             {ep_in:#04x} dci {})",
+            self.slots[slot_index].bulk_dci[0], self.slots[slot_index].bulk_dci[1]
+        );
+        // What the controller accepted: the input context above is our intent,
+        // this is its answer. A DCI whose EP state is not Running (1), or whose
+        // dequeue lost its DCS bit, never became usable, and no transfer queued
+        // on it will be fetched no matter how correct the TRB is.
+        let mut line = alloc::string::String::new();
+        {
+            let base = self.slots[slot_index].device.as_ptr().cast::<u8>();
+            for dci in 1..=highest_dci as usize {
+                line.push_str(&alloc::format!(" dci{dci}:"));
+                for dword in 0..5usize {
+                    let offset = self.context_size * dci + dword * 4;
+                    // SAFETY: `dci` does not exceed the highest configured DCI,
+                    // so this stays inside the slot's device context.
+                    let value = unsafe {
+                        core::ptr::read_volatile(base.wrapping_add(offset).cast::<u32>())
+                    };
+                    line.push_str(&alloc::format!(" {value:#x}"));
+                }
+            }
+        }
+        info!("xhci: slot {slot_id} device ctx after configure{line}");
+        Ok(())
+    }
+
     /// Drains every event the controller has published and routes it to the
     /// state it belongs to — the reference's `xhci_handle_event()`.
     ///
@@ -1296,9 +1691,7 @@ impl Xhci {
             return;
         };
         if ep_id != regs::trb::EP0 {
-            // Only EP0 is tracked as a descriptor queue; a bulk/interrupt event
-            // belongs to a transfer this driver has not queued a TD for.
-            log::warn!("xhci: transfer event header slot {slot_id} ep {ep_id} (code {code})");
+            self.handle_bulk_event(slot_index, ep_id, event);
             return;
         }
         // ldp:step irq.tx-td-front
@@ -1346,6 +1739,55 @@ impl Xhci {
             // the endpoint is reset (the controller caches them).
             self.slots[slot_index].halted_td = Some(td);
             self.halt_ep0(slot_index, false);
+        }
+    }
+
+    /// Routes a transfer event for a bulk endpoint to that endpoint's queue.
+    ///
+    /// Bulk endpoints are identified by their Device Context Index (the same
+    /// number the doorbell takes), not by the endpoint address in the
+    /// descriptor, so the slot remembers the two DCIs it configured.
+    fn handle_bulk_event(&mut self, slot_index: usize, ep_id: u32, event: &Trb) {
+        let slot_id = self.slots[slot_index].id;
+        let Some(direction) = (0..2).find(|dir| {
+            self.slots[slot_index].bulk_dci[*dir] != 0
+                && u32::from(self.slots[slot_index].bulk_dci[*dir]) == ep_id
+        }) else {
+            log::warn!("xhci: transfer event for slot {slot_id} ep {ep_id} with no bulk endpoint");
+            return;
+        };
+        let code = event.completion_code();
+        let Some(td) = self.slots[slot_index].bulk_tds[direction].front().copied() else {
+            log::warn!(
+                "xhci: bulk event slot {slot_id} ep {ep_id} with no descriptor (code {code})"
+            );
+            return;
+        };
+        if event.parameter < td.first_trb || event.parameter > td.last_trb {
+            log::error!(
+                "xhci: bulk event trb {:#x} outside head TD {:#x}..{:#x} (slot {slot_id}, ep \
+                 {ep_id})",
+                event.parameter,
+                td.first_trb,
+                td.last_trb,
+            );
+            return;
+        }
+        self.slots[slot_index].bulk_tds[direction].pop_front();
+        let completions = &mut self.slots[slot_index].bulk_completions[direction];
+        if completions.len() >= EVENT_DRAIN_LIMIT {
+            completions.pop_front();
+        }
+        completions.push_back(*event);
+        if halts_host_endpoint(
+            code,
+            self.ep_state(slot_index, self.slots[slot_index].bulk_dci[direction]),
+        ) {
+            // `finish_td()`: the endpoint is halted, so it consumes nothing more
+            // until a Reset Endpoint clears it. The caller still gets the
+            // completion and turns it into the USB error its transfer expects;
+            // the BOT layer then runs the specification's reset recovery.
+            log::info!("xhci: bulk ep {ep_id} of slot {slot_id} halted (code {code})");
         }
     }
 
@@ -1517,6 +1959,15 @@ impl Xhci {
         // SAFETY: the output device context holds a slot context and one
         // endpoint context per DCI; `ep0` is inside this allocation.
         unsafe { core::ptr::read_volatile(base.wrapping_add(ep0).cast::<u32>()) & 0x7 }
+    }
+
+    /// One endpoint's state, as the controller recorded it.
+    fn ep_state(&self, slot_index: usize, dci: u8) -> u32 {
+        let offset = self.context_size * usize::from(dci);
+        let base = self.slots[slot_index].device.as_ptr().cast::<u8>();
+        // SAFETY: the output device context holds one endpoint context per DCI;
+        // `dci` came from a configured bulk endpoint, so `offset` is inside.
+        unsafe { core::ptr::read_volatile(base.wrapping_add(offset).cast::<u32>()) & 0x7 }
     }
 
     /// Reports EP0's state and dequeue from the slot's output device context.
@@ -1798,8 +2249,17 @@ impl Xhci {
     /// when the controller looks for work is indistinguishable from a ring that
     /// is not being fetched at all.
     fn ring_slot_doorbell(&self, slot_id: u8) {
+        self.ring_doorbell(slot_id, regs::trb::EP0 as u8);
+    }
+
+    /// Rings a slot's doorbell for one endpoint.
+    ///
+    /// The value written is the Device Context Index of the endpoint to notify
+    /// (`2 * ep_number + direction`, EP0 = 1); the controller starts on whatever
+    /// that endpoint's ring holds.
+    fn ring_doorbell(&self, slot_id: u8, dci: u8) {
         let doorbell = self.doorbell + 4 * u32::from(slot_id) as usize;
-        self.bar.write32(doorbell, 1);
+        self.bar.write32(doorbell, u32::from(dci));
         let _ = self.bar.read32(doorbell);
     }
 
@@ -1993,6 +2453,15 @@ impl Xhci {
             input,
             ep0,
             bulk: [None, None],
+            bulk_dci: [0, 0],
+            bulk_tds: [
+                alloc::collections::VecDeque::new(),
+                alloc::collections::VecDeque::new(),
+            ],
+            bulk_completions: [
+                alloc::collections::VecDeque::new(),
+                alloc::collections::VecDeque::new(),
+            ],
             interrupt: None,
             device,
             tds: alloc::collections::VecDeque::new(),
@@ -2728,12 +3197,17 @@ impl Hcd for Xhci {
 
     fn bulk_transfer(
         &mut self,
-        _address: u8,
-        _endpoint: u8,
-        _data: &mut [u8],
-        _is_in: bool,
+        address: u8,
+        endpoint: u8,
+        data: &mut [u8],
+        is_in: bool,
     ) -> KResult<usize> {
-        Err(KError::Unsupported)
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.id == address)
+            .ok_or(KError::NotFound)?;
+        self.bulk_transfer_slot(slot_index, endpoint, data, is_in)
     }
 
     fn name(&self) -> &'static str {
@@ -3573,8 +4047,15 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
     }
 }
 
+/// The two bulk pipes of a bulk-only mass-storage interface.
+struct MassStoragePipe {
+    endpoints: usb::bot::BotEndpoints,
+    max_packet_out: u16,
+    max_packet_in: u16,
+}
+
 /// Finds the bulk-only mass-storage interface of `device`, if it has one.
-fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<usb::bot::BotEndpoints> {
+fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<MassStoragePipe> {
     for config in &device.configurations {
         for interface in &config.interfaces {
             if interface.class != 0x08 || interface.protocol != 0x50 {
@@ -3582,23 +4063,39 @@ fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<usb::bot::BotEndpoi
             }
             let mut endpoint_in = 0u8;
             let mut endpoint_out = 0u8;
+            let mut max_packet_in = 0u16;
+            let mut max_packet_out = 0u16;
             for endpoint in &interface.endpoints {
                 if endpoint.is_in() {
                     endpoint_in = endpoint.address;
+                    max_packet_in = endpoint.max_packet_size;
                 } else {
                     endpoint_out = endpoint.address;
+                    max_packet_out = endpoint.max_packet_size;
                 }
             }
             if endpoint_in == 0 || endpoint_out == 0 {
                 log::warn!("xhci: mass storage interface without both bulk endpoints");
                 continue;
             }
-            return Some(usb::bot::BotEndpoints {
-                address: device.address,
-                endpoint_in,
-                endpoint_out,
-                max_packet: 512,
-                interface: interface.number,
+            // The endpoint context's Max Packet Size has to match the
+            // descriptor; a SuperSpeed bulk endpoint usually declares 1024 and a
+            // mismatch is answered with Parameter Error (17).
+            log::info!(
+                "xhci: mass storage interface {} ep out {endpoint_out:#04x} max {max_packet_out}, \
+                 ep in {endpoint_in:#04x} max {max_packet_in}",
+                interface.number
+            );
+            return Some(MassStoragePipe {
+                endpoints: usb::bot::BotEndpoints {
+                    address: device.address,
+                    endpoint_in,
+                    endpoint_out,
+                    max_packet: max_packet_in,
+                    interface: interface.number,
+                },
+                max_packet_out,
+                max_packet_in,
             });
         }
     }
@@ -3609,9 +4106,10 @@ fn mass_storage_endpoints(device: &usb::UsbDevice) -> Option<usb::bot::BotEndpoi
 /// not prove the bulk path works, and on this board it has been the difference
 /// between "the device answered descriptors" and "the device answers commands".
 pub(crate) fn probe_mass_storage(xhci: &mut Xhci, device: &usb::UsbDevice) {
-    let Some(endpoints) = mass_storage_endpoints(device) else {
+    let Some(pipe) = mass_storage_endpoints(device) else {
         return;
     };
+    let endpoints = pipe.endpoints;
     log::info!(
         "xhci: mass storage on ep in {:#04x} out {:#04x}",
         endpoints.endpoint_in,
@@ -3634,7 +4132,24 @@ pub(crate) fn publish_mass_storage(
     xhci: &alloc::sync::Arc<ksync::Mutex<Xhci>>,
     device: &usb::UsbDevice,
 ) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
-    let endpoints = mass_storage_endpoints(device)?;
+    let pipe = mass_storage_endpoints(device)?;
+    let endpoints = pipe.endpoints;
+    {
+        // The endpoints have to exist before any command can be sent over them;
+        // this is the `Configure Endpoint` the xHCI path never issued.
+        let mut guard = xhci.lock();
+        if let Err(err) = guard.configure_bulk(
+            dev,
+            device.address,
+            endpoints.endpoint_out,
+            endpoints.endpoint_in,
+            pipe.max_packet_out,
+            pipe.max_packet_in,
+        ) {
+            log::error!("xhci: configuring the bulk endpoints failed: {err:?}");
+            return None;
+        }
+    }
     let blocks = {
         let mut guard = xhci.lock();
         let _ = usb::bot::reset_recovery(&mut *guard, &endpoints);

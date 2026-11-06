@@ -2535,6 +2535,62 @@ bot: CBW transfer failed: KError::Unsupported        <- 立即返回，不是超
 规模参考：同项目 usb-host 栈里纯 xHCI 端点部分是 `backend/kmod/xhci/endpoint.rs`，
 约 1300 行。这条应当作为缺口报告立项，而不是靠点补丁硬凑。
 
+### 5.9.4b xHCI bulk 路径的代码级对齐（先对齐、再上板）
+
+按 `workflow/porting-heuristics.md` §2/§11 做的：不再按现象逐点打补丁，而是把"构建 / 入队 /
+判完成 / 拆解"四个动作整套与参考对照，两侧都对齐后才上板。
+
+**参考**：BSP 5.10 `xhci-mem.c:1462`(`xhci_endpoint_init`) / `xhci.c`(`xhci_add_endpoint`,
+`xhci_configure_endpoint`) / `xhci-ring.c:3408`(`giveback_first_trb`) / `:3491`
+(`xhci_td_remainder`) / `:3580`(`xhci_queue_bulk_tx`) / `queue_trb` / `inc_enq`；
+第二实现：usb-host `backend/kmod/xhci/endpoint.rs:696`(`submit_request`)。
+
+| 项 | 参考 | 我们 | 结论 |
+| --- | --- | --- | --- |
+| 端点上下文 EP type / CErr / MaxPacket | 2 / 3 / 描述符值 | 同（值来自端点描述符，SS 为 1024） | ✅ 修正过：原来硬编码 512 |
+| Max Burst / Max ESIT / Avg TRB len | bulk 均为 0 | 0 | ✅ |
+| TR Dequeue Pointer | ring base \| DCS(1) | 同 | ✅ |
+| ring 大小 / Link TRB | 256 TRB + `LINK_TOGGLE` | `RING_TRBS=256` + Link + TC | ✅ |
+| Configure Endpoint 的 input ctx | slot ctx 取自设备已接受的上下文；`add = SLOT\|EP…` | 同 | ✅ |
+| **中间上下文** | 只把**不在 add_flags 里的** DCI 置为 disabled | 原实现清零 `2..highest`，把刚配的 IN 端点一起清了 | ❌→修复（Parameter Error 17 的根因） |
+| Normal TRB 字段 | `LEN`、`TD_SIZE`(剩余包数)、`IOC`、`ISP`(IN)、`CHAIN`(非末) | 同 | ✅ |
+| **Normal TRB 的 bit16** | 参考**不设**（`TRB_DIR_IN` 只属于控制传输的 DATA/STATUS TRB） | 原实现设了 | ❌→修复（IN 的 TD 被控制器忽略） |
+| 首个 TRB 的发布顺序 | 先写全部、`wmb()`、再置 cycle、再敲门铃 | `push_held`/`publish` + 门铃 | ✅ |
+| 门铃 | `Doorbell[slot] = DCI`（`2*ep_num + dir`） | 同 | ✅ |
+| 完成事件 | 按 (slot, DCI) 路由；`parameter` 落在 TD 范围内 | 同（新增 `handle_bulk_event`） | ✅ |
+| 残留长度 | 事件 status bits 23:0 | 同 | ✅ |
+
+硬件侧的确认（配置后读回**设备上下文**，`usb3-ioctx2` 轮）：
+
+```
+xhci: slot 3 device ctx after configure
+  dci1: 0x1 0x2000026 0x2f04141 0x0 0x8      <- EP0 Running
+  dci2: 0x0 0x0 0x0 0x0 0x0                  <- 未用，disabled
+  dci3: 0x1 0x4000016 0x2f08001 0x0 0x0      <- EP1-IN  Running, Bulk, CErr 3, maxp 1024, DCS=1
+  dci4: 0x1 0x4000016 0x2f06001 0x0 0x0      <- EP2-OUT Running, 同上
+```
+
+即"上下文层"已经不是问题。当前卡点是**运行期的数据相位**：
+
+```
+bot: cbw tag 7 op 0x25 len 8 ...            <- READ CAPACITY
+xhci: bulk out on slot 3 completed, code 1   <- CBW 被设备 ACK
+xhci: bulk timeout: ep dci 3 state 1 dequeue 0x2f08001 ring 0x2f08000
+     first trb p 0x206000 s 0x00000008 c 0x00000425 (cycle true)   <- TRB 完全正确
+```
+
+控制器**没有产生任何** IN 的 Transfer Event（日志里没有 "no bulk endpoint"/"outside head TD"）。
+
+**下一轮的判别实验（不是再调字段）**：BOT 的数据相位与 CSW 共用同一条 IN 端点，所以要用
+**零数据阶段的命令**（如 TEST UNIT READY，CBW 之后直接 CSW）把两种解释分开：
+
+- CSW 回来了 → 设备接受 CBW，问题只在"有数据阶段时设备不送数据"；
+- CSW 也不回来 → 设备的 IN 端点根本没在应答，回到端点/设备状态查（含 SS 的 companion
+  descriptor 里 `bMaxBurst` 是否必须写进端点上下文）。
+
+注意 `dequeue` 停在环首**不能**作为"TRB 未被取走"的证据：NAK 重试期间设备上下文里的
+dequeue 本来就不会前进。这一点上一轮误判过一次。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
