@@ -9,7 +9,6 @@ publish = false
 smithay = { version = "0.7", default-features = false, features = [
     "backend_drm",
     "desktop",
-    "renderer_pixman",
     "wayland_frontend",
 ] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

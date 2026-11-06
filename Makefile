@@ -35,6 +35,9 @@
 #                           when busy, the next free CID up to 203 is picked)
 #     - COMPOSITOR_IMG      Read-only compositor image attached to GRAPHIC=y
 #                           runs; built from compositor/ when missing or stale
+#     - COMPOSITOR_ARCH     Guest arch for the compositor (default: .config ARCH)
+#     - COMPOSITOR_SYSROOT  Target libs for linking; `make compositor_sysroot`
+#                           fetches them from $(DEBIAN_MIRROR)
 #     - QEMU_ARGS           Extra QEMU args, appended verbatim after `--`
 #     - LOG                 Kernel command-line log level for `make run` /
 #                           `make justrun` / `make debug`; shorthand for
@@ -139,10 +142,30 @@ GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
 	$(if $(filter -device virtio-mouse%,$(QEMU_ARGS)),,-device virtio-mouse-pci))
 
 # The compositor ships as a separate read-only disk image mounted on
-# /compositor. A graphical run builds the compositor and refreshes that image
-# first (see the run/justrun prerequisites below).
+# /compositor. It is built for the guest architecture from .config, so hosts of
+# either architecture can build either image; a cross build needs the matching
+# cross linker and can fetch the target libs with `make compositor_sysroot`.
 COMPOSITOR_DIR ?= $(CURDIR)/compositor
-COMPOSITOR_BIN := $(COMPOSITOR_DIR)/target/release/xk-wayland
+COMPOSITOR_ARCH ?= $(patsubst "%",%,$(strip $(shell sed -n 's/^ARCH=//p' .config 2>/dev/null)))
+ifeq ($(COMPOSITOR_ARCH),aarch64)
+COMPOSITOR_TRIPLE ?= aarch64-unknown-linux-gnu
+COMPOSITOR_MULTIARCH ?= aarch64-linux-gnu
+COMPOSITOR_LINKER ?= aarch64-linux-gnu-gcc
+COMPOSITOR_DEB_ARCH ?= arm64
+COMPOSITOR_LINKER_ENV := CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+COMPOSITOR_RUSTFLAGS_ENV := CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS
+else
+COMPOSITOR_ARCH := x86_64
+COMPOSITOR_TRIPLE ?= x86_64-unknown-linux-gnu
+COMPOSITOR_MULTIARCH ?= x86_64-linux-gnu
+COMPOSITOR_LINKER ?= x86_64-linux-gnu-gcc
+COMPOSITOR_DEB_ARCH ?= amd64
+COMPOSITOR_LINKER_ENV := CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+COMPOSITOR_RUSTFLAGS_ENV := CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS
+endif
+COMPOSITOR_BIN := $(COMPOSITOR_DIR)/target/$(COMPOSITOR_TRIPLE)/release/xk-wayland
+COMPOSITOR_SYSROOT ?= $(CURDIR)/target/compositor-sysroot-$(COMPOSITOR_ARCH)
+COMPOSITOR_LDFLAGS := $(if $(wildcard $(COMPOSITOR_SYSROOT)/usr/lib/$(COMPOSITOR_MULTIARCH)),-L $(COMPOSITOR_SYSROOT)/usr/lib/$(COMPOSITOR_MULTIARCH))
 COMPOSITOR_IMG ?= $(CURDIR)/compositor.img
 COMPOSITOR_STAGE := $(CURDIR)/target/compositor-root
 COMPOSITOR_DEVICE_ARGS := -device virtio-blk-pci,drive=compositor \
@@ -151,9 +174,30 @@ COMPOSITOR_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),$(COMPOSITOR_DEVICE_ARGS))
 
 compositor: $(COMPOSITOR_BIN)
 
+# Fetch the target-arch runtime and dev libraries needed to link the
+# compositor, so a cross build works without a full target sysroot.
+DEBIAN_MIRROR ?= https://deb.debian.org/debian
+compositor_sysroot:
+	@set -eu; \
+	root="$(COMPOSITOR_SYSROOT)"; \
+	idx="$$root/Packages"; \
+	mkdir -p "$$root"; \
+	if [ ! -f "$$idx" ]; then \
+		curl -fsSL "$(DEBIAN_MIRROR)/dists/trixie/main/binary-$(COMPOSITOR_DEB_ARCH)/Packages.xz" | xz -dc > "$$idx"; \
+	fi; \
+	for pkg in libxkbcommon-dev libxkbcommon0; do \
+		file=$$(awk -v p="$$pkg" '/^Package: /{name=$$2} name==p && /^Filename: /{print substr($$0,11); exit}' "$$idx"); \
+		[ -n "$$file" ] || { echo "error: $$pkg not found in the Packages index"; exit 1; }; \
+		deb="$$root/$$(basename $$file)"; \
+		curl -fsSL "$(DEBIAN_MIRROR)/$$file" -o "$$deb"; \
+		dpkg-deb -x "$$deb" "$$root"; \
+	done; \
+	echo "prepared $(COMPOSITOR_SYSROOT)"
+
 COMPOSITOR_SOURCES := $(shell find $(COMPOSITOR_DIR)/src -name '*.rs' 2>/dev/null)
 $(COMPOSITOR_BIN): $(COMPOSITOR_DIR)/Cargo.toml $(COMPOSITOR_DIR)/Cargo.lock $(COMPOSITOR_SOURCES)
-	@cargo build --release --manifest-path $(COMPOSITOR_DIR)/Cargo.toml --bin xk-wayland
+	@$(COMPOSITOR_LINKER_ENV)="$(COMPOSITOR_LINKER)" $(COMPOSITOR_RUSTFLAGS_ENV)="$(COMPOSITOR_LDFLAGS)" \
+		cargo build --release --target $(COMPOSITOR_TRIPLE) --manifest-path $(COMPOSITOR_DIR)/Cargo.toml --bin xk-wayland
 
 $(COMPOSITOR_IMG): $(COMPOSITOR_BIN)
 	@rm -rf "$(COMPOSITOR_STAGE)"
