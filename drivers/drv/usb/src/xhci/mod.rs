@@ -1542,6 +1542,25 @@ impl Xhci {
         Ok(transferred)
     }
 
+    /// `xhci_trb_in_td()`: may `trb` belong to the descriptor `td`?
+    ///
+    /// A TD that crosses the ring's end has `first_trb > last_trb`, and a plain
+    /// `first..=last` range test answers "no" for exactly the TRBs it does own --
+    /// which is what a log line reading `outside head TD 0x1010bff0..0x1010b010`
+    /// was saying. The reference walks the ring's segments for this reason; with a
+    /// single-segment ring the same result is the wrapped interval below.
+    ///
+    /// Treating a wrapped TD as "outside" was not merely noisy: the handler returns
+    /// without consuming the head TD, so one such event owns the head permanently and
+    /// every later completion is discarded as "not the head TD".
+    fn trb_in_td(td: &Td, trb: u64) -> bool {
+        if td.first_trb <= td.last_trb {
+            trb >= td.first_trb && trb <= td.last_trb
+        } else {
+            trb >= td.first_trb || trb <= td.last_trb
+        }
+    }
+
     /// `xhci_handle_halted_endpoint()` for a bulk endpoint.
     ///
     /// A bulk endpoint that returns a completion the controller considers fatal
@@ -1647,6 +1666,13 @@ impl Xhci {
             self.slots[slot_index].bulk_state[direction].halted_td = Some(td);
         }
         self.recover_bulk_endpoint(slot_index, direction);
+        // Queueing the reset is only half of `xhci_handle_halted_endpoint()`: the
+        // reference then No-Ops the descriptor that stalled and moves the ring's
+        // dequeue past it (`xhci_invalidate_cancelled_tds()`). Without that the stale
+        // TRB stays on the ring, the controller's dequeue stays in front of it, and
+        // every later transfer is enqueued behind a descriptor the controller will
+        // never advance past -- one timeout, then a dead endpoint until a full reset.
+        self.invalidate_bulk_endpoint(slot_index, direction);
         // Did the controller ever start this descriptor? The endpoint context's
         // dequeue is the answer: unchanged means the doorbell/DCS never reached
         // it, advanced means it fetched the TRB and stopped somewhere after it.
@@ -2508,12 +2534,10 @@ impl Xhci {
             self.handle_transferless(slot_index, code);
             return;
         };
-        // `xhci_trb_in_td()`: the event must point inside the head TD's range.
-        // An event pointing anywhere else belongs to a transfer that was
-        // already reaped, and acting on it would finish the wrong transfer.
-        // (These rings are single segments and never wrap mid-TD, so a plain
-        // address range is the test the reference's ring walk performs.)
-        if event.parameter < td.first_trb || event.parameter > td.last_trb {
+        // `xhci_trb_in_td()`: the event must point inside the head TD's range. An
+        // event pointing anywhere else belongs to a transfer that was already
+        // reaped, and acting on it would finish the wrong transfer.
+        if !Self::trb_in_td(&td, event.parameter) {
             log::error!(
                 "xhci: event trb {:#x} outside head TD {:#x}..{:#x} (slot {slot_id}, {})",
                 event.parameter,
@@ -2570,7 +2594,7 @@ impl Xhci {
             );
             return;
         };
-        if event.parameter < td.first_trb || event.parameter > td.last_trb {
+        if !Self::trb_in_td(&td, event.parameter) {
             log::error!(
                 "xhci: bulk event trb {:#x} outside head TD {:#x}..{:#x} (slot {slot_id}, ep \
                  {ep_id})",
