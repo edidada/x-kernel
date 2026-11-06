@@ -73,8 +73,9 @@ pub struct Ehci {
     /// replaces the descriptor's contents instead of repointing the head.
     bulk_dummy_bus: [u32; 2],
     /// The periodic frame list: allocated and programmed even though the
-    /// periodic schedule is off, because the reference always has one.
-    _frame_lists: alloc::vec::Vec<CoherentMem>,
+    /// periodic schedule is off, because the reference always has one. Kept as a
+    /// field so the base register can be rewritten after a controller reset.
+    frame_lists: alloc::vec::Vec<CoherentMem>,
     /// Speed of the device currently addressed. Enumeration handles one port at
     /// a time, so one value is enough until a hub driver exists.
     speed: Speed,
@@ -108,17 +109,17 @@ fn build_async_ring(base_address: u64, head: *mut Qh, dummy_qtd_bus: u32) {
     let total = 4u32;
     for index in 0..total {
         let entry = head.wrapping_add(index as usize);
-        // A static ring: head -> EP0 -> bulk OUT -> bulk IN -> head. The
-        // reference links only the head permanently and splices endpoints in per
-        // transfer (`qh_link_async`), but splicing needs the unlink handshake as
-        // its counterpart; with every endpoint in the ring and the head carrying
-        // QH_HEAD, the controller walks all four and stops at the reclamation
-        // head, which is the behaviour this driver is built around.
-        let next = if index + 1 == total {
-            base | 2
-        } else {
-            base + (index + 1) * size | 2
-        };
+        // `ehci_init()` leaves the asynchronous list *empty*: the reclamation
+        // head points at itself, and endpoints are spliced in for the duration of
+        // one transfer (`qh_link_async()`) and taken out again
+        // (`unlink_async()`). Keeping every endpoint in a fixed circular ring
+        // instead -- what this driver did -- breaks the moment a queue head is
+        // unlinked: the head inherits the unlinked queue head's successor, which
+        // in a ring is the queue head itself, so the schedule becomes
+        // head -> QH -> QH -> QH ... and the head is never reached again. The
+        // controller then never advances, which this board reports as
+        // `USBSTS 0xb03d` (HSE|HCH) on the next transfer.
+        let next = base | 2;
         if index == 0 {
             // `ehci_init()` initialises the reclamation-list head explicitly, and
             // every field matters:
@@ -205,9 +206,17 @@ impl Ehci {
         let frame_list = dev
             .res()
             .alloc_coherent(1024 * core::mem::size_of::<u32>(), 4096)?;
-        // SAFETY: the whole frame list was just allocated and zeroed below.
+        // Every entry terminated, as the reference does (`EHCI_LIST_END` is 1, not
+        // 0): a zeroed entry is a null pointer the controller would follow if the
+        // periodic schedule were ever enabled.
+        // SAFETY: the whole frame list was just allocated.
         unsafe {
-            core::ptr::write_bytes(frame_list.as_ptr(), 0, 1024 * core::mem::size_of::<u32>());
+            for index in 0..1024 {
+                core::ptr::write_volatile(
+                    frame_list.as_ptr().cast::<u32>().wrapping_add(index),
+                    regs::LIST_END,
+                );
+            }
         }
         regs.write32(
             operational + op::PERIODICLISTBASE,
@@ -394,7 +403,7 @@ impl Ehci {
             bulk_dummy_bus: [0; 2],
             gate_snapshot: gates,
             cru,
-            _frame_lists: frame_lists,
+            frame_lists,
             speed: Speed::Full,
         })
     }
@@ -627,6 +636,86 @@ impl Ehci {
     /// writes USBSTS back. Every transfer path needs this, control transfers
     /// included: the BOT soft reset is itself a control transfer, so without it
     /// the recovery path cannot run either.
+    /// Recover from a Host System Error, which is what `ehci_hc_died()` reacts to.
+    ///
+    /// A HSE means the controller hit a fatal internal/system fault; it latches
+    /// HCH, and from then on every qTD stays Active and every later transfer
+    /// times out -- one bad transfer used to take the whole controller down for
+    /// the rest of the boot. The register state after such a fault is not
+    /// trustworthy, so this repeats `ehci_reset()` + `ehci_run()`: stop the
+    /// schedules, reset, reprogram the list bases, rebuild the async ring, run,
+    /// and re-power the ports (a reset drops them) so the caller's next pass can
+    /// enumerate again.
+    fn recover_from_hse(&mut self) {
+        let status = self.regs.read32(self.operational + op::USBSTS);
+        log::error!("ehci: host system error (USBSTS {status:#010x}); resetting the controller");
+        // `ehci_halt()`: drop the run bit and wait for HCH to latch.
+        let command = self.regs.read32(self.operational + op::USBCMD);
+        self.regs.write32(
+            self.operational + op::USBCMD,
+            command & !(regs::cmd::RS | regs::cmd::ASE),
+        );
+        for _ in 0..100 {
+            if self.regs.read32(self.operational + op::USBSTS) & sts::HCHALTED != 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
+        // `ehci_reset()`: clear the latches by writing them back, then HCRESET.
+        self.regs.write32(self.operational + op::USBSTS, status);
+        self.regs
+            .write32(self.operational + op::USBCMD, cmd_hcreset());
+        for _ in 0..250 {
+            if self.regs.read32(self.operational + op::USBCMD) & cmd_hcreset() == 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
+        }
+        self.regs.write32(self.operational + op::CTRLDSSEGMENT, 0);
+        self.regs.write32(self.operational + op::CONFIGFLAG, 1);
+        if let Some(frame_list) = self.frame_lists.first() {
+            self.regs.write32(
+                self.operational + op::PERIODICLISTBASE,
+                frame_list.bus_addr() as u32,
+            );
+        }
+        self.regs.write32(
+            self.operational + op::ASYNCLISTADDR,
+            self.qh.bus_addr() as u32,
+        );
+        // SAFETY: the ring is rebuilt from this controller's own queue heads.
+        unsafe {
+            build_async_ring(
+                self.qh.bus_addr(),
+                self.qh.as_ptr().cast::<Qh>(),
+                self.qtds.bus_addr() as u32
+                    + (QTD_CONTROL_DUMMY * core::mem::size_of::<Qtd>()) as u32,
+            );
+        }
+        self.regs.write32(self.operational + op::USBSTS, 0);
+        self.regs
+            .write32(self.operational + op::USBCMD, run_command());
+        for _ in 0..100 {
+            if self.regs.read32(self.operational + op::USBSTS) & sts::ASS != 0 {
+                break;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
+        // A controller reset drops the port power state, so power every port
+        // again; the reset/enable sequence is the caller's next pass.
+        for port in 0..self.ports {
+            let offset = self.port_register(port);
+            let value = self.regs.read32(offset);
+            self.regs.write32(offset, value | portsc::PP);
+        }
+        let after = self.regs.read32(self.operational + op::USBSTS);
+        log::warn!(
+            "ehci: after reset USBSTS {after:#010x} (halted {}, ass {})",
+            after & sts::HCHALTED != 0,
+            after & sts::ASS != 0,
+        );
+    }
+
     fn ensure_running(&self) {
         // The reference clears a latched halt by writing USBSTS back
         // (`ehci_handshake()`/`ehci_reset()`) and otherwise leaves the schedule
@@ -888,8 +977,11 @@ impl Ehci {
         let head = self.qh.as_ptr().cast::<Qh>();
         let qh = head.wrapping_add(qh_index);
         let qh_bus = self.qh.bus_addr() as u32 + (qh_index * core::mem::size_of::<Qh>()) as u32;
-        // SAFETY: dword 0 of the async head, inside this allocation.
-        let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
+        // `qh_link_async()`: `qh->hw_next = head->hw_next; head->hw_next = dma`.
+        // The head is empty between transfers, so its successor is always the head
+        // itself -- one queue head in the list at a time, which is all this
+        // sequential driver needs.
+        let head_next = self.qh.bus_addr() as u32 | 2;
         // SAFETY: dword 0 of this queue head: it inherits the head's successor.
         unsafe {
             core::ptr::write_volatile(qh.cast::<u32>(), head_next);
@@ -916,7 +1008,9 @@ impl Ehci {
         // SAFETY: dword 0 of the async head, inside this allocation.
         let head_next = unsafe { core::ptr::read_volatile(head.cast::<u32>()) };
         if head_next & !0x1f == qh_bus & !0x1f {
-            // SAFETY: dword 0 of this queue head, then of the head.
+            // SAFETY: dword 0 of this queue head, then of the head. The unlinked
+            // queue head's successor is the head itself, so this restores the
+            // empty list rather than chaining whatever followed the queue head.
             let successor = unsafe { core::ptr::read_volatile(qh.cast::<u32>()) };
             // SAFETY: dword 0 of the head.
             unsafe {
@@ -925,7 +1019,20 @@ impl Ehci {
             karch::dsb_ishst();
         }
         self.ring_async_advance();
-        self.ring_async_advance();
+        // The doorbell being accepted is not the same as the advance being done:
+        // `USBCMD.IAAD` clears as soon as the controller latches the request, and
+        // only `USBSTS.IAA` says it has walked past the queue head. Without this
+        // wait the caller rewrites the queue head and its qTDs while the
+        // controller may still be holding pointers into them, which the board
+        // shows as `USBSTS 0xb03d` (HSE|HCH) on the *next* transfer.
+        for _ in 0..100 {
+            let status = self.regs.read32(self.operational + op::USBSTS);
+            if status & sts::IAA != 0 {
+                self.regs.write32(self.operational + op::USBSTS, sts::IAA);
+                return;
+            }
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+        }
     }
 
     /// `qh_append_tds()`: hand one descriptor to a queue head that is not linked.
@@ -1257,25 +1364,33 @@ impl Hcd for Ehci {
         //   masked PORTSC down to PP|PED, so if the controller enabled the port
         //   between the read and the write, the write disabled it again.
         let current = self.regs.read32(offset);
+        // If the port was already enabled before this reset, PED staying set must
+        // not be mistaken for "the reset completed".
+        let was_enabled = current & portsc::PED != 0;
         self.regs.write32(
             offset,
             (current | portsc::PP | portsc::RST) & !portsc::CHANGE_BITS,
         );
-        // Sample the line state across the reset window for the log: a
-        // high-speed device chirps K during it, a full-speed one never leaves J.
-        let mut saw_k = false;
-        let mut saw_j = false;
-        for _ in 0..50 {
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
-            match (self.regs.read32(offset) & portsc::LINE_MASK) >> 10 {
-                1 => saw_k = true,
-                2 => saw_j = true,
-                _ => {}
+        // The line state as a sequence, sampled every 500 µs across the reset
+        // window: a high-speed device answers the reset with a chirp K about
+        // 2.5-3 ms in and then the port settles to SE0; a full-speed device never
+        // leaves J. A sequence (rather than "did we ever see K") also shows when
+        // it happened, which a boolean cannot.
+        let mut line = alloc::string::String::new();
+        for _ in 0..100 {
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(500));
+            let value = self.regs.read32(offset);
+            let state = (value & portsc::LINE_MASK) >> 10;
+            line.push(char::from(b'0' + state as u8));
+            if !was_enabled && value & portsc::PED != 0 {
+                line.push('|');
+                break;
             }
         }
         info!(
-            "ehci: port {} reset window: chirp K seen {saw_k}, J seen {saw_j}",
-            port + 1
+            "ehci: port {} reset window line states (0=SE0 1=K 2=J, 500us/char, '|' = enabled): {}",
+            port + 1,
+            line
         );
         let in_reset = self.regs.read32(offset);
         self.regs.write32(offset, in_reset & !portsc::RST);

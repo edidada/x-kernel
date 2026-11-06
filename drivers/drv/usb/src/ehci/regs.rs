@@ -45,6 +45,11 @@ pub mod sts {
     pub const PCD: u32 = 1 << 2;
     pub const FLR: u32 = 1 << 3;
     pub const HSE: u32 = 1 << 4;
+    /// Interrupt on Async Advance: the asynchronous schedule has finished walking
+    /// past the queue head that was unlinked. Set by the controller, cleared by
+    /// writing it back. This, not the `USBCMD.IAAD` bit clearing, is what says the
+    /// hardware is no longer sitting on that queue head.
+    pub const IAA: u32 = 1 << 5;
     /// Controller halted.
     pub const HCH: u32 = 1 << 12;
     pub const HCHALTED: u32 = HCH;
