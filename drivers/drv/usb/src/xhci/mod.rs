@@ -2890,6 +2890,30 @@ impl Xhci {
             self.event_cycle,
             self.commands.len(),
         );
+        // `GSTS.BUS_ERR_ADDR_VLD` (bit 4) means the core recorded a bus fault, and
+        // `GBUSERRADDR` then holds the address it could not reach. That address is
+        // the difference between "a device did not answer" and "the controller
+        // faulted on one of our buffers", which look identical from the host side --
+        // and it names which buffer, because every address this driver hands over is
+        // one of a handful of allocations.
+        let gsts = self.bar.read32(crate::dwc3::regs::GSTS);
+        let bus_err = gsts & (1 << 4) != 0;
+        let (err_lo, err_hi) = if bus_err {
+            (
+                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x30),
+                self.bar.read32(crate::dwc3::regs::GLOBALS_START + 0x34),
+            )
+        } else {
+            (0, 0)
+        };
+        log::error!(
+            "xhci: {what} bus error recorded: {bus_err} at {err_hi:#010x}{err_lo:08x}; \
+             allocations: command ring {:#x}, event ring {:#x}, dcbaa {:#x}, bounce {:#x}",
+            self.command.mem.bus_addr(),
+            self.event.mem.bus_addr(),
+            self.dcbaa.bus_addr(),
+            self.bounce.bus_addr(),
+        );
     }
 
     /// Issues a command on the command ring and waits for its completion.
