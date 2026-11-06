@@ -775,7 +775,13 @@ impl Ehci {
         endpoint: u8,
         data: &mut [u8],
         is_in: bool,
+        retries_left: u8,
     ) -> KResult<usize> {
+        // A latched Host System Error means the previous transfer died with the
+        // controller; recover before spending another timeout on it.
+        if self.regs.read32(self.operational + op::USBSTS) & sts::HSE != 0 {
+            self.recover_from_hse();
+        }
         self.ensure_running();
         let BULK_QH: usize = if is_in { 3 } else { 2 };
         let (source_slot, dummy_slot) = if is_in { QTD_BULK_IN } else { QTD_BULK_OUT };
@@ -860,6 +866,20 @@ impl Ehci {
             );
             self.log_async_ring("bulk transfer");
             self.qh_unlink(BULK_QH);
+            // A Host System Error latched *during* the transfer leaves the
+            // schedule unreliable: repeat `ehci_reset()`/`ehci_run()` and give the
+            // transfer one more chance. Without the retry the first read after a
+            // fault fails the mount, and every later mount attempt starts from
+            // the same broken schedule.
+            if status & sts::HSE != 0 && retries_left > 0 {
+                log::warn!("ehci: bulk transfer hit a host system error, recovering and retrying");
+                self.recover_from_hse();
+                // Clear both endpoints' data toggles: the device's view of the
+                // toggle is whatever survived the fault, and a mismatch shows up
+                // as a stalled CBW.
+                self.clear_endpoint_halt(address, endpoint, !is_in);
+                return self.bulk_transfer_impl(address, endpoint, data, is_in, retries_left - 1);
+            }
             return Err(KError::TimedOut);
         }
         self.qh_unlink(BULK_QH);
@@ -1441,7 +1461,7 @@ impl Hcd for Ehci {
         data: &mut [u8],
         is_in: bool,
     ) -> KResult<usize> {
-        self.bulk_transfer_impl(address, endpoint, data, is_in)
+        self.bulk_transfer_impl(address, endpoint, data, is_in, 1)
     }
 
     /// `ehci_endpoint_reset()`: put the queue head's data toggle back to DATA0.
