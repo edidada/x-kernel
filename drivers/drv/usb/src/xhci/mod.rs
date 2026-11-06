@@ -45,6 +45,12 @@ const RT_ERDP: usize = 0x18;
 const RT_IR0: usize = 0x20;
 /// Writing this bit to ERDP clears the "event handler busy" state.
 const ERDP_EHB: u32 = 1 << 3;
+
+/// Where the event ring segment size goes in the ERST entry's dword 2.
+///
+/// 16 is what xHCI 6.5.3.3 describes; 0 is what Linux's `xhci_alloc_erst()` writes.
+/// Kept as one named value because it is an A/B on this silicon, not a preference.
+const ERST_SEG_SIZE_SHIFT: u32 = 16;
 /// The controller's scratch buffer for control data stages.
 /// `HUB_DEBOUNCE_STEP` / `HUB_DEBOUNCE_STABLE` (`drivers/usb/core/hub.c:112-113`).
 const HUB_DEBOUNCE_STEP_US: u64 = 25_000;
@@ -991,11 +997,26 @@ impl Xhci {
                 erst,
                 ErstEntry {
                     ring_segment_base: self.event.mem.bus_addr(),
-                    ring_segment_size: EVENT_RING_TRBS as u32,
+                    // xHCI 6.5.3.3: the segment size sits in dword 2 bits 31:16 and
+                    // bits 15:0 are RsvdZ. Linux writes `TRBS_PER_SEGMENT` raw
+                    // (`xhci_alloc_erst()`, xhci-mem.c:1897), which puts the count in
+                    // the reserved half; on a controller that reads the field as the
+                    // spec describes, the segment size is then zero and its idea of
+                    // the ring's length -- and so of when the cycle bit flips --
+                    // diverges from ours. That divergence is what a decoder's lap
+                    // parity cannot survive, and it fits every symptom seen here:
+                    // events stop being visible while the controller still asserts
+                    // EINT, and later the core faults.
+                    ring_segment_size: (EVENT_RING_TRBS as u32) << ERST_SEG_SIZE_SHIFT,
                     reserved: 0,
                 },
             );
         }
+        info!(
+            "xhci: erst entry base {:#x} size {:#x} (shift {ERST_SEG_SIZE_SHIFT})",
+            self.event.mem.bus_addr(),
+            (EVENT_RING_TRBS as u32) << ERST_SEG_SIZE_SHIFT,
+        );
         // Linux `xhci_add_interrupter` keeps the fields it does not own: ERSTSZ
         // only carries the segment count, ERSTBA only the base address.
         let erstsz = self.runtime + RT_IR0 + 0x08;
@@ -2906,12 +2927,40 @@ impl Xhci {
         } else {
             (0, 0)
         };
+        // What the controller sees of the event ring: the ERST entry, its size
+        // register, the dequeue register and the interrupter's mask/status. A stall
+        // where EINT is set but `next_event()` sees nothing is a disagreement about
+        // one of these, and each is one register read away.
+        let erst = self.erst.as_ptr().cast::<u32>();
+        // SAFETY: `erst` owns one `ErstEntry` = four dwords.
+        let entry = unsafe {
+            [
+                core::ptr::read_volatile(erst),
+                core::ptr::read_volatile(erst.wrapping_add(1)),
+                core::ptr::read_volatile(erst.wrapping_add(2)),
+                core::ptr::read_volatile(erst.wrapping_add(3)),
+            ]
+        };
+        let ir = self.runtime + RT_IR0;
+        log::error!(
+            "xhci: {what} event ring state: erst entry [{:#x}, {:#x}, {:#x}, {:#x}] erstsz {:#x} \
+             erdp {:#018x} iman {:#x} consumer index {} cycle {}",
+            entry[0],
+            entry[1],
+            entry[2],
+            entry[3],
+            self.bar.read32(ir + 0x08),
+            self.bar.read64(ir + RT_ERDP),
+            self.bar.read32(ir),
+            self.event_dequeue,
+            self.event_cycle,
+        );
         log::error!(
             "xhci: {what} bus error recorded: {bus_err} at {err_hi:#010x}{err_lo:08x}; \
              allocations: command ring {:#x}, event ring {:#x}, dcbaa {:#x}, bounce {:#x}",
             self.command.mem.bus_addr(),
             self.event.mem.bus_addr(),
-            self.dcbaa.bus_addr(),
+            self.device_contexts.bus_addr(),
             self.bounce.bus_addr(),
         );
     }
