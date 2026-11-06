@@ -34,6 +34,16 @@ static_lock! {
 
 pub(crate) struct DmaAllocator {
     bounce_pool: Option<BouncePool>,
+    /// Coherent pool handed over by the platform (`shared-dma-pool` in the device
+    /// tree): physical base, size, and a bump cursor.
+    ///
+    /// Its pages are *reserved* -- the page allocator never saw them -- so taking
+    /// coherent memory from here keeps device buffers out of the general free lists
+    /// entirely. That is what Linux's `of_reserved_mem` + CMA pairing does with the
+    /// same node, and it is the difference between "DMA memory is whatever the
+    /// allocator happens to hand out" and "DMA memory is a region the firmware set
+    /// aside for it".
+    dma_pool: Option<(usize, usize, usize)>,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
     coherent_allocs: BTreeMap<usize, CoherentAllocation>,
@@ -59,6 +69,7 @@ impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
             bounce_pool: None,
+            dma_pool: None,
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
             coherent_allocs: BTreeMap::new(),
@@ -83,7 +94,54 @@ impl DmaAllocator {
     }
 
     #[track_caller]
+    /// Records the platform's coherent pool; see `crate::set_coherent_pool`.
+    pub(crate) fn set_coherent_pool(&mut self, paddr: usize, size: usize) {
+        self.dma_pool = Some((paddr, size, 0));
+        log::info!(
+            "kdma: coherent pool PA {paddr:#x}..{:#x} ({} MiB) takes DMA allocations first",
+            paddr + size,
+            size / (1024 * 1024)
+        );
+    }
+
+    /// Takes `num_pages` coherent pages out of the platform pool, if one was given.
+    ///
+    /// The pages are mapped by the same code path as the general allocator's: the
+    /// pool is reserved memory, so it exists in the direct map, but a device buffer
+    /// must be uncached and shared before the first DMA touches it.
+    fn alloc_from_pool(&mut self, layout: Layout) -> AllocResult<Option<DmaInfo>> {
+        let Some((base, size, cursor)) = self.dma_pool else {
+            return Ok(None);
+        };
+        let num_pages = layout_pages(&layout);
+        let align = PAGE_SIZE_4K.max(layout.align());
+        let offset = (cursor + align - 1) & !(align - 1);
+        let bytes = num_pages * PAGE_SIZE_4K;
+        if offset + bytes > size {
+            return Ok(None);
+        }
+        let paddr = base + offset;
+        let vaddr = va!(khal::mem::p2v(PhysAddr::from_usize(paddr)).as_usize());
+        let flags = MappingFlags::READ
+            | MappingFlags::WRITE
+            | MappingFlags::UNCACHED
+            | MappingFlags::SHARED;
+        self.update_flags(vaddr, num_pages, flags)?;
+        self.prepare_platform_dma(PhysAddr::from_usize(paddr), bytes)?;
+        self.dma_pool = Some((base, size, offset + bytes));
+        let dma_info = DmaInfo {
+            // SAFETY: `vaddr` is the direct-map address of a live, reserved range.
+            cpu_addr: unsafe { NonNull::new_unchecked(vaddr.as_usize() as *mut u8) },
+            bus_addr: v2b(vaddr),
+        };
+        self.trace_coherent_alloc(dma_info, num_pages);
+        Ok(Some(dma_info))
+    }
+
     fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
+        if let Some(info) = self.alloc_from_pool(layout)? {
+            return Ok(info);
+        }
         let num_pages = layout_pages(&layout);
         let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
@@ -155,6 +213,16 @@ impl DmaAllocator {
         // Deallocation cannot fail; update_flags already logs restoration errors.
         let _ = self.update_flags(vaddr, num_pages, MappingFlags::READ | MappingFlags::WRITE);
 
+        // Pool pages were never the general allocator's: giving them back would
+        // corrupt its bookkeeping. The pool itself is bump-allocated and lives for
+        // the kernel's lifetime, so a pool allocation is simply released here.
+        let paddr = v2p(vaddr).as_usize();
+        if self
+            .dma_pool
+            .is_some_and(|(base, size, _)| paddr >= base && paddr < base + size)
+        {
+            return;
+        }
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
     }
 

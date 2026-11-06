@@ -763,6 +763,7 @@ fn init_allocator() {
     use khal::mem::{MemFlags, memory_regions, p2v};
 
     info!("Initialize global memory allocator...");
+    init_coherent_dma_pool();
     info!("  use {} allocator.", kalloc::global_allocator().name());
     let mut free_regions = memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
     if let Some(region) = free_regions.next() {
@@ -778,6 +779,32 @@ fn init_allocator() {
         kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
             .expect("failed to add free region to allocator");
     }
+}
+
+/// Gives `kdma` the device tree's `shared-dma-pool`, if the board declares one.
+///
+/// The node is parsed and reserved already (it shows up in the memory map as
+/// `shared-dma-pool (RESERVED) [source=device tree]`) but nothing consumed it, so
+/// coherent allocations came from the general free lists -- including a 2 MiB window
+/// directly below the kernel image that a non-allocator owner was observed writing
+/// into. Linux pairs the same node with `dma_alloc_coherent()`; this hands it to the
+/// DMA allocator so device buffers live in a region nothing else touches.
+fn init_coherent_dma_pool() {
+    use khal::mem::{MemFlags, memory_regions};
+
+    let Some(region) = memory_regions()
+        .find(|region| region.flags.contains(MemFlags::RSVD) && region.name == "shared-dma-pool")
+    else {
+        info!("  no shared-dma-pool in the device tree; coherent DMA uses general memory");
+        return;
+    };
+    info!(
+        "  coherent DMA pool PA {:#x}..{:#x} ({} MiB)",
+        region.paddr.as_usize(),
+        region.paddr.as_usize() + region.size,
+        region.size / (1024 * 1024)
+    );
+    kdma::set_coherent_pool(region.paddr.as_usize(), region.size);
 }
 
 fn finish_allocator_init() {

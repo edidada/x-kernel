@@ -97,6 +97,25 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// The caller must free the returned allocation exactly once with
 /// [`deallocate_dma_memory`] using the same `layout`, and must only expose the
 /// returned bus address to devices that are allowed to DMA that buffer.
+/// Hands the platform's coherent DMA pool over to the allocator.
+///
+/// The region must be reserved memory the page allocator never manages (the device
+/// tree's `shared-dma-pool`). Once set, coherent allocations are served from it
+/// first, which keeps device buffers out of the general free lists -- the
+/// difference that mattered here: a USB controller's event ring segment table was
+/// observed being rewritten by a non-allocator owner while it lived in a 2 MiB free
+/// window directly below the kernel image.
+pub fn set_coherent_pool(paddr: usize, size: usize) {
+    ALLOCATOR.lock().set_coherent_pool(paddr, size);
+}
+
+/// Allocates coherent memory for DMA access.
+///
+/// # Safety
+///
+/// The caller must free the returned allocation exactly once with
+/// [`deallocate_dma_memory`] using the same `layout`, and must only expose the
+/// returned bus address to devices that are allowed to DMA that buffer.
 #[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
