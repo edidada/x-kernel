@@ -119,6 +119,17 @@ impl Usb2Phy {
     fn set_suspended(&self, suspended: bool) {
         let mask = 1u32 << self.phy_sus_bit;
         let tmp: u32 = if suspended { 1 } else { 0 };
+        // `phy_sus` is the one write that can take a link down under another
+        // controller's feet: both the EHCI and the DWC3 host port resolve to the
+        // same USB2 PHY bank on this SoC, and whoever calls this last decides
+        // whether the port stays powered. Logged with the block so a link that
+        // dies while idle can be matched against it.
+        log::info!(
+            "usb2phy: {:?} set_suspended({suspended}) -> +{:#04x} = {:#010x}",
+            self.block,
+            self.phy_sus_offset,
+            (tmp << self.phy_sus_bit) | (mask << 16),
+        );
         self.grf.write32(
             self.phy_sus_offset,
             (tmp << self.phy_sus_bit) | (mask << 16),
@@ -160,6 +171,7 @@ impl PhyHwOps for Usb2Phy {
     /// matching Linux, where `clkout_ctl` is lazy and reads 0 even on the
     /// working board, so it is NOT driven from here.
     fn hw_power_on(&self) -> Result<(), PhyError> {
+        log::info!("usb2phy: {:?} power_on", self.block);
         let enabled = self.clk480m.prepare_enable().map_err(|_| PhyError::Io)?;
         *self.clk480m_enabled.lock() = Some(enabled);
         self.set_suspended(false);

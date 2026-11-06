@@ -82,6 +82,13 @@ pub struct Ehci {
     /// periodic schedule is off, because the reference always has one. Kept as a
     /// field so the base register can be rewritten after a controller reset.
     frame_lists: alloc::vec::Vec<CoherentMem>,
+    /// Set while `reattach()` is walking a reconnected device back to the state
+    /// it had, so the transfers it issues are not themselves checked for a
+    /// missing device.
+    reattaching: bool,
+    /// Last PORTSC value seen, so a change that happens while nothing is being
+    /// transferred still shows up in the log with the transfer that noticed it.
+    last_portsc: core::sync::atomic::AtomicU32,
     /// Speed of the device currently addressed. Enumeration handles one port at
     /// a time, so one value is enough until a hub driver exists.
     speed: Speed,
@@ -410,6 +417,8 @@ impl Ehci {
             // `ehci_qtd_alloc()` hands out a fresh qTD as the endpoint's dummy;
             // the second slot of each pair plays that part until it is traded.
             bulk_dummy_slot: [QTD_BULK_OUT.1, QTD_BULK_IN.1],
+            reattaching: false,
+            last_portsc: core::sync::atomic::AtomicU32::new(0),
             gate_snapshot: gates,
             cru,
             frame_lists,
@@ -443,6 +452,8 @@ impl Ehci {
         data: &mut [u8],
         speed: Speed,
     ) -> KResult<usize> {
+        self.watch_port();
+        self.ensure_attached(address)?;
         self.recover_if_hse();
         self.ensure_running();
         let is_in = setup.request_type & 0x80 != 0;
@@ -752,6 +763,83 @@ impl Ehci {
         );
     }
 
+    /// Makes sure the device `address` is still on the bus, and puts it back if
+    /// it dropped and came back.
+    ///
+    /// A device that loses VBUS for a moment reconnects by itself, which the
+    /// controller reports as `PORT_CONNECT_CHANGE` with `PORT_ENABLE` clear --
+    /// `hub_wq` reacts by re-enumerating it. Without that, every later transfer
+    /// goes to an address nobody answers: on this board the mounted stick dropped
+    /// while the driver was idle (the log shows `portsc 0x1005 -> 0x180b`, i.e.
+    /// connect change plus a device back at full speed) and every read after it
+    /// failed with a transaction error until the controller itself faulted.
+    ///
+    /// The device is re-addressed with the number it already had, so the class
+    /// driver that owns it -- a mounted filesystem, in the case that matters --
+    /// keeps working without being torn down and rebuilt.
+    fn ensure_attached(&mut self, address: u8) -> KResult<()> {
+        let portsc = self.regs.read32(self.port_register(0));
+        if portsc & portsc::CCS == 0 {
+            return Err(KError::NotFound);
+        }
+        if portsc & portsc::PED != 0 || self.reattaching {
+            return Ok(());
+        }
+        self.reattach(address)
+    }
+
+    /// `hub_port_init()` for a device that is already known: port reset, then
+    /// `SET_ADDRESS` with its old number and `SET_CONFIGURATION(1)`.
+    fn reattach(&mut self, address: u8) -> KResult<()> {
+        log::warn!("ehci: device at address {address} dropped off the bus; re-establishing it");
+        self.reattaching = true;
+        let result = (|| -> KResult<()> {
+            self.recover_if_hse();
+            let speed = self.port_reset(0)?;
+            // `hub_port_init()`: a reset returns the device to the Default state,
+            // which means address 0 and DATA0 on both bulk endpoints.
+            let mut empty = [0u8; 0];
+            self.control_transfer_inner(0, &SetupPacket::set_address(address), &mut empty, speed)?;
+            // USB 2.0 9.2.6.3: the device needs a recovery interval after
+            // SetAddress before it answers on the new address.
+            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(2_000));
+            self.control_transfer_inner(
+                address,
+                &SetupPacket::set_configuration(1),
+                &mut empty,
+                speed,
+            )?;
+            Ok(())
+        })();
+        self.reattaching = false;
+        match &result {
+            Ok(()) => log::warn!("ehci: device at address {address} is back"),
+            Err(err) => log::error!("ehci: re-establishing address {address} failed: {err:?}"),
+        }
+        result
+    }
+
+    /// Logs the root port whenever its `PORTSC` changes.
+    ///
+    /// The link on this board was lost while the driver was *idle* -- the port
+    /// read `ccs true, ped false, line 2` at the first transfer after the mount,
+    /// with no transfer in between to blame -- so the only way to date the event
+    /// is to sample it from the transfers on either side of the gap.
+    fn watch_port(&self) {
+        let value = self.regs.read32(self.port_register(0));
+        let previous = self
+            .last_portsc
+            .swap(value, core::sync::atomic::Ordering::Relaxed);
+        if value != previous {
+            log::warn!(
+                "ehci: port 1 portsc {previous:#010x} -> {value:#010x} (ccs {}, ped {}, line {})",
+                value & portsc::CCS != 0,
+                value & portsc::PED != 0,
+                (value & portsc::LINE_MASK) >> 10,
+            );
+        }
+    }
+
     fn ensure_running(&self) {
         // The reference clears a latched halt by writing USBSTS back
         // (`ehci_handshake()`/`ehci_reset()`) and otherwise leaves the schedule
@@ -816,6 +904,8 @@ impl Ehci {
         is_in: bool,
         retries_left: u8,
     ) -> KResult<usize> {
+        self.watch_port();
+        self.ensure_attached(address)?;
         self.recover_if_hse();
         self.ensure_running();
         let BULK_QH: usize = if is_in { 3 } else { 2 };
