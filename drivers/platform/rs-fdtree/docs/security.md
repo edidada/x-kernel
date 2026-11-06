@@ -1,5 +1,12 @@
 # rs_fdtree — Security And Reliability
 
+## Strict property trust boundary
+
+Strict readers reject duplicate or malformed properties before returning values.
+Parent traversal uses the validated immutable tree; offsets are only meaningful
+within that tree. These operations neither allocate nor interpret status or
+address bindings. OF owns validation of translated device resources.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (`LinuxFdt`,

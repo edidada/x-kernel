@@ -37,29 +37,40 @@ pub struct FdtNode<'b, 'a> {
     /// Node name (may include unit address, e.g., "uart@10000000")
     pub name: &'a str,
     pub(crate) header: &'b LinuxFdt<'a>,
+    offset: u32,
     props: &'a [u8],
     parent_props: Option<&'a [u8]>,
 }
 
 impl<'b, 'a: 'b> FdtNode<'b, 'a> {
+    /// Byte offset of this node's BEGIN_NODE token within the structure block.
+    ///
+    /// This is local to the tree, not a phandle or a globally unique identity.
+    /// Use LinuxFdt::node_at_offset to validate a stored offset on lookup.
+    pub fn offset(self) -> u32 {
+        self.offset
+    }
+
+    /// Returns the borrowed parser view, not a canonical firmware identity.
+    pub fn as_tree(self) -> &'b LinuxFdt<'a> {
+        self.header
+    }
+
+    /// Return the structural parent, or `None` for the root.
+    ///
+    /// Uses property-slice identity, not potentially duplicated node names.
+    /// This allocation-free lookup scans the tree: O(number of nodes), intended
+    /// for firmware discovery rather than runtime device operations.
+    pub fn parent(self) -> Option<Self> {
+        let props = self.parent_props?;
+        self.header
+            .all_nodes()
+            .find(|node| node.props.as_ptr() == props.as_ptr() && node.props.len() == props.len())
+    }
+
     /// Returns an iterator over the current node properties.
     pub fn properties(self) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
-        let mut stream = FdtData::new(self.props);
-        let mut done = false;
-
-        core::iter::from_fn(move || {
-            if stream.is_empty() || done {
-                return None;
-            }
-
-            stream.skip_nops();
-            if stream.peek_u32()?.get() != FDT_PROP {
-                done = true;
-                return None;
-            }
-
-            Some(NodeProperty::parse(&mut stream, self.header))
-        })
+        properties(self.header, self.props)
     }
 
     /// Returns the named property if present.
@@ -160,6 +171,7 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
         }
 
         stream.skip_nops();
+        let offset = (header.structs_block().len() - stream.remaining().len()) as u32;
         if stream.u32()?.get() != FDT_BEGIN_NODE {
             return None;
         }
@@ -181,6 +193,7 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
         Some(FdtNode {
             name: if unit_name.is_empty() { "/" } else { unit_name },
             header,
+            offset,
             props: curr_node,
             parent_props: if parent_index == 1 {
                 None
@@ -319,40 +332,58 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     /// Returns this node's `#address-cells` / `#size-cells`, falling back
     /// to the spec defaults (2 and 1).
     pub fn cell_sizes(self) -> CellSizes {
-        let mut cell_sizes = CellSizes::default();
-
-        for property in self.properties() {
-            match property.name {
-                "#address-cells" => {
-                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
-                        cell_sizes.address_cells = val.get() as usize;
-                    }
-                }
-                "#size-cells" => {
-                    if let Some(val) = BigEndianU32::from_bytes(property.value) {
-                        cell_sizes.size_cells = val.get() as usize;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        cell_sizes
+        cell_sizes(self.properties())
     }
 
     fn parent_cell_sizes(self) -> CellSizes {
-        if let Some(parent) = self.parent_props {
-            return FdtNode {
-                name: "",
-                header: self.header,
-                props: parent,
-                parent_props: None,
+        self.parent_props.map_or_else(CellSizes::default, |parent| {
+            cell_sizes(properties(self.header, parent))
+        })
+    }
+}
+
+fn cell_sizes<'a>(properties: impl Iterator<Item = NodeProperty<'a>>) -> CellSizes {
+    let mut cell_sizes = CellSizes::default();
+
+    for property in properties {
+        match property.name {
+            "#address-cells" => {
+                if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                    cell_sizes.address_cells = val.get() as usize;
+                }
             }
-            .cell_sizes();
+            "#size-cells" => {
+                if let Some(val) = BigEndianU32::from_bytes(property.value) {
+                    cell_sizes.size_cells = val.get() as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    cell_sizes
+}
+
+fn properties<'b, 'a: 'b>(
+    header: &'b LinuxFdt<'a>,
+    props: &'a [u8],
+) -> impl Iterator<Item = NodeProperty<'a>> + 'b {
+    let mut stream = FdtData::new(props);
+    let mut done = false;
+
+    core::iter::from_fn(move || {
+        if stream.is_empty() || done {
+            return None;
         }
 
-        CellSizes::default()
-    }
+        stream.skip_nops();
+        if stream.peek_u32()?.get() != FDT_PROP {
+            done = true;
+            return None;
+        }
+
+        Some(NodeProperty::parse(&mut stream, header))
+    })
 }
 
 pub(crate) fn find_node<'b, 'a: 'b>(
@@ -390,6 +421,7 @@ pub(crate) fn find_node<'b, 'a: 'b>(
             return Some(FdtNode {
                 name: unit_name,
                 header,
+                offset: (header.structs_block().len() - curr_data.len()) as u32,
                 props: stream.remaining(),
                 parent_props,
             });
@@ -397,8 +429,8 @@ pub(crate) fn find_node<'b, 'a: 'b>(
         Some(part) => part,
     };
 
-    stream.skip_nops();
     let parent_props = Some(stream.remaining());
+    stream.skip_nops();
 
     while stream.peek_u32()?.get() == FDT_PROP {
         let _ = NodeProperty::parse(stream, header);

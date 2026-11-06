@@ -1,5 +1,13 @@
 # rs_fdtree — Design
 
+## Strict property and structural access
+
+Strict scalar/string/array reads validate encoding and distinguish duplicate,
+malformed and missing properties, without allocation or binding policy.
+Node offsets are source-local structure-block offsets, not firmware identities.
+Parent and offset lookup scan the validated tree without allocation. Status
+interpretation and reg/ranges resource translation belong to OF, not this parser.
+
 ## Purpose
 
 `rs_fdtree` is a minimal, dependency-free, `no_std` parser for the Linux
@@ -45,8 +53,7 @@ which adds kernel-specific semantics.
   `LinuxFdt` borrows, for as long as the caller keeps the blob alive.
 - No mutation, patching, or DTB generation: read-only views over
   firmware-provided bytes.
-- No allocation: everything borrows from the input buffer; no `alloc`
-  dependency at all.
+- No allocation: all tree and property views borrow the input buffer.
 - No alignment guarantees: unaligned big-endian field reads are supported
   on purpose (`FdtData`), because boot loaders do not always align the blob.
 
@@ -59,6 +66,7 @@ drivers/platform/rs-fdtree/
 │   ├── header.rs         # FdtHeader layout, magic and block ranges
 │   ├── parsing.rs        # FdtData cursor, big-endian ints, CStr
 │   ├── node.rs           # FdtNode, NodeProperty, RegIter, region iterators
+│   ├── property.rs       # Strict property encoding reads
 │   ├── error.rs          # FdtError, Result alias
 │   └── kernel_nodes/     # Chosen, Dice, InterruptController wrappers
 └── Cargo.toml
@@ -161,8 +169,8 @@ checked.
 
 ## Design Decisions
 
-- Zero dependencies and no `alloc`: this parser runs before the kernel
-  heap exists and is reused by any subsystem that needs raw DTB access.
+- Zero dependencies and no allocation: raw parsing remains usable before
+  the kernel heap exists.
 - Borrowed, `Copy`-heavy views instead of an owned tree: boot-time code
   passes nodes and properties around freely without cloning, and the
   two-lifetime `FdtNode<'b, 'a>` lets iterators borrow the tree while

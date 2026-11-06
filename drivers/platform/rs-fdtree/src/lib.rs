@@ -6,6 +6,10 @@
 
 #![no_std]
 
+mod property;
+
+pub use property::PropertyError;
+
 mod error;
 mod header;
 mod kernel_nodes;
@@ -128,6 +132,14 @@ impl<'a> LinuxFdt<'a> {
     /// Returns the complete flattened device-tree blob.
     pub fn as_bytes(&self) -> &'a [u8] {
         &self.data[..self.total_size()]
+    }
+
+    /// Find a node at a BEGIN_NODE offset in this tree's structure block.
+    ///
+    /// This allocation-free linear lookup rejects non-node offsets. An offset
+    /// is local to this blob, not a canonical firmware identity.
+    pub fn node_at_offset(&self, offset: u32) -> Option<FdtNode<'_, 'a>> {
+        self.all_nodes().find(|node| node.offset() == offset)
     }
 
     /// Returns interrupt controller node.
