@@ -27,7 +27,7 @@ impl State {
         let serial = Serial::from(self.serial);
         match event {
             InputEvent::Key { code, value } if code < 0x100 => {
-                eprintln!("key {code} {value}");
+                tracing::debug!(code, value, "key event");
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     let state = if value == 0 {
                         KeyState::Released
@@ -125,10 +125,10 @@ pub(crate) fn spawn_evdev(index: u32, sender: smithay::reexports::calloop::chann
     let path = format!("/dev/input/event{index}");
     std::thread::spawn(move || {
         let Ok(mut file) = File::open(&path) else {
-            eprintln!("input: cannot open {path}");
+            tracing::warn!(%path, "cannot open input device");
             return;
         };
-        eprintln!("input: opened {path}");
+        tracing::info!(%path, "input device opened");
         let mut buf = [0u8; 24];
         let mut filled = 0usize;
         loop {

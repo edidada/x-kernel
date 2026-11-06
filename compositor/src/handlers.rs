@@ -78,7 +78,7 @@ impl CompositorHandler for State {
                     });
                     toplevel.send_configure();
                 }
-                eprintln!("focus: keyboard focus set after commit");
+                tracing::debug!("keyboard focus set after commit");
             }
         }
     }
@@ -141,7 +141,7 @@ impl XdgActivationHandler for State {
             .cloned();
         if let Some(window) = target {
             self.space.raise_element(&window, true);
-            eprintln!("activation: raised window");
+            tracing::debug!("activation: raised window");
         }
     }
 }
@@ -173,7 +173,7 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        eprintln!("new_toplevel: creating window");
+        tracing::info!("new toplevel");
         // Tell the client which output it is on and give it an explicit size;
         // Chromium only treats the window as on-screen once both are known.
         self.output.enter(surface.wl_surface());
