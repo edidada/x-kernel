@@ -351,6 +351,14 @@ pub struct Xhci {
     /// Created by the probe (which is where a `DeviceHandle` exists) and used
     /// afterwards, so a device can be withdrawn or published at runtime.
     bus: Option<alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>>,
+    /// Root ports that reported a connection but did not answer when brought up.
+    ///
+    /// A stacked connector exposes the same physical port in both protocol sets, and
+    /// the USB2 side of a SuperSpeed device accepts a port reset but then ignores
+    /// every control transfer. `hub_port_init()` gives up on such a device; this
+    /// driver used to re-try the whole enumeration for each pass, spending a control
+    /// timeout (5 s) each time. One port, one attempt, and it is named in the log.
+    dead_ports: alloc::vec::Vec<usize>,
     /// Last `(PORTSC, PORTPMSC)` sampled per root port, and when the last transfer
     /// entry sampled them (see `sample_ports_before_transfer()`).
     last_port_sample: alloc::vec::Vec<(u32, u32)>,
@@ -942,6 +950,7 @@ impl Xhci {
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
             bus: None,
+            dead_ports: alloc::vec::Vec::new(),
             last_port_sample: alloc::vec::Vec::new(),
             last_transfer_ns: 0,
             self_weak: None,
@@ -4249,6 +4258,9 @@ impl Xhci {
         // has to distinguish.
         self.poll_ports_until_settled();
         for port in 0..self.ports {
+            if self.dead_ports.contains(&port) {
+                continue;
+            }
             match self.port_status(port) {
                 Ok(status) if status.connected => found += 1,
                 _ => continue,
@@ -4279,7 +4291,18 @@ impl Xhci {
                             }
                         }
                         Err(err) => {
-                            log::error!("xhci: port {} enumeration failed: {err:?}", port + 1)
+                            log::error!("xhci: port {} enumeration failed: {err:?}", port + 1);
+                            if matches!(err, KError::TimedOut) {
+                                // `hub_port_init()` stops after its descriptor
+                                // attempts; a port that never answers must not be
+                                // paid for again on the next pass.
+                                log::warn!(
+                                    "xhci: port {} does not answer at this speed; not retrying it \
+                                     this boot",
+                                    port + 1
+                                );
+                                self.dead_ports.push(port);
+                            }
                         }
                     }
                 }
