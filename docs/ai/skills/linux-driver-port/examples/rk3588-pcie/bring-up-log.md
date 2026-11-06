@@ -3022,6 +3022,33 @@ event ring dequeue 185 之后全 0（cycle 0）                       ← 没有
 PORT_LINK_STATE`）与 `usb_reset_and_verify_device()` 只在传输错误时用；先取样确认空闲
 期 PORTSC 的 PLS 与 `PORTPMSC` 是否真的没变，再按参考决定是唤醒端口还是重设设备。
 
+### 5.9.10 更正：那"两个 hub"是板载双总线 hub，不是 xHCI 的端口集合
+
+上一节把"同一端口出现两次"归因为 xHCI 的 Defined Port Ranges 未拆。**这是错的**，
+日志里的两行设备描述符直接推翻了它：
+
+```
+usb: 001:0 id 05e3:0610 ... class 0x09/00/02 ... product USB2.1 Hub / GenesysLogic
+usb: 002:1 id 05e3:0620 ... class 0x09/00/03 ... product USB3.2 Hub / GenesysLogic
+```
+
+两块都是**真实设备**：一颗 GenesysLogic 双总线 hub，在 USB2 总线上以高速枚举出一个
+hub（protocol 2, 4 口），在 USB3 总线上以 SuperSpeed 枚举出另一个 hub（protocol 3,
+4 口）。U 盘插在这颗 hub 的第 4 口上，于是它的**两个半边**都报告 port 4 有设备 ——
+这正是双总线 hub 的正常行为，Linux 也一样：USB2 半边会报 connect，然后对该设备枚举
+失败（SS 设备不在 USB2 半边上应答），Linux 随后把这个端口 disable/断开。
+
+所以我们不需要做端口集合拆分；需要的是**失败得干脆**（`hub_port_init()` 的行为）：
+`7ce8fc0dd` 的 `dead_ports` 就是这件事 —— 一个不应答的根口只试一次、命名记录、本次
+启动不再重试。板上：USB3 半边不受影响（32.8 s `mass storage ready`，33.0 s 发布
+`usb3p1`）。
+
+真正未解决的仍是 **SS 侧 bulk 在约 100 条命令后不再完成**（以及某些启动里的 HSE）。
+下一步的取证方向应该从"hub 拓扑"转到"那笔卡住的 TRB 对应的设备/端点状态"：控制器侧
+已确认（ERST/ERDP/端点 dequeue/环位置全部正确、无总线错误、USBSTS 干净），所以要看
+的是**设备是否真的收了 CBW**——例如同一条命令序列在 EHCI 口（USB2 路径，已验证）上跑
+一遍做方向性对分，以及 `GET_STATUS(endpoint)` 之类的设备侧证据。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
