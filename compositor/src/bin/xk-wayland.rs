@@ -16,6 +16,7 @@ use std::{
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
+    wayland::shell::xdg::SurfaceCachedState,
     backend::{
         allocator::{Allocator, Fourcc, Modifier, dumb::DumbAllocator},
         drm::{
@@ -206,6 +207,17 @@ impl State {
             let Some(toplevel) = window.toplevel() else { continue };
             let surface = toplevel.wl_surface();
             let location = self.space.element_location(window).unwrap_or_default();
+            // Clients that draw their own decorations put them inside the
+            // buffer and name the visible window rectangle with
+            // xdg_surface.set_window_geometry. Place that rectangle at the
+            // window position; the decoration margins fall outside the output.
+            let geometry = with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceCachedState>()
+                    .current()
+                    .geometry
+            });
             // The committed buffer lives in the renderer surface state; the raw
             // `SurfaceAttributes.buffer` is only the pending assignment and is
             // consumed by `on_commit_buffer_handler`.
@@ -217,28 +229,40 @@ impl State {
                 data.buffer().cloned()
             });
             let Some(buffer) = buffer else { continue };
+
             {
                 let _ = with_buffer_contents(&buffer, |ptr, _len, data| {
+                    let (gx, gy) = geometry.map_or((0, 0), |geo| (geo.loc.x, geo.loc.y));
+                    let base_x = location.x - gx;
+                    let base_y = location.y - gy;
+                    let (skip_x, dst_x) = if base_x < 0 {
+                        ((-base_x) as usize, 0usize)
+                    } else {
+                        (0usize, base_x as usize)
+                    };
+                    let (skip_y, dst_y) = if base_y < 0 {
+                        ((-base_y) as usize, 0usize)
+                    } else {
+                        (0usize, base_y as usize)
+                    };
                     let stride = data.stride as usize;
                     let offset = data.offset as usize;
-                    let copy_width = (data.width as usize).min(width);
-                    let copy_height = (data.height as usize).min(height);
-                    let dst_x = location.x.max(0) as usize;
-                    let dst_y = location.y.max(0) as usize;
-                    for row in 0..copy_height {
-                        if dst_y + row >= height {
+                    let src_width = data.width as usize;
+                    let src_height = data.height as usize;
+                    for row in skip_y..src_height {
+                        let out_y = dst_y + (row - skip_y);
+                        if out_y >= height || dst_x >= width {
                             break;
                         }
-                        let src = ptr.wrapping_add(offset + row * stride);
-                        let dst_row = (dst_y + row) * pitch;
-                        let dst = map.wrapping_add(dst_row + dst_x * 4);
+                        let copy_width = src_width.saturating_sub(skip_x).min(width - dst_x);
+                        if copy_width == 0 {
+                            continue;
+                        }
+                        let src = ptr.wrapping_add(offset + row * stride + skip_x * 4);
+                        let dst = map.wrapping_add(out_y * pitch + dst_x * 4);
                         // SAFETY: both ranges are inside the buffer and the mapping.
                         unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                src as *const u8,
-                                dst,
-                                copy_width.saturating_sub(dst_x).min(width - dst_x) * 4,
-                            );
+                            std::ptr::copy_nonoverlapping(src as *const u8, dst, copy_width * 4);
                         }
                     }
                 });
