@@ -27,9 +27,9 @@ pub(super) fn is_gicv3_compatible(compatible: &str) -> bool {
 pub(super) enum DiscoveryError {
     Status {
         node: u32,
-        reason: of::PropertyError,
+        reason: rs_fdtree::PropertyError,
     },
-    Registers(of::AddressError),
+    Registers(rs_fdtree::AddressError),
     MissingRegion {
         node: u32,
     },
@@ -39,7 +39,7 @@ pub(super) enum DiscoveryError {
 }
 
 pub(super) fn config_from_device_tree(
-    tree: &of::LinuxFdt<'_>,
+    tree: &rs_fdtree::LinuxFdt<'_>,
 ) -> Result<Option<(u32, GicConfig)>, DiscoveryError> {
     for node in tree.all_nodes() {
         if node.property("interrupt-controller").is_none() {
@@ -53,13 +53,17 @@ pub(super) fn config_from_device_tree(
             continue;
         };
         let offset = node.offset();
-        if !of::is_available(node).map_err(|reason| DiscoveryError::Status {
-            node: offset,
-            reason,
-        })? {
+        if !node
+            .is_available()
+            .map_err(|reason| DiscoveryError::Status {
+                node: offset,
+                reason,
+            })?
+        {
             continue;
         }
-        let mut regions = of::mmio_resources(node)
+        let mut regions = node
+            .mmio_resources()
             .map_err(DiscoveryError::Registers)?
             .into_iter()
             .map(|region| {

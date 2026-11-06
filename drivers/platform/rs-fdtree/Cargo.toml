@@ -13,6 +13,14 @@ keywords = [
     "linux",
 ]
 
+[features]
+default = []
+alloc = []
+
+[[test]]
+name = "tests_address"
+required-features = ["alloc"]
+
 [dependencies]
 
 [lints]

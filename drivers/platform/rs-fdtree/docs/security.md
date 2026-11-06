@@ -5,7 +5,18 @@
 Strict readers reject duplicate or malformed properties before returning values.
 Parent traversal uses the validated immutable tree; offsets are only meaningful
 within that tree. These operations neither allocate nor interpret status or
-address bindings. OF owns validation of translated device resources.
+address bindings. The separate address module validates translated resources.
+
+## Translated address input boundary
+
+The address module rejects malformed/duplicate properties, invalid reg tuples,
+reg-names, unsupported cell widths, zero lengths and arithmetic overflow.
+Containment checks cover the full interval; missing ranges is not identity.
+After rejecting zero size, bounds use base + size - 1, including 32-bit widths.
+A last byte at u64::MAX is valid. Subtraction-based containment never needs an
+unrepresentable exclusive end. Metadata collection requires an allocator and
+follows its existing OOM policy. It introduces no mappings or hardware access;
+returned names borrow the immutable input tree.
 
 ## Scope
 

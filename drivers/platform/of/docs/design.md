@@ -1,23 +1,16 @@
 # of — Design
 
-## Address discovery responsibility
+## DT backend migration
 
-The private `availability` module interprets status: absent/ok/okay is available,
-other valid strings are unavailable, and malformed/duplicate properties are
-errors. It does not decide ancestor policy or hardware readiness. The private
-`address` module returns complete CPU-physical MMIO intervals from reg and
-numeric ranges, preserving optional reg-names. Missing ranges rejects translation;
-empty ranges denotes identity. PCI/ISA address encodings remain unsupported.
+rs_fdtree owns strict properties, status and numeric reg/ranges translation.
+GIC consumes its FdtNode methods directly; OF no longer implements or forwards
+the moved availability/address APIs. OF currently provides the boot tree view
+and legacy queries, not a generic firmware-node abstraction.
 
-`rs_fdtree` owns structural/property validation and borrowed node views. OF owns
-status and address semantics, corresponding to Linux drivers/of/base.c and
-drivers/of/address.c. GIC owns compatible matching, register roles, mapping and
-hardware initialization. Resource collection needs the allocator and performs no
-MMIO access or device registration. Existing early memory queries are unchanged.
-
-This PR does not change canonical firmware identity or IRQ domain mapping. Old
-controller-specific IRQ/PMU helpers below remain for existing consumers and are
-explicit follow-up debt, not the intended final OF responsibility.
+See [firmware-node direction](firmware-node-direction.md) for the agreed
+boundary and delivery order. This PR does not add fwnode, firmware identity,
+IRQ domain mapping or migrate legacy IRQ/PCI consumers. Those helpers remain
+explicit follow-up debt; OF is not being renamed into a generic interface.
 
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.

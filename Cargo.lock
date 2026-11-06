@@ -2051,6 +2051,7 @@ dependencies = [
  "of",
  "riscv",
  "riscv_plic",
+ "rs_fdtree",
  "sbi-rt",
  "unittest",
  "x86-apic",

@@ -8,15 +8,6 @@
 
 extern crate alloc;
 
-mod address;
-mod availability;
-
-pub use address::{AddressError, AddressErrorReason, MmioResource, mmio_resources};
-pub use availability::is_available;
-
-#[cfg(unittest)]
-unittest::path_mod_test!(test_support, "../ut-tests/support/mod.rs");
-
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;

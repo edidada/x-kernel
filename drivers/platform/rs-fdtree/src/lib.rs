@@ -6,6 +6,13 @@
 
 #![no_std]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "alloc")]
+mod address;
+#[cfg(feature = "alloc")]
+pub use address::{AddressError, AddressErrorReason, MmioResource};
+
 mod property;
 
 pub use property::PropertyError;

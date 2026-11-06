@@ -1,22 +1,10 @@
 # of — Security And Reliability
 
-## Translated address input boundary
+## Moved DT interpretation boundary
 
-`availability.rs` and `address.rs` consume strict borrowed parser properties.
-Malformed status, reg tuples, duplicate properties, bad reg-names, unsupported
-cell widths, arithmetic overflow and intervals crossing a translation window
-are reported as errors. A present but invalid declaration must not authorize
-raw-address fallback. Missing ranges is not identity; an empty ranges is.
-Returned intervals are metadata, not permission to access hardware. Mapping,
-register-role checks and lifetime remain the controller consumer's obligations.
-Resource collection allocates after allocator readiness; it adds no unsafe code,
-global ownership, controller registry or IRQ readiness state.
-
-Nonempty reg/ranges intervals are checked using their last valid byte
-(`base + size - 1`), including the declared 32-bit address width. An interval
-ending at u64::MAX is valid; its unrepresentable exclusive end is not an overflow
-of the resource itself. Zero-sized and genuinely overflowing intervals remain
-errors. Containment uses subtraction/length comparisons without an exclusive end.
+Status and numeric address interpretation now live in rs_fdtree; see that
+crate's security document. OF has no forwarding API for these operations.
+Existing boot-pointer ownership and legacy query boundaries below are unchanged.
 
 ## Scope
 

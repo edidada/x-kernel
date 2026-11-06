@@ -2,11 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{vec, vec::Vec};
-use unittest::{assert_eq, def_test};
-use crate::{LinuxFdt, PropertyError, is_available};
+use rs_fdtree::{LinuxFdt, PropertyError};
 
-#[def_test]
+#[test]
 fn availability_distinguishes_disabled_missing_and_malformed_status() {
     for (value, expected) in [
         (None, Ok(true)),
@@ -36,7 +34,7 @@ fn availability_distinguishes_disabled_missing_and_malformed_status() {
             .unwrap_or_default();
         let bytes = blob(&[properties]);
         let tree = LinuxFdt::new(&bytes).unwrap();
-        assert_eq!(is_available(tree.all_nodes().nth(1).unwrap()), expected);
+        assert_eq!(tree.all_nodes().nth(1).unwrap().is_available(), expected);
     }
     let bytes = blob(&[vec![
         ("status", b"okay\0".to_vec()),
@@ -44,7 +42,7 @@ fn availability_distinguishes_disabled_missing_and_malformed_status() {
     ]]);
     let tree = LinuxFdt::new(&bytes).unwrap();
     assert_eq!(
-        is_available(tree.all_nodes().nth(1).unwrap()),
+        tree.all_nodes().nth(1).unwrap().is_available(),
         Err(PropertyError::Duplicate)
     );
 }

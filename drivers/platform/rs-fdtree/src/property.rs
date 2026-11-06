@@ -6,6 +6,29 @@
 
 use crate::{FdtNode, NodeProperty};
 
+#[cfg(feature = "alloc")]
+pub(crate) fn resource_names<'b, 'a: 'b>(
+    node: FdtNode<'b, 'a>,
+    property: &str,
+) -> Result<impl Iterator<Item = &'a str> + Clone, (Option<usize>, PropertyError)> {
+    let bytes = match node.property_strict(property) {
+        Ok(property) => property.value,
+        Err(PropertyError::Missing) => return Ok("".split_terminator('\0')),
+        Err(reason) => return Err((None, reason)),
+    };
+    for (index, part) in bytes.split_inclusive(|byte| *byte == 0).enumerate() {
+        part.strip_suffix(&[0])
+            .and_then(|part| core::str::from_utf8(part).ok())
+            .filter(|name| !name.is_empty())
+            .ok_or((Some(index), PropertyError::InvalidEncoding))?;
+    }
+    if bytes.is_empty() {
+        return Err((Some(0), PropertyError::InvalidEncoding));
+    }
+    let text = core::str::from_utf8(bytes).map_err(|_| (None, PropertyError::InvalidEncoding))?;
+    Ok(text.split_terminator('\0'))
+}
+
 /// Failure to read a complete property with the requested shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyError {
@@ -81,6 +104,19 @@ impl<'a> NodeProperty<'a> {
 }
 
 impl<'b, 'a: 'b> FdtNode<'b, 'a> {
+    /// Interpret this node's status without applying ancestor or population policy.
+    ///
+    /// Missing status, `ok` and `okay` mean available. Other strings mean
+    /// unavailable; malformed or duplicate properties return an error. This is
+    /// allocation-free and does not imply that a controller or driver is ready.
+    pub fn is_available(self) -> Result<bool, PropertyError> {
+        match self.read_string("status") {
+            Ok(status) => Ok(matches!(status, "ok" | "okay")),
+            Err(PropertyError::Missing) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Read a uniquely named property, distinguishing absence from duplication.
     ///
     /// Scans this node's properties only; no tree index or allocation is required.

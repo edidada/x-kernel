@@ -6,7 +6,18 @@ Strict scalar/string/array reads validate encoding and distinguish duplicate,
 malformed and missing properties, without allocation or binding policy.
 Node offsets are source-local structure-block offsets, not firmware identities.
 Parent and offset lookup scan the validated tree without allocation. Status
-interpretation and reg/ranges resource translation belong to OF, not this parser.
+interpretation and reg/ranges resource translation belong to this DT backend.
+
+## DT address interpretation
+
+FdtNode::is_available accepts absent/ok/okay status, rejects malformed properties,
+and does not decide ancestor availability or controller readiness.
+FdtNode::mmio_resources collects full CPU-physical reg intervals and reg-names
+through numeric ranges. Missing ranges rejects translation; empty ranges is
+identity. PCI/ISA encodings remain unsupported. The private address module
+owns interval validation, including inclusive maximum-address bounds; it does
+not map MMIO. GIC register roles remain in the controller driver.
+Host tests run both with and without alloc; address tests require alloc.
 
 ## Purpose
 
@@ -14,8 +25,8 @@ interpretation and reg/ranges resource translation belong to OF, not this parser
 flattened devicetree (FDT/DTB) format. It turns a DTB blob in memory into
 borrowed, `Copy`-able views: the tree of nodes, their properties, memory
 regions, and a few well-known kernel nodes (`/chosen`, Open DICE, the
-interrupt controller). It is the structural layer beneath the `of` crate,
-which adds kernel-specific semantics.
+interrupt controller). It is the DT backend. The transitional `of` crate owns boot integration and
+legacy queries, not new DT interpretation.
 
 ## Responsibilities
 
@@ -47,13 +58,15 @@ which adds kernel-specific semantics.
 
 ## Non-Responsibilities
 
-- No kernel semantics: interrupt-cell decoding, PCI ranges, CPU status
-  filtering, and phandle-to-node policy live in `of`, not here.
+- No controller-specific bindings, IRQ mapping or device registration.
+  Legacy OF interpreters not migrated here are follow-up debt, not the intended
+  final ownership of DT semantics.
 - No global state: the crate has no statics; a tree is whatever
   `LinuxFdt` borrows, for as long as the caller keeps the blob alive.
 - No mutation, patching, or DTB generation: read-only views over
   firmware-provided bytes.
-- No allocation: all tree and property views borrow the input buffer.
+- Borrowed tree/property views do not allocate. The optional alloc feature
+  enables resource metadata collection, not hardware resource acquisition.
 - No alignment guarantees: unaligned big-endian field reads are supported
   on purpose (`FdtData`), because boot loaders do not always align the blob.
 
@@ -118,9 +131,9 @@ checks owned by callers.
 
 ## Execution Context
 
-- Callable from the earliest boot stage: no allocator, no globals, no
-  hardware access, no environment assumptions beyond the blob being
-  readable at the given address.
+- Borrowed parsing, structural queries and status work before allocator setup.
+  Resource collection (mmio_resources) requires the optional alloc feature and
+  an initialized allocator; it performs no hardware access.
 - RISC-V calls the constructor at physical addresses before enabling paging.
   Token validation consumes NOPs separately and checks the final `FDT_END`
   after the root closes, leaving only the three node/property tokens in the
