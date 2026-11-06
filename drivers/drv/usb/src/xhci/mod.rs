@@ -3047,11 +3047,27 @@ impl Xhci {
                         entry.port
                     ),
                 },
-                Err(err) => log::error!(
-                    "xhci: hub {} port {} address device failed: {err:?}",
-                    hub.address,
-                    entry.port
-                ),
+                Err(err) => {
+                    log::error!(
+                        "xhci: hub {} port {} address device failed: {err:?}",
+                        hub.address,
+                        entry.port
+                    );
+                    // `hub_port_init()`'s `fail:` label calls
+                    // `hub_port_disable(hub, port1, 0)` on every failed attempt
+                    // path. Leaving the port enabled keeps it claimed by a child
+                    // that never reached the Addressed state: the port cannot be
+                    // reset again cleanly, and the next pass starts from a
+                    // half-configured link. Disabling it returns the port to a
+                    // state a later scan can pick up from scratch.
+                    if !usb::hub::port_disable(self, hub.address, entry.port, is_usb3) {
+                        log::error!(
+                            "xhci: hub {} port {} could not be disabled",
+                            hub.address,
+                            entry.port
+                        );
+                    }
+                }
             }
         }
     }

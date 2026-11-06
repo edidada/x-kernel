@@ -94,35 +94,12 @@ pub fn enumerate_port(hcd: &mut dyn Hcd, port: usize, address: u8) -> KResult<Us
     // 1. Eight bytes of the device descriptor on the default pipe: enough for
     //    `bMaxPacketSize0`, which the rest of enumeration needs.
     let mut buf = [0u8; DeviceDescriptor::WIRE_LEN];
-    // BRING-UP PROBE (length discrimination): the same GET_DESCRIPTOR through the
-    // same pipe with three wLength values, *before* anything depends on the first
-    // read succeeding. A device that answers one length and not another points at
-    // the transfer's length handling; one that answers none points at the
-    // transaction itself. Bounded to three requests, removed once the data-stage
-    // failure is understood.
-    let mut read = 0usize;
-    for probe_len in [8usize, 18, 64] {
-        let mut probe = [0u8; 64];
-        let result = control_in(
-            hcd,
-            default_address,
-            SetupPacket::get_descriptor(descriptor::ty::DEVICE, 0, probe_len as u16),
-            &mut probe[..probe_len],
-        );
-        match result {
-            Ok(got) => {
-                info!("usb: port {port} probe wLength {probe_len} -> {got} bytes");
-                if probe_len == 8 {
-                    buf[..8].copy_from_slice(&probe[..8]);
-                    read = got.min(8);
-                }
-            }
-            Err(err) => log::error!("usb: port {port} probe wLength {probe_len} -> {err:?}"),
-        }
-    }
-    if read == 0 {
-        return Err(KError::NotFound);
-    }
+    let read = control_in(
+        hcd,
+        default_address,
+        SetupPacket::get_descriptor(descriptor::ty::DEVICE, 0, 8),
+        &mut buf[..8],
+    )?;
     info!("usb: port {port} first descriptor read {read} bytes");
     let short = DeviceDescriptor::parse(&zero_padded(&buf, read))?;
     info!(

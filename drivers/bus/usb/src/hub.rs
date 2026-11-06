@@ -68,6 +68,8 @@ const PORT_CH_LINK_STATE: u32 = 1 << 6;
 pub const LINK_RX_DETECT: u8 = 5;
 pub const LINK_SS_INACTIVE: u8 = 6;
 pub const LINK_COMP_MOD: u8 = 7;
+/// `USB_SS_PORT_LS_U3`: what `hub_port_disable()` sets on a SuperSpeed port.
+pub const LINK_U3: u8 = 3;
 
 /// How many times a port reset is followed before giving up.
 const RESET_POLLS: usize = 100;
@@ -459,9 +461,15 @@ pub fn redetect_link(hcd: &mut dyn Hcd, address: u8, port: u8) -> bool {
     }
     log::info!("usb: hub {address} port {port}: link driven to Rx.Detect, waiting for reconnect");
     for _ in 0..200 {
-        if let Some((_, change)) = port_status(hcd, address, port)
-            && change & PORT_CH_CONNECTION != 0
-        {
+        // A hub that stops answering GetPortStatus will not report a reconnect
+        // either, and every failed control transfer costs its full timeout: one
+        // dead hub turned this poll into tens of seconds of empty waiting.
+        // `hub_port_wait_reset()` treats an unreadable status the same way.
+        let Some((_, change)) = port_status(hcd, address, port) else {
+            log::error!("usb: hub {address} port {port}: port status unreadable, giving up");
+            return false;
+        };
+        if change & PORT_CH_CONNECTION != 0 {
             log::info!("usb: hub {address} port {port}: device reconnected");
             return true;
         }
@@ -469,6 +477,51 @@ pub fn redetect_link(hcd: &mut dyn Hcd, address: u8, port: u8) -> bool {
     }
     log::error!("usb: hub {address} port {port}: no reconnect after Rx.Detect");
     false
+}
+
+/// `hub_port_disable()` (`hub.c:4419`): take a port away from a device that
+/// failed to enumerate, so the port does not stay claimed by a child that never
+/// reached the Addressed state.
+///
+/// The two halves are different features, not one with a flag: a USB 2.0 port is
+/// disabled by clearing `PORT_ENABLE`, while a SuperSpeed port has no such
+/// feature and is disabled by driving the link to U3
+/// (`hub_set_port_link_state(hub, port, USB_SS_PORT_LS_U3)`). Sending the USB 2.0
+/// request to a SuperSpeed hub stalls.
+pub fn port_disable(hcd: &mut dyn Hcd, address: u8, port: u8, is_superspeed: bool) -> bool {
+    if is_superspeed {
+        let ok = control_no_data(
+            hcd,
+            address,
+            SetupPacket::new(
+                RT_OUT_CLASS_OTHER,
+                REQ_SET_FEATURE,
+                FEAT_PORT_LINK_STATE,
+                (u16::from(LINK_U3) << 8) | u16::from(port),
+                0,
+            ),
+        );
+        if !ok {
+            log::error!("usb: hub {address} port {port}: U3 (disable) rejected");
+        }
+        ok
+    } else {
+        let ok = control_no_data(
+            hcd,
+            address,
+            SetupPacket::new(
+                RT_OUT_CLASS_OTHER,
+                REQ_CLEAR_FEATURE,
+                FEAT_PORT_ENABLE,
+                u16::from(port),
+                0,
+            ),
+        );
+        if !ok {
+            log::error!("usb: hub {address} port {port}: clear PORT_ENABLE rejected");
+        }
+        ok
+    }
 }
 
 /// Whether the port-enable feature is exposed (used by the scan diagnostic).
