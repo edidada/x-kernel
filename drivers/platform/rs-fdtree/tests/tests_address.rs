@@ -6,6 +6,100 @@
 mod support;
 
 use rs_fdtree::{AddressErrorReason, LinuxFdt, PropertyError};
+
+#[test]
+fn range_errors_only_identify_actual_window_tuples() {
+    let bytes = fixture(
+        Some(&cells(&[0, 0, 0, 0x100])),
+        &cells(&[0, 1, 0x200, 1]),
+        None,
+    );
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let error = tree
+        .find_node("/bus/device")
+        .unwrap()
+        .mmio_resources()
+        .unwrap_err();
+    assert_eq!(error.node_offset, tree.find_node("/bus").unwrap().offset());
+    assert_eq!(error.property, "ranges");
+    assert_eq!(error.index, None);
+    assert_eq!(error.reason, AddressErrorReason::OutsideRanges);
+
+    let bytes = fixture(
+        Some(&cells(&[0, 0, 0, 0x100, 0x200, 0, 0x200, 0])),
+        &cells(&[0, 1]),
+        None,
+    );
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let error = tree
+        .find_node("/bus/device")
+        .unwrap()
+        .mmio_resources()
+        .unwrap_err();
+    assert_eq!(error.property, "ranges");
+    assert_eq!(error.index, Some(1));
+    assert_eq!(error.reason, AddressErrorReason::ZeroSize);
+}
+
+#[test]
+fn empty_ranges_width_failure_has_no_window_index() {
+    let mut blob = Dtb::new();
+    blob.begin("");
+    blob.property("#address-cells", &cells(&[1]));
+    blob.begin("bus");
+    blob.property("#address-cells", &cells(&[2]));
+    blob.property("#size-cells", &cells(&[1]));
+    blob.property("ranges", &[]);
+    blob.begin("device");
+    blob.property("reg", &cells(&[0, 0, 1, 1, 0, 1]));
+    blob.end();
+    blob.end();
+    blob.end();
+    let bytes = blob.finish();
+    let tree = LinuxFdt::new(&bytes).unwrap();
+    let error = tree
+        .find_node("/bus/device")
+        .unwrap()
+        .mmio_resources()
+        .unwrap_err();
+    assert_eq!(error.node_offset, tree.find_node("/bus").unwrap().offset());
+    assert_eq!(error.property, "ranges");
+    assert_eq!(error.index, None);
+    assert_eq!(error.reason, AddressErrorReason::Overflow);
+}
+
+#[test]
+fn resource_names_share_string_encoding_validation() {
+    for (names, index) in [
+        (b"good\0bad".as_slice(), None),
+        (b"good\0\xff\0".as_slice(), None),
+        (b"".as_slice(), None),
+        (b"good\0\0".as_slice(), Some(1)),
+    ] {
+        let bytes = fixture(Some(&[]), &cells(&[0x10, 1, 0x20, 1]), Some(names));
+        let tree = LinuxFdt::new(&bytes).unwrap();
+        let node = tree.find_node("/bus/device").unwrap();
+        let error = node.mmio_resources().unwrap_err();
+        assert_eq!(error.property, "reg-names");
+        assert_eq!(error.index, index);
+        assert_eq!(
+            error.reason,
+            AddressErrorReason::Property(PropertyError::InvalidEncoding)
+        );
+        if index.is_none() {
+            assert_eq!(
+                node.read_strings("reg-names").err(),
+                Some(PropertyError::InvalidEncoding)
+            );
+        } else {
+            assert_eq!(
+                node.read_strings("reg-names").unwrap().collect::<Vec<_>>(),
+                ["good", ""]
+            );
+        }
+    }
+}
+
 use support::Dtb;
 
 fn cells(values: &[u32]) -> Vec<u8> {

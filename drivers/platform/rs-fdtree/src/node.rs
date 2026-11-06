@@ -317,6 +317,12 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     /// Returns an iterator over this node's `reg` entries, honoring the
     /// parent's cell widths; `None` when the node has no `reg` property or
     /// the cell widths exceed the supported 2-cell maximum.
+    ///
+    /// Compatibility API: yields untranslated bus addresses and can stop on
+    /// malformed trailing data after returning a valid prefix. Existing boot
+    /// callers retain this behavior. New numeric MMIO discovery should use
+    /// the strict, alloc-enabled mmio_resources method instead; it validates
+    /// the complete declaration and translates ranges before returning data.
     pub fn reg(self) -> Option<RegIter<'a>> {
         let sizes = self.parent_cell_sizes();
         if sizes.address_cells > 2 || sizes.size_cells > 2 {

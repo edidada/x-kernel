@@ -47,7 +47,7 @@ pub struct AddressError {
     pub node_offset: u32,
     /// Property being interpreted.
     pub property: &'static str,
-    /// Tuple/name index, or None for scalar metadata.
+    /// Tuple/name index within property, or None when no element can be identified.
     pub index: Option<usize>,
     /// Rejection reason; this is never an IRQ/provider readiness dependency.
     pub reason: AddressErrorReason,
@@ -100,8 +100,8 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         for (index, tuple) in reg.chunks_exact(tuple_bytes).enumerate() {
             let address = number(&tuple[..address_bytes]);
             let size = number(&tuple[address_bytes..]);
-            self.address_interval_end("reg", index, (address, size), address_bytes)?;
-            let base = parent.translate_mmio(address, size, index)?;
+            self.address_interval_end("reg", Some(index), (address, size), address_bytes)?;
+            let base = parent.translate_mmio(address, size)?;
             resources.push(MmioResource {
                 base,
                 size,
@@ -177,25 +177,20 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     fn address_interval_end(
         self,
         property: &'static str,
-        index: usize,
+        index: Option<usize>,
         interval: (u64, u64),
         address_bytes: usize,
     ) -> Result<u64, AddressError> {
         let (base, size) = interval;
         if size == 0 {
-            return Err(self.address_error(property, Some(index), AddressErrorReason::ZeroSize));
+            return Err(self.address_error(property, index, AddressErrorReason::ZeroSize));
         }
         base.checked_add(size - 1)
             .filter(|end| address_bytes == 8 || *end <= u64::from(u32::MAX))
-            .ok_or_else(|| self.address_error(property, Some(index), AddressErrorReason::Overflow))
+            .ok_or_else(|| self.address_error(property, index, AddressErrorReason::Overflow))
     }
 
-    fn translate_mmio(
-        mut self,
-        mut address: u64,
-        size: u64,
-        reg_index: usize,
-    ) -> Result<u64, AddressError> {
+    fn translate_mmio(mut self, mut address: u64, size: u64) -> Result<u64, AddressError> {
         while let Some(parent) = self.parent() {
             parent.numeric_bus()?;
             let child_bytes = self.address_cell_bytes("#address-cells", 2)?;
@@ -206,14 +201,13 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
                 .map_err(|error| self.address_error("ranges", None, error.into()))?
                 .value;
             if ranges.is_empty() {
-                self.address_interval_end("ranges", reg_index, (address, size), parent_bytes)?;
+                self.address_interval_end("ranges", None, (address, size), parent_bytes)?;
             } else {
                 address = self.translate_mmio_ranges(
                     ranges,
                     (child_bytes, parent_bytes, size_bytes),
                     address,
                     size,
-                    reg_index,
                 )?;
             }
             self = parent;
@@ -227,7 +221,6 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
         widths: (usize, usize, usize),
         address: u64,
         size: u64,
-        reg_index: usize,
     ) -> Result<u64, AddressError> {
         let (child_bytes, parent_bytes, size_bytes) = widths;
         let tuple_bytes = child_bytes + parent_bytes + size_bytes;
@@ -237,8 +230,8 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
             let child = number(&tuple[..child_bytes]);
             let parent = number(&tuple[child_bytes..child_bytes + parent_bytes]);
             let length = number(&tuple[child_bytes + parent_bytes..]);
-            self.address_interval_end("ranges", index, (child, length), child_bytes)?;
-            self.address_interval_end("ranges", index, (parent, length), parent_bytes)?;
+            self.address_interval_end("ranges", Some(index), (child, length), child_bytes)?;
+            self.address_interval_end("ranges", Some(index), (parent, length), parent_bytes)?;
             if let Some(offset) = address.checked_sub(child)
                 && size <= length
                 && offset <= length - size
@@ -247,9 +240,8 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
                 translated = parent.checked_add(offset);
             }
         }
-        translated.ok_or_else(|| {
-            self.address_error("ranges", Some(reg_index), AddressErrorReason::OutsideRanges)
-        })
+        translated
+            .ok_or_else(|| self.address_error("ranges", None, AddressErrorReason::OutsideRanges))
     }
 
     fn address_error(

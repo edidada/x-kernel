@@ -1,5 +1,19 @@
 # rs_fdtree — Design
 
+## Strict decoding and legacy compatibility
+
+reg()/RegIter remain untranslated, allocation-free compatibility APIs for
+existing boot consumers. They may return a valid prefix before malformed
+trailing input ends iteration. New numeric MMIO discovery uses mmio_resources;
+strict decoding must not delegate to the permissive iterator. Migrate callers
+individually before removing legacy access, rather than changing its behavior.
+
+Resource names reuse read_strings for complete NUL/UTF-8 validation, then
+reject empty elements as a binding constraint. Encoding failures identify the
+property (index None); validly decoded empty names identify their element.
+ranges errors identify only an actual window tuple. No covering window or
+empty-ranges width failure reports index None, never the device's reg index.
+
 ## Strict property and structural access
 
 Strict scalar/string/array reads validate encoding and distinguish duplicate,

@@ -11,22 +11,18 @@ pub(crate) fn resource_names<'b, 'a: 'b>(
     node: FdtNode<'b, 'a>,
     property: &str,
 ) -> Result<impl Iterator<Item = &'a str> + Clone, (Option<usize>, PropertyError)> {
-    let bytes = match node.property_strict(property) {
-        Ok(property) => property.value,
-        Err(PropertyError::Missing) => return Ok("".split_terminator('\0')),
+    let names = match node.read_strings(property) {
+        Ok(names) => Some(names),
+        Err(PropertyError::Missing) => None,
         Err(reason) => return Err((None, reason)),
     };
-    for (index, part) in bytes.split_inclusive(|byte| *byte == 0).enumerate() {
-        part.strip_suffix(&[0])
-            .and_then(|part| core::str::from_utf8(part).ok())
-            .filter(|name| !name.is_empty())
-            .ok_or((Some(index), PropertyError::InvalidEncoding))?;
+    let names = names.into_iter().flatten();
+    for (index, name) in names.clone().enumerate() {
+        if name.is_empty() {
+            return Err((Some(index), PropertyError::InvalidEncoding));
+        }
     }
-    if bytes.is_empty() {
-        return Err((Some(0), PropertyError::InvalidEncoding));
-    }
-    let text = core::str::from_utf8(bytes).map_err(|_| (None, PropertyError::InvalidEncoding))?;
-    Ok(text.split_terminator('\0'))
+    Ok(names)
 }
 
 /// Failure to read a complete property with the requested shape.
@@ -61,7 +57,7 @@ impl<'a> NodeProperty<'a> {
     ///
     /// Empty string elements are preserved; binding-specific readers decide
     /// whether they are permitted. An empty byte property is not a string list.
-    pub fn read_strings(self) -> Result<impl Iterator<Item = &'a str>, PropertyError> {
+    pub fn read_strings(self) -> Result<impl Iterator<Item = &'a str> + Clone, PropertyError> {
         Ok(self.string_payload()?.split('\0'))
     }
 
@@ -135,7 +131,10 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
     }
 
     /// Validate all string elements before publishing a borrowed iterator.
-    pub fn read_strings(self, name: &str) -> Result<impl Iterator<Item = &'a str>, PropertyError> {
+    pub fn read_strings(
+        self,
+        name: &str,
+    ) -> Result<impl Iterator<Item = &'a str> + Clone, PropertyError> {
         self.property_strict(name)?.read_strings()
     }
 

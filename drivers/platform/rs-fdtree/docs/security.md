@@ -1,5 +1,15 @@
 # rs_fdtree — Security And Reliability
 
+## Diagnostic attribution and shared string validation
+
+Resource diagnostics attach element indices only to the reported property's
+actual elements. An uncovered address or empty identity window has no ranges
+tuple index. Resource names share the strict string reader's complete encoding
+validation, then reject empty elements; malformed encoding remains an error
+without a guessed element index. No new allocation or unsafe boundary is added.
+Legacy reg iterators remain permissive and are not validation gates for strict
+MMIO discovery.
+
 ## Strict property trust boundary
 
 Strict readers reject duplicate or malformed properties before returning values.
