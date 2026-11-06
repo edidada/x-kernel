@@ -854,6 +854,30 @@ SS 子设备行为不变（BSR=1 成功、地址 0 wire 事务 code 4）——�
 3. **死线快速失败生效**：某 slot 超时一次后后续 250ms 快速失败，启动 86.9s PASS
    （原 240s+ 卡死）。
 
+### U 盘可用（`8ccb47720`）：EHCI bulk 的 qH overlay 机制
+
+`/dev/usb1 mounted at /mnt/usb as "ext4"`，卷标 `Kylin-Industry-V`，120845300×512B。
+两轮启动稳定复现（67s 启动）。
+
+**根因**：qTD 回读 `token 0x000d8d80` = Active + CERR=3 + PID=IN + len 13（正是 CSW 的
+13 字节，控制器一位没改），`USBSTS 0x802d`（ASS=1、REC=0）。我们的代码只在**第一次**
+传输时编程过一次 QH，之后只改 dummy qTD；而控制器把描述符列表跑空后会把
+`LIST_END`+HALT 写进 **QH overlay** 的 `hw_qtd_next`/`hw_token`，从此再没有任何指针指回
+我们反复重写的 dummy —— 描述符永远 Active，传输永不被取。
+
+**参考机制**（`ehci-q.c`，逐函数读）：
+
+| 参考 | 我们对应 |
+|---|---|
+| `qh_update()`（经 `qh_refresh()`）每次交接前写 `hw_qtd_next`/`hw_alt_next` 并清 overlay token 的 halt/active | `bulk_enqueue()` 第 1 步（"writes to an active overlay are unsafe"） |
+| `qh_append_tds()`：描述符放进 QH 的 dummy 槽，token（Active 位）最后写，先 `wmb()` | 第 2 步（payload → barrier → token） |
+| `start_unlink_async()`/`qh_link_async()` 敲 IAAD：停在 reclamation 态的控制器不会自己重走链表 | 第 3 步 `ring_async_advance()` |
+
+顺带删掉"停 RS 去编程 live QH"的兜底（参考从不停调度器做这件事）和
+"never observed Active" 误报（13 字节 CSW 在首次轮询前就完成，读回 inactive 是正常的）。
+
+锚点：`qh_update`、`qh_append_tds`、`qh_link_async`、`qh_refresh`、`start_unlink_async`。
+
 ### 事件架构重构（`36367c3d5`…`e771f3dc1`）：按 skill 移植，而非继续打补丁
 
 **为什么重构**：xHCI 事件路径此前是从头自研的（等待者按 (slot,ep) 挑事件、别人的事件进
