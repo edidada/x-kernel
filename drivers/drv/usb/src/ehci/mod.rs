@@ -547,7 +547,30 @@ impl Ehci {
                         status & sts::HSE != 0,
                         status & sts::ASS != 0,
                     );
-                    self.log_async_ring("control transfer");
+                    // Which stage stopped the transfer: setup retired means the
+                    // device accepted it and the data stage is what hangs; a HALT
+                    // with XACT on the setup means the packet itself was refused.
+                    for (slot, stage) in [(2usize, "setup"), (1, "data"), (0, "status")] {
+                        // SAFETY: slots 0..2 are the control chain.
+                        let qtd = unsafe {
+                            core::ptr::read_volatile(
+                                self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot),
+                            )
+                        };
+                        log::error!(
+                            "ehci: {stage} qtd next {:#x} token {:#010x} (active {}, halt {}, \
+                             xact {}, cerr {}, pid {}, len {})",
+                            qtd.next,
+                            qtd.token,
+                            qtd.token & token::ACTIVE != 0,
+                            qtd.token & token::HALT != 0,
+                            qtd.token & token::XACT != 0,
+                            (qtd.token >> token::CERR_SHIFT) & 0x3,
+                            (qtd.token >> token::PID_SHIFT) & 0x3,
+                            (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
+                        );
+                    }
+                    self.qh_unlink(1);
                     return Err(KError::TimedOut);
                 }
                 if data_token & token::HALT != 0 {
@@ -572,25 +595,6 @@ impl Ehci {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(10));
         }
         log::error!("ehci: control transfer timed out");
-        // The chain and the queue head as the controller left them: which stage
-        // it stopped at, and whether it touched the overlay at all.
-        for slot in 0..3usize {
-            // SAFETY: the first three slots are the control chain.
-            let qtd = unsafe {
-                core::ptr::read_volatile(self.qtds.as_ptr().cast::<Qtd>().wrapping_add(slot))
-            };
-            log::error!(
-                "ehci: control qtd{slot} next {:#x} token {:#010x} (active {}, halt {}, pid {}, \
-                 len {})",
-                qtd.next,
-                qtd.token,
-                qtd.token & token::ACTIVE != 0,
-                qtd.token & token::HALT != 0,
-                (qtd.token >> token::PID_SHIFT) & 0x3,
-                (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
-            );
-        }
-        self.log_async_ring("control transfer");
         self.qh_unlink(1);
         Err(KError::TimedOut)
     }
@@ -1286,8 +1290,12 @@ impl Hcd for Ehci {
                 (value & portsc::LINE_MASK) >> 10,
             );
         }
-        // The device needs its reset recovery time before the first SETUP.
-        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(20_000));
+        // `hub_port_init()`: a root hub passes `HUB_ROOT_RESET_TIME` (60 ms) as
+        // the reset delay and `hub_port_wait_reset()` sleeps it before the port is
+        // read again; the first GET_DESCRIPTOR follows that. 20 ms was this
+        // driver's own number, and a device whose EP0 is not ready yet answers the
+        // IN with nothing at all.
+        khal::time::busy_wait(ktime_types::TimeSpan::from_micros(60_000));
 
         // Acknowledge the change bits this reset caused, keeping PED as the
         // controller set it.
