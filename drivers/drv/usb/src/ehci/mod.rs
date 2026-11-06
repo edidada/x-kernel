@@ -577,6 +577,21 @@ impl Ehci {
                             (qtd.token & token::LEN_MASK) >> token::LEN_SHIFT,
                         );
                     }
+                    // The port as the controller sees it while the data stage is
+                    // outstanding: a port that is not really in high-speed mode, or
+                    // one whose line state is not the HS idle (SE0), would explain
+                    // a data stage the device never answers.
+                    for port in 0..self.ports {
+                        let value = self.regs.read32(self.port_register(port));
+                        log::error!(
+                            "ehci: port {} at timeout: portsc {value:#010x} (ccs {}, ped {}, line \
+                             {})",
+                            port + 1,
+                            value & portsc::CCS != 0,
+                            value & portsc::PED != 0,
+                            (value & portsc::LINE_MASK) >> 10,
+                        );
+                    }
                     self.qh_unlink(1);
                     return Err(KError::TimedOut);
                 }
@@ -1225,98 +1240,54 @@ impl Hcd for Ehci {
 
     fn port_reset(&mut self, port: usize) -> KResult<Speed> {
         let offset = self.port_register(port);
-        // Linux `ehci_hub_control`, SetPortFeature(PORT_RESET): assert the reset,
-        // let it run for 50 ms, then *clear it again by hand* -- PR is not
-        // self-clearing here, which is why waiting for it to fall times out.
+        // The sequence the in-tree usb-host stack uses (`Ehci::reset_port`):
+        // assert power and reset while clearing only the *change* bits, hold the
+        // reset for 50 ms, drop it, settle 20 ms -- and never write PORTSC again
+        // afterwards.
+        //
+        // Two details are load-bearing, both learned from the board rather than
+        // from the spec:
+        //
+        // - PORT_ENABLE is kept. Clearing it (which Linux does, because its root
+        //   hub owns the port state) races the controller setting it again: a
+        //   write that samples PED as 0 turns the port back off. The board showed
+        //   exactly that, alternating between 'portsc 0x1045 (ped true, line 0)'
+        //   and 'portsc 0x180b (ped false, line 2)' across attempts.
+        // - There is no trailing "acknowledge the change bits" write. That write
+        //   masked PORTSC down to PP|PED, so if the controller enabled the port
+        //   between the read and the write, the write disabled it again.
         let current = self.regs.read32(offset);
-        // `ehci_hub_control()`, SetPortFeature(PORT_RESET): "temp |=
-        // PORT_RESET; temp &= ~PORT_PE;" -- the enable bit is *cleared* as part of
-        // asserting the reset and the controller sets it again if the device
-        // completes the handshake. Keeping the old PE (what this driver did
-        // before) leaves the port reporting "connected, not enabled" after the
-        // reset, which then reads as a device that never answered.
         self.regs.write32(
             offset,
-            (current | portsc::PP | portsc::RST) & !(portsc::CHANGE_BITS | portsc::PED),
+            (current | portsc::PP | portsc::RST) & !portsc::CHANGE_BITS,
         );
-        // The reset must be held for at least 50 ms: `hub_port_reset()` asks for
-        // the feature and `hub_port_wait_reset()` only looks at the port again
-        // after the reset timer expires. A high-speed device answers the host's
-        // SE0 with a chirp K during this window, so the line states seen here
-        // record whether it took part in the handshake.
+        // Sample the line state across the reset window for the log: a
+        // high-speed device chirps K during it, a full-speed one never leaves J.
         let mut saw_k = false;
         let mut saw_j = false;
         for _ in 0..50 {
             khal::time::busy_wait(ktime_types::TimeSpan::from_micros(1_000));
-            let sample = self.regs.read32(offset);
-            match (sample & portsc::LINE_MASK) >> 10 {
+            match (self.regs.read32(offset) & portsc::LINE_MASK) >> 10 {
                 1 => saw_k = true,
                 2 => saw_j = true,
                 _ => {}
             }
         }
         info!(
-            "ehci: port {} reset window: chirp K seen {saw_k}, J seen {saw_j} (a high-speed \
-             device chirps K; a full-speed one never leaves J)",
+            "ehci: port {} reset window: chirp K seen {saw_k}, J seen {saw_j}",
             port + 1
         );
-        // `ehci_hub_control()` completes the reset from its GetPortStatus path:
-        // it reads PORTSC, writes it back with the reset bit and the RWC bits
-        // cleared (keeping PE exactly as read), then handshakes the reset bit to
-        // zero. The controller does not clear PR on its own -- polling for that
-        // leaves the port in reset forever, which reads as "connected, PR set,
-        // never enabled".
         let in_reset = self.regs.read32(offset);
-        self.regs
-            .write32(offset, in_reset & !(portsc::CHANGE_BITS | portsc::RST));
-        let mut value = in_reset;
-        for _ in 0..200 {
-            value = self.regs.read32(offset);
-            if value & portsc::RST == 0 {
-                break;
-            }
-            khal::time::busy_wait(ktime_types::TimeSpan::from_micros(5));
-        }
-        info!(
-            "ehci: port {} after reset sequence, portsc {value:#010x} (pr {}, ped {}, ccs {}, \
-             line {})",
-            port + 1,
-            value & portsc::RST != 0,
-            value & portsc::PED != 0,
-            value & portsc::CCS != 0,
-            (value & portsc::LINE_MASK) >> 10,
-        );
-        // `check_reset_complete()`: a port that is still connected but not
-        // enabled after the reset did not complete the handshake, and every later
-        // transfer on it would be sent to a disabled port.
-        if value & portsc::CCS != 0 && value & portsc::PED == 0 {
-            log::error!(
-                "ehci: port {} did not enable after reset (portsc {value:#010x}); line {} -- \
-                 check_reset_complete() treats this as a device that never answered",
-                port + 1,
-                (value & portsc::LINE_MASK) >> 10,
-            );
-        }
-        // `hub_port_init()`: a root hub passes `HUB_ROOT_RESET_TIME` (60 ms) as
-        // the reset delay and `hub_port_wait_reset()` sleeps it before the port is
-        // read again; the first GET_DESCRIPTOR follows that. 20 ms was this
-        // driver's own number, and a device whose EP0 is not ready yet answers the
-        // IN with nothing at all.
+        self.regs.write32(offset, in_reset & !portsc::RST);
+        // `hub_port_init()`: a root hub passes `HUB_ROOT_RESET_TIME` (60 ms) as the
+        // reset delay and `hub_port_wait_reset()` sleeps it before the port is read
+        // again; the first GET_DESCRIPTOR follows that.
         khal::time::busy_wait(ktime_types::TimeSpan::from_micros(60_000));
-
-        // Acknowledge the change bits this reset caused, keeping PED as the
-        // controller set it.
-        self.regs.write32(
-            offset,
-            (value & (portsc::PP | portsc::PED)) | portsc::CHANGE_BITS,
-        );
+        let value = self.regs.read32(offset);
         // `ehci_port_speed()` reports USB_PORT_STAT_HIGH_SPEED for every port
-        // unless the controller has an integrated TT -- which this one does not
-        // (the board's EHCI node has no `has-transaction-translator`, so
-        // `ehci_is_TDI()` is false). The line status is *not* consulted: a
-        // full/low-speed device is handed to the companion controller instead,
-        // and reading K/J here turned a high-speed device into a low- or
-        // full-speed one on the passes that sampled the handshake.
+        // unless the controller has an integrated TT -- which this one does not.
+        // The line status is not consulted: full/low-speed devices are handed to
+        // the companion controller.
         let speed = Speed::High;
         info!(
             "ehci: port {} reset, portsc {value:#010x} ped {} line {}",
@@ -1325,7 +1296,11 @@ impl Hcd for Ehci {
             (value & portsc::LINE_MASK) >> 10,
         );
         if value & portsc::PED == 0 {
-            log::error!("ehci: port {} did not enable after reset", port + 1);
+            log::error!(
+                "ehci: port {} did not enable after reset (portsc {value:#010x}); \
+                 check_reset_complete() treats this as a device that never answered",
+                port + 1
+            );
             return Err(KError::Io);
         }
         self.speed = speed;
