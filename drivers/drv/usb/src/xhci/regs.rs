@@ -34,6 +34,8 @@ pub mod op {
     /// Port register array: one 16-byte block per port, 1-based.
     pub const PORTSC_BASE: usize = 0x400;
     pub const PORT_STRIDE: usize = 0x10;
+    /// Offset of `PORTPMSC` from that port's `PORTSC` (xHCI 5.4.8).
+    pub const PORTPMSC: usize = 0x04;
 }
 
 pub mod cmd {

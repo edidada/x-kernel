@@ -345,6 +345,10 @@ pub struct Xhci {
     /// Created by the probe (which is where a `DeviceHandle` exists) and used
     /// afterwards, so a device can be withdrawn or published at runtime.
     bus: Option<alloc::sync::Arc<ksync::Mutex<usb::bus::UsbBus>>>,
+    /// Last `(PORTSC, PORTPMSC)` sampled per root port, and when the last transfer
+    /// entry sampled them (see `sample_ports_before_transfer()`).
+    last_port_sample: alloc::vec::Vec<(u32, u32)>,
+    last_transfer_ns: u64,
     /// A weak handle to this controller, so a runtime path can hand the block
     /// backend the same `Arc` probe did. Weak, not strong: the controller must not
     /// keep itself alive.
@@ -932,6 +936,8 @@ impl Xhci {
             slots: Vec::new(),
             commands: alloc::collections::VecDeque::new(),
             bus: None,
+            last_port_sample: alloc::vec::Vec::new(),
+            last_transfer_ns: 0,
             self_weak: None,
             port_change: false,
             hc_error: false,
@@ -1280,6 +1286,11 @@ impl Xhci {
     fn next_event(&mut self) -> Option<Trb> {
         let mut trb = self.event.read(self.event_dequeue);
         if trb.control & regs::trb::CYCLE != u32::from(self.event_cycle) {
+            // Nothing published at this slot. Note that after a wrap the slot may
+            // still hold the *previous* lap's TRB, which is indistinguishable from
+            // "not yet written" by the cycle bit alone -- so a mismatch here is not
+            // evidence of anything and must not be "resynchronized": adopting the
+            // old parity would dispatch last lap's completions as if they were new.
             return None;
         }
         // The cycle bit is the controller's "this TRB is mine to publish" flag:
@@ -1455,6 +1466,10 @@ impl Xhci {
                 .expect("bulk ring")
                 .publish(held);
         }
+        // Where the controller is reading versus where we just wrote: the two must
+        // agree, or every later TRB is behind its read pointer (see
+        // `log_bulk_position()`).
+        self.log_bulk_position(slot_index, direction, "submitting");
         // `xhci_ring_ep_doorbell()` skips the doorbell while a cancellation is
         // pending *or* the endpoint is halted: ringing it then restarts the ring at
         // the dequeue the recovery is moving away from.
@@ -1757,6 +1772,56 @@ impl Xhci {
             gone.extend(bus.lock().detach(address));
         }
         gone
+    }
+
+    /// Samples every root port and reports what changed while nothing was running.
+    ///
+    /// The symptom being chased is "the device stops answering after roughly ten
+    /// seconds of no traffic", and the two candidate mechanisms -- the link going
+    /// to U1/U2/U3 without us noticing, or the device NAKing in U0 -- are
+    /// indistinguishable from the failure log alone, because the timeout is what
+    /// produces that log and by then the link may already be back. Sampling on the
+    /// way *into* every transfer instead turns it into a time series: a changed
+    /// `PORTSC`/`PORTPMSC` with the idle gap attached says the link moved, and an
+    /// unchanged one says it did not.
+    fn sample_ports_before_transfer(&mut self) {
+        let now = khal::time::monotonic_time_nanos();
+        for port in 0..self.ports {
+            let offset = self.operational + op::PORTSC_BASE + port * op::PORT_STRIDE;
+            let portsc = self.bar.read32(offset);
+            let pmsc = self.bar.read32(offset + op::PORTPMSC);
+            let sample = (portsc, pmsc);
+            match self.last_port_sample.get(port).copied() {
+                Some(previous) if previous == sample => {}
+                Some((previous_portsc, previous_pmsc)) => {
+                    let idle_us = now.saturating_sub(self.last_transfer_ns) / 1_000;
+                    log::info!(
+                        "xhci: port {} changed while idle {idle_us} us: portsc \
+                         {previous_portsc:#010x} -> {portsc:#010x} (pls {} -> {}, ped {} -> {}), \
+                         pmsc {previous_pmsc:#010x} -> {pmsc:#010x}",
+                        port + 1,
+                        (previous_portsc & portsc::PLS_MASK) >> portsc::PLS_SHIFT,
+                        (portsc & portsc::PLS_MASK) >> portsc::PLS_SHIFT,
+                        previous_portsc & portsc::PED != 0,
+                        portsc & portsc::PED != 0,
+                    );
+                }
+                None => log::info!(
+                    "xhci: port {} first sample portsc {portsc:#010x} (pls {}, ped {}, ccs {}), \
+                     pmsc {pmsc:#010x}",
+                    port + 1,
+                    (portsc & portsc::PLS_MASK) >> portsc::PLS_SHIFT,
+                    portsc & portsc::PED != 0,
+                    portsc & portsc::CCS != 0,
+                ),
+            }
+            if port >= self.last_port_sample.len() {
+                self.last_port_sample.push(sample);
+            } else {
+                self.last_port_sample[port] = sample;
+            }
+        }
+        self.last_transfer_ns = now;
     }
 
     /// `hub_port_debounce_be_stable()`: whether `port` has reported a disconnect
@@ -2599,6 +2664,41 @@ impl Xhci {
             }
             _ => {}
         }
+    }
+
+    /// Reports one bulk endpoint's controller-side dequeue against our producer.
+    ///
+    /// Two states produce the same host-side symptom ("no Transfer Event, device
+    /// NAKing"): the device never accepted the packet, or the controller is
+    /// dequeuing from somewhere other than where we enqueued. The second one is a
+    /// bookkeeping bug in this driver -- `Reset Endpoint` moves the controller's
+    /// dequeue back to the ring base, and if the producer is not moved with it
+    /// (`xhci_move_dequeue_past_td()`'s Set TR Dequeue) every later TRB sits behind
+    /// the controller's read pointer and is never fetched. Looking at both numbers
+    /// before each command separates them, which no timeout log can do afterwards.
+    fn log_bulk_position(&self, slot_index: usize, direction: usize, when: &str) {
+        let slot = &self.slots[slot_index];
+        let dci = slot.bulk_dci[direction];
+        if dci == 0 {
+            return;
+        }
+        let Some(ring) = slot.bulk[direction].as_ref() else {
+            return;
+        };
+        let offset = self.context_size * usize::from(dci);
+        let base = slot.device.as_ptr().cast::<u8>();
+        // SAFETY: one endpoint context per DCI inside this device context.
+        let dequeue =
+            unsafe { core::ptr::read_volatile(base.wrapping_add(offset + 8).cast::<u32>()) };
+        log::info!(
+            "xhci: {when} slot {} dci {dci}: controller dequeue {dequeue:#x}, ring base {:#x}, \
+             producer index {} (cycle {}), tds {}",
+            slot.id,
+            ring.mem.bus_addr(),
+            ring.index,
+            ring.current_cycle(),
+            slot.bulk_tds[direction].len(),
+        );
     }
 
     /// EP0's state, as the controller recorded it (`GET_EP_CTX_STATE`).
@@ -4709,6 +4809,7 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
         drop(guard);
         usb::bus::drop_bindings(gone);
         let mut guard = self.xhci.lock();
+        guard.sample_ports_before_transfer();
         let mut done = 0usize;
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
@@ -4781,6 +4882,7 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
             return Err(kerrno::KError::InvalidInput);
         }
         let mut guard = self.xhci.lock();
+        guard.sample_ports_before_transfer();
         let mut done = 0usize;
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
