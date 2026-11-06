@@ -257,8 +257,10 @@ UsbBus 锁   <  控制器锁（Xhci/Ehci）
 | **P5** | EHCI：同一张表；`detach_absent()` 在块后端入口摘除消失设备 | ✅ |
 | **P6** | 组合根：表由 probe 创建并存入驱动数据（`_bus`），`docs/security.md` 补齐 | ✅ |
 
-**P2 的 QEMU 单测尚未编写**（表的语义已按契约实现，但 §7 列的 4 个用例仍是待办），
-这是本设计唯一未完成的验收项。
+验收：`make UNITTEST=y UNITTEST_CRATE=usb run` → 5 passed（§7 的用例 + 一个句柄存活用例）。
+`bus/usb` 原本只经 RK3588 DWC3 进入构建图，QEMU 下链接不到它的测试；`entry` 的
+`unittest` feature 现在显式依赖它（`extern crate usb as _;`），与 `driver-base`
+`driver-host` 同样的做法。
 
 已知引用环（已记录在 `security.md` §3）：控制器 → `UsbBus` → `Publication` → 块后端 →
 控制器。它不造成自锁（因为移除路径只在锁外 drop），但它让"驱动卸载"没有定义语义。

@@ -2865,6 +2865,33 @@ PMA 初始化序列，节点被重探时就会在活动链路上做一次完整 
   `disable slot ... completion code 1`（而不是 5 秒超时）和 `command ring restarted`；
 - 根口的 wLength 判别探测（8/18/64）已在定位后移除，`enumerate.rs` 回到单次 8 字节首读。
 
+### 5.9.6 设备表（P1–P6）落地：谁移除、谁释放，必须分开
+
+G 阶段的设计（`drivers/bus/usb/docs/design.md`）实现完了，落点是三条不变量：
+
+1. **`Device::publish()` 从不需要 probe 的 `Device`，只需要 `Arc<DeviceCore>`。**
+   于是 `driver-base::DeviceHandle`（`'static`、泛型）可以在 probe 之后很久再发布，
+   这是"重新枚举的设备还能出 `/dev`"的前提。历史实现把句柄的生命周期和 probe 绑死，
+   所以重枚举只能枚举、不能发布。
+2. **`UsbBus::detach()` 返回绑定，不 drop 绑定。** `Publication` 的 Drop 会撤销类设备，
+   而块后端持有 `Arc<Mutex<控制器>>`；在控制器锁里 drop 就等一个需要同一把锁的消费者，
+   自锁。所以移除路径把 `ClassBinding`（`Vec<Box<dyn Any + Send + Sync>>`）交回调用方，
+   由 `drop_bindings()` 在锁外释放。锁序固定 `UsbBus < 控制器`。
+3. **`bind()` 失败也把所有者交回。** 这条是写完表格后才发现的自我违反：早先版本在
+   拒绝时直接 drop，正在锁内。现在返回 `RejectedBinding { error, binding }`。
+
+两条控制器都接上了（xHCI 的 `rescan()` 消费 Port Status Change / HC Error；EHCI 没有
+端口变化事件，用 `detach_absent()` 读 CCS），块后端入口先对表，设备不在就返回
+`NotFound` 而不是挂住——这一条正是 §5.9.4i 里"设备掉线后读写挂死"的直接对策。
+
+测试：`make UNITTEST=y UNITTEST_CRATE=usb run` → 5 passed。
+注意 `bus/usb` 只经 RK3588 DWC3 进入构建图，QEMU 下原本链接不到；`entry` 的
+`unittest` feature 现在以 `extern crate usb as _;` 显式依赖它。
+
+板上结果：两台设备都进了表（`usb: address 3 attached` / `address 1 attached`），
+当次启动发布仍然失败（USB3 盘 READ CAPACITY 超时、EHCI 盘描述符首读全零），
+与 §5.9.4i 记录的设备侧漂移一致，不是表的问题。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
