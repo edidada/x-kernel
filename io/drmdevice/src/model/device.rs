@@ -2,25 +2,24 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The card object and its domains.
+//! The card object and its core methods.
 //!
 //! `DrmDevice` owns everything that is device-wide: the backend, the object
 //! registries, the committed KMS state, the scanout slot, master ownership and
 //! the event queue. The struct, its construction and the device-wide accessors
-//! live here; the card's methods are grouped by domain into the child modules:
-//! `commit` publishes the KMS state and presents it, `framebuffer` and `blob`
-//! run the object registries, `master` decides card ownership at open, and
-//! `events` fronts the event queue. `minor` holds `DrmMinor`, the per-cdev
-//! `DeviceFileOps` adapter the filesystem registers.
+//! live here, and the child modules carry the card-core methods: `commit`
+//! publishes the KMS state and presents it, `events` fronts the event queue,
+//! and `minor` holds `DrmMinor`, the per-cdev `DeviceFileOps` adapter. Each
+//! registry's methods live with its domain instead — the blob registry in
+//! `blob.rs`, the framebuffer registry in `framebuffer.rs`, master ownership
+//! in `auth.rs` — as additional impl blocks on this struct, the way `auth.rs`
+//! has always done.
 //!
 //! All state mutation that userspace can observe goes through [`DrmDevice::commit`],
 //! so the state and what is on screen cannot disagree.
 
-mod blob;
 mod commit;
 mod events;
-mod framebuffer;
-mod master;
 mod minor;
 
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -49,25 +48,37 @@ pub type HotplugSink = Arc<dyn Fn() + Send + Sync>;
 /// One DRM card: both minors resolve to this object.
 pub struct DrmDevice {
     backend: BackendHandle,
-    framebuffers: Mutex<IdRegistry<Framebuffer, FbTag>>,
+    /// Framebuffer registry; also touched by `framebuffer.rs`.
+    pub(crate) framebuffers: Mutex<IdRegistry<Framebuffer, FbTag>>,
     /// Id -> blob lookup, holding one reference per id: a client blob lives
     /// until `DESTROY_BLOB` removes it (as Linux's idr entry does), while the
     /// committed state and the system slot hold their own references.
-    blobs: Mutex<IdRegistry<Arc<Blob>, BlobTag>>,
-    state: Mutex<KmsState>,
+    ///
+    /// Also touched by `blob.rs`.
+    pub(crate) blobs: Mutex<IdRegistry<Arc<Blob>, BlobTag>>,
+    /// Committed KMS state; written by `device/commit.rs`, unbound from by
+    /// `framebuffer.rs`.
+    pub(crate) state: Mutex<KmsState>,
     /// Serialises "publish state, then present".
-    commit: Mutex<()>,
-    scanout: Mutex<ScanoutSlot>,
+    ///
+    /// `blob.rs` and `framebuffer.rs` hold it across their registry sections
+    /// too.
+    pub(crate) commit: Mutex<()>,
+    /// What the host is scanning; also touched by `framebuffer.rs`.
+    pub(crate) scanout: Mutex<ScanoutSlot>,
     /// Master ownership; also touched by `auth.rs`.
     pub(crate) master: Mutex<MasterState>,
     events: EventQueue,
-    in_formats: Mutex<Option<(BlobId, Arc<Blob>)>>,
+    /// The IN_FORMATS blob slot; also touched by `blob.rs`.
+    pub(crate) in_formats: Mutex<Option<(BlobId, Arc<Blob>)>>,
     /// `MODE_ID` blob the driver created for a legacy `SETCRTC`.
     ///
     /// A legacy modeset builds a blob itself, so the driver — not a client —
     /// owns it. Keeping the slot is what lets the next modeset free the
     /// previous one; without it every SETCRTC leaked a blob.
-    legacy_mode: Mutex<Option<(BlobId, Arc<Blob>)>>,
+    ///
+    /// Also touched by `blob.rs`.
+    pub(crate) legacy_mode: Mutex<Option<(BlobId, Arc<Blob>)>>,
     /// Called when a refresh observes a host display change.
     hotplug: Mutex<Option<HotplugSink>>,
     retained_pages: Mutex<BTreeMap<u64, Arc<PageRef>>>,

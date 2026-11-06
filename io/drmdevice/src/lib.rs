@@ -62,7 +62,7 @@ pub(crate) mod prelude {
     pub(crate) use crate::{
         abi::*,
         auth::*,
-        blob::{Blob, build_in_formats_blob},
+        blob::Blob,
         framebuffer::{DrmModeRmFb, Framebuffer},
         gem::{DrmPrimeFdToHandle, GemObject},
         ioctl::{Ioctl, report_user_array},
