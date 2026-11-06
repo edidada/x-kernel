@@ -143,6 +143,12 @@ struct UsbDp {
     /// `?` is the "enabled then immediately disabled" trap this tree hit on
     /// the usb2 phy (and the combphy) before.
     enabled_clocks: ksync::Mutex<Vec<EnabledClock>>,
+    /// `struct phy::init_count`: `phy_init()` runs `ops->init` only when the
+    /// count is zero. Without it a second consumer (or a re-probed node) re-runs
+    /// `udphy_init` -- assert all five resets, re-power the PMA, rewrite the PMA
+    /// sequence -- on a *live* SuperSpeed link, and the device on the other side
+    /// simply stops answering.
+    init_count: core::sync::atomic::AtomicU32,
     cfg: UdphyCfg,
     mode: Mode,
     lane_mux_sel: [u32; 4],
@@ -297,6 +303,16 @@ impl PhyHwOps for UsbDp {
     /// consumer's acquire edge is what powers the PHY, matching the reference
     /// `udphy_setup`'s `clk_bulk_prepare_enable`.
     fn hw_init(&self) -> Result<(), PhyError> {
+        // `phy_init()`: `if (phy->init_count == 0 && phy->ops->init)`. A second
+        // init on an already-initialised PHY is a no-op, which is what keeps a
+        // re-probed node from resetting a link that is carrying traffic.
+        let previous = self
+            .init_count
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        if previous > 0 {
+            log::info!("usbdp: init already done (count {previous}), leaving the PHY alone");
+            return Ok(());
+        }
         {
             let mut tokens = self.enabled_clocks.lock();
             if tokens.is_empty() {
@@ -502,6 +518,7 @@ impl DriverOps<PlatformBus> for UsbDpDriver {
             resets,
             clocks,
             enabled_clocks: ksync::Mutex::new(Vec::new()),
+            init_count: core::sync::atomic::AtomicU32::new(0),
             cfg: cfg_of(id),
             mode,
             lane_mux_sel,

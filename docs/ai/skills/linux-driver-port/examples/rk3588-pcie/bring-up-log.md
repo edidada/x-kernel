@@ -2751,6 +2751,45 @@ addr 3 cbw tag 14                <- 重试：连 CBW 都没发出去（就 Io �
 re-enumerate 语义，以及 USB3 专有的 `SET_SEL`/U1-U2 交互），再决定实验——而不是继续在
 bulk 路径上找字段。
 
+### 5.9.4g 被证伪的两个假设，和一个补上的参考机制
+
+**假设 1（证伪）：USBDP（SuperSpeed PHY）被二次初始化打掉了链路。**
+
+起因是时间线上的巧合：
+
+```
+[00034.051] bot: addr 3 csw tag 7 status 0 residue 0    <- 第一笔命令成功
+[00034.051] usbdp: phy 0 u3-port phandle 0x68
+[00034.051] usbdp: u3-port published (port phandle 0x68)
+```
+
+但在给 `usbdp` 加上 `phy_init()` 的引用计数守卫后重跑，`u3-port published` 出现在 64.9 s
+（不在关键时刻），**失败形态一模一样**（`read_block 2 sector 2 x2` 仍然 TimedOut → Io）。
+所以二次初始化不是本症原因。
+
+**仍然补上的机制**：`drivers/phy/phy-core.c` 的 `phy_init()` 有
+
+```c
+	if (phy->init_count == 0 && phy->ops->init)
+		ret = phy->ops->init(phy);
+	++phy->init_count;
+```
+
+即"已初始化过就不再跑 ops->init"。我们的 `usbdp::hw_init()` 每次都会断言五个复位并重跑
+PMA 初始化序列，节点被重探时就会在活动链路上做一次完整 PHY 复位——即使它不是本次卡点的原因，
+这也是必须有的守卫（同一模式在 USB2 PHY 上已经打掉过 EHCI 的设备）。
+
+**假设 2（证伪）：设备锁死是 BOT 相位错误，靠 BOT reset 恢复。**
+
+`bulk-only reset done (address 3)` 之后紧接着的重试连 CBW 都没发出去（直接 Io，没有 5 秒超时），
+说明失败在 `reset_recovery` 的控制传输上：**EP0 也不再应答**。BOT reset 救不回来。
+
+**当前唯一还站得住的描述**：设备在完成第一笔命令后停止应答（bulk 与 EP0 都不应），
+而控制器侧已被 No-Op 探针证明完全正常。下一步按规则先重读
+`usb_reset_and_verify_device()`（`hub.c`）——Linux 对这种设备做的是**强制 unbind 接口 +
+端口复位 + 完整重枚举 + 重新 bind**；我们这条路径在 xHCI 侧根本不存在（EHCI 有 `reattach()`，
+但它只重设同一地址、不重读描述符）。这就是要先补的机制，而不是继续在 bulk 里找字段。
+
 ### 5.9.5 复现与判读要点
 
 - 上板必须 `scripts/board-run.sh <name> --cmd '...'`（不要 `SKIP_BUILD=1`，那会部署仓库根的旧 bin）；
