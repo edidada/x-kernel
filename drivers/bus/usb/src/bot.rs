@@ -561,6 +561,140 @@ pub fn wait_until_ready(hcd: &mut dyn Hcd, endpoints: &BotEndpoints) -> KResult<
     Err(KError::TimedOut)
 }
 
+/// One block-device view of a mass-storage device.
+///
+/// A stick with a partition table carries its filesystem on a partition, so the
+/// consumer has to read at a partition-relative LBA -- the same split
+/// `mmc_blk`/`sd` make between the whole disk and `…pN`
+/// (`scan_partitions()` in `drivers/subsystems/mmc/src/blk.rs` is the local
+/// transcription of Linux `check_partition()`).
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeView {
+    /// Partition number (`0` = the whole device).
+    pub part: u32,
+    /// First LBA of the view, relative to the device.
+    pub start_lba: u64,
+    /// Size of the view in 512-byte blocks.
+    pub blocks: u64,
+}
+
+/// Reads the partition table and decides which block-device views to publish.
+///
+/// Follows Linux `check_partition()` -> `efi_partition()`/`msdos_partition()`
+/// through the local `scan_partitions()`: a GPT-protective MBR is parsed as GPT,
+/// otherwise the four primary MBR entries are used (skipping empty, protective
+/// and extended markers). No usable table means the whole device is the view.
+///
+/// Every partition is clamped to the device: a bogus entry must not become an
+/// out-of-range transfer.
+pub fn plan_views(
+    hcd: &mut dyn Hcd,
+    endpoints: &BotEndpoints,
+    total_blocks: u64,
+) -> Vec<VolumeView> {
+    let whole = VolumeView {
+        part: 0,
+        start_lba: 0,
+        blocks: total_blocks,
+    };
+    let Ok(lba0) = read_sectors(hcd, endpoints, 0, 1) else {
+        return alloc::vec![whole];
+    };
+    if u16::from_le_bytes([lba0[510], lba0[511]]) != 0xAA55 {
+        return alloc::vec![whole];
+    }
+    let mut raw: Vec<(u64, u64)> = Vec::new();
+    if lba0[450] == 0xEE {
+        // GPT: the header lives in LBA 1 and points at the first entry block.
+        let mut header = [0u8; 512];
+        if let Ok(read) = read_sectors(hcd, endpoints, 1, 1) {
+            if read.len() == 512 {
+                header.copy_from_slice(&read);
+            }
+        }
+        if header[0..8] != *b"EFI PART" {
+            return alloc::vec![whole];
+        }
+        let entry_lba = u64::from_le_bytes(header[72..80].try_into().unwrap_or([0; 8]));
+        let entry_size = u32::from_le_bytes(header[84..88].try_into().unwrap_or([0; 4])) as usize;
+        if entry_lba == 0 || !(56..=512).contains(&entry_size) {
+            return alloc::vec![whole];
+        }
+        let Ok(entries) = read_sectors(hcd, endpoints, entry_lba as u32, 1) else {
+            return alloc::vec![whole];
+        };
+        let mut offset = 0usize;
+        while offset + entry_size <= entries.len() && raw.len() < 8 {
+            let entry = &entries[offset..offset + entry_size];
+            if entry[0..16].iter().any(|&byte| byte != 0) {
+                let first = u64::from_le_bytes(entry[32..40].try_into().unwrap_or([0; 8]));
+                // `last_lba` is inclusive; the size is not the device capacity.
+                let last = u64::from_le_bytes(entry[40..48].try_into().unwrap_or([0; 8]));
+                if last >= first {
+                    raw.push((first, last - first + 1));
+                }
+            }
+            offset += entry_size;
+        }
+    } else {
+        for index in 0..4usize {
+            let base = 446 + index * 16;
+            let ptype = lba0[base + 4];
+            let lba = u32::from_le_bytes(lba0[base + 8..base + 12].try_into().unwrap_or([0; 4]));
+            let sectors =
+                u32::from_le_bytes(lba0[base + 12..base + 16].try_into().unwrap_or([0; 4]));
+            if ptype != 0 && lba != 0 && sectors != 0 && ptype != 0xEE && ptype != 0x05 {
+                // The type byte is the cheapest answer to "which filesystem would
+                // have to exist before this partition can be mounted": 0x01/0x04/
+                // 0x06/0x0b/0x0c are FAT, 0x07 is NTFS/exFAT, 0x83 is Linux.
+                log::info!(
+                    "bot: addr {} mbr entry {index}: type {ptype:#04x} lba {lba} sectors {sectors}",
+                    endpoints.address
+                );
+                raw.push((u64::from(lba), u64::from(sectors)));
+            } else if ptype != 0 {
+                log::info!(
+                    "bot: addr {} mbr entry {index}: type {ptype:#04x} ignored (lba {lba} sectors \
+                     {sectors})",
+                    endpoints.address
+                );
+            }
+        }
+    }
+    if raw.is_empty() {
+        return alloc::vec![whole];
+    }
+    let mut views = Vec::new();
+    for (index, (start_lba, sectors)) in raw.into_iter().enumerate() {
+        let part = index as u32 + 1;
+        if start_lba >= total_blocks {
+            log::warn!(
+                "bot: ignoring partition {part} of addr {} (start LBA {start_lba} outside the \
+                 device)",
+                endpoints.address
+            );
+            continue;
+        }
+        let blocks = sectors.min(total_blocks - start_lba);
+        if blocks == 0 {
+            continue;
+        }
+        views.push(VolumeView {
+            part,
+            start_lba,
+            blocks,
+        });
+    }
+    if views.is_empty() {
+        log::warn!(
+            "bot: addr {} has a partition table but no usable entry",
+            endpoints.address
+        );
+        return alloc::vec![whole];
+    }
+    views
+}
+
 /// Round-trips one sector through `WRITE(10)` and back, then restores it.
 ///
 /// Until this existed, every `WRITE(10)` shipped 512 zero bytes: the data phase

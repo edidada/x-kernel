@@ -47,7 +47,11 @@ KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_ALLOC_BUDDY is not set
 # KFEAT_ALLOC_TLSF is not set
 # KFEAT_DICE is not set
-# KFEAT_FS_FAT is not set
+# FAT32 is what removable media arrives formatted as -- the x500m stick on this
+# board carries a 0x0c (FAT32 LBA) partition -- and the mount helper walks every
+# registered filesystem type, so the driver has to be in the build for the stick
+# to be mountable at all.
+KFEAT_FS_FAT=y
 # KFEAT_DWARF is not set
 KFEAT_FS_TIMES=y
 # MMC/SD: subsystem + card-bus block consumer + DW host backend; the SD

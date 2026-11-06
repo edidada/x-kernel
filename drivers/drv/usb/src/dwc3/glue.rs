@@ -231,19 +231,26 @@ impl DriverOps<PlatformBus> for Dwc3Driver {
                 crate::xhci::publish_mass_storage(&handle, &xhci, device)
             };
             match publication {
-                Ok(publication) => {
+                Ok(publications) => {
                     let pipe_interface = device
                         .configurations
                         .first()
                         .and_then(|config| config.interfaces.first())
                         .map_or(0, |interface| interface.number);
+                    // One binding, many views: the whole device and each partition
+                    // it exposes all withdraw together.
+                    let owners: alloc::vec::Vec<
+                        alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
+                    > = publications
+                        .into_iter()
+                        .map(|publication| {
+                            alloc::boxed::Box::new(publication)
+                                as alloc::boxed::Box<dyn core::any::Any + Send + Sync>
+                        })
+                        .collect();
                     let rejected = bus.lock().bind(
                         device.address,
-                        usb::bus::ClassBinding::new(
-                            "usb-storage",
-                            pipe_interface,
-                            alloc::vec![alloc::boxed::Box::new(publication)],
-                        ),
+                        usb::bus::ClassBinding::new("usb-storage", pipe_interface, owners),
                     );
                     if let Err(rejected) = rejected {
                         log::error!(

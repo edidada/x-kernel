@@ -1941,18 +1941,31 @@ pub mod driver {
                             }
                             let handle = bus.lock().handle().clone();
                             match super::publish_mass_storage(&handle, &ehci, &device) {
-                                Some(publication) => {
+                                Some(publications) => {
                                     let interface = device
                                         .configurations
                                         .first()
                                         .and_then(|config| config.interfaces.first())
                                         .map_or(0, |interface| interface.number);
+                                    // One binding, many views: the whole device and
+                                    // each partition it exposes withdraw together.
+                                    let owners: alloc::vec::Vec<
+                                        alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
+                                    > = publications
+                                        .into_iter()
+                                        .map(|publication| {
+                                            alloc::boxed::Box::new(publication)
+                                                as alloc::boxed::Box<
+                                                    dyn core::any::Any + Send + Sync,
+                                                >
+                                        })
+                                        .collect();
                                     let rejected = bus.lock().bind(
                                         device.address,
                                         usb::bus::ClassBinding::new(
                                             "usb-storage",
                                             interface,
-                                            alloc::vec![alloc::boxed::Box::new(publication)],
+                                            owners,
                                         ),
                                     );
                                     if let Err(rejected) = rejected {
@@ -2008,6 +2021,10 @@ pub mod driver {
 struct UsbBotDisk {
     ehci: alloc::sync::Arc<ksync::Mutex<Ehci>>,
     endpoints: usb::bot::BotEndpoints,
+    /// First LBA of this view. A partition's filesystem is addressed relative to
+    /// its own start, so every transfer adds this back (`part_stat` in the
+    /// reference: `start_sect`).
+    start_lba: u64,
     blocks: u64,
 }
 
@@ -2106,7 +2123,7 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
             let data = usb::bot::read_sectors(
                 &mut *guard,
                 &self.endpoints,
-                (block_id + (done / 512) as u64) as u32,
+                (self.start_lba + block_id + (done / 512) as u64) as u32,
                 sectors as u16,
             )
             .or_else(|err| {
@@ -2152,7 +2169,7 @@ impl subsys_block::BlockDeviceOperations for UsbBotDisk {
             usb::bot::write_sectors(
                 &mut *guard,
                 &self.endpoints,
-                (block_id + (done / 512) as u64) as u32,
+                (self.start_lba + block_id + (done / 512) as u64) as u32,
                 &buf[done..done + sectors * 512],
             )?;
             done += sectors * 512;
@@ -2172,7 +2189,7 @@ fn publish_mass_storage(
     handle: &driver_base::DeviceHandle,
     ehci: &alloc::sync::Arc<ksync::Mutex<Ehci>>,
     device: &usb::UsbDevice,
-) -> Option<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
+) -> Option<alloc::vec::Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>> {
     for config in &device.configurations {
         for interface in &config.interfaces {
             if interface.class != 0x08 || interface.protocol != 0x50 {
@@ -2217,19 +2234,39 @@ fn publish_mass_storage(
                     }
                 }
             };
-            let backend = UsbBotDisk {
-                ehci: ehci.clone(),
-                endpoints,
-                blocks,
+            // `sd`'s view of the same question: a partitioned stick exposes
+            // `…pN`, and a filesystem is read relative to the partition's start.
+            let views = {
+                let mut guard = ehci.lock();
+                usb::bot::plan_views(&mut *guard, &endpoints, blocks)
             };
-            let name = alloc::format!("usb{}", device.address);
             let parent_path = alloc::string::String::from(handle.path());
             let modalias = handle.modalias().map(alloc::string::String::from);
-            // Major 8 is the conventional disk major; the block core owns the
-            // dev_t registry and rejects a duplicate.
-            let disk =
-                match subsys_block::Gendisk::new(name, 8, 0, 1, alloc::boxed::Box::new(backend))
-                    .map(|disk| disk.with_devnode_context(&parent_path, modalias))
+            // Major 8 is the conventional disk major and the block core owns the
+            // dev_t registry; EHCI views take minors from zero, the xHCI side from
+            // one, so the two controllers never collide.
+            let mut publications = alloc::vec::Vec::new();
+            for (index, view) in views.iter().enumerate() {
+                let backend = UsbBotDisk {
+                    ehci: ehci.clone(),
+                    endpoints,
+                    start_lba: view.start_lba,
+                    blocks: view.blocks,
+                };
+                let name = if view.part == 0 {
+                    alloc::format!("usb{}", device.address)
+                } else {
+                    alloc::format!("usb{}p{}", device.address, view.part)
+                };
+                let minor = index as u32;
+                let disk = match subsys_block::Gendisk::new(
+                    name,
+                    8,
+                    minor,
+                    1,
+                    alloc::boxed::Box::new(backend),
+                )
+                .map(|disk| disk.with_devnode_context(&parent_path, modalias.clone()))
                 {
                     Ok(disk) => disk,
                     Err(err) => {
@@ -2237,31 +2274,43 @@ fn publish_mass_storage(
                         continue;
                     }
                 };
-            match handle.publish(
-                &subsys_block::class::BLOCK,
-                alloc::sync::Arc::new(disk),
-                "usb-storage",
-            ) {
-                Ok(publication) => {
-                    log::info!(
-                        "ehci: published {} as a block device with {blocks} 512-byte blocks",
-                        device.summary()
-                    );
-                    // What the /dev projection actually holds, so a missing node
-                    // can be attributed to the publication or to devtmpfs.
-                    let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
-                    for node in devnode::subscribe(callback) {
+                match handle.publish(
+                    &subsys_block::class::BLOCK,
+                    alloc::sync::Arc::new(disk),
+                    "usb-storage",
+                ) {
+                    Ok(publication) => {
                         log::info!(
-                            "ehci: devnode {} subsystem {} number {:?}",
-                            node.devname(),
-                            node.subsystem(),
-                            node.device_number()
+                            "ehci: published {} as {} with {} 512-byte blocks (start LBA {})",
+                            device.summary(),
+                            if view.part == 0 {
+                                alloc::format!("usb{}", device.address)
+                            } else {
+                                alloc::format!("usb{}p{}", device.address, view.part)
+                            },
+                            view.blocks,
+                            view.start_lba
                         );
+                        // What the /dev projection actually holds, so a missing
+                        // node can be attributed to the publication or to devtmpfs.
+                        let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
+                        for node in devnode::subscribe(callback) {
+                            log::info!(
+                                "ehci: devnode {} subsystem {} number {:?}",
+                                node.devname(),
+                                node.subsystem(),
+                                node.device_number()
+                            );
+                        }
+                        publications.push(publication);
                     }
-                    return Some(publication);
+                    Err(err) => log::error!("ehci: block publication failed: {err:?}"),
                 }
-                Err(err) => log::error!("ehci: block publication failed: {err:?}"),
             }
+            if publications.is_empty() {
+                continue;
+            }
+            return Some(publications);
         }
     }
     None

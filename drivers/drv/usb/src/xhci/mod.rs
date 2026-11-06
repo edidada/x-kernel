@@ -1742,6 +1742,9 @@ impl Xhci {
         let stale: alloc::vec::Vec<u8> = {
             let bus = bus.lock();
             bus.devices()
+                // `port` is 0-based for a root-port device (the index the scan
+                // above used) and a hub port number for everything else, so the
+                // two are only comparable for root-port devices.
                 .filter(|entry| entry.device().parent.is_none())
                 .filter(|entry| !connected.contains(&entry.device().port))
                 .map(|entry| entry.device().address)
@@ -4235,7 +4238,7 @@ impl Xhci {
                     usize::from(entry.port),
                     speed,
                 ) {
-                    Ok(device) => {
+                    Ok(mut device) => {
                         log::info!(
                             "xhci: hub {} port {} -> {}",
                             hub.address,
@@ -4243,7 +4246,12 @@ impl Xhci {
                             device.summary()
                         );
                         // Remember the bus, so a device that stops answering can be
-                        // reset through its own hub port and re-addressed.
+                        // reset through its own hub port and re-addressed. The bus
+                        // table needs the same fact: a port scan that only looks at
+                        // root ports would otherwise decide a device *behind* a hub
+                        // is gone -- its port number is the hub's, not a root port's
+                        // -- and withdraw a working device's block publication.
+                        device.parent = Some((hub.address, entry.port));
                         if let Some(slot_index) =
                             self.slots.iter().position(|slot| slot.id == address)
                         {
@@ -4656,6 +4664,10 @@ const BOT_MAX_SECTORS: usize = 8;
 struct XhciBotDisk {
     xhci: alloc::sync::Arc<ksync::Mutex<Xhci>>,
     endpoints: usb::bot::BotEndpoints,
+    /// First LBA of this view. A partition's filesystem is addressed relative to
+    /// its own start, so every transfer adds this back (`part_stat` in the
+    /// reference: `start_sect`).
+    start_lba: u64,
     blocks: u64,
 }
 
@@ -4701,7 +4713,7 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
             let sectors = left.min(BOT_MAX_SECTORS);
-            let lba = (block_id + (done / 512) as u64) as u32;
+            let lba = (self.start_lba + block_id + (done / 512) as u64) as u32;
             let data = usb::bot::read_sectors(&mut *guard, &self.endpoints, lba, sectors as u16)
                 .or_else(|err| {
                     // A bulk-only device that lost track of a command NAKs
@@ -4713,7 +4725,42 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
                          running the bulk-only reset"
                     );
                     usb::bot::reset_recovery(&mut *guard, &self.endpoints)?;
-                    usb::bot::read_sectors(&mut *guard, &self.endpoints, lba, sectors as u16)
+                    match usb::bot::read_sectors(&mut *guard, &self.endpoints, lba, sectors as u16)
+                    {
+                        Ok(data) => Ok(data),
+                        Err(err) => {
+                            // The bulk-only reset re-synchronizes the *device's* BOT
+                            // state machine. A device that stopped answering
+                            // altogether is where `usb_reset_and_verify_device()`
+                            // comes in: port reset, then the address/configure
+                            // sequence again, with the rings re-installed. Without
+                            // this escalation the first timeout poisons the disk for
+                            // the rest of the boot.
+                            log::error!(
+                                "xhci: sector {lba} still failing after the bulk-only reset \
+                                 ({err:?}); resetting the port and re-addressing the device"
+                            );
+                            let Some(slot_index) = self
+                                .xhci
+                                .lock()
+                                .slots
+                                .iter()
+                                .position(|slot| slot.id == self.endpoints.address)
+                            else {
+                                return Err(err);
+                            };
+                            let mut guard = self.xhci.lock();
+                            guard.reset_and_reverify(slot_index)?;
+                            drop(guard);
+                            let mut guard = self.xhci.lock();
+                            usb::bot::read_sectors(
+                                &mut *guard,
+                                &self.endpoints,
+                                lba,
+                                sectors as u16,
+                            )
+                        }
+                    }
                 })?;
             if data.len() < sectors * 512 {
                 log::error!(
@@ -4738,7 +4785,7 @@ impl subsys_block::BlockDeviceOperations for XhciBotDisk {
         while done < buf.len() {
             let left = (buf.len() - done) / 512;
             let sectors = left.min(BOT_MAX_SECTORS);
-            let lba = (block_id + (done / 512) as u64) as u32;
+            let lba = (self.start_lba + block_id + (done / 512) as u64) as u32;
             let slice = &buf[done..done + sectors * 512];
             let result =
                 usb::bot::write_sectors(&mut *guard, &self.endpoints, lba, slice).or_else(|err| {
@@ -4891,7 +4938,7 @@ pub(crate) fn publish_mass_storage(
     handle: &driver_base::DeviceHandle,
     xhci: &alloc::sync::Arc<ksync::Mutex<Xhci>>,
     device: &usb::UsbDevice,
-) -> KResult<driver_base::Publication<subsys_block::class::BlockDeviceImpl>> {
+) -> KResult<alloc::vec::Vec<driver_base::Publication<subsys_block::class::BlockDeviceImpl>>> {
     let pipe = mass_storage_endpoints(device).ok_or(KError::NotFound)?;
     let endpoints = pipe.endpoints;
     // The endpoints have to exist before any command can be sent over them. A
@@ -4910,7 +4957,7 @@ pub(crate) fn publish_mass_storage(
     // that call and only if the command actually fails, which is the reference's
     // order (`usb_stor_invoke_transport()` resets on a transport error, not
     // before every command).
-    let blocks = match usb::bot::read_capacity_ready(&mut *guard, &endpoints) {
+    let total_blocks = match usb::bot::read_capacity_ready(&mut *guard, &endpoints) {
         Ok(data) if data.len() >= 8 => {
             let last = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             u64::from(last) + 1
@@ -4920,39 +4967,58 @@ pub(crate) fn publish_mass_storage(
             return Err(KError::Io);
         }
     };
+    // `sd`'s view of the same question: a partitioned stick exposes `…pN`, and a
+    // filesystem is read relative to the partition's own start LBA.
+    let views = usb::bot::plan_views(&mut *guard, &endpoints, total_blocks);
     drop(guard);
-    let backend = XhciBotDisk {
-        xhci: xhci.clone(),
-        endpoints,
-        blocks,
-    };
-    let name = alloc::format!("usb{}", device.address);
     let parent_path = alloc::string::String::from(handle.path());
     let modalias = handle.modalias().map(alloc::string::String::from);
     // Major 8 is the conventional disk major and the block core rejects a duplicate
-    // dev_t; the EHCI side takes minor 0, so this side counts up from one.
+    // dev_t, so every view takes its own minor from one counter shared with EHCI.
     static NEXT_MINOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
-    let minor = NEXT_MINOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let disk = subsys_block::Gendisk::new(name, 8, minor, 1, alloc::boxed::Box::new(backend))
-        .map(|disk| disk.with_devnode_context(&parent_path, modalias))
-        .map_err(|err| {
-            log::error!("xhci: could not create the block disk: {err:?}");
-            KError::Io
-        })?;
-    let publication = handle
-        .publish(
-            &subsys_block::class::BLOCK,
-            alloc::sync::Arc::new(disk),
-            "usb-storage",
-        )
-        .map_err(|err| {
-            log::error!("xhci: block publication failed: {err:?}");
-            KError::Io
-        })?;
-    log::info!(
-        "xhci: published {} as a block device with {blocks} 512-byte blocks",
-        device.summary()
-    );
+    let mut publications = alloc::vec::Vec::new();
+    for view in &views {
+        let backend = XhciBotDisk {
+            xhci: xhci.clone(),
+            endpoints,
+            start_lba: view.start_lba,
+            blocks: view.blocks,
+        };
+        let name = if view.part == 0 {
+            alloc::format!("usb{}", device.address)
+        } else {
+            alloc::format!("usb{}p{}", device.address, view.part)
+        };
+        let minor = NEXT_MINOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let disk = subsys_block::Gendisk::new(name, 8, minor, 1, alloc::boxed::Box::new(backend))
+            .map(|disk| disk.with_devnode_context(&parent_path, modalias.clone()))
+            .map_err(|err| {
+                log::error!("xhci: could not create the block disk: {err:?}");
+                KError::Io
+            })?;
+        let publication = handle
+            .publish(
+                &subsys_block::class::BLOCK,
+                alloc::sync::Arc::new(disk),
+                "usb-storage",
+            )
+            .map_err(|err| {
+                log::error!("xhci: block publication failed: {err:?}");
+                KError::Io
+            })?;
+        log::info!(
+            "xhci: published {} as {} with {} 512-byte blocks (start LBA {})",
+            device.summary(),
+            if view.part == 0 {
+                alloc::format!("usb{}", device.address)
+            } else {
+                alloc::format!("usb{}p{}", device.address, view.part)
+            },
+            view.blocks,
+            view.start_lba
+        );
+        publications.push(publication);
+    }
     let callback: devnode::DevNodeCallback = alloc::sync::Arc::new(|_| {});
     for node in devnode::subscribe(callback) {
         log::info!(
@@ -4962,5 +5028,5 @@ pub(crate) fn publish_mass_storage(
             node.device_number()
         );
     }
-    Ok(publication)
+    Ok(publications)
 }
