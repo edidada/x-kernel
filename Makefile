@@ -134,6 +134,12 @@ GRAPHIC_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),\
 	$(if $(filter -device virtio-keyboard%,$(QEMU_ARGS)),,-device virtio-keyboard-pci)\
 	$(if $(filter -device virtio-mouse%,$(QEMU_ARGS)),,-device virtio-mouse-pci))
 
+# The compositor ships as a separate read-only disk image mounted on /compositor.
+COMPOSITOR_IMG ?= $(CURDIR)/compositor.img
+COMPOSITOR_DEVICE_ARGS := -device virtio-blk-pci,drive=compositor \
+	-drive id=compositor,if=none,format=raw,readonly=on,file=$(COMPOSITOR_IMG)
+COMPOSITOR_QEMU_ARGS := $(if $(filter y,$(GRAPHIC)),$(if $(wildcard $(COMPOSITOR_IMG)),$(COMPOSITOR_DEVICE_ARGS)))
+
 UAPPS ?= all
 UAPP_DIR ?= $(CURDIR)/uapps
 UAPP_AUTOSTART_TARGET ?= /etc/profile.d/99-autostart.sh
@@ -198,7 +204,7 @@ ifneq (,$(and $(strip $(LOG)),$(filter -append%,$(QEMU_ARGS))))
 $(warning LOG="$(LOG)" is ignored: QEMU_ARGS already passes -append, and QEMU keeps only the last one)
 override LOG :=
 endif
-RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(GRAPHIC_QEMU_ARGS) $(QEMU_ARGS))
+RUN_QEMU_ARGS = $(strip $(if $(strip $(LOG)),-append loglevel=$(LOG)) $(GRAPHIC_QEMU_ARGS) $(COMPOSITOR_QEMU_ARGS) $(QEMU_ARGS))
 
 run:
 	@echo "Running x-kernel..."
