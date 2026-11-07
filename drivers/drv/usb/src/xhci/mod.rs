@@ -48,9 +48,15 @@ const ERDP_EHB: u32 = 1 << 3;
 
 /// Where the event ring segment size goes in the ERST entry's dword 2.
 ///
-/// 16 is what xHCI 6.5.3.3 describes; 0 is what Linux's `xhci_alloc_erst()` writes.
-/// Kept as one named value because it is an A/B on this silicon, not a preference.
-const ERST_SEG_SIZE_SHIFT: u32 = 16;
+/// **0** -- the count raw, which is what `xhci_alloc_erst()` writes
+/// (`entry->seg_size = cpu_to_le32(TRBS_PER_SEGMENT)`, xhci-mem.c:1897). The A/B that
+/// used the spec's bit position (16) is what produced the failure it was meant to fix:
+/// with the size misplaced, the controller's idea of where the ring ends differs from
+/// ours, so it does not flip the cycle bit where we do. The event sampling shows the
+/// consequence exactly -- the consumer wrapped to index 0 with parity 0 while the
+/// controller kept publishing at parity 1, IP/EINT stayed set, and from then on nothing
+/// the controller posted was visible to us.
+const ERST_SEG_SIZE_SHIFT: u32 = 0;
 /// The controller's scratch buffer for control data stages.
 /// `HUB_DEBOUNCE_STEP` / `HUB_DEBOUNCE_STABLE` (`drivers/usb/core/hub.c:112-113`).
 const HUB_DEBOUNCE_STEP_US: u64 = 25_000;
@@ -1350,6 +1356,26 @@ impl Xhci {
             self.runtime + RT_IR0 + RT_ERDP,
             dequeue | u64::from(ERDP_EHB),
         );
+        // Bounded sampling around the ring's ends and every 32nd event: enough to see
+        // the exact event after which the controller stops publishing, without turning
+        // a boot into a log flood. `ERDP` reads back what the register holds (the EHB
+        // bit is ours -- the controller clears it, so a stuck 1 next to a silent ring
+        // is a fact, not a write artefact), `IMAN` says whether it thinks an interrupt
+        // is pending.
+        let index = self.event_dequeue;
+        if index % 32 == 0 || index < 4 || index + 4 >= self.event.trbs {
+            let ir = self.runtime + RT_IR0;
+            log::info!(
+                "xhci: event consumed type {} (p {:#x}), consumer index {index} cycle {}, erdp \
+                 {:#018x}, iman {:#x}, usbsts {:#x}",
+                trb.trb_type(),
+                trb.parameter,
+                u32::from(self.event_cycle),
+                self.bar.read64(ir + RT_ERDP),
+                self.bar.read32(ir),
+                self.bar.read32(self.operational + op::USBSTS),
+            );
+        }
         Some(trb)
     }
 
