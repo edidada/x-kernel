@@ -1383,7 +1383,7 @@ impl Xhci {
         let index = self.event_dequeue;
         if index % 32 == 0 || index < 4 || index + 4 >= self.event.trbs {
             let ir = self.runtime + RT_IR0;
-            log::info!(
+            log::debug!(
                 "xhci: event consumed type {} (p {:#x}), consumer index {index} cycle {}, erdp \
                  {:#018x}, iman {:#x}, usbsts {:#x}",
                 trb.trb_type(),
@@ -2972,7 +2972,7 @@ impl Xhci {
         // SAFETY: one endpoint context per DCI inside this device context.
         let dequeue =
             unsafe { core::ptr::read_volatile(base.wrapping_add(offset + 8).cast::<u32>()) };
-        log::info!(
+        log::debug!(
             "xhci: {when} slot {} dci {dci}: controller dequeue {dequeue:#x}, ring base {:#x}, \
              producer index {} (cycle {}), tds {}",
             slot.id,

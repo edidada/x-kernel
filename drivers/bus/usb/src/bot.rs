@@ -161,7 +161,10 @@ fn transfer(
     // The address is part of every line: the tag counter is global across
     // controllers, so without it a "no CSW for tag N" cannot be attributed to a
     // device, which cost this bring-up more than one round.
-    info!(
+    // Per-command tracing: `debug`, not `info`. At info these four lines per transfer
+    // saturate the serial console during a directory scan and destroy the userland
+    // output that is being read there.
+    log::debug!(
         "bot: addr {} cbw tag {tag} op {:#04x} len {transfer_length} dir {} cdb {:02x?}",
         endpoints.address,
         command.first().copied().unwrap_or(0),
@@ -278,7 +281,7 @@ fn finish_status(
         return Err(KError::Io);
     }
     let residue = u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]]);
-    info!(
+    log::debug!(
         "bot: addr {address} csw tag {echoed_tag} status {} residue {residue}",
         csw[12]
     );
