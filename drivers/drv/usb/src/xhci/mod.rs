@@ -172,8 +172,16 @@ impl Ring {
         self.index += 1;
         if self.index == self.trbs {
             self.index = 0;
+            // The Link TRB carries the cycle bit of the lap it *terminates*
+            // (`inc_enq()`: `next->link.control ^= TRB_CYCLE;` and only then
+            // `ring->cycle_state ^= 1`). Writing it with the new lap's bit instead
+            // leaves the controller looking at an unpublished link as it arrives
+            // there, and it stops on the link slot -- observed as
+            // `dequeue 0x1011c001` (= base + one full ring) with the transfer that
+            // crossed the wrap never completing.
+            let finished = self.cycle;
             self.cycle = !self.cycle;
-            self.write_link(self.cycle);
+            self.write_link(finished);
         }
         (index, cycle)
     }
@@ -235,11 +243,13 @@ impl Ring {
         let address = self.mem.bus_addr() + (index * core::mem::size_of::<Trb>()) as u64;
         self.index += 1;
         if self.index == self.trbs {
-            // Step over the Link TRB: the producer never writes into it, it
-            // re-arms it with the new cycle bit so the controller keeps wrapping.
+            // The producer never writes into the Link TRB; it re-arms it with the
+            // cycle bit of the lap it terminates (`inc_enq()`), while the ring's own
+            // state flips for the TRBs that follow.
             self.index = 0;
+            let finished = self.cycle;
             self.cycle = !self.cycle;
-            self.write_link(self.cycle);
+            self.write_link(finished);
         }
         address
     }
