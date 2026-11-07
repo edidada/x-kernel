@@ -3251,6 +3251,34 @@ panic 依旧出现（`grep -c 'Failed to resolve init'` = 1）→ **不是文件
 
 注：这是**内核 VFS/启动顺序**的问题，不是 USB 驱动的问题；USB3 的挂载能力本身已经验证。
 
+### 5.9.17 init panic 是代码回归，但回归区间里没有任何 VFS 改动 → 指向内存被踩
+
+三个实验把可能性逐个消掉：
+
+1. **不是 FAT 共存问题**：关掉 `KFEAT_FS_FAT` 重新构建，panic 依旧。
+2. **不是"启动时挂 /mnt/usb"**：把启动期挂载整段消融（连 kthread 一起停掉，`grep -c
+   'mounted at /mnt/usb'` = 0），panic 依旧。之前的"挂载↔panic"相关性是伪相关——两者都随
+   "USB 终于能工作"而出现。
+3. **不是环境、不是镜像尺寸**：把最后一个正常提交 `7aabcf0dd` 从 worktree 重新构建并部署
+   （size 6,090,402），**现在照样能起**：`Enter user space` 13 次、panic 0 次。
+
+对照：`7aabcf0dd` 好，`d2741a2e5`（其后 10 个提交）坏。这 10 个提交**全是 USB**，没有一行
+碰 VFS/init/启动顺序。一个只改了 USB 驱动提交能把 PID 1 的可执行文件搞没，只剩一种解释：
+**我们把内存踩了**，被踩的正是 bootloader 放 initramfs（或它依赖的结构）的地方。
+
+这与 §5.9.11 已经测到的现象是同一条：那块 `PA 0x200000–0x400000` 的"free memory"窗口里，
+我们的 ERST 条目被"非分配器持有者"改写成 `0x1`。当时的解释只到"DMA 页被踩"，现在补上另一半：
+**那块窗口里躺着 boot 阶段的数据（DTB/initramfs 一类），它既不属于分配器，也不是空闲的**。
+USB 一开始真正传数据，DMA 就越过边界踩进去；EC853F247 之后 DMA 搬到了 DT 的
+`shared-dma-pool`，但早期启动时 initramfs 与我们的缓冲区是否仍然重叠、以及 `0x10000000–
+0x20000000` 这块"shared-dma-pool"是否其实就是 ramdisk 的落点，都还没有核实。
+
+下一步（明确、可验证）：
+1. 读 boot 阶段打印的内存图与 DT 的 `chosen/linux,initrd-start,size`，确认 initramfs 的物理区间；
+2. 检查该区间是否与 `kdma` 池（0x10000000–0x20000000）或任何 `alloc_dma_pages` 结果的区间重叠；
+3. 若重叠，修 `init_coherent_dma_pool()`：只有在确认该保留区**不被 boot 数据占用**时才把它交给
+   DMA，否则退回通用分配（并保留 §5.9.12 的低窗口规避）。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成

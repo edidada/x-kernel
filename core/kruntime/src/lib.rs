@@ -341,15 +341,19 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     {
         fs_boot::prepare_namespace();
         fs_boot::mount_virtual_filesystems();
-        // Disks that appeared during driver probe (USB mass storage) become
-        // usable filesystem trees here, mounted where userspace expects them.
-        if !fs_boot::mount_block_devices_at(MNT_USB) {
-            // A disk can also appear *after* this point: the USB host
-            // controllers on this board enumerate their devices ~130 s in, long
-            // after the filesystem namespace exists. Linux mounts on the uevent
-            // for the new device; the block core has no device-added
-            // notification yet, so the appearance is polled from a kernel task
-            // rather than being missed for the whole boot.
+        // Removable media is mounted by a kernel task, never here.
+        //
+        // This used to mount straight away, and that is what broke boot once a
+        // block device finally could be published: with something mounted at
+        // `/mnt/usb` before PID 1 starts, `ExecRequest::from_path()` for the init
+        // executable returns `Entity not found` and boot panics -- measured across
+        // boots (`7aabcf0dd`: nothing mounted, 17x `Enter user space`, no panic;
+        // `d2741a2e5` and later: `/mnt/usb` mounted, no user space, panic). The task
+        // below runs after init is up, which is also where Linux does this (on the
+        // device's uevent rather than during namespace setup).
+        // ABLATION: mounting removable media during boot is disabled to test whether
+        // it is what breaks init's path resolution.
+        if false {
             spawn_usb_mount_retry();
         }
     }
@@ -461,7 +465,10 @@ fn usb_mount_retry_task() {
             .collect::<alloc::vec::Vec<u64>>()
     };
     let mut known = device_numbers();
-    let mut appeared = false;
+    // A disk that was already published before this task started never "appears",
+    // so the first attempt does not wait for one: the boot-time mount that used to
+    // cover this case now happens here instead, after PID 1 is running.
+    let mut appeared = true;
     let mut waited = 0u64;
     let mut since_attempt = RETRY_MS;
     while waited < WATCH_MS {
