@@ -3279,6 +3279,38 @@ USB 一开始真正传数据，DMA 就越过边界踩进去；EC853F247 之后 D
 3. 若重叠，修 `init_coherent_dma_pool()`：只有在确认该保留区**不被 boot 数据占用**时才把它交给
    DMA，否则退回通用分配（并保留 §5.9.12 的低窗口规避）。
 
+### 5.9.18 更正：就是 `KFEAT_FS_FAT` 导致启动 panic（我前面"证伪"它的实验是无效的）
+
+前面的 §5.9.16/§5.9.17 把 FAT 排除了，理由是"关掉 FAT 也照样 panic"。**那个实验无效**：
+
+`scripts/board-run.sh` 在构建前会 `deploy-rk3588.sh --seed-config`，即**用 defconfig 重新
+生成 `.config`**。我当时改的是 `.config`（`cp defconfig .config && sed … .config && make
+defconfig`），改动在 seed 时被覆盖。证据在日志里：那两个"关掉 FAT"的运行里
+`grep -c 'probe as vfat'` = **4**，即 FAT 根本没被关掉。
+
+**改 defconfig 本身之后的结果（同一棵树，两次启动）：**
+
+| 配置 | `probe as vfat` | `Enter user space` | panic |
+|---|---|---|---|
+| `KFEAT_FS_FAT=y` | 4 | **0** | **1** |
+| `KFEAT_FS_FAT` 未设置 | 0 | **13** | 0 |
+
+所以：**启用 FAT 会让启动在 `init_process` 的 "Failed to resolve init executable" 处 panic**，
+userland 起不来。与 ext4 不冲突，与 `/mnt/usb` 挂载无关（那两次相关性也都是伪相关）。
+
+当前处置：`rk3588_defconfig` 里保持 FAT 关闭并在旁边写明原因 —— 先把板子恢复到能启动的状态；
+代价是 FAT32 的 U 盘暂时挂不上（`usb3p1` 仍会被发布，只是没有 vfat 驱动可挂）。
+
+下一步（新线索，明确）：
+1. FAT 与启动的相互作用要单独查：FAT 的 `register_filesystem()` 与 `kvfs` 的初始化顺序、
+   `fs_fat` 拉进来的 feature（`kruntime/fs`）是否改变了根文件系统/`INIT_FS` 的构建；
+2. 复现路径很干净：只改这一行配置就能在"能启动/不能启动"之间切换，适合二分 FAT crate 的
+   注册与初始化代码（例如临时注释 `fat::init()` 的注册调用，看 boot 是否恢复）。
+
+**方法论教训（已并入 §7.13 的纪律）**：任何"配置开关"实验必须改 **defconfig（或 Kconfig）**，
+不能改 `.config` —— build/deploy 会重新 seed，改 `.config` 等于没改。验证方式：在日志里确认
+该 feature 的运行时表现（这里是 `probe as vfat` 计数）真的变了。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成

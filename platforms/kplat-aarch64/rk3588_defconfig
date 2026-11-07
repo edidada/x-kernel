@@ -51,7 +51,13 @@ KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # board carries a 0x0c (FAT32 LBA) partition -- and the mount helper walks every
 # registered filesystem type, so the driver has to be in the build for the stick
 # to be mountable at all.
-KFEAT_FS_FAT=y
+# FAT stays off until the boot failure it causes is understood: with it enabled the
+# kernel panics in `init_process` ("Failed to resolve init executable") a few seconds
+# after the filesystem namespace is set up, with `Enter user space` never reached.
+# Measured both ways on the same tree: FAT=y -> userspace 0, panic 1; FAT=n -> userspace
+# 13, panic 0. Without it a FAT32 stick cannot be mounted, so this costs the xHCI mount
+# until the interaction is explained.
+# KFEAT_FS_FAT is not set
 # KFEAT_DWARF is not set
 KFEAT_FS_TIMES=y
 # MMC/SD: subsystem + card-bus block consumer + DW host backend; the SD
