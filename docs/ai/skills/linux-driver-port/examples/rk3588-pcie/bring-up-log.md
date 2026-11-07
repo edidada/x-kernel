@@ -3311,6 +3311,45 @@ userland 起不来。与 ext4 不冲突，与 `/mnt/usb` 挂载无关（那两�
 不能改 `.config` —— build/deploy 会重新 seed，改 `.config` 等于没改。验证方式：在日志里确认
 该 feature 的运行时表现（这里是 `probe as vfat` 计数）真的变了。
 
+### 5.9.19 本轮 USB 移植的完整教训（USB3 从"设备怀疑论"到 ls 出文件名）
+
+结局：USB3（HP x5000m，xHCI SuperSpeed）**枚举 → 发布 `/dev/usb3p1` → 挂载 vfat → 读目录**
+全通；USB2（Kingston，EHCI High-Speed）链路正常、盘上 ext4 主 superblock 与 GD 表被早先的
+`WRITE(10)` 发零 bug 写坏（备份 superblock @ block 32768 完好，可 `e2fsck -b 32768` 恢复）。
+
+**六个真 bug，全部由实测定位，全部是我自己引入或未关闭的**：
+
+| # | 症状 | 根因 | 判据 |
+|---|---|---|---|
+| 1 | 跨过 256 个事件后全部传输/命令超时 | `ERST` 段大小按规范位域写（应裸计数） | 事件槽 `cycle` 与消费者期望相反 |
+| 2 | 启用 FAT 后启动 panic | 根探测把板子的 FAT 启动分区当 root | `use block device: mmcblk0p1` → `filesystem type: vfat` → `Failed to resolve init` |
+| 3 | 同上，环满 | 事件环只排 64 个/次 | `event dequeue 22 expect cycle 1` 而槽内 cycle 0 |
+| 4 | 传输环跨圈后卡死 | Link TRB 的 cycle 位取了"新一圈" | `dequeue = base + 整圈`（停在 Link 槽） |
+| 5 | ERST 内容变成 `0x1` + 偶发 HSE | DMA 页落在被 boot 数据占用却标为 free 的窗口 | 同页只被分配一次，却被外部改写 |
+| 6 | `ls` 无输出、被误判"卡死" | 每传输 4 行 `info` 把串口挤爆 | `ls`/`head` 均 exit 0，输出被内核日志覆盖 |
+
+**方法论上真正昂贵的三个错误**（都不是技术难点）：
+
+1. **A/B 开关没关**（#1）：验证完没关掉，后面十几轮全建立在错误基线上；而且我用**错误的
+   方法**（改 `.config`，会被 seed 覆盖）去"证伪"它，反而加深了误判 —— 那一轮我还据此写下
+   "FAT 无关"的结论，后来被用户质疑、重做实验才翻案。
+2. **把"所有设备都不应答"当成设备问题**：No-Op 命令也不完成、三个 slot 的 `GET_STATUS`
+   全部超时、而 `USBSTS` 干净 —— 这三条同时成立时，唯一可能是**事件投递**（或我们丢弃了
+   事件），不是任何设备。识别这一点本应只花一轮。
+3. **用"命令没有输出"推断"卡死"**：内核日志把 userland stdout 覆盖掉了（#6）。现在先看
+   `Enter user space`/`panicked`/`mounted at` 三个数。
+
+**harness 改进（本轮落地）**：
+
+- `scripts/board-digest.sh`：一屏摘要（commit/大小/userland/panic/mounts/失败计数 + 决定下一步
+  的那几行），使跨运行比较与 commit 二分有统一口径；
+- `board-run.sh` 在 seed 前打印**将被丢弃的 `.config` 差异**，让"配置实验改错了文件"当场可见；
+- 逐传输追踪降为 `debug`（§16 的规则），观测手段不再破坏被观测对象。
+
+**已并入 `porting-heuristics.md` 的新准则**：§14 环绕是一族 bug（必须早期显式走一遍）、
+§15 先分清"设备/控制器/我们丢事件"再改代码、§16 观测要能承受负载、§17 A/B 开关当场关闭、
+§18 根文件系统不是"能挂上的那个"。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成

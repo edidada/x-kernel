@@ -7,6 +7,47 @@ each time: forgetting to use the automation at all, running the unittest
 suite on a board config, and guessing at hardware state instead of dumping a
 working reference next to the broken one.
 
+## 日志判读与配置实验（两个机械工具）
+
+上板日志是几千行驱动追踪，而决定下一步的只有三个数字；配置实验又有一条会静默失效的路径。
+两者都已做成脚本，不要再手工 grep 各自的写法：
+
+### `scripts/board-digest.sh [<tag>|-f <console.log>]`
+
+在设备机上取最新（或匹配 `tag` 的）运行，打印一屏摘要：
+
+```
+commit : 5f6a2788c...
+userland  Enter user space : 15
+panic     Failed to resolve: 0  (panicked: 0)
+mounts    mounted at       : 2
+usb       published device : 24
+failures  no completion    : 0
+failures  bulk timeout     : 0
+```
+
+`Enter user space` / `panicked` / `mounted at` 三个数就能区分：
+
+- 没起来（`userland=0` 且 `panic>0`）；
+- 起来了但输出被内核日志淹没（`userland>0`，命令无输出）；
+- 起来了且正常（`userland>0`、`panic=0`、`mounted>0`）。
+
+跨运行比较时这三个数字是稳定口径，因此也可以直接用来做 **commit 二分**：每次部署后跑一次
+digest，记下这四个字段即可。
+
+### `board-run.sh` 会打印将被丢弃的 `.config` 差异
+
+`deploy-rk3588.sh --seed-config` 会用 `platforms/kplat-aarch64/rk3588_defconfig` **重新生成**
+`.config`。所以：
+
+- **配置实验必须改 defconfig**，改 `.config` 等于没改；
+- 现在 `board-run.sh` 在 seed 之前会把两者差异列出来（`these local changes will be DISCARDED`），
+  作为机械提醒；
+- 判定实验是否真的生效，看**运行时表现**（例如日志里 `probe as vfat` 的计数），不要看自己
+  改了什么。
+
+---
+
 ## 1. The loop: never boot the board by hand
 
 `scripts/board-run.sh <tag>` does the whole cycle:

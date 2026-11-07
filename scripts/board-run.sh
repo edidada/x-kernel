@@ -31,6 +31,22 @@ TAG=${1:?usage: board-run.sh <tag> [extra rkt run args...]}
 shift || true
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
+# A config experiment must edit the defconfig, not `.config`: the deploy step below
+# re-seeds `.config` from `platforms/kplat-aarch64/rk3588_defconfig`, so local edits are
+# silently discarded. That cost a round here -- two "KFEAT_FS_FAT disabled" runs were
+# built with FAT still enabled, and the logs only showed it because the runtime
+# behaviour (`probe as vfat`) did not change. Refuse to guess: say it out loud.
+defconfig=platforms/kplat-aarch64/rk3588_defconfig
+if [[ ${SKIP_BUILD:-0} != 1 && -f .config && -f $defconfig ]]; then
+    discarded=$(diff <(grep -E '^(# )?[A-Z0-9_]+(=| is not set)' "$defconfig" | sed 's/ is not set$/=n/' | sort) \
+                    <(grep -E '^(# )?[A-Z0-9_]+(=| is not set)' .config | sed 's/ is not set$/=n/' | sort) || true)
+    if [[ -n $discarded ]]; then
+        echo "== .config differs from $defconfig; these local changes will be DISCARDED:"
+        printf '%s\n' "$discarded" | sed 's/^/     /' | head -20
+        echo "   (edit the defconfig if the change is meant to persist)"
+    fi
+fi
+
 echo "== [1/3] deploy kernel to the TFTP root"
 if [[ ${SKIP_BUILD:-0} != 1 ]]; then
     "$REPO_ROOT/scripts/deploy-rk3588.sh" --seed-config --build
