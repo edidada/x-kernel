@@ -3218,6 +3218,39 @@ control transfer ep0 ring at 0x10117000: [1] ... c=0x10c25 [2] ... c=0x1001   �
 
 本轮改动编译失败（同一文件里两处写端点上下文，改到了占位循环那一段），已回退，未上板。
 
+### 5.9.16 "Failed to resolve init executable" 与 FAT 无关，但和 /mnt/usb 挂载强相关
+
+USB3 盘现在能挂载（§5.9.13 修好后连续三次 `mounted at /mnt/usb as "vfat"`），但每次挂载成功后
+约 5 s 必然 panic，userland 起不来，导致只读验证拿不到 `ls` 输出。
+
+**先排除"FAT 与 ext4 不能共存"**（这是一个合理怀疑）：把 `KFEAT_FS_FAT` 关掉重新构建并启动，
+panic 依旧出现（`grep -c 'Failed to resolve init'` = 1）→ **不是文件系统共存问题**。
+
+用每次启动日志里的 `git_commit` 做 bisect：
+
+| 运行 | commit | `Enter user space` | panic | `/mnt/usb` 挂载 |
+|---|---|---|---|---|
+| usb-write（01:31） | `7aabcf0dd` | **17** | 0 | **0 次**（没有挂载） |
+| usb-deadport（02:26） | `d2741a2e5` | **0** | 1 | **1 次**（`mmcblk0p2 as ext4`） |
+| usb-ro2（11:00） | `6e5f3f6db` | 0 | 1 | 1 次（`usb3p1 as vfat`） |
+
+即：**只有在 `/mnt/usb` 挂载成功的那次启动里，init 才解析失败**。回归窗口正是让块设备变得
+"可发布、可挂载"的那批提交（`d87508fc3` 起；在此之前 USB 侧根本没有可用磁盘，`/mnt/usb`
+什么都没挂上，init 从 initramfs 正常起来）。
+
+`/mnt/usb` 的挂载由 `fs_boot::mount_block_devices_at()` 完成，它按注释会跳过"根设备"
+（`ROOT_DEVICE_NUMBER`）。**当根是 initramfs 时这个值没有被记录**，于是承载根文件系统的那个
+块设备（这次是 `mmcblk0p2`）会被第二次挂到 `/mnt/usb`；之后 `init_process.rs` 通过
+`ExecRequest::from_path()` 解析 `/init` 返回 `Entity not found`。
+
+下一步（两个方向，都能一次验证）：
+1. 让 `mount_block_devices_at()` 在 `ROOT_DEVICE_NUMBER` 未设置时也跳过"已经作为根被挂载过"
+   的设备；
+2. 或者先确认"同一块设备的二次挂载会破坏后续路径解析"这一点（把 `/mnt/usb` 换成空目录挂载
+   一次即可复现/排除）。
+
+注：这是**内核 VFS/启动顺序**的问题，不是 USB 驱动的问题；USB3 的挂载能力本身已经验证。
+
 ## 6. 做 harness 时要固化的教训
 
 这一轮把 PCIe 打通前后踩的坑，按"能不能写进工具"分类。凡是可以机械化的，做成
