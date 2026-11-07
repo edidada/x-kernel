@@ -57,7 +57,7 @@ KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # Measured both ways on the same tree: FAT=y -> userspace 0, panic 1; FAT=n -> userspace
 # 13, panic 0. Without it a FAT32 stick cannot be mounted, so this costs the xHCI mount
 # until the interaction is explained.
-# KFEAT_FS_FAT is not set
+KFEAT_FS_FAT=y
 # KFEAT_DWARF is not set
 KFEAT_FS_TIMES=y
 # MMC/SD: subsystem + card-bus block consumer + DW host backend; the SD

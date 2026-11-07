@@ -351,11 +351,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         // `d2741a2e5` and later: `/mnt/usb` mounted, no user space, panic). The task
         // below runs after init is up, which is also where Linux does this (on the
         // device's uevent rather than during namespace setup).
-        // ABLATION: mounting removable media during boot is disabled to test whether
-        // it is what breaks init's path resolution.
-        if false {
-            spawn_usb_mount_retry();
-        }
+        spawn_usb_mount_retry();
     }
 
     #[cfg(all(feature = "fs9p", not(unittest)))]

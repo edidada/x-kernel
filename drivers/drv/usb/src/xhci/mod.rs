@@ -1203,7 +1203,15 @@ const PORT_RESET_POLL_STEPS: usize = 200_000;
 /// status change on every poll would otherwise keep the loop from ever
 /// consulting the waiter again. The value also caps the unclaimed completions
 /// kept per endpoint.
-const EVENT_DRAIN_LIMIT: usize = 64;
+/// How many events one `pump_events()` call may consume.
+///
+/// This is a *ring's worth*, not a small batch: the consumer must be able to empty the
+/// event ring completely, because the controller stops publishing once it is full and
+/// the two sides then disagree about the lap parity forever (measured: consumer at
+/// index 22 expecting cycle 1 while slots held cycle 0 -- one full lap behind, ring
+/// full, every later transfer and command timing out). Draining until `next_event()`
+/// returns nothing is safe: the ring cannot hold more than `event.trbs` events.
+const EVENT_DRAIN_LIMIT: usize = EVENT_RING_TRBS;
 
 /// `MAX_SOFT_RETRY` (`xhci-ring.c:2588`): how many times a transferless error is
 /// retried with a soft Reset Endpoint before the endpoint is hard-reset.
@@ -2556,6 +2564,8 @@ impl Xhci {
     /// transfer's own completion — and left the event ring consumed in an order
     /// the controller's own bookkeeping did not share.
     fn pump_events(&mut self) {
+        // Drain until the ring is empty; the bound exists only so a controller that
+        // keeps publishing cannot livelock this loop.
         // `xhci_irq()` acknowledges what it drained: the interrupter's pending flag
         // and `USBSTS.EINT`. Both are RW1C, so leaving them set does not block
         // events, but it makes them useless as evidence -- a set EINT then reads as

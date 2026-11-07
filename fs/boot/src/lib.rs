@@ -459,9 +459,20 @@ fn mount_root_file_system(boot: &BootVfs) {
     // "which partition carries the root filesystem" is an image fact, not a
     // device-number fact.
     let candidates = root_candidates(&mut block_devs);
+    // Root has to be a filesystem PID 1 can live on, not merely one that mounts.
+    //
+    // This board's eMMC carries a FAT boot partition (`mmcblk0p1`) next to the ext4
+    // root, and the moment a vfat driver exists the probe below accepts that
+    // partition as root: `ExecRequest::from_path("/init")` then fails and boot panics
+    // with "Failed to resolve init executable". Measured by toggling KFEAT_FS_FAT
+    // alone on one tree -- enabled: 0x "Enter user space", 1 panic; unset, or
+    // registered-but-disabled: 13x, no panic. Removable-media filesystems are
+    // therefore not root candidates; `mount_block_devices_at()` mounts them where
+    // userspace expects them instead.
     let file_system_types: Vec<_> = kvfs::registered_filesystems()
         .into_iter()
         .filter(|file_system_type| file_system_type.requires_device())
+        .filter(|file_system_type| !matches!(file_system_type.name(), "vfat"))
         .collect();
     let cred = kcred::initial_cred();
     for handle in candidates {
