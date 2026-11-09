@@ -433,3 +433,17 @@ quiescence or memory reclamation safety for dynamic device mappings.
 System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
+
+## DMA and kernel mapping readiness
+
+Before AP startup, `seal_boot_mapping` closes local-only kernel mapping
+completion. After all CPU interrupt/TLB services are ready,
+`enable_runtime_mapping` enables task-owned mutation and the runtime prepares
+kdma's fixed streaming pool before driver publication. Pool preparation is
+best effort: failure is logged and boot continues. A later sleepable-task
+streaming map can retry preparation; IRQ submit/completion returns an error if
+backing is missing and never initializes mappings. The short mapping read
+lock remains IRQ-safe; mutation completes remote TLBs outside that lock.
+Regression coverage includes a real timer IRQ reading metadata after task unlock,
+concurrent DMA lifetimes/root copies, prepared IRQ-off streaming, and confirmed
+retirement using existing PageRef holds. Rejection alone is not a progress test.

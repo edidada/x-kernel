@@ -18,11 +18,10 @@ attribute transitions.
 ## Responsibilities
 
 - Coherent allocation: `allocate_dma_memory(layout)` carves page-granular
-  regions from the global allocator (`kalloc`, `UsageKind::Dma`), applies
+  regions through `kalloc::alloc_dma_pages_ref` (`UsageKind::Dma`), applies
   `READ | WRITE | UNCACHED | SHARED` mapping flags through
   `kiface_mm_api::DmaMappingIf::set_mode`, and registers the range with the platform
-  (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
-  steps.
+  (`kplat::dma::prepare`). `deallocate_dma_memory` restores the exact PageRef transfer, reverses platform/mapping preparation, then drops that hold.
 - Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
   buffer through the coherent bounce pool (copy-in for every direction,
   including `DeviceToDriver`), tracks the mapping in `active_mappings` keyed
@@ -36,10 +35,10 @@ attribute transitions.
   `u64` bus address wrapper handed to devices.
 - Result reporting: `DmaInfo { cpu_addr, bus_addr }` pairs the CPU view
   with the device view of each region.
-- Bounce pool: a lazily created 1024-page coherent region sub-allocated
+- Bounce pool: a boot-prepared 1024-page coherent region sub-allocated
   by a TLSF byte allocator (`bounce_pool`), sized once from the same
   coherent path. The TLSF control block is const-initialized inside the
-  global `DmaAllocator`; first use registers the region in place instead
+  global `DmaAllocator`; preparation registers the region in place instead
   of constructing and moving the multi-KiB allocator on the caller's stack.
   The optional region records this second phase under the existing allocator
   lock; a value-returning `Once<BouncePool>` initializer would still construct
@@ -77,41 +76,56 @@ io/kdma/
 ## Architecture
 
 ```text
-drivers
-  |  allocate_dma_memory(layout)          map_dma_buffer(buf, dir)
-  v                                              |
-SpinNoIrq<DmaAllocator>  <--- one global lock ---+
-  |  alloc_coherent_pages                             |
-  |    kalloc alloc_dma_pages (UsageKind::Dma)        v
-  |    kiface_mm_api::DmaMappingIf::set_mode (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
-  |    kplat::dma::prepare / release                 TLSF byte allocator
-  |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
-  |                                           active_mappings: BTreeMap<bus, BounceMapping>
+coherent allocation/free             streaming map/unmap
+  | kalloc pages                       | use boot-prepared pool
+  | DmaMappingIf::set_mode              | reserve/remove mapping under lock
+  | platform prepare/release            | copy bytes outside lock
+  | trace record under lock            | recycle bounce allocation under lock
+  +-------------------- SpinNoIrq<DmaAllocator> ---------------------+
+                           TLSF, active mappings, optional trace records
 ```
 
 ## Execution Context
 
-- All public functions take a `SpinNoIrq` lock: callers must not sleep
-  while holding the API, and the functions are safe from any context
-  where spin locks are legal (task context; not from NMI-level code).
-- Coherent allocation participates in the global page allocator and page
-  table updates, so it must run after `kalloc` and the address-space
-  subsystem are initialized; first use of the bounce path lazily
-  allocates the pool through the same path.
-- `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
-  calling thread; they are intended for driver submit/completion paths.
-- Completion softirqs can submit pending requests on the interrupted idle
-  task's 16 KiB stack. Both first-use pool registration and later mappings
-  must avoid stack temporaries containing `TlsfByteAllocator`; the control
-  block stays in the static allocator throughout its lifetime.
-- The `dma-trace` feature adds allocation-site bookkeeping for
-  debugging; it is off in production builds.
+- Coherent allocation and release require sleepable task context,
+  after MM and CPU services are initialized. They synchronously change kernel
+  mapping attributes. Allocation rejects an invalid context before taking any
+  pages; an invalid release retains its pages instead of entering MM.
+- `init_streaming_pool` prepares the fixed coherent pool after CPU services and
+  before driver discovery/publication. Failure is logged without stopping boot;
+  a later sleepable-task streaming map retries missing-pool preparation once
+  outside the metadata lock. IRQ/BH or IRQ-off callers return an error instead
+  of preparing mappings. A prepared pool never grows.
+- Streaming map/unmap/cancel supports task, ordinary IRQ and BH contexts after
+  preparation. These paths only suballocate, track, copy and recycle existing
+  coherent memory. Only the missing-pool task path may prepare mappings; the
+  ordinary IRQ/BH paths never request a TLB shootdown. They are not NMI-safe.
+- Copying runs outside the metadata lock while retaining exclusive ownership of
+  the reserved bounce extent. The static TLSF control block never moves through
+  a runtime stack, including the IRQ-exit idle stack.
+- No operation may hold a lock needed by a target CPU across a synchronous
+  mapping transition. The optional dma-trace feature records coherent lifetimes.
 
 ## Concurrency Model
 
-- One global `SpinNoIrq<DmaAllocator>` serializes coherent allocation,
-  bounce mapping, and the mapping table; critical sections are short
-  (page allocation, memcpy, BTreeMap ops).
+- `SpinNoIrq<DmaAllocator>` protects only TLSF suballocation, active mappings,
+  pool publication, and optional coherent trace records. Coherent page
+  allocation, mapping attribute transitions, platform hooks and buffer copies
+  run outside it, so a metadata contender cannot block a shootdown owner.
+- Explicit preparation allocates and prepares a private coherent candidate
+  outside the lock, then rechecks and publishes under one lock acquisition.
+  Concurrent losers release their unpublished candidates after unlocking.
+  The large TLSF control block remains static and is initialized once in place.
+- `BounceMapping` is the non-cloneable token for a reserved TLSF extent. Its
+  fields stay private to the bounce module; recycling consumes the token.
+  Safe slice copy methods own the staging/copy-back boundary and fences;
+  `MaybeUninit<u8>` slices preserve RX initialization state. The public unsafe
+  API only converts the caller's buffer contract into those borrowed slices.
+- A reserved bounce allocation remains unavailable for reuse during copy-in.
+  Only after staging finishes does the allocator publish it in `active_mappings`.
+  Unmap removes its record under the lock, copies back while retaining exclusive
+  ownership, and only then recycles it under the lock. No address is published
+  to a device until copy-in and fences complete.
 - `active_mappings` makes double-map of one bus address an error
   (`AllocError::InvalidInput`) and keeps `unmap` exact-match; unmapping an
   inactive address panics — that is a driver contract violation, not a
@@ -122,12 +136,17 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 
 ## Error Model
 
-- `AllocResult` (from `alloc-engine`): `NoMemory` when pages, mapping
-  flag updates, or platform prepare fail; `InvalidInput` for zero-length
-  mappings or an already-active bus address.
+- `AllocResult` reports `NoMemory` for page, mapping or platform preparation
+  failure. `InvalidInput` also rejects forbidden coherent/preparation contexts
+  and missing-pool streaming maps from non-sleepable contexts. Sleepable task
+  maps retry preparation once; capacity exhaustion of a ready pool never grows it.
 - Panics mark contract violations: unmapping a non-active address,
   length mismatch between map and unmap, bounce recycling outside the
   initialized pool, and initializing an already registered pool.
+- Failed platform release or Normal-mode restoration quarantines the owned
+  pages rather than returning them to the allocator. Allocation failures after
+  page allocation also retain the private pages; rollback is not assumed safe
+  after a partial mapping or firmware transition.
 - With `dma-trace` enabled, `deallocate_dma_memory` logs and skips mismatched
   frees instead of corrupting the allocator (without the feature no check is made) — the trace layer detects and
   skips duplicate or inconsistent records.
@@ -186,3 +205,18 @@ internal forwardings, each with `# Safety` sections and matching
 - `dma-trace` feature: coherent allocations record their call site and
   detect duplicate or mismatched frees at runtime, which is the cheapest
   way to debug DMA leaks without a full MMU tracer.
+
+## DMA backing ownership
+
+Coherent backing uses the existing metadata-owned `PageRef` range protocol,
+including DMA32 validation and exact-page admission. The legacy DmaInfo/layout
+API transports one `into_raw` transfer; matching release uses `from_raw` exactly
+once and drops the restored hold after platform release and confirmed mapping
+restoration. It never calls raw `dealloc_dma_pages` on referenced storage. The
+boot-prepared pool retains its backing transfer for kernel lifetime. Preparation
+or completion failures retain the existing hold rather than returning pages
+with uncertain device/platform/mapping state.
+
+Raw direct-map PTEs remain access aliases, not permanent owners of every RAM
+page. Managed mappings elsewhere keep their existing PTE-owned references and
+RetiredReferences. No duplicate ownership index or counter is added here.

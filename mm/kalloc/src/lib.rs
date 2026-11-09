@@ -56,8 +56,8 @@ mod pcp;
 mod slab_cache;
 mod zero;
 pub use page::{
-    PageRef, SplitPages, alloc_compound_pages_ref, alloc_page_ref, alloc_pages_exact_ref,
-    alloc_zeroed_page_ref, alloc_zeroed_pages_exact_ref,
+    PageRef, SplitPages, alloc_compound_pages_ref, alloc_dma_pages_ref, alloc_page_ref,
+    alloc_pages_exact_ref, alloc_zeroed_page_ref, alloc_zeroed_pages_exact_ref,
 };
 pub use page_meta::UsageKind;
 

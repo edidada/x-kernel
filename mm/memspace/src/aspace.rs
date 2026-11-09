@@ -359,7 +359,9 @@ impl MmSpace {
                     }
                 }
             }
-            modify.finish();
+            // An emptied protection range also needs confirmed revocation
+            // before its runtime can release externally owned backing.
+            modify.try_finish().map_err(|_| KError::Io)?;
         }
 
         if let Some(runtime) = runtime {
@@ -537,6 +539,114 @@ impl MmSpace {
         Ok(())
     }
 
+    /// Prepares a raw linear kernel mapping without waiting under PTE serialization.
+    pub(crate) fn prepare_kernel_linear_map(
+        &mut self,
+        start: VirtAddr,
+        physical: PhysAddr,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult<crate::KernelMappingChange> {
+        self.validate_region(start, size)?;
+        if size == 0
+            || !physical.is_aligned_4k()
+            || physical.checked_add(size).is_none()
+            || flags.is_empty()
+        {
+            return Err(KError::InvalidInput);
+        }
+        let range = VirtAddrRange::from_start_size(start, size);
+        if self.vmas.overlaps(range) {
+            return Err(KError::AlreadyExists);
+        }
+        let offset = start.as_usize().wrapping_sub(physical.as_usize()) as isize;
+        let runtime = VmRuntimeRef::new_linear(offset);
+        let mut vma = VmArea::new(
+            start,
+            size,
+            flags,
+            Self::kernel_linear_max_flags(flags),
+            runtime.backing_info(),
+            0,
+            None,
+        );
+        vma.set_runtime(runtime);
+        // Reserve VA even on partial failure. An unconfirmed mapping must not
+        // be mistaken for a reusable hole by a later device probe.
+        self.vmas.insert(vma);
+        let mut edit = self.pgtbl.modify();
+        let result = edit
+            .map_region_raw(
+                start,
+                |address| PhysAddr::from(address.as_usize().wrapping_sub(offset as usize)),
+                size,
+                flags,
+                false,
+            )
+            .map_err(map_paging_err);
+        let flush = edit.defer_kernel_flush().map_err(map_paging_err)?;
+        Ok(crate::KernelMappingChange { result, flush })
+    }
+
+    /// Prepares only raw linear mappings: their backing belongs to an external
+    /// PageRef or MMIO owner, so no bounded managed-retirement drain can wait here.
+    pub(crate) fn prepare_kernel_linear_protect(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+    ) -> KResult<crate::KernelMappingChange> {
+        self.validate_region(start, size)?;
+        if size == 0 || flags.is_empty() {
+            return Err(KError::InvalidInput);
+        }
+        let range = VirtAddrRange::from_start_size(start, size);
+        let vmas = self.covering_vmas_in_range(range)?;
+        if vmas.iter().any(|vma| {
+            vma.backing().kind() != VmBackingKind::Linear || !vma.allows_protection(flags)
+        }) {
+            return Err(KError::PermissionDenied);
+        }
+        let mut edit = self.pgtbl.modify();
+        let result = edit
+            .protect_region(start, size, flags)
+            .map_err(map_paging_err);
+        let flush = edit.defer_kernel_flush().map_err(map_paging_err)?;
+        if result.is_ok() {
+            self.vmas.protect(start, size, flags);
+        }
+        Ok(crate::KernelMappingChange { result, flush })
+    }
+
+    pub(crate) fn prepare_kernel_linear_unmap(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+    ) -> KResult<crate::KernelMappingChange> {
+        self.validate_region(start, size)?;
+        let range = VirtAddrRange::from_start_size(start, size);
+        let vmas = self.covering_vmas_in_range(range)?;
+        if size == 0
+            || vmas
+                .iter()
+                .any(|vma| vma.backing().kind() != VmBackingKind::Linear)
+        {
+            return Err(KError::InvalidInput);
+        }
+        let mut edit = self.pgtbl.modify();
+        let result = edit
+            .unmap_sparse_region(start, size, PageSize::Size4K)
+            .map_err(map_paging_err);
+        let flush = edit.defer_kernel_flush().map_err(map_paging_err)?;
+        // Keep the VA reservation until completion is confirmed. The update
+        // owner removes VMA metadata while still excluding conflicting updates.
+        Ok(crate::KernelMappingChange { result, flush })
+    }
+
+    pub(crate) fn retire_kernel_linear_vma(&mut self, start: VirtAddr, size: usize) {
+        self.vmas.unmap(start, size);
+    }
+
     fn protect_mapping_range(
         &mut self,
         start: VirtAddr,
@@ -558,7 +668,8 @@ impl MmSpace {
             let pte_flags = {
                 let mut modify = self.pgtbl.modify();
                 let result = runtime.on_protect(*protect_range, flags, &mut modify);
-                modify.finish();
+                // Runtime hooks may revoke or replace entries themselves.
+                modify.try_finish().map_err(|_| KError::Io)?;
                 result?
             };
             if pte_flags.is_empty() {
@@ -571,7 +682,9 @@ impl MmSpace {
                 let mut modify = self.pgtbl.modify();
                 let result =
                     modify.protect_region(protect_range.start, protect_range.size(), pte_flags);
-                modify.finish();
+                // Protection is a synchronous boundary, including DMA cache
+                // mode transitions on raw pages owned outside the page table.
+                modify.try_finish().map_err(|_| KError::Io)?;
                 result.map_err(crate::backend::map_paging_err)?;
             }
         }
@@ -834,7 +947,8 @@ impl MmSpace {
     fn copy_kernel_mappings(&mut self) -> KResult {
         #[cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))]
         {
-            self.copy_mappings_from(&crate::kernel_layout().lock())?;
+            let kernel = crate::kernel_layout().lock();
+            self.copy_mappings_from(&kernel)?;
         }
         Ok(())
     }
@@ -1381,7 +1495,9 @@ impl MmSpace {
     /// Updates mapping within the specified virtual address range.
     ///
     /// Returns an error if the address range is out of the address space or not
-    /// aligned.
+    /// aligned. Returns `KError::Io` if required TLB invalidation cannot be
+    /// confirmed. An error may follow partial PTE changes: the caller must
+    /// retain raw backing and must not claim the new protection is complete.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.drain_pending_invalidations();
         self.validate_region(start, size)?;

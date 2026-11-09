@@ -219,7 +219,11 @@ must not trigger the callback, so PTEs that may still be visible are always prot
 
 memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
 or Normal mode, not arbitrary flags. The provider serializes protection with
-the existing kernel layout lock and preserves previous error behavior.
+the kernel mapping update mutex, prepares PTE changes under the short IRQ-safe
+layout lock, then confirms required TLB invalidation outside that lock with
+`try_finish`. If completion cannot be confirmed, protection returns `KError::Io`
+and retains the pending batch for retry. An error may follow partial PTE changes;
+the caller must retain the backing and must not treat it as reusable.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
@@ -262,3 +266,30 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## Kernel mapping serialization and completion
+
+Read/PTE access is protected by a short IRQ-saving spinlock. Ordinary IRQ readers
+cannot interrupt a same-CPU holder, and may proceed after it restores IRQs. The
+public read guard exposes no mutable MmSpace access. Runtime mutations use a
+separate sleepable mutex through completion and reject non-sleepable contexts
+before changing state. They never synchronously wait for TLB ACKs with the PTE or
+MMIO registry spinlock held.
+
+Only raw linear VMAs enter this detached-completion path. Existing managed PTE
+holds continue through page_table's RetiredReferences and PageRef release; no
+parallel reference counter or ownership index is introduced. A failed completion
+retains the exact batch in the update owner and blocks subsequent mutation until
+retry succeeds. External raw backing remains caller-owned. The kernel root and
+subtables outlive all detached batches.
+
+An incomplete unmap retains both its VA reservation and registry release identity.
+An incomplete map can retain a reserved, unpublished VA; this bounds safety by
+withholding reuse, not by claiming rollback or successful teardown. AP startup
+seals local-only completion before another CPU can cache the root; no bootstrap
+exception is available to hardirq, softirq or BH callers.
+
+A final MMIO release marks its existing registry reference `Retiring` before
+PTE removal. Failed completion retains that identity for retry, while cache
+lookup skips it: a future acquisition must not receive an address whose PTEs
+were already removed. Its VA remains reserved until revocation succeeds.

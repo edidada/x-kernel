@@ -390,7 +390,8 @@ prefix unmapping and protection do not maintain a second VMA offset field.
 
 memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
 or Normal mode, not arbitrary flags. The provider serializes protection with
-the existing kernel layout lock and preserves previous error behavior.
+the kernel layout lock. Its protection path confirms required invalidation
+through `try_finish` and reports `KError::Io` if completion is unavailable.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
@@ -448,3 +449,47 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## Kernel mapping execution context
+
+`KernelLayout` separates read/PTE serialization from mutation completion. The
+inner `SpinNoIrq<MmSpace>` is held only while reading or preparing raw linear PTE
+changes. `lock()` returns a read-only guard: ordinary IRQ callers can read
+metadata without task-versus-IRQ AA reentry, and no caller can invoke a mutating
+MmSpace method through that guard. The immutable kernel root remains cached for
+AP startup. User-MM root copying uses this short read critical section.
+
+Runtime map, protect and unmap take a sleepable task mutex through their complete
+transition. That owner carries any failed `KernelTlbFlush` for a full retry before
+another mutation. Preparation ends the mutable page-table borrow and transfers
+its existing invalidation summary and `RetiredReferences` into an owned batch.
+The IRQ-off lock is released before batch completion; a competing short reader
+therefore cannot prevent its CPU from acknowledging the initiator's IPI. No spin
+wait callback or special IPI polling is added to kspin.
+
+These kernel mutation helpers support only raw linear direct-map/MMIO VMAs.
+They create no managed retirement holds, so the page-table guard's bounded managed
+retirement drains cannot introduce an early wait under the short PTE lock.
+Managed user mappings keep their existing PageRef/PTE-retirement path unchanged.
+The direct map grants access to RAM; it does not permanently own every RAM page.
+
+MMIO registry uses `SpinNoIrq` only for reference/region bookkeeping. The task
+update mutex serializes map publication and final unmap; neither registry nor
+PTE lock spans completion. Unmap retains its reference identity and VA reservation
+on failure, removing metadata only after confirmed revocation. Failed map
+preparation keeps its VA reservation, preventing accidental reuse of a partially
+installed or unconfirmed translation.
+
+Boot controller mappings use local-only completion before AP startup.
+`seal_boot_mapping` closes this path before starting secondaries; mutations are
+unavailable until `enable_runtime_mapping` follows CPU-service readiness. The
+runtime then prepares DMA streaming backing before publishing drivers. Runtime
+mutations require sleepable task context, including enabled IRQs and no tracked
+preemption/BH/RCU exclusion; interrupt fast paths use pre-established mappings.
+The bootstrap exception never admits interrupt/BH callers. Text patching uses the
+same explicit protect/completion methods rather than mutating through a read guard.
+
+A final MMIO release marks its existing registry reference `Retiring` before
+PTE removal. Failed completion retains that identity for retry, while cache
+lookup skips it: a future acquisition must not receive an address whose PTEs
+were already removed. Its VA remains reserved until revocation succeeds.

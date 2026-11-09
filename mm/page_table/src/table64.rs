@@ -439,6 +439,79 @@ impl<M: PagingMetaData> ToFlush<M> {
     }
 }
 
+/// An owned kernel invalidation batch detached from the page-table borrow.
+///
+/// Complete this batch after releasing the lock that protected PTE edits.
+/// Raw backing and the kernel page-table tree must remain live until completion;
+/// conflicting mapping transitions require the caller's higher-level serialization.
+/// Dropping an unfinished batch performs only local invalidation or fresh-map
+/// ordering, never waits, and retains managed retirement holds. Local completion
+/// does not authorize reuse through an unconfirmed remote translation boundary.
+#[must_use = "kernel mapping changes require explicit TLB completion"]
+pub struct KernelTlbFlush<M: PagingMetaData, H: PagingHandler> {
+    flush: ToFlush<M>,
+    fresh_map: bool,
+    retired_mapping_refs: RetiredReferences<H::MappingReference>,
+}
+
+impl<M: PagingMetaData, H: PagingHandler> KernelTlbFlush<M, H> {
+    /// Completes early kernel mappings using only the boot CPU's TLB.
+    ///
+    /// # Safety
+    /// No other CPU may have activated this kernel root or cached any affected
+    /// translation. Runtime/SMP callers must use `try_finish` instead.
+    pub unsafe fn finish_boot_local(&mut self) {
+        if self.flush.has_pending() {
+            M::flush_tlb(None);
+        } else if self.fresh_map {
+            M::fence_fresh_map();
+        }
+        self.flush = ToFlush::None;
+        self.fresh_map = false;
+        self.retired_mapping_refs.clear();
+    }
+
+    /// Confirms invalidation before releasing managed retirement holds.
+    ///
+    /// # Errors
+    /// Returns the architecture's completion error. Failure retains the holds
+    /// and upgrades the next retry to a full kernel invalidation.
+    pub fn try_finish(&mut self) -> TlbFlushResult {
+        let completion = match &self.flush {
+            ToFlush::None => Ok(()),
+            ToFlush::Addresses(addresses) => addresses
+                .iter()
+                .try_for_each(|address| M::flush_tlb_all_cpus(Some(*address))),
+            ToFlush::Full => M::flush_tlb_all_cpus(None),
+        };
+        if self.fresh_map && (!self.flush.has_pending() || completion.is_err()) {
+            M::fence_fresh_map();
+        }
+        self.fresh_map = false;
+        if completion.is_ok() {
+            self.flush = ToFlush::None;
+            self.retired_mapping_refs.clear();
+        } else {
+            self.flush = ToFlush::Full;
+        }
+        completion
+    }
+}
+
+impl<M: PagingMetaData, H: PagingHandler> Drop for KernelTlbFlush<M, H> {
+    fn drop(&mut self) {
+        // Keep this CPU coherent without introducing a hidden remote wait.
+        if self.flush.has_pending() {
+            M::flush_tlb(None);
+        } else if self.fresh_map {
+            M::fence_fresh_map();
+        }
+        // Local invalidation cannot authorize release while remote CPUs may
+        // still hold translations. Keep the existing retirement holds pinned.
+        self.retired_mapping_refs.forget_holds();
+    }
+}
+
 /// Mutable page table access with deferred TLB flushes.
 ///
 /// `PageTableMut` borrows `&mut PageTable64` and provides map/unmap/remap/protect
@@ -1476,6 +1549,31 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         let receipt = TlbFlushReceipt::new(self.flush.has_pending());
         self.flush_pending()?;
         Ok(receipt)
+    }
+
+    /// Ends a kernel PTE-edit borrow without performing its final invalidation.
+    ///
+    /// The returned owned batch must be completed outside the mapping lock.
+    /// Earlier bounded retirement drains, if any, have already run: IRQ-safe
+    /// callers should use raw mappings, which create no managed retirement holds.
+    /// The caller keeps the kernel table and raw backing alive and serializes
+    /// conflicting transitions until `KernelTlbFlush::try_finish` succeeds.
+    ///
+    /// # Errors
+    /// Returns `InvalidAddress` for a user table; its ordinary drop completion
+    /// remains in effect. User residency/ASID providers cannot be detached.
+    pub fn defer_kernel_flush(mut self) -> PtResult<KernelTlbFlush<M, H>> {
+        if !self.inner.is_kernel {
+            return Err(PtError::InvalidAddress);
+        }
+        Ok(KernelTlbFlush {
+            flush: core::mem::replace(&mut self.flush, ToFlush::None),
+            fresh_map: core::mem::take(&mut self.fresh_map),
+            retired_mapping_refs: core::mem::replace(
+                &mut self.retired_mapping_refs,
+                RetiredReferences::new(),
+            ),
+        })
     }
 
     #[cfg(not(docsrs))]

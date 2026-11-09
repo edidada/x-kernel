@@ -22,9 +22,7 @@ impl kiface_mm_api::DmaMappingIf {
         size_bytes: usize,
         mode: DmaMappingMode,
     ) -> kerrno::KResult {
-        crate::kernel_layout()
-            .lock()
-            .protect(vaddr, size_bytes, mapping_flags(mode))
+        crate::kernel_layout().protect(vaddr, size_bytes, mapping_flags(mode))
     }
 }
 

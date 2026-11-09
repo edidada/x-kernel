@@ -55,10 +55,11 @@ impl DeviceDmaBackend {
     /// spaces.
     ///
     /// # Safety
-    /// The capability's acquisition, synchronization and release operations
-    /// must be non-sleeping and legal under the RNG request lock and in IRQ
-    /// context, as well as during task-context teardown. Metadata allocation
-    /// must also be legal in those contexts. The supplied capability must
+    /// Streaming map/unmap and their metadata allocation must be non-sleeping
+    /// and legal under the RNG request lock and in IRQ context. Coherent queue
+    /// allocation and release require the capability's construction/teardown
+    /// context; the host must retain the device through IRQ drain and perform
+    /// final queue destruction in that context. The supplied capability must
     /// produce addresses and platform-sharing effects actually usable in BOTH
     /// negotiated modes: DMA-bypass (`access_platform == false`) and platform
     /// DMA (`true`). The intended binding is QEMU identity DMA without an

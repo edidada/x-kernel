@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::{alloc::Layout, ptr::NonNull};
+use core::{
+    alloc::Layout,
+    mem::MaybeUninit,
+    ptr::NonNull,
+    sync::atomic::{Ordering, fence},
+};
 
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator, TlsfByteAllocator};
 use memaddr::PAGE_SIZE_4K;
@@ -23,9 +28,8 @@ struct BounceRegion {
 }
 
 pub(super) struct BounceMapping {
-    pub cpu_addr: usize,
-    pub len: usize,
-    pub layout: Layout,
+    cpu_addr: usize,
+    layout: Layout,
 }
 
 impl BouncePool {
@@ -57,16 +61,23 @@ impl BouncePool {
         });
     }
 
-    pub(super) fn allocate(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
-        let region = self.region.as_ref().ok_or(AllocError::InvalidInput)?;
+    pub(super) fn allocate(&mut self, len: usize) -> AllocResult<(DmaInfo, BounceMapping)> {
+        let region = self.region.as_ref().ok_or(AllocError::NotInitialized)?;
         let layout = bounce_buffer_layout(len)?;
         let cpu_addr = self.allocator.allocate(layout)?;
         let offset = cpu_addr.as_ptr() as usize - region.cpu_addr;
         let bus_addr = DmaBusAddress::new(region.bus_addr.as_u64() + offset as u64);
-        Ok((DmaInfo { cpu_addr, bus_addr }, layout))
+        Ok((
+            DmaInfo { cpu_addr, bus_addr },
+            BounceMapping {
+                cpu_addr: cpu_addr.as_ptr() as usize,
+                layout,
+            },
+        ))
     }
 
-    pub(super) fn deallocate(&mut self, cpu_addr: usize, layout: Layout) {
+    pub(super) fn deallocate(&mut self, mapping: BounceMapping) {
+        let BounceMapping { cpu_addr, layout } = mapping;
         assert!(
             self.contains_cpu_addr(cpu_addr),
             "DMA bounce buffer {:#x} is outside the configured bounce pool",
@@ -90,6 +101,56 @@ impl BouncePool {
         self.region.as_ref().is_some_and(|region| {
             (region.cpu_addr..region.cpu_addr + region.size).contains(&cpu_addr)
         })
+    }
+}
+
+impl BounceMapping {
+    pub(super) fn len(&self) -> usize {
+        self.layout.size()
+    }
+
+    /// Stages an exclusively owned buffer before the mapping reaches a device.
+    pub(super) fn copy_from_slice(&mut self, buffer: &[MaybeUninit<u8>]) {
+        assert_eq!(buffer.len(), self.len());
+        // Keep prior CPU accesses before preparing the device's bounce view.
+        fence(Ordering::SeqCst);
+        // SAFETY: only BouncePool constructs this token from an exclusive TLSF
+        // allocation. It remains reserved until the token is consumed by
+        // deallocate; the live source slice cannot overlap that private extent.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buffer.as_ptr(),
+                self.cpu_addr as *mut MaybeUninit<u8>,
+                self.len(),
+            );
+        }
+        // Publish the staged bytes before the caller can hand the bus address
+        // to a device. Device-specific doorbell ordering stays with the driver.
+        fence(Ordering::SeqCst);
+    }
+
+    /// Completes device ownership, optionally copying writes to the CPU buffer.
+    /// A read-only transfer passes no destination but still needs its fence.
+    pub(super) fn sync_for_cpu(&self, buffer: Option<&mut [MaybeUninit<u8>]>) {
+        if let Some(buffer) = buffer.as_ref() {
+            assert_eq!(buffer.len(), self.len());
+        }
+        // The caller has observed completion and stopped device access before
+        // this CPU reads or recycles the coherent bounce storage.
+        fence(Ordering::SeqCst);
+        if let Some(buffer) = buffer {
+            // SAFETY: this token still owns the live bounce allocation. The caller
+            // supplies an exclusive destination slice outside that private extent.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.cpu_addr as *const MaybeUninit<u8>,
+                    buffer.as_mut_ptr(),
+                    self.len(),
+                );
+            }
+            // Make returned CPU bytes visible before the caller resumes use.
+            fence(Ordering::SeqCst);
+        }
     }
 }
 

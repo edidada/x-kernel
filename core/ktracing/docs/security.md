@@ -54,3 +54,11 @@ The default simple-file permissions remain unchanged. Process descriptor
 limits constrain open handles, not aggregate snapshot bytes; permission and
 memory-budget policy are separate from observation consistency. Sharing a
 cloned snapshot Arc retains one generation without allocating another buffer.
+
+## Kernel text protection
+
+Text patching reads flags under KernelLayout's short IRQ-safe read guard and
+changes permissions through its task-owned protect method. TLB completion runs
+after the PTE lock is released. IRQ trace capture still writes preallocated ring
+storage without changing mappings. Permission-update errors stop the patch;
+restoration remains best effort under the existing static-key patching contract.

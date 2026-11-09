@@ -5,7 +5,7 @@
 //! Unified device discovery manager.
 
 use driver_base::DriverResult;
-use kspin::SpinNoPreempt;
+use ksync::Mutex;
 use lazyinit::LazyInit;
 
 use crate::{
@@ -18,7 +18,7 @@ static DEVICE_MANAGER: LazyInit<DeviceManager> = LazyInit::new();
 
 /// Long-lived device manager that owns bus instances and registered drivers.
 pub struct DeviceManager {
-    bus_mgr: SpinNoPreempt<BusManager>,
+    bus_mgr: Mutex<BusManager>,
     driver_registrar: driver_registry::DriverRegistrar,
 }
 
@@ -26,7 +26,7 @@ impl DeviceManager {
     /// Create a manager with the default bus instances and built-in drivers.
     pub fn new() -> Self {
         let mut manager = Self {
-            bus_mgr: SpinNoPreempt::new(default_bus_manager()),
+            bus_mgr: Mutex::new(default_bus_manager()),
             driver_registrar: driver_registry::DriverRegistrar::new(),
         };
         manager.register_default_drivers();
@@ -44,6 +44,7 @@ impl DeviceManager {
     }
 
     /// Discover devices on all buses and run driver matching/probing.
+    /// Requires sleepable task context: bus MMIO preparation may complete TLBs.
     pub fn discover_and_probe(&self) -> EnumerationContext {
         let mut context = EnumerationContext::new();
         let active_before = active_device_count();
@@ -81,7 +82,7 @@ impl DeviceManager {
         context
     }
 
-    /// Re-scan buses and probe newly discovered devices.
+    /// Re-scan buses and probe newly discovered devices in sleepable task context.
     pub fn rescan(&self) -> EnumerationContext {
         let mut context = EnumerationContext::new();
         let active_before = active_device_count();
@@ -103,7 +104,7 @@ impl DeviceManager {
     /// Quiesce every bus backend so they stop emitting new events.
     ///
     /// Used during system shutdown or suspend prior to draining higher
-    /// layers.
+    /// layers. Requires sleepable task context.
     pub fn quiesce_buses(&self) {
         let mut bus_mgr = self.bus_mgr.lock();
         bus_mgr.quiesce_all();
@@ -112,7 +113,7 @@ impl DeviceManager {
     /// Tear down every bus backend.
     ///
     /// Intended for orderly shutdown. Each backend reports failures via the
-    /// log; the manager keeps draining the rest.
+    /// log; the manager keeps draining the rest. Requires sleepable task context.
     pub fn remove_buses(&self) {
         let mut bus_mgr = self.bus_mgr.lock();
         bus_mgr.remove_all();

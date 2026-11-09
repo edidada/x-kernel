@@ -405,3 +405,52 @@ fn large_zeroed_exact_backing_releases_rounding_and_unselected_pages() {
     let after = counters(UsageKind::Global);
     assert_eq!(after.0 - before.0, after.1 - before.1);
 }
+
+#[def_test]
+fn dma32_range_uses_existing_page_reference_retirement() {
+    let _guard = NoPreemptIrqSave::new();
+    let kind = UsageKind::Dma;
+    let before = counters(kind);
+    let owner = alloc_dma_pages_ref(3, PAGE_SIZE_4K, kind).unwrap();
+    assert!(owner.phys_addr().as_usize() + 3 * PAGE_SIZE_4K <= 0x1_0000_0000);
+    let hold = owner.try_clone_page(1).unwrap();
+    let second = hold.pfn();
+    drop(owner);
+    assert_eq!(
+        global_meta(second).reference_state(),
+        ReferenceState::Referenced { references: 1 }
+    );
+    drop(hold);
+    assert_eq!(
+        global_meta(second).reference_state(),
+        ReferenceState::Unreferenced
+    );
+    let after = counters(kind);
+    assert_eq!(after.0 - before.0, after.1 - before.1);
+}
+
+/// Run with RAM crossing 4 GiB to distinguish DMA32 from general inventory.
+#[def_test]
+fn dma32_rejects_backing_available_only_above_four_gib() {
+    let Some(alignment_bytes) = 1usize.checked_shl(32) else {
+        return unittest::TestResult::Ignored;
+    };
+    let _guard = NoPreemptIrqSave::new();
+    let kind = UsageKind::Dma;
+    let before = counters(kind);
+    let high = match alloc_pages_exact_ref(1, alignment_bytes, kind) {
+        Ok(page) => page,
+        Err(AllocError::NoMemory) => return unittest::TestResult::Ignored,
+        Err(error) => panic!("general high-memory allocation failed: {error:?}"),
+    };
+    assert!(high.phys_addr().as_usize() >= alignment_bytes);
+    drop(high);
+    // The same alignment is available to the general path but cannot satisfy
+    // DMA32. Regressing its selector to General would return that high page.
+    assert!(matches!(
+        alloc_dma_pages_ref(1, alignment_bytes, kind),
+        Err(AllocError::NoMemory)
+    ));
+    let after = counters(kind);
+    assert_eq!(after.0 - before.0, after.1 - before.1);
+}

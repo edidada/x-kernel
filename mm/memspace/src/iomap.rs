@@ -52,6 +52,9 @@ enum RegionRefs {
     Pinned,
     /// Runtime `iomap_device` mapping with an active reference count.
     Counted(usize),
+    /// Final release started; identity/VA remain reserved until revocation
+    /// completes, but new acquisitions must not receive this address.
+    Retiring,
 }
 
 /// Internal registry entry pairing a region with its lifetime policy.
@@ -101,6 +104,7 @@ pub fn register_fixed_device_region(
 }
 
 /// Return an iterator over runtime-registered device MMIO regions.
+/// Read-only registry access uses short IRQ-safe serialization.
 pub fn device_regions() -> DeviceRegionIter {
     DEVICE_REGISTRY
         .lock()
@@ -112,6 +116,8 @@ pub fn device_regions() -> DeviceRegionIter {
 
 /// Map a device MMIO region and register it for diagnostics.
 ///
+/// Runtime callers must be in task context with IRQs enabled. Bootstrap
+/// controller mapping is allowed before runtime activation on the boot CPU.
 /// Drivers are expected to call this during initialization, cache the returned
 /// virtual base, and reuse that base from fast paths such as IRQ handlers.
 ///
@@ -126,6 +132,9 @@ pub fn iomap_device(
         return Err(IoMapError::InvalidRange);
     }
 
+    let mut update = kernel_layout()
+        .begin_update()
+        .map_err(|_| IoMapError::MappingFailed)?;
     let start = paddr.align_down_4k();
     let end = paddr
         .checked_add(size)
@@ -139,32 +148,32 @@ pub fn iomap_device(
 
     kplat::mmio::prepare(start.as_usize(), span).map_err(|_| IoMapError::MappingFailed)?;
 
-    let mut kernel_aspace = kernel_layout().lock();
-    let mut regions = DEVICE_REGISTRY.lock();
-
-    if let Some(vaddr) = acquire_mapping_locked(&mut regions, start, span) {
-        return Ok(vaddr + paddr.align_offset_4k());
-    }
-
-    let limit = iomap_window();
-    let hint = limit.start;
-    let mapped_start = kernel_aspace
-        .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
-        .ok_or(IoMapError::NoMemory)?;
-
-    kernel_aspace
-        .map_linear(
-            mapped_start,
-            start,
-            span,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
-        )
+    // Registry and PTE locks protect only preparation. Neither is held across
+    // the synchronous publication boundary, and the task update owner excludes
+    // another map/unmap from publishing this region prematurely.
+    DEVICE_REGISTRY
+        .lock()
+        .try_reserve(1)
+        .map_err(|_| IoMapError::NoMemory)?;
+    let (mapped_start, change) = {
+        let mut kernel_aspace = kernel_layout().inner.lock();
+        let limit = iomap_window();
+        let mapped_start = kernel_aspace
+            .find_free_area(limit.start, span, limit, memaddr::PAGE_SIZE_4K)
+            .ok_or(IoMapError::NoMemory)?;
+        let change = kernel_aspace
+            .prepare_kernel_linear_map(
+                mapped_start,
+                start,
+                span,
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
+            )
+            .map_err(|_| IoMapError::MappingFailed)?;
+        (mapped_start, change)
+    };
+    update
+        .finish(change)
         .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown is already handled by `PageTableMut::finish()`:
-    // `map_linear` → `Backend::map` → `pgtbl.modify()` creates a
-    // `PageTableMut`, whose `Drop` calls `finish()` →
-    // `flush_tlb_all_cpus()` (kernel page table), which does a local
-    // flush + IPI broadcast to all online CPUs.
 
     let region = DeviceRegion {
         paddr: start,
@@ -172,8 +181,7 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
-    regions.push(RegionEntry {
+    DEVICE_REGISTRY.lock().push(RegionEntry {
         region,
         refs: RegionRefs::Counted(1),
     });
@@ -186,6 +194,9 @@ pub fn iomap_device(
 /// is torn down. Pinned (statically registered) regions and addresses that do
 /// not belong to any runtime mapping are ignored.
 pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
+    let mut update = kernel_layout()
+        .begin_update()
+        .map_err(|_| IoMapError::MappingFailed)?;
     let mut regions = DEVICE_REGISTRY.lock();
     let Some(index) = regions.iter().position(|entry| {
         let Some(base) = entry.region.vaddr else {
@@ -194,31 +205,35 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
         let Some(region_end) = base.checked_add(entry.region.size) else {
             return false;
         };
-        matches!(entry.refs, RegionRefs::Counted(_)) && base <= vaddr && vaddr < region_end
+        matches!(entry.refs, RegionRefs::Counted(_) | RegionRefs::Retiring)
+            && base <= vaddr
+            && vaddr < region_end
     }) else {
         return Ok(());
     };
 
-    let RegionRefs::Counted(count) = regions[index].refs else {
-        return Ok(());
-    };
-    if count > 1 {
-        regions[index].refs = RegionRefs::Counted(count - 1);
-        return Ok(());
+    match regions[index].refs {
+        RegionRefs::Counted(count) if count > 1 => {
+            regions[index].refs = RegionRefs::Counted(count - 1);
+            return Ok(());
+        }
+        RegionRefs::Counted(_) => regions[index].refs = RegionRefs::Retiring,
+        RegionRefs::Retiring => {}
+        RegionRefs::Pinned => return Ok(()),
     }
 
-    let entry = regions.swap_remove(index);
+    let entry = regions[index];
     let Some(base) = entry.region.vaddr else {
         return Ok(());
     };
     drop(regions);
 
     kernel_layout()
-        .lock()
-        .unmap(base, entry.region.size)
+        .unmap_in_update(&mut update, base, entry.region.size)
         .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown already handled by `PageTableMut::finish()` via
-    // `MmSpace::unmap` → `Backend::unmap` → `pgtbl.modify()` → `Drop`.
+    // Registered references remain visible until revocation completes, so an
+    // error never loses the release identity or authorizes virtual-address reuse.
+    DEVICE_REGISTRY.lock().swap_remove(index);
     Ok(())
 }
 
@@ -252,7 +267,10 @@ fn acquire_mapping_locked(
         let Some(region_end) = entry.region.paddr.checked_add(entry.region.size) else {
             return false;
         };
-        entry.region.vaddr.is_some() && entry.region.paddr <= paddr && region_end >= req_end
+        entry.refs != RegionRefs::Retiring
+            && entry.region.vaddr.is_some()
+            && entry.region.paddr <= paddr
+            && region_end >= req_end
     })?;
 
     let entry = &mut regions[index];
@@ -262,3 +280,5 @@ fn acquire_mapping_locked(
     }
     Some(mapped_start + paddr.sub_addr(entry.region.paddr))
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/iomap.rs");

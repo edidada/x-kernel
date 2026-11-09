@@ -841,3 +841,9 @@ acknowledges this device's interrupt status and sets the hint. The timer-side
 readiness probe only reads the hint and never touches the ISR. Neither path
 pops or recycles descriptors. Event reads set the hint from the actual dequeue
 result, so an empty queue clears it only after a task observes it.
+
+The device-scoped DMA backend separates contexts by operation: streaming
+map/unmap and metadata remain non-sleeping under the RNG IRQ-safe request lock;
+coherent queue construction and final destruction follow the provider's task
+context contract. A host must retain its device owner through IRQ drain before
+final queue destruction. Inline RNG completion releases only streaming mappings.

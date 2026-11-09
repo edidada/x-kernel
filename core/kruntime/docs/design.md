@@ -440,6 +440,8 @@ late-init thread (Internal, PID-less):
         -> INITED_CPUS += 1 (release AP service initialization)
         -> wait until is_init_ok() (all AP services prepared)
         -> [smp] mark_all_cpus_started (enable TLB shootdowns)
+    -> memspace::enable_runtime_mapping (task/IRQ-on mapping admission)
+    -> kdma::init_streaming_pool (prepare backing before drivers)
     -> krcu::init_service, kworkng::runtime::init
     -> khal::console::prepare_input (optional IRQ input, polled fallback)
     -> [fs] init_device_discovery
@@ -689,3 +691,17 @@ System suspend/resume coordination belongs to `core/kpm`, independently of
 runtime bring-up. See `../../kpm/docs/design.md` for the transaction, platform
 contract and cooperative task-freezing sequence. Runtime does not own PM
 admission or expose a compatibility PM module.
+
+## DMA and kernel mapping readiness
+
+Before AP startup, `seal_boot_mapping` closes local-only kernel mapping
+completion. After all CPU interrupt/TLB services are ready,
+`enable_runtime_mapping` enables task-owned mutation and the runtime prepares
+kdma's fixed streaming pool before driver publication. Pool preparation is
+best effort: failure is logged and boot continues. A later sleepable-task
+streaming map can retry preparation; IRQ submit/completion returns an error if
+backing is missing and never initializes mappings. The short mapping read
+lock remains IRQ-safe; mutation completes remote TLBs outside that lock.
+Regression coverage includes a real timer IRQ reading metadata after task unlock,
+concurrent DMA lifetimes/root copies, prepared IRQ-off streaming, and confirmed
+retirement using existing PageRef holds. Rejection alone is not a progress test.
