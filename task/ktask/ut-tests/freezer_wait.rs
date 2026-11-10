@@ -20,9 +20,6 @@ fn until_blocked(task: &KtaskRef) {
 
 #[def_test(serial)]
 fn idle_freezable_wait_acknowledges_without_work_wake_and_retains_work_hint() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let returned = Arc::new(AtomicBool::new(false));
     let wake_slot = Arc::new(kspin::SpinNoIrq::new(None));
     let slot = wake_slot.clone();
@@ -56,9 +53,6 @@ fn idle_freezable_wait_acknowledges_without_work_wake_and_retains_work_hint() {
 
 #[def_test(serial)]
 fn request_before_freezable_park_is_confirmed_and_work_hint_survives_thaw() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let ready = Arc::new(WaitQueue::new());
     let proceed = Arc::new(AtomicBool::new(false));
     let wake_slot = Arc::new(kspin::SpinNoIrq::new(None));
@@ -95,9 +89,6 @@ fn request_before_freezable_park_is_confirmed_and_work_hint_survives_thaw() {
 
 #[def_test(serial)]
 fn cancellation_releases_idle_acknowledgment_and_clears_wait_opt_in() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let task = crate::spawn(|| {
         PreparedTaskWait::prepare()
             .unwrap()

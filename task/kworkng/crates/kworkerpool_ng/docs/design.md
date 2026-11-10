@@ -251,3 +251,8 @@ prepared wake hint. Stop/join must occur after thaw. Startup still completes CPU
 coverage or joins rollback, and no shared services are replaced by tests.
 This API supplies task cooperation only: it does not stop producers or pause
 queues/IRQs, discover PM exemptions, wire kpm, or implement SMP suspend.
+
+SMP regression coverage pins independent real workers to every present CPU and
+records their callback CPU IDs. Three freeze/notify/thaw rounds verify Frozen
+state, exact completion counts, persistent business demand and cleanup. These
+software tests keep all CPUs online; they do not establish SMP platform suspend.

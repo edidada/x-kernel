@@ -142,9 +142,6 @@ fn normal_runtime_stop_is_scoped_to_its_owner() {
 
 #[def_test(serial)]
 fn cooperative_manager_freezes_idle_and_defers_stop_until_thaw() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let runtime = NormalRuntime::<Empty>::start_with_policy(
         khal::percpu::this_cpu_id(),
         NonZeroUsize::new(1).unwrap(),

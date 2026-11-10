@@ -445,9 +445,6 @@ fn normal_growth_notification_does_not_spin_when_capacity_is_full() {
 
 #[def_test(serial)]
 fn cooperative_idle_worker_freezes_without_work_and_defers_new_demand_until_thaw() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let (service, worker) =
         prepare_with_policy(khal::percpu::this_cpu_id(), NormalFreezePolicy::Cooperative);
     let probe = probe(0, false);
@@ -475,9 +472,6 @@ fn cooperative_idle_worker_freezes_without_work_and_defers_new_demand_until_thaw
 
 #[def_test(serial)]
 fn cooperative_worker_confirms_only_after_claimed_callback_finishes() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let (service, worker) =
         prepare_with_policy(khal::percpu::this_cpu_id(), NormalFreezePolicy::Cooperative);
     let mut probe = probe(1, false);
@@ -520,9 +514,6 @@ fn cooperative_worker_confirms_only_after_claimed_callback_finishes() {
 
 #[def_test(serial)]
 fn default_idle_worker_does_not_implicitly_acknowledge_freezing() {
-    if kcpu_id_map::nr_cpus() != 1 {
-        return unittest::TestResult::Ignored;
-    }
     let (service, worker) = prepare();
     let running = service.clone();
     let task = start(&service, move || running.run_worker(worker));
@@ -536,4 +527,58 @@ fn default_idle_worker_does_not_implicitly_acknowledge_freezing() {
         Err(ktask::freezer::FreezeError::TimedOut)
     ));
     stop(&service, worker, task);
+}
+
+/// Real workers on every present CPU retain pending work across repeated holds.
+/// The boot-installed scheduler/timers remain available; all sources are private.
+#[def_test(serial)]
+fn smp_cooperative_workers_hold_work_on_distinct_cpus_and_resume_each_round() {
+    let mut cpus = alloc::vec::Vec::new();
+    kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
+    if cpus.len() < 2 {
+        return unittest::TestResult::Ignored;
+    }
+    let mut fixtures = alloc::vec::Vec::new();
+    for cpu in cpus {
+        let (service, worker) = prepare_with_policy(cpu, NormalFreezePolicy::Cooperative);
+        let probe = probe(1, false);
+        let source = service.dispatch.create_source(probe.clone());
+        service.dispatch.notify(&source);
+        let running = service.clone();
+        let task = start(&service, move || running.run_worker(worker));
+        until(|| probe.completed.load(Ordering::Acquire) == 1
+            && task.state() == ktask::TaskState::Blocked);
+        assert_eq!(probe.last_cpu.load(Ordering::Acquire), cpu.as_usize());
+        fixtures.push((service, worker, task, probe, source));
+    }
+    let tasks: alloc::vec::Vec<_> = fixtures.iter().map(|f| f.2.clone()).collect();
+    for round in 1..=3 {
+        let cancellation = ktask::freezer::FreezeCancellation::new();
+        let frozen = ktask::freezer::freeze_tasks(
+            &tasks, TimeSpan::from_secs(30), &cancellation,
+        ).unwrap();
+        for (service, _, task, probe, source) in &fixtures {
+            assert_eq!(task.state(), ktask::TaskState::Frozen);
+            probe.pending.store(1, Ordering::Release);
+            service.dispatch.notify(source);
+            service.notification_waker().wake_by_ref();
+            ktask::wake_task(task, true);
+            assert_eq!(task.state(), ktask::TaskState::Frozen);
+            assert_eq!(probe.completed.load(Ordering::Acquire), round);
+        }
+        cancellation.cancel();
+        for (_, _, task, _, _) in &fixtures {
+            assert_eq!(task.state(), ktask::TaskState::Frozen);
+        }
+        drop(frozen);
+        for (service, _, task, probe, _) in &fixtures {
+            until(|| probe.completed.load(Ordering::Acquire) == round + 1
+                && task.state() == ktask::TaskState::Blocked);
+            assert_eq!(probe.last_cpu.load(Ordering::Acquire), service.cpu.as_usize());
+        }
+    }
+    for (service, worker, task, _, source) in fixtures {
+        stop(&service, worker, task);
+        service.dispatch.detach(&source);
+    }
 }

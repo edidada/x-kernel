@@ -145,3 +145,9 @@ worker, a blocked claimed callback that must not confirm, deferred demand,
 repeated freezing, manager stop deferred until thaw, and unchanged default
 policy. They use scoped task/provider owners and join workers/managers; the
 existing boot scheduler/timer facilities remain permanently installed.
+
+SMP cooperative task freezing uses ktask's dedicated Frozen state and
+incoming-stack confirmation; a work notification cannot release the task.
+Round identity and release-before-park are owned by ktask. Callback dependencies,
+service separation for recovery, and stop-after-thaw remain caller obligations.
+This does not add CPU parking, interrupt exclusion or a physical sleep backend.
