@@ -546,17 +546,18 @@ fn smp_cooperative_workers_hold_work_on_distinct_cpus_and_resume_each_round() {
         service.dispatch.notify(&source);
         let running = service.clone();
         let task = start(&service, move || running.run_worker(worker));
-        until(|| probe.completed.load(Ordering::Acquire) == 1
-            && task.state() == ktask::TaskState::Blocked);
+        until(|| {
+            probe.completed.load(Ordering::Acquire) == 1
+                && task.state() == ktask::TaskState::Blocked
+        });
         assert_eq!(probe.last_cpu.load(Ordering::Acquire), cpu.as_usize());
         fixtures.push((service, worker, task, probe, source));
     }
     let tasks: alloc::vec::Vec<_> = fixtures.iter().map(|f| f.2.clone()).collect();
     for round in 1..=3 {
         let cancellation = ktask::freezer::FreezeCancellation::new();
-        let frozen = ktask::freezer::freeze_tasks(
-            &tasks, TimeSpan::from_secs(30), &cancellation,
-        ).unwrap();
+        let frozen =
+            ktask::freezer::freeze_tasks(&tasks, TimeSpan::from_secs(30), &cancellation).unwrap();
         for (service, _, task, probe, source) in &fixtures {
             assert_eq!(task.state(), ktask::TaskState::Frozen);
             probe.pending.store(1, Ordering::Release);
@@ -567,14 +568,19 @@ fn smp_cooperative_workers_hold_work_on_distinct_cpus_and_resume_each_round() {
             assert_eq!(probe.completed.load(Ordering::Acquire), round);
         }
         cancellation.cancel();
-        for (_, _, task, _, _) in &fixtures {
+        for (_, _, task, ..) in &fixtures {
             assert_eq!(task.state(), ktask::TaskState::Frozen);
         }
         drop(frozen);
         for (service, _, task, probe, _) in &fixtures {
-            until(|| probe.completed.load(Ordering::Acquire) == round + 1
-                && task.state() == ktask::TaskState::Blocked);
-            assert_eq!(probe.last_cpu.load(Ordering::Acquire), service.cpu.as_usize());
+            until(|| {
+                probe.completed.load(Ordering::Acquire) == round + 1
+                    && task.state() == ktask::TaskState::Blocked
+            });
+            assert_eq!(
+                probe.last_cpu.load(Ordering::Acquire),
+                service.cpu.as_usize()
+            );
         }
     }
     for (service, worker, task, _, source) in fixtures {

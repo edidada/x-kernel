@@ -12,7 +12,8 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::WaitQueue;
 
-pub(super) static SERIAL: klazy::Lazy<kmutex::Mutex<()>> = klazy::Lazy::new(|| kmutex::Mutex::new(()));
+pub(super) static SERIAL: klazy::Lazy<kmutex::Mutex<()>> =
+    klazy::Lazy::new(|| kmutex::Mutex::new(()));
 
 pub(super) fn wait_for_request(progress: &Progress, task: &KtaskRef) {
     CompletionWait::prepare()
@@ -302,8 +303,12 @@ fn confirmation_follows_outgoing_observer_and_completed_stack_switch() {
         wait_for_request(&progress.0, &target);
         crate::activate_task(&target);
     });
-    let frozen = freeze_tasks(core::slice::from_ref(&task), TimeSpan::from_secs(30), &cancellation)
-        .unwrap();
+    let frozen = freeze_tasks(
+        core::slice::from_ref(&task),
+        TimeSpan::from_secs(30),
+        &cancellation,
+    )
+    .unwrap();
     assert!(probe.0.load(Ordering::Acquire));
     assert_eq!(task.state(), TaskState::Frozen);
     #[cfg(feature = "smp")]
@@ -317,17 +322,21 @@ fn confirmation_follows_outgoing_observer_and_completed_stack_switch() {
 fn late_switch_completion_cannot_confirm_a_replacement_request() {
     let _serial = SERIAL.lock();
     let _admission = Admission::acquire().unwrap();
-    let make_request = || Arc::new(Request {
-        round: Arc::new(Round {
-            progress: FreezeCancellation::new().0,
-            is_released: AtomicBool::new(false),
-        }),
-        is_confirmed: AtomicBool::new(false),
-        has_entered: AtomicBool::new(true),
-    });
+    let make_request = || {
+        Arc::new(Request {
+            round: Arc::new(Round {
+                progress: FreezeCancellation::new().0,
+                is_released: AtomicBool::new(false),
+            }),
+            is_confirmed: AtomicBool::new(false),
+            has_entered: AtomicBool::new(true),
+        })
+    };
     // An unpublished task models the old handoff without racing a real CPU.
     let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
-        || {}, "freeze-round-identity".into(), 0x4000,
+        || {},
+        "freeze-round-identity".into(),
+        0x4000,
     ));
     let old = make_request();
     *task.freeze_request.lock() = Some(old.clone());

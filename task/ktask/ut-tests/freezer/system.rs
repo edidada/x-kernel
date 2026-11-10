@@ -70,7 +70,9 @@ fn snapshot_tracks_admitted_tasks_but_not_detached_or_retired_tasks() {
     drop(gate);
     crate::activate_task(&detached);
     assert_eq!(detached.try_join().unwrap(), 0);
-    while !detached.is_exit_complete.load(Ordering::Acquire) { crate::yield_now(); }
+    while !detached.is_exit_complete.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
     let gate = PublicationGate::acquire().unwrap();
     assert!(!contains(&gate.snapshot(), &detached));
 }
@@ -158,9 +160,12 @@ fn task_admitted_before_closure_cannot_escape_system_freezing() {
     let guard = freeze_system_tasks(&exemptions, TimeSpan::from_secs(5), &cancellation).unwrap();
     assert!(!ran.load(Ordering::Acquire));
     assert!(!newborn_ran.load(Ordering::Acquire));
-    assert!(task.freeze_request.lock().as_ref().is_some_and(|request| {
-        request.is_confirmed.load(Ordering::Acquire)
-    }));
+    assert!(
+        task.freeze_request
+            .lock()
+            .as_ref()
+            .is_some_and(|request| { request.is_confirmed.load(Ordering::Acquire) })
+    );
     drop(guard);
     let child = newborn.lock().take().unwrap();
     assert_eq!(child.try_join().unwrap(), 0);
@@ -257,5 +262,4 @@ fn system_freezer_rejects_invalid_context() {
             Err(FreezeError::InvalidContext)
         ));
     }
-
 }
