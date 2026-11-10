@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Platform initialization hooks for kplat-x86_64.
+
+use kbuild_config::TIMER_FREQUENCY_HZ;
+use khal::mem::pa;
+use kplat::boot::{BootHandler, BootInfo};
+
+fn io_apic_paddr_from_firmware_or_fallback() -> khal::mem::PhysAddr {
+    khal::firmware::devices::io_apic_paddr()
+        .map(|addr| pa!(addr))
+        .unwrap_or_else(|| {
+            warn!("ACPI MADT IOAPIC not found, fallback to static IOAPIC base");
+            pa!(0xFEC0_0000)
+        })
+}
+
+#[kiface::provide]
+impl BootHandler {
+    fn prepare_boot_memory(boot_info: &BootInfo) {
+        crate::peripherals::bootmem::init_ap_trampoline_page(boot_info);
+    }
+
+    fn firmware_init(_boot_info: &BootInfo) {}
+
+    fn early_driver_init() {
+        clocksource_driver::x86_lapic_tsc::early_init(
+            clocksource_driver::x86_lapic_tsc::LapicTimerConfig::platform_static(
+                ktime_types::Frequency::from_hz(TIMER_FREQUENCY_HZ as u64),
+            ),
+        );
+        kernel_boot::bootln!("timer init");
+        boot_console::init_stdout_ioport(
+            boot_console::boot_console_io_port(),
+            Some(
+                kirq::IrqDesc::new(4, kirq::IrqTrigger::EdgeRising)
+                    .with_source(kirq::IrqSource::PlatformStatic)
+                    .with_controller(kirq::IrqController::IoApic)
+                    .with_domain(kirq::IO_APIC_DOMAIN),
+            ),
+        );
+        kernel_boot::bootln!("console driver init");
+    }
+
+    fn final_init(_boot_info: &BootInfo) {
+        x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
+        boot_console::register_input_irq_handler();
+        clocksource_driver::x86_lapic_tsc::init_primary();
+    }
+
+    #[cfg(feature = "smp")]
+    fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
+        x86_apic::init_secondary();
+        clocksource_driver::x86_lapic_tsc::init_secondary();
+    }
+}

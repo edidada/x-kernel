@@ -1,0 +1,2 @@
+bsp-opi5plus BSP dts binding headers (OrangePi 5 Plus BSP numbering)
+pin: RK3588 BSP, vendored from adaptation branch

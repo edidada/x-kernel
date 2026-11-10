@@ -1,0 +1,24 @@
+[package]
+name = "devnode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Userland device-node projection for the device model: data-driven devtmpfs/sysfs/uevent registry"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "devnode", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+# The node registry key is the class publication handle (`PublicationId`):
+# one id space, no raw u64 at the publish/withdraw boundary. `driver-base`
+# is host-free; no bus or host-kernel facility enters through it.
+driver_base = { workspace = true }
+kspin.workspace = true
+ksync.workspace = true
+log.workspace = true
+unittest = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+#
+# Stable names for the rk3588 test rig's serial adapters.
+#
+# Why: the rig drives two boards plus a relay over three USB-serial
+# adapters, and /dev/ttyUSB<N> is assigned in enumeration order. Manually
+# re-plugging one cable renumbers all of them, which silently sends a board
+# run to the wrong machine (it has happened: a "kernel" run captured the
+# native-Linux reference board and produced an empty log).
+#
+# Install (on the rig host, as root):
+#   sudo install -m 0644 99-xkernel-rk3588.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=tty
+# or from the dev host:
+#   scripts/board-udev/install.sh
+#
+# Verify:
+#   ls -l /dev/ttyXK /dev/ttyREF /dev/ttyPWR
+#
+# Re-identify after swapping an adapter (serial numbers are printed on the
+# FTDI shell, and udev reports them):
+#   ls -l /dev/serial/by-id/
+#
+# Match key choice: the two FTDI adapters share vendor:product (0403:6001),
+# so only the factory serial tells them apart. Port path
+# (ID_PATH=...-usb-0:3.3:1.0) also works and is what distinguishes them
+# physically today, but it breaks as soon as a cable moves to another hub
+# port. Both keys are listed; serial is the active one.
+
+# --- x-kernel board console (FTDI FT232R, serial A5XK3RJT) ----------------
+# Port path for reference: pci-0000:05:00.0-usb-0:3.3:1.0-port0
+# ENV{ID_SERIAL_SHORT} is the id the usb_id builtin already computed
+# (verified with `udevadm info -q property -n /dev/ttyUSB0`); the ATTRS
+# form below it is the raw equivalent.
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_USB_VENDOR_ID}=="0403", \
+  ENV{ID_USB_MODEL_ID}=="6001", ENV{ID_USB_SERIAL_SHORT}=="A5XK3RJT", \
+  SYMLINK+="ttyXK", MODE="0660", GROUP="dialout"
+
+# --- native Linux reference board console (FTDI FT232R, A54LQ9PF) ---------
+# Port path for reference: pci-0000:05:00.0-usb-0:3.1:1.0-port0
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_USB_VENDOR_ID}=="0403", \
+  ENV{ID_USB_MODEL_ID}=="6001", ENV{ID_USB_SERIAL_SHORT}=="A54LQ9PF", \
+  SYMLINK+="ttyREF", MODE="0660", GROUP="dialout"
+
+# --- relay / USB power switch (CH340, no unique serial) -------------------
+# Only one CH340 on this rig, so vendor:product is enough. If a second one
+# appears, pin it by port path: ATTRS{devpath}=="3.2.4"
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_USB_VENDOR_ID}=="1a86", \
+  ENV{ID_USB_MODEL_ID}=="7523", \
+  SYMLINK+="ttyPWR", MODE="0660", GROUP="dialout"

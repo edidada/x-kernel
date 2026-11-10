@@ -1,0 +1,897 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Structures and functions for PCI bus operations.
+//!
+//! Currently, it just re-exports structures from the crate [virtio-drivers][1]
+//! and its module [`virtio_drivers::transport::pci::bus`][2].
+//!
+//! [1]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
+//! [2]: https://docs.rs/virtio-drivers/latest/virtio_drivers/transport/pci/bus/index.html
+
+#![no_std]
+
+extern crate alloc;
+
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+};
+
+use khal::firmware::devices as fw;
+// Re-export the OS-neutral firmware interrupt descriptor types so downstream
+// crates (e.g. virtio) can consume them without taking a direct `khal`
+// dependency.
+pub use khal::firmware::devices::{InterruptControllerKind, InterruptTrigger};
+use lazyinit::LazyInit;
+pub use virtio_drivers::transport::pci::bus::{
+    BarInfo, Cam, CapabilityInfo, Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo,
+    HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,
+};
+
+pub mod device_setup;
+pub mod msix;
+
+pub mod discover;
+
+/// RK3588 DesignWare root-complex host (platform driver on the same bus
+/// layer; gated behind `dw-host`, the tree is host-side by role).
+#[cfg(feature = "dw-host")]
+pub mod dw_host;
+
+use driver_base::{Bus, BusDeviceData, BusId, MatchScore};
+
+/// The PCI bus type in the driver-core device model — the single authority
+/// (Linux keeps `pci_bus_type` with the PCI subsystem in `drivers/pci`,
+/// not in the driver core).
+///
+/// Owns its device-data vocabulary ([`PciBusData`]: BDF placement +
+/// vendor/device identity) and its matching rule against [`PciMatch`] id
+/// tables. The discovery pipeline lives in [`discover`].
+pub struct PciBus;
+
+/// The PCI bus's device data: placement (BDF) and identity in one payload.
+#[derive(Debug, Clone)]
+pub struct PciBusData {
+    /// Bus-device-function placement (the `pci_dev->devfn` address).
+    pub segment: u16,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    /// Vendor/device identity for id-table matching and modalias.
+    pub vendor_id: u16,
+    pub device_id: u16,
+    /// Class/subclass (diagnostics and modalias).
+    pub class: u8,
+    pub subclass: u8,
+}
+
+impl BusDeviceData for PciBusData {
+    fn bus_id(&self) -> BusId {
+        PciBus::ID
+    }
+
+    fn path_component(&self) -> alloc::string::String {
+        alloc::format!(
+            "pci{:04x}:{:02x}/{:04x}:{:02x}:{:02x}.{}",
+            self.segment,
+            self.bus,
+            self.segment,
+            self.bus,
+            self.device,
+            self.function
+        )
+    }
+
+    fn modalias(&self) -> Option<alloc::string::String> {
+        Some(alloc::format!(
+            "pci:v{:08X}d{:08X}",
+            self.vendor_id,
+            self.device_id
+        ))
+    }
+
+    fn display_identity(&self) -> alloc::string::String {
+        alloc::format!("{:04x}:{:04x}", self.vendor_id, self.device_id)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn clone_erased(&self) -> alloc::boxed::Box<dyn BusDeviceData> {
+        alloc::boxed::Box::new(self.clone())
+    }
+}
+
+impl Bus for PciBus {
+    type DeviceData = PciBusData;
+    type IdEntry = PciMatch;
+
+    const ID: BusId = BusId("pci");
+
+    fn match_device(data: &Self::DeviceData, entry: &Self::IdEntry) -> MatchScore {
+        let device_match = entry.device_id == u16::MAX || entry.device_id == data.device_id;
+        if entry.vendor_id == data.vendor_id && device_match {
+            if entry.device_id == data.device_id {
+                MatchScore::Exact
+            } else {
+                MatchScore::Generic
+            }
+        } else {
+            MatchScore::NoMatch
+        }
+    }
+}
+
+/// One `struct pci_device_id` row, for PCI id tables.
+#[derive(Debug, Clone, Copy)]
+pub struct PciMatch {
+    pub vendor_id: u16,
+    pub device_id: u16,
+}
+
+impl PciMatch {
+    /// Exact vendor + device match.
+    pub const fn device(vendor_id: u16, device_id: u16) -> Self {
+        Self {
+            vendor_id,
+            device_id,
+        }
+    }
+
+    /// Any device from a vendor.
+    pub const fn vendor(vendor_id: u16) -> Self {
+        Self {
+            vendor_id,
+            device_id: u16::MAX,
+        }
+    }
+}
+
+impl PciMatch {
+    /// The MODALIAS this row would publish (uevent/module loading).
+    pub fn modalias(&self) -> Option<alloc::string::String> {
+        Some(alloc::format!(
+            "pci:v{vendor:08X}d{device:08X}",
+            vendor = self.vendor_id,
+            device = self.device_id
+        ))
+    }
+}
+
+#[macro_use]
+extern crate log;
+
+static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciConfigSource {
+    Static,
+    Firmware,
+    RuntimeOverride,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciInitError {
+    NoMemory,
+    InvalidRange,
+    MappingFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyInterruptRoute {
+    pub irq: usize,
+    pub trigger: fw::InterruptTrigger,
+    pub controller: fw::InterruptControllerKind,
+}
+
+impl PciInitError {
+    fn from_iomap(err: memspace::IoMapError) -> Self {
+        match err {
+            memspace::IoMapError::NoMemory => Self::NoMemory,
+            memspace::IoMapError::InvalidRange => Self::InvalidRange,
+            memspace::IoMapError::MappingFailed => Self::MappingFailed,
+        }
+    }
+}
+
+pub fn set_pci_config_space(base: u64, bus_end: u8) {
+    PCI_CONFIG_BASE_OVERRIDE.store(base, Ordering::Relaxed);
+    PCI_BUS_END_OVERRIDE.store(bus_end as u32, Ordering::Relaxed);
+}
+
+/// The resolved PCI configuration window: everything discovery needs to
+/// address one host — every field is firmware- or config-sourced, never
+/// assumed.
+#[derive(Debug, Clone, Copy)]
+pub struct PciConfigWindow {
+    /// Physical base of the config space window.
+    pub base: u64,
+    /// First bus in the host's `bus-range` (firmware `bus-range`, or the
+    /// platform's `PCI_BUS_START`).
+    pub bus_start: u8,
+    /// Last bus in the host's `bus-range`.
+    pub bus_end: u8,
+    /// PCI segment (domain) number.
+    pub segment: u16,
+    pub source: PciConfigSource,
+}
+
+pub fn pci_config_space() -> PciConfigWindow {
+    let base = PCI_CONFIG_BASE_OVERRIDE.load(Ordering::Relaxed);
+    let bus_end = PCI_BUS_END_OVERRIDE.load(Ordering::Relaxed);
+    if base != 0 && bus_end != u32::MAX {
+        log::info!(
+            "PCI config from runtime override: ecam={:#x} bus_end={:#x}",
+            base,
+            bus_end
+        );
+        return PciConfigWindow {
+            base,
+            // Runtime overrides carry no bus-range/segment of their own
+            // (test/debug entry): segment 0, bus 0-start.
+            bus_start: 0,
+            bus_end: bus_end as u8,
+            segment: 0,
+            source: PciConfigSource::RuntimeOverride,
+        };
+    }
+
+    // The firmware host is accepted for ANY bus-range — a non-zero
+    // `bus-range` start is a legitimate firmware statement (the old
+    // `bus_start == 0` gate silently fell back to the static config on
+    // exactly the boards whose firmware described their bus numbering).
+    if let Some(host) = fw::pci_host() {
+        log::info!(
+            "PCI host from firmware: cam={:?} segment={:#x} ecam={:#x} size={:#x} \
+             bus_range={:#x}..={:#x}",
+            host.cam,
+            host.segment,
+            host.ecam_base,
+            host.ecam_size,
+            host.bus_start,
+            host.bus_end
+        );
+        return PciConfigWindow {
+            base: host.ecam_base,
+            bus_start: host.bus_start,
+            bus_end: host.bus_end,
+            segment: host.segment,
+            source: PciConfigSource::Firmware,
+        };
+    }
+
+    if kbuild_config::PCI_ECAM_BASE == 0 {
+        log::info!("PCI: no firmware PCI host and PCI_ECAM_BASE=0; skipping PCI");
+        return PciConfigWindow {
+            base: 0,
+            bus_start: 0,
+            bus_end: 0,
+            segment: 0,
+            source: PciConfigSource::Static,
+        };
+    }
+    // The build-time fallback exists ONLY for boards whose firmware
+    // describes no PCI host at all — every real platform carries its
+    // facts (ECAM base, bus-range, segment) in DT or MCFG, and those are
+    // read above. The fallback therefore assumes the degenerate identity:
+    // segment 0, bus range starting at 0.
+    log::warn!(
+        "PCI: no firmware PCI host (DT/MCFG); using build-time fallback ecam={:#x} bus_end={:#x} \
+         — boards should describe PCI in firmware",
+        kbuild_config::PCI_ECAM_BASE as u64,
+        kbuild_config::PCI_BUS_END as u8
+    );
+    PciConfigWindow {
+        base: kbuild_config::PCI_ECAM_BASE as u64,
+        bus_start: 0,
+        bus_end: kbuild_config::PCI_BUS_END as u8,
+        segment: 0,
+        source: PciConfigSource::Static,
+    }
+}
+
+pub fn pci_ecam_size(bus_end: u8, cam: Cam) -> usize {
+    let buses = bus_end as usize + 1;
+    let bus_stride = match cam {
+        Cam::MmioCam => 1usize << 16,
+        Cam::Ecam => 1usize << 20,
+    };
+    buses * bus_stride
+}
+
+pub fn iomap_mmio(
+    paddr: usize,
+    size: usize,
+    name: &'static str,
+) -> Result<NonNull<u8>, PciInitError> {
+    let vaddr = memspace::iomap_device(paddr.into(), size, name).map_err(|err| {
+        log::warn!(
+            "failed to iomap {name} at [PA:{:#x}, PA:{:#x}): {:?}",
+            paddr,
+            paddr.saturating_add(size),
+            err
+        );
+        PciInitError::from_iomap(err)
+    })?;
+    NonNull::new(vaddr.as_mut_ptr()).ok_or(PciInitError::MappingFailed)
+}
+
+/// The single boot-lifetime owner of the mapped ECAM window.
+///
+/// Every [`PciBus`] is a handle over this one mapping. The `iomap_device`
+/// reference taken at resolve time is deliberately never released: the
+/// config window must outlive all `'static` config-space aliases handed
+/// to transports, so the owner holds it for the system lifetime.
+static ECAM_MAPPING: LazyInit<EcamOwner> = LazyInit::new();
+
+/// Resolved state of the ECAM window, computed exactly once.
+enum EcamOwner {
+    /// No usable config space on this platform (PCI absent).
+    Absent,
+    /// The window exists but could not be mapped; the failure is cached
+    /// so every later `PciBus::new` reports the same error.
+    Failed(PciInitError),
+    /// The mapped window.
+    Mapped(EcamWindow),
+}
+
+struct EcamWindow {
+    base: SendPtr,
+    cam: Cam,
+    config_base: u64,
+    bus_end: u8,
+    source: PciConfigSource,
+}
+
+/// The mapped ECAM base as plain shareable data.
+///
+/// The pointer itself is never dereferenced through this wrapper; every
+/// consumer re-derives an  under its own SAFETY obligations.
+/// Sharing the address across threads is sound for the same reason a
+///  would be.
+#[derive(Clone, Copy)]
+struct SendPtr(NonNull<u8>);
+// SAFETY: the wrapped pointer is plain shareable data (the mapped ECAM
+// base); it is never dereferenced through this wrapper — consumers
+// re-derive an `MmioCam` under their own safety obligations.
+unsafe impl Send for SendPtr {}
+// SAFETY: see the Send impl.
+unsafe impl Sync for SendPtr {}
+
+impl EcamOwner {
+    fn resolve(cam: Cam) -> Self {
+        let window = pci_config_space();
+        let (config_base, bus_end, source) = (window.base, window.bus_end, window.source);
+        if config_base == 0 {
+            log::info!("PCI: no config space available; skipping PCI bus init");
+            return Self::Absent;
+        }
+        if source == PciConfigSource::Firmware
+            && let Some(host) = fw::pci_host()
+        {
+            let expected = match cam {
+                Cam::MmioCam => fw::PciHostCam::Cam,
+                Cam::Ecam => fw::PciHostCam::Ecam,
+            };
+            if host.cam != expected {
+                log::warn!(
+                    "PCI firmware host advertises {:?} but build selected {:?}; falling back to \
+                     static config",
+                    host.cam,
+                    cam
+                );
+                return Self::resolve_static(cam);
+            }
+            log::info!(
+                "PCI bus using firmware host: cam={:?} ecam={:#x} bus_end={:#x}",
+                cam,
+                config_base,
+                bus_end
+            );
+        }
+        let ecam_size = pci_ecam_size(bus_end, cam);
+        match iomap_mmio(config_base as usize, ecam_size, "pci-ecam") {
+            Ok(base) => Self::Mapped(EcamWindow {
+                base: SendPtr(base),
+                cam,
+                config_base,
+                bus_end,
+                source,
+            }),
+            Err(err) => Self::Failed(err),
+        }
+    }
+
+    fn resolve_static(cam: Cam) -> Self {
+        let config_base = kbuild_config::PCI_ECAM_BASE as u64;
+        let bus_end = kbuild_config::PCI_BUS_END as u8;
+        let ecam_size = pci_ecam_size(bus_end, cam);
+        match iomap_mmio(config_base as usize, ecam_size, "pci-ecam") {
+            Ok(base) => Self::Mapped(EcamWindow {
+                base: SendPtr(base),
+                cam,
+                config_base,
+                bus_end,
+                source: PciConfigSource::Static,
+            }),
+            Err(err) => Self::Failed(err),
+        }
+    }
+}
+
+pub struct PciHost {
+    root: PciRoot<MmioCam<'static>>,
+    config_base: u64,
+    bus_start: u8,
+    bus_end: u8,
+    segment: u16,
+    source: PciConfigSource,
+}
+
+impl PciHost {
+    /// Brings up the PCI bus over the resolved configuration window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PciInitError::InvalidRange`] when no config space exists,
+    /// and [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`]
+    /// when the ECAM window cannot be mapped.
+    /// Bring up (or attach to) the shared PCI bus over the resolved
+    /// configuration window.
+    ///
+    /// The ECAM mapping has exactly one owner ([`ECAM_MAPPING`]) for the
+    /// whole system lifetime: the first call resolves the window
+    /// (firmware host, with the kbuild static fallback) and maps it once;
+    /// every later call is a cheap handle over that same mapping — no
+    /// extra `iomap_device` reference is taken and no side effect runs.
+    /// This is the Linux `pci_remap_iospace()` model: the host bridge
+    /// config window is a boot-lifetime resource and is never unmapped,
+    /// which is also what keeps the `'static` config-space aliases (the
+    /// vendored `MmioCam` copies inside transports, the x86 MSI-X state
+    /// root) alive for as long as any device exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PciInitError::InvalidRange`] when no config space exists
+    /// (cached: platforms without PCI fail once, not per probe), and
+    /// [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`] when
+    /// the ECAM window cannot be mapped.
+    pub fn new(cam: Cam) -> Result<Self, PciInitError> {
+        let window = pci_config_space();
+        ECAM_MAPPING.call_once(|| EcamOwner::resolve(cam));
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: call_once completed immediately above"
+        )]
+        let ecam = ECAM_MAPPING.get().expect("ECAM_MAPPING call_once ran");
+        match ecam {
+            EcamOwner::Absent => Err(PciInitError::InvalidRange),
+            EcamOwner::Failed(err) => Err(*err),
+            EcamOwner::Mapped(ecam) => {
+                if ecam.cam != cam {
+                    log::warn!(
+                        "PCI: ECAM owner initialized for {:?} but {:?} requested",
+                        ecam.cam,
+                        cam
+                    );
+                    return Err(PciInitError::InvalidRange);
+                }
+                // SAFETY: the mapping is owned by `ECAM_MAPPING` for the
+                // system lifetime and covers the whole window for `cam`.
+                let mmio_cam = unsafe { MmioCam::new(ecam.base.0.as_ptr(), cam) };
+                Ok(Self {
+                    root: PciRoot::new(mmio_cam),
+                    config_base: ecam.config_base,
+                    bus_start: window.bus_start,
+                    bus_end: ecam.bus_end,
+                    segment: window.segment,
+                    source: ecam.source,
+                })
+            }
+        }
+    }
+
+    pub fn config_base(&self) -> u64 {
+        self.config_base
+    }
+
+    pub fn bus_end(&self) -> u8 {
+        self.bus_end
+    }
+
+    /// First bus of this host's firmware-described `bus-range`.
+    pub fn bus_start(&self) -> u8 {
+        self.bus_start
+    }
+
+    /// The firmware-described PCI segment (domain) number.
+    pub fn segment(&self) -> u16 {
+        self.segment
+    }
+
+    pub fn source(&self) -> PciConfigSource {
+        self.source
+    }
+
+    /// Mutable access to the bus root (config space via the public
+    /// `configuration_access` field of the vendored `PciRoot`).
+    pub fn root_mut(&mut self) -> &mut PciRoot<MmioCam<'static>> {
+        &mut self.root
+    }
+}
+
+pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
+    // A DesignWare host bridge is not a `pci-host-*-generic` node, so the
+    // generic firmware query cannot see its `ranges`; the controller published
+    // the window it parsed itself. Check that first.
+    #[cfg(feature = "dw-host")]
+    if let Some((base, size)) = crate::dw_host::published_bar_window() {
+        log::info!(
+            "PCI BAR allocator from the DW host's DT ranges: cpu_base={base:#x} size={size:#x}"
+        );
+        return Some((base, size, PciConfigSource::Static));
+    }
+
+    if let Some(range) = fw::pci_bar_range() {
+        log::info!(
+            "PCI BAR allocator from firmware: cpu_base={:#x} size={:#x} prefetchable={}",
+            range.cpu_base,
+            range.size,
+            range.prefetchable
+        );
+        return Some((range.cpu_base, range.size, PciConfigSource::Firmware));
+    }
+
+    let range = kbuild_config::PCI_RANGES
+        .get(1)
+        .copied()
+        .map(|(start, len)| (start, len, PciConfigSource::Static));
+    if let Some((start, len, _)) = range {
+        log::info!(
+            "PCI BAR allocator from kbuild: cpu_base={:#x} size={:#x}",
+            start,
+            len
+        );
+    }
+    range
+}
+
+pub fn legacy_interrupt_route<C: ConfigurationAccess>(
+    root: &PciRoot<C>,
+    bdf: DeviceFunction,
+) -> Option<LegacyInterruptRoute> {
+    let word = root.configuration_access.read_word(bdf, 0x3C);
+    let pin = ((word >> 8) & 0xff) as u8;
+    if pin == 0 || pin == 0xff {
+        log::info!(
+            "PCI legacy IRQ route: bdf={:?} pin not programmed (pin={:#x})",
+            bdf,
+            pin
+        );
+        return None;
+    }
+    let irq = fw::pci_legacy_irq(bdf.bus, bdf.device, bdf.function, pin)?;
+    log::info!(
+        "PCI legacy IRQ from firmware: bdf={:?} pin=INT{} irq={} trigger={:?} controller={:?}",
+        bdf,
+        pin,
+        irq.irq,
+        irq.trigger,
+        irq.controller
+    );
+    Some(LegacyInterruptRoute {
+        irq: irq.irq,
+        trigger: irq.trigger,
+        controller: irq.controller,
+    })
+}
+
+/// Sequential allocator for MMIO address space used by PCI Base Address Registers.
+///
+/// This allocator manages a contiguous range of physical addresses and dispenses
+/// aligned chunks suitable for memory-mapped I/O regions. Each allocation must
+/// be power-of-two sized and will be naturally aligned to that size.
+pub struct PciRangeAllocator {
+    begin_addr: u64,
+    end_addr: u64,
+    cursor_addr: u64,
+}
+
+/// Whether `info` is a memory BAR that must be (re)assigned before use.
+///
+/// Two cases count as unassigned. The register reads zero (nobody programmed
+/// it). Or it holds an address outside `window`, the host's MMIO window: U-Boot
+/// enumerates PCI on its own address map before the kernel starts, and its BAR
+/// values can point into DRAM, where the device is unreachable. Trusting a
+/// non-zero register is therefore not enough -- it has to be inside the window
+/// the host decodes.
+pub(crate) fn memory_bar_needs_assignment(info: &BarInfo, window: Option<(u64, u64)>) -> bool {
+    let BarInfo::Memory { address, size, .. } = *info else {
+        return false;
+    };
+    if size == 0 {
+        return false;
+    }
+    if address == 0 {
+        return true;
+    }
+    match window {
+        Some((begin, end)) => address < begin || address.saturating_add(size) > end,
+        None => false,
+    }
+}
+
+/// Whether `bdf` has a non-zero memory BAR outside `window`, i.e. one that
+/// firmware left behind and that must be moved.
+fn has_stale_memory_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    window: (u64, u64),
+) -> bool {
+    let mut bar = 0;
+    while bar < 6 {
+        let takes_two = match root.bar_info(bdf, bar) {
+            Ok(Some(info)) => {
+                let stale = matches!(
+                    &info,
+                    BarInfo::Memory { address, .. } if *address != 0
+                ) && memory_bar_needs_assignment(&info, Some(window));
+                if stale {
+                    return true;
+                }
+                info.takes_two_entries()
+            }
+            _ => false,
+        };
+        bar += if takes_two { 2 } else { 1 };
+    }
+    false
+}
+
+/// Assigns unassigned memory BARs from `allocator`, logs the final BAR
+/// layout, and enables IO / memory / bus-master command bits.
+///
+/// # Errors
+///
+/// Returns [`PciInitError::NoMemory`] when the allocator cannot satisfy a
+/// BAR request.
+///
+/// A function with unassigned memory BARs but no allocation range fails
+/// with [`PciInitError::NoMemory`] — a per-device configuration error the
+/// caller reports (discovery skips the function) rather than a panic.
+pub fn configure_device<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    allocator: &mut Option<PciRangeAllocator>,
+) -> Result<(), PciInitError> {
+    let window = allocator.as_ref().map(PciRangeAllocator::window);
+    if let Some(window) = window {
+        stop_decoding_while_moving_bars(root, bdf, window);
+    }
+
+    let mut bar = 0;
+    while bar < 6 {
+        let Some(info) = read_bar(root, bdf, bar)? else {
+            bar += 1;
+            continue;
+        };
+        let takes_two = info.takes_two_entries();
+        if memory_bar_needs_assignment(&info, window) {
+            assign_memory_bar(root, bdf, bar, &info, allocator)?;
+        }
+        log_bar(bar, &info);
+        bar += if takes_two { 2 } else { 1 };
+    }
+
+    let (_status, cmd) = root.get_status_command(bdf);
+    root.set_command(
+        bdf,
+        cmd | Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
+    );
+    // Bus master has to be on for the function to DMA at all, and a config
+    // write that silently failed would look exactly like "the device never
+    // fetched a descriptor", so the value is read back and logged.
+    let (_status, after) = root.get_status_command(bdf);
+    if !after.contains(Command::BUS_MASTER) {
+        log::warn!(
+            "pci: {bdf:?} bus master did not stick (command {:#06x})",
+            after.bits()
+        );
+    } else {
+        log::info!("pci: {bdf:?} command {:#06x} (bus master on)", after.bits());
+    }
+    Ok(())
+}
+
+fn read_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    bar: u8,
+) -> Result<Option<BarInfo>, PciInitError> {
+    root.bar_info(bdf, bar)
+        .map_err(|_| PciInitError::InvalidRange)
+}
+
+/// Stops the device decoding memory/IO if firmware left BARs outside `window`.
+///
+/// The window is what this host decodes; a BAR outside it points somewhere
+/// else entirely (U-Boot's own map, often DRAM), so decoding must be off before
+/// the register changes under the device.
+fn stop_decoding_while_moving_bars<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    window: (u64, u64),
+) {
+    if !has_stale_memory_bar(root, bdf, window) {
+        return;
+    }
+    let (_, command) = root.get_status_command(bdf);
+    root.set_command(bdf, command & !(Command::IO_SPACE | Command::MEMORY_SPACE));
+    log::info!(
+        "pci: {:?} has BARs outside [{:#x}, {:#x}); reassigning with decode off",
+        bdf,
+        window.0,
+        window.1
+    );
+}
+
+/// Allocates an address for `info`'s BAR and writes it into config space.
+///
+/// A function needing assignment with no allocation range is a per-device
+/// configuration failure, propagated so discovery can skip this function
+/// instead of taking the system down.
+fn assign_memory_bar<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    bar: u8,
+    info: &BarInfo,
+    allocator: &mut Option<PciRangeAllocator>,
+) -> Result<(), PciInitError> {
+    let BarInfo::Memory {
+        address_type,
+        address,
+        size,
+        ..
+    } = *info
+    else {
+        return Ok(());
+    };
+    let new_addr = allocator
+        .as_mut()
+        .ok_or(PciInitError::NoMemory)?
+        .alloc_buf(size)
+        .ok_or(PciInitError::NoMemory)?;
+    match address_type {
+        MemoryBarType::Width32 => root.set_bar_32(bdf, bar, new_addr as _),
+        MemoryBarType::Width64 => root.set_bar_64(bdf, bar, new_addr),
+        MemoryBarType::Below1MiB => {
+            // "Map me below 1 MiB" -- no allocator window can honour that, and
+            // no compliant device here asks for it.
+            log::warn!(
+                "pci: {:?} BAR {} wants an address below 1 MiB; leaving it",
+                bdf,
+                bar
+            );
+            return Ok(());
+        }
+    }
+    log::info!(
+        "pci: {:?} BAR {} [{:#x}, {:#x}){}",
+        bdf,
+        bar,
+        new_addr,
+        new_addr + size,
+        if address == 0 {
+            ""
+        } else {
+            " (moved off firmware's address)"
+        }
+    );
+    Ok(())
+}
+
+fn log_bar(bar: u8, info: &BarInfo) {
+    match *info {
+        BarInfo::IO { address, size } => {
+            if address > 0 && size > 0 {
+                log::debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
+            }
+        }
+        BarInfo::Memory {
+            address_type,
+            prefetchable,
+            address,
+            size,
+        } => {
+            if address > 0 && size > 0 {
+                log::debug!(
+                    "  BAR {}: MEM [{:#x}, {:#x}){}{}",
+                    bar,
+                    address,
+                    address + size,
+                    if address_type == MemoryBarType::Width64 {
+                        " 64bit"
+                    } else {
+                        ""
+                    },
+                    if prefetchable { " pref" } else { "" },
+                );
+            }
+        }
+    }
+}
+
+impl PciRangeAllocator {
+    /// Constructs a new allocator managing the specified address range.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The starting physical address of the MMIO region
+    /// * `length` - The total size in bytes of the allocatable region
+    pub const fn new(start: u64, length: u64) -> Self {
+        Self {
+            begin_addr: start,
+            end_addr: start.saturating_add(length),
+            cursor_addr: start,
+        }
+    }
+
+    /// The `[begin, end)` physical window this allocator hands out.
+    ///
+    /// This is also the window the host decodes: a BAR outside it is not
+    /// reachable here, whatever firmware programmed into the register.
+    pub const fn window(&self) -> (u64, u64) {
+        (self.begin_addr, self.end_addr)
+    }
+
+    /// Attempts to allocate an aligned MMIO region of the requested size.
+    ///
+    /// # Arguments
+    ///
+    /// * `length` - The requested allocation size. Must be a power of two.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(address)` - The base address of the allocated region, aligned to `length`
+    /// * `None` - If `length` is not a power of two or insufficient space remains
+    ///
+    /// # Alignment guarantee
+    ///
+    /// The returned address is guaranteed to be a multiple of `length`, ensuring
+    /// natural alignment for the allocated region.
+    pub fn alloc_buf(&mut self, length: u64) -> Option<u64> {
+        // Validate that length is a power of two (required for alignment)
+        if length == 0 || (length & (length.wrapping_sub(1))) != 0 {
+            return None;
+        }
+
+        // Calculate the aligned starting address for this allocation
+        let aligned_addr = self.compute_aligned_address(length)?;
+
+        // Verify that the full allocation fits within our managed range
+        let allocation_end = aligned_addr.checked_add(length)?;
+        if allocation_end > self.end_addr {
+            return None;
+        }
+
+        // Commit the allocation by advancing our free pointer
+        self.cursor_addr = allocation_end;
+        Some(aligned_addr)
+    }
+
+    /// Computes the next address aligned to the given boundary.
+    ///
+    /// Returns `None` if alignment calculation would overflow.
+    fn compute_aligned_address(&self, alignment: u64) -> Option<u64> {
+        // Calculate the alignment mask (e.g., for alignment=4096, mask=4095)
+        let alignment_mask = alignment.wrapping_sub(1);
+
+        // Apply ceiling alignment: (addr + mask) & ~mask
+        let adjusted = self.cursor_addr.checked_add(alignment_mask)?;
+        Some(adjusted & !alignment_mask)
+    }
+}

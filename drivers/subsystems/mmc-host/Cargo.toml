@@ -1,0 +1,20 @@
+[package]
+name = "subsys-mmc-host"
+description = "Host-side services for the MMC subsystem: task-context transfer wait"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["mmc", "driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+subsys_mmc = { workspace = true }
+kerrno = { workspace = true }
+kpoll = { workspace = true }
+ktask = { workspace = true }
+
+[lints]
+workspace = true

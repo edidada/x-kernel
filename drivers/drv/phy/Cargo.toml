@@ -1,0 +1,36 @@
+[package]
+name = "drv-phy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core phy provider drivers (rk3588 usb2phy / naneng-combphy / pcie3-phy)"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["phy", "rk3588", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+rk3588-usb2phy = []
+rk3588-usbdp = []
+rk3588-combphy = []
+rk3588-pcie3phy = []
+
+[dependencies]
+driver_base = { workspace = true }
+driver_host = { workspace = true }
+kphy = { workspace = true }
+# The usb2 phy publishes its 480 MHz output as a clock, so consumers (the EHCI
+# and DWC3 controllers) can resolve the phandle their `clocks` entry names.
+kclk = { workspace = true }
+# The PHY holds the 480m clock enable token across calls.
+ksync = { workspace = true }
+of = { workspace = true }
+khal = { workspace = true }
+kspin = { workspace = true }
+ktime_types = { workspace = true }
+log.workspace = true
+
+[lints]
+workspace = true

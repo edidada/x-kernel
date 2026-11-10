@@ -1,0 +1,58 @@
+[package]
+name = "kplat-aarch64"
+description = "AArch64 platform implementation and peripheral drivers for the `kplat` hardware abstraction layer."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[package.metadata.cargo-shear]
+# kcpu is selected by platform features such as fp-simd and is not referenced
+# directly in every platform configuration.
+ignored = ["kcpu"]
+
+[features]
+default = []
+fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
+smp = ["kplat/smp"]
+nmi = ["kplat/nmi"]
+nmi-pseudo = ["nmi", "irqchip_driver/nmi-pseudo"]
+nmi-hardware = ["nmi", "irqchip_driver/nmi-hardware"]
+nmi-pmu = ["nmi", "pmu"]
+pmu = ["kplat/pmu", "dep:aarch64-pmuv3", "dep:kirq"]
+kvm-guest-mem-share = []
+kvm-mmio-guard = []
+vmm = ["clocksource_driver/vmm"]
+
+[dependencies]
+log = "0.4"
+boot_console = { workspace = true }
+irqchip_driver = { workspace = true }
+kirq = { workspace = true, optional = true }
+of = { workspace = true }
+khal = { workspace = true }
+kcpu = { workspace = true }
+kcpu_id_map = { workspace = true }
+kerrno = { workspace = true }
+kiface = { workspace = true }
+kplat = { workspace = true }
+kbuild_config = { workspace = true }
+kernel_boot = { workspace = true }
+klazy = { workspace = true }
+clocksource_driver = { workspace = true }
+memaddr = { workspace = true }
+unittest = { workspace = true }
+lazyinit = "0.2"
+heapless = "0.9"
+karch = { workspace = true }
+aarch64-pmuv3 = { workspace = true, optional = true }
+kcpu_slot = { workspace = true }
+kspin = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["aarch64-unknown-none"]
+
+[lints]
+workspace = true

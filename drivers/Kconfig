@@ -1,0 +1,655 @@
+menu "Drivers Basic Configuration"
+
+config PSCI_METHOD
+    string "PSCI Method"
+    default "hvc"
+    depends on ARCH_AARCH64
+    help
+      Specify the method used for Power State Coordination Interface (PSCI) calls.
+
+config PHYS_BUS_OFFSET
+    hex "Physical Bus Offset"
+    default 0x0
+    help
+      Specify the physical bus offset for device memory mapping.
+
+config KFEAT_PCI_NON_ECAM
+    bool "Enable non-ECAM PCI discovery quirks"
+    help
+      Enable the PCI quirks needed on guests whose PCI fabric does not behave
+      like a fully standard ECAM implementation.
+
+config PCI_ECAM_BASE
+    hex "PCI ECAM Base Address"
+    default 0x40100000000
+    help
+      Define the base address for PCI Express Configuration Access Mechanism (ECAM).
+
+config PCI_BUS_END
+    hex "PCI Bus End"
+    default 0xff
+    help
+      Set the end bus number for PCI devices.
+
+config PCI_RANGES
+    rangetype "PCI Address Ranges"
+    default [(u64, u64)]
+    help
+      Specify the address ranges for PCI devices.
+
+config BOOT_CONSOLE_TYPE
+    string "Boot console transport"
+    default "mmio" if ARCH_AARCH64
+    default "mmio" if ARCH_RISCV64
+    default "ioport" if ARCH_X86_64
+    help
+      Select how the boot console is accessed before the runtime console is
+      initialized.
+      - "mmio": BOOT_CONSOLE_ADDR is a physical MMIO base address.
+      - "ioport": BOOT_CONSOLE_ADDR is a legacy x86 I/O port base.
+      Set BOOT_CONSOLE_ADDR to 0 to disable boot-stage console output.
+
+config BOOT_CONSOLE_ADDR
+    hex "Boot console base address"
+    default 0x0
+    default 0x3f8 if ARCH_X86_64
+    help
+      Define the boot console base address used only for boot-time diagnostics
+      before the runtime console driver is initialized.
+      For BOOT_CONSOLE_TYPE="mmio", this is a physical MMIO base address.
+      For BOOT_CONSOLE_TYPE="ioport", this is a legacy I/O port base.
+
+config BOOT_CONSOLE_BAUDRATE
+    hex "Boot console output pacing rate (bits/s)"
+    default 0x0
+    help
+      Pace AArch64 early-console output at one byte time per character, so a
+      fast core does not overrun a real UART's TX FIFO before the runtime
+      console driver can poll TX-ready. This does not program the UART baud
+      rate; firmware must already have configured the UART to this line rate.
+      Set to 0 for emulated UARTs (including QEMU, crosvm and virtCCA) to disable
+      pacing and its counter-register accesses. Real MMIO 16550 consoles such
+      as the RK3588 DesignWare UART may require a nonzero rate.
+      Nonzero pacing reads CNTFRQ_EL0 and the counter selected by
+      ARM_GENERIC_TIMER_MODE before runtime timer initialization. Firmware or
+      the hypervisor must permit those reads from kernel entry onward.
+
+config BOOT_CONSOLE_REG_IO_WIDTH
+    usize "Boot console MMIO access width"
+    default 1
+    help
+      The byte width used by the minimal AArch64 early boot console when it
+      writes the UART data register before the runtime device-tree console
+      driver is available. This mirrors the device-tree `reg-io-width`
+      property for real MMIO UARTs such as the RK3588 DesignWare UART. Set to
+      1 for byte accesses and 4 for 32-bit accesses.
+
+config RTC_PADDR
+    hex "RTC Base Address"
+    help
+      Define the base address for the RTC (Real-Time Clock) device.
+
+menu "IRQ Configuration"
+
+config PMU_IRQ
+    usize "PMU IRQ Number"
+    default 23
+    depends on ARCH_AARCH64
+    default 23
+    depends on ARCH_AARCH64
+    help
+      Define the interrupt number for the Performance Monitoring Unit (PMU).
+
+config ARM_GENERIC_TIMER_MODE
+    string "ARM generic timer mode"
+    depends on ARCH_AARCH64
+    default "physical"
+    help
+      Select which architected timer view EL1 should use, including the early
+      boot console counter when BOOT_CONSOLE_BAUDRATE is nonzero.
+      - "physical": use CNTPCT_EL0/CNTP_* registers.
+      - "virtual": use CNTVCT_EL0/CNTV_* registers.
+      For virtcca-like guests where EL1 physical timer access is trapped,
+      set this to "virtual".
+
+config IPI_IRQ
+    usize "IPI IRQ Number"
+    default 1
+    help
+      Define the interrupt number for Inter-Processor Interrupts (IPI).
+
+endmenu # IRQ Configuration
+
+menu "Device Drivers Features"
+
+choice
+    prompt "Virtio Bus Type"
+    default KFEAT_VIRTIO_BUS_PCI
+
+config KFEAT_VIRTIO_BUS_PCI
+    bool "PCI Virtio_Bus Support"
+    help
+      Enable PCI virtio bus support.
+
+config KFEAT_VIRTIO_BUS_MMIO
+    bool "MMIO Virtio_Bus Support"
+    help
+      Enable MMIO virtio bus support.
+
+endchoice
+
+config KFEAT_RTC
+    bool "RTC (Real Time Clock) class support"
+    default y
+    help
+      Build the real-time clock class (subsys-rtc) and its boot wall-clock
+      seeding service. The class is a consumer contract; an actual clock
+      comes from one of the KFEAT_DRIVER_RTC_* backends. Without a backend
+      the class stays empty and the wall clock keeps its epoch base.
+
+config KFEAT_DISPLAY
+    bool "Display Driver Support"
+    default y
+    help
+      Enable display driver support (virtio-gpu, fbdevice, etc).
+
+config KFEAT_INPUT
+    bool "Input Driver Support"
+    default y
+    help
+      Enable input driver support (virtio-input, inputdev, etc).
+
+config KFEAT_CHAR
+    bool "Character Driver Support"
+    default y
+    help
+      Enable runtime character device support. This covers devices that are
+      exposed after early boot handoff or through the unified driver pipeline.
+endmenu   # Device Drivers Features
+
+endmenu # Drivers Basic Configuration
+
+menu "Device Drivers"
+
+comment "Block device drivers"
+
+
+config KFEAT_DRIVER_RAMDISK_STATIC
+    bool "Back the RAM disk with an embedded filesystem image"
+    depends on KFEAT_DRIVER_RAMDISK
+    help
+      Populate the RAM disk from a build-time filesystem image embedded into
+      the kernel, instead of an empty zero-filled region, so it can be mounted
+      as a real (read-write) root filesystem. The image path is set by the
+      RAMDISK_IMG Makefile variable (default: an empty ext4 image produced by
+      'make ramdisk_img'); any ext4 image may be substituted. Select the
+      matching filesystem support (KFEAT_FS_EXT4 by default; also enable
+      KFEAT_FS_FAT if a FAT image is used). The image is embedded in .data, so
+      the kernel binary grows by roughly the image size.
+
+comment "Network drivers"
+
+
+config KFEAT_DRIVER_VIRTIO_RNG
+    bool "virtio-rng hardware driver"
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      Enable the virtio-rng hardware entropy source driver. Required on
+      virtio-based virtual platforms (QEMU/CrosVM) when guest randomness should
+      come from the VMM-provided entropy device. Enable
+      KFEAT_ENTROPY_VIRTIO_RNG separately to connect it to the entropy pool.
+
+config KFEAT_ENTROPY_VIRTIO_RNG
+    bool "Use VirtIO RNG as a trusted entropy source"
+    depends on KFEAT_DRIVER_VIRTIO_RNG
+    help
+      Connect discovered VirtIO RNG devices to the kernel entropy pool through
+      the Hwrng class. The driver can be enabled independently of this consumer.
+      Enabling this trusts the VMM / host: its bytes are mixed into the pool
+      and may establish random-number readiness without another entropy source.
+      Disable this for isolated deployments that must not trust host entropy;
+      the hardware driver can remain enabled independently.
+
+config KFEAT_ENTROPY_ARCH_CPU
+    bool "CPU instruction RNG (AArch64 RNDR / x86 RDSEED·RDRAND)"
+    default y if ARCH_AARCH64 || ARCH_X86_64
+    help
+      Mix entropy from architecture CPU RNG instructions when available:
+        - AArch64: RNDR / RNDRRS (Armv8.5 RNG extension)
+        - x86_64: RDSEED preferred, RDRAND as fallback
+
+      Defaults to n on architectures without a CPU RNG instruction path
+      (for example RISC-V today). Kept visible on all arches so shared
+      kernel crates can always reference the Kconfig constant.
+
+      This path does not trust the VMM and is preferred on bare-metal or
+      hardware-isolated deployments. VirtIO RNG remains available as a
+      fallback when this option is disabled or the CPU lacks the extension
+      (some QEMU CPU models).
+
+config KFEAT_ENTROPY_SMCCC_TRNG
+    bool "SMCCC firmware TRNG (ARM TRNG SMCCC 1.0)"
+    default y if ARCH_AARCH64
+    help
+      Mix entropy from the ARM SMCCC TRNG firmware service (TRNG_RND64) when
+      EL3/TF-A exposes it. Probe fails silently on platforms without the
+      service, such as typical QEMU virt guests. Does not require Device Tree
+      and is suitable for ACPI bare-metal platforms.
+
+      Defaults to n on non-AArch64 architectures. Kept visible on all arches
+      so shared kernel crates can always reference the Kconfig constant.
+
+config KFEAT_ENTROPY_JITTER
+    bool "Software jitter entropy (timer / interrupt timing noise)"
+    default y
+    help
+      Mix low-rate entropy collected from timing variations during busy waits.
+      Interrupts, scheduling, and cache effects perturb the measured intervals.
+      Used as a fallback when HRNG sources are unavailable, and as
+      supplementary input when they are.
+
+comment "Character drivers"
+
+config KFEAT_DRIVER_CONSOLE_PL011
+    bool "PL011 UART backend (early console)"
+    depends on ARCH_AARCH64
+    default y if MACHINE_AARCH64_QEMU
+    help
+      Build the PL011 UART backend used by the early-boot console and the
+      per-instance serial driver.
+
+config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
+    bool "NS16550 MMIO UART backend (early console)"
+    default y if MACHINE_AARCH64_RK3588
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      Build the NS16550 MMIO UART backend used by the early-boot console and
+      the per-instance serial driver.
+
+config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
+    bool "NS16550 I/O-port UART backend (early console)"
+    depends on ARCH_X86_64
+    default y if MACHINE_X86_64_QEMU
+    help
+      Build the NS16550 I/O-port UART backend used by the early-boot console
+      and the per-instance serial driver.
+
+config KFEAT_DRIVER_SERIAL_PL011
+    bool "PL011 per-instance serial driver"
+    depends on KFEAT_CHAR && ARCH_AARCH64
+    select KFEAT_DRIVER_CONSOLE_PL011
+    default y if MACHINE_AARCH64_QEMU
+    help
+      PL011 UART driver on the driver-core model: of-device-id table,
+      early-console adoption, clock consumption with automatic deferred
+      probe. The stdout UART shares the early-boot instance.
+
+config KFEAT_DRIVER_VIRTIO_BLK
+    bool "virtio-blk driver (PCI)"
+    depends on KFEAT_CHAR
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      virtio-blk on the driver-core model: const PCI id table,
+      guards-in-Data activation, block-class publication with devtmpfs
+      projection and MODALIAS.
+
+config KFEAT_DRIVER_VIRTIO_NET
+    bool "virtio-net driver (PCI)"
+    depends on KFEAT_NET
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      virtio-net on the driver-core model: const PCI id table, per-device
+      interrupt ownership, net-class publication through a detached parent.
+
+config KFEAT_DRIVER_VIRTIO_GPU
+    bool "virtio-gpu display driver"
+    depends on KFEAT_DISPLAY
+    default n
+    help
+      virtio-gpu on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_INPUT
+    bool "virtio-input driver"
+    depends on KFEAT_INPUT
+    default n
+    help
+      virtio-input on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_SOCKET
+    bool "virtio-vsock transport"
+    depends on KFEAT_VSOCK
+    default y
+    help
+      Enable the virtio-vsock transport driver used by AF_VSOCK on virtio
+      platforms.
+
+config KFEAT_DRIVER_VIRTIO_9P
+    bool "virtio-9p filesystem transport"
+    depends on KFEAT_FS_9P
+    default y
+    help
+      Enable the virtio-9p filesystem transport driver.
+
+config KFEAT_DRIVER_VIRTIO_MMIO
+    bool "virtio-mmio transport driver"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Claims DT "virtio,mmio" nodes and dispatches to the per-family
+      driver-core virtio drivers by probing the transport header.
+
+config KFEAT_PCI_DW_HOST
+    bool "RK3588 DesignWare PCIe root-complex host"
+    default n
+    help
+      The DesignWare RC host driver: DBI + iATU config access (no ECAM),
+      link training, bus-0/1 enumeration. Pairs with the combphy and
+      pcie3 phy providers; INTx/BAR windows land with the next slice.
+
+config KFEAT_DRIVER_USB_DWC3
+    bool "DWC3 USB controller (Rockchip, host path) with xHCI"
+    default n
+    help
+      Brings up a Rockchip DWC3 USB controller: the glue owns the clocks and
+      the usb3-otg reset, the core selects host mode, and the xHCI block on the
+      same window enumerates the root ports. Translation of dwc3-of-simple +
+      the host half of dwc3/core.c plus xhci.
+
+config KFEAT_DRIVER_NET_RTL8125
+    bool "Realtek RTL8125 PCIe NIC"
+    depends on KFEAT_NET
+    default n
+    help
+      RTL8125 2.5GbE on the enumerated PCIe root complex. Binds through
+      the PCI bus id table, identifies the MAC version from TxConfig the
+      way r8169 does, and reads the station address. Probe stage only: the
+      descriptor rings, PHY bring-up and net-class publication land in the
+      next slice, so no queue is advertised yet.
+
+config KFEAT_DRIVER_PHY_USB2PHY
+    bool "RK3588 USB2 PHY provider (inno-usb2)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the usb2phy-grf port PHY (480m clock, suspend bit, CRU
+      reset pair) through the kphy registry so `phys = <&usb2phy ...>`
+      consumers resolve. Translation of the pinned inno-usb2 reference
+      (host-path subset; OTG/BC11 recorded as gaps).
+
+config KFEAT_DRIVER_PHY_USBDP
+    bool "RK3588 USBDP PHY provider (usb3/DP combophy, USB path)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the DWC3 `usb3-phy` (the U3/SuperSpeed port and its 480M
+      reference path) through the kphy registry, running the PMA init +
+      LCPLL/CDR lock sequence and clearing the U3 port's GRF disable word.
+      Translation of the pinned usbdp-phy reference (USB path only; DP is
+      out of scope on this board).
+
+config KFEAT_DRIVER_PHY_COMBPHY
+    bool "RK3588 naneng combo PHY provider"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the naneng pipe PHY (PCIe2/USB3 modes; the mode binds
+      from the DT specifier) so `phys = <&combphy ...>` consumers
+      resolve. Translation of the pinned naneng-combphy reference.
+
+config KFEAT_DRIVER_PHY_PCIE3PHY
+    bool "RK3588 PCIe3 PHY provider (snps pcie3)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Publishes the shared pcie3 pipe PHY (aggregation/bifurcation mode,
+      SRAM init polls) so pcie3x4/pcie3x2 consumers resolve; the kphy
+      refcount runs the init sequence once for both.
+
+config KFEAT_DRIVER_CLK_RK3588_CRU
+    bool "RK3588 CRU clock controller"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Registers the RK3588 CRU clock tree (PLLs, muxes, dividers, gates,
+      armclks) into kclk under the DT node's phandle, so consumers resolve
+      `clocks = <&cru N>` to real rates. Translation of the pinned Linux
+      reference via the linux-driver-port harness; DT binding indices follow
+      the Orange Pi 5 Plus BSP header.
+
+config KFEAT_DRIVER_FIXED_FACTOR
+    bool "fixed-factor clock driver (transcription exercise)"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Second clock-provider driver: consumes a parent clock by firmware
+      reference and publishes a derived fixed-factor output. Board-static
+      device (QEMU has no DT node for it); exercises the consumer+provider
+      probe shape and the provider door.
+
+config KFEAT_DRIVER_RAMDISK
+    bool "ramdisk block device"
+    depends on KFEAT_CHAR
+    default n
+    help
+      ramdisk on the driver-core model: alias-matched board-static device
+      publishing a block disk. The zero-filled variant is bring-up only.
+
+config KFEAT_RAMDISK_SIZE
+    hex "ramdisk capacity (zero-filled variant)"
+    default 0x1000000
+    help
+      Capacity of the zero-filled ramdisk (the static-image variant takes
+      its size from the embedded image). A synthetic device carries no
+      firmware description, so its capacity is a platform/build parameter
+      (Linux brd's rd_size).
+
+config KFEAT_DRIVER_SERIAL_NS16550_MMIO
+    bool "NS16550 MMIO per-instance serial driver"
+    depends on KFEAT_CHAR
+    default y if MACHINE_AARCH64_RK3588
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      NS16550 MMIO UART driver on the driver-core model.
+
+config KFEAT_DRIVER_SERIAL_NS16550_IOPORT
+    bool "NS16550 I/O-port per-instance serial driver"
+    depends on KFEAT_CHAR && ARCH_X86_64
+    default y if MACHINE_X86_64_QEMU
+    help
+      NS16550 x86 ISA COM port driver on the driver-core model.
+
+comment "Real-time clock drivers"
+
+config KFEAT_DRIVER_RTC_GOLDFISH
+    bool "Goldfish RTC driver"
+    depends on KFEAT_RTC && ARCH_RISCV64
+    default y if MACHINE_RISCV64_QEMU
+    help
+      Goldfish virtual RTC driver (`google,goldfish-rtc`) on the
+      driver-core model.
+
+config KFEAT_DRIVER_RTC_CMOS
+    bool "CMOS RTC driver"
+    depends on KFEAT_RTC && ARCH_X86_64
+    default y if MACHINE_X86_64_QEMU
+    help
+      PC-compatible CMOS clock driver on the driver-core model. X86 has no
+      firmware description, so the composition root enumerates a
+      board-static `rtc-cmos` device carrying the fixed 0x70/0x71 port
+      pair.
+
+config KFEAT_DRIVER_RTC_LS7A
+    bool "LS7A RTC driver"
+    depends on KFEAT_RTC && ARCH_LOONGARCH64
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      Loongson LS7A TOY-counter RTC driver on the driver-core model.
+      Claims the device-tree node when present; otherwise the composition
+      root enumerates a board-static `rtc-ls7a` device from RTC_PADDR.
+
+config KFEAT_MMC
+    bool "MMC/SD subsystem (mmc core + card bus)"
+    help
+      Build the MMC/SD subsystem (subsys-mmc): the host contract, the mmc
+      card bus and the SD protocol core. A storage stack needs one of the
+      KFEAT_DRIVER_MMC_* host backends plus KFEAT_DRIVER_MMC_BLOCK.
+
+config KFEAT_DRIVER_MMC_BLOCK
+    bool "MMC block device (mmc_blk)"
+    depends on KFEAT_MMC
+    help
+      The card-bus consumer publishing discovered SD cards as block
+      devices (Gendisk major 179) into the block class.
+
+config MMC_MULTIBLOCK
+    bool "MMC multi-block reads (CMD18 + auto-stop)"
+    depends on KFEAT_DRIVER_MMC_BLOCK
+    default y
+    help
+      Read a multi-block request with one CMD18 instead of one CMD17 per
+      block. Cheaper per byte, but the auto-stop path streams blocks
+      back-to-back: on a polled (PIO) data path a drain loop that loses the
+      CPU long enough overruns the FIFO. The consumer therefore latches
+      this off after the first failed multi-block transfer and keeps going
+      with per-block reads, so the switch only decides the first attempt.
+
+config KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    bool "DesignWare MMC host driver (Rockchip)"
+    depends on KFEAT_MMC && ARCH_AARCH64
+    help
+      DW MSHC host driver (dw_mmc-rockchip shape) for RK3588-class SD
+      controllers: MMIO + FIFO-polled PIO data path, card detection onto
+      the mmc card bus. The CIU input rate is a board fact (MMC_CIU_HZ)
+      and the card-clock ceiling is a board fact (MMC_MAX_CARD_HZ) — the
+      SD clock domain sits behind the firmware and is left configured by
+      the boot stages.
+
+config MMC_CIU_HZ
+    hex "MMC CIU input clock rate (Hz)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default 0x2FAF080
+    help
+      The CIU input clock feeding the DWMMC internal divider (the rate
+      the firmware/boot stages configured for the SD clock domain). The
+      driver divides this down for 400 kHz init, 25 MHz default speed
+      and 50 MHz high speed; it never reprograms the source.
+
+config MMC_4BIT
+    bool "MMC 4-bit bus support"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      Advertise the controller's DAT1..DAT3 lines to the SD core. Unset this
+      to keep every card in 1-bit mode: the bring-up switch for a slot whose
+      wide data lines do not reach the controller (every data phase then
+      fails with a start-bit error while commands stay healthy).
+
+config MMC_BOOT_IO_PROBE
+    bool "MMC boot-time I/O self-test"
+    depends on KFEAT_DRIVER_MMC_BLOCK
+    default n
+    help
+      After publishing the card's partitions, re-read LBA 0 a few times and
+      print what came back. Useful when bringing up a board or a new card
+      (it distinguishes "no partition table" from "the read returned
+      zeros" and shows whether repeated transfers stay healthy), but it is
+      diagnostic I/O on every boot, so it stays off by default.
+
+config MMC_IDMAC
+    bool "MMC internal DMA engine (IDMAC)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      Drive data phases with the controller's internal DMA engine instead of
+      the FIFO-polled PIO path: one 4 KiB descriptor ring plus a 64 KiB
+      bounce window, completion polled from IDSTS/RINTSTS.
+
+      The engine is what this IP is designed for (Linux `dw_mci_idmac_*`), and
+      it keeps the CPU out of the copy. It needs memory below 4 GiB because
+      the descriptor format carries 32-bit addresses; when the probe cannot
+      provide that, or when the engine fails a transfer, the slot latches back
+      to PIO instead of failing I/O.
+
+config MMC_CLOCK_LADDER
+    bool "MMC clock ladder on detection failure"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default y
+    help
+      Two board facts this driver cannot read decide whether a data phase
+      works: the CIU input rate (MMC_CIU_HZ, behind EL3) and whether the wide
+      data lines are usable (MMC_4BIT). A card that accepts commands but never
+      drives the bus reports the same `SBE`/`TCBCNT=0` for both, so with this
+      enabled the probe verifies a block read and walks a ladder: 4-bit at
+      the configured ceiling, then halved ceilings down to 4 MHz, then the
+      same for 1-bit. It logs the pair that worked instead of leaving the
+      board unable to boot.
+
+      A working pair is also the measurement: if only X Hz works at 4-bit,
+      set MMC_MAX_CARD_HZ to X; if only 1-bit works, unset MMC_4BIT. Turn the
+      ladder off once the board's numbers are pinned.
+
+config MMC_MAX_CARD_HZ
+    hex "MMC card clock ceiling (Hz)"
+    depends on KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP
+    default 0x2FAF080
+    help
+      Upper bound for the card clock the host programs, applied to every
+      set_ios request (the DT max-frequency caps it further; whichever is
+      lower wins). 0 disables the cap.
+
+      This is the bring-up knob for the divider arithmetic: because the
+      source rate is unmeasurable (MMC_CIU_HZ is an assumption), a board
+      that mis-samples at the nominal mode rate lowers this instead of
+      guessing a new source rate. If a lower ceiling makes the data phases
+      pass, the effective source rate was higher than MMC_CIU_HZ claims.
+
+
+config KFEAT_DRIVER_CLK_SCMI
+    bool "SCMI clock provider driver"
+    depends on ARCH_AARCH64
+    help
+      SCMI clock-domain provider over an SMC-dispatched SMT channel
+      (clk-scmi shape).
+
+      Leave this off on RK3588: the EL3 agent answers the base and clock
+      protocol VERSION probes but rejects CLOCK_ATTRIBUTES
+      (SCMI_HARDWARE_ERROR) for the SD clock domain, so the provider can
+      never publish `SCMI_CCLK_SD`/`SCMI_HCLK_SD`. The SD controller takes
+      both rates as board facts instead (MMC_CIU_HZ/MMC_MAX_CARD_HZ), and
+      enabling this only adds a guaranteed probe failure to every boot.
+
+config SCMI_SMC_ID
+    hex "SCMI SMC function id"
+    depends on KFEAT_DRIVER_CLK_SCMI
+    default 0x82000010
+    help
+      SMCCC function identifier for the SCMI SMC transport (DT
+      `arm,smc-id` on the `scmi` node; the protocol child cannot carry
+      it, so the board fact lands here).
+
+config SCMI_SHMEM_PADDR
+    hex "SCMI SMT shared memory base address"
+    depends on KFEAT_DRIVER_CLK_SCMI
+    default 0x10f000
+    help
+      Physical base of the SMT shared-memory channel (DT `scmi_shmem`
+      node; 0x100 bytes). Mapped through the device resource door.
+
+comment "Filesystem transport drivers"
+
+
+comment "Display / input drivers"
+
+
+endmenu # Device Drivers

@@ -1,0 +1,31 @@
+[package]
+name = "subsys-net"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "This crate provides core interfaces and types for network drivers."
+
+[features]
+default = []
+# ixgbe = ["dep:ixgbe-driver"]
+# fxmac = ["dep:fxmac_rs"]
+
+[dependencies]
+log = { workspace = true }
+driver_base = { workspace = true }
+kerrno.workspace = true
+# fxmac_rs = { git = "https://github.com/elliott10/fxmac_rs.git", rev = "0dbc3916", optional = true }
+# ixgbe-driver = { git = "https://github.com/KuangjuX/ixgbe-driver.git", rev = "8e5eb74", optional = true }
+ksync = { workspace = true }
+unittest = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-shear]
+# log is used through the class_api! macro expansion (invisible to shear).
+ignored = ["log"]

@@ -1,0 +1,2 @@
+{"ts":1792590509,"kind":"gap","linux":"rst-rk3588/rockchip_register_restart_notifier","note":"CRU 软复位域+重启通知无 reset framework/重启钩子承接;USB/PCI probe 需要 reset,随下一切片立项"}
+{"ts":1793153601,"kind":"gap","linux":"assigned-clock-rates (mux-type clocks)","note":"4/19 assigned rate NotSupported:HCLK_CENTER_ROOT/CLK_GPU/CLK_HDMIRX_AUD/PCLK_PMU0_ROOT 均为 mux 型,set_rate 需 parent 传播;Linux 同样容忍,非阻塞"}

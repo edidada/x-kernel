@@ -1,0 +1,47 @@
+[package]
+name = "drv-usb"
+description = "USB host controller drivers (xHCI, Synopsys DWC3/Rockchip host path)"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "usb", "xhci", "dwc3", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+rk3588-dwc3 = []
+
+[dependencies]
+driver_base = { workspace = true }
+usb = { workspace = true }
+# The mass-storage disk is published through the block class, the same way
+# drv/block publishes its ramdisk (`Gendisk::new` + `dev.publish(&BLOCK, ..)`).
+subsys_block = { workspace = true }
+rockchip-pmu = { workspace = true }
+# Diagnostic: reading the devnode snapshot says whether a published node reached
+# the /dev projection at all.
+devnode = { workspace = true }
+# `BlockDeviceOperations::read_block` takes `&self`, so the controller has to be
+# shareable between the USB side and the block backend.
+ksync = { workspace = true }
+kerrno = { workspace = true }
+# Clock/PHY/reset handles arrive through the device resource services; the
+# crates themselves are not named here (the handles are `driver_base` types).
+# `busy_wait` is the microsecond-scale poll the core soft reset needs in probe
+# context (the same primitive drv/clk and drv/phy register, boundaries E-05).
+khal = { workspace = true }
+# The arch store barrier (`dsb ishst`) publishes a TRB before its cycle bit, the
+# same ordering Linux gets from `wmb()`; drv/clk takes karch for the same reason.
+karch = { workspace = true }
+ktime_types.workspace = true
+log.workspace = true
+# The DWC3 child node's clocks live on its parent block (`clocks` is a parent
+# property), so the driver walks the firmware tree for the spec.
+of = { workspace = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "subsys-block-host"
+description = "Block-class dispatch services: host-side wait, completion reclaiming and IRQ wiring (the contracts stay in subsys-block)"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[dependencies]
+subsys_block = { workspace = true }
+kerrno = { workspace = true }
+kspin = { workspace = true }
+ksync = { workspace = true }
+kpoll = { workspace = true }
+ktask = { workspace = true }
+kirq = { workspace = true }
+kbuild_config = { workspace = true }
+khal = { workspace = true }
+linked_list_r4l = { workspace = true }
+
+[lints]
+workspace = true

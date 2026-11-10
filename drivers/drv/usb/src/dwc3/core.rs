@@ -1,0 +1,273 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! `snps,dwc3` core bring-up for the host path.
+//!
+//! The reference `dwc3_core_init()` is 2869 lines because it serves device and
+//! OTG modes as well. Host-only needs a small, ordered subset:
+//!
+//! 1. soft reset the core and wait for `GSTS.CSRST` to drop,
+//! 2. read the hardware parameters (they decide the FIFO layout),
+//! 3. select the host role (`GCTL.PrtCapDir`),
+//! 4. configure the UTMI+ PHY interface and the enable-sleep-mode handshake,
+//! 5. hand the same register window to the xHCI driver.
+
+use driver_base::{Device, IoMap, PlatformBus, ProbeError};
+use log::info;
+
+use crate::dwc3::regs::{self, GCTL, GSTS, GUSB2PHYCFG, gctl, gux2phycfg};
+
+/// Hardware parameters `dwc3_cache_hwparams` keeps.
+#[derive(Clone, Copy, Debug)]
+pub struct HwParams {
+    pub gsnpsid: u32,
+    pub hwparams0: u32,
+    pub hwparams1: u32,
+    pub hwparams3: u32,
+    pub hwparams4: u32,
+}
+
+/// Resets and configures the core for host mode.
+pub fn init(
+    dev: &Device<'_, PlatformBus>,
+    regs: &IoMap,
+    utmi_wide: bool,
+    dis_enblslpm: bool,
+) -> Result<HwParams, ProbeError> {
+    // The capability word is the liveness check that was measured on a working
+    // board: 0x01100020 = CAPLENGTH 0x20, xHCI 1.1. A dead window reads back as
+    // 0 or all-ones instead of aborting.
+    let capability = regs.read32(0);
+    info!(
+        "dwc3: xhci capability {capability:#010x} (caplen {}, version {}.{})",
+        capability & 0xff,
+        (capability >> 24) & 0xff,
+        (capability >> 16) & 0xff,
+    );
+    if capability == 0 || capability == 0xffff_ffff {
+        log::error!("dwc3: the controller does not answer at offset 0");
+        return Err(ProbeError::Fatal(driver_base::RuntimeError::Io));
+    }
+    // Order matches the reference implementations: reset first, then select the
+    // host role. (Trying it the other way round changes nothing observable.)
+    //
+    // MaxPorts (HCSPARAMS1 bits 31:24) is bracketed across each step below: the
+    // board's working Linux instance reports 2, and measurements show it is 2
+    // right up to this function and 1 by the time it returns, so the step that
+    // costs the SuperSpeed port is in here.
+    info!(
+        "dwc3: HCSPARAMS1 before soft reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+    core_soft_reset(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after soft reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+    let params = HwParams {
+        gsnpsid: regs.read32(regs::DWC_USB3_GSNPSID),
+        hwparams0: regs.read32(regs::GHWPARAMS0),
+        hwparams1: regs.read32(regs::GHWPARAMS1),
+        hwparams3: regs.read32(regs::GHWPARAMS3),
+        hwparams4: regs.read32(regs::GHWPARAMS4),
+    };
+    info!(
+        "dwc3: gsnpsid {:#010x} hwparams0 {:#010x} hwparams1 {:#010x} hwparams3 {:#010x} \
+         hwparams4 {:#010x}",
+        params.gsnpsid, params.hwparams0, params.hwparams1, params.hwparams3, params.hwparams4,
+    );
+    if params.gsnpsid == 0 || params.gsnpsid == 0xffff_ffff {
+        log::error!(
+            "dwc3: core id is {:#010x}, the window is not the controller",
+            params.gsnpsid
+        );
+        return Err(ProbeError::Fatal(driver_base::RuntimeError::Io));
+    }
+
+    program_usb2_phy(regs, utmi_wide, dis_enblslpm);
+    info!(
+        "dwc3: HCSPARAMS1 after GUSB2PHYCFG {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+    program_guctl1(regs);
+    program_usb3_pipe(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after GUSB3PIPECTL {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+
+    // Role selection comes after the PHY words, as in dwc3_core_init:
+    // `dwc3_phy_setup` runs before `dwc3_set_prtcap`.
+    set_host_mode(regs);
+    // Dump the whole global block (0xc100..0xc300) so it can be diffed against
+    // the working board's, register for register. The SuperSpeed port exists
+    // now but never leaves RxDetect, and every PHY-side register already matches
+    // the working board — so the remaining difference is in this block.
+    {
+        let mut line = alloc::string::String::new();
+        for offset in (0xc100..0xc300).step_by(4) {
+            let value = regs.read32(offset);
+            if value != 0 {
+                line.push_str(&alloc::format!(" {offset:#05x}={value:#010x}"));
+            }
+        }
+        info!("dwc3: globals:{line}");
+    }
+    info!(
+        "dwc3: HCSPARAMS1 after host mode {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+    // EXPERIMENT: the host-mode transition above is what costs the SuperSpeed
+    // port (MaxPorts 2 -> 1), while the working board ends at the same GCTL
+    // value with 2 ports — its bootloader had already left the core in host
+    // mode, so Linux's write was same-value and never re-latched. Re-run the
+    // soft reset now that host mode is selected: if the port map is latched at
+    // reset, this reset latches it WITH host capability and the second port
+    // comes back.
+    core_soft_reset(regs);
+    info!(
+        "dwc3: HCSPARAMS1 after host-mode reset {:#010x} (max ports {})",
+        regs.read32(0x04),
+        (regs.read32(0x04) >> 24) & 0xff,
+    );
+    let _ = dev;
+    Ok(params)
+}
+
+fn core_soft_reset(regs: &IoMap) {
+    // CoreSoftReset is NOT self-clearing: the reference driver asserts it,
+    // waits 100 us and clears it again. Waiting for the bit to fall on its own
+    // leaves the core held in reset -- every xHCI register then reads back zero,
+    // including the command ring, and no command can ever be fetched.
+    let gctl = regs.read32(GCTL);
+    regs.write32(GCTL, gctl | gctl::CORESOFTRESET);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+    regs.write32(GCTL, regs.read32(GCTL) & !gctl::CORESOFTRESET);
+    let gctl = regs.read32(GCTL);
+    info!(
+        "dwc3: soft reset released, GCTL {gctl:#010x} GSTS {:#010x} (asserted {})",
+        regs.read32(GSTS),
+        gctl & gctl::CORESOFTRESET != 0,
+    );
+}
+
+/// Selects the host role, before anything else touches the controller.
+///
+/// The peripheral -> host transition latches the port map this core presents to
+/// its xHCI, and on this IP that latch costs the SuperSpeed port when it happens
+/// with the SS PIPE already running (MaxPorts 2 -> 1, while GCTL ends up
+/// bit-identical to the working board). The composition root calls this as soon
+/// as the controller answers on the bus, i.e. before the PHYs are brought up.
+pub fn select_host_role(regs: &IoMap) {
+    set_host_mode(regs);
+}
+
+fn set_host_mode(regs: &IoMap) {
+    // GCTL.PrtCapDir (bits 13:12): 0 OTG, 1 host, 2 peripheral. The wrapper's
+    // reset value on this board leaves the controller in peripheral mode (read
+    // as 2), so a host port never sees a device no matter how correct the PHY
+    // and VBUS are.
+    let gctl = regs.read32(GCTL);
+    regs.write32(GCTL, (gctl & !gctl::PRTCAPDIR_MASK) | gctl::PRTCAPDIR_HOST);
+    let after = regs.read32(GCTL);
+    info!(
+        "dwc3: host mode, GCTL {gctl:#010x} -> {after:#010x} (prtcapdir {})",
+        (after >> 12) & 0x3,
+    );
+}
+
+/// Programs `GUCTL1`.
+///
+/// The value is the one a working board reads (0x9107018a). The bits that matter
+/// for a USB2 device are `PARKMODE_DISABLE_HS` (bit 16) and `..._SS` (bit 17): park
+/// mode parks the UTMI PHY between transactions, and a PHY that does not expect it
+/// leaves the controller waiting for a transaction that never completes -- connect
+/// detection is unaffected, which is exactly the failure seen here. The firmware
+/// declares both quirks in the device tree (`snps,parkmode-disable-{hs,ss}-quirk`).
+fn program_guctl1(regs: &IoMap) {
+    let before = regs.read32(regs::GUCTL1);
+    regs.write32(regs::GUCTL1, GUCTL1_VALUE);
+    info!(
+        "dwc3: GUCTL1 {before:#010x} -> {:#010x}",
+        regs.read32(regs::GUCTL1),
+    );
+}
+
+/// `GUCTL1` as read from a working board (includes park-mode disable).
+const GUCTL1_VALUE: u32 = 0x9107_018a;
+
+/// Programs the SuperSpeed PIPE control word.
+///
+/// The value is taken from a working board (`GUSB3PIPECTL0` reads 0x075e8020
+/// there); this driver never touched the register before, so a device that
+/// enumerates over SuperSpeed would find the PIPE unconfigured.
+fn program_usb3_pipe(regs: &IoMap) {
+    let offset = crate::dwc3::regs::GUSB3PIPECTL;
+    let before = regs.read32(offset);
+    // PHYSOFTRST (bit 31) must be pulsed around the SS PHY's bring-up: the core
+    // counts a SuperSpeed port only for a PIPE PHY it actually saw come out of
+    // its soft reset. Writing the configuration word with PHYSOFTRST already
+    // clear (what this port did) leaves the core believing there is no SS PHY,
+    // and it then reports half the host ports — measured as MaxPorts 2 -> 1 at
+    // exactly whichever step is the second of {role selection, PHY bring-up},
+    // with GCTL bit-identical to the working board. The PHY is already powered
+    // when this runs (the composition root acquires it first), which is the
+    // order the reference uses before it releases this bit.
+    regs.write32(offset, USB3_PIPE_CONTROL | GUSB3PIPECTL_PHYSOFTRST);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+    regs.write32(offset, USB3_PIPE_CONTROL);
+    khal::time::busy_wait(ktime_types::TimeSpan::from_micros(100));
+    info!(
+        "dwc3: GUSB3PIPECTL {before:#010x} -> {:#010x} (PHYSOFTRST pulsed)",
+        regs.read32(offset),
+    );
+}
+
+/// `GUSB3PIPECTL.PHYSOFTRST`: PIPE PHY soft reset (active high).
+const GUSB3PIPECTL_PHYSOFTRST: u32 = 1 << 31;
+
+/// `GUSB3PIPECTL0` as read from a working board at the corrected offset.
+///
+/// The previous value here (0x075e8020) came from reading offset 0xc158, which is
+/// not this register: with the real offset the working board reads 0x010a0002.
+const USB3_PIPE_CONTROL: u32 = 0x010a_0002;
+
+fn program_usb2_phy(regs: &IoMap, utmi_wide: bool, dis_enblslpm: bool) {
+    // The value comes from a working board (0x00101448): PHYIF set for the wide
+    // UTMI+ interface, suspend enabled, and the platform's other fields preserved.
+    // Computing the word from scratch produced 0x40102408 -- plausible looking, and
+    // different in five bits from what the hardware is known to run with.
+    let before = regs.read32(GUSB2PHYCFG);
+    let mut config = USB2_PHY_CONFIG;
+    if utmi_wide {
+        config |= gux2phycfg::PHYIF;
+    } else {
+        config &= !gux2phycfg::PHYIF;
+    }
+    if dis_enblslpm {
+        config &= !gux2phycfg::ENABLSLPM;
+    } else {
+        config |= gux2phycfg::ENABLSLPM;
+    }
+    // SUSPHY is left as the working board has it. An earlier revision cleared it
+    // on the theory that a suspendable PHY could not answer the first
+    // SET_ADDRESS; with the ring, IOC, addressing and U3-port defects fixed the
+    // controller enumerates High-Speed devices fine with this bit set, and it is
+    // the only configuration difference left between this core and the working
+    // board's (every other global register is bit-identical, GUID aside).
+    regs.write32(GUSB2PHYCFG, config);
+    info!(
+        "dwc3: GUSB2PHYCFG {before:#010x} -> {:#010x} (utmi_wide {utmi_wide} dis_enblslpm \
+         {dis_enblslpm})",
+        regs.read32(GUSB2PHYCFG),
+    );
+}
+
+/// `GUSB2PHYCFG0` as read from a working board at the corrected offset.
+const USB2_PHY_CONFIG: u32 = 0x0010_1448;

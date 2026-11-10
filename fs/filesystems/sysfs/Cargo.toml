@@ -1,0 +1,30 @@
+[package]
+name = "sysfs"
+description = "Linux-compatible kernel device filesystem"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+devnode = { workspace = true }
+driver_base = { workspace = true }
+pci = { workspace = true }
+
+uevent_netlink.workspace = true
+ksync.workspace = true
+kvfs.workspace = true
+klazy.workspace = true
+lazyinit.workspace = true
+macros.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-shear]
+# Consumed only by the cfg(unittest) tests under ut-tests.
+ignored = ["driver_base", "pci"]

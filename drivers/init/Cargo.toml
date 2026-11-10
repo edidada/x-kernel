@@ -1,0 +1,76 @@
+[package]
+name = "driver-init"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Composition root for the driver-core model: runtime install, DT enumeration, driver registration"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+serial-pl011 = ["dep:drv-serial", "drv-serial/pl011", "dep:drv-clk", "drv-clk/fixed-clock"]
+serial-ns16550-mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio"]
+serial-ns16550-ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport"]
+virtio-blk = ["dep:drv-virtio", "drv-virtio/blk"]
+virtio-net = ["dep:drv-virtio", "drv-virtio/net"]
+virtio-rng = ["dep:drv-virtio", "drv-virtio/rng"]
+virtio-gpu = ["dep:drv-virtio", "drv-virtio/gpu"]
+virtio-input = ["dep:drv-virtio", "drv-virtio/input"]
+virtio-vsock = ["dep:drv-virtio", "drv-virtio/vsock"]
+virtio-9p = ["dep:drv-virtio", "drv-virtio/fs9p"]
+virtio-mmio = ["dep:drv-virtio", "drv-virtio/blk", "drv-virtio/net", "drv-virtio/gpu", "drv-virtio/input", "drv-virtio/rng", "drv-virtio/vsock", "drv-virtio/fs9p", "drv-virtio/mmio"]
+ramdisk = ["dep:drv-block"]
+ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
+fixed-clock = ["dep:drv-clk"]
+fixed-factor = ["dep:drv-clk", "drv-clk/fixed-factor"]
+rk3588-cru = ["dep:drv-clk"]
+rk3588-usb2phy = ["dep:drv-phy", "drv-phy/rk3588-usb2phy"]
+rk3588-usbdp = ["dep:drv-phy", "drv-phy/rk3588-usbdp"]
+rk3588-combphy = ["dep:drv-phy", "drv-phy/rk3588-combphy"]
+rk3588-pcie3phy = ["dep:drv-phy", "drv-phy/rk3588-pcie3phy"]
+pci-dw-host = ["pci/dw-host"]
+net-rtl8125 = ["dep:drv-net", "drv-net/rk3588-rtl8125"]
+usb-dwc3 = ["dep:drv-usb", "drv-usb/rk3588-dwc3"]
+# khal/ktime_types optional activation rides the pci crate feature.
+# RTC class + one backend per feature: the class carries the boot wall-clock
+# service, each feature compiles exactly one concrete clock in.
+rtc = ["dep:subsys_rtc"]
+rtc-goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish"]
+rtc-cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos"]
+rtc-ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a"]
+# MMC/SD: the subsystem (host contract + card bus + protocol core), the
+# card-bus block consumer, the DW host backend, and the SCMI clock
+# provider the RK3588 SD clocks live behind.
+mmc = ["dep:subsys_mmc"]
+mmc-block = ["mmc"]
+mmc-dwmmc-rockchip = ["mmc", "dep:drv-mmc", "drv-mmc/dwmmc-rockchip"]
+clk-scmi = ["dep:drv-clk", "drv-clk/scmi-clock"]
+
+[dependencies]
+driver_base = { workspace = true }
+driver_host.workspace = true
+kbuild_config = { workspace = true }
+khal.workspace = true
+pci.workspace = true
+of.workspace = true
+log.workspace = true
+subsys_block_host = { workspace = true }
+subsys_rtc = { workspace = true, optional = true }
+subsys_mmc = { workspace = true, optional = true }
+subsys_mmc_host = { workspace = true, optional = true }
+drv-mmc = { workspace = true, optional = true }
+drv-virtio = { workspace = true, optional = true }
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+drv-phy = { workspace = true, optional = true }
+drv-net = { workspace = true, optional = true }
+drv-usb = { workspace = true, optional = true }
+drv-block = { workspace = true, optional = true }
+drv-rtc = { workspace = true, optional = true }
+
+[lints]
+workspace = true

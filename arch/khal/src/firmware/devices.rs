@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Firmware-described **device** abstraction.
+//!
+//! This module is the single seam between firmware-table parsers (DT / ACPI)
+//! and consumers that need to know what hardware exists and how to reach it
+//! (e.g. the driver-compose bus enumeration,
+//! `drivers/bus/pci` host detection, `drivers/drv/virtio/device` interrupt routing).
+//!
+//! Layering rationale
+//! ------------------
+//! The `of` and `acpi` crates are *raw firmware-table readers*. Higher layers
+//! should not couple to a particular firmware flavor. Instead they call the
+//! flavor-neutral entries here, which try Device Tree first and fall back to
+//! ACPI where applicable. New firmware sources (UEFI device-paths, SMBIOS,
+//! platform-static tables) plug in by extending the helpers in this file
+//! without touching the consumers.
+//!
+//! Re-exports
+//! ----------
+//! Common interrupt / PCI host description types live in `of` today and are
+//! re-exported here so callers depend only on `khal::firmware::devices::*`.
+
+use alloc::vec::Vec;
+
+#[cfg(target_arch = "x86_64")]
+use lazyinit::LazyInit;
+pub use of::{
+    ClockSpec, DmaFacts, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam,
+    PciHostInfo, PciRangeInfo,
+};
+
+/// Cached IO-APIC physical address from ACPI MADT.
+#[cfg(target_arch = "x86_64")]
+static IO_APIC_CACHE: LazyInit<Option<usize>> = LazyInit::new();
+
+/// Which firmware table the device description was read from.
+///
+/// Kept as a flat enum here (rather than borrowing bus-backend
+/// `DiscoveryOrigin`) so this layer stays free of driver-framework deps.
+/// Callers that need to record the origin can map this 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareSource {
+    /// Flattened Device Tree.
+    DeviceTree,
+    /// ACPI tables.
+    Acpi,
+}
+
+/// One device described by firmware, normalized for the kernel driver
+/// framework.
+///
+/// `firmware_id` is the matched raw firmware identity string (a DT
+/// `compatible` today; ACPI `_HID/_CID` in the future). Consumers keep this
+/// raw identifier and let the driver registry perform Linux-style matching
+/// against per-driver firmware ID tables. Resources are optional because not
+/// every firmware node carries them. `source` records which firmware table the
+/// description came from so consumers do not have to hard-code an origin.
+#[derive(Debug, Clone)]
+pub struct FirmwareDevice {
+    /// Primary (first) compatible — what identity/diagnostics report.
+    pub firmware_id: &'static str,
+    /// The node's full compatible list, DT order.
+    pub all_compatibles: Vec<&'static str>,
+    pub source: FirmwareSource,
+    /// Every `reg` entry of the node, in DT order.
+    pub mmios: Vec<MmioResource>,
+    /// Every interrupt specifier, in DT order (`interrupts` flat form or
+    /// `interrupts-extended`). Single-irq nodes keep index 0 stable.
+    pub irqs: Vec<InterruptInfo>,
+    /// Entry `i` of `interrupt-names`, when the node provides it
+    /// (parallel to `irqs`; `None` when absent).
+    pub irq_names: Option<Vec<&'static str>>,
+    /// For `fixed-clock` nodes: the `clock-frequency` property, in Hz.
+    /// Extracted during enumeration so clock controller drivers can
+    /// register without re-walking the DT.
+    pub clock_frequency: Option<u32>,
+    /// The DT `phandle` property, used as the clock ProviderId.
+    pub phandle: Option<u32>,
+    /// The `#clock-cells` property: `Some(_)` marks this node as a clock
+    /// provider. Used by the platform backend to probe clock controllers
+    /// before their consumers (Linux `of_clk_init` ordering).
+    pub clock_cells: Option<u32>,
+    /// First `clock-output-names` entry for provider nodes.
+    pub clock_output_name: Option<&'static str>,
+    /// For consumer nodes: the parsed `clocks` property, each entry a
+    /// (provider phandle, controller-local index) pair. Converted to
+    /// clocks through `first_clk()` like MMIO and IRQ.
+    pub clock_specs: Vec<of::ClockSpec>,
+    /// `resets = <&cru N>` specifiers, declaration order (mirror of clock_specs).
+    pub reset_specs: Vec<of::ResetSpec>,
+    /// `phys = <&phy ...>` specifiers, declaration order.
+    pub phy_specs: Vec<of::PhySpec>,
+    /// The node's full property set, firmware order, typed — the quirk
+    /// snapshot (`of_property_read_*` surface) the device model carries.
+    pub props: Vec<(&'static str, &'static [u8])>,
+    /// The device's DMA view as stated by firmware (`dma-ranges` on the
+    /// parent bus, `dma-coherent` on the node/parent); `None` = nothing
+    /// stated (architecture default).
+    pub dma: Option<of::DmaFacts>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MmioResource {
+    pub base: usize,
+    pub size: usize,
+    /// Entry `i` of `reg-names`, when the node provides it.
+    pub name: Option<&'static str>,
+}
+
+/// Resolve the DMA view the firmware-described primary PCI host bridge
+/// states for its children (`dma-ranges` / `dma-coherent` on the DT bridge
+/// node — every function below that bridge inherits it, the
+/// `of_dma_configure(bridge)` analogue).
+///
+/// ACPI `_DMA` on the host bridge is not parsed yet: `None` there is a
+/// known gap, not a statement that the bridge is identity-mapped.
+pub fn pci_dma_info() -> Option<DmaFacts> {
+    of::generic_pci_host().and_then(of::bus_dma_facts)
+}
+
+/// Returns `true` if any firmware device description (DT or ACPI) has been
+/// initialized.
+///
+/// Used by platform-static fallback backends to decide whether to register
+/// hard-coded peripherals (which would otherwise duplicate firmware-described
+/// nodes).
+pub fn has_device_description() -> bool {
+    if of::fdt().is_some() {
+        return true;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if acpi::desc().is_some() {
+        return true;
+    }
+    false
+}
+
+/// Locate the primary PCI host bridge.
+///
+/// Tries Device Tree (`pci-host-(e)cam-generic` — `reg`, `bus-range`,
+/// `linux,pci-domain`) first, then the ACPI MCFG (segment group, bus
+/// range, ECAM base). EVERY field is firmware-sourced; the segment is
+/// threaded through, not assumed. Callers that need caching should cache
+/// the result themselves.
+pub fn pci_host() -> Option<PciHostInfo> {
+    if let Some(host) = of::generic_pci_host_info() {
+        return Some(host);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "loongarch64"))]
+    {
+        // The first MCFG allocation entry describes the primary host;
+        // its segment/bus-range/base are the firmware's statement.
+        if let Some(mcfg) = acpi::find_mcfg_from_init() {
+            return Some(PciHostInfo {
+                cam: PciHostCam::Ecam,
+                segment: mcfg.pci_segment,
+                ecam_base: mcfg.base_address,
+                ecam_size: ((mcfg.end_bus as u64).saturating_sub(mcfg.start_bus as u64) + 1) << 20,
+                bus_start: mcfg.start_bus,
+                bus_end: mcfg.end_bus,
+            });
+        }
+    }
+
+    None
+}
+
+/// Returns the firmware source that described the primary PCI host bridge,
+/// or `None` if no firmware-described host was found.
+///
+/// Mirrors the discovery priority used by [`pci_host`]: Device Tree first,
+/// then ACPI MCFG. Useful for callers that need to record provenance (e.g.
+/// the device-database `DiscoveryOrigin`) without re-doing the table walk.
+pub fn pci_host_source() -> Option<FirmwareSource> {
+    if of::generic_pci_host_info().is_some() {
+        return Some(FirmwareSource::DeviceTree);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "loongarch64"))]
+    {
+        if acpi::find_mcfg_from_init().is_some() {
+            return Some(FirmwareSource::Acpi);
+        }
+    }
+
+    None
+}
+
+/// Returns the first non-prefetchable PCI memory range from firmware.
+///
+/// Tries Device Tree first; on x86 falls back to a best-effort byte scan of
+/// the ACPI DSDT `_CRS` resource template (see
+/// [`acpi::find_pci_host_mem_window_from_init`]). Callers that need caching
+/// should cache the result themselves.
+pub fn pci_bar_range() -> Option<PciRangeInfo> {
+    if let Some(range) = of::generic_pci_non_prefetchable_mem_range() {
+        return Some(range);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(window) = acpi::find_pci_host_mem_window_from_init() {
+            return Some(PciRangeInfo {
+                cpu_base: window.base,
+                size: window.size,
+                prefetchable: window.prefetchable,
+            });
+        }
+    }
+
+    None
+}
+
+/// Resolve a legacy INTx route for a PCI BDF/pin via firmware.
+///
+/// DT-only. ACPI legacy routing comes from `_PRT`; not yet parsed.
+pub fn pci_legacy_irq(bus: u8, device: u8, function: u8, pin: u8) -> Option<InterruptInfo> {
+    of::generic_pci_legacy_interrupt(bus, device, function, pin)
+}
+
+/// x86: physical address of the (first) IO-APIC reported by ACPI MADT.
+///
+/// Cached on first call so the MADT walk runs at most once per boot.
+#[cfg(target_arch = "x86_64")]
+pub fn io_apic_paddr() -> Option<usize> {
+    IO_APIC_CACHE.call_once(|| acpi::find_apic_from_init().and_then(|info| info.io_apic_address));
+    *IO_APIC_CACHE.get().expect("IO-APIC cache not initialized")
+}
+
+/// Iterate firmware-described devices, mapping each node to a driver-visible
+/// firmware identity via the caller-provided `matcher`.
+///
+/// `matcher` is invoked once per *firmware compatible string* on each node;
+/// returning `Some(firmware_id)` selects the node and stops checking that
+/// node's remaining compatibles. The visitor then receives the matched raw
+/// firmware ID plus the node's primary MMIO / IRQ resources, if present.
+///
+/// Today this walks the device tree. ACPI `_HID/_CID` walks can be added here
+/// without touching callers — the matcher signature stays string-based and
+/// firmware-neutral.
+pub fn for_each_compatible(
+    mut matcher: impl FnMut(&str) -> Option<&'static str>,
+    mut visitor: impl FnMut(FirmwareDevice),
+) {
+    let Some(fdt) = of::fdt() else {
+        return;
+    };
+
+    for node in fdt.all_nodes() {
+        let Some(firmware_id) = node.compatibles().find_map(&mut matcher) else {
+            continue;
+        };
+
+        let reg_names = of::string_list(node, "reg-names");
+        let mmios = node
+            .reg()
+            .map(|regs| {
+                regs.enumerate()
+                    .map(|(idx, reg)| MmioResource {
+                        base: reg.starting_address as usize,
+                        size: reg.size,
+                        name: reg_names.as_ref().and_then(|names| names.get(idx)).copied(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let irqs = of::interrupt_descs(node);
+        let irq_names = of::string_list(node, "interrupt-names");
+
+        visitor(FirmwareDevice {
+            firmware_id,
+            all_compatibles: node.compatibles().collect(),
+            source: FirmwareSource::DeviceTree,
+            mmios,
+            irqs,
+            irq_names,
+            clock_frequency: node.property_u32("clock-frequency"),
+            phandle: node.property_u32("phandle"),
+            clock_cells: node.property_u32("#clock-cells"),
+            clock_output_name: of::clock_output_name(node),
+            clock_specs: of::device_clock_specs(node),
+            reset_specs: of::device_reset_specs(node),
+            phy_specs: of::device_phy_specs(node),
+            props: of::node_properties(node),
+            dma: of::device_dma_facts(node),
+        });
+    }
+}

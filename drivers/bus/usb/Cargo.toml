@@ -1,0 +1,25 @@
+[package]
+name = "usb"
+description = "USB host bus core: descriptors, transfers, enumeration"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "usb", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+kerrno = { workspace = true }
+# The hub driver waits for power-on and port-reset timing (USB 2.0 11.11).
+khal = { workspace = true }
+ktime_types = { workspace = true }
+log.workspace = true
+unittest.workspace = true
+# The device table publishes through the device's identity handle; the class
+# itself stays in the subsystem crates (`bus/usb` names no device family).
+driver_base = { workspace = true }
+
+[lints]
+workspace = true

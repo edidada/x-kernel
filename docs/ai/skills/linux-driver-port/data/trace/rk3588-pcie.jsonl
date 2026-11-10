@@ -1,0 +1,1 @@
+{"ts":1792620642,"kind":"gap","linux":"msi-map","note":"PCIe v1 走 legacy INTx(interrupt-map 已解析 IrqSpec);GIC ITS 域单独立项(gaps msi open)"}

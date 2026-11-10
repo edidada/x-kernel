@@ -1,0 +1,116 @@
+# 可观测事实：RK3588 USB 主机路径（DWC3 + xHCI）每个被碰过的寄存器。
+#
+# 存在的理由同 rtl8125.toml：这一轮里"写进去"和"生效"被混淆过四次，
+# 每次都是靠先建立一条能判真假的断言才收敛。
+
+[port]
+name = "rk3588-usb"
+log_marker = "dwc3: "
+
+[[fact]]
+id = "gpio-v2-write-mask"
+reg = "0xfec40000 (SWPORT_DR_L) / 0xfec40008 (SWPORT_DDR_L)"
+rule = "readback_equals_low_half_and_high_half_mask"
+why = """
+RK3588 的 GPIO 是 v2：DR/DDR 拆低/高半字，且高半是写使能掩码。
+写 0x12345678 会读回 0x00001230（= 0x5678 & 0x1234）。
+写裸值（如 ddr|0x8000）等于掩码 0 = 一个位都不改，寄存器原样不动 ——
+症状与"bank 写保护/掉电/ATF 拦截"无法区分，本 port 因此白查了
+电源域、pclk 门控、IOMUX、ATF 四项。
+"""
+
+[[fact]]
+id = "gpio-vbus-pad"
+reg = "0xfec40070 (EXT_PORT_L) bit15"
+rule = "bit_set_after_enable"
+why = """
+`vcc5v0-host` 的 5V 开关是 gpio3.15；焊盘 bit15=1 才代表座上真的有 5V。
+参考板运行态为 1，我们修好写掩码后也是 1。控制器的 PORTSC.PP 只是控制器
+内部端口电源位，**不能替代**这一位。
+"""
+
+[[fact]]
+id = "pmu-usb-domain"
+reg = "0xfd8d8150 bit11 / 0xfd8d8290 bit25"
+rule = "pwr_bit_clear_and_repair_bit_set"
+why = """
+PD_USB 的极性是**反的**：0x150 的 bit11 = 1 表示掉电请求，power-on 写的是
+`pwr_w_mask`（只写高半，低半 0）；权威的在位状态在 repair_status(0x290) 的
+bit25（1 = 已上电，pm-domains 的 rockchip_pmu_domain_is_on 就看它）。
+我们曾写 `(bit<<16)|bit`，等于请求掉电 → 首次寄存器访问直接触发
+同步外部 abort（ESR 0x96000010）而不是报错。
+"""
+
+[[fact]]
+id = "cru-usb-gates"
+reg = "0xfd7c08a8 (CLKGATE_CON42, BSP 编号 id 417..422)"
+rule = "zero_after_enable"
+why = """
+dwc3 的 bus/suspend/ref 门控在 CON42 的 bit 4..9，`SET_TO_DISABLE`（1=关）。
+参考板读 0；我们曾读 0x75 —— 因为 `prepare_enable()` 返回的 `EnabledClock`
+守卫被 `?;` 丢掉了，守卫析构立即 disable，日志里能看到
+`kclk: hw-disable "aclk_usb3otg0" (count 0)`。守卫必须存进驱动数据里。
+"""
+
+[[fact]]
+id = "usb-grf-u3-port"
+reg = "0xfd5ac000 + 0x1c (port0) / 0x34 (port1)"
+rule = "equals:0x8800"
+why = """
+USB GRF 的 `USB3OTGn_CFG` 必须写成 0x8800（PIPE_ENABLE=1、PHY_DISABLE=0、
+SUSPEND_ENABLE=0、U3_PORT_DISABLE=0），初值 0x1100 就是"端口 disable"。
+缺这一步端口永远黑着。写是 GRF 形式：0xFFFF8800。
+"""
+
+[[fact]]
+id = "xhci-capability"
+reg = "0xfc000000 / 0xfc400000 (bar+0)"
+rule = "equals:0x01100020"
+why = """
+xHCI 能力字：CAPLENGTH 0x20、HCIVERSION 0x110。这是"块是否解码"的
+活体检查（参考板与我们逐位一致）；不要用 DWC3 的 GSNPSID 判活，
+它在 0xc100 读回 1，容易误判。
+"""
+
+[[fact]]
+id = "usb2phy-not-suspended"
+reg = "0xfd5d000c / 0xfd5d400c (usb3_0 / usb3_1 block +0x0c)"
+rule = "equals:0x0215"
+why = """
+bit11 是 `phy_sus`（1=挂起）。参考板与我们的可用态都是 0x215；若这里是
+0xE15 说明模拟前端还关着，D+ 上拉检测不可能发生 —— 与 VBUS 是两个独立条件。
+"""
+
+[[fact]]
+id = "dwc3-global-offsets"
+reg = "0xfc400000 + {0xc100 GSBUSCFG0, 0xc110 GCTL, 0xc118 GSTS, 0xc140 GHWPARAMS0, 0xc200 GUSB2PHYCFG0, 0xc2c0 GUSB3PIPECTL0}"
+rule = "prtcapdir_equals_1_in_gctl"
+why = """
+DWC3 全局块不连续：本 port 曾把 GCTL 写成 0xc100（GSBUSCFG0）、GUSB2PHYCFG 写成 0xc140
+（GHWPARAMS0）。两处读回都是"像样的值"，日志因此显示与参考板一致，而实际上
+USB2 PHY 从未解除挂起（GUSB2PHYCFG 的 SUSPHY 保持复位值）、控制器一直停在
+PrtCapDir=2（外设模式），主机口永远看不到设备。正确值：GCTL(0xc110)[13:12]=1 表示 host。
+"""
+
+[[fact]]
+id = "xhci-interrupter-offset"
+reg = "bar + RTSOFF + 0x20 (interrupter 0: IMAN +0x00, IMOD +0x04, ERSTSZ +0x08, ERSTBA +0x10, ERDP +0x18)"
+rule = "erstsz_equals_1_and_event_ring_receives_trb"
+why = """
+RTSOFF 指向 MFINDEX，主 interrupter 在 +0x20 之后；写 RTSOFF+0x08 是保留洞。
+症状：ERSTSZ/ERSTBA/ERDP 写入无声消失、事件环内存始终全 0、每条命令超时。
+判据不是读回值，而是**事件环内存里出现 TRB**（例如端口复位后应出现
+type=34 Port Status Change）。改成 +0x20 后 `erstsz 0x1 / erstba 0x...` 读回正确，
+环里立刻出现 `c 0x8801` 的事件 TRB。
+"""
+
+[[fact]]
+id = "crrc-not-writable-yet"
+reg = "bar + op + 0x18 (CRCR)"
+rule = "crr_bit_set_after_start"
+why = """
+未解决：所有写形式（64 位整体、先高后低、先低后高、带/不带 RCS、RS 前后）之后读回均为 0，
+标记值在窗口内任何位置都找不到；参考板该寄存器只回状态位（0x8 = CRR），所以读回
+不能作为判据。当前用行为判据观察：Enable Slot 返回 completion code 5 (TRB Error)，
+说明控制器取到了命令但判其非法 —— 命令环指针没有生效。
+"""

@@ -1,0 +1,1301 @@
+{
+  "$comment": "真相源。Linux API → x-kernel (v2 driver model) API 映射。每条 xkernel 接口必须有 source 证据(仓库内路径),check-data 会校验 path 存在。改完跑 make ldp-check-data。",
+  "conventions": {
+    "dev": "&mut driver_base::Device<'_, PlatformBus>(probe 收到的设备句柄)",
+    "ProbeError": "driver_base::ProbeError(probe 失败;含 Deferred 依赖未就绪)",
+    "RuntimeError": "driver_base::RuntimeError(运行期错误,枚举:Invalid/NoMemory/Busy/Io/BadState/Unsupported/AlreadyExists/NotFound)",
+    "KError": "kerrno::KError(设备类契约方法用,如 RtcDevice::read_time -> KResult)"
+  },
+  "sections": [
+    {
+      "id": "driver-model",
+      "title": "驱动模型与注册",
+      "order": 1,
+      "rows": [
+        {
+          "linux": "struct platform_driver + .probe/.remove",
+          "xkernel": "`impl DriverOps<PlatformBus> for XxxDriver { type Data; fn probe(&self, dev: &mut Device<'_, PlatformBus>) -> Result<Self::Data, ProbeError>; fn remove }`",
+          "note": "Data 即 Linux 的 `struct foo_priv`:probe 里构造并返回,框架持有,remove 原样可变取回,remove 返回后 drop(释放其中所有 RAII guard)",
+          "keywords": [
+            "platform_driver",
+            "probe",
+            "remove",
+            "DriverOps"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/driver.rs",
+            "line": 15
+          }
+        },
+        {
+          "linux": "static const struct of_device_id xxx_of_match[] + .of_match_table",
+          "xkernel": "`static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible(\"vendor,dev\")), PlatformId::Alias(AliasMatch::new(\"alias\"))]`",
+          "note": "OfMatch 按 compatible 匹配;AliasMatch 给组合根的 board-static 枚举用",
+          "keywords": [
+            "of_device_id",
+            "of_match_table",
+            "PlatformId",
+            "OfMatch",
+            "compatible"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/bus/platform_bus.rs",
+            "line": 153
+          }
+        },
+        {
+          "linux": "module_platform_driver(xxx) / module_init",
+          "xkernel": "`driver_base::declare_driver!(PlatformBus, XxxDriver, \"xxx\", IDS);` 宏生成 register() 注册入口,由组合根调用",
+          "note": "drv/** 不直接调框架注册 API(边界规则);家族多入口用 `... => register_xxx` 命名生成函数",
+          "keywords": [
+            "module_platform_driver",
+            "module_init",
+            "declare_driver"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/driver.rs",
+            "line": 65
+          }
+        },
+        {
+          "linux": "platform_set_drvdata(pdev, data) / platform_get_drvdata",
+          "xkernel": "`DriverOps::Data` 关联类型:probe 返回值即 drvdata,remove 收 `&mut Self::Data`",
+          "note": "无 untyped 指针、无 downcast;中断 handler 里用 Weak<Data> 共享",
+          "keywords": [
+            "set_drvdata",
+            "get_drvdata",
+            "Data"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/driver.rs",
+            "line": 15
+          }
+        },
+        {
+          "linux": "module_pci_driver(xxx)",
+          "xkernel": "`driver_base::declare_driver!(PciBus, XxxDriver, \"xxx\", PCI_IDS);`;PCI id 表 `PciMatch`",
+          "note": "PciBus 与 PciMatch 定义在 drivers/bus/pci(注册 API 仍由宏生成,drv/** 不直接调)",
+          "keywords": [
+            "module_pci_driver",
+            "PciMatch",
+            "PciBus"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/bus/pci/src/lib.rs",
+            "line": 125
+          }
+        },
+        {
+          "linux": "-EPROBE_DEFER / dev_err_probe()",
+          "xkernel": "`ProbeError::Deferred`(`dev.env().defer(DepSource)` 产生;如 clk provider 未就绪)",
+          "note": "probe 泵会重新调度依赖未就绪的设备;驱动只管返回 Deferred",
+          "keywords": [
+            "EPROBE_DEFER",
+            "defer",
+            "Deferred",
+            "probe deferral"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 455
+          }
+        },
+        {
+          "linux": "MODULE_AUTHOR/MODULE_LICENSE/MODULE_DESCRIPTION",
+          "xkernel": "文件头 SPDX 许可注释(`// SPDX-License-Identifier: Apache-2.0` + Copyright 行)",
+          "note": "树卫生检查(check_header)强制",
+          "keywords": [
+            "MODULE_LICENSE",
+            "SPDX"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/lib.rs",
+            "line": 1
+          }
+        },
+        {
+          "linux": "amba_id / amba_driver（AMBA PrimeCell 总线匹配: `static const struct amba_id`, periphid & mask 比较, module_amba_driver）",
+          "xkernel": "`static IDS: &[PlatformId]`（`PlatformId::Of(OfMatch::compatible(\"arm,<dev>\"))` 优先；泛型 `arm,primecell` 节点在 probe 内用 DT 属性 `arm,primecell-periphid` 做掩码比较兜底，不匹配返回 `ProbeError::Fatal` 交给下一个候选驱动）+ `driver_base::declare_driver!`",
+          "note": "x-kernel 没有 AMBA 总线层:PrimeCell 设备经 DT 以平台设备枚举,compatible 精确匹配优先,泛型节点靠 `arm,primecell-periphid` 属性自证身份(参考 `references/linux/drivers/amba/bus.c` 的 amba_id 匹配语义与 `include/linux/amba/bus.h`)。参考: rtc-pl031 移植(pl031-qemu)。",
+          "keywords": [
+            "amba_id",
+            "amba_driver",
+            "module_amba_driver",
+            "amba",
+            "primecell",
+            "periphid"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/bus/platform_bus.rs",
+            "line": 44
+          }
+        }
+      ]
+    },
+    {
+      "id": "mmio",
+      "title": "设备资源 — MMIO 寄存器",
+      "order": 2,
+      "rows": [
+        {
+          "linux": "platform_get_resource(pdev, IORESOURCE_MEM, n)",
+          "xkernel": "`dev.res().mmio(n)? -> MmioRegion`(base/size);按 reg-names 用 `mmio_by_name(name)?`",
+          "note": "资源由总线层从 DT/PCI BAR 预解析,驱动不碰固件",
+          "keywords": [
+            "platform_get_resource",
+            "IORESOURCE_MEM",
+            "mmio",
+            "MmioRegion"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 285
+          }
+        },
+        {
+          "linux": "devm_platform_ioremap_resource(pdev, n) / devm_ioremap",
+          "xkernel": "`dev.res().iomap(n)? -> IoMap`(RAII,drop 时 unmap);命名区域用 `iomap_by_name(name)?`",
+          "note": "IoMap 为 devres 型句柄,存进 DriverOps::Data 即自动随设备释放",
+          "keywords": [
+            "ioremap",
+            "iomap",
+            "IoMap",
+            "devm_platform_ioremap_resource"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 327
+          }
+        },
+        {
+          "linux": "ioremap(非 devm,自管生命周期)",
+          "xkernel": "`dev.res().iomap_region(region: MmioRegion, name)? -> IoMap`",
+          "note": "对拿到的 MmioRegion 手动映射;生命周期仍由 IoMap guard 承载",
+          "keywords": [
+            "ioremap",
+            "iomap_region"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 340
+          }
+        },
+        {
+          "linux": "readl/writel, readb/readw/readq, writeb/writew/writeq",
+          "xkernel": "`regs.read32(offset)` / `regs.write32(offset, val)`;另有 read8/16/64、write8/16/64",
+          "note": "offset 相对区域基址;IoMap 是 `&IoMap` 共享只读句柄,内部 volatile",
+          "keywords": [
+            "readl",
+            "writel",
+            "read32",
+            "write32",
+            "readb",
+            "writeb"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/iomap.rs",
+            "line": 94
+          }
+        },
+        {
+          "linux": "ioread32/iowrite32(repit/to/副本族)",
+          "xkernel": "同上(IoMap 方法);块拷贝无封装 helper",
+          "keywords": [
+            "ioread32",
+            "iowrite32"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/iomap.rs",
+            "line": 94
+          }
+        },
+        {
+          "linux": "memcpy_fromio / memcpy_toio",
+          "xkernel": "`regs.as_ptr() -> *mut u8` 后自行 volatile 拷贝(无封装 helper)",
+          "note": "必要时写局部 unsafe fn 并加 SAFETY:区域边界自证",
+          "keywords": [
+            "memcpy_fromio",
+            "memcpy_toio",
+            "as_ptr"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/iomap.rs",
+            "line": 55
+          }
+        }
+      ]
+    },
+    {
+      "id": "irq",
+      "title": "设备资源 — 中断(IRQ)",
+      "order": 3,
+      "rows": [
+        {
+          "linux": "platform_get_irq(pdev, n) / platform_get_irq_byname / of_irq_get",
+          "xkernel": "`dev.res().irq(n)? -> IrqSpec` / `irq_by_name(name)?`(已解析:ResolvedVirq 或 FirmwareRoute)",
+          "note": "IrqSpec 由总线层从 DT interrupt(s)(-names) 预解析",
+          "keywords": [
+            "platform_get_irq",
+            "of_irq_get",
+            "irq_by_name",
+            "IrqSpec"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 299
+          }
+        },
+        {
+          "linux": "devm_request_irq(dev, irq, handler, flags, name, dev_id)",
+          "xkernel": "`dev.res().request_irq(spec, name, handler)? -> DevIrq`(RAII);便利:`request_irq_at(n, h)` / `request_irq_by_name(name, h)`",
+          "note": "handler 是 `Fn() -> IrqAction + Send + Sync + 'static` 闭包,自捕获上下文(典型 Weak<Data>),无需 dev_id",
+          "keywords": [
+            "devm_request_irq",
+            "request_irq",
+            "DevIrq"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 353
+          }
+        },
+        {
+          "linux": "irqreturn_t (*handler)(int irq, void *dev_id)",
+          "xkernel": "`type IrqHandlerFn = Arc<dyn Fn() -> IrqAction + Send + Sync>`",
+          "note": "无 irq 参数(DevIrq 已绑定);共享上下文进闭包捕获",
+          "keywords": [
+            "irqreturn_t",
+            "handler",
+            "IrqHandlerFn"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/irq.rs",
+            "line": 71
+          }
+        },
+        {
+          "linux": "IRQ_HANDLED / IRQ_NONE / IRQ_WAKE_THREAD",
+          "xkernel": "`IrqAction::Handled` / `IrqAction::NotHandled`",
+          "note": "wake-thread 语义无线程化 IRQ,见 gaps(workqueue 下半部替代)",
+          "keywords": [
+            "IRQ_HANDLED",
+            "IRQ_NONE",
+            "IrqAction"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/irq.rs",
+            "line": 49
+          }
+        },
+        {
+          "linux": "IRQF_TRIGGER_RISING/FALLING/HIGH/LOW",
+          "xkernel": "`IrqTrigger::{EdgeRising, EdgeFalling, LevelHigh, LevelLow, …}`",
+          "note": "触发方式由固件(DT interrupts 描述符)解析进 IrqSpec,请求时不重复指定;类型来自 kirq,driver_base 再导出",
+          "keywords": [
+            "IRQF_TRIGGER",
+            "IrqTrigger"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/resource.rs",
+            "line": 156
+          }
+        },
+        {
+          "linux": "free_irq(irq, dev_id)",
+          "xkernel": "drop `DevIrq` 句柄(RAII,释放注册)",
+          "keywords": [
+            "free_irq",
+            "DevIrq"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/irq.rs",
+            "line": 15
+          }
+        },
+        {
+          "linux": "disable_irq/enable_irq(运行期屏蔽)",
+          "xkernel": "缺口:DevIrq 无 enable/disable 接口;需运行期屏蔽时上报缺口并评估 kirq 域接口",
+          "keywords": [
+            "disable_irq",
+            "enable_irq"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "request_threaded_irq(中断下半部线程)",
+          "xkernel": "缺口:无线程化 IRQ。上半部 IrqAction::Handled;重活用 kworkng 工作队列延后(见 gaps workqueue 条)",
+          "keywords": [
+            "request_threaded_irq",
+            "threaded irq",
+            "下半部"
+          ],
+          "status": "missing"
+        }
+      ]
+    },
+    {
+      "id": "dma",
+      "title": "设备资源 — DMA",
+      "order": 4,
+      "rows": [
+        {
+          "linux": "dmam_alloc_coherent / dma_alloc_coherent",
+          "xkernel": "`dev.res().alloc_coherent(len, align)? -> CoherentMem`",
+          "note": "CoherentMem { cpu 指针, bus_addr, len };bus_addr 是设备可见地址(DMA 寄存器里写它)",
+          "keywords": [
+            "dma_alloc_coherent",
+            "dmam_alloc_coherent",
+            "CoherentMem",
+            "alloc_coherent"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 388
+          }
+        },
+        {
+          "linux": "dma_free_coherent",
+          "xkernel": "drop `CoherentMem`(RAII)",
+          "keywords": [
+            "dma_free_coherent",
+            "CoherentMem"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/dma.rs",
+            "line": 12
+          }
+        },
+        {
+          "linux": "dma_handle(设备可见总线地址)",
+          "xkernel": "`CoherentMem::bus_addr`(u64,设备可见)",
+          "keywords": [
+            "dma_handle",
+            "bus_addr"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/devres/dma.rs",
+            "line": 12
+          }
+        },
+        {
+          "linux": "dma_map_single / dma_unmap_single(streaming 映射)",
+          "xkernel": "缺口:无 streaming 映射 API;用 coherent 缓冲替代或上报缺口",
+          "keywords": [
+            "dma_map_single",
+            "streaming",
+            "map_single"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "dma_sync_single_for_cpu/device",
+          "xkernel": "缺口:随 streaming 映射一并缺;coherent 内存无需 sync",
+          "keywords": [
+            "dma_sync_single_for_cpu",
+            "dma_sync_single_for_device"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "dma_set_mask_and_coherent(dev, DMA_BIT_MASK(n))",
+          "xkernel": "无显式掩码 API;RK3588 aarch64 默认按 64-bit 处理,受限掩码需求上报",
+          "keywords": [
+            "dma_set_mask",
+            "DMA_BIT_MASK",
+            "dma mask"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 388
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish",
+      "title": "设备类发布(把驱动实例挂进系统)",
+      "order": 5,
+      "rows": [
+        {
+          "linux": "register_netdev / alloc_etherdev + net_device_ops",
+          "xkernel": "`impl subsys_net::NetDevice for …` + `dev.publish(&subsys_net::class::NET, Arc::new(dev), \"name\")? -> Publication<NetDeviceImpl>`",
+          "note": "Publication 存进 Data;drop 即反发布",
+          "keywords": [
+            "register_netdev",
+            "net_device_ops",
+            "NetDevice",
+            "publish",
+            "NET"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/net/src/class.rs",
+            "line": 20
+          }
+        },
+        {
+          "linux": "block_device_operations + add_disk/gendisk",
+          "xkernel": "`impl subsys_block::BlockDevice for …` + `dev.publish(&subsys_block::class::BLOCK, Arc::new(dev), \"name\")?`",
+          "keywords": [
+            "add_disk",
+            "gendisk",
+            "BlockDevice",
+            "publish",
+            "BLOCK"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/block/src/class.rs",
+            "line": 47
+          }
+        },
+        {
+          "linux": "misc_register / cdev_init+add / tty_register_driver",
+          "xkernel": "`impl subsys_char::CharDevice for …` + `dev.publish(&subsys_char::class::CHAR, Arc::new(dev), \"name\")?`",
+          "keywords": [
+            "misc_register",
+            "cdev",
+            "tty_register_driver",
+            "CharDevice",
+            "CHAR"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/char/src/class.rs",
+            "line": 17
+          }
+        },
+        {
+          "linux": "devm_rtc_device_register / rtc_class_ops",
+          "xkernel": "`impl subsys_rtc::RtcDevice for …` + `dev.publish(&subsys_rtc::class::RTC, Arc::new(dev), \"name\")?`",
+          "note": "rtc 契约方法返回 kerrno::KResult",
+          "keywords": [
+            "rtc_class_ops",
+            "RtcDevice",
+            "RTC",
+            "rtc"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/rtc/src/class.rs",
+            "line": 24
+          }
+        },
+        {
+          "linux": "input/hwrng/display/vsock 等子系统注册",
+          "xkernel": "对应 `drivers/subsystems/<class>` 契约:`drivers/subsystems/{input,hwrng,display,vsock}` 各有 class:: 静态 + 设备 trait",
+          "keywords": [
+            "input_register_device",
+            "hwrng",
+            "display",
+            "vsock"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/hwrng/src/lib.rs",
+            "line": 1
+          }
+        },
+        {
+          "linux": "i2c/spi/regulator/watchdog 子系统注册",
+          "xkernel": "缺口:无对应 class 契约与 DeviceKind;见 gaps",
+          "keywords": [
+            "i2c_register_driver",
+            "spi_register_driver",
+            "regulator",
+            "watchdog"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "platform_device_register(板级静态设备)",
+          "xkernel": "组合根以 board-static(PortOrigin::BoardStatic)枚举 + `PlatformId::Alias(AliasMatch::new(\"xxx\"))` 匹配;一般无需驱动侧操作",
+          "keywords": [
+            "platform_device_register",
+            "board-static",
+            "AliasMatch"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/bus/platform_bus.rs",
+            "line": 30
+          }
+        }
+      ]
+    },
+    {
+      "id": "sync",
+      "title": "同步与并发",
+      "order": 6,
+      "rows": [
+        {
+          "linux": "spinlock_t + spin_lock_irqsave/spin_unlock_irqrestore",
+          "xkernel": "`kspin::SpinNoIrq<T>`(`SpinNoIrq::new(t)`,.lock() 取 guard,drop 释放)",
+          "keywords": [
+            "spin_lock_irqsave",
+            "SpinNoIrq",
+            "spinlock"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kspin/src/lib.rs",
+            "line": 144
+          }
+        },
+        {
+          "linux": "spin_lock(仅防抢占)",
+          "xkernel": "`kspin::SpinNoPreempt<T>`",
+          "keywords": [
+            "spin_lock",
+            "SpinNoPreempt"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kspin/src/lib.rs",
+            "line": 135
+          }
+        },
+        {
+          "linux": "raw_spinlock_t",
+          "xkernel": "`kspin::SpinNoPreempt<T>`(v2 无单独 raw 层;guard 类型即关抢占/关中断语义)",
+          "keywords": [
+            "raw_spinlock",
+            "SpinNoPreempt"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kspin/src/lock.rs",
+            "line": 46
+          }
+        },
+        {
+          "linux": "rwlock_t",
+          "xkernel": "`kspin::SpinRwNoIrq<T>`(.read()/.write())",
+          "keywords": [
+            "rwlock",
+            "SpinRwNoIrq"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kspin/src/lib.rs",
+            "line": 158
+          }
+        },
+        {
+          "linux": "DEFINE_MUTEX / mutex_lock/mutex_unlock",
+          "xkernel": "`ksync::Mutex<T>`(.lock() 取 guard)",
+          "keywords": [
+            "mutex_lock",
+            "Mutex",
+            "ksync"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ksync/src/mutex.rs",
+            "line": 223
+          }
+        },
+        {
+          "linux": "rw_semaphore(可睡眠读写锁)",
+          "xkernel": "`ksync::RwLock<T>`(.read()/.write())",
+          "keywords": [
+            "rw_semaphore",
+            "RwLock",
+            "ksync"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ksync/src/rwlock.rs",
+            "line": 231
+          }
+        },
+        {
+          "linux": "struct semaphore / down/up",
+          "xkernel": "`ksync::Semaphore::new(n)`(.acquire()/.try_acquire())",
+          "keywords": [
+            "semaphore",
+            "Semaphore",
+            "down",
+            "up"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ksync/src/semaphore.rs",
+            "line": 15
+          }
+        },
+        {
+          "linux": "atomic_t / atomic_set/atomic_read/atomic_inc/…",
+          "xkernel": "`core::sync::atomic::{AtomicU32, AtomicUsize, AtomicBool, …}` + Ordering",
+          "note": "项目规范:避免随手原子;仅在确需无锁计数/标志时用",
+          "keywords": [
+            "atomic_t",
+            "atomic_read",
+            "atomic_set",
+            "AtomicU32"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "wait_event*/wait_queue_head_t/wake_up*",
+          "xkernel": "`ktask::WaitQueue`(.wait()/.wait_until(closure)/.wait_timeout(dur)/.notify_one(true)/.notify_all(true))",
+          "keywords": [
+            "wait_event",
+            "wait_queue",
+            "wake_up",
+            "WaitQueue"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ktask/src/wait_queue.rs",
+            "line": 38
+          }
+        },
+        {
+          "linux": "struct completion / wait_for_completion/complete",
+          "xkernel": "无直接等价 → 用 WaitQueue 替代(缺口记录)",
+          "keywords": [
+            "completion",
+            "wait_for_completion"
+          ],
+          "status": "workaround",
+          "source": {
+            "path": "task/ktask/src/wait_queue.rs",
+            "line": 38
+          }
+        },
+        {
+          "linux": "INIT_WORK / schedule_work / queue_work",
+          "xkernel": "`kworkng::NormalQueue::new(name, QueueConfig)` 建队列;工作项 `WorkHandle` 句柄 queue/queue_on 到队列",
+          "note": "系统默认队列与专用队列都可;驱动一般 own 一个 NormalQueue 或用共享默认队列",
+          "keywords": [
+            "INIT_WORK",
+            "schedule_work",
+            "queue_work",
+            "workqueue",
+            "kworkng",
+            "NormalQueue"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kworkng/src/normal_queue.rs",
+            "line": 22
+          }
+        },
+        {
+          "linux": "INIT_DELAYED_WORK / schedule_delayed_work / mod_delayed_work",
+          "xkernel": "`kworkng::DelayedWorkHandle::new(callback)`;.queue/.modify/.cancel_pending/.cancel_sync/.flush",
+          "keywords": [
+            "delayed_work",
+            "INIT_DELAYED_WORK",
+            "DelayedWorkHandle"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kworkng/src/delayed_work_handle.rs",
+            "line": 24
+          }
+        },
+        {
+          "linux": "cancel_work_sync / flush_work / destroy_workqueue",
+          "xkernel": "kworkng 句柄方法:.cancel_sync()/.flush()/.shutdown()(队列级)",
+          "keywords": [
+            "cancel_work_sync",
+            "flush_work",
+            "destroy_workqueue",
+            "shutdown"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/kworkng/src/delayed_work_handle.rs",
+            "line": 154
+          }
+        },
+        {
+          "linux": "RCU (rcu_read_lock/call_rcu/…)",
+          "xkernel": "缺口:无 RCU;用 Arc/RwLock 替代并记录",
+          "keywords": [
+            "rcu",
+            "rcu_read_lock",
+            "call_rcu"
+          ],
+          "status": "workaround"
+        }
+      ]
+    },
+    {
+      "id": "mem",
+      "title": "内存分配",
+      "order": 7,
+      "rows": [
+        {
+          "linux": "kmalloc/kzalloc + kfree",
+          "xkernel": "`Box::new(x)` / `Vec::new()` / `alloc::vec![]`;释放由 drop 完成",
+          "keywords": [
+            "kmalloc",
+            "kzalloc",
+            "kfree",
+            "Box",
+            "Vec"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "devm_kmalloc/devm_kzalloc/devm_kfree",
+          "xkernel": "`Box::new(x)` 并把所有权存进 `DriverOps::Data`(随绑定释放);需要设备级清理钩子时用 devres 注册(`register_cleanup` 类接口)",
+          "keywords": [
+            "devm_kmalloc",
+            "devm_kzalloc",
+            "devres"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "kcalloc / kcalloc_array(清零数组)",
+          "xkernel": "`vec![T::default(); n]` 或 `Vec::with_capacity(n)`",
+          "keywords": [
+            "kcalloc",
+            "array",
+            "vec"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "kmem_cache_create + kmem_cache_alloc(slab)",
+          "xkernel": "缺口:无 slab cache;用 Box/Vec,性能敏感路径上报缺口",
+          "keywords": [
+            "kmem_cache",
+            "slab"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "get_zeroed_page / __get_free_page / alloc_pages",
+          "xkernel": "`kalloc` 页分配器:`KAlloc::alloc_pages(num_pages, align_pow2, UsageKind)` -> 页帧",
+          "note": "整页粒度;小对象用 Box/Vec",
+          "keywords": [
+            "get_zeroed_page",
+            "alloc_pages",
+            "page",
+            "kalloc"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "mm/kalloc/src/lib.rs",
+            "line": 571
+          }
+        },
+        {
+          "linux": "vmalloc(非连续物理大缓冲)",
+          "xkernel": "缺口:无 vmalloc 等价;大缓冲用 DMA coherent(alloc_coherent)或上报缺口",
+          "keywords": [
+            "vmalloc",
+            "vfree"
+          ],
+          "status": "workaround"
+        },
+        {
+          "linux": "kmap/kunmap/kmap_atomic",
+          "xkernel": "无(aarch64 直接访问物理地址映射,无需临时映射)",
+          "keywords": [
+            "kmap",
+            "kmap_atomic"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "copy_to_user/copy_from_user",
+          "xkernel": "驱动面无用户拷贝 API;char 设备契约方法直接收 `&mut [u8]`/`&[u8]`(用户拷贝由 class/系统调用层负责)",
+          "keywords": [
+            "copy_to_user",
+            "copy_from_user",
+            "CharDevice"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/subsystems/char/src/lib.rs",
+            "line": 26
+          }
+        }
+      ]
+    },
+    {
+      "id": "time",
+      "title": "时间、延迟与定时",
+      "order": 8,
+      "rows": [
+        {
+          "linux": "msleep(ms) / schedule_timeout_interruptible",
+          "xkernel": "`ktask::sleep(ktime_types::TimeSpan::from_millis(ms))`",
+          "note": "参数是 ktime_types::TimeSpan,不是 core::time::Duration",
+          "keywords": [
+            "msleep",
+            "sleep",
+            "schedule_timeout"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ktask/src/api.rs",
+            "line": 733
+          }
+        },
+        {
+          "linux": "usleep_range(min, max)",
+          "xkernel": "`ktask::sleep(TimeSpan::from_micros(..))`",
+          "keywords": [
+            "usleep_range",
+            "sleep"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ktask/src/api.rs",
+            "line": 733
+          }
+        },
+        {
+          "linux": "udelay / mdelay(忙等,不可睡眠上下文)",
+          "xkernel": "`khal::time::busy_wait(TimeSpan)` / `busy_wait_until(MonotonicInstant)`",
+          "note": "中断上下文/必须原地等时用;能用 ktask::sleep 就别忙等",
+          "keywords": [
+            "udelay",
+            "mdelay",
+            "busy_wait"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/time/mod.rs",
+            "line": 124
+          }
+        },
+        {
+          "linux": "ktime_get / ktime_get_ns / ktime_get_real",
+          "xkernel": "`khal::time::monotonic_time_nanos()` / `monotonic_time() -> MonotonicInstant`",
+          "keywords": [
+            "ktime_get",
+            "ktime_get_ns",
+            "monotonic_time"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/time/mod.rs",
+            "line": 101
+          }
+        },
+        {
+          "linux": "jiffies / msecs_to_jiffies / time_after/time_before",
+          "xkernel": "`MonotonicInstant` 直接比较(无需 jiffies 换算);`ktime_types` 提供 TimeSpan 换算",
+          "keywords": [
+            "jiffies",
+            "time_after",
+            "msecs_to_jiffies",
+            "MonotonicInstant"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/time/mod.rs",
+            "line": 101
+          }
+        },
+        {
+          "linux": "timer_setup / mod_timer / del_timer(软定时器)",
+          "xkernel": "`ktimer-core`:`TimerSet` + `Timer::new(&set, handler)`,.rearm(deadline)/.try_cancel()/.cancel_sync()",
+          "note": "回调在定时器软中断上下文;延后到任务上下文再走 kworkng",
+          "keywords": [
+            "timer_setup",
+            "mod_timer",
+            "del_timer",
+            "ktimer",
+            "TimerSet"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "task/ktimer-core/src/timer.rs",
+            "line": 59
+          }
+        },
+        {
+          "linux": "hrtimer(高精度定时器)",
+          "xkernel": "无独立 hrtimer 框架;ktimer-core 承担软定时语义,精度需求上报",
+          "keywords": [
+            "hrtimer",
+            "hrtimer_start"
+          ],
+          "status": "workaround",
+          "source": {
+            "path": "task/ktimer-core/src/lib.rs",
+            "line": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "log-err",
+      "title": "日志与错误处理",
+      "order": 9,
+      "rows": [
+        {
+          "linux": "dev_info/dev_err/dev_warn/dev_dbg",
+          "xkernel": "`log::info!/error!/warn!/debug!`(无 dev_ 变体;消息里拼 `dev.info().path()`)",
+          "keywords": [
+            "dev_info",
+            "dev_err",
+            "dev_warn",
+            "log",
+            "info",
+            "error"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "printk / pr_info/pr_err/pr_warn",
+          "xkernel": "`log::info!` 等",
+          "keywords": [
+            "printk",
+            "pr_info",
+            "pr_err"
+          ],
+          "status": "landed"
+        },
+        {
+          "linux": "-ENOMEM",
+          "xkernel": "`RuntimeError::NoMemory`(包进 ProbeError::Fatal 或 map 到 KError)",
+          "keywords": [
+            "ENOMEM",
+            "NoMemory"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 109
+          }
+        },
+        {
+          "linux": "-EINVAL",
+          "xkernel": "`RuntimeError::Invalid`",
+          "keywords": [
+            "EINVAL",
+            "Invalid"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 110
+          }
+        },
+        {
+          "linux": "-ENODEV/-ENXIO",
+          "xkernel": "`RuntimeError::NotFound` 或 `BadState`(视语义)",
+          "keywords": [
+            "ENODEV",
+            "ENXIO",
+            "NotFound",
+            "BadState"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 117
+          }
+        },
+        {
+          "linux": "-EBUSY",
+          "xkernel": "`RuntimeError::Busy`",
+          "keywords": [
+            "EBUSY",
+            "Busy"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 112
+          }
+        },
+        {
+          "linux": "-EIO",
+          "xkernel": "`RuntimeError::Io`(类契约里是 `kerrno::KError::Io`)",
+          "keywords": [
+            "EIO",
+            "Io"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 113
+          }
+        },
+        {
+          "linux": "-ENOTSUPP/-EOPNOTSUPP",
+          "xkernel": "`RuntimeError::Unsupported`",
+          "keywords": [
+            "ENOTSUPP",
+            "EOPNOTSUPP",
+            "Unsupported"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 115
+          }
+        },
+        {
+          "linux": "-EEXIST",
+          "xkernel": "`RuntimeError::AlreadyExists`",
+          "keywords": [
+            "EEXIST",
+            "AlreadyExists"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 116
+          }
+        },
+        {
+          "linux": "错误传播(返回负 errno + IS_ERR/PTR_ERR)",
+          "xkernel": "`?` 运算符 + `Result<T, ProbeError>` / `KResult<T>`;两套错误间用 map_err 转换",
+          "keywords": [
+            "IS_ERR",
+            "PTR_ERR",
+            "error propagation",
+            "Result"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/error.rs",
+            "line": 76
+          }
+        }
+      ]
+    },
+    {
+      "id": "dt",
+      "title": "设备树属性读取",
+      "order": 10,
+      "rows": [
+        {
+          "linux": "of_property_read_u32(node, \"x\", &val)",
+          "xkernel": "`dev.fw().u32(\"x\")? -> Option<u32>`;原始节点路径:`of::property_u32(node, \"x\")`",
+          "note": "驱动优先走 fw()(设备绑定的节点快照);of:: 直接查询留给总线/组合根",
+          "keywords": [
+            "of_property_read_u32",
+            "property_u32",
+            "fw",
+            "u32"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 429
+          }
+        },
+        {
+          "linux": "of_property_read_string(node, \"x\", &s)",
+          "xkernel": "`dev.fw().string(\"x\") -> Option<&'static str>`;底层走 of::fdt() 的 FdtNode property 接口",
+          "keywords": [
+            "of_property_read_string",
+            "string"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 434
+          }
+        },
+        {
+          "linux": "of_property_read_bool(node, \"x\")",
+          "xkernel": "`dev.fw().flag(\"x\") -> bool`",
+          "keywords": [
+            "of_property_read_bool",
+            "flag",
+            "bool"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 442
+          }
+        },
+        {
+          "linux": "of_find_compatible_node(NULL, NULL, \"v,d\")",
+          "xkernel": "`of::find_compatible(\"vendor,dev\") -> Option<FdtNode>`",
+          "keywords": [
+            "of_find_compatible_node",
+            "find_compatible"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/firmware/of/src/lib.rs",
+            "line": 509
+          }
+        },
+        {
+          "linux": "of_find_node_by_name / of_find_node_by_path",
+          "xkernel": "`of::find_node(\"/path\")`(支持别名解析)",
+          "keywords": [
+            "of_find_node_by_path",
+            "of_find_node_by_name",
+            "find_node"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/firmware/of/src/lib.rs",
+            "line": 525
+          }
+        },
+        {
+          "linux": "clk_get(dev, name) / devm_clk_get + clk_get_rate",
+          "xkernel": "`dev.res().clk(\"name\")? -> ClkHandle`(.get_rate()/.prepare_enable()/.set_rate());缺 provider 时返回 ProbeError::Deferred",
+          "note": "v2 已落地:clk 经 driver-host 桥接 core/kclk;消费端只见 ClkHandle",
+          "keywords": [
+            "clk_get",
+            "devm_clk_get",
+            "clk_get_rate",
+            "ClkHandle",
+            "clk"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 396
+          }
+        },
+        {
+          "linux": "of_get_named_gpio / gpiod_get",
+          "xkernel": "缺口:无 gpio 子系统;reset-gpios 等需求上报(见 gaps gpio 条)",
+          "keywords": [
+            "of_get_named_gpio",
+            "gpiod",
+            "gpio"
+          ],
+          "status": "missing"
+        },
+        {
+          "linux": "of_irq_get / of_irq_count",
+          "xkernel": "`dev.res().irq(n)?`(已解析 IrqSpec);原始接口 `of::first_interrupt_desc(node)`",
+          "keywords": [
+            "of_irq_get",
+            "of_irq_count",
+            "first_interrupt_desc"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/firmware/of/src/lib.rs",
+            "line": 683
+          }
+        },
+        {
+          "linux": "of_address_to_resource(pdev->dev.of_node, index, &res)",
+          "xkernel": "`dev.res().mmio(index)?`(已解析 MmioRegion)",
+          "keywords": [
+            "of_address_to_resource",
+            "mmio"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/device.rs",
+            "line": 285
+          }
+        },
+        {
+          "linux": "of_match_node(of_match_table, node)",
+          "xkernel": "总线层用 `PlatformId::Of(OfMatch)` id 表自动匹配,驱动不手动 match",
+          "keywords": [
+            "of_match_node",
+            "OfMatch"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "drivers/base/src/bus/platform_bus.rs",
+            "line": 178
+          }
+        }
+      ]
+    },
+    {
+      "id": "addr",
+      "title": "地址转换(DMA / 物理-虚拟)",
+      "order": 11,
+      "rows": [
+        {
+          "linux": "virt_to_phys",
+          "xkernel": "`khal::mem::v2p(VirtAddr) -> PhysAddr`",
+          "keywords": [
+            "virt_to_phys",
+            "v2p"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/mem/mod.rs",
+            "line": 38
+          }
+        },
+        {
+          "linux": "phys_to_virt",
+          "xkernel": "`khal::mem::p2v(PhysAddr) -> VirtAddr`",
+          "keywords": [
+            "phys_to_virt",
+            "p2v"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/mem/mod.rs",
+            "line": 33
+          }
+        },
+        {
+          "linux": "PAGE_SIZE / PAGE_SHIFT",
+          "xkernel": "`khal::mem::PAGE_SIZE_4K`",
+          "keywords": [
+            "PAGE_SIZE",
+            "PAGE_SHIFT",
+            "PAGE_SIZE_4K"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/mem/mod.rs",
+            "line": 13
+          }
+        },
+        {
+          "linux": "物理/虚拟地址类型(phys_addr_t/dma_addr_t)",
+          "xkernel": "`khal::mem::{PhysAddr, VirtAddr}`(memaddr 类型族);DMA 设备地址用 CoherentMem::bus_addr(u64)",
+          "keywords": [
+            "phys_addr_t",
+            "dma_addr_t",
+            "PhysAddr",
+            "VirtAddr"
+          ],
+          "status": "landed",
+          "source": {
+            "path": "arch/khal/src/mem/mod.rs",
+            "line": 13
+          }
+        }
+      ]
+    }
+  ]
+}

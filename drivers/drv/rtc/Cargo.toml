@@ -1,0 +1,31 @@
+[package]
+name = "drv-rtc"
+description = "driver-core real-time clock drivers: Goldfish, x86 CMOS, LS7A"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "rtc", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+goldfish = ["dep:riscv_goldfish"]
+cmos = ["dep:x86_rtc"]
+ls7a = []
+
+[dependencies]
+subsys_rtc = { workspace = true }
+driver_base = { workspace = true }
+kerrno.workspace = true
+ktime_types = { workspace = true }
+log = { workspace = true }
+riscv_goldfish = { version = "0.1", optional = true }
+x86_rtc = { version = "0.1", optional = true }
+chrono = { workspace = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

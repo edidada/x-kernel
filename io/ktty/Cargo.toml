@@ -1,0 +1,44 @@
+[package]
+name = "ktty"
+description = "TTY subsystem and terminal line discipline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[package.metadata.cargo-shear]
+# Guest fixtures in ut-tests/tty_ntty.rs use kdevice::DeviceObject and DeviceId.
+# Workspace cargo-shear excludes ut-tests; cfg(unittest) requires a normal dependency.
+ignored = ["kdevice"]
+
+[dependencies]
+driver_base = { workspace = true }
+serial_core = { workspace = true }
+intrusive-collections.workspace = true
+kcred.workspace = true
+kworkng.workspace = true
+kcpu_id_map.workspace = true
+subsys_char_console = { workspace = true }
+subsys_char = { workspace = true }
+kerrno.workspace = true
+khal.workspace = true
+klogger.workspace = true
+kpoll.workspace = true
+kprocess.workspace = true
+ksignal.workspace = true
+klazy.workspace = true
+kspin.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+kvfs.workspace = true
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
+osvm.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
+unittest.workspace = true
+
+[lints]
+workspace = true

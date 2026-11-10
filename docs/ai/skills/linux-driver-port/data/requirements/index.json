@@ -1,0 +1,160 @@
+{
+  "requirements": [
+    {
+      "id": "req-clk-framework",
+      "gap_id": "clk-framework",
+      "title": "实现 clk framework(rockchip_clk_register_branches)",
+      "infra_type": "multi-provider",
+      "status": "landed",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/clk/rockchip/clk-rk3588.c",
+      "symbol": "rockchip_clk_register_branches",
+      "created_ts": 1792590378,
+      "confirmed_ts": null,
+      "file": "req-clk-framework.md"
+    },
+    {
+      "id": "req-gpio",
+      "gap_id": "gpio",
+      "title": "实现 gpio / gpiod(devm_gpiod_get)",
+      "infra_type": "multi-provider",
+      "status": "rejected",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/pci/controller/dwc/pcie-dw-rockchip.c",
+      "symbol": "devm_gpiod_get",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-gpio.md"
+    },
+    {
+      "id": "req-reset",
+      "gap_id": "reset",
+      "title": "实现 reset controller(reset_control_assert)",
+      "infra_type": "multi-provider",
+      "status": "in-progress",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/pci/controller/dwc/pcie-dw-rockchip.c",
+      "symbol": "reset_control_assert",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-reset.md"
+    },
+    {
+      "id": "req-regulator",
+      "gap_id": "regulator",
+      "title": "实现 regulator(devm_regulator_get)",
+      "infra_type": "multi-provider",
+      "status": "rejected",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/pci/controller/dwc/pcie-dw-rockchip.c",
+      "symbol": "devm_regulator_get",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-regulator.md"
+    },
+    {
+      "id": "req-phy",
+      "gap_id": "phy",
+      "title": "实现 phy(phy_init)",
+      "infra_type": "multi-provider",
+      "status": "in-progress",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/pci/controller/dwc/pcie-dw-rockchip.c",
+      "symbol": "phy_init",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-phy.md"
+    },
+    {
+      "id": "req-device-class",
+      "gap_id": "device-class",
+      "title": "实现 设备子系统无 class(i2c/spi/watchdog/regulator/usb)(usb_hcd)",
+      "infra_type": "subsystem-class",
+      "status": "rejected",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "usb_hcd",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-device-class.md"
+    },
+    {
+      "id": "req-pci-dwc-host",
+      "gap_id": "pci-dwc-host",
+      "title": "实现 DesignWare PCIe 主控(RC 模式)(dw_pcie_host_init)",
+      "infra_type": "driver-missing",
+      "status": "in-progress",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/pci/controller/dwc/pcie-dw-rockchip.c",
+      "symbol": "dw_pcie_host_init",
+      "created_ts": 1792620410,
+      "confirmed_ts": null,
+      "file": "req-pci-dwc-host.md"
+    },
+    {
+      "id": "req-completion",
+      "gap_id": "completion",
+      "title": "实现 completion(complete)",
+      "infra_type": "framework",
+      "status": "confirmed",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "complete",
+      "created_ts": 1792620554,
+      "confirmed_ts": 1792620567,
+      "file": "req-completion.md"
+    },
+    {
+      "id": "req-busy-wait",
+      "gap_id": "busy-wait",
+      "title": "实现 忙等延时(udelay/mdelay/ndelay)(udelay)",
+      "infra_type": "framework",
+      "status": "landed",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "udelay",
+      "created_ts": 1792620554,
+      "confirmed_ts": null,
+      "file": "req-busy-wait.md"
+    },
+    {
+      "id": "req-timer",
+      "gap_id": "timer",
+      "title": "实现 定时器(timer_setup/mod_timer/hrtimer)(timer_setup)",
+      "infra_type": "framework",
+      "status": "landed",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "timer_setup",
+      "created_ts": 1792620554,
+      "confirmed_ts": null,
+      "file": "req-timer.md"
+    },
+    {
+      "id": "req-misc",
+      "gap_id": "misc",
+      "title": "实现 其他(vmalloc/RCU/kmem_cache/leds/pm_runtime)(vmalloc)",
+      "infra_type": "framework",
+      "status": "rejected",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "vmalloc",
+      "created_ts": 1792620554,
+      "confirmed_ts": null,
+      "file": "req-misc.md"
+    },
+    {
+      "id": "req-usb-stack",
+      "gap_id": "usb-stack",
+      "title": "实现 USB 主机栈(usb core + HCD)(ehci_setup)",
+      "infra_type": "subsystem-class",
+      "status": "in-progress",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "ehci_setup",
+      "created_ts": 1792620554,
+      "confirmed_ts": null,
+      "file": "req-usb-stack.md"
+    },
+    {
+      "id": "req-dma-streaming",
+      "gap_id": "dma-streaming",
+      "title": "实现 DMA streaming 映射(dma_map_single)",
+      "infra_type": "single-provider",
+      "status": "rejected",
+      "source": "scan:../docs/ai/skills/linux-driver-port/data/references/linux/drivers/usb/host/ehci-hcd.c",
+      "symbol": "dma_map_single",
+      "created_ts": 1792620554,
+      "confirmed_ts": null,
+      "file": "req-dma-streaming.md"
+    }
+  ]
+}

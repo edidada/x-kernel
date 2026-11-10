@@ -1,0 +1,44 @@
+[package]
+name = "krcu"
+description = "Kernel RCU context integration and grace-period service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[package.metadata.cargo-shear]
+# Used in ut-tests/rcu_callback.rs via unittest::path_mod_test!, which shear
+# does not follow. All calls are restricted to cfg(unittest).
+ignored = ["kalloc"]
+
+[features]
+default = []
+ipi = ["dep:kipi", "ktask/ipi"]
+smp = ["ipi", "ktask/smp"]
+
+[dependencies]
+# Kernel clippy adds cfg(unittest) after Cargo resolves dependencies, so this
+# test-only observation dependency cannot use a cfg(unittest) target table.
+kalloc.workspace = true
+krcu-core.workspace = true
+ktask.workspace = true
+kirq.workspace = true
+khal.workspace = true
+karch.workspace = true
+kcpu_id_map.workspace = true
+kcpu_slot.workspace = true
+kbuild_config.workspace = true
+kspin.workspace = true
+kiface.workspace = true
+kerrno.workspace = true
+klazy.workspace = true
+ktime_types.workspace = true
+kpoll.workspace = true
+kipi = { workspace = true, optional = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

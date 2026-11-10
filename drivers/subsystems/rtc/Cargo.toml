@@ -1,0 +1,20 @@
+[package]
+name = "subsys-rtc"
+description = "Real-time clock device class: driver trait, class registry, and boot wall-clock seeding"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[dependencies]
+driver_base = { workspace = true }
+kerrno.workspace = true
+ktime = { workspace = true }
+ktime_types = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true

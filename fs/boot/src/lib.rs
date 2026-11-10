@@ -1,0 +1,770 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Filesystem namespace preparation during kernel boot.
+//!
+//! This crate selects the root block device and builds the initial mount
+//! namespace. Configured filesystems register their canonical KVFS type
+//! descriptors through kernel initcalls before this crate probes registered
+//! block-backed types or mounts the built-in virtual filesystems.
+
+#![cfg_attr(any(not(test), doc), no_std)]
+
+extern crate alloc;
+
+#[macro_use]
+extern crate log;
+
+#[cfg(feature = "fs9p")]
+use alloc::boxed::Box;
+use alloc::{format, sync::Arc, vec::Vec};
+
+#[cfg(feature = "fs9p")]
+use driver_base::Publication;
+#[cfg(feature = "fs9p")]
+use kvfs::{FileSystemType, FsContext, FsContextOperations};
+use kvfs::{
+    Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
+    SuperBlock, SuperBlockFlags, path::PathBuf,
+};
+#[cfg(feature = "fs9p")]
+use virtio_devices::{Virtio9pDevice as _, Virtio9pDeviceImpl, class_9p::P9};
+
+const PSEUDO_FS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NODEV)
+    .union(MountFlags::NOEXEC)
+    .union(MountFlags::RELATIME);
+// Linux's safe devtmpfs policy is `nosuid,noexec`; `nodev` would prevent the
+// device filesystem from serving its defining purpose.
+const DEVFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NOEXEC)
+    .union(MountFlags::RELATIME);
+const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
+    .union(MountFlags::NODEV)
+    .union(MountFlags::RELATIME);
+
+/// Initializes device discovery projections and lifecycle publication.
+///
+/// This runs before driver discovery so sysfs paths are projected before add
+/// events and removal ordering is owned by the device lifecycle coordinator,
+/// independent of when userspace mounts sysfs.
+pub fn init_device_discovery() {
+    sysfs::init_device_projection();
+    uevent_netlink::init();
+}
+
+#[cfg(feature = "fs9p")]
+struct Virtio9pTransport(Publication<Virtio9pDeviceImpl>);
+
+#[cfg(feature = "fs9p")]
+impl p9::P9Transport for Virtio9pTransport {
+    fn request(&mut self, request: &[u8], response: &mut [u8]) -> kerrno::KResult<usize> {
+        // The publication's `Virtio9pDevice` forwarding gates on availability
+        // and returns the driver's own error vocabulary unchanged.
+        self.0.request(request, response)
+    }
+}
+
+#[cfg(feature = "fs9p")]
+fn host_9p_get_tree(
+    context: &mut FsContext<'_>,
+    _lookup_root: &Path,
+    _lookup_pwd: &Path,
+) -> kvfs::VfsResult<Arc<SuperBlock>> {
+    let mut devices = P9.devices();
+    let handle = match context.source().filter(|mount_tag| !mount_tag.is_empty()) {
+        Some(mount_tag) => devices
+            .into_iter()
+            .find(|device| device.mount_tag() == mount_tag),
+        None => devices.pop(),
+    }
+    .ok_or(kvfs::VfsError::NoSuchDevice)?;
+    info!("Mount 9P filesystem...");
+    info!("  use virtio-9p device: {:?}", handle.name());
+    info!("  mount tag: {:?}", handle.mount_tag());
+
+    let transport = Box::new(Virtio9pTransport(handle));
+    kvfs::get_tree_nodev(context, move |file_system_type, superblock_flags| {
+        v9fs::mount(file_system_type, superblock_flags, transport)
+    })
+}
+
+#[cfg(feature = "fs9p")]
+static HOST_9P_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(host_9p_get_tree);
+
+#[cfg(feature = "fs9p")]
+fn init_host_9p_context(context: &mut FsContext<'_>) -> kvfs::VfsResult<()> {
+    context.set_operations(&HOST_9P_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
+#[cfg(feature = "fs9p")]
+static HOST_9P_TYPE: FileSystemType = FileSystemType::nodev("9p", init_host_9p_context);
+
+#[cfg(feature = "fs9p")]
+#[macros::register_init]
+fn init_host_9p_fs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
+    kvfs::register_filesystem(&HOST_9P_TYPE).expect("9P filesystem type must register once");
+}
+
+/// Prepares the initial mount namespace from registered filesystem types.
+///
+/// # Panics
+///
+/// Panics if filesystem initcalls have not registered the required canonical
+/// types, or if bootstrap mounts, root device selection, root filesystem
+/// construction, or init `fs_struct` setup fails.
+pub fn prepare_namespace() {
+    let bootstrap = memfs::ramfs::new_rootfs(SuperBlockFlags::empty());
+    BootVfs::install_initial_root(bootstrap);
+
+    let boot = BootVfs::initial();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create bootstrap \
+                  /dev mountpoint; filesystem startup has no error return or recovery"
+    )]
+    boot.ensure_directory_path("/dev")
+        .expect("Failed to create bootstrap /dev mountpoint");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount bootstrap \
+                  devfs; filesystem startup has no error return or recovery"
+    )]
+    boot.mount_at(
+        "/dev",
+        &devfs::FILE_SYSTEM_TYPE,
+        None,
+        SuperBlockFlags::empty(),
+        DEVFS_MOUNT_FLAGS,
+    )
+    .expect("Failed to mount bootstrap devfs");
+    mount_root_file_system(&boot);
+    let root = boot.namespace.visible_root_path();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Boot installs a directory root from the \
+                  newly constructed root filesystem before user tasks run"
+    )]
+    fs_context::init_fs()
+        .lock()
+        .replace_root_and_pwd(root.clone(), root)
+        .expect("real root path must replace bootstrap root");
+    anon_inodefs::init_anon_inodefs();
+    pipefs::init_pipefs();
+}
+
+/// Mounts boot-time virtual filesystems into the initial namespace.
+pub fn mount_virtual_filesystems() {
+    info!("Initialize VFS...");
+    BootVfs::initial().mount_virtual_filesystems();
+}
+
+struct BootVfs {
+    namespace: Arc<MntNamespace>,
+    root: Path,
+}
+
+impl BootVfs {
+    fn install_initial_root(root_fs: Arc<SuperBlock>) {
+        let namespace = MntNamespace::init_mount_tree(&root_fs);
+        let root = namespace.visible_root_path();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs a directory root from \
+                      the newly constructed root filesystem before user tasks run"
+        )]
+        fs_context::init_fs()
+            .lock()
+            .attach_root(root.clone())
+            .expect("root path must initialize init fs");
+    }
+
+    fn initial() -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: install_initial_root created the \
+                      permanent initial mount namespace before BootVfs::initial"
+        )]
+        let namespace = MntNamespace::initial().expect("mount namespace must be initialized");
+        let root = namespace.visible_root_path();
+        Self { namespace, root }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: /dev/log cannot be bound for \
+                  a reason other than missing support; virtual filesystem setup has no error \
+                  return or recovery"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: linear registration table: each block creates and \
+                  mounts one independent virtual filesystem"
+    )]
+    fn mount_virtual_filesystems(&self) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /dev \
+                      mountpoint; filesystem startup has no error return or recovery"
+        )]
+        self.ensure_directory_path("/dev")
+            .expect("Failed to create /dev mountpoint");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount devfs; \
+                      filesystem startup has no error return or recovery"
+        )]
+        self.mount_at(
+            "/dev",
+            &devfs::FILE_SYSTEM_TYPE,
+            None,
+            SuperBlockFlags::empty(),
+            DEVFS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount devfs");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /dev/shm \
+                      mountpoint; filesystem startup has no error return or recovery"
+        )]
+        self.ensure_directory_path("/dev/shm")
+            .expect("Failed to create /dev/shm mountpoint");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount /dev/shm; \
+                      filesystem startup has no error return or recovery"
+        )]
+        self.mount_at(
+            "/dev/shm",
+            &memfs::TMPFS_TYPE,
+            None,
+            SuperBlockFlags::empty(),
+            TMPFS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount /dev/shm");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /tmp \
+                      mountpoint; filesystem startup has no error return or recovery"
+        )]
+        self.ensure_directory_path("/tmp")
+            .expect("Failed to create /tmp mountpoint");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount /tmp; \
+                      filesystem startup has no error return or recovery"
+        )]
+        self.mount_at(
+            "/tmp",
+            &memfs::TMPFS_TYPE,
+            None,
+            SuperBlockFlags::empty(),
+            TMPFS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount /tmp");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /proc \
+                      mountpoint; filesystem startup has no error return or recovery"
+        )]
+        self.ensure_directory_path("/proc")
+            .expect("Failed to create /proc mountpoint");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount procfs; \
+                      filesystem startup has no error return or recovery"
+        )]
+        self.mount_at(
+            "/proc",
+            &procfs::FILE_SYSTEM_TYPE,
+            None,
+            SuperBlockFlags::empty(),
+            PSEUDO_FS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount procfs");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /sys \
+                      mountpoint; filesystem startup has no error return or recovery"
+        )]
+        self.ensure_directory_path("/sys")
+            .expect("Failed to create /sys mountpoint");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount sysfs; \
+                      filesystem startup has no error return or recovery"
+        )]
+        self.mount_at(
+            "/sys",
+            &sysfs::FILE_SYSTEM_TYPE,
+            None,
+            SuperBlockFlags::empty(),
+            PSEUDO_FS_MOUNT_FLAGS,
+        )
+        .expect("Failed to mount sysfs");
+
+        #[cfg(feature = "cgroup2")]
+        {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create \
+                          /sys/fs/cgroup mountpoint; filesystem startup has no error return or \
+                          recovery"
+            )]
+            self.ensure_directory_path("/sys/fs/cgroup")
+                .expect("Failed to create /sys/fs/cgroup mountpoint");
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The immediately preceding \
+                          ensure_directory_path succeeded during serialized boot filesystem setup"
+            )]
+            let mountpoint = self
+                .lookup("/sys/fs/cgroup")
+                .expect("Failed to resolve /sys/fs/cgroup mountpoint");
+            let super_block = cgroup2fs::new_initial_cgroup2fs(SuperBlockFlags::empty());
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount \
+                          cgroup2fs; filesystem startup has no error return or recovery"
+            )]
+            self.namespace
+                .attach_with_flags_and_devname(
+                    &mountpoint,
+                    &super_block,
+                    PSEUDO_FS_MOUNT_FLAGS,
+                    None,
+                )
+                .expect("Failed to mount cgroup2fs");
+        }
+
+        #[cfg(feature = "ebpf")]
+        {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create \
+                          /sys/fs/bpf mountpoint; filesystem startup has no error return or \
+                          recovery"
+            )]
+            self.ensure_directory_path("/sys/fs/bpf")
+                .expect("Failed to create /sys/fs/bpf mountpoint");
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount \
+                          bpffs; filesystem startup has no error return or recovery"
+            )]
+            self.mount_at(
+                "/sys/fs/bpf",
+                &bpffs::FILE_SYSTEM_TYPE,
+                None,
+                SuperBlockFlags::empty(),
+                PSEUDO_FS_MOUNT_FLAGS,
+            )
+            .expect("Failed to mount bpffs");
+        }
+        if let Err(err) = devfs::bind_dev_log() {
+            if err != kerrno::LinuxError::ENOSYS && err != kerrno::LinuxError::EOPNOTSUPP {
+                panic!("Failed to bind dev-log: {err}");
+            }
+            warn!("/dev/log not available: {err}");
+        }
+    }
+
+    fn lookup(&self, path: impl AsRef<str>) -> kvfs::VfsResult<Path> {
+        let cred = kcred::initial_cred();
+        Filename::new(path.as_ref()).lookup_at(
+            &self.root,
+            &self.root,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )
+    }
+
+    fn mkdir_path(&self, path: impl AsRef<str>) -> kvfs::VfsResult<()> {
+        let cred = kcred::initial_cred();
+        Filename::new(path.as_ref())
+            .mkdir_at(
+                &self.root,
+                &self.root,
+                NodePermission::from_bits_truncate(0o755),
+                NodePermission::empty(),
+                &cred,
+            )
+            .map(|_| ())
+    }
+
+    fn ensure_directory_path(&self, path: &str) -> kvfs::VfsResult<()> {
+        let mut current = PathBuf::new();
+        for_each_lexical_component(path, |component| {
+            current.push(component);
+            if self.lookup(&current).is_err() {
+                self.mkdir_path(&current)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn mount_at(
+        &self,
+        path: &str,
+        file_system_type: &'static kvfs::FileSystemType,
+        source: Option<&str>,
+        superblock_flags: SuperBlockFlags,
+        mount_flags: MountFlags,
+    ) -> kvfs::VfsResult<()> {
+        let mountpoint = self.lookup(path)?;
+        if !mountpoint.is_dir() {
+            return Err(kvfs::VfsError::NotADirectory);
+        }
+        let cred = kcred::initial_cred();
+        let mut context =
+            kvfs::FsContext::new(file_system_type, source, None, superblock_flags, &cred)?;
+        self.namespace.mount_new(
+            &mountpoint,
+            mount_flags,
+            &mut context,
+            &self.root,
+            &self.root,
+        )?;
+        Ok(())
+    }
+}
+
+// The sole panic site in this fn carries its own `#[expect(clippy::panic)]`
+// with the CG-021 rationale; a fn-level expect would sit unfulfilled whenever
+// cfg trims make no other panic appear here (e.g. fs9p off).
+fn mount_root_file_system(boot: &BootVfs) {
+    info!("Initialize filesystem subsystem...");
+
+    let mut block_devs = subsys_block::block_devices()
+        .into_iter()
+        .filter(|device| device.num_blocks() != 0)
+        .collect();
+    // Root selection: the block consumer publishes one view per used
+    // partition (`mmcblk0pN`, in table order) and the whole card only when
+    // there is no partition table, so the candidate list is already ordered
+    // by device number. `KFEAT_ROOT_BLOCK` overrides the choice by name;
+    // otherwise the preferred device is the lowest dev_t (or the
+    // second-lowest when `KFEAT_ROOTFS_SECONDARY_BLOCK` asks for it).
+    //
+    // The preference is only a *first try*: like Linux `mount_root_generic`,
+    // every remaining candidate is attempted before boot gives up, because
+    // "which partition carries the root filesystem" is an image fact, not a
+    // device-number fact.
+    let candidates = root_candidates(&mut block_devs);
+    // Root has to be a filesystem PID 1 can live on, not merely one that mounts.
+    //
+    // This board's eMMC carries a FAT boot partition (`mmcblk0p1`) next to the ext4
+    // root, and the moment a vfat driver exists the probe below accepts that
+    // partition as root: `ExecRequest::from_path("/init")` then fails and boot panics
+    // with "Failed to resolve init executable". Measured by toggling KFEAT_FS_FAT
+    // alone on one tree -- enabled: 0x "Enter user space", 1 panic; unset, or
+    // registered-but-disabled: 13x, no panic. Removable-media filesystems are
+    // therefore not root candidates; `mount_block_devices_at()` mounts them where
+    // userspace expects them instead.
+    let file_system_types: Vec<_> = kvfs::registered_filesystems()
+        .into_iter()
+        .filter(|file_system_type| file_system_type.requires_device())
+        .filter(|file_system_type| !matches!(file_system_type.name(), "vfat"))
+        .collect();
+    let cred = kcred::initial_cred();
+    for handle in candidates {
+        let source = format!("/dev/{}", handle.name());
+        info!(
+            "  use block device: {:?} ({:?})",
+            handle.name(),
+            handle.device_number(),
+        );
+        for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
+            let mut mount_flags = MountFlags::RELATIME;
+            if superblock_flags.contains(SuperBlockFlags::RDONLY) {
+                mount_flags.insert(MountFlags::RDONLY);
+            }
+
+            for file_system_type in &file_system_types {
+                let result = kvfs::FsContext::new(
+                    file_system_type,
+                    Some(&source),
+                    None,
+                    superblock_flags,
+                    &cred,
+                )
+                .and_then(|mut context| {
+                    boot.namespace.mount_new(
+                        &boot.root,
+                        mount_flags,
+                        &mut context,
+                        &boot.root,
+                        &boot.root,
+                    )
+                });
+                match result {
+                    Ok(mount) => {
+                        info!("  filesystem type: {:?}", mount.filesystem_name());
+                        ROOT_DEVICE_NUMBER.store(
+                            handle.device_number().0,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
+                        return;
+                    }
+                    Err(err)
+                        if matches!(
+                            kerrno::LinuxError::from(err),
+                            kerrno::LinuxError::EACCES | kerrno::LinuxError::EINVAL
+                        ) =>
+                    {
+                        debug!(
+                            "root filesystem probe as {} failed: {err:?}",
+                            file_system_type.name()
+                        );
+                    }
+                    Err(err) => {
+                        // A device that errors under one filesystem may
+                        // still carry a usable one: keep probing and let the
+                        // exhausted candidate list be the failure.
+                        warn!(
+                            "root filesystem probe as {} on {source} failed: {err:?}",
+                            file_system_type.name()
+                        );
+                    }
+                }
+            }
+        }
+        warn!("no root filesystem on {source}; trying the next block device");
+    }
+    error!("Failed to mount any block device as the root filesystem");
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no block device carries a \
+                  registered filesystem; root mounting has no error return or recovery"
+    )]
+    {
+        panic!("VFS: Unable to mount root fs");
+    }
+}
+
+/// Block devices to try as the root filesystem, in preference order: the
+/// configured/preferred device first, then every other candidate.
+fn root_candidates(
+    devs: &mut Vec<Arc<subsys_block::BlockDevice>>,
+) -> Vec<Arc<subsys_block::BlockDevice>> {
+    let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
+    if !preferred.is_empty() {
+        // An explicit name is authoritative: boot fails rather than
+        // silently mounting some other partition.
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured root block \
+                      device is absent; root mounting has no error return or recovery"
+        )]
+        let index = devs
+            .iter()
+            .position(|device| device.name() == preferred)
+            .unwrap_or_else(|| {
+                panic!(
+                    "root block device '{preferred}' not found among {:?}",
+                    devs.iter().map(|device| device.name()).collect::<Vec<_>>()
+                )
+            });
+        return alloc::vec![devs.remove(index)];
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no block device is \
+                  registered; root mounting has no error return or recovery"
+    )]
+    if devs.is_empty() {
+        panic!("No block device found!");
+    }
+    let preference = if cfg!(feature = "rootfs-secondary-block") {
+        1
+    } else {
+        0
+    };
+    let preference = preference.min(devs.len() - 1);
+    let mut candidates = Vec::with_capacity(devs.len());
+    candidates.push(devs.remove(preference));
+    candidates.append(devs);
+    candidates
+}
+
+/// Mounts the host-share 9P filesystem into the initial namespace.
+/// Device number of the filesystem mounted as root, recorded by
+/// `mount_root_file_system()` so that `mount_block_devices_at()` can skip it.
+static ROOT_DEVICE_NUMBER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Mounts any block device that carries a registered filesystem at `mount_path`.
+///
+/// This is the same pair the root filesystem uses — `kvfs::get_tree_bdev()`
+/// resolves the `/dev/<name>` source through its device number, and
+/// `MntNamespace::mount_new()` attaches it — only the mountpoint is fixed. It
+/// runs after the driver initcalls, so a disk that appeared during probe (a USB
+/// mass-storage device, for instance) is already published.
+///
+/// Read-write is tried first and read-only second: a filesystem that needs
+/// journal recovery mounts read-write, while media that cannot be written still
+/// becomes visible read-only instead of failing outright.
+pub fn mount_block_devices_at(mount_path: &str) -> bool {
+    let boot = BootVfs::initial();
+    if boot.ensure_directory_path(mount_path).is_err() {
+        warn!("could not create mount point {mount_path}");
+        return false;
+    }
+    let mountpoint = match boot.lookup(mount_path) {
+        Ok(mountpoint) => mountpoint,
+        Err(err) => {
+            warn!("could not look up mount point {mount_path}: {err:?}");
+            return false;
+        }
+    };
+    let cred = kcred::initial_cred();
+    // Whatever carries the root filesystem is already mounted; mounting it again
+    // at a second path would hide the disk this helper is meant to expose.
+    let root_device = ROOT_DEVICE_NUMBER.load(core::sync::atomic::Ordering::Relaxed);
+    let root_device = (root_device != 0).then_some(root_device);
+    for handle in subsys_block::block_devices() {
+        if handle.num_blocks() == 0 {
+            continue;
+        }
+        if Some(handle.device_number().0) == root_device {
+            continue;
+        }
+        let source = format!("/dev/{}", handle.name());
+        // devtmpfs creates a node for a published disk; if the projection did
+        // not deliver one (a disk published after the devtmpfs projection was
+        // built), the node is created here from the device number the block core
+        // already holds. `Mount::mknod` is the kernel-side equivalent of the
+        // node `devtmpfsd` would have made.
+        if boot.lookup(&source).is_err() {
+            match boot.lookup("/dev") {
+                Ok(dev_dir) => {
+                    let number = handle.device_number();
+                    let device = kvfs::DeviceId::new(number.major(), number.minor());
+                    match dev_dir.mknod(
+                        handle.name(),
+                        kvfs::NodeType::BlockDevice,
+                        kvfs::NodePermission::OWNER_READ
+                            | kvfs::NodePermission::OWNER_WRITE
+                            | kvfs::NodePermission::GROUP_READ
+                            | kvfs::NodePermission::OTHER_READ,
+                        device,
+                        &cred,
+                    ) {
+                        Ok(_) => info!("  created {source} for {}", handle.name()),
+                        Err(err) => {
+                            warn!("  could not create {source}: {err:?}");
+                            continue;
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("  could not look up /dev: {err:?}");
+                    continue;
+                }
+            }
+        }
+        for file_system_type in kvfs::registered_filesystems()
+            .into_iter()
+            .filter(|file_system_type| file_system_type.requires_device())
+        {
+            for superblock_flags in [SuperBlockFlags::empty(), SuperBlockFlags::RDONLY] {
+                let mut mount_flags = MountFlags::RELATIME;
+                if superblock_flags.contains(SuperBlockFlags::RDONLY) {
+                    mount_flags.insert(MountFlags::RDONLY);
+                }
+                let result = kvfs::FsContext::new(
+                    file_system_type,
+                    Some(&source),
+                    None,
+                    superblock_flags,
+                    &cred,
+                )
+                .and_then(|mut context| {
+                    boot.namespace.mount_new(
+                        &mountpoint,
+                        mount_flags,
+                        &mut context,
+                        &boot.root,
+                        &boot.root,
+                    )
+                });
+                match result {
+                    Ok(mount) => {
+                        info!(
+                            "  {source} mounted at {mount_path} as {:?}",
+                            mount.filesystem_name()
+                        );
+                        return true;
+                    }
+                    Err(err) => info!(
+                        "{source} as {} ({superblock_flags:?}) failed: {err:?}",
+                        file_system_type.name()
+                    ),
+                }
+            }
+        }
+    }
+    info!("  no filesystem found on any block device for {mount_path}");
+    false
+}
+
+#[cfg(feature = "fs9p")]
+pub fn mount_host_share(mount_path: &str) {
+    let boot = BootVfs::initial();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create the 9P \
+                  host-share mountpoint; filesystem startup has no error return or recovery"
+    )]
+    boot.ensure_directory_path(mount_path)
+        .expect("Failed to create 9P mountpoint path");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount the 9P host \
+                  share; filesystem startup has no error return or recovery"
+    )]
+    boot.mount_at(
+        mount_path,
+        &HOST_9P_TYPE,
+        None,
+        SuperBlockFlags::empty(),
+        MountFlags::RELATIME,
+    )
+    .expect("Failed to mount 9P filesystem");
+    info!("  mounted at: {:?}", mount_path);
+}
+
+fn for_each_lexical_component<E>(
+    path: &str,
+    mut f: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut rest = path;
+    let mut at_start = true;
+    while !rest.is_empty() {
+        let (component, next) = match rest.find('/') {
+            Some(index) => (&rest[..index], &rest[index + 1..]),
+            None => (rest, ""),
+        };
+        rest = next;
+        let component = match component {
+            "" if at_start => Some("/"),
+            "" => None,
+            "." if at_start => Some("."),
+            "." => None,
+            name => Some(name),
+        };
+        at_start = false;
+        if let Some(component) = component {
+            f(component)?;
+        }
+    }
+    Ok(())
+}

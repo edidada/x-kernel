@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use kcpu_id_map::LogicalCpuId;
+use kplat::boot::{BootHandler, BootInfo};
+
+#[kiface::provide]
+impl BootHandler {
+    fn prepare_boot_memory(boot_info: &BootInfo) {
+        let _ = boot_info;
+    }
+
+    fn firmware_init(_boot_info: &BootInfo) {}
+
+    fn early_driver_init() {
+        clocksource_driver::riscv_sbi::init(
+            clocksource_driver::riscv_sbi::SbiTimerConfig::platform_static(
+                irqchip_driver::riscv::S_TIMER,
+                ktime_types::Frequency::from_hz(10_000_000),
+            ),
+        );
+        irqchip_driver::riscv::init_primary();
+        irqchip_driver::riscv::init_current_cpu_context();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
+                      cannot be parsed; early_driver_init has no error return or recovery"
+        )]
+        boot_console::init_stdout_from_device_tree()
+            .expect("failed to parse console from device tree");
+        if let Some(fdt) = of::fdt() {
+            kcpu::init_hwprobe_from_fdt(fdt);
+        }
+        boot_console::register_input_irq_handler();
+    }
+
+    fn final_init(_boot_info: &BootInfo) {
+        irqchip_driver::riscv::init_percpu();
+        clocksource_driver::riscv_sbi::init_percpu();
+    }
+
+    #[cfg(feature = "smp")]
+    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
+        irqchip_driver::riscv::init_percpu();
+        clocksource_driver::riscv_sbi::init_percpu();
+    }
+}

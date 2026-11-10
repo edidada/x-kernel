@@ -1,0 +1,33 @@
+[package]
+name = "drv-clk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core clock provider drivers"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "clk", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+fixed-clock = []
+fixed-factor = []
+scmi-clock = []
+rk3588-cru = []
+
+[dependencies]
+driver_base = { workspace = true }
+driver_host = { workspace = true }
+karch = { workspace = true }
+kbuild_config = { workspace = true }
+kclk = { workspace = true }
+kreset = { workspace = true }
+khal = { workspace = true }
+kspin = { workspace = true }
+ktime_types = { workspace = true }
+log.workspace = true
+
+[lints]
+workspace = true

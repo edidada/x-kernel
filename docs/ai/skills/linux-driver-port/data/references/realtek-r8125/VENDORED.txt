@@ -1,0 +1,3 @@
+realtek-r8125 9.018.00-NAPI (官方 DKMS 源码)
+vendored: 2026-11, source https://codeload.github.com/awesometic/realtek-r8125-dkms (tar.gz, master)
+原解包路径 /workspace/r8125-vendor-9.018.00 (rtl8125 port 的板上权威源, 已整体 vendor 进仓库)

@@ -1,0 +1,29 @@
+{
+  "$comment": "参考树注册表。把'以 Linux/U-Boot 源码为参考'从散文升级为机器可验:每棵必须是本地目录(submodule 或 vendored 快照),带 pin。拒绝 web search —— 缺参考即 fail-closed(check-layout/check-data 都会挡),这正是'太容易忘了'的结构性解法。如何 vendor 见 data/references/README.md。",
+  "trees": [
+    {
+      "id": "linux",
+      "path": "docs/ai/skills/linux-driver-port/data/references/linux",
+      "kind": "linux",
+      "pin": "linux-7.1.8 (sparse subset)",
+      "required": true,
+      "$comment": "RK3588 USB/PCI/clk 移植的钉死参考(sparse 子集:scmi/rockchip-clk/usb-host/dwc3/pci-dwc/rockchip-phy + rk3588-cru bindings)。VENDORED.txt 记来源与范围。"
+    },
+    {
+      "id": "bsp-opi5plus",
+      "path": "docs/ai/skills/linux-driver-port/data/references/bsp-opi5plus",
+      "kind": "dt-bindings",
+      "pin": "OrangePi 5 Plus BSP dts binding headers",
+      "required": false,
+      "$comment": "BSP 设备树(本仓库根 orangepi-5-plus-m.dts)用 BSP 编号(SCLK_UART2=187、CCLK_EMMC=314…),与 mainline include/dt-bindings 编号不同;CRU 索引以这棵为准。"
+    },
+    {
+      "id": "realtek-r8125",
+      "path": "docs/ai/skills/linux-driver-port/data/references/realtek-r8125",
+      "kind": "vendor-driver",
+      "pin": "Realtek r8125 9.018.00-NAPI (官方 DKMS 源码)",
+      "required": false,
+      "$comment": "板上实际绑定的驱动就是这个（modinfo: r8125 9.014.01-NAPI）。获取方式: https://codeload.github.com/awesometic/realtek-r8125-dkms (GitHub 镜像官方 Realtek 源码)。整棵源码已 vendor 进仓库（VENDORED.txt 记 pin）；r8169 是 mainline 的通用实现，r8125 才是板上权威源——两者在 TX 描述符格式、RxConfig 表值、hw_config 序列上都有差异。"
+    }
+  ]
+}

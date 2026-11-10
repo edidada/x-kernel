@@ -1,0 +1,117 @@
+#
+# RK3588 (Orange Pi 5 Plus) minimal boot configuration.
+#
+# Brings up console (UART2 / DesignWare APB UART @ 0xfeb50000) + GICv3 +
+# ARM generic timer + SMP via PSCI. All four are device-tree driven, so no
+# RK3588 SoC driver is needed for this minimal milestone (U-Boot has already
+# configured the CRU; the kernel inherits reset defaults).
+#
+# Inherits ARCH_AARCH64 from the AArch64 choice default; selects the RK3588
+# machine. Boot this image through U-Boot `booti` on the real board with the
+# matching board device tree.
+#
+# ARCH_LOONGARCH64 is not set
+# ARCH_RISCV64 is not set
+# ARCH_X86_64 is not set
+MACHINE_AARCH64_RK3588=y
+BOOT_CONSOLE_ADDR=0xfeb50000
+BOOT_CONSOLE_REG_IO_WIDTH=4
+BOOT_CONSOLE_TYPE="mmio"
+# UART2 console line rate (1.5 Mbaud). Drives early-console TX pacing so the
+# fast cores don't overrun the 16550 TX FIFO before the polled runtime console
+# is up. 0x16e360 = 1500000.
+BOOT_CONSOLE_BAUDRATE=0x16e360
+BOOT_STACK_SIZE=0x40000
+NR_CPUS=8
+# BUILD_TYPE_DEBUG is not set
+KERNEL_STACK_SIZE=0x40000
+# Character device class (the NS16550 MMIO console driver depends on it).
+KFEAT_CHAR=y
+# RK3588 CRU clock controller: registers the SoC clock tree so consumers
+# (console UART, eMMC, PCIe, USB, ...) resolve their DT clocks to real rates.
+KFEAT_DRIVER_CLK_RK3588_CRU=y
+# RK3588 phy providers: the `phys = <&...>` consumers (EHCI/OHCI, DWC3,
+# PCIe RCs) resolve through the kphy registry.
+KFEAT_DRIVER_PHY_USB2PHY=y
+# DWC3's usb3-phy: the USBDP (U3/SuperSpeed + 480M) provider the dwc3 node's
+# `phys` second entry names. Without it the DWC3 OT G port never completes a
+# transaction (connect detection works, SET_ADDRESS times out).
+KFEAT_DRIVER_PHY_USBDP=y
+KFEAT_DRIVER_PHY_COMBPHY=y
+KFEAT_DRIVER_PHY_PCIE3PHY=y
+# RK3588 DesignWare PCIe root-complex host (DBI + iATU, no ECAM).
+KFEAT_PCI_DW_HOST=y
+# RK3588 UART2 is a DesignWare APB UART (16550-compatible) -> ns16550-mmio.
+KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
+# KFEAT_DRIVER_CONSOLE_PL011 is not set
+# KFEAT_ALLOC_BUDDY is not set
+# KFEAT_ALLOC_TLSF is not set
+# KFEAT_DICE is not set
+# FAT32 is what removable media arrives formatted as -- the x500m stick on this
+# board carries a 0x0c (FAT32 LBA) partition -- and the mount helper walks every
+# registered filesystem type, so the driver has to be in the build for the stick
+# to be mountable at all.
+# FAT stays off until the boot failure it causes is understood: with it enabled the
+# kernel panics in `init_process` ("Failed to resolve init executable") a few seconds
+# after the filesystem namespace is set up, with `Enter user space` never reached.
+# Measured both ways on the same tree: FAT=y -> userspace 0, panic 1; FAT=n -> userspace
+# 13, panic 0. Without it a FAT32 stick cannot be mounted, so this costs the xHCI mount
+# until the interaction is explained.
+KFEAT_FS_FAT=y
+# KFEAT_DWARF is not set
+KFEAT_FS_TIMES=y
+# MMC/SD: subsystem + card-bus block consumer + DW host backend; the SD
+# controller's ciu/biu clocks live behind the EL3 SCMI agent.
+KFEAT_MMC=y
+KFEAT_DRIVER_MMC_BLOCK=y
+KFEAT_DRIVER_MMC_DWMMC_ROCKCHIP=y
+# The EL3 SCMI agent rejects the SD clock domain (CLOCK_ATTRIBUTES ->
+# SCMI_HARDWARE_ERROR); the SD controller takes its clocks as board facts.
+# KFEAT_DRIVER_CLK_SCMI is not set
+SCMI_SMC_ID=0x82000010
+# Derived from measurement, not from a datasheet: two 4-bit runs with the
+# divider at 0 and 1 (9.0 vs 5.1 MB/s) solve to a ~25 MHz card clock with a
+# ~13 us per-block card delay, so the CIU input this divider sees is 25 MHz.
+# MMC_CIU_HZ=50MHz made every programmed rate twice what the hardware produced.
+MMC_CIU_HZ=0x17D7840
+# Card-clock ceiling: the divider math rests on MMC_CIU_HZ being the real
+# source rate, which the firmware does not let us read. Measured: throughput
+# scales with the programmed clock (9.0 MB/s at the 50 MHz ceiling, 5.1 MB/s at
+# 25 MHz), so the bus is the limit at this setting; MMC_CLOCK_LADDER falls back
+# to 25 MHz on its own if a setting does not work.
+MMC_MAX_CARD_HZ=0x2FAF080
+MMC_4BIT=y
+MMC_CLOCK_LADDER=y
+MMC_IDMAC=y
+MMC_MULTIBLOCK=y
+# MMC_BOOT_IO_PROBE is not set
+SCMI_SHMEM_PADDR=0x10f000
+KFEAT_NET=y
+KFEAT_DRIVER_NET_RTL8125=y
+KFEAT_DRIVER_USB_DWC3=y
+# KFEAT_TA_VERIFY_WITH_ROOT is not set
+# KFEAT_TEE is not set
+# KFEAT_TEE_TA_SIGN is not set
+# KFEAT_VIRTCCA_HUK_KEY is not set
+# KFEAT_VIRTIO_BUS_MMIO is not set
+# KFEAT_VSOCK is not set
+# Bring-up default: warn everywhere, debug for the stacks being brought up.
+# `LOG_FILTER` is runtime-changeable, so a session never needs a rebuild:
+#   echo 'warn drv_mmc=trace' > /proc/sys/kernel/printk
+LOG_LEVEL_WARN=y
+LOG_FILTER="warn drv_mmc=debug subsys_mmc=debug fs_boot=debug"
+# LOG_LEVEL_ERROR is not set
+# LOG_LEVEL_INFO is not set
+# LOG_LEVEL_TRACE is not set
+# No generic ECAM PCI host on RK3588: its PCIe is the rockchip,rk3588-pcie
+# driver (KFEAT_PCI_DW_HOST), which publishes its own DBI+iATU access backend
+# and its BAR window. PCI_ECAM_BASE=0 keeps the flat-ECAM path from claiming a
+# window that does not exist.
+# gracefully instead of mapping a bogus ECAM window.
+PCI_BUS_END=0x0
+PCI_ECAM_BASE=0x0
+PCI_RANGES=[]
+PHYS_BUS_OFFSET=0x0
+RTC_PADDR=0x0
+TASK_STACK_SIZE=0x40000
+KFEAT_RAMDISK_SIZE=0x1000000

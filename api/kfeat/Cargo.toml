@@ -1,0 +1,276 @@
+[package]
+name = "kfeat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Top-level feature selection for x-kernel"
+
+[package.metadata.cargo-shear]
+# kfeat owns top-level feature forwarding. These optional crates are selected
+# through feature edges rather than direct code references.
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+
+[features]
+default = []
+
+# Multicore
+smp = [
+    "ipi",
+    "khal/smp",
+    "kruntime/smp",
+    "ktracing?/smp",
+    "ktask?/smp",
+    "kspin/smp",
+    "kplat-aarch64?/smp",
+    "kplat-loongarch64?/smp",
+    "kplat-riscv64?/smp",
+    "kplat-x86_64?/smp",
+]
+
+# Floating point/SIMD
+fp-simd = ["khal/fp-simd"]
+
+# Virtualization (VMM)
+vmm = [
+    "devfs/vmm",
+    "khal/vmm",
+    "kplat-aarch64?/vmm",
+    "kplat-x86_64?/vmm",
+    "kplat-riscv64?/vmm",
+]
+
+
+# Interrupts
+ipi = ["dep:kipi", "kruntime/ipi", "ktask?/ipi"]
+dma-trace = ["kdma/dma-trace"]
+dev_log = ["devfs/dev-log"]
+dice = [
+    "dep:tee_kernel",
+    "tee_kernel/dice_huk_key",
+    "devfs/dice",
+]
+kvm_guest_mem_share = ["kplat-aarch64?/kvm-guest-mem-share"]
+kvm_mmio_guard = ["kplat-aarch64?/kvm-mmio-guard"]
+arm_timer_resume_fixup = [
+    "kruntime/arm-timer-resume-fixup",
+    "ktask?/arm-timer-resume-fixup",
+]
+rootfs_secondary_block = ["kruntime/rootfs-secondary-block"]
+pci_non_ecam = ["pci/pci-non-ecam"]
+
+# Platform wiring
+platform_kplat_aarch64 = ["dep:kplat-aarch64", "fp-simd", "smp", "dev_log"]
+platform_kplat_x86_64 = ["dep:kplat-x86_64", "fp-simd", "smp", "dev_log"]
+platform_kplat_riscv64 = ["dep:kplat-riscv64", "fp-simd", "smp", "dev_log"]
+platform_kplat_loongarch64 = ["dep:kplat-loongarch64", "fp-simd", "dev_log"]
+
+# Memory
+alloc = ["dep:alloc-engine", "dep:kalloc"]
+alloc_tlsf = ["alloc", "alloc-engine/tlsf", "kalloc/tlsf"]
+alloc_slab = ["alloc", "alloc-engine/slab", "kalloc/slab"]
+alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
+dma = []
+
+# Task scheduler
+sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
+
+# File system
+#
+# `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features link concrete
+# filesystem implementations while kruntime only owns the generic fs stage.
+fs_ext4 = ["dep:kext4", "kruntime/fs"]
+fs_fat = ["dep:fat", "kruntime/fs"]
+fs_9p = ["kruntime/fs9p"]
+fs_cgroup2 = ["kruntime/fs_cgroup2"]
+fs_times = ["fs_ext4", "kext4/times"]
+
+# Networking
+#
+# Subsystem-only. The NIC / vsock transport driver is selected separately via
+# the `driver_*` features below.
+net = ["dep:knet", "kruntime/net"]
+vsock = ["net", "kruntime/vsock", "knet/vsock", "ksyscall/vsock"]
+
+# Display (subsystem only; pick a driver via `driver_*`).
+display = ["dep:fbdevice", "kruntime/display"]
+
+# Input (subsystem only; pick a driver via `driver_*`).
+input = ["dep:inputdev", "kruntime/input", "devfs/input"]
+
+# Character device class infrastructure.
+char = ["kruntime/char", "devfs/serial"]
+
+# Real Time Clock (RTC) Driver.
+rtc = ["kruntime/rtc", "driver-init/rtc"]
+
+# Device drivers
+#
+# Each `driver_*` feature pulls in one concrete hardware driver. It does NOT
+# automatically enable the corresponding subsystem -- both must be selected
+# independently (via Kconfig or by hand). They use underscores so they map
+# directly from `KFEAT_DRIVER_*` Kconfig symbols (see
+# `scripts/make/kfeat_features.sh`).
+driver_virtio_blk = ["dep:drv-virtio", "drv-virtio/blk", "driver-init/virtio-blk", "char"]
+driver_virtio_net = ["dep:drv-virtio", "drv-virtio/net", "driver-init/virtio-net", "net"]
+driver_virtio_gpu = ["dep:drv-virtio", "drv-virtio/gpu", "driver-init/virtio-gpu", "display"]
+driver_virtio_input = ["dep:drv-virtio", "drv-virtio/input", "driver-init/virtio-input", "input"]
+driver_virtio_socket = ["dep:drv-virtio", "drv-virtio/vsock", "driver-init/virtio-vsock", "vsock"]
+driver_virtio_9p = ["dep:drv-virtio", "drv-virtio/fs9p", "driver-init/virtio-9p", "fs_9p"]
+# Hardware driver and trusted-source connection are separate knobs (main's
+# !916 split): the driver can exist without feeding the entropy pool.
+driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-init/virtio-rng"]
+entropy_virtio_rng = ["driver_virtio_rng", "dep:entropy", "entropy/entropy_virtio_rng"]
+driver_virtio_mmio = ["dep:drv-virtio", "drv-virtio/mmio", "driver-init/virtio-mmio"]
+entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]
+entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
+entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
+driver_ramdisk = ["dep:drv-block", "driver-init/ramdisk", "char"]
+# Second provider driver (transcription exercise): consumer+provider in one
+# probe; board-static node, parent = QEMU apb-pclk.
+driver_fixed_factor = ["dep:drv-clk", "drv-clk/fixed-factor", "driver-init/fixed-factor"]
+# RK3588 CRU: the SoC clock tree provider (PLLs/muxes/dividers/gates), the
+# prerequisite for every `clocks = <&cru N>` consumer on the board.
+driver_clk_rk3588_cru = ["dep:drv-clk", "drv-clk/rk3588-cru", "driver-init/rk3588-cru"]
+# RK3588 phy providers: usb2 (EHCI/OHCI + dwc3), naneng combphy (PCIe2 +
+# USB3), snps pcie3 (gen3 RCs). Consumers resolve them via `phys = <&...>`.
+driver_phy_usb2phy = ["dep:drv-phy", "drv-phy/rk3588-usb2phy", "driver-init/rk3588-usb2phy"]
+# USBDP PHY (DWC3's usb3-phy, the U3/SuperSpeed port + its 480M path).
+driver_phy_usbdp = ["dep:drv-phy", "drv-phy/rk3588-usbdp", "driver-init/rk3588-usbdp"]
+driver_phy_combphy = ["dep:drv-phy", "drv-phy/rk3588-combphy", "driver-init/rk3588-combphy"]
+driver_phy_pcie3phy = ["dep:drv-phy", "drv-phy/rk3588-pcie3phy", "driver-init/rk3588-pcie3phy"]
+# RK3588 PCIe root complex (DesignWare host): config space via DBI+iATU.
+pci_dw_host = ["pci/dw-host", "driver-init/pci-dw-host"]
+# Realtek RTL8125 PCIe NIC: binds through the PCI bus, publishes to `net`.
+driver_net_rtl8125 = ["net", "dep:drv-net", "driver-init/net-rtl8125"]
+# DWC3 USB controller (host path) with its xHCI block: clocks, usb3-otg reset,
+# usb2 phy, then root-port enumeration.
+driver_usb_dwc3 = ["dep:drv-usb", "drv-usb/rk3588-dwc3", "driver-init/usb-dwc3"]
+driver_ramdisk_static = ["driver_ramdisk", "drv-block/ramdisk-static", "driver-init/ramdisk-static"]
+driver_console_pl011 = ["dep:boot_console", "boot_console/pl011"]
+driver_console_ns16550_mmio = ["dep:boot_console", "boot_console/ns16550-mmio"]
+driver_console_ns16550_ioport = ["dep:boot_console", "boot_console/ns16550-ioport"]
+driver_serial_pl011 = ["dep:drv-serial", "dep:drv-clk", "drv-serial/pl011", "drv-clk/fixed-clock", "driver-init/serial-pl011", "driver-init/fixed-clock", "char", "dep:boot_console", "boot_console/pl011"]
+driver_serial_ns16550_mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio", "driver-init/serial-ns16550-mmio", "char", "dep:boot_console", "boot_console/ns16550-mmio"]
+driver_serial_ns16550_ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport", "driver-init/serial-ns16550-ioport", "char", "dep:boot_console", "boot_console/ns16550-ioport"]
+# RTC class plus one backend per driver feature (KFEAT_DRIVER_RTC_*).
+driver_rtc_goldfish = ["rtc", "dep:drv-rtc", "drv-rtc/goldfish", "driver-init/rtc-goldfish"]
+driver_rtc_cmos = ["rtc", "dep:drv-rtc", "drv-rtc/cmos", "driver-init/rtc-cmos"]
+driver_rtc_ls7a = ["rtc", "dep:drv-rtc", "drv-rtc/ls7a", "driver-init/rtc-ls7a"]
+
+# MMC/SD (KFEAT_MMC / KFEAT_DRIVER_MMC_*): subsystem, card-bus block
+# consumer, DW host backend, and the SCMI clock provider the RK3588 SD
+# clocks live behind.
+mmc = ["driver-init/mmc"]
+driver_mmc_block = ["mmc", "driver-init/mmc-block"]
+driver_mmc_dwmmc_rockchip = ["mmc", "dep:drv-mmc", "driver-init/mmc-dwmmc-rockchip"]
+driver_clk_scmi = ["dep:drv-clk", "drv-clk/scmi-clock", "driver-init/clk-scmi"]
+
+# Backtrace
+# In-kernel DWARF symbolication (legacy mode; KFEAT_DWARF)
+dwarf = ["backtrace/dwarf"]
+# Compact kernel symbol table (kallsyms-style; KFEAT_SYMTAB)
+symtab = ["backtrace/symtab"]
+
+
+# Diagnostics
+memtrack = ["dep:kalloc", "kalloc/tracking", "devfs/memtrack"]
+snapshot = ["ktask/snapshot"]
+sysrq = ["dep:procfs", "procfs/sysrq"]
+watchdog = ["kruntime/watchdog", "ksync/watchdog"]
+kwork_stall_check = ["watchdog", "dep:kworkng", "kworkng/stall-check"]
+workqueue_bench = ["kruntime/workqueue-bench"]
+watchdog_hardlockup = ["kruntime/watchdog_hardlockup"]
+irq_context_debug = ["irq_stat", "dep:kirq", "kirq/irq_context_debug"]
+irq_stat = ["dep:kirq", "kirq/irq_stat"]
+lock_stat = [
+    "dep:procfs",
+    "procfs/lock_stat",
+    "dep:ksync",
+    "ksync/stats",
+    "dep:kspin",
+    "kspin/stats",
+]
+
+# TEE
+tee = ["dep:tee_kernel", "dep:tee_task_iface", "kexec/tee", "ksyscall/tee"]
+tee_ta_sign = [
+    "kexec/tee_ta_sign",
+    "ksyscall/tee_ta_sign",
+    "tee_task_iface/tee_ta_sign",
+]
+csv_huk_key = ["tee_kernel/csv_huk_key"]
+virtcca_huk_key = ["tee_kernel/virtcca_huk_key"]
+ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
+
+# Trusty IPC
+tipc = ["ksyscall/tipc", "kprocess/tipc", "linux_sysno/tipc"]
+vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
+
+# Pmu
+pmu = ["kruntime/pmu", "kplat-aarch64?/pmu"]
+
+# NMI
+nmi = ["khal/nmi", "kplat-aarch64?/nmi"]
+nmi_pmu = ["khal/nmi_pmu", "kplat-aarch64?/nmi-pmu"]
+nmi_mode_pseudo = ["khal/nmi_pseudo", "kplat-aarch64?/nmi-pseudo"]
+nmi_mode_hardware = ["khal/nmi_hardware", "kplat-aarch64?/nmi-hardware"]
+
+# Tracepoint
+tracepoint = ["ktracing/tracepoint"]
+
+# eBPF
+ebpf = ["dep:kbpf", "ksyscall/ebpf", "kruntime/fs_ebpf"]
+
+[dependencies]
+drv-usb = { workspace = true, optional = true }
+kworkng = { workspace = true, optional = true }
+alloc-engine = { workspace = true, optional = true }
+memspace = { workspace = true, optional = true }
+kalloc = { workspace = true, optional = true }
+backtrace.workspace = true
+fbdevice = { workspace = true, optional = true }
+fat = { workspace = true, optional = true }
+driver-init.workspace = true
+drv-virtio = { workspace = true, optional = true }
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+drv-phy = { workspace = true, optional = true }
+drv-net = { workspace = true, optional = true }
+pci = { workspace = true, optional = true }
+drv-block = { workspace = true, optional = true }
+drv-rtc = { workspace = true, optional = true }
+drv-mmc = { workspace = true, optional = true }
+boot_console = { workspace = true, optional = true }
+kdma.workspace = true
+kirq = { workspace = true, optional = true }
+kprocess.workspace = true
+kplat-aarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-x86_64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-riscv64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-loongarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kexec = { workspace = true }
+devfs = { workspace = true }
+entropy = { workspace = true, optional = true }
+khal.workspace = true
+inputdev = { workspace = true, optional = true }
+kipi = { workspace = true, optional = true }
+knet = { workspace = true, optional = true }
+kruntime.workspace = true
+kext4 = { workspace = true, optional = true }
+ksync = { workspace = true, optional = true }
+ktask = { workspace = true, optional = true }
+ksyscall = { workspace = true }
+linux_sysno.workspace = true
+kspin = { workspace = true, optional = true }
+procfs = { workspace = true, optional = true }
+tee_kernel = { workspace = true, optional = true }
+tee_task_iface = { workspace = true, optional = true }
+ktracing = { workspace = true, optional = true }
+kbpf = { workspace = true, optional = true }
+
+[lints]
+workspace = true

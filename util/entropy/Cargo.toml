@@ -1,0 +1,44 @@
+[package]
+name = "entropy"
+description = "Kernel entropy pool for /dev/random, getrandom, and TEE consumers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[package.metadata.cargo-shear]
+# kdevice is used by the cfg(unittest) collector fixture in ut-tests/virtio.rs
+# for device registration and cleanup; workspace cargo-shear excludes ut-tests.
+ignored = ["kdevice"]
+
+[features]
+default = []
+entropy_arch_cpu = ["dep:karch"]
+entropy_smccc_trng = ["dep:kplat-aarch64"]
+entropy_jitter = []
+entropy_virtio_rng = ["dep:subsys_hwrng", "dep:kspin", "dep:kworkng", "dep:driver_base", "dep:devnode"]
+
+[dependencies]
+kworkng = { workspace = true, optional = true }
+subsys_hwrng = { workspace = true, optional = true }
+kspin = { workspace = true, optional = true }
+driver_base = { workspace = true, optional = true }
+devnode = { workspace = true, optional = true }
+khal.workspace = true
+karch = { workspace = true, optional = true }
+klazy.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+ktime_types.workspace = true
+log.workspace = true
+rand_chacha.workspace = true
+unittest.workspace = true
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+kplat-aarch64 = { workspace = true, default-features = false, optional = true }
+
+[lints]
+workspace = true

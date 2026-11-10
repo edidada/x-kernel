@@ -1,0 +1,8 @@
+linux-7.1.8 (local snapshot, sparse subset)
+vendored: 2026-07, source tree /workspace/linux-7.1.8
+subtrees: drivers/{firmware/arm_scmi/common.h,clk/rockchip,usb/host,usb/dwc3,pci/controller/dwc,phy/rockchip}, include/dt-bindings/{clock,reset}/rockchip,rk3588-cru.h
+extra files:
+- drivers/rtc/rtc-loongson.c
+- drivers/rtc/rtc-pl031.c  (pl031-qemu port 的参考驱动; pin linux-7.1.8)
+- drivers/amba/bus.c + include/linux/amba/bus.h  (AMBA/PrimeCell 总线匹配语义:
+  amba_id 表、periphid 提取; rtc-pl031.c 的 #include <linux/amba/bus.h> 依赖)

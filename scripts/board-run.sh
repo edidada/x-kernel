@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+#
+# One-shot board bring-up loop for the rk3588 test rig (172.30.193.53):
+#
+#   1. build + deploy the kernel into the rig's TFTP root
+#      (scripts/deploy-rk3588.sh --build, skipped with SKIP_BUILD=1)
+#   2. run one rkt cycle on the rig: serial-relay power cycle → U-Boot →
+#      tftpboot → boot → console capture, verdict from the profile's
+#      ready/fail regex; a hanging boot ends via --until-quiet
+#   3. fetch the console log back to /tmp for local analysis
+#
+# Usage:
+#   scripts/board-run.sh <tag> [extra rkt run args...]
+#   SKIP_BUILD=1 scripts/board-run.sh pcie-dbg        # reuse the pushed image
+#
+# The console log lands at /tmp/board-<tag>.log.
+
+set -euo pipefail
+
+# Refuse to build a board image when driver code changed without a reference
+# anchor: the source diff is the step that gets skipped in a long session.
+if [ "${SKIP_ANCHOR:-0}" != "1" ] && ! "$(dirname "$0")/ref-anchor.sh" --check; then
+	echo "board-run: refusing to run — add a reference anchor first (SKIP_ANCHOR=1 to bypass)" >&2
+	exit 1
+fi
+
+RIG=${RIG:-kylin@172.30.193.53}
+TAG=${1:?usage: board-run.sh <tag> [extra rkt run args...]}
+shift || true
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+# A config experiment must edit the defconfig, not `.config`: the deploy step below
+# re-seeds `.config` from `platforms/kplat-aarch64/rk3588_defconfig`, so local edits are
+# silently discarded. That cost a round here -- two "KFEAT_FS_FAT disabled" runs were
+# built with FAT still enabled, and the logs only showed it because the runtime
+# behaviour (`probe as vfat`) did not change. Refuse to guess: say it out loud.
+defconfig=platforms/kplat-aarch64/rk3588_defconfig
+if [[ ${SKIP_BUILD:-0} != 1 && -f .config && -f $defconfig ]]; then
+    discarded=$(diff <(grep -E '^(# )?[A-Z0-9_]+(=| is not set)' "$defconfig" | sed 's/ is not set$/=n/' | sort) \
+                    <(grep -E '^(# )?[A-Z0-9_]+(=| is not set)' .config | sed 's/ is not set$/=n/' | sort) || true)
+    if [[ -n $discarded ]]; then
+        echo "== .config differs from $defconfig; these local changes will be DISCARDED:"
+        printf '%s\n' "$discarded" | sed 's/^/     /' | head -20
+        echo "   (edit the defconfig if the change is meant to persist)"
+    fi
+fi
+
+echo "== [1/3] deploy kernel to the TFTP root"
+if [[ ${SKIP_BUILD:-0} != 1 ]]; then
+    "$REPO_ROOT/scripts/deploy-rk3588.sh" --seed-config --build
+else
+    echo "SKIP_BUILD=1 — pushing the existing image"
+    "$REPO_ROOT/scripts/deploy-rk3588.sh"
+fi
+
+echo "== serial adapter check"
+# ttyUSB numbering follows enumeration order, so a manually re-plugged cable
+# silently renumbers every port -- one run was lost to capturing the native
+# Linux reference board instead of ours. scripts/board-udev/ pins stable
+# names; this check reports which world we are in without failing the run.
+CONSOLE_PORT=$(ssh -o BatchMode=yes "$RIG" \
+    "grep -A2 '^\[console\]' ~/rkt/profiles/opi5plus.ini | sed -n 's/^port = //p'" || true)
+POWER_PORT=$(ssh -o BatchMode=yes "$RIG" \
+    "grep -A4 '^\[power\]' ~/rkt/profiles/opi5plus.ini | sed -n 's/^port = //p'" || true)
+for port in "$CONSOLE_PORT" "$POWER_PORT"; do
+    [[ -z $port ]] && continue
+    if ssh -o BatchMode=yes "$RIG" "test -e '$port'"; then
+        echo "  ok      $port"
+    else
+        echo "  MISSING $port  (see scripts/board-udev/; renumbered after a re-plug?)"
+    fi
+done
+
+echo "== [2/3] rkt boot cycle (tag: $TAG)"
+# --until-quiet 30: a hanging boot (e.g. the DBI bus stall) ends the cycle
+# after 30s of console silence instead of blocking for the full 240s boot
+# timeout; the console log still covers everything up to the stall.
+# --no-preflash: the kernel is built HERE and pushed by step 1; the rig has
+# no rust toolchain, so the runner's remote "make build" preflash must not run.
+# Each extra argument is shell-quoted individually: `run --cmd 'ip link set
+# eth0 up'` has to arrive on the rig as ONE argument, not as five. Passing
+# `$*` expanded here silently splits it and rkt rejects the leftovers.
+EXTRA=()
+for arg in "$@"; do
+    EXTRA+=("$(printf '%q' "$arg")")
+done
+ssh -o BatchMode=yes "$RIG" \
+    "cd ~/rkt && ./rkt run --tag '$TAG' --until-quiet 30 --no-preflash ${EXTRA[*]}"
+
+echo "== [3/3] fetch the console log"
+run_id=$(ssh -o BatchMode=yes "$RIG" "ls -t ~/rkt/logs/ | grep '$TAG' | head -1")
+log="board-$TAG.log"
+scp -q "$RIG:~/rkt/logs/$run_id/console.log" "/tmp/$log"
+echo "console log: /tmp/$log (run $run_id)"

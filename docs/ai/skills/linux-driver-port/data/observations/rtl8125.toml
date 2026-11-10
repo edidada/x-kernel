@@ -1,0 +1,75 @@
+# 可观测事实：代码里碰过的每个寄存器都要有一条能判真假的断言。
+#
+# 存在的理由：读错偏移得到的 0 与"设备真的没动作"不可区分。本 port 曾因为
+# 在 0x3e 读 IntrStatus（8125 在 0x3c）而得出"MAC 毫无反应"，白追十几轮。
+
+[port]
+name = "rtl8125"
+log_marker = "rtl8125: "
+
+[[fact]]
+id = "intr-status-progress"
+reg = "0x3c"
+rule = "changes_across_tx"
+why = """
+RTL8125 的 32 位 IntrStatus 在 0x3c（816x 的 16 位 0x3c/0x3e 布局不适用）。
+一次发送尝试后它必须出现 RX_OK/TX_OK/TX_DESC_UNAVAILABLE 之一；
+恒为 0 说明偏移又写错了。
+"""
+
+[[fact]]
+id = "chip-id"
+reg = "0x40"
+rule = "bits_set:29:20"
+why = "TxConfig[29:20] 是只读芯片版本号，8125B 读到 0x641；乱码说明读错地址。"
+
+[[fact]]
+id = "link-list-ready"
+reg = "0xd3"
+rule = "bit_set_after_init:1"
+why = "MCU.LINK_LIST_RDY(bit1)：描述符链表 FIFO 就绪，是取描述符的前提。"
+
+[[fact]]
+id = "mac-link-up"
+reg = "0x6c"
+rule = "bit_set_after_init:1"
+why = "MAC 侧的链路状态（与 PHY BMSR 不是同一处）；TX 只在 MAC 认为链路 up 时才走。"
+
+[[fact]]
+id = "tx-ring-base"
+reg = "0x20"
+rule = "equals_bus_addr:tx_ring"
+why = "写进去的环基址必须原样读回；不一致说明 latch 或写通路有问题。"
+
+[[fact]]
+id = "rx-accept-mode"
+reg = "0x44"
+rule = "bits_set:3:1"
+why = "accept broadcast/multicast/own 三位在参考实例里是 0x0e；写不进去则收包不可能。"
+
+[fact]
+id = "rx-desc-status-layout"
+reg = "rx descriptor opts1 (coherent ring)"
+rule = "bit_set_on_good_frame:18"
+why = """
+完成状态字不是"错误位集合"，而是带布局的：8125B 硬件支持 type-3/type-4
+描述符环，但参考驱动只在开 RSS 或 PTP 时才切换，默认走 type 1。type 1 里
+判错的唯一依据是 RxRES(bit21)，RxRWT(22)/RxRUNT(20)/RxCRC(19) 只做统计，
+而 bit18 在**每一个好帧**上都置位。
+
+本 port 曾按位集合写掩码 (16|18|19|20)，于是把收到的每一帧都当错误丢掉，
+表现为"0 received + rx[0] 始终 owned"，看起来像 MAC 完全没收包。实测帧头
+（rx[5] opts1 0x3800007b head 01:80:c2:00:00:00 ...）证明硬件收得很好。
+换成 type-4 布局 (22|21|20) 同样错：那三位在 type-1 帧上本来就不出现。
+"""
+
+[fact]
+id = "rx-poll-tick"
+reg = "knet TIMER_SAMPLE_PERIOD (10 ms)"
+rule = "periodic_notify_while_receiving"
+why = """
+轮询模式（无中断路由）的网卡需要一个接收节拍：knet 的 10 ms 定时器原本
+只在协议定时器到期时才唤醒数据面，于是空闲期到达的回包要等到下一次发送
+被唤醒才被取走 —— 实测 ping RTT 出现整 1005 ms 的尖峰且伴随 ~20% 丢包。
+让该定时器每拍都通知数据面后：RTT 4.7 ms 均值、0% 丢包（10/10 连续两轮）。
+"""

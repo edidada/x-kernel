@@ -1,0 +1,30 @@
+[package]
+name = "boot-console"
+description = "Boot-stage console: printk sink, device-tree stdout bring-up, and early console input"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+pl011 = ["serial_core/pl011", "serial_core/earlycon"]
+ns16550-mmio = ["serial_core/ns16550-mmio", "serial_core/earlycon"]
+ns16550-ioport = ["serial_core/ns16550-ioport"]
+
+[dependencies]
+khal = { workspace = true }
+kiface = { workspace = true }
+kirq = { workspace = true }
+kspin = { workspace = true }
+log = { workspace = true }
+memspace = { workspace = true }
+of = { workspace = true }
+unittest.workspace = true
+serial_core = { workspace = true }
+
+[lints]
+workspace = true

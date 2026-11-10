@@ -1,0 +1,51 @@
+[package]
+name = "kplat-x86_64"
+description = "Implementation of `kplat` hardware abstraction layer for x86 Standard PC machine."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[package.metadata.cargo-shear]
+# kcpu and kspin are selected by platform features such as fp-simd/smp and are
+# not referenced directly in every platform configuration.
+ignored = ["kcpu", "kspin"]
+
+[features]
+fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
+smp = ["kplat/smp", "kspin/smp"]
+vmm = []
+
+[dependencies]
+kernel_boot = { workspace = true }
+kspin = { workspace = true }
+log = "0.4"
+kcpu = { workspace = true }
+karch = { workspace = true }
+kcpu_id_map = { workspace = true }
+kerrno = { workspace = true }
+kiface = { workspace = true }
+kplat = { workspace = true }
+boot_console = { workspace = true, features = ["ns16550-ioport"] }
+kbuild_config = { workspace = true }
+irqchip_driver = { workspace = true }
+khal = { workspace = true }
+ktime_types = { workspace = true }
+kirq = { workspace = true }
+x86_apic = { workspace = true }
+clocksource_driver = { workspace = true }
+boot_info = { workspace = true }
+acpi = { workspace = true }
+klazy = { workspace = true }
+multiboot2 = { version = "0.24.1", default-features = false }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-none"]
+
+[lints]
+workspace = true
