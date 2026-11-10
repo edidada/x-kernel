@@ -37,7 +37,9 @@ use ktask::{
 use ktime::{RtcSleepAccounting, RtcSleepError, RtcSleepSession};
 use ktime_types::TimeSpan;
 use workqueue::WorkqueueFreezeSession;
-pub use workqueue::{SuspendWorkqueues, WorkqueueFreezeError};
+pub use workqueue::{
+    FrozenSystemWorkqueues, SuspendWorkqueues, WorkqueueFreezeError, freeze_system_workqueues,
+};
 
 /// Platform-owned exclusion and hardware recovery around one PM transaction.
 ///

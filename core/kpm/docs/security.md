@@ -144,3 +144,20 @@ before platform finish; queues thaw after finish with usable time/events and
 before the system task guard drops. Callbacks and platform/device methods must
 not unwind. As with existing device participation, panic recovery and forgotten
 credentials are not supported cancellation mechanisms.
+
+## Multicore preparation guard
+
+`freeze_system_workqueues` accepts trusted kernel references and performs no
+platform transition. It retains global transaction admission and the authoritative
+system task-admission gate until queue and task cleanup finish. Queue failure
+releases only this attempt's acquired prefix before task thaw; aliases cannot
+steal another owner's pause. Cancellation after success cannot release either
+kind of guard. Callers must recover their own resources before dropping it.
+
+The guard permits scheduler infrastructure, exempt workers, idle and interrupts
+to continue. It is not a DMA, IRQ, CPU or device barrier. In particular, SMP
+support here does not relax the UP-only platform-suspend validation. Using this
+guard as evidence that shared clocks or hardware may be stopped violates its
+contract. Serial integration fixtures use a test-only authoritative task snapshot
+for explicit infrastructure exemptions; no production exemption discovery API
+or name-based rule is introduced.

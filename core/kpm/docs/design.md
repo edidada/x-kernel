@@ -240,3 +240,28 @@ workers/timers, retain pending work while an unselected queue progresses, and
 exercise Busy/Closed/cancelled preparation, alias rejection and retry. They
 thaw/drain/close fixture resources. No production platform implementation,
 worker safe points, real device transition or physical guest sleep is added.
+
+## Multicore software preparation
+
+`freeze_system_workqueues` is independent of platform sleep. It accepts the same
+explicit task exemptions and selected private queues, closes task activation,
+freezes admitted tasks using the SMP scheduler handshake, then pauses queues.
+`FrozenSystemWorkqueues` holds all credentials on the coordinator; Drop thaws
+queues in reverse order before tasks and deferred activation, then releases
+transaction admission. A queue failure explicitly releases its successful prefix
+before task cleanup, allowing a subsequent attempt. No platform callbacks run.
+
+All CPUs, IRQs and logical clocks remain available. Queue workers and recovery
+infrastructure must be explicitly exempt, and their callbacks must not depend
+on frozen tasks or earlier paused queues. Exemptions are caller policy, not
+inferred from task names or a diagnostic list. This safe guard does not certify
+hardware quiescence and must not authorize device power-off or clock freeze.
+The existing `suspend_uniprocessor*` entry points retain their CPU-count check.
+
+The serial integration fixture captures the authoritative admitted-task registry
+through a test-only ktask adapter to exempt boot infrastructure. It runs real
+pinned tasks and private queues on every present CPU, verifies callback CPU IDs,
+and models device availability with a fixture-owned atomic. Three rounds verify
+pending work and wake retention, deferred activation and recovery before thaw.
+A duplicate-queue failure exercises task/queue rollback and successful retry.
+No real device is powered down and no firmware sleep is entered.
