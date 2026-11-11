@@ -290,7 +290,7 @@ The following invariants are critical to both the robustness and the memory safe
 |------|----------|----------|----------|-----------|
 | F-01 | The target CPU's IPI queue is not initialized | `run_on_cpu` / broadcast fails | The related cross-core operation cannot be performed | Returns `KipiError::TargetCpuNotReady` |
 | F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
-| F-03 | The target CPU does not ack the TLB request for a long time | The initiating CPU spin-waits | The page-table modification path stalls, which may look like a system hang | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
+| F-03 | The target CPU does not ack the TLB request for a long time | The initiating CPU spin-waits | The page-table modification path stalls, which may look like a system hang | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TlbFlushError::TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits; page-table callers retain retry state and retirement holds on error. |
 | F-04 | The pending epoch is not updated synchronously | The target CPU fast path returns directly without scanning the slots | False negatives / hangs on unit tests or protocol misuse | The production path is encapsulated by `flush_remote()`; unit tests update it synchronously through a helper |
 | F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
 | F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
@@ -298,7 +298,7 @@ The following invariants are critical to both the robustness and the memory safe
 ## Failure Management
 
 - The generic IPI delivery path returns errors as a `Result` instead of failing silently;
-- The main TLB shootdown failure mode is a target CPU that does not ack. The initiator spins with a bounded wait: it warns at 1 s, re-sends the IPI every 1 s, escalates at 10 s, and after 30 s logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack;
+- The main TLB shootdown failure mode is a target CPU that does not ack. The initiator spins with a bounded wait: it warns at 1 s, re-sends the IPI every 1 s, escalates at 10 s, and after 30 s logs an error, flushes only the local TLB and returns `TlbFlushError::TimedOut` without the target's ack; page-table callers retain full-retry state and retirement holds rather than treating this as success;
 - A nested TLB request on the same CPU does not panic directly; instead it sets `needs_retry_full_flush` and is re-issued after the current request finishes;
 - The requirements on the platform's IPI ordering semantics are written into the interface contract, so implicit dependencies are not scattered across call sites.
 

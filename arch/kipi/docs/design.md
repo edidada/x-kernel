@@ -307,7 +307,8 @@ This order is deliberate: TLB shootdown is a page-table consistency protocol and
 7. Wait for each target CPU to advance `acked_seq_by_cpu[target]` to that `request_seq`.
    The wait loop polls `handle_shootdown()`: the page-table path often reaches
    `flush_remote` with IRQs disabled, and if it only waited for the IPI handler, two CPUs waiting on each other could never ack.
-8. Release the active slot; if a nested request from the same CPU was detected in the meantime, issue a full retry flush.
+8. If a target remains unacknowledged, periodically resend the IPI. After 30 seconds, log diagnostics and return `Err(TlbFlushError::TimedOut)`; a local flush is not proof of remote completion. The page-table layer retains the full-retry request and retirement holds, so callers must not release page-table or data pages that may still be referenced by a remote stale TLB.
+9. Release the active slot; if a nested request from the same CPU was detected in the meantime, issue a full retry flush.
 
 ### `tlb::handle_shootdown`
 
