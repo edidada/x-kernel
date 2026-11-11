@@ -128,7 +128,13 @@ pub(crate) fn run_user_thread_loop(
                     ktask::check_preempt_pending();
                     continue;
                 } else if !outcome.is_resolved() {
-                    let (signo, code) = fault_signal_for_outcome(outcome);
+                    // Linux distinguishes backing-store rejection from a
+                    // protection or unmapped-address fault through si_code.
+                    let (signo, code) = match outcome {
+                        PageFaultOutcome::BusError => (Signo::SIGBUS, BUS_ADRERR as i32),
+                        PageFaultOutcome::AccessDenied => (Signo::SIGSEGV, SEGV_ACCERR as i32),
+                        _ => (Signo::SIGSEGV, SEGV_MAPERR as i32),
+                    };
                     let exe_path = thr.process().exe_path().unwrap_or_default();
                     warn!(
                         "segfault at {:#x} ip {:#x} sp {:#x} in {} pid={} outcome={:?} flags={:?}",
@@ -598,20 +604,6 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
             // A sibling may already have exited and needs no delivery.
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
-    }
-}
-
-/// Selects the Linux synchronous-fault signal and `si_code` for a fault outcome.
-///
-/// `BusError` means a file-backed mapping rejected the access past the backing
-/// object's end, which Linux reports as `SIGBUS/BUS_ADRERR`. A present VMA that
-/// denied the attempted access maps to `SIGSEGV/SEGV_ACCERR`; every other fatal
-/// outcome reports an unmapped-address `SIGSEGV/SEGV_MAPERR`.
-fn fault_signal_for_outcome(outcome: PageFaultOutcome) -> (Signo, i32) {
-    match outcome {
-        PageFaultOutcome::BusError => (Signo::SIGBUS, BUS_ADRERR as i32),
-        PageFaultOutcome::AccessDenied => (Signo::SIGSEGV, SEGV_ACCERR as i32),
-        _ => (Signo::SIGSEGV, SEGV_MAPERR as i32),
     }
 }
 
