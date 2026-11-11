@@ -16,16 +16,17 @@ validated:
   resolution against the worker's own address space. No worker ever
   dereferences a raw user pointer outside that path, and no other
   process's memory is reachable.
-- **Ring memory**: ring pages are user-writable by design. The kernel keeps
-  its own `sq_head`/`cq_tail`, re-reads user indices on every enter, validates
-  every SQE (`is_abi_clean`, known opcode) before queueing it, and only
-  publishes CQEs it generated. A faulting or unmapped ring becomes a syscall
-  error without consuming a staged completion: the completion is popped only
-  after its CQE write succeeds.
-- **`asyncio_enter` arguments**: unknown enter flags and a timeout without
-  WAIT are rejected; `to_submit` beyond the user-published tail or the ring
-  depth is rejected; timeout carriers use the shared non-negative
-  `__kernel_timespec` validation.
+- **Ring memory**: ring pages are user-mappable and writable by design. The
+  kernel keeps its own `sq_head`/`cq_tail`, masks every user-published index,
+  validates every SQE (supported opcode, zero `flags`, bounded array index),
+  and only publishes CQEs it generated. The pages are owned by the open file,
+  so the descriptor must stay open while its mappings are in use (liburing's
+  `io_uring_queue_exit` munmaps before closing); closing the last descriptor
+  stops workers and drains staged completions.
+- **`io_uring_enter` arguments**: unknown enter flags and a non-NULL signal
+  mask are rejected; `to_submit` beyond the user-published tail or the ring
+  depth is rejected. A subset that needs interruptible enter must add signal
+  masking rather than silently ignoring it.
 
 ## Worker credentials and reach
 

@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Linux `io_uring_setup` / `io_uring_enter` subset.
+//!
+//! Supported: a single shared SQ/CQ mmap, SQE submission, CQ draining, and
+//! the `GETEVENTS` wait mode. SQPOLL, registration, linked operations and
+//! registered files/buffers are not advertised or implemented.
+
+use kasyncio::{
+    AsyncioFile,
+    abi::{IORING_ENTER_GETEVENTS, IORING_SETUP_FLAGS_SUPPORTED, IoUringParams},
+    setup,
+};
+use kerrno::{KError, KResult};
+use posix_types::{UserConstPtr, UserPtr, k_sigset};
+
+/// Creates an io_uring context and returns its file descriptor.
+///
+/// `entries` is rounded up by the caller to a power of two. The out-fields of
+/// `params` are filled with the granted depths, feature bits, and ring offsets
+/// before the descriptor is installed.
+pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -> KResult<isize> {
+    let params = params.check_non_null().ok_or(KError::BadAddress)?;
+    let mut value = params.read_vm()?;
+    if value.flags & !IORING_SETUP_FLAGS_SUPPORTED != 0 {
+        return Err(KError::InvalidInput);
+    }
+    // Fail an unwritable parameter block before allocating ring pages.
+    params.write_vm(value)?;
+
+    let created = setup(entries, kprocess::current_cred())?;
+    value.sq_entries = created.sq_entries;
+    value.cq_entries = created.cq_entries;
+    value.features = created.features;
+    value.wq_fd = 0;
+    value.sq_off = created.sq_off;
+    value.cq_off = created.cq_off;
+
+    let fd = kprocess::current_files().add_file(created.file, false)?;
+    if let Err(error) = params.write_vm(value) {
+        let _ = kprocess::current_files().close_file(fd);
+        return Err(error.into());
+    }
+    Ok(fd as isize)
+}
+
+/// Submits SQEs and optionally waits for completions.
+///
+/// `flags` accepts only `IORING_ENTER_GETEVENTS`; a supplied signal mask is
+/// rejected because this subset does not implement interruptible enter.
+pub(crate) fn sys_io_uring_enter(
+    fd: i32,
+    to_submit: u32,
+    min_complete: u32,
+    flags: u32,
+    sig: UserConstPtr<k_sigset>,
+    _sigsetsize: usize,
+) -> KResult<isize> {
+    if flags & !IORING_ENTER_GETEVENTS != 0 {
+        return Err(KError::InvalidInput);
+    }
+    if !sig.is_null() {
+        return Err(KError::InvalidInput);
+    }
+
+    let file = kprocess::current_files().get_file(fd)?;
+    let ring = AsyncioFile::from_file(&file)?;
+    let wait = flags & IORING_ENTER_GETEVENTS != 0;
+    let submitted = ring.enter(to_submit, if wait { min_complete } else { 0 }, None)?;
+    Ok(submitted as isize)
+}
+
+unittest::path_mod_test!(tests, "../../ut-tests/io_mpx/io_uring.rs");

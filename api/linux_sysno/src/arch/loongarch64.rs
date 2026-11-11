@@ -705,15 +705,5 @@ syscall_enum! {
         /// See [open_tree_attr(2)](https://man7.org/linux/man-pages/man2/open_tree_attr.2.html) for more info on this syscall.
         open_tree_attr = 467,
     }
-    EXTENSIONS {
-        #[cfg(feature = "asyncio")]
-        {
-            /// X-Kernel async I/O context setup (custom ABI, not a Linux syscall).
-            asyncio_setup = 700,
-            /// X-Kernel async I/O submit and completion wait (custom ABI, not a Linux syscall).
-            asyncio_enter = 701,
-        }
-    }
-
     LAST: open_tree_attr;
 }

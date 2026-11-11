@@ -10,7 +10,6 @@ use ktask::future::{block_on, poll_io};
 use unittest::def_test;
 
 use crate::{
-    abi::ASYNCIO_RES_CANCELED,
     context::{AsyncContext, CompletionSource, PreparedOp, READY_LIMIT},
     worker::ensure_worker,
 };
@@ -19,7 +18,7 @@ use crate::{
 fn shutdown_context_refuses_worker_spawn() {
     let ctx = AsyncContext::new().expect("context creation");
 
-    ctx.push_ready(PreparedOp { cookie: 7 })
+    ctx.push_ready(PreparedOp { user_data: 7 })
         .expect("op below queue limit");
     ctx.shutdown();
     ensure_worker(&ctx).expect("ensure_worker must not fail on a shut-down context");
@@ -33,13 +32,13 @@ fn shutdown_context_refuses_worker_spawn() {
 fn full_ready_queue_rejects_until_drained() {
     let ctx = AsyncContext::new().expect("context creation");
 
-    for cookie in 0..READY_LIMIT as u64 {
-        ctx.push_ready(PreparedOp { cookie })
+    for user_data in 0..READY_LIMIT as u64 {
+        ctx.push_ready(PreparedOp { user_data })
             .expect("fills up to the limit must succeed");
     }
     assert!(
         ctx.push_ready(PreparedOp {
-            cookie: READY_LIMIT as u64
+            user_data: READY_LIMIT as u64
         })
         .is_err(),
         "the queue past its limit must report WouldBlock"
@@ -47,7 +46,7 @@ fn full_ready_queue_rejects_until_drained() {
 
     let mut drained: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(READY_LIMIT);
     while let Some(op) = ctx.pop_ready() {
-        drained.push(op.cookie);
+        drained.push(op.user_data);
     }
     assert_eq!(drained.len(), READY_LIMIT, "drain must observe every op");
     assert_eq!(drained[0], 0, "FIFO: the first queued op drains first");
@@ -56,7 +55,7 @@ fn full_ready_queue_rejects_until_drained() {
         READY_LIMIT as u64 - 1,
         "FIFO: the last queued op drains last"
     );
-    ctx.push_ready(PreparedOp { cookie: 0 })
+    ctx.push_ready(PreparedOp { user_data: 0 })
         .expect("drained queue must accept again");
 }
 
@@ -64,8 +63,8 @@ fn full_ready_queue_rejects_until_drained() {
 fn try_reserve_worker_enforces_the_pool_cap() {
     let ctx = AsyncContext::new().expect("context creation");
 
-    for cookie in 0..5 {
-        ctx.push_ready(PreparedOp { cookie })
+    for user_data in 0..5 {
+        ctx.push_ready(PreparedOp { user_data })
             .expect("seed op below queue limit");
     }
 
@@ -90,13 +89,13 @@ fn try_reserve_worker_enforces_the_pool_cap() {
 fn shutdown_cancels_queued_ops_with_canceled_result() {
     let ctx = AsyncContext::new().expect("context creation");
 
-    for cookie in 1..=3 {
-        ctx.push_ready(PreparedOp { cookie })
+    for user_data in 1..=3 {
+        ctx.push_ready(PreparedOp { user_data })
             .expect("op below queue limit");
     }
 
     // No worker was spawned, so every queued op is still undispatched and
-    // must come back as a cancellation, keeping its cookie observable.
+    // must come back as a cancellation, keeping its user_data observable.
     ctx.shutdown();
 
     assert!(!ctx.has_ready(), "shutdown must drain the ready queue");
@@ -121,15 +120,18 @@ fn shutdown_cancels_queued_ops_with_canceled_result() {
     let completions: alloc::vec::Vec<_> = ctx.take_completions().into_iter().collect();
     assert_eq!(completions.len(), 3);
     for (index, completion) in completions.iter().enumerate() {
-        assert_eq!(completion.cookie, index as u64 + 1);
-        assert_eq!(completion.res, ASYNCIO_RES_CANCELED);
+        assert_eq!(completion.user_data, index as u64 + 1);
+        assert_eq!(
+            completion.res,
+            -kerrno::LinuxError::ECANCELED.into_raw()
+        );
     }
 
     // A submission racing the shutdown drain must be rejected with the
     // documented error, never silently queued on a context no worker will
     // serve again, and must leave both queues untouched.
     assert!(matches!(
-        ctx.push_ready(PreparedOp { cookie: 9 }),
+        ctx.push_ready(PreparedOp { user_data: 9 }),
         Err(KError::BadFileDescriptor)
     ));
     assert!(!ctx.has_ready());

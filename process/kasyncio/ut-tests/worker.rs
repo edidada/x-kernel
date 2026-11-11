@@ -28,7 +28,7 @@ fn wait_until(condition: impl Fn() -> bool) {
 /// Spawns one worker directly (bypassing the growth policy) so the test
 /// holds the worker's task handle for state observation.
 fn spawn_direct(ctx: &Arc<AsyncContext>) -> ktask::KtaskRef {
-    ctx.push_ready(PreparedOp { cookie: 1 })
+    ctx.push_ready(PreparedOp { user_data: 1 })
         .expect("seed op below queue limit");
     assert!(ctx.try_reserve_worker(), "fresh context must reserve");
     spawn_worker(ctx, ctx.next_worker_ordinal()).expect("worker spawn must succeed")
@@ -37,14 +37,14 @@ fn spawn_direct(ctx: &Arc<AsyncContext>) -> ktask::KtaskRef {
 #[def_test(user, serial)]
 fn worker_executes_queued_op_and_exits_on_shutdown() {
     let ctx = AsyncContext::new().expect("context creation");
-    ctx.push_ready(PreparedOp { cookie: 0xABCD })
+    ctx.push_ready(PreparedOp { user_data: 0xABCD })
         .expect("op below queue limit");
     ensure_worker(&ctx).expect("worker spawn must succeed");
 
     wait_until(|| ctx.has_completions());
     let completions: alloc::vec::Vec<_> = ctx.take_completions().into_iter().collect();
     assert_eq!(completions.len(), 1);
-    assert_eq!(completions[0].cookie, 0xABCD);
+    assert_eq!(completions[0].user_data, 0xABCD);
     assert_eq!(completions[0].res, 0);
 
     ctx.shutdown();
@@ -92,12 +92,12 @@ fn worker_executes_a_second_op_after_reparking() {
     wait_until(|| worker.state() == TaskState::Blocked);
     assert_eq!(ctx.total_workers(), 1);
 
-    ctx.push_ready(PreparedOp { cookie: 2 })
+    ctx.push_ready(PreparedOp { user_data: 2 })
         .expect("op below queue limit");
     wait_until(|| {
         ctx.take_completions()
             .into_iter()
-            .any(|completion| completion.cookie == 2)
+            .any(|completion| completion.user_data == 2)
     });
     wait_until(|| worker.state() == TaskState::Blocked);
     wait_until(|| ctx.idle_workers() == 1);
@@ -106,7 +106,7 @@ fn worker_executes_a_second_op_after_reparking() {
 #[def_test(user, serial)]
 fn failed_spawn_releases_the_worker_reservation() {
     let ctx = AsyncContext::new().expect("context creation");
-    ctx.push_ready(PreparedOp { cookie: 1 })
+    ctx.push_ready(PreparedOp { user_data: 1 })
         .expect("seed op below queue limit");
 
     let result = ensure_worker_with(&ctx, |_ctx, _ordinal| Err(KError::WouldBlock));
@@ -150,6 +150,7 @@ fn last_ordinary_thread_exit_retires_the_worker() {
             fd_table: ForkFdTable::Private,
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(Signo::SIGCHLD),
+            cgroup_target: None,
         })
         .expect("fork must succeed");
     let child_process = prepared.process().clone();
@@ -163,7 +164,7 @@ fn last_ordinary_thread_exit_retires_the_worker() {
     let child_ctx = ctx.clone();
     let child_entry = ktask::PreparedTaskEntry::new(move || {
         child_ctx
-            .push_ready(PreparedOp { cookie: 1 })
+            .push_ready(PreparedOp { user_data: 1 })
             .expect("op below queue limit");
         ensure_worker(&child_ctx).expect("worker spawn must succeed");
         wait_for_op_completion(&child_ctx, 1);
@@ -202,12 +203,12 @@ fn last_ordinary_thread_exit_retires_the_worker() {
     kprocess::wait_reap::assert_reap_zombie_process(&child_process);
 }
 
-/// Waits until the operation with `cookie` appears in the completions of
+/// Waits until the operation with `user_data` appears in the completions of
 /// `ctx` (test-side observation for the fork child's context).
-fn wait_for_op_completion(ctx: &Arc<AsyncContext>, cookie: u64) {
+fn wait_for_op_completion(ctx: &Arc<AsyncContext>, user_data: u64) {
     wait_until(|| {
         ctx.take_completions()
             .into_iter()
-            .any(|completion| completion.cookie == cookie)
+            .any(|completion| completion.user_data == user_data)
     });
 }

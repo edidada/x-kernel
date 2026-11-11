@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Async-context creation: allocates the ring, maps it into the current
-//! process, and installs the anonymous-inode file.
+//! `io_uring_setup` context creation.
 
 use alloc::sync::Arc;
 
@@ -11,45 +10,48 @@ use kcred::Cred;
 use kerrno::KResult;
 use kvfs::VfsFile;
 
-use crate::{context::AsyncContext, file, ring::Ring};
+use crate::{
+    abi::{IoUringCqOffsets, IoUringSqOffsets},
+    context::AsyncContext,
+    file,
+    ring::Ring,
+};
 
-/// Result of `asyncio_setup` that the syscall layer copies back to userspace.
-pub struct AsyncioSetup {
-    /// Newly created async context file.
+/// Outputs that `io_uring_setup` copies back into `struct io_uring_params`.
+pub struct IoUringSetup {
+    /// Newly created io_uring file.
     pub file: Arc<VfsFile>,
-    /// User virtual address of the mapped ring.
-    pub ring_user_va: usize,
-    /// Byte length of the mapped ring.
-    pub ring_user_len: usize,
-    /// Submission-ring entry count.
+    /// Granted SQ depth.
     pub sq_entries: u32,
-    /// Completion-ring entry count.
+    /// Granted CQ depth.
     pub cq_entries: u32,
+    /// Advertised feature bits.
+    pub features: u32,
+    /// SQ ring offsets.
+    pub sq_off: IoUringSqOffsets,
+    /// CQ ring offsets.
+    pub cq_off: IoUringCqOffsets,
 }
 
-/// Creates one async context with an `entries`-deep submission ring.
+/// Creates one io_uring context with `entries` SQ slots.
 ///
-/// The ring is mapped into the calling process's address space before the
-/// descriptor is returned; the caller must be a sleepable user thread of
-/// that process.
+/// The caller must be a sleepable user thread. Userspace maps the ring through
+/// the returned file's mmap offsets.
 ///
 /// # Errors
 ///
 /// Rejects non-power-of-two or oversized entry counts with `InvalidInput`,
-/// and forwards address-space mapping, page-allocation, and anonymous-file
-/// creation errors.
-pub fn setup(entries: u32, cred: Arc<Cred>) -> KResult<AsyncioSetup> {
+/// and forwards page-allocation and anonymous-file creation errors.
+pub fn setup(entries: u32, cred: Arc<Cred>) -> KResult<IoUringSetup> {
     let context = AsyncContext::new()?;
     let ring = Ring::create(entries)?;
-    let ring_user_va = ring.user_base();
-    let ring_user_len = ring.user_len();
-    let sq_entries = ring.sq_entries();
-    let cq_entries = ring.cq_entries();
-    Ok(AsyncioSetup {
+    let setup = IoUringSetup {
+        sq_entries: ring.sq_entries(),
+        cq_entries: ring.cq_entries(),
+        features: ring.features(),
+        sq_off: ring.sq_offsets(),
+        cq_off: ring.cq_offsets(),
         file: file::new_file(context, ring, cred)?,
-        ring_user_va,
-        ring_user_len,
-        sq_entries,
-        cq_entries,
-    })
+    };
+    Ok(setup)
 }

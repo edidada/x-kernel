@@ -12,8 +12,9 @@
 //! are identical to the synchronous syscall path. The synchronous syscall
 //! surface stays untouched; async entry points are incremental.
 //!
-//! Not goals: io_uring ABI compatibility, kernel-side polling of the
-//! submission ring (SQPOLL), and cancellation semantics.
+//! This is a Linux io_uring-compatible subset: single shared SQ/CQ mmap,
+//! submission and completion draining. Non-goals: SQPOLL, registered
+//! files/buffers, linked operations, and cancellation requests.
 
 #![no_std]
 
@@ -34,6 +35,6 @@ mod setup;
 mod worker;
 
 pub use file::AsyncioFile;
-pub use setup::{AsyncioSetup, setup};
+pub use setup::{IoUringSetup, setup};
 
 unittest::path_mod_test!(tests, "../ut-tests/context.rs");

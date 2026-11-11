@@ -2,262 +2,203 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! User-visible ABI of the async submission/completion rings.
+//! Linux `io_uring` ABI subset used by the async I/O implementation.
 //!
-//! All layouts are kernel-defined (io_uring *semantics*, not ABI) and must be
-//! padding-free because they cross the user boundary through
-//! [`posix_types::UserRead`]/[`posix_types::UserWrite`]. The static asserts at
-//! the bottom of this file pin every size and stride.
-//!
-//! The ABI ships complete rather than incrementally, so items that the not
-//! yet landed ring/syscall steps will consume are staged here. They remain
-//! public crate API, so plain builds see no dead-code findings.
+//! Supported today: `io_uring_setup` with a single shared SQ/CQ mapping,
+//! `io_uring_enter` submission and completion draining, and the NOP/READ/
+//! WRITE/FSYNC opcodes (operation execution is still staged). Unsupported
+//! Linux features (SQPOLL, registered files/buffers, linked SQEs, `io_uring_
+//! register`, IOPOLL, ...) are not advertised in `features`.
 
 use core::mem::{offset_of, size_of};
 
-use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
+use posix_types::{UserRead, UserWrite};
 
-/// Async read from `fd` into the buffer at `addr`.
-pub const ASYNCIO_OP_READ: u8 = 1;
-/// Async write from the buffer at `addr` to `fd`.
-pub const ASYNCIO_OP_WRITE: u8 = 2;
-/// Async `fsync` of `fd` (full sync, `data_only = false`).
-pub const ASYNCIO_OP_FSYNC: u8 = 3;
-/// Async `splice` between `fd` (source) and `fd2` (destination).
-pub const ASYNCIO_OP_SPLICE: u8 = 4;
-/// Async `sendfile` from `fd` (source) to `fd2` (destination).
-pub const ASYNCIO_OP_SENDFILE: u8 = 5;
-/// Async `copy_file_range` between `fd` (source) and `fd2` (destination).
-pub const ASYNCIO_OP_COPY_FILE_RANGE: u8 = 6;
+/// `io_uring_setup` mmap offset for the shared SQ/CQ ring.
+pub const IORING_OFF_SQ_RING: usize = 0;
+/// `io_uring_setup` mmap offset for the CQ ring (only with `SINGLE_MMAP` off).
+pub const IORING_OFF_CQ_RING: usize = 0x0800_0000;
+/// `io_uring_setup` mmap offset for the SQE array.
+pub const IORING_OFF_SQES: usize = 0x1000_0000;
 
-/// `AsyncSqe.flags`: `off` is a valid absolute offset for READ/WRITE.
+/// `io_uring_enter` flag: wait for at least `min_complete` completions.
+pub const IORING_ENTER_GETEVENTS: u32 = 1 << 0;
+
+/// Feature: SQ and CQ rings share one mmap.
+pub const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
+
+/// `io_uring_setup` input flag bits supported by this subset.
+pub const IORING_SETUP_FLAGS_SUPPORTED: u32 = 0;
+
+/// `IORING_OP_NOP`.
+pub const IORING_OP_NOP: u8 = 0;
+/// `IORING_OP_READV`.
+pub const IORING_OP_READV: u8 = 1;
+/// `IORING_OP_WRITEV`.
+pub const IORING_OP_WRITEV: u8 = 2;
+/// `IORING_OP_FSYNC`.
+pub const IORING_OP_FSYNC: u8 = 3;
+/// `IORING_OP_READ`.
+pub const IORING_OP_READ: u8 = 22;
+/// `IORING_OP_WRITE`.
+pub const IORING_OP_WRITE: u8 = 23;
+
+/// Byte size of one Linux `struct io_uring_sqe`.
+pub const IO_URING_SQE_SIZE: usize = 64;
+/// Byte size of one Linux `struct io_uring_cqe`.
+pub const IO_URING_CQE_SIZE: usize = 16;
+/// Byte size of Linux `struct io_uring_params`.
+pub const IO_URING_PARAMS_SIZE: usize = 120;
+
+/// One Linux `struct io_uring_sqe` (64 bytes).
 ///
-/// Without this bit, READ/WRITE use (and advance) the file's current
-/// position. Splice-family operations instead carry user-space offset
-/// *pointers* in `off`/`off2`, where a null pointer means "current position"
-/// — matching the Linux syscall signatures — so this flag does not apply.
-pub const ASYNCIO_SQE_OFF_VALID: u8 = 1 << 0;
-
-/// `AsyncSqe.flags`: `fd2` is a valid destination fd (splice family).
-pub const ASYNCIO_SQE_FD2_VALID: u8 = 1 << 1;
-
-/// All SQE flag bits defined so far; anything else is rejected.
-pub const ASYNCIO_SQE_FLAGS_KNOWN: u8 = ASYNCIO_SQE_OFF_VALID | ASYNCIO_SQE_FD2_VALID;
-
-/// `AsyncioParams.flags` accepted by the setup entry point (landed with the
-/// `asyncio_setup` syscall step).
-pub const ASYNCIO_PARAMS_VERSION: u32 = 0;
-
-/// `enter` flag: block until `min_complete` completions are published.
-pub const ASYNCIO_ENTER_WAIT: u32 = 1 << 0;
-/// `enter` flag: bound the WAIT by the timeout at `argp`
-/// (`*const __kernel_timespec`). Requires [`ASYNCIO_ENTER_WAIT`].
-pub const ASYNCIO_ENTER_TIMEOUT: u32 = 1 << 1;
-
-/// All `enter` flag bits defined so far; anything else is `EINVAL`.
-pub const ASYNCIO_ENTER_FLAGS_KNOWN: u32 = ASYNCIO_ENTER_WAIT | ASYNCIO_ENTER_TIMEOUT;
-
-/// Ring header field byte offsets inside the shared ring memory.
-///
-/// Every field is a `u32`; the header is 4K-aligned and far smaller than a
-/// page, so no atomic counter ever straddles a page boundary.
-pub mod header {
-    /// Submission ring: kernel-owned consumed index (free-running).
-    pub const SQ_HEAD: usize = 0x00;
-    /// Submission ring: user-owned published index (free-running).
-    pub const SQ_TAIL: usize = 0x04;
-    /// Submission ring: entry index mask (`sq_entries - 1`).
-    pub const SQ_MASK: usize = 0x08;
-    /// Submission ring: entry count.
-    pub const SQ_ENTRIES: usize = 0x0C;
-    /// Completion ring: user-owned consumed index (free-running).
-    pub const CQ_HEAD: usize = 0x10;
-    /// Completion ring: kernel-owned published index (free-running).
-    pub const CQ_TAIL: usize = 0x14;
-    /// Completion ring: entry index mask (`cq_entries - 1`).
-    pub const CQ_MASK: usize = 0x18;
-    /// Completion ring: entry count.
-    pub const CQ_ENTRIES: usize = 0x1C;
-    /// Context status flags (see [`CTX_FLAG_SHUTDOWN`]).
-    pub const CTX_FLAGS: usize = 0x20;
-    /// Size of the ring header (SQE array starts here).
-    pub const LEN: usize = 0x40;
-
-    /// Context status: the context is shutting down (fd released).
-    pub const CTX_FLAG_SHUTDOWN: u32 = 1 << 0;
-}
-
-/// Byte size of one [`AsyncSqe`].
-pub const ASYNCIO_SQE_SIZE: usize = 64;
-/// Byte size of one [`AsyncCqe`].
-pub const ASYNCIO_CQE_SIZE: usize = 32;
-/// Maximum supported submission-ring depth.
-pub const ASYNCIO_MAX_SQ_ENTRIES: u32 = 4096;
-
-/// CQE `res` for an operation discarded before it started: negated Linux
-/// `ECANCELED` (125; `kerrno` carries the errno value but no matching
-/// `KError` variant).
-pub const ASYNCIO_RES_CANCELED: i64 = -(kerrno::LinuxError::ECANCELED.into_raw() as i64);
-
-/// One submission-queue entry (64 bytes).
-///
-/// Field roles depend on `opcode`:
-///
-/// | opcode | fd | fd2 | addr | len | off | off2 |
-/// |---|---|---|---|---|---|---|
-/// | READ/WRITE | target | — | user buffer | byte count | absolute offset if [`ASYNCIO_SQE_OFF_VALID`] | — |
-/// | FSYNC | target | — | — | — | — | — |
-/// | SPLICE | source fd | dest fd (needs [`ASYNCIO_SQE_FD2_VALID`]) | — | byte count | `*i64` source offset ptr | `*i64` dest offset ptr |
-/// | SENDFILE | source fd | dest fd | — | byte count | `*u64` source offset ptr | — |
-/// | COPY_FILE_RANGE | source fd | dest fd | — | byte count | `*u64` source offset ptr | `*u64` dest offset ptr |
-///
-/// Null offset pointers mean "use the file's current position", matching the
-/// Linux syscall signatures.
+/// Field roles depend on `opcode`; the layout matches the Linux UAPI so a
+/// subset implementation can consume liburing-built SQEs unchanged.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
-pub struct AsyncSqe {
-    /// One of the `ASYNCIO_OP_*` opcodes.
+pub struct IoUringSqe {
+    /// `IORING_OP_*`.
     pub opcode: u8,
-    /// [`ASYNCIO_SQE_OFF_VALID`] / [`ASYNCIO_SQE_FD2_VALID`].
+    /// `IOSQE_*`.
     pub flags: u8,
-    /// Must be zero.
-    pub reserved0: u16,
-    /// Source/target file descriptor.
+    /// Request priority (unused by this subset).
+    pub ioprio: u16,
+    /// Target file descriptor (interpretation depends on `opcode`).
     pub fd: i32,
-    /// User cookie echoed verbatim in the completion entry.
-    pub cookie: u64,
-    /// Opcode-dependent user address (see the table above).
-    pub addr: u64,
-    /// Byte count for data-movement opcodes.
-    pub len: u64,
-    /// Destination file descriptor when [`ASYNCIO_SQE_FD2_VALID`] is set.
-    pub fd2: i32,
-    /// Must be zero.
-    pub reserved1: u32,
-    /// Opcode-dependent offset (see the table above).
+    /// Offset or second address operand.
     pub off: u64,
-    /// Second offset pointer for two-ended transfers.
-    pub off2: u64,
-    /// Must be zero.
-    pub reserved2: u64,
+    /// User buffer address / first operand.
+    pub addr: u64,
+    /// Byte count.
+    pub len: u32,
+    /// Opcode-specific flags (rw_flags/fsync_flags/...).
+    pub op_flags: u32,
+    /// Opaque user cookie echoed in the CQE.
+    pub user_data: u64,
+    /// Buffer index / group (unused by this subset).
+    pub buf_index: u16,
+    /// Request personality (unused by this subset).
+    pub personality: u16,
+    /// splice fd / file index (unused by this subset).
+    pub splice_fd_in: i32,
+    /// Third address operand.
+    pub addr3: u64,
+    /// Tail padding.
+    pub reserved: u64,
 }
 
-/// One completion-queue entry (32 bytes).
+/// One Linux `struct io_uring_cqe` (16 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
-pub struct AsyncCqe {
+pub struct IoUringCqe {
     /// Cookie echoed from the originating SQE.
-    pub cookie: u64,
-    /// Operation result: non-negative byte/count value, or negated errno.
-    pub res: i64,
-    /// Reserved; always written as zero by the kernel. Keeps the entry at
-    /// 32 bytes so no CQE ever straddles a page in the shared ring.
-    pub reserved0: u64,
-    /// Reserved; always written as zero by the kernel.
+    pub user_data: u64,
+    /// Non-negative result or negated errno.
+    pub res: i32,
+    /// Completion flags (zero in this subset).
     pub flags: u32,
-    /// Explicit tail padding, always zero (the `k_epoll_event` rule).
-    pub abi_pad: u32,
 }
 
-/// Setup parameter block for `asyncio_setup` (40 bytes, in/out).
+/// Linux `struct io_sqring_offsets`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
-pub struct AsyncioParams {
-    /// In: must be [`ASYNCIO_PARAMS_VERSION`].
-    pub version: u32,
-    /// In: reserved, must be zero.
+pub struct IoUringSqOffsets {
+    /// Kernel-consumed submission index.
+    pub head: u32,
+    /// User-published submission index.
+    pub tail: u32,
+    /// `sq_entries - 1`.
+    pub ring_mask: u32,
+    /// Submission-ring depth.
+    pub ring_entries: u32,
+    /// Ring flags.
     pub flags: u32,
-    /// Out: submission-ring entry count.
-    pub sq_entries: u32,
-    /// Out: completion-ring entry count.
-    pub cq_entries: u32,
-    /// Out: user VA of the ring (header + SQE array + CQE array).
-    pub ring_user_va: usize,
-    /// Out: mapped byte length of the ring.
-    pub ring_user_len: usize,
-    /// Out: [`ASYNCIO_SQE_SIZE`].
-    pub sqe_size: u32,
-    /// Out: [`ASYNCIO_CQE_SIZE`].
-    pub cqe_size: u32,
+    /// Dropped submissions.
+    pub dropped: u32,
+    /// Offset of the u32 SQE-index array.
+    pub array: u32,
+    /// Reserved.
+    pub resv1: u32,
+    /// Registered user address (zero here).
+    pub user_addr: u64,
 }
 
-impl AsyncSqe {
-    /// Returns `true` when the SQE carries no unknown flags or nonzero
-    /// reserved fields.
-    pub fn is_abi_clean(&self) -> bool {
-        self.flags & !ASYNCIO_SQE_FLAGS_KNOWN == 0
-            && self.reserved0 == 0
-            && self.reserved1 == 0
-            && self.reserved2 == 0
-    }
+/// Linux `struct io_cqring_offsets`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
+pub struct IoUringCqOffsets {
+    /// User-consumed completion index.
+    pub head: u32,
+    /// Kernel-published completion index.
+    pub tail: u32,
+    /// `cq_entries - 1`.
+    pub ring_mask: u32,
+    /// Completion-ring depth.
+    pub ring_entries: u32,
+    /// Overflow count.
+    pub overflow: u32,
+    /// Offset of the CQE array.
+    pub cqes: u32,
+    /// Ring flags.
+    pub flags: u32,
+    /// Reserved.
+    pub resv1: u32,
+    /// Registered user address (zero here).
+    pub user_addr: u64,
+}
 
-    /// Returns `true` when `opcode` is one of the defined `ASYNCIO_OP_*`.
-    pub fn is_known_opcode(&self) -> bool {
+/// Linux `struct io_uring_params` (120 bytes, in/out).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
+pub struct IoUringParams {
+    /// Requested SQ depth (out: granted depth).
+    pub sq_entries: u32,
+    /// Requested CQ depth (out: granted depth).
+    pub cq_entries: u32,
+    /// Setup flags.
+    pub flags: u32,
+    /// SQPOLL thread CPU (unsupported).
+    pub sq_thread_cpu: u32,
+    /// SQPOLL idle timeout (unsupported).
+    pub sq_thread_idle: u32,
+    /// Out: supported feature bits.
+    pub features: u32,
+    /// Out: worker queue fd (unsupported).
+    pub wq_fd: u32,
+    /// Reserved.
+    pub resv: [u32; 3],
+    /// Out: SQ ring field offsets.
+    pub sq_off: IoUringSqOffsets,
+    /// Out: CQ ring field offsets.
+    pub cq_off: IoUringCqOffsets,
+}
+
+impl IoUringSqe {
+    /// Returns whether this subset recognizes the opcode.
+    pub fn is_supported_opcode(&self) -> bool {
         matches!(
             self.opcode,
-            ASYNCIO_OP_READ
-                | ASYNCIO_OP_WRITE
-                | ASYNCIO_OP_FSYNC
-                | ASYNCIO_OP_SPLICE
-                | ASYNCIO_OP_SENDFILE
-                | ASYNCIO_OP_COPY_FILE_RANGE
+            IORING_OP_NOP
+                | IORING_OP_READV
+                | IORING_OP_WRITEV
+                | IORING_OP_FSYNC
+                | IORING_OP_READ
+                | IORING_OP_WRITE
         )
-    }
-
-    /// Returns `true` when READ/WRITE must use `off` instead of the file
-    /// position.
-    pub fn has_explicit_offset(&self) -> bool {
-        self.flags & ASYNCIO_SQE_OFF_VALID != 0
-    }
-
-    /// Returns the destination fd when [`ASYNCIO_SQE_FD2_VALID`] is set.
-    pub fn dest_fd(&self) -> Option<i32> {
-        (self.flags & ASYNCIO_SQE_FD2_VALID != 0).then_some(self.fd2)
-    }
-
-    /// Reinterprets `off` as the source offset pointer of a transfer.
-    pub fn off_source_ptr(&self) -> UserConstPtr<u64> {
-        UserConstPtr::from(self.off as usize)
-    }
-
-    /// Reinterprets `off` as the source `i64` offset pointer of a splice.
-    pub fn off_source_i64_ptr(&self) -> UserConstPtr<i64> {
-        UserConstPtr::from(self.off as usize)
-    }
-
-    /// Reinterprets `off2` as the destination offset pointer of a transfer.
-    pub fn off_dest_ptr(&self) -> UserConstPtr<u64> {
-        UserConstPtr::from(self.off2 as usize)
-    }
-
-    /// Reinterprets `off2` as the destination `i64` offset pointer of a splice.
-    pub fn off_dest_i64_ptr(&self) -> UserConstPtr<i64> {
-        UserConstPtr::from(self.off2 as usize)
-    }
-
-    /// Reinterprets `addr` as the mutable user buffer of READ.
-    pub fn read_buffer(&self) -> UserPtr<u8> {
-        UserPtr::from(self.addr as usize)
-    }
-
-    /// Reinterprets `addr` as the immutable user buffer of WRITE.
-    pub fn write_buffer(&self) -> UserConstPtr<u8> {
-        UserConstPtr::from(self.addr as usize)
     }
 }
 
 const _: () = {
-    assert!(size_of::<AsyncSqe>() == ASYNCIO_SQE_SIZE);
-    assert!(offset_of!(AsyncSqe, reserved1) == 36);
-    assert!(offset_of!(AsyncSqe, off) == 40);
-    assert!(offset_of!(AsyncSqe, off2) == 48);
-    assert!(offset_of!(AsyncSqe, reserved2) == 56);
-    assert!(size_of::<AsyncCqe>() == ASYNCIO_CQE_SIZE);
-    assert!(offset_of!(AsyncCqe, res) == 8);
-    assert!(offset_of!(AsyncCqe, reserved0) == 16);
-    assert!(offset_of!(AsyncCqe, flags) == 24);
-    assert!(offset_of!(AsyncCqe, abi_pad) == 28);
-    assert!(size_of::<AsyncioParams>() == 40);
-    assert!(offset_of!(AsyncioParams, ring_user_va) == 16);
-    assert!(size_of::<u64>() == 8);
+    assert!(size_of::<IoUringSqe>() == IO_URING_SQE_SIZE);
+    assert!(offset_of!(IoUringSqe, off) == 8);
+    assert!(offset_of!(IoUringSqe, addr) == 16);
+    assert!(offset_of!(IoUringSqe, len) == 24);
+    assert!(offset_of!(IoUringSqe, user_data) == 32);
+    assert!(offset_of!(IoUringSqe, addr3) == 48);
+    assert!(size_of::<IoUringCqe>() == IO_URING_CQE_SIZE);
+    assert!(offset_of!(IoUringCqe, res) == 8);
+    assert!(offset_of!(IoUringCqe, flags) == 12);
+    assert!(size_of::<IoUringParams>() == IO_URING_PARAMS_SIZE);
+    assert!(offset_of!(IoUringParams, sq_off) == 40);
+    assert!(offset_of!(IoUringParams, cq_off) == 80);
 };

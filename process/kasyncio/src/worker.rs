@@ -25,7 +25,7 @@
 //! - The context shut down. Operations already dispatched run to their
 //!   natural completion; operations still queued (never dispatched) were
 //!   cancelled by [`AsyncContext::shutdown`] with an
-//!   `ASYNCIO_RES_CANCELED` completion, so no user cookie is lost.
+//!   `-ECANCELED` completion, so no `user_data` is lost.
 //! - The thread is exiting or the process group exited. Blocked operations
 //!   unwind through the same `interruptible` waits the synchronous syscalls
 //!   use, so the group-exit SIGKILL broadcast unblocks them.
@@ -135,7 +135,7 @@ fn spawn_worker(ctx: &Arc<AsyncContext>, ordinal: u32) -> KResult<ktask::KtaskRe
         prepared.process().pid(),
         ordinal
     );
-    debug!("asyncio spawn worker {name}");
+    debug!("io_uring spawn worker {name}");
     let page_table_root = prepared.page_table_root();
     let process = prepared.process().clone();
     let (thread, task_number) = prepared.into_parts();
@@ -167,7 +167,7 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
                 ctx.account_inflight();
                 let res = execute(&op);
                 ctx.publish_completion(CompletedOp {
-                    cookie: op.cookie,
+                    user_data: op.user_data,
                     res,
                 });
             }
@@ -196,7 +196,7 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
                         let backoff_ms = PARK_FAILURE_BACKOFF_BASE_MS
                             .saturating_mul(1 << shift)
                             .min(PARK_FAILURE_BACKOFF_MAX_MS);
-                        debug!("asyncio idle registration failed, backing off {backoff_ms}ms");
+                        debug!("io_uring idle registration failed, backing off {backoff_ms}ms");
                         block_on(sleep(TimeSpan::from_millis(backoff_ms)));
                     }
                     ParkOutcome::RegistrationFailed(err) => {
@@ -220,7 +220,7 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
                             let backoff_ms = PARK_FAILURE_BACKOFF_BASE_MS
                                 .saturating_mul(1 << shift)
                                 .min(PARK_FAILURE_BACKOFF_MAX_MS);
-                            debug!("asyncio idle park failed, backing off {backoff_ms}ms: {err}");
+                            debug!("io_uring idle park failed, backing off {backoff_ms}ms: {err}");
                             block_on(sleep(TimeSpan::from_millis(backoff_ms)));
                         }
                     }
@@ -245,7 +245,7 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
 
 /// Spike stand-in for the operation table: every queued operation completes
 /// successfully. The syscall steps replace this with the real dispatch.
-fn execute(op: &PreparedOp) -> i64 {
+fn execute(op: &PreparedOp) -> i32 {
     let _ = op;
     0
 }

@@ -32,20 +32,20 @@ pub(crate) const READY_LIMIT: usize = 1024;
 
 /// A submission prepared for execution.
 ///
-/// The spike carries only the user cookie; the syscall-facing steps extend
-/// this with resolved file handles and decoded arguments.
+/// The spike carries only the io_uring `user_data`; operation decode extends
+/// this with resolved file handles and arguments.
 pub struct PreparedOp {
-    /// User cookie echoed verbatim in the completion entry.
-    pub cookie: u64,
+    /// io_uring `user_data` echoed verbatim in the CQE.
+    pub user_data: u64,
 }
 
-/// A completed operation in CQE shape (cookie + signed result).
+/// A completed operation in CQE shape (`user_data` + signed result).
 #[derive(Clone, Copy)]
 pub struct CompletedOp {
-    /// Cookie echoed from the originating submission.
-    pub cookie: u64,
+    /// `user_data` echoed from the originating SQE.
+    pub user_data: u64,
     /// Operation result: non-negative count or negated errno.
-    pub res: i64,
+    pub res: i32,
 }
 
 #[derive(Default)]
@@ -66,7 +66,7 @@ struct InnerState {
     shutdown: bool,
 }
 
-/// Shared state of one async context (one per `asyncio_setup` fd).
+/// Shared state of one async context (one per `io_uring_setup` fd).
 pub struct AsyncContext {
     inner: Mutex<InnerState>,
     /// Woken when work becomes available or the context shuts down.
@@ -168,10 +168,10 @@ impl AsyncContext {
 
     /// Marks the context shut down and wakes workers and completion waiters.
     ///
-    /// Operations still queued and never dispatched are cancelled with an
-    /// `ASYNCIO_RES_CANCELED` completion so no user cookie is lost; operations
-    /// already dispatched to a worker run to their natural completion. Never
-    /// blocks: the caller is the fd `release` path or a test.
+    /// Operations still queued and never dispatched are cancelled with a
+    /// `-ECANCELED` CQE so no `user_data` is lost; operations already
+    /// dispatched to a worker run to their natural completion. Never blocks:
+    /// the caller is the fd `release` path or a test.
     pub fn shutdown(&self) {
         let cancelled = {
             let mut inner = self.inner.lock();
@@ -186,8 +186,8 @@ impl AsyncContext {
             inner
                 .completed
                 .extend(cancelled.into_iter().map(|op| CompletedOp {
-                    cookie: op.cookie,
-                    res: crate::abi::ASYNCIO_RES_CANCELED,
+                    user_data: op.user_data,
+                    res: -kerrno::LinuxError::ECANCELED.into_raw(),
                 }));
         }
         // Wake outside the lock; PollSet::wake detaches registrations under

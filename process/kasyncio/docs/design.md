@@ -2,30 +2,32 @@
 
 ## Purpose
 
-`kasyncio` owns the asynchronous submission/completion-ring I/O model
-(issue #IKJIGT, phase 1): the per-process async context, the operation
-staging queues, and the in-process worker threads that execute submitted
-operations off the submitting user thread. Syscall ABI decoding for the
-`asyncio_setup`/`asyncio_enter` entry points stays in `ksyscall`; the ring
-allocation, user mapping, and file lifecycle live here.
+`kasyncio` owns the Linux `io_uring`-compatible subset used for asynchronous
+I/O (issue #IKJIGT, phase 1): the per-process context, submission/completion
+rings, and in-process worker threads that execute submitted operations off the
+submitting user thread. Syscall ABI decoding for `io_uring_setup` and
+`io_uring_enter` stays in `ksyscall`; ring allocation, mmap, and file lifecycle
+live here.
 
 The synchronous syscall surface is untouched; async entry is additive and
 incrementally enabled (read, write, fsync, splice, sendfile,
 copy_file_range first).
 
-Non-goals: io_uring ABI compatibility, kernel-side polling of the
-submission ring (SQPOLL), cancellation requests from userspace, buffer
-registration, and a preemptive async runtime.
+Supported: one shared SQ/CQ mmap (`IORING_FEAT_SINGLE_MMAP`), SQE submission,
+CQE draining, and `IORING_ENTER_GETEVENTS`. Non-goals for this phase: SQPOLL,
+registered files/buffers, linked operations, cancellation requests, full
+io_uring feature coverage (`io_uring_register` stays unimplemented), and a
+preemptive async runtime.
 
 ## Scope
 
 ```text
 process/kasyncio/src/
-├── abi.rs       user ABI: opcodes, flags, SQE/CQE/params layouts, ring header
+├── abi.rs       Linux io_uring subset: SQE/CQE/params layouts and constants
 ├── context.rs   AsyncContext: ready/completed staging, worker accounting, wake sources
-├── file.rs      anon-inode fops: enter, poll/register_poll, shutdown on release
-├── ring.rs      SharedPages ring mapping, SQE submission, CQE publication
-├── setup.rs     context creation, ring mapping, AsyncioSetup out-parameters
+├── file.rs      anon-inode fops: enter, mmap, poll/register_poll, shutdown on release
+├── ring.rs      SQ/CQ ring layout, SQE submission, CQE publication
+├── setup.rs     context creation and io_uring_params outputs
 ├── worker.rs    spawn, idle park, retirement, signal/exit contracts
 └── lib.rs       re-exports
 ```
@@ -77,9 +79,11 @@ here explicitly to avoid rework under an ABI-compatibility pretext.
   `cq_wake` (published completions).
 - The ready queue is bounded by `READY_LIMIT` (1024); a full queue reports
   `WouldBlock` to the submitter.
-- The ring mapping uses anonymous shared pages. The kernel keeps its own
-  `sq_head` and `cq_tail`; user-owned `sq_tail`/`cq_head` are read from the
-  shared header. Aligned 32-bit field copies plus acquire/release fences
+- The ring lives in one physically contiguous 2 MiB block. The kernel accesses
+  it through the direct map; userspace obtains the same pages through
+  `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`. The kernel
+  keeps its own `sq_head` and `cq_tail`; user-owned `sq_tail`/`cq_head` are read
+  from the shared header. Volatile field accesses plus acquire/release fences
   separate SQE/CQE payload publication from index updates.
 
 ## Completion contract
@@ -90,7 +94,7 @@ outcomes, and its user cookie is observable in exactly one completion:
 - **Executed**: a worker dispatched it; the completion carries the natural
   result (non-negative count or negated errno).
 - **Cancelled**: `shutdown` found it still queued (never dispatched); the
-  completion carries `ASYNCIO_RES_CANCELED` (negated `ECANCELED`).
+  completion carries a `-ECANCELED` CQE result.
 - **In flight at shutdown**: already dispatched operations run to their
   natural completion even after shutdown; the context stays alive until
   the last worker retires.
@@ -134,7 +138,7 @@ by the ordinary exit path — when any of the following holds:
   park bound (not a cross-context wake) is what eventually retires their
   workers. Latency in that corner is bounded but not prompt.
 - Completions are staged in a kernel-side deque and published to the CQ ring
-  by `asyncio_enter` (or the next enter after a full ring). User buffers and
+  by `io_uring_enter` (or the next enter after a full ring). User buffers and
   real operation dispatch still wait for the `ops.rs` step.
 - Handler-visible fatal signals other than `SIGKILL` still require a
   userspace return; workers only self-terminate on pending `SIGKILL`.

@@ -16,9 +16,13 @@ use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io, timeout};
 use ktime_types::TimeSpan;
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
+use kvfs::{FMode, FileOperations, MmapMapper, OpenFlags, VfsFile, VfsResult};
+use memaddr::PhysAddrRange;
 
 use crate::{
+    abi::{
+        IORING_OFF_CQ_RING, IORING_OFF_SQ_RING, IORING_OFF_SQES, IoUringCqOffsets, IoUringSqOffsets,
+    },
     context::{AsyncContext, CompletionSource},
     ring::Ring,
     worker::ensure_worker,
@@ -27,7 +31,7 @@ use crate::{
 /// One async context exposed as a file descriptor.
 pub struct AsyncioFile {
     context: Arc<AsyncContext>,
-    ring: Mutex<Ring>,
+    pub(crate) ring: Mutex<Ring>,
 }
 
 impl AsyncioFile {
@@ -39,7 +43,7 @@ impl AsyncioFile {
         }
     }
 
-    /// Returns the async file attached to an `asyncio_setup` descriptor.
+    /// Returns the async file attached to an `io_uring_setup` descriptor.
     ///
     /// # Errors
     ///
@@ -90,7 +94,7 @@ impl AsyncioFile {
             if published >= min_complete {
                 return Ok(());
             }
-            if self.ring.lock().is_cq_full()? {
+            if self.ring.lock().is_cq_full() {
                 // The user must consume CQEs before more can be published;
                 // returning now is preferable to spinning in the kernel.
                 return Ok(());
@@ -138,6 +142,31 @@ impl AsyncioFile {
     fn register(&self, context: &mut PollContext<'_>) -> Result<(), PollRegisterError> {
         self.context.register_completion_wait(context)
     }
+
+    /// Returns the SQ depth granted by the ring.
+    pub fn sq_entries(&self) -> u32 {
+        self.ring.lock().sq_entries()
+    }
+
+    /// Returns the CQ depth granted by the ring.
+    pub fn cq_entries(&self) -> u32 {
+        self.ring.lock().cq_entries()
+    }
+
+    /// Returns the `io_sqring_offsets` for `io_uring_params`.
+    pub fn sq_offsets(&self) -> IoUringSqOffsets {
+        self.ring.lock().sq_offsets()
+    }
+
+    /// Returns the `io_cqring_offsets` for `io_uring_params`.
+    pub fn cq_offsets(&self) -> IoUringCqOffsets {
+        self.ring.lock().cq_offsets()
+    }
+
+    /// Returns the advertised feature bits.
+    pub fn features(&self) -> u32 {
+        self.ring.lock().features()
+    }
 }
 
 /// File operations for an async context descriptor.
@@ -166,9 +195,23 @@ impl FileOperations for AsyncioFops {
         Ok(())
     }
 
-    fn release(&self, _inode: &kvfs::VfsInode, file: &VfsFile) -> kvfs::VfsResult<()> {
+    fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
+        let file = Self::file(file)?;
+        let ring = file.ring.lock();
+        let offset = mapper.offset();
+        let (start, len) = match offset {
+            IORING_OFF_SQ_RING | IORING_OFF_CQ_RING => (ring.base_paddr(), ring.ring_len()),
+            IORING_OFF_SQES => (
+                memaddr::PhysAddr::from_usize(ring.base_paddr().as_usize() + ring.sqes_offset()),
+                ring.ring_len() - ring.sqes_offset(),
+            ),
+            _ => return Err(kvfs::VfsError::InvalidInput),
+        };
+        mapper.map_physical(PhysAddrRange::from_start_size(start, len))
+    }
+
+    fn release(&self, _inode: &kvfs::VfsInode, file: &VfsFile) -> VfsResult<()> {
         if let Ok(file) = Self::file(file) {
-            file.ring.lock().mark_shutdown();
             file.context.shutdown();
         }
         Ok(())
@@ -189,7 +232,7 @@ pub(crate) fn new_file(
 ) -> KResult<Arc<VfsFile>> {
     let state = Arc::new(AsyncioFile::new(context, ring));
     AnonInodeFs::global().get_file(
-        "[asyncio]",
+        "[io_uring]",
         Arc::new(AsyncioFops),
         state,
         FMode::READ | FMode::WRITE,

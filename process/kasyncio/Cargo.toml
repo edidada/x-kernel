@@ -15,7 +15,6 @@ documentation.workspace = true
 ignored = ["kns"]
 
 [dependencies]
-anon.workspace = true
 anon_inodefs.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
