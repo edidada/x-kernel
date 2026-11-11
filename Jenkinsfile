@@ -50,7 +50,9 @@ pipeline {
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
-        ROOTFS_VERSION = '20260302'
+        ROOTFS_VARIANT = 'xkernel-glibc'
+        ROOTFS_RELEASE_TAG = 'latest'
+        HARNESS_ROOTFS_DIR = '/xkernel-target/rootfs-harness'
         HARNESS_JOBS = '2'
         STARRY_ACCEL = 'n'
     }
@@ -184,7 +186,7 @@ def guestAgentLabelForArch(String arch) {
 
 def ciBuilderImage() {
     // Agents preload the platform image with docker load (tag preserved, digest may differ).
-    return 'kennard/x-kernel-builder:v3.1'
+    return 'yeanwang/x-kernel-builder:v3.2'
 }
 
 def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
@@ -196,8 +198,8 @@ def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
         '--mount type=volume,dst=/xkernel-target ' +
         '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
         // Keep Rustup temporary files and toolchains on the same filesystem.
-        '--mount type=volume,src=xkernel-rustup-home-v5,dst=/usr/local/rustup ' +
-        '--mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs ' +
+        '--mount type=volume,src=xkernel-rustup-home-v6,dst=/usr/local/rustup ' +
+        '--mount type=volume,src=xkernel-rootfs-cache-v3,dst=/xkernel-cache/rootfs ' +
         '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
         "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
 }
@@ -402,6 +404,9 @@ def restoreStashedArchCiOutputs() {
 }
 
 def prepareRootfsCacheForArch(String arch, String stageName) {
+    dir(env.HARNESS_ROOTFS_DIR) {
+        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
+    }
     sh label: "Prepare rootfs cache ${arch}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
@@ -1099,7 +1104,8 @@ def runRuntimeTests(String arch) {
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
-                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}",
+                         "ROOTFS_LATEST_FILE=${env.HARNESS_ROOTFS_DIR}/rootfs/releases/latest.json",
+                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}-gnu-dynamic",
                          "JOBS=${env.HARNESS_JOBS}"]) {
                     sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
 set -euo pipefail

@@ -1,0 +1,17 @@
+# GNU guest cross toolchains and Debian 13 glibc sysroots on amd64 and arm64.
+ARG BASE_IMAGE=kennard/x-kernel-builder:v3.1@sha256:25b707ce4754dff4b7eb185c9f0c049dee202a394fe4b812153396b49821bca2
+FROM ${BASE_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+    gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
+    && rm -rf /var/lib/apt/lists/*
+ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="--target=x86_64-linux-gnu -isystem /usr/x86_64-linux-gnu/include" \
+    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--target=aarch64-linux-gnu -isystem /usr/aarch64-linux-gnu/include" \
+    BINDGEN_EXTRA_CLANG_ARGS_riscv64gc_unknown_linux_gnu="--target=riscv64-linux-gnu -isystem /usr/riscv64-linux-gnu/include"
+USER jenkins
+ARG IMAGE_VERSION=v3.2
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"
