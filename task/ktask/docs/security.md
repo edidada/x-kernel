@@ -911,6 +911,13 @@ reallocate under the lock. Dropping a completed system guard thaws before
 reopening admission. Gate rollback drains deferred owners on all ordinary
 error paths. Forgetting a guard is not a supported PM cancellation mechanism.
 
+Private scheduler fixtures select infrastructure exemptions and invoke the
+shared freeze implementation under one continuously owned publication gate.
+They never reopen admission between exemption and target snapshots. A regression
+fixture activates a non-cooperative task in that interval and checks that it
+stays deferred until the frozen guard is released. Public entry validation is
+still covered separately; this fixture does not exempt production PM tasks.
+
 This is scheduler admission, not a ban on allocating detached task objects or
 updating process-domain visibility. Those objects cannot execute until admitted.
 Explicitly exempt kernel workers can still run, so platform preparation must

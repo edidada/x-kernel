@@ -204,6 +204,17 @@ pub fn freeze_system_tasks(
         return Err(FreezeError::InvalidContext);
     }
     let gate = PublicationGate::acquire()?;
+    freeze_with_gate(gate, exempt, timeout, cancellation)
+}
+
+// Consume an already-closed gate so exemption selection in private scheduler
+// fixtures can share the same admission interval as the production freeze.
+fn freeze_with_gate(
+    gate: PublicationGate,
+    exempt: &[KtaskRef],
+    timeout: TimeSpan,
+    cancellation: &FreezeCancellation,
+) -> Result<SystemFrozenTasks, FreezeError> {
     let current = crate::current().clone();
     let mut tasks = gate.snapshot();
     for (index, task) in exempt.iter().enumerate() {
