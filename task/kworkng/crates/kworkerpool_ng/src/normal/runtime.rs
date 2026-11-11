@@ -156,6 +156,9 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
     /// Idempotent after completion. Caller must exclude producers and finish source
     /// teardown first, and must not call from this manager or one of its workers.
     /// This does not close a Queue or cancel caller-owned delayed work.
+    /// With Cooperative services, release every freeze guard covering these
+    /// managers/workers before waiting for stop. Stop does not thaw them; joining
+    /// while retaining their freeze credentials creates a caller-owned wait cycle.
     ///
     /// # Errors
     /// Invalid context rejects before publishing the stop request.

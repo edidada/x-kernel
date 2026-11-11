@@ -130,6 +130,9 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalServices<S> {
     /// first, and must not execute this operation inside an owned worker/manager.
     /// Repeated calls after complete stop are harmless. References alone do not
     /// authorize publishing new demand during or after this operation.
+    /// With Cooperative services, release every freeze guard covering these
+    /// managers/workers before waiting for stop. Stop does not thaw them; joining
+    /// while retaining their freeze credentials creates a caller-owned wait cycle.
     ///
     /// # Errors
     /// Invalid context returns before stopping any CPU service.

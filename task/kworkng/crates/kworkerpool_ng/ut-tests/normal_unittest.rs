@@ -76,7 +76,13 @@ fn prepare() -> (Arc<NormalService<Arc<Probe>>>, usize) {
 }
 
 fn prepare_on(cpu: LogicalCpuId) -> (Arc<NormalService<Arc<Probe>>>, usize) {
-    prepare_with_policy(cpu, NormalFreezePolicy::KeepRunning)
+    let service = NormalService::new(
+        cpu,
+        NonZeroUsize::new(2).unwrap(),
+        kalloc_types::AllocFlags::NOWAIT,
+    )
+    .unwrap();
+    prepare_service(service)
 }
 
 fn prepare_with_policy(
@@ -90,6 +96,12 @@ fn prepare_with_policy(
         policy,
     )
     .unwrap();
+    prepare_service(service)
+}
+
+fn prepare_service(
+    service: Arc<NormalService<Arc<Probe>>>,
+) -> (Arc<NormalService<Arc<Probe>>>, usize) {
     let worker = {
         let mut workers = service.workers.lock();
         // Keep retirement policy out of this isolated one-thread wait probe.
@@ -521,7 +533,7 @@ fn default_idle_worker_does_not_implicitly_acknowledge_freezing() {
     assert!(matches!(
         ktask::freezer::freeze_tasks(
             core::slice::from_ref(&task),
-            TimeSpan::ZERO,
+            TimeSpan::from_secs(5),
             &ktask::freezer::FreezeCancellation::new()
         ),
         Err(ktask::freezer::FreezeError::TimedOut)

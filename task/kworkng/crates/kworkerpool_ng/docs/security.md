@@ -151,3 +151,9 @@ incoming-stack confirmation; a work notification cannot release the task.
 Round identity and release-before-park are owned by ktask. Callback dependencies,
 service separation for recovery, and stop-after-thaw remain caller obligations.
 This does not add CPU parking, interrupt exclusion or a physical sleep backend.
+
+The manager stop regression starts an independent joined stop caller, observes
+its published stop request and blocked wait while the manager remains Frozen,
+then checks completion only after thaw. The default-policy rejection probe uses
+the actual default constructor and a positive five-second freeze budget so a zero deadline cannot mask accidental
+cooperative opt-in. Public joined-stop APIs explicitly require thaw-before-join.
