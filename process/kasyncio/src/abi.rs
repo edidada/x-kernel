@@ -10,11 +10,8 @@
 //! the bottom of this file pin every size and stride.
 //!
 //! The ABI ships complete rather than incrementally, so items that the not
-//! yet landed ring/syscall steps will consume are staged here. Allow the
-//! resulting dead-code findings only in unittest builds, where the syscall
-//! consumers are absent; in plain builds the `expect(dead_code)` on the
-//! module declaration accounts for them instead.
-#![cfg_attr(unittest, allow(dead_code))]
+//! yet landed ring/syscall steps will consume are staged here. They remain
+//! public crate API, so plain builds see no dead-code findings.
 
 use core::mem::{offset_of, size_of};
 

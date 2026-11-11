@@ -22,14 +22,11 @@ extern crate klogger;
 
 extern crate alloc;
 
-// The abi/context/worker modules are exercised through in-crate unit tests
-// until the syscall surface lands; keep non-unittest builds warning-clean.
-#[cfg_attr(not(unittest), expect(dead_code))]
-mod abi;
-#[cfg_attr(not(unittest), expect(dead_code))]
-mod context;
-#[cfg_attr(not(unittest), expect(dead_code))]
+/// User-visible async I/O ABI for the future submission/completion rings.
+pub mod abi;
+/// Per-process async context, ready/completion staging, and wake sources.
+pub mod context;
+// Worker internals stay crate-private until the submit path lands.
 mod worker;
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/context.rs");

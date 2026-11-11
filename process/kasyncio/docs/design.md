@@ -108,7 +108,7 @@ by the ordinary exit path — when any of the following holds:
    syscalls use, so blocked operations unwind with `-EINTR`.
 3. **Pending `SIGKILL`**: a worker never re-enters userspace, where
    fatal-signal delivery normally happens, so the idle path probes the
-   thread's pending-signal set after every signal-induced wake. `kill -9`
+   thread's pending-signal set after every task-interrupt wake. `kill -9`
    on a worker tid therefore ends the worker. Handler-visible fatal
    signals other than `SIGKILL` still require a userspace return and are
    out of scope for phase 1.

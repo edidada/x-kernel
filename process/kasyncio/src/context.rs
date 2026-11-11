@@ -34,17 +34,17 @@ pub(crate) const READY_LIMIT: usize = 1024;
 ///
 /// The spike carries only the user cookie; the syscall-facing steps extend
 /// this with resolved file handles and decoded arguments.
-pub(crate) struct PreparedOp {
+pub struct PreparedOp {
     /// User cookie echoed verbatim in the completion entry.
-    pub(crate) cookie: u64,
+    pub cookie: u64,
 }
 
 /// A completed operation in CQE shape (cookie + signed result).
-pub(crate) struct CompletedOp {
+pub struct CompletedOp {
     /// Cookie echoed from the originating submission.
-    pub(crate) cookie: u64,
+    pub cookie: u64,
     /// Operation result: non-negative count or negated errno.
-    pub(crate) res: i64,
+    pub res: i64,
 }
 
 #[derive(Default)]
@@ -141,6 +141,10 @@ impl AsyncContext {
     }
 
     /// Returns `true` when at least one completion is published.
+    #[cfg_attr(
+        not(unittest),
+        expect(dead_code, reason = "staged: consumed by the enter syscall step")
+    )]
     pub(crate) fn has_completions(&self) -> bool {
         !self.inner.lock().completed.is_empty()
     }
@@ -255,6 +259,10 @@ impl AsyncContext {
     }
 
     /// Poll-side readiness of the completion source for submitters.
+    #[cfg_attr(
+        not(unittest),
+        expect(dead_code, reason = "staged: consumed by the enter syscall step")
+    )]
     pub(crate) fn completion_readiness(&self) -> IoEvents {
         let inner = self.inner.lock();
         if inner.shutdown || !inner.completed.is_empty() {
@@ -273,6 +281,10 @@ impl AsyncContext {
     }
 
     /// Registers a waker on the completion source.
+    #[cfg_attr(
+        not(unittest),
+        expect(dead_code, reason = "staged: consumed by the enter syscall step")
+    )]
     pub(crate) fn register_completion_wait(
         &self,
         context: &mut PollContext<'_>,
@@ -299,6 +311,10 @@ impl Pollable for WorkSource<'_> {
 }
 
 /// `poll_io` source for submitters waiting for completions.
+#[cfg_attr(
+    not(unittest),
+    expect(dead_code, reason = "staged: consumed by the enter syscall step")
+)]
 pub(crate) struct CompletionSource<'a>(pub(crate) &'a AsyncContext);
 
 impl Pollable for CompletionSource<'_> {
