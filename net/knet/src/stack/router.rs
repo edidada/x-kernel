@@ -4,7 +4,7 @@
 
 //! Router state and packet dispatch.
 
-use alloc::{collections::VecDeque, vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 
 use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};

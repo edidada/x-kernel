@@ -494,9 +494,13 @@ pub(crate) fn resolve_output_route(
 ) -> KResult<OutputRoute> {
     // FIB ownership can differ from the actual output device for local routes.
     let oif = NetDeviceId::new(oif).filter(|id| id.ifindex() > 0);
-    let rule = routes.lookup_for_output(dst, oif).ok_or(LinuxError::ENETUNREACH)?;
+    let rule = routes
+        .lookup_for_output(dst, oif)
+        .ok_or(LinuxError::ENETUNREACH)?;
     if oif.is_some() {
-        let fib_device = devices.get_by_id(rule.lookup_device()).ok_or(LinuxError::ENETUNREACH)?;
+        let fib_device = devices
+            .get_by_id(rule.lookup_device())
+            .ok_or(LinuxError::ENETUNREACH)?;
         if !fib_device.is_link_up() {
             return Err(LinuxError::ENETUNREACH.into());
         }
@@ -518,7 +522,12 @@ pub(crate) fn resolve_output_route(
         Some(source) => source,
         None => devices
             .ipv4(rule.dev)
-            .and_then(|addrs| addrs.select_source(&rule.via.unwrap_or(crate::ip::Ipv4Address::UNSPECIFIED.into()), rule.scope))
+            .and_then(|addrs| {
+                addrs.select_source(
+                    &rule.via.unwrap_or(Ipv4Address::UNSPECIFIED.into()),
+                    rule.scope,
+                )
+            })
             .map(IpAddress::Ipv4)
             .ok_or(LinuxError::ENETUNREACH)?,
     };

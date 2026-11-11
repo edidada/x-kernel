@@ -131,7 +131,6 @@ fn error_msg_trunc_returns_original_payload_len() {
 
 #[def_test]
 fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
-
     use crate::{
         device::{DeviceRegistry, LoopbackDevice},
         network::{
@@ -149,7 +148,9 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
         .state()
         .set_local_endpoint(Some(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1234).into()));
     let mut devices = DeviceRegistry::new(4);
-    let dev = devices.register(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
+    let dev = devices
+        .register(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap())
+        .unwrap();
     // Keep routing empty to exercise bound broadcast source selection without an MTU.
     let _change = devices
         .add_ipv4_addr(
@@ -158,6 +159,8 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
                 addr: crate::ip::Ipv4Cidr::new(src_addr, 24).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();

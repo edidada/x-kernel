@@ -10,10 +10,12 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
-    network::output::Ipv4FragmentationPolicy,
-    network::router::{
-        ROUTE_PROTOCOL_KERNEL, ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_TABLE_LOCAL,
-        ROUTE_TYPE_BROADCAST, ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs,
+    network::{
+        output::Ipv4FragmentationPolicy,
+        router::{
+            ROUTE_PROTOCOL_KERNEL, ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_TABLE_LOCAL,
+            ROUTE_TABLE_MAIN, ROUTE_TYPE_BROADCAST, ROUTE_TYPE_UNICAST, RouteAttrs,
+        },
     },
 };
 
@@ -120,8 +122,8 @@ fn rx_failure_preserves_partial_batch_and_advances_device_cursor() {
                 link: LoopbackDevice::new(),
                 packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
                 up: true,
-            tx_log: None,
-}).unwrap())
+                tx_log: None,
+            }).unwrap())
             .unwrap();
     }
     let mut packets = Vec::new();
@@ -202,8 +204,8 @@ fn unrelated_address_update_preserves_automatic_and_configured_route_order() {
                 link: LoopbackDevice::new(),
                 packet: None,
                 up: true,
-            tx_log: None,
-}).unwrap())
+                tx_log: None,
+            }).unwrap())
             .unwrap();
         let primary = Ipv4AddrEntry {
             addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
@@ -258,7 +260,7 @@ fn cross_device_address_iteration_does_not_reorder_surviving_routes() {
             packet: None,
             up: true,
             tx_log: None,
-}).unwrap())
+        }).unwrap())
         .unwrap();
     let first_primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(10, 0, 0, 1), 24),
@@ -343,7 +345,7 @@ fn deleting_connected_primary_cascades_secondaries_and_falls_back() {
             packet: None,
             up: true,
             tx_log: None,
-}).unwrap())
+        }).unwrap())
         .unwrap();
     let primary = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 1), 24),
@@ -392,7 +394,7 @@ fn local_address_output_survives_owner_link_down_without_oif() {
             packet: None,
             up: true,
             tx_log: None,
-}).unwrap())
+        }).unwrap())
         .unwrap();
     let entry = Ipv4AddrEntry {
         addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
@@ -1005,9 +1007,15 @@ fn recording_output_router() -> (Router, NetDeviceId, TxLog) {
     let mut link = LoopbackDevice::new();
     link.set_mtu(100).unwrap();
     let dev = router
-        .add_device(kalloc_types::KBox::new(FailingRxDevice { link, packet: None, up: true,
-            tx_log: Some(tx_log.clone()),
-}).unwrap())
+        .add_device(
+            kalloc_types::KBox::new(FailingRxDevice {
+                link,
+                packet: None,
+                up: true,
+                tx_log: Some(tx_log.clone()),
+            })
+            .unwrap(),
+        )
         .unwrap();
     router
         .add_ipv4_addr(
@@ -1016,6 +1024,8 @@ fn recording_output_router() -> (Router, NetDeviceId, TxLog) {
                 addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
                 scope: ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -1032,7 +1042,9 @@ fn output_route_uses_selected_device_and_validates_binding() {
     );
     let mut loopback = LoopbackDevice::new();
     loopback.set_mtu(68).unwrap();
-    let lo = router.add_device(kalloc_types::KBox::new(loopback).unwrap()).unwrap();
+    let lo = router
+        .add_device(kalloc_types::KBox::new(loopback).unwrap())
+        .unwrap();
     let source = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 7));
     let gateway = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
     router
@@ -1362,7 +1374,9 @@ fn limited_broadcast_with_bound_device_preserves_no_route_output() {
 #[def_test(serial)]
 fn resolved_loopback_output_bypasses_full_tx_queue() {
     let mut router = Router::new();
-    let lo = router.add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap()).unwrap();
+    let lo = router
+        .add_device(kalloc_types::KBox::new(LoopbackDevice::new()).unwrap())
+        .unwrap();
     let addr = Ipv4Address::new(127, 0, 0, 1);
     router
         .add_ipv4_addr(
@@ -1371,6 +1385,8 @@ fn resolved_loopback_output_bypasses_full_tx_queue() {
                 addr: valid_ipv4_cidr(addr, 8),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -1398,12 +1414,15 @@ fn resolved_loopback_output_bypasses_full_tx_queue() {
 
 fn add_recording_output_device(router: &mut Router, tx_log: &TxLog) -> NetDeviceId {
     let dev = router
-        .add_device(kalloc_types::KBox::new(FailingRxDevice {
-            link: LoopbackDevice::new(),
-            packet: None,
-            tx_log: Some(tx_log.clone()),
-            up: true,
-}).unwrap())
+        .add_device(
+            kalloc_types::KBox::new(FailingRxDevice {
+                link: LoopbackDevice::new(),
+                packet: None,
+                tx_log: Some(tx_log.clone()),
+                up: true,
+            })
+            .unwrap(),
+        )
         .unwrap();
     router
         .add_ipv4_addr(
@@ -1412,6 +1431,8 @@ fn add_recording_output_device(router: &mut Router, tx_log: &TxLog) -> NetDevice
                 addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 9), 24),
                 scope: ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
+                no_prefix_route: false,
+                label: None,
             },
         )
         .unwrap();
@@ -1468,9 +1489,11 @@ fn queued_output_rejects_removed_source_and_missing_route_device() {
             .add_ipv4_addr(
                 dev,
                 Ipv4AddrEntry {
-                    addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 9), 24),
+                    addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 9), 25),
                     scope: ROUTE_SCOPE_UNIVERSE,
                     broadcast: None,
+                    no_prefix_route: false,
+                    label: None,
                 },
             )
             .unwrap();
