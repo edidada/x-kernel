@@ -194,6 +194,13 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
 - pseudo filesystem 的 magic、block size、最大文件大小和 root inode 由通用 helper 一次
   安装；具体实现不得在 private state 复制另一组 geometry/identity。
 - `Nameidata` 不持有 credential；一次操作的调用者必须在整个方法链中传递同一个 `&Cred`。
+- `openat2(2)` 的 `RESOLVE_*` 约束必须由 namei 统一保证，不能只靠 syscall 层替换
+  root：`BENEATH`/`IN_ROOT` 的每一次路径状态转换都要验证结果仍在锚定子树内
+  （`Path::render_from`），`NO_XDEV` 必须固定起始 mount 并覆盖下行、`..` 上行、绝对
+  symlink 目标与 magic link 跳转，`NO_SYMLINKS` 必须覆盖最终分量与 magic link。
+- 锚定查找在并发 rename 改变中间目录拓扑时必须拒绝交付外部对象（`EXDEV`）；不能
+  仅凭早先比较过 `path == root` 就信任后续父目录遍历。
+- `RESOLVE_CACHED` 必须在慢路径查找、创建或截断等副作用发生前返回 `EAGAIN`。
 - 路径中间目录在 lookup 下一组件前必须通过 `MAY_EXEC`。
 - 尾随 `/` 必须在最终组件 lookup 前强制 `FOLLOW_FINAL | DIRECTORY`；最终
   `LOOKUP_DIRECTORY` 必须由通用 namei 用 `Dentry::can_lookup()` 消费，不能由 open 层用

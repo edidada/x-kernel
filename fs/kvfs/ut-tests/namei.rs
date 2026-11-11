@@ -1159,6 +1159,7 @@ fn magic_link_rejection_applies_to_final_and_non_final_components() {
             LookupFlags::follow() | LookupFlags::NO_MAGIC_LINKS,
             &kcred::initial_cred(),
         )
+        .map(|_| ())
         .unwrap_err();
     assert_eq!(err, VfsError::FilesystemLoop);
 
@@ -1170,6 +1171,7 @@ fn magic_link_rejection_applies_to_final_and_non_final_components() {
             LookupFlags::no_follow() | LookupFlags::NO_MAGIC_LINKS,
             &kcred::initial_cred(),
         )
+        .map(|_| ())
         .unwrap_err();
     assert_eq!(err, VfsError::FilesystemLoop);
     assert_eq!(tree.magic_dir.follow_count(), 0);
@@ -1486,4 +1488,138 @@ fn trailing_slash_survives_final_symlink_expansion() {
         )
         .map(|_| ())
         .unwrap();
+}
+
+fn openat2_at(
+    root: &Path,
+    base: &Path,
+    path: &str,
+    flags: u64,
+    resolve: u64,
+) -> VfsResult<Arc<VfsFile>> {
+    Filename::new(path).open_with_openat2_at(
+        root,
+        base,
+        crate::Openat2How {
+            flags,
+            mode: 0,
+            resolve,
+        },
+        NodePermission::empty(),
+        kcred::initial_cred(),
+    )
+}
+
+#[def_test]
+fn no_symlinks_rejects_final_and_magic_links() {
+    let tree = test_tree();
+    let resolve = crate::open_flags::RESOLVE_NO_SYMLINKS;
+
+    let err = openat2_at(&tree.root, &tree.base, "/link", 0, resolve).map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::FilesystemLoop);
+
+    let err = openat2_at(&tree.root, &tree.base, "/magic", 0, resolve).map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::FilesystemLoop);
+}
+
+#[def_test]
+fn o_path_no_follow_still_returns_the_symlink_itself() {
+    use linux_raw_sys::general::{O_NOFOLLOW, O_PATH};
+
+    let tree = test_tree();
+    let file = openat2_at(
+        &tree.root,
+        &tree.base,
+        "/link",
+        u64::from(O_PATH | O_NOFOLLOW),
+        crate::open_flags::RESOLVE_NO_SYMLINKS,
+    )
+    .unwrap();
+
+    assert_eq!(file.node_type(), NodeType::Symlink);
+}
+
+#[def_test]
+fn beneath_rejects_absolute_paths_and_dotdot_escape() {
+    let tree = test_tree();
+    let cred = kcred::initial_cred();
+    let dir = Filename::new("/dir")
+        .lookup_at(
+            &tree.root,
+            &tree.base,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )
+        .unwrap();
+    let resolve = crate::RESOLVE_BENEATH;
+
+    let err = openat2_at(&dir, &dir, "/target", 0, resolve)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::CrossesDevices);
+
+    let err = openat2_at(&dir, &dir, "../target", 0, resolve)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::CrossesDevices);
+}
+
+#[def_test]
+fn in_root_rebases_absolute_paths_and_clamps_dotdot() {
+    let tree = test_tree();
+    let cred = kcred::initial_cred();
+    let dir = Filename::new("/dir")
+        .lookup_at(
+            &tree.root,
+            &tree.base,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )
+        .unwrap();
+    let resolve = crate::RESOLVE_IN_ROOT;
+
+    let file = openat2_at(&dir, &dir, "/leaf", 0, resolve).unwrap();
+    assert_eq!(file.node_type(), NodeType::RegularFile);
+
+    let file = openat2_at(&dir, &dir, "/../leaf", 0, resolve).unwrap();
+    assert_eq!(file.node_type(), NodeType::RegularFile);
+
+    let err = openat2_at(&dir, &dir, "/target", 0, resolve)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::NotFound);
+}
+
+#[def_test]
+fn cached_rejects_side_effects_before_touching_the_filesystem() {
+    use linux_raw_sys::general::{O_CREAT, O_RDWR, O_TRUNC};
+
+    let tree = test_tree();
+    let resolve = crate::open_flags::RESOLVE_CACHED;
+
+    let err = openat2_at(
+        &tree.root,
+        &tree.base,
+        "/new-file",
+        u64::from(O_CREAT | O_RDWR),
+        resolve,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err, VfsError::WouldBlock);
+
+    let err = openat2_at(
+        &tree.root,
+        &tree.base,
+        "/target",
+        u64::from(O_TRUNC),
+        resolve,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err, VfsError::WouldBlock);
 }

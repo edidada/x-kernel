@@ -13,10 +13,10 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 use kcred::Cred;
 
 use crate::{
-    AccMode, CreatedEntry, DeviceId, FMode, Filename, LookupFlags, LookupIntent, MountFlags,
-    NodePermission, NodeType, OpenFlags, OpenHow, OpenParams, Path, RemovedEntry, ResolvedObject,
-    Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, d_inode, d_is_dir,
-    d_is_negative, d_is_symlink, node::LookupCreateResult, path::PathBuf,
+    AccMode, CreatedEntry, DeviceId, FMode, Filename, LookupFlags, LookupIntent, Mount, MountFlags,
+    NodePermission, NodeType, OpenFlags, OpenHow, OpenParams, Path, RemovedEntry, RenderedPath,
+    ResolvedObject, Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, d_inode,
+    d_is_dir, d_is_negative, d_is_symlink, node::LookupCreateResult, path::PathBuf,
 };
 
 /// Deferred cleanup context used while resolving symbolic-link targets.
@@ -140,6 +140,9 @@ struct Nameidata<'a> {
     dfd: i32,
     intent: LookupIntent,
     flags: LookupFlags,
+    /// Mount the walk started on, pinned for `NO_XDEV`. Symlink hops inherit
+    /// it so the constraint spans the whole resolution, not one nameidata.
+    no_xdev_mount: Option<Arc<Mount>>,
 }
 
 impl<'a> Nameidata<'a> {
@@ -171,6 +174,7 @@ impl<'a> Nameidata<'a> {
             dfd: AT_FDCWD,
             intent,
             flags,
+            no_xdev_mount: None,
         }
     }
 
@@ -187,6 +191,9 @@ impl<'a> Nameidata<'a> {
             self.path.clone()
         };
         self.inode = Some(d_inode(self.path.dentry()).clone());
+        if self.flags.contains(LookupFlags::NO_XDEV) && self.no_xdev_mount.is_none() {
+            self.no_xdev_mount = Some(self.path.mount().clone());
+        }
     }
 
     fn follow_flags_for_intermediate(&self) -> LookupFlags {
@@ -230,6 +237,10 @@ impl<'a> Nameidata<'a> {
             self.flags,
         );
         nd.total_link_count = self.total_link_count;
+        // `NO_XDEV` spans the whole resolution, not one nameidata: the symlink
+        // hop must stay on the mount the lookup started on, even when its
+        // target is absolute.
+        nd.no_xdev_mount = self.no_xdev_mount.clone();
         let resolved = nd.path_lookupat(containing_dir, cred);
         self.total_link_count = nd.total_link_count;
         self.flags = saved_flags;
@@ -278,19 +289,24 @@ impl<'a> Nameidata<'a> {
         component: WalkComponent,
         cred: &Cred,
     ) -> VfsResult<Path> {
+        let follows = component == WalkComponent::More || self.flags.follows_final();
+
         if d_inode(next.dentry()).magic_link().is_some() {
             if self.flags.rejects_magic_links() {
                 return Err(VfsError::FilesystemLoop);
             }
-            if component == WalkComponent::More || self.flags.follows_final() {
+            if follows {
+                // `openat2(RESOLVE_NO_SYMLINKS)` applies to every link the walk
+                // would follow, magic links included.
+                if self.flags.contains(LookupFlags::NO_SYMLINKS) {
+                    return Err(VfsError::FilesystemLoop);
+                }
                 return self.follow_magic_link(next);
             }
             return Ok(next);
         }
 
-        if d_is_symlink(next.dentry())
-            && (component == WalkComponent::More || self.flags.follows_final())
-        {
+        if d_is_symlink(next.dentry()) && follows {
             // `openat2(RESOLVE_NO_SYMLINKS)`: Linux reports ELOOP for any
             // symlink the walk would follow, including intermediate ones.
             if self.flags.contains(LookupFlags::NO_SYMLINKS) {
@@ -306,6 +322,44 @@ impl<'a> Nameidata<'a> {
         self.path = path;
     }
 
+    /// Moves the walk to `path`, enforcing every constraint that spans a path
+    /// state transition: `NO_XDEV` mount identity and the `BENEATH`/`IN_ROOT`
+    /// anchor.
+    fn enter(&mut self, path: Path) -> VfsResult<()> {
+        self.check_transition(&path)?;
+        self.set_path(path);
+        Ok(())
+    }
+
+    fn check_transition(&self, path: &Path) -> VfsResult<()> {
+        if let Some(start) = &self.no_xdev_mount
+            && !Arc::ptr_eq(path.mount(), start)
+        {
+            return Err(VfsError::CrossesDevices);
+        }
+        if self.flags.is_anchored() {
+            self.ensure_below_root(path)?;
+        }
+        Ok(())
+    }
+
+    /// Verifies that `path` is still inside the anchored subtree.
+    ///
+    /// This is the authoritative boundary check: it walks the live mount and
+    /// dentry topology, so a concurrent rename that moved an intermediate
+    /// directory out of the anchor is observed instead of trusted from an
+    /// earlier `..` decision.
+    fn ensure_below_root(&self, path: &Path) -> VfsResult<()> {
+        match path.render_from(&self.root)? {
+            RenderedPath::Reachable(_) => Ok(()),
+            RenderedPath::Unreachable(_) => Err(VfsError::CrossesDevices),
+        }
+    }
+
+    fn check_final(&self, path: &Path) -> VfsResult<()> {
+        self.check_transition(path)
+    }
+
     fn hash_name(&mut self, name: &str) -> Qstr {
         let qstr = Qstr::new(name);
         self.last = Some(qstr.clone());
@@ -314,7 +368,7 @@ impl<'a> Nameidata<'a> {
 
     fn handle_dots(&mut self, last_type: LastType) -> VfsResult<()> {
         match last_type {
-            LastType::Root => self.set_path(self.root.clone()),
+            LastType::Root => self.enter(self.root.clone())?,
             LastType::Dot => {}
             LastType::Dotdot => {
                 if self.path.ptr_eq(&self.root) {
@@ -328,7 +382,10 @@ impl<'a> Nameidata<'a> {
                     }
                 } else {
                     let parent = self.path.parent().unwrap_or_else(|| self.root.clone());
-                    self.set_path(parent);
+                    // `enter` rejects an upward `..` that leaves the anchor or
+                    // crosses a mount under `NO_XDEV`, instead of silently
+                    // walking into the parent mount.
+                    self.enter(parent)?;
                 }
             }
             LastType::Norm => {}
@@ -347,6 +404,11 @@ impl<'a> Nameidata<'a> {
     }
 
     fn lookup_slow(&self, name: &str) -> VfsResult<Path> {
+        // `openat2(RESOLVE_CACHED)`: a component that is not in the dentry
+        // cache would require a filesystem lookup, which the caller forbade.
+        if self.flags.is_cached_only() {
+            return Err(VfsError::WouldBlock);
+        }
         Ok(Path::new(
             self.path.mount().clone(),
             self.path.dentry().lookup(name)?,
@@ -371,8 +433,7 @@ impl<'a> Nameidata<'a> {
         };
         let next = self.resolve_final_mount_checked(next)?;
         let next = self.step_into(&containing_dir, next, component, cred)?;
-        self.set_path(next);
-        Ok(())
+        self.enter(next)
     }
 
     fn next_path_component<'p>(
@@ -509,6 +570,7 @@ impl<'a> Nameidata<'a> {
     }
 
     fn complete_path_lookup(&self, path: Path) -> VfsResult<Path> {
+        self.check_final(&path)?;
         if self.flags.contains(LookupFlags::DIRECTORY) && !path.dentry().can_lookup() {
             return Err(VfsError::NotADirectory);
         }
@@ -665,6 +727,10 @@ impl<'a> Nameidata<'a> {
         lookup_flags: LookupFlags,
         was_created: bool,
     ) -> VfsResult<()> {
+        // `OPENAT2_REGULAR`: the request only accepts a regular file.
+        if flags.requires_regular() && d_inode(path.dentry()).node_type() != NodeType::RegularFile {
+            return Err(VfsError::InvalidInput);
+        }
         if flags.will_create() {
             if flags.is_exclusive_create() && !was_created {
                 return Err(VfsError::AlreadyExists);
@@ -794,12 +860,17 @@ impl<'a> Nameidata<'a> {
         let path = if let Some(path) = self.lookup_fast_for_open(flags)? {
             path
         } else {
+            // A miss here would consult the filesystem (and possibly create or
+            // truncate); `RESOLVE_CACHED` forbids that outright.
+            if self.flags.is_cached_only() {
+                return Err(VfsError::WouldBlock);
+            }
             self.lookup_open(file, flags, umask, cred)?
         };
 
         if file.was_created() {
             let resolved = path.resolve_final_mount();
-            self.set_path(resolved);
+            self.enter(resolved)?;
             return Ok(None);
         }
 
@@ -814,6 +885,11 @@ impl<'a> Nameidata<'a> {
             // display path (which is stale for memfd-backed exe links).
             && d_inode(path.dentry()).magic_link().is_none()
         {
+            // This final-component fast path reads the link target itself, so
+            // it must apply the same `NO_SYMLINKS` rule as `step_into`.
+            if self.flags.contains(LookupFlags::NO_SYMLINKS) {
+                return Err(VfsError::FilesystemLoop);
+            }
             self.reserve_link_follow()?;
             let target = d_inode(path.dentry()).read_link(path.dentry())?;
             if target.is_empty() {
@@ -822,7 +898,7 @@ impl<'a> Nameidata<'a> {
             return Ok(Some(PathBuf::from(target)));
         }
         let path = self.step_into(&containing_dir, path, WalkComponent::Final, cred)?;
-        self.set_path(path);
+        self.enter(path)?;
         Ok(None)
     }
 
@@ -835,9 +911,19 @@ impl<'a> Nameidata<'a> {
         umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Arc<VfsFile>> {
+        // `RESOLVE_CACHED` with a side effect is rejected before anything can
+        // be created or truncated, matching Linux's `build_open_flags`.
+        if flags.lookup_flags().is_cached_only()
+            && (flags.will_create() || flags.file_flags().contains(OpenFlags::TRUNCATE))
+        {
+            return Err(VfsError::WouldBlock);
+        }
         let mut name = filename.clone();
         let mut walk_base = base.clone();
         let mut total_link_count = 0;
+        // The mount the walk started on, carried across symlink hops so
+        // `NO_XDEV` covers the whole resolution rather than a single nameidata.
+        let mut start_mount: Option<Arc<Mount>> = None;
         // Resolution constraints accumulate in the lookup flags, as Linux keeps
         // them in `nd->flags` while it expands symlinks (`path_openat`). A
         // trailing slash demands a directory for the final resolved path, and
@@ -850,7 +936,11 @@ impl<'a> Nameidata<'a> {
         loop {
             let mut nd = Nameidata::new(root, &walk_base, &name, LookupIntent::Open, lookup_flags);
             nd.total_link_count = total_link_count;
+            nd.no_xdev_mount = start_mount.clone();
             nd.link_path_walk(&walk_base, cred)?;
+            if start_mount.is_none() {
+                start_mount = nd.no_xdev_mount.clone();
+            }
             // `open_last_lookups` is where `lookup_fast_for_open` turns this
             // hop's trailing slash into `DIRECTORY`, so the demand is only
             // visible in `nd.flags` after it runs.
@@ -858,6 +948,7 @@ impl<'a> Nameidata<'a> {
             lookup_flags |= nd.flags;
             let Some(next) = next else {
                 let path = nd.path.clone();
+                nd.check_final(&path)?;
                 let may_open =
                     Self::may_open_resolved(&path, flags, lookup_flags, file.was_created(), cred)?;
                 let opened = file.vfs_open(path)?;
@@ -884,6 +975,9 @@ impl<'a> Nameidata<'a> {
     ) -> VfsResult<Arc<VfsFile>> {
         let path =
             filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags(), cred)?;
+        if flags.requires_regular() && d_inode(path.dentry()).node_type() != NodeType::RegularFile {
+            return Err(VfsError::InvalidInput);
+        }
         file.vfs_open(path)
     }
 

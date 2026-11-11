@@ -592,6 +592,12 @@ number 和 superblock block size 由唯一 `InodeIdentity`/`SuperBlock` 传入�
 credential。所有会解析或修改 namespace 的入口都把 `&Cred` 作为方法参数逐层传递。
 credential 的生命周期由 syscall 持有的 `Arc` 保证；对象字段不需要重复保存调用上下文。
 
+`openat2(2)` 的 `BENEATH`/`IN_ROOT`/`NO_XDEV`/`NO_SYMLINKS`/`CACHED` 是 namei 状态机的
+不变量，不是 syscall 层的包装：每次 `enter` 新路径都检查锚定子树归属与起始 mount，
+symlink hop 继承同一 root 与 mount；最终交付前再做一次归属校验。`RESOLVE_CACHED` 在
+慢速 lookup、创建与截断前返回 `EAGAIN`。因此 `sys_openat2` 只负责参数校验、选择
+dirfd/cwd 作为 base 以及决定是否为锚定查找，不复制一套查找策略。
+
 ## 调用约束 / 执行上下文
 
 路径和 namespace 操作会获取 sleepable lock、分配对象并调用具体文件系统，可能阻塞，

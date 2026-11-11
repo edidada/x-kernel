@@ -81,3 +81,36 @@ fn legacy_open_never_requests_resolve_constraints() {
     assert!(!lookup.contains(LookupFlags::NO_SYMLINKS));
     assert!(!lookup.contains(LookupFlags::BENEATH));
 }
+
+#[def_test]
+fn openat2_rejects_mode_bits_outside_permission_mask() {
+    // 0o10000 is not a permission bit; truncating it used to create a
+    // zero-permission file instead of reporting EINVAL.
+    assert!(OpenHow::from_openat2(u64::from(O_CREAT | O_RDWR), 0o10000, 0).is_err());
+    assert!(OpenHow::from_openat2(u64::from(O_CREAT | O_RDWR), 0o7777, 0).is_ok());
+}
+
+#[def_test]
+fn openat2_accepts_and_records_regular_constraint() {
+    let params = OpenHow::from_openat2(u64::from(O_RDONLY) | OPENAT2_REGULAR, 0, 0)
+        .unwrap()
+        .into_open_params()
+        .unwrap();
+    assert!(params.requires_regular());
+}
+
+#[def_test]
+fn openat2_translates_in_root_and_cached() {
+    let params = OpenHow::from_openat2(
+        u64::from(O_RDONLY),
+        0,
+        RESOLVE_IN_ROOT | crate::open_flags::RESOLVE_CACHED,
+    )
+    .unwrap()
+    .into_open_params()
+    .unwrap();
+    let lookup = params.lookup_flags();
+
+    assert!(lookup.contains(LookupFlags::IN_ROOT));
+    assert!(lookup.contains(LookupFlags::CACHED));
+}

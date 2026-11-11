@@ -131,6 +131,15 @@ pub fn sys_openat2(
     size: usize,
 ) -> KResult<isize> {
     let (flags, mode, resolve) = read_open_how(how, size)?;
+    // Validate the whole `open_how` before touching the pathname or the
+    // directory fd, so a malformed request reports `EINVAL` rather than
+    // `EFAULT`/`EBADF`/`ENOTDIR` from later stages.
+    let how = Openat2How {
+        flags,
+        mode,
+        resolve,
+    }
+    .validate()?;
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_openat2 <= {dirfd} {path:?} flags={flags:#x} resolve={resolve:#x}");
     let cred = kprocess::current_cred();
@@ -139,33 +148,33 @@ pub fn sys_openat2(
     let fs = kprocess::current_user_process_fs_context()
         .lock()
         .snapshot();
-    let (mut root, base) = if dirfd == AT_FDCWD as c_int {
-        (fs.root().clone(), fs.pwd().clone())
-    } else {
-        let file = kprocess::current_files().get_file(dirfd)?;
-        if !file.is_dir() {
-            return Err(KError::NotADirectory);
+    let anchored = resolve & (RESOLVE_IN_ROOT | RESOLVE_BENEATH) != 0;
+    // A plain absolute pathname is independent of the directory fd; only an
+    // anchored request (`IN_ROOT`/`BENEATH`) or a relative pathname makes the
+    // fd meaningful.
+    let base = if !path.as_str().starts_with('/') || anchored {
+        if dirfd == AT_FDCWD as c_int {
+            fs.pwd().clone()
+        } else {
+            let file = kprocess::current_files().get_file(dirfd)?;
+            if !file.is_dir() {
+                return Err(KError::NotADirectory);
+            }
+            file.path().clone()
         }
-        (fs.root().clone(), file.path().clone())
+    } else {
+        fs.root().clone()
     };
     // `RESOLVE_IN_ROOT` and `RESOLVE_BENEATH` anchor the walk at the directory
-    // fd: absolute pathnames rebase there and ".." stops there.
-    if resolve & (RESOLVE_IN_ROOT | RESOLVE_BENEATH) != 0 {
-        root = base.clone();
-    }
+    // fd; `Nameidata` owns the rebasing/clamping rules.
+    let root = if anchored {
+        base.clone()
+    } else {
+        fs.root().clone()
+    };
 
     filename
-        .open_with_openat2_at(
-            &root,
-            &base,
-            Openat2How {
-                flags,
-                mode,
-                resolve,
-            },
-            fs.node_umask(),
-            cred,
-        )
+        .open_with_openat2_at(&root, &base, how, fs.node_umask(), cred)
         .and_then(|file| add_to_fd(file, flags as u32))
         .map(|fd| fd as isize)
 }

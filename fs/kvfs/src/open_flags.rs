@@ -69,6 +69,14 @@ const O_PATH_FLAGS: OpenFlags = OpenFlags::DIRECTORY
     .union(OpenFlags::CLOSE_ON_EXEC);
 const VALID_OPEN_FLAGS: u32 = OpenFlags::all().bits();
 
+/// `OPENAT2_REGULAR`: the resolved object must be a regular file.
+///
+/// The low 32 bits of `open_how.flags` are the Linux `O_*` namespace; this
+/// project-level flag lives in the upper half so it cannot collide with them.
+pub const OPENAT2_REGULAR: u64 = 1u64 << 32;
+/// Every raw `open_how.flags` bit this kernel accepts.
+const VALID_OPENAT2_FLAGS: u64 = VALID_OPEN_FLAGS as u64 | OPENAT2_REGULAR;
+
 fn is_create_like_open(flags: OpenFlags) -> bool {
     flags.contains(OpenFlags::CREATE)
 }
@@ -97,12 +105,23 @@ const VALID_RESOLVE_FLAGS: u64 = RESOLVE_NO_XDEV
 /// split out so the syscall layer does not need to know the internal layout.
 #[derive(Clone, Copy, Debug)]
 pub struct Openat2How {
-    /// `open_how.flags` (`O_*` bits).
+    /// `open_how.flags` (`O_*` bits plus project flags in the upper half).
     pub flags: u64,
     /// `open_how.mode` (creation permission bits).
     pub mode: u64,
     /// `open_how.resolve` (`RESOLVE_*` bits).
     pub resolve: u64,
+}
+
+impl Openat2How {
+    /// Validates the raw `open_how` fields with the same rules namei applies.
+    ///
+    /// The syscall layer calls this before it resolves the directory fd, so a
+    /// malformed request reports `EINVAL` rather than an fd error.
+    pub fn validate(self) -> VfsResult<Self> {
+        OpenHow::from_openat2(self.flags, self.mode, self.resolve)?;
+        Ok(self)
+    }
 }
 
 /// Raw open arguments after legacy syscall cleanup.
@@ -112,6 +131,8 @@ pub(crate) struct OpenHow {
     pub(crate) mode: NodePermission,
     /// `openat2` resolve bits; always zero for legacy `open`/`openat`.
     pub(crate) resolve: u64,
+    /// `OPENAT2_REGULAR`: require the resolved object to be a regular file.
+    pub(crate) regular_only: bool,
 }
 
 impl OpenHow {
@@ -121,6 +142,7 @@ impl OpenHow {
             flags: u64::from(flags & VALID_OPEN_FLAGS),
             mode,
             resolve: 0,
+            regular_only: false,
         };
         if OpenFlags::from_bits_retain(how.flags as u32).contains(OpenFlags::PATH) {
             how.flags &= u64::from(O_PATH_FLAGS.bits());
@@ -138,13 +160,22 @@ impl OpenHow {
     /// `O_CREAT` is `EINVAL`, and the two subtree constraints
     /// (`RESOLVE_BENEATH` and `RESOLVE_IN_ROOT`) are mutually exclusive.
     pub(crate) fn from_openat2(flags: u64, mode: u64, resolve: u64) -> VfsResult<Self> {
-        let flags_u32 = u32::try_from(flags).map_err(|_| VfsError::InvalidInput)?;
-        if flags_u32 & !VALID_OPEN_FLAGS != 0 {
+        // Check the whole 64-bit flag word, not a `u32` truncation: a flag this
+        // kernel accepts may legitimately live above `O_*` (see
+        // [`OPENAT2_REGULAR`]), and an unknown bit must be `EINVAL` because it
+        // is unknown, not because it did not fit in 32 bits.
+        if flags & !VALID_OPENAT2_FLAGS != 0 {
             return Err(VfsError::InvalidInput);
         }
-        let mode_permission = u16::try_from(mode).map_err(|_| VfsError::InvalidInput)?;
-        let mode_permission = NodePermission::from_bits_truncate(mode_permission);
-        if !is_create_like_open(OpenFlags::from_bits_retain(flags_u32)) && mode != 0 {
+        let raw_flags = (flags & u64::from(VALID_OPEN_FLAGS)) as u32;
+        // Creation permissions are a mode, not a permission "hint": reject any
+        // bit outside `0o7777` instead of silently truncating it (a truncated
+        // `0o10000` used to create a zero-permission file).
+        if mode & !0o7777 != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        let mode_permission = NodePermission::from_bits_truncate(mode as u16);
+        if !is_create_like_open(OpenFlags::from_bits_retain(raw_flags)) && mode != 0 {
             return Err(VfsError::InvalidInput);
         }
         if resolve & !VALID_RESOLVE_FLAGS != 0 {
@@ -154,9 +185,10 @@ impl OpenHow {
             return Err(VfsError::InvalidInput);
         }
         Ok(Self {
-            flags: flags & u64::from(VALID_OPEN_FLAGS),
+            flags: u64::from(raw_flags),
             mode: mode_permission,
             resolve,
+            regular_only: flags & OPENAT2_REGULAR != 0,
         })
     }
 
@@ -219,12 +251,9 @@ impl OpenHow {
         if !flags.contains(OpenFlags::NO_FOLLOW) {
             lookup_flags |= LookupFlags::FOLLOW_FINAL;
         }
-        // `openat2(2)` resolve constraints. `RESOLVE_IN_ROOT` needs no lookup
-        // bit: the syscall layer passes the directory as the walk root, and
-        // `Nameidata` already rebases absolute pathnames and stops ".." at the
-        // root. `RESOLVE_CACHED` is a performance hint ("answer from cache or
-        // fail with EAGAIN"); answering without the hint is semantically
-        // correct, so it is accepted and ignored.
+        // `openat2(2)` resolve constraints. `Nameidata` owns the anchored
+        // subtree semantics for `IN_ROOT`/`BENEATH`; the syscall layer only
+        // selects the directory fd as the walk base.
         if self.resolve & RESOLVE_NO_XDEV != 0 {
             lookup_flags |= LookupFlags::NO_XDEV;
         }
@@ -237,6 +266,15 @@ impl OpenHow {
         if self.resolve & RESOLVE_BENEATH != 0 {
             lookup_flags |= LookupFlags::BENEATH;
         }
+        if self.resolve & RESOLVE_IN_ROOT != 0 {
+            lookup_flags |= LookupFlags::IN_ROOT;
+        }
+        // `RESOLVE_CACHED` is a real constraint: the walk may only complete
+        // from cached state. `Nameidata` turns a slow lookup (or a request
+        // with side effects such as create/truncate) into `EAGAIN`.
+        if self.resolve & RESOLVE_CACHED != 0 {
+            lookup_flags |= LookupFlags::CACHED;
+        }
 
         Ok(OpenParams {
             flags,
@@ -244,6 +282,7 @@ impl OpenHow {
             acc_mode,
             intent,
             lookup_flags,
+            regular_only: self.regular_only,
         })
     }
 }
@@ -256,6 +295,8 @@ pub(crate) struct OpenParams {
     acc_mode: AccMode,
     intent: OpenIntent,
     lookup_flags: LookupFlags,
+    /// `OPENAT2_REGULAR`: the resolved object must be a regular file.
+    regular_only: bool,
 }
 
 impl OpenParams {
@@ -273,6 +314,10 @@ impl OpenParams {
 
     pub(crate) const fn lookup_flags(&self) -> LookupFlags {
         self.lookup_flags
+    }
+
+    pub(crate) const fn requires_regular(&self) -> bool {
+        self.regular_only
     }
 
     pub(crate) const fn is_path(&self) -> bool {
