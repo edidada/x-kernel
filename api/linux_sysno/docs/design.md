@@ -27,8 +27,9 @@ validated Sysno ──> SysnoSet (bitset) / SysnoMap<T> (membership + slots)
 `lib.rs` re-exports the current architecture's `Sysno`, enabled architecture
 modules, argument carrier, errno types, set/map and iterators. The architecture
 macro generates a non-exhaustive enum, numeric/name lookup and iteration.
-The table's first/last identifiers define its numeric span; gaps occupy storage
-but are not valid keys. Numeric `From<i32/u32>` conversions panic on gaps; the
+The table's first identifier and its largest identifier define the numeric span;
+`last()` returns the largest identifier regardless of declaration order. Gaps
+occupy storage but are not valid keys. Numeric `From<i32/u32>` conversions panic on gaps; the
 fallible `new` constructor is the syscall-boundary entry point. Parsing names
 is exact and case-sensitive.
 
