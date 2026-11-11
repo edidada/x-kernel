@@ -19,7 +19,9 @@ For three rounds the serial QEMU fixture:
 3. Submits callbacks and business wake hints; checks that tasks stay Frozen,
    callbacks stay pending, and no business visit completes.
 4. Cancels both preparation handles after success and verifies retained ownership.
-5. Attempts new task activation; the activation gate retains it.
+5. Attempts nested public preparation with cancelled handles and verifies Busy
+   without releasing the existing task/queue guards, then attempts new task
+   activation; the activation gate retains it.
 6. Restores the simulated resource, releases queues then tasks, and checks exact
    callback/visit counts and completion of the deferred task.
 

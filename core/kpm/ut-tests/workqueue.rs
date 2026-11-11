@@ -269,6 +269,32 @@ fn smp_preparation_holds_tasks_and_callbacks_until_simulated_device_recovery() {
         }
         task_cancel.cancel();
         queue_cancel.cancel();
+        // A second public preparation cannot consume cancelled handles or
+        // release the first owner's queues/task admission while it is held.
+        assert!(matches!(
+            freeze_system_workqueues(
+                crate::SuspendTasks {
+                    exempt: &exempt,
+                    timeout: TimeSpan::ZERO,
+                    cancellation: &task_cancel,
+                },
+                SuspendWorkqueues {
+                    queues: &queues,
+                    timeout: TimeSpan::ZERO,
+                    cancellation: &queue_cancel,
+                },
+            ),
+            Err(crate::SuspendError::Busy)
+        ));
+        for (index, (_, _, calls, task, _, visits, ..)) in fixtures.iter().enumerate() {
+            assert_eq!(task.state(), ktask::TaskState::Frozen);
+            assert_eq!(calls.load(Ordering::Acquire), round + 1);
+            assert_eq!(visits.load(Ordering::Acquire), round);
+            assert!(matches!(
+                queues[index].freeze(TimeSpan::ZERO, &QueueFreezeCancellation::new()),
+                Err(QueueFreezeError::Busy)
+            ));
+        }
         let deferred_ran = Arc::new(AtomicBool::new(false));
         let ran = deferred_ran.clone();
         let deferred = ktask::spawn(move || ran.store(true, Ordering::Release));
