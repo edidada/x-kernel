@@ -10,9 +10,10 @@ control, or guarantee that a listed call is implemented by X-Kernel.
 The complete source scope is `src/lib.rs`, `src/args.rs`, `src/macros.rs`,
 `src/map.rs`, `src/set.rs`, `src/errno/{mod,macros,generated}.rs`, and
 `src/arch/{mod,macros,aarch64,arm,loongarch64,riscv64,x86_64}.rs`.
-`build.rs` detects Thumb-compatible target names. Tests live in the source files
-behind `cfg(unittest)`. Architecture tables and errno constants are checked-in
-ABI data; no network fetch or table regeneration occurs during a normal build.
+`build.rs` detects Thumb-compatible target names. Tests live under `ut-tests/`
+and are mounted with `unittest::path_mod_test!`. Architecture tables and errno
+constants are checked-in ABI data; no network fetch or table regeneration occurs
+during a normal build.
 
 ## Architecture and interfaces
 

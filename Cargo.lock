@@ -2205,6 +2205,9 @@ dependencies = [
 name = "kasyncio"
 version = "0.3.0-dev"
 dependencies = [
+ "anon",
+ "anon_inodefs",
+ "kcred",
  "kerrno",
  "khal",
  "klogger",
@@ -2215,6 +2218,9 @@ dependencies = [
  "ksync",
  "ktask",
  "ktime_types",
+ "kvfs",
+ "memaddr",
+ "memspace",
  "posix-process",
  "posix-types",
  "unittest",

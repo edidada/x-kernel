@@ -10,12 +10,14 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
-# ut-tests/ uses khal (monotonic time in wait_until) and kns (fork namespace
-# flags); shear ignores ut-tests/, so declare them here instead of dropping
-# dependencies the guest tests need.
-ignored = ["khal", "kns"]
+# ut-tests/ uses kns (fork namespace flags); shear ignores ut-tests/, so
+# declare it here instead of dropping a dependency the guest tests need.
+ignored = ["kns"]
 
 [dependencies]
+anon.workspace = true
+anon_inodefs.workspace = true
+kcred.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true
@@ -25,7 +27,10 @@ ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktime_types.workspace = true
+kvfs.workspace = true
 kns.workspace = true
+memaddr.workspace = true
+memspace.workspace = true
 posix-process.workspace = true
 posix-types.workspace = true
 unittest.workspace = true

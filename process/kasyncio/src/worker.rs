@@ -101,13 +101,6 @@ const PARK_FAILURE_BACKOFF_MAX_MS: u64 = 320;
 /// # Errors
 ///
 /// Forwards thread-clone, publication, or commit errors.
-#[cfg_attr(
-    not(unittest),
-    expect(
-        dead_code,
-        reason = "staged: the submit path lands in a follow-up step"
-    )
-)]
 pub(crate) fn ensure_worker(ctx: &Arc<AsyncContext>) -> KResult<()> {
     ensure_worker_with(ctx, spawn_worker)
 }

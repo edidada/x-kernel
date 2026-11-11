@@ -6,8 +6,8 @@
 (issue #IKJIGT, phase 1): the per-process async context, the operation
 staging queues, and the in-process worker threads that execute submitted
 operations off the submitting user thread. Syscall ABI decoding for the
-`asyncio_setup`/`asyncio_enter` entry points stays in `ksyscall`; the rings
-and their user mapping land with those steps.
+`asyncio_setup`/`asyncio_enter` entry points stays in `ksyscall`; the ring
+allocation, user mapping, and file lifecycle live here.
 
 The synchronous syscall surface is untouched; async entry is additive and
 incrementally enabled (read, write, fsync, splice, sendfile,
@@ -23,14 +23,15 @@ registration, and a preemptive async runtime.
 process/kasyncio/src/
 ├── abi.rs       user ABI: opcodes, flags, SQE/CQE/params layouts, ring header
 ├── context.rs   AsyncContext: ready/completed staging, worker accounting, wake sources
+├── file.rs      anon-inode fops: enter, poll/register_poll, shutdown on release
+├── ring.rs      SharedPages ring mapping, SQE submission, CQE publication
+├── setup.rs     context creation, ring mapping, AsyncioSetup out-parameters
 ├── worker.rs    spawn, idle park, retirement, signal/exit contracts
 └── lib.rs       re-exports
 ```
 
-Planned with the syscall step (not part of the tree yet): `file.rs`
-(anon-inode fops: poll/register_poll/release), `ops.rs` (operation
-decode/dispatch), `ring.rs` (SharedPages ring memory and kernel-side
-accessors), and `setup.rs` (context creation and user mapping).
+`ops.rs` (operation decode/dispatch) remains the next step: `execute()` is
+still a placeholder that completes every accepted SQE with result `0`.
 
 ## Execution model
 
@@ -76,6 +77,10 @@ here explicitly to avoid rework under an ABI-compatibility pretext.
   `cq_wake` (published completions).
 - The ready queue is bounded by `READY_LIMIT` (1024); a full queue reports
   `WouldBlock` to the submitter.
+- The ring mapping uses anonymous shared pages. The kernel keeps its own
+  `sq_head` and `cq_tail`; user-owned `sq_tail`/`cq_head` are read from the
+  shared header. Aligned 32-bit field copies plus acquire/release fences
+  separate SQE/CQE payload publication from index updates.
 
 ## Completion contract
 
@@ -128,7 +133,8 @@ by the ordinary exit path — when any of the following holds:
 - Multiple contexts per process each park independently; the periodic
   park bound (not a cross-context wake) is what eventually retires their
   workers. Latency in that corner is bounded but not prompt.
-- The completion path stages completions in a kernel-side deque until the
-  completion ring lands; ring publication replaces the staging step.
+- Completions are staged in a kernel-side deque and published to the CQ ring
+  by `asyncio_enter` (or the next enter after a full ring). User buffers and
+  real operation dispatch still wait for the `ops.rs` step.
 - Handler-visible fatal signals other than `SIGKILL` still require a
   userspace return; workers only self-terminate on pending `SIGKILL`.

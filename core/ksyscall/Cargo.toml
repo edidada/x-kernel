@@ -58,7 +58,7 @@ kspin.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 osvm.workspace = true
-linux_sysno.workspace = true
+linux_sysno = { workspace = true, features = ["asyncio"] }
 tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 tipc = { workspace = true, optional = true }

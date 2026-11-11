@@ -377,6 +377,14 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         ),
 
         // io mpx
+        Sysno::asyncio_setup => sys_asyncio_setup(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::asyncio_enter => sys_asyncio_enter(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
         #[cfg(target_arch = "x86_64")]
         Sysno::poll => sys_poll(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::ppoll => sys_ppoll(

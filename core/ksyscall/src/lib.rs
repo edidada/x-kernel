@@ -21,12 +21,6 @@ extern crate klogger;
 
 extern crate alloc;
 
-// Dependency-inject `kasyncio` so its `def_test` descriptors link into
-// unittest builds before the async syscall arms arrive (same pattern as
-// entry's unittest_simple). The dispatch wiring lands with those syscalls.
-#[cfg(unittest)]
-extern crate kasyncio;
-
 mod arch;
 mod cpuset;
 mod dispatch;

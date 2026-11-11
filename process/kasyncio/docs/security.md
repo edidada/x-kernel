@@ -16,10 +16,16 @@ validated:
   resolution against the worker's own address space. No worker ever
   dereferences a raw user pointer outside that path, and no other
   process's memory is reachable.
-- **Ring memory** (once mapped): ring pages are user-writable by design.
-  The kernel re-derives all state it consumes from validated reads, keeps
-  its own indices, and treats shared-memory contents as hostile; CQE
-  publication is kernel-only.
+- **Ring memory**: ring pages are user-writable by design. The kernel keeps
+  its own `sq_head`/`cq_tail`, re-reads user indices on every enter, validates
+  every SQE (`is_abi_clean`, known opcode) before queueing it, and only
+  publishes CQEs it generated. A faulting or unmapped ring becomes a syscall
+  error without consuming a staged completion: the completion is popped only
+  after its CQE write succeeds.
+- **`asyncio_enter` arguments**: unknown enter flags and a timeout without
+  WAIT are rejected; `to_submit` beyond the user-published tail or the ring
+  depth is rejected; timeout carriers use the shared non-negative
+  `__kernel_timespec` validation.
 
 ## Worker credentials and reach
 

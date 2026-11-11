@@ -875,6 +875,14 @@ syscall_enum! {
             tipc_send_msg = 619,
             tipc_memref_create = 648,
         }
+
+        #[cfg(feature = "asyncio")]
+        {
+            /// X-Kernel async I/O context setup (custom ABI, not a Linux syscall).
+            asyncio_setup = 700,
+            /// X-Kernel async I/O submit and completion wait (custom ABI, not a Linux syscall).
+            asyncio_enter = 701,
+        }
     }
     LAST: open_tree_attr;
 }

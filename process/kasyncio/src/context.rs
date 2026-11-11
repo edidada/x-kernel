@@ -40,6 +40,7 @@ pub struct PreparedOp {
 }
 
 /// A completed operation in CQE shape (cookie + signed result).
+#[derive(Clone, Copy)]
 pub struct CompletedOp {
     /// Cookie echoed from the originating submission.
     pub cookie: u64,
@@ -140,11 +141,17 @@ impl AsyncContext {
         core::mem::take(&mut inner.completed)
     }
 
+    /// Peeks at the oldest published completion for ring publication.
+    pub(crate) fn peek_completion(&self) -> Option<CompletedOp> {
+        self.inner.lock().completed.front().copied()
+    }
+
+    /// Pops the completion observed by [`AsyncContext::peek_completion`].
+    pub(crate) fn pop_completion(&self) -> Option<CompletedOp> {
+        self.inner.lock().completed.pop_front()
+    }
+
     /// Returns `true` when at least one completion is published.
-    #[cfg_attr(
-        not(unittest),
-        expect(dead_code, reason = "staged: consumed by the enter syscall step")
-    )]
     pub(crate) fn has_completions(&self) -> bool {
         !self.inner.lock().completed.is_empty()
     }
@@ -259,10 +266,6 @@ impl AsyncContext {
     }
 
     /// Poll-side readiness of the completion source for submitters.
-    #[cfg_attr(
-        not(unittest),
-        expect(dead_code, reason = "staged: consumed by the enter syscall step")
-    )]
     pub(crate) fn completion_readiness(&self) -> IoEvents {
         let inner = self.inner.lock();
         if inner.shutdown || !inner.completed.is_empty() {
@@ -281,10 +284,6 @@ impl AsyncContext {
     }
 
     /// Registers a waker on the completion source.
-    #[cfg_attr(
-        not(unittest),
-        expect(dead_code, reason = "staged: consumed by the enter syscall step")
-    )]
     pub(crate) fn register_completion_wait(
         &self,
         context: &mut PollContext<'_>,
@@ -311,10 +310,6 @@ impl Pollable for WorkSource<'_> {
 }
 
 /// `poll_io` source for submitters waiting for completions.
-#[cfg_attr(
-    not(unittest),
-    expect(dead_code, reason = "staged: consumed by the enter syscall step")
-)]
 pub(crate) struct CompletionSource<'a>(pub(crate) &'a AsyncContext);
 
 impl Pollable for CompletionSource<'_> {

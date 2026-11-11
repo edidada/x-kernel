@@ -26,7 +26,14 @@ extern crate alloc;
 pub mod abi;
 /// Per-process async context, ready/completion staging, and wake sources.
 pub mod context;
-// Worker internals stay crate-private until the submit path lands.
+// Worker internals stay crate-private; the file and setup layers are the
+// crate's syscall-facing surface.
+pub mod file;
+mod ring;
+mod setup;
 mod worker;
+
+pub use file::AsyncioFile;
+pub use setup::{AsyncioSetup, setup};
 
 unittest::path_mod_test!(tests, "../ut-tests/context.rs");

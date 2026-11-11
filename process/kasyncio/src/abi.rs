@@ -191,6 +191,19 @@ impl AsyncSqe {
             && self.reserved2 == 0
     }
 
+    /// Returns `true` when `opcode` is one of the defined `ASYNCIO_OP_*`.
+    pub fn is_known_opcode(&self) -> bool {
+        matches!(
+            self.opcode,
+            ASYNCIO_OP_READ
+                | ASYNCIO_OP_WRITE
+                | ASYNCIO_OP_FSYNC
+                | ASYNCIO_OP_SPLICE
+                | ASYNCIO_OP_SENDFILE
+                | ASYNCIO_OP_COPY_FILE_RANGE
+        )
+    }
+
     /// Returns `true` when READ/WRITE must use `off` instead of the file
     /// position.
     pub fn has_explicit_offset(&self) -> bool {
