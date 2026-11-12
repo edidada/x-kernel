@@ -192,11 +192,14 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         // <linux/kd.h>: K_RAW=0x00, K_XLATE=0x01. The console reports XLATE.
         const K_XLATE: i32 = 0x01;
         const KB_101: i32 = 0x02;
+        const N_TTY: i32 = 0;
         const TIOCSER_TEMT: i32 = 0x01;
         const KDSKBDIACR: u32 = 0x4B4B;
         if !matches!(
             cmd,
-            KDGETMODE
+            FIONREAD
+                | TIOCOUTQ
+                | KDGETMODE
                 | KDSETMODE
                 | KDGKBMODE
                 | KDSKBMODE
@@ -233,6 +236,8 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
                 | TIOCMSET
                 | TIOCMBIS
                 | TIOCMBIC
+                | TIOCGETD
+                | TIOCSETD
                 | TIOCCONS
                 | TIOCSERGETLSR
                 | TIOCGICOUNT
@@ -252,8 +257,13 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         }
         Some((|| {
             match cmd {
+                FIONREAD => {
+                    UserPtr::<i32>::from(arg).write_vm(self.ingress.readable_bytes() as i32)?
+                }
+                TIOCOUTQ => UserPtr::<i32>::from(arg).write_vm(0)?,
                 KDGETMODE => UserPtr::<i32>::from(arg).write_vm(KD_TEXT)?,
                 KDGKBMODE => UserPtr::<i32>::from(arg).write_vm(K_XLATE)?,
+                TIOCGETD => UserPtr::<i32>::from(arg).write_vm(N_TTY)?,
                 // Linux stores these as a single char/unsigned char: writing an
                 // `int` would corrupt the three bytes after the caller's buffer
                 // (and fault when the char ends a writable mapping).
