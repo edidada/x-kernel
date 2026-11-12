@@ -100,6 +100,28 @@ impl DeviceDriver for VirtioDriver {
         activate_virtio_device(device, self.bus_type, self.kind, self.device_type)
     }
 
+    fn supports_suspend(&self) -> bool {
+        cfg!(feature = "virtio-blk") && self.kind == DeviceKind::Block
+    }
+
+    fn suspend(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        #[cfg(feature = "virtio-blk")]
+        if self.kind == DeviceKind::Block {
+            return block::suspend_device(device.id());
+        }
+        let _ = device;
+        Err(driver_base::DriverError::Unsupported)
+    }
+
+    fn resume(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        #[cfg(feature = "virtio-blk")]
+        if self.kind == DeviceKind::Block {
+            return block::resume_device(device.id());
+        }
+        let _ = device;
+        Err(driver_base::DriverError::Unsupported)
+    }
+
     fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
         #[cfg(feature = "virtio-blk")]
         if self.kind == DeviceKind::Block {

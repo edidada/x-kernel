@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/manager.rs`,
-`src/enumeration.rs`, `src/resource.rs`, `src/firmware_dma.rs`,
+`src/enumeration.rs`, `src/resource.rs`, `src/firmware_dma.rs`, `src/power.rs`,
 `src/block_completion*.rs`,
 `src/block_irq.rs`, `src/bus/`, and `src/driver_registry/` (including
 the VirtIO, block, char, and net driver glue), plus `ut-tests/`, which
@@ -824,3 +824,17 @@ spurious wakes only trigger another check. The driver must call IRQ-safe
 The provider retains neither the predicate nor DMA storage. Invalid context and
 preparation failures do not establish a device fault. Once the predicate is invoked,
 scoped registration and wakeup are allocation-free and cannot return registration errors.
+
+## System sleep lifecycle
+
+A PM driver must explicitly opt in; default no-op callbacks are insufficient
+proof of recovery. Busy suspend must leave its own device usable, and successful
+predecessors remain owned until rollback. The PM caller must exclude discovery,
+removal, request producers and device IRQ delivery until recovery completes.
+PCI DMA is disabled after drain; BAR/decode is restored before callbacks, with
+bus mastering restored only after queue/driver recovery. A failed recovery must
+not release execution. Hotplug/bridge/MSI-X context recovery is not claimed.
+
+System-sleep preflight rejects discovered PCI display devices before callbacks,
+including unbound VGA devices, because firmware may still execute their option
+ROMs on wake. No driver binding does not establish a safe firmware PM contract.

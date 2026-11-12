@@ -46,6 +46,7 @@ drivers/integration/kdriver/
 ├── ut-tests/                    # unit-test fixtures included through path_mod_test
 └── src/
     ├── lib.rs                   # crate entry, init_drivers, ownership summary API
+    ├── power.rs                 # owned system-sleep participants and PCI state
     ├── manager.rs               # DeviceManager and the unified discovery pipeline
     ├── enumeration.rs           # EnumerationContext, descriptor buffer bus backends write
     ├── resource.rs              # provider holder and DriverResult wrappers
@@ -945,3 +946,26 @@ buffer. The current entropy integration uses one worker per selected VirtIO RNG 
 issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
+
+## Guest system sleep
+
+`power::PowerDevices` snapshots exact bound driver/device Arcs, validates explicit
+`supports_suspend` contracts, and orders children before parents. It owns PCI
+endpoint BAR/command/INTx-line state; nonzero segments and bridge headers refuse
+preparation. Device callbacks run outside registry locks. A successful prefix
+is recovered in reverse order, followed by original PCI bus-master admission.
+The system coordinator separately owns task/work/IRQ exclusion and CPU join.
+
+The ACPI owner also publishes a copied `_S3` type pair at boot; PM performs no
+AML evaluation while tasks or devices are frozen. Current callbacks implement
+ISA serial, the synthetic PCI host and VirtIO block only. Other driver kinds
+inherit a false capability even if legacy callbacks default to no-op.
+
+The VirtIO block integration holds PM handles in POWER under a sleepable Mutex.
+Lookup clones the exact device Arc, then releases that mutex before calling
+suspend/resume; callback locks never nest under the registry mutex. Removal
+unpublishes the handle, and the coordinator separately excludes removal.
+Discovery descriptors, including those without runtime device objects, are
+checked for PCI display-class devices before bound participants are captured.
+These devices are rejected even if unbound: firmware VGA option-ROM
+recovery is not implemented. The supported QEMU profile requires `-vga none`.

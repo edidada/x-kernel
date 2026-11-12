@@ -3,10 +3,25 @@
 // See LICENSES for license details.
 
 //! VirtIO device probing and HAL integration.
-use alloc::{boxed::Box, sync::Arc};
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-gpu",
+    feature = "virtio-9p",
+    feature = "virtio-socket"
+))]
+use alloc::boxed::Box;
+#[cfg(any(feature = "virtio-gpu", feature = "virtio-rng"))]
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-gpu",
+    feature = "virtio-rng",
+    feature = "virtio-9p",
+    feature = "virtio-socket"
+))]
 use driver_base::DriverResult;
 use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
@@ -69,7 +84,7 @@ cfg_if! {
                 };
                 kdevice_uevent::publish_drm_hotplug(&node);
             })
-            .map_err(|_| DriverError::NoMemory)?;
+            .map_err(|_| driver_base::DriverError::NoMemory)?;
             let virq = irq.virq().raw();
             let handler: Arc<dyn IrqHandler> = Arc::new(move |fired: usize| {
                 if fired != virq {

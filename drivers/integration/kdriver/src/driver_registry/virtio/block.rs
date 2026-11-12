@@ -23,6 +23,43 @@ static_lock! {
         Mutex::new(BTreeMap::new());
 }
 
+trait BlockPower: Send + Sync {
+    fn suspend(&self) -> DriverResult<()>;
+    fn resume(&self) -> DriverResult<()>;
+}
+
+impl<H: VirtIoHal, T: Transport> BlockPower for VirtIoBlkDev<H, T> {
+    fn suspend(&self) -> DriverResult<()> {
+        self.suspend()
+    }
+
+    fn resume(&self) -> DriverResult<()> {
+        self.resume()
+    }
+}
+
+static_lock! {
+    static POWER: Mutex<BTreeMap<DeviceId, Arc<dyn BlockPower>>> = Mutex::new(BTreeMap::new());
+}
+
+pub(super) fn suspend_device(id: DeviceId) -> DriverResult<()> {
+    let device = POWER
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or(DriverError::BadState)?;
+    device.suspend()
+}
+
+pub(super) fn resume_device(id: DeviceId) -> DriverResult<()> {
+    let device = POWER
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or(DriverError::BadState)?;
+    device.resume()
+}
+
 struct BlockActivation<H: VirtIoHal, T: Transport> {
     device: Arc<VirtIoBlkDev<H, T>>,
     irq: Option<DevIrq>,
@@ -109,6 +146,7 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
         if registry.contains_key(&id) {
             return Err(DriverError::AlreadyExists);
         }
+        POWER.lock().insert(id, device.clone());
         registry.insert(id, Box::new(move || drop(activation)));
     }
     parent.add_cleanup(move || close_device(id));
@@ -122,6 +160,8 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
 /// Device-core serializes remove via begin_removing; its later devres fallback
 /// calls this again after remove returns. Taking the unique owner is idempotent.
 pub(super) fn close_device(id: DeviceId) {
+    let power = POWER.lock().remove(&id);
+    drop(power);
     let close = { ACTIVATIONS.lock().remove(&id) };
     if let Some(close) = close {
         close();
