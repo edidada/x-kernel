@@ -1,6 +1,6 @@
 # kpm — Security and reliability
 
-## PM transaction admission and platform trust
+## Legacy UP transaction admission and platform trust
 
 `kpm::suspend_uniprocessor` has no userspace entry, raw device pointer or new
 MMIO/assembly. It accepts a prepared RTC accounting owner and a platform
@@ -161,3 +161,44 @@ guard as evidence that shared clocks or hardware may be stopped violates its
 contract. Serial integration fixtures use a test-only authoritative task snapshot
 for explicit infrastructure exemptions; no production exemption discovery API
 or name-based rule is introduced.
+
+## Production guest request boundary
+
+The historical UP fixture analysis above does not describe the new
+`suspend_guest` route. The userspace reboot permission checks still precede PM.
+The production coordinator uses an acknowledged reset-aware CPU barrier, not
+the best-effort terminal SMP stop. The platform ACTIVE owner serializes wake
+credentials until device recovery and AP callback join are complete.
+
+The supported hardware contract is QEMU q35 with SeaBIOS, retained guest RAM,
+stable TSC frequency, IOAPIC/ISA serial and drained VirtIO block endpoints.
+Other bound driver kinds fail preflight. This is not physical-machine ACPI PM,
+CPU hotplug support, PCI bridge recovery, network/GPU PM or host-transparent
+pvclock compensation. Boot AML evaluates `_S3` before freezing; absent or
+malformed packages do not advertise sleep support. Firmware and ACPI mappings
+remain trusted under the existing boot validation policy.
+
+Reset contexts and the original stacks stay pinned until every AP exits its
+trampoline and callback. INIT-all is issued before sharing the wake page among
+APs; each retarget waits for the previous AP acknowledgment. Per-CPU saved
+registers are exclusively written by their owner; the BSP patches only wake
+metadata while the target is reset. External IRQ routes remain masked through
+PCI/device recovery. Queue reset reuses DMA allocations only after the device
+acknowledges transport reset and verifies compatible features/capacity.
+
+Preparation failure releases only successfully acquired stages. Device rollback
+repairs the successful prefix before producers thaw. Unrecoverable AP, device,
+clock or event restoration terminates execution; it cannot be represented as
+an ordinary retryable failure with tasks released. RTC settlement failures
+return an error after execution recovery and do not invent compensation.
+
+PCI display discovery causes preflight refusal before task freeze or hardware
+entry, including unbound VGA. Firmware may execute option ROMs independently
+of driver binding; `-vga none` is required by the supported QEMU profile.
+
+The production route's unsafe `kworkng::freeze_system_normal_queue` is separate
+from the explicit queue slice of the preparation API. Ordinary task/worker
+producers are frozen before normal-queue closure. Recovery is synchronous and
+must not wait for pending normal-queue work; the guard is retained through
+shared hardware restoration. Private queues and IRQ producers need their own
+exclusion and are not covered by this normal-queue guard.

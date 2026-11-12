@@ -21,5 +21,11 @@ ktime_types.workspace = true
 kcpu_id_map.workspace = true
 unittest.workspace = true
 
+log.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+kdriver.workspace = true
+driver_base.workspace = true
+
 [lints]
 workspace = true

@@ -114,9 +114,14 @@ actual synchronization report arrives. A peer open's queue is never cleared.
 
 ## Unsafe code and FFI inventory
 
-The crate contains two unsafe memory operations, one unsafe timer start, and
-two exported C ABI entry points:
+The inventory includes memory access, timer start, the audited freezable
+syslog wait, and the exported C ABI entry points:
 
+- `src/nodes/log.rs::bind_dev_log` calls `block_on_freezable(receive)`. Each
+  nonblocking poll releases socket/queue guards. Pending retains only its stable
+  message buffer and readiness registrations, neither needed by PM recovery.
+  A rejected freezer wait is logged and ends this service, rather than panicking
+  the kernel; operators must treat the syslog endpoint as unavailable afterward.
 - `src/nodes/fb.rs::FrameBuffer::as_mut_slice` uses
   `slice::from_raw_parts_mut`. The constructor obtains `base` and `size` from
   `fbdevice`; the required invariant is that `base..base + size` remains a

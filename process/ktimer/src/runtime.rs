@@ -23,7 +23,7 @@ use futures_util::{FutureExt, select_biased, task::AtomicWaker};
 use khal::time::monotonic_time;
 use klazy::Once;
 use ksync::{Mutex, static_lock};
-use ktask::future::{block_on, timeout_at};
+use ktask::future::timeout_at;
 use ktime_types::MonotonicInstant;
 
 use crate::{Pid, interval_timer::TimerInstant};
@@ -237,7 +237,14 @@ pub fn spawn_alarm_task() {
     ALARM_TASK_INIT.call_once(|| {
         ksignal::register_timer_record_waker(|| ALARM_WAKE.notify());
         ktask::spawn_raw(
-            || block_on(alarm_task()),
+            || {
+                // SAFETY: alarm_task releases ALARM_LIST before Pending. Its
+                // retained listeners/timer wait own no device or recovery lock;
+                // thaw rescans persistent original clock-domain deadlines.
+                if let Err(error) = unsafe { ktask::future::block_on_freezable(alarm_task()) } {
+                    log::error!("alarm task freezer wait rejected: {error:?}");
+                }
+            },
             "alarm_task".to_owned(),
             kbuild_config::TASK_STACK_SIZE,
         );

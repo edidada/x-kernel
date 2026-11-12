@@ -98,11 +98,13 @@ No user pointers, MMIO, DMA, FFI, or device input reach this crate; the
 
 ## Unsafe inventory
 
-One unsafe block exists, in `posix_timer.rs`:
+The unsafe inventory covers `posix_timer.rs` and the alarm service in `runtime.rs`:
 
 | Location | Operation | Invariant |
 |---|---|---|
 | `TimerSigValue::from_raw` | read of `k_sigval.sival_ptr` | `k_sigval` is an ABI carrier union; the pointer view is read solely to preserve the raw user bits and is never dereferenced |
+
+| `runtime.rs::spawn_alarm_task` | `block_on_freezable(alarm_task())` | ALARM_LIST is released before Pending; retained listeners/timer waits own no PM recovery lock or device. Thaw rescans original clock-domain deadlines. A rejected wait is logged and stops this service without a kernel panic. |
 
 There is no FFI or inline assembly; architecture time reads come through
 `khal`/`ktime`.

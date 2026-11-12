@@ -254,3 +254,10 @@ Successful service initialization precedes the current runtime's console input
 preparation and device setup. Physical IRQ delivery, controller
 quiescence and hotplug/affinity correctness are outside the adapter's guarantee;
 no unperformed hardware validation is claimed.
+
+## PM queue pause scope
+
+The unsafe system-normal-queue helper requires frozen producers and cooperative
+workers, and recovery must not depend on queued callbacks. Its guard retains
+ownership through device recovery. It does not stop private queues, IRQ/BH work,
+DMA or CPUs, and cannot substitute for the reset-aware platform barrier.

@@ -346,3 +346,7 @@ A definitely idle device rearms without waking a task; ready, detached or
 legacy devices wake the poll set for normal task-context polling. Unsupported
 drivers keep the previous wake fallback. The timer only runs while a waiter is
 registered.
+
+The syslog loop logs and ends its task if the audited freezable wait rejects
+its context; the endpoint then has no receive service. It does not panic the
+kernel or report a false freeze acknowledgment.

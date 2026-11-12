@@ -68,8 +68,28 @@ The one-CPU skips belong to SMP-only scheduler/worker tests.
 
 ## Unverified boundaries
 
+### Historical preparation-only boundary (before the guest S3 implementation)
+
+The guest `SW_SUSPEND` syscall currently calls the platform HAL directly; it
+does not call `freeze_system_workqueues`. The x86_64 HAL returns
+`OperationNotSupported`. Separately, `suspend_uniprocessor_with_workqueues`
+rejects multiple present CPUs before calling platform preparation. Consequently,
+running the preparation fixture on four CPUs does not establish that a guest
+suspend request reaches task freezing or enters QEMU's suspended state.
+
+The public workqueue-entry test checks the actual entry point: with multiple
+CPUs it returns `MultipleCpus` without platform preparation, device callbacks,
+RTC reads or queue pauses. With one CPU its deliberately refusing platform
+returns `Prepare(OperationNotSupported)`, again without device or RTC access.
+The real task/queue fixture and the test-owned device/transaction fixtures cover
+different boundaries; neither is a complete platform suspend/resume test.
+
 The device flag is a controlled resource-availability model; no actual device
 power callback, CPU power-off, IRQ-controller suspend, RTC injection or firmware
 entry runs. User-mode NOHZ delivery is not established by these kernel fixtures.
 The existing platform-suspend API still rejects multiple present CPUs. This
 preparation guard must not be used as a CPU/IRQ/DMA or hardware-suspend barrier.
+
+The production guest S3 implementation supersedes the syscall limitation in
+this historical report. See `guest-s3-validation.md` for actual firmware/QMP
+and userspace recovery evidence; these preparation fixtures remain narrower.

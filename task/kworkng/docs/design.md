@@ -379,3 +379,12 @@ before queue flush/close, handle flush/shutdown, or waits on held work. Existing
 ownership wrappers still retain Work/timers; this queue guard is not a storage
 release barrier, a physical timer drain or a full system PM transaction. Quiesce
 IRQ producers and nonparticipating queues separately before suspending devices.
+
+## System PM normal queue
+
+Boot starts the kernel normal service with cooperative freeze participation.
+The system coordinator freezes ordinary producers and worker safe points before
+calling `freeze_system_normal_queue`, retains the pause guard through hardware
+recovery, then resumes the queue before ordinary tasks. Privately owned queues,
+IRQ/BH producers and callbacks that cannot reach a safe point remain separate
+provider obligations. The normal service public default policy is unchanged.

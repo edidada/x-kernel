@@ -433,3 +433,15 @@ quiescence or memory reclamation safety for dynamic device mappings.
 System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
+
+## Unsafe inventory additions for PM services
+
+`src/lib.rs::rust_main` calls `block_on_freezable(pending())` only after
+scheduler startup, with IRQs enabled, no initialization resources retained and
+no future-owned locks/devices. The permanent PID 0 frame outlives every freeze
+request; unexpected inability to park has no boot return channel.
+
+`src/rcu.rs::start_gp_task` calls `with_pm_infrastructure` before publication.
+The GP coordinator remains runnable during preparation and is held by the CPU
+rendezvous during hardware loss. PM restoration must not wait for an RCU grace
+period or its private locks. The tag is not a general business-worker exemption.

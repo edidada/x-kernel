@@ -981,6 +981,13 @@ fn public_workqueue_entry_rejects_without_pausing_queues_or_reading_rtc() {
     )
     .unwrap();
     let mut platform = RefusingPlatform(core::cell::Cell::new(0));
+    let probe = Probe::new(Fault::None);
+    let mut device = DeviceProbe {
+        index: 0,
+        probe: probe.clone(),
+        fail_at: Rc::new(core::cell::Cell::new(None)),
+        is_suspended: false,
+    };
     let task_cancellation = FreezeCancellation::new();
     let queue_cancellation = kworkng::QueueFreezeCancellation::new();
     let result = suspend_uniprocessor_with_workqueues(
@@ -996,7 +1003,7 @@ fn public_workqueue_entry_rejects_without_pausing_queues_or_reading_rtc() {
             timeout: TimeSpan::ZERO,
             cancellation: &queue_cancellation,
         },
-        &mut [],
+        &mut [&mut device],
     );
     if kcpu_id_map::nr_cpus() == 1 {
         assert_eq!(
@@ -1009,6 +1016,8 @@ fn public_workqueue_entry_rejects_without_pausing_queues_or_reading_rtc() {
         assert_eq!(platform.0.get(), 0);
     }
     assert_eq!(reads.get(), 0);
+    assert!(probe.borrow().log.is_empty());
+    assert!(!device.is_suspended);
     drop(queue.freeze(TimeSpan::ZERO, &queue_cancellation).unwrap());
     queue.close_and_drain().unwrap();
 }

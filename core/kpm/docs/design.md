@@ -1,7 +1,8 @@
 # kpm — System power management
 
 See the [SMP freeze audit and staged proposal](smp-freeze-proposal.md) for
-multicore preparation work. The platform-suspend entry remains UP-only.
+multicore preparation work. The legacy integration entries remain UP-only;
+the production guest S3 coordinator is described separately below.
 
 ## Ownership
 
@@ -9,9 +10,9 @@ multicore preparation work. The platform-suspend entry remains UP-only.
 `src/device.rs` owns ordered device participation and successful-prefix rollback.
 Runtime startup remains in `kruntime`; task checkpoints remain in `ktask`;
 timekeeping and clock-event mechanisms remain in their existing crates.
-Future device PM and wakeup coordination can extend this subsystem without
-making runtime bring-up their owner. Guest and physical-platform backends must
-satisfy the same contract; neither backend is implemented by this extraction.
+The production guest route owns its reset-aware lifecycle in `src/runtime.rs`;
+the platform owns firmware/register reconstruction and kdriver owns bound-device
+context. Physical-platform PM remains outside the implemented QEMU contract.
 
 ## Single-CPU PM time transaction
 
@@ -21,8 +22,9 @@ not a syscall or firmware sleep implementation. It composes already-owned
 `LocalTimerSuspend` rather than duplicating their offsets, epoch or queues.
 The crate depends on task, time and HAL contracts; it does not depend on
 `kruntime`. The `entry` crate links it independently, including test registration.
-There is no device registry, CPU-stop protocol or concrete platform provider.
-The optional device entry accepts an explicitly ordered, exclusively borrowed list.
+These legacy APIs inject platform/device participants rather than consulting
+the production registry or CPU protocol. Their optional device entry accepts
+an explicitly ordered, exclusively borrowed list.
 
 Admission requires a boot-initialized sleepable task with IRQs enabled and
 exactly one present CPU. SMP-capable kernels with one present CPU can use it;
@@ -265,3 +267,45 @@ and models device availability with a fixture-owned atomic. Three rounds verify
 pending work and wake retention, deferred activation and recovery before thaw.
 A duplicate-queue failure exercises task/queue rollback and successful retry.
 No real device is powered down and no firmware sleep is entered.
+
+## Production x86 guest S3 coordinator
+
+`src/runtime.rs::suspend_guest` is the production `reboot(SW_SUSPEND)` route.
+It is separate from the retained UP integration APIs described above.
+The x86 backend currently accepts QEMU/SeaBIOS firmware and implemented device
+contracts only; other targets return `OperationNotSupported`. There is no
+`/sys/power/state` interface in this change.
+
+The coordinator migrates to logical CPU 0 and retains fixed affinity through
+remote callback join. It prepares the exact bound device/driver identities,
+boot-discovered AML S3 types, RTC accounting, and platform wake/IRQ storage.
+It freezes ordinary tasks using the registry admission gate, then drains the
+system normal queue. Device callbacks execute child before parent; completed
+prefixes are recovered in reverse order on failure. Unsupported drivers refuse
+before the first device callback.
+
+Pinned Stop tasks disarm each remote local event and save reset-surviving CPU
+contexts before acknowledgment. The BSP then masks external IRQ routes, pauses
+its event, freezes MONOTONIC and enters firmware S3. Firmware returns through
+a reserved real-mode trampoline onto the original BSP stack. The BSP resets
+all APs to wait-for-SIPI before sequentially retargeting the shared trampoline,
+restarting each saved AP and waiting for its release/acquire acknowledgment.
+APs retain a second software barrier until shared recovery completes.
+
+MONOTONIC resumes before IRQ-enabled RTC sampling; sleep duration is injected
+into BOOTTIME/REALTIME through the existing accounting owner. PCI BAR/decode,
+VirtIO block transport/empty rings and console state recover while device IRQs
+and producers remain excluded. Only then are remote callbacks released and
+joined, original IOAPIC masks restored, normal work admitted, and ordinary tasks
+thawed. Original affinity is restored last. Hardware restoration failures are
+fatal rather than releasing execution against invalid state.
+
+PM infrastructure exemptions are immutable pre-publication task properties
+owned by Stop/migration, softirq and RCU infrastructure constructors. Runtime
+idle, alarm scanning and syslog processing instead use audited cooperative
+safe points with no recovery-needed locks held across Pending. Business tasks
+are not exempted by names.
+
+The production QEMU profile explicitly disables VGA. PCI display-class devices
+are rejected during device preflight, even without a bound graphics driver;
+firmware option-ROM restoration is not part of the serial/block PM contract.

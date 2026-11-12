@@ -276,3 +276,23 @@ pub use kworkqueue_ng::{
     ArmError, CpuPolicy, DelayedFlushError, DelayedWork, DisableGuard, FrozenQueue, QueueConfig,
     QueueConfigError, QueueFreezeCancellation, QueueFreezeError, SubmitError, WaitError, Work,
 };
+
+/// Pauses the kernel-owned normal queue for the system PM coordinator.
+///
+/// # Safety
+/// First freeze ordinary producers and cooperative workers. Recovery must not
+/// depend on pending work in this queue; retain the guard until resources are
+/// usable. This does not stop IRQ/BH producers or privately owned queues.
+///
+/// # Errors
+/// Returns Closed before boot services are ready, otherwise the queue's error.
+pub unsafe fn freeze_system_normal_queue(
+    timeout: ktime_types::TimeSpan,
+    cancellation: &QueueFreezeCancellation,
+) -> Result<FrozenQueue, QueueFreezeError> {
+    services::with_default_queue(DefaultQueue::Normal, |queue| {
+        queue
+            .ok_or(QueueFreezeError::Closed)?
+            .freeze(timeout, cancellation)
+    })
+}

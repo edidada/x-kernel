@@ -882,3 +882,7 @@ rechecking. A rollback can make that recheck find no expiration; the owner still
 rearms if the previous ticket was consumed. An unchanged live ticket suppresses
 duplicate entries. Replacing a POSIX timer snapshots the old clock domain before
 replacing its spec, avoiding old-deadline interpretation in the new domain.
+
+A rejected freezer wait is logged and ends the alarm service; no kernel panic
+is used as error propagation. This is observable timer-service unavailability,
+not a successful PM acknowledgment.
