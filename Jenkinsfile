@@ -406,7 +406,7 @@ def restoreStashedArchCiOutputs() {
 
 def prepareRootfsCacheForArch(String arch, String stageName) {
     dir(env.HARNESS_ROOTFS_DIR) {
-        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
+        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
     }
     sh label: "Prepare rootfs cache ${arch}", script: """#!/bin/bash
 set -euo pipefail
@@ -1100,7 +1100,7 @@ def runRuntimeTests(String arch) {
         withEnv(["TARGET_DIR=${runtimeTargetDir}", "STAGE_LOG=${stageLog}"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
             dir('test-harness') {
-                gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
+                gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
 
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
@@ -1363,7 +1363,7 @@ def checkoutProject() {
     gitCheckoutPublic(env.PROJECT_REPO, env.DEFAULT_BRANCH)
 }
 
-def gitCheckoutPublic(String repoUrl, String branch) {
+def gitCheckoutPublic(String repoUrl, String branch, boolean shallow = false) {
     if (!repoUrl?.trim()) {
         error('Repository URL is required')
     }
@@ -1374,6 +1374,7 @@ def gitCheckoutPublic(String repoUrl, String branch) {
     withEnv([
         "_CI_CHECKOUT_REPO=${repoUrl.trim()}",
         "_CI_CHECKOUT_BRANCH=${branch.trim()}",
+        "_CI_CHECKOUT_SHALLOW=${shallow}",
     ]) {
         sh(label: 'Checkout source branch', script: '''#!/bin/bash
 set -euo pipefail
@@ -1383,6 +1384,10 @@ git init --quiet .
 git remote add origin "${_CI_CHECKOUT_REPO}"
 
 refspec="+refs/heads/${_CI_CHECKOUT_BRANCH}:refs/remotes/origin/${_CI_CHECKOUT_BRANCH}"
+depth_args=()
+if [[ "${_CI_CHECKOUT_SHALLOW}" == true ]]; then
+    depth_args=(--depth=1)
+fi
 fetch_ok=false
 for attempt in 1 2 3; do
     if git fetch \
@@ -1390,6 +1395,7 @@ for attempt in 1 2 3; do
         --prune \
         --no-tags \
         --no-recurse-submodules \
+        "${depth_args[@]}" \
         origin "${refspec}"; then
         fetch_ok=true
         break
