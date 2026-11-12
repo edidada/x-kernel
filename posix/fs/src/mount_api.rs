@@ -353,11 +353,6 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
     if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | 0x100 | 0x800) != 0 {
         return Err(KError::InvalidInput);
     }
-    if flags & OPEN_TREE_CLONE == 0 {
-        // A non-cloning open_tree references an existing mount for move_mount;
-        // only the cloning form is implemented. ENOSYS lets callers fall back.
-        return Err(KError::Unsupported);
-    }
     let cred = kprocess::current_cred();
     let filename = Filename::new(path.as_str());
     let source = with_fs_at(dfd, &filename, |fs| {
@@ -369,8 +364,14 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
             &cred,
         )
     })?;
-    let namespace = kprocess::current_user_process().mnt_ns()?;
-    let (root, kept) = namespace.clone_mount_tree(&source)?;
+    let (root, kept) = if flags & OPEN_TREE_CLONE != 0 {
+        let namespace = kprocess::current_user_process().mnt_ns()?;
+        namespace.clone_mount_tree(&source)?
+    } else {
+        // Non-cloning open_tree: a reference to the existing mount, usable with
+        // mount_setattr(AT_EMPTY_PATH) and move_mount.
+        (source.mount().clone(), Vec::new())
+    };
     let file = dentry_open(root.root_path(), O_RDONLY | O_DIRECTORY, cred)?;
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(root)),
@@ -428,6 +429,18 @@ pub fn sys_mount_setattr(
     let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
     let recursive = flags & AT_RECURSIVE != 0;
+    // AT_EMPTY_PATH on an open_tree/fsmount fd operates on that mount directly
+    // rather than resolving a pathname.
+    if path.is_empty()
+        && flags & AT_EMPTY_PATH != 0
+        && let Ok(file) = kprocess::current_files().get_file(dfd)
+        && let Ok(mfd) = mount_fd(&file)
+    {
+        let mount = mfd.mount.lock().clone().ok_or(KError::InvalidInput)?;
+        let namespace = kprocess::current_user_process().mnt_ns()?;
+        namespace.set_mount_attributes_on(&mount, set_flags, clr_flags, recursive)?;
+        return Ok(0);
+    }
     let cred = kprocess::current_cred();
     let filename = Filename::new(path.as_str());
     let target = with_fs_at(dfd, &filename, |fs| {

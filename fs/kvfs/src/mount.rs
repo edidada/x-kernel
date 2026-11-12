@@ -485,14 +485,38 @@ impl MntNamespace {
     ) -> VfsResult<()> {
         let mounts = self.mounts.lock();
         let mount = Self::registered_mount_at(&mounts, target)?.clone();
+        Self::apply_mount_attributes(&mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    /// Applies attribute changes to a specific mount (e.g. one referenced by an
+    /// `open_tree` fd via `mount_setattr` `AT_EMPTY_PATH`), not by path.
+    pub fn set_mount_attributes_on(
+        &self,
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mount)?;
+        Self::apply_mount_attributes(mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    fn apply_mount_attributes(
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) {
         let apply = |m: &Mount| m.set_flags((m.flags() & !attr_clr) | attr_set);
-        apply(&mount);
+        apply(mount);
         if recursive {
             for sub in mount.collect_subtree().iter().skip(1) {
                 apply(sub);
             }
         }
-        Ok(())
     }
 
     /// Clones the mount subtree at `source` into a detached tree (`open_tree`
