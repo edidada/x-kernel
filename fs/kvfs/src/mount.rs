@@ -581,6 +581,40 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Makes the mount rooted at `target` shared.
+    ///
+    /// KVFS does not yet model shared propagation groups, so a shared mount
+    /// would propagate no mount events and is behaviorally identical to a
+    /// private mount. This operation only validates the target and is
+    /// idempotent. It exists so callers such as systemd, which remount the
+    /// namespace root `MS_SHARED` after `pivot_root`, are not rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_shared(&self, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::registered_mount_at(&mounts, target)?;
+        Ok(())
+    }
+
+    /// Makes the mount rooted at `target` unbindable.
+    ///
+    /// KVFS does not yet model shared propagation groups, so an unbindable
+    /// mount is behaviorally identical to a private mount. This operation only
+    /// validates the target and is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_unbindable(&self, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::registered_mount_at(&mounts, target)?;
+        Ok(())
+    }
+
     fn registered_mount_at<'a>(
         mounts: &HashMap<u64, Arc<Mount>>,
         target: &'a Path,
