@@ -125,14 +125,12 @@ impl PreparedIpv4Send<'_> {
 
     /// Completes IPv4 encapsulation and consumes the datagram for submission.
     ///
-    /// Capacity remains available under this transaction's exclusive borrow.
-    /// Returns `EMSGSIZE` for a DF datagram exceeding the MTU or an MTU too small
-    /// to fragment. Successful loopback submission can still drop on RX overflow.
+    /// Capacity remains available under this transaction's exclusive borrow, and
+    /// every size decision was made during preparation. Only a malformed packet
+    /// or a broken capacity reservation can fail here, and neither is retryable.
+    /// Successful loopback submission can still drop on RX overflow.
     pub(crate) fn submit(mut self) -> KResult {
-        let dont_fragment = self
-            .options
-            .fragmentation
-            .should_set_dont_fragment(self.packet.packet.len(), self.decision.mtu);
+        let dont_fragment = self.decision.dont_fragment;
         // RFC 6864 §4.3 requires distinct IDs even when only a downstream
         // router might fragment the datagram. Atomic datagrams can use zero.
         let identification = if dont_fragment {
@@ -199,6 +197,8 @@ enum SubmissionTarget {
 struct Ipv4SendDecision {
     source: Ipv4Address,
     mtu: Option<usize>,
+    /// Chosen once during preparation so submission cannot reject the datagram.
+    dont_fragment: bool,
     submission: SubmissionTarget,
 }
 
@@ -227,8 +227,9 @@ impl Ipv4Output {
     ///
     /// On error, returns the original builder. Returns `EACCES` for a forbidden
     /// broadcast, `ENETUNREACH` for an invalid route, binding, or source,
-    /// `WouldBlock` for insufficient queue capacity, and `EMSGSIZE` for an
-    /// unusable fragment MTU.
+    /// `EMSGSIZE` for a DF datagram larger than the MTU or an MTU too small to
+    /// fragment, and `WouldBlock` for insufficient queue capacity. Size errors
+    /// are checked first because waiting cannot resolve them.
     /// The returned transaction exclusively borrows all resources through
     /// submission, so neither its route nor its capacity can become stale.
     pub(crate) fn prepare<'a>(
@@ -272,7 +273,10 @@ impl Ipv4Output {
             OutputTarget::LimitedBroadcast
         } else {
             let dst_addr = IpAddress::Ipv4(destination);
-            let Some(rule) = routes.lookup(&dst_addr) else {
+            // Preparation chose the route under this binding, so queued output
+            // must search the same candidate set rather than the global best.
+            let oif = NetDeviceId::new(packet.ifindex());
+            let Some(rule) = routes.lookup_for_output(&dst_addr, oif) else {
                 warn!("No route found for destination: {}", dst_addr);
                 return Ipv4DispatchOutcome::default();
             };
@@ -323,10 +327,20 @@ impl Ipv4Output {
                 },
             )
         };
+        let dont_fragment = options
+            .fragmentation
+            .should_set_dont_fragment(packet_len, mtu);
+        // A datagram that may neither fragment nor fit is a permanent error.
+        // Reporting it before the capacity check keeps a full queue from
+        // turning it into a wait that can only end in `EMSGSIZE`.
+        if dont_fragment && mtu.is_some_and(|mtu| packet_len > mtu) {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        let packet_count = output_packet_count(packet_len, mtu)?;
         let submission = if link_kind == Some(LinkKind::Loopback) {
             SubmissionTarget::Immediate(target)
         } else {
-            if tx_queue.is_full() || !tx_queue.can_push(output_packet_count(packet_len, mtu)?) {
+            if tx_queue.is_full() || !tx_queue.can_push(packet_count) {
                 return Err(KError::WouldBlock);
             }
             SubmissionTarget::Queued
@@ -334,6 +348,7 @@ impl Ipv4Output {
         Ok(Ipv4SendDecision {
             source,
             mtu,
+            dont_fragment,
             submission,
         })
     }
@@ -352,7 +367,9 @@ impl Ipv4Output {
                     PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
                 }),
             )
-            .map_err(|_| KError::WouldBlock)
+            // Preparation reserved this capacity under the same exclusive
+            // borrow. A retryable error here would reread consumed user data.
+            .map_err(|_| KError::from(LinuxError::ENOBUFS))
     }
 
     fn fragment(packet: Vec<u8>, mtu: Option<usize>) -> KResult<Vec<Vec<u8>>> {

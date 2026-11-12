@@ -1235,13 +1235,11 @@ fn abandoned_output_does_not_occupy_capacity_or_advance_identification() {
     drop(send);
     assert_eq!(router.available_tx_packet_slots(), available);
     options.fragmentation = Ipv4FragmentationPolicy::Forbid;
-    assert_eq!(
-        router
-            .prepare_ipv4_send(options, Ipv4PacketBuilder::new(200).unwrap())
-            .unwrap()
-            .submit(),
-        Err(LinuxError::EMSGSIZE.into())
-    );
+    let (error, _) = router
+        .prepare_ipv4_send(options, Ipv4PacketBuilder::new(200).unwrap())
+        .err()
+        .unwrap();
+    assert_eq!(error, LinuxError::EMSGSIZE.into());
     assert_eq!(router.available_tx_packet_slots(), available);
     options.fragmentation = Ipv4FragmentationPolicy::Allow;
     router
@@ -1301,16 +1299,15 @@ fn output_fragmentation_policy_preserves_mtu_boundary_behavior() {
             let mut options = output_options(Ipv4Address::new(192, 0, 2, 8));
             options.fragmentation = policy;
             let available = router.available_tx_packet_slots();
-            let result = router
-                .prepare_ipv4_send(options, Ipv4PacketBuilder::new(transport_len).unwrap())
-                .unwrap()
-                .submit();
+            let prepared =
+                router.prepare_ipv4_send(options, Ipv4PacketBuilder::new(transport_len).unwrap());
             if policy == Forbid && transport_len > 80 {
-                assert_eq!(result, Err(LinuxError::EMSGSIZE.into()));
+                let (error, _) = prepared.err().unwrap();
+                assert_eq!(error, LinuxError::EMSGSIZE.into());
                 assert_eq!(router.available_tx_packet_slots(), available);
                 continue;
             }
-            result.unwrap();
+            prepared.unwrap().submit().unwrap();
             let expected_count = if transport_len > 80 { 2 } else { 1 };
             assert_eq!(
                 router.available_tx_packet_slots(),
@@ -1330,6 +1327,21 @@ fn output_fragmentation_policy_preserves_mtu_boundary_behavior() {
             }
         }
     }
+}
+
+#[def_test]
+fn dont_fragment_oversize_output_reports_size_before_waiting_for_capacity() {
+    let (mut router, _) = output_test_router();
+    router.data_tx_queue = DataTxQueue::with_capacity(0);
+    let mut options = output_options(Ipv4Address::new(192, 0, 2, 8));
+    let packet = Ipv4PacketBuilder::new(200).unwrap();
+    // Waiting for capacity cannot make an unfragmentable datagram fit.
+    options.fragmentation = Ipv4FragmentationPolicy::Forbid;
+    let (error, packet) = router.prepare_ipv4_send(options, packet).err().unwrap();
+    assert_eq!(error, LinuxError::EMSGSIZE.into());
+    options.fragmentation = Ipv4FragmentationPolicy::Allow;
+    let (error, _) = router.prepare_ipv4_send(options, packet).err().unwrap();
+    assert_eq!(error, KError::WouldBlock);
 }
 
 #[def_test]
@@ -1440,7 +1452,7 @@ fn add_recording_output_device(router: &mut Router, tx_log: &TxLog) -> NetDevice
 }
 
 #[def_test]
-fn queued_output_rechecks_routing_and_binding_without_reselecting_source() {
+fn queued_output_rechecks_routing_under_binding_without_reselecting_source() {
     for is_bound in [false, true] {
         let (mut router, first_dev, tx_log) = recording_output_router();
         let dst = Ipv4Address::new(192, 0, 2, 8);
@@ -1466,10 +1478,13 @@ fn queued_output_rechecks_routing_and_binding_without_reselecting_source() {
         let (count, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
         assert_eq!(count, 1);
         let sent = tx_log.lock();
+        assert_eq!(sent.len(), 1);
         if is_bound {
-            assert!(sent.is_empty());
+            // The binding constrains route selection; it does not turn a
+            // better route on another device into a drop.
+            assert_eq!(sent[0].0, first_dev.ifindex());
+            assert_eq!(sent[0].1, IpAddress::Ipv4(dst));
         } else {
-            assert_eq!(sent.len(), 1);
             assert_eq!(sent[0].0, second_dev.ifindex());
             assert_eq!(sent[0].1, gateway);
             let header =
