@@ -882,4 +882,15 @@ pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> KResult<isize> {
     Ok(0)
 }
 
+/// Locks all of the caller's memory. X-Kernel has no swap, so every page is
+/// already resident; accept the request as a no-op (greetd and other daemons
+/// call `mlockall` for hardening and abort if it fails).
+pub fn sys_mlockall(_flags: u32) -> KResult<isize> {
+    Ok(0)
+}
+
+pub fn sys_munlockall() -> KResult<isize> {
+    Ok(0)
+}
+
 unittest::path_mod_test!(tests, "../ut-tests/mmap.rs");
