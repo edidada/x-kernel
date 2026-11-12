@@ -365,6 +365,55 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         true
     }
 
+    /// Steals this TTY as `proc`'s controlling terminal (`TIOCSCTTY` arg 1).
+    ///
+    /// Like [`Self::bind_to`] but forcibly reassigns a terminal that already
+    /// belongs to another session. Linux restricts this to a privileged
+    /// session leader; the previous session simply loses the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EPERM` when `proc` is not a session leader or lacks
+    /// `CAP_SYS_ADMIN`, and the foreground-group error if the final state
+    /// transition cannot complete.
+    pub fn steal_for(self: &Arc<Self>, proc: &Process) -> KResult<()> {
+        if self.kind == TtyKind::PtyMaster {
+            return Err(KError::NotATty);
+        }
+        let _association = self.terminal.association.lock();
+        let pg = proc.group();
+        let session = pg.session();
+        if session.sid() != proc.pid() {
+            return Err(KError::OperationNotPermitted);
+        }
+        if !kprocess::current_cred().has_sys_admin() {
+            return Err(KError::OperationNotPermitted);
+        }
+        // Drop any prior session's claim before installing the new one.
+        if let Some(previous) = self.terminal.job_control.session() {
+            let terminal: Arc<dyn ControllingTerminal> = self.clone();
+            previous.unset_terminal(&terminal);
+            self.terminal
+                .job_control
+                .clear_session_if_matches(&previous);
+        }
+        let terminal: Arc<dyn ControllingTerminal> = self.clone();
+        self.terminal.job_control.ensure_session(&session)?;
+        match session.set_terminal(&terminal) {
+            SetTerminalResult::Installed | SetTerminalResult::AlreadySetToSame => {}
+            SetTerminalResult::Occupied => {
+                self.terminal.job_control.clear_session_if_matches(&session);
+                return Err(KError::ResourceBusy);
+            }
+        }
+        if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
+            session.unset_terminal(&terminal);
+            self.terminal.job_control.clear_session_if_matches(&session);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// Set `pg` as the foreground process group of this terminal.
     ///
     /// This supports explicit foreground-group changes after
@@ -482,18 +531,17 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             TIOCSPTLCK => {}
             TIOCGPTN => UserPtr::<u32>::from(arg).write_vm(self.pty_number())?,
             TIOCSCTTY => {
-                if arg != 0 {
-                    // Linux supports arg == 1 for privileged terminal stealing.
-                    // X-Kernel does not yet implement reassignment across sessions.
-                    return Err(if arg == 1 {
-                        KError::OperationNotPermitted
-                    } else {
-                        KError::InvalidInput
-                    });
-                }
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
                 let current_process = kprocess::current_user_thread().process().clone();
-                tty.bind_to(&current_process)?;
+                if arg == 0 {
+                    tty.bind_to(&current_process)?;
+                } else if arg == 1 {
+                    // Linux privileged terminal stealing: greetd reassigns a VT
+                    // that a getty already holds as its controlling terminal.
+                    tty.steal_for(&current_process)?;
+                } else {
+                    return Err(KError::InvalidInput);
+                }
             }
             TIOCNOTTY => {
                 let tty = self.this.upgrade().ok_or(KError::NoSuchDevice)?;
