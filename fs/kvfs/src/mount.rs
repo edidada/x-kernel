@@ -490,7 +490,9 @@ impl MntNamespace {
     }
 
     /// Applies attribute changes to a specific mount (e.g. one referenced by an
-    /// `open_tree` fd via `mount_setattr` `AT_EMPTY_PATH`), not by path.
+    /// `open_tree` fd via `mount_setattr` `AT_EMPTY_PATH`), not by path. The
+    /// mount may still be detached (an `fsmount` result not yet attached), so no
+    /// namespace-registration check is performed.
     pub fn set_mount_attributes_on(
         &self,
         mount: &Arc<Mount>,
@@ -498,8 +500,6 @@ impl MntNamespace {
         attr_clr: MountFlags,
         recursive: bool,
     ) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::require_mount(&mounts, mount)?;
         Self::apply_mount_attributes(mount, attr_set, attr_clr, recursive);
         Ok(())
     }
