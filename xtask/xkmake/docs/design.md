@@ -1,21 +1,21 @@
-# xkmake — 设计文档
+# xkmake — Design Document
 
-## 定位
+## Positioning
 
-`xkmake` 是 X-Kernel 仓库内的构建与运行编排器。根 `Makefile` 只提供
-稳定入口，`xkmake` 负责连接 `xconfig`、Cargo、镜像加工工具和 QEMU。
+`xkmake` is the build and run orchestrator inside the X-Kernel repository. The root `Makefile` only provides
+a stable entry point; `xkmake` is responsible for connecting `xconfig`, Cargo, the image processing tools, and QEMU.
 
-## 范围
+## Scope
 
 ```text
 src/
-├── main.rs       命令分发
-├── cli.rs        强类型命令行参数
-├── context.rs    最终构建上下文
-├── build.rs      Cargo、镜像和 bundle
-├── linker.rs     内核 linker script 渲染与稳定写入
-├── coverage.rs   unittest 覆盖率提取与报告生成
-├── doc.rs        workspace rustdoc 编排
+├── main.rs       command dispatch
+├── cli.rs        strongly typed command-line arguments
+├── context.rs    final build context
+├── build.rs      Cargo, images, and bundle
+├── linker.rs     kernel linker script rendering and stable writing
+├── coverage.rs   unittest coverage extraction and report generation
+├── doc.rs        workspace rustdoc orchestration
 ├── hygiene.rs    仓库卫生工具编排
 ├── dylint.rs     Dylint lint library build and kernel scan
 ├── facts.rs      packing of the code facts exported by the Dylint scan
@@ -29,7 +29,7 @@ src/
 └── error.rs      工具层错误模型
 ```
 
-## 架构
+## Architecture
 
 ```text
 Makefile
@@ -41,28 +41,28 @@ xkmake ------> xconfig ------> .config / config.rs / Cargo config
    |                            |
    |                            +--> kernel.debug.elf（完整符号、DWARF 和覆盖率映射）
    |
-   +-- 按需嵌入 DWARF（KFEAT_DWARF）/ 自举符号表（KFEAT_SYMTAB）
-   |      + rust-objcopy(外部)
+   +-- embed DWARF on demand (KFEAT_DWARF) / bootstrap symbol table (KFEAT_SYMTAB)
+   |      + rust-objcopy (external)
    |                         |
    |                         v
    +--------------------> versioned bundle
                                |  \
                                |   +--> workspace-root xkernel_* copies
                                |
-                               +--> make symbolize（Host 侧还原函数/行号）
+                               +--> make symbolize (host-side recovery of function names and line numbers)
                                |
                                v
                               QEMU
 ```
 
-LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，不暴露
-独立命令或第二套参数模型。
+The conversion from LCOV to Cobertura XML is an internal stage of the unittest coverage flow; it does not expose
+a separate command or a second argument model.
 
-`xconfig::build_config::ResolvedKernelConfig` 是配置器与构建器之间的稳定
-语义边界。`xkmake` 不读取 `.config` 文本，也不从生成的 TOML 反向推导
-架构、平台或 feature。
+`xconfig::build_config::ResolvedKernelConfig` is the stable semantic
+boundary between the configurator and the builder. `xkmake` does not read the `.config` text, nor does it derive
+the architecture, platform, or features back from the generated TOML.
 
-## 核心流程
+## Core Flows
 
 ### Build
 
@@ -98,9 +98,9 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
     临时路径，使 APFS/Linux CoW 文件系统可走 clone/reflink 快速路径，再
     以 rename 替换最终文件；文件系统不支持时由标准库回退普通复制。
 
-### 产物
+### Artifacts
 
-每个 bundle 包含两类 ELF：
+Each bundle contains two kinds of ELF:
 
 - `kernel.elf`：精简的启动 ELF，保留加载段及 x86 必需的两个引导符号。
   KFEAT_DWARF 时嵌入的可加载调试段、KFEAT_SYMTAB 的运行时符号表，以及
@@ -113,124 +113,125 @@ LinuxBoot 和 UEFI 都封装 `kernel.elf`；文件中的 Host 调试数据不再
 启动时的源镜像保留区。bundle 格式 v8 强制重建旧版本产物，避免复用
 尚未精简的启动 ELF。
 
-### 符号表自举（KFEAT_SYMTAB）
+### Symbol Table Bootstrapping (KFEAT_SYMTAB)
 
-紧凑符号表（kallsyms 风格）来自内核自身符号，因此存在"表需要链接产物、
-产物需要表"的循环。构建按两轮收敛：
+The compact symbol table (kallsyms style) comes from the kernel's own symbols, so there is a circularity: "the table needs the link output,
+and the output needs the table". The build converges in two rounds:
 
-1. 首轮以空表链接；`create_bundle` 从 Cargo ELF 提取函数符号并写入
-   `$TARGET_DIR/kbuild/ksymtab.bin`；
-2. 内容变化时再次调用 Cargo 重链（`util/backtrace` 通过 build.rs 复制
-   该 blob 并以 `include_bytes!` 嵌入），随后重建 bundle。
+1. The first round links with an empty table; `create_bundle` extracts function symbols from the Cargo ELF and writes them to
+   `$TARGET_DIR/kbuild/ksymtab.bin`;
+2. When the content has changed, Cargo is invoked again to relink (`util/backtrace` copies
+   that blob through build.rs and embeds it with `include_bytes!`), and then the bundle is rebuilt.
 
-收敛性由布局保证：blob 位于 `.rodata`（普通 static），符号表只收录
-`.text` 系段的函数，而 `.text` 在 `.rodata` 之前——blob 大小的变化
-不会改变表内记录的地址。第二轮的 blob 与第一轮相同，构建停止。
+Convergence is guaranteed by the layout: the blob lives in `.rodata` (an ordinary static), the symbol table only records functions in
+the `.text` family of sections, and `.text` comes before `.rodata`, so a change in the blob size
+does not change the addresses recorded in the table. The blob in the second round is identical to that of the first round, and the build stops.
 
-KFEAT_SYMTAB=n 时同样会落盘一个空的 16 字节 blob。`util/backtrace`
-的 build.rs 以 `cargo:rerun-if-changed` 跟踪 `$TARGET_DIR/kbuild/
-ksymtab.bin`，而 Cargo 对不存在的 `rerun-if-changed` 输入一律视为
-dirty，会导致 backtrace 及其全部传递依赖在每次构建时被全量重编译。
-因此 xkmake 在首次调用 Cargo 前准备该输入：关闭 KFEAT_SYMTAB 时写入
-稳定的空 blob；开启时保留已有符号表，并只在文件缺失时写入空 blob。
-这样 clean build 结束后不会因为输入从缺失变为存在而额外触发下一次构建，
-后续构建也能完整命中 Cargo 增量缓存。
+With KFEAT_SYMTAB=n, an empty 16-byte blob is likewise written to disk. The build.rs of `util/backtrace`
+tracks `$TARGET_DIR/kbuild/
+ksymtab.bin` with `cargo:rerun-if-changed`, while Cargo treats any nonexistent `rerun-if-changed` input as
+dirty, which would cause backtrace and all of its transitive dependencies to be fully recompiled on every build.
+Therefore xkmake prepares this input before the first Cargo invocation: when KFEAT_SYMTAB is off it writes
+a stable empty blob; when it is on it keeps the existing symbol table and writes an empty blob only if the file is missing.
+In this way, after a clean build finishes, the input going from missing to present does not trigger an extra next build,
+and subsequent builds can fully hit the Cargo incremental cache.
 
 ### Symbolize
 
-`make symbolize LOG=<log>` 从日志提取 `Backtrace:` 块的原始地址（兼容
-`func+0xoff/0xsize` 注解），调用 `llvm-addr2line`/`addr2line` 对照
-`kernel.debug.elf` 输出函数名与文件/行号。`--offset` 支持内核加载地址
-偏移（如 KASLR）。
+`make symbolize LOG=<log>` extracts the raw addresses of the `Backtrace:` block from the log (compatible with the
+`func+0xoff/0xsize` annotations), and calls `llvm-addr2line`/`addr2line` against
+`kernel.debug.elf` to output function names and file/line numbers. `--offset` supports a kernel load address
+offset (such as KASLR).
 
-`make run`/`make justrun` 自动符号化：QEMU 输出实时 tee 到终端并镜像到
-`bundle/qemu.log`，运行结束后扫描 backtrace 帧，发现则自动对照
-`kernel.debug.elf` 解析并打印（`--no-symbolize` 关闭）。tee 由
-`Process::run_tee` 实现：stdout 走管道由读取线程转发到终端与日志文件，
-stdin/stderr 保持继承，交互会话不受影响。
+`make run`/`make justrun` symbolize automatically: QEMU output is tee'd to the terminal in real time and mirrored to
+`bundle/qemu.log`; after the run ends, the backtrace frames are scanned, and if any are found they are automatically resolved against
+`kernel.debug.elf` and printed (`--no-symbolize` turns this off). The tee is implemented by
+`Process::run_tee`: stdout goes through a pipe and is forwarded by a reader thread to the terminal and the log file,
+while stdin/stderr remain inherited, so interactive sessions are unaffected.
 
 ### Run
 
-1. 执行 Build 流程并取得 bundle。
-2. 根据已解析平台选择封闭的 QEMU 启动策略。
-3. 根据编译进内核的驱动和 CLI 选项添加设备。
-4. 以结构化参数启动 QEMU，并传播退出状态。
-5. unittest QEMU 成功退出后，校验本轮 `qemu.log` 中的 `ALL_TESTS_PASSED` 和
-   `COVERAGE_PERSISTED` 标记。后者仅在 guest 确认覆盖率完整写入、文件 fsync 和
-   filesystem sync 后发布。缺标记或存在 `TESTS_FAILED` 时拒绝旧镜像中的 profile。
-6. 校验通过后从磁盘镜像提取 `default.profraw`，依次生成
-   `default.profdata`、`coverage.txt`、`coverage.info` 和 `coverage.xml`。
+1. Execute the Build flow and obtain the bundle.
+2. Select a closed QEMU boot policy according to the resolved platform.
+3. Add devices according to the drivers compiled into the kernel and the CLI options.
+4. Launch QEMU with structured arguments and propagate the exit status.
+5. After the unittest QEMU exits successfully, verify the `ALL_TESTS_PASSED` and
+   `COVERAGE_PERSISTED` markers in this run's `qemu.log`. The latter is published only after the guest confirms that the coverage has been fully written, the file fsynced, and the
+   filesystem synced. When a marker is missing or `TESTS_FAILED` is present, the profile from an old image is rejected.
+6. After verification passes, extract `default.profraw` from the disk image, and then generate in order
+   `default.profdata`, `coverage.txt`, `coverage.info`, and `coverage.xml`.
 
-覆盖率产物位于 `target/<rust-target>/<profile>/`。开始生成前会删除旧
-产物，任一步失败都会使本次 run 失败，避免 CI 消费过期报告。
+Coverage artifacts are located in `target/<rust-target>/<profile>/`. Old
+artifacts are deleted before generation starts, and the failure of any step makes this run fail, so that CI does not consume stale reports.
 
 ### Doc
 
-1. 与 build 流程相同，通过一次 `ConfigEngine` 求值得到配置快照。
-2. 从快照生成构建配置和 linker script，并直接取得
-   Cargo feature 集。
-3. 使用解析后的内核 Rust target 调用 `cargo doc --workspace --no-deps`，
-   不在 host target 上解释内核 ABI，也不解析生成的 Cargo TOML。
-4. `--check-missing` 在保留 broken-link/cfg 检查的基础上拒绝缺失 rustdoc。
+1. As in the build flow, obtain the configuration snapshot through a single `ConfigEngine` evaluation.
+2. Generate the build configuration and the linker script from the snapshot, and obtain the
+   Cargo feature set directly.
+3. Invoke `cargo doc --workspace --no-deps` with the resolved kernel Rust target,
+   without interpreting the kernel ABI on the host target and without parsing the generated Cargo TOML.
+4. `--check-missing` rejects missing rustdoc, on top of retaining the broken-link/cfg checks.
 
 ### Hygiene Deps
 
-1. 校验 PATH 中的 `cargo-shear` 版本与 XKMake 固定版本一致；
-   工具缺失或版本不符时引导执行 `make install-tools`。
-2. 对根 workspace、`xtask`、`tee_apps` 和 `uapps/hello` 依次执行检查。
-3. 仅对 `Cargo.lock` 被 Git 跟踪的 workspace（内核根 workspace）传递
-   `--locked`，防止卫生检查隐式改写已提交的 lockfile；`xtask`、
-   `tee_apps`、`uapps/hello` 的 lockfile 被 gitignore，没有已提交锁，
-   不传 `--locked`，由 cargo 按需生成。
-4. `--fix` 仅透传 cargo-shear 的依赖删除能力；warning 保持提示语义，
-   error 或任何 workspace 检查失败都会终止命令。
+1. Verify that the `cargo-shear` version in PATH matches the version pinned by XKMake;
+   when the tool is missing or the version does not match, direct the user to run `make install-tools`.
+2. Run the check in turn on the root workspace, `xtask`, `tee_apps`, and `uapps/hello`.
+3. Pass `--locked` only to workspaces whose `Cargo.lock` is tracked by Git (the kernel root workspace),
+   to prevent the hygiene check from implicitly rewriting the committed lockfile; the lockfiles of `xtask`,
+   `tee_apps`, and `uapps/hello` are gitignored and have no committed lock,
+   so `--locked` is not passed and cargo generates them as needed.
+4. `--fix` only passes through the dependency-removal capability of cargo-shear; warnings keep their hint semantics, while
+   an error or the failure of any workspace check terminates the command.
 
 ### Hygiene Header
 
-1. 校验 PATH 中的 `licensure` 版本与 XKMake 固定版本一致；工具缺失或
-   版本不符时引导执行 `make install-tools`。
-2. 通过 Git 获取已跟踪及未忽略的未跟踪 Rust 源文件，并过滤工作树中已
-   删除的路径；非 Rust 文件不进入 header 检查。
-3. 分批将文件传给 licensure，避免仓库增长后触及进程参数长度限制。
-4. 普通模式执行 `--check`；`--fix` 先执行 `--in-place`，再以 `--check`
-   复查最终状态。header 模板和注释格式由仓库根 `.licensure.yml` 定义。
+1. Verify that the `licensure` version in PATH matches the version pinned by XKMake; when the tool is missing or
+   the version does not match, direct the user to run `make install-tools`.
+2. Obtain the tracked and the untracked-but-not-ignored Rust source files through Git, and filter out the paths that have been
+   deleted in the working tree; non-Rust files do not enter the header check.
+3. Pass the files to licensure in batches, to avoid hitting the process argument length limit as the repository grows.
+4. In normal mode, run `--check`; `--fix` first runs `--in-place`, and then rechecks the final state with `--check`.
+   The header template and comment format are defined by the repository-root `.licensure.yml`.
 
 ### Hygiene Lints
 
-1. 在根 workspace 执行 `cargo metadata --no-deps`，以 Cargo 解析出的
-   `workspace_members` 为准；workspace 目录内的 path 依赖是隐式成员，
-   不能只看 `members` glob。
-2. 逐个解析成员 manifest，要求 `lints.workspace = true`；缺失或为
-   `false` 的成员一次性列出后失败。没有登记豁免名单。
-3. `make clippy`、`make dylint` 和 `make dylint_test` 在 Cargo 检查前执行
-   本项，因此 CI 的 clippy 阶段会拦下不继承 `[workspace.lints]` 的 crate。
+1. Run `cargo metadata --no-deps` in the root workspace and use the
+   `workspace_members` resolved by Cargo as the source of truth; path dependencies inside the workspace directory are implicit members,
+   so the `members` glob alone is not sufficient.
+2. Parse each member manifest and require `lints.workspace = true`; members where it is missing or
+   `false` are listed all at once and the check fails. There is no registered exemption list.
+3. `make clippy`, `make dylint` and `make dylint_test` run
+   this check before the Cargo checks, so the CI clippy stage rejects any crate that does not inherit `[workspace.lints]`.
 
-x86_64 bundle 同时携带 `kernel.bzimg` 和 `kernel.uefi.img`。默认使用
-LinuxBoot，`--boot uefi` 使用 OVMF。OVMF VARS 模板在每次运行时复制到
-`target/xkmake/runtime/<platform>/`，不会修改固件模板或 bundle。
+The x86_64 bundle carries both `kernel.bzimg` and `kernel.uefi.img`. LinuxBoot is used by default,
+and `--boot uefi` uses OVMF. The OVMF VARS template is copied to
+`target/xkmake/runtime/<platform>/` on every run, so neither the firmware template nor the bundle is modified.
 
-vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsock`
-时，XKMake 查询当前 QEMU 的设备列表。仅在对应 `vhost-vsock-*` 型号
-存在时添加设备；不支持时输出 warning 并继续启动。
+vsock uses capability probing: when the kernel enables virtio-socket and the user has not passed `--no-vsock`,
+XKMake queries the device list of the current QEMU.
+The device is added only if the corresponding `vhost-vsock-*` model
+exists; if it is not supported, a warning is printed and startup continues.
 
-网络转发端口与 vsock CID 采用顺序探测。`--hostfwd-port`（默认 61005）
-是转发到 guest TCP/UDP 5555 的首选主机端口，被占用时按 10 为步长
-（61005、61015、...、62005）在 `61005..=62005` 内查找首个 TCP 与 UDP
-均空闲的端口；探测区间耗尽时报错退出。端口探测只把 `AddrInUse` 视为
-占用，其他 bind 错误（如非 root 绑定 <1024 端口）直接报错，不会静默
-换端口。`--vsock-cid`（默认 103）是首选 guest CID，被占用时在
-`103..=203` 内逐个顺序查找空闲 CID。CID 探测通过临时打开
-`/dev/vhost-vsock` 并执行 `VHOST_VSOCK_SET_GUEST_CID` 完成，内核以
-`EADDRINUSE` 表示 CID 已被占用，探测 fd 随即关闭释放 CID；设备缺失或
-无权限探测时退回首选值，避免探测失败阻止虚拟机启动，而内核 `EINVAL`
-（保留 CID）直接报错；`--vsock-cid` 在参数解析时校验不小于 3（内核
-保留 0/1/2）。`--dry-run` 不执行任何探测，直接使用首选端口与 CID 构造
-命令行。
+The network forwarding port and the vsock CID are probed sequentially. `--hostfwd-port` (default 61005)
+is the preferred host port forwarded to guest TCP/UDP 5555. If it is in use, XKMake searches `61005..=62005` in steps of 10
+(61005, 61015, ..., 62005) for the first port that is free for both TCP and UDP;
+when the probe range is exhausted, it exits with an error. Port probing treats only `AddrInUse` as
+in use; any other bind error (such as a non-root user binding a port below 1024) is reported as an error directly, and the port is not silently
+changed. `--vsock-cid` (default 103) is the preferred guest CID; if it is in use, XKMake searches `103..=203`
+one by one in order for a free CID. CID probing is done by temporarily opening
+`/dev/vhost-vsock` and performing `VHOST_VSOCK_SET_GUEST_CID`; the kernel uses
+`EADDRINUSE` to indicate that the CID is already in use, and the probe fd is then closed to release the CID. If the device is missing or
+the user lacks permission to probe, XKMake falls back to the preferred value so that a probe failure does not prevent the virtual machine from starting, while the kernel's `EINVAL`
+(reserved CID) is reported as an error directly; `--vsock-cid` is validated during argument parsing to be at least 3 (the kernel
+reserves 0/1/2). `--dry-run` performs no probing and builds
+the command line directly from the preferred port and CID.
 
-`--no-build` 会只接受 manifest、构建信息、内嵌 Build ID、产物和 Cargo ELF
-时间均匹配的现有 bundle。复用校验会重新计算 ELF 的 loadable-image hash，
-避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
-target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
+`--no-build` accepts only an existing bundle whose manifest, build information, embedded Build ID, artifacts and Cargo ELF
+time all match. The reuse check recomputes the ELF loadable-image hash
+to avoid consuming a modified or incomplete bundle. The `config` subcommand provides the Makefile tool targets with read-only queries for the architecture,
+target, platform and bundle path, so the Makefile does not need to re-parse `.config`.
 
 ### Dylint
 
@@ -316,7 +317,7 @@ on. When packing, non-member units whose paths lie under the kernel target
 directory are taken in as `dep` crates too; the manifest records
 `deps: true`, and their crate entries carry the dependency's features.
 
-## 设计决策
+## Design Decisions
 
 - Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。
 - 普通 build 的复用属于可信本地缓存边界，依靠 manifest 最后提交的不变量、
@@ -356,8 +357,8 @@ directory are taken in as `dep` crates too; the manifest records
 - guest IP 和 gateway 当前属于构建输入，因为现有网络栈通过
   `option_env!` 编译它们；后续应迁移为内核命令行参数。
 
-## 当前限制
+## Current Limitations
 
-- AArch64、RISC-V 64、LoongArch64 QEMU virt 使用 raw BIN 直接启动。
-- x86_64 LinuxBoot 和 UEFI 已支持；其他 x86 平台仍需独立启动策略。
-- unittest 已生成 LLVM 覆盖率报告；更丰富的测试结果聚合尚未迁移。
+- AArch64, RISC-V 64 and LoongArch64 QEMU virt boot directly from the raw BIN.
+- x86_64 LinuxBoot and UEFI are supported; other x86 platforms still need a separate boot strategy.
+- unittest already generates an LLVM coverage report; richer aggregation of test results has not yet been migrated.

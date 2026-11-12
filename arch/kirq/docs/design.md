@@ -1,4 +1,4 @@
-# kirq — 设计文档
+# kirq — Design Document
 
 ## Runtime Affinity
 
@@ -496,11 +496,11 @@ softirq nesting. Execution services use the former to reject invalid BH dispatch
 before acquiring work. This query neither pins the CPU nor serializes passes;
 the caller establishes those conditions. Existing nesting APIs are unchanged.
 
-## 定位
+## Positioning
 
-`kirq` 是 X-Kernel 的通用中断核心。它位于架构 trap 适配层和平台中断
-控制器后端之间，向驱动、IPI、计时器和 NMI 使用者提供统一的 IRQ 描述、
-注册、映射、使能、dispatch 和完成语义。
+`kirq` is the generic interrupt core of X-Kernel. It sits between the architecture trap adaptation layer and the platform interrupt
+controller backends, and provides drivers, IPI, timer and NMI users with unified IRQ description,
+registration, mapping, enabling, dispatch and completion semantics.
 
 `kirq` sits above irqchip drivers, which implement controller operations
 (configure, mask/unmask, claim, complete, priority and IPI delivery) through
@@ -508,22 +508,22 @@ the caller establishes those conditions. Existing nesting APIs are unchanged.
 to kirq. General sleepable workqueues belong to `kworkng`; kirq supplies
 IRQ/BH context and dispatch capabilities.
 
-`khal::irq` 只保留 trap-entry adapter 和 HAL 特定 helper；generic IRQ state 与
-dispatch ownership 属于 `kirq`。
+`khal::irq` retains only the trap-entry adapter and HAL-specific helpers; generic IRQ state and
+dispatch ownership belong to `kirq`.
 
-## 背景
+## Background
 
-重构前，generic IRQ descriptor、domain mapping、dispatch、NMI、MSI 和后续
-bottom-half 扩展点分散在 HAL 或平台/驱动 glue 中。这样容易出现两类问题：一是
-不同平台对 hwirq/virq/domain 的解释不一致，二是中断热路径为了兼容控制面状态而
-重新引入全局锁或隐式 identity fallback。
+Before the refactoring, the generic IRQ descriptor, domain mapping, dispatch, NMI, MSI and later
+bottom-half extension points were scattered across the HAL and platform/driver glue. This easily led to two kinds of problems: first, different
+platforms interpreted hwirq/virq/domain inconsistently; second, to stay compatible with control-plane state, the interrupt hot path
+reintroduced global locks or implicit identity fallbacks.
 
 `kirq` owns descriptor publication and Domain mappings. Normal dispatch resolves
 stable `PendingIrq`/`IrqRef` claims directly to retained Lines; numeric-only
 queries borrow the same Domain XArray. Trap adapters, irqchip backends
 and devres providers retain only their integration responsibilities.
 
-## 测试布局
+## Test Layout
 
 Mapping-only fixtures use two `cfg(unittest)` software domains with strict lookup
 and independent XArray indexes, including equal-hwirq namespace-isolation tests.
@@ -531,38 +531,38 @@ They do not borrow a real controller's domain for synthetic out-of-range hardwar
 IDs. Both registry entries are absent from production builds; real-provider
 admission tests remain separate.
 
-guest 测试和两个公共 fixture 模块位于 crate 根部 `ut-tests/`，通过
-`unittest::path_mod_test!` 在原父模块挂载。模块名、可见性和注册路径不变；
-`context::test_support`、`softirq::test_support` 的外部测试调用路径也不变。
+The guest tests and the two shared fixture modules live under `ut-tests/` at the crate root and are mounted in their original parent modules through
+`unittest::path_mod_test!`. Module names, visibility, and registration paths are unchanged;
+the external test call paths of `context::test_support` and `softirq::test_support` are also unchanged.
 
-| 文件（相对 `ut-tests/`） | 用例数 | 附加门控 |
+| File (relative to `ut-tests/`) | Test cases | Additional gate |
 | --- | --- | --- |
-| `backend_msi.rs` | 1 | 无 |
-| `backend_msi_unittest_tests.rs` | 1 | 非 x86_64 |
-| `bottom_half_context.rs` | 10 | 无，其中 9 例为 serial |
+| `backend_msi.rs` | 1 | None |
+| `backend_msi_unittest_tests.rs` | 1 | Non-x86_64 |
+| `bottom_half_context.rs` | 10 | None, 9 of them serial |
 | `bottom_half_context_test_support.rs` | 0 | fixture |
-| `bottom_half_deferred.rs` | 6 | 无，均为 serial |
-| `bottom_half_softirq.rs` | 17 | 无，均为 serial |
+| `bottom_half_deferred.rs` | 6 | None, all serial |
+| `bottom_half_softirq.rs` | 17 | None, all serial |
 | `bottom_half_softirq_test_support.rs` | 0 | fixture |
-| `runtime_action.rs` | 6 | 无 |
-| `runtime_manager.rs` | 49 | 无，其中 43 例为 serial |
-| `rcu_irq_entry.rs` | 2 | 无，其中 1 例为 serial |
-| `rcu_context.rs` | 1 | 无 |
-| `unhandled_unittest.rs` | 4 | 无 |
-| `irq_work.rs` | 6 | 无，均为 serial |
+| `runtime_action.rs` | 6 | None |
+| `runtime_manager.rs` | 49 | None, 43 of them serial |
+| `rcu_irq_entry.rs` | 2 | None, 1 of them serial |
+| `rcu_context.rs` | 1 | None |
+| `unhandled_unittest.rs` | 4 | None |
+| `irq_work.rs` | 6 | None, all serial |
 
-共 13 个 guest 模块（含 2 个零用例 fixture）、103 例；x86_64 为 102 例。
-82 例保留 serial，无 user 用例。所有 guest 模块均要求 `cfg(unittest)`。
-`context::test_support::with_nmi_context` 保留主线的安全契约；新增 NMI 分类
-用例在持有普通上下文锁时验证查询绕过该锁。`tests_rcu_entry` 的独立挂载保留
-专用 NMI 和嵌套 IRQ/NMI 的 RCU watching 平衡检查。
+There are 13 guest modules in total (including 2 fixtures with zero test cases) and 103 test cases; x86_64 has 102 test cases.
+82 test cases remain serial, and there are no user test cases. All guest modules require `cfg(unittest)`.
+`context::test_support::with_nmi_context` retains the safety contract of the mainline; the newly added NMI classification
+test case verifies, while holding the ordinary context lock, that the query bypasses that lock. The separate mount of `tests_rcu_entry` retains
+the RCU watching balance checks for dedicated NMI and nested IRQ/NMI.
 
-未处理 IRQ 计数的四例同时保留 host 覆盖：`tests/host/unhandled.rs` 使用
-`#[test]`，`ut-tests/unhandled_unittest.rs` 使用 `#[unittest::def_test]`。
-两份测试体相同，分别验证报告边界、抑制计数和饱和语义，后续修改需同步。
-host 挂载保留模块名 `unhandled_unittest`，条件为 `all(test, not(unittest))`；
-guest 宏调用另有外层 `cfg(unittest)`，独立 host 导入生产源码时无需解析
-`unittest`，两种挂载互斥。未将 host 测试转换为 guest 或引入公共测试 API。
+The four test cases for unhandled IRQ counting also retain host coverage: `tests/host/unhandled.rs` uses
+`#[test]`, and `ut-tests/unhandled_unittest.rs` uses `#[unittest::def_test]`.
+The two test bodies are identical and respectively verify the reporting boundary, suppression counting, and saturation semantics; later changes must be kept in sync.
+The host mount retains the module name `unhandled_unittest`, with the condition `all(test, not(unittest))`;
+the guest macro invocation has an additional outer `cfg(unittest)`, so a standalone host import of the production source does not need to resolve
+`unittest`, and the two mounts are mutually exclusive. The host tests were not converted to guest tests, and no public test API was introduced.
 
 ## Ordinary Flow And Replay
 
@@ -980,7 +980,7 @@ CPUHP instance (including applicable local teardown callbacks) before calling
 `free_percpu_irq`. A callback-return acknowledgement alone does not prohibit
 another startup/enable path from reopening a source afterward.
 
-## 范围
+## Scope
 
 ```text
 arch/kirq/src/
@@ -1034,7 +1034,7 @@ irqchip/backend detail reached through `kirq::MsiBackendIf`, not through
 Driver IRQ integration is owned by the `driver_os_api_xkernel` provider crate, which translates
 `driver_os_api` IRQ resources into `kirq` descriptors and handlers.
 
-## 架构
+## Architecture
 
 The crate root explicitly exports APIs from their owning modules; `manager`
 does not aggregate backend, NMI, lifecycle or deferred exports. `runtime/entry.rs`
@@ -1090,7 +1090,7 @@ CPU trap entry
                     └── generic_handle_nmi(PendingIrq)
 ```
 
-注册/配置路径：
+Registration/configuration paths:
 
 ```text
 try_map/try_register/try_enable/unregister
@@ -1120,7 +1120,7 @@ prepare_percpu_nmi()
     `-- publish current CPU's pointer to the installed owner
 ```
 
-## 调用约束 / 执行上下文
+## Calling Constraints / Execution Context
 
 - Mapping and control operations protect the directory with `IRQ_STATE` and
   the selected Line with its state lock. Registration/free additionally require
@@ -1165,10 +1165,10 @@ prepare_percpu_nmi()
 - `IntrManagerIf::notify_cpu()` 必须满足 publish-before-notify 顺序，IPI/TLB
   shootdown 依赖该契约。
 
-## 中断控制器后端契约
+## Interrupt Controller Backend Contract
 
-`IntrManagerIf` 是 `kirq` 和具体 irqchip driver 的边界。`kirq` 负责 descriptor、
-handler fanout、上下文和 completion ordering；irqchip driver 负责具体控制器行为。
+`IntrManagerIf` is the boundary between `kirq` and the concrete irqchip drivers. `kirq` is responsible for descriptors,
+handler fanout, context and completion ordering; the irqchip driver is responsible for the concrete controller behavior.
 
 ### configure / enable
 
@@ -1232,13 +1232,13 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
 
 ### notify_cpu publish-before-notify
 
-`notify_cpu(id, target)` 必须保证调用者在 Normal memory 中发布的请求状态先于 IPI
-被目标 CPU 观察。x86、GIC 和 RISC-V backend 应在各自实现中提供架构等价的 fence 或
-barrier；调用者不应在每个 IPI call site 重复补 fence。
+`notify_cpu(id, target)` must guarantee that the request state the caller published in Normal memory is observed by the target CPU before the IPI.
+The x86, GIC and RISC-V backends should provide an architecturally equivalent fence or
+barrier in their own implementations; callers should not repeat a fence at every IPI call site.
 
-## 状态机
+## State Machine
 
-### Descriptor / action 生命周期
+### Descriptor / action lifecycle
 
 ```text
 unknown
@@ -1425,7 +1425,7 @@ handler 的 normal IRQ 调用参数是已经解析出的 OS-visible `virq`；sha
 future threaded slot 和 optional name，但本阶段 threaded slot 始终
 不产生调度、唤醒、softirq 或 workerqueue 行为。
 
-`IrqDescRuntimeState` 是 descriptor/action 运行态的唯一 owner。它当前保存：
+`IrqDescRuntimeState` is the sole owner of descriptor/action runtime state. It currently holds:
 
 - `actions`: the private ordinary action chain of stable KBox nodes. Regular registration admits one
   exclusive action; shared registration has no fixed four-action limit.
@@ -1451,23 +1451,23 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
 - `is_msi`：从 descriptor flags 派生的 MSI lifetime marker；
 - `oneshot_mask_pending`：后续 threaded/oneshot 语义预留，本阶段不驱动硬件 mask。
 
-这些字段是 crate-private 运行态，不构成 public ABI。后续 shared IRQ、oneshot mask
-和 threaded IRQ 只能在这个 owner 内扩展，不能绕过 `IrqStateDesc` 在 dispatch、
-MSI free 或 unregister 路径上另建并行状态。
+These fields are crate-private runtime state and do not constitute a public ABI. Later shared IRQ, oneshot mask,
+and threaded IRQ work may only be extended within this owner, and must not bypass `IrqStateDesc` to create parallel state on the dispatch,
+MSI free, or unregister paths.
 
-primary handler 的 public return 仍是 `IrqEvent`。dispatch 内部把它分类为：
+The public return type of the primary handler is still `IrqEvent`. Internally, dispatch classifies it as:
 
-- `NOT_HANDLED` -> `Unhandled`；
-- `HANDLED` -> `Handled { sources: 0 }`；
-- `from_sources(bits)` -> `Handled { sources: bits }`。
+- `NOT_HANDLED` -> `Unhandled`;
+- `HANDLED` -> `Handled { sources: 0 }`;
+- `from_sources(bits)` -> `Handled { sources: bits }`.
 
-内部还保留 future-only `WakeThread { sources }` 分类。当前 public handler 无法返回
-该分类；即使内部测试构造该值，它也只表示未来 threaded IRQ 语义，不会触发 IRQ
-thread wake、softirq 或 workerqueue work。带
-future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch：它不会同步
-运行 primary handler。
+A future-only `WakeThread { sources }` classification is also kept internally. Current public handlers cannot return
+this classification; even if an internal test constructs this value, it only represents future threaded IRQ semantics and does not trigger an IRQ
+thread wake, softirq, or workqueue work. An action with a
+future-only thread slot is not dispatchable in the current non-threaded core: it does not synchronously
+run the primary handler.
 
-### virq 映射
+### virq mapping
 
 - 显式 `virq` 直接使用调用者指定的 OS-visible IRQ number；
 - 带 `domain` 但无 `virq` 的 descriptor 通过 `(domain, hwirq)` 分配动态 virq；
@@ -1633,10 +1633,7 @@ register_irq_lifecycle_hooks()
    -> clear_irq_lifecycle_hooks()
 ```
 
-guard 在 enter 时保存 exit hook 快照，因此处理中途清除 hook 不会破坏本次
-enter/exit 配对。未注册 hook 时，IRQ entry 通过 atomic active bit 直接跳过全局
-hook 锁；active bit 为真时才获取锁复制 hook 快照。lifecycle hook 描述
-trap/preempt-off 生命周期，不等价于 Linux `hardirq_count` 边界。
+The guard saves a snapshot of the exit hook at enter time, so clearing the hooks midway through handling does not break the enter/exit pairing of this IRQ. When no hook is registered, IRQ entry skips the global hook lock directly via an atomic active bit; only when the active bit is set does it acquire the lock to copy the hook snapshot. The lifecycle hooks describe the trap/preempt-off lifecycle and are not equivalent to the Linux `hardirq_count` boundary.
 
 ### IRQ context
 
@@ -1648,26 +1645,18 @@ handle_irq()
    -> deferred executor
 ```
 
-`kirq::context` 在每 CPU state 中维护 hardirq、serving-softirq 和 BH-disabled depth。
-public 查询 API 会使用 `NoPreemptIrqSave` 保护当前 CPU slot 读取，避免普通任务查询
-被本地 IRQ 打断时和 hardirq guard 并发读写同一 per-CPU slot。
+`kirq::context` maintains the hardirq, serving-softirq and BH-disabled depths in per-CPU state.
+The public query APIs use `NoPreemptIrqSave` to protect the read of the current CPU slot, so that when an ordinary task's query is interrupted by a local IRQ, it does not read the same per-CPU slot concurrently with the hardirq guard's writes.
 The hardirq guard and softirq runner IRQ-tail hot paths run with local IRQs already masked and the CPU pinned by the caller, and use `*_irqoff` crate-local helpers. These helpers still create a nested `NoPreemptIrqSave` (or `IrqSave` for snapshots), a near-free nested save/restore on already-masked paths.
 
-上下文诊断语义：
+Context diagnostic semantics:
 
-- hardirq、serving softirq 和 BH-disabled 都是 non-sleepable / interrupt-like。
-- `interrupt_context_level()` 按 hardirq、softirq、BH-disabled、task 的优先级给出
-  粗粒度诊断；BH-disabled 不是 hardirq，但仍不能运行 sleepable 回调。
-- `is_in_interrupt_context()` 是 bottom-half gating predicate，不是 future IRQ-thread
-  predicate。未来 sleepable IRQ-thread context 应是独立执行上下文，不属于 softirq、
-  deferred executor，也不应通过该 predicate 表示。
-- `local_bh_disable()` 在 hardirq 中调用会增加诊断计数并限流 warning；underflow
-  诊断同样计数并限流，避免错误路径造成日志风暴。
+- hardirq, serving softirq and BH-disabled are all non-sleepable / interrupt-like.
+- `interrupt_context_level()` gives a coarse-grained diagnosis by the priority order hardirq, softirq, BH-disabled, task; BH-disabled is not hardirq, but sleepable callbacks still cannot run in it.
+- `is_in_interrupt_context()` is a bottom-half gating predicate, not a future IRQ-thread predicate. A future sleepable IRQ-thread context should be a separate execution context, belonging neither to softirq nor to the deferred executor, and should not be expressed through this predicate.
+- Calling `local_bh_disable()` in hardirq increments a diagnostic counter and rate-limits the warning; underflow diagnostics are likewise counted and rate-limited, to avoid a log storm on error paths.
 
-`local_bh_disable()` 返回的 `LocalBhGuard` 持有 `NoPreempt` 到 drop，因此
-BH-disabled 临界区不会迁移到另一个 CPU。enter/drop 更新 per-CPU depth 时额外短暂
-屏蔽本地 IRQ；outermost drop 只在同一 CPU 且不处于 hardirq/serving-softirq 时尝试
-direct softirq drain。`LocalBhGuard` 不是 `Send`，不能跨线程转移。
+The `LocalBhGuard` returned by `local_bh_disable()` holds `NoPreempt` until drop, so the BH-disabled critical section does not migrate to another CPU. Enter/drop additionally mask local IRQs briefly while updating the per-CPU depth; the outermost drop attempts a direct softirq drain only when on the same CPU and not in hardirq/serving-softirq. `LocalBhGuard` is not `Send` and cannot be transferred across threads.
 
 ### Softirq foundation
 
@@ -1690,35 +1679,34 @@ run_pending_softirqs()
    -> preserve pending and wake current CPU ksoftirqd on either limit
 ```
 
-`bottom_half/softirq.rs` 实现 Linux-like fixed-vector foundation，使用 per-CPU pending bit。
-`ktask` 通过 `SoftirqDaemonIf` 为每个已上线 CPU 提供 `ksoftirqd/N`，daemon
-固定在对应 CPU 上阻塞等待 `kirq` 的 wake source，并在普通任务上下文 drain
-本 CPU pending softirq。当 restart limit 命中，或 task context raise softirq 使当前
-CPU pending mask 从空变为非空而没有 hardirq-exit/BH-enable 直跑机会时，`kirq`
-会唤醒当前 CPU 的 daemon 作为退避执行者。
-如果在 hardirq、active softirq 或 BH-disabled 临界区中 raise softirq，`kirq` 只保留
-pending bit，不直接唤醒 daemon：hardirq exit 或 outermost `local_bh_enable()` 会在同
-CPU 上尝试 direct drain；若 direct drain 超过 restart budget，才转交 `ksoftirqd/N`。
-如果 task context 的 raise 早于该 CPU `ksoftirqd/N` 创建，pending bit 会被保留；
-daemon 启动后的等待循环会先检查 `local_softirq_pending()`，因此不依赖另一次 wake
-才能 drain 早期 pending work。
+`bottom_half/softirq.rs` implements a Linux-like fixed-vector foundation, using per-CPU pending bits.
+Through `SoftirqDaemonIf`, `ktask` provides `ksoftirqd/N` for each online CPU. The daemon is
+pinned to its CPU, blocks waiting on the `kirq` wake source, and drains
+that CPU's pending softirqs in normal task context. When the restart limit is hit, or when a task-context raise of a softirq makes the current
+CPU's pending mask go from empty to non-empty without a chance for a direct run at hardirq-exit/BH-enable, `kirq`
+wakes the current CPU's daemon as the backoff executor.
+If a softirq is raised in a hardirq, an active softirq, or a BH-disabled critical section, `kirq` only keeps the
+pending bit and does not wake the daemon directly: hardirq exit or the outermost `local_bh_enable()` will try a direct drain on the same
+CPU; only if the direct drain exceeds the restart budget is the work handed over to `ksoftirqd/N`.
+If a task-context raise happens before that CPU's `ksoftirqd/N` is created, the pending bit is preserved;
+the daemon's wait loop checks `local_softirq_pending()` first after it starts, so draining early pending work does not depend on another wake.
 
-softirq runner 的入口和出口保持 local IRQ masked，便于 IRQ-tail、BH-enable 和
-daemon drain 共用同一条 `*_irqoff` 内部路径；action loop 内会临时打开 local IRQ，
-再在检查新 pending bit 和 restart budget 前重新关闭。这个语义对齐 Linux
-`__do_softirq()` 的关键行为，同时仍保持 preemption disabled。M3 仍然不是完整 Linux
-softirq/NAPI 等价实现：当前不创建 workerqueue thread、tasklet 或 threaded IRQ
-handler，也没有 NAPI poll budget/repoll 状态机。
+The entry and exit of the softirq runner keep local IRQs masked, so that IRQ-tail, BH-enable and
+daemon drain share the same `*_irqoff` internal path; inside the action loop, local IRQs are temporarily enabled,
+and disabled again before checking new pending bits and the restart budget. This semantics aligns with the key behavior of Linux
+`__do_softirq()` while still keeping preemption disabled. M3 is still not a complete Linux
+softirq/NAPI equivalent: it currently creates no workerqueue thread, tasklet or threaded IRQ
+handler, and has no NAPI poll budget/repoll state machine.
 
-`ksoftirqd/N` 的调度让出由 `ktask` provider 负责：daemon 每次实际运行 softirq 后
-主动回到调度点，避免持续 pending workload 下长时间占用同一 CPU。当前 direct
-drain 在每批 action 完成且仍有 pending 时，通过 `kiface_task_api::TaskPreemptionIf::needs_resched()`
-查询当前任务的调度请求；请求存在或 restart limit 命中时保留 pending 并唤醒 daemon。
-查询不消费请求、不直接调度；任务尚未初始化或未启用 preempt 时返回 false。
-该检查不能打断单个 action，也没有引入 Linux 的 2ms 时间预算。
+Yielding by `ksoftirqd/N` is the responsibility of the `ktask` provider: after each time the daemon actually runs softirqs, it
+voluntarily returns to a scheduling point, avoiding holding the same CPU for a long time under a persistent pending workload. Currently, when a batch of actions completes in direct
+drain and work is still pending, the current task's scheduling request is queried through `kiface_task_api::TaskPreemptionIf::needs_resched()`;
+if a request exists or the restart limit is hit, pending is preserved and the daemon is woken.
+The query neither consumes the request nor schedules directly; it returns false if the task is not yet initialized or preemption is not enabled.
+This check cannot interrupt a single action, and Linux's 2ms time budget is not introduced.
 
-`open_softirq()` 只用于 init-time 注册。本阶段没有 unregister API；runner 在
-`SpinNoIrq` 下复制 action table snapshot，但不会持有注册锁执行 action。
+`open_softirq()` is only for init-time registration. There is no unregister API at this stage; the runner copies an action table snapshot
+under `SpinNoIrq`, but does not hold the registration lock while executing actions.
 
 ### Workqueue Integration
 
@@ -1741,20 +1729,20 @@ checks nor self-wait detection prove the absence of arbitrary dependency cycles.
 
 ### IRQ diagnostics configuration
 
-KIRQ 诊断通过 Kconfig 显式控制，而不是把生产诊断绑定到 `unittest`：
+KIRQ diagnostics are controlled explicitly through Kconfig, rather than binding production diagnostics to `unittest`:
 
-- `KFEAT_IRQ_CONTEXT_DEBUG` 启用执行上下文不变量检查，覆盖
-  `raise_softirq_irqoff()` 的 IRQ-on 误用检测、softirq action 前后 context snapshot
-  比对、以及 hardirq/softirq/BH depth underflow 这类定位手段。该选项在
-  `BUILD_TYPE_DEBUG` 下默认打开，release 默认关闭，避免高频中断路径承担额外 CSR
-  读取和 context snapshot 成本。
-- `KFEAT_IRQ_STAT` 启用 IRQ/softirq 诊断统计，记录 softirq runs、restart limit
-  hits、daemon wake/suppression、context-deferred runs、unhandled vector 和 context
-  debug warning 等计数。高频路径统计必须按 per-CPU counter 采集，需要读取诊断时再
-  聚合，避免全局 atomic cacheline 在多核中断压力下成为新的瓶颈。
+- `KFEAT_IRQ_CONTEXT_DEBUG` enables execution-context invariant checks, covering
+  detection of IRQ-on misuse of `raise_softirq_irqoff()`, comparison of context snapshots before and after a softirq action,
+  and diagnostics such as hardirq/softirq/BH depth underflow. This option
+  is on by default under `BUILD_TYPE_DEBUG` and off by default in release, so that the high-frequency interrupt path does not bear the extra CSR
+  reads and context snapshot cost.
+- `KFEAT_IRQ_STAT` enables IRQ/softirq diagnostic statistics, recording counters such as softirq runs, restart limit
+  hits, daemon wake/suppression, context-deferred runs, unhandled vectors and context
+  debug warnings. Statistics on high-frequency paths must be collected in per-CPU counters and aggregated only when the diagnostics are read,
+  so that a global atomic cacheline does not become a new bottleneck under multi-core interrupt pressure.
 
-`unittest` 仍可启用测试 helper 和诊断读取入口，但它只是验证机制，不是生产诊断
-能力的唯一开关。
+`unittest` can still enable test helpers and diagnostic read entry points, but it is only a validation mechanism, not the sole switch for production diagnostic
+capability.
 
 ### Deferred executor
 
@@ -1783,7 +1771,7 @@ Workqueues use explicit submission through `kworkng::DefaultQueue::Normal`.
 Tasklets and IRQ threads must use their corresponding execution infrastructure,
 not install a competing implicit deferred-executor owner.
 
-## 算法流程
+## Algorithm Flow
 
 ### Unclaimed action fanout diagnostics
 
@@ -2130,8 +2118,8 @@ the directory before controller application removes that particular global
 critical section. Normal IRQ lookup separately uses RCU and does not take
 the registry lock; these control-plane serialization limits do not apply to it.
 
-`synchronize_irq()` 不 mask line，持续 IRQ 仍可能让等待条件反复变为非零；teardown
-路径应使用 `disable_irq()` 或 `free_irq()`。
+`synchronize_irq()` does not mask the line; a persistent IRQ may still cause the wait condition to repeatedly become non-zero, so teardown
+paths should use `disable_irq()` or `free_irq()`.
 
 ### normal IRQ dispatch
 
@@ -2216,7 +2204,7 @@ logical callback identity distinct from the controller hwirq, original completio
 and refusal to withdraw a locally published owner. They do not prove physical
 NMI delivery, source quiescence or remote shutdown completion.
 
-## 并发模型
+## Concurrency Model
 
 ### Ordinary Action Lifetime Proof
 
@@ -2379,15 +2367,15 @@ graph and default unit tests.
   函数指针。无 hook 的 IRQ hot path 通过 atomic active bit 跳过全局锁；hook 本体
   不在该锁内执行。
 - `IRQ_CONTEXT_STATE` is per-CPU state accessed through `NoPreemptIrqSave` (or `IrqSave` for snapshots). Public queries and the hardirq/softirq IRQ-tail `*_irqoff` helpers all create this guard; on paths where the caller already masked local IRQs and pinned the CPU, the nested save/restore is near-free.
-- `SOFTIRQ_PENDING` 是 per-CPU atomic bit mask。`raise_softirq*()` 用
-  `fetch_or(Release)` 发布 pending bit，runner 用 `swap(0, Acquire)` 获取 batch，
-  避免 handler 运行期间重新 raise 的 bit 被清 pending 覆盖。
-- `SOFTIRQ_ACTIONS` 使用 `SpinNoIrq` 保护 init-time 注册和 runner snapshot；action
-  在锁外执行。
-- `SoftirqDaemonIf` 是 `kirq -> scheduler` 的单向 capability：`kirq` 只请求唤醒
-  当前 CPU 的 daemon，不创建任务、不阻塞、不依赖 `ktask`。provider 必须可从
-  IRQ-disabled context 调用。`ktask` 在每个 CPU local IRQ 打开前创建并 pin
-  `ksoftirqd/N`，所以 daemon drain 的是同一 CPU 的 per-CPU pending mask。
+- `SOFTIRQ_PENDING` is a per-CPU atomic bit mask. `raise_softirq*()` publishes the pending bit with
+  `fetch_or(Release)`, and the runner takes the batch with `swap(0, Acquire)`,
+  so that a bit re-raised while a handler is running is not overwritten by clearing pending.
+- `SOFTIRQ_ACTIONS` uses `SpinNoIrq` to protect init-time registration and the runner snapshot; actions
+  are executed outside the lock.
+- `SoftirqDaemonIf` is a one-way `kirq -> scheduler` capability: `kirq` only requests a wakeup of the
+  current CPU's daemon; it does not create tasks, does not block, and does not depend on `ktask`. The provider must be callable from
+  IRQ-disabled context. `ktask` creates and pins
+  `ksoftirqd/N` before local IRQs are enabled on each CPU, so what the daemon drains is the per-CPU pending mask of the same CPU.
 - `kworkng` owns service publication; `kworkerpool_ng` uses ktask task/wait/timer
   services and kirq's BH execution context. IRQ-safe submission does not create
   tasks or block. No scheduler execution-accounting provider is needed.
@@ -2409,29 +2397,29 @@ graph and default unit tests.
   must separately exclude CPU migration through completion; the marker does
   not pin execution or validate a claim.
 
-## 设计决策
+## Design Decisions
 
-### 为什么拆成独立 crate
+### Why it is split into a separate crate
 
 IRQ descriptors, state, dispatch, NMI actions and lifecycle hooks form an
 ownership boundary shared by architectures, platforms and drivers. Keeping
 them in `khal` would couple softirq, workerqueue and threaded IRQ semantics
 to HAL trap-entry details.
 
-### 为什么 `khal::irq` 仍然存在
+### Why `khal::irq` still exists
 
-`khal::irq` 现在只负责 trap handler registration 和进入 `kirq` 前的 HAL 执行约束。
-它不再 re-export generic `kirq` API，也不再暴露 x86 MSI-X/APIC helper；驱动、
-运行时、IPI、timer 和 irqchip 后端应直接依赖 `kirq`。
+`khal::irq` is now only responsible for trap handler registration and the HAL execution constraints before entering `kirq`.
+It no longer re-exports the generic `kirq` API, and no longer exposes the x86 MSI-X/APIC helpers; drivers,
+the runtime, IPI, timer and irqchip backends should depend on `kirq` directly.
 
-### 为什么 devres 只适配到 `kirq`
+### Why devres is adapted only to `kirq`
 
 `driver_os_api` 是驱动框架的 OS-neutral resource model。它描述驱动需要的 IRQ 资源，
 但不拥有内核中断处理语义。x-kernel 的 provider 位于 `driver_os_api_xkernel`（`drivers/adapters/xkernel/provider`），
 负责把 `driver_os_api` 的 trigger/controller/domain/event/handler 转换为 `kirq`
 类型。这样驱动框架获得内核 IRQ 能力，同时 `kirq` 不反向依赖驱动框架。
 
-### 为什么 lifecycle hook 和 deferred executor 都采用单 owner
+### Why lifecycle hook and deferred executor both use a single owner
 
 Lifecycle hooks provide hardirq enter/exit notification. The deferred executor
 is instead softirq's internal hardirq-exit handoff, not a public extension-owner
@@ -2447,10 +2435,10 @@ and removes unrelated global subscription bookkeeping from IRQ processing.
 Softirq and IRQ-thread semantics belong to `kirq`; sleepable workqueues belong
 to `kworkng`.
 
-NetRx direct progress 是 workerqueue foundation 之后的独立里程碑。当前 `NetRx`
-softirq 只能作为网络 fallback worker 的 wake source；后续里程碑再决定由 softirq
-投递 `system_wq` work，或由一条已审计的 nonblocking ingress path 直接按 budget 推进
-RX。
+NetRx direct progress is a separate milestone after the workerqueue foundation. For now the `NetRx`
+softirq can only serve as a wake source for the network fallback worker; a later milestone will decide whether the softirq
+delivers `system_wq` work, or an audited nonblocking ingress path advances
+RX directly according to a budget.
 
 ### Why NMI Reads Avoid Mutable IRQ State
 
@@ -2462,7 +2450,7 @@ handler and claim completion; withdrawal refuses any remaining published slot.
 Management from NMI is rejected before allocation or locks. Unrelated NMI
 sources can continue during task-context retirement.
 
-### 为什么 normal IRQ claim 使用 `PendingIrq`
+### Why Normal IRQ Claim Uses `PendingIrq`
 
 Hardware claiming and logical resolution are separate steps. `PendingIrq`
 retains the raw source and completion cookie. LAPIC timer and LoongArch EXTIOI
@@ -2470,7 +2458,7 @@ claims use explicit logical identities; GIC/PLIC/IO-APIC/MSI Domain claims
 retain the mapped Line directly. A lookup miss still completes the original
 hardware claim, without inventing an identity fallback for strict Domains.
 
-## Drop / 资源释放
+## Drop / Resource Release
 
 - `PendingIrq::Drop` consumes outstanding host completion on an early return;
   it does not repeat acknowledgement or completion already consumed by the flow.

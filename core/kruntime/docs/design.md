@@ -356,12 +356,12 @@ core/kruntime/
 ## Architecture
 
 ```
-kernel-boot (汇编 / MMU / BootInfo)
+kernel-boot (assembly / MMU / BootInfo)
         │
         │  PrimaryKernelEntry::enter(boot_info_ptr)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  kruntime::rust_main (主核, boot task)                         │
+│  kruntime::rust_main (primary CPU, boot task)                 │
 │    khal / memspace / kalloc / klogger / backtrace             │
 │    init_scheduler / init_interrupt                            │
 │    create PID-less late-init bootstrap thread                 │
@@ -382,12 +382,12 @@ kernel-boot (汇编 / MMU / BootInfo)
         │  boot_ap → SecondaryKernelEntry::enter(logical_cpu_id)
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  kruntime::rust_main_secondary (从核)                          │
-│    percpu / trap / memspace 从核 / 调度器从核 / IPI            │
+│  kruntime::rust_main_secondary (secondary CPU)                │
+│    percpu / trap / memspace secondary / scheduler secondary / IPI │
 │    wait for primary -> local services -> publish -> idle      │
 └───────────────────────────────────────────────────────────────┘
 
-侧向接线（链接期，非启动顺序）：
+Lateral wiring (link time, not boot order):
   lib.rs            ──provide──►  kiface_logging_api::LogSinkIf / LogContextIf
   lib.rs            ──provide──►  kernel_boot::PrimaryKernelEntry
   mp.rs             ──provide──►  kernel_boot::SecondaryKernelEntry
@@ -410,10 +410,10 @@ BootInfo*
     → firmware::init / percpu::init_primary / init_trap
     → mem::init
     → init_allocator (resident physical-page metadata, page inventory, then byte heap)
-    → register_boot_console_runtime_region (可选 MMIO UART)
+    → register_boot_console_runtime_region (optional MMIO UART)
     → memspace::init_memory_management
     → early_driver_init
-    → klogger + backtrace (链接符号 _stext/_etext)
+    → klogger + backtrace (linker symbols _stext/_etext)
         (Log filtering: `init_klogger(configured_log_level())` fixes the build
          level — the console default and the floor of the log filter, which a
          runtime request may raise but never lower. `resolve_boot_log_filter()`
@@ -452,14 +452,14 @@ late-init thread (Internal, PID-less):
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
     → finish_allocator_init, log_memory_regions
-    → [vsock_tipc_bridge] start_vsock_bridge (依赖跨 CPU 调度，必须在屏障后)
+    → [vsock_tipc_bridge] start_vsock_bridge (depends on cross-CPU scheduling, so it must come after the barrier)
     → SystemInitEntry::enter()
-        (entry; spawn 出全新 PID 1 用户任务 init，返回)
-    → late-init thread exits (task_entry 自动调 ktask::exit)
+        (entry; spawns a brand-new PID 1 user task init, then returns)
+    → late-init thread exits (task_entry automatically calls ktask::exit)
 
-init (PID 1, 全新 spawn 的用户任务):
-    → 调度器 switch-in 时自动激活用户页表 (switch_page_table_root)
-    → run_user_thread_loop → 进入用户态
+init (PID 1, a newly spawned user task):
+    → the scheduler automatically activates the user page table on switch-in (switch_page_table_root)
+    → run_user_thread_loop → enter user mode
 ```
 
 ### Boot RAM handoff
@@ -479,9 +479,9 @@ The boot/current task and idle task created by `ktask::init_scheduler()` both ha
 This ordering fixes the early PID semantics of the root namespace as:
 
 ```text
-PID 0   = boot/idle/swapper 类内部任务（不经普通 allocator）
-PID 1   = init 用户进程（late-init 线程 spawn 的全新用户任务）
-PID >=2 = 后续 fork 出的用户进程或显式 Linux-visible task；普通内核 worker 不占号
+PID 0   = internal tasks of the boot/idle/swapper kind (do not go through the ordinary allocator)
+PID 1   = the init user process (a brand-new user task spawned by the late-init thread)
+PID >=2 = user processes forked later or explicit Linux-visible tasks; ordinary kernel workers do not consume a PID
 ```
 
 Init no longer "transforms in place": the late-init thread constructs a brand-new `User`-identity task through `SystemInitEntry::enter()` → `posix-process::spawn_init_process`; its runtime is made ready once at `new_user` construction (`UserRuntimeSlot::ready`), published and activated via `publish_user_task().commit()`, and the page table is written automatically by the scheduler at first switch-in through `switch_page_table_root`. There is no "after-the-fact installation" mechanism such as `install_user_runtime`, an empty-slot state machine, or `activate_current_user_page_table`.
@@ -530,7 +530,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     → percpu::init_secondary, init_trap
     → memspace::init_memory_management_secondary
     → prepare_local_interrupts, init_scheduler_secondary
-    → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
+    → SCHED_READY_CPUS += 1  (for start_secondary_cpus to wait on; RQ is registered, cross-CPU spawn is safe)
     → [ipi] kipi::init
     -> wait until INITED_CPUS != 0 (primary services prepared)
     -> activate_local_interrupts (before notifications can reprogram the timer)
@@ -541,7 +541,7 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     -> [pmu] enable_irq
     -> INITED_CPUS += 1 (publish local service completion)
     -> release startup preemption guard
-    → run_idle()  (永不返回)
+    → run_idle()  (never returns)
 ```
 
 `start_secondary_cpus` waits for each AP's `SCHED_READY_CPUS` publication after
@@ -549,7 +549,7 @@ scheduler initialization before starting the next AP. This permits cross-CPU
 task placement but does not permit assuming that local services are ready.
 The primary subsequently completes `init_cpu_services` before entering drivers.
 
-## `.init_array` 与 `register_init`
+## `.init_array` and `register_init`
 
 `init_setup.rs` maintains the linker section `.init_array`:
 

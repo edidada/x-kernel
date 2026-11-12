@@ -1,4 +1,4 @@
-# kalloc — 安全与可靠性分析
+# kalloc — Security and Reliability Analysis
 
 ## Test Probe Boundary
 
@@ -13,18 +13,18 @@ change allocator metadata or expose mutable references. The guard prevents task
 migration and ordinary local IRQ attribution during measurement; NMI attribution
 and remote allocation are outside the contract. No production API is added.
 
-## 概述
+## Overview
 
-`kalloc` 位于内核内存 ownership 的基础层。它把未经类型化的虚拟地址 region 转换为
-Rust heap object、连续页和 DMA32 页，并通过 raw pointer、地址算术、底层 allocator
-contract 和 per-CPU mutable state 维护这些资源。这里的不变量一旦破坏，影响通常不是
-局部 allocation 失败，而是 freelist 损坏、页重复分配、越界 DMA 或内核未定义行为。
+`kalloc` sits at the foundational layer of kernel memory ownership. It converts untyped virtual-address regions into
+Rust heap objects, contiguous pages, and DMA32 pages, and maintains these resources through raw pointers, address arithmetic, low-level allocator
+contracts, and per-CPU mutable state. Once the invariants here are broken, the impact is usually not
+a local allocation failure but freelist corruption, double allocation of pages, out-of-bounds DMA, or kernel undefined behavior.
 
 This document covers the entire crate: the central byte/page allocator,
 page-level PCP, slab object caches, `PageRef`, usage accounting and tracking.
 The per-CPU slab cache is one of these safety boundaries.
 
-## 信任模型
+## Trust Model
 
 ```text
 boot memory map / kernel callers / C components / DMA users
@@ -43,84 +43,82 @@ boot memory map / kernel callers / C components / DMA users
                allocator-owned kernel memory
 ```
 
-`kalloc` 信任以下条件：
+`kalloc` trusts the following conditions:
 
-1. 启动流程传入的 `[va, va + size)` 已映射、可写、独占，包含至少一个完整 4 KiB 页，
-   且不同 region 不重叠；`va` 按页对齐，`p2v` / `v2p` 对这些地址有效。
-2. deallocation caller 使用原 allocation 的起始地址、layout 或页数，只释放一次，并
-   保持相同的 `UsageKind`。
-3. `alloc-engine` 返回的地址满足请求的大小、对齐、非空性和唯一 ownership，并接受
-   与 allocation 匹配的 deallocation。
-4. 当前 CPU 的 per-CPU storage 已安装；普通中断和 preemption 约束按 API 要求执行；
-   NMI 不进入 allocator。
-5. DMA caller 只把返回的 DMA range 交给获准访问该区域的设备，并由上层完成页属性、
-   share/unshare 和设备同步。
+1. The `[va, va + size)` passed in by the boot flow is mapped, writable, and exclusively owned, contains at least one complete 4 KiB page,
+   and does not overlap with other regions; `va` is page-aligned, and `p2v` / `v2p` are valid for these addresses.
+2. The deallocation caller uses the starting address, layout, or page count of the original allocation, frees it only once, and
+   keeps the same `UsageKind`.
+3. The addresses returned by `alloc-engine` satisfy the requested size, alignment, non-nullness, and unique ownership, and accept
+   the deallocation that matches the allocation.
+4. The per-CPU storage of the current CPU is installed; ordinary interrupt and preemption constraints are enforced as the API requires;
+   NMIs do not enter the allocator.
+5. The DMA caller hands the returned DMA range only to devices permitted to access that region, and the upper layer handles page attributes,
+   share/unshare, and device synchronization.
 
-`kalloc` 不验证任意地址是否真正属于某个 allocator，也不保存足以在 production 中
-检测所有 wrong-layout free、double free 或跨 allocator free 的逐 allocation metadata。
+`kalloc` does not verify whether an arbitrary address actually belongs to some allocator, and does not keep per-allocation metadata sufficient to
+detect all wrong-layout frees, double frees, or cross-allocator frees in production.
 
-## 外部边界 / 攻击面
+## External Boundaries / Attack Surface
 
-| 边界 | 输入 | 当前处理 | 剩余风险 |
+| Boundary | Input | Current handling | Residual risk |
 |------|------|----------|----------|
-| 启动内存 | `kruntime` 从 firmware/boot memory 描述中筛选的 free region，经 `p2v` 传入 | 底层 buddy 拒绝未页对齐、过小、超出 region 数上限或与既有 region 重叠的输入；首个 region 建立 page/byte allocator | 无法验证地址是否真实映射、可写、属于 free RAM 或与 allocator 外部 owner 冲突；端点算术仍依赖可信范围 |
-| Rust 内核 caller | `Layout`、raw allocation pointer、页数、alignment、固定地址、`UsageKind` | allocation 返回 `Result`；部分大小计算和汇总 usage subtraction 使用 checked arithmetic | safe 外观的部分 deallocation API 仍依赖 caller contract，错误参数可能导致 UB |
-| DMA / 设备 | 连续页数量、alignment、虚实地址转换结果 | allocation 后检查整个物理区间低于 4 GiB，不满足则归还 | 没有 DMA32 zone；错误 `v2p`、区间溢出或设备越权仍可导致错误 DMA |
-| Tracking/观测 | enable/disable、generation range、visitor | feature-gated、全局锁和递归 guard | backtrace/地址可能泄露内核布局；visitor 重入 tracking API 可能死锁或 panic |
+| Boot memory | Free regions that `kruntime` filters from the firmware/boot memory description and passes in via `p2v` | The underlying buddy rejects input that is not page-aligned, is too small, exceeds the region-count limit, or overlaps an existing region; the first region establishes the page/byte allocator | Cannot verify whether the address is actually mapped, writable, belongs to free RAM, or conflicts with an owner outside the allocator; endpoint arithmetic still relies on a trusted range |
+| Rust kernel callers | `Layout`, raw allocation pointer, page count, alignment, fixed address, `UsageKind` | Allocation returns `Result`; some size computations and summary usage subtraction use checked arithmetic | Some deallocation APIs that look safe still depend on the caller contract, and wrong arguments may cause UB |
+| DMA / devices | Contiguous page count, alignment, virtual-to-physical address translation result | After allocation, checks that the entire physical range is below 4 GiB, and returns it if not | There is no DMA32 zone; a wrong `v2p`, range overflow, or device overreach can still cause erroneous DMA |
+| Tracking/observability | enable/disable, generation range, visitor | Feature-gated, global lock, and recursion guard | Backtraces/addresses may leak the kernel layout; a visitor re-entering the tracking API may deadlock or panic |
 
-本 crate 不直接解析用户地址，不直接访问 MMIO/PIO，也不直接处理文件系统、网络或 IPC
-payload。用户 workload 可以间接驱动 allocation 压力；可选 tracking 信息由上层
-`/dev/memtrack` 等接口暴露时，上层必须另行建立权限边界。
+This crate does not directly parse user addresses, does not directly access MMIO/PIO, and does not directly handle file system, network, or IPC
+payloads. User workloads can indirectly drive allocation pressure; when optional tracking information is exposed by upper-layer
+interfaces such as `/dev/memtrack`, the upper layer must separately establish a permission boundary.
 
-## unsafe 代码清单
+## Unsafe Code Inventory
 
-### U-01：Rust `GlobalAlloc` 与 raw allocation pointer
+### U-01: Rust `GlobalAlloc` and raw allocation pointers
 
-位置：`src/lib.rs` 中 `unsafe impl GlobalAlloc for GlobalAllocator`、`large_alloc()`。
+Location: `unsafe impl GlobalAlloc for GlobalAllocator` and `large_alloc()` in `src/lib.rs`.
 
-主要操作：
+Main operations:
 
-- 把 page allocator 返回的非零整数地址构造成 `NonNull<u8>`；
-- 实现 `GlobalAlloc::alloc` / `dealloc` 的 raw pointer ABI；
-- 将 allocation failure 转交 `handle_alloc_error()`。
+- Construct a `NonNull<u8>` from the non-zero integer address returned by the page allocator;
+- Implement the raw pointer ABI of `GlobalAlloc::alloc` / `dealloc`;
+- Hand allocation failure over to `handle_alloc_error()`.
 
-依赖不变量：底层 allocator 返回有效、对齐、独占且覆盖完整 layout 的地址；dealloc
-收到的 pointer/layout 必须与原 allocation 匹配。内部 `balloc` / `palloc` 锁和
-per-CPU guard 保护 metadata 并发，但不能修复 caller 伪造的 pointer。
+Relied-on invariants: the underlying allocator returns an address that is valid, aligned, exclusive, and covers the complete layout; the pointer/layout
+received by dealloc must match the original allocation. The internal `balloc` / `palloc` locks and the
+per-CPU guard protect metadata against concurrency, but cannot repair a pointer forged by the caller.
 
-### U-02：per-CPU slab intrusive list
+### U-02: per-CPU slab intrusive list
 
-位置：`src/slab_cache.rs` 中 `ObjectCache::pop()`、`push_unchecked()`、`try_push()`。
+Location: `ObjectCache::pop()`, `push_unchecked()`, and `try_push()` in `src/slab_cache.rs`.
 
-主要操作：把 cached object 的起始地址 cast 为 `Option<NonNull<u8>>`，从首 word
-读取或写入 next link。
+Main operations: cast the starting address of a cached object to `Option<NonNull<u8>>`, and read or write the next link from the first word.
 
-依赖不变量：
+Relied-on invariants:
 
-- object 是对应 canonical class layout 的 live、可写、独占 allocation；
-- caller 已结束所有访问，且 object 不在其他 cache/freelist；
-- object size/alignment 足以容纳 link；编译期断言验证 link 不超过最小 8 字节 class；
-- list mutation 期间 local IRQ 保持关闭，远程 CPU 不修改本 CPU list。
+- The object is a live, writable, exclusive allocation of the corresponding canonical class layout;
+- The caller has finished all accesses, and the object is not in any other cache/freelist;
+- The object size/alignment is sufficient to hold the link; a compile-time assertion verifies that the link does not exceed the smallest 8-byte class;
+- Local IRQs stay disabled during list mutation, and remote CPUs do not modify this CPU's list.
 
-crate-private `AllocLocalOwner` 持有 `NoPreemptIrqSave` 并作为所有 PCP/slab cache 操作的必需
-参数。cache 模块只在 owner 的可变借用范围内构造临时引用，不把引用返回给调用者；
-因此 raw per-CPU 可变访问集中在两个 owner-backed helper。该协议不支持 NMI 进入
-allocator，NMI 路径必须使用预分配存储。
+The crate-private `AllocLocalOwner` holds a `NoPreemptIrqSave` and serves as a required
+parameter of all PCP/slab cache operations. The cache module constructs temporary references only within the owner's mutable borrow scope and does not return references to callers;
+therefore raw per-CPU mutable access is concentrated in two owner-backed helpers. This protocol does not support NMIs entering the
+allocator; NMI paths must use preallocated storage.
 
-`GlobalAllocator::alloc_from_percpu_slab()` 和 `dealloc()` 建立 IRQ guard 并按
-`SizeClass` 路由；`with_object_cache!` 保持 enum class 与 `ObjectCache<N>` 一致。
+`GlobalAllocator::alloc_from_percpu_slab()` and `dealloc()` establish an IRQ guard and route by
+`SizeClass`; `with_object_cache!` keeps the enum class consistent with `ObjectCache<N>`.
 
-### U-03：slab refill/drain ownership
+### U-03: slab refill/drain ownership
 
-位置：`src/slab_cache.rs` 中 `ObjectCache::drain()`、`PerCpuSlabCache::{try_free,drain}`
-和 crate-private current-CPU cache API。
+Location: `ObjectCache::drain()`, `PerCpuSlabCache::{try_free,drain}`
+in `src/slab_cache.rs`, and the crate-private current-CPU cache API.
 
-主要操作：在 per-CPU cache、caller 和中央 `ByteAllocator` 之间转移 raw object，并以
-canonical layout 调用中央 deallocation。
+Main operations: transfer raw objects among the per-CPU cache, the caller, and the central `ByteAllocator`, and call the central deallocation with the
+canonical layout.
 
-依赖不变量：中央 allocator lock 已由 caller 持有；所有 cached object 最初由同一中央
-allocator 使用相同 class layout 分配；current-CPU mutable reference 不发生同 CPU
-重入。违反这些条件可能把对象放进错误 freelist 或制造 mutable alias。
+Relied-on invariants: the central allocator lock is already held by the caller; all cached objects were originally allocated by the same central
+allocator with the same class layout; the current-CPU mutable reference is not re-entered on the same CPU. Violating these conditions may put an object into the wrong freelist or create a mutable alias.
 
 ### U-04: Fresh exact zeroing and reference-range transfer
 
@@ -136,17 +134,17 @@ unique consumption, initialization, access exclusivity or external retirement.
 A shared PageRef cannot grant an exclusive content reference. Single-page PA
 adapters may omit count only under their explicit length-one allocation contract.
 
-### U-05：per-CPU usage shared references
+### U-05: per-CPU usage shared references
 
-位置：`src/lib.rs` 中 `with_current_usage_counters()` 和 `usage_snapshot()`。
+Location: `with_current_usage_counters()` and `usage_snapshot()` in `src/lib.rs`.
 
 Main operations: obtain a shared reference to the per-CPU usage slot through `kcpu_slot::area()` and `PERCPU_USAGE_COUNTERS.shared_at()`, and access its atomic counters from the allocation/free hot paths or the cross-CPU aggregation path.
 
 Relied-on invariants: while the current-CPU area is resolved, `NoPreempt` pins the executing CPU; an unpublished area is skipped (early-boot accounting is dropped, and `usage_snapshot()` skips it) rather than assumed initialized; `usage_snapshot()` iterates CPU indexes below `kbuild_config::NR_CPUS`; areas are published monotonically and never unpublished; all concurrent access goes through atomic fields and shared references, and the runtime does not concurrently reset per-CPU areas.
 
-## 内存安全不变量
+## Memory Safety Invariants
 
-以下条件必须始终成立：
+The following conditions must always hold:
 
 1. 每个加入 allocator 的 region 都有页对齐 base，覆盖至少一个已映射、可写、独占的
    完整 4 KiB 页，且其实际纳入部分与既有 region 不重叠；非整页尾部不被管理。
@@ -170,34 +168,34 @@ Relied-on invariants: while the current-CPU area is resolved, `NoPreempt` pins t
 11. usage/tracking metadata 只是诊断信息，不得用来替代 allocator provenance 或
     ownership 判断。
 
-## 线程安全
+## Thread Safety
 
-| 共享状态 | 同步条件 | 不能覆盖的情况 |
+| Shared state | Synchronization condition | Cases not covered |
 |----------|----------|----------------|
-| `DefaultByteAllocator` | `balloc: SpinNoIrq<_>` | NMI 重入、错误 raw pointer/layout |
-| `BuddyPageAllocator` | `palloc: SpinNoIrq<_>` | NMI 重入、错误 region/page contract |
-| PCP | local IRQ off + current-CPU storage | NMI、CPU offline/remote inspection |
-| slab object cache | local IRQ off + current-CPU storage | NMI、CPU offline/remote inspection |
-| ready flags | Release store / Acquire load | 并发重复初始化的高层协议错误 |
-| 各类 usage | per-CPU cumulative atomics；free Release / snapshot Acquire | 跨 CPU/跨种类线性化快照、allocator metadata publication、即时 wrong-kind free 检测 |
-| tracking map | `SpinNoIrq<GlobalState>` + per-CPU recursion guard | visitor 对 tracking state 的递归获取 |
+| `DefaultByteAllocator` | `balloc: SpinNoIrq<_>` | NMI reentrancy, incorrect raw pointer/layout |
+| `BuddyPageAllocator` | `palloc: SpinNoIrq<_>` | NMI reentrancy, incorrect region/page contract |
+| PCP | local IRQ off + current-CPU storage | NMI, CPU offline/remote inspection |
+| slab object cache | local IRQ off + current-CPU storage | NMI, CPU offline/remote inspection |
+| ready flags | Release store / Acquire load | High-level protocol errors from concurrent duplicate initialization |
+| Usage of each kind | per-CPU cumulative atomics; free Release / snapshot Acquire | Cross-CPU/cross-kind linearizable snapshots, allocator metadata publication, immediate wrong-kind free detection |
+| tracking map | `SpinNoIrq<GlobalState>` + per-CPU recursion guard | Recursive acquisition of tracking state by a visitor |
 
-tracking recursion guard 使用 per-CPU `AtomicBool::swap`，并在读取标记前获取
-`NoPreemptIrqSave`。RAII 析构保证正常返回及 unwind 路径都清除原 CPU 的标记，避免
-旧的普通 bool 在迁移或提前退出后留在错误 CPU。代价是 tracking callback、backtrace
-和 tracking 锁期间均保持 IRQ/preemption disabled；这是 feature-gated 诊断成本，
-tracking 数据不可用于正常运行时延迟基线。
+The tracking recursion guard uses a per-CPU `AtomicBool::swap` and acquires
+`NoPreemptIrqSave` before reading the flag. RAII destruction guarantees that both the normal return and unwind paths clear the flag of the original CPU, preventing
+an old plain bool from being left on the wrong CPU after migration or early exit. The cost is that IRQ/preemption stay disabled during the tracking callback, backtrace,
+and tracking lock; this is a feature-gated diagnostic cost, and
+tracking data must not be used as a normal runtime latency baseline.
 
-既定嵌套锁顺序是 tracking state（启用时）→ `balloc` → `palloc`。byte heap 扩容是
-`balloc -> palloc`；其他路径不得持有 `palloc` 再获取 `balloc`。usage accounting 不增加
-锁嵌套。普通 IRQ 通过 `SpinNoIrq` 或显式 `IrqSave` 排除；NMI 不在支持范围。
+The established nested lock order is tracking state (when enabled) → `balloc` → `palloc`. Byte heap growth is
+`balloc -> palloc`; no other path may hold `palloc` and then acquire `balloc`. Usage accounting adds no
+lock nesting. Ordinary IRQs are excluded through `SpinNoIrq` or an explicit `IrqSave`; NMI is not supported.
 
-allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完成状态，不把多个
-并发 `global_init()` / `add_memory()` 调用变成安全的 region 初始化协议。
+Allocator initialization is completed serially by the boot CPU. The ready atomics are used to publish the completed state; they do not turn multiple
+concurrent `global_init()` / `add_memory()` calls into a safe region initialization protocol.
 
-## 威胁分析
+## Threat Analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat description | Impact level | Trigger condition | Mitigation |
 |------|----------|----------|----------|----------|
 | T-01 | 无效、重叠或保留内存 region 被加入 allocator | 高 | boot memory 分类、`p2v` 或 caller 参数错误 | `kruntime` 只传递标记为 `FREE` 的 region；底层 buddy 检查页对齐、最小大小和内部 region 重叠。映射有效性、外部 ownership 和端点范围仍由启动边界保证 |
 | T-02 | Wrong layout, page count, double free or cross-allocator free corrupts a freelist | High | A kernel caller violates the allocation/deallocation pairing | API rustdoc and RAII `PageRef` constrain normal paths; aggregate usage underflow detects some accounting errors. Immediate, complete provenance validation is absent, so the residual risk remains high. |
@@ -211,9 +209,9 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 | T-10 | 同时选择多个 byte allocator feature，实际实现与配置认知不一致 | 低 | 非 Kconfig 构建错误启用多个 feature | 正常构建由 Kconfig 选择一种；未选择会编译失败，同时选择目前依赖 `cfg_if!` 分支顺序，需由构建审计保证 |
 | T-11 | 把非线性化 usage/central stats 用于安全或 reclaim 决策 | 低 | caller 把诊断快照误当精确 ownership | API 将其定位为统计；文档区分 caller-live、byte central 和 page central 视图，未提供强一致保证 |
 
-## 故障模式与影响分析（FMEA）
+## Failure Mode and Effects Analysis (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure mode | Failure cause | Local effect | System effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | allocator 在 page region 就绪前被调用 | 启动顺序错误或无可用 `FREE` region | debug assertion、allocation failure 或访问未初始化 allocator | 早期启动失败 | 1 | `kruntime` 在普通内核服务前初始化；页表路径通过 `is_page_allocator_ready()` 断言 |
 | F-02 | byte heap 或 page buddy 无法满足请求 | 内存耗尽、碎片化或 cache residency | 显式 API 返回 `AllocError` | Rust `GlobalAlloc` 路径记录 OOM 后进入 `handle_alloc_error`，通常终止当前内核运行 | 2 | byte heap 减小扩容请求重试；PCP/slab 允许 partial refill；显式 API 向上返回错误 |
@@ -226,31 +224,31 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 | F-09 | tracking visitor 重入不兼容 API | visitor 调用 `current_generation()` 等再次获取 `STATE` | 自旋死锁或 `None.unwrap()` panic | 诊断接口挂起，可能影响系统 | 2 | allocation recursion 由 per-CPU flag 跳过；visitor 必须短小且不得递归进入 tracking state |
 | F-10 | Invalid PageRef raw restoration | Forged, duplicated or stale transfer | Consumes a hold the caller does not own | Premature free or memory corruption | 1 | Unsafe API requires the exact outstanding transfer from the same incarnation; safe lookup cannot grant ownership |
 
-## 故障管理
+## Fault Management
 
-- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_pages,alloc_pages_at,add_memory}` 使用
-  `AllocResult` 报告 `NoMemory`、`InvalidInput` 等错误。
-- Rust `GlobalAlloc::alloc` 不能把普通失败静默传给大多数 Rust allocation；它记录
-  layout 和中央 heap 状态后调用 `handle_alloc_error()`。
-- `global_init()`、`init_page_allocator()` 和部分内部不变量使用 assert/expect，启动或
-  allocator metadata 错误按 fail-fast 处理；内核不尝试在此类错误后继续运行。
-- PCP 和 slab refill 接受 partial progress，避免因为未达到 batch 目标而丢弃已经取得的
-  block/object。
-- DMA32 检查失败会先把不合格 allocation 归还 buddy，再返回错误。
-- per-CPU usage 累计量使用 checked addition；总释放量超过总分配量在 `usages()` 汇总时
-  fail-fast，但这不是即时或完整的 pointer provenance 检查。
-- 自旋锁没有面向 allocator corruption 的恢复协议；一旦 unsafe 不变量破坏，不能认为
-  后续错误返回仍可保持系统安全。
+- `GlobalAllocator::{alloc,alloc_pages,alloc_dma_pages,alloc_pages_at,add_memory}` use
+  `AllocResult` to report errors such as `NoMemory` and `InvalidInput`.
+- Rust `GlobalAlloc::alloc` cannot silently pass an ordinary failure to most Rust allocations; it records the
+  layout and central heap state and then calls `handle_alloc_error()`.
+- `global_init()`, `init_page_allocator()`, and some internal invariants use assert/expect; boot or
+  allocator metadata errors are handled fail-fast, and the kernel does not attempt to keep running after such errors.
+- PCP and slab refill accept partial progress, to avoid discarding blocks/objects already obtained
+  just because the batch target was not reached.
+- When the DMA32 check fails, the unqualified allocation is first returned to the buddy, and then an error is returned.
+- Per-CPU usage cumulative counters use checked addition; a total freed amount exceeding the total allocated amount fails
+  fast when summarized in `usages()`, but this is not an immediate or complete pointer provenance check.
+- The spinlock has no recovery protocol for allocator corruption; once an unsafe invariant is broken, it cannot be assumed that
+  subsequent error returns still keep the system safe.
 
-### 容量查询边界
+### Capacity Query Boundary
 
-`total_pages()` 只在全局 page-allocator lock 下读取管理容量，不取得 byte-heap lock，
-也不发布或释放页。上层用其制定文件系统额度不构成物理内存 reservation；实际分配
-仍可能失败，不能把该容量值当成剩余内存或 admission 保证。
+`total_pages()` reads the managed capacity only under the global page-allocator lock. It does not take the byte-heap lock,
+and it neither publishes nor releases pages. Using it for upper-layer filesystem quota does not constitute a physical-memory reservation; actual allocations
+can still fail, and the capacity value must not be treated as remaining memory or as an admission guarantee.
 
-## 隐私分析
+## Privacy Analysis
 
-普通 allocator 把 payload 视为不透明字节，不主动读取 caller 的 live 数据。但是：
+The ordinary allocator treats the payload as opaque bytes and does not actively read the caller's live data. However:
 
 - 普通 allocation 不保证清零；之前 owner 的内容可能残留，处理敏感数据的 caller 必须
   use alloc_zeroed_page_ref/alloc_zeroed_pages_exact_ref before publishing contents;
@@ -259,13 +257,13 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - tracking 保存 allocation 地址和 backtrace。上层若将其暴露给用户态，可能泄露内核
   地址布局、调用关系和工作负载信息，必须限制访问并考虑地址脱敏。
 
-本 crate 不再定义任何 C ABI symbol。`memcpy`/`memmove`/`memset`/`memcmp` 由 rustc 为目标
-附带的 `compiler_builtins` 以弱符号提供，其输入契约由该上游实现与 LLVM 的 lowering 共同
-负责，不再构成本 crate 的信任边界。需要留意的是：任何以 `#[no_mangle]` 重新定义这四个名字
-的强符号都会静默替换全内核的页清零与页拷贝实现，因此新增此类 symbol 必须按架构级性能改动
-评审。
+This crate no longer defines any C ABI symbol. `memcpy`/`memmove`/`memset`/`memcmp` are provided as weak symbols by the `compiler_builtins` that rustc ships for the target,
+and their input contract is the joint responsibility of that upstream implementation and LLVM lowering;
+they are no longer part of this crate's trust boundary. Note that any strong symbol that redefines these four names
+with `#[no_mangle]` silently replaces the kernel-wide page-zeroing and page-copy implementations, so adding such a symbol must be reviewed
+as an architecture-level performance change.
 
-## 已知限制
+## Known Limitations
 
 1. **无统一 reclaim**：byte heap backing 不整体归还 page allocator；PCP 和 slab cache
    没有全 CPU freeze/flush/shrink 接口。cache 中资源只有达到本地高水位时才批量归还。
@@ -293,9 +291,9 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
     高水位不足两个 batch；需结合 X-Kernel workload 的 hit rate、lock-stat、内存保留和
     IRQ latency 调整。
 
-## 审计清单
+## Audit Checklist
 
-修改 `kalloc` 时应确认：
+When modifying `kalloc`, confirm the following:
 
 - [ ] 新的 memory region 入口是否验证映射、页对齐、独占性、重叠和地址端点溢出？
 - [ ] allocation/deallocation 是否在所有分支保持 pointer、layout、页数和 `UsageKind`

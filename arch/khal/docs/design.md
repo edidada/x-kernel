@@ -31,8 +31,8 @@ arch/khal/src/
 ├── irq/
 │   ├── mod.rs       # adapter helper exports only
 │   ├── manager.rs   # trap handlers
-│   └── nmi.rs       # khal::irq::configure_nmi（每 CPU 中断线提升，委托平台 NmiMechanismIf）
-└── lib.rs           # khal::nmi / khal::pmu 机制中立 facade（re-export kplat）
+│   └── nmi.rs       # khal::irq::configure_nmi (per-CPU interrupt line promotion, delegated to the platform NmiMechanismIf)
+└── lib.rs           # khal::nmi / khal::pmu mechanism-neutral facade (re-export kplat)
 ```
 
 Generic IRQ state, descriptors, dispatch, Line-owned NMI actions, lifecycle
@@ -57,14 +57,14 @@ Ordinary IRQ API call paths should go directly into `kirq`, not through the `kha
 NMI mechanism facade:
 
 ```text
-watchdog / perf 消费者
+watchdog / perf consumers
     |
-    `-- khal::nmi（re-export kplat::nm_irq）
-            |-- early_init / late_init   # 机制探测 + 每 CPU 使能
-            |-- mode / info              # 运行时机制查询（Pseudo / Hardware / None）
-            |-- enable_periodic_nmi      # 周期 NMI 源（当前为 PMU）
-            |-- quiesce_nmi               # 终止路径停靠本地周期源
-            `-- khal::irq::configure_nmi # 每 CPU 提升中断线
+    `-- khal::nmi (re-export kplat::nm_irq)
+            |-- early_init / late_init   # mechanism probing + per-CPU enablement
+            |-- mode / info              # runtime mechanism query (Pseudo / Hardware / None)
+            |-- enable_periodic_nmi      # periodic NMI source (currently PMU)
+            |-- quiesce_nmi               # park the local periodic source on the terminating path
+            `-- khal::irq::configure_nmi # per-CPU interrupt line promotion
 ```
 
 ## Firmware and device-tree transport (`khal::firmware`)
@@ -170,7 +170,7 @@ remains, but no longer carries the generic IRQ API or the x86 MSI-X vector helpe
 
 ### Why the x86 MSI-X helper is not in `khal::irq`
 
-MSI-X vector allocation、APIC destination selection 和 MSI message composition
+MSI-X vector allocation, APIC destination selection and MSI message composition
 belong to the IRQ core/backend boundary. Currently `kirq::MsiBackendIf` defines the backend contract,
 implemented by `arch/x86-apic`; `khal::irq` no longer exposes APIC ids or raw CPU vectors.
 
