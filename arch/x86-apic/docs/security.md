@@ -180,3 +180,12 @@ inherit the previous destination. The notification is not an acknowledgement:
 an already issued interrupt may still be pending in a LAPIC after the lock is
 released. Device shutdown and safe vector reuse remain caller/system lifecycle
 obligations, not properties proven by a bitmap or by KIRQ software in-flight.
+
+## Sleep snapshot lifetime
+
+The unsafe IOAPIC snapshot phases require stable installed controller identities,
+route mutation exclusion and valid retained mappings. Other CPUs must be parked
+while routing is captured/reconstructed. Original masks may be restored only
+when every consumer reachable from newly enabled IRQs is usable. Preallocation
+prevents heap work while IRQs are disabled. A missing owned controller after
+preparation is an invariant violation, not a recoverable partial resume.
