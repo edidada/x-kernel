@@ -321,7 +321,11 @@ impl MntNamespace {
         let mut mounts = self.mounts.lock();
         Self::require_mount(&mounts, mountpoint.mount())?;
         let mount = mountpoint.graft_tree_arc(mount)?;
-        mounts.insert(mount.mount_id(), mount.clone());
+        // Register the whole subtree: a single fsmount mount, or an open_tree
+        // clone whose children must gain strong namespace references here.
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
         Ok(mount)
     }
 
@@ -466,6 +470,59 @@ impl MntNamespace {
         let mount = Self::registered_mount_at(&mounts, target)?;
         mount.set_flags(flags);
         Ok(())
+    }
+
+    /// Applies `mount_setattr(2)` attribute changes to the mount at `target`.
+    ///
+    /// `attr_set`/`attr_clr` are already translated to per-mount [`MountFlags`].
+    /// With `recursive`, the change is applied to every mount in the subtree.
+    pub fn set_mount_attributes(
+        &self,
+        target: &Path,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mount = Self::registered_mount_at(&mounts, target)?.clone();
+        let apply = |m: &Mount| m.set_flags((m.flags() & !attr_clr) | attr_set);
+        apply(&mount);
+        if recursive {
+            for sub in mount.collect_subtree().iter().skip(1) {
+                apply(sub);
+            }
+        }
+        Ok(())
+    }
+
+    /// Clones the mount subtree at `source` into a detached tree (`open_tree`
+    /// with `OPEN_TREE_CLONE`).
+    ///
+    /// The returned root is not attached to the namespace; the caller keeps the
+    /// whole subtree alive (e.g. in an `open_tree` fd) until `move_mount`
+    /// installs it. Children are re-grafted under their cloned parents.
+    pub fn clone_mount_tree(&self, source: &Path) -> VfsResult<(Arc<Mount>, Vec<Arc<Mount>>)> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        let new_root = Arc::new(Mount::clone_mnt(source));
+        let mut kept = vec![new_root.clone()];
+        let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
+        clone_map.insert(source.mount().mount_id(), new_root.clone());
+        for child in source.mount().collect_subtree().iter().skip(1) {
+            let location = child.location().ok_or(VfsError::InvalidInput)?;
+            let new_parent = clone_map
+                .get(&location.mount().mount_id())
+                .ok_or(VfsError::InvalidInput)?;
+            let new_location = Path::new(new_parent.clone(), location.dentry.clone());
+            let new_child = Arc::new(Mount::clone_mnt(&child.root_path()));
+            *new_child.mnt_location.lock() = Some(new_location.clone());
+            new_location
+                .mnt
+                .install_child_mount(&new_location.dentry, &new_child);
+            clone_map.insert(child.mount_id(), new_child.clone());
+            kept.push(new_child);
+        }
+        Ok((new_root, kept))
     }
 
     /// Makes the mount rooted at `target` private.

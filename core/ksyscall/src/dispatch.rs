@@ -463,6 +463,14 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg3().into(),
             uctx.arg4() as _,
         ),
+        Sysno::open_tree => sys_open_tree(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::mount_setattr => sys_mount_setattr(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+            uctx.arg4() as _,
+        ),
 
         // pipe
         Sysno::pipe2 => sys_pipe2(uctx.arg0().into(), uctx.arg1() as _),
@@ -932,7 +940,6 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         | Sysno::perf_event_open
         | Sysno::io_uring_setup
         | Sysno::fspick
-        | Sysno::open_tree
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
 
         Sysno::timer_create => {

@@ -23,9 +23,11 @@ use kvfs::{
     path::PATH_MAX,
 };
 use linux_raw_sys::general::{
-    FSMOUNT_CLOEXEC, FSOPEN_CLOEXEC, MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOSUID,
-    MOUNT_ATTR_NOSYMFOLLOW, MOUNT_ATTR_RDONLY, MOVE_MOUNT_F_EMPTY_PATH, O_DIRECTORY, O_RDONLY,
+    AT_EMPTY_PATH, AT_RECURSIVE, FSMOUNT_CLOEXEC, FSOPEN_CLOEXEC, MOUNT_ATTR_NODEV,
+    MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NOSYMFOLLOW, MOUNT_ATTR_RDONLY,
+    MOVE_MOUNT_F_EMPTY_PATH, O_DIRECTORY, O_RDONLY, OPEN_TREE_CLOEXEC, OPEN_TREE_CLONE,
 };
+use osvm::VirtPtr;
 use posix_types::UserConstPtr;
 
 use crate::{mount::require_mount_privilege, path::with_fs_at};
@@ -35,6 +37,13 @@ const FSCONFIG_SET_FLAG: u32 = 0;
 const FSCONFIG_SET_STRING: u32 = 1;
 const FSCONFIG_CMD_CREATE: u32 = 6;
 const FSCONFIG_CMD_RECONFIGURE: u32 = 7;
+
+// mount_attr(2) atime group; linux_raw_sys exposes the individual bits but not
+// the mask used to clear the whole policy.
+const MOUNT_ATTR__ATIME: u64 = 0x0000_0070;
+const MOUNT_ATTR_NOATIME: u64 = 0x0000_0010;
+const MOUNT_ATTR_STRICTATIME: u64 = 0x0000_0020;
+const MOUNT_ATTR_NODIRATIME: u64 = 0x0000_0080;
 
 /// Accumulated state of one fs-context fd between `fsopen` and `fsmount`.
 struct FsContextState {
@@ -51,9 +60,12 @@ struct FsContextFd {
     state: Mutex<FsContextState>,
 }
 
-/// A detached mount produced by `fsmount`, consumed by `move_mount`.
+/// A detached mount produced by `fsmount` or `open_tree`, consumed by
+/// `move_mount`. `_kept` holds strong references to an `open_tree` clone's
+/// subtree so the children survive until `move_mount` registers them.
 struct MountFd {
     mount: Mutex<Option<Arc<Mount>>>,
+    _kept: Vec<Arc<Mount>>,
 }
 
 struct MountApiFops;
@@ -255,6 +267,7 @@ pub fn sys_fsmount(fd: c_int, flags: u32, attr_flags: u32) -> KResult<isize> {
     )?;
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(mount)),
+        _kept: Vec::new(),
     }));
     kprocess::current_files()
         .add_file(file, flags & FSMOUNT_CLOEXEC != 0)
@@ -328,5 +341,105 @@ pub fn sys_move_mount(
         *slot = Some(mount);
         return Err(error);
     }
+    Ok(0)
+}
+
+/// Clones the mount subtree at a path into a detached mount fd (`open_tree(2)`).
+pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
+    let path = path.load_string_with_max_len(PATH_MAX)?;
+    debug!("sys_open_tree <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
+    // OPEN_TREE_* plus the path-resolution AT_* hints (NOFOLLOW/NO_AUTOMOUNT/
+    // EMPTY_PATH); the hints do not change the clone itself.
+    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | 0x100 | 0x800) != 0 {
+        return Err(KError::InvalidInput);
+    }
+    if flags & OPEN_TREE_CLONE == 0 {
+        // A non-cloning open_tree references an existing mount for move_mount;
+        // only the cloning form is implemented. ENOSYS lets callers fall back.
+        return Err(KError::Unsupported);
+    }
+    let cred = kprocess::current_cred();
+    let filename = Filename::new(path.as_str());
+    let source = with_fs_at(dfd, &filename, |fs| {
+        filename.lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )
+    })?;
+    let namespace = kprocess::current_user_process().mnt_ns()?;
+    let (root, kept) = namespace.clone_mount_tree(&source)?;
+    let file = dentry_open(root.root_path(), O_RDONLY | O_DIRECTORY, cred)?;
+    file.set_private_data(Arc::new(MountFd {
+        mount: Mutex::new(Some(root)),
+        _kept: kept,
+    }));
+    kprocess::current_files()
+        .add_file(file, flags & OPEN_TREE_CLOEXEC != 0)
+        .map(|fd| fd as isize)
+}
+
+/// Translates `mount_setattr(2)` `attr_set`/`attr_clr` into per-mount flags.
+fn mount_attr_set_clr(attr_set: u64, attr_clr: u64) -> (MountFlags, MountFlags) {
+    let mut set = mount_attr_to_flags(attr_set as u32);
+    let mut clr = mount_attr_to_flags(attr_clr as u32);
+    // The atime policy is a group: requesting any atime bit replaces the whole
+    // policy, so clear the existing relatime/noatime selection first.
+    if attr_set & MOUNT_ATTR__ATIME != 0 {
+        clr |= MountFlags::NOATIME | MountFlags::RELATIME;
+        if attr_set & MOUNT_ATTR_NOATIME != 0 {
+            set |= MountFlags::NOATIME;
+        } else if attr_set & MOUNT_ATTR_STRICTATIME == 0 {
+            set |= MountFlags::RELATIME;
+        }
+    }
+    if attr_clr & MOUNT_ATTR__ATIME != 0 {
+        clr |= MountFlags::NOATIME | MountFlags::RELATIME;
+    }
+    if attr_set & MOUNT_ATTR_NODIRATIME != 0 {
+        set |= MountFlags::NODIRATIME;
+    }
+    if attr_clr & MOUNT_ATTR_NODIRATIME != 0 {
+        clr |= MountFlags::NODIRATIME;
+    }
+    (set, clr)
+}
+
+/// Changes mount attributes (`mount_setattr(2)`).
+pub fn sys_mount_setattr(
+    dfd: c_int,
+    path: UserConstPtr<c_char>,
+    flags: u32,
+    attr: UserConstPtr<c_void>,
+    size: usize,
+) -> KResult<isize> {
+    // Probes (e.g. systemd mount_new_api_supported) pass size=0 / attr=NULL /
+    // path=NULL. Report ENOSYS before touching user memory so callers fall back
+    // to the classic mount API instead of seeing a fatal bad-address error.
+    if size < 16 || attr.is_null() {
+        return Err(KError::Unsupported);
+    }
+    let path = path.load_string_with_max_len(PATH_MAX)?;
+    debug!("sys_mount_setattr <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
+    let base = attr.as_ptr() as usize;
+    let attr_set = UserConstPtr::<u64>::from(base).read_vm()?;
+    let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
+    let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
+    let recursive = flags & AT_RECURSIVE != 0;
+    let cred = kprocess::current_cred();
+    let filename = Filename::new(path.as_str());
+    let target = with_fs_at(dfd, &filename, |fs| {
+        filename.lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &cred,
+        )
+    })?;
+    let namespace = kprocess::current_user_process().mnt_ns()?;
+    namespace.set_mount_attributes(&target, set_flags, clr_flags, recursive)?;
     Ok(0)
 }
