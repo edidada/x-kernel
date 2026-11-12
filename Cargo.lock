@@ -2437,7 +2437,6 @@ name = "kernel-elf-parser"
 version = "0.3.0-dev"
 dependencies = [
  "xmas-elf",
- "zero",
  "zerocopy",
 ]
 
