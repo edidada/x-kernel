@@ -1636,3 +1636,35 @@ fn regular_constraint_reports_eftype_for_non_regular() {
     let file = openat2_at(&tree.root, &tree.base, "/target", crate::OPENAT2_REGULAR, 0).unwrap();
     assert_eq!(file.node_type(), NodeType::RegularFile);
 }
+
+#[def_test]
+fn no_magiclinks_with_o_path_no_follow_returns_the_link_itself() {
+    use linux_raw_sys::general::{O_NOFOLLOW, O_PATH};
+
+    let tree = test_tree();
+    let file = openat2_at(
+        &tree.root,
+        &tree.base,
+        "/magic",
+        u64::from(O_PATH | O_NOFOLLOW),
+        crate::ResolveFlags::NO_MAGICLINKS.bits(),
+    )
+    .unwrap();
+
+    assert_eq!(file.node_type(), NodeType::Symlink);
+}
+
+#[def_test]
+fn scoped_lookup_refuses_magic_link_jump() {
+    let tree = test_tree();
+
+    for resolve in [
+        crate::ResolveFlags::BENEATH.bits(),
+        crate::ResolveFlags::IN_ROOT.bits(),
+    ] {
+        let err = openat2_at(&tree.root, &tree.base, "magic", 0, resolve)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, VfsError::CrossesDevices);
+    }
+}

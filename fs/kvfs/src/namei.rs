@@ -254,6 +254,14 @@ impl<'a> Nameidata<'a> {
             return Ok(link);
         };
 
+        // A magic link is a direct jump out of the walked namespace. Scoped
+        // lookups (`BENEATH`/`IN_ROOT`) refuse it even when the target currently
+        // lies inside the anchor, rather than trusting a post-hoc membership
+        // check (Linux `LOOKUP_BENEATH`/`LOOKUP_IN_ROOT`).
+        if self.flags.is_anchored() {
+            return Err(VfsError::CrossesDevices);
+        }
+
         loop {
             self.reserve_link_follow()?;
             let resolved =
@@ -292,13 +300,12 @@ impl<'a> Nameidata<'a> {
         let follows = component == WalkComponent::More || self.flags.follows_final();
 
         if d_inode(next.dentry()).magic_link().is_some() {
-            if self.flags.rejects_magic_links() {
-                return Err(VfsError::FilesystemLoop);
-            }
             if follows {
-                // `openat2(RESOLVE_NO_SYMLINKS)` applies to every link the walk
-                // would follow, magic links included.
-                if self.flags.contains(LookupFlags::NO_SYMLINKS) {
+                // `RESOLVE_NO_MAGICLINKS` / `RESOLVE_NO_SYMLINKS` forbid
+                // *following* a magic link; obtaining the link itself
+                // (`O_PATH | O_NOFOLLOW`) stays allowed.
+                if self.flags.rejects_magic_links() || self.flags.contains(LookupFlags::NO_SYMLINKS)
+                {
                     return Err(VfsError::FilesystemLoop);
                 }
                 return self.follow_magic_link(next);
@@ -823,6 +830,12 @@ impl<'a> Nameidata<'a> {
         if !flags.will_create() {
             return Err(VfsError::NotFound);
         }
+
+        // Re-validate the parent against the anchor / starting mount right
+        // before the create side effect: a concurrent rename that moved the
+        // parent out of the subtree must be refused before anything is created,
+        // because the post-create `enter` check cannot undo a creation.
+        self.check_transition(&self.path)?;
 
         match dir.lookup_or_create_with(name, flags.is_exclusive_create(), |candidate| {
             self.path.vfs_create(
