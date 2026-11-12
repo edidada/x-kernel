@@ -218,7 +218,7 @@ Avoid:
 
 Repository examples:
 
-- [drivers/arm-gic/src/gicv3.rs](/home/laoyekang/code/x-kernel/drivers/arm-gic/src/gicv3.rs:121)
+- [drivers/platform/irq/src/gic/gicv3.rs](../../../../drivers/platform/irq/src/gic/gicv3.rs)
 - [drivers/platform/console/src/ns16550_mmio.rs](../../../../drivers/platform/console/src/ns16550_mmio.rs)
 
 Relevant standard references:
