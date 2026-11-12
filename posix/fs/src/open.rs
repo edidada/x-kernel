@@ -4,7 +4,7 @@
 
 //! `open` and `openat` syscall entry points.
 
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
@@ -32,6 +32,32 @@ fn add_to_fd(file: Arc<VfsFile>, flags: u32) -> KResult<i32> {
     kprocess::current_files().add_file(file, flags & O_CLOEXEC != 0)
 }
 
+/// Reports the fsnotify effects of an open, shared by `openat` and `openat2`
+/// (Linux funnels both through `do_file_open`).
+fn report_open_notify(file: &Arc<VfsFile>, flags: u32) {
+    // Report IN_CREATE only when this call created the entry: O_CREAT on an
+    // existing file is an ordinary open and must not report a creation the
+    // filesystem never performed. The watch probe gates the *reporting*; the
+    // creation identity itself is captured by the open path unconditionally
+    // (`VfsFile::created_under`), because a watch can be registered
+    // concurrently with this open and a capture that had been skipped then
+    // would never be recovered -- a removed or renamed object would keep a
+    // watch nothing retires.
+    if crate::notify::entry_notify_wanted() && flags & O_CREAT != 0 && file.was_created() {
+        // Attribution comes from the created entry itself, not from the
+        // caller's argument: when the last component is a symbolic link,
+        // creation happens where the link points.
+        crate::notify::notify_created(file, crate::notify::IN_CREATE);
+    }
+    if flags & O_TRUNC != 0
+        && !file.is_path()
+        && !file.was_created()
+        && file.path().is_regular_file()
+    {
+        crate::notify::notify_modified(file.path());
+    }
+}
+
 /// Opens a file relative to a directory file descriptor.
 pub fn sys_openat(
     dirfd: c_int,
@@ -54,34 +80,7 @@ pub fn sys_openat(
             fs.node_umask(),
             cred,
         )
-        .inspect(|file| {
-            // Report IN_CREATE only when this call created the entry: O_CREAT on
-            // an existing file is an ordinary open and must not report a
-            // creation the filesystem never performed. The watch probe gates
-            // the *reporting*; the creation identity itself is captured by the
-            // open path unconditionally (`VfsFile::created_under`), because a
-            // watch can be registered concurrently with this open and a
-            // capture that had been skipped then would never be recovered -- a
-            // removed or renamed object would keep a watch nothing retires.
-            if crate::notify::entry_notify_wanted()
-                && flags as u32 & O_CREAT != 0
-                && file.was_created()
-            {
-                // Attribution comes from the created entry itself, not from the caller's
-                // argument: when the last component is a symbolic link, creation
-                // happens where the link points, and `entry_parts_at` (which
-                // does not follow the final component) would report the event in
-                // the link's directory for a name that was never created.
-                crate::notify::notify_created(file, crate::notify::IN_CREATE);
-            }
-            if flags as u32 & O_TRUNC != 0
-                && !file.is_path()
-                && !file.was_created()
-                && file.path().is_regular_file()
-            {
-                crate::notify::notify_modified(file.path());
-            }
-        })
+        .inspect(|file| report_open_notify(file, flags as u32))
     })
     .and_then(|it| add_to_fd(it, flags as _))
     .map(|fd| fd as isize)
@@ -144,16 +143,31 @@ pub fn sys_openat2(
         resolve,
     }
     .validate()?;
-    let path = path.load_string_with_max_len(PATH_MAX)?;
+    // Linux `getname` reports `ENAMETOOLONG` for a pathname that reaches
+    // `PATH_MAX`; the bounded loader signals that as `OutOfRange`.
+    let bytes = path.load_bytes_with_max_len(PATH_MAX - 1).map_err(|err| {
+        if err.canonicalize() == KError::OutOfRange {
+            KError::NameTooLong
+        } else {
+            err
+        }
+    })?;
+    let path = String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)?;
     debug!("sys_openat2 <= {dirfd} {path:?} flags={flags:#x} resolve={resolve:#x}");
     let cred = kprocess::current_cred();
     let filename = Filename::new(path.as_str());
 
+    let resolve_flags = ResolveFlags::from_bits_truncate(resolve);
+    let anchored = resolve_flags.intersects(ResolveFlags::IN_ROOT | ResolveFlags::BENEATH);
+    // `RESOLVE_BENEATH` rejects an absolute pathname with `EXDEV` before the
+    // dirfd is consulted (Linux `path_init`/`nd_jump_root`), so a bad or
+    // non-directory dirfd must not surface as `EBADF`/`ENOTDIR` here.
+    if resolve_flags.contains(ResolveFlags::BENEATH) && path.as_str().starts_with('/') {
+        return Err(KError::CrossesDevices);
+    }
     let fs = kprocess::current_user_process_fs_context()
         .lock()
         .snapshot();
-    let anchored = ResolveFlags::from_bits_truncate(resolve)
-        .intersects(ResolveFlags::IN_ROOT | ResolveFlags::BENEATH);
     // A plain absolute pathname is independent of the directory fd; only an
     // anchored request (`IN_ROOT`/`BENEATH`) or a relative pathname makes the
     // fd meaningful.
@@ -180,6 +194,7 @@ pub fn sys_openat2(
 
     filename
         .open_with_openat2_at(&root, &base, how, fs.node_umask(), cred)
+        .inspect(|file| report_open_notify(file, flags as u32))
         .and_then(|file| add_to_fd(file, flags as u32))
         .map(|fd| fd as isize)
 }
