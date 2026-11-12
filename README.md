@@ -233,7 +233,7 @@ The project uses three primary verification layers (in-kernel unit tests, extern
 
 | Layer | How it runs | Scale | CI coverage |
 |---|---|---|---|
-| Kernel unit tests | `make unittest` | 4,731 `#[def_test]` cases; 1,165 `#[test]` cases; 122 `ut-tests` directories / 795 files | x86_64, AArch64, RISC-V |
+| Kernel unit tests | `make unittest` | 4,731 `#[def_test]` cases; 1,165 `#[test]` cases; 122 `ut-tests` directories / 796 files | x86_64, AArch64, RISC-V |
 | PR syscall regression | `make ci-test` (clones the Starry Harness) | 40 cases: 38 guest + 1 boot + 1 powercut | x86_64, AArch64, RISC-V |
 | Iteration suite | Harness `make ci-test-iter run` | 14 cases: 13 guest + 1 powercut | Not a PR gate |
 | Debian APT suite | Harness `make ci-debian run` | 1 APT guest case | Not a PR gate |

@@ -233,7 +233,7 @@ ABI：ksyscall / posix / tee
 
 | 层级 | 运行方式 | 规模 | CI 覆盖 |
 |---|---|---|---|
-| 内核单测 | `make unittest` | 4,731 个 `#[def_test]`；1,165 个 `#[test]`；122 个 `ut-tests` 目录 / 795 个文件 | x86_64、AArch64、RISC-V |
+| 内核单测 | `make unittest` | 4,731 个 `#[def_test]`；1,165 个 `#[test]`；122 个 `ut-tests` 目录 / 796 个文件 | x86_64、AArch64、RISC-V |
 | PR 系统调用回归 | `make ci-test`（拉取 Starry Harness） | 40 个用例：38 guest + 1 boot + 1 powercut | x86_64、AArch64、RISC-V |
 | 迭代 suite | Harness `make ci-test-iter run` | 14 个用例：13 guest + 1 powercut | 非 PR 门禁 |
 | Debian APT suite | Harness `make ci-debian run` | 1 个 APT guest 用例 | 非 PR 门禁 |
