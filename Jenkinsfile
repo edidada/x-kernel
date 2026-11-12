@@ -24,6 +24,8 @@ pipeline {
         string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+        string(name: 'CI_BUILDER_IMAGE', defaultValue: 'yeanwang/x-kernel-builder:v3.2', description: 'Builder image; set a candidate tag for pre-release validation')
+        string(name: 'ROOTFS_RELEASE_TAG', defaultValue: 'latest', description: 'RootFS release; set a candidate tag for pre-release validation')
         booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
         booleanParam(
             name: 'ENABLE_COVERAGE',
@@ -51,7 +53,7 @@ pipeline {
         TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VARIANT = 'xkernel-glibc'
-        ROOTFS_RELEASE_TAG = 'latest'
+        ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'latest'}"
         HARNESS_JOBS = '2'
         STARRY_ACCEL = 'n'
     }
@@ -185,7 +187,7 @@ def guestAgentLabelForArch(String arch) {
 
 def ciBuilderImage() {
     // Agents preload the platform image with docker load (tag preserved, digest may differ).
-    return 'yeanwang/x-kernel-builder:v3.2'
+    return params.CI_BUILDER_IMAGE?.trim() ?: 'yeanwang/x-kernel-builder:v3.2'
 }
 
 def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
