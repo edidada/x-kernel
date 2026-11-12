@@ -81,28 +81,37 @@ fn is_create_like_open(flags: OpenFlags) -> bool {
     flags.contains(OpenFlags::CREATE)
 }
 
-/// `RESOLVE_NO_XDEV` (`uapi/linux/openat2.h`).
-pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
-/// `RESOLVE_NO_MAGICLINKS` (`uapi/linux/openat2.h`).
-pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-/// `RESOLVE_NO_SYMLINKS` (`uapi/linux/openat2.h`).
-pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-/// `RESOLVE_BENEATH` (`uapi/linux/openat2.h`).
-pub const RESOLVE_BENEATH: u64 = 0x08;
-/// `RESOLVE_IN_ROOT` (`uapi/linux/openat2.h`).
-pub const RESOLVE_IN_ROOT: u64 = 0x10;
-/// `RESOLVE_CACHED` (`uapi/linux/openat2.h`).
-pub(crate) const RESOLVE_CACHED: u64 = 0x20;
-/// Every resolve bit this kernel understands (`openat2` `VALID_RESOLVE_FLAGS`).
-const VALID_RESOLVE_FLAGS: u64 = RESOLVE_NO_XDEV
-    | RESOLVE_NO_MAGICLINKS
-    | RESOLVE_NO_SYMLINKS
-    | RESOLVE_BENEATH
-    | RESOLVE_IN_ROOT
-    | RESOLVE_CACHED;
+bitflags::bitflags! {
+    /// `openat2(2)` `open_how.resolve` policy (`uapi/linux/openat2.h`).
+    ///
+    /// The ABI word is `u64`; this is the validated in-kernel form. Converting
+    /// with [`ResolveFlags::from_bits`] at the boundary rejects unknown bits
+    /// instead of letting raw resolve bits reach the open algorithm.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct ResolveFlags: u64 {
+        /// `RESOLVE_NO_XDEV`: do not cross mount boundaries.
+        const NO_XDEV = 0x01;
+        /// `RESOLVE_NO_MAGICLINKS`: do not follow magic links.
+        const NO_MAGICLINKS = 0x02;
+        /// `RESOLVE_NO_SYMLINKS`: do not follow symbolic links.
+        const NO_SYMLINKS = 0x04;
+        /// `RESOLVE_BENEATH`: keep the walk below the dirfd subtree.
+        const BENEATH = 0x08;
+        /// `RESOLVE_IN_ROOT`: treat the dirfd subtree as the root.
+        const IN_ROOT = 0x10;
+        /// `RESOLVE_CACHED`: only cached lookups, otherwise `EAGAIN`.
+        const CACHED = 0x20;
+    }
+}
 
 /// The `flags`/`mode`/`resolve` triple of `openat2(2)`'s `struct open_how`,
 /// split out so the syscall layer does not need to know the internal layout.
+///
+/// This is the raw ABI carrier: Linux declares all three `open_how` fields as
+/// `__u64`, so they stay `u64` here (the upper half of `flags` carries project
+/// extensions such as [`OPENAT2_REGULAR`]). Validation converts them into the
+/// in-kernel semantic types (`OpenFlags`, `NodePermission`, [`ResolveFlags`])
+/// before namei consumes them.
 #[derive(Clone, Copy, Debug)]
 pub struct Openat2How {
     /// `open_how.flags` (`O_*` bits plus project flags in the upper half).
@@ -129,8 +138,8 @@ impl Openat2How {
 pub(crate) struct OpenHow {
     pub(crate) flags: u64,
     pub(crate) mode: NodePermission,
-    /// `openat2` resolve bits; always zero for legacy `open`/`openat`.
-    pub(crate) resolve: u64,
+    /// Validated `openat2` resolve policy; empty for legacy `open`/`openat`.
+    pub(crate) resolve: ResolveFlags,
     /// `OPENAT2_REGULAR`: require the resolved object to be a regular file.
     pub(crate) regular_only: bool,
 }
@@ -141,7 +150,7 @@ impl OpenHow {
         let mut how = Self {
             flags: u64::from(flags & VALID_OPEN_FLAGS),
             mode,
-            resolve: 0,
+            resolve: ResolveFlags::empty(),
             regular_only: false,
         };
         if OpenFlags::from_bits_retain(how.flags as u32).contains(OpenFlags::PATH) {
@@ -178,10 +187,8 @@ impl OpenHow {
         if !is_create_like_open(OpenFlags::from_bits_retain(raw_flags)) && mode != 0 {
             return Err(VfsError::InvalidInput);
         }
-        if resolve & !VALID_RESOLVE_FLAGS != 0 {
-            return Err(VfsError::InvalidInput);
-        }
-        if resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0 {
+        let resolve = ResolveFlags::from_bits(resolve).ok_or(VfsError::InvalidInput)?;
+        if resolve.contains(ResolveFlags::BENEATH) && resolve.contains(ResolveFlags::IN_ROOT) {
             return Err(VfsError::InvalidInput);
         }
         let regular_only = flags & OPENAT2_REGULAR != 0;
@@ -203,7 +210,7 @@ impl OpenHow {
         }
         // `RESOLVE_CACHED` forbids side effects; Linux `build_open_flags`
         // rejects create/truncate before the pathname or dirfd is touched.
-        if resolve & RESOLVE_CACHED != 0 && raw_flags & (O_CREAT | O_TRUNC) != 0 {
+        if resolve.contains(ResolveFlags::CACHED) && raw_flags & (O_CREAT | O_TRUNC) != 0 {
             return Err(VfsError::WouldBlock);
         }
         Ok(Self {
@@ -276,25 +283,25 @@ impl OpenHow {
         // `openat2(2)` resolve constraints. `Nameidata` owns the anchored
         // subtree semantics for `IN_ROOT`/`BENEATH`; the syscall layer only
         // selects the directory fd as the walk base.
-        if self.resolve & RESOLVE_NO_XDEV != 0 {
+        if self.resolve.contains(ResolveFlags::NO_XDEV) {
             lookup_flags |= LookupFlags::NO_XDEV;
         }
-        if self.resolve & RESOLVE_NO_MAGICLINKS != 0 {
+        if self.resolve.contains(ResolveFlags::NO_MAGICLINKS) {
             lookup_flags |= LookupFlags::NO_MAGIC_LINKS;
         }
-        if self.resolve & RESOLVE_NO_SYMLINKS != 0 {
+        if self.resolve.contains(ResolveFlags::NO_SYMLINKS) {
             lookup_flags |= LookupFlags::NO_SYMLINKS;
         }
-        if self.resolve & RESOLVE_BENEATH != 0 {
+        if self.resolve.contains(ResolveFlags::BENEATH) {
             lookup_flags |= LookupFlags::BENEATH;
         }
-        if self.resolve & RESOLVE_IN_ROOT != 0 {
+        if self.resolve.contains(ResolveFlags::IN_ROOT) {
             lookup_flags |= LookupFlags::IN_ROOT;
         }
         // `RESOLVE_CACHED` is a real constraint: the walk may only complete
         // from cached state. `Nameidata` turns a slow lookup (or a request
         // with side effects such as create/truncate) into `EAGAIN`.
-        if self.resolve & RESOLVE_CACHED != 0 {
+        if self.resolve.contains(ResolveFlags::CACHED) {
             lookup_flags |= LookupFlags::CACHED;
         }
 

@@ -48,7 +48,7 @@ fn openat2_rejects_unknown_resolve_bits() {
 
 #[def_test]
 fn openat2_rejects_beneath_with_in_root() {
-    let both = RESOLVE_BENEATH | RESOLVE_IN_ROOT;
+    let both = ResolveFlags::BENEATH.bits() | ResolveFlags::IN_ROOT.bits();
     assert!(OpenHow::from_openat2(u64::from(O_RDONLY), 0, both).is_err());
 }
 
@@ -57,7 +57,10 @@ fn openat2_translates_resolve_bits_to_lookup_constraints() {
     let params = OpenHow::from_openat2(
         u64::from(O_RDONLY),
         0,
-        RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH,
+        ResolveFlags::NO_XDEV.bits()
+            | ResolveFlags::NO_MAGICLINKS.bits()
+            | ResolveFlags::NO_SYMLINKS.bits()
+            | ResolveFlags::BENEATH.bits(),
     )
     .unwrap()
     .into_open_params()
@@ -104,7 +107,7 @@ fn openat2_translates_in_root_and_cached() {
     let params = OpenHow::from_openat2(
         u64::from(O_RDONLY),
         0,
-        RESOLVE_IN_ROOT | crate::open_flags::RESOLVE_CACHED,
+        ResolveFlags::IN_ROOT.bits() | ResolveFlags::CACHED.bits(),
     )
     .unwrap()
     .into_open_params()
@@ -125,7 +128,7 @@ fn openat2_rejects_regular_with_path_or_directory() {
 
 #[def_test]
 fn openat2_cached_with_create_or_truncate_is_eagain() {
-    let cached = crate::open_flags::RESOLVE_CACHED;
+    let cached = ResolveFlags::CACHED.bits();
     assert_eq!(
         OpenHow::from_openat2(u64::from(O_CREAT | O_RDWR), 0, cached).unwrap_err(),
         VfsError::WouldBlock
@@ -140,7 +143,7 @@ fn openat2_cached_with_create_or_truncate_is_eagain() {
 fn openat2_contradictory_flags_are_einval_before_cached_eagain() {
     use linux_raw_sys::general::{O_CREAT, O_DIRECTORY, O_PATH, O_RDWR};
 
-    let cached = crate::open_flags::RESOLVE_CACHED;
+    let cached = ResolveFlags::CACHED.bits();
     // O_DIRECTORY|O_CREAT and O_PATH|O_CREAT are EINVAL in Linux
     // build_open_flags, which runs before the RESOLVE_CACHED rule.
     assert_eq!(

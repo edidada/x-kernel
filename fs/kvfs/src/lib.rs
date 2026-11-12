@@ -84,7 +84,7 @@ pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
 };
 pub(crate) use open_flags::{AccMode, OpenHow, OpenParams};
-pub use open_flags::{OPENAT2_REGULAR, OpenFlags, Openat2How, RESOLVE_BENEATH, RESOLVE_IN_ROOT};
+pub use open_flags::{OPENAT2_REGULAR, OpenFlags, Openat2How, ResolveFlags};
 pub use pagecache::WritebackRangeResult;
 pub use permission::{Permission, generic_permission, open_access_to_permission};
 pub use poll::poll_file_io;

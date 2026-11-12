@@ -8,10 +8,7 @@ use alloc::sync::Arc;
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
-use kvfs::{
-    Filename, NodePermission, Openat2How, Path, RESOLVE_BENEATH, RESOLVE_IN_ROOT, VfsFile,
-    path::PATH_MAX,
-};
+use kvfs::{Filename, NodePermission, Openat2How, Path, ResolveFlags, VfsFile, path::PATH_MAX};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::UserConstPtr;
@@ -155,7 +152,8 @@ pub fn sys_openat2(
     let fs = kprocess::current_user_process_fs_context()
         .lock()
         .snapshot();
-    let anchored = resolve & (RESOLVE_IN_ROOT | RESOLVE_BENEATH) != 0;
+    let anchored = ResolveFlags::from_bits_truncate(resolve)
+        .intersects(ResolveFlags::IN_ROOT | ResolveFlags::BENEATH);
     // A plain absolute pathname is independent of the directory fd; only an
     // anchored request (`IN_ROOT`/`BENEATH`) or a relative pathname makes the
     // fd meaningful.

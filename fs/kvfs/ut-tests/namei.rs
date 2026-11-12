@@ -1513,7 +1513,7 @@ fn openat2_at(
 #[def_test]
 fn no_symlinks_rejects_final_and_magic_links() {
     let tree = test_tree();
-    let resolve = crate::open_flags::RESOLVE_NO_SYMLINKS;
+    let resolve = crate::open_flags::ResolveFlags::NO_SYMLINKS.bits();
 
     let err = openat2_at(&tree.root, &tree.base, "/link", 0, resolve).map(|_| ())
         .unwrap_err();
@@ -1534,7 +1534,7 @@ fn o_path_no_follow_still_returns_the_symlink_itself() {
         &tree.base,
         "/link",
         u64::from(O_PATH | O_NOFOLLOW),
-        crate::open_flags::RESOLVE_NO_SYMLINKS,
+        crate::open_flags::ResolveFlags::NO_SYMLINKS.bits(),
     )
     .unwrap();
 
@@ -1554,7 +1554,7 @@ fn beneath_rejects_absolute_paths_and_dotdot_escape() {
             &cred,
         )
         .unwrap();
-    let resolve = crate::RESOLVE_BENEATH;
+    let resolve = crate::ResolveFlags::BENEATH.bits();
 
     let err = openat2_at(&dir, &dir, "/target", 0, resolve)
         .map(|_| ())
@@ -1580,7 +1580,7 @@ fn in_root_rebases_absolute_paths_and_clamps_dotdot() {
             &cred,
         )
         .unwrap();
-    let resolve = crate::RESOLVE_IN_ROOT;
+    let resolve = crate::ResolveFlags::IN_ROOT.bits();
 
     let file = openat2_at(&dir, &dir, "/leaf", 0, resolve).unwrap();
     assert_eq!(file.node_type(), NodeType::RegularFile);
@@ -1599,7 +1599,7 @@ fn cached_rejects_side_effects_before_touching_the_filesystem() {
     use linux_raw_sys::general::{O_CREAT, O_RDWR, O_TRUNC};
 
     let tree = test_tree();
-    let resolve = crate::open_flags::RESOLVE_CACHED;
+    let resolve = crate::open_flags::ResolveFlags::CACHED.bits();
 
     let err = openat2_at(
         &tree.root,
