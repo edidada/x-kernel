@@ -10,13 +10,13 @@ does not read user memory, and does not take part in syscall dispatch.
 Responsibility boundaries of the related crates:
 
 ```text
-ksyscall (sys_seccomp)  ->  逐字段解码用户 sock_fprog，调用 kseccomp 构造过滤器
-                          ->  存到 kprocess::Thread.seccomp()
-kseccomp                 ->  纯解释器 run(SockFilter[], SeccompData) -> u32
-                          ->  SeccompFilter 校验（长度/指令编码/跳转范围）
-                          ->  SeccompFilter::strict_allowlist() 生成 strict 白名单
-kprocess::Thread         ->  持有 SeccompContext（mode + filter chain）
-handle_syscall           ->  syscall 入口先 evaluate_seccomp 再分发
+ksyscall (sys_seccomp)  ->  decode the user sock_fprog field by field, call kseccomp to build the filter
+                          ->  store in kprocess::Thread.seccomp()
+kseccomp                 ->  pure interpreter run(SockFilter[], SeccompData) -> u32
+                          ->  SeccompFilter validation (length / instruction encoding / jump range)
+                          ->  SeccompFilter::strict_allowlist() generates the strict allowlist
+kprocess::Thread         ->  holds SeccompContext (mode + filter chain)
+handle_syscall           ->  syscall entry runs evaluate_seccomp first, then dispatches
 ```
 
 ## Architecture

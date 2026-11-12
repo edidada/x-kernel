@@ -342,10 +342,10 @@ Source files involved:
 ```
 core/kruntime/
 ├── src/
-│   ├── lib.rs              # 主核 rust_main、日志适配、中断/分配器、内存区日志
-│   ├── mp.rs               # SMP 从核启动、TLB 单测
+│   ├── lib.rs              # primary-core rust_main, log adapter, interrupt/allocator, memory-region log
+│   ├── mp.rs               # SMP secondary-core boot, TLB unit test
 │   ├── cpu_readiness.rs    # Per-CPU interrupt-readiness publication and query
-│   ├── init_setup.rs       # .init_array 构造函数表遍历
+│   ├── init_setup.rs       # .init_array constructor table traversal
 │   └── lang_items.rs       # #[panic_handler]
 ├── Cargo.toml
 └── docs/

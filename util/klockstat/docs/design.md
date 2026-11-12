@@ -120,9 +120,9 @@ When `stats` is off, `klockstat` can still be linked by `procfs`, but there is n
 
 ## Design Trade-offs
 
-- **按调用点而非类型聚合**：与 Linux `lock_stat` 类似，便于定位源码位置；同一行多个
-  `Mutex::new` 因 `column` 不同可能分为多个 class。
-- **Relaxed 原子**：统计为诊断用途，不要求与锁状态严格 happens-before。
+- **Aggregate by call site, not by type**: like Linux `lock_stat`, this makes it easy to locate the source position; multiple
+  `Mutex::new` on the same line may be split into several classes because their `column` differs.
+- **Relaxed atomics**: the statistics are for diagnostic use and do not require a strict happens-before relation with the lock state.
 - Runtime registration uses a fixed 1024-slot open-addressed table. Each slot
   is published once through `klazy::Once`; no heap allocation, container growth,
   or label formatting occurs during registration. The key includes file, line,

@@ -176,8 +176,8 @@ completes the object-driven PTE zap through `mm/vmobj` and `MmSpace`.
 
 ### msync
 
-`msync` 执行 ABI request validation 后，把非空范围交给
-既有 `LiveAddressSpace::msync_range()` capability，保留 active MM user：
+After ABI request validation, `msync` hands the non-empty range to the
+existing `LiveAddressSpace::msync_range()` capability, keeping an active MM user:
 
 - `addr` must be 4K-aligned;
 - `len == 0` succeeds and does not enter MM;
@@ -186,13 +186,13 @@ completes the object-driven PTE zap through `mm/vmobj` and `MmSpace`.
 - `MS_SYNC` synchronizes only shared file mappings, through the VMA walk in `memspace`;
 - `MS_INVALIDATE` returns not supported, because locked-page / invalidate semantics are not yet wired in.
 
-MM 在锁内把当前 VMA overlap 转换为经过溢出校验的半开文件字节范围，保留当前
-runtime 引用后释放 MM mutex，再调用既有文件的
-`VfsFile::fsync_range(range, true)`。文件系统完成数据写入、等待和 datasync
-所需的元数据/journal/设备持久化。`MsyncPolicy` 只保存 MS_* 的写回模式与
-invalidate 标志，不另存恒为 true 的 datasync 字段。`posix-mm` 不直接访问
-page cache、filemap runtime 或 VMA 内部状态。同步后 MM 重新加锁、重新查找下一段 VMA，
-不会持有整段请求的旧映射快照；并发 unmap/mmap 不受文件持久化阻塞。
+Under the lock, MM converts the current VMA overlap into an overflow-checked half-open file byte range, keeps the current
+runtime reference and releases the MM mutex, then calls the existing file's
+`VfsFile::fsync_range(range, true)`. The filesystem completes the data writes, the waiting and the datasync
+metadata/journal/device persistence it requires. `MsyncPolicy` stores only the MS_* writeback mode and
+invalidate flags, and keeps no separate always-true datasync field. `posix-mm` does not directly access
+the page cache, the filemap runtime or VMA internal state. After synchronization MM re-takes the lock and looks up the next VMA again,
+and never holds an old mapping snapshot of the whole requested range; concurrent unmap/mmap is not blocked by file persistence.
 
 ### mremap relocation
 

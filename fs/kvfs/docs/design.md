@@ -448,12 +448,12 @@ corresponding to the role of `s_umount`. As with Linux behavior when no callback
 flags changes; before the callback, the VFS uniformly rejects, for a block-backed superblock, a read-write target that conflicts with a canonical read-only
 device.
 
-`ktime_types::TimestampLimits` 对应 Linux `super_block` 的 `s_time_gran`、`s_time_min` 和
-`s_time_max`。`SuperBlockOperations::timestamp_limits()` 采用 Linux `alloc_super()` 的整秒、
-完整 `i64` 范围作为保守默认；filesystem fill operation 安装 operation table 和 private state
-后查询一次该 capability，再由唯一的 `SuperBlock` 持久保存。文件系统可以像 Linux
-`fill_super()` 设置 `s_time_*` 一样，根据磁盘格式或协议状态显式覆盖；KVFS 不另建并行的
-format object，也不在 bridge 中复制该状态。
+`ktime_types::TimestampLimits` corresponds to Linux `super_block`'s `s_time_gran`, `s_time_min` and
+`s_time_max`. `SuperBlockOperations::timestamp_limits()` adopts Linux `alloc_super()`'s whole-second,
+full `i64` range as a conservative default; after the filesystem fill operation installs the operation table and private state
+it queries this capability once, and it is then persisted by the sole `SuperBlock`. A filesystem may explicitly override it based on the on-disk format or protocol state, just as Linux
+`fill_super()` sets `s_time_*`; KVFS does not create a parallel
+format object and does not duplicate this state in the bridge.
 `VfsInode::current_time()` rounds and clamps the current time;
 `truncate_timestamp()` applies the same conversion to explicit values. Explicit
 setattr, automatic I/O updates, and namespace helpers apply superblock policy
@@ -467,51 +467,51 @@ This follows Linux's separation between `current_time()`/`timestamp_truncate()`
 and `inode_set_*_to_ts()`, while allowing FAT-style distinct atime and mtime/ctime
 invariants.
 
-`FileSystemType` 对应 Linux `struct file_system_type`，描述文件系统实现的名称、
-是否需要 backing device、`init_fs_context` 及类型 flags。`init_fs_context` 为每个
-transaction 安装静态共享的 `FsContextOperations` 并初始化 context-private state，对应
-Linux `file_system_type::init_fs_context` 设置 `fs_context::ops`/`fs_private` 的层次；operation
-table 本身不保存 transaction state。全局注册表对应 Linux
-`file_systems` list，是按类型名挂载和 `/proc/filesystems` 的共同事实源。
-每个类型通过 context operation table 的 `get_tree` 回调构造 superblock，对应 Linux 的 `->get_tree`：nodev
-类型调用 `get_tree_nodev`；device-backed 类型调用 KVFS `get_tree_bdev`，由 VFS super
-层完成 source pathname、block-special inode、`nodev` 和 `rdev` 校验，再从 block core
-取得 canonical `BlockDevice`。`get_tree_bdev` 随后按
-`(FileSystemType, BlockDevice object)` 在同一个 superblock registry 中执行 Linux
-`sget_dev()` 等价查找：已有 live 实例直接复用；初始化中
-或正在 shutdown 的实例等待其 lifecycle transition；只有取得 reservation 的调用者才执行
-filesystem fill-super。新的 block-backed superblock 在 block core 取得 exclusive claim，
-所以同一 canonical device 不能由不同 filesystem type 或 instance 并行拥有；同一 `dev_t`
-撤销后重新发布的 `BlockDevice` 对象则是新的介质代际，不会命中旧 root 和 cache。这与
-Linux `setup_bdev_super()` 以新 superblock 作为 exclusive `bdev_open()` holder 一致：不同
-filesystem type 创建不同 holder，因此不能同时取得同一设备。VFS
-先分配并注册已经带有 `s_type/s_bdev/s_flags` 的 nascent `SuperBlock`，fill callback 只接收
-该对象并安装 filesystem operations 与 root，不再接收或复制 type、device、flags；一次性
-fill closure 可以捕获同一 `FsContext` 中已经解析的 mount state，而不把 option parser 放进
+`FileSystemType` corresponds to Linux `struct file_system_type` and describes the name of a filesystem implementation,
+whether it needs a backing device, `init_fs_context`, and type flags. `init_fs_context` installs the statically shared `FsContextOperations` for each
+transaction and initializes the context-private state, corresponding to
+the layering in which Linux `file_system_type::init_fs_context` sets `fs_context::ops`/`fs_private`; the operation
+table itself holds no transaction state. The global registry corresponds to the Linux
+`file_systems` list and is the common source of truth for mounting by type name and for `/proc/filesystems`.
+Each type constructs a superblock through the `get_tree` callback of the context operation table, corresponding to Linux's `->get_tree`: nodev
+types call `get_tree_nodev`; device-backed types call KVFS `get_tree_bdev`, and the VFS super
+layer completes validation of the source pathname, block-special inode, `nodev` and `rdev`, and then obtains the canonical `BlockDevice` from the block core.
+`get_tree_bdev` then performs, by
+`(FileSystemType, BlockDevice object)` in the same superblock registry, the lookup equivalent to Linux
+`sget_dev()`: an existing live instance is reused directly; an instance being initialized
+or shutting down waits for its lifecycle transition; only the caller that obtains the reservation executes
+filesystem fill-super. A new block-backed superblock obtains an exclusive claim in the block core,
+so the same canonical device cannot be owned in parallel by different filesystem types or instances; a `BlockDevice` object republished for the same `dev_t`
+after revocation is a new medium generation and will not hit the old root and cache. This is consistent with
+Linux `setup_bdev_super()` using the new superblock as the exclusive `bdev_open()` holder: different
+filesystem types create different holders and therefore cannot obtain the same device simultaneously. The VFS
+first allocates and registers the nascent `SuperBlock` that already carries `s_type/s_bdev/s_flags`; the fill callback receives only
+that object and installs the filesystem operations and root, and no longer receives or copies type, device or flags; the one-shot
+fill closure may capture the mount state already parsed in the same `FsContext`, without putting the option parser into
 generic VFS. Driver open runs after reservation, outside the registry mutex. The once-installed
 claim corresponds to Linux `s_bdev_file`, separate from reserved `s_bdev` identity.
 Failure/final shutdown closes it before unregistering and waking mount waiters.
 VFS publishes the available lifecycle only after fill succeeds.
-已有 block-backed superblock 与新请求的 `SB_RDONLY` 不一致时返回 `EBUSY`，对应 Linux
-`get_tree_bdev_flags()` 的已有 `s_root` 分支，而不是将 block mount 降格为 per-mount 策略。
-与 Linux `bdev_file_open_by_path` 一样，可写 mount 会拒绝
-canonical read-only device；只读 mount 仍可继续交给 filesystem fill-super。`fs_flags` 字段是类型化
-的 `FileSystemTypeFlags`（bitflags），对应 Linux `struct file_system_type::fs_flags`，
-其中 `REQUIRES_DEV` 声明是否需要 backing device，位编号与 Linux `include/linux/fs.h`
-对齐，供 `/proc/filesystems` 的 nodev 列和 mount 错误路径判断；未来按 Linux 语义
-新增标志（如 binary mountdata、subtype）时保持同一编号体系即可扩展。
+When an existing block-backed superblock disagrees with the new request's `SB_RDONLY`, `EBUSY` is returned, corresponding to Linux's
+existing-`s_root` branch of `get_tree_bdev_flags()`, rather than downgrading the block mount to a per-mount policy.
+As with Linux `bdev_file_open_by_path`, a writable mount rejects a
+canonical read-only device; a read-only mount may still proceed to filesystem fill-super. The `fs_flags` field is the typed
+`FileSystemTypeFlags` (bitflags), corresponding to Linux `struct file_system_type::fs_flags`,
+in which `REQUIRES_DEV` declares whether a backing device is needed, and the bit numbering is aligned with Linux `include/linux/fs.h`,
+for the nodev column of `/proc/filesystems` and the mount error path; when flags are added in the future
+following Linux semantics (such as binary mountdata, subtype), keeping the same numbering scheme is enough to extend it.
 
-block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应 Linux
+block-special inodes uniformly install KVFS's `DefaultBlkdevFileOperations`, corresponding to Linux
 `def_blk_fops`. Only open looks up `rdev`; existing file-private storage retains
 `BlockDeviceClaim`. Capacity, I/O, ioctl and close use that original device even
 after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
 the current nonblocking flag. Last-file release closes once.
-块设备特殊 inode 尚无 canonical block address space，mmap 返回 ENODEV；启用前必须同时实现介质变更失效协议。
+A block-device special inode has no canonical block address space yet, so mmap returns ENODEV; the medium-change invalidation protocol must be implemented before enabling it.
 KVFS supplies checked argument access and `has_sys_admin` from the current caller.
 The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
-通用 block 命令及未知命令的 driver fallback 统一由 `BlockDevice::ioctl` 分派。普通 close 和 write 不隐式 flush，显式 fsync 才把
-durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
-devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
+Generic block commands and the driver fallback for unknown commands are dispatched uniformly by `BlockDevice::ioctl`. An ordinary close and write do not implicitly flush; only an explicit fsync passes the
+durability request to the backend. KVFS maintains no second `dev_t -> DeviceFileOps` table;
+devfs projects only names and `rdev`, and loop devices are also published as ordinary `Gendisk`s.
 
 Byte I/O on a block-device file is first clamped to the current capacity. If both the offset and the clamped length are aligned to the backend
 block size, the entire borrowed buffer is submitted through a single general block call, using the existing contiguous multi-block
@@ -718,19 +718,19 @@ complete target Path and then look it up by name, so it cannot delete another in
 
 ### Path traversal and DAC
 
-namei 在进入每个目录并查找下一组件前检查目录 search permission (`MAY_EXEC`)；最终
-open 再按访问模式检查目标 inode。默认 `InodeOperations::permission` 进入
-`generic_permission()`，依次选择 owner、group（包括补充组）或 other 权限位。
+Before entering each directory and looking up the next component, namei checks the directory search permission (`MAY_EXEC`); on the final
+open, the target inode is then checked by access mode. The default `InodeOperations::permission` enters
+`generic_permission()`, which selects the owner, group (including supplementary groups) or other permission bits in turn.
 effective `CAP_DAC_OVERRIDE` overrides ordinary mode bits; effective
 `CAP_DAC_READ_SEARCH` additionally grants exact read (and search for
 directories). Neither grants execute permission on a regular file with no
 execute bit set, matching Linux `generic_permission()`.
 
-namespace 修改由 `Path` 或 `Filename` 在调用文件系统回调前统一检查：
-create、mkdir、mknod、symlink、link、unlink、rmdir 和 rename 要求父目录
-`MAY_WRITE | MAY_EXEC`。所有 create-like 操作由锁内 callback 调用共同的 `Path::vfs_*`
-能力；unlink、rmdir 和 rename 把 Path policy 作为 validator 传入 Dentry 操作。
-这些 policy 在父目录锁、所需 participant lock 和最终 lookup 结果仍然有效时执行。
+Namespace modifications are checked uniformly by `Path` or `Filename` before the filesystem callback is invoked:
+create, mkdir, mknod, symlink, link, unlink, rmdir and rename require the parent directory
+`MAY_WRITE | MAY_EXEC`. All create-like operations call the common `Path::vfs_*`
+capabilities from the in-lock callback; unlink, rmdir and rename pass the Path policy to the Dentry operation as a validator.
+These policies execute while the parent directory lock, the required participant locks and the final lookup result are still valid.
 Deletion and replacement in a sticky directory require effective
 `CAP_FOWNER`, directory ownership, or ownership of the final victim; the
 mountpoint check applies to that same dentry.
@@ -757,8 +757,8 @@ Inode metadata modifications are likewise authorized uniformly by `Path` and the
   with write permission on the inode; explicit values and mixed
   `UTIME_NOW`/`UTIME_OMIT` permit only the owner or effective `CAP_FOWNER`.
 
-`SetattrTime` 只承载单次调用中“当前值/显式值”的授权信息，落盘的 `MetadataUpdate`
-只包含解析后的 atime/mtime/ctime 值，不在 inode 或 namei 状态中保存调用上下文。
+`SetattrTime` carries only the authorization information of "current value/explicit value" within a single call, and the persisted `MetadataUpdate`
+contains only the resolved atime/mtime/ctime values; the call context is not saved in the inode or namei state.
 Automatic I/O updates use `InodeUpdateTime`, corresponding to Linux
 `FS_UPD_ATIME` / `FS_UPD_CMTIME`, and invoke filesystem `update_time`. Authorized
 explicit values pass through `VfsInode::truncate_timestamp()`; automatic values
@@ -978,29 +978,29 @@ supporting only plain allocation need no override. The syscall layer consults th
 same mask before dispatching: a backend that declares PUNCH_HOLE/ZERO_RANGE owns
 those modes, and a mode it does not declare (kext4 today) is emulated locally by
 zeroing the range, which frees no blocks.
-无独立 backing 的文件使用 inode operation 的默认截断实现；有 backing 状态的文件系统
-覆盖它，并在调用 `truncate_setsize()` 前完成自身准备。
+A file without independent backing uses the inode operation's default truncate implementation; a filesystem with backing state
+overrides it and completes its own preparation before calling `truncate_setsize()`.
 
 `AddressSpaceOperations` provides only folio read, writeback, and cache-state callbacks; it no longer goes through the byte-level
 `read_at`/`write_at` default forwarding. Byte reads that a filesystem needs can stay in its private backing helper,
 and are reused explicitly by `read_folio` and `readahead`.
 
-`simple_write_end` 保留在 `kvfs::libfs`，只服务 ramfs/memfs 风格的 aops。
-块设备文件系统完成自己的 write-end 后，经 `AddressSpace::write_end_set_size()`
-在同一 generic-write data-lock 和已复制 folio 锁临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
-libfs helper。
+`simple_write_end` stays in `kvfs::libfs` and serves only ramfs/memfs-style aops.
+After a block-device filesystem completes its own write-end, it publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
+within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
+libfs helper.
 
-`AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
-`i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
-`address_space::i_pages`；Folio 使用 `Arc<Folio>` 同时保持物理页、稳定 identity 和内部页锁生命周期。
-`read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
-`MappingPages` 不保存 length、object-id 或 views。`AddressSpace` 持有 cache-invalidate
-lock，用于把 readahead 插入、writeback、page_mkwrite 与 truncate 串行到同一个
-mapping。writeback 通过 owner 闭包在每个 folio 锁定后从 inode 读取实时 EOF。
-构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。
-Backing-store callbacks 只从当前 `AddressSpace` 的 `mapping->host` 借用唯一 filesystem-private
-inode，再经 host 的 `i_sb` 恢复 superblock；filesystem-private inode 因而不需要保存平行
-inode identity 或 superblock 回指。
+`AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
+`i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
+`address_space::i_pages`; Folio uses `Arc<Folio>` to keep the physical page, the stable identity and the internal page-lock lifetime together.
+`read_folio` obtains the stable index from the Folio itself; the AddressSpace constructor no longer takes a mapping kind that only controls diagnostics.
+`MappingPages` does not store length, object-id or views. `AddressSpace` holds the cache-invalidate
+lock, used to serialize readahead insertion, writeback, page_mkwrite and truncate onto the same
+mapping. Writeback reads the live EOF from the inode via an owner closure after each folio is locked.
+The construction API accepts only `&'static dyn AddressSpaceOperations`, so aops are not an inode private object.
+Backing-store callbacks borrow the sole filesystem-private inode only from the current `AddressSpace`'s `mapping->host`,
+and then recover the superblock through the host's `i_sb`; the filesystem-private inode therefore does not need to store a parallel
+inode identity or superblock back-pointer.
 `InodeOperations::cache_residency()` supplies optional filesystem-owned admission
 and removal callbacks once, before inode publication. Resident hits perform no
 quota lookup or superblock recovery. The common cache contains no capacity policy.
@@ -1015,12 +1015,12 @@ zeroes; no sparse policy or readahead is added to generic cache traversal.
 `VfsFile::mapping()` borrows the counterpart of Linux `f_mapping`; MM does not touch the underlying storage, and explicitly clones the `Arc` only when it really needs a lifetime
 that outlives the file borrow.
 
-Generic buffered-write limit check 只读取 `SuperBlock` 创建时缓存的最大文件大小。
-需要按 inode 格式进一步收紧范围的文件系统由 `FileOperations::write_iter()` 调用
-`generic_file_write_iter_with_prepare()`；该回调在同一个 inode data critical section
-内组合文件系统策略、通用大小限制和自动时间戳发布，进入 page-cache write 前执行，
-不把 open-file 写策略下沉到 address-space operation。
-空请求也执行策略检查；被拒绝或裁剪后为空的请求不更新时间戳。
+The generic buffered-write limit check reads only the maximum file size cached at `SuperBlock` creation.
+A filesystem that needs to tighten the range further by inode format has `FileOperations::write_iter()` call
+`generic_file_write_iter_with_prepare()`; this callback composes the filesystem policy, the generic size limit and automatic timestamp publication
+within the same inode data critical section, executing before entering the page-cache write,
+and does not push the open-file write policy down into the address-space operation.
+An empty request also undergoes the policy check; a request that is rejected or trimmed to empty does not update timestamps.
 
 Before a writable open of a non-special file enters the filesystem `open` callback, KVFS increments the
 inode `write_count`; on success it records with `FMode::WRITER` that the current file holds that count, and
@@ -1028,10 +1028,10 @@ it decrements the count when the open fails or after `FileOperations::release()`
 means the current file is the last writer, matching the call order of `get_write_access()`/`FMODE_WRITER` in Linux `do_dentry_open()` and of `ext4_release_file()`. Currently KVFS
 does not yet implement the negative count state caused by executable deny-write.
 
-`WritebackControl` 由 pagecache 定义，KVFS reexport 同一类型。扫描和提交同步借用
-同一个控制对象；预算按交给后端处理的页数扣减，错误或拒绝不退还，完成前缀不改变预算。byte-range callback 的 `WritebackRangeResult` 是
-`Result<usize, (usize, VfsError)>` 的别名，
-表达完成前缀或完成前缀与错误，不再导出独立 writeback outcome 类型。
+`WritebackControl` is defined by pagecache, and KVFS re-exports the same type. Scanning and submission borrow
+the same control object synchronously; the budget is deducted by the number of pages handed to the backend, an error or rejection does not refund it, and a completed prefix does not change the budget. The `WritebackRangeResult` of the byte-range callback is an alias of
+`Result<usize, (usize, VfsError)>`,
+expressing a completed prefix or a completed prefix with an error, and no separate writeback outcome type is exported any more.
 
 ## Concurrency Model
 
@@ -1111,44 +1111,44 @@ lock model and regression coverage are stable.
 
 ## Design Decisions
 
-- ABI carrier 与内核语义类型分离，转换尽量靠近边界。
-- FIEMAP 使用 `FiemapExtentInfo` 和安全 writer 连接 ABI 与 inode operation，避免把用户
-  指针下传，也避免按用户声明容量在 VFS 中分配临时 extent 数组。
-- 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
-- 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
-- current task 定位只存在于 `kprocess`；`kvfs` 对所有安全相关操作显式接收 `&Cred`。
-- `Nameidata` 不保存 credential，避免把一次调用上下文变成冗余对象状态。
-- 通用 DAC、父目录修改检查、sticky policy 和初始 owner 由 VFS 统一实现，后端只负责
-  自身元数据与 operation callback。
-- 打开文件保存 `f_cred`；descriptor 权限与 pathname 权限使用不同入口表达。
-- pathname special file 的 `FileOperations::open()` 必须保留 namei 已解析的 `Path`；
-  FIFO 使用共享无状态 operation table，runtime session 由 inode 的 typed pipe slot
-  持有；禁止使用 per-inode stateful fops、全局 factory、裸指针 key 或 anonymous inode
-  替换原 opened-file identity。
-- 具体 pseudo filesystem 的显式预初始化由各自 `fs/filesystems` crate 拥有；KVFS 只提供
-  hidden mount 所需的通用对象机制，不提供具体 filesystem facade。
-- `FileSystemType` 保留 Linux 的“类型描述符 + 全局注册表”层次；POSIX mount 不依赖
-  具体文件系统 crate，`/proc/filesystems` 也不维护平行的名称表。
-- 不为 immutable simple symlink 增加文件系统私有 target 字段；cached-link 是唯一目标
-  owner，operation table 只标识并读取该 inode 状态。
-- `InodeOperations::set_len()` 必须进入 `VfsInode::truncate_setsize()`；文件系统不能自行组合
-  i_size、cache resize 和 mmap invalidation，也不能建立第二套 EOF/cache owner。
+- The ABI carrier is separate from the kernel semantic types, and conversion stays as close to the boundary as possible.
+- FIEMAP connects the ABI and the inode operation through `FiemapExtentInfo` and a safe writer, avoiding passing the user
+  pointer down, and avoiding allocating a temporary extent array in the VFS according to the user-declared capacity.
+- No generic raw-flags getter is provided; `bits()` is called only when writing to the ABI or the underlying storage.
+- Different flag families do not share integer aliases, so wrong combinations fail at compile time.
+- Current task lookup exists only in `kprocess`; `kvfs` explicitly takes `&Cred` for all security-related operations.
+- `Nameidata` does not store credentials, to avoid turning one call's context into redundant object state.
+- Generic DAC, parent-directory modification checks, the sticky policy and the initial owner are implemented uniformly by the VFS, and the backend is responsible only for its
+  own metadata and operation callbacks.
+- An open file stores `f_cred`; descriptor permission and pathname permission are expressed through different entry points.
+- The `FileOperations::open()` of a pathname special file must preserve the `Path` already resolved by namei;
+  FIFO uses a shared stateless operation table, and the runtime session is held by the inode's typed pipe slot;
+  per-inode stateful fops, global factories, raw-pointer keys, or anonymous inodes replacing the
+  original opened-file identity are forbidden.
+- Explicit pre-initialization of concrete pseudo filesystems is owned by their respective `fs/filesystems` crates; KVFS provides only
+  the generic object mechanisms needed by hidden mounts and provides no concrete filesystem facade.
+- `FileSystemType` keeps Linux's "type descriptor + global registry" layering; POSIX mount does not depend on
+  concrete filesystem crates, and `/proc/filesystems` maintains no parallel name table either.
+- No filesystem-private target field is added for an immutable simple symlink; the cached-link is the sole target
+  owner, and the operation table only identifies and reads that inode state.
+- `InodeOperations::set_len()` must go through `VfsInode::truncate_setsize()`; a filesystem must not compose
+  i_size, cache resize and mmap invalidation by itself, nor establish a second EOF/cache owner.
 - `FileOperations::fallocate()` must publish visible-size growth through
   `VfsInode::truncate_setsize()`; dispatch already holds the data and invalidate
   locks, so the self-locking publish helpers deadlock in that context.
-- `VfsInode` 直接保存唯一的 `Arc<AddressSpace>`，不增加单字段 address-space wrapper；
-  `VfsFile` 保存 Linux 风格的 `f_mapping` 引用，MM runtime 只保存 `VfsFile`。
-- 锁由语义 VFS 对象持有，而不是由 filesystem bridge 持有。
-- `RenameData` 对应 Linux `struct renamedata`，其一次性 `execute` 会消费操作对象并驱动
-  VFS orchestration；辅助方法只借用该对象，不为它提供 `Clone`/`Copy`。
-- callback closure 是 Path policy 与锁内 Dentry final lookup 之间的窄接口，不新增持久
-  状态，也不在锁外保留 lookup 结果；parent inode 由 Path 自身解析，调用者不能传入
-  不一致的 Path/inode/dentry 组合。
-- `mknodat` 直接由 `Filename` 驱动上述 transaction，不新增 syscall 专用类型或
-  transaction 状态结构；`Umode::mknod_node_type()` 只解码 type bits，
-  namei 层的 `may_mknod()` 统一分配 Linux 错误并返回通过校验的 `NodeType`。
-  syscall 边界将该类型写回现有 `Umode` 后再开始 `dirfd`/pathname 解析。
-- namespace lock 使用 blocking lock，因为文件系统 callback 可以执行 I/O。
+- `VfsInode` directly stores the sole `Arc<AddressSpace>`, with no single-field address-space wrapper added;
+  `VfsFile` stores a Linux-style `f_mapping` reference, and the MM runtime stores only `VfsFile`.
+- Locks are held by semantic VFS objects, not by the filesystem bridge.
+- `RenameData` corresponds to Linux `struct renamedata`; its one-shot `execute` consumes the operation object and drives
+  the VFS orchestration; helper methods only borrow that object and provide no `Clone`/`Copy` for it.
+- The callback closure is a narrow interface between the Path policy and the in-lock Dentry final lookup; it adds no persistent
+  state and keeps no lookup result outside the lock; the parent inode is resolved by Path itself, and the caller cannot pass an
+  inconsistent Path/inode/dentry combination.
+- `mknodat` drives the above transaction directly from `Filename`, adding no syscall-specific type or
+  transaction state structure; `Umode::mknod_node_type()` only decodes the type bits,
+  and the namei-layer `may_mknod()` assigns the Linux errors uniformly and returns the validated `NodeType`.
+  The syscall boundary writes that type back into the existing `Umode` before starting `dirfd`/pathname resolution.
+- The namespace lock uses a blocking lock, because filesystem callbacks may perform I/O.
 
 ### SimpleFile Write Modes
 
@@ -1188,24 +1188,24 @@ the cached reference batch is independent of the per-open readahead window, and 
 after which collection is redone. Batch references only keep the allocation alive; when copying page by page, invalidated or non-uptodate pages are rejected,
 falling back to resident lookup and on-demand initialization. Subsequent batches collect only the remaining range of the current read request.
 
-`VfsFile` 持有 `Mutex<FileRaState>`，独立 open / alloc_clone 初始化独立历史，
-共享同一个打开文件描述的 dup/fork 引用共享历史。状态只保存页窗口起点、页数、
-提前触发区长度、可缩减的页预算和已完成读取的字节位置，不保存 EOF 或 folio 引用。
-打开文件时，从所属 superblock 的 canonical block device 取得 `Gendisk::bdi` 预读预算；
-块设备特殊文件直接解析该设备，无设备文件使用 128 KiB 默认值。预算只在打开时快照，
-既有 fd 不受后续 BLKRASET 影响。顺序读按请求规模建立窗口，消费 folio 预读标记后按上限增长。
-小随机缺页只准备请求范围，不覆盖顺序窗口；必要时从缓存的有界连续历史重建窗口。
-仅允许预读的打开实例可以消费共享标记；预算为零的实例保留标记供其他读者使用。
-其他允许预读的打开实例也可以消费共享标记，并根据当前缓存恢复自己的窗口。按需读取最终
-返回 EIO 时该打开实例的预算缩为四分之一，降为零后仅准备一个需求页。
-仅标记命中时在 folio 锁内获取策略锁，把预算检查、标记消费与窗口计算作为一次决策；
-普通命中不逐页获取策略锁。策略锁不覆盖 folio 等待、用户复制或文件系统 I/O。
+`VfsFile` holds a `Mutex<FileRaState>`; independent open / alloc_clone initialize independent history,
+and dup/fork references sharing the same open file description share the history. The state stores only the window start page, the page count,
+the length of the early-trigger zone, the shrinkable page budget and the byte position of completed reads, and stores no EOF or folio reference.
+When a file is opened, the readahead budget is obtained from `Gendisk::bdi` of the canonical block device of the owning superblock;
+a block-device special file resolves that device directly, and a file without a device uses the 128 KiB default. The budget is snapshotted only at open time,
+and existing fds are not affected by a later BLKRASET. Sequential reads build the window by request size, and grow it up to the limit after consuming the folio readahead mark.
+A small random fault prepares only the requested range and does not overwrite the sequential window; when necessary the window is rebuilt from the cached bounded contiguous history.
+An open instance that only allows readahead may consume the shared mark; an instance with a zero budget leaves the mark for other readers.
+Other open instances that allow readahead may also consume the shared mark and restore their own window from the current cache. When an on-demand read finally
+returns EIO, that open instance's budget shrinks to a quarter, and once it drops to zero only one demanded page is prepared.
+When only the mark hits, the policy lock is taken inside the folio lock, making the budget check, mark consumption and window computation a single decision;
+an ordinary hit does not take the policy lock per page. The policy lock does not cover folio waits, user copies or filesystem I/O.
 Early triggering describes when the window advances. Current backends still read
 synchronously, but the interface allows initialization ownership to be transferred
 without introducing a background task.
 
-窗口预算与批次容量独立；单页缺失段及分批后的单页尾段也在本轮初始化。
-分发时只有一个预留页则直接调用 `read_folio`，避免为单页 I/O 分配预读中转缓冲。
+The window budget is independent of the batch capacity; a single-page missing segment and the single-page tail segment after batching are also initialized in this round.
+When dispatching, if there is only one reserved page, `read_folio` is called directly, avoiding allocating a readahead bounce buffer for single-page I/O.
 The window is submitted as contiguous missing ranges of at most 31 pages per
 batch. Private folios are allocated and locked outside the index lock, then a
 contiguous prefix is rechecked and published under that lock. I/O runs after the
@@ -1215,11 +1215,11 @@ responsibility for its held lock, without a separate request index.
 Default readahead consumes existing reservations through per-page `read_folio`
 calls and continues after submission failures. The completer publishes uptodate
 and unlocks the folio.
-首个候选被并发插入时，窗口游标只越过该位置，继续查询后面的缺页。
-游标在尝试初始化时消费当前页；文件系统提供含空洞及 EOF 尾部零填充的完整页，再标记 uptodate。
-已消费的失败页可保留供按需重试；回调未消费的后缀在退出时清理，避免空预读或提前返回
-留下无用驻留页。清理保持未消费页的锁，取得索引锁复核身份并摘除后再解锁；
-等待读取者醒来后重新查找 resident，不在已摘除的预留页上继续初始化。读取失败不暴露部分数据，已复制前缀优先返回。
+When the first candidate is inserted concurrently, the window cursor only skips past that position and continues querying the following missing pages.
+The cursor consumes the current page when it attempts initialization; the filesystem provides a complete page with holes and zero-filled EOF tail, and then it is marked uptodate.
+Consumed failed pages may be kept for on-demand retry; the suffix not consumed by the callback is cleaned up on exit, so that empty readahead or an early return
+does not leave useless resident pages. Cleanup keeps the lock of the unconsumed page, takes the index lock to recheck identity and unlink it, and then unlocks;
+after waiting readers wake, they look up the resident page again and do not continue initializing on an already unlinked reserved page. A read failure exposes no partial data, and the already copied prefix is returned first.
 
 Demand reads also reserve an uninitialized folio before reading under its lock.
 Competing readers wait for the folio lock and repeat the resident lookup;
@@ -1233,10 +1233,10 @@ token describes one initialization attempt; a detached replacement may require
 another call for the same index. Buffered writes validate context before
 `write_begin`, and size changes do so before publishing EOF, keeping mandatory
 rollback/truncation waits inside an admitted operation.
-文件系统负责本次读取边界与尾部清零，通用层不以完成后的 EOF 重验返回字节数。
-缓冲缺页路径从 EOF 检查到初始化完成持 invalidate shared lock，缓存索引锁不覆盖 I/O。通用 buffered 复制期间不持 invalidate lock，锁定每页后重新读取
-inode EOF。单次读取的已准备末端只用于避免对失败预留重复发起预读，不保证缓存驻留。
-只有新发布的预留页携带窗口标记；在 folio 锁内完成标记消费与窗口决策，释放 folio 和策略锁后执行后续窗口。
+The filesystem is responsible for the read boundary and tail zeroing of this read, and the generic layer does not revalidate the returned byte count against the post-completion EOF.
+The buffered fault path holds the invalidate shared lock from the EOF check to initialization completion, and the cache index lock does not cover I/O. The generic buffered copy holds no invalidate lock, and re-reads after locking each page
+the inode EOF. The prepared end of a single read is used only to avoid issuing readahead repeatedly for a failed reservation, and does not guarantee cache residency.
+Only newly published reserved pages carry the window mark; mark consumption and window decision complete inside the folio lock, and the subsequent window runs after the folio and the policy lock are released.
 
 ### Advisory file locks
 
@@ -1291,17 +1291,17 @@ released with its last reference; hard links share the same active session becau
   after becoming effective. `trusted.*` access and `security.*` mutation require
   effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory also
   requires directory ownership or effective `CAP_FOWNER`.
-- FAT 等不能原生表达 Unix UID/GID 的后端不能完整持久化创建者身份。
-- 当前 POSIX rename 路径不支持 `RENAME_WHITEOUT`。
-- superblock dentry cache 尚无 Linux 风格 LRU/shrinker。
-- fast lookup 仍是 mutex-based，没有 RCU 或 rename sequence validation；slow lookup 已按
-  hashed candidate owner/waiter 模型合并同名并发 lookup。
-- layered filesystem 的跨文件系统 lock rank 尚未建模。
-- mount topology 同步与 superblock rename mutex 仍是不同机制。
-- 文件系统类型当前都是静态内建实现，尚无 Linux module autoload、引用计数和
-  `unregister_filesystem()` 生命周期。
-- `FsContext` 只传递一页 opaque mount data；具体 binary/text format 和支持的 option 集合属于
-  各 filesystem type。
+- Backends such as FAT that cannot natively express Unix UID/GID cannot fully persist the creator identity.
+- The current POSIX rename path does not support `RENAME_WHITEOUT`.
+- The superblock dentry cache has no Linux-style LRU/shrinker yet.
+- Fast lookup is still mutex-based, without RCU or rename sequence validation; slow lookup already merges same-name concurrent lookups under the
+  hashed candidate owner/waiter model.
+- The cross-filesystem lock rank of layered filesystems has not been modeled.
+- Mount topology synchronization and the superblock rename mutex are still different mechanisms.
+- Filesystem types are currently all statically built-in implementations, with no Linux module autoload, reference counting or
+  `unregister_filesystem()` lifecycle.
+- `FsContext` passes only one page of opaque mount data; the concrete binary/text format and the supported option set belong to
+  each filesystem type.
 
 ## Sequential record rendering errors
 

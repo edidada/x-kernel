@@ -45,7 +45,7 @@ posix/fs/
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
-│   ├── ioctl.rs        # ioctl dispatch、file attributes 与 FIEMAP ABI handling
+│   ├── ioctl.rs        # ioctl dispatch, file attributes and FIEMAP ABI handling
 │   ├── quota.rs        # quotactl/quotactl_fd (with quota/xfs.rs)
 │   ├── sync.rs         # sync/syncfs
 │   ├── file.rs         # stdio fd installation (add_stdio)
@@ -85,18 +85,18 @@ core/ksyscall
 
 | Submodule | Responsibility |
 |--------|------|
-| `path` | 统一处理绝对路径忽略 `dirfd`、`AT_FDCWD`、`AT_EMPTY_PATH`、`AT_SYMLINK_NOFOLLOW`、`O_NOFOLLOW` 和 VFS magic-link follow |
+| `path` | Uniformly handles absolute paths ignoring `dirfd`, `AT_FDCWD`, `AT_EMPTY_PATH`, `AT_SYMLINK_NOFOLLOW`, `O_NOFOLLOW` and VFS magic-link follow |
 | `open` | Hands Linux open arguments to `kvfs::Filename` and installs the returned file into the current process fd table; does not re-resolve special-file pathnames. `openat2` additionally copies and validates `struct open_how` (`read_open_how`), enforces `RESOLVE_*` constraints via kvfs namei, and selects the dirfd/cwd base (a plain absolute pathname ignores dirfd) |
-| `io` | 处理普通、向量、定点和 fd-to-fd 数据传输 syscall |
-| `fd_ops` | 维护 fd 生命周期、复制、`CLOEXEC`、非阻塞标志和部分 `fcntl` 行为 |
-| `dir` | 维护当前目录、根目录、目录/节点创建和 `linux_dirent64` 输出；`mknodat` 只转换 ABI 参数，创建策略由 KVFS 执行 |
-| `namei` | 处理链接、删除、符号链接和重命名等命名空间变更 |
-| `metadata` | 修改所有者、权限和时间戳 |
-| `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
-| `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
-| `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO`、inode FIEMAP 和文件属性，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
-| `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
+| `io` | Handles ordinary, vectored, positioned and fd-to-fd data-transfer syscalls |
+| `fd_ops` | Maintains fd lifecycle, duplication, `CLOEXEC`, non-blocking flags and some `fcntl` behavior |
+| `dir` | Maintains the current directory, root directory, directory/node creation and `linux_dirent64` output; `mknodat` only converts ABI arguments, and the creation policy is enforced by KVFS |
+| `namei` | Handles namespace mutations such as links, deletion, symlinks and renames |
+| `metadata` | Modifies owner, permissions and timestamps |
+| `xattr` | Implements set/get/list/remove xattr for three target forms (pathname, no-follow and fd), copies bounded input names and values, and handles list size queries/`ERANGE` with a single bounded writer |
+| `mount` | Maps Linux mount flags to `kvfs::MountFlags`, looks up the implementation by registered `FileSystemType`, and handles non-recursive bind and remount |
+| `stat` | Converts VFS metadata, access checks and statfs information |
+| `ioctl` | Handles `FIONBIO`, inode FIEMAP and file attributes, and forwards other commands to `FileLike::ioctl`; unrecognized commands return `ENOTTY` and are only logged with `debug!` |
+| `sync` | Forwards sync requests to the filesystem, or to the filesystem of the open object |
 
 ## Content modification notifications
 
@@ -524,8 +524,8 @@ or a binary representation, and when parsing an unknown or unimplemented option 
 genuine compatibility no-op. Filesystem-specific remount reconfigure is still not modeled.
 `MS_MOVE`, `MS_SHARED` and `MS_UNBINDABLE` return `InvalidInput` before any operation dispatch, and an ordinary new mount carrying `MS_REC` also returns `InvalidInput`; `MS_PRIVATE`/`MS_SLAVE` are accepted, and `MS_BIND|MS_REC` is accepted only when the source subtree has no mounts. Therefore `MS_BIND|MS_MOVE` and `MS_REMOUNT|MS_SHARED` never execute a partial request.
 `sys_umount2` returns `InvalidInput` for `MNT_FORCE`, `MNT_EXPIRE` and `UMOUNT_NOFOLLOW`; `MNT_DETACH` is supported.
-显式拒绝比静默忽略更安全，
-因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。
+Explicit rejection is safer than silent ignoring,
+because silent ignoring would lead user space to believe it has obtained semantics such as asynchronous unmount or bind mount.
 `mount` privilege is decided at the syscall boundary from the credential
 snapshot captured for that call: `path_mount()` checks after `MS_NOUSER` and
 before operation dispatch, while `sys_umount2()` checks after target lookup and
@@ -620,33 +620,33 @@ nonzero flags return `InvalidInput` at the syscall boundary.
 `posix-fs` has no custom `Drop` types.
 Resource release depends on the lower-level objects:
 
-- `close`/`close_range` 从当前进程 fd 表移除 `Arc<dyn FileLike>`；
-- `close_range` 的两个范围参数遵守 Linux `unsigned int` ABI，接受 `UINT_MAX`
-  作为开放上界；向有符号 fd 表转换时裁剪上界。超出 fd 表编号域的空范围仍保留
-  `CLOSE_RANGE_UNSHARE` 的文件表隔离效果，不将无效顺序或未知 flags 当作成功。
-- fd 复制和打开路径通过 `Arc` 共享文件、目录、pipe 或设备对象；
-- 临时 `Vec`、路径 `String`、`CString` 和中间 I/O 缓冲区在函数返回时释放；
-- mount/unmount 的 topology 由 `kvfs::Path` 和 `Mount` 管理；`VfsMount` 最后释放时归还
-  superblock active 引用，并在最后一个引用消失时执行 shutdown。
+- `close`/`close_range` remove the `Arc<dyn FileLike>` from the current process fd table;
+- the two range arguments of `close_range` follow the Linux `unsigned int` ABI and accept `UINT_MAX`
+  as an open upper bound; the upper bound is clamped when converted to the signed fd table. An empty range beyond the fd table's numbering domain still retains
+  the file-table isolation effect of `CLOSE_RANGE_UNSHARE`, and an invalid order or unknown flags are not treated as success.
+- fd duplication and the open path share file, directory, pipe or device objects through `Arc`;
+- temporary `Vec`, path `String`, `CString` and intermediate I/O buffers are released when the function returns;
+- the mount/unmount topology is managed by `kvfs::Path` and `Mount`; when the last `VfsMount` is released, it returns the
+  superblock active reference, and shutdown runs when the last reference goes away.
 
 ## Known limitations
 
 1. Credential DAC uses effective capabilities and Linux mode semantics, but
    LSM, ACL, user-namespace ID mapping, and idmapped mounts are not implemented.
-2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
-3. 文件锁提供本地 advisory 语义，不实现 lease 或网络文件系统锁协议。
-4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语
-   服务，否则要求同一超级块。
-5. `mount` 尚不支持 move、带挂载子树的 recursive bind、shared/unbindable propagation，以及
-   只读策略之外的文件系统专用
-   reconfigure。普通新挂载已转交一页 opaque mount data，但具体文本或二进制格式及选项仍由
-   各 filesystem type 选择性实现；nodev 与 device-backed 类型均经 registry/FsContext 创建。
-6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
-7. `F_ADD_SEALS` / `F_GET_SEALS` 已接入 shmem object state；shared
-   writable mmap 和 `mprotect(PROT_WRITE)` seal enforcement 由 `mm/filemap`
-   执行。
-8. POSIX ACL 仍未实现权限计算、mode 同步和继承；KExt4 不把 core 中的 opaque ACL bytes
-   作为普通 `system.posix_acl_*` xattr 暴露。
+2. Backends such as FAT that cannot express Unix UID/GID cannot fully persist the creator identity.
+3. File locks provide local advisory semantics and do not implement leases or network filesystem lock protocols.
+4. `copy_file_range` has no zero-copy path; a cross-superblock pairing can only be
+   served by the target's native copy primitive, otherwise the same superblock is required.
+5. `mount` does not yet support move, recursive bind with mounted subtrees, shared/unbindable propagation, or filesystem-specific
+   reconfigure beyond the read-only policy.
+   An ordinary new mount already passes one page of opaque mount data, but the concrete text or binary format and options are still selectively implemented by
+   each filesystem type; both nodev and device-backed types are created through registry/FsContext.
+6. `sendfile` retains the 32-bit range limit for a non-null offset, reflecting legacy interface compatibility constraints.
+7. `F_ADD_SEALS` / `F_GET_SEALS` are wired into shmem object state; shared
+   writable mmap and `mprotect(PROT_WRITE)` seal enforcement are
+   performed by `mm/filemap`.
+8. POSIX ACL still lacks permission computation, mode synchronization and inheritance; KExt4 does not expose the opaque ACL bytes in core
+   as ordinary `system.posix_acl_*` xattrs.
 
 ## Kernel unit-test layout
 

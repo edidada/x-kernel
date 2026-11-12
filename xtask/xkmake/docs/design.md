@@ -16,17 +16,17 @@ src/
 ├── linker.rs     kernel linker script rendering and stable writing
 ├── coverage.rs   unittest coverage extraction and report generation
 ├── doc.rs        workspace rustdoc orchestration
-├── hygiene.rs    仓库卫生工具编排
+├── hygiene.rs    repository hygiene tool orchestration
 ├── dylint.rs     Dylint lint library build and kernel scan
 ├── facts.rs      packing of the code facts exported by the Dylint scan
-├── image_metadata.rs  内嵌构建信息与 Build ID 的 ELF finalize
-├── qemu.rs       平台启动策略
-├── x86.rs        LinuxBoot/UEFI 启动介质
-├── process.rs    外部进程边界
-├── dwarf_embed.rs 进程内 DWARF 段嵌入（KFEAT_DWARF 时启用）
-├── symtab.rs     紧凑内核符号表生成（KFEAT_SYMTAB）
-├── symbolize.rs  日志地址的 Host 侧符号化
-└── error.rs      工具层错误模型
+├── image_metadata.rs  ELF finalize for embedded build info and Build ID
+├── qemu.rs       platform boot policy
+├── x86.rs        LinuxBoot/UEFI boot media
+├── process.rs    external process boundary
+├── dwarf_embed.rs in-process DWARF section embedding (enabled with KFEAT_DWARF)
+├── symtab.rs     compact kernel symbol table generation (KFEAT_SYMTAB)
+├── symbolize.rs  host-side symbolization of log addresses
+└── error.rs      tool-layer error model
 ```
 
 ## Architecture
@@ -39,7 +39,7 @@ xkmake ------> xconfig ------> .config / config.rs / Cargo config
    |
    +---------> Cargo --------> kernel ELF
    |                            |
-   |                            +--> kernel.debug.elf（完整符号、DWARF 和覆盖率映射）
+   |                            +--> kernel.debug.elf (full symbols, DWARF and coverage maps)
    |
    +-- embed DWARF on demand (KFEAT_DWARF) / bootstrap symbol table (KFEAT_SYMTAB)
    |      + rust-objcopy (external)
@@ -66,52 +66,52 @@ the architecture, platform, or features back from the generated TOML.
 
 ### Build
 
-1. 校验当前目录是 X-Kernel workspace。
-2. 通过一次 `ConfigEngine` 求值生成完整的 `ResolvedKernelConfig` 快照。
-3. 从该快照生成 `.config`、`auto.conf`、`autoconf.h`、`config.rs`、
-   rust-analyzer 设置和 Cargo 配置，并从仓库根目录
-   `linker.lds.S` 渲染当前 target 的 linker script；生成阶段不再次
-   解析 Kconfig。linker script 只在
-   内容变化时重写，避免无效更新 mtime 使 Cargo 重新编译。
-4. 构造一次性的 `BuildContext`，之后不再读取环境或配置文件。
-5. 调用 Cargo 生成目标 ELF。
-6. x86_64 额外增量构建 boot stub 与 EFI loader。
-7. 若现有 bundle 的稳定构建来源、配置 hash、输入时间、产物名称、大小和
-   mtime 顺序仍匹配，则作为可信本地缓存直接复用，并保留原有构建时间；
-   普通 build 不重新扫描完整 ELF。
-8. 否则在临时路径保存完整 Cargo ELF 供 Host 分析；启动 ELF 按需嵌入
-   DWARF（KFEAT_DWARF），再由 `rust-objcopy --strip-all` 移除非加载调试与
-   覆盖率映射。x86 保留引导器查找的 `rust_entry` 和 `boot_stack_top`。
-   最后原地填充 linker 预留的 `.note.xkernel.build-info` 与 `.note.gnu.build-id`；自动
-   构建时间在此时取当前 UTC 时间，而不是参与前置缓存判断。
-9. Build ID 对 build-info 已写入、Build ID descriptor 清零后的全部
-   `PT_LOAD` 内容计算 SHA-256。
-10. 从 finalized ELF 生成 raw BIN。
-11. x86_64 在进程内生成 LinuxBoot header/镜像，并创建 UEFI FAT 镜像。
-    LinuxBoot 的 i386 setup 代码用 GNU 工具汇编链接：x86_64 主机用本机
-    `gcc`/`ld`/`objcopy`，其他主机用 `x86_64-linux-gnu-*`。
-    FAT 镜像按引导器、内核 ELF 和配置文件的实际大小计算，预留两份 FAT、
-    目录和分配对齐空间，按 MiB 对齐且至少 256 MiB，支持较大的 UT/coverage 产物。
-12. 移除旧 manifest，提升所有产物，最后提升新 manifest 作为有效性标记。
-13. 从有效 bundle 刷新仓库根目录的 `xkernel_<platform>.*` 兼容产物，供
-    Jenkins 制品传递和仍使用旧命名的工具消费。复制先写入不存在的同目录
-    临时路径，使 APFS/Linux CoW 文件系统可走 clone/reflink 快速路径，再
-    以 rename 替换最终文件；文件系统不支持时由标准库回退普通复制。
+1. Verify that the current directory is the X-Kernel workspace.
+2. Evaluate `ConfigEngine` once to produce the complete `ResolvedKernelConfig` snapshot.
+3. From that snapshot, generate `.config`, `auto.conf`, `autoconf.h`, `config.rs`,
+   the rust-analyzer settings and the Cargo config, and render the linker script of the current target from the repository-root
+   `linker.lds.S`; the generation phase does not parse
+   Kconfig again. The linker script is rewritten only
+   when its content changes, to avoid pointless mtime updates that make Cargo recompile.
+4. Construct a one-shot `BuildContext`, after which the environment and configuration files are no longer read.
+5. Invoke Cargo to produce the target ELF.
+6. x86_64 additionally builds the boot stub and the EFI loader incrementally.
+7. If the existing bundle's stable build source, config hash, input times, artifact names, sizes and
+   mtime order still match, it is reused directly as a trusted local cache, keeping the original build time;
+   an ordinary build does not rescan the complete ELF.
+8. Otherwise, save the complete Cargo ELF at a temporary path for host analysis; embed DWARF into the boot ELF on demand
+   (KFEAT_DWARF), then have `rust-objcopy --strip-all` remove the non-loaded debug data and
+   coverage maps. On x86, keep the `rust_entry` and `boot_stack_top` that the bootloader looks up.
+   Finally, fill in place the `.note.xkernel.build-info` and `.note.gnu.build-id` reserved by the linker; the automatic
+   build time takes the current UTC time at this point and does not take part in the earlier cache check.
+9. The Build ID is the SHA-256 over all `PT_LOAD` content after build-info has been written and the
+   Build ID descriptor zeroed.
+10. Generate the raw BIN from the finalized ELF.
+11. x86_64 generates the LinuxBoot header/image in-process and creates the UEFI FAT image.
+    LinuxBoot's i386 setup code is assembled and linked with GNU tools: x86_64 hosts use the native
+    `gcc`/`ld`/`objcopy`, and other hosts use `x86_64-linux-gnu-*`.
+    The FAT image size is computed from the actual sizes of the bootloader, kernel ELF and config file, reserving two FATs,
+    directory and allocation alignment space, MiB-aligned and at least 256 MiB, to support larger UT/coverage artifacts.
+12. Remove the old manifest, promote all artifacts, and finally promote the new manifest as the validity marker.
+13. Refresh the compatibility artifacts `xkernel_<platform>.*` in the repository root from the valid bundle, for
+    Jenkins artifact handoff and tools that still use the old names. The copy is first written to a nonexistent
+    temporary path in the same directory, so that APFS/Linux CoW filesystems can take the clone/reflink fast path, and
+    then renamed over the final file; when the filesystem does not support it, the standard library falls back to a plain copy.
 
 ### Artifacts
 
 Each bundle contains two kinds of ELF:
 
-- `kernel.elf`：精简的启动 ELF，保留加载段及 x86 必需的两个引导符号。
-  KFEAT_DWARF 时嵌入的可加载调试段、KFEAT_SYMTAB 的运行时符号表，以及
-  unittest 的运行时 profile 数据和计数器均保留；
-- `kernel.debug.elf`：**始终**是未加工的 Cargo 产物（非 alloc `.debug_*`
-  及 `__llvm_covfun` / `__llvm_covmap` 完整保留），供 Host 符号化、GDB、
-  反汇编和覆盖率报告使用。`config bundle-debug-elf` 提供该产物的路径。
+- `kernel.elf`: the slimmed boot ELF, keeping the loadable segments and the two boot symbols required by x86.
+  The loadable debug sections embedded with KFEAT_DWARF, the runtime symbol table of KFEAT_SYMTAB, and the
+  runtime profile data and counters of unittest are all retained;
+- `kernel.debug.elf`: **always** the unprocessed Cargo artifact (non-alloc `.debug_*`
+  and `__llvm_covfun` / `__llvm_covmap` fully retained), used for host symbolization, GDB,
+  disassembly and coverage reports. `config bundle-debug-elf` provides the path of this artifact.
 
-LinuxBoot 和 UEFI 都封装 `kernel.elf`；文件中的 Host 调试数据不再进入
-启动时的源镜像保留区。bundle 格式 v8 强制重建旧版本产物，避免复用
-尚未精简的启动 ELF。
+Both LinuxBoot and UEFI wrap `kernel.elf`; the host debug data in the file no longer enters
+the source-image retention area at boot. Bundle format v8 forces a rebuild of old-version artifacts, to avoid reusing
+a boot ELF that has not yet been slimmed.
 
 ### Symbol Table Bootstrapping (KFEAT_SYMTAB)
 
@@ -319,34 +319,34 @@ directory are taken in as `dep` crates too; the manifest records
 
 ## Design Decisions
 
-- Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。
-- 普通 build 的复用属于可信本地缓存边界，依靠 manifest 最后提交的不变量、
-  产物大小与 mtime 快速判断；`--no-build` 属于已有制品消费边界，额外执行
-  完整 loadable-image SHA-256 校验。
-- 每次 build 仍调用 Cargo 检查源码新鲜度；源码和配置未变化时 Cargo
-  增量流程不重新编译，XKMake 也不重新生成 ELF metadata、BIN 或启动镜像。
-  KFEAT_SYMTAB 的符号表自举在 blob 内容不变时不触发第二次链接。
-- 构建来源元数据不进入 Cargo 编译环境；linker 预留固定 note，XKMake 在
-  bundle 阶段原地写入，因此机器名和时间变化不会让 kernel crate 重编译。
-- 自动构建时间表示 bundle 本次真正生成的 UTC 时间，不是缓存检查输入；
-  `KBUILD_BUILD_TIME` 或 `SOURCE_DATE_EPOCH` 是显式覆盖值，值发生变化时会
-  使已有 bundle 失效。
-- 镜像元数据 ABI 由 `boot/kernel-image-metadata` 持有；XKMake 负责收集，
-  entry 只负责校验后的展示。
-- linker script 是配置派生的 host 编排产物，由 XKMake 在调用
-  Cargo 前生成；`kernel-boot` 不再用 `build.rs` 生成它。
-- `.config` 仍是内核产品配置的唯一事实来源。
-- QEMU 参数使用 `Vec<OsString>` 语义逐项传递，不经过 shell 求值。
-- `xkmake` 仅依赖 `xconfig::build_config` 门面，不依赖 CLI 实现模块。
-- 没有 `.config` 时不猜测默认平台。
-- bundle 是规范产物位置；仓库根目录的 `xkernel_<platform>.*` 是从有效
-  bundle 刷新的兼容副本，不参与 bundle 有效性判断。
-- LinuxBoot 镜像布局由 XKMake 的 Rust 代码生成，不依赖 Python 脚本。
-- rustdoc feature 与内核构建使用同一份解析快照，不维护第二套配置读取器。
-- 依赖分析使用固定版本的外部 cargo-shear，不在 XKMake 内复制 Cargo/Rust
-  解析逻辑，也不把其大型依赖树链接进 XKMake。
-- Rust 源文件 header 由固定版本的外部 licensure 按仓库配置检查和修复；
-  XKMake 只负责确定文件集合、分批调用和传播失败状态。
+- Cargo handles incremental source compilation; the bundle caches only the image-processing results.
+- Reuse in an ordinary build belongs to the trusted local cache boundary, judged quickly from the invariant that the manifest is committed last,
+  and the artifact sizes and mtime; `--no-build` belongs to the existing-artifact consumption boundary and additionally performs
+  a full loadable-image SHA-256 check.
+- Every build still invokes Cargo to check source freshness; when sources and config are unchanged, the Cargo
+  incremental flow does not recompile, and XKMake also does not regenerate ELF metadata, BIN or boot images.
+  The KFEAT_SYMTAB symbol-table bootstrap does not trigger a second link when the blob content is unchanged.
+- Build-source metadata does not enter the Cargo compilation environment; the linker reserves a fixed note, and XKMake writes it in place at the
+  bundle stage, so changes in machine name and time do not recompile the kernel crate.
+- The automatic build time is the UTC time at which the bundle was actually generated this time, not a cache-check input;
+  `KBUILD_BUILD_TIME` or `SOURCE_DATE_EPOCH` is an explicit override, and when its value changes it
+  invalidates the existing bundle.
+- The image-metadata ABI is owned by `boot/kernel-image-metadata`; XKMake is responsible for collection,
+  and entry is only responsible for displaying the validated result.
+- The linker script is a config-derived host orchestration artifact, generated by XKMake before invoking
+  Cargo; `kernel-boot` no longer generates it with `build.rs`.
+- `.config` remains the sole source of truth for the kernel product configuration.
+- QEMU arguments are passed item by item with `Vec<OsString>` semantics, without shell evaluation.
+- `xkmake` depends only on the `xconfig::build_config` facade, not on the CLI implementation modules.
+- Without a `.config`, no default platform is guessed.
+- The bundle is the canonical artifact location; the `xkernel_<platform>.*` files in the repository root are compatibility copies refreshed from the valid
+  bundle and do not take part in bundle validity checks.
+- The LinuxBoot image layout is generated by XKMake's Rust code and does not depend on Python scripts.
+- The rustdoc features and the kernel build use the same resolved snapshot; no second config reader is maintained.
+- Dependency analysis uses the external cargo-shear at a pinned version; it does not duplicate Cargo/Rust
+  parsing logic inside XKMake nor link its large dependency tree into XKMake.
+- Rust source file headers are checked and repaired by the external licensure at a pinned version according to the repository config;
+  XKMake is only responsible for determining the file set, invoking in batches, and propagating failure status.
 - Code facts are exported by the lint library inside rustc; XKMake only
   selects the units of this build, validates and compresses their files and
   writes the manifest. Units are selected from Cargo's JSON messages rather
@@ -354,8 +354,8 @@ directory are taken in as `dep` crates too; the manifest records
   in the same target directory are never mixed in. The export switch is an
   environment variable with the fixed value `1`, so that a changing value
   does not make Cargo re-check every crate.
-- guest IP 和 gateway 当前属于构建输入，因为现有网络栈通过
-  `option_env!` 编译它们；后续应迁移为内核命令行参数。
+- The guest IP and gateway are currently build inputs, because the existing network stack compiles them in via
+  `option_env!`; they should later be migrated to kernel command-line parameters.
 
 ## Current Limitations
 

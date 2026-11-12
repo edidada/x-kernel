@@ -123,13 +123,13 @@ arch/kcpu/
 │   ├── active_exception_context.rs   # per-CPU current trapframe tracking
 │   ├── userspace_common.rs           # ReturnReason, exception table fix-up
 │   ├── x86_64/
-│   │   ├── mod.rs                    # 导出 ExceptionContext(=TrapFrame)、TaskContext、测试挂载
-│   │   ├── xstate.rs                 # 系统保存格式、XSAVE/FXSAVE、Linux 信号 FP 编解码
-│   │   ├── cpuinfo.rs                # 每 CPU 身份、受内核状态支持约束的能力快照
-│   │   ├── ctx.rs                    # ExceptionContext（含 orig_rax）、ContextSwitchFrame、TaskContext
-│   │   ├── excp.rs / excp.S          # trap 入口、IRQ/PageFault 分发、syscall_entry
-│   │   ├── instrs.rs / copy_user.S   # user_copy + 异常表条目
-│   │   ├── userspace.rs              # UserContext、UserRestorableContext、enter_user、syscall MSR 初始化、syscall_restart_error
+│   │   ├── mod.rs                    # exports ExceptionContext(=TrapFrame), TaskContext, test mounting
+│   │   ├── xstate.rs                 # system save format, XSAVE/FXSAVE, Linux signal FP encode/decode
+│   │   ├── cpuinfo.rs                # per-CPU identity, capability snapshot constrained by kernel-state support
+│   │   ├── ctx.rs                    # ExceptionContext (incl. orig_rax), ContextSwitchFrame, TaskContext
+│   │   ├── excp.rs / excp.S          # trap entry, IRQ/PageFault dispatch, syscall_entry
+│   │   ├── instrs.rs / copy_user.S   # user_copy + exception table entries
+│   │   ├── userspace.rs              # UserContext, UserRestorableContext, enter_user, syscall MSR init, syscall_restart_error
 │   │   ├── boot.rs                   # init_trap()
 │   │   ├── gdt.rs                    # GDT/TSS per-CPU initialization
 │   │   └── idt.rs                    # IDT initialization
@@ -177,15 +177,15 @@ Guest tests are mounted into their original parent modules through `unittest::pa
 | `aarch64_current_unittest.rs` | 1 | AArch64, existing file changed to path mounting |
 | `x86_64.rs` | 6 | x86_64 |
 | `x86_cpuinfo.rs` | 13 | x86_64 |
-| `x86_xstate.rs` | 3 | x86_64（YMM 用例需要 `fp-simd`） |
+| `x86_xstate.rs` | 3 | x86_64 (YMM cases need `fp-simd`) |
 | `x86_64_userspace.rs` | 2 | x86_64 and `fp-simd` |
 | `riscv.rs` | 4 | riscv32 or riscv64 |
 | `riscv_hwprobe.rs` | 7 | riscv32 or riscv64, of which 2 cases are serial |
 | `loongarch64.rs` | 5 | LoongArch64 |
 
-实际 guest 用例数量由架构、feature 和测试过滤条件共同决定，以运行时注册清单为准。
-`src/aarch64/userspace.rs` 原有 `cfg(test)`
-挂载的 `tests/host/aarch64_userspace_host.rs` 保持不变，2 个 host 用例不转换为 guest。
+The actual number of guest cases is determined jointly by the architecture, features and test filters, according to the runtime registration list.
+`tests/host/aarch64_userspace_host.rs`, which `src/aarch64/userspace.rs` originally mounted under `cfg(test)`,
+stays unchanged, and its 2 host cases are not converted to guest cases.
 
 ## Architecture
 
@@ -253,7 +253,7 @@ ExceptionContext  (defined per architecture, full-register trap frame)
 
 UserContext       (defined per architecture, wraps ExceptionContext + user-mode-specific fields)
       │           x86_64:      { kernel_rsp, tf: TrapFrame, fs_base, gs_base }
-      │                          - kernel_rsp 紧邻 tf，是 enter_user 汇编的私有帧
+      │                          - kernel_rsp sits right next to tf and is the private frame of the enter_user assembly
       │                          - syscall_restart_error() queries the restart error code
       │           aarch64:     { tf: ExceptionContext, sp, tpidr, saved_syscall_arg0 }
       │           riscv:       UserContext(ExceptionContext)     -- newtype
@@ -263,10 +263,10 @@ UserContext       (defined per architecture, wraps ExceptionContext + user-mode-
           (via the impl_user_context_deref! macro)
 
 UserRestorableContext
-      │           x86_64 用于 fork/clone 继承段基址及完整 x87/SSE/YMM 快照，
-      │           始终保存在内核；信号使用 Linux ABI 的独立 fpregs 区域。
-      │           其他架构携带 ABI `mcontext_t` 未覆盖的窄状态并用于信号帧。
-      │           不包含 UserContext::kernel_rsp 私有字段或 syscall restart scratch。
+      │           x86_64 uses it for fork/clone to inherit segment bases and the full x87/SSE/YMM snapshot,
+      │           which is always saved in the kernel; signals use the separate fpregs area of the Linux ABI.
+      │           Other architectures carry the narrow state not covered by the ABI `mcontext_t` and use it for signal frames.
+      │           It does not include the private UserContext::kernel_rsp field or the syscall restart scratch.
 
 TaskContext       (defined per architecture, callee-saved registers used for context switching)
                   x86_64:      { kstack_top, rsp, cr3, ext_state? }
@@ -292,37 +292,37 @@ on its first switch-out.
 
 ## Calling Constraints / Execution Context
 
-- **`init_trap()`**：必须在 per-CPU 数据初始化之后、调度器启动之前调用。
-  每个架构在该函数中完成异常表排序、硬件描述符表加载、trap 向量基址设置。
-- **trap handler**（如 `x86_trap_handler`）：运行在中断关闭上下文中，
-  不可睡眠或阻塞。由汇编入口直接调用，调用时栈上已保存完整 trap frame。
-- **riscv64 `gp` 不变量**：`gp`（x3）是每 CPU 的 percpu 基址，启动时由
-  `kcpu_slot` 架构层的 `set_current_base` 设置一次，S-mode trap 期间恒定，故**不**由
-  `PUSH_POP_GENERAL_REGS` 保存/恢复——绝不放入可迁移的每任务 trapframe。
-  U-mode 用户 `gp` 经 slot-3（`UserContext.regs.gp`）中转：`.Lexit_user`
-  入口保存，`.Ltrap_return` 仅在返回 U-mode（SPP==0）时恢复；S-mode 返回
-  保持本 hart 的 `gp`。原因：handler 若在 trap 途中阻塞（如 page-fault
-  后端），任务会在 PUSH 与 POP 之间迁移到另一 hart，此时从 trapframe 恢复
-  旧 hart 的基址会污染 `current()`/`this_cpu_id()`。
-- **riscv64 hwprobe snapshot**：`init_hwprobe_from_fdt()` 在平台早期初始化
-  从 enabled CPU device-tree node 采集 `riscv,isa` /
-  `riscv,isa-extensions`、vendor/arch/impl id、`timebase-frequency`、
-  Zicboz block size 和当前用户虚拟地址上限。
-  `RiscvHwprobe` private provider 持有 per-CPU capability snapshot；
-  对外 helper 接收 Linux raw key，在 `kcpu` 内部完成取值、聚合和
-  `WHICH_CPUS` 匹配语义。syscall 路径不读取 M-mode CSR，也不重新解析设备树。
-- **`TaskContext::switch_to()`**：unsafe 调度入口，必须由调用者关闭普通 IRQ、
-  排除迁移并保留新旧任务。涉及页表切换、FP 状态保存/恢复及 current 发布。
-- **`UserContext::run()`**：禁用本地 IRQ 后进入用户态，返回后重新启用。
-  调用者必须确保当前处于进程线程上下文且用户页表已正确设置。
-- **`user_copy()`**：可在任意内核上下文调用。依赖异常表机制安全处理无效
-  用户指针，不会因用户空间地址错误而 panic。
-- **`active_exception_context()`**：可在任意上下文调用（包括 NMI 类上下文），
-  返回 best-effort 快照。
-- **`in_exception_context()`**：在读取 CPU slot 和指针存在性期间屏蔽普通 IRQ，
-  随后恢复原屏蔽状态。调用者无需为该布尔快照额外做排除；它不解引用 trap frame，
-  不调整抢占计数，也不调用调度器或 RCU 检查。后续队列操作或 reader 移除的保护
-  仍由调用者负责。
+- **`init_trap()`**: must be called after per-CPU data initialization and before the scheduler starts.
+  Each architecture completes exception-table sorting, hardware descriptor table loading and trap vector base setup in this function.
+- **trap handler** (such as `x86_trap_handler`): runs in an interrupts-disabled context
+  and must not sleep or block. It is called directly by the assembly entry, with the full trap frame already saved on the stack at call time.
+- **riscv64 `gp` invariant**: `gp` (x3) is the per-CPU percpu base, set once at boot by the
+  `set_current_base` of the `kcpu_slot` architecture layer and constant during an S-mode trap, so it is **not** saved/restored by
+  `PUSH_POP_GENERAL_REGS` - it must never be placed in the migratable per-task trapframe.
+  The U-mode user `gp` is relayed through slot-3 (`UserContext.regs.gp`): `.Lexit_user`
+  saves it at entry, and `.Ltrap_return` restores it only when returning to U-mode (SPP==0); an S-mode return
+  keeps this hart's `gp`. Reason: if a handler blocks midway through a trap (such as a page-fault
+  backend), the task may migrate to another hart between PUSH and POP, and restoring the
+  old hart's base from the trapframe would corrupt `current()`/`this_cpu_id()`.
+- **riscv64 hwprobe snapshot**: `init_hwprobe_from_fdt()` collects, during early platform initialization, from the enabled CPU device-tree nodes
+  `riscv,isa` /
+  `riscv,isa-extensions`, the vendor/arch/impl ids, `timebase-frequency`,
+  the Zicboz block size and the current user virtual address upper limit.
+  The `RiscvHwprobe` private provider holds the per-CPU capability snapshot;
+  the public helper receives Linux raw keys and completes value lookup, aggregation and
+  `WHICH_CPUS` matching semantics inside `kcpu`. The syscall path neither reads M-mode CSRs nor re-parses the device tree.
+- **`TaskContext::switch_to()`**: an unsafe scheduling entry; the caller must disable normal IRQs,
+  exclude migration and keep the old and new tasks alive. It involves page-table switching, FP state save/restore and current publication.
+- **`UserContext::run()`**: enters user mode after disabling local IRQs and re-enables them after returning.
+  The caller must ensure that it is currently in a process thread context and that the user page table is set up correctly.
+- **`user_copy()`**: may be called from any kernel context. It relies on the exception-table mechanism to handle invalid
+  user pointers safely and does not panic because of a user-space address error.
+- **`active_exception_context()`**: may be called from any context (including NMI-like contexts),
+  and returns a best-effort snapshot.
+- **`in_exception_context()`**: masks normal IRQs while reading the CPU slot and pointer presence,
+  then restores the original mask state. The caller needs no extra exclusion for this boolean snapshot; it does not dereference the trap frame,
+  does not adjust the preemption count, and does not call the scheduler or RCU checks. The protection of later queue operations or reader removal
+  remains the caller's responsibility.
 - **FP/SIMD save/restore**: controlled by the `fp-simd` feature. When it is not enabled, FP state operations are skipped.
 - **TLS boundary**: kernel tasks do not allocate TLS and do not switch the TLS register at scheduling time.
   User-mode TLS still belongs to `UserContext` and is saved/restored by the user-mode entry/exit paths.
@@ -467,18 +467,18 @@ The user-mode switch on each architecture needs different additional state:
 - On riscv and loongarch64, `ExceptionContext` already contains the complete state,
   so `UserContext` can simply be a newtype wrapper.
 
-x86_64 的 `UserContext::run()` 把 `&mut UserContext` 直接传给汇编 `enter_user`：
-`kernel_rsp` 紧邻 `tf`，汇编把 `&kernel_rsp` 当作私有帧，保存 Rust 调用者的内核栈指针，
-并原地使用 `tf` 作为临时 trap stack（TSS.rsp0 指向 `tf` 末尾），避免在用户态窗口前后
-拷贝整个 trap frame。因此 `kernel_rsp` 与 `tf` 的相对偏移
-（`KERNEL_RSP_TO_TRAPFRAME_OFFSET`）是 `UserContext` 的布局不变量。
+On x86_64, `UserContext::run()` passes `&mut UserContext` directly to the assembly `enter_user`:
+`kernel_rsp` sits right next to `tf`, and the assembly treats `&kernel_rsp` as a private frame, saves the kernel stack pointer of the Rust caller,
+and uses `tf` in place as the temporary trap stack (TSS.rsp0 points to the end of `tf`), avoiding copying the whole trap frame before and after the user-mode window.
+Therefore the relative offset between `kernel_rsp` and `tf`
+(`KERNEL_RSP_TO_TRAPFRAME_OFFSET`) is a layout invariant of `UserContext`.
 
-信号处理不直接把完整 `UserContext` 放入用户栈。`UContext/MContext` 承载
-用户 ABI 寄存器状态，`UserRestorableContext` 补充 ABI 上下文未覆盖的状态
-（非 x86 架构的补充状态；x86_64 使用独立 Linux fpregs 区域），避免 x86_64
-`UserContext::kernel_rsp` 等内核私有字段泄露到 signal frame 或被 `sigreturn`
-恢复。每个信号帧持有独立的 FP 快照，因此嵌套信号也能逐层恢复被中断的 FP/SIMD
-状态。
+Signal handling does not put the full `UserContext` directly on the user stack. `UContext/MContext` carry
+the user ABI register state, and `UserRestorableContext` supplements the state not covered by the ABI context
+(supplementary state on non-x86 architectures; x86_64 uses a separate Linux fpregs area), preventing kernel-private fields such as x86_64
+`UserContext::kernel_rsp` from leaking into the signal frame or being restored by `sigreturn`.
+Each signal frame holds its own FP snapshot, so nested signals can also restore the interrupted FP/SIMD
+state layer by layer.
 
 ### Why LoongArch64 has software unaligned-access emulation
 
@@ -511,18 +511,18 @@ The RISC-V `sstatus.FS` field tracks the FP state (Off/Initial/Clean/Dirty).
 and on restore decides, based on the target state, whether to restore, clear, or skip.
 This avoids unnecessary FP register operations.
 
-## 析构与资源释放
+## Destruction and resource release
 
 The types in this crate are mainly register snapshots and context containers, and hold no resources that need explicit release. The RAII guards are `ExceptionContextGuard`, whose `Drop` tries to restore the recorded per-CPU active trapframe pointer to its previous value, plus the feature-gated AArch64 `NmiExceptionGuard` (restores the entry PMR on drop) and `HardwareNmiExitGuard` (re-sets ALLINT on drop).
 Before the current CPU switches away from the task that installed this pointer, the scheduler
 suspends and clears this CPU's slot, and after the task is switched back it is restored to the new current CPU, avoiding a stale marker on the old CPU
 and the absence of the exception context marker in the second half of the trap handler after restoration.
 
-## 中断回调边界
+## Interrupt callback boundary
 
-`excp::IRQ` 和 `excp::NMI` 保存 `unsafe fn(usize) -> bool` 回调。架构层负责
-在调用 HAL 适配器前持有已捕获的 trap 状态和普通 IRQ 排除；该回调类型不允许
-任意安全 Rust 调用冒充中断。内核态与用户态返回路径继续使用各自的入口屏蔽。
-普通延迟工作可以在完成中断认领后短暂开启 IRQ，但返回前必须恢复屏蔽状态；
-普通适配器负责完成中断后的调度尾部，专用 NMI 回调则必须在不排队的情况下
-返回。缺页回调保留其独立的安全签名。
+`excp::IRQ` and `excp::NMI` store `unsafe fn(usize) -> bool` callbacks. The architecture layer is responsible for
+holding the captured trap state and normal IRQ exclusion before calling the HAL adapter; the callback type does not allow
+arbitrary safe Rust to call it and pose as an interrupt. The kernel-mode and user-mode return paths keep using their own entry masking.
+Ordinary deferred work may briefly enable IRQs after interrupt claim completes, but must restore the masked state before returning;
+the ordinary adapter is responsible for the scheduling tail after the interrupt completes, while a dedicated NMI callback must
+return without queuing. The page-fault callback keeps its own safe signature.

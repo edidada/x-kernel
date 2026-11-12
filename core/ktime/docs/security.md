@@ -47,12 +47,12 @@ or user-memory boundary, and does not write global time.
 | ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 |------|----------|----------|----------|----------|
 | T-01 | Unprivileged process modifies wall-clock time | High | Direct call to `set_realtime_checked` | The syscall layer requires effective `CAP_SYS_TIME`; `set_realtime_checked` performs range validation (the wall clock must not precede `CLOCK_MONOTONIC` or exceed `MAX_SETTABLE_UNIX_SECONDS`) and returns `RealtimeOutOfRange`, which the syscall layer maps to `EINVAL` |
-| T-02 | 初始化输入超范围 | 中 | 越界 SystemTime sample | `SystemTime` 构造规范化分量；读取路径 checked/saturating 兜底 |
-| T-03 | IRQ 上下文死锁 | 高 | 中断读取 realtime 时写者持锁 | 读写均使用 `SpinRwNoIrq`（关中断），写临界区极短 |
-| T-04 | 墙钟回拨导致负 duration | 中 | realtime 被设置到过去 | `duration_since` 返回错误而非下溢，deadline 换算按已过期处理 |
-| T-05 | 重复注入或注入已计入 MONOTONIC 的时间 | 高 | PM 调用方违反结算契约 | 调用方维护休眠事务和来源选择；此阶段未接入生产路径 |
-| T-06 | 补偿溢出导致部分状态更新 | 高 | 过大 delta 或累计值 | 所有计算成功后才提交两个状态；失败保持原值 |
-| T-07 | 时间更新后仍使用旧 deadline | 高 | 未来调用方未处理 timer 恢复 | 状态提交时发布 generation，解锁后唤醒；消费者保留原域截止时间并重新判断 |
+| T-02 | Initialization input out of range | Medium | Out-of-bounds SystemTime sample | `SystemTime` construction normalizes components; read path falls back to checked/saturating arithmetic |
+| T-03 | IRQ-context deadlock | High | Writer holds the lock while an interrupt reads realtime | Both reads and writes use `SpinRwNoIrq` (interrupts disabled); the write critical section is very short |
+| T-04 | Wall-clock step back causes negative duration | Medium | realtime is set to the past | `duration_since` returns an error instead of underflowing; deadline conversion treats the deadline as already expired |
+| T-05 | Duplicate injection, or injection of time already counted in MONOTONIC | High | PM caller violates the settlement contract | The caller maintains the sleep transaction and source selection; this phase is not wired into the production path |
+| T-06 | Compensation overflow causes a partial state update | High | Oversized delta or accumulated value | Both states are committed only after all computations succeed; on failure the original values are kept |
+| T-07 | Stale deadline still used after a time update | High | A future caller does not handle timer recovery | A generation is published when the state is committed and waiters are woken after unlock; consumers keep the original-domain deadline and re-evaluate |
 
 ## Audit Checklist
 

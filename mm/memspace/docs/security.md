@@ -68,26 +68,26 @@ The test migration does not change production visibility, unsafe preconditions, 
 
 ## Memory Safety Invariants
 
-- 每个 VMA 范围必须完全落在 `MmSpace` 地址空间边界内。
-- `VmAreaSet::try_insert()` 必须拒绝重叠 VMA。
-- `VmAreaSet::unmap()` / `protect()` 必须在 split/trim 后保持 VMA 非重叠、有序。
-- `page_offset()` 与 `FileMappingInfo.offset` 必须随 VMA split/trim 同步调整。
-- `VmArea::max_flags()` 必须在 split/protect/fork/mremap 后保留原始最大权限。
-- `VmArea::backing()` 与 `VmRuntimeRef::backing_info()` 必须一致。
-- `mprotect` 更新 VMA current permission 时，present PTE flags 必须使用
-  `VmRuntimeOps::on_protect()` 返回值；不能无条件把 requested flags 直接写入页表。
-- `msync_range()` 只能让 shared file runtime 执行文件范围 datasync（含文件系统持久化）；anonymous、
-  linear 和 private file mappings 不能写回 file source。
-- `FilePrivate` backing 必须同时保留 file source object、anon result object 和
-  anon lineage。
-- private-anon page state 必须由 `AnonPrivateObject` 持有，runtime 不能拥有独立
-  private frame table。
-- detach frame、unmap PTE、TLB finalization、frame release 必须保持顺序。
-- 私有映射的 sparse range unmap 只跳过不存在的页表子树和 non-present
-  项；实际叶大小必须符合 runtime。页表遍历失败时保留 backing ownership，
-  detached slots 的 RAII rollback 恢复对象记录；已经清除的 PTE 前缀可在
-  后续 fault 中重新建立，不能在失败路径提前释放 frame。原地址空间锁与
-  TLB guard 仍覆盖该过程，不释放中间页表。
+- Every VMA range must lie entirely within the address-space bounds of `MmSpace`.
+- `VmAreaSet::try_insert()` must reject overlapping VMAs.
+- `VmAreaSet::unmap()` / `protect()` must keep VMAs non-overlapping and ordered after split/trim.
+- `page_offset()` and `FileMappingInfo.offset` must be adjusted in step with VMA split/trim.
+- `VmArea::max_flags()` must preserve the original maximum permission after split/protect/fork/mremap.
+- `VmArea::backing()` and `VmRuntimeRef::backing_info()` must be consistent.
+- When `mprotect` updates the VMA current permission, the present PTE flags must use
+  the return value of `VmRuntimeOps::on_protect()`; the requested flags must not be written into the page table unconditionally.
+- `msync_range()` may only let the shared file runtime perform a file-range datasync (including filesystem persistence); anonymous,
+  linear and private file mappings must not write back to the file source.
+- A `FilePrivate` backing must keep the file source object, the anon result object and the
+  anon lineage together.
+- Private-anon page state must be held by `AnonPrivateObject`, and the runtime must not own a separate
+  private frame table.
+- Detach frame, unmap PTE, TLB finalization and frame release must keep their order.
+- A sparse range unmap of a private mapping skips only nonexistent page-table subtrees and non-present
+  entries; the actual leaf size must match the runtime. When a page-table walk fails, backing ownership is kept,
+  the RAII rollback of the detached slots restores the object records; the already cleared PTE prefix can be
+  re-established by later faults, and frames must not be released early on the failure path. The original address-space lock and
+  the TLB guard still cover the process and do not release intermediate page tables.
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
 - `relocate_mapping()` prepares every destination PTE before removing source

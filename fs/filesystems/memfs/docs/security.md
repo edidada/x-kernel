@@ -156,14 +156,14 @@ This crate contains no `unsafe`.
 
 ## Fault Management
 
-- 读写和 truncate 错误通过 `VfsResult` 返回。
-- 内存文件的同步成功只表示无需持久化 I/O，不承诺断电保存；同步不得丢弃内容页。
+- Read, write and truncate errors are returned through `VfsResult`.
+- A successful sync of an in-memory file only means no persistent I/O is needed and does not promise survival of a power loss; sync must not discard content pages.
   Half-open partial and empty ranges use the same explicit volatile fsync capability;
   VFS rejects backwards ranges before dispatch.
-  特殊文件的同步能力由打开后安装的专用 operation table 决定。
-- inode/mapping 绑定缺失必须返回错误，不能静默创建不一致的第二对象。
-- quota admission 的容量拒绝作为文件系统 `StorageFull` 错误传播。候选物理页和
-  heap 对象分配发生在 admission 前，仍遵循各自的内存分配失败路径。
+  The sync capability of special files is determined by the dedicated operation table installed after open.
+- A missing inode/mapping binding must return an error and must not silently create an inconsistent second object.
+- A capacity rejection by quota admission propagates as the filesystem `StorageFull` error. Candidate physical pages and
+  heap object allocations happen before admission and still follow their own memory-allocation failure paths.
 
 ## Known Limitations
 

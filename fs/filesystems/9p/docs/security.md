@@ -27,12 +27,12 @@ PDU length, tag, type and field boundaries are validated by the `p9` client.
 
 ## External Boundaries / Attack Surface
 
-- mount 时的 negotiation、root qid 和 attributes；
-- lookup/readdir 返回的 object identity、type、name 和 offset；
-- read/write、setattr、statfs 和 namespace operation 的 server result；
+- negotiation, root qid and attributes at mount time;
+- the object identity, type, name and offset returned by lookup/readdir;
+- the server results of read/write, setattr, statfs and namespace operations;
 - the content and length a TREAD returns for a folio fault;
 - the size confirmed by a `TSETATTR` truncate and its local cache publication;
-- endpoint failure 与 synchronous fid Drop。
+- endpoint failure and synchronous fid Drop.
 
 This crate does not directly access user pointers, DMA/MMIO, firmware, interrupts, FFI or architecture raw
 interfaces. Transport and device safety reside in the specific provider/driver.
@@ -86,24 +86,24 @@ The Drop of the last fid reference may block, and must not be executed in IRQ co
 
 | Threat | Trigger Condition | Impact | Mitigation |
 | --- | --- | --- | --- |
-| stale path identity | rename 后按缓存 path 重新 walk | opened file 指向错误对象 | 只持 fid，不缓存 absolute path |
-| type/qid spoofing | attributes 与 lookup fid 不一致 | 发布错误 inode 类型或身份 | qid path/type 与 mode type 交叉验证 |
-| directory offset manipulation | server 返回异常 `d_off` | 重复或遗漏 entry | 原样使用 server offset，不伪造 local index |
-| fid lifetime error | remove 后重复使用或 clunk | server handle misuse | `P9Fid` live state 与 `Arc` Drop |
+| stale path identity | Re-walk by the cached path after rename | The opened file points to the wrong object | Hold only the fid, and do not cache the absolute path |
+| type/qid spoofing | attributes are inconsistent with the lookup fid | A wrong inode type or identity is published | Cross-validate qid path/type against the mode type |
+| directory offset manipulation | The server returns an abnormal `d_off` | Duplicated or missed entries | Use the server offset as is, and do not forge a local index |
+| fid lifetime error | Reuse or clunk after remove | server handle misuse | `P9Fid` live state and `Arc` Drop |
 | stale cached folio after truncate | `TSETATTR` shrinks the file but only updates the size | read/mmap keeps returning pre-truncate data | invalidate cached folios and mappings through `update_size_after_backing_change()` after a confirmed size change |
-| broad fallback | server 返回真实 I/O/permission error | 错误被掩盖 | 只对 Linux 指定的 `ENOSYS`/`EOPNOTSUPP` fallback |
+| broad fallback | The server returns a real I/O/permission error | The error is masked | Fall back only for the `ENOSYS`/`EOPNOTSUPP` that Linux specifies |
 
 ## Failure Mode and Effects Analysis (FMEA)
 
 | Failure Mode | Local Effect | System Effect | Handling |
 | --- | --- | --- | --- |
-| negotiation/attach/root getattr 失败 | mount 失败 | superblock 不发布 | error propagation 和 RAII cleanup |
-| lookup 不存在 | negative lookup | 单个 pathname 不存在 | 只把 `ENOENT` 转成 negative result |
-| create 成功、child walk 失败 | local inode 不发布 | remote object 可能已存在 | 返回 error，不伪造 local state |
-| statfs 不实现 | 无 remote statistics | mount 仍可用 | 仅 `ENOSYS` 回退 `simple_statfs` |
+| negotiation/attach/root getattr fails | mount fails | The superblock is not published | error propagation and RAII cleanup |
+| lookup of a nonexistent name | negative lookup | A single pathname does not exist | Convert only `ENOENT` into a negative result |
+| create succeeds, child walk fails | The local inode is not published | The remote object may already exist | Return the error, and do not forge local state |
+| statfs not implemented | No remote statistics | mount is still usable | Fall back to `simple_statfs` only on `ENOSYS` |
 | truncate succeeds but cache publication fails | local size stays stale | later reads diverge from the server | propagate the `update_size_after_backing_change()` error without publishing partial state |
-| final clunk 失败 | remote fid 暂时滞留 | 到 connection teardown 才回收 | `p9` warning |
-| endpoint 永久不响应 | caller task 阻塞 | 同 client operations 排队 | 当前无 timeout/cancel |
+| final clunk fails | The remote fid lingers for a while | Reclaimed only at connection teardown | `p9` warning |
+| endpoint never responds | The caller task blocks | Operations of the same client queue up | Currently no timeout/cancel |
 
 ## Fault Management
 
@@ -123,10 +123,10 @@ encryption; the trust relationship is determined by the boot configuration, the 
 
 ## Known Limitations
 
-- 只实现 9P2000.L cacheless semantics；
-- KVFS 没有 dentry-private fid slot，lookup fid 因而放在 `V9fsInode`；
+- Implements only 9P2000.L cacheless semantics;
+- KVFS has no dentry-private fid slot, so the lookup fid lives in `V9fsInode`;
 - the page cache serves read faults only; no atomic-open contract, xattr or remote lock support;
-- synchronous operations 没有 timeout/cancel。
+- synchronous operations have no timeout/cancel.
 
 ## Audit Checklist
 

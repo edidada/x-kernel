@@ -1131,39 +1131,39 @@ prepare_percpu_nmi()
   numbers belonging to different controllers.
 - `disable_irq()`, `synchronize_irq()` and `free_irq()` wait for the retained
   Line's aggregate execution predicate to become idle; hardirq, softirq and
-  BH-disabled callers are rejected. `disable_irq_nosync()` / `try_disable_irq_nosync()` 只对已经存在的
-  descriptor 做 lookup-only disable，更新嵌套 disable depth 并 mask 平台 line；
-  它不会创建 descriptor、分配 `virq` 或发布 domain mapping，也不等待正在运行的
-  handler。
-- 兼容入口 `enable()`、`register()` 仍存在。`enable(spec, false)` 是
-  `disable_irq_nosync()` 的 legacy boolean bridge，可从 hardirq 路径使用且不会等待；
-  `enable(spec, true)` 是 legacy enable bridge：存在 disable nesting 时先递减 depth，
-  depth 到 `0` 时启动平台 line；depth 已经是 `0` 时仍会下发平台 enable，以保留
-  per-CPU/static IRQ bring-up 的既有语义。新代码应优先使用语义更明确的 `try_*` /
-  `*_irq` 入口处理 descriptor 冲突和 enable/disable nesting。
-- `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
-  IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
-- `handle_nmi()` 运行在 IRQ-off NMI adapter 调用路径中（pseudo-NMI 或 hardware
-  NMI），不触碰 normal IRQ dispatch fanout，不调用 lifecycle hooks，也不获取
-  `IRQ_STATE`。若异常来自 IRQ-on context，入口已经执行普通 IRQ entry；GIC 在该外层
-  lifecycle 内调用 `generic_handle_nmi()`，与 Linux 的 IRQ-on NMI 语义一致。
+  BH-disabled callers are rejected. `disable_irq_nosync()` / `try_disable_irq_nosync()` perform a lookup-only disable on a descriptor that
+  already exists, update the nested disable depth and mask the platform line;
+  they do not create a descriptor, allocate a `virq` or publish a domain mapping, and do not wait for a running
+  handler.
+- The compatibility entries `enable()` and `register()` still exist. `enable(spec, false)` is
+  the legacy boolean bridge of `disable_irq_nosync()`, usable from the hardirq path and never waiting;
+  `enable(spec, true)` is the legacy enable bridge: when disable nesting exists it first decrements the depth,
+  and starts the platform line when the depth reaches `0`; when the depth is already `0` it still issues the platform enable, to preserve the existing
+  semantics of per-CPU/static IRQ bring-up. New code should prefer the more explicit `try_*` /
+  `*_irq` entries to handle descriptor conflicts and enable/disable nesting.
+- `handle_irq()` runs on the hardirq trap adapter call path. The caller must have masked local
+  IRQs, disabled preemption and pinned the current CPU, and the function itself must not sleep.
+- `handle_nmi()` runs on the IRQ-off NMI adapter call path (pseudo-NMI or hardware
+  NMI); it does not touch the normal IRQ dispatch fanout, does not call lifecycle hooks, and does not acquire
+  `IRQ_STATE`. If the exception comes from an IRQ-on context, the entry has already performed the normal IRQ entry; the GIC calls `generic_handle_nmi()` inside that outer
+  lifecycle, consistent with the Linux IRQ-on NMI semantics.
 - `translate_hwirq()` borrows the Domain XArray in IRQ/NMI context; boot/control
   queries use writer exclusion. Strict misses return `None`, not identity IDs.
-- `IrqLifecycleHook` 在 trap adapter 已禁抢占、IRQ-on exception 生命周期仍未结束时
-  执行；该 exception 随后可能由 irqchip 分类为普通 IRQ、NMI 或 spurious。它不是
-  hardirq-depth 边界；hardirq/softirq/BH 状态由
-  `kirq::context` 维护。hook 不能睡眠，不能等待可能被中断上下文持有的锁，也不能
-  假设当前有进程上下文。
-- `DeferredExecutorHook` 在 IRQ-on controller dispatch 返回、generic hardirq depth
-  已退出之后、lifecycle exit 之前执行。若 claim 存在，generic IRQ/NMI helper 已先
-  完成 controller completion。它只是后续 deferred execution
-  subsystem 的交接点，不能睡眠、不能递归调用 deferred runner，不能假设当前有进程
-  或 task 上下文。
-- `alloc_msix()` / `free_msix()` 必须从普通内核上下文调用。它们通过 backend
-  分配控制器本地 vector 并返回 OS-visible virq 与 device-visible MSI message；
-  调用方不能读取当前 APIC id 或假设 virq 等于硬件 vector。
-- `IntrManagerIf::notify_cpu()` 必须满足 publish-before-notify 顺序，IPI/TLB
-  shootdown 依赖该契约。
+- `IrqLifecycleHook` runs after the trap adapter has disabled preemption and while the IRQ-on exception lifecycle has not yet ended;
+  that exception may later be classified by the irqchip as a normal IRQ, an NMI or spurious. It is not a
+  hardirq-depth boundary; the hardirq/softirq/BH state is maintained by
+  `kirq::context`. A hook must not sleep, must not wait for locks that an interrupted context may hold, and must not
+  assume a process context exists.
+- `DeferredExecutorHook` runs after the IRQ-on controller dispatch returns and the generic hardirq depth
+  has been exited, and before the lifecycle exit. If a claim exists, the generic IRQ/NMI helper has already
+  completed the controller completion. It is only the handoff point to the later deferred execution
+  subsystem; it must not sleep, must not recursively call the deferred runner, and must not assume a process
+  or task context exists.
+- `alloc_msix()` / `free_msix()` must be called from a normal kernel context. They allocate, through the backend,
+  a controller-local vector and return an OS-visible virq and a device-visible MSI message;
+  the caller must not read the current APIC id or assume the virq equals the hardware vector.
+- `IntrManagerIf::notify_cpu()` must satisfy the publish-before-notify order, which IPI/TLB
+  shootdown depends on.
 
 ## Interrupt Controller Backend Contract
 
@@ -1172,17 +1172,17 @@ handler fanout, context and completion ordering; the irqchip driver is responsib
 
 ### configure / enable
 
-- `configure(desc)` 在普通非 MSI line enable 前调用。它消费已经规范化的
-  `IrqDesc` metadata，包括 trigger、polarity、controller、source、affinity 和
-  flags。后端只应使用自己理解的字段，未知或无关 metadata 不应造成错误配置。
+- `configure(desc)` is called before a normal non-MSI line is enabled. It consumes the already normalized
+  `IrqDesc` metadata, including trigger, polarity, controller, source, affinity and
+  flags. A backend should use only the fields it understands, and unknown or irrelevant metadata should not cause a wrong configuration.
 - `enable(desc, on)` receives the selected Line's normalized descriptor,
   retaining domain and controller metadata across the backend boundary.
   Existing providers use `desc.hwirq` as their controller-local source id,
   not the dynamic virq; their register behavior is unchanged. This metadata
   transport does not add controller-instance routing or temporary flow masking,
   and a copied descriptor does not retain the hardware binding's lifetime.
-- MSI descriptor 带 `IrqFlags::MSI`，不走普通 line configure/enable。MSI enablement
-  来自 bus/device 层写入设备可见的 `MsiMessage`。
+- An MSI descriptor carries `IrqFlags::MSI` and does not go through the normal line configure/enable. MSI enablement
+  comes from the bus/device layer writing the device-visible `MsiMessage`.
 
 ### dispatch / claim / ack
 
@@ -1190,11 +1190,11 @@ handler fanout, context and completion ordering; the irqchip driver is responsib
   exactly one generic entry: `generic_handle_irq(PendingIrq)` or
   `generic_handle_nmi(PendingIrq)`. The boundary follows Linux irqchip calls to
   `generic_handle_domain_irq()` / `generic_handle_domain_nmi()`.
-- `dispatch_irq()` 返回的 `Option<Virq>` 只给外层 deferred context 提供 resolved
-  normal virq 元数据；`None` 可能表示 NMI、strict domain miss 或 spurious，不能再被
-  当作 IRQ/NMI 分类结果。handler dispatch 和 completion 在返回前已经完成。
-- normal dispatch 的 `PendingIrq` 保存 `IrqRef` 与 completion cookie；domain hwirq
-  到 OS-visible virq 的解析仍由 `generic_handle_irq()` 在 `kirq` 内完成。
+- The `Option<Virq>` returned by `dispatch_irq()` only gives the outer deferred context the resolved
+  normal virq metadata; `None` may mean an NMI, a strict domain miss or spurious, and must no longer be
+  treated as an IRQ/NMI classification result. Handler dispatch and completion have already finished before it returns.
+- The `PendingIrq` of normal dispatch holds an `IrqRef` and a completion cookie; the resolution of the domain hwirq
+  to an OS-visible virq is still done by `generic_handle_irq()` inside `kirq`.
 - `dispatch_nmi(vector)` claims a hardware source, tags its Domain and calls
   `generic_handle_nmi(PendingIrq)`. Lookup borrows the Domain index without
   locking `IRQ_STATE`; this path never opens the normal IRQ window.
@@ -1309,11 +1309,11 @@ reader or dispatch guard. Ordinary action removal still keeps its descriptor.
 `IrqSpec::PlainVirq` contributes no hardware metadata. `IrqSpec::Desc`
 participates in descriptor merge and mapping validation. `commit_resolution`
 returns only after both required prepared insertions have completed.
-`IrqDesc::try_merge()` 允许后来的 descriptor 补齐 trigger、polarity、controller、
-domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、virq、domain、
-trigger、polarity、controller 或 `(domain, hwirq) -> virq` 映射冲突会返回
-`IrqDescError`，release 构建中不会静默覆盖 metadata。Unknown trigger/polarity/
-controller 可以由后继的确定值补齐；两个不同的确定值永不互相覆盖。
+`IrqDesc::try_merge()` allows a later descriptor to fill in trigger, polarity, controller,
+domain, affinity and flags, but does not drop metadata that has already been confirmed. A conflict in hwirq, virq, domain,
+trigger, polarity, controller or the `(domain, hwirq) -> virq` mapping returns
+`IrqDescError`, and release builds do not silently overwrite metadata. Unknown trigger/polarity/
+controller may be filled in by a later determined value; two different determined values never overwrite each other.
 
 ### Firmware interrupt mapping
 
@@ -1411,19 +1411,19 @@ consumer default. Repeating the same valid declaration returns the existing
 mapping; conflicting trigger/controller/domain metadata returns
 `IrqDescError::TriggerConflict` / `ControllerConflict` / `DomainConflict`.
 
-`actions` 是 `kirq` 内部 action list。`register(desc, handler)` 仍是兼容的
-single-action API：它只允许空 line 上安装一个非 shared action，第二次 regular
-registration 继续返回 `false` 并记录 warning。`register_shared()` /
-`try_register_shared()` 会安装带 `IrqActionToken` 的 shared action；同一 line 上的
-shared action 由 `kirq` 在 dispatch 中统一 fanout，`driver_os_api_xkernel` 只保存
-devres token 与 `IrqActionToken` 的适配关系。shared action 当前只支持默认
-auto-enable 路径，不暴露 disabled shared registration API。后续 shared action
-注册如果补齐了更具体的 descriptor metadata，`kirq` 会在不改变当前 enable/depth
-状态的前提下重新下发 stale platform configure。
-handler 的 normal IRQ 调用参数是已经解析出的 OS-visible `virq`；shared IRQ handler
-依赖这个参数识别当前 line，而不应从设备或平台私有状态反推。action 内部仍预留
-future threaded slot 和 optional name，但本阶段 threaded slot 始终
-不产生调度、唤醒、softirq 或 workerqueue 行为。
+`actions` is the internal action list of `kirq`. `register(desc, handler)` remains the compatible
+single-action API: it only allows installing one non-shared action on an empty line, and a second regular
+registration keeps returning `false` and logs a warning. `register_shared()` /
+`try_register_shared()` install a shared action carrying an `IrqActionToken`; the
+shared actions on the same line are fanned out uniformly by `kirq` in dispatch, and `driver_os_api_xkernel` keeps only the
+adaptation relation between the devres token and the `IrqActionToken`. A shared action currently supports only the default
+auto-enable path and exposes no disabled shared registration API. If a later shared action
+registration fills in more specific descriptor metadata, `kirq` re-issues the stale platform configure without changing the current enable/depth
+state.
+The normal IRQ call argument of a handler is the already resolved OS-visible `virq`; a shared IRQ handler
+relies on this argument to identify the current line, and should not infer it back from device or platform private state. The action still reserves
+a future threaded slot and an optional name, but in this phase the threaded slot never
+produces scheduling, wakeup, softirq or workerqueue behavior.
 
 `IrqDescRuntimeState` is the sole owner of descriptor/action runtime state. It currently holds:
 
@@ -1431,14 +1431,14 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
   exclusive action; shared registration has no fixed four-action limit.
   Storage is prepared with NOWAIT before short locks. Exhausted publication
   sequences reject registration without wrapping or reusing removal keys;
-- `generation`：descriptor/platform configuration metadata 变化序号；action 和
-  lifecycle 不递增该值；
-- `configured_generation`：上一次成功下发到平台 configure 路径的 descriptor
-  generation，用于避免每次 enable 都重复 configure；
+- `generation`: the sequence number of descriptor/platform configuration metadata changes; actions and
+  lifecycle do not increment it;
+- `configured_generation`: the descriptor
+  generation last successfully issued to the platform configure path, used to avoid configuring again on every enable;
 - `is_enabled`: logical management enable state, distinct from Fasteoi source
   suppression and the provider's effective hardware priority;
-- `disable_depth`：嵌套 disable 深度；`try_register_disabled()` 以 depth `1` 安装
-  handler，后续 `try_enable_irq()` 递减到 `0` 时才启用平台 line；
+- `disable_depth`: the nested disable depth; `try_register_disabled()` installs the
+  handler at depth `1`, and the platform line is enabled only when a later `try_enable_irq()` decrements it to `0`;
 - `is_running`: accepted Level/Edge/Fasteoi handlers and software replay own
   ordinary execution through required completion/tail work. Locked rejections
   own no running admission, and queued replay retains only an Arc and flag.
@@ -1448,8 +1448,8 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
   adds a credit only for the last action; non-last shared removal relies on the
   management mutex for membership serialization and leaves survivors eligible.
   A nonzero value rejects new actions; descriptor lifetime is independent;
-- `is_msi`：从 descriptor flags 派生的 MSI lifetime marker；
-- `oneshot_mask_pending`：后续 threaded/oneshot 语义预留，本阶段不驱动硬件 mask。
+- `is_msi`: the MSI lifetime marker derived from the descriptor flags;
+- `oneshot_mask_pending`: reserved for later threaded/oneshot semantics; this phase does not drive a hardware mask.
 
 These fields are crate-private runtime state and do not constitute a public ABI. Later shared IRQ, oneshot mask,
 and threaded IRQ work may only be extended within this owner, and must not bypass `IrqStateDesc` to create parallel state on the dispatch,
@@ -1469,36 +1469,36 @@ run the primary handler.
 
 ### virq mapping
 
-- 显式 `virq` 直接使用调用者指定的 OS-visible IRQ number；
-- 带 `domain` 但无 `virq` 的 descriptor 通过 `(domain, hwirq)` 分配动态 virq；
+- An explicit `virq` directly uses the OS-visible IRQ number specified by the caller;
+- A descriptor with a `domain` but no `virq` allocates a dynamic virq through `(domain, hwirq)`;
 - New Domain bindings publish the retained Line through a prepared XArray slot;
-- 未注册在 `domain/mod.rs` 静态 registry 中的 domain 会返回 `IrqDescError::UnknownDomain`，
-  不会留下控制面 mapping 或返回一条数据面不可解析的死线；
-- 动态 virq 从 `DYNAMIC_VIRQ_BASE` 开始；
-- plain `usize` 在 API 边界被解释为 `IrqSpec::PlainVirq`，只引用 `virq` 本身；
-- `enable(usize, on)` 不携带新 metadata，但会解析到 stored identity descriptor；
-  对低号 platform-static line，这仍可能按 identity `hwirq` 调用平台 enable；
-- `try_map()` 只接受 `IrqDesc`，因为建立 domain mapping 必须有明确的
-  `(domain, hwirq)` 资源语义，plain `virq` 不能参与硬件映射。
-- 同一 `virq` 不能同时作为两条不同 `(domain, hwirq)` mapping 的目标；显式 `virq`
-  插入 mapping 前必须检查反向一致性。
+- A domain not registered in the static registry in `domain/mod.rs` returns `IrqDescError::UnknownDomain`,
+  and leaves no control-plane mapping nor returns a dead line that the data plane cannot resolve;
+- Dynamic virqs start from `DYNAMIC_VIRQ_BASE`;
+- A plain `usize` is interpreted at the API boundary as `IrqSpec::PlainVirq` and refers only to the `virq` itself;
+- `enable(usize, on)` carries no new metadata but resolves to the stored identity descriptor;
+  for a low-numbered platform-static line, this may still call the platform enable by the identity `hwirq`;
+- `try_map()` accepts only `IrqDesc`, because establishing a domain mapping requires explicit
+  `(domain, hwirq)` resource semantics, and a plain `virq` cannot take part in hardware mapping.
+- The same `virq` cannot be the target of two different `(domain, hwirq)` mappings at once; an explicit `virq`
+  must have its reverse consistency checked before the mapping is inserted.
 
-`driver_os_api_xkernel` provider 是 devres IRQ vocabulary 到 `kirq` 的边界 adapter。无
-`hwirq/domain/controller` metadata 的 `IrqResource` 必须转换成
-`IrqSpec::PlainVirq`；带硬件 routing metadata 的 resource 才转换成
-`IrqSpec::Desc`。这样 device resource 的 plain IRQ handle 不会误入 descriptor
-merge/mapping 分支。
+The `driver_os_api_xkernel` provider is the boundary adapter from the devres IRQ vocabulary to `kirq`. An `IrqResource` without
+`hwirq/domain/controller` metadata must be converted into
+`IrqSpec::PlainVirq`; only a resource carrying hardware routing metadata is converted into
+`IrqSpec::Desc`. This way the plain IRQ handle of a device resource never wrongly enters the descriptor
+merge/mapping branch.
 
-devres IRQ request 通过 `kirq::try_register_shared()` 安装 shared action，并把返回的
-`IrqActionToken` 包装成 `driver_os_api::IrqHandlerToken`。release 时，`driver_os_api_xkernel` provider 使用
-`kirq::free_irq_action()` 删除单个 action；只有最后一个 action 离开时，
+A devres IRQ request installs a shared action through `kirq::try_register_shared()` and wraps the returned
+`IrqActionToken` into `driver_os_api::IrqHandlerToken`. On release, the `driver_os_api_xkernel` provider uses
+`kirq::free_irq_action()` to delete a single action; only when the last action leaves,
 KIRQ masks only for last-action removal. Every successful shared removal drains ordinary
 execution before returning the owner, without disposing of the descriptor. Shared IRQ
-fanout、teardown 和后续 threaded/oneshot 扩展点都集中在 IRQ core，而不是隐藏在
-devres adapter 的本地聚合表中。handler return 的 `IrqEvent` 由 `kirq`
-在同一 line 的 fanout 完成后合并；数据就绪通知由设备子系统负责。
-`kdriver` 不参与 IRQ wake bridge；它只负责 devres IRQ
-resource 到 `kirq` action 生命周期的适配。
+fanout, teardown and later threaded/oneshot extension points are all concentrated in the IRQ core, not hidden in the
+local aggregation table of the devres adapter. The `IrqEvent` returned by a handler is merged by `kirq`
+after the fanout on the same line completes; data-ready notification is the responsibility of the device subsystem.
+`kdriver` takes no part in the IRQ wake bridge; it is responsible only for adapting the devres IRQ
+resource to the `kirq` action lifecycle.
 
 ### MSI/MSI-X
 
@@ -1849,21 +1849,21 @@ locks. This exercises error handling, not physical allocator exhaustion.
 
 ### `enable_irq(desc)`
 
-1. 解析 `IrqSpec` 到已经存在的 descriptor，不创建新 descriptor 或发布新 domain
-   mapping。
+1. Resolve the `IrqSpec` to an already existing descriptor, without creating a new descriptor or publishing a new domain
+   mapping.
 2. Reject a whole-Line teardown with `TeardownInProgress`, preventing re-enable
    after last-action withdrawal. A non-last shared removal adds no such gate;
    surviving actions retain their normal enable/disable rules during its wait.
-3. 若该 line 没有任何 registered action，返回 `NoIrqAction`；普通显式 enable 只服务
-   disabled registration / nested disable 的 action 生命周期。
-4. 递减 `disable_depth`；只有深度回到 `0` 时才按需要 configure 并 unmask 平台 line。
-   legacy `enable(spec, true)` 仍保留平台 bring-up 用的 force-enable 语义，但同样不能
-   穿过 teardown gate；命中已有 teardown descriptor 时必须在 resolve/publish 前拒绝，
-   避免失败路径 merge metadata 或插入 domain mapping。
+3. If the line has no registered action, return `NoIrqAction`; an ordinary explicit enable serves only the action lifecycle of
+   disabled registration / nested disable.
+4. Decrement `disable_depth`; only when the depth returns to `0` is the platform line configured and unmasked as needed.
+   The legacy `enable(spec, true)` still keeps the force-enable semantics used for platform bring-up, but likewise must not
+   pass through the teardown gate; hitting an existing teardown descriptor must be rejected before resolve/publish,
+   to avoid merging metadata or inserting a domain mapping on the failure path.
 
 ### `free_irq(desc)`
 
-1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
+1. Reject waiting teardown in hardirq, softirq and BH-disabled contexts.
 2. Retain the Line under `IRQ_STATE`, acquire its management mutex outside short
    locks, then revalidate identity and record admission under `IRQ_STATE`.
 3. Validate sleepable execution before withdrawal. Action removal prepares no GP
@@ -1889,7 +1889,7 @@ retirement or its separate submission/failure contract.
 
 ### `free_irq_action(desc, token)`
 
-1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
+1. Reject waiting teardown in hardirq, softirq and BH-disabled contexts.
 2. Retain the Line under `IRQ_STATE`, acquire its management mutex outside short
    locks, then revalidate identity and record admission under `IRQ_STATE`.
 3. Unlink only the matching token under the
@@ -1909,14 +1909,14 @@ retirement or its separate submission/failure contract.
 
 ### `synchronize_irq(desc)`
 
-1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式同步。
-2. 解析 `IrqSpec` 到已存在的 `virq`，不创建新 descriptor。
+1. Reject waiting synchronization in hardirq, softirq and BH-disabled contexts.
+2. Resolve the `IrqSpec` to an existing `virq`, without creating a new descriptor.
 3. Wait for retained-Line `has_active_execution()` to become false, including original-claim
    completion and admitted running replay, not just callback return. Pending
    queue entries are excluded and may execute later if still eligible.
-4. 该 API 不 mask 平台 line；需要阻止新 handler 进入时应先调用 `disable_irq()`。
-5. 调用方不能持有 handler 可能获取的锁或阻止目标 CPU handler 退出的资源锁，否则
-   可能形成 handler 等锁、teardown 等 handler 的死锁。
+4. This API does not mask the platform line; to prevent new handlers from entering, call `disable_irq()` first.
+5. The caller must not hold a lock the handler may acquire or a resource lock that prevents the target CPU's handler from exiting, otherwise
+   a deadlock may form in which the handler waits for the lock and teardown waits for the handler.
 
 Execution waits use the descriptor-local `execution_idle` completion, obtained
 through `execution_idle_completion()`. Under the retained Line lock,
@@ -1942,7 +1942,7 @@ The manager validates before side effects and restores all temporary IRQ locks
 before waiting, without leaving state that changes sleepability. Its post-removal
 wait therefore asserts that site-specific invariant rather than treating a
 failed wait as successful teardown.
-`Completion` 只作为 wake source；
+`Completion` serves only as a wake source;
 The authoritative ordinary condition is `!is_running`, rechecked under
 the retained Line lock after every wait.
 
@@ -2123,12 +2123,12 @@ paths should use `disable_irq()` or `free_irq()`.
 
 ### normal IRQ dispatch
 
-1. `khal::irq::irq_handler()` 创建 `NoPreempt` guard。
-2. `kirq::handle_irq()` 创建 lifecycle guard，触发 `on_irq_enter`。
-3. `HardIrqContextGuard` 进入 generic hardirq context。
-4. 平台后端 claim 并分类；普通 IRQ 构造
-   `PendingIrq { IrqRef, completion cookie }`，直接调用
-   `generic_handle_irq()`。
+1. `khal::irq::irq_handler()` creates the `NoPreempt` guard.
+2. `kirq::handle_irq()` creates the lifecycle guard and triggers `on_irq_enter`.
+3. `HardIrqContextGuard` enters the generic hardirq context.
+4. The platform backend claims and classifies; a normal IRQ constructs
+   `PendingIrq { IrqRef, completion cookie }` and directly calls
+   `generic_handle_irq()`.
 5. `generic_handle_irq()` delegates source resolution and original completion
    to `dispatch_claim`. An RCU lookup retains the original Line without
    `IRQ_STATE`; its lock checks retirement and flow eligibility. Accepted ordinary
@@ -2159,14 +2159,14 @@ paths should use `disable_irq()` or `free_irq()`.
    Admission release updates only the retained Line and wakes drain waiters
    outside its lock. It does not acquire the directory lock or delete even an
    empty domainless descriptor; an empty claim must not undo preparation.
-8. `HardIrqContextGuard` 退出 generic hardirq context。
-9. `run_hardirq_exit_deferred()` 调用当前注册的 deferred executor；
-   `DeferredRunContext::resolved_irq()` 携带上一步解析出的 IRQ identity，NMI、strict
-   domain miss 或 spurious 时为 `None`，不表达 handler 是否实际运行。
-   默认 owner 是 `softirq`，会在 context 允许时 drain 当前 CPU pending softirq；
-   restart budget 未覆盖的 pending work 会交给当前 CPU 的 `ksoftirqd/N`。
-10. lifecycle guard drop，触发 `on_irq_exit`。
-11. 返回 `khal::irq` adapter 后释放 `NoPreempt`。
+8. `HardIrqContextGuard` exits the generic hardirq context.
+9. `run_hardirq_exit_deferred()` calls the currently registered deferred executor;
+   `DeferredRunContext::resolved_irq()` carries the IRQ identity resolved in the previous step, and is `None` for NMI, strict
+   domain miss or spurious, and does not express whether a handler actually ran.
+   The default owner is `softirq`, which drains the current CPU's pending softirqs when the context allows;
+   pending work not covered by the restart budget is handed to the current CPU's `ksoftirqd/N`.
+10. The lifecycle guard is dropped and triggers `on_irq_exit`.
+11. After returning to the `khal::irq` adapter, `NoPreempt` is released.
 
 ### NMI Dispatch
 
@@ -2363,9 +2363,9 @@ graph and default unit tests.
   under CPU/IRQ exclusion. Only task/startup writers acquire management and
   state locks. Action removal requires completed local teardown on every
   published CPU, not an RCU wait; readers never acquire the management mutex.
-- `IRQ_LIFECYCLE_HOOKS` 使用 `SpinNoIrq`，只在 active bit 为真时于 entry 短暂复制
-  函数指针。无 hook 的 IRQ hot path 通过 atomic active bit 跳过全局锁；hook 本体
-  不在该锁内执行。
+- `IRQ_LIFECYCLE_HOOKS` uses `SpinNoIrq` and copies the function
+  pointers briefly at entry only when the active bit is set. The no-hook IRQ hot path skips the global lock through an atomic active bit; the hook body
+  does not run inside that lock.
 - `IRQ_CONTEXT_STATE` is per-CPU state accessed through `NoPreemptIrqSave` (or `IrqSave` for snapshots). Public queries and the hardirq/softirq IRQ-tail `*_irqoff` helpers all create this guard; on paths where the caller already masked local IRQs and pinned the CPU, the nested save/restore is near-free.
 - `SOFTIRQ_PENDING` is a per-CPU atomic bit mask. `raise_softirq*()` publishes the pending bit with
   `fetch_or(Release)`, and the runner takes the batch with `swap(0, Acquire)`,
@@ -2381,17 +2381,17 @@ graph and default unit tests.
   tasks or block. No scheduler execution-accounting provider is needed.
 - `kworkqueue_ng` owns work lifecycle predicates. Wake notifications are hints;
   synchronous waits recheck their predicate after waking.
-- softirq diagnostics 记录 context leak、restart-limit、unhandled vector、action run、
-  daemon wake request、context-suppressed wake、context-deferred run 和
-  `raise_softirq_irqoff()` 的 IRQ-enabled 误用。它们用于发现 “softirq action 过重
-  导致 daemon fallback”“BH/hardirq 内误以为能睡眠”“`*_irqoff` helper 调用方没有
-  建立 IRQ-off 前置条件”等问题。daemon wake/request 类计数按事件口径记录：
-  `raise_softirq*()` 只在 pending mask 从空变非空时请求或抑制一次 daemon wake；
-  direct drain 在 interrupt-like context 中被拒绝时会记录 context-deferred run。
-- `DEFERRED_EXECUTOR_HOOKS` 使用 `SpinNoIrq` 保护注册/清空控制面；runner hot path
-  只从 atomic function-pointer slot 读取 hook，不持锁调用 owner。当前不使用全局
-  reentry guard，避免 SMP 上一个 CPU 的 hardirq-exit handoff 误抑制另一个 CPU；
-  softirq 已使用 per-CPU pending/reentry 模型。
+- softirq diagnostics record context leak, restart-limit, unhandled vector, action run,
+  daemon wake request, context-suppressed wake, context-deferred run and
+  IRQ-enabled misuse of `raise_softirq_irqoff()`. They are used to find problems such as "a softirq action too heavy
+  causing daemon fallback", "mistakenly believing sleeping is possible inside BH/hardirq", and "callers of `*_irqoff` helpers not having
+  established the IRQ-off precondition". The daemon wake/request counters are recorded per event:
+  `raise_softirq*()` requests or suppresses a daemon wake only once when the pending mask goes from empty to non-empty;
+  a direct drain rejected in an interrupt-like context records a context-deferred run.
+- `DEFERRED_EXECUTOR_HOOKS` uses `SpinNoIrq` to protect the registration/clearing control plane; the runner hot path
+  reads the hook only from an atomic function-pointer slot and does not call the owner while holding a lock. A global
+  reentry guard is not currently used, to avoid the hardirq-exit handoff of one CPU wrongly suppressing another CPU on SMP;
+  softirq already uses a per-CPU pending/reentry model.
 - `PendingIrq` owns the remaining host completion obligation and uses
   `PhantomData<*mut ()>` to prevent cross-thread transfer. The entry integration
   must separately exclude CPU migration through completion; the marker does
@@ -2414,10 +2414,10 @@ the runtime, IPI, timer and irqchip backends should depend on `kirq` directly.
 
 ### Why devres is adapted only to `kirq`
 
-`driver_os_api` 是驱动框架的 OS-neutral resource model。它描述驱动需要的 IRQ 资源，
-但不拥有内核中断处理语义。x-kernel 的 provider 位于 `driver_os_api_xkernel`（`drivers/adapters/xkernel/provider`），
-负责把 `driver_os_api` 的 trigger/controller/domain/event/handler 转换为 `kirq`
-类型。这样驱动框架获得内核 IRQ 能力，同时 `kirq` 不反向依赖驱动框架。
+`driver_os_api` is the OS-neutral resource model of the driver framework. It describes the IRQ resources a driver needs,
+but does not own kernel interrupt handling semantics. The x-kernel provider lives in `driver_os_api_xkernel` (`drivers/adapters/xkernel/provider`),
+and converts the trigger/controller/domain/event/handler of `driver_os_api` into `kirq`
+types. This way the driver framework gains kernel IRQ capability while `kirq` does not depend back on the driver framework.
 
 ### Why lifecycle hook and deferred executor both use a single owner
 
@@ -2462,7 +2462,7 @@ hardware claim, without inventing an identity fallback for strict Domains.
 
 - `PendingIrq::Drop` consumes outstanding host completion on an early return;
   it does not repeat acknowledgement or completion already consumed by the flow.
-- `IrqLifecycleGuard` 的 `Drop` 执行 entry 时保存的 exit hook。
+- The `Drop` of `IrqLifecycleGuard` runs the exit hook saved at entry.
 - Deferred handoff registration is internal and permanent during normal runtime.
   `cfg(unittest)` clearing/restoration is fixture support, not owner shutdown.
 - `unregister()` removes the regular action and disables the last action's

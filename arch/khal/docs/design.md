@@ -118,36 +118,36 @@ The lazy index means device enumeration must not run before the allocator
 exists. Early console and PMU discovery use allocation-free
 `FdtNode::irq_spec(0)` directly instead of `for_each_compatible`.
 
-## 调用约束 / 执行上下文
+## Calling constraints / execution context
 
-- `irq_handler()` 与 `nmi_handler()` 只能由架构 trap dispatch 调用。
-- 两个 handler 都先创建 `kspin::NoPreempt`，再调用 `kirq`。
-- `irq_handler()` 调用 `kirq::handle_irq()`；hardirq lifecycle enter/exit 和
-  IRQ completion 顺序由 `kirq` 负责。
-- `nmi_handler()` 调用 `kirq::handle_nmi()`；NMI raw-hwirq dispatch 语义由
-  `kirq` 负责。
+- `irq_handler()` and `nmi_handler()` may only be called by the architecture trap dispatch.
+- Both handlers first create a `kspin::NoPreempt` and then call `kirq`.
+- `irq_handler()` calls `kirq::handle_irq()`; the hardirq lifecycle enter/exit and the
+  IRQ completion order are the responsibility of `kirq`.
+- `nmi_handler()` calls `kirq::handle_nmi()`; the NMI raw-hwirq dispatch semantics are the responsibility of
+  `kirq`.
 - `khal::irq` stores neither IRQ registry state nor NMI handler ownership;
   both remain in the single `kirq` core.
-- `khal::nmi::early_init()`：GIC 初始化后、任何 NMI 使能前调用一次（平台
-  early_driver_init），探测机制并写入运行时 `NmiMode`。
-- `khal::nmi::late_init()`：主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` 各调用
-  一次（每 CPU）；hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT 使能。
-- `khal::nmi::enable_periodic_nmi(period_ns, cb)`：每 CPU 调用；返回 `false`
-  表示本 CPU 无法武装（机制不可用或资源冲突），消费者应显式降级。
-- `khal::quiesce_nmi()`：仅供终止停机路径调用；以 `NoPreempt` 钉住当前 CPU，
-  停掉已武装的本地周期源但保留回调和 IRQ 配置。没有 `nmi_pmu` source 或本地
-  source 未初始化时为 no-op，调用后不得重新武装。
+- `khal::nmi::early_init()`: called once after GIC initialization and before any NMI is enabled (platform
+  early_driver_init); it probes the mechanism and writes the runtime `NmiMode`.
+- `khal::nmi::late_init()`: called once each by the primary core's `prepare_interrupts` and by every secondary core's `prepare_local_interrupts`
+  (per CPU); in hardware mode it enables `SCTLR_EL1.NMI` / ALLINT here.
+- `khal::nmi::enable_periodic_nmi(period_ns, cb)`: called per CPU; returning `false`
+  means this CPU cannot be armed (mechanism unavailable or resource conflict), and the consumer should degrade explicitly.
+- `khal::quiesce_nmi()`: to be called only from the terminal halt path; it pins the current CPU with `NoPreempt`,
+  and stops the armed local periodic source while keeping the callback and the IRQ configuration. It is a no-op when there is no `nmi_pmu` source or the local
+  source is uninitialized, and must not re-arm after the call.
 - `khal::irq::configure_nmi(hwirq)` delegates CPU-local preparation through the
   platform to KIRQ. Initial preparation requires a registered disabled source;
   repeated preparation rechecks admission without rewriting live attributes.
   Shared sources are unsupported. False means rejected/failed preparation,
   including an unavailable mechanism or a closing Line; it does not enable IRQs.
-- `khal::nmi::mode()`：返回 `NmiMode::{Pseudo, Hardware, None}`，供消费者
-  （如 watchdog）判断是否启用依赖 NMI 的功能。
+- `khal::nmi::mode()`: returns `NmiMode::{Pseudo, Hardware, None}`, for consumers
+  (such as the watchdog) to decide whether to enable NMI-dependent features.
 
 ## Concurrency model
 
-`khal::irq` adapter 只有短生命周期的 `NoPreempt` guard，不持有全局 IRQ state。
+The `khal::irq` adapter has only a short-lived `NoPreempt` guard and holds no global IRQ state.
 IRQ shared-state locking, NMI RCU ownership and lifecycle hooks are maintained
 inside `kirq`.
 

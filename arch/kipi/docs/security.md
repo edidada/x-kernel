@@ -290,8 +290,8 @@ The following invariants are critical to both the robustness and the memory safe
 |------|----------|----------|----------|-----------|
 | F-01 | The target CPU's IPI queue is not initialized | `run_on_cpu` / broadcast fails | The related cross-core operation cannot be performed | Returns `KipiError::TargetCpuNotReady` |
 | F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
-| F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
-| F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
+| F-03 | The target CPU does not ack the TLB request for a long time | The initiating CPU spin-waits | The page-table modification path stalls, which may look like a system hang | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
+| F-04 | The pending epoch is not updated synchronously | The target CPU fast path returns directly without scanning the slots | False negatives / hangs on unit tests or protocol misuse | The production path is encapsulated by `flush_remote()`; unit tests update it synchronously through a helper |
 | F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
 | F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
 

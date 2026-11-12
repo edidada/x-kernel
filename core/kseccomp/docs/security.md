@@ -37,15 +37,15 @@ The interpreter in this crate sits on the kernel side of that boundary, so it mu
 
 | Attack vector | Defense |
 | --- | --- |
-| 过滤器返回 ALLOW 绕过 | 链式合并取最高优先级；ALLOW 在 `Action::precedence` 中优先级最低 |
-| 用 TRAP / 未知返回码绕过 | `Action::Unknown` 优先级最高（最严）→ `Decision::Unsupported` → dispatch `do_exit(SIGSYS)` |
-| 用 TRACE/USER_NOTIF 绕过 | 枚举为不可执行 → `GET_ACTION_AVAIL` 返回 `ENOSYS`，dispatch 对 syscall 返回 `ENOSYS`，不会放行 |
-| 越界 `BPF_ABS/IND` 读取内核内存 | load 全部以 64 字节快照边界校验，越界补零 |
-| 除零 / 移位崩溃 | ALU 除零/取模零在安装期即 `EINVAL`，运行期仍以 deny 兜底；移位按 `wrapping_*` 语义 |
-| 超大 `sock_fprog.len` 或超长链拖垮内核 | `SeccompFilter::new` 与 ksyscall 双重 `BPF_MAXINSNS`；链总长受 Linux `MAX_INSNS_PER_PATH` 约束 |
-| 用非法程序把内核变成"必然杀进程"的放大器 | 安装期校验先行拒绝，调用方可在安装点看到 `EINVAL` |
-| syscall 入口不作为（漏评估） | `handle_syscall` 在分发前统一 `evaluate_seccomp`，单点入口 |
-| strict 白名单生成错（放行错误 syscall） | `SeccompFilter::strict_allowlist` 由单元测试固定"只放行四个号、其余 kill"的语义；号来源是 `linux_sysno::Sysno` |
+| A filter returns ALLOW to bypass | Chained merging takes the highest priority; ALLOW has the lowest priority in `Action::precedence` |
+| Bypass using TRAP / an unknown return code | `Action::Unknown` has the highest priority (strictest) → `Decision::Unsupported` → dispatch `do_exit(SIGSYS)` |
+| Bypass using TRACE/USER_NOTIF | The enumerators are non-executable → `GET_ACTION_AVAIL` returns `ENOSYS`, and dispatch returns `ENOSYS` for the syscall, never letting it through |
+| Out-of-bounds `BPF_ABS/IND` reads kernel memory | All loads are bounds-checked against the 64-byte snapshot, and out-of-bounds reads are zero-filled |
+| Division-by-zero / shift crash | ALU division/modulo by zero gives `EINVAL` at install time, and at run time still falls back to deny; shifts follow `wrapping_*` semantics |
+| An oversized `sock_fprog.len` or an overlong chain drags down the kernel | `SeccompFilter::new` and ksyscall both enforce `BPF_MAXINSNS`; the total chain length is bounded by Linux `MAX_INSNS_PER_PATH` |
+| An illegal program turns the kernel into an amplifier of "certainly kill the process" | Install-time validation rejects it first, and the caller sees `EINVAL` at the install point |
+| The syscall entry does nothing (misses evaluation) | `handle_syscall` uniformly calls `evaluate_seccomp` before dispatch, a single-point entry |
+| The strict allowlist is generated wrongly (lets a wrong syscall through) | `SeccompFilter::strict_allowlist` is pinned by unit tests to the semantics "allow only four numbers, kill the rest"; the numbers come from `linux_sysno::Sysno` |
 
 ## Audit points
 

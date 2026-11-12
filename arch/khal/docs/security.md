@@ -20,11 +20,11 @@ CPU hotplug; success is not permission to restart old watchdog consumer state.
 generic `kirq` API.
 It trusts that:
 
-- `kcpu` trap dispatch 只在正确异常上下文调用 `irq_handler()` / `nmi_handler()`；
-- `kspin::NoPreempt` 能覆盖进入 `kirq` 的 adapter 调用区间；
+- `kcpu` trap dispatch calls `irq_handler()` / `nmi_handler()` only in the correct exception context;
+- `kspin::NoPreempt` covers the adapter call interval that enters `kirq`;
 - `kirq` owns IRQ state, Line-owned NMI actions, dispatch and completion invariants.
-- `kplat::nm_irq` 的平台实现（`NmiMechanismIf` / `PeriodicNmiSourceIf`）与 `karch` 的 NMI 寄存器
-  访问（PMR / ALLINT / SCTLR_EL1.NMI）正确反映机制与降级状态。
+- The platform implementation of `kplat::nm_irq` (`NmiMechanismIf` / `PeriodicNmiSourceIf`) and `karch`'s NMI register
+  accesses (PMR / ALLINT / SCTLR_EL1.NMI) correctly reflect the mechanism and degradation state.
 
 ## External boundaries / attack surface
 
@@ -32,16 +32,16 @@ It trusts that:
    `kcpu` enters this module through the registered trap handler. A wrong trap classification would confuse normal IRQ
    and pseudo-NMI semantics.
 
-2. **NMI 机制 facade 边界**
-   `khal::nmi` 把 `mode()` / `enable_periodic_nmi()` 等接口 re-export 给消费者。
-   机制不可用（`mode() == NmiMode::None`）时，消费者必须禁用依赖 NMI 的功能；
+2. **NMI mechanism facade boundary**
+   `khal::nmi` re-exports interfaces such as `mode()` / `enable_periodic_nmi()` to consumers.
+   When the mechanism is unavailable (`mode() == NmiMode::None`), consumers must disable NMI-dependent features;
    `configure_nmi` can also reject Closing, unsupported source types or failed
    local preparation. A false result must not be treated as prepared delivery;
    partial controller failure retains cleanup obligations in KIRQ. Periodic
    source activation remains separate from this preparation contract.
-   最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
-   `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
-   覆盖可能已经到达的 NMI 分发。
+   The final shutdown path stops the current CPU's periodic source via `quiesce_nmi()`; this path holds
+   `NoPreempt` and relies on the PMU backend's shared counter access and atomic enabled state to safely
+   cover any NMI dispatch that may already have arrived.
 
 3. **Firmware / device-tree handoff boundary** (`khal::firmware`)
 
@@ -116,7 +116,7 @@ This module does not directly handle user pointers, DMA buffers, device MMIO or 
 
 - `khal::irq` owns no IRQ registry or NMI handler storage, avoiding duplicate
   active state beside `kirq`.
-- `NoPreempt` guard 必须覆盖整个 `kirq::handle_irq()` / `kirq::handle_nmi()` 调用。
+- The `NoPreempt` guard must cover the entire `kirq::handle_irq()` / `kirq::handle_nmi()` call.
 - `kiface_task_api::TaskIrqExitCheckpointIf` (defined by kiface-task-api, provided by ktask)
   is reserved for the completed normal IRQ tail, after controller
   completion and dispatch cleanup. It may exempt only the entry IRQ mask from

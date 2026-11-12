@@ -236,8 +236,8 @@ COW directly copies the retained page object that the current PTE refers to and 
 
 Object invalidation for truncate clears the PTEs of matching VMAs through memspace and completes TLB finalization, then calls `on_invalidate_complete`; filemap releases the pins for that range immediately and does not wait for a later page fault. When MM is busy, the invalidation request is queued, and the pins are retained until the queued request actually completes. munmap and MADV_DONTNEED likewise clear the PTEs and complete the TLB flush first, and then release the pins of the completed pages; on partial failure, pages that were not processed keep their pins. Split VMAs share the original object-offset index, so partial cleanup does not affect the remaining range; fork uses an independent index and shares folio references; mremap keeps the object-offset index and migrates the virtual-address translation base to the new address.
 
-`mprotect(PROT_NONE)` 清除现有 PTE 后也会在 TLB finalization 完成时通知
-filemap 释放对应 pin；恢复读权限后，缺页可重新安装只读缓存页。
+`mprotect(PROT_NONE)` also notifies filemap to release the corresponding pin once TLB finalization
+completes after the existing PTEs are cleared; after read permission is restored, a page fault can reinstall read-only cache pages.
 
 ### Bounded private-fault prefetch
 

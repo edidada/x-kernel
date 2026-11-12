@@ -171,21 +171,21 @@ An ordinary mutation is not responsible for synchronously completing the home-bl
 
 ## Whole-Block File Reads and Cache Commit
 
-`Ext4SbInfo::read_inode_bytes` 按映射 run 读取文件。只有 initialized 映射、文件偏移位于
-filesystem block 边界且本段长度为整块倍数时，才把调用者已有的目标切片交给
-`FilesystemDevice::read_blocks`；省去该段临时零初始化 `Vec` 的分配和一次回拷。
-目标切片可以从任意字节地址开始；`BlockDevice` 的同步读写将该范围直接交给 Bio，
-由后端与既有 DMA 能力层解决设备地址对齐、连续性、映射及缓存维护要求。
-同步调用在设备访问结束后才返回，通用层不复制完整块缓冲区。
-ext4 不保存设备对齐常量或驱动清单，也不为设备地址要求额外创建回退缓冲。
+`Ext4SbInfo::read_inode_bytes` reads a file by mapping runs. Only when the mapping is initialized, the file offset lies on a
+filesystem block boundary and the length of the segment is a whole multiple of blocks, is the destination slice the caller already has handed to
+`FilesystemDevice::read_blocks`; this saves the allocation of a temporary zero-initialized `Vec` for that segment and one copy back.
+The destination slice may start at any byte address; the synchronous read/write of `BlockDevice` hands that range directly to the Bio,
+and the backend together with the existing DMA capability layer resolves device address alignment, contiguity, mapping and cache maintenance requirements.
+A synchronous call returns only after the device access finishes, and the generic layer does not copy the full block buffer.
+ext4 keeps no device alignment constant or driver list, and creates no extra fallback buffer for device address requirements.
 `FilesystemDevice` validates filesystem bounds and buffer lengths, then converts
 filesystem blocks directly to 512-byte sectors. Queue geometry, live media bounds
 and read-only policy are checked by block core; no device geometry is cached.
-部分块仍需 staging 来提取文件范围，与设备地址要求无关；驱动的 DMA/bounce buffer 所有权
-协议不变，这不是端到端零拷贝。
+A partial block still needs staging to extract the file range, which is unrelated to the device address requirements; the ownership protocol of the driver's DMA/bounce buffer
+is unchanged, so this is not end-to-end zero-copy.
 
-部分首尾块继续用 staging buffer；hole 和 unwritten extent 仍只填零，返回长度仍受 inode
-EOF 限制。`read_at` 返回错误时目标缓冲可能已被后端修改，不能把其前缀当作成功读取。
+Partial head and tail blocks continue to use the staging buffer; holes and unwritten extents are still only zero-filled, and the returned length is still bounded by the inode
+EOF limit. When `read_at` returns an error the destination buffer may already have been modified by the backend, and its prefix must not be treated as a successful read.
 KExt4's `read_folio` and readahead share `vfs/read.rs`: block mapping runs under
 the core read guard, then `FolioRead` owners move directly into bios. Physically
 contiguous pages are submitted together without waiting for data I/O. Completion
@@ -262,42 +262,42 @@ All regular-file/symlink mappings share the same static `Ext4AddressSpaceOperati
 obtain the unique `VfsInode` from `mapping->host` and then borrow the `Ext4Inode` private component inside it;
 `Ext4Inode` no longer doubles as the aops object, so there are not two inode identities that must be kept consistent.
 
-allocator 可变状态（逐组可变 descriptor 字段、per-group free-extent cache、
-free-blocks/free-inodes/directory-inode 全局计数、orphan 头、`RECOVER` 与
-`ORPHAN_PRESENT` 位）由 `Ext4SbInfo` 内的
-`Mutex<AllocatorState>` 保护；mount-wide delayed-allocation 总量刻意放在该锁之外，
-由独立的 `delalloc_reserved_blocks: Mutex<u64>` 保护，对应 Linux
-`s_dirtyclusters_counter`（per-CPU 原子计数）的独立更新域——reserve/release 只与
-其他 delalloc 修改互相串行，不阻塞全局组分配。静态几何不受本锁变动：
+The allocator mutable state (per-group mutable descriptor fields, the per-group free-extent cache,
+the global free-blocks/free-inodes/directory-inode counters, the orphan head, and the `RECOVER` and
+`ORPHAN_PRESENT` bits) is protected by the
+`Mutex<AllocatorState>` inside `Ext4SbInfo`; the mount-wide delayed-allocation total is deliberately kept outside this lock
+and protected by a separate `delalloc_reserved_blocks: Mutex<u64>`, corresponding to the independent update domain of Linux
+`s_dirtyclusters_counter` (a per-CPU atomic counter) - reserve/release is serialized only against
+other delalloc modifications and does not block global group allocation. Static geometry is not changed under this lock:
 `layout` and `group_geometry` retain the validated mount geometry. Metadata
 reload checks a decoded superblock against that geometry before rebuilding
 mutable counters. Only recovery refresh replaces the mount mirror and hash policy.
-逐组地址（block/inode bitmap、inode table）只保存在挂载时冻结的 `group_geometry`
-一维表中——`AllocatorState` 的逐组条目（`GroupMutableState`）只镜像计数、flags 与
-bitmap checksum 等可变字段，刻意不含地址字段，地址因此只有一个读取源，对应 Linux
-`ext4_get_group_desc(..., NULL)` 对静态地址字段的无锁读，inode 表定位等热路径据此
-无锁读。journal replay 可能重写 descriptor block，`reload_mutable_metadata_state`
-重解码并校验 replay 后的 descriptor 表：计数等可变字段照常重建，地址字段与冻结表
-不一致时 fail-closed 拒绝（KExt4 支持的操作不会 journal 地址变更，变化即损坏或不
-支持特性），避免冻结几何与重载状态分裂后操作错误的 bitmap/inode table。取锁前，
-balloc/ialloc 入口先完成冻结几何解析与元数据缓存预热（`prefetch_metadata_blocks`），
-冷缓存设备读在锁外完成、失败也在锁外返回，不串行化全体分配器（对应 Linux 先读
-bitmap buffer 再 `ext4_lock_group`）；返回的 `MetadataBuffer` 集合保留到 allocator guard
-释放之后，同时 pin 不可变字节和槽位身份，回收不能在预取与重读之间重建槽位。
-权威快照在锁内重读，预热结果绝不作为权威
-数据。balloc/ialloc 的
-单组分配/释放入口（`*_in_group`）整体为单一临界区：从读组描述符、位图 buffer 读改、
-journal write-access 到内存状态发布全程持锁，入口之间不会基于同一位图快照重复选取
-同一块/同一 inode，也不会丢失计数更新——对应 Linux 组锁"锁窗覆盖分配决策与
-bitmap 更新"的语义。多组扫描入口（`allocate_blocks_for_write()` /
-`allocate_inode_with_name()`）不是单一临界区：扫描循环逐组以短锁窥探 hint、随即
-释放，再逐个在 `*_in_group` 中重新取锁尝试；由于该锁不可重入，不能在扫描循环内持锁
-调用 `*_in_group`，goal 选择与分配也不构成原子操作，组间竞态由 `*_in_group` 锁内
-重校验兜底。delalloc 总量更新位于独立小锁的单临界区，读改写不会丢计数；预算准入
-检查与累计位于同一临界区（allocator 锁读 free-blocks + delalloc 锁读并累加，
-锁序固定 allocator → delalloc），check-then-act 基于同一快照原子完成，不存在
-并发超预留窗口，也不依赖 bridge 挂载级写锁的外部串行化；临界区有界（仅读计数
-并做一次加法），与 Linux 直接原子累加 percpu 计数的近似记账相比保持精确语义。
+per-group addresses (block/inode bitmap, inode table) are kept only in the one-dimensional table `group_geometry`
+frozen at mount time - the per-group entries of `AllocatorState` (`GroupMutableState`) mirror only mutable fields such as counters, flags and
+bitmap checksums and deliberately contain no address fields, so addresses have exactly one read source, corresponding to Linux
+`ext4_get_group_desc(..., NULL)` reading static address fields without a lock, and hot paths such as inode table location rely on this
+lock-free read. Journal replay may rewrite descriptor blocks, so `reload_mutable_metadata_state`
+re-decodes and validates the descriptor table after replay: mutable fields such as counters are rebuilt as usual, and when an address field differs from the frozen table
+it fails closed and rejects (the operations KExt4 supports never journal address changes, so a change means corruption or an
+unsupported feature), preventing the frozen geometry and the reloaded state from diverging and operating on the wrong bitmap/inode table. Before taking the lock,
+the balloc/ialloc entry first completes frozen-geometry resolution and metadata cache warm-up (`prefetch_metadata_blocks`);
+cold-cache device reads complete outside the lock and failures also return outside the lock, so the allocator as a whole is not serialized (corresponding to Linux reading the
+bitmap buffer first and then `ext4_lock_group`); the returned `MetadataBuffer` set is kept until after the allocator guard
+is released, pinning both the immutable bytes and the slot identity, so reclaim cannot rebuild the slot between prefetch and re-read.
+The authoritative snapshot is re-read under the lock, and the warm-up result is never used as authoritative
+data. The per-group allocation/release entries (`*_in_group`) of balloc/ialloc are
+as a whole a single critical section: from reading the group descriptor, the read-modify of the bitmap buffer,
+and journal write-access to publishing the in-memory state, the lock is held throughout, so entries never select
+the same block/the same inode twice from the same bitmap snapshot and never lose a counter update - corresponding to the Linux group-lock semantics that "the lock window covers the allocation decision and the
+bitmap update". The multi-group scan entries (`allocate_blocks_for_write()` /
+`allocate_inode_with_name()`) are not a single critical section: the scan loop peeks at the hint with a short lock per group and releases it immediately,
+then re-takes the lock in `*_in_group` for each attempt; since the lock is not reentrant, the scan loop must not hold the lock while
+calling `*_in_group`, goal selection and allocation are not one atomic operation, and the cross-group race is covered by the recheck inside the `*_in_group` lock.
+The delalloc total update is a single critical section under its own small lock, so read-modify-write does not lose counts; budget admission
+check and accumulation are in the same critical section (the allocator lock reads free-blocks + the delalloc lock reads and accumulates,
+with a fixed lock order allocator → delalloc), and check-then-act completes atomically on the same snapshot, so there is no
+concurrent over-reservation window and no dependence on external serialization by the bridge's mount-level write lock; the critical section is bounded (it only reads the counter
+and performs one addition), keeping exact semantics compared with Linux's approximate accounting of directly atomically accumulating a percpu counter.
 
 The lock order is fixed as the `Ext4Mount` mount-level lock → the allocator lock → the delalloc lock / the prealloc map leaf lock → the metadata-buffer /
 journal internal locks, and waiting in the reverse direction is forbidden. The delalloc total lock and the per-inode prealloc map leaf lock are both
@@ -594,51 +594,51 @@ Tail verification borrows the persisted-evidence iterator already in the batch a
 the journal superblock is written only after all continuity checks have completed. Frozen images are still written back transaction by transaction here, and
 cross-transaction coalescing of metadata block writeback is not yet implemented.
 
-regular inode 的同步目标保存在 VFS inode 组合持有的 `Ext4InodeState` 中，不在 journal 中
-建立 inode-number 全局表。普通 inode-table staging 和 zero-link staging 在发布 metadata
-时同时保存 handle 所属 `RuntimeTransaction` 的 `Arc`。已提交状态由该对象的
-Checkpoint/Finished phase 判断，不用长期保存的 32 位 tid 与当前 sequence 作大小比较；
-inode 长期驻留、checkpoint 退休和 sequence 回绕不会使旧目标重新指向新事务。每个 inode
-只保留最新目标；checkpoint 退休仍释放该对象的 frozen metadata payload。
+The sync target of a regular inode is kept in the `Ext4InodeState` held by the VFS inode composition, and no global inode-number table is
+built in the journal. Ordinary inode-table staging and zero-link staging, when publishing metadata,
+also save the `Arc` of the `RuntimeTransaction` that the handle belongs to. The committed state is judged by that object's
+Checkpoint/Finished phase, without comparing a long-kept 32-bit tid against the current sequence;
+long inode residency, checkpoint retirement and sequence wraparound cannot make an old target point to a new transaction again. Each inode
+keeps only the latest target; checkpoint retirement still releases the frozen metadata payload of that object.
 
-`fsync` 先完成所需 PageCache writeback，full fsync 再 stage dirty timestamps，随后在
-mount 写锁内检查目标。未提交目标只提交其所属事务；已提交目标不再连带提交别的 inode
-新建的 running transaction，但仍执行 device flush，因为此后可能有不带 metadata 的
-mapped overwrite。`fdatasync` 暂时使用同一个 metadata 目标，不区分 timestamp-only 事务。
-无目标的加载 inode、目录和其他非 regular inode 保留 mount-wide commit/flush。
-未报告 transaction 的 metadata publication（包括 xattr）使旧目标失效；extent mutation
-先使旧目标失效，只有后续 inode-table staging 才恢复目标，覆盖 external leaf-only rewrite。
-Legacy orphan 链指针更新分为两类：当前操作的 resident inode 在 inode-table 更新成功后
-登记 handle 的事务，不覆盖常驻时间戳，也不确认尚未 staging 的 dirty 时间戳。删除非头部
-节点时，前驱只有 inode number；对其 `dtime` 链指针的拼接属于删除事务的内部恢复账目，
-不改变前驱的文件属性或映射，因此不推进前驱的 fsync 目标，也不创建临时 inode 来模拟
-常驻对象。拼接与被移除 inode 的链更新及适用的释放操作在同一事务中提交；事务未提交时，
-恢复仍看到旧链和未由该事务释放的 inode。该例外不适用于前驱自身的属性或 extent 修改。
-journal abort 在任何目标判断前检查；commit/flush 错误沿用原有 abort 和 VFS 错误观察路径。
-mount 写锁仍覆盖提交和 flush，本步骤不拆分锁，也不省略数据屏障。
-已挂载路径的 abort（包括异步回写的元数据完成）在 mount 写 guard 内执行；abort 返回前
-发布原子投影，guard 的 Drop 在释放同一把写锁前观察它并标记 superblock 只读。同一 mount
-不能同时有另一份写 guard 在投影发布中途执行 Drop。将来移出 mount 锁的 abort 出口必须
-自行发布 superblock 只读状态，不能依赖另一次访问碰巧触发 Drop。
-`syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
-当前 ordered-data dependency 由 running transaction 的 `ordered_generation` 和
-`flushed_generation` 记录：发布 metadata 的 writeback batch 在成功的数据 write 后递增
-登记代次，多个 PageCache batch 和 inode 可以共享同一事务。普通 batch 结束只更新内存
-metadata，不单独 flush；freeze 根据两个代次是否相等生成 committing phase 的待 flush 位，persist 在
-任何 recovery evidence 或 journal write 之前统一 flush，成功后才清除依赖并继续提交。
-因此 writeback 完成不代表当前事务的数据已持久化；inode/filesystem sync 或容量压力提交提供
-持久化边界。metadata-only transaction 不增加数据 flush。仅覆盖已映射且不超过 `i_disksize`
-的数据在 data-only 路径不加入 metadata 事务；inode sync 提交已有事务时的同设备 journal flush，
-或无事务时的直接设备 flush，以及 filesystem sync 的最终 flush，保证同步返回时的数据持久化。
-该路径不承诺覆盖内容先于无关事务的 commit record 持久化。`flush_ordered_data` 在 barrier
-开始前快照登记代次，成功后只确认该代次，失败不确认；较旧的 barrier 后完成时也不能降低已确认
-代次。barrier 期间不持有 journal/transaction 短状态锁，并发新增依赖留给后续 barrier；
-此确认协议不再依赖 mount 排斥其他 handle。冻结后的 flush 与 journal I/O 由持久化执行锁串行。
-PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 `write_begin` 或
-`page_mkwrite` 纳入 delayed-allocation accounting，writeback 不再扫描完整范围生成静态空间/
-credit plan。实际写回由 byte cursor 推进，每处理一个 mapped、unwritten 或 hole allocation run
-都重新调用 `map_blocks()`；unwritten conversion 和 hole allocation/insert/conversion 按实际
-发生的 run 增长 credit usage，并优先通过 `JournalHandle::reserve_more()` 扩展当前 transaction。
+`fsync` first completes the required PageCache writeback, full fsync then stages dirty timestamps, and afterwards checks the target
+under the mount write lock. An uncommitted target commits only the transaction it belongs to; a committed target no longer drags along the running transaction newly created
+by another inode, but still performs a device flush, because mapped overwrites without metadata may follow.
+`fdatasync` temporarily uses the same metadata target and does not distinguish timestamp-only transactions.
+Loaded inodes without a target, directories and other non-regular inodes keep the mount-wide commit/flush.
+Metadata publication that does not report a transaction (including xattr) invalidates the old target; an extent mutation
+first invalidates the old target, and only the subsequent inode-table staging restores the target, covering external leaf-only rewrite.
+Legacy orphan chain pointer updates fall into two classes: the resident inode of the current operation, after its inode-table update succeeds,
+registers the handle's transaction, without overwriting resident timestamps and without confirming dirty timestamps not yet staged. When removing a non-head
+node, the predecessor has only an inode number; splicing its `dtime` chain pointer is internal recovery bookkeeping of the removal transaction,
+does not change the predecessor's file attributes or mapping, and therefore does not advance the predecessor's fsync target, nor create a temporary inode to simulate
+a resident object. The splice, the chain update of the removed inode and the applicable release operations commit in the same transaction; while the transaction is uncommitted,
+recovery still sees the old chain and the inodes not released by that transaction. This exception does not apply to attribute or extent modifications of the predecessor itself.
+A journal abort is checked before any target judgment; commit/flush errors follow the existing abort and VFS error observation paths.
+The mount write lock still covers commit and flush; this step neither splits the lock nor omits the data barrier.
+An abort on the mounted path (including metadata completion of asynchronous writeback) runs inside the mount write guard; before the abort returns it
+publishes the atomic projection, and the guard's Drop observes it before releasing the same write lock and marks the superblock read-only. The same mount
+cannot have another write guard running Drop in the middle of projection publication. A future abort exit moved out of the mount lock must
+publish the superblock read-only state itself and must not rely on another access happening to trigger Drop.
+`syncfs` and KVFS unmount writeback still commit the running transaction and drain all checkpoints.
+The current ordered-data dependency is recorded by the `ordered_generation` and
+`flushed_generation` of the running transaction: a writeback batch that publishes metadata increments the
+registered generation after a successful data write, and multiple PageCache batches and inodes may share the same transaction. An ordinary batch ending only updates in-memory
+metadata and does not flush by itself; freeze generates the pending-flush bit of the committing phase according to whether the two generations are equal, and persist flushes uniformly before
+any recovery evidence or journal write, and only after success clears the dependency and continues the commit.
+Therefore writeback completion does not mean the current transaction's data is persisted; an inode/filesystem sync or a capacity-pressure commit provides the
+persistence boundary. A metadata-only transaction adds no data flush. Data that only overwrites already mapped blocks and does not exceed `i_disksize`
+is not added to a metadata transaction on the data-only path; the same-device journal flush when an inode sync commits an existing transaction,
+or the direct device flush when there is no transaction, and the final flush of a filesystem sync, guarantee data persistence when the sync returns.
+This path does not promise that content is persisted before the commit record of an unrelated transaction. `flush_ordered_data` snapshots the registered generation before the barrier
+starts, confirms only that generation after success, and does not confirm on failure; an older barrier completing later also cannot lower the confirmed
+generation. No journal/transaction short-state lock is held during the barrier, and dependencies added concurrently are left for a later barrier;
+this confirmation protocol no longer depends on the mount excluding other handles. After freezing, flush and journal I/O are serialized by the persistence execution lock.
+PageCache still aggregates folios up to a fixed limit; the required data blocks of a dirty range have already been brought into delayed-allocation accounting by `write_begin` or
+`page_mkwrite`, and writeback no longer scans the full range to generate a static space/
+credit plan. The actual writeback advances by a byte cursor, and `map_blocks()` is called again
+for every mapped, unwritten or hole allocation run processed; unwritten conversion and hole allocation/insert/conversion grow credit usage according to the runs that actually
+occur, and preferentially extend the current transaction through `JournalHandle::reserve_more()`.
 The transaction credit limit is owned and enforced only by the journal engine inside `begin()`/`reserve_more()`;
 the file layer neither reads nor reinterprets it. If the handle cannot be extended, core first flushes the current
 data, advances only that prefix's `i_disksize`, clears the data dependencies this transaction already satisfied,
@@ -950,33 +950,33 @@ the result onward, without constructing `Ext4Xattr` or an intermediate vector of
 back to the shared VFS identity. Zero-link eviction reuses the external xattr block cleanup logic, first releasing the
 EA block and then releasing the inode bitmap entry.
 
-Truncate 使用 orphan file（满时回退 legacy orphan list）保护 regular-file shrink。KExt4 的
-`InodeOperations::set_len()` 按
-`prepare_regular_inode_truncate()` → `VfsInode::truncate_setsize()`（先发布 VFS i_size，
-再执行 unmap/cache truncate/unmap）→
-delalloc extent-status 尾部删除 → `finish_regular_inode_shrink()` 排序。是否删除 delalloc
-以旧 `i_size` 为准，是否释放磁盘 mapping 以旧 `i_disksize` 为准；因此截断到
-`[i_disksize, old i_size)` 或恰好等于 `i_disksize` 仍会在 dirty folio 被丢弃后同步减少
-`i_reserved_data_blocks` 与 mount aggregate。这与 Linux ext4 `setattr` 路径在
-`i_size_write()` 后执行其内部 `truncate_pagecache()`、再进行 filesystem block truncate
-的职责层次一致。`prepare_regular_inode_truncate()` 即使先提交了缩小后的 `i_disksize`，也必须
-保留旧 `i_size`，使随后 PageCache 能按真实旧 EOF 丢弃 folio、清零同页尾部并失效映射；不增加
-第二个 truncate operation hook。显式 recovery 在 journal 需要 replay 时先重放并保持 recovery flag，
-再初始化 mount-lifetime orphan info 并遍历 legacy list 和 orphan file；即使 journal 已 clean，
-只要 superblock 仍有 orphan head、orphan-file entry 或 `ORPHAN_PRESENT`，也会执行同一 cleanup。
-`nlink > 0` regular inode 完成中断的 truncate，`nlink == 0` inode 复用 final
-eviction 事务释放 external xattr、extent 和 inode bitmap。`recover()` 返回 `None` 只表示
-没有 journal replay report，不表示没有执行 orphan cleanup，也不降低成功返回的持久性保证。
-Orphan file backing inode 通过 Linux `EXT4_IGET_SPECIAL` 对等的内部入口加载，不进入 public
-iget、inode allocator 或 release。`Ext4SbInfo::orphan_info` 只保存 Linux `ext4_orphan_info`
-同层的 block identity、checksum seed 与增量 free-entry 计数；resident `Ext4Inode` 保存
-`i_orphan`/`i_orphan_idx` 对等的 `OrphanLocation`，不把运行时索引塞进按需解码的磁盘 inode 值。
-`OrphanInfo::add/remove` 直接拥有槽位选择、journaled block 更新和 free-entry 计数维护；
-`Ext4SbInfo` 负责 orphan 格式分派、legacy fallback 和 recovery 调度。格式参数借用现有磁盘
-superblock，I/O 借用现有 metadata object，不增加 operation context 或重复 geometry 字段。
-挂载级独占访问串行化槽位修改，因此不需要 Linux 并发分配器的 CPU hash、CAS 和原子计数。
-信息只在 journal replay 后初始化一次；recovery 每块只取一次 entry snapshot，逐 inode
-checkpoint 只重载 superblock/group 可变状态并增量维护 free-entry 计数，不重复扫描整个 orphan file。
+Truncate uses the orphan file (falling back to the legacy orphan list when full) to protect a regular-file shrink. The
+`InodeOperations::set_len()` of KExt4 is ordered as
+`prepare_regular_inode_truncate()` → `VfsInode::truncate_setsize()` (first publish the VFS i_size,
+then unmap/cache truncate/unmap) →
+delalloc extent-status tail removal → `finish_regular_inode_shrink()`. Whether to delete delalloc
+is decided by the old `i_size`, and whether to release the disk mapping by the old `i_disksize`; therefore truncating to
+`[i_disksize, old i_size)` or exactly to `i_disksize` still synchronously reduces
+`i_reserved_data_blocks` and the mount aggregate after the dirty folios are discarded. This matches the layering of responsibilities of the Linux ext4 `setattr` path, which after
+`i_size_write()` runs its internal `truncate_pagecache()` and then the filesystem block truncate.
+Even if `prepare_regular_inode_truncate()` has already committed the shrunk `i_disksize`, it must
+keep the old `i_size`, so that the following PageCache can discard folios by the true old EOF, zero the tail of the same page and invalidate mappings; no
+second truncate operation hook is added. When the journal needs replay, explicit recovery first replays and keeps the recovery flag,
+then initializes the mount-lifetime orphan info and walks the legacy list and the orphan file; even if the journal is already clean,
+as long as the superblock still has an orphan head, an orphan-file entry or `ORPHAN_PRESENT`, the same cleanup is also performed.
+A regular inode with `nlink > 0` completes the interrupted truncate, and an inode with `nlink == 0` reuses the final
+eviction transaction to release the external xattr, extents and the inode bitmap. `recover()` returning `None` only means
+there was no journal replay report; it does not mean no orphan cleanup was performed, nor does it lower the durability guarantee of a successful return.
+The orphan file backing inode is loaded through an internal entry equivalent to Linux `EXT4_IGET_SPECIAL`, and does not enter the public
+iget, the inode allocator or release. `Ext4SbInfo::orphan_info` keeps only the block identity, checksum seed and incremental free-entry count
+at the same layer as Linux `ext4_orphan_info`; the resident `Ext4Inode` keeps the `OrphanLocation` equivalent to
+`i_orphan`/`i_orphan_idx`, and does not stuff the runtime index into the on-demand decoded on-disk inode value.
+`OrphanInfo::add/remove` directly own slot selection, journaled block updates and free-entry count maintenance;
+`Ext4SbInfo` is responsible for orphan format dispatch, the legacy fallback and recovery scheduling. The format parameters borrow the existing on-disk
+superblock and the I/O borrows the existing metadata object, adding no operation context or duplicate geometry fields.
+Mount-level exclusive access serializes slot modifications, so the CPU hash, CAS and atomic counters of the Linux concurrent allocator are not needed.
+The info is initialized only once after journal replay; recovery takes one entry snapshot per block, and per-inode
+checkpoint reloads only the superblock/group mutable state and maintains the free-entry count incrementally, without rescanning the whole orphan file.
 
 Fallocate preallocation (`Ext4Mount::fallocate_regular_inode_preallocate`, mode 0
 and KEEP_SIZE) walks `map_blocks()` and skips each already-mapped range (including
@@ -1026,31 +1026,31 @@ reclaims an unwritten reservation (punch hole converts an unwritten extent to
 initialized rather than deallocating). This approximation stays until kext4
 implements real punch-hole/zero-range, at which point it declares the modes and
 owns the release/zeroing.
-Legacy orphan 链的 `i_dtime` 是 journaled inode-table topology，不复制到 resident private
-state。链遍历直接读取 metadata cache 中的 inode-table bytes，前驱重连也按已经校验的 inode
-number 原位修改同一 bytes；它不会为了读取或更新前驱而构造另一个 `Ext4Inode`。因此两个同时
-open-unlink 的 inode 可以按任意顺序完成 final eviction，而不会从旧 private snapshot 恢复已经
-移除的 orphan next。
-clean-journal cleanup 的首个 transaction 会先建立 ext4 recovery evidence；所有 recovery
-cleanup transaction 都采用 `PreserveDuringRecovery`，逐个同步完成 commit/checkpoint，并从
-已落盘的 superblock/group descriptors 重新建立内存状态，避免旧 orphan head 或 allocator
-counter 被 checkpoint 前的快照重新带回循环。重建时冻结的 `group_geometry` 地址表保持
-挂载时的值：replay 后的 descriptor 地址若与冻结表不一致，reload 直接报 corruption
-返回，不会带着分裂的地址状态继续清理。全部 orphan 清理完成后，recovery 再确认 JBD2
-`s_start` 为零，最后清除并 flush ext4 recovery feature；任一步失败都会返回错误，而不会先
-清除最终的磁盘恢复证据。Ext4DiskSuperblock decode 会保留越过 inode table 的原始
-`s_last_orphan`，使显式 recovery 有机会处理该损坏，而普通 mount 仍因非零 orphan head 返回
-`NeedsRecovery`。Recovery 在 `iget` 前同时校验 inode table 上界、reserved inode 范围和经过
-checksum 验证的 inode bitmap 分配位；编号合法但 allocation bit 为零的 head 不读取 inode
-table。成功加载 inode 后还会在执行 truncate/eviction 前验证：带链接的 inode kind 必须属于
-Linux ext4 可截断的 regular/directory/非 fast symlink，以及原始 `i_dtime` 不得超过 inode
-上界；legacy next 还必须为零或合法的下一
-orphan 编号。命中这些 bad-orphan 条件时按 Linux `ext4_orphan_cleanup()` 的终止规则，用独立的
-一-credit transaction 把 head 清零。该 transaction 同样采用 `PreserveDuringRecovery` 并计为
-cleanup work，避免 replay 分支把已经推进的 journal sequence 回写成旧状态；只有 clear 的
-commit/checkpoint 完成后才允许清理最终 recovery feature。Bitmap 读取/checksum、inode decode、
-合法但 KExt4 尚不支持的格式或 cleanup 错误仍向上返回，不借此路径静默吞掉一般 metadata
-corruption 或把未完成的有效 cleanup 伪装成成功。
+The `i_dtime` of the legacy orphan chain is journaled inode-table topology and is not copied into the resident private
+state. Chain traversal reads the inode-table bytes in the metadata cache directly, and predecessor relinking also modifies the same bytes in place by the already validated inode
+number; it never constructs another `Ext4Inode` to read or update the predecessor. Therefore two concurrently
+open-unlinked inodes can complete final eviction in any order, without restoring an already
+removed orphan next from an old private snapshot.
+The first transaction of clean-journal cleanup first establishes the ext4 recovery evidence; all recovery
+cleanup transactions use `PreserveDuringRecovery`, complete commit/checkpoint synchronously one by one, and re-establish the in-memory state from the
+on-disk superblock/group descriptors, preventing an old orphan head or allocator
+counter from being brought back into the loop by a pre-checkpoint snapshot. The `group_geometry` address table frozen at rebuild time keeps
+its mount-time value: if a descriptor address after replay differs from the frozen table, reload directly returns a corruption error
+and does not continue cleanup with a split address state. After all orphan cleanup completes, recovery re-confirms that JBD2
+`s_start` is zero, and finally clears and flushes the ext4 recovery feature; failure of any step returns an error, and the
+final on-disk recovery evidence is not cleared first. Ext4DiskSuperblock decode keeps the raw
+`s_last_orphan` that points past the inode table, giving explicit recovery a chance to handle that corruption, while an ordinary mount still returns
+`NeedsRecovery` because of the nonzero orphan head. Before `iget`, recovery validates together the inode table upper bound, the reserved inode range and the
+checksum-verified inode bitmap allocation bit; a head whose number is legal but whose allocation bit is zero does not read the inode
+table. After an inode loads successfully, before truncate/eviction it also validates that: a linked inode's kind must be one of the
+regular/directory/non-fast-symlink kinds that Linux ext4 can truncate, and the raw `i_dtime` must not exceed the inode
+upper bound; the legacy next must also be zero or a legal next
+orphan number. When these bad-orphan conditions hit, following the termination rule of Linux `ext4_orphan_cleanup()`, a separate
+one-credit transaction clears the head to zero. That transaction likewise uses `PreserveDuringRecovery` and counts as
+cleanup work, preventing the replay branch from writing an already advanced journal sequence back to an old state; only after the clear's
+commit/checkpoint completes may the final recovery feature be cleared. Bitmap read/checksum, inode decode,
+legal but not-yet-supported KExt4 formats, or cleanup errors are still returned upward, and this path does not silently swallow general metadata
+corruption or disguise unfinished valid cleanup as success.
 
 Truncate and preallocation-discard journal credits are computed from the actual
 extent structure: the inode root, the rebuilt extent-tree blocks, the old tree
@@ -1114,31 +1114,31 @@ mtime through the same base/extra encoder as existing inodes, so a 256-byte inod
 whole-second range. The existing timestamp encode/decode still truncates or validates according to whether each actual extra field is present,
 serving as a second layer of protection at the on-disk format boundary.
 
-挂载时由 ext4 fill operation 把 filesystem block size 与 extent-format `s_maxbytes` 写入 KVFS
-`SuperBlock`，legacy bitmap maxbytes 只保存在 `Ext4SbInfo`；Ext4Inode 通过其组合持有的 ext4
-private state 查询 extent-format 状态。write、truncate、FIEMAP
-和 `page_mkwrite` 通过同一个 helper 按该格式状态选择上限，既不复制派生的 per-inode
-maxbytes，也不为上限查询重新读取 inode-table 或取得挂载级 core lock。
-Block mapping 热路径从同一 inode state 临界区一次取得 ext4 flags 与 60-byte `i_block` root；
-extent 和 legacy mapper 随后借用该局部 root 完成一次 run 查询，避免 direct-pointer 合并循环
-重复加锁或复制 `i_block`，也不在块设备 I/O 期间持有 inode state lock。
-每份 inode private state 用不重叠的 logical-block 区间保存 delayed extent，
-对应 Linux `ext4_inode_info::i_es_tree` 中的 delayed entries，并维护
-`i_reserved_data_blocks` 等价计数。挂载级 reservation aggregate 对应 Linux
-`s_dirtyclusters_counter`，用于 admission 与 `statfs()`，不是第二份 extent identity。
-Delayed-allocation admission 使用 primary superblock 的 free-block counter 减去 ext4 reserved
-blocks 和 core mount aggregate。reserve/release/truncate/writeback/eviction 只能调用 core 的
-区间 API，由 core 在各自临界区内原子更新 inode 区间、per-inode count 和 mount
-aggregate（inode 侧在 per-inode 状态锁内，mount 总量在独立 delalloc 锁内）；
-writeback 结算时，同一 inode 状态锁内将配额预留转为已用、增加已分配块数并移除已结算
-的延迟预留，`getattr` 读取的已分配量和剩余预留不会重复计算同一块。bridge 不读取或调整
-任一计数。该 counter 与 group descriptor 由同一
-allocation/release mutation 更新，因此 admission 与显式 `statfs()` 都直接读该常
-数时间 aggregate，不遍历 group descriptor（避免持锁 O(组数) 折叠阻塞全局分配）。
-目录分配的 Orlov goal 选择同样只读常数时间 aggregate：allocator 锁内一次取得
-free-inodes/free-blocks 与 mount 级 directory-inode 总量（对应 Linux
-`s_dirs_counter`，挂载时一次 O(组数) fold 播种，此后与逐组 `bg_used_dirs_count`
-同点更新），不在持锁期间逐组折叠。
+At mount time the ext4 fill operation writes the filesystem block size and the extent-format `s_maxbytes` into the KVFS
+`SuperBlock`, while the legacy bitmap maxbytes is kept only in `Ext4SbInfo`; Ext4Inode queries the extent-format state through the ext4
+private state it holds by composition. write, truncate, FIEMAP
+and `page_mkwrite` choose the limit by that format state through the same helper, neither duplicating a derived per-inode
+maxbytes nor re-reading the inode table or taking the mount-level core lock for the limit query.
+The block-mapping hot path obtains the ext4 flags and the 60-byte `i_block` root in one inode state critical section;
+the extent and legacy mappers then borrow this local root to finish one run query, avoiding repeated locking or copying of `i_block` in the direct-pointer merge loop,
+and not holding the inode state lock during block device I/O.
+Each inode private state keeps delayed extents in non-overlapping logical-block ranges,
+corresponding to the delayed entries in Linux `ext4_inode_info::i_es_tree`, and maintains an
+`i_reserved_data_blocks`-equivalent count. The mount-level reservation aggregate corresponds to Linux
+`s_dirtyclusters_counter`, is used for admission and `statfs()`, and is not a second extent identity.
+Delayed-allocation admission uses the primary superblock's free-block counter minus the ext4 reserved
+blocks and the core mount aggregate. reserve/release/truncate/writeback/eviction may only call the core
+range API, and the core atomically updates the inode ranges, the per-inode count and the mount
+aggregate in their respective critical sections (the inode side under the per-inode state lock, the mount total under the separate delalloc lock);
+at writeback settlement, under the same inode state lock the quota reservation is converted to used, the allocated block count is increased and the settled
+delayed reservation is removed, so the allocated amount and the remaining reservation read by `getattr` never count the same block twice. The bridge neither reads nor adjusts
+any counter. This counter and the group descriptors are updated by the same
+allocation/release mutation, so both admission and an explicit `statfs()` read that constant-time aggregate directly,
+without walking the group descriptors (avoiding an O(groups) fold under a lock blocking global allocation).
+The Orlov goal selection for directory allocation likewise reads only constant-time aggregates: under the allocator lock it obtains in one pass
+free-inodes/free-blocks and the mount-level directory-inode total (corresponding to Linux
+`s_dirs_counter`, seeded by a one-time O(groups) fold at mount, and afterwards updated at the same point as the per-group `bg_used_dirs_count`),
+without folding group by group while holding the lock.
 
 Core exposes two Linux ext4 total-capacity conventions through `Ext4StatFsMode`, but does not parse mount-option strings:
 `Bsd` subtracts the first-data-block and the metadata system zones from the superblock's total block count, while `Minix` uses the
@@ -1197,14 +1197,14 @@ run down the normal allocation path.
 
 ## Concurrency Model
 
-运行态仍需联合修改 superblock/group metadata 的 mutation 当前通过 `Ext4Mount` 内的挂载级 `RwLock`
-write guard 串行化；只读调用以及 delalloc reservation 可共享 read guard，后者再使用独立
-reservation mutex。KVFS inode cache mutex 只保护 `New/Live/Freeing` identity state；每个 cache
-slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，因此一个 inode 的状态变化不会
-唤醒其它 inode 的 `iget`。ext4 private state 使用 per-inode `RwLock<Ext4InodeState>`，普通 metadata 读取或
-mutation 不进入另一张 inode cache。
-核心内部的 metadata buffer
-和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。
+Mutations that at run time still need to modify superblock/group metadata jointly are currently serialized through the mount-level `RwLock` write guard inside `Ext4Mount`;
+read-only calls and delalloc reservations may share the read guard, the latter then using a separate
+reservation mutex. The KVFS inode cache mutex protects only the `New/Live/Freeing` identity state; each cache
+slot uses its own wait queue, and waiting happens after the cache mutex is released, so a state change of one inode does not
+wake the `iget` of other inodes. The ext4 private state uses a per-inode `RwLock<Ext4InodeState>`, and ordinary metadata reads or
+mutations do not enter another inode cache.
+The metadata buffers inside the core
+and the JBD2 transaction handle still record buffer ownership, credit consumption and revoke state.
 `writepages()`, the two VFS `set_len()` phases, last-writer preallocation cleanup,
 and final eviction share the inode's sleepable submission mutex. Writeback may
 release it after installing in-flight requests. Mapping mutation and release
@@ -1213,16 +1213,16 @@ physical release, and eviction through all release batches. Acquire KVFS
 data/invalidate protection before submission protection, then enter the mount.
 Never acquire submission protection while holding a mount or inode-state guard.
 
-恢复期只操作未发布 inode，仍由独占恢复流程保护。进入 PageCache
-遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
-batch writer 才短暂取得 core write guard；delalloc accounting 由独立 reservation mutex 更新。这样
-普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
-FIEMAP 在 VFS inode shared lock 下执行，regular inode 另以 `writeback_lock` 稳定磁盘
-mapping；core `report_mapping()` 只短暂读取 delayed extent lock，随后再查询磁盘 mapping，
-并在调用安全输出 writer 前释放 core 锁。Buffered write 和 truncate 使用 inode data lock 的 exclusive 侧；
-`page_mkwrite` 使用 address-space invalidate shared lock 和 folio lock，truncate 同时使用
-invalidate exclusive 侧。三条路径通过同一个 delayed-set lock 发布 mapping/reservation
-状态。用户页错误或大输出因此不会持有挂载级 core read lock。
+Recovery operates only on unpublished inodes and is still protected by the exclusive recovery flow. When entering PageCache
+traversal, the mount-level core mutex is not held; PageCache calls the batch writer after releasing the mapping/folio mutex,
+and the batch writer then briefly takes the core write guard; delalloc accounting is updated by the separate reservation mutex. This way
+the `MappingInner -> core` path of an ordinary cache miss does not form a reverse lock order with writeback.
+FIEMAP runs under the VFS inode shared lock, and a regular inode additionally uses `writeback_lock` to stabilize the disk
+mapping; core `report_mapping()` only briefly reads the delayed extent lock, then queries the disk mapping,
+and releases the core lock before calling the safe output writer. Buffered write and truncate use the exclusive side of the inode data lock;
+`page_mkwrite` uses the address-space invalidate shared lock and the folio lock, and truncate also uses the
+invalidate exclusive side. The three paths publish mapping/reservation state through the same delayed-set lock.
+A user page fault or large output therefore never holds the mount-level core read lock.
 
 ### Shared State and Mapping Protection Foundations
 
@@ -1231,10 +1231,10 @@ The newly added internal contracts are meant to remove that dependency step by s
 
 | State/Operation | Protection in this phase | Remaining preconditions |
 |---|---|---|
-| 元数据块读改写 | `MetadataWriteAccess::update_bytes` 在同一 slot mutex 下读取最新字节、执行内存更新并发布；失败保留旧值和状态 | callback 不得 I/O、调用 journal 或重新访问该 buffer/cache |
-| 共享 inode-table 发布 | `replace_inode_table_entry` 只把已验证的目标 entry 合入最新 block；普通 inode、xattr、分配/释放及 orphan-next 路径共用 | 同一 inode 的逻辑修改仍须串行；此机制不提供多 inode 操作的原子事务 |
-| 不可变读取及预热 | `MetadataBuffer` 同时持有 bytes 和 slot 的 Arc；预热 pins 保持至 allocator 锁释放 | pins 不是权威内容快照，锁内仍重读最新 bytes |
-| 回收/forget 后移除槽位 | cache index mutex 下校验 slot 唯一引用及 clean、无 frozen、字节无读者等条件 | 整体失效仍是独占恢复/生命周期操作，不能与活跃访问并行 |
+| Metadata block read-modify-write | `MetadataWriteAccess::update_bytes` reads the latest bytes, performs the in-memory update and publishes under the same slot mutex; on failure the old value and state are kept | The callback must not do I/O, call the journal or re-access that buffer/cache |
+| Shared inode-table publication | `replace_inode_table_entry` merges only the validated target entry into the latest block; ordinary inode, xattr, allocation/release and orphan-next paths share it | Logical modifications of the same inode must still be serialized; this mechanism provides no atomic transaction across multiple inodes |
+| Immutable reads and warm-up | `MetadataBuffer` holds both the bytes and the Arc of the slot; the warm-up pins are kept until the allocator lock is released | The pins are not an authoritative content snapshot, and the latest bytes are still re-read under the lock |
+| Slot removal after reclaim/forget | Under the cache index mutex, check conditions such as the slot's unique reference, clean, no frozen data, and no byte readers | Whole invalidation remains an exclusive recovery/lifecycle operation and cannot run in parallel with active accesses |
 | File mapping lifetime | The per-inode submission mutex serializes admission; truncate and VFS release boundaries drain in-flight requests first | Acquire KVFS invalidate/data locks first; core callers still provide operation exclusion |
 
 Calling `snapshot()` and a full-block `replace_bytes()` separately is not an atomic read-modify-write; it is allowed only for full-block rewrites already guaranteed exclusive by an existing
@@ -1525,12 +1525,12 @@ extent is converted in place on a subsequent write after reopen, avoiding
 reallocation. close does not additionally force ordinary dirty PageCache
 writeback; data writeback is handled by `fsync`/`syncfs` and the generic writeback
 path. When the last `VfsInode` reference goes away, the superblock hook first drops
-PageCache/剩余 delalloc accounting，再对 nlink=0 inode 组合持有的 ext4 private state 调用
-final eviction。KVFS 在 hook 前完成 `Live -> Freeing`，所以 cleanup 期间没有普通 VFS 能力；
-三阶段 core API 始终借用该 `VfsInode` 组合持有的同一 private component；它不返回可逃逸的
-eviction token 或另一种 inode handle。完成后 KVFS 精确删除旧 cache entry 并唤醒同号 `iget`。
-nlink 非零的 cache eviction 不释放磁盘 inode；后续 `iget` 可从仍分配的磁盘 inode构造新的
-private component。
+PageCache/remaining delalloc accounting, and then calls final eviction on the ext4 private state held by the nlink=0 inode composition.
+KVFS completes `Live -> Freeing` before the hook, so there is no ordinary VFS capability during cleanup;
+the three-phase core API always borrows the same private component held by that `VfsInode` composition; it returns no escapable
+eviction token or another kind of inode handle. After completion KVFS deletes the old cache entry exactly and wakes the same-number `iget`.
+Cache eviction of an inode with nonzero nlink does not release the disk inode; a later `iget` can construct a new
+private component from the still-allocated disk inode.
 
 Speculative prealloc space reclamation hangs off the file/inode lifecycle and writeback settlement. The last
 writable close drops all of the file's spaces only when no delalloc reservation remains; with reservations it

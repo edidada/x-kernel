@@ -229,31 +229,31 @@ field of the next task. The callee-saved register layout is consistent with `Con
 
 ### 5. FP state save/restore (ctx.rs of each architecture)
 
-- x86_64：标准 `_xsave64` / `_xrstor64`；无 XSAVE 时回退 `_fxsave64` / `_fxrstor64`。
-- aarch64：`fpstate_save` / `fpstate_restore` naked 函数。
-- riscv：`save_fp_registers` / `restore_fp_registers` naked 函数。
-- loongarch64：`save_fp_registers` / `restore_fp_registers` naked 函数。
+- x86_64: standard `_xsave64` / `_xrstor64`; falls back to `_fxsave64` / `_fxrstor64` when XSAVE is absent.
+- aarch64: `fpstate_save` / `fpstate_restore` naked functions.
+- riscv: `save_fp_registers` / `restore_fp_registers` naked functions.
+- loongarch64: `save_fp_registers` / `restore_fp_registers` naked functions.
 
 **Invariant**: the size and alignment of the target memory region satisfy the architectural requirements.
 
 **Why it is safe**: the layouts of `FpState`/`FpuState`/`FxStateBlock` are guaranteed by
 `static_assertions` or `repr(C, align(...))` to match what the instructions expect.
 
-### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/xstate.rs`）
+### 5a. x86_64 signal-frame FP/SIMD restore (`x86_64/xstate.rs`)
 
-`rt_sigreturn` 在 syscall 边界用 checked copy 读取 `ucontext` 和 FP 字节。
-先验证长度（最大 836 字节）、两处 magic、支持的 xfeatures、XSTATE_BV、
-零 XCOMP_BV 和保留字段，再恢复到 64 字节对齐的内核自有 `ExtendedState`。
-任何用户指针都不直接传给 XRSTOR。短帧、未映射帧和非法 header 触发进程
-SIGSEGV；RIP/RSP 和代码段也在更改寄存器前校验，RFLAGS 仅允许用户状态位。
+`rt_sigreturn` reads `ucontext` and the FP bytes with a checked copy at the syscall boundary.
+It first validates the length (at most 836 bytes), both magics, the supported xfeatures, XSTATE_BV,
+zero XCOMP_BV and the reserved fields, and then restores into the 64-byte-aligned kernel-owned `ExtendedState`.
+No user pointer is ever passed directly to XRSTOR. A short frame, an unmapped frame, and an invalid header trigger process
+SIGSEGV; RIP/RSP and the code segment are also validated before any register is changed, and RFLAGS permits only user-state bits.
 
-MXCSR 仍按本项目原有兼容策略与启动时可信 mask 相与（硬件返回 0 时使用
-0xffbf），不同于 Linux 对非法 MXCSR 的拒绝策略。BSP 发布保存格式和 mask；
-每个 AP 验证兼容性并安装相同 XCR0 后才能调度。新建、exec 和信号处理器
-使用确定的初始状态；信号捕获使用全初始化存储，避免泄露未写入的扩展区域。
-用户可编辑自己的 x87/SSE/YMM 数据，无法通过 header 启用 AVX-512/AMX。
+MXCSR is still ANDed with the trusted boot-time mask under this project's existing compatibility policy (0xffbf is used
+when the hardware returns 0), unlike Linux's policy of rejecting an invalid MXCSR. The BSP publishes the save format and mask;
+each AP must verify compatibility and install the same XCR0 before it can be scheduled. New tasks, exec and signal handlers
+use a deterministic initial state; signal capture uses fully initialized storage to avoid leaking unwritten extended regions.
+The user can edit their own x87/SSE/YMM data but cannot enable AVX-512/AMX through the header.
 
-### 6. `ExtendedState::default`（`x86_64/xstate.rs`）
+### 6. `ExtendedState::default` (`x86_64/xstate.rs`)
 
 `ExtendedState::default` is a safe `const fn` that builds the state from `FxStateBlock::initial()` and zeroed XSAVE header and YMM fields; it contains no `unsafe` operation. Every field is explicitly initialized, so no all-zero validity assumption is needed. The layout is guaranteed by `repr(C, align(64))` with compile-time size and offset assertions on `ExtendedState`, and by `repr(C, align(16))` with a 512-byte size assertion on `FxStateBlock`, matching what XSAVE/FXSAVE expect.
 
@@ -412,20 +412,20 @@ The following invariants must hold at all times:
 
 | ID | Threat Description | Impact Level | Trigger Condition | Mitigation |
 | ---- | -------- | -------- | -------- | -------- |
-| T-01 | 用户通过 `user_copy` 传入恶意地址导致内核 panic | 高 | `user_copy` 访问无效用户指针且异常表条目缺失 | 异常表机制覆盖所有 `copy_user.S` 中的访存指令；`fixup_exception` 拦截内核态 Page Fault 并恢复到安全路径 |
-| T-02 | trap frame 布局与汇编不一致导致寄存器错位 | 高 | 修改 `ExceptionContext` 字段顺序但未同步汇编 | `trapframe_size` 编译期常量注入汇编；`repr(C)` 保证内存布局可预测 |
-| T-03 | LoongArch64 `emulate_unaligned` 解码未知指令导致寄存器损坏 | 高 | 故障指令为非预期的操作码 | 未匹配的操作码返回 `Err(UnalignedError)`，不修改寄存器；trap handler panic 而非继续执行 |
-| T-04 | `active_exception_context()` 返回过期或 stale trapframe | 高 | trap handler 阻塞/迁移后原 CPU slot 未清理，或调用者持久保存快照来源 | API 只返回按值快照；context switch 挂起并清空当前 CPU slot、切回后恢复当前 CPU slot；guard Drop 用 CAS 恢复原始/当前 slot |
-| T-05 | `switch_to` 使用无效页表根导致 TLB 填充错误地址 | 高 | `TaskContext` 的页表根被错误设置 | `new_kernel` 显式接收永久根；用户根由 `set_page_table_root` 安装，调用方保证页表有效期 |
-| T-06 | IDT/向量表条目指向错误地址 | 高 | 汇编符号名拼写错误或链接脚本问题 | `trap_handler_table` 为汇编定义的固定大小数组；IDT 初始化通过 `set_handler_addr` 填充 |
-| T-07 | 中断未关闭时调用 `switch_to` 或 `run` | 中 | 调用者违反调用约束 | `run()` 内部调用 `disable_local_irq()`；`switch_to` 要求调用者保证关中断 |
-| T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |
-| T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
-| T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
-| T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入；x86_64 信号帧只导出 Linux ABI 状态，恢复时重置 `orig_rax`；x86_64 `UserContext::kernel_rsp` 也不进入用户信号帧；signal delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
-| T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |
-| T-13 | IRQ 被误分类为 NMI（或反之） | 高 | `use_nmi_path` misjudges SPSR.I / entry PMR, or the readiness flags (`pmr::is_ready` / `allint_active`) are wrong; impact: an NMI handler runs under wrong context constraints (e.g. a normal IRQ treated under NMI rules), or a Superpriority NMI is treated as a normal IRQ and loses its priority | 分类依赖硬件状态快照 + readiness 双重门控；降级构建永不触碰 NMI 寄存器；NMI path 保持 ALLINT/PMR 防嵌套 |
-| T-14 | x86_64 恶意 FP 信号帧使 XRSTOR 触发内核异常 | 高 | The user tampers with `MXCSR`, the XSAVE header, the frame length or pointers; impact: a kernel exception or a data leak | checked copy、最大长度限制、feature/header/magic 校验、可信 MXCSR mask、64 字节对齐的私有存储；无效帧投递 SIGSEGV |
+| T-01 | User passes a malicious address through `user_copy`, causing a kernel panic | High | `user_copy` accesses an invalid user pointer and the exception-table entry is missing | The exception-table mechanism covers all memory-access instructions in `copy_user.S`; `fixup_exception` intercepts kernel-mode Page Faults and resumes on a safe path |
+| T-02 | trap frame layout inconsistent with assembly causes register misalignment | High | `ExceptionContext` field order changed without updating the assembly | The `trapframe_size` compile-time constant is injected into the assembly; `repr(C)` keeps the memory layout predictable |
+| T-03 | LoongArch64 `emulate_unaligned` decodes an unknown instruction and corrupts registers | High | The faulting instruction has an unexpected opcode | An unmatched opcode returns `Err(UnalignedError)` without modifying registers; the trap handler panics instead of continuing |
+| T-04 | `active_exception_context()` returns an expired or stale trapframe | High | The original CPU slot is not cleaned after the trap handler blocks/migrates, or the caller persists the snapshot source | The API returns only a by-value snapshot; context switch suspends and clears the current CPU slot and restores it after switching back; the guard's Drop uses CAS to restore the original/current slot |
+| T-05 | `switch_to` uses an invalid page-table root, causing TLB fills of wrong addresses | High | `TaskContext`'s page-table root is set incorrectly | `new_kernel` explicitly takes a permanent root; user roots are installed by `set_page_table_root`, and the caller guarantees page-table validity |
+| T-06 | IDT/vector table entry points to a wrong address | High | Misspelled assembly symbol name or a linker-script problem | `trap_handler_table` is a fixed-size array defined by assembly; IDT initialization fills it via `set_handler_addr` |
+| T-07 | `switch_to` or `run` called with interrupts not disabled | Medium | Caller violates the calling constraints | `run()` calls `disable_local_irq()` internally; `switch_to` requires the caller to guarantee interrupts are disabled |
+| T-08 | `ExceptionContextGuard` nesting overwrites the per-CPU pointer | Low | Another exception is triggered while a trap handler is running | `swap` semantics save the previous value and the guard restores it with CAS on drop; deep nesting is restored correctly through the guard chain and does not overwrite a later new trap |
+| T-09 | LoongArch64 user mode crafts a malicious unaligned instruction word | High | A user program performs an unaligned access and the faulting instruction word is decoded by `emulate_unaligned` into an unexpected operation | `emulate_unaligned` modifies only the destination register specified in the instruction encoding; an unmatched opcode returns an error without modifying any state; the opcode masks match only known instruction types |
+| T-10 | `init_trap()` called repeatedly leaves hardware state inconsistent | Medium | A second call overwrites already-active hardware structures such as GDT/IDT/vector tables | The caller guarantees a single call (single-threaded execution in the boot phase); no runtime protection |
+| T-11 | x86_64 `orig_rax` maliciously tampered with, causing abnormal syscall restart | Medium | User mode modifies `orig_rax` in the trap frame through a signal handler | `orig_rax` is written only in the `syscall_entry` assembly; the x86_64 signal frame exports only Linux ABI state and resets `orig_rax` on restore; x86_64 `UserContext::kernel_rsp` also does not enter the user signal frame; signal delivery code decides the restart condition via `syscall_restart_error()` |
+| T-12 | `rollback_syscall` called in a non-syscall context | Low | Signal handling code misjudges the context type | `is_from_syscall()` checks `orig_rax != u64::MAX`; in a non-syscall context `rollback_syscall()` and `restart_with_syscall()` are no-ops |
+| T-13 | IRQ misclassified as NMI (or vice versa) | High | `use_nmi_path` misjudges SPSR.I / entry PMR, or the readiness flags (`pmr::is_ready` / `allint_active`) are wrong; impact: an NMI handler runs under wrong context constraints (e.g. a normal IRQ treated under NMI rules), or a Superpriority NMI is treated as a normal IRQ and loses its priority | Classification is double-gated by a hardware-state snapshot plus readiness; degraded builds never touch NMI registers; the NMI path keeps ALLINT/PMR nesting protection |
+| T-14 | Malicious x86_64 FP signal frame makes XRSTOR raise a kernel exception | High | The user tampers with `MXCSR`, the XSAVE header, the frame length or pointers; impact: a kernel exception or a data leak | checked copy, maximum-length limit, feature/header/magic validation, trusted MXCSR mask, 64-byte-aligned private storage; an invalid frame delivers SIGSEGV |
 
 ## Failure Modes and Effects Analysis (FMEA)
 
@@ -478,8 +478,8 @@ once the `fp-simd` feature is enabled, save/restore prevents leakage across task
 4. **`context_switch` has no stack overflow detection**: The kernel stack of a new task must have enough space to hold
    `ContextSwitchFrame`, otherwise `prepare_initial_frame` writes out of bounds.
 
-5. **x86_64 扩展状态范围**：仅支持 x87/SSE/YMM；AVX-512、AMX 和 supervisor
-   状态不启用、不报告。AP 必须兼容 BSP 的保存格式；不提供异构 CPU 降级或热插拔协商。
+5. **x86_64 extended-state scope**: only x87/SSE/YMM are supported; AVX-512, AMX and supervisor
+   state are neither enabled nor reported. APs must be compatible with the BSP's save format; no heterogeneous-CPU degradation or hotplug negotiation is provided.
 
 6. **The riscv64 hwprobe snapshot depends on firmware descriptions**: The RISC-V capability snapshot
    reports only information that can be determined from the device tree or the kernel address layout. Undescribed vendor ids

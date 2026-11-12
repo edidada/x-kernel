@@ -37,13 +37,13 @@ This crate contains no direct `unsafe` code blocks.
 - `MAP_FIXED` / `MAP_FIXED_NOREPLACE` addresses must be aligned to the target page size.
 - successful `mremap` move must not retire the source with ordinary
   `MmSpace::unmap()`.
-- `munmap(addr, 0)` 必须失败，不能作为成功 no-op 穿透到 `MmSpace`。
-- `PROT_GROWSDOWN` / `PROT_GROWSUP` 必须在 syscall 边界拒绝。
-- `MS_ASYNC | MS_SYNC` 冲突组合必须拒绝；unknown `msync` flags 也必须拒绝。
-- `MS_INVALIDATE` 必须返回不支持，直到 locked VMA 与 invalidate 语义存在。
-- `posix-mm` 不得直接访问 pagecache 或 filemap runtime internals；`msync`
-  必须通过捕获的 `LiveAddressSpace::msync_range()` 进入 MM，保留 active user；
-  syscall 不持有 MM mutex 执行文件持久化。
+- `munmap(addr, 0)` must fail and must not pass through to `MmSpace` as a successful no-op.
+- `PROT_GROWSDOWN` / `PROT_GROWSUP` must be rejected at the syscall boundary.
+- The conflicting combination `MS_ASYNC | MS_SYNC` must be rejected; unknown `msync` flags must also be rejected.
+- `MS_INVALIDATE` must return unsupported until locked VMA and invalidate semantics exist.
+- `posix-mm` must not directly access pagecache or filemap runtime internals; `msync`
+  must enter MM through the captured `LiveAddressSpace::msync_range()`, keeping an active user;
+  the syscall does not hold the MM mutex while performing file persistence.
 - `mremap` move must preserve the ownership split between VMA metadata,
   present PTE residency, and backing object pages.
 - The file object returned by `memfd_create` must hold a valid `Location`.
@@ -83,16 +83,16 @@ This crate contains no direct `unsafe` code blocks.
 
 | Failure | Condition | Handling | Impact |
 |---|---|---|---|
-| 用户名字读取失败 | 无效用户指针、非法 UTF-8、缺少 NUL、超长 | 返回错误 | syscall 失败 |
-| anonymous file 创建失败 | 内存不足或 VFS 分配失败 | 返回错误 | syscall 失败 |
-| fd 安装失败 | fd table 满 | 返回错误 | 文件对象立即释放 |
-| `mmap` flag 不支持 | unknown `MAP_*`、`MAP_SHARED_VALIDATE` 携带 deferred flag、或 file-backed hugetlb | 返回错误 | mmap 失败，不修改地址空间 |
-| fixed mmap 地址未对齐 | `MAP_FIXED*` 地址不满足目标页大小 | 返回错误 | mmap 失败，不修改地址空间 |
-| `munmap` 范围非法 | 长度为 0 或下游地址空间拒绝 | 返回错误 | 不修改地址空间 |
-| `mprotect` grow flag 不支持 | `PROT_GROWSDOWN` 或 `PROT_GROWSUP` | 返回错误 | protect 失败，不修改 PTE/VMA |
-| `MADV_DONTNEED` 范围非法 | 地址未映射、未页对齐、或 `addr + len` 溢出 | 返回错误 | advice 失败，不修改对象 |
-| `msync` flag 不支持 | unknown flags 或 `MS_ASYNC | MS_SYNC` 组合 | 返回错误 | sync 失败，不修改对象 |
-| shared file sync 失败 | 文件范围 datasync 的数据、元数据、journal 或设备持久化失败 | 传播文件系统/文件错误游标结果，未完成数据保留重试状态 | syscall 失败，调用者可重试 |
+| User name read fails | Invalid user pointer, illegal UTF-8, missing NUL, too long | Return an error | The syscall fails |
+| anonymous file creation fails | Out of memory or VFS allocation failure | Return an error | The syscall fails |
+| fd installation fails | The fd table is full | Return an error | The file object is released immediately |
+| `mmap` flag unsupported | unknown `MAP_*`, `MAP_SHARED_VALIDATE` carrying a deferred flag, or file-backed hugetlb | Return an error | mmap fails and the address space is not modified |
+| fixed mmap address not aligned | The `MAP_FIXED*` address does not satisfy the target page size | Return an error | mmap fails and the address space is not modified |
+| `munmap` range illegal | Length is 0 or the downstream address space rejects it | Return an error | The address space is not modified |
+| `mprotect` grow flag unsupported | `PROT_GROWSDOWN` or `PROT_GROWSUP` | Return an error | protect fails and the PTE/VMA are not modified |
+| `MADV_DONTNEED` range illegal | The address is unmapped, not page-aligned, or `addr + len` overflows | Return an error | advice fails and the object is not modified |
+| `msync` flag unsupported | unknown flags or the `MS_ASYNC | MS_SYNC` combination | Return an error | sync fails and the object is not modified |
+| shared file sync fails | Data, metadata, journal or device persistence of the file-range datasync fails | Propagate the filesystem/file error cursor result, and unfinished data keeps its retry state | The syscall fails and the caller may retry |
 
 ## Fault Management
 
@@ -102,21 +102,21 @@ This crate contains no direct `unsafe` code blocks.
 
 ## Known Limitations
 
-- `memfd_create` 支持 `MFD_ALLOW_SEALING` 初始 seal policy；
-  `F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，shared writable mmap
-  seal enforcement 由 `mm/filemap` 处理，hugetlb 扩展未接入。
-- `memfd` 名字仅用于调试，不保证与 Linux `/proc/self/fd` 展示完全一致。
-- `madvise` 支持 `MADV_DONTNEED` 与四个性能提示（no-op，但仍要求范围完全
-  映射并页对齐，未映射返回 `ENOMEM`）；`InvalidInput` 只在 advice 值未知、
-  地址未对齐或范围溢出时返回。
-- `mmap` 的 maximum permission 与 current permission 分离；shared file
-  映射的 may-permission 受文件打开权限约束。
-- `MS_SYNC` 已进入 shared file 范围 datasync；文件系统可保守同步更多范围。
-  `MS_INVALIDATE` 和 locked-page `EBUSY` 语义未实现。
-- dirty-PTE 收集与写回后重新写保护属于 Issue G；不能据此声称已经覆盖
-  同一可写 PTE 上不再触发缺页的连续 mmap 写入。
-- file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
-  dirty tracking 支持。
+- `memfd_create` supports the `MFD_ALLOW_SEALING` initial seal policy;
+  `F_ADD_SEALS` / `F_GET_SEALS` are handled by `posix-fs`, and shared writable mmap
+  seal enforcement is handled by `mm/filemap`; the hugetlb extension is not wired in.
+- The `memfd` name is for debugging only and is not guaranteed to match the Linux `/proc/self/fd` display exactly.
+- `madvise` supports `MADV_DONTNEED` and four performance hints (no-ops, but they still require the range to be fully
+  mapped and page-aligned, and an unmapped range returns `ENOMEM`); `InvalidInput` is returned only when the advice value is unknown,
+  the address is unaligned, or the range overflows.
+- The maximum permission and current permission of `mmap` are separate; the may-permission of a shared file
+  mapping is bounded by the file open permissions.
+- `MS_SYNC` now enters the shared file range datasync; the filesystem may conservatively sync more ranges.
+  The `MS_INVALIDATE` and locked-page `EBUSY` semantics are not implemented.
+- Dirty-PTE collection and write re-protection after writeback belong to Issue G; it cannot be claimed that this already covers
+  consecutive mmap writes on the same writable PTE that no longer trigger a fault.
+- File-backed writable `MAP_SHARED` is supported by the `filemap` runtime through write-fault
+  dirty tracking.
 
 ## Audit Checklist
 

@@ -81,10 +81,10 @@ No business consumer was found that needs "automatic BH destruction on the last 
 
 | Operation | Allowed context and preconditions | Guarantees not provided |
 | --- | --- | --- |
-| 普通 new | provider 已安装的可睡眠任务上下文 | 不允许 IRQ/NMI 中临时构造 |
-| unsafe service::new_integration | provider 已安装，各 CPU 本地 allocator/per-CPU/IRQ 锁就绪；已审计启动/任务准备，可禁止抢占 | 不允许 hardirq/softirq/NMI 构造；不是通用检查旁路 |
-| 最后强引用释放 | task、softirq、hardirq、已审计启动路径；NMI 要求本 CPU irq_work 已准备好 | 普通路径锁序约束不变；不保证 wait-free |
-| 最后 Weak 释放 | 普通上下文直接释放 identity；NMI 经独立 irq_work 节点转交普通 IRQ | 不支持未准备 irq_work 的 NMI；不保证延迟 |
+| Plain new | Sleepable task context with a provider installed | Ad hoc construction in IRQ/NMI is not allowed |
+| unsafe service::new_integration | Provider installed, each CPU's local allocator/per-CPU/IRQ locks ready; audited boot/task preparation, preemption may be disabled | hardirq/softirq/NMI construction not allowed; not a general bypass of the checks |
+| Last strong reference release | task, softirq, hardirq, audited boot paths; NMI requires this CPU's irq_work to be prepared | Lock-ordering constraints on ordinary paths are unchanged; wait-free is not guaranteed |
+| Last Weak release | Ordinary context frees the identity directly; NMI hands off to ordinary IRQ via a separate irq_work node | NMI without a prepared irq_work is not supported; no latency guarantee |
 | Payload Drop / KBox free | Sleepable normal worker, outside queue locks | Never inline in submit; no latency bound |
 
 The NMI branch is decided before any ordinary guard, pending/queue lock or allocator free.
@@ -120,10 +120,10 @@ The shared Work serializes current ordinary reclamation: if one Normal destructi
 
 ## State Machine and Algorithm
 
-1. 检查 provider，准备 carrier；任何可恢复失败都尚未接管输入。
+1. Check the provider and prepare the carrier; any recoverable failure has not yet taken over the input.
 2. Reserve and initialize stable KBox<Payload<T>> storage, construct the standard Arc identity, then initialize the raw header before publication. Identity, payload and carrier remain separate allocations, including the header for ZST values.
-3. 标准 Arc 将最后强引用变为零后调用 Identity::drop。此时所有 Weak 升级失败。
-4. Identity 交出唯一 Finalization；载体保活不引用公开身份，不延长 Weak 升级窗口。
+3. After the standard Arc drops the last strong reference to zero, Identity::drop is called. From this point all Weak upgrades fail.
+4. Identity hands out the unique Finalization; the carrier keep-alive does not reference the public identity and does not extend the Weak upgrade window.
 5. The prepared executor consumes Finalization; KBox::from_raw runs T::drop and releases payload storage. Submission context does not change the executor.
 
 ## Concurrency Model and Design Decisions
@@ -138,16 +138,16 @@ a duplicate restoration is an unsafe contract violation by the caller. While a r
 which neither consumes the original count nor adds a reference. The caller guarantees that the real raw owner covers the view and its
 borrows, and must not explicitly Drop/take out the handle inside the wrapper; only clone produces an independent owning reference.
 
-payload 在 T 前保存不可变 RawIdentity：原 Arc identity 指针与兼容的
-IdentityAllocator 副本。初始化发生在首次发布前，不添加保活引用，
-不是引用环。into_raw 从完整 payload 原始指针投影 T；from_raw 仅接受
-保留该分配 provenance 的拥有型指针，按 repr(C) 字段偏移回到头部。
-不能从 Deref 产生的 &T 逆推头部；as_ptr 本身也不授予一份强引用。
-这与禁止从 Arc 缩窄区域指针恢复 allocator backing allocation 不冲突：
+The payload stores an immutable RawIdentity before T: the original Arc identity pointer and a compatible
+IdentityAllocator copy. It is initialized before first publication and adds no keep-alive reference,
+so it is not a reference cycle. into_raw projects T from the full payload raw pointer; from_raw accepts only an owning pointer
+that retains the allocation provenance, and returns to the header by the repr(C) field offset.
+The header cannot be derived backwards from a &T produced by Deref; as_ptr itself also does not grant a strong reference.
+This does not conflict with the prohibition on recovering the allocator backing allocation from a narrowed Arc region pointer:
 The retained pointer has the full KBox allocation provenance, not authority widened from a shared T reference.
 
-末强引用结束后头部中的 identity 指针可能悬垂，worker 绝不读取它；
-MaybeUninit 头部无需析构，其 allocator 副本本身不释放资源。worker 仅
+After the last strong reference ends, the identity pointer in the header may dangle, and the worker never reads it;
+the MaybeUninit header needs no destructor, and its allocator copy itself releases no resources. The worker only
 The worker drops T and frees the whole payload KBox. Last Weak release retains the identity-memory protocol.
 
 On 64-bit, RawIdentity is 24 B; a usize payload request goes from 8 B to 32 B, a ZST
@@ -164,8 +164,8 @@ The consuming Arc receiver of Prepared and the Arc held by the pending list prot
 | Object | Release location |
 | --- | --- |
 | T destruction and KBox<Payload<T>> storage | Finalization::finish on a normal worker |
-| Arc 公开控制块 | 最后强/弱引用的调用者；可能在 IRQ 路径 |
-| 空 carrier 分配与元数据 | 最后发布者或 worker；可能在 IRQ 路径 |
+| Arc public control block | Caller of the last strong/weak reference; possibly on an IRQ path |
+| Empty carrier allocation and metadata | Last publisher or worker; possibly on an IRQ path |
 
 The last two rows must not contain business destruction that needs to sleep, and it is not claimed that all allocator frees are made asynchronous. This is a source-level ownership boundary, not the result of per-call allocator tracing measurements.
 

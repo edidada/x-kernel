@@ -61,19 +61,19 @@ correctly retaining the `LOCK_CLASSES` section.
 
 ## Thread Safety
 
-- `LockClassStats` 计数器为 `AtomicU64`，多 CPU 并发 `record_*` 安全。
+- `LockClassStats` counters are `AtomicU64`; concurrent `record_*` from multiple CPUs is safe.
 - Runtime slots are initialized once and never recycled. Snapshots use
   nonblocking reads and do not hold a registration lock while allocating.
-- 快照使用 `Relaxed` load，允许轻微撕裂（诊断可接受）。
+- Snapshots use `Relaxed` loads and tolerate slight tearing (acceptable for diagnostics).
 
 ## Failure and Abuse Scenarios
 
 | Scenario | Impact | Mitigation |
 |------|------|------|
-| 关闭 `KFEAT_LOCK_STAT` 仍挂载 procfs 节点 | 旧行为：空表误导 | 已通过 `procfs/lock_stat` feature 门控节点 |
+| procfs node still mounted when `KFEAT_LOCK_STAT` is off | Old behavior: an empty table misleads | The node is now gated by the `procfs/lock_stat` feature |
 | More than 1024 runtime classes | Statistics become permanently disabled | Fixed storage, no OOM or failure of the underlying lock; dump reports disabled state |
-| 误用 `static Mutex::new`（stats 开） | 编译失败 | 文档要求使用 `static_lock!` |
-| 计数与真实竞争不完全一致 | 误判热点 | `design.md` 明确指标语义 |
+| Misuse of `static Mutex::new` (stats on) | Compilation fails | Documentation requires `static_lock!` |
+| Counts do not exactly match real contention | Hotspots misjudged | `design.md` states the metric semantics explicitly |
 
 ## Recommendations
 

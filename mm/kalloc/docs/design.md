@@ -16,11 +16,11 @@ the byte allocator, the global page buddy and the corresponding per-CPU caches.
 
 The main users include:
 
-- Rust `alloc` 生态以及内核中使用 `Box`、`Vec`、`Arc` 等类型的代码；
-- 页表、用户虚拟内存、page cache 和通用连续页使用者；
-- `kdma` 等需要 DMA32 物理地址的子系统；
+- the Rust `alloc` ecosystem, and kernel code that uses types such as `Box`, `Vec`, and `Arc`;
+- page tables, user virtual memory, the page cache, and general contiguous-page users;
+- subsystems such as `kdma` that need DMA32 physical addresses;
 - Kernel components retaining single or contiguous allocations through `PageRef`;
-- 可选的 allocation tracking。
+- optional allocation tracking.
 
 ## Background
 
@@ -392,12 +392,12 @@ immediate check on the deallocation hot path to a check performed when `usages()
 
 ## Drop / Resource Release
 
-- `GLOBAL_ALLOCATOR`、中央 allocator、per-CPU cache 和 tracking state 为静态生命周期，
-  关机前不 drop。
-- 加入 page allocator 的启动内存 region 永久转移给 `kalloc`；不支持移除 region。
-- byte allocator 从 page allocator 取得的 heap region 不会在 runtime 整体归还。
-- PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
-  pressure flush。
+- `GLOBAL_ALLOCATOR`, the central allocator, per-CPU caches, and tracking state have static lifetime
+  and are not dropped before shutdown.
+- Boot memory regions added to the page allocator are transferred to `kalloc` permanently; removing a region is not supported.
+- Heap regions the byte allocator obtains from the page allocator are not returned as a whole at runtime.
+- PCP and slab caches return memory in batches when they reach their respective watermarks, but there is no shutdown, CPU-offline, or global
+  pressure flush.
 - Raw page API callers explicitly pair deallocation; PageRef performs final
   allocation release through Drop after the last hold ends.
 

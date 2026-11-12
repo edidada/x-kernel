@@ -33,8 +33,8 @@ The code is split by responsibility following Linux:
 
 | X-Kernel | Linux | Responsibility |
 | --- | --- | --- |
-| `fs.rs` | `vfs_super.c`、`v9fs.c` | mount session 和 superblock operations |
-| `inode.rs` | `vfs_inode.c`、`vfs_inode_dotl.c` | inode、metadata 和 namespace operations |
+| `fs.rs` | `vfs_super.c`, `v9fs.c` | mount session and superblock operations |
+| `inode.rs` | `vfs_inode.c`, `vfs_inode_dotl.c` | inode, metadata and namespace operations |
 | `file.rs` | `vfs_file.c` | open, read/write, fsync and folio reads |
 | `dir.rs` | `vfs_dir.c` | opened directory iteration |
 | `util.rs` | dotl/VFS conversion helpers | device number and `d_type` conversion |
@@ -98,10 +98,10 @@ translate automatic updates into server-side current-time requests.
 
 ### open, I/O and lifecycle
 
-每次 VFS open 都从 inode 的 unopened fid 执行 zero-name walk，得到独立 fid，按 Linux
-`v9fs_open_to_dotl_flags()` 规则选择 access mode/status flags 后执行 `TLOPEN`。opened fid 作为 typed private data 放入 `VfsFile`；普通文件的 read、write、readdir 和 fsync 始终从该对象取 fid；symlink 读取经 `read_link()` 使用 inode 的 unopened fid。
-write 根据服务端确认的写入字节数更新 inode size，使用 KVFS 的
-`grow_size_after_backing_write()` 保持 backing write 与本地大小发布的职责一致。
+Every VFS open performs a zero-name walk from the inode's unopened fid to obtain an independent fid, selects the access mode/status flags following Linux's
+`v9fs_open_to_dotl_flags()` rules, and then issues `TLOPEN`. The opened fid is stored in `VfsFile` as typed private data; read, write, readdir and fsync on regular files always take the fid from that object; symlink reads go through `read_link()` and use the inode's unopened fid.
+write updates the inode size from the number of bytes the server confirmed written, and uses KVFS's
+`grow_size_after_backing_write()` to keep the backing write and the local size publication under consistent responsibility.
 
 Therefore, after a rename/unlink, an already opened file does not depend on the old path and still refers to the same server object. When the file is released, the typed
 private data drops the last `Arc<P9Fid>`, which is clunked by `P9Fid::drop`; v9fs does not implement a duplicate release state machine.
@@ -152,9 +152,9 @@ Directory iteration converts the server qid into an inode number, and uses the s
 - rename prefers `TRENAMEAT`, and falls back to `TRENAME` on the source fid only for `EOPNOTSUPP`;
 - all operations use object fids and do not construct or update absolute path strings.
 
-`statfs` 使用 root inode fid 的 `TSTATFS`；仅在服务端明确表示 unsupported 时回退到
-`simple_statfs`。`sync_fs` 没有 superblock-owned dirty state，opened object 的 durability 由
-per-fid `TFSYNC` 表达。The range-aware VFS callback forwards `data_only` unchanged.
+`statfs` uses `TSTATFS` on the root inode fid; it falls back to
+`simple_statfs` only when the server explicitly reports unsupported. `sync_fs` has no superblock-owned dirty state; the durability of opened objects is expressed by
+per-fid `TFSYNC`. The range-aware VFS callback forwards `data_only` unchanged.
 9P fsync has no byte-range operand, so partial and empty VFS ranges conservatively
 synchronize the whole opened fid; no local writeback or second sync hook is added.
 
@@ -165,10 +165,10 @@ internal mutex serializes transport requests and protocol allocation state; the 
 
 ## Design Decisions
 
-- 只实现 9P2000.L cacheless filesystem 语义；
+- Only 9P2000.L cacheless filesystem semantics are implemented;
 - No KVFS dentry-private fid slot, atomic-open contract, xattr, or remote-lock support yet;
 - the page cache only serves read faults; no writable shared mappings or writeback;
-- transport discovery 和 VirtIO/kclass glue 保持在现有 boot/driver 层，本次不重构它们。
+- transport discovery and VirtIO/kclass glue stay in the existing boot/driver layer; this change does not refactor them.
 
 ## Drop / Resource Release
 

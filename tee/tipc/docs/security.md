@@ -82,19 +82,19 @@ If a new path uses TIPC in IRQ or early boot context, the lock and allocator ass
 
 | ID | Threat description | Impact level | Trigger condition | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 恶意 service path 造成 registry 混淆 | 中 | 空 path、含 NUL、超长 path | `validate_port_path` 拒绝非法 path |
-| T-02 | 重复发布同名 live port | 中 | 两个服务使用同一路径 | publish 时检查 live weak port，返回 `AlreadyExists` |
-| T-03 | stale weak entry 造成连接到已释放 port | 中 | port drop 后 registry 尚未清理 | lookup/publish 时必须 upgrade，stale entry 会被忽略或清理 |
-| T-04 | 未授权 client 连接服务 | 高 | port flags 与 client identity 不匹配 | `ipc_port_check_access` 基于 TA/NS flags 拒绝；真实身份集成仍是已知限制 |
-| T-05 | 消息过大耗尽队列或覆盖 slot | 高 | 发送方传入超过 slot 大小的数据 | `push` 检查 `data.len() <= item_sz`；syscall 入口最多复制 peer receive slot 大小 |
-| T-06 | 队列满导致发送方忙等 | 中 | 接收方不 `put` slot | 返回 `WouldBlock`，释放 slot 后通知 `SEND_UNBLOCKED` |
-| T-07 | handle set 持有已关闭 handle id | 中 | handle 关闭但仍注册在 handle set | `HandleTable::uctx_handle_remove` 调用 `detach_from_handle_sets` |
-| T-08 | handle set 循环导致 poll 递归或死循环 | 高 | handle set 嵌套注册 | 当前直接拒绝注册 `HandleSet` |
-| T-09 | memref 元数据表示越界、非页对齐或未映射地址范围 | 中 | `addr + size` 溢出、范围不满足 Trusty memref 页粒度、或 syscall 调用方试图引用未覆盖/权限不足的 VMA | `MemRef::create` 使用 `checked_add` 并要求 address/size 页对齐；`sys_tipc_memref_create` 使用当前进程地址空间校验 VMA 覆盖和 READ/WRITE 权限 |
-| T-10 | 不可发送 handle 被跨 channel 传递 | 中 | 发送方附带 handle set 等对象 | `IpcMsgQueue::push` 检查 `is_sendable()` |
-| T-11 | close/drop 重入导致状态不一致 | 中 | 多路径重复关闭 port/channel | `close` 设计为幂等，状态切换后通知等待者 |
-| T-12 | vsock-TIPC bridge 把 object capability 透传给 host | 高 | TIPC message 附带 handle 或 memref | bridge v1 只转发 bytes，发现 attached handles 时关闭连接 |
-| T-13 | host 通过动态 port 0 连接非法 TIPC service path | 中 | 首个 vsock record 为空、含 NUL、超长或非 UTF-8 | bridge 在连接 TIPC 前校验 service name，并复用 TIPC path validation |
+| T-01 | Malicious service path causes registry confusion | Medium | Empty path, path containing NUL, overlong path | `validate_port_path` rejects illegal paths |
+| T-02 | Duplicate publication of a live port with the same name | Medium | Two services use the same path | publish checks for a live weak port and returns `AlreadyExists` |
+| T-03 | Stale weak entry causes a connection to a freed port | Medium | Registry not yet cleaned after the port is dropped | lookup/publish must upgrade; stale entries are ignored or cleaned |
+| T-04 | Unauthorized client connects to a service | High | Port flags do not match the client identity | `ipc_port_check_access` rejects based on TA/NS flags; real identity integration remains a known limitation |
+| T-05 | Oversized message exhausts the queue or overwrites a slot | High | Sender passes data larger than the slot size | `push` checks `data.len() <= item_sz`; the syscall entry copies at most the peer receive slot size |
+| T-06 | Full queue makes the sender busy-wait | Medium | Receiver does not `put` the slot | Returns `WouldBlock`; notifies `SEND_UNBLOCKED` after the slot is released |
+| T-07 | handle set holds a closed handle id | Medium | Handle is closed but still registered in a handle set | `HandleTable::uctx_handle_remove` calls `detach_from_handle_sets` |
+| T-08 | handle set cycle causes poll recursion or an infinite loop | High | Nested handle set registration | Registering a `HandleSet` is currently rejected outright |
+| T-09 | memref metadata denotes an out-of-bounds, non-page-aligned, or unmapped address range | Medium | `addr + size` overflows, the range does not meet the Trusty memref page granularity, or a syscall caller tries to reference a VMA that is not covered or lacks permission | `MemRef::create` uses `checked_add` and requires address/size page alignment; `sys_tipc_memref_create` validates VMA coverage and READ/WRITE permission against the current process address space |
+| T-10 | Non-sendable handle passed across channels | Medium | Sender attaches an object such as a handle set | `IpcMsgQueue::push` checks `is_sendable()` |
+| T-11 | close/drop reentrancy causes inconsistent state | Medium | Port/channel closed repeatedly via multiple paths | `close` is designed to be idempotent and notifies waiters after the state transition |
+| T-12 | vsock-TIPC bridge passes object capabilities through to the host | High | TIPC message carries a handle or memref | bridge v1 forwards only bytes and closes the connection when attached handles are found |
+| T-13 | Host connects to an illegal TIPC service path via dynamic port 0 | Medium | First vsock record is empty, contains NUL, is overlong, or is not UTF-8 | The bridge validates the service name before connecting to TIPC and reuses TIPC path validation |
 
 Impact level definitions:
 
