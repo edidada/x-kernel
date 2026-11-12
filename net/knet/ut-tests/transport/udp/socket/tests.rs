@@ -168,7 +168,9 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
     let mut queue = DataTxQueue::with_capacity(1);
     let mut output = Ipv4Output::new();
     let mut builder = Ipv4PacketBuilder::new(UDP_HEADER_LEN + 4).unwrap();
-    builder.transport_mut()[UDP_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);
+    let payload = &mut builder.transport_mut()[UDP_HEADER_LEN..];
+    payload.copy_from_slice(&[1, 2, 3, 4]);
+    let payload_checksum = UdpPayloadChecksum::compute(payload);
     let allocation = builder.transport_mut().as_ptr();
     let options = Ipv4SendOptions {
         bound_src: None,
@@ -195,7 +197,13 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
     assert_eq!(source, src_addr);
     assert_eq!(destination, dst_addr);
     socket
-        .write_datagram(send.transport_mut(), source, destination, 4321)
+        .write_datagram(
+            send.transport_mut(),
+            payload_checksum,
+            source,
+            destination,
+            4321,
+        )
         .unwrap();
     send.submit().unwrap();
 
@@ -227,5 +235,32 @@ fn mtu_discovery_maps_socket_options_to_ipv4_fragmentation_policy() {
         (IP_PMTUDISC_OMIT, Allow),
     ] {
         assert_eq!(fragmentation_policy(option), expected);
+    }
+}
+
+#[def_test]
+fn udp_precomputed_payload_checksum_matches_even_odd_and_zero_fold_cases() {
+    let src_addr = Ipv4Address::new(192, 0, 2, 10);
+    let dst_addr = Ipv4Address::new(198, 51, 100, 20);
+    for payload in [
+        &[][..],
+        &[0x12][..],
+        &[0x12, 0x34, 0x56][..],
+        &[0xff; 64][..],
+    ] {
+        let mut udp_packet = vec![0u8; UDP_HEADER_LEN + payload.len()];
+        udp_packet[UDP_HEADER_LEN..].copy_from_slice(payload);
+        let payload_checksum = UdpPayloadChecksum::compute(&udp_packet[UDP_HEADER_LEN..]);
+        write_udp_header_with_checksum(
+            &mut udp_packet,
+            payload_checksum,
+            src_addr,
+            dst_addr,
+            1234,
+            5678,
+        )
+        .unwrap();
+        assert!(has_valid_udp_checksum(src_addr, dst_addr, &udp_packet));
+        assert_ne!(&udp_packet[6..8], &[0, 0]);
     }
 }

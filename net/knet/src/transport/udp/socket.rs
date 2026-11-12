@@ -11,7 +11,7 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 use super::{
     UDP_HEADER_LEN, UDP_MAX_PAYLOAD_LEN,
-    output::{ipv4_pair, write_udp_header},
+    output::{UdpPayloadChecksum, ipv4_pair, write_udp_header_with_checksum},
     pcb::{RecvMode, UdpDatagram, UdpPcb},
     registry,
     state::UdpSocketState,
@@ -182,7 +182,9 @@ impl UdpSocket {
             return Err(LinuxError::EMSGSIZE.into());
         }
         let mut builder = Ipv4PacketBuilder::new(UDP_HEADER_LEN + payload_len)?;
-        src.read_exact(&mut builder.transport_mut()[UDP_HEADER_LEN..])?;
+        let payload = &mut builder.transport_mut()[UDP_HEADER_LEN..];
+        src.read_exact(payload)?;
+        let payload_checksum = UdpPayloadChecksum::compute(payload);
         let mut packet = Some(builder);
         self.state()
             .send_poller_with_nonblocking(self, flags.nonblocking(), || {
@@ -214,6 +216,7 @@ impl UdpSocket {
                     let destination = send.destination_addr();
                     self.write_datagram(
                         send.transport_mut(),
+                        payload_checksum,
                         source,
                         destination,
                         remote_endpoint.port,
@@ -229,6 +232,7 @@ impl UdpSocket {
     fn write_datagram(
         &self,
         udp_packet: &mut [u8],
+        payload_checksum: UdpPayloadChecksum,
         source_addr: Ipv4Address,
         destination_addr: Ipv4Address,
         destination_port: u16,
@@ -237,8 +241,9 @@ impl UdpSocket {
             .state()
             .local_endpoint()
             .ok_or(KError::from(LinuxError::EDESTADDRREQ))?;
-        write_udp_header(
+        write_udp_header_with_checksum(
             udp_packet,
+            payload_checksum,
             source_addr,
             destination_addr,
             local.port,
