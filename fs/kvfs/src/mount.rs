@@ -356,9 +356,10 @@ impl MntNamespace {
         let new_root = mountpoint.mount_bind(source)?;
         mounts.insert(new_root.mount_id(), new_root.clone());
 
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
         let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
         clone_map.insert(source.mount().mount_id(), new_root.clone());
-        for child in source.mount().collect_subtree().iter().skip(1) {
+        for child in subtree.iter().skip(1) {
             let location = child.location().ok_or(VfsError::InvalidInput)?;
             // Only clone submounts at or below the bind source. `collect_subtree`
             // walks the whole host mount, so a subdirectory bind would otherwise
@@ -532,7 +533,12 @@ impl MntNamespace {
         let mut kept = vec![new_root.clone()];
         let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
         clone_map.insert(source.mount().mount_id(), new_root.clone());
-        for child in source.mount().collect_subtree().iter().skip(1) {
+        for child in source
+            .mount()
+            .collect_subtree_under(&source.dentry)?
+            .iter()
+            .skip(1)
+        {
             let location = child.location().ok_or(VfsError::InvalidInput)?;
             let new_parent = clone_map
                 .get(&location.mount().mount_id())
@@ -1058,6 +1064,39 @@ impl Mount {
             index += 1;
         }
         mounts
+    }
+
+    /// Collects this mount plus the submounts at or under `dentry`, parents
+    /// before children.
+    ///
+    /// A recursive bind or `open_tree` clone of a subdirectory must clone only
+    /// the mounts beneath that directory, not the whole containing mount: the
+    /// latter re-clones unrelated subtrees and, when the destination lives
+    /// under the source, the clone's own previously-grafted tree, growing the
+    /// namespace without bound. Linux `copy_tree` roots the clone at the source
+    /// path for the same reason. Only the top mount's direct children need the
+    /// ancestry test; deeper descendants lie under `dentry` by construction.
+    fn collect_subtree_under(self: &Arc<Self>, dentry: &Dentry) -> VfsResult<Vec<Arc<Self>>> {
+        let mut mounts = vec![self.clone()];
+        let mut index = 0;
+        while index < mounts.len() {
+            let mount = mounts[index].clone();
+            for child in mount.children() {
+                if index == 0 {
+                    let location = child.location().ok_or(VfsError::InvalidInput)?;
+                    if !dentry.is_ancestor_of(&location.dentry)? {
+                        continue;
+                    }
+                }
+                let mut layer = Some(child);
+                while let Some(mount) = layer {
+                    layer = mount.covered_mount();
+                    mounts.push(mount);
+                }
+            }
+            index += 1;
+        }
+        Ok(mounts)
     }
 
     fn child_mount_at(&self, dentry: &Dentry) -> Option<Arc<Self>> {
