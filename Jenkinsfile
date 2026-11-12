@@ -1014,7 +1014,7 @@ facts_early_failure() {
 }
 trap facts_early_failure EXIT
 facts_base=''
-if [ -n "\${_CI_FACTS_BASE_REF}" ]; then
+if [ -n "\${_CI_FACTS_BASE_REF:-}" ]; then
     facts_base=\$(git merge-base HEAD "\${_CI_FACTS_BASE_REF}" 2>/dev/null || true)
 fi
 scripts/ci/check_dylint_environment.sh
