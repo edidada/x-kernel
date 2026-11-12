@@ -145,6 +145,7 @@ define_options! {
     ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),
     PassCredentials(bool),
+    PassSecurity(bool),
     PeerCredentials(PeerCredentials),
     /// `NETLINK_CAP_ACK`: omit the original request payload from error
     /// acknowledgements and mark them `NLM_F_CAPPED`.

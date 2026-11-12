@@ -258,11 +258,13 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_BROADCAST) => Broadcast as IntBool,
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
+            (SOL_SOCKET, SO_SNDBUFFORCE) => SendBufferForce as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
             (SOL_SOCKET, SO_LINGER) => Linger as SocketLinger,
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
+            (SOL_SOCKET, SO_PASSSEC) => PassSecurity as IntBool,
 
             (SOL_NETLINK, NETLINK_CAP_ACK) => NetlinkCapAck as IntBool,
 

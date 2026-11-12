@@ -29,9 +29,18 @@ pub(crate) struct GeneralOptions {
     broadcast: AtomicBool,
     /// Whether received messages include sender credentials.
     pass_credentials: AtomicBool,
+    /// Whether received messages include the peer's security label (SO_PASSSEC).
+    /// No LSM is modeled, so the flag is tracked but no label is ever attached.
+    pass_security: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
+
+    /// Advertised send/receive buffer sizes (SO_SNDBUF/SO_RCVBUF). The data
+    /// path uses its own channel capacity; these are the values userspace
+    /// reads back, defaulting to Linux's stock socket buffer size.
+    send_buffer_bytes: AtomicU64,
+    receive_buffer_bytes: AtomicU64,
 
     /// Bound device ifindex; zero selects all devices for RX polling.
     bound_dev_if: AtomicI32,
@@ -51,9 +60,15 @@ impl GeneralOptions {
             reuse_address: AtomicBool::new(false),
             broadcast: AtomicBool::new(false),
             pass_credentials: AtomicBool::new(false),
+            pass_security: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
+
+            // Linux's default SO_SNDBUF/SO_RCVBUF (net.core.wmem_default /
+            // rmem_default); callers such as systemd-resolved read these back.
+            send_buffer_bytes: AtomicU64::new(212_992),
+            receive_buffer_bytes: AtomicU64::new(212_992),
 
             bound_dev_if: AtomicI32::new(0),
             device_binding_changed: PollEvent::new(),
@@ -226,6 +241,18 @@ impl Configurable for GeneralOptions {
             O::PassCredentials(enabled) => {
                 **enabled = self.pass_credentials();
             }
+            O::PassSecurity(enabled) => {
+                **enabled = self.pass_security.load(Ordering::Relaxed);
+            }
+            O::SendBuffer(size) => {
+                **size = self.send_buffer_bytes.load(Ordering::Relaxed) as usize;
+            }
+            O::ReceiveBuffer(size) => {
+                **size = self.receive_buffer_bytes.load(Ordering::Relaxed) as usize;
+            }
+            O::SendBufferForce(size) => {
+                **size = self.send_buffer_bytes.load(Ordering::Relaxed) as usize;
+            }
             O::BindToDevice(name) => {
                 let ifindex = self.bound_dev_if();
                 **name = if ifindex > 0 && SERVICE.is_inited() {
@@ -263,6 +290,9 @@ impl Configurable for GeneralOptions {
             O::PassCredentials(enabled) => {
                 self.pass_credentials.store(*enabled, Ordering::Relaxed);
             }
+            O::PassSecurity(enabled) => {
+                self.pass_security.store(*enabled, Ordering::Relaxed);
+            }
             O::BindToDevice(name) => {
                 let ifindex = match name {
                     None => 0,
@@ -291,8 +321,17 @@ impl Configurable for GeneralOptions {
                 self.recv_timeout_nanos
                     .store(timeout.as_nanos_u64_saturating(), Ordering::Relaxed);
             }
-            O::SendBuffer(_) | O::ReceiveBuffer(_) => {
-                // TODO(mivik): implement buffer size options
+            O::SendBuffer(size) => {
+                self.send_buffer_bytes
+                    .store(*size as u64, Ordering::Relaxed);
+            }
+            O::ReceiveBuffer(size) => {
+                self.receive_buffer_bytes
+                    .store(*size as u64, Ordering::Relaxed);
+            }
+            O::SendBufferForce(size) => {
+                self.send_buffer_bytes
+                    .store(*size as u64, Ordering::Relaxed);
             }
             _ => return Ok(OptionHandled::No),
         }
