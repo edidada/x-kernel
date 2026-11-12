@@ -20,6 +20,30 @@ fn name(path: &str) -> AmlName {
 }
 
 #[def_test]
+fn s3_requires_a_present_package_with_bounded_sleep_types() {
+    use crate::acpi_test_support::insert;
+
+    let mut absent = test_context();
+    assert_eq!(absent.s3_sleep_types().unwrap(), None);
+    for object in [
+        Object::Integer(1),
+        Object::Package(vec![Object::Integer(1).wrap()]),
+        Object::Package(vec![Object::Integer(8).wrap(), Object::Integer(1).wrap()]),
+        Object::Package(vec![Object::Integer(1).wrap(), Object::Buffer(vec![]).wrap()]),
+    ] {
+        let mut context = test_context();
+        insert(&mut context, "\\_S3", object);
+        assert_eq!(context.s3_sleep_types().unwrap(), None);
+    }
+    let mut context = test_context();
+    insert(&mut context, "\\_S3", Object::Package(vec![
+        Object::Integer(1).wrap(), Object::Integer(2).wrap(),
+        Object::Integer(0).wrap(), Object::Integer(0).wrap(),
+    ]));
+    assert_eq!(context.s3_sleep_types().unwrap(), Some([1, 2]));
+}
+
+#[def_test]
 fn loads_dsdt_and_ssdts() {
     let tables = test_tables(1);
     let mut context = tables.context();

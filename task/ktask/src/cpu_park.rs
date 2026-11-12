@@ -31,6 +31,7 @@ pub enum CpuParkError {
 }
 
 struct ParkState {
+    is_reset_aware: bool,
     // Release/acquire publishes successful event suspension (1) or failure (2).
     acknowledged: AtomicU8,
     // The coordinator publishes completion of shared hardware/time recovery.
@@ -51,7 +52,24 @@ fn park_remote(argument: *mut ()) {
         state.acknowledged.store(2, Ordering::Release);
         return;
     };
-    acknowledge_and_wait(argument);
+    #[cfg(target_arch = "x86_64")]
+    if state.is_reset_aware {
+        // SAFETY: acquire_for_system_sleep requires the platform transaction;
+        // our pinned state and callback stack survive until joined completion.
+        unsafe { khal::power::SystemSleepIf::park_cpu(acknowledge_and_wait, argument) };
+    } else {
+        acknowledge_and_wait(argument);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        debug_assert!(!state.is_reset_aware);
+        acknowledge_and_wait(argument);
+    }
+    // Reset-aware entry returns after CPU context/controller restoration, before
+    // shared time or device recovery necessarily completes on the coordinator.
+    while !state.release.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
     // A stale token or failed restore here would release execution with an
     // inhibited timer. That is an internal credential violation, not a usable
     // partial recovery state; never silently release ordinary execution.
@@ -94,6 +112,25 @@ impl ParkedCpus {
     /// Returns invalid context, unavailable Stop work, event-pause failure or
     /// an acknowledgment timeout after rolling back all queued participants.
     pub fn acquire(timeout: TimeSpan) -> Result<Self, CpuParkError> {
+        Self::acquire_inner(timeout, false)
+    }
+
+    /// Parks CPUs with platform-owned context preservation across hardware reset.
+    ///
+    /// # Safety
+    /// The platform sleep transaction must be prepared on the boot CPU and
+    /// exclude hotplug. Keep its static context storage until this guard joins
+    /// every callback, and restore remote hardware contexts before releasing
+    /// this guard after actual sleep. Shared devices/time must then be usable.
+    ///
+    /// # Errors
+    /// Returns the same admission and acknowledgment failures as acquire.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn acquire_for_system_sleep(timeout: TimeSpan) -> Result<Self, CpuParkError> {
+        Self::acquire_inner(timeout, true)
+    }
+
+    fn acquire_inner(timeout: TimeSpan, is_reset_aware: bool) -> Result<Self, CpuParkError> {
         if !crate::is_sleepable_context() {
             return Err(CpuParkError::InvalidContext);
         }
@@ -102,6 +139,7 @@ impl ParkedCpus {
             participants.push(Participant {
                 cpu,
                 state: ParkState {
+                    is_reset_aware,
                     acknowledged: AtomicU8::new(0),
                     release: AtomicBool::new(false),
                 },

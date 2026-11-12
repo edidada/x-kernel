@@ -92,7 +92,8 @@ RSDP/root data can still panic; the query is not unconditionally panic-free.
 - The AML interpreter relies on boot firmware being well-behaved; there is no
   instruction budget or general AML sandbox.
 - The x86 context loads every SSDT from the boot table set even though only
-  `_PIC`, root `_PRT`, and referenced link `_CRS` objects are evaluated later.
+  `_PIC`, root `_PRT`, referenced link `_CRS`, and optional `_S3` objects
+  are evaluated later.
 - No IRQ routing, controller lifecycle, or consumer behavior changes are added.
 
 ## Regression Coverage
@@ -118,3 +119,11 @@ byte. Internal tests assert the policy on top of those facts (one IRQ per link,
 complete end tag required, source suffixes unsupported, descriptor caps) rather
 than re-decoding bytes. The vendor decoder contains no second copy in internal
 ACPI.
+
+## Sleep discovery input boundary
+
+Missing/malformed `_S3` packages do not advertise S3. Both sleep types must be
+integers in 0..=7. Evaluation errors propagate through existing host/context
+poison rules. The FADT FACS accessor obeys declared extent and revision; it does
+not dereference FACS or validate a physical mapping. Firmware remains trusted
+under boot table policy, and the platform owns exclusive wake-vector lifetime.
