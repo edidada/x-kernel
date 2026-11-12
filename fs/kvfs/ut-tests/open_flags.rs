@@ -135,3 +135,21 @@ fn openat2_cached_with_create_or_truncate_is_eagain() {
         VfsError::WouldBlock
     );
 }
+
+#[def_test]
+fn openat2_contradictory_flags_are_einval_before_cached_eagain() {
+    use linux_raw_sys::general::{O_CREAT, O_DIRECTORY, O_PATH, O_RDWR};
+
+    let cached = crate::open_flags::RESOLVE_CACHED;
+    // O_DIRECTORY|O_CREAT and O_PATH|O_CREAT are EINVAL in Linux
+    // build_open_flags, which runs before the RESOLVE_CACHED rule.
+    assert_eq!(
+        OpenHow::from_openat2(u64::from(O_RDWR | O_CREAT | O_DIRECTORY), 0o644, cached)
+            .unwrap_err(),
+        VfsError::InvalidInput
+    );
+    assert_eq!(
+        OpenHow::from_openat2(u64::from(O_PATH | O_CREAT), 0, cached).unwrap_err(),
+        VfsError::InvalidInput
+    );
+}

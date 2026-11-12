@@ -191,6 +191,16 @@ impl OpenHow {
         if regular_only && raw_flags & (O_PATH | O_DIRECTORY) != 0 {
             return Err(VfsError::InvalidInput);
         }
+        // Contradictory flag combinations are `EINVAL` in Linux
+        // `build_open_flags`, and that check precedes the `RESOLVE_CACHED`
+        // rule, so it must run before the `EAGAIN` below.
+        let open_flags = OpenFlags::from_bits_retain(raw_flags);
+        if open_flags.contains(OpenFlags::DIRECTORY | OpenFlags::CREATE) {
+            return Err(VfsError::InvalidInput);
+        }
+        if open_flags.contains(OpenFlags::PATH) && !O_PATH_FLAGS.contains(open_flags) {
+            return Err(VfsError::InvalidInput);
+        }
         // `RESOLVE_CACHED` forbids side effects; Linux `build_open_flags`
         // rejects create/truncate before the pathname or dirfd is touched.
         if resolve & RESOLVE_CACHED != 0 && raw_flags & (O_CREAT | O_TRUNC) != 0 {
