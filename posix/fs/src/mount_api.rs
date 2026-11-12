@@ -364,15 +364,21 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
             &cred,
         )
     })?;
-    let (root, kept) = if flags & OPEN_TREE_CLONE != 0 {
+    let (root, kept, open_path) = if flags & OPEN_TREE_CLONE != 0 {
         let namespace = kprocess::current_user_process().mnt_ns()?;
-        namespace.clone_mount_tree(&source)?
+        let (root, kept) = namespace.clone_mount_tree(&source)?;
+        let open_path = root.root_path();
+        (root, kept, open_path)
     } else {
-        // Non-cloning open_tree: a reference to the existing mount, usable with
-        // mount_setattr(AT_EMPTY_PATH) and move_mount.
-        (source.mount().clone(), Vec::new())
+        // Non-cloning open_tree: a reference to the existing mount at the
+        // resolved path, usable with mount_setattr(AT_EMPTY_PATH) and
+        // move_mount. The fd must keep the resolved dentry rather than the
+        // mount root: callers such as systemd's chase() resolve further
+        // components relative to it, and returning the mount root would reset
+        // the walk to the mountpoint on every non-mountpoint component.
+        (source.mount().clone(), Vec::new(), source.clone())
     };
-    let file = dentry_open(root.root_path(), O_RDONLY | O_DIRECTORY, cred)?;
+    let file = dentry_open(open_path, O_RDONLY | O_DIRECTORY, cred)?;
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(root)),
         _kept: kept,
