@@ -8,8 +8,10 @@
 
 X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It runs Linux userspace built for musl/glibc on x86_64, AArch64, RISC-V 64, and LoongArch64, provides in-kernel TEE support for confidential-computing guests, and runs Wayland/X11 desktop workloads including Chromium, niri, and Xorg/Xwayland.
 
-<!-- TODO(image): replace this line with a screenshot/GIF of the systemd + Wayland desktop. -->
-<p align="center"><em>Screenshot/demo placeholder - add a systemd or Wayland desktop capture here.</em></p>
+<p align="center">
+  <img src="docs/images/desktop-niri-chromium.png" alt="X-Kernel running niri with Chromium" width="100%">
+</p>
+<p align="center"><em>niri + Chromium on X-Kernel (x86_64, virtio-gpu, 1600x900).</em></p>
 
 Subsystems are separated into crates with explicit ownership boundaries; see [Source layout](#source-layout). The project is under active development on `main` (`0.3.0-dev`), with quarterly milestone releases ([release policy](docs/release.md)).
 
@@ -94,11 +96,15 @@ These are the end-to-end workloads that distinguish X-Kernel from a syscall-only
 
 | Workload | Command | Expected | Status |
 |---|---|---|---|
-| systemd + glibc | `TBD` (rootfs variant + command) | systemd reaches a shell | `TBD` |
+| systemd + glibc | `make rootfs ROOTFS_VARIANT=debian-systemd` | systemd 257 + glibc 2.41 reach a shell | Captured 2026-11-12 |
 | Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | `TBD` |
-| Wayland desktop | `make run GRAPHIC=y` with a desktop rootfs | Chromium/niri/Xorg starts | `TBD` |
+| Wayland desktop | `make run GRAPHIC=y DISK_IMG=<desktop-image>` | Chromium/niri/Xorg starts | Captured 2026-11-12 |
 
-<!-- TODO(data): add the rootfs variant, kernel commit, date, and log/CI link for each workload. -->
+<!-- TODO(data): add the kernel commit and log/CI link for each workload. -->
+
+![systemd + glibc on X-Kernel](docs/images/systemd-glibc.png)
+
+*systemd 257 + glibc 2.41 on Debian 13 (x86_64, systemd `debian-systemd` rootfs).*
 
 ### Run options
 

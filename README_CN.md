@@ -8,8 +8,10 @@
 
 X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可以在 x86_64、AArch64、RISC-V 64 和 LoongArch64 上运行基于 musl/glibc 构建的 Linux 用户态程序，在内核内为机密计算 guest 提供 TEE 支持，并可运行 Chromium、niri、Xorg/Xwayland 等 Wayland/X11 桌面负载。
 
-<!-- TODO(image): 替换为 systemd + Wayland 桌面的截图/GIF。 -->
-<p align="center"><em>截图/演示占位：后续补充 systemd 或 Wayland 桌面截图。</em></p>
+<p align="center">
+  <img src="docs/images/desktop-niri-chromium.png" alt="X-Kernel 运行 niri 与 Chromium" width="100%">
+</p>
+<p align="center"><em>X-Kernel 上的 niri + Chromium（x86_64，virtio-gpu，1600x900）。</em></p>
 
 各子系统按明确的职责与所有权边界拆分为 crate，详见[源码布局](#源码布局)。项目当前在 `main` 分支活跃开发（`0.3.0-dev`），按季度发布里程碑版本，见[发布规范](docs/release.md)。
 
@@ -94,11 +96,15 @@ bash scripts/start.sh
 
 | 负载 | 命令 | 预期结果 | 状态 |
 |---|---|---|---|
-| systemd + glibc | `TBD`（rootfs variant + 命令） | systemd 进入 shell | `TBD` |
+| systemd + glibc | `make rootfs ROOTFS_VARIANT=debian-systemd` | systemd 257 + glibc 2.41 进入 shell | 已截图 2026-11-12 |
 | Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | `TBD` |
-| Wayland 桌面 | `make run GRAPHIC=y` + 桌面 rootfs | Chromium/niri/Xorg 启动 | `TBD` |
+| Wayland 桌面 | `make run GRAPHIC=y DISK_IMG=<desktop-image>` | Chromium/niri/Xorg 启动 | 已截图 2026-11-12 |
 
-<!-- TODO(data): 补充每个负载的 rootfs variant、内核 commit、日期和日志/CI 链接。 -->
+<!-- TODO(data): 补充每个负载的内核 commit 和日志/CI 链接。 -->
+
+![X-Kernel 上的 systemd + glibc](docs/images/systemd-glibc.png)
+
+*Debian 13 上的 systemd 257 + glibc 2.41（x86_64，`debian-systemd` rootfs）。*
 
 ### 运行参数
 
