@@ -9,9 +9,9 @@
 X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It runs Linux userspace built for musl/glibc on x86_64, AArch64, RISC-V 64, and LoongArch64, provides in-kernel TEE support for confidential-computing guests, and runs Wayland/X11 desktop workloads including Chromium, niri, and Xorg/Xwayland.
 
 <p align="center">
-  <img src="docs/images/desktop-niri-chromium.png" alt="X-Kernel running niri with Chromium" width="100%">
+  <img src="docs/images/desktop-niri-bilibili-fm.png" alt="X-Kernel running niri with Chromium on Bilibili and PCManFM" width="100%">
 </p>
-<p align="center"><em>niri + Chromium on X-Kernel (x86_64, virtio-gpu, 1600x900).</em></p>
+<p align="center"><em>niri + Chromium (Bilibili) + PCManFM on X-Kernel (x86_64, virtio-gpu, 1600x900).</em></p>
 
 Subsystems are separated into crates with explicit ownership boundaries; see [Source layout](#source-layout). The project is under active development on `main` (`0.3.0-dev`), with quarterly milestone releases ([release policy](docs/release.md)).
 

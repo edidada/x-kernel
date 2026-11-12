@@ -9,9 +9,9 @@
 X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可以在 x86_64、AArch64、RISC-V 64 和 LoongArch64 上运行基于 musl/glibc 构建的 Linux 用户态程序，在内核内为机密计算 guest 提供 TEE 支持，并可运行 Chromium、niri、Xorg/Xwayland 等 Wayland/X11 桌面负载。
 
 <p align="center">
-  <img src="docs/images/desktop-niri-chromium.png" alt="X-Kernel 运行 niri 与 Chromium" width="100%">
+  <img src="docs/images/desktop-niri-bilibili-fm.png" alt="X-Kernel 运行 niri、Chromium（哔哩哔哩）与 PCManFM" width="100%">
 </p>
-<p align="center"><em>X-Kernel 上的 niri + Chromium（x86_64，virtio-gpu，1600x900）。</em></p>
+<p align="center"><em>X-Kernel 上的 niri + Chromium（哔哩哔哩）+ PCManFM（x86_64，virtio-gpu，1600x900）。</em></p>
 
 各子系统按明确的职责与所有权边界拆分为 crate，详见[源码布局](#源码布局)。项目当前在 `main` 分支活跃开发（`0.3.0-dev`），按季度发布里程碑版本，见[发布规范](docs/release.md)。
 
