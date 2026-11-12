@@ -460,6 +460,10 @@ impl Configurable for TcpSocket {
             });
             return Ok(OptionHandled::Yes);
         }
+        if let O::AcceptConn(listening) = option {
+            **listening = self.is_listening();
+            return Ok(OptionHandled::Yes);
+        }
         if self.general.get_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }

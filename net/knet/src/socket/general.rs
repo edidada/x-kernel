@@ -45,6 +45,13 @@ pub(crate) struct GeneralOptions {
     netlink_ext_ack: AtomicBool,
     netlink_get_strict_chk: AtomicBool,
     netlink_pktinfo: AtomicBool,
+    ip_pktinfo: AtomicBool,
+    ip_recv_ttl: AtomicBool,
+    ip_recv_tos: AtomicBool,
+    tcp_fastopen: AtomicI32,
+    ip_multicast_ttl: AtomicI32,
+    ip_recv_fragsize: AtomicBool,
+    pass_pidfd: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
@@ -81,6 +88,13 @@ impl GeneralOptions {
             netlink_ext_ack: AtomicBool::new(false),
             netlink_get_strict_chk: AtomicBool::new(false),
             netlink_pktinfo: AtomicBool::new(false),
+            ip_pktinfo: AtomicBool::new(false),
+            ip_recv_ttl: AtomicBool::new(false),
+            ip_recv_tos: AtomicBool::new(false),
+            tcp_fastopen: AtomicI32::new(0),
+            ip_multicast_ttl: AtomicI32::new(1),
+            ip_recv_fragsize: AtomicBool::new(false),
+            pass_pidfd: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
@@ -136,6 +150,24 @@ impl GeneralOptions {
     #[cfg(unittest)]
     pub(crate) fn set_bound_dev_if_for_test(&self, ifindex: i32) {
         self.set_bound_dev_if(ifindex);
+    }
+
+    /// Resolves a `SO_BINDTODEVICE` name to an ifindex; empty/`None` clears it.
+    fn device_ifindex(name: Option<&str>) -> KResult<i32> {
+        match name {
+            None | Some("") => Ok(0),
+            Some(dev_name) => {
+                if !SERVICE.is_inited() {
+                    return Err(KError::from(LinuxError::ENODEV));
+                }
+                SERVICE
+                    .link_snapshots()
+                    .into_iter()
+                    .find(|link| link.name == dev_name)
+                    .map(|link| link.ifindex)
+                    .ok_or(KError::from(LinuxError::ENODEV))
+            }
+        }
     }
 
     /// Returns the configured send timeout.
@@ -285,6 +317,38 @@ impl Configurable for GeneralOptions {
             O::NetlinkPktinfo(enabled) => {
                 **enabled = self.netlink_pktinfo.load(Ordering::Relaxed);
             }
+            O::IpPktinfo(enabled) => {
+                **enabled = self.ip_pktinfo.load(Ordering::Relaxed);
+            }
+            O::IpRecvTtl(enabled) => {
+                **enabled = self.ip_recv_ttl.load(Ordering::Relaxed);
+            }
+            O::IpRecvTos(enabled) => {
+                **enabled = self.ip_recv_tos.load(Ordering::Relaxed);
+            }
+            O::BindToIfindex(ifindex) => {
+                **ifindex = self.bound_dev_if();
+            }
+            O::TcpFastopen(queue) => {
+                **queue = self.tcp_fastopen.load(Ordering::Relaxed) as u32;
+            }
+            O::AcceptConn(listening) => {
+                // Listening state is transport-specific; transports that can
+                // listen override this. The shared default is "not listening".
+                **listening = false;
+            }
+            O::ReceiveBufferForce(size) => {
+                **size = self.receive_buffer_bytes.load(Ordering::Relaxed) as usize;
+            }
+            O::IpMulticastTtl(ttl) => {
+                **ttl = self.ip_multicast_ttl.load(Ordering::Relaxed) as u32;
+            }
+            O::IpRecvFragsize(enabled) => {
+                **enabled = self.ip_recv_fragsize.load(Ordering::Relaxed);
+            }
+            O::PassPidfd(enabled) => {
+                **enabled = self.pass_pidfd.load(Ordering::Relaxed);
+            }
             O::SendBuffer(size) => {
                 **size = self.send_buffer_bytes.load(Ordering::Relaxed) as usize;
             }
@@ -356,25 +420,36 @@ impl Configurable for GeneralOptions {
             O::NetlinkPktinfo(enabled) => {
                 self.netlink_pktinfo.store(*enabled, Ordering::Relaxed);
             }
+            O::IpPktinfo(enabled) => {
+                self.ip_pktinfo.store(*enabled, Ordering::Relaxed);
+            }
+            O::IpRecvTtl(enabled) => {
+                self.ip_recv_ttl.store(*enabled, Ordering::Relaxed);
+            }
+            O::IpRecvTos(enabled) => {
+                self.ip_recv_tos.store(*enabled, Ordering::Relaxed);
+            }
+            O::BindToIfindex(ifindex) => {
+                self.set_bound_dev_if(*ifindex);
+            }
+            O::TcpFastopen(queue) => {
+                self.tcp_fastopen.store(*queue as i32, Ordering::Relaxed);
+            }
+            O::ReceiveBufferForce(size) => {
+                self.receive_buffer_bytes
+                    .store(*size as u64, Ordering::Relaxed);
+            }
+            O::IpMulticastTtl(ttl) => {
+                self.ip_multicast_ttl.store(*ttl as i32, Ordering::Relaxed);
+            }
+            O::IpRecvFragsize(enabled) => {
+                self.ip_recv_fragsize.store(*enabled, Ordering::Relaxed);
+            }
+            O::PassPidfd(enabled) => {
+                self.pass_pidfd.store(*enabled, Ordering::Relaxed);
+            }
             O::BindToDevice(name) => {
-                let ifindex = match name {
-                    None => 0,
-                    Some(dev_name) => {
-                        if dev_name.is_empty() {
-                            0
-                        } else if SERVICE.is_inited() {
-                            SERVICE
-                                .link_snapshots()
-                                .into_iter()
-                                .find(|link| &link.name == dev_name)
-                                .map(|link| link.ifindex)
-                                .ok_or(KError::from(LinuxError::ENODEV))?
-                        } else {
-                            return Err(KError::from(LinuxError::ENODEV));
-                        }
-                    }
-                };
-                self.set_bound_dev_if(ifindex);
+                self.set_bound_dev_if(Self::device_ifindex(name.as_deref())?);
             }
             O::SendTimeout(timeout) => {
                 self.send_timeout_nanos

@@ -33,14 +33,17 @@ pub(crate) use wire::route::{
 
 pub const NETLINK_ROUTE: i32 = 0;
 pub(super) const NETLINK_USERSOCK: i32 = 2;
+pub(super) const NETLINK_AUDIT: i32 = 9;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
 /// Number of netlink protocol slots, matching Linux `MAX_LINKS`.
 pub const NETLINK_MAX_LINKS: i32 = 32;
-/// Protocols with a kernel handler in this implementation.
+/// Protocols accepted by `socket(AF_NETLINK, ...)`. `NETLINK_AUDIT` has no
+/// kernel handler here; it is a sink so audit emitters (systemd-resolved) can
+/// open their audit socket and send best-effort messages.
 pub fn netlink_protocol_supported(protocol: i32) -> bool {
     matches!(
         protocol,
-        NETLINK_ROUTE | NETLINK_USERSOCK | NETLINK_KOBJECT_UEVENT
+        NETLINK_ROUTE | NETLINK_USERSOCK | NETLINK_AUDIT | NETLINK_KOBJECT_UEVENT
     )
 }
 pub(super) const NLM_F_REQUEST: u16 = 0x0001;

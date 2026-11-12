@@ -36,6 +36,8 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 /// `NETLINK_CAP_ACK` is not exposed by `linux_raw_sys` on every target.
 const NETLINK_CAP_ACK: u32 = 10;
 /// Netlink options not exposed by `linux_raw_sys` on every target.
+const NETLINK_ADD_MEMBERSHIP: u32 = 1;
+const NETLINK_DROP_MEMBERSHIP: u32 = 2;
 const NETLINK_PKTINFO: u32 = 3;
 const NETLINK_LIST_MEMBERSHIPS: u32 = 9;
 const NETLINK_EXT_ACK: u32 = 11;
@@ -271,6 +273,10 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
             (SOL_SOCKET, SO_PASSSEC) => PassSecurity as IntBool,
             (SOL_SOCKET, SO_PASSRIGHTS) => PassRights as IntBool,
+            (SOL_SOCKET, SO_BINDTOIFINDEX) => BindToIfindex as Int<i32>,
+            (SOL_SOCKET, SO_ACCEPTCONN) => AcceptConn as IntBool,
+            (SOL_SOCKET, SO_RCVBUFFORCE) => ReceiveBufferForce as Int<usize>,
+            (SOL_SOCKET, SO_PASSPIDFD) => PassPidfd as IntBool,
             (SOL_SOCKET, SO_TIMESTAMP) => Timestamp as IntBool,
             (SOL_SOCKET, SO_TIMESTAMP_NEW) => Timestamp as IntBool,
             (SOL_SOCKET, SO_TIMESTAMPNS) => TimestampNs as IntBool,
@@ -279,6 +285,8 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_TIMESTAMPING_NEW) => Timestamping as Int<u32>,
 
             (SOL_NETLINK, NETLINK_CAP_ACK) => NetlinkCapAck as IntBool,
+            (SOL_NETLINK, NETLINK_ADD_MEMBERSHIP) => NetlinkAddMembership as Int<u32>,
+            (SOL_NETLINK, NETLINK_DROP_MEMBERSHIP) => NetlinkDropMembership as Int<u32>,
             (SOL_NETLINK, NETLINK_EXT_ACK) => NetlinkExtAck as IntBool,
             (SOL_NETLINK, NETLINK_GET_STRICT_CHK) => NetlinkGetStrictChk as IntBool,
             (SOL_NETLINK, NETLINK_PKTINFO) => NetlinkPktinfo as IntBool,
@@ -289,10 +297,16 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_KEEPIDLE) => KeepIdle as Int<u32>,
             (PROTO_TCP, TCP_KEEPINTVL) => KeepInterval as Int<u32>,
             (PROTO_TCP, TCP_KEEPCNT) => KeepCount as Int<u32>,
+            (PROTO_TCP, TCP_FASTOPEN) => TcpFastopen as Int<u32>,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
             (PROTO_IP, IP_MTU_DISCOVER) => MtuDiscover as Int<u8>,
+            (PROTO_IP, IP_PKTINFO) => IpPktinfo as IntBool,
+            (PROTO_IP, IP_RECVTTL) => IpRecvTtl as IntBool,
+            (PROTO_IP, IP_RECVTOS) => IpRecvTos as IntBool,
+            (PROTO_IP, IP_MULTICAST_TTL) => IpMulticastTtl as Int<u32>,
+            (PROTO_IP, IP_RECVFRAGSIZE) => IpRecvFragsize as IntBool,
 
             (SOL_PACKET, PACKET_STATISTICS) => PacketStatistics as PacketStats,
             (SOL_PACKET, PACKET_ADD_MEMBERSHIP) => PacketAddMembership as PacketMembershipConv,

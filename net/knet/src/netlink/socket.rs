@@ -529,6 +529,22 @@ impl Configurable for NetlinkSocket {
             self.inner.cap_ack.store(*enabled, Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
+        if let SetSocketOption::NetlinkAddMembership(group) = opt {
+            if (1..=32).contains(group)
+                && let Some(addr) = self.inner.local_addr.write().as_mut()
+            {
+                addr.groups |= 1u32 << (*group - 1);
+            }
+            return Ok(OptionHandled::Yes);
+        }
+        if let SetSocketOption::NetlinkDropMembership(group) = opt {
+            if (1..=32).contains(group)
+                && let Some(addr) = self.inner.local_addr.write().as_mut()
+            {
+                addr.groups &= !(1u32 << (*group - 1));
+            }
+            return Ok(OptionHandled::Yes);
+        }
         self.inner.general.set_option_inner(opt)
     }
 }

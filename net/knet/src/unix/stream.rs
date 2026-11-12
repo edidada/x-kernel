@@ -129,6 +129,10 @@ impl Configurable for StreamTransport {
             **error = self.endpoint.socket_error.swap(0, Ordering::AcqRel);
             return Ok(OptionHandled::Yes);
         }
+        if let O::AcceptConn(listening) = opt {
+            **listening = self.listener.lock().is_some();
+            return Ok(OptionHandled::Yes);
+        }
         if self.options.get_option_inner(opt)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
