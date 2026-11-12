@@ -727,10 +727,6 @@ impl<'a> Nameidata<'a> {
         lookup_flags: LookupFlags,
         was_created: bool,
     ) -> VfsResult<()> {
-        // `OPENAT2_REGULAR`: the request only accepts a regular file.
-        if flags.requires_regular() && d_inode(path.dentry()).node_type() != NodeType::RegularFile {
-            return Err(VfsError::InvalidInput);
-        }
         if flags.will_create() {
             if flags.is_exclusive_create() && !was_created {
                 return Err(VfsError::AlreadyExists);
@@ -738,6 +734,11 @@ impl<'a> Nameidata<'a> {
             if d_is_dir(path.dentry()) {
                 return Err(VfsError::IsADirectory);
             }
+        }
+        // `OPENAT2_REGULAR`: the request only accepts a regular file. Linux
+        // reports `EFTYPE`, and checks it after the `O_CREAT`/`O_EXCL` rules.
+        if flags.requires_regular() && d_inode(path.dentry()).node_type() != NodeType::RegularFile {
+            return Err(VfsError::WrongFileType);
         }
         // The trailing-slash demand rides the lookup flags across symlink
         // expansion (see [`Self::open_path`]) and is consumed here exactly as
@@ -976,7 +977,7 @@ impl<'a> Nameidata<'a> {
         let path =
             filename.lookup_at(root, base, LookupIntent::Open, flags.lookup_flags(), cred)?;
         if flags.requires_regular() && d_inode(path.dentry()).node_type() != NodeType::RegularFile {
-            return Err(VfsError::InvalidInput);
+            return Err(VfsError::WrongFileType);
         }
         file.vfs_open(path)
     }

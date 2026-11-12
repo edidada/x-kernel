@@ -114,3 +114,24 @@ fn openat2_translates_in_root_and_cached() {
     assert!(lookup.contains(LookupFlags::IN_ROOT));
     assert!(lookup.contains(LookupFlags::CACHED));
 }
+
+#[def_test]
+fn openat2_rejects_regular_with_path_or_directory() {
+    use linux_raw_sys::general::{O_DIRECTORY, O_PATH};
+
+    assert!(OpenHow::from_openat2(u64::from(O_PATH) | OPENAT2_REGULAR, 0, 0).is_err());
+    assert!(OpenHow::from_openat2(u64::from(O_DIRECTORY) | OPENAT2_REGULAR, 0, 0).is_err());
+}
+
+#[def_test]
+fn openat2_cached_with_create_or_truncate_is_eagain() {
+    let cached = crate::open_flags::RESOLVE_CACHED;
+    assert_eq!(
+        OpenHow::from_openat2(u64::from(O_CREAT | O_RDWR), 0, cached).unwrap_err(),
+        VfsError::WouldBlock
+    );
+    assert_eq!(
+        OpenHow::from_openat2(u64::from(O_TRUNC), 0, cached).unwrap_err(),
+        VfsError::WouldBlock
+    );
+}

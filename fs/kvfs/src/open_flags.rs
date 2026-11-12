@@ -184,11 +184,23 @@ impl OpenHow {
         if resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0 {
             return Err(VfsError::InvalidInput);
         }
+        let regular_only = flags & OPENAT2_REGULAR != 0;
+        // `OPENAT2_REGULAR` contradicts `O_PATH` (no file type is opened) and
+        // `O_DIRECTORY` (a directory is required); Linux rejects both with
+        // `EINVAL` rather than honoring the combination.
+        if regular_only && raw_flags & (O_PATH | O_DIRECTORY) != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        // `RESOLVE_CACHED` forbids side effects; Linux `build_open_flags`
+        // rejects create/truncate before the pathname or dirfd is touched.
+        if resolve & RESOLVE_CACHED != 0 && raw_flags & (O_CREAT | O_TRUNC) != 0 {
+            return Err(VfsError::WouldBlock);
+        }
         Ok(Self {
             flags: u64::from(raw_flags),
             mode: mode_permission,
             resolve,
-            regular_only: flags & OPENAT2_REGULAR != 0,
+            regular_only,
         })
     }
 

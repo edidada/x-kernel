@@ -1623,3 +1623,16 @@ fn cached_rejects_side_effects_before_touching_the_filesystem() {
     .unwrap_err();
     assert_eq!(err, VfsError::WouldBlock);
 }
+
+#[def_test]
+fn regular_constraint_reports_eftype_for_non_regular() {
+    let tree = test_tree();
+
+    let err = openat2_at(&tree.root, &tree.base, "/dir", crate::OPENAT2_REGULAR, 0)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::WrongFileType);
+
+    let file = openat2_at(&tree.root, &tree.base, "/target", crate::OPENAT2_REGULAR, 0).unwrap();
+    assert_eq!(file.node_type(), NodeType::RegularFile);
+}

@@ -124,6 +124,13 @@ fn read_open_how(how: UserConstPtr<u8>, size: usize) -> KResult<(u64, u64, u64)>
 }
 
 /// Opens a file relative to a directory fd with `openat2(2)` resolution.
+///
+/// # Execution context
+///
+/// Requires a current process thread: it reads the caller's credentials,
+/// filesystem context and fd table. It may sleep (pathname lookup, filesystem
+/// callbacks and fd allocation), so it must not be called from IRQ context or
+/// while holding a spinlock or IRQ-preemption guard.
 pub fn sys_openat2(
     dirfd: c_int,
     path: UserConstPtr<c_char>,
