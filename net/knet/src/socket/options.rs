@@ -146,10 +146,20 @@ define_options! {
     SendBufferForce(usize),
     PassCredentials(bool),
     PassSecurity(bool),
+    PassRights(bool),
+    Timestamp(bool),
+    TimestampNs(bool),
+    Timestamping(u32),
     PeerCredentials(PeerCredentials),
     /// `NETLINK_CAP_ACK`: omit the original request payload from error
     /// acknowledgements and mark them `NLM_F_CAPPED`.
     NetlinkCapAck(bool),
+    /// `NETLINK_EXT_ACK`: request extended ACK error reporting. Tracked only.
+    NetlinkExtAck(bool),
+    /// `NETLINK_GET_STRICT_CHK`: strict dump checking. Tracked only.
+    NetlinkGetStrictChk(bool),
+    /// `NETLINK_PKTINFO`: receive packet info ancillary data. Tracked only.
+    NetlinkPktinfo(bool),
 
     // ---- TCP options ----
     NoDelay(bool),

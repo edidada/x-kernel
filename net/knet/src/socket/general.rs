@@ -32,6 +32,19 @@ pub(crate) struct GeneralOptions {
     /// Whether received messages include the peer's security label (SO_PASSSEC).
     /// No LSM is modeled, so the flag is tracked but no label is ever attached.
     pass_security: AtomicBool,
+    /// Whether received messages may carry SCM_RIGHTS file descriptors
+    /// (SO_PASSRIGHTS). Tracked for compatibility; rights delivery is unchanged.
+    pass_rights: AtomicBool,
+    /// SO_TIMESTAMP / SO_TIMESTAMPNS enablement. The flag is tracked; receive
+    /// timestamping ancillary data is not synthesized.
+    timestamp: AtomicBool,
+    timestampns: AtomicBool,
+    /// SO_TIMESTAMPING flags; tracked, no hardware/software timestamp generation.
+    timestamping: AtomicI32,
+    /// Netlink reporting/behavior toggles; tracked for compatibility only.
+    netlink_ext_ack: AtomicBool,
+    netlink_get_strict_chk: AtomicBool,
+    netlink_pktinfo: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
@@ -61,6 +74,13 @@ impl GeneralOptions {
             broadcast: AtomicBool::new(false),
             pass_credentials: AtomicBool::new(false),
             pass_security: AtomicBool::new(false),
+            pass_rights: AtomicBool::new(false),
+            timestamp: AtomicBool::new(false),
+            timestampns: AtomicBool::new(false),
+            timestamping: AtomicI32::new(0),
+            netlink_ext_ack: AtomicBool::new(false),
+            netlink_get_strict_chk: AtomicBool::new(false),
+            netlink_pktinfo: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
@@ -244,6 +264,27 @@ impl Configurable for GeneralOptions {
             O::PassSecurity(enabled) => {
                 **enabled = self.pass_security.load(Ordering::Relaxed);
             }
+            O::PassRights(enabled) => {
+                **enabled = self.pass_rights.load(Ordering::Relaxed);
+            }
+            O::Timestamp(enabled) => {
+                **enabled = self.timestamp.load(Ordering::Relaxed);
+            }
+            O::TimestampNs(enabled) => {
+                **enabled = self.timestampns.load(Ordering::Relaxed);
+            }
+            O::Timestamping(flags) => {
+                **flags = self.timestamping.load(Ordering::Relaxed) as u32;
+            }
+            O::NetlinkExtAck(enabled) => {
+                **enabled = self.netlink_ext_ack.load(Ordering::Relaxed);
+            }
+            O::NetlinkGetStrictChk(enabled) => {
+                **enabled = self.netlink_get_strict_chk.load(Ordering::Relaxed);
+            }
+            O::NetlinkPktinfo(enabled) => {
+                **enabled = self.netlink_pktinfo.load(Ordering::Relaxed);
+            }
             O::SendBuffer(size) => {
                 **size = self.send_buffer_bytes.load(Ordering::Relaxed) as usize;
             }
@@ -292,6 +333,28 @@ impl Configurable for GeneralOptions {
             }
             O::PassSecurity(enabled) => {
                 self.pass_security.store(*enabled, Ordering::Relaxed);
+            }
+            O::PassRights(enabled) => {
+                self.pass_rights.store(*enabled, Ordering::Relaxed);
+            }
+            O::Timestamp(enabled) => {
+                self.timestamp.store(*enabled, Ordering::Relaxed);
+            }
+            O::TimestampNs(enabled) => {
+                self.timestampns.store(*enabled, Ordering::Relaxed);
+            }
+            O::Timestamping(flags) => {
+                self.timestamping.store(*flags as i32, Ordering::Relaxed);
+            }
+            O::NetlinkExtAck(enabled) => {
+                self.netlink_ext_ack.store(*enabled, Ordering::Relaxed);
+            }
+            O::NetlinkGetStrictChk(enabled) => {
+                self.netlink_get_strict_chk
+                    .store(*enabled, Ordering::Relaxed);
+            }
+            O::NetlinkPktinfo(enabled) => {
+                self.netlink_pktinfo.store(*enabled, Ordering::Relaxed);
             }
             O::BindToDevice(name) => {
                 let ifindex = match name {

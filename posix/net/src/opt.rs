@@ -35,6 +35,11 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
 /// `NETLINK_CAP_ACK` is not exposed by `linux_raw_sys` on every target.
 const NETLINK_CAP_ACK: u32 = 10;
+/// Netlink options not exposed by `linux_raw_sys` on every target.
+const NETLINK_PKTINFO: u32 = 3;
+const NETLINK_LIST_MEMBERSHIPS: u32 = 9;
+const NETLINK_EXT_ACK: u32 = 11;
+const NETLINK_GET_STRICT_CHK: u32 = 12;
 
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
@@ -265,8 +270,18 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
             (SOL_SOCKET, SO_PASSSEC) => PassSecurity as IntBool,
+            (SOL_SOCKET, SO_PASSRIGHTS) => PassRights as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMP) => Timestamp as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMP_NEW) => Timestamp as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPNS) => TimestampNs as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPNS_NEW) => TimestampNs as IntBool,
+            (SOL_SOCKET, SO_TIMESTAMPING) => Timestamping as Int<u32>,
+            (SOL_SOCKET, SO_TIMESTAMPING_NEW) => Timestamping as Int<u32>,
 
             (SOL_NETLINK, NETLINK_CAP_ACK) => NetlinkCapAck as IntBool,
+            (SOL_NETLINK, NETLINK_EXT_ACK) => NetlinkExtAck as IntBool,
+            (SOL_NETLINK, NETLINK_GET_STRICT_CHK) => NetlinkGetStrictChk as IntBool,
+            (SOL_NETLINK, NETLINK_PKTINFO) => NetlinkPktinfo as IntBool,
 
             (PROTO_TCP, TCP_NODELAY) => NoDelay as IntBool,
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
@@ -464,6 +479,11 @@ pub fn sys_getsockopt(
             osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &buf)?;
         }
         optlen = buf.len() as socklen_t;
+    } else if level == SOL_NETLINK && optname == NETLINK_LIST_MEMBERSHIPS {
+        // Per-socket multicast membership lists are not tracked; report an empty
+        // set so callers probing the option (systemd-resolved) do not see
+        // ENOPROTOOPT. The bound group mask remains available via getsockname.
+        optlen = 0;
     } else {
         call_dispatch!(dispatch, (level, optname));
     }
