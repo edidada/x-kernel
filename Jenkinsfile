@@ -52,7 +52,6 @@ pipeline {
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VARIANT = 'xkernel-glibc'
         ROOTFS_RELEASE_TAG = 'latest'
-        HARNESS_ROOTFS_DIR = '/xkernel-target/rootfs-harness'
         HARNESS_JOBS = '2'
         STARRY_ACCEL = 'n'
     }
@@ -217,7 +216,7 @@ def ciArchOutputStashName(String arch) {
 }
 
 def withCiRootWs(String rootWs, Closure body) {
-    withEnv(["ROOT_WS=${rootWs}"]) {
+    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${rootWs}/.ci/rootfs-harness"]) {
         body.call()
     }
 }
