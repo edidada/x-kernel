@@ -25,7 +25,7 @@ pub fn sock_alloc_file(socket: Socket, flags: u32, cred: Arc<Cred>) -> KResult<A
     let flags = OpenFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     let socket = Arc::new(socket);
     let name = format!("socket:[{}]", socket.as_ref() as *const _ as usize);
-    AnonInodeFs::global().get_file(
+    AnonInodeFs::global().get_socket_file(
         &name,
         Arc::new(SocketFileOps),
         socket,
