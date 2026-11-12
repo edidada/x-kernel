@@ -9,4 +9,5 @@ pub(crate) mod fragment;
 pub(crate) mod interface_address;
 pub(crate) mod ipv4;
 pub(crate) mod output;
+pub(crate) mod output_route;
 pub(crate) mod router;

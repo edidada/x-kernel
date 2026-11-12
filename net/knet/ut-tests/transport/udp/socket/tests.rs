@@ -135,8 +135,8 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
         device::{DeviceRegistry, LoopbackDevice},
         network::{
             interface_address::Ipv4AddrEntry,
-            output::Ipv4Output,
-            router::{ROUTE_SCOPE_HOST, RouteTable},
+            output::{Ipv4Output, Ipv4OutputResources},
+            router::{ROUTE_SCOPE_LINK, RouteTable},
         },
         runtime::tx_queue::DataTxQueue,
     };
@@ -157,7 +157,7 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
             dev,
             Ipv4AddrEntry {
                 addr: crate::ip::Ipv4Cidr::new(src_addr, 24).unwrap(),
-                scope: ROUTE_SCOPE_HOST,
+                scope: ROUTE_SCOPE_LINK,
                 broadcast: None,
                 no_prefix_route: false,
                 label: None,
@@ -173,14 +173,22 @@ fn udp_datagram_fills_only_transport_bytes_before_ipv4_submission() {
     let options = Ipv4SendOptions {
         bound_src: None,
         dst_addr,
-        oif: dev.ifindex(),
+        oif: Some(dev),
         allow_broadcast: true,
         protocol: ipv4::PROTOCOL_UDP,
         ttl: 37,
         fragmentation: Ipv4FragmentationPolicy::PreferDontFragment,
     };
     let mut send = output
-        .prepare(&routes, &mut devices, &mut queue, options, builder)
+        .prepare(
+            Ipv4OutputResources {
+                routes: &routes,
+                devices: &mut devices,
+                tx_queue: &mut queue,
+            },
+            options,
+            builder,
+        )
         .unwrap();
     let source = send.source_addr();
     let destination = send.destination_addr();

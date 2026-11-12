@@ -161,7 +161,11 @@ net/knet/
     │   │   ├── mod.rs
     │   │   └── process.rs
     │   ├── interface_address.rs
-    │   ├── output.rs
+    │   ├── output/
+    │   │   ├── mod.rs
+    │   │   ├── send.rs
+    │   │   └── xmit.rs
+    │   ├── output_route.rs
     │   ├── fragment.rs
     │   ├── mod.rs
     │   └── router.rs
@@ -331,7 +335,9 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
 | DeviceRegistry | Owns registered interfaces and address configuration, validates mutations, and synchronizes device address projections and aggregate MTU. |
 | Router | Owns routing and device state and schedules RX/TX queues; lends routes, devices, and the data queue to `Ipv4Output` under its mutex. |
-| Ipv4Output | Owns IPv4 send transactions, IPv4 header and DF construction, capacity preflight, datagram identification, and queued device dispatch, including limited-broadcast fan-out and immediate loopback submission. |
+| Ipv4Output (`network/output/send.rs`) | Owns IPv4 send transactions: permission, source, size and capacity decisions during preparation, then IPv4 header and DF construction, datagram identification, and fragmentation at submission. |
+| IPv4 transmit (`network/output/xmit.rs`) | Hands finished datagrams to devices: queued dispatch that re-resolves routing, limited-broadcast fan-out, and immediate loopback submission. |
+| Ipv4OutputLookup (`network/output_route.rs`) | The single read-only IPv4 output route lookup shared by UDP preparation, queued dispatch, source queries, and `RTM_GETROUTE`. |
 | StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -1346,7 +1352,7 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 
 ### TX Routing
 
-`Service::ipv4_output` supplies an `Ipv4OutputGuard` that keeps Router locked through preparation and submission. UDP allocates an `Ipv4PacketBuilder` and reads user data before acquiring this guard. Output preparation checks broadcast permission, selects the source and MTU, checks capacity, and returns a `PreparedIpv4Send` borrowing the configuration and queue. UDP fills only its own header and checksum using the selected addresses. Consuming the transaction with `submit` writes the IPv4 header and DF flag, then fragments and submits the packet. The guard is released before notifying or assisting the poller. TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+`Service::ipv4_output` supplies an `Ipv4OutputGuard` that keeps Router locked through preparation and submission. UDP allocates an `Ipv4PacketBuilder` and reads user data before acquiring this guard. Output preparation checks broadcast permission, selects the source and MTU, rejects a DF datagram larger than the MTU, checks capacity, and returns a `PreparedIpv4Send` borrowing the configuration and queue. UDP fills only its own header and checksum using the selected addresses. Consuming the transaction with `submit` writes the IPv4 header and DF flag, then fragments and submits the packet. The guard is released before notifying or assisting the poller. TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
 
 TCP connection setup and UDP connect/send resolve IPv4 endpoints through the
 same output lookup used by route queries. Its result carries the effective
@@ -1366,13 +1372,13 @@ wildcard bind addresses retain their listening meaning.
 |---:|:---|
 | 1 | **Procedure** `send_udp(payload, destination, bound_source, bound_interface)` |
 | 2 | &emsp;lock Router |
-| 3 | &emsp;check broadcast permission and select an active output route |
+| 3 | &emsp;check broadcast permission and select an active output route through the shared lookup |
 | 4 | &emsp;source = bound_source if set, otherwise route-selected source |
-| 5 | &emsp;**if** output device is not loopback: |
-| 6 | &emsp;&emsp;check data-queue capacity for the expected packet count |
+| 5 | &emsp;**if** DF applies and the datagram exceeds the route MTU: return `EMSGSIZE` before any capacity check |
+| 6 | &emsp;**if** output device is not loopback: check data-queue capacity for the expected packet count, or return `WouldBlock` |
 | 7 | &emsp;UDP fills its header and checksum using the prepared addresses |
 | 8 | &emsp;output submission writes the IPv4 header and chooses DF from the fragmentation policy and MTU |
-| 9 | &emsp;fragment oversized IPv4 output; return `EMSGSIZE` if DF forbids it |
+| 9 | &emsp;fragment oversized IPv4 output |
 | 10 | &emsp;**if** output device is loopback: |
 | 11 | &emsp;&emsp;dispatch fragments immediately |
 | 12 | &emsp;**else**: |
@@ -1401,7 +1407,7 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 `EthernetDevice` currently accepts IPv4 output only. It checks link state, source, and MTU, then sends limited and directed broadcasts to the Ethernet broadcast address. Other next hops use the ARP cache: a valid entry permits immediate transmission; an unresolved or expired entry triggers an ARP request when needed and retains the packet in bounded `pending_tx`. A full pending queue drops the packet. IPv6 remains available in the smoltcp and loopback paths, while the Ethernet adapter drops IPv6 output.
 
-Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Ipv4Output`](../src/network/output.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
+Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Ipv4Output`](../src/network/output/send.rs), [`IPv4 transmit`](../src/network/output/xmit.rs), [`Ipv4OutputLookup`](../src/network/output_route.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
 ### Unix Stream Control Data Delivery
 
@@ -1591,24 +1597,26 @@ RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms so
 
 TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP registers socket-local read/write wakers with smoltcp, while raw sockets use the shared protocol source for send notifications. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
-`Ipv4Output` separates preparation, submission, and queued dispatch. Preparation resolves the explicit or default source, output device, next hop, MTU, and link kind from `RouteTable` and `DeviceRegistry`. A `PreparedIpv4Send` owns the builder and borrows the output state, routes, devices, and data queue. These borrows prevent configuration changes or competing capacity consumption until the transaction is submitted or dropped. The runtime guard only provides synchronization and Router only lends its resources; neither implements IPv4 output policy.
+Output is split by ownership. `Ipv4OutputLookup` in `network/output_route.rs` is the only IPv4 output route lookup; it reads `RouteTable` and `DeviceRegistry` and is shared by preparation, queued dispatch, `RTM_GETROUTE`, and source queries, so they cannot choose different devices or sources. `network/output/send.rs` owns the transaction: preparation wraps the lookup with the output-device state, MTU, and link kind. `network/output/xmit.rs` owns device submission. A `PreparedIpv4Send` owns the builder and borrows the output state and an `Ipv4OutputResources` bundle of routes, devices, and data queue. These borrows prevent configuration changes or competing capacity consumption until the transaction is submitted or dropped. The runtime guard only provides synchronization and Router only lends its resources; neither implements IPv4 output policy.
 
-`OutputRoute` narrows the route table's generic source and next-hop addresses to `Ipv4Address` at resolution.
+`OutputRoute` projects the shared lookup result onto an existing, up output device with a resolved IPv4 source and next hop.
 `OutputTarget` retains an IPv4 next hop or selects limited-broadcast fan-out; `SubmissionTarget` selects queued or immediate submission.
-`Ipv4SendDecision` combines the final source, optional MTU, and submission strategy for the prepared transaction.
+`Ipv4SendDecision` combines the final source, optional MTU, DF decision, and submission strategy for the prepared transaction.
 
 An explicit source must still be configured on a local device when preparation runs.
 It can belong to a different device from the output route and bypasses automatic source selection, including when the output device has no eligible default source.
 Without an explicit source, an unavailable default source returns `ENETUNREACH`; limited broadcasts bound to an unaddressed device retain the `0.0.0.0` exception.
 Dispatch rechecks source ownership because addresses can change after queued submission.
 
-`Ipv4PacketBuilder` reserves the IPv4 header and exposes only transport bytes. Preparation errors return the unchanged builder for retry. After UDP fills its header and checksum, `submit` consumes the transaction, applies the IPv4 fragmentation policy, writes the IP header, and fragments before atomically queuing the packet group. Dropping an unsubmitted transaction releases its buffer and borrows without occupying queue slots or advancing the identification sequence. Submission consumes the buffer even on terminal fragmentation errors. An unfragmented queued datagram retains its original byte allocation.
+A DF datagram larger than the MTU, and an MTU too small to fragment, return `EMSGSIZE` during preparation before the capacity check, so a full queue cannot turn a permanent size error into a wait. The DF decision is stored on the prepared transaction, so `submit` makes no further decisions that can fail for a retryable reason; a failed capacity reservation at that point is an invariant violation reported as `ENOBUFS`, never `WouldBlock`.
+
+`Ipv4PacketBuilder` reserves the IPv4 header and exposes only transport bytes. Preparation errors return the unchanged builder for retry. After UDP fills its header and checksum, `submit` consumes the transaction, applies the IPv4 fragmentation policy, writes the IP header, and fragments before atomically queuing the packet group. Dropping an unsubmitted transaction releases its buffer and borrows without occupying queue slots or advancing the identification sequence. Submission consumes the buffer. An unfragmented queued datagram retains its original byte allocation.
 
 Submission assigns an identification to every datagram with DF clear, including datagrams that fit the selected MTU or have no selected MTU.
 This covers downstream fragmentation as required by RFC 6864 §4.3; all locally generated fragments retain the datagram's assigned identification.
-Atomic datagrams use identification zero and do not consume the sequence, including oversized DF datagrams rejected at submission.
+Atomic datagrams use identification zero and do not consume the sequence, including oversized DF datagrams rejected at preparation.
 
-The Router guard spans resolution through submission: synchronous loopback output reuses an explicit selected target, while queued packets retain the socket's interface constraint and resolve the route again in `dispatch_queued`. Limited broadcast uses a distinct target with its existing bound-device or multi-device path and route-based optional MTU. The dispatch outcome reports resulting RX work, not device transmit success. The data queue still stores individual `PacketBuf` packets/fragments and retains the smoltcp byte-buffer normalization boundary.
+The Router guard spans resolution through submission: synchronous loopback output reuses an explicit selected target, while queued packets retain the socket's interface constraint and resolve the route again in `dispatch_queued` through the same lookup, which searches only routes on the bound interface, as preparation did. Limited broadcast uses a distinct target with its existing bound-device or multi-device path and route-based optional MTU. The dispatch outcome reports resulting RX work, not device transmit success. The data queue still stores individual `PacketBuf` packets/fragments and retains the smoltcp byte-buffer normalization boundary.
 
 ### Socket File I/O
 

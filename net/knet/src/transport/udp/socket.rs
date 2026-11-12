@@ -20,6 +20,7 @@ use crate::{
     AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags,
     SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
+    device::NetDeviceId,
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     network::output::{Ipv4FragmentationPolicy, Ipv4PacketBuilder, Ipv4SendOptions},
@@ -171,11 +172,6 @@ impl UdpSocket {
         };
         validate_remote_endpoint(remote_endpoint)?;
         let allow_broadcast = self.state().broadcast();
-        if matches!(&remote_endpoint.addr, IpAddress::Ipv4(addr) if addr.is_broadcast())
-            && !allow_broadcast
-        {
-            return Err(KError::from(LinuxError::EACCES));
-        }
 
         if self.state().local_endpoint().is_none() {
             self.bind_ephemeral()?;
@@ -198,7 +194,7 @@ impl UdpSocket {
                 let options = Ipv4SendOptions {
                     bound_src: (!local_addr.is_unspecified()).then_some(local_addr),
                     dst_addr,
-                    oif: self.state().bound_dev_if(),
+                    oif: NetDeviceId::new(self.state().bound_dev_if()),
                     allow_broadcast,
                     protocol: ipv4::PROTOCOL_UDP,
                     ttl: *self.pcb.ttl.read(),

@@ -35,10 +35,11 @@ use crate::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::Ipv4AddrSnapshot,
         output::{Ipv4PacketBuilder, Ipv4SendOptions, PreparedIpv4Send},
+        output_route::Ipv4OutputRoute,
         router::Rule,
     },
     poller::{PollBudget, PollProgress},
-    router::{Ipv4OutputRoute, NeighborUpdatePolicy, Router},
+    router::{NeighborUpdatePolicy, Router},
     stack::{
         device::StackDevice,
         ingress::{IngressProcessor, prepare_smoltcp_ingress},

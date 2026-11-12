@@ -5574,7 +5574,7 @@ fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
     );
     assert_eq!(
         router.output_route_source(&destination, eth0.ifindex()),
-        Err(LinuxError::ENETUNREACH.into())
+        Err(LinuxError::ENODEV.into())
     );
 
     let eth2 = router.add_device(kalloc_types::KBox::new(ethernet("eth2", 4)).unwrap()).unwrap();

@@ -727,18 +727,9 @@ fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
         )
         .unwrap();
 
-    assert!(output::requires_broadcast(
-        &router.devices,
-        &IpAddress::Ipv4(Ipv4Address::BROADCAST)
-    ));
-    assert!(output::requires_broadcast(
-        &router.devices,
-        &IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255))
-    ));
-    assert!(!output::requires_broadcast(
-        &router.devices,
-        &IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 8))
-    ));
+    assert!(output::requires_broadcast(&router.devices, Ipv4Address::BROADCAST));
+    assert!(output::requires_broadcast(&router.devices, Ipv4Address::new(192, 0, 2, 255)));
+    assert!(!output::requires_broadcast(&router.devices, Ipv4Address::new(192, 0, 2, 8)));
 }
 
 #[def_test]
@@ -1035,9 +1026,9 @@ fn recording_output_router() -> (Router, NetDeviceId, TxLog) {
 #[def_test]
 fn output_route_uses_selected_device_and_validates_binding() {
     let (mut router, dev) = output_test_router();
-    let dst = Ipv4Address::new(203, 0, 113, 1).into();
+    let dst = Ipv4Address::new(203, 0, 113, 1);
     assert_eq!(
-        router.resolve_output_route(&dst, 0).err(),
+        output_route::resolve_output_route(&router.table, &router.devices, dst, None, None).err(),
         Some(LinuxError::ENETUNREACH.into())
     );
     let mut loopback = LoopbackDevice::new();
@@ -1055,27 +1046,48 @@ fn output_route_uses_selected_device_and_validates_binding() {
             source,
         ))
         .unwrap();
-    let route = router.resolve_output_route(&dst, dev.ifindex()).unwrap();
+    let route =
+        output_route::resolve_output_route(&router.table, &router.devices, dst, Some(dev), None)
+            .unwrap();
     assert_eq!(route.dev, dev);
     assert_eq!(IpAddress::Ipv4(route.source), source);
     assert_eq!(IpAddress::Ipv4(route.next_hop), gateway);
     assert_eq!(route.mtu, 100);
     assert_eq!(route.link_kind, LinkKind::Ethernet);
     assert_eq!(router.devices.effective_mtu(), 68);
-    assert!(router.resolve_output_route(&dst, lo.ifindex()).is_err());
+    let fallback =
+        output_route::resolve_output_route(&router.table, &router.devices, dst, Some(lo), None)
+            .unwrap();
+    assert_eq!(fallback.dev, lo);
+    assert_eq!(fallback.next_hop, dst);
+    assert_eq!(fallback.mtu, 68);
+    assert_eq!(
+        output_route::resolve_output_route(
+            &router.table,
+            &router.devices,
+            dst,
+            NetDeviceId::new(i32::MAX),
+            None,
+        )
+        .err(),
+        Some(LinuxError::ENODEV.into())
+    );
     router
         .devices
         .get_mut_by_id(dev)
         .unwrap()
         .set_link_up(false);
-    assert!(router.resolve_output_route(&dst, 0).is_err());
+    assert!(
+        output_route::resolve_output_route(&router.table, &router.devices, dst, None, None)
+            .is_err()
+    );
 }
 
 fn output_options(dst_addr: Ipv4Address) -> Ipv4SendOptions {
     Ipv4SendOptions {
         bound_src: None,
         dst_addr,
-        oif: 0,
+        oif: None,
         allow_broadcast: false,
         protocol: ipv4::PROTOCOL_UDP,
         ttl: 37,
@@ -1089,7 +1101,7 @@ fn output_preparation_rejects_nonlocal_sources_without_consuming_packet_or_capac
         let (mut router, dev) = output_test_router();
         let mut options = output_options(dst);
         options.allow_broadcast = true;
-        options.oif = dev.ifindex();
+        options.oif = Some(dev);
         options.bound_src = Some(Ipv4Address::new(198, 51, 100, 1));
         let available = router.available_tx_packet_slots();
         let mut packet = Ipv4PacketBuilder::new(8).unwrap();
@@ -1113,7 +1125,7 @@ fn output_preparation_rejects_nonlocal_sources_without_consuming_packet_or_capac
 }
 
 #[def_test]
-fn bound_output_source_does_not_require_an_automatic_source_on_the_route() {
+fn output_source_falls_back_across_devices_and_honors_explicit_sources() {
     let (mut router, dev, tx_log) = recording_output_router();
     let mut entry = router.first_ipv4_entry(dev).unwrap();
     router.remove_ipv4_addr(dev, entry.addr);
@@ -1138,12 +1150,12 @@ fn bound_output_source_does_not_require_an_automatic_source_on_the_route() {
         ))
         .unwrap();
     let mut options = output_options(destination);
-    options.oif = dev.ifindex();
-    let (error, _) = router
+    options.oif = Some(dev);
+    let send = router
         .prepare_ipv4_send(options, Ipv4PacketBuilder::new(8).unwrap())
-        .err()
         .unwrap();
-    assert_eq!(error, LinuxError::ENETUNREACH.into());
+    assert_eq!(send.source_addr(), other_source);
+    drop(send);
     for source in [entry.addr.address(), other_source] {
         options.bound_src = Some(source);
         let send = router
@@ -1359,16 +1371,16 @@ fn limited_broadcast_with_bound_device_preserves_no_route_output() {
         );
         router.data_tx_queue = DataTxQueue::with_capacity(1);
         let mut options = output_options(Ipv4Address::BROADCAST);
-        options.oif = dev.ifindex();
+        options.oif = Some(dev);
         options.fragmentation = policy;
         let packet = Ipv4PacketBuilder::new(200).unwrap();
         let (error, packet) = router.prepare_ipv4_send(options, packet).err().unwrap();
         assert_eq!(error, LinuxError::EACCES.into());
         options.allow_broadcast = true;
-        options.oif = 0;
+        options.oif = None;
         let (error, packet) = router.prepare_ipv4_send(options, packet).err().unwrap();
         assert_eq!(error, LinuxError::ENETUNREACH.into());
-        options.oif = dev.ifindex();
+        options.oif = Some(dev);
         let send = router.prepare_ipv4_send(options, packet).unwrap();
         assert_eq!(send.source_addr(), Ipv4Address::UNSPECIFIED);
         send.submit().unwrap();
@@ -1405,23 +1417,26 @@ fn resolved_loopback_output_bypasses_full_tx_queue() {
     router.data_tx_queue = DataTxQueue::with_capacity(0);
     let service = crate::runtime::service::Service::new(router);
     assert!(!service.can_send_ip_packet());
-    {
-        let mut output = service.ipv4_output();
-        let mut options = output_options(addr);
-        options.oif = lo.ifindex();
-        options.protocol = ipv4::PROTOCOL_ICMP;
-        let send = output
-            .prepare(options, Ipv4PacketBuilder::new(0).unwrap())
-            .unwrap();
-        assert_eq!(send.source_addr(), addr);
-        send.submit().unwrap();
+    for destination in [addr, Ipv4Address::UNSPECIFIED] {
+        {
+            let mut output = service.ipv4_output();
+            let mut options = output_options(destination);
+            options.oif = Some(lo);
+            options.protocol = ipv4::PROTOCOL_ICMP;
+            let send = output
+                .prepare(options, Ipv4PacketBuilder::new(0).unwrap())
+                .unwrap();
+            assert_eq!(send.source_addr(), addr);
+            assert_eq!(send.destination_addr(), addr);
+            send.submit().unwrap();
+        }
+        let progress = service.poll_budgeted(crate::poller::PollBudget {
+            rx_packets: 1,
+            tx_packets: 1,
+            timer_events: 1,
+        });
+        assert_eq!(progress.rx_packets, 1);
     }
-    let progress = service.poll_budgeted(crate::poller::PollBudget {
-        rx_packets: 1,
-        tx_packets: 1,
-        timer_events: 1,
-    });
-    assert_eq!(progress.rx_packets, 1);
 }
 
 fn add_recording_output_device(router: &mut Router, tx_log: &TxLog) -> NetDeviceId {
@@ -1458,7 +1473,7 @@ fn queued_output_rechecks_routing_under_binding_without_reselecting_source() {
         let dst = Ipv4Address::new(192, 0, 2, 8);
         let mut options = output_options(dst);
         if is_bound {
-            options.oif = first_dev.ifindex();
+            options.oif = Some(first_dev);
         }
         router
             .prepare_ipv4_send(options, Ipv4PacketBuilder::new(8).unwrap())
@@ -1484,6 +1499,24 @@ fn queued_output_rechecks_routing_under_binding_without_reselecting_source() {
             // better route on another device into a drop.
             assert_eq!(sent[0].0, first_dev.ifindex());
             assert_eq!(sent[0].1, IpAddress::Ipv4(dst));
+            drop(sent);
+
+            // Once the bound device goes down, its route is no longer usable
+            // and the queued bound packet must not fall back to `second_dev`.
+            router
+                .prepare_ipv4_send(options, Ipv4PacketBuilder::new(8).unwrap())
+                .unwrap()
+                .submit()
+                .unwrap();
+            router
+                .devices
+                .get_mut_by_id(first_dev)
+                .unwrap()
+                .set_link_up(false);
+            tx_log.lock().clear();
+            let (count, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
+            assert_eq!(count, 1);
+            assert!(tx_log.lock().is_empty());
         } else {
             assert_eq!(sent[0].0, second_dev.ifindex());
             assert_eq!(sent[0].1, gateway);
@@ -1539,6 +1572,26 @@ fn queued_output_rejects_removed_source_and_missing_route_device() {
 }
 
 #[def_test]
+fn queued_unicast_rejects_an_unspecified_source() {
+    let (mut router, _, tx_log) = recording_output_router();
+    let mut packet = vec![0; 28];
+    ipv4::write_ipv4_packet_header(
+        &mut packet,
+        Ipv4Address::UNSPECIFIED,
+        Ipv4Address::new(192, 0, 2, 8),
+        ipv4::PROTOCOL_UDP,
+        64,
+        0,
+        false,
+    )
+    .unwrap();
+    router.queue_ipv4_packet(packet, 0, Some(100)).unwrap();
+    let (count, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
+    assert_eq!(count, 1);
+    assert!(tx_log.lock().is_empty());
+}
+
+#[def_test]
 fn queued_broadcast_fanout_obeys_binding() {
     for is_bound in [false, true] {
         let (mut router, first_dev, tx_log) = recording_output_router();
@@ -1554,7 +1607,7 @@ fn queued_broadcast_fanout_obeys_binding() {
         let mut options = output_options(Ipv4Address::BROADCAST);
         options.allow_broadcast = true;
         if is_bound {
-            options.oif = first_dev.ifindex();
+            options.oif = Some(first_dev);
         }
         router
             .prepare_ipv4_send(options, Ipv4PacketBuilder::new(8).unwrap())

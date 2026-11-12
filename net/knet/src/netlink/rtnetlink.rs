@@ -31,11 +31,11 @@ use crate::{
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::Ipv4AddrEntry,
+        output_route::Ipv4OutputRoute,
         router::{RouteAttrs as RouterRouteAttrs, Rule},
     },
     router::NeighborUpdatePolicy,
     service::ExistingIpv4AddrAction,
-    stack::router::Ipv4OutputRoute,
 };
 
 #[derive(Clone, Debug)]

@@ -12,8 +12,6 @@ use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
-#[cfg(unittest)]
-use crate::network::output::OutputRoute;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
@@ -27,11 +25,12 @@ use crate::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
         ipv4,
-        output::{self, Ipv4Output, Ipv4PacketBuilder, Ipv4SendOptions, PreparedIpv4Send},
-        router::{
-            ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TYPE_BROADCAST,
-            ROUTE_TYPE_LOCAL, ROUTE_TYPE_MULTICAST, ROUTE_TYPE_UNICAST, RouteTable, Rule,
+        output::{
+            self, Ipv4Output, Ipv4OutputResources, Ipv4PacketBuilder, Ipv4SendOptions,
+            PreparedIpv4Send,
         },
+        output_route::{self, Ipv4OutputLookup, Ipv4OutputRoute},
+        router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
     },
     runtime::tx_queue::DataTxQueue,
     stack::device::StackDevice,
@@ -49,33 +48,6 @@ pub(crate) struct NeighborUpdatePolicy {
     pub(crate) exclusive: bool,
     /// `NLM_F_REPLACE` allows changing a valid entry's link-layer address.
     pub(crate) can_override: bool,
-}
-
-/// Result of the output-route lookup performed for `RTM_GETROUTE`.
-///
-/// `fib_entry` is absent only for Linux's source-specified multicast
-/// shortcut, zero-destination loopback rewrite, and on-link synthesis.  The
-/// source shortcut bypasses the FIB; the other two paths start with an empty
-/// `fib_result`.  FIB hits keep their entry even when final output turns the
-/// route into a broadcast or multicast route, because `RTM_F_FIB_MATCH`
-/// reports the matched FIB entry rather than the constructed output type.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Ipv4OutputRoute {
-    /// Effective destination after resolving an unspecified target.
-    pub(crate) destination: Ipv4Address,
-    pub(crate) fib_entry: Option<Rule>,
-    pub(crate) table: u8,
-    pub(crate) route_type: u8,
-    pub(crate) oif: NetDeviceId,
-    pub(crate) source: Option<Ipv4Address>,
-    pub(crate) gateway: Option<Ipv4Address>,
-}
-
-fn ipv4_address(addr: IpAddress) -> Option<Ipv4Address> {
-    match addr {
-        IpAddress::Ipv4(addr) => Some(addr),
-        IpAddress::Ipv6(_) => None,
-    }
 }
 
 pub(crate) struct Router {
@@ -143,272 +115,34 @@ impl Router {
     ///
     /// # Errors
     ///
-    /// Returns `ENETUNREACH` when the route or its device is absent, when
-    /// the selected device is administratively down, or when `oif` disagrees
-    /// with the looked-up output device.
+    /// Returns `ENETUNREACH` when no output route or source is available or
+    /// the selected device is administratively down, and `ENODEV` when an
+    /// explicitly bound output interface is absent.
     pub(crate) fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
-        output::output_source_address(&self.table, &self.devices, dst, oif, None)
-            .map(IpAddress::Ipv4)
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn resolve_output_route(&self, dst: &IpAddress, oif: i32) -> KResult<OutputRoute> {
-        output::resolve_output_route(&self.table, &self.devices, dst, oif, None)
+        let IpAddress::Ipv4(dst) = *dst else {
+            return Err(LinuxError::EAFNOSUPPORT.into());
+        };
+        output_route::output_source_address(
+            &self.table,
+            &self.devices,
+            dst,
+            NetDeviceId::new(oif),
+            None,
+        )
+        .map(IpAddress::Ipv4)
     }
 
     /// Resolves the effective IPv4 destination, source, and output route.
     ///
-    /// This follows Linux's output lookup order: validate an explicit source,
-    /// apply the output-interface shortcuts, handle the zero-destination
-    /// loopback rewrite, and only then consult the routing table.  The lookup
-    /// itself has no `FLOWI_FLAG_ANYSRC`; an explicit source must be local.
-    ///
-    /// An explicit `oif` constrains the FIB lookup and, when no route matches,
-    /// synthesizes an on-link route exactly as `ip_route_output_key_hash_rcu`
-    /// does.  The project does not model policy rules, marks, UIDs, protocol
-    /// or port based routing, input routes, multipath, or metrics; those
-    /// selectors are accepted but do not change the matched route.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EINVAL` for a multicast, limited-broadcast, or zero-network
-    /// source, `ENETUNREACH` for a non-local source or an unreachable route,
-    /// and `ENODEV` when an explicit output interface does not exist.
+    /// Delegates to [`Ipv4OutputLookup::lookup`]; see that method for the
+    /// lookup order and error contract.
     pub(crate) fn lookup_ipv4_output(
         &self,
         dst: Ipv4Address,
         src: Option<Ipv4Address>,
         oif: Option<NetDeviceId>,
     ) -> KResult<Ipv4OutputRoute> {
-        let requested = src.filter(|src| !src.is_unspecified());
-        if let Some(src) = requested {
-            if src.is_multicast() || src.is_broadcast() || src.is_zeronet() {
-                return Err(LinuxError::EINVAL.into());
-            }
-            if self.ipv4_address_owner(src).is_none() {
-                return Err(LinuxError::ENETUNREACH.into());
-            }
-        }
-
-        let output_oif = oif;
-        if let Some(id) = output_oif {
-            let device = self.devices.get_by_id(id).ok_or(LinuxError::ENODEV)?;
-            if !device.is_link_up() || self.devices.ipv4(id).is_none() {
-                return Err(LinuxError::ENETUNREACH.into());
-            }
-        }
-
-        if let Some(route) = self.ipv4_output_shortcut(dst, requested, output_oif)? {
-            return self.finish_output_route(route, dst);
-        }
-
-        // Linux preselects an output-interface source only for the zero
-        // destination (host scope) and multicast (universe scope).  Ordinary
-        // output routes leave `fl4.saddr` unset until `fib_select_path`, so a
-        // route's preferred source is not shadowed by a device-primary source.
-        let mut flow_source = requested;
-        if flow_source.is_none()
-            && let Some(output) = output_oif
-        {
-            if dst.is_unspecified() {
-                flow_source =
-                    self.select_ipv4_source(output, Ipv4Address::UNSPECIFIED, ROUTE_SCOPE_HOST);
-            } else if dst.is_multicast() {
-                flow_source =
-                    self.select_ipv4_source(output, Ipv4Address::UNSPECIFIED, ROUTE_SCOPE_UNIVERSE);
-            }
-        }
-
-        let zero_destination = dst.is_unspecified();
-        let lookup_dst = if zero_destination {
-            flow_source.unwrap_or(Ipv4Address::LOOPBACK)
-        } else {
-            dst
-        };
-
-        let rule = self
-            .table
-            .lookup_for_output(&IpAddress::Ipv4(lookup_dst), output_oif);
-
-        let route = if zero_destination {
-            Ipv4OutputRoute {
-                destination: lookup_dst,
-                fib_entry: None,
-                table: 0,
-                route_type: ROUTE_TYPE_LOCAL,
-                oif: NetDeviceId::LOOPBACK,
-                source: flow_source.or(Some(lookup_dst)),
-                gateway: None,
-            }
-        } else if let Some(rule) = rule {
-            self.output_route_from_fib(*rule, dst, flow_source)
-        } else if let Some(output) = output_oif {
-            Ipv4OutputRoute {
-                destination: dst,
-                fib_entry: None,
-                table: 0,
-                route_type: ROUTE_TYPE_UNICAST,
-                oif: output,
-                source: flow_source.or_else(|| {
-                    self.select_ipv4_source(output, Ipv4Address::UNSPECIFIED, ROUTE_SCOPE_LINK)
-                }),
-                gateway: None,
-            }
-        } else {
-            return Err(LinuxError::ENETUNREACH.into());
-        };
-
-        self.finish_output_route(route, dst)
-    }
-
-    /// Applies the two output lookups that Linux resolves without consulting
-    /// the FIB: an explicit multicast/broadcast source selects the owning
-    /// device, and an explicit output interface selects a local multicast or
-    /// limited-broadcast route.  IGMP is unreachable because this lookup has
-    /// no protocol selector.
-    fn ipv4_output_shortcut(
-        &self,
-        dst: Ipv4Address,
-        requested: Option<Ipv4Address>,
-        output_oif: Option<NetDeviceId>,
-    ) -> KResult<Option<Ipv4OutputRoute>> {
-        if output_oif.is_none()
-            && (dst.is_multicast() || dst.is_broadcast())
-            && let Some(source) = requested
-        {
-            let output = self
-                .ipv4_address_owner(source)
-                .ok_or(LinuxError::ENETUNREACH)?;
-            return Ok(Some(Ipv4OutputRoute {
-                destination: dst,
-                fib_entry: None,
-                table: 0,
-                route_type: 0,
-                oif: output,
-                source: Some(source),
-                gateway: None,
-            }));
-        }
-
-        if let Some(output) = output_oif
-            && (dst.is_local_multicast() || dst.is_broadcast())
-        {
-            let source = requested
-                .or_else(|| {
-                    self.select_ipv4_source(output, Ipv4Address::UNSPECIFIED, ROUTE_SCOPE_LINK)
-                })
-                .unwrap_or(Ipv4Address::UNSPECIFIED);
-            return Ok(Some(Ipv4OutputRoute {
-                destination: dst,
-                fib_entry: None,
-                table: 0,
-                route_type: 0,
-                oif: output,
-                source: Some(source),
-                gateway: None,
-            }));
-        }
-
-        Ok(None)
-    }
-
-    /// Builds the output route for a matched FIB rule.  A local rule is served
-    /// by the loopback device; other rules select their configured preferred
-    /// source before falling back to address selection.
-    fn output_route_from_fib(
-        &self,
-        rule: Rule,
-        dst: Ipv4Address,
-        flow_source: Option<Ipv4Address>,
-    ) -> Ipv4OutputRoute {
-        let (table, route_type, _) = rule.notification_route();
-        let mut output_oif = rule.lookup_device();
-        let mut selected_source = flow_source;
-        if route_type == ROUTE_TYPE_LOCAL {
-            if selected_source.is_none() {
-                selected_source = rule.preferred_source().and_then(ipv4_address).or(Some(dst));
-            }
-            output_oif = NetDeviceId::LOOPBACK;
-        } else if selected_source.is_none() {
-            selected_source = rule.preferred_source().and_then(ipv4_address).or_else(|| {
-                self.select_ipv4_source(
-                    output_oif,
-                    rule.via
-                        .and_then(ipv4_address)
-                        .unwrap_or(Ipv4Address::UNSPECIFIED),
-                    rule.scope,
-                )
-            });
-        }
-        Ipv4OutputRoute {
-            destination: dst,
-            fib_entry: Some(rule),
-            table,
-            route_type,
-            oif: output_oif,
-            source: selected_source,
-            gateway: if route_type == ROUTE_TYPE_LOCAL {
-                None
-            } else {
-                rule.via.and_then(ipv4_address)
-            },
-        }
-    }
-
-    fn finish_output_route(
-        &self,
-        mut route: Ipv4OutputRoute,
-        requested_dst: Ipv4Address,
-    ) -> KResult<Ipv4OutputRoute> {
-        if let Some(source) = route.source
-            && source.is_loopback()
-            && route.oif != NetDeviceId::LOOPBACK
-        {
-            return Err(LinuxError::EINVAL.into());
-        }
-        if requested_dst.is_multicast() {
-            route.route_type = ROUTE_TYPE_MULTICAST;
-            // `__mkroute_output` drops a multicast FIB result shorter than
-            // the IPv4 multicast prefix, so the packet goes out on the link
-            // without a gateway.  The FIB entry itself survives for
-            // `RTM_F_FIB_MATCH` replies.
-            if route
-                .fib_entry
-                .is_some_and(|fib| fib.filter.prefix_len() < 4)
-            {
-                route.gateway = None;
-            }
-        } else if requested_dst.is_broadcast() {
-            route.route_type = ROUTE_TYPE_BROADCAST;
-            // Linux unconditionally clears `fi` for limited broadcast.
-            route.gateway = None;
-        }
-        Ok(route)
-    }
-
-    fn ipv4_address_owner(&self, addr: Ipv4Address) -> Option<NetDeviceId> {
-        self.devices
-            .iter_ipv4_addrs()
-            .find(|(_, entry)| entry.addr.address() == addr)
-            .map(|(dev, _)| dev)
-    }
-
-    fn select_ipv4_source(
-        &self,
-        dev: NetDeviceId,
-        next_hop: Ipv4Address,
-        scope: u8,
-    ) -> Option<Ipv4Address> {
-        self.devices
-            .ipv4(dev)
-            .and_then(|addrs| addrs.select_source(&IpAddress::Ipv4(next_hop), scope))
-            .or_else(|| {
-                // Linux continues through every device in `dev_base` order
-                // when the output device has no eligible primary address.
-                self.devices
-                    .iter_ipv4_addrs()
-                    .find_map(|(dev, _)| self.devices.ipv4(dev)?.select_fallback_source(scope))
-            })
+        Ipv4OutputLookup::new(&self.table, &self.devices).lookup(dst, src, oif)
     }
 
     pub(crate) fn can_enqueue_tx_packet(&self) -> bool {
@@ -437,9 +171,11 @@ impl Router {
         packet: Ipv4PacketBuilder,
     ) -> Result<PreparedIpv4Send<'_>, (KError, Ipv4PacketBuilder)> {
         self.ipv4_output.prepare(
-            &self.table,
-            &mut self.devices,
-            &mut self.data_tx_queue,
+            Ipv4OutputResources {
+                routes: &self.table,
+                devices: &mut self.devices,
+                tx_queue: &mut self.data_tx_queue,
+            },
             options,
             packet,
         )
@@ -452,7 +188,16 @@ impl Router {
         oif: i32,
         mtu: Option<usize>,
     ) -> KResult {
-        Ipv4Output::queue_packet(&mut self.data_tx_queue, packet, oif, mtu)
+        let identification = ipv4::Ipv4Header::parse_header_only(&packet)
+            .map_err(|_| KError::InvalidInput)?
+            .identification();
+        output::queue_packet(
+            &mut self.data_tx_queue,
+            packet,
+            NetDeviceId::new(oif),
+            mtu,
+            identification,
+        )
     }
 
     pub(crate) fn add_device(
@@ -1072,13 +817,9 @@ impl Router {
             };
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
-                    poll_next |= Ipv4Output::dispatch_queued(
-                        &self.table,
-                        &mut self.devices,
-                        packet,
-                        timestamp,
-                    )
-                    .has_rx_work;
+                    poll_next |=
+                        output::dispatch_queued(&self.table, &mut self.devices, packet, timestamp)
+                            .has_rx_work;
                 }
                 Some(6) => {
                     let (src_addr, dst_addr, is_multicast) = {
