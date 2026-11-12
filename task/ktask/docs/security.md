@@ -943,3 +943,14 @@ no IRQ reader or raw pointer is added. It introduces no new unsafe code or
 Send/Sync implementation. The prepared handle retains its task and remains
 neither Send nor Sync. Ordinary waker hints survive confirmed freezing, while
 request cancellation never independently releases a successfully returned guard.
+
+## Reset-aware CPU callback lifetime
+
+Stop callbacks cannot borrow stack metadata that their caller may reclaim.
+ParkedCpus boxes state before queueing and joins every queued callback even on
+preparation timeout. A CPU that stops servicing Stop work can therefore prevent
+rollback: timeout is not proof of safe storage reclamation. CPU topology must
+remain stable. Hardware-reset context preservation remains a separate platform obligation;
+this spin-only rendezvous cannot authorize firmware sleep. Local scheduling is enabled only with fixed owner affinity.
+Infrastructure tags are assigned before task publication by audited constructors;
+freezer-aware futures must not retain a device/lock needed by PM while Pending.

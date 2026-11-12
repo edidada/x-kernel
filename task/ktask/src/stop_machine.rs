@@ -10,6 +10,7 @@
 
 use alloc::format;
 use core::{
+    cell::UnsafeCell,
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
@@ -71,7 +72,9 @@ struct CpuStopDone {
 /// released this slot; [`stop_one_cpu_nowait`] callers must keep `work` pinned
 /// until the callback has returned.
 pub struct CpuStopWork {
-    next: *mut CpuStopWork,
+    // The submitter may observe queued through &Self while the pending-list
+    // owner updates this link; only the link needs interior mutability.
+    next: UnsafeCell<*mut CpuStopWork>,
     callback: fn(*mut ()),
     arg: *mut (),
     done: *mut CpuStopDone,
@@ -85,15 +88,23 @@ pub struct CpuStopWork {
 // raw pointers are never dereferenced except by the stopper that drained
 // them, or to link the list under that lock.
 unsafe impl Send for CpuStopWork {}
-// SAFETY: same as `Send`: concurrent access is only through the per-CPU
-// pending lock or the exclusive `queued` CAS that claims the slot.
+// SAFETY: the pending lock (or detached consumer) exclusively mutates the
+// UnsafeCell link. Callback metadata is immutable while queued; only the
+// independent completion atomic is observed concurrently by the submitter.
 unsafe impl Sync for CpuStopWork {}
 
 impl CpuStopWork {
+    /// Whether the stopper still owns this pinned slot.
+    /// An Acquire observation of false after enqueue confirms the callback and
+    /// all stopper accesses are finished; the caller may then reclaim storage.
+    pub fn is_queued(&self) -> bool {
+        self.queued.load(Ordering::Acquire)
+    }
+
     /// Empty work slot, for per-CPU storage filled in before each nowait.
     pub const fn empty() -> Self {
         Self {
-            next: core::ptr::null_mut(),
+            next: UnsafeCell::new(core::ptr::null_mut()),
             callback: nop_stop_fn,
             arg: core::ptr::null_mut(),
             done: core::ptr::null_mut(),
@@ -104,7 +115,7 @@ impl CpuStopWork {
     /// Build a work item that runs `callback(arg)` on the target CPU.
     pub const fn new(callback: fn(*mut ()), arg: *mut ()) -> Self {
         Self {
-            next: core::ptr::null_mut(),
+            next: UnsafeCell::new(core::ptr::null_mut()),
             callback,
             arg,
             done: core::ptr::null_mut(),
@@ -154,16 +165,16 @@ impl CpuStopper {
             let mut pending = self.pending.lock();
             // SAFETY: `work` is exclusive to this queue until the stopper
             // runs it; `next` is only written under `pending`.
-            unsafe {
-                (*ptr).next = core::ptr::null_mut();
-            }
+            let next = unsafe { (*ptr).next.get() };
+            // SAFETY: the pending lock exclusively owns this link cell.
+            unsafe { next.write(core::ptr::null_mut()) };
             if pending.tail.is_null() {
                 pending.head = ptr;
             } else {
                 // SAFETY: `tail` was linked in this list under the same lock.
-                unsafe {
-                    (*pending.tail).next = ptr;
-                }
+                let next = unsafe { (*pending.tail).next.get() };
+                // SAFETY: the same pending lock exclusively owns the tail link.
+                unsafe { next.write(ptr) };
             }
             pending.tail = ptr;
             pending.len += 1;
@@ -244,12 +255,15 @@ fn current_stopper() -> &'static CpuStopper {
 /// timer descriptor would flood unhandled IRQs.
 pub(crate) fn init_current_cpu() {
     let cpu_id = this_cpu_id();
-    let thread = TaskInner::new_internal(
+    let task = TaskInner::new_internal(
         cpu_stopper_thread,
         format!("migration/{}", cpu_id.as_usize()),
         kbuild_config::TASK_STACK_SIZE,
-    )
-    .into_arc_kernel(ksched::KernelClass::Stop);
+    );
+    // SAFETY: the pinned Stop thread owns the PM CPU rendezvous and runs only
+    // IRQ-off callbacks; recovery does not acquire resources held by this task.
+    let thread =
+        unsafe { task.with_pm_infrastructure() }.into_arc_kernel(ksched::KernelClass::Stop);
     thread.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     #[cfg(feature = "smp")]
     thread.set_cpu_id(cpu_id);
@@ -404,17 +418,28 @@ fn enqueue_claimed(cpu: LogicalCpuId, work: &mut CpuStopWork, kick: bool) -> boo
 
 fn run_taken_stop_work(mut cursor: *mut CpuStopWork) {
     while !cursor.is_null() {
-        // SAFETY: each node stayed pinned from enqueue until this drain; we
-        // are the only consumer.
-        let work = unsafe { &mut *cursor };
-        cursor = work.next;
-        work.next = core::ptr::null_mut();
-        let done = work.done;
-        (work.callback)(work.arg);
+        let work = cursor;
+        // SAFETY: the pinned, claimed slot is owned by this consumer. Copy its
+        // metadata without retaining an exclusive reference across the callback;
+        // its owner may concurrently observe the atomic completion state.
+        let next = unsafe { (*work).next.get() };
+        // SAFETY: take_pending detached the chain under its exclusive lock.
+        cursor = unsafe { next.read() };
+        // SAFETY: the detached queue link belongs only to this consumer.
+        unsafe { next.write(core::ptr::null_mut()) };
+        // SAFETY: immutable claimed-slot metadata stays live through callback.
+        let callback = unsafe { (*work).callback };
+        // SAFETY: same claimed slot; copying does not borrow the atomic flag.
+        let arg = unsafe { (*work).arg };
+        // SAFETY: completion storage is retained by the submitting owner.
+        let done = unsafe { (*work).done };
+        callback(arg);
         // Release publishes "the callback has finished and the slot is free"
         // to the next AcqRel claim of `queued`. `stop_one_cpu` waiters ignore
         // this flag and keep the stack frame until `notify_done`.
-        work.queued.store(false, Ordering::Release);
+        // SAFETY: storage stays pinned until the owner observes this release.
+        // This is the final access to the slot, permitting immediate reclaim.
+        unsafe { (*work).queued.store(false, Ordering::Release) };
         if !done.is_null() {
             // SAFETY: `stop_one_cpu` keeps `CpuStopDone` on the caller's stack
             // until `wait` observes `notify_done`. That store is the last
