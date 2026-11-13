@@ -68,6 +68,22 @@ fn check_mount_attr_bits(attr: u64) -> KResult<()> {
     Ok(())
 }
 
+/// Rejects an atime request Linux will not honour.
+///
+/// `build_mount_kattr` requires `MOUNT_ATTR__ATIME` in `attr_clr` whenever the
+/// caller sets any atime bit, and requires the group in `attr_clr` to be either
+/// all of it or none. Both forms are `EINVAL` there, so accepting them here
+/// would report success for a policy change the ABI cannot express.
+fn check_mount_attr_atime(attr_set: u64, attr_clr: u64) -> KResult<()> {
+    if attr_clr & MOUNT_ATTR__ATIME != 0 && attr_clr & MOUNT_ATTR__ATIME != MOUNT_ATTR__ATIME {
+        return Err(KError::InvalidInput);
+    }
+    if attr_set & MOUNT_ATTR__ATIME != 0 && attr_clr & MOUNT_ATTR__ATIME == 0 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// Requires the bytes past the published `mount_attr` to be zero.
 ///
 /// `copy_struct_from_user` copies the interoperable prefix and then checks the
@@ -462,21 +478,26 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
 }
 
 /// Translates `mount_setattr(2)` `attr_set`/`attr_clr` into per-mount flags.
+///
+/// The atime field is an enum, not a bitmap, so a caller changes it by putting
+/// `MOUNT_ATTR__ATIME` in `attr_clr` and the wanted value in `attr_set`
+/// (`build_mount_kattr`). `MOUNT_ATTR_RELATIME` is zero, so "request relatime"
+/// is exactly `attr_clr = MOUNT_ATTR__ATIME, attr_set = 0` -- the shape systemd
+/// uses. Handling only a non-zero `attr_set` would clear both modelled atime
+/// flags there and land on strictatime instead.
 fn mount_attr_set_clr(attr_set: u64, attr_clr: u64) -> (MountFlags, MountFlags) {
     let mut set = mount_attr_to_flags(attr_set as u32);
     let mut clr = mount_attr_to_flags(attr_clr as u32);
-    // The atime policy is a group: requesting any atime bit replaces the whole
-    // policy, so clear the existing relatime/noatime selection first.
-    if attr_set & MOUNT_ATTR__ATIME != 0 {
+    if attr_clr & MOUNT_ATTR__ATIME != 0 {
+        // Both existing selections go, then the requested one is set. A
+        // partially cleared group is EINVAL, which `check_mount_attr_bits` has
+        // already rejected by only admitting `MOUNT_ATTR__ATIME` as a whole.
         clr |= MountFlags::NOATIME | MountFlags::RELATIME;
         if attr_set & MOUNT_ATTR_NOATIME != 0 {
             set |= MountFlags::NOATIME;
         } else if attr_set & MOUNT_ATTR_STRICTATIME == 0 {
             set |= MountFlags::RELATIME;
         }
-    }
-    if attr_clr & MOUNT_ATTR__ATIME != 0 {
-        clr |= MountFlags::NOATIME | MountFlags::RELATIME;
     }
     if attr_set & MOUNT_ATTR_NODIRATIME != 0 {
         set |= MountFlags::NODIRATIME;
@@ -540,6 +561,7 @@ pub fn sys_mount_setattr(
     // unknown bit is an error rather than a silent no-op.
     check_mount_attr_bits(attr_set)?;
     check_mount_attr_bits(attr_clr)?;
+    check_mount_attr_atime(attr_set, attr_clr)?;
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
     let recursive = flags & AT_RECURSIVE != 0;
     // AT_EMPTY_PATH on an open_tree/fsmount fd operates on that mount directly

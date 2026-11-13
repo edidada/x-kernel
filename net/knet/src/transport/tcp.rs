@@ -599,12 +599,13 @@ impl SocketOps for TcpSocket {
         if self.is_listening() {
             return Err(KError::InvalidInput);
         }
-        let (received, queued) = self.with_smol_socket(|socket| {
-            if !socket.is_open() {
-                return Err(KError::NotConnected);
-            }
-            Ok((socket.recv_queue(), socket.send_queue()))
-        })?;
+        // A closed or time-wait socket still answers: `tcp_inq` reports its
+        // (usually empty) receive queue rather than an error, and only the
+        // listening state is refused. `recv_queue()`/`send_queue()` remain
+        // readable in those states, so no state check beyond listening is
+        // needed here.
+        let (received, queued) =
+            self.with_smol_socket(|socket| (socket.recv_queue(), socket.send_queue()));
         let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
         *inq = to_i32(received);
         *outq = to_i32(queued);

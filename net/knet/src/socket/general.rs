@@ -25,6 +25,12 @@ use crate::{
 const WMEM_MAX: usize = 4 << 20;
 /// The modeled `net.core.rmem_max`, the clamp `SO_RCVBUF` applies.
 const RMEM_MAX: usize = 4 << 20;
+/// Largest hint `sock_setsockopt` accepts before doubling.
+///
+/// Linux clamps the hint to `INT_MAX / 2` first so that `val * 2` still fits an
+/// `int`; without it a larger request would produce a stored value whose
+/// `int` read-back is negative.
+const BUFFER_HINT_MAX: usize = i32::MAX as usize / 2;
 /// Minimum effective `sk_sndbuf` (`SOCK_MIN_SNDBUF`, twice a minimal skb).
 const SNDBUF_MIN: usize = 4_608;
 /// Minimum effective `sk_rcvbuf` (`SOCK_MIN_RCVBUF`).
@@ -283,6 +289,31 @@ impl GeneralOptions {
             poll_io(pollable, IoEvents::IN, self.nonblocking() || nonblocking, f),
         ))?
     }
+
+    /// Applies `sock_setsockopt(SO_SNDBUF)` / `SO_SNDBUFFORCE`.
+    ///
+    /// `clamp` is the modeled `net.core.wmem_max` for the unprivileged form and
+    /// `None` for the `CAP_NET_ADMIN` form, which skips only that clamp. Both
+    /// then bound the hint so `val * 2` fits an `int`, double it, and apply
+    /// `SOCK_MIN_SNDBUF`; `SO_SNDBUF` reports that stored value, which is why a
+    /// client that sets N reads back 2N.
+    fn set_send_buffer(&self, size: usize, clamp: Option<usize>) {
+        let requested = clamp.unwrap_or(usize::MAX).min(size).min(BUFFER_HINT_MAX);
+        let effective = requested.saturating_mul(2).max(SNDBUF_MIN);
+        self.send_buffer_bytes
+            .store(effective as u64, Ordering::Relaxed);
+    }
+
+    /// Applies `sock_setsockopt(SO_RCVBUF)` / `SO_RCVBUFFORCE`.
+    ///
+    /// Same rule as [`Self::set_send_buffer`] with `rmem_max` and
+    /// `SOCK_MIN_RCVBUF` (`__sock_set_rcvbuf`).
+    fn set_receive_buffer(&self, size: usize, clamp: Option<usize>) {
+        let requested = clamp.unwrap_or(usize::MAX).min(size).min(BUFFER_HINT_MAX);
+        let effective = requested.saturating_mul(2).max(RCVBUF_MIN);
+        self.receive_buffer_bytes
+            .store(effective as u64, Ordering::Relaxed);
+    }
 }
 impl Configurable for GeneralOptions {
     fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
@@ -448,9 +479,10 @@ impl Configurable for GeneralOptions {
             }
             O::ReceiveBufferForce(size) => {
                 // `SO_RCVBUFFORCE` is the CAP_NET_ADMIN form: it skips the
-                // `rmem_max` clamp but still doubles the hint and applies
-                // `SOCK_MIN_RCVBUF` (`__sock_set_rcvbuf`).
-                let effective = (*size).saturating_mul(2).max(RCVBUF_MIN);
+                // `rmem_max` clamp but still bounds the hint, doubles it and
+                // applies `SOCK_MIN_RCVBUF` (`__sock_set_rcvbuf`).
+                let requested = (*size).min(BUFFER_HINT_MAX);
+                let effective = requested.saturating_mul(2).max(RCVBUF_MIN);
                 self.receive_buffer_bytes
                     .store(effective as u64, Ordering::Relaxed);
             }
@@ -474,31 +506,9 @@ impl Configurable for GeneralOptions {
                 self.recv_timeout_nanos
                     .store(timeout.as_nanos_u64_saturating(), Ordering::Relaxed);
             }
-            O::SendBuffer(size) => {
-                // `sock_setsockopt(SO_SNDBUF)`: Linux treats the argument as a
-                // hint, clamps it to `net.core.wmem_max`, doubles it, and stores
-                // `max(val * 2, SOCK_MIN_SNDBUF)`. `SO_SNDBUF` then reports that
-                // doubled value, which is why a client that sets N reads 2N.
-                let requested = (*size).min(WMEM_MAX);
-                let effective = requested.saturating_mul(2).max(SNDBUF_MIN);
-                self.send_buffer_bytes
-                    .store(effective as u64, Ordering::Relaxed);
-            }
-            O::ReceiveBuffer(size) => {
-                // `sock_setsockopt(SO_RCVBUF)`: the same doubling, clamped to
-                // `net.core.rmem_max` and floored at `SOCK_MIN_RCVBUF`.
-                let requested = (*size).min(RMEM_MAX);
-                let effective = requested.saturating_mul(2).max(RCVBUF_MIN);
-                self.receive_buffer_bytes
-                    .store(effective as u64, Ordering::Relaxed);
-            }
-            O::SendBufferForce(size) => {
-                // `SO_SNDBUFFORCE` is the CAP_NET_ADMIN form: it skips the
-                // `wmem_max` clamp but still doubles and applies the floor.
-                let effective = (*size).saturating_mul(2).max(SNDBUF_MIN);
-                self.send_buffer_bytes
-                    .store(effective as u64, Ordering::Relaxed);
-            }
+            O::SendBuffer(size) => self.set_send_buffer(*size, Some(WMEM_MAX)),
+            O::ReceiveBuffer(size) => self.set_receive_buffer(*size, Some(RMEM_MAX)),
+            O::SendBufferForce(size) => self.set_send_buffer(*size, None),
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
