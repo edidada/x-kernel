@@ -15,7 +15,7 @@ X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It r
 
 Subsystems are separated into crates with explicit ownership boundaries; see [Source layout](#source-layout). The project is under active development on `main` (`0.3.0-dev`), with quarterly milestone releases ([release policy](docs/release.md)).
 
-**Data baseline:** capability and CI data were last verified on 2026-11-13. Performance uses daily-test #140; syscall-coverage and workload rows marked `TBD` are placeholders for the next measurement run.
+**Data baseline:** capability and CI data were last verified on 2026-11-13. Performance uses daily-test #139; syscall-coverage and workload rows marked `TBD` are placeholders for the next measurement run.
 
 ## Contents
 
@@ -263,20 +263,23 @@ The [Jenkinsfile](Jenkinsfile) defines 18 arch/check stages (excluding Prepare/P
 
 ## Performance
 
-Source: [daily-test #140](https://jenkins.openkylin.top/job/daily-test/140/) (2026-11-12 18:27 UTC, kernel commit `150d0c7`), with the Linux baseline from the same daily run. The build is marked `UNSTABLE` because the dashboard raised a performance-regression alert; the measured workloads completed.
+Source: [daily-test #139](https://jenkins.openkylin.top/job/daily-test/139/) (2026-11-11, kernel `8f866f9`, Harness `150d0c7`), with the Linux baseline from the same run and the same QEMU contract: 4 vCPU, 1 GiB, QEMU 11.0.2, virtio-blk with 4 queues, virtio-net user-net (SLIRP), 4k fio on ext4. The build is `UNSTABLE` because the dashboard reported nine metric-level regressions; the measured workloads completed and the CSV/`results.json` values are used below.
 
 | Workload | x86_64 X-Kernel | x86_64 Linux | Δ | AArch64 X-Kernel | AArch64 Linux | Δ |
 |---|---:|---:|---:|---:|---:|---:|
-| UnixBench syscall | 846.4 | 809.6 | +4.5% | 215.7 | 319.1 | -32.4% |
-| schbench p50 wakeup (µs) | 4.0 | 5.0 | -20.0% | 12.0 | 5.0 | +140.0% |
-| schbench average RPS | 3,239 | 1,213 | +167.1% | 616 | 416 | +48.0% |
-| pagecache hot read (MiB/s) | 6,809 | 5,567 | +22.3% | 1,598 | 2,816 | -43.3% |
-| fio 4k randread (IOPS) | 994,236 | 1,281,667 | -22.4% | 425,515 | 509,865 | -16.5% |
-| iperf3 guest→host TCP (Mbps) | 101.0 | 2,256.4 | -95.5% | 11.0 | 1,484.4 | -99.3% |
+| UnixBench syscall | 868.4 | 809.6 | +7.3% | 210.7 | 319.1 | -34.0% |
+| schbench p99 wakeup (µs) | 9 | 3,724 | -99.8% | 27 | 6,088 | -99.6% |
+| schbench average RPS | 3,372 | 1,213 | +178.0% | 616 | 416 | +48.0% |
+| fio 4k randread (IOPS) | 1,022,242 | 1,281,667 | -20.2% | 437,514 | 509,865 | -14.2% |
+| fio 4k randwrite (IOPS) | 724,072 | 756,976 | -4.3% | 237,044 | 404,874 | -41.5% |
+| iperf3 guest→host TCP (Mbps) | 65.5 | 2,256.4 | -97.1% | 14.9 | 1,484.4 | -99.0% |
+| iperf3 host→guest TCP (Mbps) | 145.8 | 3,479.6 | -95.8% | 59.2 | 2,595.6 | -97.7% |
 
-Δ = X-Kernel relative to Linux; for latency, lower is better. The x86_64 compute/scheduler/pagecache results are ahead of the Linux baseline, while storage and TCP throughput are behind. AArch64 is mixed: scheduler RPS is ahead, but syscall, pagecache, fio, and iperf3 are behind. The full per-suite dashboard is the source of truth for follow-up work.
+Δ = X-Kernel relative to Linux; lower is better for latency. x86_64 compute/scheduler results lead Linux, and fio write is close to parity; fio read and both TCP directions are behind. AArch64 is mixed: scheduler RPS leads, while UnixBench syscall, fio, and TCP throughput trail. TCP throughput is the largest remaining gap and should not be presented as "close to Linux" until it is fixed.
 
-<!-- TODO(data): add the dashboard URL or a public report link once it is externally reachable; verify the Linux baseline configuration before publishing release claims. -->
+Hosts: x86_64 `xkernel-amd64-01` (Xeon Gold 6548Y+), AArch64 `xkernel-arm64-01` (Kunpeng 920). Raw logs, CSV ratios, and Linux `results.json` are linked from the [build page](https://jenkins.openkylin.top/job/daily-test/139/).
+
+<!-- TODO(data): add a public dashboard/report URL when externally reachable; confirm the archived Linux baseline is from the same host and QEMU version before a release claim. -->
 
 ## Configuration
 
@@ -346,7 +349,7 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 - pKVM is feature-flag only; there is no defconfig or PR CI coverage.
 - CSV and LoongArch64 have no PR CI; crosvm and virtCCA have build checks only.
 - Container support is validated by a host-network `hello-world` smoke test; user namespaces and full OCI isolation are still in progress.
-- Syscall-coverage numbers are not yet published; rows marked `TBD` are placeholders. The current performance table shows both leads and gaps versus Linux.
+- Syscall-coverage numbers are not yet published; rows marked `TBD` are placeholders. The current performance table shows both leads and gaps versus Linux; TCP throughput is the largest gap.
 - Architecture and platform maturity differs; see [Platform Support](#platform-support).
 
 ## Roadmap
@@ -358,7 +361,7 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 - Bring RK3588 VOP2 display support into `main`.
 - Complete user-namespace and cgroup support for full OCI containers.
 - Track new Linux syscalls and ABI revisions.
-- Close the storage/TCP throughput gaps shown by daily-test #140.
+- Close the storage/TCP throughput gaps shown by daily-test #139.
 - Publish a stable performance report with the Linux baseline configuration.
 - Publish the syscall-coverage list and the counting script.
 

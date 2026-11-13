@@ -15,7 +15,7 @@ X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可
 
 各子系统按明确的职责与所有权边界拆分为 crate，详见[源码布局](#源码布局)。项目当前在 `main` 分支活跃开发（`0.3.0-dev`），按季度发布里程碑版本，见[发布规范](docs/release.md)。
 
-**数据基线：** 能力与 CI 数据最后核对于 2026-11-13。性能数据来自 daily-test #140；syscall 覆盖和 workload 表中标记为 `TBD` 的数据仍是占位符。
+**数据基线：** 能力与 CI 数据最后核对于 2026-11-13。性能数据来自 daily-test #139；syscall 覆盖和 workload 表中标记为 `TBD` 的数据仍是占位符。
 
 ## 目录
 
@@ -263,20 +263,23 @@ ABI：ksyscall / posix / tee
 
 ## 性能
 
-来源：[daily-test #140](https://jenkins.openkylin.top/job/daily-test/140/)（2026-11-12 18:27 UTC，内核 commit `150d0c7`），Linux 基线来自同一次 daily run。该构建因为性能回归告警被标记为 `UNSTABLE`，但表中的 workload 均已完成。
+来源：[daily-test #139](https://jenkins.openkylin.top/job/daily-test/139/)（2026-11-11，内核 `8f866f9`，Harness `150d0c7`），Linux 基线来自同一次 run，且使用相同 QEMU 合约：4 vCPU、1 GiB、QEMU 11.0.2、4 队列 virtio-blk、virtio-net user-net（SLIRP）、ext4 上的 4k fio。该构建因看板报告 9 项指标级回归而标记为 `UNSTABLE`，但表中 workload 均已完成，数值取自 CSV / `results.json`。
 
 | Workload | x86_64 X-Kernel | x86_64 Linux | Δ | AArch64 X-Kernel | AArch64 Linux | Δ |
 |---|---:|---:|---:|---:|---:|---:|
-| UnixBench syscall | 846.4 | 809.6 | +4.5% | 215.7 | 319.1 | -32.4% |
-| schbench p50 唤醒延迟（µs） | 4.0 | 5.0 | -20.0% | 12.0 | 5.0 | +140.0% |
-| schbench 平均 RPS | 3,239 | 1,213 | +167.1% | 616 | 416 | +48.0% |
-| pagecache 热读（MiB/s） | 6,809 | 5,567 | +22.3% | 1,598 | 2,816 | -43.3% |
-| fio 4k 随机读（IOPS） | 994,236 | 1,281,667 | -22.4% | 425,515 | 509,865 | -16.5% |
-| iperf3 guest→host TCP（Mbps） | 101.0 | 2,256.4 | -95.5% | 11.0 | 1,484.4 | -99.3% |
+| UnixBench syscall | 868.4 | 809.6 | +7.3% | 210.7 | 319.1 | -34.0% |
+| schbench p99 唤醒延迟（µs） | 9 | 3,724 | -99.8% | 27 | 6,088 | -99.6% |
+| schbench 平均 RPS | 3,372 | 1,213 | +178.0% | 616 | 416 | +48.0% |
+| fio 4k 随机读（IOPS） | 1,022,242 | 1,281,667 | -20.2% | 437,514 | 509,865 | -14.2% |
+| fio 4k 随机写（IOPS） | 724,072 | 756,976 | -4.3% | 237,044 | 404,874 | -41.5% |
+| iperf3 guest→host TCP（Mbps） | 65.5 | 2,256.4 | -97.1% | 14.9 | 1,484.4 | -99.0% |
+| iperf3 host→guest TCP（Mbps） | 145.8 | 3,479.6 | -95.8% | 59.2 | 2,595.6 | -97.7% |
 
-Δ = X-Kernel 相对 Linux；延迟类指标越低越好。x86_64 的计算/调度/pagecache 领先 Linux 基线，但存储和 TCP 吞吐落后；AArch64 则是调度 RPS 领先，syscall、pagecache、fio、iperf3 落后。完整的 per-suite 看板数据是后续工作的依据。
+Δ = X-Kernel 相对 Linux；延迟类指标越低越好。x86_64 的计算/调度领先 Linux，fio 写接近持平；fio 读和两个方向的 TCP 吞吐落后。AArch64 为混合结果：调度 RPS 领先，UnixBench syscall、fio 和 TCP 吞吐落后。TCP 吞吐是当前最大差距，修复前不应表述为“接近 Linux”。
 
-<!-- TODO(data): 看板可公开访问后补充链接；发布版本性能结论前确认 Linux 基线配置。 -->
+Host：x86_64 `xkernel-amd64-01`（Xeon Gold 6548Y+），AArch64 `xkernel-arm64-01`（Kunpeng 920）。原始日志、CSV 比值和 Linux `results.json` 均从[构建页](https://jenkins.openkylin.top/job/daily-test/139/)可追溯。
+
+<!-- TODO(data): 看板可公开访问后补充链接；发布版本性能结论前确认归档 Linux 基线来自同一 host 和 QEMU 版本。 -->
 
 ## 配置
 
@@ -346,7 +349,7 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 - pKVM 仅有 feature flag；没有 defconfig，也没有 PR CI。
 - CSV 和 LoongArch64 没有 PR CI；crosvm 和 virtCCA 只有构建检查。
 - 容器支持目前由 host-network 的 `hello-world` smoke 验证；user namespace 和完整 OCI 隔离仍在推进。
-- syscall 覆盖数据尚未发布；标记为 `TBD` 的行仍是占位符。当前性能表同时给出了领先项和差距。
+- syscall 覆盖数据尚未发布；标记为 `TBD` 的行仍是占位符。当前性能表同时给出了领先项和差距，TCP 吞吐是最大差距。
 - 各架构和平台成熟度不同，详见[平台支持](#平台支持)。
 
 ## 路线图
@@ -358,7 +361,7 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 - 将 RK3588 VOP2 显示支持合入 `main`。
 - 补齐 user namespace 与 cgroup，支持完整 OCI 容器。
 - 跟进 Linux 新增系统调用和 ABI 修订。
-- 收敛 daily-test #140 暴露的存储/TCP 吞吐差距。
+- 收敛 daily-test #139 暴露的存储/TCP 吞吐差距。
 - 发布包含 Linux 基线配置的稳定性能报告。
 - 发布 syscall 覆盖清单和统计脚本。
 
