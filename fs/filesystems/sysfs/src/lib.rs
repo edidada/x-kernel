@@ -919,6 +919,28 @@ fn build_tree(
                     properties,
                 },
             );
+        } else if bus_name(node.location()) == "platform" {
+            // Linux emits a `MODALIAS=platform:<name>` uevent for every
+            // platform device. libdrm's `drmParseOFBusInfo` falls back to that
+            // attribute when it builds a DRM platform bus info and returns
+            // `ENOENT` without it, so `drmGetDevices2` silently drops the node
+            // and clients such as `kmscube` report "no drm device found".
+            let leaf = physical.rsplit('/').next().unwrap_or(physical.as_str());
+            let properties = vec![
+                ("DRIVER".to_string(), node.driver_name().to_string()),
+                ("MODALIAS".to_string(), format!("platform:{leaf}")),
+            ];
+            let path = format!("devices/{physical}/uevent");
+            add_entry(
+                &mut tree,
+                path.clone(),
+                TreeEntry::RawUevent {
+                    path,
+                    subsystem: "platform".to_string(),
+                    contents: render_uevent(&properties),
+                    properties,
+                },
+            );
         }
         match node.kind() {
             DeviceNodeKind::Input => add_input_entries(&mut tree, projected),

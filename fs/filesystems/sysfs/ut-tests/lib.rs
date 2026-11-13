@@ -136,6 +136,44 @@ fn symlink_targets_are_relative_to_the_link_parent() {
 }
 
 #[def_test]
+fn platform_devices_expose_a_modalias_uevent() {
+    let node = kdevice::register_device_node(
+        kdevice::DeviceId::new(9003),
+        kdevice::DeviceNodeClass::Drm(drm_metadata()),
+        String::from("virtio-gpu-mmio"),
+        String::from("test"),
+        kdevice::DeviceLocation::Mmio {
+            base: 0xa003e00,
+            size: 0x1000,
+        },
+        None,
+    )
+    .expect("an MMIO device node must register");
+    let projected = Arc::new(ProjectedDevice::new(node.clone()));
+    let mut nodes = BTreeMap::new();
+    nodes.insert(node.core_id(), projected);
+    let tree = build_tree(&nodes, &[]);
+
+    // libdrm's `drmParseOFBusInfo` and `drmParseOFDeviceInfo` read
+    // `OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS` on the
+    // device directory's `uevent`. Without either attribute `drmGetDevices2`
+    // drops the platform node and clients report "no drm device found".
+    let path = "devices/platform/a003e00.mmio/uevent";
+    let Some(TreeEntry::RawUevent { contents, .. }) = tree.get(path) else {
+        panic!("a platform device must expose a device-directory uevent");
+    };
+    let text = core::str::from_utf8(contents).expect("uevent is text");
+    assert!(
+        text.contains("MODALIAS=platform:a003e00.mmio\n"),
+        "the uevent must carry a platform MODALIAS, got {text:?}"
+    );
+    assert!(
+        text.contains("DRIVER=test\n"),
+        "the uevent must name the bound driver, got {text:?}"
+    );
+}
+
+#[def_test]
 fn drm_nodes_project_a_render_minor() {
     let node = kdevice::register_device_node(
         kdevice::DeviceId::new(9002),
