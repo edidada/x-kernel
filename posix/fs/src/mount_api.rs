@@ -45,6 +45,28 @@ const MOUNT_ATTR_NOATIME: u64 = 0x0000_0010;
 const MOUNT_ATTR_STRICTATIME: u64 = 0x0000_0020;
 const MOUNT_ATTR_NODIRATIME: u64 = 0x0000_0080;
 
+/// `MOUNT_ATTR_SIZE_VER0`: sizeof the first published `struct mount_attr`.
+///
+/// Linux rejects a `mount_setattr` call whose `usize` is below this, even
+/// though the fields it reads live in the first 16 bytes.
+const MOUNT_ATTR_SIZE_VER0: usize = 32;
+
+/// Every `MOUNT_ATTR_*` bit `build_mount_kattr` accepts.
+///
+/// `MOUNT_SETATTR_VALID_FLAGS` in `fs/namespace.c` is `FSMOUNT_VALID_FLAGS`
+/// (`RDONLY|NOSUID|NODEV|NOEXEC|__ATIME|NODIRATIME|NOSYMFOLLOW`) plus
+/// `MOUNT_ATTR_IDMAP`. A bit outside this set is `EINVAL` there, so silently
+/// dropping it would report success for a request the kernel did not honour.
+const MOUNT_ATTR_VALID_FLAGS: u64 = 0x0030_10ff;
+
+/// Rejects an `attr_set`/`attr_clr` word with a bit the ABI does not define.
+fn check_mount_attr_bits(attr: u64) -> KResult<()> {
+    if attr & !MOUNT_ATTR_VALID_FLAGS != 0 {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// Accumulated state of one fs-context fd between `fsopen` and `fsmount`.
 struct FsContextState {
     fs_type: String,
@@ -348,23 +370,40 @@ pub fn sys_move_mount(
 pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_open_tree <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
-    // OPEN_TREE_* plus the path-resolution AT_* hints (NOFOLLOW/NO_AUTOMOUNT/
-    // EMPTY_PATH); the hints do not change the clone itself.
-    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | 0x100 | 0x800) != 0 {
+    // Linux `open_tree`: the accepted word is exactly the OPEN_TREE_* pair plus
+    // the four path-resolution hints, and `AT_RECURSIVE` without
+    // `OPEN_TREE_CLONE` is rejected because there is nothing to recurse into.
+    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE | 0x100 | 0x800)
+        != 0
+    {
+        return Err(KError::InvalidInput);
+    }
+    if flags & AT_RECURSIVE != 0 && flags & OPEN_TREE_CLONE == 0 {
         return Err(KError::InvalidInput);
     }
     let cred = kprocess::current_cred();
+    let is_clone = flags & OPEN_TREE_CLONE != 0;
+    // Cloning a mount into a detached tree is a mount operation: Linux gates it
+    // on `may_mount()`, which every other mount entry point here also requires.
+    if is_clone {
+        require_mount_privilege(&cred)?;
+    }
     let filename = Filename::new(path.as_str());
+    // `open_tree` passes AT_NO_AUTOMOUNT/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH
+    // straight into `user_path_at`; only the last two change this walk.
+    let mut lookup = LookupFlags::follow();
+    if flags & 0x100 != 0 {
+        // AT_SYMLINK_NOFOLLOW: the final component must not be followed, so
+        // opening a symlink names the link's own mount.
+        lookup = LookupFlags::no_follow();
+    }
+    if flags & AT_EMPTY_PATH != 0 {
+        lookup |= LookupFlags::EMPTY_PATH;
+    }
     let source = with_fs_at(dfd, &filename, |fs| {
-        filename.lookup_at(
-            fs.root(),
-            fs.pwd(),
-            LookupIntent::Open,
-            LookupFlags::follow(),
-            &cred,
-        )
+        filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, lookup, &cred)
     })?;
-    let (root, kept, open_path) = if flags & OPEN_TREE_CLONE != 0 {
+    let (root, kept, open_path) = if is_clone {
         let namespace = kprocess::current_user_process().mnt_ns()?;
         let (root, kept) = namespace.clone_mount_tree(&source)?;
         let open_path = root.root_path();
@@ -378,7 +417,10 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
         // the walk to the mountpoint on every non-mountpoint component.
         (source.mount().clone(), Vec::new(), source.clone())
     };
-    let file = dentry_open(open_path, O_RDONLY | O_DIRECTORY, cred)?;
+    // `dentry_open(&path, O_PATH, ...)`: the descriptor names the mount without
+    // granting read access to whatever it covers, which is why `open_tree`
+    // works on a directory it may not read.
+    let file = dentry_open(open_path, OpenFlags::PATH.bits(), cred)?;
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(root)),
         _kept: kept,
@@ -415,6 +457,13 @@ fn mount_attr_set_clr(attr_set: u64, attr_clr: u64) -> (MountFlags, MountFlags) 
 }
 
 /// Changes mount attributes (`mount_setattr(2)`).
+///
+/// # Execution context
+///
+/// Requires a current process thread: it checks the caller's credentials, reads
+/// its fd table (`AT_EMPTY_PATH`) and mount namespace. It may sleep while
+/// resolving the target path and applying attributes, so it must not be called
+/// from IRQ context or while holding a spinlock or IRQ-preemption guard.
 pub fn sys_mount_setattr(
     dfd: c_int,
     path: UserConstPtr<c_char>,
@@ -428,11 +477,27 @@ pub fn sys_mount_setattr(
     if size < 16 || attr.is_null() {
         return Err(KError::Unsupported);
     }
+    // Linux `mount_setattr` admits the four path-resolution flags only, and
+    // bounds the structure size before reading it.
+    if flags & !(AT_EMPTY_PATH | AT_RECURSIVE | 0x100 | 0x800) != 0 {
+        return Err(KError::InvalidInput);
+    }
+    if size < MOUNT_ATTR_SIZE_VER0 {
+        return Err(KError::InvalidInput);
+    }
+    // Changing a mount's attributes is a mount operation: `may_mount()` gates
+    // it exactly as it gates every other entry point here.
+    let cred = kprocess::current_cred();
+    require_mount_privilege(&cred)?;
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_mount_setattr <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
     let base = attr.as_ptr() as usize;
     let attr_set = UserConstPtr::<u64>::from(base).read_vm()?;
     let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
+    // `build_mount_kattr` rejects an attr bit the ABI does not define, so an
+    // unknown bit is an error rather than a silent no-op.
+    check_mount_attr_bits(attr_set)?;
+    check_mount_attr_bits(attr_clr)?;
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
     let recursive = flags & AT_RECURSIVE != 0;
     // AT_EMPTY_PATH on an open_tree/fsmount fd operates on that mount directly
@@ -447,7 +512,6 @@ pub fn sys_mount_setattr(
         namespace.set_mount_attributes_on(&mount, set_flags, clr_flags, recursive)?;
         return Ok(0);
     }
-    let cred = kprocess::current_cred();
     let filename = Filename::new(path.as_str());
     let target = with_fs_at(dfd, &filename, |fs| {
         filename.lookup_at(

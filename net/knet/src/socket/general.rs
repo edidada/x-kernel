@@ -19,6 +19,17 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
+/// The modeled `net.core.wmem_max`, the clamp `SO_SNDBUF` applies to its hint.
+///
+/// Linux initializes `sysctl_wmem_max` to 4 MiB.
+const WMEM_MAX: usize = 4 << 20;
+/// The modeled `net.core.rmem_max`, the clamp `SO_RCVBUF` applies.
+const RMEM_MAX: usize = 4 << 20;
+/// Minimum effective `sk_sndbuf` (`SOCK_MIN_SNDBUF`, twice a minimal skb).
+const SNDBUF_MIN: usize = 4_608;
+/// Minimum effective `sk_rcvbuf` (`SOCK_MIN_RCVBUF`).
+const RCVBUF_MIN: usize = 2_304;
+
 /// General options for all sockets.
 pub(crate) struct GeneralOptions {
     /// Whether the socket is non-blocking.
@@ -460,16 +471,29 @@ impl Configurable for GeneralOptions {
                     .store(timeout.as_nanos_u64_saturating(), Ordering::Relaxed);
             }
             O::SendBuffer(size) => {
+                // `sock_setsockopt(SO_SNDBUF)`: Linux treats the argument as a
+                // hint, clamps it to `net.core.wmem_max`, doubles it, and stores
+                // `max(val * 2, SOCK_MIN_SNDBUF)`. `SO_SNDBUF` then reports that
+                // doubled value, which is why a client that sets N reads 2N.
+                let requested = (*size).min(WMEM_MAX);
+                let effective = requested.saturating_mul(2).max(SNDBUF_MIN);
                 self.send_buffer_bytes
-                    .store(*size as u64, Ordering::Relaxed);
+                    .store(effective as u64, Ordering::Relaxed);
             }
             O::ReceiveBuffer(size) => {
+                // `sock_setsockopt(SO_RCVBUF)`: the same doubling, clamped to
+                // `net.core.rmem_max` and floored at `SOCK_MIN_RCVBUF`.
+                let requested = (*size).min(RMEM_MAX);
+                let effective = requested.saturating_mul(2).max(RCVBUF_MIN);
                 self.receive_buffer_bytes
-                    .store(*size as u64, Ordering::Relaxed);
+                    .store(effective as u64, Ordering::Relaxed);
             }
             O::SendBufferForce(size) => {
+                // `SO_SNDBUFFORCE` is the CAP_NET_ADMIN form: it skips the
+                // `wmem_max` clamp but still doubles and applies the floor.
+                let effective = (*size).saturating_mul(2).max(SNDBUF_MIN);
                 self.send_buffer_bytes
-                    .store(*size as u64, Ordering::Relaxed);
+                    .store(effective as u64, Ordering::Relaxed);
             }
             _ => return Ok(OptionHandled::No),
         }

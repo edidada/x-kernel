@@ -11,8 +11,9 @@ use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 
 use super::{
-    NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK, NLM_F_REQUEST, NLMSG_HDR_LEN, NLMSG_MIN_TYPE,
-    NetlinkAddr, NetlinkPacket, NetlinkRxQueue, NetlinkSocketInner, UEVENT_SEQNUM, port,
+    NETLINK_GROUP_COUNT, NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK, NLM_F_REQUEST,
+    NLMSG_HDR_LEN, NLMSG_MIN_TYPE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue, NetlinkSocketInner,
+    UEVENT_SEQNUM, port,
     rtnetlink::{
         build_ack_response, build_error_response_with_cap, handle_rtnetlink_request_with_cred,
     },
@@ -530,17 +531,22 @@ impl Configurable for NetlinkSocket {
             return Ok(OptionHandled::Yes);
         }
         if let SetSocketOption::NetlinkAddMembership(group) = opt {
-            if (1..=32).contains(group)
-                && let Some(addr) = self.inner.local_addr.write().as_mut()
-            {
+            // `netlink_setsockopt` answers EINVAL for group 0 and for any group
+            // at or past the protocol's `ngroups`; silently succeeding would
+            // tell a subscriber it joined a group that will never deliver.
+            if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
+                return Err(KError::InvalidInput);
+            }
+            if let Some(addr) = self.inner.local_addr.write().as_mut() {
                 addr.groups |= 1u32 << (*group - 1);
             }
             return Ok(OptionHandled::Yes);
         }
         if let SetSocketOption::NetlinkDropMembership(group) = opt {
-            if (1..=32).contains(group)
-                && let Some(addr) = self.inner.local_addr.write().as_mut()
-            {
+            if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
+                return Err(KError::InvalidInput);
+            }
+            if let Some(addr) = self.inner.local_addr.write().as_mut() {
                 addr.groups &= !(1u32 << (*group - 1));
             }
             return Ok(OptionHandled::Yes);

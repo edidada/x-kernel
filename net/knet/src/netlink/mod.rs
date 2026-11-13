@@ -37,6 +37,12 @@ pub(super) const NETLINK_AUDIT: i32 = 9;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
 /// Number of netlink protocol slots, matching Linux `MAX_LINKS`.
 pub const NETLINK_MAX_LINKS: i32 = 32;
+/// Multicast groups this netlink implementation reports for every protocol.
+///
+/// `NETLINK_ADD_MEMBERSHIP`/`NETLINK_DROP_MEMBERSHIP` are bounded by the
+/// protocol's `ngroups` in `netlink_setsockopt`; the group mask kept on the
+/// socket address is 32 bits wide, so the accepted range is 1..=32.
+pub(super) const NETLINK_GROUP_COUNT: i32 = 32;
 /// Protocols accepted by `socket(AF_NETLINK, ...)`. `NETLINK_AUDIT` has no
 /// kernel handler here; it is a sink so audit emitters (systemd-resolved) can
 /// open their audit socket and send best-effort messages.
