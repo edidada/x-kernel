@@ -270,6 +270,16 @@ impl Configurable for SeqpacketTransport {
 
         match opt {
             O::PassCredentials(_) => {}
+            O::AcceptConn(listening) => {
+                // `unix_listen` accepts SOCK_SEQPACKET like SOCK_STREAM, so
+                // `sk_getsockopt` reports `sk_state == TCP_LISTEN` here too.
+                **listening = self
+                    .listener
+                    .lock()
+                    .as_ref()
+                    .map(|listener| listener.state.lock().is_listening())
+                    .unwrap_or(false);
+            }
             O::PeerCredentials(cred) => {
                 **cred = self
                     .peer
