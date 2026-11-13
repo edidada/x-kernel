@@ -266,6 +266,7 @@ CI 用户态 glibc 基线使用 `yeanwang/x-kernel-builder:v3.2`。新版本增�
 架构的 GNU GCC/G++ 和 glibc 开发 sysroot；裸机 kernel target 不变。
 Setup 检出 `HARNESS_ROOTFS_DIR`，单测、TEE 和 runtime 使用固定的
 `rootfs-v20261111`，并共用 harness 的 release 下载器和校验元数据。
+校验元数据按 release 标签保存，CI 不跟随 `latest` 指针。
 缓存按架构、libc、release 和
 归档校验值识别，不再使用 x-kernel-image 的 `20260302` 镜像。
 `prepare_rootfs_cache.sh` 在返回镜像路径前检查用户态工具与 bridge 的 libc，

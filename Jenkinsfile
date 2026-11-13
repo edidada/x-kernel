@@ -218,7 +218,9 @@ def ciArchOutputStashName(String arch) {
 }
 
 def withCiRootWs(String rootWs, Closure body) {
-    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${rootWs}/.ci/rootfs-harness"]) {
+    def harnessRoot = "${rootWs}/.ci/rootfs-harness"
+    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
+             "ROOTFS_LATEST_FILE=${harnessRoot}/rootfs/releases/${env.ROOTFS_RELEASE_TAG}.json"]) {
         body.call()
     }
 }
@@ -1105,7 +1107,6 @@ def runRuntimeTests(String arch) {
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
-                         "ROOTFS_LATEST_FILE=${env.HARNESS_ROOTFS_DIR}/rootfs/releases/latest.json",
                          "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}-gnu-dynamic",
                          "JOBS=${env.HARNESS_JOBS}"]) {
                     sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash

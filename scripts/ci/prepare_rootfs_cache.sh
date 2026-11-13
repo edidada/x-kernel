@@ -11,6 +11,10 @@ fi
 export ROOTFS_CACHE_DIR="${ROOTFS_CACHE_DIR:-${repo_root}/.cache/rootfs}"
 export ROOTFS_VARIANT="${ROOTFS_VARIANT:-xkernel-glibc}"
 export ROOTFS_RELEASE_TAG="${ROOTFS_RELEASE_TAG:-rootfs-v20261111}"
+[[ "$ROOTFS_RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$ROOTFS_RELEASE_TAG" != latest ]] || {
+    echo "CI requires a fixed ROOTFS_RELEASE_TAG" >&2; exit 2;
+}
+export ROOTFS_LATEST_FILE="${ROOTFS_LATEST_FILE:-${harness}/rootfs/releases/${ROOTFS_RELEASE_TAG}.json}"
 [[ "$ROOTFS_VARIANT" == xkernel-glibc ]] || {
     echo "CI requires ROOTFS_VARIANT=xkernel-glibc" >&2; exit 2;
 }
